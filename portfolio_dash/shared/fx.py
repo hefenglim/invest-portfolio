@@ -18,10 +18,10 @@ def convert(
 
     Returns ``amount * rate`` at full precision. When ``to_currency`` is given, the
     result is quantized to that currency's minor unit (settlement). ``amount`` may be
-    negative (cashflow signs); ``rate`` must be positive.
+    negative (cashflow signs); ``rate`` must be positive and finite.
     """
-    if rate <= 0:
-        raise ValueError(f"FX rate must be positive, got {rate}")
+    if not rate.is_finite() or rate <= 0:
+        raise ValueError(f"FX rate must be positive and finite, got {rate!r}")
     result = amount * rate
     if to_currency is not None:
         return quantize_amount(result, to_currency)
