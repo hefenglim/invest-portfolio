@@ -21,4 +21,13 @@ prevents recurrence.
 - **Average cost is computed on read** from `total_cost / shares`, never stored as an
   authoritative rounded value.
 
-_No project-specific incident lessons recorded yet._
+## Implementation lessons
+
+- **`StrEnum` + Pydantic v2 serialization (2026-06-06):** `Currency`/`Market` are
+  `enum.StrEnum` (ruff UP042 prefers this over `(str, Enum)` on 3.11+). A `StrEnum`
+  member *is* a `str` (`isinstance` is `True`, SQLite binds it as TEXT, `json.dumps`
+  and `model_dump(mode="json")`/`model_dump_json()` emit a bare string). **But**
+  Pydantic v2 `model_dump()` in the default *python* mode returns the **member object**,
+  not a bare string — so `type(x) is str` is `False` even though `isinstance(x, str)` is
+  `True`. When serializing settings/models for the web layer, use json mode (or
+  `isinstance`, never `type() is str`).
