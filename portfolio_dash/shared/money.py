@@ -19,14 +19,17 @@ MINOR_UNITS: dict[Currency, int] = {
 def to_db(value: Decimal) -> str:
     """Serialize a Decimal to a canonical fixed-point TEXT string.
 
-    Rejects ``float`` to enforce the no-float-money invariant. Preserves significant
-    trailing zeros and never emits scientific notation, so the value round-trips
-    losslessly via :func:`from_db`.
+    Rejects ``float`` to enforce the no-float-money invariant, and rejects non-finite
+    Decimals (NaN / Infinity) so a computation bug cannot silently enter the ledger.
+    Preserves significant trailing zeros and never emits scientific notation, so the
+    value round-trips losslessly via :func:`from_db`.
     """
     if isinstance(value, float):
         raise TypeError("money must be Decimal, not float")
     if not isinstance(value, Decimal):
         raise TypeError(f"expected Decimal, got {type(value).__name__}")
+    if not value.is_finite():
+        raise ValueError(f"cannot store non-finite Decimal: {value!r}")
     return format(value, "f")
 
 
@@ -41,8 +44,11 @@ def quantize_amount(
     """Quantize an amount to ``currency``'s minor unit (settlement precision).
 
     TWD -> 0 dp, USD/MYR -> 2 dp, using ROUND_HALF_UP (四捨五入). Call only at
-    settlement/display — prices and FX rates are stored at full precision.
+    settlement/display — prices and FX rates are stored at full precision. Rejects
+    non-finite Decimals (NaN / Infinity) rather than letting them propagate silently.
     """
+    if not value.is_finite():
+        raise ValueError(f"cannot quantize non-finite Decimal: {value!r}")
     try:
         minor = MINOR_UNITS[currency]
     except KeyError as exc:

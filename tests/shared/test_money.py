@@ -47,3 +47,24 @@ def test_quantize_myr_two_dp() -> None:
 
 def test_minor_units_mapping() -> None:
     assert MINOR_UNITS == {Currency.TWD: 0, Currency.USD: 2, Currency.MYR: 2}
+
+
+def test_to_db_rejects_non_finite() -> None:
+    with pytest.raises(ValueError, match="non-finite"):
+        to_db(Decimal("NaN"))
+    with pytest.raises(ValueError, match="non-finite"):
+        to_db(Decimal("Infinity"))
+
+
+def test_quantize_rejects_non_finite() -> None:
+    with pytest.raises(ValueError, match="non-finite"):
+        quantize_amount(Decimal("NaN"), Currency.USD)
+
+
+def test_quantize_unknown_currency_raises() -> None:
+    with pytest.raises(ValueError, match="unknown currency"):
+        quantize_amount(Decimal("1.00"), "XXX")  # type: ignore[arg-type]
+
+
+def test_quantize_twd_negative_half_up() -> None:
+    assert quantize_amount(Decimal("-1234.5"), Currency.TWD) == Decimal("-1235")
