@@ -9,6 +9,16 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+### Added
+- `shared/` foundation layer: `Currency`/`Market` enums; `Decimal` money primitives
+  (canonical TEXT persistence via `to_db`/`from_db`, per-currency `quantize_amount`
+  with ROUND_HALF_UP, float + non-finite guards); single pure `fx.convert` helper
+  (rejects non-positive / non-finite rates); env-driven `Settings` + cached
+  `get_settings`; stdlib `sqlite3` `get_connection`/`session` (WAL, foreign keys on).
+- Package + tooling bootstrap: `pyproject.toml` (pydantic, pydantic-settings; dev:
+  mypy strict, ruff, pytest, pytest-asyncio; strict `asyncio_mode`); `portfolio_dash/`
+  package with `py.typed`; `tests/` layout. 38 tests; mypy strict + ruff clean.
+
 ### Planned
 - `portfolio/` cost-basis & return core (weighted-average cost, original vs adjusted,
   realized / unrealized P&L, total return without double-counting dividends, XIRR).
