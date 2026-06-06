@@ -34,9 +34,13 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 - `shared/models/`: canonical domain models (`Account`, `Instrument`, `Transaction`,
   `Dividend`, `FXConversion`, `OpeningInventory`) + `Money` finite-Decimal type.
 - Dependency: `pyxirr` (irregular-cashflow XIRR).
+- `forex/` FX (換匯) P&L: per-account foreign-currency pool (weighted-avg acquisition
+  rate from home→foreign conversions), reconstructed foreign cash balance, realized FX on
+  reconversions, unrealized FX (stocks + cash) marked to spot; reporting-currency
+  `FXSummary` rollup. Presented as an attribution decomposition of the portfolio return
+  (asset + FX), never additive.
 
 ### Planned
-- `forex/` currency-exchange ledger + realized/unrealized FX P&L (attribution).
 - Data-source availability probe: US / TW / MY quotes; USD/TWD, USD/MYR, MYR/TWD FX;
   ex-dividend calendar.
 
