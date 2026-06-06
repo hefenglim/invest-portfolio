@@ -19,7 +19,8 @@ def test_defaults() -> None:
 def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "prod")
     monkeypatch.setenv("REPORTING_CURRENCY", "USD")
-    s = Settings()
+    # _env_file=None: rely solely on monkeypatched env, ignore any local .env.
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.app_env == "prod"
     assert s.reporting_currency == Currency.USD
 
@@ -27,7 +28,7 @@ def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_invalid_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "staging")
     with pytest.raises(ValidationError):
-        Settings()
+        Settings(_env_file=None)  # type: ignore[call-arg]
 
 
 def test_get_settings_is_cached() -> None:
