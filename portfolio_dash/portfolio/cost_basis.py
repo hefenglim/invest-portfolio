@@ -114,9 +114,13 @@ def build_book(
             if ev.type is DividendType.CASH:
                 existing.adjusted_total -= ev.net
             else:  # DRIP / STOCK add shares at zero cost
-                existing.shares += (
-                    ev.reinvest_shares if ev.reinvest_shares is not None else _ZERO
-                )
+                if ev.reinvest_shares is None:
+                    # Fail loud: a DRIP/stock dividend without share count would
+                    # silently drop the reinvestment instead of coercing to zero.
+                    raise ValueError(
+                        f"{ev.type} dividend for {key} requires reinvest_shares"
+                    )
+                existing.shares += ev.reinvest_shares
 
     holdings: list[Holding] = []
     for (account_id, symbol), pos in positions.items():

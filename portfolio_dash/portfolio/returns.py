@@ -30,7 +30,14 @@ def total_return(
     current_fx: FxRate,
     reporting: Currency,
 ) -> ReturnSummary:
-    """Per-currency realized+unrealized and rate (vs gross invested); blended at spot."""
+    """Per-currency realized+unrealized and rate (vs gross invested); blended at spot.
+
+    Expects ``valued_holdings`` already passed through ``value_holdings`` (a holding with
+    ``unrealized_pnl is None`` — stale or never valued — is skipped). Note: a stale
+    holding's unrealized is excluded from the numerator while its cost stays in
+    ``gross_invested`` (denominator), so the simple rate UNDERSTATES returns when stale
+    positions are present. The rate is a secondary glance metric; XIRR is the rigorous one.
+    """
     unrealized: dict[Currency, Decimal] = {}
     for h in valued_holdings:
         if h.unrealized_pnl is not None:
@@ -80,6 +87,10 @@ def xirr_reporting(
     Flows: buy - (gross incl. fees+tax), sell + (net), cash dividend + (net), DRIP/stock
     neutral, opening - (original_cost_total at build_date), final market value + at as_of.
     Each flow converted at its trade-date FX; final value at current spot.
+
+    All-or-nothing on missing prices: if ANY held symbol lacks a current price this
+    returns None (the terminal value can't be formed), unlike total_return/allocation
+    which degrade partially. Also returns None on non-convergence / non-finite results.
     """
 
     def ccy_of(symbol: str) -> Currency:

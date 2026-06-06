@@ -189,3 +189,13 @@ def test_sell_then_rebuy_reuses_position() -> None:
     assert h.original_avg == Decimal("200")
     assert book.realized.by_currency[Currency.USD] == Decimal("500")  # from the full sell
     assert book.gross_invested[Currency.USD] == Decimal("2000")  # 1000 + 1000 both buys
+
+
+def test_drip_without_reinvest_shares_raises() -> None:
+    # A DRIP/stock dividend missing reinvest_shares must fail loud, not silently drop it.
+    txs = [_buy("AAPL", "10", "100", date(2025, 1, 1))]
+    divs = [Dividend(account_id="a", symbol="AAPL", date=date(2025, 6, 1),
+                     type=DividendType.DRIP, gross=Decimal("100"),
+                     withholding=Decimal("30"), net=Decimal("70"))]
+    with pytest.raises(ValueError, match="requires reinvest_shares"):
+        build_book(txs, divs, [], INSTR)
