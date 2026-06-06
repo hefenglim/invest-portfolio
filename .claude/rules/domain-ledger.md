@@ -27,8 +27,10 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
 - Tracked in the instrument's **quote currency** (TW→TWD, US→USD incl. Moomoo, MY→MYR).
 - Maintain **two numbers**: `original_cost` (永久保留, never overwritten) and
   `adjusted_cost` (after dividend adjustments).
-- `average_cost = total_cost / shares`, **computed on read** — never store a rounded
-  average as the authority (avoids cumulative rounding error across many lots).
+- `average_cost = total_cost / shares`, **computed on read** — applies to each of the two
+  numbers (`original_avg = original_total / shares`, `adjusted_avg = adjusted_total /
+  shares`); never store a rounded average as the authority (avoids cumulative rounding
+  error across many lots).
 
 ## Dividend models (per account)
 

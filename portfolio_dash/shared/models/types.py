@@ -3,14 +3,10 @@
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import AfterValidator
+from pydantic import Field
 
-
-def _ensure_finite(value: Decimal) -> Decimal:
-    if not value.is_finite():
-        raise ValueError(f"value must be finite, got {value!r}")
-    return value
-
-
-# A Decimal that rejects NaN / Infinity at the model boundary.
-Money = Annotated[Decimal, AfterValidator(_ensure_finite)]
+# A Decimal constrained to finite values (no NaN / Infinity). pydantic's Decimal core
+# schema already rejects non-finite values; the explicit constraint documents the money
+# invariant at the type level. Negative and zero values are allowed (e.g. adjusted cost
+# may go <= 0 after cumulative dividends exceed cost).
+Money = Annotated[Decimal, Field(allow_inf_nan=False)]
