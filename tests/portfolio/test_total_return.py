@@ -45,3 +45,17 @@ def test_total_return_zero_gross_rate_none() -> None:
                gross_invested={Currency.USD: Decimal("0")})
     rs = total_return(book, [], _fx, Currency.USD)
     assert rs.by_currency[Currency.USD].rate is None
+
+
+def test_stale_holding_excluded_from_unrealized() -> None:
+    book = Book(
+        holdings=[],
+        realized=RealizedPnL(rows=[], by_currency={}),
+        gross_invested={Currency.USD: Decimal("1000")},
+    )
+    priced = _valued("AAPL", Currency.USD, "10", "100", "120")  # unrealized 200
+    stale = _valued("MSFT", Currency.USD, "5", "100", "100").model_copy(
+        update={"unrealized_pnl": None, "market_price": None, "price_stale": True}
+    )
+    rs = total_return(book, [priced, stale], _fx, Currency.USD)
+    assert rs.by_currency[Currency.USD].unrealized == Decimal("200")

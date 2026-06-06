@@ -1,6 +1,5 @@
 """Returns: per-currency total return + blended reporting total, and reporting XIRR."""
 
-from collections import defaultdict
 from collections.abc import Callable
 from decimal import Decimal
 
@@ -24,10 +23,10 @@ def total_return(
     reporting: Currency,
 ) -> ReturnSummary:
     """Per-currency realized+unrealized and rate (vs gross invested); blended at spot."""
-    unrealized: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
+    unrealized: dict[Currency, Decimal] = {}
     for h in valued_holdings:
         if h.unrealized_pnl is not None:
-            unrealized[h.quote_ccy] += h.unrealized_pnl
+            unrealized[h.quote_ccy] = unrealized.get(h.quote_ccy, _ZERO) + h.unrealized_pnl
 
     ccys = set(book.gross_invested) | set(book.realized.by_currency) | set(unrealized)
     by_ccy: dict[Currency, CurrencyReturn] = {}
