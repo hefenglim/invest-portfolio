@@ -1,9 +1,11 @@
 """Returns: per-currency total return + blended reporting total, and reporting XIRR."""
 
+import math
 from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 
+from pyxirr import InvalidPaymentsError
 from pyxirr import xirr as _xirr
 
 from portfolio_dash.portfolio.results import (
@@ -118,8 +120,10 @@ def xirr_reporting(
 
     try:
         rate = _xirr(dates, amounts)
-    except Exception:
+    except InvalidPaymentsError:
+        # No sign change in the cashflow series (e.g. all outflows) — not computable.
         return None
-    if rate is None:
+    if rate is None or not math.isfinite(rate):
+        # Non-finite (e.g. conflicting same-date flows yield inf) — never surface it.
         return None
     return Decimal(str(rate))
