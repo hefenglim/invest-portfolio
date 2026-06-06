@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
+    "pyxirr>=0.10",
 ]
 
 [project.optional-dependencies]

@@ -43,21 +43,29 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
 
 ## P&L and returns — single source of truth, NO double counting
 
-- **Realized P&L** (on sell) = net proceeds (after fees + tax) − `original_avg ×
-  shares_sold`. Uses **original cost** (Q1).
-- **Unrealized P&L** = (market price − `original_avg`) × shares. Uses **original cost**.
-- `adjusted_cost` / `average_cost(adjusted)` / **股利回收率** are **display-only
-  "回本進度"** — they are NOT inputs to total return.
-- **Total return** = realized + unrealized + dividend income. Dividends are added
-  **exactly once** here (because P&L uses original cost, not dividend-adjusted) — this
-  is the fix for the original double-count (Q1).
-- **Total return rate** denominator = **original invested cost** (Q2).
-- **XIRR is the primary return metric** (Q2). Cashflow signs: buy −, sell +, cash
-  dividend +, current market value + (final period). DRIP US dividends are **neutral**
-  (not a + inflow; reinvest not a − outflow) (Q3). TW/MY cash dividends are + inflows.
-  Opening inventory contributes a flow equal to its `original_cost_total` dated on its
-  **build date** (so opening capital is counted). Single reporting currency; every
-  flow converted at **trade-date FX** (Q7).
+- **Accounting model = adjusted cost (decided 2026-06-06, human sign-off).** P&L is computed against `adjusted_cost`; cash dividends are folded into cost
+  (NOT a separate income line). `original_cost` is never overwritten and is retained for
+  the return-rate denominator and the capital-gain-vs-dividend split.
+  - `adjusted_total = original_total − cumulative cash dividends`; `adjusted_avg =
+    adjusted_total / shares`; **may be ≤ 0** (high-yield payback) — never floored.
+  - **Realized P&L** (on sell) = net proceeds (after fees+tax) − `adjusted_avg × shares_sold`.
+  - **Unrealized P&L** = (market − `adjusted_avg`) × shares.
+  - **Total return** = realized + unrealized (both vs adjusted), incl. realized from
+    closed positions. Dividends enter exactly once (via cost reduction); **no separate
+    dividend line** (the old double-count trap).
+  - **Total return rate** = total return / **original invested cost** (cumulative, not
+    annualized). **XIRR** is the annualized, money-weighted, FX-aware decision metric.
+  - **Cost basis is all-in:** buy-side fees + tax are part of `original_total` (and thus
+    adjusted), so every transaction cost is captured.
+- **Dividend treatment:** TW/MY cash → reduce `adjusted_total` by net received. US DRIP →
+  net reinvested as $0-cost shares (does NOT reduce `adjusted_total`). 配股 → add shares,
+  no cost change. Display-only: 回本進度 / 股利回收率 = cumulative cash dividends /
+  original_total.
+- **XIRR cashflow signs:** buy −, sell +, cash dividend + (TW/MY), current market value +
+  (final period). DRIP US dividends are **neutral** (not a + inflow; reinvest not a −
+  outflow) (Q3). Opening inventory contributes a flow equal to its `original_cost_total`
+  dated on its **build date** (so opening capital is counted). Single reporting currency;
+  every flow converted at **trade-date FX** (Q7).
 
 ## FX / currency-exchange ledger (Q12)
 
