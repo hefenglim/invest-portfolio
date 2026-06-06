@@ -35,6 +35,7 @@ class RealizedRow(BaseModel):
     quote_ccy: Currency
     shares_sold: Decimal
     proceeds_net: Decimal
+    original_cost_removed: Decimal
     adjusted_cost_removed: Decimal
     realized: Decimal
 

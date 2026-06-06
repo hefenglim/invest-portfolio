@@ -61,6 +61,8 @@ def test_sell_realized_vs_adjusted_and_reduces_shares() -> None:
            _sell("AAPL", "4", "150", date(2025, 1, 3), fees="2")]
     book = build_book(txs, [], [], INSTR)
     assert book.realized.rows[0].realized == Decimal("198")
+    assert book.realized.rows[0].original_cost_removed == Decimal("400")
+    assert book.realized.rows[0].adjusted_cost_removed == Decimal("400")
     assert book.realized.by_currency[Currency.USD] == Decimal("198")
     h = book.holdings[0]
     assert h.shares == Decimal("6")
@@ -140,3 +142,50 @@ def test_equivalence_adjusted_total_equals_original_plus_dividends() -> None:
     adj_model = (price - h.adjusted_avg) * h.shares
     orig_model = (price - h.original_avg) * h.shares + Decimal("20000")
     assert adj_model == orig_model
+
+
+def test_dividend_for_unknown_position_raises() -> None:
+    # A dividend with no prior buy/opening must fail loud, not create a ghost position.
+    divs = [Dividend(account_id="a", symbol="AAPL", date=date(2025, 6, 1),
+                     type=DividendType.CASH, gross=Decimal("100"),
+                     withholding=Decimal("0"), net=Decimal("100"))]
+    with pytest.raises(ValueError, match="unknown position"):
+        build_book([], divs, [], INSTR)
+
+
+def test_multi_account_same_symbol_isolated() -> None:
+    txs = [_buy("AAPL", "10", "100", date(2025, 1, 1), acc="schwab"),
+           _buy("AAPL", "5", "200", date(2025, 1, 1), acc="moomoo"),
+           _sell("AAPL", "4", "150", date(2025, 1, 2), acc="schwab")]
+    book = build_book(txs, [], [], INSTR)
+    by_acc = {h.account_id: h for h in book.holdings}
+    assert by_acc["schwab"].shares == Decimal("6")        # 10 - 4, unaffected by moomoo
+    assert by_acc["moomoo"].shares == Decimal("5")        # untouched by schwab's sell
+    assert by_acc["moomoo"].original_cost_total == Decimal("1000")
+    assert book.gross_invested[Currency.USD] == Decimal("2000")  # 1000 + 1000 (both buys)
+
+
+def test_opening_inventory_plus_subsequent_buy_accumulates() -> None:
+    oi = OpeningInventory(account_id="a", symbol="AAPL", shares=Decimal("10"),
+                          original_avg_cost=Decimal("100"), original_cost_total=Decimal("1000"),
+                          build_date=date(2024, 12, 31))
+    txs = [_buy("AAPL", "10", "120", date(2025, 1, 2))]
+    book = build_book(txs, [], [oi], INSTR)
+    h = book.holdings[0]
+    assert h.shares == Decimal("20")
+    assert h.original_cost_total == Decimal("2200")  # 1000 + 1200, accumulated
+    assert h.original_avg == Decimal("110")
+    assert book.gross_invested[Currency.USD] == Decimal("2200")
+
+
+def test_sell_then_rebuy_reuses_position() -> None:
+    txs = [_buy("AAPL", "10", "100", date(2025, 1, 1)),
+           _sell("AAPL", "10", "150", date(2025, 1, 2)),
+           _buy("AAPL", "5", "200", date(2025, 1, 3))]
+    book = build_book(txs, [], [], INSTR)
+    h = book.holdings[0]
+    assert h.shares == Decimal("5")
+    assert h.original_cost_total == Decimal("1000")  # only the rebuy remains
+    assert h.original_avg == Decimal("200")
+    assert book.realized.by_currency[Currency.USD] == Decimal("500")  # from the full sell
+    assert book.gross_invested[Currency.USD] == Decimal("2000")  # 1000 + 1000 both buys

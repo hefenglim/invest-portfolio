@@ -92,6 +92,7 @@ def build_book(
                         quote_ccy=ccy,
                         shares_sold=ev.quantity,
                         proceeds_net=proceeds_net,
+                        original_cost_removed=original_removed,
                         adjusted_cost_removed=adjusted_removed,
                         realized=proceeds_net - adjusted_removed,
                     )
@@ -102,11 +103,20 @@ def build_book(
         else:  # dividend
             assert isinstance(ev, Dividend)
             key = (ev.account_id, ev.symbol)
-            pos = positions.setdefault(key, _Position(quote_ccy(ev.symbol)))
+            existing = positions.get(key)
+            if existing is None:
+                # Fail loud on a dividend for a position with no prior buy/opening:
+                # silently creating one would discard cash dividends (filtered out at
+                # 0 shares) or fabricate a $0-cost ghost holding from a DRIP.
+                raise ValueError(
+                    f"dividend for unknown position {key} (no prior buy/opening inventory)"
+                )
             if ev.type is DividendType.CASH:
-                pos.adjusted_total -= ev.net
+                existing.adjusted_total -= ev.net
             else:  # DRIP / STOCK add shares at zero cost
-                pos.shares += ev.reinvest_shares or _ZERO
+                existing.shares += (
+                    ev.reinvest_shares if ev.reinvest_shares is not None else _ZERO
+                )
 
     holdings: list[Holding] = []
     for (account_id, symbol), pos in positions.items():

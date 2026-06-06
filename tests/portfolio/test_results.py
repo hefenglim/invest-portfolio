@@ -64,6 +64,7 @@ def test_realized_row_and_allocation_models() -> None:
         quote_ccy=Currency.TWD,
         shares_sold=Decimal("500"),
         proceeds_net=Decimal("310000"),
+        original_cost_removed=Decimal("300000"),
         adjusted_cost_removed=Decimal("290000"),
         realized=Decimal("20000"),
     )
