@@ -1,3 +1,4 @@
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -33,6 +34,29 @@ def test_foreign_keys_pragma_on(tmp_db: Path) -> None:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_foreign_keys_enforcement_rejects_orphan(tmp_db: Path) -> None:
+    with db.session() as conn:
+        conn.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TABLE child (id INTEGER, pid INTEGER REFERENCES parent(id))")
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.session() as conn:
+            conn.execute("INSERT INTO child VALUES (1, 999)")
+
+
+def test_get_connection_creates_parent_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nested = tmp_path / "a" / "b" / "c" / "test.db"
+    monkeypatch.setenv("DB_PATH", str(nested))
+    get_settings.cache_clear()
+    try:
+        conn = db.get_connection()
+        conn.close()
+        assert nested.exists()
+    finally:
+        get_settings.cache_clear()
 
 
 def test_session_commits_on_success(tmp_db: Path) -> None:

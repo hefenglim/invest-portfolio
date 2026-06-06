@@ -31,3 +31,10 @@ prevents recurrence.
   not a bare string — so `type(x) is str` is `False` even though `isinstance(x, str)` is
   `True`. When serializing settings/models for the web layer, use json mode (or
   `isinstance`, never `type() is str`).
+- **sqlite3 DDL is not transactional under the legacy isolation model (2026-06-06):**
+  `shared/db.session()` commits/rolls back DML correctly, but Python's default
+  `isolation_level=""` runs standalone DDL (CREATE/DROP TABLE, etc.) *outside* a
+  transaction — a `rollback()` after pure DDL is a no-op and the schema change sticks.
+  DML that follows DDL in the same session *is* transactional (Python 3.12 no longer
+  auto-commits before DDL). Keep schema migrations out of plain DML sessions, or handle
+  this explicitly.
