@@ -51,3 +51,12 @@ def test_allocation_skips_stale_holdings() -> None:
     )
     sa = sector_allocation([stale], INSTR, _spot, Currency.USD)
     assert sa.by_sector == {}
+
+
+def test_combined_view_skips_stale_holdings() -> None:
+    stale = _valued("AAPL", Currency.USD, "100").model_copy(
+        update={"market_value": None, "price_stale": True}
+    )
+    cv = combined_view([stale], _spot, Currency.TWD)
+    assert cv.by_currency_value == {}
+    assert cv.reporting_total_value == Decimal("0")
