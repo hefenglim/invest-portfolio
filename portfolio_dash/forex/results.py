@@ -9,7 +9,12 @@ from portfolio_dash.shared.enums import Currency
 
 class AccountFXResult(BaseModel):
     """Per-account FX P&L. Money figures (realized/unrealized) are in ``home_ccy``;
-    ``foreign_cash`` and ``foreign_stock_value`` are in ``foreign_ccy``."""
+    ``foreign_cash`` and ``foreign_stock_value`` are in ``foreign_ccy``.
+
+    ``foreign_cash`` may be negative — net foreign drawn beyond the tracked conversions
+    (e.g. an untracked funding path or sale proceeds). A negative balance is a signal the
+    consumer should flag rather than render an FX figure on directly.
+    """
 
     account_id: str
     home_ccy: Currency

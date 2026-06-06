@@ -29,6 +29,8 @@ def _realized_fx(
     total = _ZERO
     for c in conversions:
         if c.from_ccy == foreign and c.to_ccy == home:
+            # Cost-basis math (foreign sold × pool weighted-avg rate), deliberately NOT
+            # shared.fx.convert — avg_rate is a derived pool rate, not a market spot.
             total += c.to_amount - c.from_amount * avg_rate
     return total
 
@@ -116,9 +118,11 @@ def compute_fx_summary(
             account, foreign, stock_value, txs, divs, convs, instruments, spot
         )
         by_account[account_id] = result
-        # home->reporting is intentionally unguarded (see docstring): a missing reporting
-        # rate is a config error, unlike the foreign->home spot which may legitimately lag.
-        to_reporting = current_spot(home, reporting)
+        # home==reporting short-circuits to the identity rate so the rollup can't be broken
+        # by an incomplete current_spot. Otherwise home->reporting is intentionally
+        # unguarded (see docstring): a missing reporting rate is a config error, unlike the
+        # foreign->home spot which may legitimately lag.
+        to_reporting = Decimal("1") if home == reporting else current_spot(home, reporting)
         if result.realized_fx is not None:
             rep_realized += convert(result.realized_fx, to_reporting)
         if result.unrealized_fx_stocks is not None and result.unrealized_fx_cash is not None:
