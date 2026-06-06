@@ -83,12 +83,18 @@ def test_compute_account_fx_fx_loss_when_spot_below_avg() -> None:
 
 def test_compute_account_fx_two_rates_blended_then_reconversion() -> None:
     convs = [
-        FXConversion(account_id="schwab", date=date(2025, 1, 1), from_ccy=Currency.TWD,
-                     from_amount=Decimal("320000"), to_ccy=Currency.USD, to_amount=Decimal("10000")),
-        FXConversion(account_id="schwab", date=date(2025, 2, 1), from_ccy=Currency.TWD,
-                     from_amount=Decimal("330000"), to_ccy=Currency.USD, to_amount=Decimal("10000")),
-        FXConversion(account_id="schwab", date=date(2025, 6, 1), from_ccy=Currency.USD,
-                     from_amount=Decimal("5000"), to_ccy=Currency.TWD, to_amount=Decimal("165000")),
+        FXConversion(
+            account_id="schwab", date=date(2025, 1, 1), from_ccy=Currency.TWD,
+            from_amount=Decimal("320000"), to_ccy=Currency.USD, to_amount=Decimal("10000"),
+        ),
+        FXConversion(
+            account_id="schwab", date=date(2025, 2, 1), from_ccy=Currency.TWD,
+            from_amount=Decimal("330000"), to_ccy=Currency.USD, to_amount=Decimal("10000"),
+        ),
+        FXConversion(
+            account_id="schwab", date=date(2025, 6, 1), from_ccy=Currency.USD,
+            from_amount=Decimal("5000"), to_ccy=Currency.TWD, to_amount=Decimal("165000"),
+        ),
     ]
     r = compute_account_fx(SCHWAB, Currency.USD, Decimal("0"), [], [], convs, INSTR,
                            spot=Decimal("33"))
