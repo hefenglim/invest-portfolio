@@ -93,6 +93,11 @@ def compute_fx_summary(
     ``foreign_exposure`` maps account_id -> (foreign_ccy, foreign stock market value in
     that foreign ccy), supplied by the orchestrator from the portfolio core's valued
     holdings. Only accounts present in ``foreign_exposure`` are processed.
+
+    ``current_spot(x, x)`` must return ``Decimal("1")`` (identity rate). The foreign->home
+    spot is allowed to be missing (degrades to ``None`` unrealized), but the home->reporting
+    rate is assumed always resolvable — a missing reporting rate is a configuration error
+    (the orchestrator must cover the single reporting currency), so it is allowed to raise.
     """
     by_account: dict[str, AccountFXResult] = {}
     rep_realized = _ZERO
@@ -111,6 +116,8 @@ def compute_fx_summary(
             account, foreign, stock_value, txs, divs, convs, instruments, spot
         )
         by_account[account_id] = result
+        # home->reporting is intentionally unguarded (see docstring): a missing reporting
+        # rate is a config error, unlike the foreign->home spot which may legitimately lag.
         to_reporting = current_spot(home, reporting)
         if result.realized_fx is not None:
             rep_realized += convert(result.realized_fx, to_reporting)

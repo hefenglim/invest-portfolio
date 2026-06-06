@@ -64,8 +64,16 @@ def test_decomposition_identity_no_double_count() -> None:
     stock_fx = summary.reporting_unrealized_fx - cash_unreal
     cash_fx = cash_unreal + summary.reporting_realized_fx
 
+    # Independently hand-computed expected values (not re-derived from the summary):
+    # ① unrealized 90*(120-100)=1800 USD -> *33 = 59400 TWD; stock_fx = 10800 USD*(33-32);
+    # cash_fx = 1000 USD*(33-32). These pin the actual production outputs, not just algebra.
+    assert one_total == Decimal("59400")
+    assert stock_fx == Decimal("10800")
+    assert cash_fx == Decimal("1000")
+
     asset = one_total - stock_fx
     total_fx = stock_fx + cash_fx
     grand_total = one_total + cash_fx
-    assert asset + total_fx == grand_total
-    assert asset == one_total - stock_fx
+    assert asset == Decimal("48600")        # 59400 - 10800: stock local gain in TWD terms
+    assert grand_total == Decimal("60400")  # ① (59400) + cash FX (1000)
+    assert asset + total_fx == grand_total  # no double count: asset + FX == grand total

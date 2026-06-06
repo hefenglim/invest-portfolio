@@ -24,7 +24,10 @@ class AccountFXResult(BaseModel):
 
 
 class FXSummary(BaseModel):
-    """All per-account results plus a reporting-currency rollup."""
+    """All per-account results plus a reporting-currency rollup.
+
+    Money figures are full-precision (not quantized); quantize at display/settlement.
+    """
 
     by_account: dict[str, AccountFXResult]
     reporting_currency: Currency
