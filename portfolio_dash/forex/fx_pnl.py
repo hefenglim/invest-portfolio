@@ -1,14 +1,17 @@
 """Realized + unrealized FX P&L per account, and the reporting-currency rollup."""
 
+from collections.abc import Callable
 from decimal import Decimal
 
 from portfolio_dash.forex.pools import average_acquisition_rate, foreign_cash_balance
-from portfolio_dash.forex.results import AccountFXResult
+from portfolio_dash.forex.results import AccountFXResult, FXSummary
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.ledger import Dividend, FXConversion, Transaction
 
 _ZERO = Decimal("0")
+SpotRate = Callable[[Currency, Currency], Decimal]
 
 
 def _realized_fx(
@@ -72,4 +75,52 @@ def compute_account_fx(
         realized_fx=realized,
         unrealized_fx_stocks=unreal_stocks,
         unrealized_fx_cash=unreal_cash,
+    )
+
+
+def compute_fx_summary(
+    accounts: dict[str, Account],
+    instruments: dict[str, Instrument],
+    transactions: list[Transaction],
+    dividends: list[Dividend],
+    fx_conversions: list[FXConversion],
+    foreign_exposure: dict[str, tuple[Currency, Decimal]],
+    current_spot: SpotRate,
+    reporting: Currency,
+) -> FXSummary:
+    """FX P&L for every FX-exposed account + reporting rollup.
+
+    ``foreign_exposure`` maps account_id -> (foreign_ccy, foreign stock market value in
+    that foreign ccy), supplied by the orchestrator from the portfolio core's valued
+    holdings. Only accounts present in ``foreign_exposure`` are processed.
+    """
+    by_account: dict[str, AccountFXResult] = {}
+    rep_realized = _ZERO
+    rep_unrealized = _ZERO
+    for account_id, (foreign, stock_value) in foreign_exposure.items():
+        account = accounts[account_id]
+        home = account.funding_ccy
+        txs = [t for t in transactions if t.account_id == account_id]
+        divs = [d for d in dividends if d.account_id == account_id]
+        convs = [c for c in fx_conversions if c.account_id == account_id]
+        try:
+            spot: Decimal | None = current_spot(foreign, home)
+        except KeyError:
+            spot = None
+        result = compute_account_fx(
+            account, foreign, stock_value, txs, divs, convs, instruments, spot
+        )
+        by_account[account_id] = result
+        to_reporting = current_spot(home, reporting)
+        if result.realized_fx is not None:
+            rep_realized += convert(result.realized_fx, to_reporting)
+        if result.unrealized_fx_stocks is not None and result.unrealized_fx_cash is not None:
+            rep_unrealized += convert(
+                result.unrealized_fx_stocks + result.unrealized_fx_cash, to_reporting
+            )
+    return FXSummary(
+        by_account=by_account,
+        reporting_currency=reporting,
+        reporting_realized_fx=rep_realized,
+        reporting_unrealized_fx=rep_unrealized,
     )
