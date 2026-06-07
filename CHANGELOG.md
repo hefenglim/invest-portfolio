@@ -41,8 +41,16 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   (asset + FX), never additive.
 
 ### Planned
-- Data-source availability probe: US / TW / MY quotes; USD/TWD, USD/MYR, MYR/TWD FX;
-  ex-dividend calendar.
+- Data-source availability probe (spike): US / TW / MY quotes (latest + historical),
+  USD/TWD · USD/MYR · MYR/TWD FX, dividends / ex-dividend. Produces a ranked
+  primary/fallback recommendation per (data type × market) + recorded fixtures; feeds the
+  `pricing/` spec. Fees/taxes are config-driven (not probed). Spec:
+  `docs/superpowers/specs/2026-06-08-data-source-probe-design.md`.
+- `llm_insight/` prediction self-tracking + backtest loop (future sub-project): the LLM
+  records each recommendation/forecast, later replays and scores its own past predictions
+  against realized outcomes, accumulating a per-prediction confidence index and a
+  corrective feedback loop that informs future advice. Gets its own brainstorm at the
+  `llm_insight/` stage.
 
 ## [v0.0.0] - 2026-06-05
 
