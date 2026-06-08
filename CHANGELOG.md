@@ -66,10 +66,11 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 - `llm_insight/` insight inputs & per-stock prompt (future): per-holding decision signals from
   FinMind (財報 / 月營收 / 法人 / 融資券 / PER-PBR / news URL) plus **US sentiment indicators —
   CNN Fear & Greed Index and VIX** — as buy/sell context. **Prompt architecture (decided
-  2026-06-08):** one editable **default system prompt** holds the output contract + invariants
-  (JSON schema, no numbers-of-record, batch-only) and is immutable by overrides; reusable, named
-  **Strategy Prompts** add a per-type analytical focus, and each stock optionally **selects 0..1**
-  of them (per-stock assignment — option A; data model pre-reserves tag/category binding for a
+  2026-06-08):** one editable **default system prompt** (ships as a Claude-recommended best prompt; user
+  fine-tunes in config) holds the output contract + invariants (JSON schema, no
+  numbers-of-record, batch-only) and is immutable by overrides; reusable, named
+  **Strategy Prompts** add a per-type analytical focus, and each stock's Strategy is **blank by
+  default**, optionally **selecting 0..1** from the library (per-stock assignment — option A; data model pre-reserves tag/category binding for a
   later upgrade). All prompts live in the settings (config) page, versioned and folded into the
   cache fingerprint + self-backtest attribution (per `llm-insight.md`).
 - **User authentication / access control** (`web_ui/`, future): basic login + permission gating
