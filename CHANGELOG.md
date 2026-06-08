@@ -58,6 +58,10 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   the LLM self-backtest loop.
 
 ### Planned
+- `pricing/` v1 scope = **latest quotes + FX** (decided 2026-06-08). Deferred to later pricing
+  iterations — **do not forget**: **(B) historical daily backfill** (from each instrument's
+  first trade date, for ECharts trend / equity curves) and **(C) dividend / ex-dividend
+  fetching** (FinMind 除權息 + ex-dividend calendar → 回本進度 / 股利回收率).
 - `llm_insight/` prediction self-tracking + backtest loop (future sub-project): the LLM
   records each recommendation/forecast, later replays and scores its own past predictions
   against realized outcomes, accumulating a per-prediction confidence index and a
