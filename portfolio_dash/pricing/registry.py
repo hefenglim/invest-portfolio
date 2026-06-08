@@ -3,7 +3,7 @@ from datetime import date
 from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
-from portfolio_dash.pricing.results import FxRow, PriceRow
+from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRow
 from portfolio_dash.shared.enums import Market
 
 _OrderKey = tuple[DataType, Market | None]
@@ -79,6 +79,28 @@ class Registry:
             if not filled:
                 failed.append(ref.symbol)
         return rows, sources, failed
+
+    def fetch_dividends(
+        self, instruments: list[InstrumentRef],
+    ) -> tuple[list[DividendEvent], dict[str, str], list[str]]:
+        events: list[DividendEvent] = []
+        sources: dict[str, str] = {}
+        failed: list[str] = []
+        for ref in instruments:
+            filled = False
+            for provider in self._chain(DataType.DIVIDEND, ref.market):
+                try:
+                    got = provider.fetch_dividends([ref])
+                except Exception:  # noqa: BLE001 - any provider failure -> fall back
+                    continue
+                if got:
+                    events.extend(got)
+                    sources[ref.symbol] = provider.name
+                    filled = True
+                    break
+            if not filled:
+                failed.append(ref.symbol)
+        return events, sources, failed
 
     def fetch_fx(
         self, pairs: list[FxPair],

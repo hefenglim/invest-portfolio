@@ -13,7 +13,7 @@ from datetime import date, datetime
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import RefreshSummary
-from portfolio_dash.pricing.store import upsert_fx, upsert_prices
+from portfolio_dash.pricing.store import upsert_dividend_events, upsert_fx, upsert_prices
 
 
 def refresh_quotes(
@@ -61,4 +61,24 @@ def refresh_history(
     rows, sources, failed = registry.fetch_quote_history(instruments, start)
     if rows:
         upsert_prices(conn, rows, fetched_at=now)
+    return RefreshSummary(ok=sources, failed=failed, fetched_at=now)
+
+
+def refresh_dividends(
+    conn: sqlite3.Connection,
+    registry: Registry,
+    instruments: list[InstrumentRef],
+    *,
+    now: datetime,
+) -> RefreshSummary:
+    """Fetch dividend events via ``registry``, upsert into SQLite, summarize.
+
+    Mirrors `refresh_history`'s shape but for the `DIVIDEND` data type — a
+    per-instrument routed fetch of corporate-action events. Same graceful-
+    degradation contract: failed symbols are recorded in the summary, never
+    raised (`data-and-pricing.md` — never crash, never fabricate).
+    """
+    events, sources, failed = registry.fetch_dividends(instruments)
+    if events:
+        upsert_dividend_events(conn, events, fetched_at=now)
     return RefreshSummary(ok=sources, failed=failed, fetched_at=now)

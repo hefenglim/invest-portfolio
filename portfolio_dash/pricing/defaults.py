@@ -8,6 +8,7 @@ is no until it's justified).
 """
 
 from portfolio_dash.pricing.enums import DataType
+from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
 from portfolio_dash.pricing.providers.tpex_provider import TpexProvider
 from portfolio_dash.pricing.providers.twse_provider import TwseProvider
 from portfolio_dash.pricing.providers.yfinance_provider import YFinanceProvider
@@ -22,6 +23,9 @@ DEFAULT_PROVIDER_ORDER: dict[tuple[DataType, Market | None], list[str]] = {
     (DataType.QUOTE_HISTORY, Market.TW): ["yfinance"],
     (DataType.QUOTE_HISTORY, Market.MY): ["yfinance"],
     (DataType.FX, None): ["yfinance"],
+    (DataType.DIVIDEND, Market.TW): ["finmind", "yfinance"],
+    (DataType.DIVIDEND, Market.US): ["yfinance"],
+    (DataType.DIVIDEND, Market.MY): ["yfinance"],
 }
 
 
@@ -31,5 +35,6 @@ def default_registry() -> Registry:
         "yfinance": YFinanceProvider(),
         "twse": TwseProvider(),
         "tpex": TpexProvider(),
+        "finmind": FinMindProvider(),
     }
     return Registry(providers=providers, order=DEFAULT_PROVIDER_ORDER)
