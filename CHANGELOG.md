@@ -80,6 +80,14 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   cache fingerprint + self-backtest attribution (per `llm-insight.md`).
 - **User authentication / access control** (`web_ui/`, future): basic login + permission gating
   so the self-hosted instance (1–2 users) is not publicly exposed on the network — kept minimal.
+- `web_ui/` dashboard UI/UX (future): as strategy info, data, and ECharts charts grow, the page
+  can get long — evaluate clear categorization + non-cluttered tabs/sections (avoid endless
+  scroll) for this AI-stock-strategy / position-management / watchlist assistant. Optimize the
+  human-computer interface then, not pre-emptively.
+- **Design principle (all modules):** invest in adjustable structure — config-driven behavior,
+  provider/strategy protocols + registries, swappable adapters, decoupled layers — so future
+  changes are config edits + small additions, not rewrites; keep YAGNI on features/scale (per
+  `stack.md`), deferring concrete specifics until real use surfaces them.
 
 ## [v0.0.0] - 2026-06-05
 
