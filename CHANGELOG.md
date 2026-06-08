@@ -69,7 +69,8 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   2026-06-08):** one editable **default system prompt** (ships as a Claude-recommended best prompt; user
   fine-tunes in config) holds the output contract + invariants (JSON schema, no
   numbers-of-record, batch-only) and is immutable by overrides; reusable, named
-  **Strategy Prompts** add a per-type analytical focus, and each stock's Strategy is **blank by
+  **Strategy Prompts** (the library ships with several Claude-generated optimized templates;
+  users can add their own) add a per-type analytical focus, and each stock's Strategy is **blank by
   default**, optionally **selecting 0..1** from the library (per-stock assignment — option A; data model pre-reserves tag/category binding for a
   later upgrade). All prompts live in the settings (config) page, versioned and folded into the
   cache fingerprint + self-backtest attribution (per `llm-insight.md`).
