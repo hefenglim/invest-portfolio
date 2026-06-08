@@ -1,0 +1,146 @@
+"""Account + fee-rule + LLM-model config seed (config-as-code defaults)."""
+
+import sqlite3
+from decimal import Decimal
+
+from pydantic import BaseModel
+
+from portfolio_dash.shared.enums import Currency, Market
+
+
+class FeeRuleSet(BaseModel):
+    """Fee and tax parameters for a single account rule set."""
+
+    market: Market
+    brokerage: Decimal = Decimal("0")  # rate of notional
+    discount: Decimal = Decimal("1")
+    min_fee: Decimal = Decimal("0")
+    tax_normal: Decimal = Decimal("0")  # sell-side
+    tax_etf: Decimal = Decimal("0")
+    tax_daytrade: Decimal = Decimal("0")
+    sec_fee: Decimal = Decimal("0")  # US sell-side regulatory fee rate
+    clearing: Decimal = Decimal("0")  # MY
+    clearing_cap: Decimal | None = None
+    stamp_duty: Decimal = Decimal("0")
+    sst: Decimal = Decimal("0")
+    round_integer: bool = False  # TW rounds fee/tax to integer NT$
+
+
+class AccountConfig(BaseModel):
+    """Static configuration for a broker account."""
+
+    account_id: str
+    name: str
+    broker: str
+    settlement_ccy: Currency
+    funding_ccy: Currency
+    fee_rule_set: str
+    dividend_model: str
+
+
+class ModelPricing(BaseModel):
+    """LLM model pricing entry (per 1M tokens)."""
+
+    model_config = {"protected_namespaces": ()}  # allow field named 'model'
+    model: str
+    input_price_per_mtok: Decimal
+    output_price_per_mtok: Decimal
+
+
+FEE_RULES: dict[str, FeeRuleSet] = {
+    "tw": FeeRuleSet(
+        market=Market.TW,
+        brokerage=Decimal("0.001425"),
+        discount=Decimal("1"),
+        min_fee=Decimal("20"),
+        tax_normal=Decimal("0.003"),
+        tax_etf=Decimal("0.001"),
+        tax_daytrade=Decimal("0.0015"),
+        round_integer=True,
+    ),
+    # US/MY exact rates are config placeholders the user fills later; structure is correct.
+    "schwab": FeeRuleSet(market=Market.US, sec_fee=Decimal("0")),
+    "moomoo_us": FeeRuleSet(market=Market.US),
+    "moomoo_my": FeeRuleSet(
+        market=Market.MY,
+        clearing=Decimal("0.0003"),
+        clearing_cap=Decimal("1000"),
+    ),
+}
+
+DEFAULT_ACCOUNTS: list[AccountConfig] = [
+    AccountConfig(
+        account_id="tw_broker",
+        name="TW Broker",
+        broker="TW Broker",
+        settlement_ccy=Currency.TWD,
+        funding_ccy=Currency.TWD,
+        fee_rule_set="tw",
+        dividend_model="cash_cost_reduction",
+    ),
+    AccountConfig(
+        account_id="schwab",
+        name="Charles Schwab",
+        broker="Schwab",
+        settlement_ccy=Currency.USD,
+        funding_ccy=Currency.TWD,
+        fee_rule_set="schwab",
+        dividend_model="drip_us",
+    ),
+    AccountConfig(
+        account_id="moomoo_my_us",
+        name="Moomoo MY (US)",
+        broker="Moomoo MY",
+        settlement_ccy=Currency.USD,
+        funding_ccy=Currency.MYR,
+        fee_rule_set="moomoo_us",
+        dividend_model="drip_us",
+    ),
+    AccountConfig(
+        account_id="moomoo_my_my",
+        name="Moomoo MY (MY)",
+        broker="Moomoo MY",
+        settlement_ccy=Currency.MYR,
+        funding_ccy=Currency.MYR,
+        fee_rule_set="moomoo_my",
+        dividend_model="cash",
+    ),
+]
+
+# LLM model registry defaults (pricing per 1M tokens); endpoint/key live in Settings.
+DEFAULT_LLM_MODELS: list[ModelPricing] = []
+
+
+def get_fee_rule_set(name: str) -> FeeRuleSet:
+    """Return the named FeeRuleSet; raises KeyError if not found."""
+    return FEE_RULES[name]
+
+
+def seed_accounts(conn: sqlite3.Connection) -> None:
+    """Insert DEFAULT_ACCOUNTS into the accounts table; idempotent via upsert."""
+    conn.executemany(
+        """INSERT INTO accounts
+               (account_id, name, broker, settlement_ccy, funding_ccy,
+                fee_rule_set, dividend_model)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(account_id) DO UPDATE SET
+               name           = excluded.name,
+               broker         = excluded.broker,
+               settlement_ccy = excluded.settlement_ccy,
+               funding_ccy    = excluded.funding_ccy,
+               fee_rule_set   = excluded.fee_rule_set,
+               dividend_model = excluded.dividend_model""",
+        [
+            (
+                a.account_id,
+                a.name,
+                a.broker,
+                a.settlement_ccy.value,
+                a.funding_ccy.value,
+                a.fee_rule_set,
+                a.dividend_model,
+            )
+            for a in DEFAULT_ACCOUNTS
+        ],
+    )
+    conn.commit()
