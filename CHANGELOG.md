@@ -39,13 +39,19 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   reconversions, unrealized FX (stocks + cash) marked to spot; reporting-currency
   `FXSummary` rollup. Presented as an attribution decomposition of the portfolio return
   (asset + FX), never additive.
+- Data-source availability probe (spike) under `scripts/probe/`: typed harness
+  (`ProbeResult` model, `run_probe` runner + fixture recorder, markdown report renderer)
+  + live adapters (yfinance, TWSE, TPEx, twstock, stockprices.dev, klsescreener; FinMind /
+  AlphaVantage / Finnhub keyed). Produced a ranked primary/fallback recommendation per
+  (data type × market) and recorded raw fixtures under `tests/pricing/fixtures/` for
+  `pricing/` mock tests. Results + `pricing/` architecture recommendation:
+  `docs/probes/2026-06-08-data-source-probe-results.md`. Key findings: yfinance is the
+  US/MY/FX workhorse primary; TW latest quotes from TWSE/TPEx string sources for true tick
+  precision; MY 3-dp verified via klsescreener (yfinance is float64 — convert via
+  `Decimal(str(...))`); TW board (上市/上櫃) must be resolved per instrument; keyed sources
+  (FinMind/AlphaVantage/Finnhub) and Schwab await keys/OAuth.
 
 ### Planned
-- Data-source availability probe (spike): US / TW / MY quotes (latest + historical),
-  USD/TWD · USD/MYR · MYR/TWD FX, dividends / ex-dividend. Produces a ranked
-  primary/fallback recommendation per (data type × market) + recorded fixtures; feeds the
-  `pricing/` spec. Fees/taxes are config-driven (not probed). Spec:
-  `docs/superpowers/specs/2026-06-08-data-source-probe-design.md`.
 - `llm_insight/` prediction self-tracking + backtest loop (future sub-project): the LLM
   records each recommendation/forecast, later replays and scores its own past predictions
   against realized outcomes, accumulating a per-prediction confidence index and a
