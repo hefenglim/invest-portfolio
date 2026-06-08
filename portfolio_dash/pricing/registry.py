@@ -1,3 +1,5 @@
+from datetime import date
+
 from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
@@ -54,6 +56,28 @@ class Registry:
                         sources[row.instrument] = provider.name
                         del remaining[row.instrument]
             failed.extend(remaining.keys())
+        return rows, sources, failed
+
+    def fetch_quote_history(
+        self, instruments: list[InstrumentRef], start: date,
+    ) -> tuple[list[PriceRow], dict[str, str], list[str]]:
+        rows: list[PriceRow] = []
+        sources: dict[str, str] = {}
+        failed: list[str] = []
+        for ref in instruments:
+            filled = False
+            for provider in self._chain(DataType.QUOTE_HISTORY, ref.market):
+                try:
+                    got = provider.fetch_quote_history(ref, start)
+                except Exception:  # noqa: BLE001 - any provider failure -> fall back
+                    continue
+                if got:
+                    rows.extend(got)
+                    sources[ref.symbol] = provider.name
+                    filled = True
+                    break
+            if not filled:
+                failed.append(ref.symbol)
         return rows, sources, failed
 
     def fetch_fx(

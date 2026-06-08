@@ -18,6 +18,9 @@ DEFAULT_PROVIDER_ORDER: dict[tuple[DataType, Market | None], list[str]] = {
     (DataType.QUOTE_LATEST, Market.US): ["yfinance"],
     (DataType.QUOTE_LATEST, Market.TW): ["twse", "tpex", "yfinance"],
     (DataType.QUOTE_LATEST, Market.MY): ["yfinance"],
+    (DataType.QUOTE_HISTORY, Market.US): ["yfinance"],
+    (DataType.QUOTE_HISTORY, Market.TW): ["yfinance"],
+    (DataType.QUOTE_HISTORY, Market.MY): ["yfinance"],
     (DataType.FX, None): ["yfinance"],
 }
 

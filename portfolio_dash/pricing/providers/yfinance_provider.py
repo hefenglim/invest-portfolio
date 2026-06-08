@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -51,6 +51,19 @@ class YFinanceProvider(ProviderBase):
                                 as_of=df.index[-1].date(),
                                 close=Decimal(str(df["Close"].iloc[-1])), source=self.name))
         return out
+
+    def fetch_quote_history(self, instrument: InstrumentRef, start: date) -> list[PriceRow]:
+        df = yf.Ticker(yf_symbol(instrument)).history(start=start.isoformat(), auto_adjust=False)
+        if df is None or df.empty:
+            return []
+        rows: list[PriceRow] = []
+        for ts, close in df["Close"].items():
+            if close is None:
+                continue
+            rows.append(PriceRow(instrument=instrument.symbol, market=instrument.market,
+                                 as_of=ts.date(), close=Decimal(str(close)), source=self.name))
+        rows.sort(key=lambda r: r.as_of)
+        return rows
 
     def fetch_fx(self, pairs: list[FxPair]) -> list[FxRow]:
         out: list[FxRow] = []

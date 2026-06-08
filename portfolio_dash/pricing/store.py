@@ -69,6 +69,27 @@ def get_latest_price(
     )
 
 
+def get_price_history(
+    conn: sqlite3.Connection, instrument: str, start: date, end: date,
+) -> list[PriceRead]:
+    """Return stored daily prices for ``instrument`` within ``[start, end]``, ascending.
+
+    Used for historical backfill reads (Phase B). Unlike `get_latest_price`, this
+    returns a full series and does not compute staleness (``stale`` is always
+    ``False`` — staleness is a latest-quote concern).
+    """
+    rows = conn.execute(
+        "SELECT close, as_of_date, source FROM prices WHERE instrument=? "
+        "AND as_of_date BETWEEN ? AND ? ORDER BY as_of_date ASC",
+        (instrument, start.isoformat(), end.isoformat()),
+    ).fetchall()
+    return [
+        PriceRead(value=from_db(r["close"]), as_of=date.fromisoformat(r["as_of_date"]),
+                  source=r["source"], stale=False)
+        for r in rows
+    ]
+
+
 def upsert_fx(conn: sqlite3.Connection, rows: list[FxRow], *, fetched_at: datetime) -> None:
     """Upsert FX rate rows into ``fx_rates``, keyed on (base, quote, as_of_date)."""
     conn.executemany(

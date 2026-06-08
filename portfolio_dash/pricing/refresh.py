@@ -8,7 +8,7 @@ from page load; the dashboard reads what is in SQLite).
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
@@ -41,3 +41,24 @@ def refresh_quotes(
         failed=[*p_failed, *f_failed],
         fetched_at=now,
     )
+
+
+def refresh_history(
+    conn: sqlite3.Connection,
+    registry: Registry,
+    instruments: list[InstrumentRef],
+    start: date,
+    *,
+    now: datetime,
+) -> RefreshSummary:
+    """Fetch historical daily quotes via ``registry`` from ``start``, upsert, summarize.
+
+    Phase B (historical backfill): mirrors `refresh_quotes`'s shape but for the
+    `QUOTE_HISTORY` data type — a per-instrument routed fetch over a date range
+    rather than a single latest-quote snapshot. Same graceful-degradation contract:
+    failed symbols are recorded in the summary, never raised.
+    """
+    rows, sources, failed = registry.fetch_quote_history(instruments, start)
+    if rows:
+        upsert_prices(conn, rows, fetched_at=now)
+    return RefreshSummary(ok=sources, failed=failed, fetched_at=now)
