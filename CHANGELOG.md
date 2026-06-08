@@ -58,10 +58,21 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   the LLM self-backtest loop.
 
 ### Planned
-- `pricing/` v1 scope = **latest quotes + FX** (decided 2026-06-08). Deferred to later pricing
-  iterations — **do not forget**: **(B) historical daily backfill** (from each instrument's
-  first trade date, for ECharts trend / equity curves) and **(C) dividend / ex-dividend
-  fetching** (FinMind 除權息 + ex-dividend calendar → 回本進度 / 股利回收率).
+- `pricing/` market-data layer (decided 2026-06-08, **A+B+C combined**, staged A→B→C): **(A)**
+  latest quotes + FX, **(B)** historical daily backfill (base data for analysis / backtest /
+  ECharts trend & equity curves), **(C)** dividend / ex-dividend **reference** fetch (FinMind
+  除權息 + ex-div calendar). C stores reference data only — it does **not** write the ledger and
+  does **not** enter P&L; it feeds viewing, the ex-div calendar, and the future confirmed
+  auto-import (below).
+- **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
+  (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a
+  **user-confirmed** auto-import into the ledger following the account's accounting rules —
+  cutting manual entry, never bypassing confirmation, never double-counting (calc reads only the
+  ledger), `original_cost` never overwritten; **manual entry always retained**.
+- `data_ingestion/` confirmed auto-import (future): match `pricing/`'s fetched dividend/ex-div
+  events (and Schwab transactions) to the holdings list → prompt "new distribution detected —
+  auto-import?" → on confirm, write a ledger entry per the account's dividend model (TW cash →
+  cost reduction, US DRIP $0-cost, MY cash). `web_ui/` provides the prompt UI.
 - `llm_insight/` prediction self-tracking + backtest loop (future sub-project): the LLM
   records each recommendation/forecast, later replays and scores its own past predictions
   against realized outcomes, accumulating a per-prediction confidence index and a
