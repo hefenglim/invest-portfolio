@@ -50,6 +50,12 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   precision; MY 3-dp verified via klsescreener (yfinance is float64 — convert via
   `Decimal(str(...))`); TW board (上市/上櫃) must be resolved per instrument; keyed sources
   (FinMind/AlphaVantage/Finnhub) and Schwab await keys/OAuth.
+- FinMind **validated** (2026-06-08, trial token, 600/hr): 6 datasets confirmed (price,
+  dividend/除權息, FX, financial statements, institutional, margin) with fixtures under
+  `tests/pricing/fixtures/finmind/`. Added capability research notes under `docs/research/`
+  for **Schwab Trader API** (enables US account/transaction auto-import for `data_ingestion/`)
+  and **FinMind** — both feeding `pricing/` source selection, `llm_insight/` fundamentals, and
+  the LLM self-backtest loop.
 
 ### Planned
 - `llm_insight/` prediction self-tracking + backtest loop (future sub-project): the LLM

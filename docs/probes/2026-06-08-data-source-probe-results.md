@@ -4,6 +4,9 @@
 - **Branch:** `feat/data-source-probe`
 - **Spec:** `docs/superpowers/specs/2026-06-08-data-source-probe-design.md`
 - **Status:** complete for no-key sources; keyed sources pending keys (see §6).
+- **Update 2026-06-08:** FinMind subsequently **validated** with a 7-day trial token (6
+  datasets, fixtures recorded) — see `docs/research/2026-06-08-finmind-capabilities.md`. The
+  FinMind rows below are updated accordingly; AlphaVantage/Finnhub/Schwab remain pending.
 
 > The "Raw probe matrix" in §3 is **auto-generated** by `scripts/probe/run_all.py`
 > (re-running regenerates that section only). Everything else on this page is curated
@@ -19,13 +22,14 @@
 | **US dividend** | yfinance (AAPL: 91 rows since 1987) | Finnhub†/AlphaVantage† | |
 | **TW quote (latest)** | **TWSE** (上市) + **TPEx** (上櫃) — string ticks | yfinance `.TW`/`.TWO`, twstock (intraday), FinMind† | per-board routing required (§2.2) |
 | **TW quote (history)** | yfinance `.TW`/`.TWO` | FinMind†; TWSE/TPEx per-date | |
-| **TW dividend** | **FinMind† `TaiwanStockDividend`** (validate w/ token) | yfinance dividends | high-value once token loaded |
+| **TW dividend** | **FinMind `TaiwanStockDividend`** (validated: cash + ex-div + pay dates) | yfinance dividends | full 除權息 schedule |
 | **MY quote (latest)** | yfinance `.KL` (5/5) | **klsescreener** (3-dp string), Malaysiastock.biz | use string source for tick verification (§2.1) |
 | **MY quote (history)** | yfinance `.KL` (≥5y) | — (klsescreener is latest-only) | |
 | **MY dividend** | yfinance dividends (validate) | klsescreener / Bursa | |
 | **FX (USD/TWD, USD/MYR, MYR/TWD)** | yfinance (`USDTWD=X` etc., 3/3) | FinMind† `TaiwanExchangeRate`, AlphaVantage† FX, FRED† | |
 
-`*` reachable but unreliable (see §2.3). `†` keyed — not validated this round (§6).
+`*` reachable but unreliable (see §2.3). `†` keyed; AlphaVantage/Finnhub/FRED/Schwab not
+validated this round (FinMind since validated — see top Update note).
 
 **Headline:** yfinance is the workhorse primary for US/MY quotes+history+dividends and FX;
 TW latest quotes are best taken from the **government string sources** (TWSE/TPEx) for true
@@ -69,8 +73,8 @@ Recommended order: yfinance
 
 | source | verdict | cov | batch | latency ms | 3dp | raw+adj | hist | notes |
 |---|---|---|---|---|---|---|---|---|
-| yfinance | primary | 3 | 3 | 231 |  |  |  | 3 pairs in one batch: USDTWD=X 31.51, USDMYR=X 4.07, MYRTWD=X 7.75 |
-| finmind | skipped | 0 |  |  |  |  |  | no key supplied this round |
+| yfinance | primary | 3 | 3 | 231 |  |  |  | 3 pairs in one batch: USDTWD=X 31.51, USDMYR=X 4.07, MYRTWD=X 7.75 (mid rate) |
+| finmind | fallback | 1 |  |  |  |  | 2024→ | VALIDATED: TaiwanExchangeRate USD, 494 rows; bank cash+spot buy/sell (not interbank mid) |
 
 ### MY — quote_history
 Recommended order: yfinance
@@ -88,11 +92,12 @@ Recommended order: yfinance → klsescreener
 | klsescreener | fallback | 2 | 1 | 3536 | True |  |  | `#price` data-value: 5212 '1.700', 3182 '2.260'; 3-dp STRING (true tick precision) |
 
 ### TW — dividend
-Recommended order: (none — FinMind needs a token)
+Recommended order: FinMind
 
 | source | verdict | cov | batch | latency ms | 3dp | raw+adj | hist | notes |
 |---|---|---|---|---|---|---|---|---|
-| finmind | skipped | 0 |  |  |  |  |  | no key supplied this round |
+| finmind | primary | 1 |  |  |  |  | 2015→ | VALIDATED: TaiwanStockDividend 2330, 33 rows; cash + stock dividend, ex-div trading date + payment date |
+| yfinance | fallback | — |  |  |  |  |  | yfinance dividends (thinner; no ex-div/pay-date schedule) |
 
 ### TW — quote_history
 Recommended order: yfinance
@@ -110,7 +115,7 @@ Recommended order: tw_gov (TWSE) → yfinance → tw_gov (TPEx) → twstock
 | yfinance | fallback | 10 | 12 | 3316 |  |  |  | yf.download batch of 12 (10/12); misses=['6531','6139'] |
 | tw_gov (TPEx) | fallback | 2 | 10208 | 1986 | True |  |  | mainboard_daily_close_quotes (10208 rows); 2/4 OTC found: 8299 '2250.00', 6488 '768.00'; misses=['6531','6139'] (board mis-class) |
 | twstock | fallback | 3 | 1 | 1746 |  |  |  | realtime for 0050/2454/2330; intraday fallback |
-| finmind | skipped | 0 |  |  |  |  |  | no key supplied this round |
+| finmind | fallback | 1 |  |  |  |  | 2024→ | VALIDATED: TaiwanStockPrice 2330, 586 rows, close 2295.0 (matches TWSE) |
 
 ### US — dividend
 Recommended order: yfinance
@@ -159,8 +164,11 @@ Out of scope for `pricing/` (these are NOT numbers of record; they feed narrativ
 ## 6. Keyed sources — validate on re-run (with keys in `.env`, gitignored)
 
 Re-run `python -m scripts.probe.run_all` after adding keys to validate and re-rank:
-- **FinMind** (`FINMIND_TOKEN`) — user already holds a token (600/hr). **Highest-value
-  pending item**: TW dividends/除權息 (`TaiwanStockDividend`) and FX (`TaiwanExchangeRate`).
+- **FinMind** (`FINMIND_TOKEN`) — ✅ **validated 2026-06-08** (trial token, 600/hr):
+  TaiwanStockPrice, TaiwanStockDividend (除權息), TaiwanExchangeRate, FinancialStatements,
+  InstitutionalInvestors, Margin — fixtures under `tests/pricing/fixtures/finmind/`; details
+  in `docs/research/2026-06-08-finmind-capabilities.md`. Swap the permanent token in settings
+  later (config-only). Also exposes 月營收 / 法人 / 融資券 / 財報 for `llm_insight/`.
 - **AlphaVantage** (`ALPHAVANTAGE_KEY`) — US quote/history/FX; verify the real free-tier
   rate limit (declared 5/min is historical; free tier may now be ~25/day).
 - **Finnhub** (`FINNHUB_KEY`) — US latest quote.
