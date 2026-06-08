@@ -14,8 +14,8 @@ import sqlite3
 from datetime import date, datetime
 from decimal import Decimal
 
-from portfolio_dash.pricing.results import FxRead, FxRow, PriceRead, PriceRow
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.pricing.results import DividendEvent, FxRead, FxRow, PriceRead, PriceRow
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.money import from_db, to_db
 
 _DEFAULT_MAX_AGE = 4  # days
@@ -130,3 +130,48 @@ def get_fx(
         source=row["source"],
         stale=(now.date() - as_of).days > max_age_days,
     )
+
+
+def upsert_dividend_events(
+    conn: sqlite3.Connection, events: list[DividendEvent], *, fetched_at: datetime,
+) -> None:
+    """Upsert dividend reference-data rows into ``dividend_events``.
+
+    Keyed on the natural key (``instrument, ex_date``) — re-running a refresh never
+    duplicates rows.
+    """
+    conn.executemany(
+        """INSERT INTO dividend_events (instrument, market, ex_date, pay_date, cash_amount,
+               stock_amount, currency, source, fetched_at)
+           VALUES (?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(instrument, ex_date) DO UPDATE SET
+               pay_date=excluded.pay_date, cash_amount=excluded.cash_amount,
+               stock_amount=excluded.stock_amount, currency=excluded.currency,
+               source=excluded.source, fetched_at=excluded.fetched_at""",
+        [(e.instrument, e.market.value, e.ex_date.isoformat(),
+          e.pay_date.isoformat() if e.pay_date is not None else None,
+          _opt(e.cash_amount), _opt(e.stock_amount),
+          e.currency.value if e.currency is not None else None, e.source,
+          fetched_at.isoformat()) for e in events],
+    )
+    conn.commit()
+
+
+def get_dividend_events(conn: sqlite3.Connection, instrument: str) -> list[DividendEvent]:
+    """Return stored dividend events for ``instrument``, ascending by ex-date."""
+    rows = conn.execute(
+        "SELECT instrument, market, ex_date, pay_date, cash_amount, stock_amount, currency, "
+        "source FROM dividend_events WHERE instrument=? ORDER BY ex_date ASC",
+        (instrument,)).fetchall()
+    return [
+        DividendEvent(
+            instrument=r["instrument"], market=Market(r["market"]),
+            ex_date=date.fromisoformat(r["ex_date"]),
+            pay_date=date.fromisoformat(r["pay_date"]) if r["pay_date"] else None,
+            cash_amount=from_db(r["cash_amount"]) if r["cash_amount"] else None,
+            stock_amount=from_db(r["stock_amount"]) if r["stock_amount"] else None,
+            currency=Currency(r["currency"]) if r["currency"] else None,
+            source=r["source"],
+        )
+        for r in rows
+    ]
