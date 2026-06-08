@@ -56,14 +56,18 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   for **Schwab Trader API** (enables US account/transaction auto-import for `data_ingestion/`)
   and **FinMind** — both feeding `pricing/` source selection, `llm_insight/` fundamentals, and
   the LLM self-backtest loop.
+- `pricing/` market-data layer (A+B+C): config-driven, capability-aware provider chain
+  (yfinance / TWSE / TPEx / FinMind-keyed) writing idempotent SQLite rows
+  (`prices`/`fx_rates`/`dividend_events`) — the only writer of those tables. (A) latest quotes +
+  FX, (B) historical daily backfill, (C) dividend/ex-dividend **reference** data (FinMind 除權息
+  + yfinance fallback). Graceful degradation (last-known + staleness; never raises/fabricates),
+  per-row source provenance, `Decimal(str())` precision, per-instrument TW board resolution.
+  Read API (`get_latest_price`/`get_fx`/`get_price_history`/`get_dividend_events`) + orchestrators
+  (`refresh_quotes`/`refresh_history`/`refresh_dividends`). Providers tested against the probe's
+  recorded fixtures (no live network). Dividend events are reference-only — never the ledger,
+  never in P&L. Plan: `docs/superpowers/plans/2026-06-08-pricing-market-data-layer.md`.
 
 ### Planned
-- `pricing/` market-data layer (decided 2026-06-08, **A+B+C combined**, staged A→B→C): **(A)**
-  latest quotes + FX, **(B)** historical daily backfill (base data for analysis / backtest /
-  ECharts trend & equity curves), **(C)** dividend / ex-dividend **reference** fetch (FinMind
-  除權息 + ex-div calendar). C stores reference data only — it does **not** write the ledger and
-  does **not** enter P&L; it feeds viewing, the ex-div calendar, and the future confirmed
-  auto-import (below).
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
   (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a
   **user-confirmed** auto-import into the ledger following the account's accounting rules —
