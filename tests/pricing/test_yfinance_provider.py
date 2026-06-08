@@ -28,3 +28,20 @@ def test_parse_history_json_to_pricerows() -> None:
     assert rows and all(isinstance(r.close, Decimal) for r in rows)
     assert rows[-1].source == "yfinance"
     assert rows == sorted(rows, key=lambda r: r.as_of)  # ascending
+
+
+def test_finite_filters_nan_inf_none() -> None:
+    from portfolio_dash.pricing.providers.yfinance_provider import _finite
+
+    assert _finite(2.5) == Decimal("2.5")
+    assert _finite("2.260") == Decimal("2.260")
+    assert _finite(None) is None
+    assert _finite(float("nan")) is None
+    assert _finite(float("inf")) is None
+
+
+def test_parse_history_json_skips_nan_close() -> None:
+    # yfinance gaps arrive as null/NaN -> must be skipped, not raised (Money is finite-only)
+    payload = {"Close": {"1700000000000": None, "1700086400000": 2.5}}
+    rows = YFinanceProvider()._parse_history_json(payload, instrument="X", market=Market.MY)
+    assert len(rows) == 1 and rows[0].close == Decimal("2.5")

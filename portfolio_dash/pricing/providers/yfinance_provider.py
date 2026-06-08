@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import yfinance as yf
@@ -12,6 +12,17 @@ from portfolio_dash.shared.enums import Currency, Market
 
 _SUFFIX = {Market.US: "", Market.TW: ".TW", Market.MY: ".KL"}
 _DIV_CCY = {Market.US: Currency.USD, Market.TW: Currency.TWD, Market.MY: Currency.MYR}
+
+
+def _finite(value: object) -> Decimal | None:
+    """Return Decimal(value) if finite, else None — filters yfinance NaN/inf/None gaps."""
+    if value is None:
+        return None
+    try:
+        d = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return d if d.is_finite() else None
 
 
 def yf_symbol(ref: InstrumentRef) -> str:
@@ -31,14 +42,14 @@ class YFinanceProvider(ProviderBase):
     def _parse_history_json(
         self, payload: dict[str, Any], *, instrument: str, market: Market,
     ) -> list[PriceRow]:
-        closes = payload.get("Close", {})
         rows: list[PriceRow] = []
-        for ts_ms, close in closes.items():
-            if close is None:
+        for ts_ms, close in payload.get("Close", {}).items():
+            fc = _finite(close)
+            if fc is None:
                 continue
             d = datetime.fromtimestamp(int(ts_ms) / 1000, tz=UTC).date()
             rows.append(PriceRow(instrument=instrument, market=market, as_of=d,
-                                 close=Decimal(str(close)), source=self.name))
+                                 close=fc, source=self.name))
         rows.sort(key=lambda r: r.as_of)
         return rows
 
@@ -48,9 +59,13 @@ class YFinanceProvider(ProviderBase):
             df = yf.Ticker(yf_symbol(ref)).history(period="5d", auto_adjust=False)
             if df is None or df.empty:
                 continue
-            out.append(PriceRow(instrument=ref.symbol, market=ref.market,
-                                as_of=df.index[-1].date(),
-                                close=Decimal(str(df["Close"].iloc[-1])), source=self.name))
+            # most recent row with a finite close (today's row can be NaN intraday)
+            for ts, close in reversed(list(df["Close"].items())):
+                fc = _finite(close)
+                if fc is not None:
+                    out.append(PriceRow(instrument=ref.symbol, market=ref.market,
+                                        as_of=ts.date(), close=fc, source=self.name))
+                    break
         return out
 
     def fetch_quote_history(self, instrument: InstrumentRef, start: date) -> list[PriceRow]:
@@ -59,10 +74,11 @@ class YFinanceProvider(ProviderBase):
             return []
         rows: list[PriceRow] = []
         for ts, close in df["Close"].items():
-            if close is None:
+            fc = _finite(close)
+            if fc is None:
                 continue
             rows.append(PriceRow(instrument=instrument.symbol, market=instrument.market,
-                                 as_of=ts.date(), close=Decimal(str(close)), source=self.name))
+                                 as_of=ts.date(), close=fc, source=self.name))
         rows.sort(key=lambda r: r.as_of)
         return rows
 
@@ -73,8 +89,12 @@ class YFinanceProvider(ProviderBase):
                 period="5d", auto_adjust=False)
             if df is None or df.empty:
                 continue
-            out.append(FxRow(base=p.base, quote=p.quote, as_of=df.index[-1].date(),
-                             rate=Decimal(str(df["Close"].iloc[-1])), source=self.name))
+            for ts, rate in reversed(list(df["Close"].items())):
+                fr = _finite(rate)
+                if fr is not None:
+                    out.append(FxRow(base=p.base, quote=p.quote, as_of=ts.date(),
+                                     rate=fr, source=self.name))
+                    break
         return out
 
     def fetch_dividends(self, instruments: list[InstrumentRef]) -> list[DividendEvent]:
@@ -82,7 +102,10 @@ class YFinanceProvider(ProviderBase):
         for ref in instruments:
             series = yf.Ticker(yf_symbol(ref)).dividends
             for ex, amount in series.items():
+                amt = _finite(amount)
+                if amt is None:
+                    continue
                 out.append(DividendEvent(instrument=ref.symbol, market=ref.market,
-                                         ex_date=ex.date(), cash_amount=Decimal(str(amount)),
+                                         ex_date=ex.date(), cash_amount=amt,
                                          currency=_DIV_CCY[ref.market], source=self.name))
         return out
