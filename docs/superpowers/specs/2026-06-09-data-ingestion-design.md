@@ -63,7 +63,8 @@ with a per-row snapshot so 重算 reproduces history.
 - On entry (manual/CSV/AI) with blank fee/tax → compute per the account's rules:
   - **TW:** brokerage 0.1425%×discount, **min NT$20**; sell tax **現股 0.3% / ETF 0.1%**,
     **當沖 0.15%** via an optional per-row flag (default 現股; ETF detected from the instrument);
-    fee+tax **四捨五入 to integer NT$**.
+    fee+tax **四捨五入 to integer NT$**. Defaults: brokerage **0.1425%**, sell tax 現股 **0.3%**
+    / ETF **0.1%** / 當沖 **0.15%**, discount **none (1.0)** — all editable + savable in settings.
   - **US (Schwab):** ~US$0 commission + tiny sell-side reg fee (config, may be ~0).
   - **Moomoo MY-US:** commission + platform fee + FX spread (config).
   - **MY (Moomoo MY-MY):** brokerage + clearing 0.03% (cap RM1,000) + stamp duty + SST (config).
@@ -101,6 +102,12 @@ Resolution never silently guesses; ambiguous/low-confidence → surfaced for con
   from `Settings` (swappable by config, no code change), a **structured-output helper** (prompt
   → validated Pydantic), prompt-versioning, and **graceful degradation** (endpoint down →
   feature unavailable, never crashes; per `llm-insight.md`). New dependency: `litellm`.
+- **Model management + cost tracking** — a **config model registry**: multiple models addable,
+  each with its **input / output price per 1M tokens**, and a **switchable active model** (no
+  code change). `shared/llm.py` **logs every call's token usage** (input/output tokens, model,
+  computed cost, agent) to an `llm_usage` table. This feeds an **AI cost-info page** (usage
+  stats + history trend + per-model cost + model add/switch) — the **page itself is `web_ui/`
+  (deferred)**; v1 builds the registry/pricing config + the usage log + the cost calc.
 - **Agent registry** — agents are named units (prompt + input/output schema + the LLM client).
   **A. AI Agents Input** (this module) is the first. The registry + config endpoint are built so
   **B (statement/screenshot parsing), C (portfolio Q&A), D (corporate-action reconcile), E

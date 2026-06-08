@@ -99,6 +99,10 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   can get long — evaluate clear categorization + non-cluttered tabs/sections (avoid endless
   scroll) for this AI-stock-strategy / position-management / watchlist assistant. Optimize the
   human-computer interface then, not pre-emptively.
+- **AI cost-info page** (`web_ui/`, future): show LLM token-usage stats + history trend +
+  per-model cost; manage the model registry (add models, set per-1M-token input/output pricing,
+  switch active model). Fed by `shared/llm.py`'s per-call `llm_usage` log + config model registry
+  (the log + registry + cost calc land with `data_ingestion/`'s AI framework; the page is web_ui).
 - **Design principle (all modules):** invest in adjustable structure — config-driven behavior,
   provider/strategy protocols + registries, swappable adapters, decoupled layers — so future
   changes are config edits + small additions, not rewrites; keep YAGNI on features/scale (per
