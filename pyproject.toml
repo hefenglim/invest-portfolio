@@ -16,6 +16,13 @@ dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
 ]
+probe = [
+    "yfinance>=0.2.40",
+    "FinMind>=1.7",
+    "twstock>=1.3",
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -28,7 +35,16 @@ include = ["portfolio_dash*"]
 python_version = "3.12"
 strict = true
 warn_unused_configs = true
-files = ["portfolio_dash", "tests"]
+explicit_package_bases = true
+files = ["portfolio_dash", "tests", "scripts/probe"]
+
+[[tool.mypy.overrides]]
+module = "scripts.probe.adapters.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["yfinance.*", "FinMind.*", "twstock.*", "bs4.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
