@@ -1,7 +1,8 @@
 # Research: FinMind — capabilities & system fit (validated 2026-06-08)
 
 - **Date:** 2026-06-08
-- **Status:** research note + **live validation** (7-day trial token; user tier 600 req/hr).
+- **Status:** research note + **live validation** (7-day trial token). Tiers: FREE **300
+  req/hr**, registered member **600 req/hr**; **44 datasets** on the free/registered tier.
 - **API:** `GET https://api.finmindtrade.com/api/v4/data?dataset=<DS>&data_id=<ID>&start_date=<D>&token=<T>`.
   Token-based; usage visible on the FinMind dashboard. Permanent token will live in the
   settings UX / `.env` (gitignored) later.
@@ -22,18 +23,27 @@ Confirmed: `TaiwanStockPrice` 2330 close = **2295.0** (matches TWSE), so FinMind
 the government source. Values arrive as JSON numbers (floats) → same discipline as everywhere:
 parse via `Decimal(str(x))`, quantize at display.
 
-## 2. Full dataset catalogue (from docs — beyond what was validated)
+## 2. Full free-tier dataset catalogue (44 datasets; FREE 300/hr · registered 600/hr)
 
-- **TW technical:** stock prices, historical, **K-line**, technical indicators, index codes.
-- **TW fundamental:** financial statements, cash-flow, balance sheet, **dividend policy**,
-  **monthly revenue (月營收)**.
-- **TW chip/shareholding:** margin trading, institutional positions, **major-shareholder /
-  大戶持股**.
-- **TW derivatives:** futures & options trades; **convertible bonds**; **real-time** stock/
-  futures/options.
-- **International:** **US** stock daily & minute (from 2021-04-28), government-bond yields;
-  UK/Europe/Japan; **commodities** (oil, gold).
-- **Macro:** G8 central-bank rates, **exchange rates**, money supply.
+Authoritative list from the user's FinMind account (free/registered member tier):
+
+- **技術面 (technical):** 台股總覽 · 台股總覽(含權證) · 台灣股價資料表 · 台股交易日 ·
+  台灣類股股價表 · **個股 PER/PBR** · 每 5 秒委託成交統計 · 台股加權指數 ·
+  當日沖銷標的及成交量值 · 加權/櫃買報酬指數.
+- **籌碼面 (chip):** 個股融資融券 · 整體市場融資融券 · **個股三大法人買賣** ·
+  整體三大法人買賣 · **外資持股** · 借券成交明細 · 暫停融券賣出(融券回補日) ·
+  信用額度總量管制餘額 · 證券商資訊.
+- **基本面 (fundamental):** 現金流量表 · 綜合損益表 · 資產負債表 · **股利政策表** ·
+  **除權除息結果表** · **月營收表** · 減資恢復買賣參考價 · 台股下市資料 · 分割後參考價 ·
+  變更面額恢復買賣參考價.
+- **衍生性 (derivatives):** 期貨/選擇權日成交總覽 · 期貨/選擇權即時報價總覽 · 期貨日成交 ·
+  選擇權日成交 · 期貨三大法人 · 選擇權三大法人 · 期貨各券商每日交易 · 選擇權各券商每日交易.
+- **其他 (other):** **相關新聞網頁 URL** · 黃金價格 · 原油(Brent/WTI) · **美股股價** ·
+  **外幣對台幣(19 幣別匯率)** · **央行利率(12 國)** · 美國國債(1 月~30 年, 12 種).
+
+The validated 6 (§1) are a subset. **Bolded** items are the highest-value for this app
+(valuation, dividends, institutional/margin flow, monthly revenue, news URLs, US price,
+multi-currency FX, central-bank rates).
 
 ## 3. Mapping to `portfolio-dash` modules
 
@@ -59,6 +69,10 @@ parse via `Decimal(str(x))`, quantize at display.
 - **Institutional buy/sell (法人)** → accumulation/distribution flow signal.
 - **Margin/short (融資融券)** → leverage extremes / contrarian sentiment flag.
 - **Major shareholders (大戶)** → concentration/ownership context.
+- **PER / PBR** → valuation context per holding (cheap/expensive vs its own history).
+- **相關新聞網頁 URL** → seed for TW news retrieval (fills the news source the probe left TBD).
+- **美股股價 / 19-currency FX / 12-country central-bank rates / US treasury** → cross-market +
+  macro backdrop for insight cards.
 These are decision-support signals, fed *into* prompts — the LLM narrates, it never becomes the
 number of record.
 

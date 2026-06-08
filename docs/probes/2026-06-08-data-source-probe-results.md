@@ -159,7 +159,10 @@ Recommended order: yfinance
 Out of scope for `pricing/` (these are NOT numbers of record; they feed narrative only):
 - **Google Trends** (`pytrends`) — keyword search-interest signal.
 - **FRED** (`fredapi`, keyed) — macroeconomic series.
-- **News / analyst reports** — source(s) TBD; validate when building `llm_insight/`.
+- **CNN Fear & Greed Index** (<https://edition.cnn.com/markets/fear-and-greed>) + **VIX** —
+  US market sentiment / buy-sell decision signals for US-stock insight.
+- **FinMind 相關新聞網頁 URL** — TW per-stock news seed (free tier).
+- **News / analyst reports** — additional source(s) TBD; validate when building `llm_insight/`.
 
 ## 6. Keyed sources — validate on re-run (with keys in `.env`, gitignored)
 

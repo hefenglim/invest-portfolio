@@ -63,6 +63,13 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   against realized outcomes, accumulating a per-prediction confidence index and a
   corrective feedback loop that informs future advice. Gets its own brainstorm at the
   `llm_insight/` stage.
+- `llm_insight/` insight inputs & per-stock prompt (future): per-holding decision signals from
+  FinMind (財報 / 月營收 / 法人 / 融資券 / PER-PBR / news URL) plus **US sentiment indicators —
+  CNN Fear & Greed Index and VIX** — as buy/sell context. Each stock (US/TW/TWO) gets an optimal
+  **system prompt** for insight generation, **centrally viewable/customizable in the settings
+  (config) page** and versioned (per `llm-insight.md`).
+- **User authentication / access control** (`web_ui/`, future): basic login + permission gating
+  so the self-hosted instance (1–2 users) is not publicly exposed on the network — kept minimal.
 
 ## [v0.0.0] - 2026-06-05
 
