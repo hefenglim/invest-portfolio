@@ -7,10 +7,11 @@ import yfinance as yf
 from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
-from portfolio_dash.pricing.results import FxRow, PriceRow
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRow
+from portfolio_dash.shared.enums import Currency, Market
 
 _SUFFIX = {Market.US: "", Market.TW: ".TW", Market.MY: ".KL"}
+_DIV_CCY = {Market.US: Currency.USD, Market.TW: Currency.TWD, Market.MY: Currency.MYR}
 
 
 def yf_symbol(ref: InstrumentRef) -> str:
@@ -74,4 +75,14 @@ class YFinanceProvider(ProviderBase):
                 continue
             out.append(FxRow(base=p.base, quote=p.quote, as_of=df.index[-1].date(),
                              rate=Decimal(str(df["Close"].iloc[-1])), source=self.name))
+        return out
+
+    def fetch_dividends(self, instruments: list[InstrumentRef]) -> list[DividendEvent]:
+        out: list[DividendEvent] = []
+        for ref in instruments:
+            series = yf.Ticker(yf_symbol(ref)).dividends
+            for ex, amount in series.items():
+                out.append(DividendEvent(instrument=ref.symbol, market=ref.market,
+                                         ex_date=ex.date(), cash_amount=Decimal(str(amount)),
+                                         currency=_DIV_CCY[ref.market], source=self.name))
         return out
