@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from scripts.probe.adapters.finmind_src import parse_finmind_close
+from scripts.probe.adapters.my_src import parse_klse_price
 from scripts.probe.adapters.tw_gov import parse_twse_close, tpex_close_for
 from scripts.probe.adapters.twstock_src import parse_twstock_price
 from scripts.probe.adapters.us_alt import (
@@ -20,6 +21,7 @@ from scripts.probe.adapters.yfinance_src import (
 )
 
 _FX = Path("tests/pricing/fixtures/yfinance/3182.KL.json")
+_KLSE = Path("tests/pricing/fixtures/klse/3182.html")
 _FM = Path("tests/pricing/fixtures/finmind/2330.json")
 _TW = Path("tests/pricing/fixtures/twstock/2330.json")
 _SP = Path("tests/pricing/fixtures/stockprices/AAPL.json")
@@ -76,3 +78,15 @@ def test_alpha_parser() -> None:
 @pytest.mark.skipif(not _FH.exists(), reason="Finnhub fixture needs a key")
 def test_finnhub_parser() -> None:
     assert parse_finnhub_close(json.loads(_FH.read_text("utf-8"))) is not None
+
+
+@pytest.mark.skipif(not _KLSE.exists(), reason="klsescreener fixture not recorded")
+def test_klse_parser() -> None:
+    html = _KLSE.read_text("utf-8")
+    price = parse_klse_price(html)
+    assert price is not None
+    assert isinstance(price, str)
+    # discovered shape: klsescreener preserves full decimal precision as text
+    # (e.g. "2.260", 3 dp) -- unlike yfinance's float64 columns.
+    assert "." in price
+    assert len(price.split(".")[-1]) >= 2
