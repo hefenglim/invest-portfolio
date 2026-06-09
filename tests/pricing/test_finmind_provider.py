@@ -2,6 +2,8 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
 from portfolio_dash.shared.enums import Currency, Market
@@ -9,7 +11,9 @@ from portfolio_dash.shared.enums import Currency, Market
 _FIX = Path("tests/pricing/fixtures/finmind/TaiwanStockDividend_2330.json")
 
 
-def test_supports_requires_token() -> None:
+def test_supports_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    # isolate from a real FINMIND_TOKEN in the environment (litellm loads .env on import)
+    monkeypatch.delenv("FINMIND_TOKEN", raising=False)
     assert FinMindProvider(token="x").supports(DataType.DIVIDEND, Market.TW)
     assert not FinMindProvider(token=None).supports(DataType.DIVIDEND, Market.TW)
     assert not FinMindProvider(token="x").supports(DataType.DIVIDEND, Market.US)
