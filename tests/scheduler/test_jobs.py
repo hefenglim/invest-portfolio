@@ -61,3 +61,32 @@ def test_refresh_quotes_for_filters_by_market(
     monkeypatch.setattr(jobs_mod, "refresh_quotes", fake_refresh)
     refresh_quotes_for(conn, Market.TW, now=_NOW)
     assert seen["symbols"] == ["2330"]
+
+
+from portfolio_dash.scheduler.jobs import JobSpec, run_job  # noqa: E402
+
+
+def _register(monkeypatch: pytest.MonkeyPatch, spec: JobSpec) -> None:
+    monkeypatch.setattr(jobs_mod, "JOBS", [*jobs_mod.JOBS, spec])
+
+
+def test_run_job_logs_ok(monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection) -> None:
+    spec = JobSpec("ok_job", lambda c, *, now: "did 3", "0 0 * * *", "UTC", True, "")
+    _register(monkeypatch, spec)
+    run_job(conn, "ok_job", now=_NOW)
+    row = conn.execute(
+        "SELECT status, detail, finished_at FROM job_runs WHERE job_id='ok_job'"
+    ).fetchone()
+    assert row["status"] == "ok" and row["detail"] == "did 3" and row["finished_at"] is not None
+
+
+def test_run_job_swallows_and_logs_error(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    def boom(c: sqlite3.Connection, *, now: datetime) -> str:
+        raise RuntimeError("provider exploded")
+
+    _register(monkeypatch, JobSpec("bad_job", boom, "0 0 * * *", "UTC", True, ""))
+    run_job(conn, "bad_job", now=_NOW)  # must NOT raise
+    row = conn.execute("SELECT status, detail FROM job_runs WHERE job_id='bad_job'").fetchone()
+    assert row["status"] == "error" and "provider exploded" in row["detail"]

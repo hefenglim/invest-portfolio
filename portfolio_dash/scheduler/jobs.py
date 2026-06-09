@@ -8,13 +8,14 @@ unit-testable; the APScheduler wiring lives in ``runtime.py``.
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.refresh import refresh_dividends, refresh_history, refresh_quotes
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
 
 # A job does its own trigger+wiring and returns a short run summary for job_runs.detail.
@@ -176,3 +177,38 @@ def build_worklist(
         board = row["board"] or _DEFAULT_BOARD[mkt]
         refs.append(InstrumentRef(symbol=row["symbol"], market=mkt, board=board))
     return refs, _FX_PAIRS
+
+
+def _jobs_by_id() -> dict[str, JobSpec]:
+    return {j.id: j for j in JOBS}
+
+
+def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> None:
+    """Execute one job, logging start/finish to ``job_runs``.
+
+    A job exception is caught and logged as ``status="error"`` (never re-raised), so
+    one failing job cannot crash the scheduler or other jobs.
+    """
+    spec = _jobs_by_id()[job_id]
+    cur = conn.execute(
+        "INSERT INTO job_runs (job_id, started_at) VALUES (?, ?)",
+        (job_id, now.isoformat()),
+    )
+    run_id = cur.lastrowid
+    conn.commit()
+    try:
+        detail = spec.func(conn, now=now)
+        status = "ok"
+    except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
+        detail, status = str(exc), "error"
+    conn.execute(
+        "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
+        (datetime.now(UTC).isoformat(), status, detail, run_id),
+    )
+    conn.commit()
+
+
+def trigger_job(job_id: str) -> None:
+    """Manual ad-hoc run of a job (used by the scheduler and a future manual-trigger route)."""
+    with session() as conn:
+        run_job(conn, job_id, now=datetime.now(UTC))
