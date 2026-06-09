@@ -15,6 +15,84 @@ from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_tra
 from portfolio_dash.shared.models.enums import Side
 
 
+def txn_preview_row(
+    conn: sqlite3.Connection,
+    index: int,
+    raw: dict[str, str],
+    inp: TxnInput,
+) -> PreviewRow:
+    """Build a :class:`PreviewRow` for a single transaction input.
+
+    Runs validation, symbol resolution, and fee/tax auto-fill from the account's
+    FeeRuleSet.  Reusable by both the CSV importer and the AI agents input path.
+
+    Args:
+        conn:  Active SQLite connection (schema in place, accounts seeded).
+        index: Row index (0-based) used to identify the row in the preview.
+        raw:   Original raw key/value mapping for display purposes.
+        inp:   Parsed and typed transaction input.
+
+    Returns:
+        A fully populated :class:`PreviewRow`.
+    """
+    issues: list[Issue] = list(validate_transaction(conn, inp))
+
+    # --- symbol resolution: flag unresolved symbols as soft issues ---
+    if resolve(conn, inp.symbol).status is ResolutionStatus.NEEDS_AI:
+        issues.append(
+            Issue(
+                kind="symbol_unresolved",
+                needs_confirm=True,
+                message=f"unresolved {inp.symbol}",
+            )
+        )
+
+    # --- fee / tax auto-fill (only when account exists and values are missing) ---
+    fee: Decimal | None = inp.fee
+    tax: Decimal | None = inp.tax
+    snap: dict[str, str] = {}
+
+    acc = conn.execute(
+        "SELECT fee_rule_set FROM accounts WHERE account_id=?",
+        (inp.account_id,),
+    ).fetchone()
+    if acc is not None and (fee is None or tax is None):
+        fr = compute_fees(
+            get_fee_rule_set(acc["fee_rule_set"]),
+            inp.side,
+            inp.quantity,
+            inp.price,
+            is_etf=inp.is_etf,
+            daytrade=inp.daytrade,
+        )
+        if fee is None:
+            fee = fr.fee
+        if tax is None:
+            tax = fr.tax
+        snap = fr.snapshot
+
+    # Build payload for the writer (string dict + prefixed snapshot entries)
+    payload: dict[str, str] = {
+        "account_id": inp.account_id,
+        "symbol": inp.symbol,
+        "side": inp.side.value,
+        "quantity": str(inp.quantity),
+        "price": str(inp.price),
+        "trade_date": inp.trade_date.isoformat(),
+        "note": inp.note or "",
+        **{f"snap.{k}": v for k, v in snap.items()},
+    }
+
+    return PreviewRow(
+        index=index,
+        raw=raw,
+        payload=payload,
+        fee=fee,
+        tax=tax,
+        issues=issues,
+    )
+
+
 def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     """Parse *csv_text* into an :class:`ImportPreview` of transaction rows.
 
@@ -36,7 +114,6 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
 
     for idx, raw_row in enumerate(reader):
         raw = {k.strip(): (v or "").strip() for k, v in raw_row.items()}
-        issues: list[Issue] = []
 
         # --- parse: build TxnInput from CSV columns ---
         try:
@@ -61,65 +138,7 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
             )
             continue
 
-        # --- validate ---
-        issues += validate_transaction(conn, inp)
-
-        # --- symbol resolution: flag unresolved symbols as soft issues ---
-        if resolve(conn, inp.symbol).status is ResolutionStatus.NEEDS_AI:
-            issues.append(
-                Issue(
-                    kind="symbol_unresolved",
-                    needs_confirm=True,
-                    message=f"unresolved {inp.symbol}",
-                )
-            )
-
-        # --- fee / tax auto-fill (only when account exists and values are missing) ---
-        fee: Decimal | None = inp.fee
-        tax: Decimal | None = inp.tax
-        snap: dict[str, str] = {}
-
-        acc = conn.execute(
-            "SELECT fee_rule_set FROM accounts WHERE account_id=?",
-            (inp.account_id,),
-        ).fetchone()
-        if acc is not None and (fee is None or tax is None):
-            fr = compute_fees(
-                get_fee_rule_set(acc["fee_rule_set"]),
-                inp.side,
-                inp.quantity,
-                inp.price,
-                is_etf=inp.is_etf,
-                daytrade=inp.daytrade,
-            )
-            if fee is None:
-                fee = fr.fee
-            if tax is None:
-                tax = fr.tax
-            snap = fr.snapshot
-
-        # Build payload for the writer (string dict + prefixed snapshot entries)
-        payload: dict[str, str] = {
-            "account_id": inp.account_id,
-            "symbol": inp.symbol,
-            "side": inp.side.value,
-            "quantity": str(inp.quantity),
-            "price": str(inp.price),
-            "trade_date": inp.trade_date.isoformat(),
-            "note": inp.note or "",
-            **{f"snap.{k}": v for k, v in snap.items()},
-        }
-
-        rows.append(
-            PreviewRow(
-                index=idx,
-                raw=raw,
-                payload=payload,
-                fee=fee,
-                tax=tax,
-                issues=issues,
-            )
-        )
+        rows.append(txn_preview_row(conn, idx, raw, inp))
 
     return ImportPreview(rows=rows)
 

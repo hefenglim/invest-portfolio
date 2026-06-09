@@ -1,6 +1,7 @@
 """Fuzzy symbol resolution: exact match → fuzzy name/symbol match → NEEDS_AI."""
 
 import sqlite3
+from collections.abc import Callable
 from difflib import SequenceMatcher
 from enum import StrEnum
 
@@ -33,12 +34,26 @@ def resolve(
     *,
     market_hint: Market | None = None,
     threshold: float = 0.6,
+    llm_resolver: Callable[[str], Instrument | None] | None = None,
 ) -> Resolution:
     """Resolve a raw user string to an Instrument.
 
+    First attempts an exact symbol match, then a fuzzy name/symbol match.  If
+    both fail and *llm_resolver* is provided, calls it as a last-resort fallback.
+
+    Args:
+        conn:          Active SQLite connection.
+        raw:           Raw user-supplied symbol or name string.
+        market_hint:   Optional market filter applied to the fuzzy-match pool.
+        threshold:     Minimum fuzzy-match ratio to accept a candidate (0–1).
+        llm_resolver:  Optional callable ``(raw_symbol) -> Instrument | None``
+                       invoked only when exact and fuzzy both fail.  When it
+                       returns an instrument, the resolution status is FUZZY
+                       (confident enough to proceed with confirmation).
+
     Returns:
         Resolution with status EXACT (symbol hit), FUZZY (best name/symbol match
-        above threshold), or NEEDS_AI (no confident match found).
+        above threshold or LLM-resolved), or NEEDS_AI (no confident match found).
     """
     exact = get_instrument(conn, raw.strip())
     if exact is not None:
@@ -64,4 +79,15 @@ def resolve(
             instrument=scored[0][1],
             candidates=cands,
         )
+
+    # --- LLM fallback (optional, injected by caller) ---
+    if llm_resolver is not None:
+        proposed = llm_resolver(raw)
+        if proposed is not None:
+            return Resolution(
+                status=ResolutionStatus.FUZZY,
+                instrument=proposed,
+                candidates=[proposed],
+            )
+
     return Resolution(status=ResolutionStatus.NEEDS_AI)
