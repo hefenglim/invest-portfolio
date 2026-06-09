@@ -149,3 +149,37 @@ def test_provider_error_is_unavailable(
     monkeypatch.setattr(llm_mod.litellm, "completion", boom)
     with pytest.raises(LLMUnavailable):
         complete_structured("hi", Out, agent="test", conn=conn)
+
+
+from portfolio_dash.shared.llm import _build_messages  # noqa: E402
+
+
+def test_build_messages_text_only() -> None:
+    msgs = _build_messages("hello", None)
+    assert msgs == [{"role": "user", "content": "hello"}]
+
+
+def test_build_messages_with_image_blocks() -> None:
+    msgs = _build_messages("describe", [b"PNGDATA"])
+    content = msgs[0]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "describe"}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_vision_call_routes_to_vision_role(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    upsert_model(conn, _model("v"))
+    set_role(conn, LLMRole.VISION, "v")
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        return _Resp('{"x": 3}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("describe", Out, agent="vis", conn=conn, images=[b"img"])
+    assert out.x == 3
+    assert seen == ["openai/v"]  # used the vision role, not the text default 'a'
