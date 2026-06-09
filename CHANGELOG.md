@@ -66,6 +66,17 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   (`refresh_quotes`/`refresh_history`/`refresh_dividends`). Providers tested against the probe's
   recorded fixtures (no live network). Dividend events are reference-only — never the ledger,
   never in P&L. Plan: `docs/superpowers/plans/2026-06-08-pricing-market-data-layer.md`.
+- `data_ingestion/` ledger input (the only ledger writer): SQLite schema for the four
+  source-of-truth ledgers (`transactions`/`dividends`/`fx_conversions`/`opening_inventory`) +
+  `instruments` registry + `accounts`/fee-rule/LLM-model config seed. Per-account **fee/tax
+  engine** (config rules + per-row snapshot; TW 0.1425% / 0.3% / 0.1% / 0.15%, min NT$20, integer
+  rounding; US/MY structures). Three input modes through one resolve→fee/tax→validate→
+  **preview→confirm** pipeline: **manual**, **CSV import**, and **AI Agents Input** (natural
+  language → LLM structured draft → confirm; the LLM never writes directly). Symbol resolution
+  fuzzy → LLM-fallback → confirm; sell>holdings blocks until confirmed; per-account dividend
+  models (TW cash / US DRIP 30% / MY cash). New `shared/llm.py` (LiteLLM client + structured
+  output + model registry + `llm_usage` token/cost log + graceful degradation; `litellm` dep).
+  Spec/plan: `docs/superpowers/{specs,plans}/2026-06-09-data-ingestion*`.
 
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
