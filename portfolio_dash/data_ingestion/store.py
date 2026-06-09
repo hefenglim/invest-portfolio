@@ -293,6 +293,88 @@ def list_dividends(
     ]
 
 
+# ---------------------------------------------------------------------------
+# FX conversions
+# ---------------------------------------------------------------------------
+
+
+class StoredFxConversion(BaseModel):
+    """Pydantic model for a persisted fx_conversions row."""
+
+    id: int
+    account_id: str
+    date: date
+    from_ccy: Currency
+    from_amount: Decimal
+    to_ccy: Currency
+    to_amount: Decimal
+
+    @property
+    def implied_rate(self) -> Decimal:
+        """Home-currency units per one foreign-currency unit (from_amount / to_amount)."""
+        return self.from_amount / self.to_amount
+
+
+def insert_fx_conversion(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    date: date,
+    from_ccy: Currency,
+    from_amount: Decimal,
+    to_ccy: Currency,
+    to_amount: Decimal,
+) -> int:
+    """Insert an fx_conversions row and return its new primary-key id."""
+    cur = conn.execute(
+        """INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy,
+               to_amount) VALUES (?,?,?,?,?,?)""",
+        (
+            account_id,
+            date.isoformat(),
+            from_ccy.value,
+            to_db(from_amount),
+            to_ccy.value,
+            to_db(to_amount),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def list_fx_conversions(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str | None = None,
+) -> list[StoredFxConversion]:
+    """Return fx_conversions rows ordered by date ASC, id ASC.
+
+    Optionally filter by *account_id*.
+    """
+    where = ""
+    params: list[str] = []
+    if account_id is not None:
+        where = " WHERE account_id=?"
+        params = [account_id]
+    rows = conn.execute(
+        f"SELECT id, account_id, date, from_ccy, from_amount, to_ccy, to_amount "
+        f"FROM fx_conversions{where} ORDER BY date ASC, id ASC",
+        params,
+    ).fetchall()
+    return [
+        StoredFxConversion(
+            id=r["id"],
+            account_id=r["account_id"],
+            date=date.fromisoformat(r["date"]),
+            from_ccy=Currency(r["from_ccy"]),
+            from_amount=from_db(r["from_amount"]),
+            to_ccy=Currency(r["to_ccy"]),
+            to_amount=from_db(r["to_amount"]),
+        )
+        for r in rows
+    ]
+
+
 def list_transactions(
     conn: sqlite3.Connection,
     *,
