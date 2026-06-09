@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 CREATE TABLE IF NOT EXISTS instruments (
     symbol TEXT PRIMARY KEY, market TEXT NOT NULL, quote_ccy TEXT NOT NULL,
-    sector TEXT, name TEXT
+    sector TEXT, name TEXT, board TEXT
 );
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS opening_inventory (
 """
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def create_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
+    _add_column_if_missing(conn, "instruments", "board", "TEXT")  # migrate legacy DBs
     conn.commit()
