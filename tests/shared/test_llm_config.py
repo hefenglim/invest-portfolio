@@ -2,14 +2,20 @@
 
 import sqlite3
 from collections.abc import Iterator
+from decimal import Decimal
 
 import pytest
 
 from portfolio_dash.shared.llm_config import (
     LLMRole,
+    ModelConfig,
     create_llm_tables,
+    delete_model,
     ensure_llm_seeded,
+    get_model,
+    list_models,
     restore_llm_defaults,
+    upsert_model,
 )
 
 
@@ -47,4 +53,45 @@ def test_restore_defaults_clears_roles(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE llm_defaults SET model_id = 'x' WHERE role = 'default'")
     restore_llm_defaults(conn)
     row = conn.execute("SELECT model_id FROM llm_defaults WHERE role='default'").fetchone()
+    assert row["model_id"] is None
+
+
+def _model(**kw: object) -> ModelConfig:
+    base: dict[str, object] = dict(
+        id="opus", model_alias="Opus 4.8", provider="anthropic",
+        model_name="claude-opus-4-8", vision=True,
+        input_price_per_mtok=Decimal("1.50"), output_price_per_mtok=Decimal("15.00"),
+    )
+    base.update(kw)
+    return ModelConfig(**base)  # type: ignore[arg-type]
+
+
+def test_upsert_get_roundtrip_preserves_decimal(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model())
+    got = get_model(conn, "opus")
+    assert got is not None
+    assert got.model_alias == "Opus 4.8" and got.vision is True
+    assert got.input_price_per_mtok == Decimal("1.50")
+    assert got.output_price_per_mtok == Decimal("15.00")
+
+
+def test_upsert_updates_existing(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model())
+    upsert_model(conn, _model(model_alias="Renamed", enabled=False))
+    got = get_model(conn, "opus")
+    assert got is not None and got.model_alias == "Renamed" and got.enabled is False
+    assert len(list_models(conn)) == 1
+
+
+def test_delete_model_nulls_role_binding(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model())
+    conn.execute("UPDATE llm_defaults SET model_id='opus' WHERE role='default'")
+    delete_model(conn, "opus")
+    assert get_model(conn, "opus") is None
+    row = conn.execute(
+        "SELECT model_id FROM llm_defaults WHERE role='default'"
+    ).fetchone()
     assert row["model_id"] is None
