@@ -11,6 +11,7 @@ dependencies = [
     "FinMind>=1.7",
     "requests>=2.31",
     "litellm>=1.40",
+    "APScheduler>=3.10,<4",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +45,7 @@ module = "scripts.probe.adapters.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["yfinance.*", "FinMind.*", "twstock.*", "bs4.*", "pandas.*", "numpy.*", "litellm.*"]
+module = ["yfinance.*", "FinMind.*", "twstock.*", "bs4.*", "pandas.*", "numpy.*", "litellm.*", "apscheduler.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
