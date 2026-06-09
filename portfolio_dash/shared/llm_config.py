@@ -188,3 +188,45 @@ def delete_model(conn: sqlite3.Connection, model_id: str) -> None:
     conn.execute("UPDATE llm_defaults SET model_id = NULL WHERE model_id = ?", (model_id,))
     conn.execute("DELETE FROM llm_models WHERE id = ?", (model_id,))
     conn.commit()
+
+
+def set_role(conn: sqlite3.Connection, role: LLMRole, model_id: str | None) -> None:
+    """Bind *role* to *model_id* (or None to disable that role)."""
+    conn.execute(
+        "INSERT INTO llm_defaults (role, model_id) VALUES (?, ?) "
+        "ON CONFLICT(role) DO UPDATE SET model_id = excluded.model_id",
+        (role.value, model_id),
+    )
+    conn.commit()
+
+
+def get_role_model_id(conn: sqlite3.Connection, role: LLMRole) -> str | None:
+    row = conn.execute(
+        "SELECT model_id FROM llm_defaults WHERE role = ?", (role.value,)
+    ).fetchone()
+    return row["model_id"] if row is not None else None
+
+
+def select_models(conn: sqlite3.Connection, *, vision: bool) -> list[ModelConfig]:
+    """Return the ordered [primary, fallback] enabled models for the task kind.
+
+    Raises :exc:`AINotActivated` when neither role resolves to an enabled model.
+    The order drives runtime failover in ``shared/llm.py``.
+    """
+    roles = (
+        (LLMRole.VISION, LLMRole.VISION_FALLBACK)
+        if vision
+        else (LLMRole.DEFAULT, LLMRole.DEFAULT_FALLBACK)
+    )
+    chain: list[ModelConfig] = []
+    for role in roles:
+        model_id = get_role_model_id(conn, role)
+        if model_id is None:
+            continue
+        model = get_model(conn, model_id)
+        if model is not None and model.enabled:
+            chain.append(model)
+    if not chain:
+        kind = "vision" if vision else "text"
+        raise AINotActivated(f"no enabled model configured for {kind} tasks")
+    return chain

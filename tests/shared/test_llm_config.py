@@ -7,14 +7,18 @@ from decimal import Decimal
 import pytest
 
 from portfolio_dash.shared.llm_config import (
+    AINotActivated,
     LLMRole,
     ModelConfig,
     create_llm_tables,
     delete_model,
     ensure_llm_seeded,
     get_model,
+    get_role_model_id,
     list_models,
     restore_llm_defaults,
+    select_models,
+    set_role,
     upsert_model,
 )
 
@@ -95,3 +99,46 @@ def test_delete_model_nulls_role_binding(conn: sqlite3.Connection) -> None:
         "SELECT model_id FROM llm_defaults WHERE role='default'"
     ).fetchone()
     assert row["model_id"] is None
+
+
+def test_set_and_get_role(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model())
+    set_role(conn, LLMRole.DEFAULT, "opus")
+    assert get_role_model_id(conn, LLMRole.DEFAULT) == "opus"
+    set_role(conn, LLMRole.DEFAULT, None)
+    assert get_role_model_id(conn, LLMRole.DEFAULT) is None
+
+
+def test_select_text_uses_default_then_fallback(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model(id="a"))
+    upsert_model(conn, _model(id="b"))
+    set_role(conn, LLMRole.DEFAULT, "a")
+    set_role(conn, LLMRole.DEFAULT_FALLBACK, "b")
+    chain = select_models(conn, vision=False)
+    assert [m.id for m in chain] == ["a", "b"]
+
+
+def test_select_skips_disabled_and_missing(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model(id="a", enabled=False))
+    upsert_model(conn, _model(id="b"))
+    set_role(conn, LLMRole.DEFAULT, "a")          # disabled -> skipped
+    set_role(conn, LLMRole.DEFAULT_FALLBACK, "b")
+    assert [m.id for m in select_models(conn, vision=False)] == ["b"]
+
+
+def test_select_all_null_raises_not_activated(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    with pytest.raises(AINotActivated):
+        select_models(conn, vision=False)
+
+
+def test_select_vision_uses_vision_roles(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model(id="vis"))
+    set_role(conn, LLMRole.VISION, "vis")
+    assert [m.id for m in select_models(conn, vision=True)] == ["vis"]
+    with pytest.raises(AINotActivated):  # text roles still unset
+        select_models(conn, vision=False)
