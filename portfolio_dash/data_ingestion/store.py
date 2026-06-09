@@ -193,6 +193,106 @@ def list_opening(
     ]
 
 
+# ---------------------------------------------------------------------------
+# Dividends
+# ---------------------------------------------------------------------------
+
+
+class StoredDividend(BaseModel):
+    """Pydantic model for a persisted dividends row."""
+
+    id: int
+    account_id: str
+    symbol: str
+    date: date
+    type: str
+    gross: Decimal
+    withholding: Decimal
+    net: Decimal
+    reinvest_shares: Decimal | None = None
+    reinvest_price: Decimal | None = None
+
+
+def insert_dividend(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    symbol: str,
+    div_date: date,
+    div_type: str,
+    gross: Decimal,
+    withholding: Decimal,
+    net: Decimal,
+    reinvest_shares: Decimal | None = None,
+    reinvest_price: Decimal | None = None,
+) -> int:
+    """Insert a dividends row and return its new primary-key id."""
+    cur = conn.execute(
+        """INSERT INTO dividends
+               (account_id, symbol, date, type, gross, withholding, net,
+                reinvest_shares, reinvest_price)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (
+            account_id,
+            symbol,
+            div_date.isoformat(),
+            div_type,
+            to_db(gross),
+            to_db(withholding),
+            to_db(net),
+            to_db(reinvest_shares) if reinvest_shares is not None else None,
+            to_db(reinvest_price) if reinvest_price is not None else None,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def list_dividends(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str | None = None,
+    symbol: str | None = None,
+) -> list[StoredDividend]:
+    """Return dividends rows ordered by date ASC, id ASC.
+
+    Optionally filter by *account_id* and/or *symbol* (AND logic when both given).
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    if account_id is not None:
+        clauses.append("account_id=?")
+        params.append(account_id)
+    if symbol is not None:
+        clauses.append("symbol=?")
+        params.append(symbol)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT id, account_id, symbol, date, type, gross, withholding, net, "
+        f"reinvest_shares, reinvest_price FROM dividends{where} ORDER BY date ASC, id ASC",
+        params,
+    ).fetchall()
+    return [
+        StoredDividend(
+            id=r["id"],
+            account_id=r["account_id"],
+            symbol=r["symbol"],
+            date=date.fromisoformat(r["date"]),
+            type=r["type"],
+            gross=from_db(r["gross"]),
+            withholding=from_db(r["withholding"]),
+            net=from_db(r["net"]),
+            reinvest_shares=(
+                from_db(r["reinvest_shares"]) if r["reinvest_shares"] is not None else None
+            ),
+            reinvest_price=(
+                from_db(r["reinvest_price"]) if r["reinvest_price"] is not None else None
+            ),
+        )
+        for r in rows
+    ]
+
+
 def list_transactions(
     conn: sqlite3.Connection,
     *,
