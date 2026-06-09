@@ -6,7 +6,7 @@ tasks append the model registry, role selection, and budget ledger here.
 """
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -236,24 +236,10 @@ def select_models(conn: sqlite3.Connection, *, vision: bool) -> list[ModelConfig
 def reset_budget(
     conn: sqlite3.Connection, amount_usd: Decimal, note: str | None = None
 ) -> None:
-    """Append a budget reset/recharge event (a fresh start line). History untouched.
-
-    The event ``ts`` is set to strictly after the latest existing ``llm_usage.ts``
-    so that usage recorded before this call is never attributed to the new period,
-    regardless of the usage row's own ``ts`` label.  Both timestamps are ISO-8601
-    strings; lexicographic ordering is therefore correct.
-    """
-    latest_usage_ts: str | None = (
-        conn.execute("SELECT MAX(ts) FROM llm_usage").fetchone()[0]
-    )
-    now_ts = datetime.now(UTC).isoformat()
-    if latest_usage_ts is not None and now_ts <= latest_usage_ts:
-        # Advance past any future-dated usage rows already in the table.
-        parsed = datetime.fromisoformat(latest_usage_ts)
-        now_ts = (parsed + timedelta(microseconds=1)).isoformat()
+    """Append a budget reset/recharge event (a fresh start line). History untouched."""
     conn.execute(
         "INSERT INTO llm_budget_events (ts, amount_usd, note) VALUES (?, ?, ?)",
-        (now_ts, str(amount_usd), note),
+        (datetime.now(UTC).isoformat(), str(amount_usd), note),
     )
     conn.commit()
 

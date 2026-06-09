@@ -175,12 +175,21 @@ def test_remaining_is_amount_minus_spend_since_reset(conn: sqlite3.Connection) -
 
 def test_latest_reset_wins(conn: sqlite3.Connection) -> None:
     ensure_llm_seeded(conn)
-    reset_budget(conn, Decimal("50"))
-    _spend(conn, "2999-01-01T00:00:00+00:00", "60")  # drives first period negative
-    assert budget_remaining(conn) is not None and budget_remaining(conn) < 0  # type: ignore[operator]
-    reset_budget(conn, Decimal("100"))               # new start line, future usage only
-    rem = budget_remaining(conn)
-    assert rem is not None and rem == Decimal("100")
+    # Two resets at explicit, distinct times; a spend falls inside the first period.
+    conn.execute(
+        "INSERT INTO llm_budget_events (ts, amount_usd, note) "
+        "VALUES ('2026-01-01T00:00:00+00:00', '50', NULL)"
+    )
+    _spend(conn, "2026-06-01T00:00:00+00:00", "60")  # in period 1 -> drives it negative
+    rem1 = budget_remaining(conn)
+    assert rem1 is not None and rem1 < 0
+    conn.execute(
+        "INSERT INTO llm_budget_events (ts, amount_usd, note) "
+        "VALUES ('2026-12-01T00:00:00+00:00', '100', NULL)"
+    )
+    conn.commit()
+    rem2 = budget_remaining(conn)
+    assert rem2 is not None and rem2 == Decimal("100")  # spend predates the new reset
 
 
 def test_check_budget_blocks_when_negative(conn: sqlite3.Connection) -> None:
