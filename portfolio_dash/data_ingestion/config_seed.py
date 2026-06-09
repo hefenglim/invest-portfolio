@@ -38,15 +38,6 @@ class AccountConfig(BaseModel):
     dividend_model: str
 
 
-class ModelPricing(BaseModel):
-    """LLM model pricing entry (per 1M tokens)."""
-
-    model_config = {"protected_namespaces": ()}  # allow field named 'model'
-    model: str
-    input_price_per_mtok: Decimal
-    output_price_per_mtok: Decimal
-
-
 FEE_RULES: dict[str, FeeRuleSet] = {
     "tw": FeeRuleSet(
         market=Market.TW,
@@ -106,10 +97,6 @@ DEFAULT_ACCOUNTS: list[AccountConfig] = [
         dividend_model="cash",
     ),
 ]
-
-# LLM model registry defaults (pricing per 1M tokens); endpoint/key live in Settings.
-DEFAULT_LLM_MODELS: list[ModelPricing] = []
-
 
 def get_fee_rule_set(name: str) -> FeeRuleSet:
     """Return the named FeeRuleSet; raises KeyError if not found."""

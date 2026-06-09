@@ -2,13 +2,15 @@ import sqlite3
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from portfolio_dash.data_ingestion.agents import AiDraft, AiDraftList, ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.csv_import import write_transaction_row
 from portfolio_dash.data_ingestion.preview import commit_preview
 from portfolio_dash.data_ingestion.store import list_transactions, upsert_instrument
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.llm import LLMUnavailable
+from portfolio_dash.shared.llm import AINotActivated, LLMBudgetExceeded, LLMUnavailable
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
 
@@ -33,7 +35,6 @@ def _good_completer(
     *,
     agent: str,
     conn: object = None,
-    pricing: object = None,
 ) -> AiDraftList:
     return AiDraftList(
         drafts=[
@@ -63,18 +64,23 @@ def test_ai_input_commit_writes(conn: sqlite3.Connection) -> None:
     assert len(list_transactions(conn, account_id="tw_broker")) == 1
 
 
-def test_ai_input_llm_unavailable_no_crash(conn: sqlite3.Connection) -> None:
+@pytest.mark.parametrize(
+    "exc, kind",
+    [
+        (LLMUnavailable("down"), "llm_unavailable"),
+        (AINotActivated("off"), "ai_not_activated"),
+        (LLMBudgetExceeded("broke"), "budget_exceeded"),
+    ],
+)
+def test_ai_input_degrades_with_kind(
+    conn: sqlite3.Connection, exc: Exception, kind: str
+) -> None:
     _setup(conn)
 
     def boom(
-        prompt: str,
-        schema: type,
-        *,
-        agent: str,
-        conn: object = None,
-        pricing: object = None,
+        prompt: str, schema: type, *, agent: str, conn: object = None
     ) -> AiDraftList:
-        raise LLMUnavailable("down")
+        raise exc
 
     p = ai_agents_input(conn, "buy ...", completer=boom)
-    assert any(i.kind == "llm_unavailable" for i in p.rows[0].issues)
+    assert p.rows[0].issues[0].kind == kind

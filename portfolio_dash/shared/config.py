@@ -12,7 +12,7 @@ from .enums import Currency
 class Settings(BaseSettings):
     """Application settings, loaded from environment and ``.env``.
 
-    Foundation fields only; LLM/LiteLLM settings arrive with ``llm_insight/``.
+    Foundation fields only; DB-backed LLM config lives in ``shared/llm_config``.
     """
 
     model_config = SettingsConfigDict(
@@ -24,11 +24,6 @@ class Settings(BaseSettings):
     app_env: Literal["dev", "prod"] = "dev"
     tz_display: str = "Asia/Taipei"  # display tz; storage is always UTC
     reporting_currency: Currency = Currency.TWD
-
-    # LLM / LiteLLM settings — all optional; empty string = use litellm defaults.
-    llm_endpoint: str = ""
-    llm_api_key: str = ""
-    llm_active_model: str = ""
 
 
 @lru_cache

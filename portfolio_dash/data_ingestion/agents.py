@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from portfolio_dash.data_ingestion.csv_import import txn_preview_row
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
-from portfolio_dash.shared.llm import LLMUnavailable, ModelPricing, complete_structured
+from portfolio_dash.shared.llm import LLMError, complete_structured
 from portfolio_dash.shared.models.enums import Side
 
 
@@ -53,7 +53,6 @@ def ai_agents_input(
     text: str,
     *,
     completer: Completer = complete_structured,
-    pricing: ModelPricing | None = None,
 ) -> ImportPreview:
     """Extract transactions from natural-language *text* and return a preview.
 
@@ -71,8 +70,6 @@ def ai_agents_input(
         text:      Free-form user text describing one or more transactions.
         completer: Injectable LLM callable (default: :func:`~shared.llm.complete_structured`).
                    Replaced with a mock in tests.
-        pricing:   Optional per-model pricing for usage logging.
-
     Returns:
         :class:`ImportPreview` with one :class:`PreviewRow` per extracted draft,
         or a single row with a ``llm_unavailable`` issue when the LLM call fails.
@@ -83,15 +80,14 @@ def ai_agents_input(
             AiDraftList,
             agent="ai_agents_input",
             conn=conn,
-            pricing=pricing,
         )
-    except LLMUnavailable as exc:
+    except LLMError as exc:
         return ImportPreview(
             rows=[
                 PreviewRow(
                     index=0,
                     raw={"text": text},
-                    issues=[Issue(kind="llm_unavailable", message=str(exc))],
+                    issues=[Issue(kind=exc.kind, message=str(exc))],
                 )
             ]
         )
