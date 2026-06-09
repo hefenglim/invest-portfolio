@@ -101,9 +101,9 @@ LLM provides typed relational tables (above) conforming to these conventions, ra
 
 - `budget_remaining(conn) -> Decimal | None`:
   - If `llm_budget_events` is empty → **no cap set** → returns `None` (calls allowed, surfaced as
-    "no budget cap"). *(Open item — confirm at review; alternative is "unset = blocked". Recommended:
-    unset = no cap, because role-defaults already gate the AI off initially; the $ cap is an opt-in
-    safety the user turns on by setting an amount.)*
+    "no budget cap"). **Settled 2026-06-09: unset = no cap.** Role-defaults already gate the AI off
+    initially, so the $ cap is an opt-in safety the user turns on by setting an amount; it never
+    blocks before one is set.
   - Else: `latest = most recent reset (by ts,id)`; `remaining = latest.amount_usd − Σ Decimal(cost)
     for llm_usage where ts >= latest.ts`. Costs summed as `Decimal` in Python (low volume).
 - `reset_budget(conn, amount_usd, note=None)` — appends a new `llm_budget_events` row (the "重置"
@@ -167,7 +167,7 @@ LLM provides typed relational tables (above) conforming to these conventions, ra
 
 - **Budget ledger math** (pure): remaining with no events (→ None), one reset, multiple resets (only
   the latest counts), and usage driving remaining negative.
-- **Gate**: blocks at remaining < 0, allows at ≥ 0, allows when unset (per decision/open item).
+- **Gate**: blocks at remaining < 0, allows at ≥ 0, allows when unset (no cap).
 - **Role selection + fallback**: primary null → uses fallback; primary errors (mock `litellm`
   raising once then succeeding) → fails over; all roles null → `AINotActivated`; vision routing picks
   the vision role.
