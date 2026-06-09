@@ -8,9 +8,12 @@ unit-testable; the APScheduler wiring lives in ``runtime.py``.
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from portfolio_dash.pricing.defaults import default_registry
+from portfolio_dash.pricing.refresh import refresh_dividends, refresh_history, refresh_quotes
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
+from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.enums import Currency, Market
 
@@ -78,30 +81,67 @@ def ensure_scheduler_seeded(conn: sqlite3.Connection) -> None:
 
 # --- Job registry -------------------------------------------------------------
 # Default cron times fall after each exchange's close; users override per job later.
-# Placeholder funcs are replaced with the real pricing-refresh functions in a later task.
-def _todo(conn: sqlite3.Connection, *, now: datetime) -> str:  # pragma: no cover
-    raise NotImplementedError
+
+_HISTORY_LOOKBACK_DAYS = 7
+
+
+def _summarize(summary: RefreshSummary) -> str:
+    return f"{len(summary.ok)} ok, {len(summary.failed)} failed"
+
+
+def refresh_quotes_for(conn: sqlite3.Connection, market: Market, *, now: datetime) -> str:
+    """Refresh latest quotes + FX for one market's instruments."""
+    instruments, fx_pairs = build_worklist(conn, market)
+    summary = refresh_quotes(conn, default_registry(), instruments, fx_pairs, now=now)
+    return _summarize(summary)
+
+
+def quotes_tw(conn: sqlite3.Connection, *, now: datetime) -> str:
+    return refresh_quotes_for(conn, Market.TW, now=now)
+
+
+def quotes_us(conn: sqlite3.Connection, *, now: datetime) -> str:
+    return refresh_quotes_for(conn, Market.US, now=now)
+
+
+def quotes_my(conn: sqlite3.Connection, *, now: datetime) -> str:
+    return refresh_quotes_for(conn, Market.MY, now=now)
+
+
+def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Backfill a recent history window for all instruments (deep backfill is manual)."""
+    instruments, _ = build_worklist(conn, None)
+    start = (now - timedelta(days=_HISTORY_LOOKBACK_DAYS)).date()
+    summary = refresh_history(conn, default_registry(), instruments, start, now=now)
+    return _summarize(summary)
+
+
+def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Sweep dividend/ex-div events for all instruments."""
+    instruments, _ = build_worklist(conn, None)
+    summary = refresh_dividends(conn, default_registry(), instruments, now=now)
+    return _summarize(summary)
 
 
 JOBS: list[JobSpec] = [
     JobSpec(
-        "quotes_tw", _todo, "0 14 * * mon-fri", "Asia/Taipei", True,
+        "quotes_tw", quotes_tw, "0 14 * * mon-fri", "Asia/Taipei", True,
         "TW quotes + FX (post-close)",
     ),
     JobSpec(
-        "quotes_us", _todo, "30 16 * * mon-fri", "America/New_York", True,
+        "quotes_us", quotes_us, "30 16 * * mon-fri", "America/New_York", True,
         "US quotes + FX (post-close)",
     ),
     JobSpec(
-        "quotes_my", _todo, "30 17 * * mon-fri", "Asia/Kuala_Lumpur", True,
+        "quotes_my", quotes_my, "30 17 * * mon-fri", "Asia/Kuala_Lumpur", True,
         "MY quotes + FX (post-close)",
     ),
     JobSpec(
-        "history_daily", _todo, "0 2 * * *", "Asia/Taipei", True,
+        "history_daily", history_daily, "0 2 * * *", "Asia/Taipei", True,
         "Daily history backfill (recent window)",
     ),
     JobSpec(
-        "dividends_daily", _todo, "0 3 * * *", "Asia/Taipei", True,
+        "dividends_daily", dividends_daily, "0 3 * * *", "Asia/Taipei", True,
         "Daily dividend/ex-div sweep",
     ),
 ]
