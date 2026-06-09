@@ -77,6 +77,22 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   models (TW cash / US DRIP 30% / MY cash). New `shared/llm.py` (LiteLLM client + structured
   output + model registry + `llm_usage` token/cost log + graceful degradation; `litellm` dep).
   Spec/plan: `docs/superpowers/{specs,plans}/2026-06-09-data-ingestion*`.
+- LLM config management + token-budget governance (`shared/`): DB-backed model registry
+  (`llm_models`; per-model provider / endpoint / key / `vision` flag / pricing / context-window /
+  timeout / retries / enabled). Four **nullable** role-defaults (`default` / `default_fallback` /
+  `vision` / `vision_fallback`) — all empty = AI cleanly **off** (first-launch seed). `complete_structured`
+  now: budget gate → role selection → **runtime failover** to the fallback model on provider error →
+  **image (vision)** input → cost logged from the *selected* model's registry pricing. Three
+  degradation signals — `AINotActivated` / `LLMUnavailable` / `LLMBudgetExceeded` (all subclass
+  `LLMError`) — surfaced to callers (mapped to issue `kind`), never crash or fabricate. **USD budget**
+  as an append-only reset ledger (`llm_budget_events`): remaining = latest reset amount − Σ usage cost
+  since that reset; **unset = no cap**; **remaining < 0 blocks** ("額度用盡"); per-model usage/trend from
+  `llm_usage` is never reset (a reset is a fresh start line, not a counter overwrite). Reusable
+  `config_store` create-always / seed-once settings framework; package-root `portfolio_dash/bootstrap.py`
+  composition root (so `shared/` keeps importing nothing internal); `llm_usage` ownership moved from
+  `data_ingestion/` to `shared/llm_config`. AI Agents Input rewired to the registry API (no
+  caller-supplied pricing). The settings-page UI stays deferred to `web_ui/`. Spec/plan:
+  `docs/superpowers/{specs,plans}/2026-06-09-llm-config-and-budget*`.
 
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
@@ -110,10 +126,11 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   can get long — evaluate clear categorization + non-cluttered tabs/sections (avoid endless
   scroll) for this AI-stock-strategy / position-management / watchlist assistant. Optimize the
   human-computer interface then, not pre-emptively.
-- **AI cost-info page** (`web_ui/`, future): show LLM token-usage stats + history trend +
-  per-model cost; manage the model registry (add models, set per-1M-token input/output pricing,
-  switch active model). Fed by `shared/llm.py`'s per-call `llm_usage` log + config model registry
-  (the log + registry + cost calc land with `data_ingestion/`'s AI framework; the page is web_ui).
+- **AI cost-info + LLM settings page** (`web_ui/`, future): the **backend is now built** (model
+  registry, four role-defaults, USD budget governance, `llm_usage` log + cost calc, vision plumbing —
+  see Added). Remaining is the `web_ui/` page: usage stats + history-trend + per-model cost charts;
+  model add/edit (provider / endpoint / key / vision / pricing); role-default pickers; budget
+  set/reset; and the screenshot-upload widget for vision (statement → draft → confirm).
 - **Design principle (all modules):** invest in adjustable structure — config-driven behavior,
   provider/strategy protocols + registries, swappable adapters, decoupled layers — so future
   changes are config edits + small additions, not rewrites; keep YAGNI on features/scale (per

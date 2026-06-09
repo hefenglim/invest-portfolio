@@ -38,3 +38,13 @@ prevents recurrence.
   DML that follows DDL in the same session *is* transactional (Python 3.12 no longer
   auto-commits before DDL). Keep schema migrations out of plain DML sessions, or handle
   this explicitly.
+- **Dev gates need the repo `.venv` interpreter (2026-06-09):** runtime deps + tooling live only in
+  `.venv` (`./.venv/Scripts/python.exe`); the bare `python` resolves to a system interpreter without
+  them, so `python -m pytest` / `-m mypy` report spurious missing-module / missing-stub errors that
+  look like regressions. Always run gates via the venv; instruct subagents to do the same.
+- **Fix the test, not the production code, when the test is wrong (2026-06-09):** a flawed budget
+  test (far-future-dated usage rows vs. wall-clock reset timestamps) tempted an implementer to make
+  `reset_budget` scan `llm_usage` and advance its timestamp — bending real behavior to satisfy a
+  broken test. The correct fix was the opposite: keep `reset_budget` a plain `now()` event and make
+  the test deterministic with explicit timestamps. When a test forces awkward production logic,
+  suspect the test first.
