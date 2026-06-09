@@ -78,16 +78,22 @@ per job in the settings page. FX is refreshed alongside each market's quote job 
 `build_worklist(conn, market: Market | None) -> tuple[list[InstrumentRef], list[FxPair]]`:
 - Reads the `instruments` table (SQL read of a shared DB table; no `data_ingestion` code import, keeping
   the dependency direction clean), filtered by `market` when given.
-- Maps rows → `InstrumentRef`: board is `""` (US) / `".KL"` (MY) / **`"TWSE"` (TW, v1 default)**.
+- Maps each row → `InstrumentRef`, taking **board from the stored `instruments.board` column** when set,
+  else a deterministic market default: `""` (US) / `".KL"` (MY) / `"TWSE"` (TW). US/MY are always
+  deterministic; only TW is ambiguous, so the stored column is meaningful mainly for TW.
 - `fx_pairs`: the reporting-currency pairs needed for the combined view (USD/TWD, USD/MYR, MYR/TWD),
   derived from the configured reporting currency + the account funding/quote currencies.
 
-**Known v1 limitation (documented):** the `instruments` table has no `board` column, so TW board defaults
-to `TWSE`. For **quotes** this is harmless — the registry order `twse → tpex → yfinance` falls through to
-the right source. For **history** (which needs the exact `.TW`/`.TWO` yfinance suffix), a TPEx-listed TW
-stock may fail its backfill (recorded in the run summary, never crashes). Precise TW board resolution
-(an `instruments.board` column or a resolver) is a **`pricing/` / `data_ingestion/` follow-up**, out of
-scope here.
+### `instruments.board` column (decided 2026-06-10, option (b))
+
+A nullable **`board`** column is added to the `instruments` table (owned by `data_ingestion/schema.py`):
+- New DBs get it via `CREATE TABLE`; existing DBs via an **idempotent migration** (`ALTER TABLE
+  instruments ADD COLUMN board TEXT`, guarded by a `PRAGMA table_info` check so re-runs are safe).
+- The work-list builder reads it; a row with no board yet (legacy / not-yet-resolved) falls back to the
+  market default above — so TW **quotes** are always correct (registry `twse → tpex → yfinance` fallback),
+  and a TPEx stock's **history** backfill becomes precise once its board is stored (graceful until then).
+- **Populating board for TW is the immediate next sub-project** (see Out of scope); this spec only adds
+  the column + reads it.
 
 ## Runtime
 
@@ -133,7 +139,11 @@ scope here.
 - The **Scheduler 設定頁面** UI + last/next/status display + manual-trigger button (`web_ui/`).
 - The `llm_insight` scheduled job (lands with `llm_insight/`; the registry slot is ready).
 - Confirmed auto-import checks + data-quality sweeps (future jobs).
-- Precise TW board resolution for history (a `pricing/` / `data_ingestion/` follow-up).
+- **TW board resolution at input** (the **immediate next sub-project**, decided 2026-06-10): extend
+  `data_ingestion`'s symbol resolution so TW input **probes `.TW` then `.TWO`** (via the existing pricing
+  providers) to guess TWSE vs TPEx, lists the guess for the user to **confirm/correct** in the existing
+  preview→confirm pipeline, and **stores the confirmed board** on the `instruments` row — resolved once,
+  permanently. This scheduler spec only adds the column + reads it.
 
 ## Designed-in flexibility (per human directive)
 
@@ -147,7 +157,9 @@ no distributed scheduler, no extra broker (`stack.md` — APScheduler in-process
 1. Add `APScheduler` dep; `scheduler/` package skeleton.
 2. `schedule_config` + `job_runs` tables via `config_store`; `JobSpec` registry + `ensure_job_rows`
    (idempotent per-job seeding) + default cron/tz constants.
-3. `build_worklist(conn, market)` (instruments → InstrumentRef + FX pairs).
+3. Add the nullable `instruments.board` column (`CREATE TABLE` + idempotent `ALTER`-if-missing migration)
+   in `data_ingestion/schema.py`; `build_worklist(conn, market)` reads board (fallback to market default)
+   → `InstrumentRef` list + FX pairs.
 4. The pricing-refresh job functions (`quotes_<mkt>`, `history_daily`, `dividends_daily`) over
    `pricing.refresh_*` + `default_registry`.
 5. `run_job` (job_runs logging + swallow-and-log on failure) + `trigger_job` (manual).
