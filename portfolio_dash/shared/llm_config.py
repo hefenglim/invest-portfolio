@@ -6,6 +6,7 @@ tasks append the model registry, role selection, and budget ledger here.
 """
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -230,3 +231,53 @@ def select_models(conn: sqlite3.Connection, *, vision: bool) -> list[ModelConfig
         kind = "vision" if vision else "text"
         raise AINotActivated(f"no enabled model configured for {kind} tasks")
     return chain
+
+
+def reset_budget(
+    conn: sqlite3.Connection, amount_usd: Decimal, note: str | None = None
+) -> None:
+    """Append a budget reset/recharge event (a fresh start line). History untouched.
+
+    The event ``ts`` is set to strictly after the latest existing ``llm_usage.ts``
+    so that usage recorded before this call is never attributed to the new period,
+    regardless of the usage row's own ``ts`` label.  Both timestamps are ISO-8601
+    strings; lexicographic ordering is therefore correct.
+    """
+    latest_usage_ts: str | None = (
+        conn.execute("SELECT MAX(ts) FROM llm_usage").fetchone()[0]
+    )
+    now_ts = datetime.now(UTC).isoformat()
+    if latest_usage_ts is not None and now_ts <= latest_usage_ts:
+        # Advance past any future-dated usage rows already in the table.
+        parsed = datetime.fromisoformat(latest_usage_ts)
+        now_ts = (parsed + timedelta(microseconds=1)).isoformat()
+    conn.execute(
+        "INSERT INTO llm_budget_events (ts, amount_usd, note) VALUES (?, ?, ?)",
+        (now_ts, str(amount_usd), note),
+    )
+    conn.commit()
+
+
+def budget_remaining(conn: sqlite3.Connection) -> Decimal | None:
+    """Remaining USD = latest reset amount − Σ usage cost dated at/after that reset.
+
+    Returns ``None`` when no reset has ever been set (no cap; calls allowed).
+    """
+    latest = conn.execute(
+        "SELECT ts, amount_usd FROM llm_budget_events ORDER BY ts DESC, id DESC LIMIT 1"
+    ).fetchone()
+    if latest is None:
+        return None
+    spent = Decimal("0")
+    for row in conn.execute(
+        "SELECT cost FROM llm_usage WHERE ts >= ?", (latest["ts"],)
+    ):
+        spent += Decimal(row["cost"])
+    return Decimal(latest["amount_usd"]) - spent
+
+
+def check_budget(conn: sqlite3.Connection) -> None:
+    """Gate: raise :exc:`LLMBudgetExceeded` only when a cap is set and remaining < 0."""
+    remaining = budget_remaining(conn)
+    if remaining is not None and remaining < 0:
+        raise LLMBudgetExceeded(f"token budget exhausted (remaining ${remaining})")

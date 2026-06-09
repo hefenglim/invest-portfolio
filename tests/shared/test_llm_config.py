@@ -8,14 +8,18 @@ import pytest
 
 from portfolio_dash.shared.llm_config import (
     AINotActivated,
+    LLMBudgetExceeded,
     LLMRole,
     ModelConfig,
+    budget_remaining,
+    check_budget,
     create_llm_tables,
     delete_model,
     ensure_llm_seeded,
     get_model,
     get_role_model_id,
     list_models,
+    reset_budget,
     restore_llm_defaults,
     select_models,
     set_role,
@@ -142,3 +146,46 @@ def test_select_vision_uses_vision_roles(conn: sqlite3.Connection) -> None:
     assert [m.id for m in select_models(conn, vision=True)] == ["vis"]
     with pytest.raises(AINotActivated):  # text roles still unset
         select_models(conn, vision=False)
+
+
+def _spend(conn: sqlite3.Connection, ts: str, cost: str) -> None:
+    conn.execute(
+        "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost) "
+        "VALUES (?, 'm', 'a', 1, 1, ?)",
+        (ts, cost),
+    )
+    conn.commit()
+
+
+def test_no_events_means_no_cap(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    assert budget_remaining(conn) is None
+    check_budget(conn)  # never blocks when unset
+
+
+def test_remaining_is_amount_minus_spend_since_reset(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    reset_budget(conn, Decimal("50"), note="2026-06-09T00:00:00+00:00")
+    # backdate a row before the reset (excluded) and after (included)
+    _spend(conn, "2025-01-01T00:00:00+00:00", "5")   # before -> ignored
+    _spend(conn, "2999-01-01T00:00:00+00:00", "10")  # after  -> counted
+    rem = budget_remaining(conn)
+    assert rem is not None and rem == Decimal("40")
+
+
+def test_latest_reset_wins(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    reset_budget(conn, Decimal("50"))
+    _spend(conn, "2999-01-01T00:00:00+00:00", "60")  # drives first period negative
+    assert budget_remaining(conn) is not None and budget_remaining(conn) < 0  # type: ignore[operator]
+    reset_budget(conn, Decimal("100"))               # new start line, future usage only
+    rem = budget_remaining(conn)
+    assert rem is not None and rem == Decimal("100")
+
+
+def test_check_budget_blocks_when_negative(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    reset_budget(conn, Decimal("1"))
+    _spend(conn, "2999-01-01T00:00:00+00:00", "2")
+    with pytest.raises(LLMBudgetExceeded):
+        check_budget(conn)
