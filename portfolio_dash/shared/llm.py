@@ -1,22 +1,39 @@
-"""LiteLLM client: structured output, retry, and usage/cost logging."""
+"""LiteLLM client: budget gate, role-based selection with fallback, vision, usage log."""
 
+import base64
 import json
 import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import litellm as litellm  # re-exported so tests can monkeypatch litellm_mod.litellm
+import litellm as litellm  # re-exported so tests can monkeypatch llm_mod.litellm
 from pydantic import BaseModel, ValidationError
 
-from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.llm_config import (
+    AINotActivated,
+    LLMBudgetExceeded,
+    LLMError,
+    LLMUnavailable,
+    ModelConfig,
+    check_budget,
+    litellm_model_string,
+    select_models,
+)
 
-
-class LLMUnavailable(Exception):
-    """Raised when the LLM provider fails or returns unusable output."""
+__all__ = [
+    "AINotActivated",
+    "LLMBudgetExceeded",
+    "LLMError",
+    "LLMUnavailable",
+    "ModelPricing",
+    "complete_structured",
+    "cost_of",
+    "log_usage",
+]
 
 
 class ModelPricing(BaseModel):
-    """Per-model token pricing (prices in USD per million tokens)."""
+    """Per-model token pricing (USD per million tokens)."""
 
     model_config = {"protected_namespaces": ()}
 
@@ -46,16 +63,70 @@ def log_usage(
     conn.execute(
         "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost) "
         "VALUES (?,?,?,?,?,?)",
-        (
-            datetime.now(UTC).isoformat(),
-            model,
-            agent,
-            input_tokens,
-            output_tokens,
-            str(cost),
-        ),
+        (datetime.now(UTC).isoformat(), model, agent, input_tokens, output_tokens, str(cost)),
     )
     conn.commit()
+
+
+def _build_messages(prompt: str, images: list[bytes] | None) -> list[dict[str, object]]:
+    """Assemble the chat messages; multimodal content when images are present."""
+    if not images:
+        return [{"role": "user", "content": prompt}]
+    content: list[dict[str, object]] = [{"type": "text", "text": prompt}]
+    for img in images:
+        b64 = base64.b64encode(img).decode("ascii")
+        content.append(
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+        )
+    return [{"role": "user", "content": content}]
+
+
+def _complete_with[T: BaseModel](
+    model: ModelConfig,
+    messages: list[dict[str, object]],
+    schema: type[T],
+    *,
+    agent: str,
+    conn: sqlite3.Connection,
+) -> T:
+    """Try one model: call, log usage, parse (retry once). Raise LLMUnavailable on failure."""
+    for _attempt in range(2):
+        try:
+            resp = litellm.completion(
+                model=litellm_model_string(model),
+                api_base=model.api_base or None,
+                api_key=model.api_key or None,
+                messages=messages,
+                timeout=model.timeout_seconds,
+                num_retries=model.max_retries or 0,
+                max_tokens=model.max_output_tokens,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise LLMUnavailable(f"provider error ({model.id}): {exc}") from exc
+
+        content = resp.choices[0].message.content or ""
+        usage = resp.usage
+        log_usage(
+            conn,
+            model=model.model_name,
+            agent=agent,
+            input_tokens=usage.prompt_tokens,
+            output_tokens=usage.completion_tokens,
+            cost=cost_of(
+                ModelPricing(
+                    model=model.model_name,
+                    input_price_per_mtok=model.input_price_per_mtok,
+                    output_price_per_mtok=model.output_price_per_mtok,
+                ),
+                usage.prompt_tokens,
+                usage.completion_tokens,
+            ),
+        )
+        try:
+            return schema.model_validate_json(content)
+        except (ValidationError, json.JSONDecodeError, ValueError):
+            continue
+    raise LLMUnavailable(f"invalid structured output from {model.id}")
 
 
 def complete_structured[T: BaseModel](
@@ -63,47 +134,25 @@ def complete_structured[T: BaseModel](
     schema: type[T],
     *,
     agent: str,
-    conn: sqlite3.Connection | None = None,
-    pricing: ModelPricing | None = None,
+    conn: sqlite3.Connection,
+    images: list[bytes] | None = None,
 ) -> T:
     """Call the configured LLM and parse the response into *schema*.
 
-    Retries once on a parse failure.  Raises :exc:`LLMUnavailable` if the
-    provider errors or two consecutive responses cannot be parsed.
+    Order: budget gate -> role selection (vision if *images*) -> try each candidate
+    model in order (failover on provider error) -> parse (retry once) -> log cost.
 
-    Usage is logged to *conn* (``llm_usage`` table) whenever both *conn* and
-    *pricing* are supplied.
+    Raises :exc:`AINotActivated` (no model for the role), :exc:`LLMBudgetExceeded`
+    (cap hit), or :exc:`LLMUnavailable` (all candidates failed). All subclass
+    :exc:`LLMError`, so callers may catch the base for graceful degradation.
     """
-    settings = get_settings()
-    last_content = ""
-
-    for _attempt in range(2):
+    check_budget(conn)
+    candidates = select_models(conn, vision=bool(images))
+    messages = _build_messages(prompt, images)
+    last: LLMUnavailable | None = None
+    for model in candidates:
         try:
-            resp = litellm.completion(
-                model=settings.llm_active_model or "gpt-4o-mini",
-                api_base=settings.llm_endpoint or None,
-                api_key=settings.llm_api_key or None,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise LLMUnavailable(f"provider error: {exc}") from exc
-
-        last_content = resp.choices[0].message.content or ""
-
-        if conn is not None and pricing is not None:
-            usage = resp.usage
-            log_usage(
-                conn,
-                model=settings.llm_active_model,
-                agent=agent,
-                input_tokens=usage.prompt_tokens,
-                output_tokens=usage.completion_tokens,
-                cost=cost_of(pricing, usage.prompt_tokens, usage.completion_tokens),
-            )
-
-        try:
-            return schema.model_validate_json(last_content)
-        except (ValidationError, json.JSONDecodeError, ValueError):
-            continue
-
-    raise LLMUnavailable(f"invalid structured output: {last_content[:200]}")
+            return _complete_with(model, messages, schema, agent=agent, conn=conn)
+        except LLMUnavailable as exc:
+            last = exc
+    raise last or LLMUnavailable("no model produced valid output")
