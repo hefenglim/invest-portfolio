@@ -3,13 +3,13 @@ from collections.abc import Iterator
 
 import pytest
 
-from portfolio_dash.data_ingestion.schema import create_tables
+from portfolio_dash.bootstrap import bootstrap_db
 
 
 @pytest.fixture
 def conn() -> Iterator[sqlite3.Connection]:
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
-    create_tables(c)
+    bootstrap_db(c)
     yield c
     c.close()

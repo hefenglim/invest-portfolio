@@ -10,5 +10,5 @@ def test_create_tables_idempotent() -> None:
     names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {
         "accounts", "instruments", "transactions", "dividends",
-        "fx_conversions", "opening_inventory", "llm_usage",
+        "fx_conversions", "opening_inventory",
     }.issubset(names)

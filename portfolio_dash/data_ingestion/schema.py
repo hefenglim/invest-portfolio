@@ -33,11 +33,6 @@ CREATE TABLE IF NOT EXISTS opening_inventory (
     build_date TEXT NOT NULL,
     PRIMARY KEY (account_id, symbol)
 );
-CREATE TABLE IF NOT EXISTS llm_usage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL, model TEXT NOT NULL, agent TEXT NOT NULL,
-    input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cost TEXT NOT NULL
-);
 """
 
 
