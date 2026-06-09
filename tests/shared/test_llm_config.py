@@ -19,6 +19,7 @@ from portfolio_dash.shared.llm_config import (
     get_model,
     get_role_model_id,
     list_models,
+    litellm_model_string,
     reset_budget,
     restore_llm_defaults,
     select_models,
@@ -198,3 +199,14 @@ def test_check_budget_blocks_when_negative(conn: sqlite3.Connection) -> None:
     _spend(conn, "2999-01-01T00:00:00+00:00", "2")
     with pytest.raises(LLMBudgetExceeded):
         check_budget(conn)
+
+
+def test_litellm_model_string_by_provider() -> None:
+    def s(provider: str, model_name: str) -> str:
+        return litellm_model_string(_model(provider=provider, model_name=model_name))
+
+    assert s("anthropic", "claude-opus-4-8") == "anthropic/claude-opus-4-8"
+    assert s("openrouter", "x/y") == "openrouter/x/y"
+    assert s("openai", "gpt-4o") == "openai/gpt-4o"
+    # openai-compatible servers route through the openai adapter + api_base
+    assert s("openai-compatible", "gemma-4") == "openai/gemma-4"

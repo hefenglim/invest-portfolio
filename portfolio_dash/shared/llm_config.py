@@ -267,3 +267,17 @@ def check_budget(conn: sqlite3.Connection) -> None:
     remaining = budget_remaining(conn)
     if remaining is not None and remaining < 0:
         raise LLMBudgetExceeded(f"token budget exhausted (remaining ${remaining})")
+
+
+_PROVIDER_PREFIX = {
+    "openai": "openai",
+    "openrouter": "openrouter",
+    "anthropic": "anthropic",
+    "openai-compatible": "openai",  # uses the OpenAI adapter + an explicit api_base
+}
+
+
+def litellm_model_string(model: ModelConfig) -> str:
+    """Compose the LiteLLM ``provider/model`` string from a registry row."""
+    prefix = _PROVIDER_PREFIX.get(model.provider, "openai")
+    return f"{prefix}/{model.model_name}"
