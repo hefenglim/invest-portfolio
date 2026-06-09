@@ -110,6 +110,89 @@ def insert_transaction(
     return int(cur.lastrowid or 0)
 
 
+# ---------------------------------------------------------------------------
+# Opening inventory
+# ---------------------------------------------------------------------------
+
+
+class StoredOpening(BaseModel):
+    """Pydantic model for a persisted opening_inventory row."""
+
+    account_id: str
+    symbol: str
+    shares: Decimal
+    original_avg_cost: Decimal
+    original_cost_total: Decimal
+    build_date: date
+
+
+def upsert_opening(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    symbol: str,
+    shares: Decimal,
+    original_avg_cost: Decimal,
+    original_cost_total: Decimal,
+    build_date: date,
+) -> None:
+    """Insert or update an opening_inventory row (idempotent on PK account_id+symbol)."""
+    conn.execute(
+        """INSERT INTO opening_inventory
+               (account_id, symbol, shares, original_avg_cost, original_cost_total, build_date)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(account_id, symbol) DO UPDATE SET
+               shares=excluded.shares,
+               original_avg_cost=excluded.original_avg_cost,
+               original_cost_total=excluded.original_cost_total,
+               build_date=excluded.build_date""",
+        (
+            account_id,
+            symbol,
+            to_db(shares),
+            to_db(original_avg_cost),
+            to_db(original_cost_total),
+            build_date.isoformat(),
+        ),
+    )
+    conn.commit()
+
+
+def list_opening(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str | None = None,
+) -> list[StoredOpening]:
+    """Return opening_inventory rows ordered by account_id, symbol.
+
+    Optionally filter by *account_id*.
+    """
+    where: str
+    params: list[str]
+    if account_id is not None:
+        where = " WHERE account_id=?"
+        params = [account_id]
+    else:
+        where = ""
+        params = []
+    rows = conn.execute(
+        f"SELECT account_id, symbol, shares, original_avg_cost, original_cost_total, "
+        f"build_date FROM opening_inventory{where} ORDER BY account_id, symbol",
+        params,
+    ).fetchall()
+    return [
+        StoredOpening(
+            account_id=r["account_id"],
+            symbol=r["symbol"],
+            shares=from_db(r["shares"]),
+            original_avg_cost=from_db(r["original_avg_cost"]),
+            original_cost_total=from_db(r["original_cost_total"]),
+            build_date=date.fromisoformat(r["build_date"]),
+        )
+        for r in rows
+    ]
+
+
 def list_transactions(
     conn: sqlite3.Connection,
     *,
