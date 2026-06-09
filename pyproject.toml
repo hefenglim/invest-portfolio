@@ -10,6 +10,7 @@ dependencies = [
     "yfinance>=0.2.40",
     "FinMind>=1.7",
     "requests>=2.31",
+    "litellm>=1.40",
 ]
 
 [project.optional-dependencies]
@@ -43,7 +44,7 @@ module = "scripts.probe.adapters.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["yfinance.*", "FinMind.*", "twstock.*", "bs4.*", "pandas.*", "numpy.*"]
+module = ["yfinance.*", "FinMind.*", "twstock.*", "bs4.*", "pandas.*", "numpy.*", "litellm.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

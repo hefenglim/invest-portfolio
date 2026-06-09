@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     tz_display: str = "Asia/Taipei"  # display tz; storage is always UTC
     reporting_currency: Currency = Currency.TWD
 
+    # LLM / LiteLLM settings — all optional; empty string = use litellm defaults.
+    llm_endpoint: str = ""
+    llm_api_key: str = ""
+    llm_active_model: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
