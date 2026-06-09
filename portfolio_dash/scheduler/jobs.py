@@ -10,7 +10,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
+from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.enums import Currency, Market
 
 # A job does its own trigger+wiring and returns a short run summary for job_runs.detail.
 JobFunc = Callable[..., str]
@@ -103,3 +105,34 @@ JOBS: list[JobSpec] = [
         "Daily dividend/ex-div sweep",
     ),
 ]
+
+_DEFAULT_BOARD: dict[Market, str] = {Market.US: "", Market.MY: ".KL", Market.TW: "TWSE"}
+
+# Reporting-currency FX pairs needed for the combined view (reporting ccy = TWD).
+_FX_PAIRS: list[FxPair] = [
+    FxPair(base=Currency.USD, quote=Currency.TWD),
+    FxPair(base=Currency.USD, quote=Currency.MYR),
+    FxPair(base=Currency.MYR, quote=Currency.TWD),
+]
+
+
+def build_worklist(
+    conn: sqlite3.Connection, market: Market | None
+) -> tuple[list[InstrumentRef], list[FxPair]]:
+    """Build the pricing work-list from the ``instruments`` table.
+
+    Board comes from the stored ``instruments.board`` column when set, else the
+    deterministic market default (US ``""`` / MY ``".KL"`` / TW ``"TWSE"``). FX pairs
+    are the fixed reporting-currency set.
+    """
+    sql = "SELECT symbol, market, board FROM instruments"
+    params: tuple[str, ...] = ()
+    if market is not None:
+        sql += " WHERE market = ?"
+        params = (market.value,)
+    refs: list[InstrumentRef] = []
+    for row in conn.execute(sql, params):
+        mkt = Market(row["market"])
+        board = row["board"] or _DEFAULT_BOARD[mkt]
+        refs.append(InstrumentRef(symbol=row["symbol"], market=mkt, board=board))
+    return refs, _FX_PAIRS
