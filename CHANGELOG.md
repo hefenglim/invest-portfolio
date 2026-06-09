@@ -93,6 +93,18 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   `data_ingestion/` to `shared/llm_config`. AI Agents Input rewired to the registry API (no
   caller-supplied pricing). The settings-page UI stays deferred to `web_ui/`. Spec/plan:
   `docs/superpowers/{specs,plans}/2026-06-09-llm-config-and-budget*`.
+- `scheduler/` in-process job scheduling (APScheduler, **triggers-only**): an extensible `JobSpec`
+  registry + DB-backed `schedule_config` (on the `config_store` framework; idempotent per-job seeding,
+  so a newly-registered job auto-gets a default row while user edits are preserved) + a `job_runs` log.
+  v1 jobs trigger `pricing.refresh_*`: per-market post-close quotes + FX (`quotes_tw` / `quotes_us` /
+  `quotes_my`, editable cron defaults in each exchange's tz), plus daily `history_daily` +
+  `dividends_daily` sweeps; a manual `trigger_job` shares the same `run_job` path (job_runs logging; a
+  job failure is logged as `error`, never crashes the scheduler). `build_worklist` reads the
+  `instruments` table — a new nullable **`instruments.board`** column (idempotent migration) carries the
+  resolved TW board, falling back to the market default (US `""` / MY `.KL` / TW `TWSE`) when unset.
+  New dependency: `APScheduler` (locked in `stack.md`), confined to `scheduler/runtime.py`. The
+  Scheduler settings-page UI is deferred to `web_ui/`. Spec/plan:
+  `docs/superpowers/{specs,plans}/2026-06-10-scheduler*`.
 
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
