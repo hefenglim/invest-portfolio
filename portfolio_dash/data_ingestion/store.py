@@ -8,7 +8,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import from_db, to_db
 
@@ -55,6 +55,22 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
         "SELECT symbol, market, quote_ccy, sector, name, board FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
+
+
+def list_accounts(conn: sqlite3.Connection) -> list[Account]:
+    """Return all broker accounts (seeded by ``config_seed.seed_accounts``)."""
+    rows = conn.execute(
+        "SELECT account_id, name, broker, settlement_ccy, funding_ccy "
+        "FROM accounts ORDER BY account_id"
+    ).fetchall()
+    return [
+        Account(
+            account_id=r["account_id"], name=r["name"], broker=r["broker"],
+            settlement_ccy=Currency(r["settlement_ccy"]),
+            funding_ccy=Currency(r["funding_ccy"]),
+        )
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
