@@ -113,6 +113,18 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   raising a soft `board_unresolved` flag (never blocking) when a TW probe finds nothing. Resolves the
   board once so the scheduler work-list picks the right `.TW`/`.TWO` source; the listing/confirm UI is
   deferred to `web_ui/`. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-10-tw-board-resolution*`.
+- `portfolio/dashboard.py` — the orchestration combiner: `build_dashboard(conn, now,
+  reporting)` assembles one complete `DashboardData` (KPIs, enriched holdings, realized
+  P&L, returns, sector allocation, currency view, FX P&L, dividend summary, ex-dividend
+  calendar, daily-replay trend series, freshness report, insight placeholders) from the
+  ledgers + stored prices/FX; the contract `web_ui` (and later `llm_insight`) binds to.
+  Introduces the one-way dependency edge `portfolio -> forex` (spec
+  2026-06-10-dashboard-combiner-design).
+- `portfolio/timeseries.py` — pure daily ledger-replay valuation series (market value
+  vs cumulative net invested, carry-forward prices/FX, honest `incomplete`/unavailable
+  flags).
+- `pricing/store.py` — `get_fx_on` (on-or-before point-in-time rate) and
+  `get_fx_history` reads; `data_ingestion/store.py` — `list_accounts` read.
 
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data

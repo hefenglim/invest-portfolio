@@ -153,3 +153,97 @@ def test_build_dashboard_happy_path(conn: sqlite3.Connection) -> None:
     assert data.freshness.xirr_unavailable_reason is None
     assert data.freshness.trend_unavailable_reason is None
     assert data.insights == []
+
+
+def _seed_usd_only(conn: sqlite3.Connection) -> None:
+    """One schwab USD holding; FX/price seeding varies per test."""
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"),
+                       trade_date=date(2026, 1, 10))
+
+
+def test_cold_start_missing_fx_degrades_blends(conn: sqlite3.Connection) -> None:
+    _seed_usd_only(conn)
+    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
+                                  as_of=date(2026, 6, 9), close=Decimal("120"),
+                                  source="test")], fetched_at=NOW)
+    # No fx_rates rows at all.
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    assert data.returns is None
+    assert data.allocation is None
+    assert data.currency_view is None
+    assert data.fx is None
+    assert data.kpis.total_market_value is None
+    assert data.kpis.total_return is None
+    assert "USD/TWD" in data.freshness.missing_fx
+    # Per-position data still renders (no FX needed in quote ccy).
+    assert data.holdings[0].market_value == Decimal("1200")
+    assert data.holdings[0].weight is None
+    assert data.kpis.xirr is None
+    assert data.freshness.xirr_unavailable_reason is not None
+    assert data.trend.available is False
+    assert data.freshness.trend_unavailable_reason is not None
+
+
+def test_no_prices_renders_at_cost_with_flags(conn: sqlite3.Connection) -> None:
+    upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=TWD,
+                                       sector="Semiconductors", name="TSMC",
+                                       board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"),
+                       trade_date=date(2026, 1, 5))
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    h = data.holdings[0]
+    assert h.market_value is None and h.unrealized_pnl is None
+    assert h.price_stale is True and h.price_as_of is None
+    assert data.freshness.missing_prices == ["2330"]
+    # TWD-only: blends work via the identity rate; valued total is 0 (nothing valued).
+    assert data.kpis.total_market_value == Decimal("0")
+    assert data.returns is not None
+    assert data.returns.by_currency[TWD].total_return == Decimal("0")
+    assert data.kpis.xirr is None  # terminal value cannot be formed
+    assert data.freshness.xirr_unavailable_reason is not None
+
+
+def test_stale_price_used_and_flagged(conn: sqlite3.Connection) -> None:
+    upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=TWD,
+                                       sector="Semiconductors", name="TSMC",
+                                       board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"),
+                       trade_date=date(2026, 1, 5))
+    upsert_prices(conn, [PriceRow(instrument="2330", market=Market.TW,
+                                  as_of=date(2026, 4, 11), close=Decimal("600"),
+                                  source="test")], fetched_at=NOW)  # 60 days old
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    h = data.holdings[0]
+    assert h.market_value == Decimal("600000")  # last-known value IS used
+    assert h.price_stale is True                # ...but flagged
+    assert h.price_as_of == date(2026, 4, 11)
+    assert data.freshness.any_stale is True
+    assert data.freshness.missing_prices == []
+
+
+def test_xirr_flow_predates_fx_history(conn: sqlite3.Connection) -> None:
+    _seed_usd_only(conn)
+    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
+                                  as_of=date(2026, 6, 9), close=Decimal("120"),
+                                  source="test")], fetched_at=NOW)
+    # Current FX exists, but nothing on/before the 2026-01-10 buy.
+    upsert_fx(conn, [FxRow(base=USD, quote=TWD, as_of=date(2026, 6, 9),
+                           rate=Decimal("33"), source="test"),
+                     FxRow(base=MYR, quote=TWD, as_of=date(2026, 6, 9),
+                           rate=Decimal("7"), source="test"),
+                     FxRow(base=USD, quote=MYR, as_of=date(2026, 6, 9),
+                           rate=Decimal("4.4"), source="test")], fetched_at=NOW)
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    assert data.returns is not None          # current rates fine
+    assert data.kpis.xirr is None            # historical rate missing
+    reason = data.freshness.xirr_unavailable_reason
+    assert reason is not None and "USD/TWD" in reason and "2026-01-10" in reason
+    assert data.trend.available is False     # same missing flow-date FX
