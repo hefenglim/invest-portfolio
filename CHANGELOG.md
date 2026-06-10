@@ -105,6 +105,14 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   New dependency: `APScheduler` (locked in `stack.md`), confined to `scheduler/runtime.py`. The
   Scheduler settings-page UI is deferred to `web_ui/`. Spec/plan:
   `docs/superpowers/{specs,plans}/2026-06-10-scheduler*`.
+- TW board resolution at instrument registration (`data_ingestion/` + `pricing/` + `shared/`):
+  `Instrument` gains a persisted **`board`** attribute (`store.py` reads/writes it). `pricing.probe_tw_board`
+  guesses a TW instrument's board by trying TWSE then TPEx (injectable providers, graceful on a network
+  error). `data_ingestion.register_instrument` fills the board — US `""` / MY `.KL` deterministic; TW via
+  an **injected** prober (keeping `data_ingestion` decoupled from `pricing`) — and upserts on confirm,
+  raising a soft `board_unresolved` flag (never blocking) when a TW probe finds nothing. Resolves the
+  board once so the scheduler work-list picks the right `.TW`/`.TWO` source; the listing/confirm UI is
+  deferred to `web_ui/`. Spec/plan: `docs/superpowers/{specs,plans}/2026-06-10-tw-board-resolution*`.
 
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
