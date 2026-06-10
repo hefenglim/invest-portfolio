@@ -132,6 +132,42 @@ def get_fx(
     )
 
 
+def get_fx_on(
+    conn: sqlite3.Connection, base: Currency, quote: Currency, *, on: date,
+) -> FxRead | None:
+    """Return the most recent stored rate with ``as_of_date <= on``, or ``None``.
+
+    Point-in-time read for trade-date conversion: never a later rate ("never guess
+    backwards"). ``stale`` is always False — staleness is a latest-quote concern
+    (same convention as ``get_price_history``).
+    """
+    row = conn.execute(
+        "SELECT rate, as_of_date, source FROM fx_rates WHERE base=? AND quote=? "
+        "AND as_of_date<=? ORDER BY as_of_date DESC LIMIT 1",
+        (base.value, quote.value, on.isoformat()),
+    ).fetchone()
+    if row is None:
+        return None
+    return FxRead(rate=from_db(row["rate"]), as_of=date.fromisoformat(row["as_of_date"]),
+                  source=row["source"], stale=False)
+
+
+def get_fx_history(
+    conn: sqlite3.Connection, base: Currency, quote: Currency, start: date, end: date,
+) -> list[FxRead]:
+    """Return stored FX rates for ``base``/``quote`` within ``[start, end]``, ascending."""
+    rows = conn.execute(
+        "SELECT rate, as_of_date, source FROM fx_rates WHERE base=? AND quote=? "
+        "AND as_of_date BETWEEN ? AND ? ORDER BY as_of_date ASC",
+        (base.value, quote.value, start.isoformat(), end.isoformat()),
+    ).fetchall()
+    return [
+        FxRead(rate=from_db(r["rate"]), as_of=date.fromisoformat(r["as_of_date"]),
+               source=r["source"], stale=False)
+        for r in rows
+    ]
+
+
 def upsert_dividend_events(
     conn: sqlite3.Connection, events: list[DividendEvent], *, fetched_at: datetime,
 ) -> None:

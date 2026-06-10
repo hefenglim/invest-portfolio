@@ -6,6 +6,8 @@ from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRow
 from portfolio_dash.pricing.store import (
     get_dividend_events,
     get_fx,
+    get_fx_history,
+    get_fx_on,
     get_latest_price,
     upsert_dividend_events,
     upsert_fx,
@@ -65,3 +67,34 @@ def test_upsert_and_get_dividend_events_idempotent(conn: sqlite3.Connection) -> 
     assert [e.ex_date for e in out] == [date(2025, 6, 1), date(2026, 6, 1)]  # ascending
     assert out[1].cash_amount == Decimal("13.5") and out[1].pay_date == date(2026, 7, 1)
     assert out[0].pay_date is None and out[1].currency == Currency.TWD
+
+
+def _fx(rate: str, d: date) -> FxRow:
+    return FxRow(base=Currency.USD, quote=Currency.TWD, as_of=d,
+                 rate=Decimal(rate), source="test")
+
+
+def test_get_fx_on_exact_and_carry_forward(conn: sqlite3.Connection) -> None:
+    upsert_fx(conn, [_fx("32.1", date(2026, 6, 1)), _fx("32.5", date(2026, 6, 5))],
+              fetched_at=_NOW)
+    exact = get_fx_on(conn, Currency.USD, Currency.TWD, on=date(2026, 6, 5))
+    assert exact is not None and exact.rate == Decimal("32.5")
+    carry = get_fx_on(conn, Currency.USD, Currency.TWD, on=date(2026, 6, 3))
+    assert carry is not None and carry.rate == Decimal("32.1")
+    assert carry.as_of == date(2026, 6, 1) and carry.stale is False
+
+
+def test_get_fx_on_none_before_first_rate(conn: sqlite3.Connection) -> None:
+    upsert_fx(conn, [_fx("32.1", date(2026, 6, 1))], fetched_at=_NOW)
+    assert get_fx_on(conn, Currency.USD, Currency.TWD, on=date(2026, 5, 31)) is None
+    assert get_fx_on(conn, Currency.MYR, Currency.TWD, on=date(2026, 6, 5)) is None
+
+
+def test_get_fx_history_bounds_and_order(conn: sqlite3.Connection) -> None:
+    upsert_fx(conn, [_fx("32.1", date(2026, 6, 1)), _fx("32.3", date(2026, 6, 3)),
+                     _fx("32.5", date(2026, 6, 5))], fetched_at=_NOW)
+    rows = get_fx_history(conn, Currency.USD, Currency.TWD,
+                          date(2026, 6, 1), date(2026, 6, 3))
+    assert [r.rate for r in rows] == [Decimal("32.1"), Decimal("32.3")]
+    assert [r.as_of for r in rows] == [date(2026, 6, 1), date(2026, 6, 3)]
+    assert all(r.stale is False for r in rows)
