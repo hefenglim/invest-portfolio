@@ -23,3 +23,4 @@ class Instrument(BaseModel):
     quote_ccy: Currency
     sector: str
     name: str
+    board: str = ""  # "TWSE" | "TPEx" | ".KL" | "" (US / unresolved)
