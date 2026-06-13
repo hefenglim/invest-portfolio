@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — AI 提示詞</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="settings.css"></link>
+<link rel="stylesheet" href="input.css"></link>
+<link rel="stylesheet" href="pipeline.css"></link>
+</head>
+<body data-page="settings-prompts" data-title="AI 提示詞">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <section class="panel" data-screen-label="系統提示詞">
+    <div class="panel-head">
+      <h2 class="panel-title">系統提示詞</h2>
+      <span class="panel-sub" id="sys-prompt-meta"></span>
+    </div>
+    <div class="sys-prompt-card">
+      <textarea class="input" id="sys-prompt" spellcheck="false"></textarea>
+      <span class="hint">定義角色、語言與全域規則；所有 AI 呼叫（輸入解析、洞察批次）皆先套用此提示詞。</span>
+    </div>
+  </section>
+
+  <section class="panel" data-screen-label="策略提示詞">
+    <div class="panel-head">
+      <h2 class="panel-title">策略提示詞</h2>
+      <span class="panel-sub">啟用中的策略會在洞察批次依序執行，各產生一張洞察卡片</span>
+      <span class="spacer"></span>
+      <button class="btn btn-primary" id="tpl-add" type="button">＋ 新增策略</button>
+    </div>
+    <div class="set-body">
+      <div class="tpl-list" id="tpl-list"></div>
+    </div>
+  </section>
+
+  <div class="save-bar" data-screen-label="儲存列">
+    <span class="note">提示詞寫入本機 config — 此頁為設計稿，不會真的儲存</span>
+    <button class="btn" type="button">還原變更</button>
+    <button class="btn btn-primary" id="prompts-save" type="button">儲存設定</button>
+  </div>
+
+</div>
+</div>
+</div>
+
+<script src="shell.js"></script>
+<script src="format.js"></script>
+<script src="alerts.js"></script>
+<script src="vars.js"></script>
+<script src="settings-prompts.js"></script>
+<script>
+/* 資產庫化：任務組合/排程/校正管理已移至洞察管線中心；舊區塊收摴保留對照（不刪功能） */
+(function () {
+  var page = document.querySelector('.page');
+  if (!page) return;
+  var banner = document.createElement('div');
+  banner.className = 'pp-banner';
+  banner.setAttribute('data-screen-label', '資產庫橫幅');
+  var b = document.createElement('b');
+  b.textContent = '本頁 = 資產庫';
+  var s = document.createElement('span');
+  s.textContent = '全域守則、分析模板與數據變數在此維護；任務的組合、排程與校正版本管理已整合至';
+  var a = document.createElement('a');
+  a.className = 'btn btn-sm btn-primary';
+  a.href = 'AI Pipeline Hub.html';
+  a.textContent = '洞察管線中心 →';
+  banner.appendChild(b); banner.appendChild(s); banner.appendChild(a);
+  page.insertBefore(banner, page.firstElementChild);
+
+  var LEGACY = ['洞察類型組合器', 'AI 自我校正提示詞庫', '自我進化設定'];
+  var det = document.createElement('details');
+  det.className = 'panel';
+  det.style.padding = '10px 14px';
+  det.setAttribute('data-screen-label', '舊版視圖');
+  var sum = document.createElement('summary');
+  sum.textContent = '舊版視圖 — 組合器／校正庫／進化設定（已由洞察管線中心取代，保留對照）';
+  sum.style.cssText = 'cursor:pointer;font-size:12px;color:var(--text-2);';
+  det.appendChild(sum);
+  var saveBar = page.querySelector('.save-bar');
+  Array.prototype.slice.call(document.querySelectorAll('.panel')).forEach(function (p) {
+    var h = p.querySelector('.panel-title');
+    if (h && LEGACY.indexOf(h.textContent) >= 0) det.appendChild(p);
+  });
+  page.insertBefore(det, saveBar);
+})();
+</script>
+</body>
+</html>

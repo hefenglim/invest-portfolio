@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — 系統設定</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="settings.css"></link>
+<link rel="stylesheet" href="input.css"></link>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  /* settings tab bar */
+  .set-tabbar {
+    display: flex; gap: 2px; padding: 12px 20px 0;
+    border-bottom: 1px solid var(--border-soft);
+    margin-bottom: var(--gap);
+    flex-wrap: wrap;
+  }
+  .set-tab {
+    padding: 7px 18px; font-size: 12px; font-family: var(--font-ui);
+    border: none; background: transparent; color: var(--text-2);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    cursor: pointer; border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  }
+  .set-tab:hover { color: var(--text); background: var(--panel-2); }
+  .set-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
+  .set-view { display: none; flex-direction: column; gap: var(--gap);
+    width: 100%; min-width: 0; box-sizing: border-box; }
+  .set-view.active { display: flex; }
+
+  /* LLM specific */
+  .model-health-row { display: flex; align-items: center; gap: 6px; }
+  .ping-lat { font-family: var(--font-num); font-size: 10px; color: var(--text-3); background: var(--panel-3); border-radius: 3px; padding: 0 5px; }
+  .ping-btn { font-size: 11px; padding: 1px 7px; color: var(--accent); }
+  .dot-gray { background: var(--text-3); }
+  .quota-card { display: flex; flex-direction: column; gap: 10px; padding: 14px var(--pad) 16px; }
+  .quota-big { font-family: var(--font-num); font-size: 30px; font-weight: 600; }
+  .quota-threshold-row { display: flex; align-items: center; gap: 8px; }
+  .roles-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 14px var(--pad) 6px; }
+  .roles-help { padding: 0 var(--pad) 8px; font-size: 10.5px; color: var(--text-3); }
+  .roles-close-bar { display: flex; align-items: center; gap: 14px; padding: 10px var(--pad) 14px; border-top: 1px solid var(--border-soft); }
+  .roles-close-hint { flex: 1; font-size: 11px; color: var(--text-3); }
+  .btn-outline-warn { color: var(--amber); border-color: rgba(217,161,63,0.45); background: var(--amber-soft); }
+  .btn-outline-warn:hover { border-color: var(--amber); }
+  .billing-grid { display: grid; grid-template-columns: minmax(260px,340px) 1fr; gap: var(--gap); align-items: start; }
+  .drawer-backdrop { position:fixed;inset:0;z-index:60;background:rgba(4,7,11,.55); }
+  .drawer { position:absolute;top:0;right:0;bottom:0;width:420px;max-width:calc(100vw - 40px);background:var(--panel);border-left:1px solid var(--border);box-shadow:-16px 0 50px rgba(0,0,0,.5);display:flex;flex-direction:column;animation:drawer-in .18s ease; }
+  @keyframes drawer-in { from{transform:translateX(30px);opacity:0}to{transform:none;opacity:1} }
+  .drawer-head { display:flex;align-items:center;padding:14px var(--pad);border-bottom:1px solid var(--border-soft); }
+  .drawer-body { flex:1;overflow-y:auto;padding:14px var(--pad);display:flex;flex-direction:column;gap:12px; }
+  .drawer-body .form-grid { grid-template-columns:1fr 1fr; }
+  .drawer-foot { display:flex;justify-content:flex-end;gap:8px;padding:12px var(--pad);border-top:1px solid var(--border-soft); }
+
+  /* scheduler */
+  .cron-friendly { display:flex;align-items:center;gap:6px;flex-wrap:wrap; }
+  .cron-sel { width:80px;font-size:11px;padding:4px 6px; }
+  .cron-time { width:80px;font-size:11px;padding:4px 6px;font-family:var(--font-num); }
+  .cron-adv { font-size:10px;padding:2px 8px;color:var(--text-3); }
+  .cron-human { margin-top:3px;font-size:10px; }
+  .last-run { display:inline-flex;align-items:center;gap:7px;cursor:default; }
+  .run-dot { width:7px;height:7px;border-radius:50%; }
+  .dot-ok { background:var(--ok); }
+  .dot-err { background:var(--up); }
+  .err-inline { font-size:10px;color:var(--up);margin-top:2px; }
+  .run-result { margin-top:5px; }
+  .pill-warn { color:var(--amber);border-color:rgba(217,161,63,.4);background:var(--amber-soft); }
+
+  /* accounts */
+  .acct-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:var(--gap);padding:12px var(--pad) 14px; }
+  .acct-card { background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius);padding:13px 15px;display:flex;flex-direction:column;gap:8px; }
+  .acct-name { font-weight:700;font-size:13px; }
+  .acct-kv { display:flex;justify-content:space-between;font-size:11px;border-bottom:1px dashed var(--border-soft);padding:4px 0; }
+  .acct-kv:last-of-type { border-bottom:none; }
+  .acct-kv .k { color:var(--text-3); white-space:nowrap; }
+  .acct-kv .v { font-family:var(--font-num); }
+  .div-mode { align-self:flex-start;font-size:10px;padding:0 8px;line-height:18px;border-radius:999px;border:1px solid var(--border);font-family:var(--font-ui);white-space:nowrap; }
+  .dm-tw { color:var(--accent);border-color:rgba(88,166,221,.4);background:var(--accent-soft); }
+  .dm-drip { color:var(--series-usd);border-color:rgba(155,134,216,.4);background:rgba(155,134,216,.12); }
+  .dm-net { color:var(--text-2); }
+  details.fee-detail { border-top:1px solid var(--border-soft); }
+  details.fee-detail > summary { list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;padding:11px var(--pad);font-size:12.5px;font-weight:700; }
+  details.fee-detail > summary::-webkit-details-marker { display:none; }
+  details.fee-detail > summary .caret { font-size:10px;color:var(--text-3);transition:transform .15s; }
+  details.fee-detail[open] > summary .caret { transform:rotate(90deg); }
+  .fee-rows { padding:0 var(--pad) 14px;display:flex;flex-direction:column;gap:4px; }
+  .fee-row { display:flex;justify-content:space-between;gap:12px;font-size:11.5px;padding:5px 0;border-bottom:1px dashed var(--border-soft); }
+  .fee-row:last-child { border-bottom:none; }
+  .fee-row .k { color:var(--text-3); }
+  .fee-row .v { font-family:var(--font-num); }
+  .fee-row .v.placeholder { color:var(--amber);font-family:var(--font-ui);font-size:10.5px; }
+  .gen-rows { padding:12px var(--pad) 14px;display:flex;flex-direction:column; }
+  .gen-row { display:grid;grid-template-columns:180px 1fr;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12px;align-items:center; }
+  .gen-row:last-child { border-bottom:none; }
+  .gen-row .k { color:var(--text-3);font-size:11px; }
+  .provider-chips { display:flex;gap:6px;align-items:center; }
+  .provider-chips .arrow { color:var(--text-3);font-size:10px; }
+
+  /* datasources */
+  .ds-section { margin-bottom:var(--gap); }
+  .ds-sec-head { display:flex;align-items:center;gap:10px;padding:10px var(--pad) 6px; }
+  .ds-key-row { display:flex;align-items:center;gap:6px; }
+  .fallback-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:var(--gap);padding:12px var(--pad) 14px; }
+  .fallback-card { background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius);padding:12px 14px;display:flex;flex-direction:column;gap:8px; }
+  .fallback-acct { font-weight:700;font-size:12px; }
+  .fallback-chips { display:flex;flex-direction:column;gap:5px; }
+  .fb-chip { display:flex;align-items:center;gap:8px;background:var(--panel-3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:5px 9px;cursor:grab;font-size:11px;user-select:none; }
+  .fb-chip:active { cursor:grabbing;opacity:.7; }
+  .fb-num { font-family:var(--font-num);font-size:10px;color:var(--text-3);width:14px;text-align:center;border:1px solid var(--border);border-radius:2px; }
+  .fb-name { flex:1; }
+  .fb-hint { font-size:10px;color:var(--text-3); }
+  @media(max-width:1100px){.roles-grid{grid-template-columns:repeat(2,1fr)}.acct-grid{grid-template-columns:repeat(2,1fr)}.fallback-grid{grid-template-columns:repeat(2,1fr)}}
+
+  /* E1: alert rules */
+  .ar-list { display:flex;flex-direction:column;padding:6px var(--pad) 14px; }
+  .ar-row { display:flex;align-items:center;gap:14px;padding:11px 0;border-bottom:1px solid var(--border-soft); }
+  .ar-row:last-child { border-bottom:none; }
+  .ar-sev { flex:none;width:8px;height:8px;border-radius:50%; }
+  .ar-sev.sev-risk { background:var(--up); }
+  .ar-sev.sev-warn { background:var(--amber); }
+  .ar-sev.sev-info { background:var(--accent); }
+  .ar-main { flex:1;min-width:0; }
+  .ar-name { font-size:12.5px;font-weight:700; }
+  .ar-desc { font-size:11px;color:var(--text-3);margin-top:1px; }
+  .ar-ctrl { display:flex;align-items:center;gap:8px;flex:none; }
+  .ar-input { width:76px;text-align:right;font-family:var(--font-num); }
+  .ar-unit { font-size:10.5px;color:var(--text-3);width:30px; }
+
+  /* E7: export center */
+  .ec-group { padding:10px var(--pad) 4px; }
+  .ec-group-title { margin:0 0 8px;font-size:12px;font-weight:700;color:var(--text-2);letter-spacing:.04em; }
+  .ec-grid { display:grid;grid-template-columns:repeat(2,1fr);gap:var(--gap); }
+  .ec-card { background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius);padding:12px 14px;display:flex;flex-direction:column;gap:7px; }
+  .ec-head { display:flex;align-items:center;justify-content:space-between; }
+  .ec-name { font-size:12.5px;font-weight:700; }
+  .ec-glyph { color:var(--text-3);font-size:13px; }
+  .ec-desc { margin:0;font-size:11px;color:var(--text-2);line-height:1.55; }
+  .ec-foot { display:flex;align-items:center;gap:8px;margin-top:2px; }
+  .ec-year { width:110px;font-size:11px;padding:4px 8px; }
+  .ec-tag { font-size:9.5px;color:var(--series-usd);border:1px solid rgba(155,134,216,.4);background:rgba(155,134,216,.12);border-radius:3px;padding:0 6px;line-height:16px; }
+  .ec-note { padding:10px var(--pad) 14px;font-size:10.5px;color:var(--text-3); }
+  @media(max-width:900px){.ec-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body data-page="settings" data-title="系統設定">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <!-- Tab bar -->
+  <div class="set-tabbar" id="set-tabbar">
+    <button class="set-tab" data-tab="accounts" type="button">帳戶與費率</button>
+    <button class="set-tab" data-tab="llm" type="button">AI 與額度</button>
+    <button class="set-tab" data-tab="prompts" type="button">AI 提示詞</button>
+    <button class="set-tab" data-tab="scheduler" type="button">排程</button>
+    <button class="set-tab" data-tab="datasources" type="button">資料來源</button>
+    <button class="set-tab" data-tab="alerts" type="button">預警規則</button>
+    <button class="set-tab" data-tab="exports" type="button">匯出中心</button>
+  </div>
+
+  <!-- ===== AI 與額度 ===== -->
+  <div class="set-view" id="view-llm" data-screen-label="AI 與額度">
+    <div class="view-head"><span class="pill" id="ai-status"></span><span class="view-desc">角色預設四者皆空時，所有 AI 功能停用</span></div>
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">模型註冊表</h2><span class="spacer"></span><button class="btn btn-primary" id="model-add" type="button">＋ 新增模型</button></div>
+      <div class="table-wrap"><table class="data"><thead><tr>
+        <th class="col-text">別名 / 狀態</th><th class="col-text">供應商</th><th class="col-text">模型名</th>
+        <th class="col-text">Vision</th><th>輸入價 $/Mtok</th><th>輸出價 $/Mtok</th>
+        <th>Context</th><th>Timeout</th><th>上次呼叫</th><th>啟用</th><th></th>
+      </tr></thead><tbody id="model-body"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">角色預設</h2><span class="panel-sub">僅列出啟用中的模型</span></div>
+      <div class="roles-grid">
+        <div class="field"><label for="role-default">Default 模型</label><select class="select" id="role-default"></select></div>
+        <div class="field"><label for="role-default-fb">Default 後備</label><select class="select" id="role-default-fb"></select></div>
+        <div class="field"><label for="role-vision">Vision 模型</label><select class="select" id="role-vision"></select></div>
+        <div class="field"><label for="role-vision-fb">Vision 後備</label><select class="select" id="role-vision-fb"></select></div>
+        <div class="field"><label for="role-master">AI 大師模型（自我校正）</label><select class="select" id="role-master"></select></div>
+        <div class="field"><label for="role-master-fb">AI 大師後備</label><select class="select" id="role-master-fb"></select></div>
+      </div>
+      <div class="roles-help">角色皆空時，所有 AI 功能停用，輸入頁將顯示「AI 未啟用」。<br>AI 大師模型負責最關鍵的工作：洞察回測評分與校正提示詞產生 — 建議選用前沿高階模型（呼叫頻率低、單次價值高）；未設定時自我校正管線暫停，洞察照常產生。</div>
+      <div class="roles-close-bar">
+        <span class="roles-close-hint">關閉全部角色將停用所有 AI 功能，已註冊的模型設定不受影響。</span>
+        <button class="btn btn-outline-warn" id="llm-restore" type="button">關閉全部角色</button>
+      </div>
+    </section>
+    <section class="panel" id="quota">
+      <div class="panel-head"><h2 class="panel-title">額度治理</h2><span class="panel-sub">額度依 AI 代理閘道回報的實際用量自動扣抵；餘額歸零後，所有 AI 服務請求將暫停，補充額度後自動恢復。</span></div>
+      <div class="billing-grid" style="padding:0;">
+        <div class="quota-card">
+          <span class="hint">剩餘額度</span>
+          <span class="quota-big num" id="quota-value"></span>
+          <div class="quota-threshold-row">
+            <span class="hint">低額度警示於</span>
+            <input class="input" id="quota-threshold" type="number" min="0.01" step="0.01" style="width:80px;font-family:var(--font-num);text-align:right;"></input>
+            <span class="hint">USD 時顯示警示</span>
+          </div>
+          <div><button class="btn btn-primary" id="quota-topup" type="button">＋ 添加額度</button></div>
+        </div>
+        <div style="padding:14px var(--pad);">
+          <h3 class="panel-title" style="margin:0 0 8px;font-size:12px;">加值歷史</h3>
+          <table class="data"><thead><tr><th>時間</th><th>金額</th><th class="col-text">備註</th></tr></thead><tbody id="topup-body"></tbody></table>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">用量與趨勢</h2><span class="panel-sub">累計</span><span class="spacer"></span><span class="sum-chips" id="agent-chips"></span></div>
+      <div class="table-wrap"><table class="data"><thead><tr><th class="col-text">模型</th><th>呼叫數</th><th>輸入 tokens</th><th>輸出 tokens</th><th>累計成本</th></tr></thead><tbody id="usage-body"></tbody></table></div>
+      <div class="set-body"><div id="llm-daily-chart" style="height:180px;"></div></div>
+    </section>
+  </div>
+
+  <!-- ===== AI 提示詞 ===== -->
+  <div class="set-view" id="view-prompts" data-screen-label="AI 提示詞">
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">系統提示詞</h2><span class="panel-sub" id="sys-prompt-meta"></span></div>
+      <div class="sys-prompt-card"><textarea class="input" id="sys-prompt" spellcheck="false"></textarea><span class="hint">定義角色、語言與全域規則；所有 AI 呼叫皆先套用此提示詞。</span></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">策略提示詞</h2><span class="panel-sub">純設計物件 — 搭配數據變數組裝，由洞察類型引用後執行</span><span class="spacer"></span><button class="btn btn-primary" id="tpl-add" type="button">＋ 新增策略</button></div>
+      <div class="set-body"><div class="tpl-list" id="tpl-list"></div></div>
+    </section>
+    <div class="save-bar"><span class="note">提示詞寫入本機 config — 此頁為設計稿，不會真的儲存</span><button class="btn" type="button">還原變更</button><button class="btn btn-primary" id="prompts-save" type="button">儲存設定</button></div>
+  </div>
+
+  <!-- ===== 排程 ===== -->
+  <div class="set-view" id="view-scheduler" data-screen-label="排程">
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">排程工作表</h2><span class="panel-sub">時區 <span class="num" id="sched-tz"></span></span></div>
+      <div class="table-wrap"><table class="data" id="jobs-table"><thead><tr>
+        <th class="col-text">工作</th><th>啟用</th><th class="col-text">排程 (cron)</th>
+        <th class="col-text">時區</th><th class="col-text">上次執行</th><th>下次執行</th><th></th>
+      </tr></thead><tbody id="jobs-body"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">最近 10 筆</span></div>
+      <div class="filter-bar" id="hist-filter"></div>
+      <div class="table-wrap"><table class="data"><thead><tr>
+        <th>時間</th><th class="col-text">工作</th><th>狀態</th><th class="col-text">摘要</th><th>耗時</th><th>費用</th>
+      </tr></thead><tbody id="hist-body"></tbody></table></div>
+    </section>
+  </div>
+
+  <!-- ===== 帳戶與費率 ===== -->
+  <div class="set-view" id="view-accounts" data-screen-label="帳戶與費率">
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">授權用戶</h2><span class="panel-sub">可登入本系統的帳號；投資人稱號會用於儀表板問候</span></div>
+      <div id="users-wrap"></div>
+      <div class="user-add">
+        <div class="field"><label for="nu-name">投資人稱號</label><input class="input" id="nu-name" placeholder="例如：家明、媽媽的帳戶"></input></div>
+        <div class="field"><label for="nu-user">帳號</label><input class="input" id="nu-user" autocomplete="off" spellcheck="false" placeholder="登入用帳號"></input></div>
+        <div class="field"><label for="nu-pass">密碼</label><input class="input" id="nu-pass" type="password" autocomplete="new-password" placeholder="登入用密碼"></input></div>
+        <button class="btn btn-primary" id="nu-add" type="button">新增用戶</button>
+      </div>
+      <div class="user-note">設計稿：帳號密碼存於本機瀏覽器（localStorage）。後端接線後改為伺服器端帶雜湊儲存，並支援角色權限。</div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">帳戶</h2><span class="panel-sub">v1 唯讀</span></div>
+      <div class="acct-grid">
+        <div class="acct-card"><span class="acct-name">台灣券商</span><span class="div-mode dm-tw">股利：成本沖減</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">tw_default</span></div></div>
+        <div class="acct-card"><span class="acct-name">嘉信 Schwab</span><span class="div-mode dm-drip">股利：DRIP 預扣 30%</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">schwab_zero</span></div></div>
+        <div class="acct-card"><span class="acct-name">Moomoo 美股</span><span class="div-mode dm-drip">股利：DRIP 預扣 30%</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_us</span></div></div>
+        <div class="acct-card"><span class="acct-name">Moomoo 馬股</span><span class="div-mode dm-net">股利：淨額</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_my</span></div></div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">費率明細</h2></div>
+      <div style="margin:12px var(--pad) 0;font-size:11px;color:var(--text-2);background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius-sm);padding:8px 12px;">費率為版本化設定 — 修改需經設定檔變更紀錄（v1 唯讀）。</div>
+      <div style="height:8px;"></div>
+      <details class="fee-detail" open="open"><summary><span class="caret">▶</span>台灣券商 <span class="panel-sub num">tw_default</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">券商費率</span><span class="v">0.1425%</span></div><div class="fee-row"><span class="k">折扣</span><span class="v">1.0</span></div><div class="fee-row"><span class="k">最低手續費</span><span class="v">NT$20</span></div><div class="fee-row"><span class="k">證交稅（現股）</span><span class="v">0.3%</span></div><div class="fee-row"><span class="k">證交稅（ETF）</span><span class="v">0.1%</span></div></div></details>
+      <details class="fee-detail"><summary><span class="caret">▶</span>嘉信 Schwab <span class="panel-sub num">schwab_zero</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">佣金</span><span class="v">$0</span></div><div class="fee-row"><span class="k">股利預扣</span><span class="v">30%</span></div></div></details>
+      <details class="fee-detail"><summary><span class="caret">▶</span>Moomoo 美股 <span class="panel-sub num">moomoo_us</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">佣金</span><span class="v">$0</span></div><div class="fee-row"><span class="k">平台費</span><span class="v">USD 0.99 / 筆</span></div></div></details>
+      <details class="fee-detail"><summary><span class="caret">▶</span>Moomoo 馬股 <span class="panel-sub num">moomoo_my</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">Clearing fee</span><span class="v">0.03%</span></div><div class="fee-row"><span class="k">Stamp duty</span><span class="v placeholder">依設定檔</span></div></div></details>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">一般</h2><span class="panel-sub">唯讀</span></div>
+      <div class="gen-rows">
+        <div class="gen-row"><span class="k">報告幣別</span><span class="v num">TWD</span></div>
+        <div class="gen-row"><span class="k">顯示時區</span><span class="v num">Asia/Taipei</span></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===== 資料來源 ===== -->
+  <div class="set-view" id="view-datasources" data-screen-label="資料來源">
+    <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">帳戶抓取順序</h2><span class="panel-sub">系統依序嘗試各來源，拖曳調整優先順序</span></div>
+      <div class="fallback-grid" id="fallback-wrap"></div>
+    </section>
+        <section class="panel">
+      <div class="panel-head"><h2 class="panel-title">資料來源清單</h2><span class="panel-sub">報價・股利・匯率・新聞 · 需金鑰的來源在此設定 token／API key 並測試連線</span></div>
+      <div id="sources-wrap"></div>
+    </section>
+  </div>
+
+  <!-- ===== 預警規則 (E1) ===== -->
+  <div class="set-view" id="view-alerts" data-screen-label="預警規則">
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">風險預警規則</h2>
+        <span class="panel-sub">純規則引擎（非 AI）・每次資料更新時重算・調整即時生效於頂欄鈴鐺</span>
+      </div>
+      <div id="alert-rules-wrap"></div>
+    </section>
+    <div class="save-bar"><span class="note">規則門檻儲存於本機，後端 strategy/ 模組接線後改存伺服器設定</span><button class="btn" id="alert-rules-reset" type="button">還原預設值</button><button class="btn btn-primary" id="alert-rules-save" type="button">儲存規則</button></div>
+  </div>
+
+  <!-- ===== 匯出中心 (E7) ===== -->
+  <div class="set-view" id="view-exports" data-screen-label="匯出中心">
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">匯出中心</h2>
+        <span class="panel-sub">所有匯出皆為當下快照；對帳級精度（raw Decimal）由後端產生</span>
+      </div>
+      <div id="export-center-wrap"></div>
+    </section>
+  </div>
+
+</div>
+</div>
+</div>
+
+<!-- model edit drawer -->
+<div class="drawer-backdrop" id="drawer-backdrop" hidden="hidden">
+  <div class="drawer">
+    <div class="drawer-head"><h3 class="modal-title" id="drawer-title"></h3><button class="modal-close" id="drawer-close" type="button">✕</button></div>
+    <div class="drawer-body">
+      <div class="form-grid">
+        <div class="field"><label for="dr-alias">別名</label><input class="input" id="dr-alias"></input></div>
+        <div class="field"><label for="dr-provider">供應商</label><select class="select" id="dr-provider"><option value="anthropic">anthropic</option><option value="openai-compatible">openai-compatible</option><option value="openrouter">openrouter</option></select></div>
+        <div class="field span-2"><label for="dr-model">模型名</label><input class="input" id="dr-model" spellcheck="false"></input></div>
+        <div class="field span-2"><label for="dr-base">API Base</label><input class="input" id="dr-base" spellcheck="false"></input></div>
+        <div class="field span-2"><label for="dr-key">API Key（遮罩）</label><div class="input-row"><input class="input" id="dr-key" readonly="readonly" spellcheck="false"></input><button class="btn" id="dr-key-reset" type="button">重設</button></div><span class="hint">永不顯示既存金鑰；重設後輸入新值覆蓋</span></div>
+        <div class="field"><label>Vision</label><button class="toggle" id="dr-vision" type="button" role="switch"></button></div><div class="field"></div>
+        <div class="field"><label for="dr-pin">輸入價 $/Mtok</label><input class="input" id="dr-pin" type="number" step="0.01"></input></div>
+        <div class="field"><label for="dr-pout">輸出價 $/Mtok</label><input class="input" id="dr-pout" type="number" step="0.01"></input></div>
+        <div class="field"><label for="dr-ctx">Context window</label><input class="input" id="dr-ctx" type="number"></input></div>
+        <div class="field"><label for="dr-maxout">最大輸出 tokens</label><input class="input" id="dr-maxout" type="number"></input></div>
+        <div class="field"><label for="dr-timeout">Timeout（秒）</label><input class="input" id="dr-timeout" type="number"></input></div>
+        <div class="field"><label for="dr-retries">最大重試</label><input class="input" id="dr-retries" type="number"></input></div>
+        <div class="field span-2"><label for="dr-notes">備註</label><input class="input" id="dr-notes"></input></div>
+      </div>
+    </div>
+    <div class="drawer-foot"><button class="btn" id="drawer-cancel" type="button">取消</button><button class="btn btn-primary" id="drawer-save" type="button">儲存</button></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script src="format.js"></script>
+<script src="export.js"></script>
+<script src="alerts.js"></script>
+<script src="vars.js"></script>
+<script src="settings-llm.js"></script>
+<script src="settings-prompts.js"></script>
+<script src="settings-scheduler.js"></script>
+<script src="settings-datasources.js"></script>
+<script src="settings-alerts.js"></script>
+<script src="settings-users.js"></script>
+<script>
+/* glue: CSV exports for audit tables（llm_usage / job_runs） */
+(function () {
+  if (!window.pdExport) return;
+  var usage = document.getElementById('usage-body');
+  if (usage) {
+    usage.closest('.panel').querySelector('.panel-head')
+      .appendChild(window.pdExport.tableButton(usage.closest('table'), 'llm_usage.csv'));
+  }
+  var hist = document.getElementById('hist-body');
+  if (hist) {
+    hist.closest('.panel').querySelector('.panel-head')
+      .appendChild(window.pdExport.tableButton(hist.closest('table'), 'job_runs.csv'));
+  }
+})();
+</script>
+<script>
+(function () {
+  /* tab switching */
+  window.showSettingsTab = function (id, skipHash) {
+    document.querySelectorAll('.set-tab').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.tab === id);
+    });
+    document.querySelectorAll('.set-view').forEach(function (v) {
+      v.classList.toggle('active', v.id === 'view-' + id);
+    });
+    if (!skipHash) { try { history.replaceState(null, '', '#' + id); } catch (e) { /* noop */ } }
+    window.dispatchEvent(new CustomEvent('pd-settings-tab', { detail: id }));
+  };
+  document.querySelectorAll('.set-tab').forEach(function (b) {
+    b.addEventListener('click', function () { window.showSettingsTab(b.dataset.tab); });
+  });
+  /* activate from hash or default */
+  var hash = location.hash.slice(1);
+  var valid = ['llm','prompts','scheduler','accounts','datasources','alerts','exports'];
+  showSettingsTab(valid.includes(hash) ? hash : 'accounts', true);
+  window.addEventListener('hashchange', function () {
+    var h = location.hash.slice(1);
+    if (valid.includes(h)) showSettingsTab(h);
+  });
+})();
+</script>
+</body>
+</html>
