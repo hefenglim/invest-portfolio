@@ -6,7 +6,7 @@ def test_side_members() -> None:
 
 
 def test_dividend_type_members() -> None:
-    assert {d.value for d in DividendType} == {"CASH", "STOCK", "DRIP"}
+    assert {d.value for d in DividendType} == {"CASH", "STOCK", "DRIP", "NET"}
 
 
 def test_enums_are_str() -> None:

@@ -51,17 +51,17 @@ def test_w7_moomoo_us_buy_flat_fee() -> None:  # flat 0.99
 
 
 def test_w8_moomoo_my_buy() -> None:
-    # notional 2886: comm 2886*0.0008=2.3088 -> min 3; clearing 2886*0.0003=0.8658 -> 0.87;
-    # stamp 2886*0.001=2.886 -> 2.89; fee = 3 + 0.87 + 2.89 = 6.76
+    # notional 2886: comm 2886*0.0008=2.3088 -> min 3; clearing 2886*0.0003=0.8658;
+    # fee = 3 + 0.8658 = 3.8658 -> 3.87. stamp(tax) 2886*0.001=2.886 -> 2.89.
     r = compute_fees(MOOMOO_MY, Side.BUY, Decimal("300"), Decimal("9.62"))
-    assert r.fee == Decimal("6.76") and r.tax == Decimal("0.00")
+    assert r.fee == Decimal("3.87") and r.tax == Decimal("2.89")
 
 
 def test_w9_moomoo_my_clearing_cap() -> None:
-    # notional 4,000,000: clearing 1200 -> cap 1000; comm 4,000,000*0.0008=3200;
-    # stamp 4,000,000*0.001=4000; fee = 3200 + 1000 + 4000 = 8200
+    # notional 4,000,000: clearing 1200 -> cap 1000; comm 3200; fee = 3200 + 1000 = 4200.
+    # stamp(tax) 0.001*4,000,000 = 4000 (no stamp cap set on this rule).
     r = compute_fees(MOOMOO_MY, Side.BUY, Decimal("400000"), Decimal("10"))
-    assert r.fee == Decimal("8200.00")
+    assert r.fee == Decimal("4200.00") and r.tax == Decimal("4000.00")
 
 
 def test_tw_zero_notional_no_min_fee() -> None:  # guard: notional 0 must not charge min_fee
