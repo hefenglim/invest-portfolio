@@ -284,6 +284,9 @@ class VarContext:
     symbol: str | None = None
     closes: list[Decimal] | None = None  # chronological closes (pricing.store.get_price_history)
     price_points: list[dict[str, Any]] = field(default_factory=list)  # [{date, close}]
+    # Router-fed (the api layer reads conn; this layer must not import pricing/data_ingestion):
+    fx_rates: dict[str, Any] | None = None       # {"USD_TWD": {"rate", "as_of", "stale"}}
+    dividend_rows: list[dict[str, Any]] | None = None  # per-event ledger rows incl. ccy
 
 
 _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
@@ -358,12 +361,10 @@ def _price_vs_cost(ctx: VarContext) -> dict[str, Any]:
     if not rows:
         return {"unavailable": True}
     primary = max(rows, key=lambda h: h.shares)
-    if (
-        primary.market_price is None
-        or primary.original_avg <= 0
-        or primary.adjusted_avg <= 0
-    ):
+    if primary.market_price is None:
         return {"unavailable": True}
+    # Per-ratio: a non-positive cost yields None for that ratio only (domain-ledger allows
+    # adjusted_avg <= 0); the valid ratio is still surfaced.
     return technicals.price_vs_cost(
         primary.market_price, primary.original_avg, primary.adjusted_avg
     )
@@ -396,17 +397,23 @@ def _fx(data: DashboardData) -> dict[str, Any]:
     return {acct_id: r.model_dump() for acct_id, r in data.fx.by_account.items()}
 
 
-def _fx_rates(data: DashboardData) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for fxf in data.freshness.fx:
-        if fxf.as_of is None:
-            continue
-        out[f"{fxf.base.value}_{fxf.quote.value}"] = {
-            "as_of": fxf.as_of,
-            "stale": fxf.stale,
-        }
-    out["as_of"] = data.as_of
+def _fx_rates(ctx: VarContext) -> dict[str, Any]:
+    """Spot rates per reporting-currency pair. The actual rate is resolved by the router
+    (conn-bearing) and fed via ``ctx.fx_rates`` — ``data.freshness.fx`` carries only
+    as_of/stale, NOT the rate. Unavailable when the router did not supply rates."""
+    if not ctx.fx_rates:
+        return {"unavailable": True}
+    out: dict[str, Any] = dict(ctx.fx_rates)
+    out["as_of"] = ctx.data.as_of
     return out
+
+
+def _dividends(ctx: VarContext) -> Any:
+    """Per-event dividend ledger rows (symbol/date/type/gross/net/ccy), fed by the router.
+    Falls back to the computed yearly summary when no rows are supplied (conn-less callers)."""
+    if ctx.dividend_rows is not None:
+        return ctx.dividend_rows
+    return ctx.data.dividends.model_dump()
 
 
 def _dividend_projection(data: DashboardData) -> dict[str, Any]:
@@ -450,7 +457,7 @@ def value_for(token: str, ctx: VarContext) -> Any:
     if token == "price_vs_cost_json":
         return _price_vs_cost(ctx)
     if token == "dividends_json":
-        return data.dividends.model_dump()
+        return _dividends(ctx)
     if token == "ex_dividend_calendar_json":
         return [e.model_dump() for e in data.ex_dividend_calendar]
     if token == "dividend_projection_json":
@@ -458,7 +465,7 @@ def value_for(token: str, ctx: VarContext) -> Any:
     if token == "fx_json":
         return _fx(data)
     if token == "fx_rates_json":
-        return _fx_rates(data)
+        return _fx_rates(ctx)
     if token == "freshness_json":
         return data.freshness.model_dump()
     if token == "as_of":

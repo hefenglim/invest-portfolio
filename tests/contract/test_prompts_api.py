@@ -107,6 +107,47 @@ def test_preview_per_symbol(api_client: TestClient) -> None:
     assert "2330" in b["rendered"]
 
 
+def test_fx_rates_json_carries_a_rate(api_client: TestClient) -> None:
+    # Senior-review I-1/C-2: fx_rates_json must emit the actual spot rate, not just as_of/stale.
+    r = api_client.post(
+        "/api/prompts/preview",
+        json={"body": "{{fx_rates_json}}", "scope": "portfolio", "symbol": None},
+    )
+    assert r.status_code == 200
+    rendered = r.json()["rendered"]
+    assert "USD_TWD" in rendered and '"rate"' in rendered  # golden DB holds an AAPL (USD) position
+
+
+def test_dividends_json_is_per_event_list(api_client: TestClient) -> None:
+    # Senior-review I-2: dividends_json is the per-event ledger (symbol/type/ccy), not a summary.
+    r = api_client.post(
+        "/api/prompts/preview",
+        json={"body": "{{dividends_json}}", "scope": "portfolio", "symbol": None},
+    )
+    rendered = r.json()["rendered"]
+    assert '"symbol"' in rendered and '"ccy"' in rendered and "2330" in rendered
+
+
+def test_all_available_tokens_render_valid_json(api_client: TestClient) -> None:
+    # Senior-review C-1: every available token renders to valid JSON (per its scope).
+    import json as _json
+
+    rows = api_client.get("/api/prompt-vars").json()
+    for v in rows:
+        if not v["available"]:
+            continue
+        scope = v["scope"]
+        symbol = "2330" if scope == "per_symbol" else None
+        r = api_client.post(
+            "/api/prompts/preview",
+            json={"body": "{{" + v["token"] + "}}", "scope": scope, "symbol": symbol},
+        )
+        assert r.status_code == 200, v["token"]
+        rendered = r.json()["rendered"]
+        assert "⚠unknown" not in rendered, v["token"]
+        _json.loads(rendered)  # the single token rendered to a valid JSON document
+
+
 def test_preview_prepends_system_prompt(api_client: TestClient) -> None:
     api_client.put("/api/system-prompt", json={"body": "SYS-MARKER"})
     r = api_client.post(

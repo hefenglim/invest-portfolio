@@ -21,7 +21,9 @@ def to_wire(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Mapping):
-        return {k: to_wire(v) for k, v in value.items()}
+        # Transform keys too: a Decimal/Enum/date key would otherwise leak its repr.
+        # Plain str keys are unchanged; Currency/Market StrEnum keys become their value.
+        return {to_wire(k): to_wire(v) for k, v in value.items()}
     if isinstance(value, str):
         return value
     if isinstance(value, Sequence):

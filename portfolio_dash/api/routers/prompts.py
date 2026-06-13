@@ -17,6 +17,7 @@ Two paths share one validation core (``validate_tokens``):
 import math
 import sqlite3
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -25,10 +26,11 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.data_ingestion.store import list_dividends
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import budget_remaining
@@ -89,12 +91,66 @@ def write_system_prompt(
 # --- shared assembly ----------------------------------------------------------
 
 
+def _resolve_fx_rates(
+    conn: sqlite3.Connection, data: Any, now: datetime, reporting: Currency
+) -> dict[str, dict[str, Any]]:
+    """Latest spot rate for each distinct holding currency -> reporting currency.
+
+    Reads stored rates (``get_fx``; direct pair, else inverted) — no number is computed
+    of record beyond the trivial inversion the dashboard's RateResolver also performs.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    seen: set[Currency] = set()
+    for h in data.holdings:
+        ccy = h.quote_ccy
+        if ccy == reporting or ccy in seen:
+            continue
+        seen.add(ccy)
+        read = get_fx(conn, ccy, reporting, now=now)
+        if read is not None:
+            rate, as_of, stale = read.rate, read.as_of, read.stale
+        else:
+            inv = get_fx(conn, reporting, ccy, now=now)
+            if inv is None:
+                continue
+            rate, as_of, stale = Decimal("1") / inv.rate, inv.as_of, inv.stale
+        out[f"{ccy.value}_{reporting.value}"] = {
+            "rate": rate, "as_of": as_of.isoformat(), "stale": stale,
+        }
+    return out
+
+
+def _dividend_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Per-event dividend ledger rows with the instrument's quote currency (LLM-facing,
+    type lowercased to match the wire convention)."""
+    ccy_by_symbol = {
+        r["symbol"]: r["quote_ccy"]
+        for r in conn.execute("SELECT symbol, quote_ccy FROM instruments")
+    }
+    rows: list[dict[str, Any]] = []
+    for d in list_dividends(conn):
+        rows.append({
+            "symbol": d.symbol, "date": d.date.isoformat(), "type": d.type.lower(),
+            "gross": d.gross, "withholding": d.withholding, "net": d.net,
+            "reinvest_shares": d.reinvest_shares, "ccy": ccy_by_symbol.get(d.symbol),
+        })
+    return rows
+
+
 def _build_context(
     conn: sqlite3.Connection, payload: PromptBody, now: datetime, reporting: Currency
 ) -> V.VarContext:
-    """Build the render context with the REAL computed dashboard (+ per-symbol history)."""
+    """Build the render context with the REAL computed dashboard (+ per-symbol history).
+
+    Conn-bearing reads (FX spot rates, dividend ledger rows) are resolved HERE and fed
+    into the context — ``llm_insight`` must not import ``pricing``/``data_ingestion``.
+    """
     data = build_dashboard(conn, now=now, reporting=reporting)
-    ctx = V.VarContext(data=data)
+    ctx = V.VarContext(
+        data=data,
+        fx_rates=_resolve_fx_rates(conn, data, now, reporting),
+        dividend_rows=_dividend_rows(conn),
+    )
     if payload.scope == "per_symbol" and payload.symbol:
         as_of = now.date()
         start = as_of - timedelta(days=_HISTORY_DAYS)

@@ -80,3 +80,10 @@ def test_price_vs_cost() -> None:
     r = T.price_vs_cost(Decimal("612.5"), Decimal("500"), Decimal("495"))
     assert r["price_vs_original"] == (Decimal("612.5") - Decimal("500")) / Decimal("500")
     assert r["price_vs_adjusted"] == (Decimal("612.5") - Decimal("495")) / Decimal("495")
+
+
+def test_price_vs_cost_nonpositive_adjusted_keeps_original() -> None:
+    # domain-ledger allows adjusted_avg <= 0 (high-yield payback) — surface original, None adjusted.
+    r = T.price_vs_cost(Decimal("100"), Decimal("80"), Decimal("0"))
+    assert r["price_vs_original"] == (Decimal("100") - Decimal("80")) / Decimal("80")
+    assert r["price_vs_adjusted"] is None

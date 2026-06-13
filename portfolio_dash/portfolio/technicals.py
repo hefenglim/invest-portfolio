@@ -108,13 +108,15 @@ def max_drawdown(closes: list[Decimal], window: int = 90) -> Decimal | None:
 
 def price_vs_cost(
     price: Decimal, original_avg: Decimal, adjusted_avg: Decimal
-) -> dict[str, Decimal]:
+) -> dict[str, Decimal | None]:
     """Current price relative to the original and adjusted average cost.
 
-    ``price_vs_X = (price - X) / X``. Costs are assumed ``> 0`` (a held position with a
-    positive original cost basis); the caller filters non-positive / missing costs.
+    ``price_vs_X = (price - X) / X``, computed independently per denominator. A
+    non-positive cost yields ``None`` for THAT ratio only (``domain-ledger.md`` allows
+    ``adjusted_avg <= 0`` on high-yield payback — never floored), so the valid ratio is
+    still surfaced rather than dropping both.
     """
     return {
-        "price_vs_original": (price - original_avg) / original_avg,
-        "price_vs_adjusted": (price - adjusted_avg) / adjusted_avg,
+        "price_vs_original": (price - original_avg) / original_avg if original_avg > 0 else None,
+        "price_vs_adjusted": (price - adjusted_avg) / adjusted_avg if adjusted_avg > 0 else None,
     }
