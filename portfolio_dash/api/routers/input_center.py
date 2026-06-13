@@ -13,8 +13,22 @@ from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.wire import div_model_wire, fee_rules_wire, issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
+from portfolio_dash.data_ingestion.csv_import import (
+    build_transaction_preview,
+    write_transaction_row,
+)
+from portfolio_dash.data_ingestion.dividend_import import (
+    build_dividend_preview,
+    write_dividend_row,
+)
+from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.manual import enter_transaction
+from portfolio_dash.data_ingestion.opening_import import (
+    build_opening_preview,
+    write_opening_row,
+)
+from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
 from portfolio_dash.data_ingestion.validate import TxnInput
 
@@ -148,3 +162,56 @@ def manual_commit(body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)
     total = (-(gross + written.fee + written.tax) if inp.side.value == "BUY"
              else (gross - written.fee - written.tax))
     return {"txn_id": written.transaction_id, "total": _money_str(total)}
+
+
+# --- CSV import: preview (12.3) + commit (12.4) shared infrastructure ---
+
+_BUILDERS = {
+    "transactions": build_transaction_preview, "dividends": build_dividend_preview,
+    "fx": build_fx_preview, "openings": build_opening_preview,
+}
+_WRITERS = {
+    "transactions": write_transaction_row, "dividends": write_dividend_row,
+    "fx": write_fx_row, "openings": write_opening_row,
+}
+
+
+def _row_status(row: PreviewRow) -> str:
+    if row.has_hard_issue:
+        return "error"
+    return "warn" if row.issues else "ok"
+
+
+def _row_data(row: PreviewRow) -> dict[str, Any]:
+    data = dict(row.payload)
+    if row.fee is not None:
+        data["fee"] = str(row.fee)
+    if row.tax is not None:
+        data["tax"] = str(row.tax)
+    return data
+
+
+def _preview_wire(preview: ImportPreview) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    counts = {"ok": 0, "warn": 0, "error": 0}
+    for r in preview.rows:
+        st = _row_status(r)
+        counts[st] += 1
+        rows.append({"n": r.index, "status": st,
+                     "reason": r.issues[0].message if r.issues else None,
+                     "data": _row_data(r)})
+    return {"rows": rows, "summary": {"total": len(preview.rows), **counts}}
+
+
+class ImportPreviewBody(BaseModel):
+    kind: str
+    csv_text: str
+
+
+@router.post("/import/preview")
+def import_preview(body: ImportPreviewBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+    builder = _BUILDERS.get(body.kind)
+    if builder is None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"未知 kind: {body.kind}", field="kind"))
+    return _preview_wire(builder(conn, body.csv_text))
