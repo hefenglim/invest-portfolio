@@ -59,6 +59,12 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   `instruments += target_low/board_status/is_etf` (idempotent migration); `target_low`/`is_etf`
   on the `Instrument` model, `board_status` a registration-only column set by
   `register_instrument`; `is_etf` is the single source of truth for ETF (no `sector=="ETF"`).
+- **Ledgers read API (spec 11, Phase 1):** `GET /api/ledgers/{transactions,dividends,fx,openings}`
+  read-only over the four append-only ledgers — account-name join, account/symbol/date-range
+  filters, desc pagination (`limit`/`offset`/`total_count`), the buy/sell `total` sign convention,
+  `implied_rate`, and the **lowercase wire format** for `side`/`type` (Currency stays uppercase).
+  Reuses the existing `transactions.fee_rule_snapshot` column (mapped to API `fee_snapshot`) — no
+  new column; `openings` gets a synthetic display id (its PK is account_id+symbol). No write routes.
 - `shared/` foundation layer: `Currency`/`Market` enums; `Decimal` money primitives
   (canonical TEXT persistence via `to_db`/`from_db`, per-currency `quantize_amount`
   with ROUND_HALF_UP, float + non-finite guards); single pure `fx.convert` helper
