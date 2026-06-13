@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -29,12 +30,34 @@ def _d(v: Any) -> date | None:
 class FinMindProvider(ProviderBase):
     name = "finmind"
 
-    def __init__(self, token: str | None = None) -> None:
+    def __init__(
+        self,
+        token: str | None = None,
+        *,
+        token_getter: Callable[[], str | None] | None = None,
+    ) -> None:
+        """FinMind dividend provider.
+
+        Token resolution (spec 14.2): in production the token is read at call time
+        from the ``data_sources`` table via an injected ``token_getter`` (the
+        DB-backed path), so a key set on the settings page takes effect on the next
+        fetch without reconstructing the provider. For standalone use / back-compat,
+        an explicit ``token`` arg or the ``FINMIND_TOKEN`` env var still works as a
+        fallback when no getter is supplied (or it returns nothing).
+        """
         self._token = token if token is not None else os.environ.get("FINMIND_TOKEN")
+        self._token_getter = token_getter
+
+    def _resolve_token(self) -> str | None:
+        if self._token_getter is not None:
+            token = self._token_getter()
+            if token:
+                return token
+        return self._token
 
     def supports(self, data_type: DataType, market: Market | None) -> bool:
         return (
-            self._token is not None
+            self._resolve_token() is not None
             and data_type is DataType.DIVIDEND
             and market is Market.TW
         )
@@ -63,6 +86,7 @@ class FinMindProvider(ProviderBase):
         return events
 
     def fetch_dividends(self, instruments: list[InstrumentRef]) -> list[DividendEvent]:
+        token = self._resolve_token()
         out: list[DividendEvent] = []
         for ref in instruments:
             if ref.market is not Market.TW:
@@ -73,7 +97,7 @@ class FinMindProvider(ProviderBase):
                     "dataset": "TaiwanStockDividend",
                     "data_id": ref.symbol,
                     "start_date": "2015-01-01",
-                    "token": self._token,
+                    "token": token,
                 },
                 timeout=20,
             )
