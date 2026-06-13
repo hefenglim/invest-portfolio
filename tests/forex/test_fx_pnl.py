@@ -101,3 +101,28 @@ def test_compute_account_fx_two_rates_blended_then_reconversion() -> None:
     # avg_rate = (320000+330000)/(10000+10000) = 32.5; realized = 165000 - 5000*32.5 = 2500
     assert r.avg_rate == Decimal("32.5")
     assert r.realized_fx == Decimal("2500")
+
+
+def test_realized_fx_rows_per_reconversion() -> None:
+    from datetime import date
+    from decimal import Decimal
+
+    from portfolio_dash.forex.fx_pnl import realized_fx_rows
+    from portfolio_dash.shared.enums import Currency
+    from portfolio_dash.shared.models.ledger import FXConversion
+
+    convs = [
+        FXConversion(account_id="schwab", date=date(2026, 1, 8), from_ccy=Currency.TWD,
+                     from_amount=Decimal("32000"), to_ccy=Currency.USD,
+                     to_amount=Decimal("1000")),  # acquisition TWD->USD, avg 32
+        FXConversion(account_id="schwab", date=date(2026, 5, 1), from_ccy=Currency.USD,
+                     from_amount=Decimal("500"), to_ccy=Currency.TWD,
+                     to_amount=Decimal("17000")),  # reconversion: 17000 - 500*32 = +1000
+    ]
+    rows = realized_fx_rows(convs, Currency.TWD, Currency.USD, Decimal("32"))
+    assert len(rows) == 1
+    assert rows[0].date == date(2026, 5, 1)
+    assert rows[0].foreign_sold == Decimal("500")
+    assert rows[0].home_received == Decimal("17000")
+    assert rows[0].rate_used == Decimal("32")
+    assert rows[0].realized == Decimal("1000")

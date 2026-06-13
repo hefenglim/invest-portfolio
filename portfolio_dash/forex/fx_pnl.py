@@ -4,7 +4,7 @@ from collections.abc import Callable
 from decimal import Decimal
 
 from portfolio_dash.forex.pools import average_acquisition_rate, foreign_cash_balance
-from portfolio_dash.forex.results import AccountFXResult, FXSummary
+from portfolio_dash.forex.results import AccountFXResult, FxRealizedRow, FXSummary
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account, Instrument
@@ -14,24 +14,42 @@ _ZERO = Decimal("0")
 SpotRate = Callable[[Currency, Currency], Decimal]
 
 
+def realized_fx_rows(
+    conversions: list[FXConversion], home: Currency, foreign: Currency,
+    avg_rate: Decimal | None,
+) -> list[FxRealizedRow]:
+    """Per-reconversion realized FX rows (foreign -> home). Empty if no avg_rate.
+
+    For each conversion from foreign to home, the realized gain is the cost-basis
+    formula ``home_received - (foreign_sold * avg_rate)`` — deliberately NOT
+    shared.fx.convert, since avg_rate is a derived pool rate, not a market spot.
+    """
+    if avg_rate is None:
+        return []
+    out: list[FxRealizedRow] = []
+    for c in conversions:
+        if c.from_ccy == foreign and c.to_ccy == home:
+            out.append(FxRealizedRow(
+                date=c.date, foreign_ccy=foreign, home_ccy=home,
+                foreign_sold=c.from_amount, home_received=c.to_amount,
+                rate_used=avg_rate,
+                realized=c.to_amount - c.from_amount * avg_rate,
+            ))
+    return out
+
+
 def _realized_fx(
     conversions: list[FXConversion], home: Currency, foreign: Currency, avg_rate: Decimal | None
 ) -> Decimal | None:
     """Sum realized FX P&L over reconversions (foreign -> home).
 
-    For each conversion from foreign to home:
-        gain = home_received - (foreign_sold * avg_rate)
-
     Returns None if avg_rate is None (no FX cost basis established).
     """
     if avg_rate is None:
         return None
-    total = _ZERO
-    for c in conversions:
-        if c.from_ccy == foreign and c.to_ccy == home:
-            # Cost-basis math (foreign sold × pool weighted-avg rate), deliberately NOT
-            # shared.fx.convert — avg_rate is a derived pool rate, not a market spot.
-            total += c.to_amount - c.from_amount * avg_rate
+    total: Decimal = sum(
+        (r.realized for r in realized_fx_rows(conversions, home, foreign, avg_rate)), _ZERO
+    )
     return total
 
 

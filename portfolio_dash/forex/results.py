@@ -1,5 +1,6 @@
 """Computed FX (換匯) P&L result models."""
 
+from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -26,6 +27,18 @@ class AccountFXResult(BaseModel):
     realized_fx: Decimal | None
     unrealized_fx_stocks: Decimal | None
     unrealized_fx_cash: Decimal | None
+
+
+class FxRealizedRow(BaseModel):
+    """One realized-FX event from a reconversion (foreign -> home)."""
+
+    date: date
+    foreign_ccy: Currency
+    home_ccy: Currency
+    foreign_sold: Decimal
+    home_received: Decimal
+    rate_used: Decimal
+    realized: Decimal
 
 
 class FXSummary(BaseModel):
