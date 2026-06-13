@@ -50,9 +50,33 @@ CREATE TABLE IF NOT EXISTS job_runs (
 """
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    """Add ``column`` to ``table`` if absent (additive, idempotent migration).
+
+    A LOCAL copy of the ``data_ingestion`` PRAGMA pattern, intentionally NOT imported:
+    ``scheduler/`` must not gain a dependency on ``data_ingestion`` (see
+    ``architecture.md``). ``PRAGMA table_info`` row index 1 is the column name,
+    which is row_factory-agnostic.
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def create_scheduler_tables(conn: sqlite3.Connection) -> None:
-    """Create the scheduler tables idempotently."""
+    """Create the scheduler tables idempotently and apply additive §15.0 migrations.
+
+    The §15.0 columns (SR 2026-06-13) are added for legacy DBs that predate them so
+    specs 04/07 (insight scheduling, run cost/skip reasons) can rely on their presence.
+    """
     conn.executescript(_DDL)
+    _add_column_if_missing(conn, "schedule_config", "kind", "TEXT NOT NULL DEFAULT 'system'")
+    _add_column_if_missing(conn, "schedule_config", "payload", "TEXT")
+    _add_column_if_missing(conn, "job_runs", "payload", "TEXT")
+    _add_column_if_missing(conn, "job_runs", "reason", "TEXT")
+    _add_column_if_missing(conn, "job_runs", "cost_usd", "TEXT")
     conn.commit()
 
 
@@ -209,6 +233,60 @@ def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
     )
     conn.commit()
     return run_id
+
+
+def start_job_run(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
+    """Insert a 'running' ``job_runs`` row (finished_at NULL) and return its id.
+
+    Used by ``POST /api/scheduler/jobs/{id}/run`` to obtain the run id synchronously
+    (on the request conn) before the background thread finalizes the row.
+    """
+    cur = conn.execute(
+        "INSERT INTO job_runs (job_id, started_at) VALUES (?, ?)", (job_id, now.isoformat())
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def finish_job_run(conn: sqlite3.Connection, run_id: int, *, status: str, detail: str) -> None:
+    """Finalize a running ``job_runs`` row with its terminal status + detail."""
+    conn.execute(
+        "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
+        (datetime.now(UTC).isoformat(), status, detail, run_id),
+    )
+    conn.commit()
+
+
+def latest_run_unfinished(conn: sqlite3.Connection, job_id: str) -> bool:
+    """True if the job's most recent run row is still running (``finished_at IS NULL``)."""
+    row = conn.execute(
+        "SELECT finished_at FROM job_runs WHERE job_id = ? ORDER BY id DESC LIMIT 1", (job_id,)
+    ).fetchone()
+    return row is not None and row["finished_at"] is None
+
+
+def run_job_func(job_id: str, *, now: datetime) -> None:
+    """Execute a job in a fresh session, finalizing its latest running row.
+
+    For the async ``/run`` endpoint: the request handler already inserted the running
+    row via ``start_job_run``; this opens its OWN connection (the request conn is closed
+    by then) and finalizes it. Exceptions are swallowed and logged as ``status='error'``
+    so a failing job never crashes the worker thread.
+    """
+    with session() as conn:
+        rid = conn.execute(
+            "SELECT id FROM job_runs WHERE job_id=? AND finished_at IS NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if rid is None:
+            return
+        try:
+            detail = _jobs_by_id()[job_id].func(conn, now=now)
+            status = "ok"
+        except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
+            detail, status = str(exc), "error"
+        finish_job_run(conn, int(rid["id"]), status=status, detail=detail)
 
 
 def log_export_run(
