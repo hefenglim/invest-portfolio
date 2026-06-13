@@ -14,6 +14,7 @@ from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.strategy.alerts import compute_alerts
 from portfolio_dash.strategy.rules_config import (
     RULE_IDS,
@@ -21,6 +22,7 @@ from portfolio_dash.strategy.rules_config import (
     get_alert_rules,
     set_alert_rules,
 )
+from portfolio_dash.strategy.whatif import WhatIfError, compute_whatif
 
 router = APIRouter()
 
@@ -94,3 +96,31 @@ def put_rules(body: AlertRulesBody,
     alerts = compute_alerts(conn, now=now, reporting=reporting)
     return {"rules": _rules_wire(current),
             "alerts": to_wire([a.model_dump() for a in alerts])}
+
+
+class WhatIfBody(BaseModel):
+    symbol: str
+    side: str  # "buy" | "sell"
+    shares: Decimal
+    price: Decimal
+    account_id: str | None = None
+
+
+@router.post("/whatif")
+def post_whatif(body: WhatIfBody,
+                conn: sqlite3.Connection = Depends(get_conn),
+                now: datetime = Depends(get_now),
+                reporting: Currency = Depends(get_reporting)) -> Any:
+    try:
+        side = Side(body.side.strip().upper())
+    except ValueError:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"未知交易方向 {body.side}", field="side"))
+    try:
+        result = compute_whatif(conn, now=now, reporting=reporting, symbol=body.symbol,
+                                side=side, shares=body.shares, price=body.price,
+                                account_id=body.account_id)
+    except WhatIfError as exc:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", str(exc), field="account_id"))
+    return result
