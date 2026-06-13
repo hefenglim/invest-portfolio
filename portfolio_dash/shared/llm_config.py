@@ -44,6 +44,8 @@ class LLMRole(StrEnum):
     DEFAULT_FALLBACK = "default_fallback"
     VISION = "vision"
     VISION_FALLBACK = "vision_fallback"
+    MASTER = "master"  # spec 04 §4.3: the orchestrating "master" agent
+    MASTER_FALLBACK = "master_fallback"
 
 
 _DDL = """
@@ -281,3 +283,98 @@ def litellm_model_string(model: ModelConfig) -> str:
     """Compose the LiteLLM ``provider/model`` string from a registry row."""
     prefix = _PROVIDER_PREFIX.get(model.provider, "openai")
     return f"{prefix}/{model.model_name}"
+
+
+# --- spec 16: settings reads/writes (CRUD support, quota view, threshold) -----
+
+
+def roles_using_model(conn: sqlite3.Connection, model_id: str) -> list[str]:
+    """Return the role names (``LLMRole`` values) currently bound to *model_id*.
+
+    Used by the API to block (HTTP 422) deletion of a model still assigned to a role.
+    """
+    return [
+        row["role"]
+        for row in conn.execute(
+            "SELECT role FROM llm_defaults WHERE model_id = ? ORDER BY role", (model_id,)
+        )
+    ]
+
+
+def all_role_bindings(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """Return ``{role_value: model_id_or_None}`` for every defined :class:`LLMRole`."""
+    bound = {
+        row["role"]: row["model_id"]
+        for row in conn.execute("SELECT role, model_id FROM llm_defaults")
+    }
+    return {role.value: bound.get(role.value) for role in LLMRole}
+
+
+def add_topup(
+    conn: sqlite3.Connection, amount_usd: Decimal, note: str | None = None
+) -> None:
+    """Append a top-up to the budget ledger (append-only). Same table as resets.
+
+    The spec-16 quota view (:func:`quota_remaining`) sums *all* top-ups minus *all*
+    usage; this differs from :func:`budget_remaining`, the latest-reset-wins gate used
+    by ``check_budget`` for the runtime spend cap. Both read the same ledger.
+    """
+    reset_budget(conn, amount_usd, note)
+
+
+def list_topups(conn: sqlite3.Connection) -> list[dict[str, str]]:
+    """All budget events oldest-first: ``[{"at", "amount_usd", "note"}]``."""
+    return [
+        {
+            "at": row["ts"],
+            "amount_usd": row["amount_usd"],
+            "note": row["note"],
+        }
+        for row in conn.execute(
+            "SELECT ts, amount_usd, note FROM llm_budget_events ORDER BY ts ASC, id ASC"
+        )
+    ]
+
+
+def quota_remaining(conn: sqlite3.Connection) -> Decimal:
+    """Spec-16 remaining = Σ all top-ups − Σ all usage cost. Defaults to 0 when empty."""
+    topups = conn.execute(
+        "SELECT COALESCE(amount_usd, '0') a FROM llm_budget_events"
+    ).fetchall()
+    spent_rows = conn.execute("SELECT cost FROM llm_usage").fetchall()
+    total_topups = sum((Decimal(r["a"]) for r in topups), Decimal("0"))
+    total_spent = sum((Decimal(r["cost"]) for r in spent_rows), Decimal("0"))
+    return total_topups - total_spent
+
+
+_THRESHOLD_DDL = (
+    "CREATE TABLE IF NOT EXISTS llm_quota_config "
+    "(id INTEGER PRIMARY KEY CHECK (id = 1), alert_threshold_usd TEXT)"
+)
+_DEFAULT_THRESHOLD = Decimal("0")
+
+
+def _ensure_threshold_table(conn: sqlite3.Connection) -> None:
+    conn.execute(_THRESHOLD_DDL)
+
+
+def get_alert_threshold(conn: sqlite3.Connection) -> Decimal:
+    """Read the quota-low alert threshold (USD); 0 when never set (spec 03 ``quota_low``)."""
+    _ensure_threshold_table(conn)
+    row = conn.execute(
+        "SELECT alert_threshold_usd FROM llm_quota_config WHERE id = 1"
+    ).fetchone()
+    if row is None or row["alert_threshold_usd"] is None:
+        return _DEFAULT_THRESHOLD
+    return Decimal(row["alert_threshold_usd"])
+
+
+def set_alert_threshold(conn: sqlite3.Connection, amount_usd: Decimal) -> None:
+    """Set the quota-low alert threshold (USD). Single-row upsert."""
+    _ensure_threshold_table(conn)
+    conn.execute(
+        "INSERT INTO llm_quota_config (id, alert_threshold_usd) VALUES (1, ?) "
+        "ON CONFLICT(id) DO UPDATE SET alert_threshold_usd = excluded.alert_threshold_usd",
+        (str(amount_usd),),
+    )
+    conn.commit()
