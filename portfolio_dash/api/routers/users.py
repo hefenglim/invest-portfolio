@@ -58,6 +58,11 @@ def create(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
+    if not body.username.strip():
+        return JSONResponse(
+            status_code=400,
+            content=error_body("validation_error", "帳號不可為空", field="username"),
+        )
     if len(body.password) < _MIN_PASSWORD:
         return JSONResponse(
             status_code=400,

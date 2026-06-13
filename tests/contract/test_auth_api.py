@@ -83,3 +83,36 @@ def test_logout_and_lock_204(
     # After lock, the session is invalid -> relogin to proceed.
     api_client.post("/api/auth/login", json={"username": "chiaming", "password": "password123"})
     assert api_client.post("/api/auth/logout").status_code == 204
+
+
+def test_gate_allows_authenticated_protected_request(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # Coverage gap (senior review): the happy path THROUGH the gate with a valid cookie.
+    api_client.post(
+        "/api/users", json={"name": "家明", "username": "chiaming", "password": "password123"}
+    )  # activates protected mode
+    api_client.post("/api/auth/login", json={"username": "chiaming", "password": "password123"})
+    r = api_client.get("/api/dashboard")  # cookie retained by the TestClient
+    assert r.status_code == 200
+
+
+def test_users_gated_in_protected_mode(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # Coverage gap (senior review): /api/users is NOT in _OPEN_PATHS -> gated when protected.
+    api_client.post(
+        "/api/users", json={"name": "家明", "username": "chiaming", "password": "password123"}
+    )
+    api_client.cookies.clear()
+    r = api_client.get("/api/users")
+    assert r.status_code == 401 and r.json()["error"]["code"] == "unauthorized"
+
+
+def test_create_user_empty_username_400(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    r = api_client.post(
+        "/api/users", json={"name": "x", "username": "   ", "password": "password123"}
+    )
+    assert r.status_code == 400 and r.json()["error"]["field"] == "username"

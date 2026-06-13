@@ -77,8 +77,17 @@ def verify_password(pw: str, stored: str) -> bool:
 
 
 def is_protected(conn: sqlite3.Connection) -> bool:
-    """Protected mode iff there is >=1 authorized user."""
-    row = conn.execute("SELECT 1 FROM auth_users LIMIT 1").fetchone()
+    """Protected mode iff there is >=1 authorized user.
+
+    Treats a missing ``auth_users`` table as guest mode (defensive): the gate runs
+    on every ``/api/*`` request, and if it ever fired before the lifespan created the
+    table the app would 500 instead of degrading. ``_lifespan`` / the test fixtures
+    always create it, so this is belt-and-suspenders, not a live path.
+    """
+    try:
+        row = conn.execute("SELECT 1 FROM auth_users LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return False
     return row is not None
 
 
@@ -127,14 +136,24 @@ def delete_user(conn: sqlite3.Connection, username: str) -> None:
     conn.commit()
 
 
+# Precomputed once at import so a missing-user authenticate pays the SAME scrypt cost
+# as a real verify — closes the username-enumeration timing side-channel. The password
+# is random, so a verify against it always fails; only its timing is used.
+_DUMMY_HASH = hash_password(secrets.token_urlsafe(16))
+
+
 def authenticate(conn: sqlite3.Connection, username: str, password: str) -> bool:
-    """True iff the user exists and the password verifies. Missing user and bad
-    password follow the same path (no enumeration; verify against a stored hash
-    when present, else return False)."""
+    """True iff the user exists and the password verifies.
+
+    Missing-user and bad-password are indistinguishable in status, body, AND timing:
+    on a missing user we run a dummy scrypt verify (result discarded) so the response
+    time does not reveal whether the username exists (spec 9.1 不可洩漏帳號是否存在).
+    """
     row = conn.execute(
         "SELECT password_hash FROM auth_users WHERE username = ?", (username,)
     ).fetchone()
     if row is None:
+        verify_password(password, _DUMMY_HASH)  # equalize timing; result intentionally discarded
         return False
     return verify_password(password, row["password_hash"])
 

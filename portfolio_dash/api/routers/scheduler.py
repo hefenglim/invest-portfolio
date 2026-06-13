@@ -11,6 +11,7 @@ import sqlite3
 import threading
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.base import BaseScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -137,14 +138,21 @@ def update_job(
     tz = body.tz if body.tz is not None else current["timezone"]
     enabled = body.enabled if body.enabled is not None else bool(current["enabled"])
 
-    # Validate cron + tz together; a construction failure means NO DB write.
-    field = "tz" if body.tz is not None else "cron"
+    # Validate tz then cron SEPARATELY so the 400 `field` points at the real offender
+    # (not "tz" merely because tz was present in the body). Any failure → NO DB write.
+    try:
+        ZoneInfo(tz)
+    except Exception as exc:  # noqa: BLE001 — unknown/invalid timezone
+        return JSONResponse(
+            status_code=400,
+            content=error_body("invalid_cron", f"時區無效：{exc}", field="tz"),
+        )
     try:
         CronTrigger.from_crontab(cron, timezone=tz)
     except Exception as exc:  # noqa: BLE001 — surface any builder failure as 400
         return JSONResponse(
             status_code=400,
-            content=error_body("invalid_cron", f"cron 表達式無效：{exc}", field=field),
+            content=error_body("invalid_cron", f"cron 表達式無效：{exc}", field="cron"),
         )
 
     conn.execute(

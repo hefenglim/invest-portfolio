@@ -43,6 +43,22 @@ def test_put_invalid_tz_400_field_tz(
     assert r.json()["error"]["field"] == "tz"
 
 
+def test_put_valid_tz_bad_cron_field_cron(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # Senior-review IMPORTANT-2: a valid tz + invalid cron must blame "cron", not "tz".
+    r = api_client.put(
+        "/api/scheduler/jobs/quotes_tw",
+        json={"tz": "Asia/Kuala_Lumpur", "cron": "not a cron"},
+    )
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_cron"
+    assert r.json()["error"]["field"] == "cron"
+    row = golden_db.execute(
+        "SELECT cron, timezone FROM schedule_config WHERE job_id='quotes_tw'"
+    ).fetchone()
+    assert row["cron"] == "0 14 * * mon-fri" and row["timezone"] == "Asia/Taipei"  # no write
+
+
 def test_put_updates_row(api_client: TestClient, golden_db: sqlite3.Connection) -> None:
     r = api_client.put(
         "/api/scheduler/jobs/quotes_tw",
