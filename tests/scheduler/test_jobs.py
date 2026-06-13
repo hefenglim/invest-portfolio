@@ -32,7 +32,7 @@ def test_quotes_job_passes_market_worklist(
     _add(conn, "2330", "TW")
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(jobs_mod, "default_registry", lambda: "REG")
+    monkeypatch.setattr(jobs_mod, "default_registry", lambda conn=None: "REG")
 
     def fake_refresh(c, registry, instruments, fx_pairs, *, now):  # type: ignore[no-untyped-def]
         captured["registry"] = registry
@@ -51,7 +51,7 @@ def test_refresh_quotes_for_filters_by_market(
     monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
 ) -> None:
     _add(conn, "2330", "TW")
-    monkeypatch.setattr(jobs_mod, "default_registry", lambda: "REG")
+    monkeypatch.setattr(jobs_mod, "default_registry", lambda conn=None: "REG")
     seen: dict[str, object] = {}
 
     def fake_refresh(c, registry, instruments, fx_pairs, *, now):  # type: ignore[no-untyped-def]

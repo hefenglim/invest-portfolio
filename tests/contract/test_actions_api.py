@@ -24,7 +24,9 @@ def _hermetic_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     ``RefreshSummary`` (everything ``failed``) and ``run_job`` logs it, so the
     endpoint contract (200 + ``jobs`` + ``run_ids``) is unchanged.
     """
-    monkeypatch.setattr(jobs, "default_registry", lambda: Registry(providers={}, order={}))
+    monkeypatch.setattr(
+        jobs, "default_registry", lambda conn=None: Registry(providers={}, order={})
+    )
 
 
 def test_refresh_quotes_all_markets(api_client: TestClient, _hermetic_registry: None) -> None:

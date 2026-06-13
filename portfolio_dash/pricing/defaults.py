@@ -7,6 +7,8 @@ enhancement, not a need now (`stack.md` — default answer to new config surface
 is no until it's justified).
 """
 
+import sqlite3
+
 from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
 from portfolio_dash.pricing.providers.tpex_provider import TpexProvider
@@ -29,12 +31,31 @@ DEFAULT_PROVIDER_ORDER: dict[tuple[DataType, Market | None], list[str]] = {
 }
 
 
-def default_registry() -> Registry:
-    """Build the production `Registry` wired with the default provider order."""
+def default_registry(conn: sqlite3.Connection | None = None) -> Registry:
+    """Build the production `Registry` wired with the default provider order.
+
+    When ``conn`` is given (the live path — scheduler refresh jobs), keyed
+    providers read their API key from the ``data_sources`` table at call time, so
+    a key set on the settings page takes effect on the next fetch (spec 14.2,
+    review I-3). FinMind is wired with a DB-backed ``token_getter`` here. When
+    ``conn`` is ``None`` (standalone / tests), the providers keep their env/ctor
+    fallback so zero-arg callers are unaffected.
+
+    The ``datasources_store`` import is function-local to avoid a circular import
+    (``datasources_store`` imports ``DEFAULT_PROVIDER_ORDER`` from this module).
+    """
+    if conn is not None:
+        from portfolio_dash.pricing import datasources_store
+
+        finmind = FinMindProvider(
+            token_getter=lambda: datasources_store.get_api_key(conn, "finmind")
+        )
+    else:
+        finmind = FinMindProvider()
     providers = {
         "yfinance": YFinanceProvider(),
         "twse": TwseProvider(),
         "tpex": TpexProvider(),
-        "finmind": FinMindProvider(),
+        "finmind": finmind,
     }
     return Registry(providers=providers, order=DEFAULT_PROVIDER_ORDER)

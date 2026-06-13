@@ -93,7 +93,7 @@ def _summarize(summary: RefreshSummary) -> str:
 def refresh_quotes_for(conn: sqlite3.Connection, market: Market, *, now: datetime) -> str:
     """Refresh latest quotes + FX for one market's instruments."""
     instruments, fx_pairs = build_worklist(conn, market)
-    summary = refresh_quotes(conn, default_registry(), instruments, fx_pairs, now=now)
+    summary = refresh_quotes(conn, default_registry(conn), instruments, fx_pairs, now=now)
     return _summarize(summary)
 
 
@@ -113,14 +113,14 @@ def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Backfill a recent history window for all instruments (deep backfill is manual)."""
     instruments, _ = build_worklist(conn, None)
     start = (now - timedelta(days=_HISTORY_LOOKBACK_DAYS)).date()
-    summary = refresh_history(conn, default_registry(), instruments, start, now=now)
+    summary = refresh_history(conn, default_registry(conn), instruments, start, now=now)
     return _summarize(summary)
 
 
 def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Sweep dividend/ex-div events for all instruments."""
     instruments, _ = build_worklist(conn, None)
-    summary = refresh_dividends(conn, default_registry(), instruments, now=now)
+    summary = refresh_dividends(conn, default_registry(conn), instruments, now=now)
     return _summarize(summary)
 
 
