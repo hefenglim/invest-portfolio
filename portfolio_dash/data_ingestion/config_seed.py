@@ -19,9 +19,11 @@ class FeeRuleSet(BaseModel):
     tax_etf: Decimal = Decimal("0")
     tax_daytrade: Decimal = Decimal("0")
     sec_fee: Decimal = Decimal("0")  # US sell-side regulatory fee rate
+    flat_fee: Decimal = Decimal("0")  # per-trade fixed fee (e.g. Moomoo US platform fee)
     clearing: Decimal = Decimal("0")  # MY
     clearing_cap: Decimal | None = None
-    stamp_duty: Decimal = Decimal("0")
+    stamp_duty_rate: Decimal = Decimal("0")  # MY: rate of notional (was a flat constant)
+    stamp_duty_cap: Decimal | None = None
     sst: Decimal = Decimal("0")
     round_integer: bool = False  # TW rounds fee/tax to integer NT$
 

@@ -52,7 +52,7 @@ def compute_fees(
 
     if rules.market is Market.TW:
         raw_fee = rules.brokerage * rules.discount * notional
-        fee = max(raw_fee, rules.min_fee)
+        fee = max(raw_fee, rules.min_fee) if notional > 0 else Decimal("0")
         snap["brokerage"] = str(rules.brokerage)
         snap["discount"] = str(rules.discount)
         snap["min_fee"] = str(rules.min_fee)
@@ -76,31 +76,42 @@ def compute_fees(
         )
 
     if rules.market is Market.US:
-        fee = rules.brokerage * notional
+        fee = rules.flat_fee + rules.brokerage * notional
+        snap["flat_fee"] = str(rules.flat_fee)
         snap["brokerage"] = str(rules.brokerage)
         if side is Side.SELL:
             fee = fee + rules.sec_fee * notional
             snap["sec_fee"] = str(rules.sec_fee)
-        return FeeResult(
-            fee=_round(fee, integer=False),
-            tax=Decimal("0.00"),
-            snapshot=snap,
-        )
+        if notional > 0 and rules.min_fee > 0:
+            fee = max(fee, rules.min_fee)
+            snap["min_fee"] = str(rules.min_fee)
+        return FeeResult(fee=_round(fee, integer=False), tax=Decimal("0.00"), snapshot=snap)
 
-    # Market.MY
+    # Market.MY — each component is quantized to 0.01 MYR before summing (the worked
+    # examples derive the fee as a sum of independently-rounded components, not a
+    # single round of the raw total; see spec 18.1 W8).
+    brokerage = rules.brokerage * notional
+    if notional > 0 and rules.min_fee > 0:
+        brokerage = max(brokerage, rules.min_fee)
     clearing = rules.clearing * notional
     if rules.clearing_cap is not None and clearing > rules.clearing_cap:
         clearing = rules.clearing_cap
-    fee = rules.brokerage * notional + clearing + rules.stamp_duty + rules.sst
+    stamp = rules.stamp_duty_rate * notional
+    if rules.stamp_duty_cap is not None and stamp > rules.stamp_duty_cap:
+        stamp = rules.stamp_duty_cap
+    fee = (
+        _round(brokerage, integer=False)
+        + _round(clearing, integer=False)
+        + _round(stamp, integer=False)
+        + _round(rules.sst, integer=False)
+    )
     snap["brokerage"] = str(rules.brokerage)
+    snap["min_fee"] = str(rules.min_fee)
     snap["clearing"] = str(rules.clearing)
-    snap["stamp_duty"] = str(rules.stamp_duty)
+    snap["stamp_duty_rate"] = str(rules.stamp_duty_rate)
     snap["sst"] = str(rules.sst)
     if rules.clearing_cap is not None:
         snap["clearing_cap"] = str(rules.clearing_cap)
-
-    return FeeResult(
-        fee=_round(fee, integer=False),
-        tax=Decimal("0.00"),
-        snapshot=snap,
-    )
+    if rules.stamp_duty_cap is not None:
+        snap["stamp_duty_cap"] = str(rules.stamp_duty_cap)
+    return FeeResult(fee=_round(fee, integer=False), tax=Decimal("0.00"), snapshot=snap)
