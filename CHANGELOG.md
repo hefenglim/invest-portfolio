@@ -61,6 +61,30 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **Export endpoints (spec 02, Phase 2):** a new consumer-layer module `portfolio_dash/export/`
+  + `POST /api/export/{holdings,ledgers,llm-usage,job-runs,tax-package}`. All output is
+  reconciliation-grade: **raw `Decimal` strings** (no rounding/thousands separators), **UTF-8
+  with BOM**, **CRLF**, `Content-Disposition: attachment`. holdings → 21-column snapshot CSV
+  (incl. `reporting_ccy_value` via the promoted public `RateResolver`; blank on missing FX,
+  never fabricated) + `# as_of/fx_rates/generated` footer; ledgers → zip of the four raw ledger
+  CSVs + `fee_rules_snapshot.json` (Decimals as strings via `to_wire`) + `manifest.json`
+  (counts/as_of/schema_version); llm-usage/job-runs → range-filtered raw CSV (`from>to` → 400
+  `validation_error`); tax-package → annual zip (`realized_gains`/`dividends`/`fx_realized`/
+  `summary.md`), **year-cut by trade date**, **per-currency never summed**, realized converted
+  at **trade-date FX** with the rate recorded (blank when no stored rate). Each endpoint writes
+  one `job_runs` audit row.
+  - **Calc-core enrichment:** `RealizedRow.sell_date` (the sell transaction's trade date), so
+    realized gains can be cut by tax year. Domain-model enrichment only — no accounting-semantics
+    change.
+  - **DRY:** `forex.fx_pnl.realized_fx_rows` is the single source of the realized-FX formula;
+    `_realized_fx` now sums over it.
+  - **Reconciliation — audit `kind`:** spec 02 §3 says the audit row carries `kind=export`, but
+    `job_runs` has no `kind` column and spec 15.0 places `kind` on `schedule_config` (not
+    `job_runs`). Implemented instead as a namespaced `job_id=export:<type>` via
+    `scheduler.jobs.log_export_run`.
+  - **Reconciliation — module map:** `portfolio_dash/export/` added as a consumer layer
+    (`web_ui → export → {portfolio, forex, pricing, data_ingestion, scheduler, shared}`; nothing
+    lower imports it; the router stays thin and computes no numbers of record).
 - **Review fixes I-2 / I-3 (2026-06-13):** a single shared secret-masking helper
   `shared/masking.py::mask_secret` (`prefix•••suffix`, with a short-key guard that fully masks
   keys too short to safely reveal a prefix/suffix) — now the one masker for `api_key_masked` and

@@ -60,7 +60,7 @@ def export_holdings(
 ) -> Response:
     art = build_holdings_csv(conn, now=now, reporting=reporting)
     log_export_run(conn, "holdings", now=now,
-                   detail=f"rows_bytes={len(art.content)} file={art.filename}")
+                   detail=f"bytes={len(art.content)} file={art.filename}")
     return _respond(art)
 
 
