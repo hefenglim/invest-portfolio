@@ -74,6 +74,16 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   issues → 400, unacked oversell → 422 `oversell_unacknowledged`, else append. (Known follow-up:
   unify API money-string formatting — `_money_str` trims trailing zeros in manual preview/commit
   while `to_wire`/ledgers use raw `str`; cosmetic, deferred to the frontend-wiring phase.)
+- **Input center — CSV import + AI input (spec 12b, Phase 1):** `POST /api/import/{preview,commit}`
+  (4 ledger kinds; preview → `{rows:[{n,status,reason,data}],summary}`; **commit re-derives from
+  `csv_text`** and re-validates vs the current ledger, ack-gating warn rows → 422
+  `warnings_unacknowledged`) and `POST /api/input/ai/preview` (LLM text → preview + `meta` +
+  `csv_text`; degradation mapped `budget_exceeded`→402 / `ai_not_activated`→409 /
+  `llm_unavailable`→503). `ai_agents_input` now returns `AiInputResult{preview, meta, csv_text}`
+  (meta from the `llm_usage` row; `completer` default resolved at call time). Also fixed
+  `build_transaction_preview` to catch `decimal.InvalidOperation` (a malformed number now yields a
+  `parse_error` row instead of crashing — matching its siblings + docstring). Completes the Phase-1
+  core data flow (specs 10 / 11 / 12).
 - `shared/` foundation layer: `Currency`/`Market` enums; `Decimal` money primitives
   (canonical TEXT persistence via `to_db`/`from_db`, per-currency `quantize_amount`
   with ROUND_HALF_UP, float + non-finite guards); single pure `fx.convert` helper
