@@ -9,9 +9,11 @@ def test_account_construction() -> None:
         broker="Schwab",
         settlement_ccy=Currency.USD,
         funding_ccy=Currency.TWD,
+        dividend_model="cash_cost_reduction",
     )
     assert acc.settlement_ccy is Currency.USD
     assert acc.funding_ccy is Currency.TWD
+    assert acc.dividend_model == "cash_cost_reduction"
 
 
 def test_instrument_construction() -> None:

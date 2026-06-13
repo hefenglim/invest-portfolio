@@ -2,17 +2,16 @@
 no ledger writes. Net applies each holding account's dividend model (withholding only --
 the Moomoo-US per-dividend platform fee is probe-pending and deferred).
 
-dividend_model is sourced from config-as-code (``DEFAULT_ACCOUNTS``) keyed by
-account_id: the runtime ``Account`` model (shared/models/assets.py) does not carry a
-dividend_model field, and ``list_accounts`` does not select one. The ``accounts``
-argument is the set of accounts in play; the per-account dividend model is resolved
-from the config seed so this stays a pure function over computed inputs.
+dividend_model is read from the ``accounts`` param (``Account.dividend_model``), which
+is DB truth (``list_accounts`` selects the ``accounts.dividend_model`` column). This is
+the single source of the per-account dividend rule -- there is no config-as-code map. A
+holding referencing an unknown account_id raises KeyError (fail loud on corrupt data
+rather than silently defaulting net = gross).
 """
 
 from collections import defaultdict
 from decimal import Decimal
 
-from portfolio_dash.data_ingestion.config_seed import DEFAULT_ACCOUNTS
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.portfolio.dashboard_models import (
     DividendProjection,
@@ -34,9 +33,6 @@ _MODEL_DIV_TYPE = {
     "net": "net",
 }
 
-# Config-as-code is the authoritative dividend_model source (keyed by account_id).
-_DIVIDEND_MODEL_BY_ACCOUNT = {a.account_id: a.dividend_model for a in DEFAULT_ACCOUNTS}
-
 
 def project_dividends(
     holdings: list[Holding],
@@ -50,10 +46,11 @@ def project_dividends(
 
     declared_only basis: only ex-dividend events for held symbols with a cash amount
     and ``ex_date.year == year``. Net applies each holding account's dividend model
-    (withholding only). Currencies are NEVER summed across; ``by_currency`` is keyed by
-    the event currency (falling back to the instrument's quote currency).
+    (read from ``accounts[h.account_id].dividend_model`` -- DB truth; an unknown
+    account_id raises KeyError = fail loud on corrupt data). Currencies are NEVER summed
+    across; ``by_currency`` is keyed by the event currency (falling back to the
+    instrument's quote currency).
     """
-    del accounts  # accepted for interface symmetry; model resolved from config seed
     gross: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     net: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     events: dict[Currency, int] = defaultdict(int)
@@ -70,7 +67,7 @@ def project_dividends(
         contributed = False
         for h in by_symbol.get(ev.symbol, []):
             g = h.shares * ev.cash_amount
-            model = _DIVIDEND_MODEL_BY_ACCOUNT.get(h.account_id, "cash")
+            model = accounts[h.account_id].dividend_model
             div_type = _MODEL_DIV_TYPE.get(model, "cash")
             gross[ccy] += g
             net[ccy] += apply_dividend_model(div_type, gross=g).net

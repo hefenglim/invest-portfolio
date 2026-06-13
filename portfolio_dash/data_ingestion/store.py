@@ -66,7 +66,7 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
 def list_accounts(conn: sqlite3.Connection) -> list[Account]:
     """Return all broker accounts (seeded by ``config_seed.seed_accounts``)."""
     rows = conn.execute(
-        "SELECT account_id, name, broker, settlement_ccy, funding_ccy "
+        "SELECT account_id, name, broker, settlement_ccy, funding_ccy, dividend_model "
         "FROM accounts ORDER BY account_id"
     ).fetchall()
     return [
@@ -74,6 +74,7 @@ def list_accounts(conn: sqlite3.Connection) -> list[Account]:
             account_id=r["account_id"], name=r["name"], broker=r["broker"],
             settlement_ccy=Currency(r["settlement_ccy"]),
             funding_ccy=Currency(r["funding_ccy"]),
+            dividend_model=r["dividend_model"],
         )
         for r in rows
     ]

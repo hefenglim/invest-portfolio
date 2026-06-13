@@ -15,6 +15,7 @@ class Account(BaseModel):
     broker: str
     settlement_ccy: Currency
     funding_ccy: Currency
+    dividend_model: str  # DB truth; per-account dividend rule (e.g. drip_us, cash)
 
 
 class Instrument(BaseModel):

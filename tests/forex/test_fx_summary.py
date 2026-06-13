@@ -11,7 +11,8 @@ from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.models.ledger import FXConversion, Transaction
 
 SCHWAB = Account(account_id="schwab", name="Schwab", broker="Schwab",
-                 settlement_ccy=Currency.USD, funding_ccy=Currency.TWD)
+                 settlement_ccy=Currency.USD, funding_ccy=Currency.TWD,
+                 dividend_model="drip_us")
 AAPL = Instrument(symbol="AAPL", market=Market.US, quote_ccy=Currency.USD,
                   sector="Tech", name="Apple")
 INSTR = {"AAPL": AAPL}
