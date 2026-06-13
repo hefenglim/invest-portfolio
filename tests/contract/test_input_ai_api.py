@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from portfolio_dash.data_ingestion import agents as agents_mod
 from portfolio_dash.data_ingestion.agents import AiDraft, AiDraftList
-from portfolio_dash.shared.llm_config import AINotActivated, LLMBudgetExceeded
+from portfolio_dash.shared.llm_config import AINotActivated, LLMBudgetExceeded, LLMUnavailable
 from portfolio_dash.shared.models.enums import Side
 
 
@@ -43,3 +43,13 @@ def test_ai_preview_not_activated_409(
     monkeypatch.setattr(agents_mod, "complete_structured", _boom)
     r = api_client.post("/api/input/ai/preview", json={"text": "x"})
     assert r.status_code == 409 and r.json()["error"]["code"] == "ai_not_activated"
+
+
+def test_ai_preview_unavailable_503(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*_a: object, **_k: object) -> AiDraftList:
+        raise LLMUnavailable("provider down")
+    monkeypatch.setattr(agents_mod, "complete_structured", _boom)
+    r = api_client.post("/api/input/ai/preview", json={"text": "x"})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "llm_unavailable"

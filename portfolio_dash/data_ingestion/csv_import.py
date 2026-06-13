@@ -37,8 +37,12 @@ def txn_preview_row(
     """
     issues: list[Issue] = list(validate_transaction(conn, inp))
 
-    # --- symbol resolution: flag unresolved symbols as soft issues ---
-    if resolve(conn, inp.symbol).status is ResolutionStatus.NEEDS_AI:
+    # --- symbol resolution: surface soft issues; write the RESOLVED symbol ---
+    # NEEDS_AI -> soft issue, keep the raw symbol; FUZZY -> soft issue + resolved
+    # symbol (no silent phantom write); EXACT -> resolved symbol.
+    res = resolve(conn, inp.symbol)
+    symbol = inp.symbol
+    if res.status is ResolutionStatus.NEEDS_AI:
         issues.append(
             Issue(
                 kind="symbol_unresolved",
@@ -46,6 +50,17 @@ def txn_preview_row(
                 message=f"unresolved {inp.symbol}",
             )
         )
+    elif res.status is ResolutionStatus.FUZZY and res.instrument is not None:
+        symbol = res.instrument.symbol
+        issues.append(
+            Issue(
+                kind="fuzzy_resolved",
+                needs_confirm=True,
+                message=f"{inp.symbol} 視為 {res.instrument.symbol}（模糊比對，請確認）",
+            )
+        )
+    elif res.instrument is not None:  # EXACT
+        symbol = res.instrument.symbol
 
     # --- fee / tax auto-fill (only when account exists and values are missing) ---
     fee: Decimal | None = inp.fee
@@ -74,7 +89,7 @@ def txn_preview_row(
     # Build payload for the writer (string dict + prefixed snapshot entries)
     payload: dict[str, str] = {
         "account_id": inp.account_id,
-        "symbol": inp.symbol,
+        "symbol": symbol,
         "side": inp.side.value,
         "quantity": str(inp.quantity),
         "price": str(inp.price),

@@ -184,7 +184,7 @@ def _row_status(row: PreviewRow) -> str:
 
 
 def _row_data(row: PreviewRow) -> dict[str, Any]:
-    data = dict(row.payload)
+    data = {k: v for k, v in row.payload.items() if not k.startswith("snap.")}
     if row.fee is not None:
         data["fee"] = str(row.fee)
     if row.tax is not None:

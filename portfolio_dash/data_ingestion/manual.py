@@ -72,6 +72,16 @@ def enter_transaction(
                 message=f"could not resolve {inp.symbol!r}",
             )
         )
+    elif res.status is ResolutionStatus.FUZZY and instrument is not None:
+        # The resolved symbol is already written below; surface the fuzzy match
+        # as a soft (needs_confirm) issue so it is not silently accepted.
+        issues.append(
+            Issue(
+                kind="fuzzy_resolved",
+                needs_confirm=True,
+                message=f"{inp.symbol} 視為 {instrument.symbol}（模糊比對，請確認）",
+            )
+        )
 
     # --- 3. Compute fee / tax (auto-fill only where caller left None) ---
     fee: Decimal | None = inp.fee
