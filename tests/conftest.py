@@ -29,6 +29,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import upsert_fx, upsert_prices
+from portfolio_dash.scheduler.jobs import create_scheduler_tables
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -96,6 +97,7 @@ def golden_db() -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     bootstrap_db(conn)
     create_pricing_tables(conn)
+    create_scheduler_tables(conn)
     _seed_golden(conn)
     yield conn
     conn.close()
