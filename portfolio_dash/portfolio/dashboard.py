@@ -27,6 +27,7 @@ from portfolio_dash.portfolio.allocation import combined_view, sector_allocation
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard_models import (
     DashboardData,
+    DividendProjection,
     DividendSummary,
     DividendYearRow,
     ExDividendItem,
@@ -37,6 +38,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     PriceFreshness,
     TrendSeries,
 )
+from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.pnl import value_holdings
 from portfolio_dash.portfolio.results import CombinedView, ReturnSummary, SectorAllocation
 from portfolio_dash.portfolio.returns import total_return, xirr_reporting
@@ -234,6 +236,12 @@ def build_dashboard(
                     source=ev.source))
     calendar.sort(key=lambda e: e.ex_date)
 
+    # 7b. Dividend projection (spec 05) — current-year declared cash flow, per-account
+    # net (withholding only), per currency, never summed across currencies.
+    dividend_projection: DividendProjection = project_dividends(
+        valued, calendar, accounts, instruments, year=as_of.year
+    )
+
     # 8. Holding rows — enrichment + weight; age-based staleness overrides
     # value_holdings' presence-based flag.
     total_value = view.reporting_total_value if view is not None else None
@@ -355,4 +363,5 @@ def build_dashboard(
         trend=trend,
         freshness=freshness,
         insights=[],
+        dividend_projection=dividend_projection,
     )

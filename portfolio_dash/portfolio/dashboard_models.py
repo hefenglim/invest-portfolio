@@ -88,6 +88,22 @@ class ExDividendItem(BaseModel):
     source: str
 
 
+class DividendProjectionCurrency(BaseModel):
+    """Declared gross/net dividend cash flow for one currency (spec 05)."""
+
+    declared_gross: Decimal
+    declared_net: Decimal
+    events: int
+
+
+class DividendProjection(BaseModel):
+    """Current-year declared dividend projection, per currency (never summed across)."""
+
+    year: int
+    by_currency: dict[Currency, DividendProjectionCurrency]
+    basis: str = "declared_only"
+
+
 class TrendPoint(BaseModel):
     date: date
     total_value: Decimal
@@ -152,3 +168,6 @@ class DashboardData(BaseModel):
     trend: TrendSeries
     freshness: FreshnessReport
     insights: list[InsightCardStub] = Field(default_factory=list)
+    # Optional default: build_dashboard always populates it; the default only avoids
+    # breaking direct DashboardData constructions that predate spec 05.
+    dividend_projection: DividendProjection | None = None
