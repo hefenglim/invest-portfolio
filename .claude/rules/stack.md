@@ -10,9 +10,8 @@ decision in `CHANGELOG.md` before acting.
 | --- | --- | --- |
 | Language | Python 3.12 | Most "native" language for LLM code-gen; one language = smallest error surface |
 | Web framework | FastAPI | Async, Pydantic-native, minimal boilerplate |
-| Templating | Jinja2 | Server-rendered HTML; no build step |
-| HTML interactivity | HTMX | Server round-trips for most UI; no SPA state to drift |
-| Client micro-interactions | Alpine.js | Tabs, filters, toggles without a framework |
+| Frontend (decision (B), 2026-06-13) | Static vanilla JS + ECharts (CDN) | No framework, no bundler, no build step; served by FastAPI `StaticFiles`. Supersedes Jinja2/HTMX/Alpine — see CHANGELOG. |
+| Front/back contract | JSON over `/api/*` | Money as Decimal **strings**; frontend never computes; `web/api.js` single fetch layer; `mock-data.js` = documented contract |
 | Charts | ECharts (CDN) | Visual quality lives in the chart lib + CSS, not in a JS framework |
 | Storage | SQLite | Tiny data volume; zero-ops; one file |
 | DataFrames / math | pandas, numpy | Idiomatic financial computation |
@@ -22,7 +21,7 @@ decision in `CHANGELOG.md` before acting.
 | Scheduling | APScheduler | In-process; no extra service |
 | Validation / models | Pydantic v2 | Shared between API, DB layer, and LLM I/O |
 | Type checking | mypy (strict) | Compile-time guardrail for an AI-implemented codebase |
-| Tests | pytest + httpx | Unit + route-level; HTML assertions for HTMX endpoints |
+| Tests | pytest + httpx + Playwright | Unit + FastAPI TestClient contract tests (JSON shape) + Playwright E2E; golden-payload regression; pytest-socket network ban |
 | Container | single Docker image | Small footprint; runs on 1 GB VM or a NAS |
 
 ## Why NOT (settled trade-offs)

@@ -20,11 +20,15 @@ synthesizes **batch-generated insight cards / reports** rendered into the dashbo
 These are settled. Do **not** relitigate without explicit human sign-off recorded
 in `CHANGELOG.md`.
 
-- **Single-language Python 3.12 monolith.** No frontend/backend split, no separate
-  SPA, no JSON contract between two codebases.
-- **Web layer:** FastAPI + Jinja2 + **HTMX** (server round-trips) + **Alpine.js**
-  (small client-side interactions: tabs, filters, expand/collapse) + **ECharts**
-  (charts, via CDN in templates).
+- **Python 3.12 backend monolith.** All business logic, calculation, and persistence
+  in one Python package. No SPA framework, no build step.
+- **Web layer (decision (B), 2026-06-13 — supersedes the prior Jinja2+HTMX rule;
+  see CHANGELOG):** a **FastAPI JSON API** (`portfolio_dash/api/*`, all routes under
+  `/api/*`) serving a **static vanilla-JS frontend** (`web/`, served via `StaticFiles`)
+  + **ECharts** (CDN). Vanilla JS only — **no framework, no bundler, no build step**.
+  The frontend never computes money or returns; all numbers come from the API as
+  Decimal **strings** (`web/api.js` is the single fetch layer). `mock-data.js` is the
+  documented JSON contract; spec-17 golden-payload + spec-18 round-trip tests guard it.
 - **Storage:** **SQLite**. DuckDB is deferred — add it *only* if analytical query
   volume later justifies a second engine. Do not add it pre-emptively.
 - **Financial math:** pandas / numpy / numpy-financial. **Money is never `float`** —
@@ -65,7 +69,8 @@ portfolio_dash/
   forex/         # currency-exchange ledger, FX cost basis, realized/unrealized FX P&L
   strategy/      # user-defined strategy logic as Python modules (parameterized)
   llm_insight/   # LiteLLM orchestration: portfolio + news -> structured cards (cached)
-  web_ui/        # FastAPI routes + Jinja2 templates + HTMX/Alpine/ECharts
+  api/           # FastAPI JSON API: routers (call core + serialize), no business logic
+  web/           # static vanilla-JS frontend (HTML/CSS/JS + ECharts CDN); served by api/
   scheduler/     # APScheduler jobs (pricing refresh, scheduled insight runs)
 ```
 

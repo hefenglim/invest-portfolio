@@ -23,7 +23,14 @@ integrating any `web_ui/` template that originates from a Claude Design export.
 
 ## Integration rules (on handoff)
 
-- Convert the static HTML into **Jinja2 templates** under `web_ui/`.
+> **Superseded by decision (B), 2026-06-13 (see CHANGELOG + `docs/design/spec-reconciliation-2026-06-13.md`):**
+> the web layer is now a **FastAPI JSON API (`api/`) + static vanilla-JS frontend (`web/`)**,
+> NOT Jinja2/HTMX. Do **not** convert the export to Jinja2 templates. Keep it as static
+> HTML/JS (no framework, no build step) and wire it to `/api/*` via `web/api.js`. The
+> guardrail below still holds: never introduce a JS framework or a build step. The two
+> bullets immediately below are retained only as the prior rule's record.
+
+- ~~Convert the static HTML into **Jinja2 templates** under `web_ui/`.~~ (superseded — see above)
 - Wire **HTMX** endpoints + **Alpine.js** + **ECharts** to the **real computed data**
   from the backend. The web layer stays **thin** — no calculation or data-fetching
   logic in templates (`architecture.md`).
