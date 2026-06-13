@@ -65,6 +65,15 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   `implied_rate`, and the **lowercase wire format** for `side`/`type` (Currency stays uppercase).
   Reuses the existing `transactions.fee_rule_snapshot` column (mapped to API `fee_snapshot`) — no
   new column; `openings` gets a synthetic display id (its PK is account_id+symbol). No write routes.
+- **Input center — context + manual entry (spec 12a, Phase 1):** `GET /api/input/context`
+  (accounts + mapped `div_model`, fee-rule serialization with label, instruments + `etf`,
+  current holdings) and `POST /api/input/manual/{preview,commit}` over `enter_transaction`.
+  New `api/wire.py` shared mappers: lowercase `side` in/out (`parse_side`), `Issue` →
+  `{sev,code,text,field}` (`issue_wire`), `fee_rules_wire` (reused by spec 13), `div_model`
+  mapping (`cash_cost_reduction→tw`/`drip_us→drip`/`cash→net`). Commit is **ack-gated**: hard
+  issues → 400, unacked oversell → 422 `oversell_unacknowledged`, else append. (Known follow-up:
+  unify API money-string formatting — `_money_str` trims trailing zeros in manual preview/commit
+  while `to_wire`/ledgers use raw `str`; cosmetic, deferred to the frontend-wiring phase.)
 - `shared/` foundation layer: `Currency`/`Market` enums; `Decimal` money primitives
   (canonical TEXT persistence via `to_db`/`from_db`, per-currency `quantize_amount`
   with ROUND_HALF_UP, float + non-finite guards); single pure `fx.convert` helper
