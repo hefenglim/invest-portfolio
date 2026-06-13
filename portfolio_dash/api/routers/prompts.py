@@ -20,14 +20,18 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
+from portfolio_dash.api.errors import error_body
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.shared import llm
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.llm_config import budget_remaining
 
 router = APIRouter()
 
@@ -129,4 +133,49 @@ def preview(
         "unknown_tokens": validation.unknown_tokens,
         "scope_violations": validation.scope_violations,
         "est_tokens": _est_tokens(system_prompt, rendered),
+    }
+
+
+# --- 6.2 test (real LLM; 422 on bad tokens; budget -> 402 via global handler) --
+
+
+@router.post("/prompts/test")
+def test_prompt(
+    payload: PromptBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+) -> Any:
+    """Execution path: render + send to the real LLM, record usage, honour the budget.
+
+    Unlike preview, this REJECTS bad tokens with 422 (unknown token OR a per_symbol var
+    used in a portfolio-scope body = spec 04 R1). The budget gate / role activation /
+    provider failure surface as 402 / 409 / 503 via the global exception handlers.
+    Records ``llm_usage`` with agent ``prompt_test``; does NOT write an insight card.
+    """
+    validation = V.validate_tokens(payload.body, payload.scope)
+    if validation.unknown_tokens or validation.scope_violations:
+        issues = [
+            {"code": "unknown_token", "token": t} for t in validation.unknown_tokens
+        ] + [
+            {"code": "scope_violation", "token": t} for t in validation.scope_violations
+        ]
+        return JSONResponse(
+            status_code=422,
+            content=error_body(
+                "validation_error", "prompt references invalid tokens", issues=issues
+            ),
+        )
+    ctx = _build_context(conn, payload, now, reporting)
+    rendered, _ = V.render_prompt(payload.body, ctx)
+    system_prompt = get_system_prompt(conn)["body"]
+    result = llm.complete_text(rendered, agent="prompt_test", conn=conn, system=system_prompt)
+    return {
+        "reply": result.reply,
+        "model": result.model,
+        "via": "litellm",
+        "tokens_in": result.tokens_in,
+        "tokens_out": result.tokens_out,
+        "cost_usd": str(result.cost),
+        "quota_remaining": str(budget_remaining(conn)),
     }
