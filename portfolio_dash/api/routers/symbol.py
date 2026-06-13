@@ -179,6 +179,7 @@ def _realized_wire(r: RealizedRow) -> dict[str, str]:
         "account_id": r.account_id,
         "symbol": r.symbol,
         "quote_ccy": r.quote_ccy.value,
+        "sell_date": r.sell_date.isoformat(),
         "shares_sold": str(r.shares_sold),
         "proceeds_net": str(r.proceeds_net),
         "original_cost_removed": str(r.original_cost_removed),

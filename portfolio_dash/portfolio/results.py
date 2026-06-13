@@ -1,5 +1,6 @@
 """Computed result models produced by the calculation core."""
 
+from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -33,6 +34,7 @@ class RealizedRow(BaseModel):
     account_id: str
     symbol: str
     quote_ccy: Currency
+    sell_date: date
     shares_sold: Decimal
     proceeds_net: Decimal
     original_cost_removed: Decimal

@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 from portfolio_dash.portfolio.results import (
@@ -62,6 +63,7 @@ def test_realized_row_and_allocation_models() -> None:
         account_id="tw",
         symbol="2330.TW",
         quote_ccy=Currency.TWD,
+        sell_date=date(2025, 5, 20),
         shares_sold=Decimal("500"),
         proceeds_net=Decimal("310000"),
         original_cost_removed=Decimal("300000"),
@@ -69,6 +71,7 @@ def test_realized_row_and_allocation_models() -> None:
         realized=Decimal("20000"),
     )
     assert row.realized == Decimal("20000")
+    assert row.sell_date == date(2025, 5, 20)
     sa = SectorAllocation(
         by_sector={"Tech": Decimal("100")},
         weights={"Tech": Decimal("1")},

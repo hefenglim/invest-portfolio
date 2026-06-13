@@ -199,3 +199,29 @@ def test_drip_without_reinvest_shares_raises() -> None:
                      withholding=Decimal("30"), net=Decimal("70"))]
     with pytest.raises(ValueError, match="requires reinvest_shares"):
         build_book(txs, divs, [], INSTR)
+
+
+def test_realized_row_carries_sell_date() -> None:
+    """A realized row records the sell transaction's trade_date (for year-cut tax export)."""
+    from datetime import date
+    from decimal import Decimal
+
+    from portfolio_dash.portfolio.cost_basis import build_book
+    from portfolio_dash.shared.enums import Currency, Market
+    from portfolio_dash.shared.models.assets import Instrument
+    from portfolio_dash.shared.models.enums import Side
+    from portfolio_dash.shared.models.ledger import Transaction
+
+    inst = {"AAPL": Instrument(symbol="AAPL", market=Market.US,
+                               quote_ccy=Currency.USD, sector="Tech", name="Apple")}
+    txs = [
+        Transaction(account_id="schwab", symbol="AAPL", side=Side.BUY,
+                    quantity=Decimal("10"), price=Decimal("100"),
+                    fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10)),
+        Transaction(account_id="schwab", symbol="AAPL", side=Side.SELL,
+                    quantity=Decimal("4"), price=Decimal("130"),
+                    fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 5, 20)),
+    ]
+    book = build_book(txs, [], [], inst)
+    assert len(book.realized.rows) == 1
+    assert book.realized.rows[0].sell_date == date(2026, 5, 20)

@@ -90,6 +90,7 @@ def build_book(
                         account_id=ev.account_id,
                         symbol=ev.symbol,
                         quote_ccy=ccy,
+                        sell_date=ev.trade_date,
                         shares_sold=ev.quantity,
                         proceeds_net=proceeds_net,
                         original_cost_removed=original_removed,
