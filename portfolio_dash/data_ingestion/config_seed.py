@@ -51,13 +51,19 @@ FEE_RULES: dict[str, FeeRuleSet] = {
         tax_daytrade=Decimal("0.0015"),
         round_integer=True,
     ),
-    # US/MY exact rates are config placeholders the user fills later; structure is correct.
-    "schwab": FeeRuleSet(market=Market.US, sec_fee=Decimal("0")),
-    "moomoo_us": FeeRuleSet(market=Market.US),
+    # Rates per spec 18.0 truth table; pending real-statement confirmation
+    # (SEC fee, MY stamp-duty cap, Moomoo platform fee buy/sell).
+    "schwab": FeeRuleSet(market=Market.US, sec_fee=Decimal("0.0000278")),
+    "moomoo_us": FeeRuleSet(
+        market=Market.US, flat_fee=Decimal("0.99"), sec_fee=Decimal("0.0000278")
+    ),
     "moomoo_my": FeeRuleSet(
         market=Market.MY,
+        brokerage=Decimal("0.0008"),
+        min_fee=Decimal("3"),
         clearing=Decimal("0.0003"),
         clearing_cap=Decimal("1000"),
+        stamp_duty_rate=Decimal("0.001"),
     ),
 }
 

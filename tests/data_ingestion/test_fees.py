@@ -38,16 +38,19 @@ def test_tw_fee_rounded_to_integer() -> None:
     assert r.tax == Decimal("1779")  # 0.3%*593000
 
 
-def test_us_fee_near_zero() -> None:
-    us = get_fee_rule_set("schwab")
-    r = compute_fees(us, Side.SELL, Decimal("100"), Decimal("300"))
-    assert r.fee == Decimal("0.00") and r.tax == Decimal("0.00")
+def test_us_sec_fee_on_sell() -> None:
+    us = get_fee_rule_set("schwab")  # brokerage 0, sec_fee 0.0000278 (sell-side)
+    r = compute_fees(us, Side.SELL, Decimal("100"), Decimal("300"))  # notional 30,000
+    assert r.fee == Decimal("0.83")  # 0.0000278*30000=0.834 -> 0.83
+    assert r.tax == Decimal("0.00")
 
 
 def test_my_clearing_capped() -> None:
-    my = get_fee_rule_set("moomoo_my")  # clearing 0.03% cap 1000, brokerage 0
+    my = get_fee_rule_set("moomoo_my")  # brokerage 0.08%, clearing 0.03% cap 1000, stamp 0.1%
     r = compute_fees(my, Side.BUY, Decimal("1000000"), Decimal("10"))  # notional 10,000,000
-    assert r.fee == Decimal("1000.00")  # clearing 0.0003*1e7=3000 -> capped 1000
+    # brokerage 0.0008*1e7=8000; clearing 0.0003*1e7=3000 -> capped 1000; fee = 8000+1000.
+    assert r.fee == Decimal("9000.00")
+    assert r.tax == Decimal("10000.00")  # stamp 0.001*1e7 (no stamp cap set)
 
 
 def test_snapshot_records_rates() -> None:

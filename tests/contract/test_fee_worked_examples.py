@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from portfolio_dash.data_ingestion.config_seed import FeeRuleSet
+from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import compute_fees
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.enums import Side
@@ -67,3 +67,23 @@ def test_w9_moomoo_my_clearing_cap() -> None:
 def test_tw_zero_notional_no_min_fee() -> None:  # guard: notional 0 must not charge min_fee
     r = compute_fees(TW, Side.BUY, Decimal("0"), Decimal("612.5"))
     assert r.fee == Decimal("0")
+
+
+def test_seeded_schwab_has_sec_fee() -> None:
+    assert get_fee_rule_set("schwab").sec_fee == Decimal("0.0000278")
+
+
+def test_seeded_moomoo_us_has_flat_fee() -> None:
+    assert get_fee_rule_set("moomoo_us").flat_fee == Decimal("0.99")
+
+
+def test_seeded_moomoo_my_rates() -> None:
+    r = get_fee_rule_set("moomoo_my")
+    assert r.brokerage == Decimal("0.0008") and r.min_fee == Decimal("3")
+    assert r.clearing == Decimal("0.0003") and r.clearing_cap == Decimal("1000")
+    assert r.stamp_duty_rate == Decimal("0.001")
+
+
+def test_seeded_moomoo_us_end_to_end_w7() -> None:
+    r = compute_fees(get_fee_rule_set("moomoo_us"), Side.BUY, Decimal("10"), Decimal("165.20"))
+    assert r.fee == Decimal("0.99")
