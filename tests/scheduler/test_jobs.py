@@ -90,3 +90,9 @@ def test_run_job_swallows_and_logs_error(
     run_job(conn, "bad_job", now=_NOW)  # must NOT raise
     row = conn.execute("SELECT status, detail FROM job_runs WHERE job_id='bad_job'").fetchone()
     assert row["status"] == "error" and "provider exploded" in row["detail"]
+
+
+def test_run_job_returns_run_id(conn: sqlite3.Connection) -> None:
+    rid = run_job(conn, "history_daily", now=datetime(2026, 6, 11, tzinfo=UTC))
+    assert isinstance(rid, int) and rid > 0
+    assert conn.execute("SELECT id FROM job_runs WHERE id=?", (rid,)).fetchone() is not None

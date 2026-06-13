@@ -183,18 +183,20 @@ def _jobs_by_id() -> dict[str, JobSpec]:
     return {j.id: j for j in JOBS}
 
 
-def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> None:
-    """Execute one job, logging start/finish to ``job_runs``.
+def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
+    """Execute one job, logging start/finish to ``job_runs``; return its run id.
 
     A job exception is caught and logged as ``status="error"`` (never re-raised), so
-    one failing job cannot crash the scheduler or other jobs.
+    one failing job cannot crash the scheduler or other jobs. The ``job_runs`` row is
+    inserted before the job func runs, so the returned id is always valid regardless of
+    job success/failure (consumed by the manual-refresh action to report ``run_ids``).
     """
     spec = _jobs_by_id()[job_id]
     cur = conn.execute(
         "INSERT INTO job_runs (job_id, started_at) VALUES (?, ?)",
         (job_id, now.isoformat()),
     )
-    run_id = cur.lastrowid
+    run_id = int(cur.lastrowid or 0)
     conn.commit()
     try:
         detail = spec.func(conn, now=now)
@@ -206,6 +208,7 @@ def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> None:
         (datetime.now(UTC).isoformat(), status, detail, run_id),
     )
     conn.commit()
+    return run_id
 
 
 def trigger_job(job_id: str) -> None:
