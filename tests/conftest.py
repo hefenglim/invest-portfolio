@@ -35,6 +35,7 @@ from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
 
 GOLDEN_NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
@@ -100,6 +101,7 @@ def golden_db() -> Iterator[sqlite3.Connection]:
     create_pricing_tables(conn)
     create_scheduler_tables(conn)
     datasources_store.ensure_seeded(conn)  # data_sources tables (spec 14)
+    ensure_alert_rules_seeded(conn)  # alert-rules config (spec 03)
     _seed_golden(conn)
     yield conn
     conn.close()
