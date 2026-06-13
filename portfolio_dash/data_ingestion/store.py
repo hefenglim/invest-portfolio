@@ -14,16 +14,21 @@ from portfolio_dash.shared.money import from_db, to_db
 
 
 def upsert_instrument(conn: sqlite3.Connection, inst: Instrument) -> None:
-    """Insert or update an instrument row (idempotent)."""
+    """Insert or update an instrument row (idempotent). board_status is owned by
+    register_instrument and intentionally not written here (preserved on conflict)."""
     conn.execute(
-        """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board)
-           VALUES (?,?,?,?,?,?)
+        """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board,
+               target_low, is_etf)
+           VALUES (?,?,?,?,?,?,?,?)
            ON CONFLICT(symbol) DO UPDATE SET
                market=excluded.market, quote_ccy=excluded.quote_ccy,
-               sector=excluded.sector, name=excluded.name, board=excluded.board""",
+               sector=excluded.sector, name=excluded.name, board=excluded.board,
+               target_low=excluded.target_low, is_etf=excluded.is_etf""",
         (
             inst.symbol, inst.market.value, inst.quote_ccy.value,
             inst.sector, inst.name, inst.board,
+            to_db(inst.target_low) if inst.target_low is not None else None,
+            1 if inst.is_etf else 0,
         ),
     )
     conn.commit()
@@ -31,19 +36,19 @@ def upsert_instrument(conn: sqlite3.Connection, inst: Instrument) -> None:
 
 def _row_to_instrument(row: sqlite3.Row) -> Instrument:
     return Instrument(
-        symbol=row["symbol"],
-        market=Market(row["market"]),
-        quote_ccy=Currency(row["quote_ccy"]),
-        sector=row["sector"],
-        name=row["name"],
+        symbol=row["symbol"], market=Market(row["market"]),
+        quote_ccy=Currency(row["quote_ccy"]), sector=row["sector"], name=row["name"],
         board=row["board"] or "",
+        target_low=from_db(row["target_low"]) if row["target_low"] else None,
+        is_etf=bool(row["is_etf"]),
     )
 
 
 def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
-        "SELECT symbol, market, quote_ccy, sector, name, board FROM instruments WHERE symbol=?",
+        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf "
+        "FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
     return _row_to_instrument(row) if row is not None else None
@@ -52,7 +57,8 @@ def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
 def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
     """Return all instruments in the database."""
     rows = conn.execute(
-        "SELECT symbol, market, quote_ccy, sector, name, board FROM instruments"
+        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf "
+        "FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
 

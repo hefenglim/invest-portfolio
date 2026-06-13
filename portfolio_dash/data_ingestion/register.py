@@ -66,5 +66,9 @@ def register_instrument(
     hard = [i for i in issues if not i.needs_confirm]
     if confirm and not hard:
         upsert_instrument(conn, inst)
+        status = "unresolved" if (inst.market is Market.TW and not board) else "resolved"
+        conn.execute("UPDATE instruments SET board_status=? WHERE symbol=?",
+                     (status, inst.symbol))
+        conn.commit()
         written = True
     return InstrumentDraft(instrument=inst, issues=issues, written=written)

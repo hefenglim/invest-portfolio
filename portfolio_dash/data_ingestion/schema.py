@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 CREATE TABLE IF NOT EXISTS instruments (
     symbol TEXT PRIMARY KEY, market TEXT NOT NULL, quote_ccy TEXT NOT NULL,
-    sector TEXT, name TEXT, board TEXT
+    sector TEXT, name TEXT, board TEXT,
+    target_low TEXT, board_status TEXT NOT NULL DEFAULT 'resolved',
+    is_etf INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,4 +49,7 @@ def _add_column_if_missing(
 def create_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
     _add_column_if_missing(conn, "instruments", "board", "TEXT")  # migrate legacy DBs
+    _add_column_if_missing(conn, "instruments", "target_low", "TEXT")
+    _add_column_if_missing(conn, "instruments", "board_status", "TEXT NOT NULL DEFAULT 'resolved'")
+    _add_column_if_missing(conn, "instruments", "is_etf", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()

@@ -1,5 +1,7 @@
 """Account and Instrument models."""
 
+from decimal import Decimal
+
 from pydantic import BaseModel
 
 from portfolio_dash.shared.enums import Currency, Market
@@ -24,3 +26,5 @@ class Instrument(BaseModel):
     sector: str
     name: str
     board: str = ""  # "TWSE" | "TPEx" | ".KL" | "" (US / unresolved)
+    target_low: Decimal | None = None  # price-alert floor (spec 10)
+    is_etf: bool = False  # single source of truth for ETF (never derive from sector)
