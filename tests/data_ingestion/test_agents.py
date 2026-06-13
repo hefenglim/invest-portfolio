@@ -52,15 +52,16 @@ def _good_completer(
 
 def test_ai_input_builds_preview_with_fee_no_write(conn: sqlite3.Connection) -> None:
     _setup(conn)
-    p = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
+    result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
+    p = result.preview
     assert len(p.rows) == 1 and p.rows[0].fee == Decimal("855")
     assert list_transactions(conn, account_id="tw_broker") == []  # not written
 
 
 def test_ai_input_commit_writes(conn: sqlite3.Connection) -> None:
     _setup(conn)
-    p = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
-    commit_preview(conn, p, accept={0}, writer=write_transaction_row)
+    result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
+    commit_preview(conn, result.preview, accept={0}, writer=write_transaction_row)
     assert len(list_transactions(conn, account_id="tw_broker")) == 1
 
 
@@ -82,5 +83,5 @@ def test_ai_input_degrades_with_kind(
     ) -> AiDraftList:
         raise exc
 
-    p = ai_agents_input(conn, "buy ...", completer=boom)
-    assert p.rows[0].issues[0].kind == kind
+    result = ai_agents_input(conn, "buy ...", completer=boom)
+    assert result.preview.rows[0].issues[0].kind == kind

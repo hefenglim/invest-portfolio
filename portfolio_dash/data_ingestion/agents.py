@@ -34,6 +34,44 @@ class AiDraftList(BaseModel):
     drafts: list[AiDraft]
 
 
+class AiMeta(BaseModel):
+    """Provenance of the LLM run that produced a preview (latest usage row)."""
+
+    model: str | None = None
+    via: str = "litellm"
+    cost_usd: Decimal | None = None
+
+
+class AiInputResult(BaseModel):
+    """Bundle returned by :func:`ai_agents_input`: preview + meta + commit CSV."""
+
+    preview: ImportPreview
+    meta: AiMeta
+    csv_text: str = ""
+
+
+def _latest_meta(conn: sqlite3.Connection) -> AiMeta:
+    """Read the most recent ``llm_usage`` row for the AI-input agent into meta."""
+    row = conn.execute(
+        "SELECT model, cost FROM llm_usage WHERE agent='ai_agents_input' "
+        "ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return AiMeta()
+    return AiMeta(model=row["model"], cost_usd=Decimal(row["cost"]))
+
+
+def _drafts_to_csv(drafts: list[AiDraft]) -> str:
+    """Render drafts as canonical transaction CSV for /api/import/commit."""
+    lines = ["account,symbol,side,date,shares,price,note"]
+    for d in drafts:
+        lines.append(
+            f"{d.account_id},{d.symbol},{d.side.value},{d.date.isoformat()},"
+            f"{d.shares},{d.price},{d.note or ''}"
+        )
+    return "\n".join(lines) + "\n"
+
+
 Completer = Callable[..., AiDraftList]
 
 _PROMPT = (
@@ -52,8 +90,8 @@ def ai_agents_input(
     conn: sqlite3.Connection,
     text: str,
     *,
-    completer: Completer = complete_structured,
-) -> ImportPreview:
+    completer: Completer | None = None,
+) -> AiInputResult:
     """Extract transactions from natural-language *text* and return a preview.
 
     Calls the LLM (via *completer*) to parse the user's free-form text into
@@ -68,12 +106,16 @@ def ai_agents_input(
     Args:
         conn:      Active SQLite connection (schema in place, accounts seeded).
         text:      Free-form user text describing one or more transactions.
-        completer: Injectable LLM callable (default: :func:`~shared.llm.complete_structured`).
+        completer: Injectable LLM callable. Defaults to ``None``, resolved at call
+                   time to :func:`~shared.llm.complete_structured` via module lookup
+                   (so ``monkeypatch.setattr`` on the module attribute takes effect).
                    Replaced with a mock in tests.
     Returns:
-        :class:`ImportPreview` with one :class:`PreviewRow` per extracted draft,
-        or a single row with a ``llm_unavailable`` issue when the LLM call fails.
+        :class:`AiInputResult` bundling the :class:`ImportPreview` (one
+        :class:`PreviewRow` per extracted draft, or a single degradation row when
+        the LLM call fails), the latest-run :class:`AiMeta`, and a commit-ready CSV.
     """
+    completer = completer or complete_structured
     try:
         result = completer(
             _PROMPT.format(text=text),
@@ -82,14 +124,18 @@ def ai_agents_input(
             conn=conn,
         )
     except LLMError as exc:
-        return ImportPreview(
-            rows=[
-                PreviewRow(
-                    index=0,
-                    raw={"text": text},
-                    issues=[Issue(kind=exc.kind, message=str(exc))],
-                )
-            ]
+        return AiInputResult(
+            preview=ImportPreview(
+                rows=[
+                    PreviewRow(
+                        index=0,
+                        raw={"text": text},
+                        issues=[Issue(kind=exc.kind, message=str(exc))],
+                    )
+                ]
+            ),
+            meta=AiMeta(),
+            csv_text="",
         )
 
     rows: list[PreviewRow] = []
@@ -107,4 +153,8 @@ def ai_agents_input(
         )
         rows.append(txn_preview_row(conn, idx, {"text": text}, inp))
 
-    return ImportPreview(rows=rows)
+    return AiInputResult(
+        preview=ImportPreview(rows=rows),
+        meta=_latest_meta(conn),
+        csv_text=_drafts_to_csv(result.drafts),
+    )

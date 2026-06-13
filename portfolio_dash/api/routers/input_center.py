@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.wire import div_model_wire, fee_rules_wire, issue_wire, parse_side
+from portfolio_dash.data_ingestion.agents import ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.csv_import import (
     build_transaction_preview,
@@ -238,3 +239,28 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
     accept = {r.index for r in preview.rows if not r.has_hard_issue}
     summary = commit_preview(conn, preview, accept=accept, writer=writer)
     return {"written": len(summary.written), "skipped": len(summary.skipped)}
+
+
+# --- AI agents input: NL text -> preview + meta + commit CSV (12.4) ---
+
+_LLM_HTTP = {"budget_exceeded": 402, "ai_not_activated": 409,
+             "llm_unavailable": 503, "llm_error": 503}
+
+
+class AiBody(BaseModel):
+    text: str
+
+
+@router.post("/input/ai/preview")
+def ai_preview(body: AiBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+    result = ai_agents_input(conn, body.text)
+    for r in result.preview.rows:
+        for issue in r.issues:
+            if issue.kind in _LLM_HTTP:
+                return JSONResponse(status_code=_LLM_HTTP[issue.kind],
+                                    content=error_body(issue.kind, issue.message))
+    wire = _preview_wire(result.preview)
+    wire["meta"] = {"model": result.meta.model, "via": result.meta.via,
+                    "cost_usd": None if result.meta.cost_usd is None else str(result.meta.cost_usd)}
+    wire["csv_text"] = result.csv_text
+    return wire
