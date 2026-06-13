@@ -16,6 +16,7 @@ from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.strategy.alerts import compute_alerts
+from portfolio_dash.strategy.rebalance import compute_rebalance
 from portfolio_dash.strategy.rules_config import (
     RULE_IDS,
     RULE_META,
@@ -124,3 +125,20 @@ def post_whatif(body: WhatIfBody,
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", str(exc), field="account_id"))
     return result
+
+
+class RebalanceBody(BaseModel):
+    targets: dict[str, Decimal]
+
+
+@router.post("/rebalance/preview")
+def post_rebalance(body: RebalanceBody,
+                   conn: sqlite3.Connection = Depends(get_conn),
+                   now: datetime = Depends(get_now),
+                   reporting: Currency = Depends(get_reporting)) -> Any:
+    for symbol, ratio in body.targets.items():
+        if ratio < Decimal("0"):
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", f"{symbol} 目標權重不可為負", field="targets"))
+    result = compute_rebalance(conn, now=now, reporting=reporting, targets=body.targets)
+    return to_wire(result)
