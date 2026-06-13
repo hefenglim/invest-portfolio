@@ -10,6 +10,16 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 ## [Unreleased]
 
 ### Changed
+- **LLM budget model — single topup-cumulative (2026-06-13, human sign-off; senior-review
+  finding I-1):** the USD budget is now one number — `budget_remaining = Σ top-ups − Σ usage`
+  (`shared/llm_config`). `remaining <= 0` blocks (`check_budget` raises `LLMBudgetExceeded`),
+  so an unfunded/$0 account is blocked even when fully configured; exhaustion coincides exactly
+  with `Σ top-ups == Σ usage`. Top-ups ADD cumulatively (no reset). The gate, settings page
+  (`GET /api/llm/config` `quota.remaining_usd`), dashboard chip (`GET /api/dashboard`
+  `llm_quota.remaining_usd`), and the spec-16 `quota_remaining` alias all read this single value
+  (`reset_budget` removed; `quota_remaining` delegates to `budget_remaining`). **Supersedes the
+  earlier append-only "reset ledger" model** (remaining = latest reset − Σ usage since that reset;
+  unset = no cap). End-to-end reconciliation proof: `tests/contract/test_quota_accounting.py`.
 - **Web-layer architecture decision — option (B) (2026-06-13, human sign-off):** the web
   layer is now a **FastAPI JSON API (`portfolio_dash/api/*`) + a static vanilla-JS frontend
   (`web/`)**, superseding the originally-locked **Jinja2 + HTMX server-rendering** (CLAUDE.md
@@ -51,6 +61,12 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **Review fixes I-2 / I-3 (2026-06-13):** a single shared secret-masking helper
+  `shared/masking.py::mask_secret` (`prefix•••suffix`, with a short-key guard that fully masks
+  keys too short to safely reveal a prefix/suffix) — now the one masker for `api_key_masked` and
+  data-source key views (I-2); and `default_registry(conn)` wiring the FinMind token from the
+  `data_sources` DB into the provider chain (env/ctor fallback retained) so the configured key is
+  actually used at runtime (I-3).
 - **Instruments API (spec 10, Phase 1):** `GET /api/instruments` (list + held flag + latest
   price + `chg_pct` + target_low; TW board serialized `null` until confirmed),
   `POST /api/instruments/probe` (TW board probe via `probe_tw_board`),
