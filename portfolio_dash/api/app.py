@@ -5,13 +5,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session
 from portfolio_dash.api.errors import register_error_handlers
 from portfolio_dash.api.routers import (
     accounts,
     actions,
+    auth,
     dashboard,
     datasources,
     export,
@@ -23,6 +25,7 @@ from portfolio_dash.api.routers import (
     scheduler,
     strategy,
     symbol,
+    users,
 )
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded
@@ -39,6 +42,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         bootstrap_db(conn)
         ensure_scheduler_seeded(conn)
         ensure_alert_rules_seeded(conn)
+        ensure_auth_seeded(conn)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
@@ -52,8 +56,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="portfolio-dash", lifespan=_lifespan)
+    app = FastAPI(
+        title="portfolio-dash", lifespan=_lifespan,
+        dependencies=[Depends(require_session)],
+    )
     register_error_handlers(app)
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(users.router, prefix="/api")
     app.include_router(health.router, prefix="/api")
     app.include_router(dashboard.router, prefix="/api")
     app.include_router(instruments.router, prefix="/api")

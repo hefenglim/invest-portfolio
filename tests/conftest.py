@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from pytest_socket import disable_socket, enable_socket
 
 from portfolio_dash.api.app import create_app
+from portfolio_dash.api.auth_store import create_auth_tables
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
@@ -102,6 +103,7 @@ def golden_db() -> Iterator[sqlite3.Connection]:
     create_scheduler_tables(conn)
     datasources_store.ensure_seeded(conn)  # data_sources tables (spec 14)
     ensure_alert_rules_seeded(conn)  # alert-rules config (spec 03)
+    create_auth_tables(conn)  # empty auth tables -> guest mode (spec 09)
     _seed_golden(conn)
     yield conn
     conn.close()
