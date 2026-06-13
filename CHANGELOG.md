@@ -61,6 +61,46 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **Scheduler management API (spec 15, Phase 3):** `portfolio_dash/api/routers/scheduler.py` over the
+  existing in-process scheduler. `GET /api/scheduler/jobs` (config + latest run + next fire),
+  `PUT /api/scheduler/jobs/{id}` (cron/tz/enabled subset-merge with live reschedule), `POST
+  /api/scheduler/jobs/{id}/run` (async **202** + a daemon thread that opens its own `session()`;
+  `409 already_running` when the latest run is unfinished), `GET /api/scheduler/runs` (history;
+  `limit>500 → 400`). Cron/tz validated via `CronTrigger.from_crontab` — invalid → **400
+  `invalid_cron`** with the `field` pointing at the real offender (tz checked separately from cron),
+  and **no DB write**. Every route degrades gracefully when `app.state.scheduler` is `None`
+  (`PD_DISABLE_SCHEDULER=1`, e.g. tests): `next` = null, reschedule is a no-op. `cost_usd`/`reason`
+  are Decimal-string/null, never stringified. New `scheduler/runtime.py::reschedule_job` (None-safe)
+  + `scheduler/jobs.py` helpers (`start_job_run`/`finish_job_run`/`latest_run_unfinished`/
+  `run_job_func`). **§15.0 schema columns (SR 2026-06-13; specs 04/07 depend on these):**
+  `schedule_config += kind ('system'|'insight'), payload`; `job_runs += payload, reason, cost_usd`,
+  added idempotently in `create_scheduler_tables` via a **local** `_add_column_if_missing` (no
+  `scheduler → data_ingestion` dependency). v1 lists `kind='system'` jobs only (no insight jobs yet).
+- **Sessions & authorized users (spec 09, Phase 3):** stdlib-only auth (`hashlib.scrypt` +
+  `secrets`; no new dependency). `portfolio_dash/api/auth_store.py` (table DDL, scrypt
+  hash/verify with `hmac.compare_digest`, user/session CRUD, mode check) + routers `auth.py`
+  (`POST /api/auth/login` sets an `HttpOnly; SameSite=Lax; Path=/` `pd_session` cookie; `GET
+  /api/auth/session`; `POST /api/auth/logout`/`lock` → 204) and `users.py` (`GET/POST/DELETE
+  /api/users`; 201 create / 409 `duplicate_username` / 400 short-or-empty). **Guest vs protected
+  mode:** `auth_users` empty → everything open; ≥1 user → a global `require_session` dependency
+  (wired into `create_app`, sharing `Depends(get_conn)` so it is test-overridable — NOT middleware)
+  gates all `/api/*` except `login`/`session` → 401 without a valid, unlocked cookie. `golden_db`
+  seeds no user (guest), so the entire pre-existing suite stays green. Stores only salted scrypt
+  hashes; `password_hash` is never returned or logged; bad-username and bad-password are
+  indistinguishable in status, body, **and timing** (a dummy scrypt verify equalizes the
+  missing-user path — no username enumeration).
+  - **`GET /api/auth/session` shape (additive to the spec's two literal examples):** not protected
+    → `{"mode":"guest"}`; protected + valid/known cookie → `{"mode":"user", username, name, locked}`
+    (a locked-but-known session reports `locked:true`); protected + absent/unknown cookie →
+    `{"mode":"user", username:null, name:null, locked:false}` so the shell shows the login screen.
+  - **Senior-review fixes folded in before merge:** equalized login timing (closes the
+    username-enumeration side-channel); `PUT /scheduler/jobs` 400 `field` attribution (valid tz +
+    bad cron now blames `cron`); `require_session` treats a missing `auth_users` table as guest
+    (defensive, no 500 before lifespan); non-empty `username` validation; +coverage (authenticated
+    request through the gate, `/api/users` gated when protected, valid-tz/bad-cron field).
+    **Deferred (low risk for the 1–2-user localhost threat model, filed as follow-ups):** `/run`
+    check-then-insert TOCTOU; cookie `Secure` flag (HTTPS only); `run_job_func` outer-except
+    logging; last-user deletion silently reverting to guest mode.
 - **Dividend projection in dashboard payload (spec 05, Phase 2):** `DashboardData.dividend_projection`
   — annual declared-dividend cash flow `{year, by_currency: {<ccy>: {declared_gross, declared_net,
   events}}, basis: "declared_only"}`, computed by the pure `portfolio/dividends.py::project_dividends`
