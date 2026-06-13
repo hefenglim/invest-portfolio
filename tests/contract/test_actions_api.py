@@ -2,13 +2,32 @@ import sqlite3
 from datetime import date
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.data_ingestion.store import insert_transaction
+from portfolio_dash.pricing.registry import Registry
+from portfolio_dash.scheduler import jobs
 from portfolio_dash.shared.models.enums import Side
 
 
-def test_refresh_quotes_all_markets(api_client: TestClient) -> None:
+@pytest.fixture
+def _hermetic_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make refresh-quotes jobs network-free.
+
+    The ``api_client`` fixture calls ``enable_socket()`` (a Windows TestClient
+    self-pipe workaround) which re-enables ALL outbound sockets, so the real
+    ``default_registry()`` would let the refresh jobs hit live TWSE/yfinance
+    (spec 17.3 bans network in tests). Patch the factory the jobs module looks up
+    to return an empty ``Registry``: its provider chain is empty, so no provider —
+    and therefore no HTTP — is ever invoked. ``refresh_quotes`` still returns a
+    ``RefreshSummary`` (everything ``failed``) and ``run_job`` logs it, so the
+    endpoint contract (200 + ``jobs`` + ``run_ids``) is unchanged.
+    """
+    monkeypatch.setattr(jobs, "default_registry", lambda: Registry(providers={}, order={}))
+
+
+def test_refresh_quotes_all_markets(api_client: TestClient, _hermetic_registry: None) -> None:
     r = api_client.post("/api/actions/refresh-quotes", json={})
     assert r.status_code == 200
     b = r.json()
@@ -16,7 +35,7 @@ def test_refresh_quotes_all_markets(api_client: TestClient) -> None:
     assert len(b["run_ids"]) == 3 and all(isinstance(x, int) for x in b["run_ids"])
 
 
-def test_refresh_quotes_subset(api_client: TestClient) -> None:
+def test_refresh_quotes_subset(api_client: TestClient, _hermetic_registry: None) -> None:
     r = api_client.post("/api/actions/refresh-quotes", json={"markets": ["TW"]})
     assert r.status_code == 200
     assert r.json()["jobs"] == ["quotes_tw"] and len(r.json()["run_ids"]) == 1
