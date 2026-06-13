@@ -61,6 +61,19 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **Dividend projection in dashboard payload (spec 05, Phase 2):** `DashboardData.dividend_projection`
+  — annual declared-dividend cash flow `{year, by_currency: {<ccy>: {declared_gross, declared_net,
+  events}}, basis: "declared_only"}`, computed by the pure `portfolio/dividends.py::project_dividends`
+  over the ex-dividend calendar + valued holdings. Net applies each holding account's dividend model
+  via `apply_dividend_model` (drip_us → 30% US withholding; cash/cash_cost_reduction → net=gross).
+  **Per-currency, never summed across currencies.** v1 is `declared_only` (events with `ex_date.year ==
+  current year`); v2 `declared_plus_estimated` deferred. **Reconciliation:** the Moomoo-US per-dividend
+  platform fee mentioned in the spec is NOT encoded (no per-dividend fee config; probe-pending) — v1 net
+  applies withholding only.
+  - **Account model: `dividend_model` is now a first-class field** (`shared/models/assets.py` +
+    `list_accounts` SELECT). `project_dividends` reads it from the DB-sourced `accounts` param (single
+    source of truth; fail-loud KeyError on an unknown account_id), resolving the prior split where the
+    projection read config-as-code while `accounts.py` read the DB (senior-review finding).
 - **strategy/ module: alerts, what-if, rebalance (spec 03, Phase 2):** a new
   `portfolio_dash/strategy/` consumer layer (pure functions over computed outputs; writes
   no ledger) + five endpoints. **Alert engine** — `compute_alerts_from(data, rules, *,
