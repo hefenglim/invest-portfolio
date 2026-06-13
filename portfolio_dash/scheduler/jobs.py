@@ -211,6 +211,25 @@ def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
     return run_id
 
 
+def log_export_run(
+    conn: sqlite3.Connection, export_type: str, *, now: datetime, detail: str
+) -> int:
+    """Write a `job_runs` audit row for a completed export (spec 02 §3).
+
+    Exports are not registered jobs, so the row uses a namespaced ``job_id``
+    (``export:<type>``) rather than a ``kind`` column — spec 15.0 places ``kind`` on
+    ``schedule_config``, not ``job_runs``. ``started_at`` == ``finished_at`` (synchronous).
+    """
+    ts = now.isoformat()
+    cur = conn.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
+        "VALUES (?, ?, ?, 'ok', ?)",
+        (f"export:{export_type}", ts, ts, detail),
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
 def trigger_job(job_id: str) -> None:
     """Manual ad-hoc run of a job (used by the scheduler and a future manual-trigger route)."""
     with session() as conn:
