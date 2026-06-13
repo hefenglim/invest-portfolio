@@ -51,6 +51,14 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **Instruments API (spec 10, Phase 1):** `GET /api/instruments` (list + held flag + latest
+  price + `chg_pct` + target_low; TW board serialized `null` until confirmed),
+  `POST /api/instruments/probe` (TW board probe via `probe_tw_board`),
+  `POST/PUT /api/instruments` (register/update through `register_instrument`, with
+  `duplicate_symbol` 409 / `validation_error` 400 / `not_found` 404 envelopes). Schema/model:
+  `instruments += target_low/board_status/is_etf` (idempotent migration); `target_low`/`is_etf`
+  on the `Instrument` model, `board_status` a registration-only column set by
+  `register_instrument`; `is_etf` is the single source of truth for ETF (no `sector=="ETF"`).
 - `shared/` foundation layer: `Currency`/`Market` enums; `Decimal` money primitives
   (canonical TEXT persistence via `to_db`/`from_db`, per-currency `quantize_amount`
   with ROUND_HALF_UP, float + non-finite guards); single pure `fx.convert` helper
