@@ -92,6 +92,20 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   (Sync 200 instead of the spec's 202-background — the `GET /api/scheduler/runs` poll endpoint is
   spec 15, not yet built; `run_job` swallows provider errors so a failed fetch is a logged run, not a
   500. Revisit when spec 15 lands.) **Phase-1 core data flow (specs 08 / 10 / 11 / 12) backend complete.**
+- **Settings batch — accounts/fees + datasources + LLM settings (specs 13 / 14 / 16, Phase 2; built as
+  3 parallel worktree-isolated sub-projects):**
+  - **spec 13:** `GET /api/accounts` (read-only) — accounts + dividend model + fee-rule serialization
+    (reusing `api/wire.py`); `version.seeded_at` is `null` (accounts aren't recorded in `settings_meta`).
+  - **spec 14:** data-source management — new `pricing/datasources_store.py` (config_store tables
+    `data_sources` / `data_source_health` / `data_source_fallbacks`); `GET /api/datasources`,
+    `PUT …/{id}/key`, `POST …/{id}/test`, `PUT …/fallbacks`; API keys write-only (masked
+    `prefix•••suffix`); `FinMindProvider` reads its token from the DB via an injected getter
+    (env/ctor fallback retained).
+  - **spec 16:** `GET /api/llm/config` + model CRUD (`POST/PUT/DELETE /api/llm/models/{alias}`,
+    api_key write-only, `model_in_use` 422) + `PUT /api/llm/roles` + quota topup/threshold + model
+    connection-test; `LLMRole += MASTER / MASTER_FALLBACK` (spec 04 overlay); usage aggregation reads
+    (`shared/llm_usage_reads.py`: by-model / by-agent / 30-day daily series).
+  - Routers mounted in `api/app.py`; `golden_db` seeds the data_sources tables.
 - `shared/` foundation layer: `Currency`/`Market` enums; `Decimal` money primitives
   (canonical TEXT persistence via `to_db`/`from_db`, per-currency `quantize_amount`
   with ROUND_HALF_UP, float + non-finite guards); single pure `fx.convert` helper
