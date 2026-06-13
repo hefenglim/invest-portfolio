@@ -1,15 +1,20 @@
 """Input center API (spec 12): read context + manual/CSV/AI write paths (12a: context+manual)."""
 
 import sqlite3
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn
-from portfolio_dash.api.wire import div_model_wire, fee_rules_wire
-from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
+from portfolio_dash.api.wire import div_model_wire, fee_rules_wire, issue_wire, parse_side
+from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.manual import enter_transaction
 from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.data_ingestion.validate import TxnInput
 
 router = APIRouter()
 
@@ -58,4 +63,65 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         "fee_rules": fee_rules,
         "instruments": instruments,
         "holdings": holdings,
+    }
+
+
+class ManualBody(BaseModel):
+    account_id: str
+    symbol: str
+    side: str
+    date: date
+    shares: Decimal
+    price: Decimal
+    fee_override: Decimal | None = None
+    tax_override: Decimal | None = None
+    note: str | None = None
+    ack_oversell: bool = False  # used by commit (Task 3)
+
+
+def _txn_input(body: ManualBody) -> TxnInput:
+    return TxnInput(
+        account_id=body.account_id, symbol=body.symbol, side=parse_side(body.side),
+        quantity=body.shares, price=body.price, trade_date=body.date,
+        fee=body.fee_override, tax=body.tax_override, note=body.note,
+    )
+
+
+def _rule_for(conn: sqlite3.Connection, account_id: str) -> FeeRuleSet | None:
+    row = conn.execute(
+        "SELECT fee_rule_set FROM accounts WHERE account_id=?", (account_id,)
+    ).fetchone()
+    return get_fee_rule_set(row["fee_rule_set"]) if row is not None else None
+
+
+def _money_str(value: Decimal) -> str:
+    """Plain (non-scientific) string with trailing fractional zeros trimmed.
+
+    Presentation only — drops the scale artifact from ``shares * price``
+    (e.g. ``Decimal('612500.0')`` -> ``'612500'``) without altering the value.
+    """
+    if value == value.to_integral_value():
+        return str(value.quantize(Decimal(1)))
+    return str(value.normalize())
+
+
+@router.post("/input/manual/preview")
+def manual_preview(
+    body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    draft = enter_transaction(conn, _txn_input(body), confirm=False)
+    gross = body.shares * body.price
+    total = (
+        -(gross + draft.fee + draft.tax)
+        if draft.inp.side.value == "BUY"
+        else (gross - draft.fee - draft.tax)
+    )
+    rule = _rule_for(conn, body.account_id)
+    return {
+        "fee": str(draft.fee), "tax": str(draft.tax), "gross": _money_str(gross),
+        "total": _money_str(total),
+        "fee_rule_label": fee_rules_wire(rule)["label"] if rule is not None else None,
+        "fee_overridden": body.fee_override is not None,
+        "tax_overridden": body.tax_override is not None,
+        "issues": [issue_wire(i) for i in draft.issues],
     }
