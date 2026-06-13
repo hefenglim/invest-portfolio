@@ -5,16 +5,26 @@ Thin over data_ingestion.store + pricing.store reads. Computes nothing of record
 
 import sqlite3
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
+from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.holdings import current_shares
-from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.data_ingestion.register import register_instrument
+from portfolio_dash.data_ingestion.store import (
+    get_instrument,
+    list_accounts,
+    list_instruments,
+    upsert_instrument,
+)
 from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 
 router = APIRouter()
@@ -78,3 +88,74 @@ def probe(body: ProbeBody) -> dict[str, Any]:
     board = probe_tw_board(sym)
     return {"symbol": sym, "name": None, "board": board,
             "board_label": _BOARD_LABEL.get(board or "", "未解析")}
+
+
+_DEFAULT_CCY = {Market.TW: Currency.TWD, Market.US: Currency.USD, Market.MY: Currency.MYR}
+_TW_BOARDS = {"TWSE", "TPEx"}
+
+
+class RegisterBody(BaseModel):
+    symbol: str
+    market: Market
+    name: str = ""
+    sector: str = ""
+    board: str | None = None
+    quote_ccy: Currency | None = None
+    target_low: Decimal | None = None
+    is_etf: bool = False
+
+
+class UpdateBody(BaseModel):
+    name: str | None = None
+    sector: str | None = None
+    board: str | None = None
+    target_low: Decimal | None = None
+    is_etf: bool | None = None
+
+
+@router.post("/instruments", status_code=201)
+def register(
+    body: RegisterBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    if get_instrument(conn, body.symbol) is not None:
+        return JSONResponse(status_code=409,
+                            content=error_body("duplicate_symbol", f"{body.symbol} 已註冊"))
+    if body.market in (Market.US, Market.MY) and (body.board or "") in _TW_BOARDS:
+        return JSONResponse(status_code=400,
+                            content=error_body("validation_error", "US/MY 不可帶台股板別",
+                                               field="board"))
+    ccy = body.quote_ccy or _DEFAULT_CCY[body.market]
+    inst = Instrument(symbol=body.symbol, market=body.market, quote_ccy=ccy,
+                      sector=body.sector, name=body.name, board=body.board or "",
+                      target_low=body.target_low, is_etf=body.is_etf)
+    register_instrument(conn, inst, prober=probe_tw_board, confirm=True)
+    saved = get_instrument(conn, body.symbol)
+    assert saved is not None
+    account_ids = [a.account_id for a in list_accounts(conn)]
+    return _element(conn, saved, account_ids, now)
+
+
+@router.put("/instruments/{symbol}")
+def update(
+    symbol: str,
+    body: UpdateBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    existing = get_instrument(conn, symbol)
+    if existing is None:
+        return JSONResponse(status_code=404,
+                            content=error_body("not_found", f"{symbol} 不存在"))
+    if existing.market in (Market.US, Market.MY) and (body.board or "") in _TW_BOARDS:
+        return JSONResponse(status_code=400,
+                            content=error_body("validation_error", "US/MY 不可帶台股板別",
+                                               field="board"))
+    fields = body.model_dump(exclude_none=True)
+    updated = existing.model_copy(update=fields)
+    upsert_instrument(conn, updated)
+    saved = get_instrument(conn, symbol)
+    assert saved is not None
+    account_ids = [a.account_id for a in list_accounts(conn)]
+    return _element(conn, saved, account_ids, now)

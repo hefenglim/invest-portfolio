@@ -38,3 +38,34 @@ def test_probe_unresolved(api_client: TestClient, monkeypatch: pytest.MonkeyPatc
 def test_probe_blank_symbol_400(api_client: TestClient) -> None:
     r = api_client.post("/api/instruments/probe", json={"symbol": "  "})
     assert r.status_code == 400
+
+
+def test_register_new_instrument(api_client: TestClient) -> None:
+    r = api_client.post("/api/instruments", json={
+        "symbol": "6488", "market": "TW", "name": "環球晶", "sector": "Semis",
+        "board": "TPEx", "quote_ccy": "TWD", "target_low": "450"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["symbol"] == "6488" and body["board"] == "TPEx" and body["target_low"] == "450"
+
+
+def test_register_duplicate_409(api_client: TestClient) -> None:
+    r = api_client.post("/api/instruments", json={"symbol": "2330", "market": "TW",
+                                                  "name": "x", "sector": "y", "board": "TWSE"})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "duplicate_symbol"
+
+
+def test_register_us_with_tw_board_400(api_client: TestClient) -> None:
+    r = api_client.post("/api/instruments", json={"symbol": "TSLA", "market": "US",
+                                                  "name": "Tesla", "board": "TWSE"})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+
+
+def test_put_updates_target_low(api_client: TestClient) -> None:
+    r = api_client.put("/api/instruments/2330", json={"target_low": "550"})
+    assert r.status_code == 200 and r.json()["target_low"] == "550"
+
+
+def test_put_missing_404(api_client: TestClient) -> None:
+    r = api_client.put("/api/instruments/NOPE", json={"sector": "z"})
+    assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
