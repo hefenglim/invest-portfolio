@@ -14,6 +14,7 @@ from portfolio_dash.api.routers import (
     actions,
     dashboard,
     datasources,
+    export,
     health,
     input_center,
     instruments,
@@ -59,6 +60,7 @@ def create_app() -> FastAPI:
     app.include_router(datasources.router, prefix="/api")
     app.include_router(llm_settings.router, prefix="/api")
     app.include_router(symbol.router, prefix="/api")
+    app.include_router(export.router, prefix="/api")
     if _WEB_DIR.is_dir():
         app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app

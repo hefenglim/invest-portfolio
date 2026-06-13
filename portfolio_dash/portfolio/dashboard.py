@@ -66,7 +66,7 @@ _ONE = Decimal("1")
 _EPOCH = date(1900, 1, 1)
 
 
-class _RateResolver:
+class RateResolver:
     """Current-FX lookup: identity -> direct pair -> inverted pair -> KeyError.
 
     Records every requested pair (found or not) for the freshness report.
@@ -143,7 +143,7 @@ def build_dashboard(
     price_map = {sym: pr.value for sym, pr in price_reads.items() if pr is not None}
     valued = value_holdings(book.holdings, price_map)
 
-    resolver = _RateResolver(conn, now=now)
+    resolver = RateResolver(conn, now=now)
 
     # 3. Core summaries — each degrades to None on a missing current rate.
     returns: ReturnSummary | None
