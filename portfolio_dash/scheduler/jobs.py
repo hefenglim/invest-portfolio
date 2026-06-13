@@ -270,23 +270,27 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
 
     For the async ``/run`` endpoint: the request handler already inserted the running
     row via ``start_job_run``; this opens its OWN connection (the request conn is closed
-    by then) and finalizes it. Exceptions are swallowed and logged as ``status='error'``
-    so a failing job never crashes the worker thread.
+    by then) and finalizes it. This is a fire-and-forget daemon-thread target, so the
+    WHOLE body is exception-safe — any failure (job func, or even the surrounding DB
+    access) is swallowed so it never crashes the worker thread.
     """
-    with session() as conn:
-        rid = conn.execute(
-            "SELECT id FROM job_runs WHERE job_id=? AND finished_at IS NULL "
-            "ORDER BY id DESC LIMIT 1",
-            (job_id,),
-        ).fetchone()
-        if rid is None:
-            return
-        try:
-            detail = _jobs_by_id()[job_id].func(conn, now=now)
-            status = "ok"
-        except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
-            detail, status = str(exc), "error"
-        finish_job_run(conn, int(rid["id"]), status=status, detail=detail)
+    try:
+        with session() as conn:
+            rid = conn.execute(
+                "SELECT id FROM job_runs WHERE job_id=? AND finished_at IS NULL "
+                "ORDER BY id DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            if rid is None:
+                return
+            try:
+                detail = _jobs_by_id()[job_id].func(conn, now=now)
+                status = "ok"
+            except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
+                detail, status = str(exc), "error"
+            finish_job_run(conn, int(rid["id"]), status=status, detail=detail)
+    except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
+        return
 
 
 def log_export_run(

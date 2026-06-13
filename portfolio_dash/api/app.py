@@ -20,6 +20,7 @@ from portfolio_dash.api.routers import (
     instruments,
     ledgers,
     llm_settings,
+    scheduler,
     strategy,
     symbol,
 )
@@ -65,6 +66,7 @@ def create_app() -> FastAPI:
     app.include_router(strategy.router, prefix="/api")
     app.include_router(symbol.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
+    app.include_router(scheduler.router, prefix="/api")
     if _WEB_DIR.is_dir():
         app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app
