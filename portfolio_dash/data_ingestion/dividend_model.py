@@ -62,7 +62,7 @@ def apply_dividend_model(
             reinvest_shares=reinvest_shares,
             reinvest_price=None,
         )
-    # cash (TW / MY)
+    # cash (TW) or net (MY single-tier): recorded amount is net received, no withholding
     wh = withholding if withholding is not None else Decimal("0")
     n = net if net is not None else gross - wh
     return DividendAmounts(gross=gross, withholding=wh, net=n)
