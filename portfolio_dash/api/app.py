@@ -19,6 +19,7 @@ from portfolio_dash.api.routers import (
     instruments,
     ledgers,
     llm_settings,
+    symbol,
 )
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(accounts.router, prefix="/api")
     app.include_router(datasources.router, prefix="/api")
     app.include_router(llm_settings.router, prefix="/api")
+    app.include_router(symbol.router, prefix="/api")
     if _WEB_DIR.is_dir():
         app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app
