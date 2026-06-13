@@ -157,6 +157,17 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   flags).
 - `pricing/store.py` — `get_fx_on` (on-or-before point-in-time rate) and
   `get_fx_history` reads; `data_ingestion/store.py` — `list_accounts` read.
+- **Phase 0 — web API foundation (decision B):** `portfolio_dash/api/` FastAPI app
+  factory (lifespan boots DB + scheduler; serves static `web/` via StaticFiles; routers
+  under `/api/*`), the common error envelope (incl. LLM 402/409/503 mapping), the
+  Decimal→string wire serializer (`to_wire`), per-request `get_conn`/`get_now`/`get_reporting`
+  dependencies, and `GET /api/health` + `GET /api/dashboard` (serialized `build_dashboard` +
+  `spark_30d` + `llm_quota`). Spec-17 test harness: `golden_db` fixture (seeded via the real
+  write paths), injected clock (`GOLDEN_NOW`), `api_client`, `pytest-socket` network ban, and
+  a `Makefile` (`make all`). Fee engine (spec 18): `FeeRuleSet` gains `flat_fee` /
+  `stamp_duty_rate` / `stamp_duty_cap` and US/MY `min_fee`; MY stamp duty books to `tax`;
+  worked examples W1–W9; US/MY rates backfilled from the spec-18.0 truth table (pending
+  real-statement confirmation). `DividendType += NET` (MY single-tier).
 
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
