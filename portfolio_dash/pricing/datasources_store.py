@@ -23,6 +23,7 @@ from portfolio_dash.pricing.defaults import DEFAULT_PROVIDER_ORDER
 from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.masking import mask_secret
 
 CATEGORY = "data_sources"
 
@@ -295,7 +296,9 @@ def set_account_chains(
 
 
 def mask_token(api_key: str | None) -> str | None:
-    """Mask a key as ``prefix(3) + "•••" + suffix(3)``; None key -> None (spec 14.1)."""
-    if not api_key:
-        return None
-    return f"{api_key[:3]}•••{api_key[-3:]}"
+    """Mask a key for display (spec 14.1). Thin wrapper over the shared masker.
+
+    Delegates to ``shared.masking.mask_secret`` so masking is defined once (review
+    I-2): includes the short-key guard the old local implementation lacked.
+    """
+    return mask_secret(api_key)

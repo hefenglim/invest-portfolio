@@ -41,6 +41,7 @@ from portfolio_dash.shared.llm_usage_reads import (
     usage_by_model,
     usage_daily,
 )
+from portfolio_dash.shared.masking import mask_secret
 
 router = APIRouter()
 
@@ -61,15 +62,6 @@ _ROLE_PAIRS = (
 )
 
 
-def _mask_key(key: str | None) -> str | None:
-    """Mask an API key as ``prefix(3) + "•••" + suffix(3)``; ``None`` stays ``None``."""
-    if not key:
-        return None
-    if len(key) <= 6:
-        return "•••"
-    return f"{key[:3]}•••{key[-3:]}"
-
-
 def _model_wire(
     m: ModelConfig, health: dict[str, Any]
 ) -> dict[str, Any]:
@@ -80,7 +72,7 @@ def _model_wire(
         "provider": m.provider,
         "model_name": m.model_name,
         "api_base": m.api_base,
-        "api_key_masked": _mask_key(m.api_key),
+        "api_key_masked": mask_secret(m.api_key),
         "vision": m.vision,
         "price_in": str(m.input_price_per_mtok),
         "price_out": str(m.output_price_per_mtok),
