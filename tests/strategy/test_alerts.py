@@ -62,8 +62,8 @@ def test_disabled_rule_silent(golden_db) -> None:
 
 
 def test_compute_alerts_wrapper_uses_db(golden_db) -> None:
-    # golden DB has no topups -> budget_remaining 0; set a $1 threshold so 0 < 1 fires
-    # quota_low (default threshold is 0, which would not). single_weight fires regardless.
+    # golden DB has no topups -> budget_remaining 0; set $1 threshold explicitly (the
+    # default is now 1.00) so 0 < 1 fires quota_low. single_weight fires regardless.
     set_alert_threshold(golden_db, Decimal("1"))
     alerts = compute_alerts(golden_db, now=_NOW, reporting=Currency.TWD)
     ids = {a.id for a in alerts}

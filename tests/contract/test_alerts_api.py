@@ -18,6 +18,15 @@ def test_dashboard_embeds_same_alerts(api_client: TestClient) -> None:
     assert any(a["id"] == "single_weight:2330" for a in dash["alerts"])
 
 
+def test_alerts_single_source_dashboard_equals_endpoint(api_client: TestClient) -> None:
+    # Single source of truth: the dashboard-embedded alerts and GET /api/alerts must be
+    # byte-for-byte identical (same compute_alerts_from over the same rules/quota reads).
+    dash_alerts = api_client.get("/api/dashboard").json()["alerts"]
+    endpoint_alerts = api_client.get("/api/alerts").json()["alerts"]
+    assert sorted(dash_alerts, key=lambda a: a["id"]) == \
+        sorted(endpoint_alerts, key=lambda a: a["id"])
+
+
 def test_put_alert_rules_returns_recomputed_alerts(api_client: TestClient) -> None:
     r = api_client.put("/api/alert-rules",
                        json={"rules": [{"id": "single_weight", "enabled": False, "value": "0.30"}]})

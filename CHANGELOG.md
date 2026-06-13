@@ -61,6 +61,31 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **strategy/ module: alerts, what-if, rebalance (spec 03, Phase 2):** a new
+  `portfolio_dash/strategy/` consumer layer (pure functions over computed outputs; writes
+  no ledger) + five endpoints. **Alert engine** — `compute_alerts_from(data, rules, *,
+  quota_remaining, quota_threshold)` is the single source for both the dashboard payload's
+  embedded `alerts` and `GET /api/alerts` (the dashboard path reuses its already-built
+  `DashboardData`, no second build); six v1 rules (single_weight, sector_weight, stale_price,
+  missing_price, fx_drift, exdiv_upcoming, quota_low — `quota_low` escalates warn→risk at
+  remaining 0). `GET/PUT /api/alert-rules` — editable thresholds in a single-row JSON config
+  (`alert_rules_config`), Decimal-as-string, bounds-validated (out-of-bounds → 400). **what-if**
+  `POST /api/whatif` — buy/sell trade sim reusing the real `compute_fees` (compute, no write);
+  `account_id` defaults to the most-shares account and is echoed; `oversell=true` still returns
+  full numbers. **rebalance** `POST /api/rebalance/preview` — target-weight trades with integer
+  shares (MY market rounds to 100-unit board lots), per-row fee/tax + `new_weight`, and a summary
+  (turnover/fees in reporting ccy, cash_after, excluded). Missing-price symbols are excluded and
+  missing FX leaves `new_weight` null — never fabricated.
+  - **Reconciliations (recorded):** (R1) `calib_gap` / `calibration_regression` rules DEFERRED
+    to spec 04 (their AI-calibration data source does not exist yet) — absent, not stubbed with
+    fake data; (R2) `quota_low` threshold is sourced from spec-16's `llm_config.get_alert_threshold`
+    (single source of truth), NOT stored in alert-rules; (R3) alerts single-sourced via
+    `compute_alerts_from`; (R4) rebalance v1 acts only on symbols present in `targets` (held
+    symbols absent from `targets` are left untouched).
+- **Fixed — quota alert threshold default (spec-03 §3.1 SR):** `llm_config._DEFAULT_THRESHOLD`
+  changed `0 → 1.00` so `quota_low` fires when remaining < 1.00 until the user sets their own
+  threshold, matching the SR ("預設值 1.00"). Spec 16's contract is unaffected (it asserts the
+  key's presence, not the default value).
 - **Export endpoints (spec 02, Phase 2):** a new consumer-layer module `portfolio_dash/export/`
   + `POST /api/export/{holdings,ledgers,llm-usage,job-runs,tax-package}`. All output is
   reconciliation-grade: **raw `Decimal` strings** (no rounding/thousands separators), **UTF-8
