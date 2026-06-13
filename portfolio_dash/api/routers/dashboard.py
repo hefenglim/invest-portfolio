@@ -16,7 +16,9 @@ from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.llm_config import budget_remaining
+from portfolio_dash.shared.llm_config import budget_remaining, get_alert_threshold
+from portfolio_dash.strategy.alerts import compute_alerts_from
+from portfolio_dash.strategy.rules_config import get_alert_rules
 
 router = APIRouter()
 
@@ -42,4 +44,13 @@ def dashboard(
 
     # Single source of truth (Σ top-ups − Σ usage); never None, $0 when nothing funded.
     payload["llm_quota"] = {"remaining_usd": str(budget_remaining(conn))}
+
+    # alerts: the SAME rule engine as GET /api/alerts, run over the already-built `data`
+    # (no second build_dashboard) so the embedded array can never diverge from the endpoint.
+    alerts = compute_alerts_from(
+        data, get_alert_rules(conn),
+        quota_remaining=budget_remaining(conn),
+        quota_threshold=get_alert_threshold(conn),
+    )
+    payload["alerts"] = to_wire([a.model_dump() for a in alerts])
     return payload

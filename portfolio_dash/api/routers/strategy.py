@@ -2,6 +2,7 @@
 rebalance (later tasks). Thin: reads/writes config + calls the strategy core."""
 
 import sqlite3
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -9,8 +10,11 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from portfolio_dash.api.deps import get_conn
+from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.api.serialize import to_wire
+from portfolio_dash.shared.enums import Currency
+from portfolio_dash.strategy.alerts import compute_alerts
 from portfolio_dash.strategy.rules_config import (
     RULE_IDS,
     RULE_META,
@@ -39,6 +43,14 @@ def get_rules(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     return {"rules": _rules_wire(get_alert_rules(conn))}
 
 
+@router.get("/alerts")
+def get_alerts(conn: sqlite3.Connection = Depends(get_conn),
+               now: datetime = Depends(get_now),
+               reporting: Currency = Depends(get_reporting)) -> dict[str, Any]:
+    alerts = compute_alerts(conn, now=now, reporting=reporting)
+    return {"as_of": now.isoformat(), "alerts": to_wire([a.model_dump() for a in alerts])}
+
+
 class RuleInput(BaseModel):
     id: str
     enabled: bool
@@ -51,7 +63,9 @@ class AlertRulesBody(BaseModel):
 
 @router.put("/alert-rules")
 def put_rules(body: AlertRulesBody,
-              conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+              conn: sqlite3.Connection = Depends(get_conn),
+              now: datetime = Depends(get_now),
+              reporting: Currency = Depends(get_reporting)) -> Any:
     current = get_alert_rules(conn)
     for item in body.rules:
         if item.id not in RULE_META:
@@ -77,4 +91,6 @@ def put_rules(body: AlertRulesBody,
         if _dv is not None:
             rule.value = value
     set_alert_rules(conn, current)
-    return {"rules": _rules_wire(current)}
+    alerts = compute_alerts(conn, now=now, reporting=reporting)
+    return {"rules": _rules_wire(current),
+            "alerts": to_wire([a.model_dump() for a in alerts])}
