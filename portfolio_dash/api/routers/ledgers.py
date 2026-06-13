@@ -16,7 +16,9 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
     list_dividends,
+    list_fx_conversions,
     list_instruments,
+    list_opening,
     list_transactions,
 )
 
@@ -104,3 +106,52 @@ def dividends(
             "ccy": ccys.get(d.symbol, ""),
         })
     return _page(out, limit, offset)
+
+
+@router.get("/ledgers/fx")
+def fx(
+    account_id: str | None = None,
+    frm: str | None = Query(None, alias="from"), to: str | None = None,
+    limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    bad = _check_dates(frm, to)
+    if bad is not None:
+        return bad
+    accts, _names_map, _ccys = _names(conn)
+    out: list[dict[str, Any]] = []
+    for c in list_fx_conversions(conn, account_id=account_id):
+        if not _in_range(c.date, frm, to):
+            continue
+        out.append({
+            "id": c.id, "date": c.date.isoformat(), "account_id": c.account_id,
+            "account": accts.get(c.account_id, c.account_id),
+            "from_ccy": c.from_ccy.value, "from_amt": str(c.from_amount),
+            "to_ccy": c.to_ccy.value, "to_amt": str(c.to_amount),
+            "implied_rate": str(c.implied_rate),
+        })
+    return _page(out, limit, offset)
+
+
+@router.get("/ledgers/openings")
+def openings(
+    account_id: str | None = None, symbol: str | None = None,
+    limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    accts, names, ccys = _names(conn)
+    out: list[dict[str, Any]] = []
+    for o in list_opening(conn, account_id=account_id):
+        if symbol is not None and o.symbol != symbol:
+            continue
+        out.append({
+            "date": o.build_date.isoformat(), "account_id": o.account_id,
+            "account": accts.get(o.account_id, o.account_id), "symbol": o.symbol,
+            "name": names.get(o.symbol, ""), "shares": str(o.shares),
+            "avg": str(o.original_avg_cost), "total": str(o.original_cost_total),
+            "ccy": ccys.get(o.symbol, ""),
+        })
+    paged = _page(out, limit, offset)
+    for i, row in enumerate(paged["rows"], start=1):
+        row["id"] = i  # openings has no DB id; synthetic 1-based display key
+    return paged

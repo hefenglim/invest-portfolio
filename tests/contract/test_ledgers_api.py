@@ -36,3 +36,17 @@ def test_dividends_lowercase_type(api_client: TestClient) -> None:
     d = body["rows"][0]
     assert d["type"] == "cash" and d["symbol"] == "2330"
     assert d["net"] == "5000" and d["account"] == "TW Broker" and d["ccy"] == "TWD"
+
+
+def test_fx_rows(api_client: TestClient) -> None:
+    body = api_client.get("/api/ledgers/fx").json()
+    assert body["total_count"] == 1
+    fx = body["rows"][0]
+    assert fx["from_ccy"] == "TWD" and fx["from_amt"] == "32000"
+    assert fx["to_ccy"] == "USD" and fx["to_amt"] == "1000"
+    assert fx["implied_rate"] == "32" and fx["account"] == "Charles Schwab"
+
+
+def test_openings_empty_and_shape(api_client: TestClient) -> None:
+    body = api_client.get("/api/ledgers/openings").json()
+    assert body["total_count"] == 0 and body["rows"] == []
