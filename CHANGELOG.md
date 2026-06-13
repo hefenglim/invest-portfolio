@@ -61,6 +61,39 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **Data-variable & prompt-rendering foundation (spec 06a, Phase 4 — the AI brain's base):**
+  the prompt "Lego-block" layer that specs 04/07 build on. New module `portfolio_dash/llm_insight/`
+  (`variables.py` = a **26-variable / 8-category registry** mirroring `web/vars.js` + `render_prompt`
+  + `validate_tokens` — the SINGLE reusable validation core that spec 04 §4.9 R1 runtime gating and
+  spec 07 §7.2 preflight will also call; `system_prompt.py` = one editable global system prompt via
+  `config_store`, default seeded). New `portfolio_dash/portfolio/technicals.py` (pure Decimal: MA
+  20/60/120 + deviation, sample-stdev annualized volatility via `Decimal.sqrt`, max drawdown,
+  price-vs-cost) — the **LLM emits no numbers of record**, so every numeric variable value is
+  computed by the calc core and only ASSEMBLED into JSON here. Endpoints (`api/routers/prompts.py`):
+  `GET /api/prompt-vars`, `GET/PUT /api/system-prompt`, `POST /api/prompts/preview` (diagnostic —
+  ALWAYS 200, lists `unknown_tokens`/`scope_violations`, REAL computed values, **never calls the
+  LLM**, `est_tokens` heuristic), `POST /api/prompts/test` (execution path — **422** on unknown
+  token or a `per_symbol` var in a `portfolio`-scope body = R1; else real LiteLLM via a new
+  `shared/llm.complete_text`, records `llm_usage` agent=`prompt_test`, budget exhausted → 402,
+  returns `quota_remaining`). Money/price/rate are Decimal **strings**.
+  - **Availability:** position+price+dividend+fx+system (17 vars) are live now; chips+sentiment
+    (7) are `available=false` until spec 06b external ingest; backtest/calibration (2) until spec 04
+    (`web/vars.js` mislabels the `ai` category `ready` — corrected to `false`). Unavailable vars
+    render `{"unavailable": true}`. (Reconciliation: the spec prose says "24" variables; its own
+    table and `web/vars.js` enumerate **26** — the authoritative count.)
+  - **Senior-review (Opus, APPROVE-WITH-NITS) fixes folded in before merge:** `fx_rates_json` now
+    emits the real spot rate (was as_of/stale only — `freshness.fx` carries no rate; the router
+    resolves it via `get_fx`); `dividends_json` is the per-event ledger list with currency (was a
+    yearly summary, contradicting its contract); `price_vs_cost` returns each ratio independently so
+    a non-positive `adjusted_avg` (high-yield payback, allowed by `domain-ledger.md`) no longer
+    drops the valid original ratio; `to_wire` now transforms Mapping keys (defensive); +coverage
+    (all available tokens render valid JSON, fx rate present, per-event dividends). Conn-bearing
+    reads (FX rates, dividend rows) are resolved in the api router and fed into `VarContext` —
+    `llm_insight` imports only `portfolio`/`shared`/`api.serialize` (one-way deps intact).
+  - **Deferred to spec 06b** (intentional split): `external_snapshots` table + 5 ingest jobs
+    (FinMind chips/fundamentals/valuation, VIX/Fear&Greed, indices) + derivations + flipping
+    chips/sentiment vars to available. **Global system-prompt CRUD lands here** (neither spec 06
+    nor 04 assigned the endpoint; it is foundational to rendering).
 - **Scheduler management API (spec 15, Phase 3):** `portfolio_dash/api/routers/scheduler.py` over the
   existing in-process scheduler. `GET /api/scheduler/jobs` (config + latest run + next fire),
   `PUT /api/scheduler/jobs/{id}` (cron/tz/enabled subset-merge with live reschedule), `POST
