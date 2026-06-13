@@ -63,6 +63,10 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency-injection markers are intentional calls in argument defaults (B008).
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --disable-socket --allow-unix-socket"

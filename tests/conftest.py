@@ -88,7 +88,11 @@ def _seed_golden(conn: sqlite3.Connection) -> None:
 
 @pytest.fixture
 def golden_db() -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(":memory:")
+    # check_same_thread=False: TestClient drives the ASGI app through an anyio portal
+    # worker thread, so a route reading this connection runs off the fixture's thread.
+    # Requests are serialized through the single portal (no true concurrency), so the
+    # shared in-memory connection is safe to use across threads here.
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     bootstrap_db(conn)
     create_pricing_tables(conn)
