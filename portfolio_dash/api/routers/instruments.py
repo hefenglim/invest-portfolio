@@ -7,11 +7,13 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared.models.assets import Instrument
 
@@ -58,3 +60,21 @@ def list_all(
     account_ids = [a.account_id for a in list_accounts(conn)]
     items = [_element(conn, inst, account_ids, now) for inst in list_instruments(conn)]
     return {"as_of": now.isoformat(), "list": items}
+
+
+_BOARD_LABEL = {"TWSE": "TWSE 上市", "TPEx": "TPEx 上櫃"}
+
+
+class ProbeBody(BaseModel):
+    symbol: str
+
+
+@router.post("/instruments/probe")
+def probe(body: ProbeBody) -> dict[str, Any]:
+    """Registration step 1: guess the TW board for a symbol (user confirms next)."""
+    sym = body.symbol.strip()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol 不可為空")
+    board = probe_tw_board(sym)
+    return {"symbol": sym, "name": None, "board": board,
+            "board_label": _BOARD_LABEL.get(board or "", "未解析")}
