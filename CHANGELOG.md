@@ -82,8 +82,16 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   `llm_unavailable`→503). `ai_agents_input` now returns `AiInputResult{preview, meta, csv_text}`
   (meta from the `llm_usage` row; `completer` default resolved at call time). Also fixed
   `build_transaction_preview` to catch `decimal.InvalidOperation` (a malformed number now yields a
-  `parse_error` row instead of crashing — matching its siblings + docstring). Completes the Phase-1
-  core data flow (specs 10 / 11 / 12).
+  `parse_error` row instead of crashing — matching its siblings + docstring). Senior review added a
+  soft `fuzzy_resolved` (ack-gated) issue so a fuzzy symbol match surfaces + writes the resolved
+  symbol (no silent phantom-symbol writes), in both `txn_preview_row` and `enter_transaction`.
+- **Top-bar actions (spec 08 §8.2–8.3, Phase 1 close-out):** `POST /api/actions/refresh-quotes`
+  (triggers the per-market `quotes_*` jobs synchronously, returns their `job_runs` ids; unknown
+  market → 400) and `POST /api/actions/recompute` (re-runs `build_book` over the ledgers to validate
+  consistency, `OversellError` → 422; append-only, writes nothing). `run_job` now returns its run id.
+  (Sync 200 instead of the spec's 202-background — the `GET /api/scheduler/runs` poll endpoint is
+  spec 15, not yet built; `run_job` swallows provider errors so a failed fetch is a logged run, not a
+  500. Revisit when spec 15 lands.) **Phase-1 core data flow (specs 08 / 10 / 11 / 12) backend complete.**
 - `shared/` foundation layer: `Currency`/`Market` enums; `Decimal` money primitives
   (canonical TEXT persistence via `to_db`/`from_db`, per-currency `quantize_amount`
   with ROUND_HALF_UP, float + non-finite guards); single pure `fx.convert` helper
