@@ -15,8 +15,8 @@ from portfolio_dash.shared.llm_config import (
     LLMRole,
     LLMUnavailable,
     ModelConfig,
+    add_topup,
     ensure_llm_seeded,
-    reset_budget,
     set_role,
     upsert_model,
 )
@@ -64,6 +64,9 @@ def conn() -> Iterator[sqlite3.Connection]:
     ensure_llm_seeded(c)
     upsert_model(c, _model("a"))
     set_role(c, LLMRole.DEFAULT, "a")
+    # Unified budget model: no top-up = remaining 0 = blocked. The happy-path tests
+    # exercise the LLM flow, not the budget gate, so fund the budget generously here.
+    add_topup(c, Decimal("100"))
     yield c
     c.close()
 
@@ -95,10 +98,10 @@ def test_not_activated_when_no_role(
 def test_budget_gate_blocks(
     monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
 ) -> None:
-    reset_budget(conn, Decimal("0.000001"))
+    # Fixture topped up $100; log usage past it so cumulative remaining <= 0 -> blocked.
     conn.execute(
         "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost) "
-        "VALUES ('2999-01-01T00:00:00+00:00', 'm', 'a', 1, 1, '1')"
+        "VALUES ('2999-01-01T00:00:00+00:00', 'm', 'a', 1, 1, '100')"
     )
     conn.commit()
     monkeypatch.setattr(llm_mod.litellm, "completion", lambda **kw: _Resp('{"x": 1}'))

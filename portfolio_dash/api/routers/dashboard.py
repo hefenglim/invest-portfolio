@@ -40,6 +40,6 @@ def dashboard(
         history = get_price_history(conn, row["symbol"], start, end)
         row["spark_30d"] = [str(p.value) for p in history]
 
-    remaining = budget_remaining(conn)
-    payload["llm_quota"] = {"remaining_usd": None if remaining is None else str(remaining)}
+    # Single source of truth (Σ top-ups − Σ usage); never None, $0 when nothing funded.
+    payload["llm_quota"] = {"remaining_usd": str(budget_remaining(conn))}
     return payload

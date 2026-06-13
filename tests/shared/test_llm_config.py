@@ -11,6 +11,7 @@ from portfolio_dash.shared.llm_config import (
     LLMBudgetExceeded,
     LLMRole,
     ModelConfig,
+    add_topup,
     budget_remaining,
     check_budget,
     create_llm_tables,
@@ -20,7 +21,7 @@ from portfolio_dash.shared.llm_config import (
     get_role_model_id,
     list_models,
     litellm_model_string,
-    reset_budget,
+    quota_remaining,
     restore_llm_defaults,
     select_models,
     set_role,
@@ -158,47 +159,55 @@ def _spend(conn: sqlite3.Connection, ts: str, cost: str) -> None:
     conn.commit()
 
 
-def test_no_events_means_no_cap(conn: sqlite3.Connection) -> None:
+def test_fresh_db_zero_remaining_blocks(conn: sqlite3.Connection) -> None:
+    # Unified model: no top-up -> Σtopups − Σusage = 0; 0 <= 0 -> blocked.
     ensure_llm_seeded(conn)
-    assert budget_remaining(conn) is None
-    check_budget(conn)  # never blocks when unset
+    assert budget_remaining(conn) == Decimal("0")
+    with pytest.raises(LLMBudgetExceeded):
+        check_budget(conn)  # $0 topped up must block, even with models configured
 
 
-def test_remaining_is_amount_minus_spend_since_reset(conn: sqlite3.Connection) -> None:
+def test_topup_is_cumulative_and_subtracts_usage(conn: sqlite3.Connection) -> None:
     ensure_llm_seeded(conn)
-    reset_budget(conn, Decimal("50"), note="2026-06-09T00:00:00+00:00")
-    # backdate a row before the reset (excluded) and after (included)
-    _spend(conn, "2025-01-01T00:00:00+00:00", "5")   # before -> ignored
-    _spend(conn, "2999-01-01T00:00:00+00:00", "10")  # after  -> counted
-    rem = budget_remaining(conn)
-    assert rem is not None and rem == Decimal("40")
-
-
-def test_latest_reset_wins(conn: sqlite3.Connection) -> None:
-    ensure_llm_seeded(conn)
-    # Two resets at explicit, distinct times; a spend falls inside the first period.
-    conn.execute(
-        "INSERT INTO llm_budget_events (ts, amount_usd, note) "
-        "VALUES ('2026-01-01T00:00:00+00:00', '50', NULL)"
-    )
-    _spend(conn, "2026-06-01T00:00:00+00:00", "60")  # in period 1 -> drives it negative
-    rem1 = budget_remaining(conn)
-    assert rem1 is not None and rem1 < 0
-    conn.execute(
-        "INSERT INTO llm_budget_events (ts, amount_usd, note) "
-        "VALUES ('2026-12-01T00:00:00+00:00', '100', NULL)"
-    )
-    conn.commit()
-    rem2 = budget_remaining(conn)
-    assert rem2 is not None and rem2 == Decimal("100")  # spend predates the new reset
-
-
-def test_check_budget_blocks_when_negative(conn: sqlite3.Connection) -> None:
-    ensure_llm_seeded(conn)
-    reset_budget(conn, Decimal("1"))
-    _spend(conn, "2999-01-01T00:00:00+00:00", "2")
+    add_topup(conn, Decimal("10"))
+    assert budget_remaining(conn) == Decimal("10")
+    _spend(conn, "2026-06-13T00:00:00+00:00", "4")
+    assert budget_remaining(conn) == Decimal("6")
+    # A second top-up ADDS (proves cumulative, not a reset): 10 + 5 - 4 = 11.
+    add_topup(conn, Decimal("5"))
+    assert budget_remaining(conn) == Decimal("11")
+    # Drive total usage to $15 (4 + 11) against $15 topped up -> remaining 0 -> blocked.
+    _spend(conn, "2026-06-13T01:00:00+00:00", "11")
+    assert budget_remaining(conn) == Decimal("0")
     with pytest.raises(LLMBudgetExceeded):
         check_budget(conn)
+
+
+def test_check_budget_allows_when_positive(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    add_topup(conn, Decimal("10"))
+    _spend(conn, "2026-06-13T00:00:00+00:00", "3")
+    check_budget(conn)  # remaining 7 > 0 -> no block
+
+
+def test_check_budget_blocks_when_exhausted(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    add_topup(conn, Decimal("1"))
+    _spend(conn, "2026-06-13T00:00:00+00:00", "2")  # remaining -1 <= 0
+    with pytest.raises(LLMBudgetExceeded):
+        check_budget(conn)
+
+
+def test_quota_remaining_equals_budget_remaining(conn: sqlite3.Connection) -> None:
+    # Single source of truth: the two functions agree at every step.
+    ensure_llm_seeded(conn)
+    assert quota_remaining(conn) == budget_remaining(conn)  # both 0 on fresh DB
+    add_topup(conn, Decimal("10"))
+    assert quota_remaining(conn) == budget_remaining(conn) == Decimal("10")
+    _spend(conn, "2026-06-13T00:00:00+00:00", "4")
+    assert quota_remaining(conn) == budget_remaining(conn) == Decimal("6")
+    add_topup(conn, Decimal("5"))
+    assert quota_remaining(conn) == budget_remaining(conn) == Decimal("11")
 
 
 def test_litellm_model_string_by_provider() -> None:

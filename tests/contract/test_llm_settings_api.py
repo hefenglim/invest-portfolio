@@ -23,7 +23,7 @@ from portfolio_dash.shared import llm
 from portfolio_dash.shared.llm_config import (
     LLMRole,
     ModelConfig,
-    reset_budget,
+    add_topup,
     set_role,
     upsert_model,
 )
@@ -55,7 +55,7 @@ def conn() -> Iterator[sqlite3.Connection]:
     c.row_factory = sqlite3.Row
     bootstrap_db(c)  # creates ledger + LLM tables, AI-off
     _seed_model(c)
-    reset_budget(c, Decimal("10.00"), note="seed top-up")
+    add_topup(c, Decimal("10.00"), note="seed top-up")
     set_role(c, LLMRole.DEFAULT, "claude-sonnet")
     # one usage row so by_model / by_agent / daily / health have content
     llm.log_usage(

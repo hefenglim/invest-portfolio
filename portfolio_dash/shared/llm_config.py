@@ -235,39 +235,30 @@ def select_models(conn: sqlite3.Connection, *, vision: bool) -> list[ModelConfig
     return chain
 
 
-def reset_budget(
-    conn: sqlite3.Connection, amount_usd: Decimal, note: str | None = None
-) -> None:
-    """Append a budget reset/recharge event (a fresh start line). History untouched."""
-    conn.execute(
-        "INSERT INTO llm_budget_events (ts, amount_usd, note) VALUES (?, ?, ?)",
-        (datetime.now(UTC).isoformat(), str(amount_usd), note),
-    )
-    conn.commit()
+def budget_remaining(conn: sqlite3.Connection) -> Decimal:
+    """Remaining USD = Σ(all top-up amounts) − Σ(all usage cost). The single source
+    of truth for the gate, the settings page, and the dashboard chip.
 
-
-def budget_remaining(conn: sqlite3.Connection) -> Decimal | None:
-    """Remaining USD = latest reset amount − Σ usage cost dated at/after that reset.
-
-    Returns ``None`` when no reset has ever been set (no cap; calls allowed).
+    Cumulative and never ``None``: a fresh DB with no top-ups has remaining ``0``.
+    There is no "reset" concept — every budget event is a positive top-up that adds.
     """
-    latest = conn.execute(
-        "SELECT ts, amount_usd FROM llm_budget_events ORDER BY ts DESC, id DESC LIMIT 1"
-    ).fetchone()
-    if latest is None:
-        return None
-    spent = Decimal("0")
-    for row in conn.execute(
-        "SELECT cost FROM llm_usage WHERE ts >= ?", (latest["ts"],)
-    ):
-        spent += Decimal(row["cost"])
-    return Decimal(latest["amount_usd"]) - spent
+    topups = conn.execute(
+        "SELECT amount_usd FROM llm_budget_events"
+    ).fetchall()
+    spent = conn.execute("SELECT cost FROM llm_usage").fetchall()
+    total_topups = sum((Decimal(r["amount_usd"]) for r in topups), Decimal("0"))
+    total_spent = sum((Decimal(r["cost"]) for r in spent), Decimal("0"))
+    return total_topups - total_spent
 
 
 def check_budget(conn: sqlite3.Connection) -> None:
-    """Gate: raise :exc:`LLMBudgetExceeded` only when a cap is set and remaining < 0."""
+    """Gate: raise :exc:`LLMBudgetExceeded` when cumulative remaining is ``<= 0``.
+
+    A fresh DB ($0 topped up) and a fully-consumed budget both block here — you must
+    top up before AI calls run, even when models/roles are configured.
+    """
     remaining = budget_remaining(conn)
-    if remaining is not None and remaining < 0:
+    if remaining <= 0:
         raise LLMBudgetExceeded(f"token budget exhausted (remaining ${remaining})")
 
 
@@ -313,13 +304,15 @@ def all_role_bindings(conn: sqlite3.Connection) -> dict[str, str | None]:
 def add_topup(
     conn: sqlite3.Connection, amount_usd: Decimal, note: str | None = None
 ) -> None:
-    """Append a top-up to the budget ledger (append-only). Same table as resets.
-
-    The spec-16 quota view (:func:`quota_remaining`) sums *all* top-ups minus *all*
-    usage; this differs from :func:`budget_remaining`, the latest-reset-wins gate used
-    by ``check_budget`` for the runtime spend cap. Both read the same ledger.
+    """Append a positive top-up to the budget ledger (append-only). The canonical
+    budget writer: ``remaining`` (:func:`budget_remaining`) subtracts cumulative usage
+    from cumulative top-ups, so each top-up adds — there is no reset semantics.
     """
-    reset_budget(conn, amount_usd, note)
+    conn.execute(
+        "INSERT INTO llm_budget_events (ts, amount_usd, note) VALUES (?, ?, ?)",
+        (datetime.now(UTC).isoformat(), str(amount_usd), note),
+    )
+    conn.commit()
 
 
 def list_topups(conn: sqlite3.Connection) -> list[dict[str, str]]:
@@ -337,14 +330,11 @@ def list_topups(conn: sqlite3.Connection) -> list[dict[str, str]]:
 
 
 def quota_remaining(conn: sqlite3.Connection) -> Decimal:
-    """Spec-16 remaining = Σ all top-ups − Σ all usage cost. Defaults to 0 when empty."""
-    topups = conn.execute(
-        "SELECT COALESCE(amount_usd, '0') a FROM llm_budget_events"
-    ).fetchall()
-    spent_rows = conn.execute("SELECT cost FROM llm_usage").fetchall()
-    total_topups = sum((Decimal(r["a"]) for r in topups), Decimal("0"))
-    total_spent = sum((Decimal(r["cost"]) for r in spent_rows), Decimal("0"))
-    return total_topups - total_spent
+    """Spec-16 remaining = Σ all top-ups − Σ all usage cost. Delegates to
+    :func:`budget_remaining` so the gate, settings page, and dashboard chip share one
+    source of truth (they return identical values).
+    """
+    return budget_remaining(conn)
 
 
 _THRESHOLD_DDL = (
