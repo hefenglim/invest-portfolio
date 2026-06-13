@@ -30,3 +30,35 @@ def test_manual_preview_fee_override(api_client: TestClient) -> None:
         "fee_override": "500"})
     b = r.json()
     assert b["fee"] == "500" and b["fee_overridden"] is True
+
+
+def test_manual_commit_writes(api_client: TestClient) -> None:
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "600"})
+    assert r.status_code == 201
+    b = r.json()
+    assert isinstance(b["txn_id"], int) and b["total"].startswith("-")
+    lg = api_client.get("/api/ledgers/transactions", params={"account_id": "tw_broker"}).json()
+    assert lg["total_count"] == 2  # golden's 1 tw_broker txn + this one
+
+
+def test_manual_commit_oversell_unacked_422(api_client: TestClient) -> None:
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-11", "shares": "5000", "price": "600", "ack_oversell": False})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "oversell_unacknowledged"
+
+
+def test_manual_commit_oversell_acked_writes(api_client: TestClient) -> None:
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-11", "shares": "5000", "price": "600", "ack_oversell": True})
+    assert r.status_code == 201
+
+
+def test_manual_commit_hard_error_400(api_client: TestClient) -> None:
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "0", "price": "600"})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"

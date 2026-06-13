@@ -6,9 +6,11 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn
+from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.wire import div_model_wire, fee_rules_wire, issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.holdings import current_shares
@@ -125,3 +127,24 @@ def manual_preview(
         "tax_overridden": body.tax_override is not None,
         "issues": [issue_wire(i) for i in draft.issues],
     }
+
+
+@router.post("/input/manual/commit", status_code=201)
+def manual_commit(body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+    inp = _txn_input(body)
+    draft = enter_transaction(conn, inp, confirm=False)  # inspect, no write
+    hard = [i for i in draft.issues if not i.needs_confirm]
+    if hard:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", hard[0].message,
+            issues=[issue_wire(i) for i in draft.issues]))
+    oversell = any(i.kind == "sell_exceeds_holdings" for i in draft.issues)
+    if oversell and not body.ack_oversell:
+        return JSONResponse(status_code=422, content=error_body(
+            "oversell_unacknowledged", "需確認賣超",
+            issues=[issue_wire(i) for i in draft.issues]))
+    written = enter_transaction(conn, inp, confirm=True)
+    gross = body.shares * body.price
+    total = (-(gross + written.fee + written.tax) if inp.side.value == "BUY"
+             else (gross - written.fee - written.tax))
+    return {"txn_id": written.transaction_id, "total": _money_str(total)}
