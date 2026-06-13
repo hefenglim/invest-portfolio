@@ -5,6 +5,7 @@ DB connection), so jobs are independent and a single failure is logged, not fata
 """
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.base import BaseScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded, trigger_job
@@ -43,3 +44,22 @@ def start() -> BackgroundScheduler:
 def shutdown(scheduler: BackgroundScheduler) -> None:
     """Stop the scheduler."""
     scheduler.shutdown(wait=False)
+
+
+def reschedule_job(
+    scheduler: BaseScheduler | None, job_id: str, *, cron: str, tz: str, enabled: bool
+) -> None:
+    """Apply a schedule change to the live scheduler immediately.
+
+    A no-op when ``scheduler`` is None (e.g. ``PD_DISABLE_SCHEDULER=1`` in tests / when
+    the scheduler is not running). Disabled jobs are removed; enabled jobs are (re)added
+    with ``replace_existing`` so an existing trigger is updated in place.
+    """
+    if scheduler is None:
+        return
+    if not enabled:
+        if scheduler.get_job(job_id) is not None:
+            scheduler.remove_job(job_id)
+        return
+    trigger = CronTrigger.from_crontab(cron, timezone=tz)
+    scheduler.add_job(trigger_job, trigger, args=[job_id], id=job_id, replace_existing=True)
