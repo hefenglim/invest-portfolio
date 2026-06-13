@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from portfolio_dash.api.errors import register_error_handlers
-from portfolio_dash.api.routers import dashboard, health, instruments, ledgers
+from portfolio_dash.api.routers import dashboard, health, input_center, instruments, ledgers
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded
 from portfolio_dash.scheduler.runtime import build_scheduler
@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard.router, prefix="/api")
     app.include_router(instruments.router, prefix="/api")
     app.include_router(ledgers.router, prefix="/api")
+    app.include_router(input_center.router, prefix="/api")
     if _WEB_DIR.is_dir():
         app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app
