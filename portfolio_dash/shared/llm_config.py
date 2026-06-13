@@ -341,7 +341,9 @@ _THRESHOLD_DDL = (
     "CREATE TABLE IF NOT EXISTS llm_quota_config "
     "(id INTEGER PRIMARY KEY CHECK (id = 1), alert_threshold_usd TEXT)"
 )
-_DEFAULT_THRESHOLD = Decimal("0")
+# Default per the spec-03 §3.1 SR clarification ("預設值 1.00"): quota_low fires when
+# remaining < 1.00 until the user sets their own threshold (spec 16 single source of truth).
+_DEFAULT_THRESHOLD = Decimal("1.00")
 
 
 def _ensure_threshold_table(conn: sqlite3.Connection) -> None:
@@ -349,7 +351,8 @@ def _ensure_threshold_table(conn: sqlite3.Connection) -> None:
 
 
 def get_alert_threshold(conn: sqlite3.Connection) -> Decimal:
-    """Read the quota-low alert threshold (USD); 0 when never set (spec 03 ``quota_low``)."""
+    """Read the quota-low alert threshold (USD); defaults to 1.00 when never set
+    (spec 03 §3.1 ``quota_low`` SR — single source of truth in spec 16's quota config)."""
     _ensure_threshold_table(conn)
     row = conn.execute(
         "SELECT alert_threshold_usd FROM llm_quota_config WHERE id = 1"
