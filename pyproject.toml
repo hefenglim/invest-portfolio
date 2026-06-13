@@ -65,5 +65,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --disable-socket --allow-unix-socket"
 asyncio_mode = "strict"

@@ -4,6 +4,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+# This module enters the TestClient via `with` → the FastAPI lifespan runs, which
+# starts a Windows ProactorEventLoop. That loop opens an internal socketpair self-pipe
+# (not real network I/O), which the global --disable-socket ban blocks. Allow sockets
+# for this module only; the hermetic api_client fixture (tests/conftest.py) avoids the
+# lifespan precisely so it never needs this.
+pytestmark = pytest.mark.enable_socket
+
 
 @pytest.fixture
 def skeleton_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
