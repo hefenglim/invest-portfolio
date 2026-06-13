@@ -4,7 +4,7 @@ import csv
 import io
 import sqlite3
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import compute_fees
@@ -128,7 +128,7 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
                 tax=Decimal(raw["tax"]) if raw.get("tax") else None,
                 note=raw.get("note") or None,
             )
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, InvalidOperation) as exc:
             rows.append(
                 PreviewRow(
                     index=idx,

@@ -28,7 +28,7 @@ from portfolio_dash.data_ingestion.opening_import import (
     build_opening_preview,
     write_opening_row,
 )
-from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
+from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, commit_preview
 from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
 from portfolio_dash.data_ingestion.validate import TxnInput
 
@@ -215,3 +215,26 @@ def import_preview(body: ImportPreviewBody, conn: sqlite3.Connection = Depends(g
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
     return _preview_wire(builder(conn, body.csv_text))
+
+
+class ImportCommitBody(BaseModel):
+    kind: str
+    csv_text: str
+    ack_warnings: bool = False
+
+
+@router.post("/import/commit")
+def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+    builder = _BUILDERS.get(body.kind)
+    writer = _WRITERS.get(body.kind)
+    if builder is None or writer is None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"未知 kind: {body.kind}", field="kind"))
+    preview = builder(conn, body.csv_text)  # re-derive (re-validate vs current ledger)
+    has_warn = any((not r.has_hard_issue) and r.issues for r in preview.rows)
+    if has_warn and not body.ack_warnings:
+        return JSONResponse(status_code=422, content=error_body(
+            "warnings_unacknowledged", "有警告列需確認後才寫入"))
+    accept = {r.index for r in preview.rows if not r.has_hard_issue}
+    summary = commit_preview(conn, preview, accept=accept, writer=writer)
+    return {"written": len(summary.written), "skipped": len(summary.skipped)}
