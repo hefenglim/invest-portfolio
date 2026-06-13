@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="detail.css"></link>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body data-page="dashboard" data-title="儀表板" data-chips="1" data-refresh="1">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <!-- B. KPI band -->
+  <section class="kpi-band" id="kpi-band" data-screen-label="KPI"></section>
+
+  <!-- B2. 各幣別報酬拆分（可折疊） -->
+  <details class="panel freshness" id="ccyret" data-screen-label="各幣別報酬">
+    <summary>
+      <span class="caret">▶</span>
+      <span>各幣別報酬拆分</span>
+      <span class="chips sum-chips" id="ccyret-chips"></span>
+    </summary>
+    <div id="ccyret-wrap" class="ccyret-table-wrap">
+      <table class="ccyret">
+        <thead>
+          <tr>
+            <th>幣別</th>
+            <th>已實現</th>
+            <th>未實現</th>
+            <th>總報酬</th>
+            <th>累計投入</th>
+            <th>報酬率</th>
+          </tr>
+        </thead>
+        <tbody id="ccyret-body"></tbody>
+      </table>
+      <div class="ccyret-note">各幣別為原幣金額，不可跨幣加總；報酬率 = 總報酬 ÷ 累計投入（原幣）。</div>
+    </div>
+  </details>
+
+  <!-- C. Trend + AI insights (每日決策層) -->
+  <div class="row-trend" data-screen-label="趨勢與洞察">
+  <section class="panel trend-panel" data-screen-label="趨勢圖">
+    <div class="panel-head">
+      <h2 class="panel-title">總市值 vs 累計淨投入</h2>
+      <span class="panel-sub">TWD・日線</span>
+      <span class="trend-note" id="trend-note" hidden="hidden"><span class="dot"></span>○ 標記＝部分標的當日無價格</span>
+      <span class="spacer"></span>
+      <div class="range-group">
+        <button class="range-btn" type="button" data-range="1">1M</button>
+        <button class="range-btn" type="button" data-range="3">3M</button>
+        <button class="range-btn" type="button" data-range="6">6M</button>
+        <button class="range-btn active" type="button" data-range="all">全部</button>
+      </div>
+    </div>
+    <div id="trend-chart"></div>
+  </section>
+  <section class="panel insights-panel" data-screen-label="AI 洞察">
+    <div class="panel-head">
+      <h2 class="panel-title">AI 洞察</h2>
+      <span class="panel-sub">由排程批次產生</span>
+      <span id="ai-quota-chip"></span>
+    </div>
+    <div class="insight-list" id="insight-grid"></div>
+  </section>
+  </div>
+
+  <!-- D. Holdings -->
+  <section class="panel" data-screen-label="持倉明細">
+    <div class="panel-head">
+      <h2 class="panel-title">持倉明細</h2>
+      <span class="panel-sub">市值與損益為原幣金額；合計列為報告幣別</span>
+    </div>
+    <div class="filter-bar" id="filter-bar"></div>
+    <div class="table-wrap">
+      <table class="data" id="holdings-table">
+        <thead><tr id="holdings-head"></tr></thead>
+        <tbody id="holdings-body"></tbody>
+        <tfoot id="holdings-foot"></tfoot>
+      </table>
+    </div>
+  </section>
+
+  <!-- E. Allocation row -->
+  <div class="row-2" data-screen-label="配置">
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">產業配置</h2>
+        <span class="panel-sub">報告幣別 TWD</span>
+      </div>
+      <div class="chart-box" id="sector-chart"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">幣別組成</h2>
+        <span class="panel-sub">原幣金額</span>
+      </div>
+      <div id="ccy-content"></div>
+    </section>
+  </div>
+
+  <!-- F. 換匯損益 -->
+  <section class="panel" data-screen-label="換匯損益">
+    <div class="panel-head">
+      <h2 class="panel-title">換匯損益</h2>
+      <span class="panel-sub">依帳戶</span>
+    </div>
+    <div class="fx-grid" id="fx-grid"></div>
+    <div class="fx-footer" id="fx-footer"></div>
+  </section>
+
+  <!-- G. 已實現損益 -->
+  <section class="panel" data-screen-label="已實現損益">
+    <div class="panel-head">
+      <h2 class="panel-title">已實現損益</h2>
+      <span class="panel-sub">原幣金額</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th class="col-text">代號</th>
+            <th class="col-text">帳戶</th>
+            <th>賣出股數</th>
+            <th>淨收款</th>
+            <th>調整成本移除</th>
+            <th>已實現損益</th>
+          </tr>
+        </thead>
+        <tbody id="realized-body"></tbody>
+      </table>
+    </div>
+    <div class="realized-footer" id="realized-footer"></div>
+  </section>
+
+  <!-- H. 股利區 -->
+  <div class="row-2 align-start" data-screen-label="股利">
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">年度股利</h2>
+        <span class="panel-sub">堆疊為各幣別原幣金額，不可跨幣加總</span>
+      </div>
+      <div class="div-chips sum-chips" id="div-chips" style="padding: 8px 16px 0; margin-left: 0;"></div>
+      <div class="chart-box" id="dividend-chart"></div>
+    </section>
+    <section class="panel" data-screen-label="除息日曆">
+      <div class="panel-head">
+        <h2 class="panel-title">除息日曆</h2>
+        <span class="sum-chips" id="exdiv-summary" style="margin-left: auto;"></span>
+      </div>
+      <div class="exdiv-list" id="exdiv-list"></div>
+    </section>
+  </div>
+
+  <!-- J. 資料新鮮度 -->
+  <details class="panel freshness" id="freshness" data-screen-label="資料新鮮度">
+    <summary>
+      <span class="caret">▶</span>
+      <span>資料新鮮度</span>
+      <span class="chips" id="fresh-chips"></span>
+    </summary>
+    <div class="fresh-body">
+      <div class="fresh-col">
+        <h4>個股價格</h4>
+        <table class="fresh"><tbody id="fresh-prices"></tbody></table>
+      </div>
+      <div class="fresh-col">
+        <h4>匯率</h4>
+        <table class="fresh"><tbody id="fresh-fx"></tbody></table>
+      </div>
+      <div id="fresh-notes" style="display: contents;"></div>
+    </div>
+  </details>
+
+</div>
+</div>
+</div>
+
+<script src="shell.js"></script>
+<script src="mock-data.js"></script>
+<script src="format.js"></script>
+<script src="export.js"></script>
+<script src="history-mock.js"></script>
+<script src="alerts.js"></script>
+<script src="app.js"></script>
+<script src="charts.js"></script>
+<script src="detail.js"></script>
+<script src="rebalance.js"></script>
+</body>
+</html>

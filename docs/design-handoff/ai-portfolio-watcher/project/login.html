@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — 登入</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="settings.css"></link>
+<style>
+  .login-wrap {
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .login-card {
+    width: 360px;
+    background: var(--panel);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 28px 28px 24px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .login-logo {
+    font-family: var(--font-num);
+    font-size: 20px; font-weight: 600;
+    text-align: center;
+  }
+  .login-logo .tld { color: var(--accent); }
+  .login-sub { text-align: center; font-size: 11px; color: var(--text-3); margin-top: -10px; }
+  .login-error {
+    font-size: 11px; color: var(--up);
+    background: var(--up-soft); border: 1px solid rgba(240, 84, 79, 0.3);
+    border-radius: var(--radius-sm); padding: 7px 10px;
+  }
+  .login-btn { width: 100%; justify-content: center; padding: 9px; font-size: 13px; }
+</style>
+</head>
+<body data-page="login">
+<div class="login-wrap">
+  <form class="login-card" data-screen-label="登入卡" onsubmit="return false;">
+    <div class="login-logo">portfolio<span class="tld">-dash</span></div>
+    <div class="login-sub">個人多市場投資管理</div>
+    <div class="login-hint" id="login-hint" hidden="hidden"></div>
+    <div class="login-error" id="login-error" hidden="hidden">帳號或密碼錯誤</div>
+    <div class="field">
+      <label for="login-user">使用者</label>
+      <input class="input" id="login-user" autocomplete="username" spellcheck="false"></input>
+    </div>
+    <div class="field">
+      <label for="login-pass">密碼</label>
+      <input class="input" id="login-pass" type="password" autocomplete="current-password"></input>
+    </div>
+    <button class="btn btn-primary login-btn" id="login-btn" type="submit">登入</button>
+  </form>
+</div>
+<script>
+  /* 工作階段：mock 存 localStorage；後端接線後改 server session。
+     首次使用（尚無授權用戶）→ 任意帳密皆可進入；新增用戶後 → 帳密驗證。 */
+  (function () {
+    function getUsers() { try { return JSON.parse(localStorage.getItem('pd_users') || '[]') || []; } catch (e) { return []; } }
+    function setSession(s) { try { localStorage.setItem('pd_session', JSON.stringify(s)); } catch (e) { /* noop */ } }
+    function getSession() { try { return JSON.parse(localStorage.getItem('pd_session') || 'null'); } catch (e) { return null; } }
+
+    var userInput = document.getElementById('login-user');
+    var passInput = document.getElementById('login-pass');
+    var errEl = document.getElementById('login-error');
+    var hintEl = document.getElementById('login-hint');
+    var users = getUsers();
+    var sess = getSession();
+
+    if (users.length === 0) {
+      hintEl.hidden = false;
+      hintEl.textContent = '首次使用：輸入任意帳號與密碼即可進入。稍後可於「系統設定 › 帳戶與費率 › 授權用戶」新增帳號與投資人稱號。';
+    } else if (sess && sess.locked && sess.username) {
+      userInput.value = sess.username;
+      hintEl.hidden = false;
+      hintEl.textContent = '畫面已鎖定 — 請輸入密碼解除鎖定。';
+      setTimeout(function () { passInput.focus(); }, 30);
+    }
+
+    function submit() {
+      var u = userInput.value.trim();
+      var p = passInput.value;
+      errEl.hidden = true;
+      if (!u || !p) { errEl.textContent = '請輸入帳號與密碼'; errEl.hidden = false; return; }
+      if (users.length === 0) {
+        setSession({ username: u, name: u, ts: Date.now(), locked: false });
+        window.location.href = 'index.html';
+        return;
+      }
+      var match = users.filter(function (x) { return x.username === u && x.password === p; })[0];
+      if (match) {
+        setSession({ username: match.username, name: match.name || match.username, ts: Date.now(), locked: false });
+        window.location.href = 'index.html';
+      } else {
+        errEl.textContent = '帳號或密碼錯誤';
+        errEl.hidden = false;
+      }
+    }
+
+    document.getElementById('login-btn').addEventListener('click', submit);
+    userInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+    passInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+  })();
+</script>
+</body>
+</html>

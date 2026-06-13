@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — 觀察清單</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="settings.css"></link>
+<link rel="stylesheet" href="trades.css"></link>
+<link rel="stylesheet" href="input.css"></link>
+<style>
+  .board-pill {
+    font-family: var(--font-num); font-size: 10px; padding: 0 7px;
+    line-height: 17px; border-radius: 999px; border: 1px solid var(--border);
+  }
+  .board-twse { color: var(--accent); border-color: rgba(88, 166, 221, 0.45); background: var(--accent-soft); }
+  .board-tpex { color: var(--series-usd); border-color: rgba(155, 134, 216, 0.45); background: rgba(155, 134, 216, 0.12); }
+  .board-kl { color: var(--down); border-color: rgba(47, 180, 124, 0.45); background: var(--down-soft); }
+  .board-unres { color: var(--amber); border-color: rgba(217, 161, 63, 0.45); background: var(--amber-soft); }
+  .probe-card {
+    margin: 12px var(--pad) 0;
+    background: var(--panel-2); border: 1px solid var(--border-soft);
+    border-radius: var(--radius); padding: 13px 15px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    font-size: 12px;
+  }
+  .probe-card .acts { display: flex; gap: 8px; margin-left: auto; }
+  .add-row { display: flex; gap: 8px; align-items: flex-end; padding: 12px var(--pad) 0; flex-wrap: wrap; }
+  .add-row .field { min-width: 160px; }
+  .unres-banner {
+    margin: 12px var(--pad) 0;
+    font-size: 11px; color: var(--amber);
+    background: var(--amber-soft); border: 1px solid rgba(217, 161, 63, 0.3);
+    border-radius: var(--radius-sm); padding: 8px 12px;
+  }
+  .detail-form { margin: 12px var(--pad) 0; background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 13px 15px; }
+  .detail-form .form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .detail-form h3 { margin: 0 0 10px; font-size: 12px; color: var(--text-2); font-weight: 500; }
+  .wl-actions { display: flex; gap: 6px; justify-content: flex-end; }
+</style>
+</head>
+<body data-page="instruments" data-title="觀察清單">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <section class="panel" data-screen-label="新增標的">
+    <div class="panel-head">
+      <h2 class="panel-title">新增標的</h2>
+      <span class="panel-sub">台股需經板別探測（TWSE / TPEx）；美股、馬股板別固定</span>
+    </div>
+    <div class="add-row">
+      <div class="field">
+        <label for="new-symbol">代號</label>
+        <input class="input" id="new-symbol" placeholder="例：2330" value="2330" spellcheck="false"></input>
+      </div>
+      <div class="field">
+        <label for="new-market">市場</label>
+        <select class="select" id="new-market">
+          <option value="TW" selected="selected">台股</option>
+          <option value="US">美股</option>
+          <option value="MY">馬股</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="probe-btn" type="button" style="margin-bottom: 1px;">查詢</button>
+    </div>
+
+    <div class="probe-card" id="probe-card" hidden="hidden" data-screen-label="板別探測">
+      <span id="probe-text"></span>
+      <span class="acts">
+        <button class="btn btn-primary" id="probe-ok" type="button">確認</button>
+        <button class="btn" id="probe-tpex" type="button">改為 TPEx</button>
+        <button class="btn" id="probe-fail" type="button" title="模擬探測失敗的未解析狀態">模擬探測失敗</button>
+      </span>
+    </div>
+
+    <div class="unres-banner" id="unresolved-banner" hidden="hidden">
+      ⚠ 板別未解析 — 已以預設 TWSE 抓報價，請稍後手動確認。此標的會在清單中帶琥珀色「未解析」徽章。
+    </div>
+
+    <div class="detail-form" id="detail-form" hidden="hidden" data-screen-label="標的明細表單">
+      <h3 id="df-title"></h3>
+      <div class="form-grid">
+        <div class="field">
+          <label for="df-name">名稱</label>
+          <input class="input" id="df-name" value="台積電"></input>
+        </div>
+        <div class="field">
+          <label for="df-sector">產業</label>
+          <input class="input" id="df-sector" list="sector-list" placeholder="自由輸入，含建議"></input>
+          <datalist id="sector-list">
+            <option value="半導體"></option>
+            <option value="ETF"></option>
+            <option value="科技"></option>
+            <option value="金融"></option>
+            <option value="光電"></option>
+          </datalist>
+        </div>
+        <div class="field">
+          <label for="df-ccy">幣別（依市場自動）</label>
+          <input class="input" id="df-ccy" value="TWD" readonly="readonly"></input>
+        </div>
+      </div>
+      <div class="form-actions" style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;">
+        <button class="btn" type="button">取消</button>
+        <button class="btn btn-primary" id="df-register" type="button">確認註冊</button>
+      </div>
+    </div>
+    <div style="height: 14px;"></div>
+  </section>
+
+  <section class="panel" data-screen-label="標的清單">
+    <div class="panel-head">
+      <h2 class="panel-title">標的清單</h2>
+      <span class="panel-sub">持有標的由交易自動註冊；觀察標的含現價與目標價提醒</span>
+    </div>
+    <div class="inst-toolbar">
+      <input class="input" id="inst-search" type="search" placeholder="搜尋代號或名稱…"></input>
+      <span class="spacer"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th class="col-text">代號 / 名稱</th>
+            <th class="col-text">市場</th>
+            <th class="col-text">板別</th>
+            <th class="col-text">產業</th>
+            <th class="col-text">幣別</th>
+            <th>現價</th>
+            <th>目標價提醒</th>
+            <th class="col-text">狀態</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="inst-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+</div>
+</div>
+</div>
+
+<script src="shell.js"></script>
+<script src="format.js"></script>
+<script src="export.js"></script>
+<script src="alerts.js"></script>
+<script src="instruments.js"></script>
+</body>
+</html>

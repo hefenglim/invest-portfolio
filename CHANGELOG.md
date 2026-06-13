@@ -10,6 +10,38 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 ## [Unreleased]
 
 ### Changed
+- **Web-layer architecture decision — option (B) (2026-06-13, human sign-off):** the web
+  layer is now a **FastAPI JSON API (`portfolio_dash/api/*`) + a static vanilla-JS frontend
+  (`web/`)**, superseding the originally-locked **Jinja2 + HTMX server-rendering** (CLAUDE.md
+  locked decision #1 "no frontend/backend split / no JSON contract"; `stack.md`;
+  `design-handoff.md` "convert to Jinja2 templates"). Rationale: the Claude-Design export is
+  vanilla JS + ECharts CDN with **no framework and no build step** (the stack-drift guardrail
+  is honored) and pushes **all computation to the backend** (the web layer still does not
+  compute — invariant #4 intent preserved). The trade-off ("single codebase / no contract to
+  drift") is mitigated by `mock-data.js` as the version-controlled contract and spec-17 golden
+  payload + spec-18.4 string-serialization round-trip tests. Net upside: the JSON contract makes
+  the automated regression loop machine-diffable (stronger than HTML-fragment assertions).
+  `CLAUDE.md`/`stack.md` web rows to be amended; the HANDOFF.md CLAUDE.md template is
+  **reconciled, not applied verbatim** (locked accounting/ledger/process rules preserved).
+  Full reconciliation: `docs/design/spec-reconciliation-2026-06-13.md`.
+- **Scope expansions adopted from design-handoff specs 01–19 (2026-06-13, human sign-off):**
+  a new `api/` HTTP layer (08/19); `strategy/` alerts rule-engine + what-if + rebalance as
+  pure functions (03, with config-row editable thresholds — a narrow, bounded step toward
+  user-editable rules, explicitly NOT a DSL); a full `llm_insight/` self-evolution system —
+  insight composers, calibration version chains, backtest scoring, a new `master` LLM role
+  (04, far beyond the prior "batch insight cards"; invariant #1 preserved — quant hits are
+  code, the LLM only writes narrative/calibration text); external-data ingest + an append-only
+  `external_snapshots` store (06: FinMind chips/fundamentals/valuation, VIX, Fear&Greed,
+  indices); auth/users via stdlib `hashlib.scrypt` (09, no new dependency); a full test/
+  regression harness — `make all`, golden dataset, FastAPI TestClient contract tests,
+  Playwright E2E, hypothesis/mutmut, pytest-socket network ban (17/18); SQLite backup/restore
+  + structured logging (19). Schema migrations (additive, via `_add_column_if_missing` /
+  `config_store`): `instruments += target_low/board_status/is_etf`, `transactions +=
+  fee_snapshot`, `schedule_config += kind/payload`, `job_runs += payload/reason/cost_usd`, plus
+  new tables for auth/datasources/external-snapshots/insight. Enum extensions: `DividendType +=
+  NET`, `LLMRole += MASTER/MASTER_FALLBACK`. `FeeRuleSet` structural fixes (flat_fee, US/MY
+  min_fee, stamp_duty_rate+cap) and US/MY fee-rate backfill (spec 18.0, pending real-statement
+  confirmation). Build order in the reconciliation doc §6.
 - **Accounting model decision (2026-06-06, human sign-off):** P&L now uses the
   adjusted-cost model — cash dividends fold into cost (no separate dividend-income line),
   realized/unrealized computed vs `adjusted_cost`; `original_cost` retained for the

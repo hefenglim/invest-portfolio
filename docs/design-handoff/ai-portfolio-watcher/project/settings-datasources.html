@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — 資料來源</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="settings.css"></link>
+<link rel="stylesheet" href="input.css"></link>
+<style>
+  .ds-section { margin-bottom: var(--gap); }
+  .ds-sec-head { display: flex; align-items: center; gap: 10px; padding: 10px var(--pad) 6px; }
+  .ds-key-row { display: flex; align-items: center; gap: 6px; }
+  .err-inline { font-size: 10px; color: var(--up); margin-top: 2px; }
+
+  /* fallback cards */
+  .fallback-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px var(--pad) 14px; }
+  .fallback-card {
+    background: var(--panel-2); border: 1px solid var(--border-soft);
+    border-radius: var(--radius); padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .fallback-acct { font-weight: 700; font-size: 12px; }
+  .fallback-chips { display: flex; flex-direction: column; gap: 5px; }
+  .fb-chip {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel-3); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 5px 9px;
+    cursor: grab; font-size: 11px;
+    user-select: none;
+  }
+  .fb-chip:active { cursor: grabbing; opacity: 0.7; }
+  .fb-num {
+    font-family: var(--font-num); font-size: 10px;
+    color: var(--text-3); width: 14px; text-align: center;
+    border: 1px solid var(--border); border-radius: 2px;
+  }
+  .fb-name { flex: 1; }
+  .fb-hint { font-size: 10px; color: var(--text-3); }
+
+  @media (max-width: 1200px) { .fallback-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 700px)  { .fallback-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-page="settings-datasources" data-title="資料來源">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <!-- 系統資料來源 -->
+  <section class="panel" data-screen-label="資料來源清單">
+    <div class="panel-head">
+      <h2 class="panel-title">資料來源清單</h2>
+      <span class="panel-sub">報價・股利・匯率・新聞 各類來源・可測試連線</span>
+    </div>
+    <div id="sources-wrap"></div>
+  </section>
+
+  <!-- 各帳戶 fallback 順序 -->
+  <section class="panel" data-screen-label="帳戶抓取順序">
+    <div class="panel-head">
+      <h2 class="panel-title">帳戶抓取順序</h2>
+      <span class="panel-sub">系統依序嘗試各來源，第一個成功即採用・拖曳調整優先順序</span>
+    </div>
+    <div class="fallback-grid" id="fallback-wrap"></div>
+  </section>
+
+</div>
+</div>
+</div>
+
+<script src="shell.js"></script>
+<script src="format.js"></script>
+<script src="alerts.js"></script>
+<script src="settings-datasources.js"></script>
+</body>
+</html>

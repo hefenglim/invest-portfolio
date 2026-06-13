@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — 洞察管線中心（重構提案）</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="settings.css"></link>
+<link rel="stylesheet" href="pipeline.css"></link>
+</head>
+<body data-page="pipeline" data-title="洞察管線中心">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <div class="pp-banner" data-screen-label="提案橫幅">
+    <b>重構提案 v1 — 洞察管線中心</b>
+    <span>以「洞察任務」為唯一主角：觸發 → 輸入 → 組裝 → 執行 → 產出，一張卡看完一條管線。既有 9 個模組功能不變，只改組織方式。</span>
+    <span class="spacer"></span>
+    <button class="btn-link" id="pp-naming-toggle" type="button">命名對照 ▾</button>
+  </div>
+
+  <details class="pp-naming panel" id="pp-naming" style="padding: 10px 14px; margin-bottom: 12px;">
+    <summary style="cursor:pointer; font-size:12px; color:var(--text-2);">新舊命名對照（提案一套，可全部退回原名）</summary>
+    <table>
+      <tbody>
+        <tr><td>洞察類型（組合器）</td><td>→ <b>洞察任務</b> — 唯一可排程、可校正的「執行單位」</td></tr>
+        <tr><td>策略提示詞</td><td>→ <b>分析模板</b> — 純設計物件，放在資產庫，本身不會跑</td></tr>
+        <tr><td>系統提示詞</td><td>→ <b>全域守則</b> — 所有任務共用的第一層</td></tr>
+        <tr><td>自我校正提示詞庫</td><td>→ <b>校正版本鏈</b> — 1:1 掛在任務上，不再是獨立頁</td></tr>
+        <tr><td>排程頁＋排程工作表＋執行歷史</td><td>→ <b>運行中心</b> — 任務抽屜內看單一任務、原頁看全部</td></tr>
+        <tr><td>預警規則（觸發 AI 解讀）</td><td>→ <b>觸發來源</b>之一 — 在任務的「① 觸發」節點設定</td></tr>
+      </tbody>
+    </table>
+  </details>
+
+  <div class="pp-health" id="pp-health" data-screen-label="全局健康列"></div>
+
+  <section class="panel" data-screen-label="洞察任務管線">
+    <div class="panel-head">
+      <h2 class="panel-title">洞察任務</h2>
+      <span class="panel-sub">每張卡 = 一條完整管線；點任一節點直接跳到該節設定</span>
+      <span class="spacer"></span>
+      <button class="btn btn-primary" id="pp-add" type="button">＋ 新增洞察任務</button>
+    </div>
+    <div class="pp-filter" id="pp-filter"></div>
+    <div class="pp-list" id="pp-list"></div>
+  </section>
+
+  <div class="pp-assets" data-screen-label="資產庫">
+    <a class="pp-asset" href="settings-prompts.html"><b>分析模板庫</b><span class="cnt">4 個模板・1 停用</span><span>原「策略提示詞」頁 — 設計物件，與執行解耦</span></a>
+    <a class="pp-asset" href="settings-prompts.html"><b>數據變數庫</b><span class="cnt">8 類 24 個</span><span>變數總表＋預覽/測試送出</span></a>
+    <a class="pp-asset" href="settings-scheduler.html"><b>運行中心</b><span class="cnt">全部 jobs</span><span>跨任務的排程工作表與完整歷史</span></a>
+    <a class="pp-asset" href="settings.html"><b>進化設定</b><span class="cnt">5 項安全邊界</span><span>影子批次數/最低樣本/自動晉升…</span></a>
+  </div>
+
+</div>
+</div>
+</div>
+
+<script src="shell.js"></script>
+<script src="format.js"></script>
+<script src="alerts.js"></script>
+<script src="pipeline-data.js"></script>
+<script src="pipeline.js"></script>
+<script src="pipeline-preflight.js"></script>
+<script src="pipeline-wizard.js"></script>
+<script>
+  document.getElementById('pp-add').addEventListener('click', function () { window.ppWizard(); });
+  document.getElementById('pp-naming-toggle').addEventListener('click', function () {
+    var d = document.getElementById('pp-naming');
+    d.open = !d.open;
+  });
+</script>
+</body>
+</html>
