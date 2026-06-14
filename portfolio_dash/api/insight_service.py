@@ -356,3 +356,68 @@ def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
         except Exception:  # noqa: BLE001 — one insight failing must not abort the pass
             logger.exception("evaluate_due failed for insight %s", due.insight_id)
     return processed
+
+
+# --- Loop 3: generate calibration versions (spec 04.5 / 4.8) ------------------
+# Deterministic trigger (scoring.should_calibrate) + min_samples gate; the master writes the
+# new body (master.generate_calibration), the validator gates it (master.validate_calibration),
+# and only a valid body is appended (append-only). Master unset → pipeline pauses (no crash).
+
+
+def _generate_one(
+    conn: sqlite3.Connection, it: cs.InsightType, *, now: datetime, cfg: dict[str, object]
+) -> bool:
+    """Evaluate the triggers + min_samples gate for one combo; generate a version if due.
+
+    Returns True when a new (valid) calibration version was appended. Master unset / over
+    budget / a validator rejection → no version, no crash (the pipeline pauses).
+    """
+    resolved = es.resolved_sample_count(conn, it.id)
+    miss_count = es.combo_score(conn, it.id)["miss_count"]
+    streak = es.consecutive_misses(conn, it.id)
+    gap = Decimal(str(cfg["gap_alert_pp"]))
+    if not scoring.should_calibrate(
+        resolved_samples=resolved, min_samples=int(str(cfg["min_samples"])),
+        consecutive_misses=streak, miss_count=miss_count, gap_alert_pp=gap,
+    ):
+        return False
+    active = cs.list_calibrations(conn, it.id)
+    active_body = active[-1].body if active else ""
+    active_version = active[-1].version if active else 1
+    samples = es.miss_samples_for_version(
+        conn, insight_type_id=it.id, version=active_version
+    )
+    bins = es.calibration_bins(conn, it.id)
+    try:
+        out = master.generate_calibration(
+            active_body=active_body, miss_samples=samples, bins=bins, conn=conn
+        )
+        ok, _reasons = master.validate_calibration(out["body"], conn=conn)
+    except LLMError:
+        return False  # master unset / budget → pause (cards still generate)
+    if not ok:
+        logger.info("calibration for insight_type %s rejected by validator", it.id)
+        return False
+    cs.create_calibration(conn, it.id, body=out["body"], cause=out["cause"], now=now)
+    return True
+
+
+def generate_calibrations_for_all(conn: sqlite3.Connection, *, now: datetime) -> int:
+    """Run the Loop-3 calibration pass over every self_correct combo. Returns versions made.
+
+    The registered Loop-3 runner. Per spec 4.5: only self_correct, non-archived combos with
+    resolved samples ≥ min_samples AND a trigger get a new version. One combo failing never
+    aborts the rest (degrade, never crash the weekly job).
+    """
+    es.ensure_tables(conn)
+    cfg = cs.get_evolution_config(conn)
+    made = 0
+    for it in cs.list_insight_types(conn):
+        if not it.self_correct:
+            continue
+        try:
+            if _generate_one(conn, it, now=now, cfg=cfg):
+                made += 1
+        except Exception:  # noqa: BLE001 — one combo failing must not abort the pass
+            logger.exception("generate_calibrations failed for insight_type %s", it.id)
+    return made

@@ -121,6 +121,30 @@ def decide_miss(
     return narrative_score < threshold
 
 
+def should_calibrate(
+    *,
+    resolved_samples: int,
+    min_samples: int,
+    consecutive_misses: int,
+    miss_count: int,
+    gap_alert_pp: Decimal,
+) -> bool:
+    """Whether a self_correct combo should generate a new calibration version (spec 4.5).
+
+    Gated FIRST by ``resolved_samples >= min_samples`` (spec 04.10 — small samples never
+    trigger). Then ANY of: ≥3 consecutive misses, OR a miss rate exceeding ``gap_alert_pp``
+    percentage points. (Output-rule violations are recorded by the validator on generation;
+    they are not a separate pre-trigger here.) Pure + deterministic — the LLM never decides
+    whether to calibrate, only what the new text is (spec 4.8).
+    """
+    if resolved_samples < min_samples or resolved_samples == 0:
+        return False
+    if consecutive_misses >= 3:
+        return True
+    miss_rate_pp = (Decimal(miss_count) / Decimal(resolved_samples)) * Decimal("100")
+    return miss_rate_pp > gap_alert_pp
+
+
 def calibration_error(rows: list[tuple[int, bool]]) -> Decimal:
     """Calibration error in percentage points: |avg claimed confidence − actual hit rate|.
 

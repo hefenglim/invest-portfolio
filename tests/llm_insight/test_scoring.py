@@ -162,6 +162,40 @@ def test_decide_miss_no_signals_not_miss() -> None:
     assert scoring.decide_miss(quant_hit=None, narrative_score=None, threshold=60) is False
 
 
+# --- should_calibrate ---------------------------------------------------------
+
+
+def test_should_calibrate_min_samples_gate() -> None:
+    # below min_samples → never trigger, even with all misses.
+    assert scoring.should_calibrate(
+        resolved_samples=3, min_samples=8, consecutive_misses=3, miss_count=3,
+        gap_alert_pp=Decimal("10"),
+    ) is False
+
+
+def test_should_calibrate_consecutive_misses() -> None:
+    assert scoring.should_calibrate(
+        resolved_samples=8, min_samples=8, consecutive_misses=3, miss_count=3,
+        gap_alert_pp=Decimal("90"),  # miss-rate path off; streak path on
+    ) is True
+
+
+def test_should_calibrate_miss_rate_over_gap() -> None:
+    # 5/8 = 62.5% miss rate > 10pp gap, but only 1 consecutive → miss-rate trigger.
+    assert scoring.should_calibrate(
+        resolved_samples=8, min_samples=8, consecutive_misses=1, miss_count=5,
+        gap_alert_pp=Decimal("10"),
+    ) is True
+
+
+def test_should_calibrate_no_trigger() -> None:
+    # enough samples, low miss rate, no streak → no trigger.
+    assert scoring.should_calibrate(
+        resolved_samples=8, min_samples=8, consecutive_misses=0, miss_count=0,
+        gap_alert_pp=Decimal("10"),
+    ) is False
+
+
 # --- calibration_error --------------------------------------------------------
 
 
