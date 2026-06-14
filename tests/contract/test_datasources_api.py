@@ -79,9 +79,9 @@ def test_get_lists_sources_grouped_with_masking(client: TestClient) -> None:
 def test_get_includes_account_fallbacks_and_names(client: TestClient) -> None:
     body = client.get("/api/datasources").json()
     fb = body["account_fallbacks"]
-    # Seeded from the default TW quote chain (twse, tpex, yfinance).
-    assert fb["tw_broker"] == ["twse", "tpex", "yfinance"]
-    assert fb["schwab"] == ["yfinance"]
+    # Seeded from the market default quote chains (spec 20.8 appended free fallbacks).
+    assert fb["tw_broker"] == ["twse", "tpex", "yfinance", "twstock"]
+    assert fb["schwab"] == ["yfinance", "stockprices_dev"]
     names = body["account_names"]
     assert names["tw_broker"] == "TW Broker"
     assert set(names) == {"tw_broker", "schwab", "moomoo_my_us", "moomoo_my_my"}

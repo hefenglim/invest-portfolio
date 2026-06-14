@@ -58,7 +58,8 @@ def test_refresh_quotes_all_fail_no_raise(conn: sqlite3.Connection) -> None:
 
 def test_default_order_and_registry() -> None:
     assert (DataType.QUOTE_LATEST, Market.TW) in DEFAULT_PROVIDER_ORDER
-    expected = ["twse", "tpex", "yfinance"]
+    # spec 20.8 appended the free twstock fallback to the TW chain tail.
+    expected = ["twse", "tpex", "yfinance", "twstock"]
     assert DEFAULT_PROVIDER_ORDER[(DataType.QUOTE_LATEST, Market.TW)] == expected
     reg = default_registry()  # must instantiate real providers without error
     assert isinstance(reg, Registry)

@@ -10,17 +10,23 @@ is no until it's justified).
 import sqlite3
 
 from portfolio_dash.pricing.enums import DataType
+from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
+from portfolio_dash.pricing.providers.klsescreener_provider import KlseScreenerProvider
+from portfolio_dash.pricing.providers.malaysiastock_provider import MalaysiaStockProvider
+from portfolio_dash.pricing.providers.stockprices_dev_provider import StockPricesDevProvider
 from portfolio_dash.pricing.providers.tpex_provider import TpexProvider
 from portfolio_dash.pricing.providers.twse_provider import TwseProvider
+from portfolio_dash.pricing.providers.twstock_provider import TwStockProvider
 from portfolio_dash.pricing.providers.yfinance_provider import YFinanceProvider
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.shared.enums import Market
 
 DEFAULT_PROVIDER_ORDER: dict[tuple[DataType, Market | None], list[str]] = {
-    (DataType.QUOTE_LATEST, Market.US): ["yfinance"],
-    (DataType.QUOTE_LATEST, Market.TW): ["twse", "tpex", "yfinance"],
-    (DataType.QUOTE_LATEST, Market.MY): ["yfinance"],
+    # Free spec-20.8 fallbacks appended to each market's QUOTE_LATEST chain.
+    (DataType.QUOTE_LATEST, Market.US): ["yfinance", "stockprices_dev"],
+    (DataType.QUOTE_LATEST, Market.TW): ["twse", "tpex", "yfinance", "twstock"],
+    (DataType.QUOTE_LATEST, Market.MY): ["yfinance", "klsescreener", "malaysiastock"],
     (DataType.QUOTE_HISTORY, Market.US): ["yfinance"],
     (DataType.QUOTE_HISTORY, Market.TW): ["yfinance"],
     (DataType.QUOTE_HISTORY, Market.MY): ["yfinance"],
@@ -52,10 +58,15 @@ def default_registry(conn: sqlite3.Connection | None = None) -> Registry:
         )
     else:
         finmind = FinMindProvider()
-    providers = {
+    providers: dict[str, ProviderBase] = {
         "yfinance": YFinanceProvider(),
         "twse": TwseProvider(),
         "tpex": TpexProvider(),
         "finmind": finmind,
+        # Free spec-20.8 quote fallbacks (key-less; inert until their chain slot is hit).
+        "twstock": TwStockProvider(),
+        "stockprices_dev": StockPricesDevProvider(),
+        "klsescreener": KlseScreenerProvider(),
+        "malaysiastock": MalaysiaStockProvider(),
     }
     return Registry(providers=providers, order=DEFAULT_PROVIDER_ORDER)
