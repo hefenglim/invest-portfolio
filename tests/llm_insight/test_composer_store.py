@@ -7,6 +7,7 @@ fixture only needs ``ensure_seeded``. No LLM, no money math — pure CRUD + casc
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -202,3 +203,111 @@ def test_archive_calibration_hidden_by_default(conn: sqlite3.Connection) -> None
     incl = cs.list_calibrations(conn, it.id, include_archived=True)
     assert [c.version for c in incl] == [1]
     assert incl[0].archived is True
+
+
+def test_archive_calibration_clears_active_when_it_was_active(conn: sqlite3.Connection) -> None:
+    it = cs.create_insight_type(conn, name="N", scope="portfolio", now=NOW)
+    c1 = cs.create_calibration(conn, it.id, body="v1", cause="seed", now=NOW)
+    cs.set_active_calibration(conn, it.id, c1.version)
+    cs.archive_calibration(conn, c1.id)
+    assert cs.get_insight_type(conn, it.id).active_calibration_version is None  # type: ignore[union-attr]
+
+
+def test_archive_calibration_unknown_returns_none(conn: sqlite3.Connection) -> None:
+    assert cs.archive_calibration(conn, 999) is None
+
+
+# --- delete cascade: strategy (spec 4.1) --------------------------------------
+
+
+def test_delete_strategy_referenced_raises_in_use(conn: sqlite3.Connection) -> None:
+    it = cs.create_insight_type(conn, name="Combo", scope="portfolio", now=NOW)
+    sp = cs.create_strategy(conn, name="A", body="a", now=NOW)
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    with pytest.raises(cs.StrategyInUseError) as exc:
+        cs.delete_strategy(conn, sp.id, now=LATER)
+    assert exc.value.referencing_insight_type_ids == [it.id]
+    # Still present (not deleted).
+    assert cs.get_strategy(conn, sp.id) is not None
+
+
+def test_delete_strategy_never_used_hard_deletes(conn: sqlite3.Connection) -> None:
+    sp = cs.create_strategy(conn, name="Lonely", body="x", now=NOW)
+    outcome = cs.delete_strategy(conn, sp.id, now=LATER)
+    assert outcome == "deleted"
+    assert cs.get_strategy(conn, sp.id) is None
+
+
+def test_delete_strategy_with_history_archives(conn: sqlite3.Connection) -> None:
+    # A strategy that was archived (has history) but is no longer referenced -> stays
+    # archived (soft-deleted), not hard-deleted.
+    sp = cs.create_strategy(conn, name="Old", body="x", now=NOW)
+    cs.archive_strategy(conn, sp.id, now=NOW)
+    outcome = cs.delete_strategy(conn, sp.id, now=LATER)
+    assert outcome == "archived"
+    got = cs.get_strategy(conn, sp.id)
+    assert got is not None and got.archived is True
+
+
+def test_delete_strategy_unknown_returns_none(conn: sqlite3.Connection) -> None:
+    assert cs.delete_strategy(conn, 999, now=NOW) is None
+
+
+# --- delete cascade: insight_type (spec 4.1) ----------------------------------
+
+
+def test_delete_insight_type_archives_clears_job_and_calibrations(
+    conn: sqlite3.Connection,
+) -> None:
+    it = cs.create_insight_type(conn, name="Combo", scope="portfolio", now=NOW)
+    cs.set_job_id(conn, it.id, "insight:1")
+    c1 = cs.create_calibration(conn, it.id, body="v1", cause="seed", now=NOW)
+    archived = cs.delete_insight_type(conn, it.id, now=LATER)
+    assert archived is not None
+    assert archived.archived is True
+    assert archived.job_id is None
+    # Calibration chain archived but retained.
+    chain = cs.list_calibrations(conn, it.id, include_archived=True)
+    assert [c.version for c in chain] == [c1.version]
+    assert chain[0].archived is True
+    # Default list hides the archived insight_type.
+    assert it.id not in {x.id for x in cs.list_insight_types(conn)}
+    assert it.id in {x.id for x in cs.list_insight_types(conn, include_archived=True)}
+
+
+def test_delete_insight_type_unknown_returns_none(conn: sqlite3.Connection) -> None:
+    assert cs.delete_insight_type(conn, 999, now=NOW) is None
+
+
+# --- evolution config (spec 4.6) ----------------------------------------------
+
+
+def test_evolution_config_defaults(conn: sqlite3.Connection) -> None:
+    cfg = cs.get_evolution_config(conn)
+    assert cfg == {
+        "auto_promote": False,
+        "shadow_batches": 3,
+        "min_samples": 8,
+        "max_shadows": 2,
+        "gap_alert_pp": "10",
+    }
+
+
+def test_evolution_config_set_roundtrip(conn: sqlite3.Connection) -> None:
+    out = cs.set_evolution_config(
+        conn,
+        auto_promote=True,
+        shadow_batches=5,
+        min_samples=12,
+        max_shadows=3,
+        gap_alert_pp=Decimal("7.5"),
+    )
+    assert out["auto_promote"] is True
+    assert out["shadow_batches"] == 5
+    assert out["min_samples"] == 12
+    assert out["max_shadows"] == 3
+    # gap_alert_pp round-trips as an exact Decimal string (never float).
+    assert out["gap_alert_pp"] == "7.5"
+    assert isinstance(out["gap_alert_pp"], str)
+    # Persisted: a fresh read returns the same.
+    assert cs.get_evolution_config(conn)["gap_alert_pp"] == "7.5"
