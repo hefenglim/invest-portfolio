@@ -112,6 +112,54 @@ def ensure_scheduler_seeded(conn: sqlite3.Connection) -> None:
     ensure_job_rows(conn)  # also run unconditionally so newly-registered jobs get their row
 
 
+# --- Insight-type schedule binding (spec 4.2) ---------------------------------
+# An insight_type schedule is a DYNAMIC, payload-dispatched ``schedule_config`` row —
+# NOT one of the static ``JOBS``. 04a only persists the binding (kind=insight,
+# payload=insight_type_id) and returns a deterministic job_id; the runtime dispatch of
+# kind=insight is 04b. The API router (api → scheduler is allowed) calls these from the
+# composer endpoints; ``llm_insight`` itself never imports ``scheduler``.
+
+
+def insight_job_id(insight_type_id: int) -> str:
+    """The deterministic schedule job_id for an insight_type binding."""
+    return f"insight:{insight_type_id}"
+
+
+def bind_insight_schedule(
+    conn: sqlite3.Connection,
+    insight_type_id: int,
+    *,
+    cron: str,
+    tz: str = "Asia/Taipei",
+) -> str:
+    """Create/update the kind=insight ``schedule_config`` row for an insight_type.
+
+    Upserts on the deterministic ``job_id`` so a re-bind updates the cron/timezone in
+    place (no duplicate row). Returns the job_id. Ensures the scheduler tables exist
+    first (idempotent). NO APScheduler wiring here — pure row write.
+    """
+    create_scheduler_tables(conn)
+    job_id = insight_job_id(insight_type_id)
+    conn.execute(
+        "INSERT INTO schedule_config (job_id, enabled, cron, timezone, kind, payload) "
+        "VALUES (?, 1, ?, ?, 'insight', ?) "
+        "ON CONFLICT(job_id) DO UPDATE SET enabled = 1, cron = excluded.cron, "
+        "timezone = excluded.timezone, kind = 'insight', payload = excluded.payload",
+        (job_id, cron, tz, str(insight_type_id)),
+    )
+    conn.commit()
+    return job_id
+
+
+def unbind_insight_schedule(conn: sqlite3.Connection, insight_type_id: int) -> None:
+    """Remove an insight_type's ``schedule_config`` binding row (no-op if absent)."""
+    create_scheduler_tables(conn)
+    conn.execute(
+        "DELETE FROM schedule_config WHERE job_id = ?", (insight_job_id(insight_type_id),)
+    )
+    conn.commit()
+
+
 # --- Job registry -------------------------------------------------------------
 # Default cron times fall after each exchange's close; users override per job later.
 
