@@ -336,6 +336,38 @@ def test_stored_model_is_alias_not_symbol(
     assert cards[0].model != "2330"  # NEVER the ticker symbol
 
 
+# --- fix #4: a multi-block skip carries a SINGLE reason enum + full text in detail ----
+
+
+def test_multi_block_skip_reason_is_single_enum(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A per_symbol combo with NO live strategies AND an empty universe fires two hard
+    # blocks (R3 then R2). The job_runs.reason must be ONE enum (the first/highest-severity
+    # block, R3_no_live_templates), with the full joined human text in detail (spec 07 §7.4).
+    _patch_llm(monkeypatch)
+    it = cs.create_insight_type(
+        conn, name="Watch", scope="per_symbol",
+        universe={"mode": "custom", "symbols": []}, now=NOW,
+    )
+    result = generate.run_insight_type(
+        conn, it.id, var_contexts={},
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=[]), now=NOW,
+    )
+    assert result.status == "skipped"
+    row = conn.execute(
+        "SELECT reason, detail FROM job_runs WHERE job_id = ?", (f"insight:{it.id}",)
+    ).fetchone()
+    # reason is exactly ONE enum value (no "; " join), the first blocking gate.
+    assert row["reason"] == "R3_no_live_templates"
+    assert ";" not in row["reason"]
+    # the human detail keeps the full multi-block text (both R3 and R2 messages).
+    assert "R3_no_live_templates" in row["detail"]
+    assert "R2_universe_empty" in row["detail"]
+    # RunResult.reason mirrors the single enum.
+    assert result.reason == "R3_no_live_templates"
+
+
 def test_anomaly_card_model_stays_none(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

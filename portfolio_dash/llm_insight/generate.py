@@ -199,7 +199,22 @@ def _write_job_run(
 
 
 def _block_reason_text(result: GateResult) -> str:
+    """The full human text of every block reason, joined (goes into ``job_runs.detail``)."""
     return "; ".join(r["reason"] for r in skip_reasons(result) if r["reason"])
+
+
+def _first_block_reason(result: GateResult) -> str:
+    """The SINGLE block-reason enum for ``job_runs.reason`` (spec 07 §7.4).
+
+    The gate appends findings in severity order (R1 → R3 → R2 → R6 → R7), so the first
+    block-level finding is the highest-severity one; a skip row carries exactly that one
+    enum (e.g. ``R3_no_live_templates``), never a joined string. The full multi-block text
+    is preserved separately in ``job_runs.detail``.
+    """
+    for r in skip_reasons(result):
+        if r["reason"]:
+            return str(r["reason"])
+    return ""
 
 
 def run_insight_type(
@@ -231,10 +246,13 @@ def run_insight_type(
 
     gate = evaluate_gates(_gate_context(conn, it, inputs))
     if gate.verdict == "blocked":
-        reason = _block_reason_text(gate)
+        # Fix #4: job_runs.reason is a SINGLE enum (the first/highest-severity block);
+        # the full multi-block human text goes to job_runs.detail.
+        reason = _first_block_reason(gate)
+        detail = _block_reason_text(gate)
         _write_job_run(
-            conn, insight_type_id, status="skipped", reason=reason, cost=Decimal("0"),
-            now=now, run_id=run_id, is_shadow=inputs.is_shadow,
+            conn, insight_type_id, status="skipped", reason=reason, detail=detail,
+            cost=Decimal("0"), now=now, run_id=run_id, is_shadow=inputs.is_shadow,
         )
         return RunResult(
             status="skipped", reason=reason, cards_created=0, cost_usd=Decimal("0")
