@@ -18,7 +18,6 @@ import sqlite3
 
 from pydantic import BaseModel
 
-from portfolio_dash.data_ingestion.config_seed import DEFAULT_ACCOUNTS
 from portfolio_dash.pricing.defaults import DEFAULT_PROVIDER_ORDER
 from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.shared import config_store
@@ -176,7 +175,10 @@ def _default_quote_chain(market: Market) -> list[str]:
     return list(DEFAULT_PROVIDER_ORDER.get((DataType.QUOTE_LATEST, market), []))
 
 
-# Each account's fallback chain seeds from its market's default quote order.
+# Each account's fallback chain seeds from its market's default quote order. This
+# local map is the account source for seeding (one entry per default account id), so
+# pricing/ needs no import from data_ingestion (architecture.md: sibling lower layers
+# must not import each other). Keep in sync with data_ingestion's DEFAULT_ACCOUNTS.
 _ACCOUNT_MARKET: dict[str, Market] = {
     "tw_broker": Market.TW,
     "schwab": Market.US,
@@ -204,13 +206,12 @@ def seed(conn: sqlite3.Connection) -> None:
             "ON CONFLICT(source_id) DO NOTHING",
             (sid,),
         )
-    for acc in DEFAULT_ACCOUNTS:
-        market = _ACCOUNT_MARKET.get(acc.account_id)
-        chain = _default_quote_chain(market) if market is not None else []
+    for account_id, market in _ACCOUNT_MARKET.items():
+        chain = _default_quote_chain(market)
         conn.execute(
             "INSERT INTO data_source_fallbacks (account_id, chain) VALUES (?, ?) "
             "ON CONFLICT(account_id) DO NOTHING",
-            (acc.account_id, json.dumps(chain)),
+            (account_id, json.dumps(chain)),
         )
     conn.commit()
 
@@ -300,11 +301,10 @@ def account_chains(conn: sqlite3.Connection) -> dict[str, list[str]]:
             out[r["account_id"]] = [str(x) for x in parsed]
         return out
     # No rows persisted yet: fall back to the hardcoded default per account market.
-    fallback: dict[str, list[str]] = {}
-    for acc in DEFAULT_ACCOUNTS:
-        market = _ACCOUNT_MARKET.get(acc.account_id)
-        fallback[acc.account_id] = _default_quote_chain(market) if market else []
-    return fallback
+    return {
+        account_id: _default_quote_chain(market)
+        for account_id, market in _ACCOUNT_MARKET.items()
+    }
 
 
 # --- Writes -------------------------------------------------------------------
