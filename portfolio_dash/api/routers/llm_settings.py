@@ -42,6 +42,7 @@ from portfolio_dash.shared.llm_usage_reads import (
     usage_daily,
 )
 from portfolio_dash.shared.masking import mask_secret
+from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
@@ -74,8 +75,8 @@ def _model_wire(
         "api_base": m.api_base,
         "api_key_masked": mask_secret(m.api_key),
         "vision": m.vision,
-        "price_in": str(m.input_price_per_mtok),
-        "price_out": str(m.output_price_per_mtok),
+        "price_in": decimal_str(m.input_price_per_mtok),
+        "price_out": decimal_str(m.output_price_per_mtok),
         "context_window": m.context_window,
         "max_output_tokens": m.max_output_tokens,
         "timeout_seconds": m.timeout_seconds,
@@ -94,8 +95,8 @@ def _roles_wire(conn: sqlite3.Connection) -> dict[str, str | None]:
 
 def _quota_wire(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
-        "remaining_usd": str(quota_remaining(conn)),
-        "alert_threshold_usd": str(get_alert_threshold(conn)),
+        "remaining_usd": decimal_str(quota_remaining(conn)),
+        "alert_threshold_usd": decimal_str(get_alert_threshold(conn)),
         "topups": list_topups(conn),
     }
 
@@ -109,17 +110,18 @@ def _usage_wire(conn: sqlite3.Connection) -> dict[str, Any]:
                 "calls": u.calls,
                 "tokens_in": u.tokens_in,
                 "tokens_out": u.tokens_out,
-                "cost_usd": str(u.cost_usd),
+                "cost_usd": decimal_str(u.cost_usd),
             }
             for u in usage_by_model(conn)
         ],
         "by_agent": [
-            {"agent": u.agent, "cost_usd": str(u.cost_usd)} for u in usage_by_agent(conn)
+            {"agent": u.agent, "cost_usd": decimal_str(u.cost_usd)}
+            for u in usage_by_agent(conn)
         ],
         "daily": {
             "dates": daily.dates,
             "series": [
-                {"alias": s.alias, "costs": [str(c) for c in s.costs]}
+                {"alias": s.alias, "costs": [decimal_str(c) for c in s.costs]}
                 for s in daily.series
             ],
         },
@@ -337,7 +339,7 @@ def topup_quota(body: TopupBody, conn: sqlite3.Connection = Depends(get_conn)) -
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "加值金額需大於 0", field="amount_usd"))
     add_topup(conn, body.amount_usd, body.note)
-    return {"remaining_usd": str(quota_remaining(conn))}
+    return {"remaining_usd": decimal_str(quota_remaining(conn))}
 
 
 class QuotaBody(BaseModel):
@@ -350,7 +352,7 @@ def put_quota(body: QuotaBody, conn: sqlite3.Connection = Depends(get_conn)) -> 
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "警示閾值不可為負", field="alert_threshold_usd"))
     set_alert_threshold(conn, body.alert_threshold_usd)
-    return {"alert_threshold_usd": str(get_alert_threshold(conn))}
+    return {"alert_threshold_usd": decimal_str(get_alert_threshold(conn))}
 
 
 __all__ = ["router"]

@@ -6,6 +6,7 @@ from portfolio_dash.data_ingestion.config_seed import FeeRuleSet
 from portfolio_dash.data_ingestion.validate import Issue
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.wire import decimal_str
 
 _ISSUE_FIELD = {
     "sell_exceeds_holdings": "shares",
@@ -60,11 +61,11 @@ def fee_rules_wire(r: FeeRuleSet) -> dict[str, Any]:
             f"印花稅 {r.stamp_duty_rate * 100}%"
         )
     return {
-        "rate": str(r.brokerage),
-        "discount": str(r.discount),
-        "min_fee": str(r.min_fee),
+        "rate": decimal_str(r.brokerage),
+        "discount": decimal_str(r.discount),
+        "min_fee": decimal_str(r.min_fee),
         "round_int": r.round_integer,
-        "tax_sell": str(r.tax_normal),
-        "tax_sell_etf": str(r.tax_etf),
+        "tax_sell": decimal_str(r.tax_normal),
+        "tax_sell_etf": decimal_str(r.tax_etf),
         "label": label,
     }

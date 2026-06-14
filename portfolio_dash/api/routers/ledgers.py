@@ -21,6 +21,7 @@ from portfolio_dash.data_ingestion.store import (
     list_opening,
     list_transactions,
 )
+from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
@@ -74,8 +75,9 @@ def transactions(
             "id": t.id, "date": t.trade_date.isoformat(), "account_id": t.account_id,
             "account": accts.get(t.account_id, t.account_id), "symbol": t.symbol,
             "name": names.get(t.symbol, ""), "side": t.side.value.lower(),
-            "shares": str(t.quantity), "price": str(t.price), "fee": str(t.fees),
-            "tax": str(t.tax), "total": str(total), "ccy": ccys.get(t.symbol, ""),
+            "shares": decimal_str(t.quantity), "price": decimal_str(t.price),
+            "fee": decimal_str(t.fees), "tax": decimal_str(t.tax),
+            "total": decimal_str(total), "ccy": ccys.get(t.symbol, ""),
             "fee_snapshot": (t.fee_rule_snapshot or None), "note": t.note,
         })
     return _page(out, limit, offset)
@@ -100,9 +102,14 @@ def dividends(
             "id": d.id, "date": d.date.isoformat(), "account_id": d.account_id,
             "account": accts.get(d.account_id, d.account_id), "symbol": d.symbol,
             "name": names.get(d.symbol, ""), "type": d.type.lower(),
-            "gross": str(d.gross), "withhold": str(d.withholding), "net": str(d.net),
-            "reinvest_shares": str(d.reinvest_shares) if d.reinvest_shares is not None else None,
-            "reinvest_price": str(d.reinvest_price) if d.reinvest_price is not None else None,
+            "gross": decimal_str(d.gross), "withhold": decimal_str(d.withholding),
+            "net": decimal_str(d.net),
+            "reinvest_shares": (
+                decimal_str(d.reinvest_shares) if d.reinvest_shares is not None else None
+            ),
+            "reinvest_price": (
+                decimal_str(d.reinvest_price) if d.reinvest_price is not None else None
+            ),
             "ccy": ccys.get(d.symbol, ""),
         })
     return _page(out, limit, offset)
@@ -126,9 +133,9 @@ def fx(
         out.append({
             "id": c.id, "date": c.date.isoformat(), "account_id": c.account_id,
             "account": accts.get(c.account_id, c.account_id),
-            "from_ccy": c.from_ccy.value, "from_amt": str(c.from_amount),
-            "to_ccy": c.to_ccy.value, "to_amt": str(c.to_amount),
-            "implied_rate": str(c.implied_rate),
+            "from_ccy": c.from_ccy.value, "from_amt": decimal_str(c.from_amount),
+            "to_ccy": c.to_ccy.value, "to_amt": decimal_str(c.to_amount),
+            "implied_rate": decimal_str(c.implied_rate),
         })
     return _page(out, limit, offset)
 
@@ -147,8 +154,9 @@ def openings(
         out.append({
             "date": o.build_date.isoformat(), "account_id": o.account_id,
             "account": accts.get(o.account_id, o.account_id), "symbol": o.symbol,
-            "name": names.get(o.symbol, ""), "shares": str(o.shares),
-            "avg": str(o.original_avg_cost), "total": str(o.original_cost_total),
+            "name": names.get(o.symbol, ""), "shares": decimal_str(o.shares),
+            "avg": decimal_str(o.original_avg_cost),
+            "total": decimal_str(o.original_cost_total),
             "ccy": ccys.get(o.symbol, ""),
         })
     paged = _page(out, limit, offset)

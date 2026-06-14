@@ -34,6 +34,7 @@ from portfolio_dash.scheduler.jobs import (
     unbind_insight_schedule,
 )
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
@@ -710,7 +711,9 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
             {
                 "metric": pred.metric,
                 "direction": pred.direction,
-                "target_pct": None if pred.target_pct is None else str(pred.target_pct),
+                "target_pct": (
+                    None if pred.target_pct is None else decimal_str(pred.target_pct)
+                ),
                 "horizon_days": pred.horizon_days,
             }
             if pred is not None

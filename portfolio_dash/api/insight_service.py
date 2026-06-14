@@ -64,6 +64,7 @@ from portfolio_dash.shared.llm_config import (
     get_role_model_id,
 )
 from portfolio_dash.shared.llm_config import get_model as llm_config_get_model
+from portfolio_dash.shared.wire import decimal_str
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,9 @@ def _per_symbol_ctx(
     as_of = now.date()
     history = get_price_history(conn, symbol, as_of - timedelta(days=_HISTORY_DAYS), as_of)
     ctx.closes = [p.value for p in history]
-    ctx.price_points = [{"date": p.as_of.isoformat(), "close": str(p.value)} for p in history]
+    ctx.price_points = [
+        {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in history
+    ]
     return ctx
 
 
@@ -398,7 +401,7 @@ def _actual_text(actual: scoring.ActualMeasurement | None) -> str:
     if actual is None:
         return "（無實際數據）"
     return json.dumps(
-        {k: (str(v) if isinstance(v, Decimal) else v)
+        {k: (decimal_str(v) if isinstance(v, Decimal) else v)
          for k, v in actual.model_dump().items() if v is not None},
         ensure_ascii=False,
     )
@@ -751,7 +754,7 @@ def build_status(
         "as_of": now.isoformat(),
         "health": {
             "master_ok": master_configured,
-            "quota_remaining": str(quota),
+            "quota_remaining": decimal_str(quota),
             "last_batch": _last_batch(conn),
         },
         "tasks": tasks,
@@ -1032,7 +1035,7 @@ def _assembled_preview(
     return {
         "layers": layers,
         "est_tokens": est_tokens,
-        "est_cost_usd": str(est_cost),
+        "est_cost_usd": decimal_str(est_cost),
     }
 
 

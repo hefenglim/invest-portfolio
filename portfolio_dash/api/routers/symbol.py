@@ -35,6 +35,7 @@ from portfolio_dash.shared.models.ledger import (
     OpeningInventory,
     Transaction,
 )
+from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
@@ -97,8 +98,8 @@ def symbol_detail(
     if held is not None:
         cost_basis = {
             "account_id": held.account_id,
-            "original_avg": str(held.original_avg),
-            "adjusted_avg": str(held.adjusted_avg),
+            "original_avg": decimal_str(held.original_avg),
+            "adjusted_avg": decimal_str(held.adjusted_avg),
         }
 
     # price_history — STORED prices over [as_of - days, as_of] (read-only; no backfill).
@@ -108,7 +109,7 @@ def symbol_detail(
         last = history[-1]
         price_history: dict[str, Any] = {
             "available": True,
-            "points": [{"date": p.as_of.isoformat(), "close": str(p.value)}
+            "points": [{"date": p.as_of.isoformat(), "close": decimal_str(p.value)}
                        for p in history],
             "last_date": last.as_of.isoformat(),
             "stale": last.stale,
@@ -133,10 +134,14 @@ def symbol_detail(
         {
             "date": d.date.isoformat(),
             "type": _DIV_TYPE_WIRE[DividendType(d.type)],
-            "gross": str(d.gross),
-            "net": str(d.net),
-            "reinvest_shares": str(d.reinvest_shares) if d.reinvest_shares is not None else None,
-            "reinvest_price": str(d.reinvest_price) if d.reinvest_price is not None else None,
+            "gross": decimal_str(d.gross),
+            "net": decimal_str(d.net),
+            "reinvest_shares": (
+                decimal_str(d.reinvest_shares) if d.reinvest_shares is not None else None
+            ),
+            "reinvest_price": (
+                decimal_str(d.reinvest_price) if d.reinvest_price is not None else None
+            ),
             "ccy": ccy,
         }
         for d in sym_divs
@@ -148,14 +153,15 @@ def symbol_detail(
         if o.symbol == symbol:
             events.append((o.build_date, 0, {
                 "date": o.build_date.isoformat(), "side": "open",
-                "shares": str(o.shares), "price": str(o.original_avg_cost)}))
+                "shares": decimal_str(o.shares),
+                "price": decimal_str(o.original_avg_cost)}))
     for tx in txs:
         if tx.symbol == symbol:
             side = "buy" if tx.side is Side.BUY else "sell"
             order = 1 if tx.side is Side.BUY else 2
             events.append((tx.trade_date, order, {
                 "date": tx.trade_date.isoformat(), "side": side,
-                "shares": str(tx.quantity), "price": str(tx.price)}))
+                "shares": decimal_str(tx.quantity), "price": decimal_str(tx.price)}))
     events.sort(key=lambda e: (e[0], e[1]))
     trade_events = [e[2] for e in events]
 
@@ -180,9 +186,9 @@ def _realized_wire(r: RealizedRow) -> dict[str, str]:
         "symbol": r.symbol,
         "quote_ccy": r.quote_ccy.value,
         "sell_date": r.sell_date.isoformat(),
-        "shares_sold": str(r.shares_sold),
-        "proceeds_net": str(r.proceeds_net),
-        "original_cost_removed": str(r.original_cost_removed),
-        "adjusted_cost_removed": str(r.adjusted_cost_removed),
-        "realized": str(r.realized),
+        "shares_sold": decimal_str(r.shares_sold),
+        "proceeds_net": decimal_str(r.proceeds_net),
+        "original_cost_removed": decimal_str(r.original_cost_removed),
+        "adjusted_cost_removed": decimal_str(r.adjusted_cost_removed),
+        "realized": decimal_str(r.realized),
     }

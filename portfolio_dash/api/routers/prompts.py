@@ -36,6 +36,7 @@ from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import budget_remaining
+from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
@@ -312,7 +313,7 @@ def _build_context(
         ctx.symbol = payload.symbol
         ctx.closes = [p.value for p in history]
         ctx.price_points = [
-            {"date": p.as_of.isoformat(), "close": str(p.value)} for p in history
+            {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in history
         ]
     return ctx
 
@@ -386,6 +387,6 @@ def test_prompt(
         "via": "litellm",
         "tokens_in": result.tokens_in,
         "tokens_out": result.tokens_out,
-        "cost_usd": str(result.cost),
-        "quota_remaining": str(budget_remaining(conn)),
+        "cost_usd": decimal_str(result.cost),
+        "quota_remaining": decimal_str(budget_remaining(conn)),
     }

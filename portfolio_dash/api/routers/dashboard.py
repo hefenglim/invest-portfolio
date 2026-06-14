@@ -17,6 +17,7 @@ from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import budget_remaining, get_alert_threshold
+from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy.alerts import compute_alerts_from
 from portfolio_dash.strategy.rules_config import get_alert_rules
 
@@ -40,10 +41,10 @@ def dashboard(
     start = end - timedelta(days=_SPARK_DAYS)
     for row in payload["holdings"]:
         history = get_price_history(conn, row["symbol"], start, end)
-        row["spark_30d"] = [str(p.value) for p in history]
+        row["spark_30d"] = [decimal_str(p.value) for p in history]
 
     # Single source of truth (Σ top-ups − Σ usage); never None, $0 when nothing funded.
-    payload["llm_quota"] = {"remaining_usd": str(budget_remaining(conn))}
+    payload["llm_quota"] = {"remaining_usd": decimal_str(budget_remaining(conn))}
 
     # alerts: the SAME rule engine as GET /api/alerts, run over the already-built `data`
     # (no second build_dashboard) so the embedded array can never diverge from the endpoint.

@@ -32,6 +32,7 @@ from portfolio_dash.data_ingestion.opening_import import (
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, commit_preview
 from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
 from portfolio_dash.data_ingestion.validate import TxnInput
+from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
@@ -69,7 +70,7 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     holdings: dict[str, dict[str, str]] = {}
     for a in accts:
         per = {
-            inst.symbol: str(sh)
+            inst.symbol: decimal_str(sh)
             for inst in insts
             if (sh := current_shares(conn, a.account_id, inst.symbol)) != 0
         }
@@ -111,17 +112,6 @@ def _rule_for(conn: sqlite3.Connection, account_id: str) -> FeeRuleSet | None:
     return get_fee_rule_set(row["fee_rule_set"]) if row is not None else None
 
 
-def _money_str(value: Decimal) -> str:
-    """Plain (non-scientific) string with trailing fractional zeros trimmed.
-
-    Presentation only — drops the scale artifact from ``shares * price``
-    (e.g. ``Decimal('612500.0')`` -> ``'612500'``) without altering the value.
-    """
-    if value == value.to_integral_value():
-        return str(value.quantize(Decimal(1)))
-    return str(value.normalize())
-
-
 @router.post("/input/manual/preview")
 def manual_preview(
     body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)
@@ -135,8 +125,8 @@ def manual_preview(
     )
     rule = _rule_for(conn, body.account_id)
     return {
-        "fee": str(draft.fee), "tax": str(draft.tax), "gross": _money_str(gross),
-        "total": _money_str(total),
+        "fee": decimal_str(draft.fee), "tax": decimal_str(draft.tax),
+        "gross": decimal_str(gross), "total": decimal_str(total),
         "fee_rule_label": fee_rules_wire(rule)["label"] if rule is not None else None,
         "fee_overridden": body.fee_override is not None,
         "tax_overridden": body.tax_override is not None,
@@ -162,7 +152,7 @@ def manual_commit(body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)
     gross = body.shares * body.price
     total = (-(gross + written.fee + written.tax) if inp.side.value == "BUY"
              else (gross - written.fee - written.tax))
-    return {"txn_id": written.transaction_id, "total": _money_str(total)}
+    return {"txn_id": written.transaction_id, "total": decimal_str(total)}
 
 
 # --- CSV import: preview (12.3) + commit (12.4) shared infrastructure ---
@@ -186,9 +176,9 @@ def _row_status(row: PreviewRow) -> str:
 def _row_data(row: PreviewRow) -> dict[str, Any]:
     data = {k: v for k, v in row.payload.items() if not k.startswith("snap.")}
     if row.fee is not None:
-        data["fee"] = str(row.fee)
+        data["fee"] = decimal_str(row.fee)
     if row.tax is not None:
-        data["tax"] = str(row.tax)
+        data["tax"] = decimal_str(row.tax)
     return data
 
 
@@ -261,6 +251,7 @@ def ai_preview(body: AiBody, conn: sqlite3.Connection = Depends(get_conn)) -> An
                                     content=error_body(issue.kind, issue.message))
     wire = _preview_wire(result.preview)
     wire["meta"] = {"model": result.meta.model, "via": result.meta.via,
-                    "cost_usd": None if result.meta.cost_usd is None else str(result.meta.cost_usd)}
+                    "cost_usd": None if result.meta.cost_usd is None
+                    else decimal_str(result.meta.cost_usd)}
     wire["csv_text"] = result.csv_text
     return wire

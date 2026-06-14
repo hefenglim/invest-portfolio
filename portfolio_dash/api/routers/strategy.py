@@ -15,6 +15,7 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy.alerts import compute_alerts
 from portfolio_dash.strategy.rebalance import compute_rebalance
 from portfolio_dash.strategy.rules_config import (
@@ -35,7 +36,7 @@ def _rules_wire(rules: Any) -> list[dict[str, Any]]:
         _dv, unit, mn, mx = RULE_META[rid]
         out.append({
             "id": rid, "enabled": rule.enabled,
-            "value": None if rule.value is None else str(rule.value),
+            "value": None if rule.value is None else decimal_str(rule.value),
             "unit": unit, "min": mn, "max": mx,
         })
     return out

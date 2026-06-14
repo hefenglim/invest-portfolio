@@ -26,6 +26,7 @@ from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
@@ -47,18 +48,18 @@ def _board_wire(conn: sqlite3.Connection, inst: Instrument) -> str | None:
 def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
              now: datetime) -> dict[str, Any]:
     pr = get_latest_price(conn, inst.symbol, now=now)
-    last = str(pr.value) if pr is not None else None
+    last = decimal_str(pr.value) if pr is not None else None
     chg_pct: str | None = None
     if pr is not None:
         hist = get_price_history(conn, inst.symbol, pr.as_of.replace(day=1), pr.as_of)
         if len(hist) >= 2 and hist[-2].value != 0:
-            chg_pct = str((hist[-1].value - hist[-2].value) / hist[-2].value)
+            chg_pct = decimal_str((hist[-1].value - hist[-2].value) / hist[-2].value)
     return {
         "symbol": inst.symbol, "name": inst.name, "market": inst.market.value,
         "board": _board_wire(conn, inst), "sector": inst.sector,
         "ccy": inst.quote_ccy.value, "held": _held(conn, account_ids, inst.symbol),
         "last": last, "chg_pct": chg_pct,
-        "target_low": str(inst.target_low) if inst.target_low is not None else None,
+        "target_low": decimal_str(inst.target_low) if inst.target_low is not None else None,
     }
 
 
