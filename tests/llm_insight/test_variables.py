@@ -37,15 +37,14 @@ def test_category_counts_mirror_vars_js() -> None:
     }
 
 
-def test_available_split_17_now_9_later() -> None:
+def test_available_split_24_now_2_later() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    assert len(available) == 17
-    assert len(unavailable) == 9
-    # the 9 deferred (chips/sentiment -> 06b, ai -> 04) are all available=false
-    assert {v.token for v in V.REGISTRY if v.category in {"chips", "sentiment", "ai"}} == set(
-        unavailable
-    )
+    # chips(5) + sentiment(2) went live (spec 20.2): 17 + 7 = 24 available.
+    assert len(available) == 24
+    assert len(unavailable) == 2
+    # only the 2 'ai' vars remain deferred (spec 04).
+    assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)
 
 
 def test_scope_enum_is_english() -> None:
@@ -97,8 +96,16 @@ def test_render_unknown_marker(golden_db: sqlite3.Connection) -> None:
 
 
 def test_unavailable_var_renders_marker(golden_db: sqlite3.Connection) -> None:
-    # institutional_json is available=false in 06a -> {"unavailable": true}
-    assert any(v.token == "institutional_json" and not v.available for v in V.REGISTRY)
+    # backtest_json is available=false (spec 04) -> {"unavailable": true}
+    assert any(v.token == "backtest_json" and not v.available for v in V.REGISTRY)
+    data = _data(golden_db)
+    out, _ = V.render_prompt("{{backtest_json}}", V.VarContext(data=data))  # type: ignore[arg-type]
+    assert '"unavailable"' in out and "true" in out
+
+
+def test_external_var_degrades_without_fed_value(golden_db: sqlite3.Connection) -> None:
+    # institutional_json is now available but degrades when no external value is fed.
+    assert any(v.token == "institutional_json" and v.available for v in V.REGISTRY)
     data = _data(golden_db)
     out, _ = V.render_prompt("{{institutional_json}}", V.VarContext(data=data))  # type: ignore[arg-type]
     assert '"unavailable"' in out and "true" in out

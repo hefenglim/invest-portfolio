@@ -3,9 +3,12 @@
 The single source of truth for the prompt "Lego blocks". Three pieces:
 
 1. **REGISTRY** — the 26 data variables across 8 categories, mirroring ``web/vars.js``
-   exactly (token ids, categories, scope, description, sample). 17 are available now;
-   the 9 external/AI-self variables (chips → spec 06b, sentiment → 06b, ai → spec 04)
-   are registered ``available=False`` and render as ``{"unavailable": true}``.
+   exactly (token ids, categories, scope, description, sample). 24 are available now;
+   the chips/sentiment 7 went live from ``external_snapshots`` (spec 20.2). The 2
+   AI-self variables (ai → spec 04) remain ``available=False`` and render
+   ``{"unavailable": true}``. External values are derived in the calc core
+   (``portfolio/external_signals.py``) and FED IN via ``VarContext.external_vars`` —
+   this layer never reads a connection or recomputes a number.
 
 2. **validate_tokens** — THE single validation core, reused by the preview endpoint
    (diagnostic, always 200), ``/prompts/test`` (execution path, 422), spec 04 R1
@@ -151,41 +154,41 @@ REGISTRY: tuple[VarSpec, ...] = (
         "報告幣別對各持倉幣別的最新匯率與取得時間",
         '{"USD_TWD":"32.90","MYR_TWD":"7.05","as_of":"2026-06-11T14:30:00+08:00"}',
     ),
-    # --- chips (籌碼與基本面 / FinMind) — available=False until spec 06b ---
+    # --- chips (籌碼與基本面 / FinMind) — live from external_snapshots (spec 20.2) ---
     VarSpec(
-        "institutional_json", "法人買賣超", "chips", "per_symbol", False,
+        "institutional_json", "法人買賣超", "chips", "per_symbol", True,
         "外資/投信/自營近 20 日買賣超與連買連賣天數（台股）",
         '{"symbol":"2330","foreign_net_20d":"+48200","consecutive_buy_days":6}',
     ),
     VarSpec(
-        "margin_json", "融資融券", "chips", "per_symbol", False,
+        "margin_json", "融資融券", "chips", "per_symbol", True,
         "融資餘額/融券餘額近 20 日變化（台股）",
         '{"margin_balance_chg_20d":"-0.031","short_balance_chg_20d":"+0.012"}',
     ),
     VarSpec(
-        "monthly_revenue_json", "月營收", "chips", "per_symbol", False,
+        "monthly_revenue_json", "月營收", "chips", "per_symbol", True,
         "近 12 個月營收與 YoY/MoM（台股）",
         '{"latest":{"month":"2026-05","yoy":"+0.31","mom":"+0.04"},"trailing_12m":[…]}',
     ),
     VarSpec(
-        "valuation_json", "估值（PER/PBR）", "chips", "per_symbol", False,
+        "valuation_json", "估值（PER/PBR）", "chips", "per_symbol", True,
         "本益比/股價淨值比與 5 年歷史百分位",
         '{"per":"24.1","per_5y_percentile":"0.78","pbr":"6.2"}',
     ),
     VarSpec(
-        "financials_json", "季度財報摘要", "chips", "per_symbol", False,
+        "financials_json", "季度財報摘要", "chips", "per_symbol", True,
         "近 4 季營收/毛利率/EPS（台股；美股 v2）",
         '{"quarters":[{"q":"2026Q1","revenue_yoy":"+0.28","gross_margin":"0.532",'
         '"eps":"14.2"}, …]}',
     ),
-    # --- sentiment (市場情緒) — available=False until spec 06b ---
+    # --- sentiment (市場情緒) — live from external_snapshots (spec 20.2) ---
     VarSpec(
-        "market_sentiment_json", "情緒指標", "sentiment", "portfolio", False,
+        "market_sentiment_json", "情緒指標", "sentiment", "portfolio", True,
         "VIX、Fear & Greed 指數與所處區間",
         '{"vix":"14.2","vix_zone":"low","fear_greed":62,"fear_greed_zone":"greed"}',
     ),
     VarSpec(
-        "index_quotes_json", "大盤指數", "sentiment", "portfolio", False,
+        "index_quotes_json", "大盤指數", "sentiment", "portfolio", True,
         "加權指數/S&P 500/KLCI 近 20 日漲跌",
         '{"TAIEX":{"chg_20d":"+0.042"},"SPX":{"chg_20d":"+0.031"},'
         '"KLCI":{"chg_20d":"+0.008"}}',
@@ -287,9 +290,18 @@ class VarContext:
     # Router-fed (the api layer reads conn; this layer must not import pricing/data_ingestion):
     fx_rates: dict[str, Any] | None = None       # {"USD_TWD": {"rate", "as_of", "stale"}}
     dividend_rows: list[dict[str, Any]] | None = None  # per-event ledger rows incl. ccy
+    # Chips/sentiment/index values, already derived in portfolio.external_signals by the
+    # router and keyed by variable token (spec 20.2). Absent token -> the var degrades.
+    external_vars: dict[str, Any] = field(default_factory=dict)
 
 
 _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
+
+# Chips/sentiment tokens whose value is fed via VarContext.external_vars (spec 20.2).
+_EXTERNAL_TOKENS: frozenset[str] = frozenset({
+    "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
+    "financials_json", "market_sentiment_json", "index_quotes_json",
+})
 
 
 def _holdings_for_symbol(data: DashboardData, symbol: str) -> list[Any]:
@@ -435,6 +447,14 @@ def value_for(token: str, ctx: VarContext) -> Any:
     spec = BY_TOKEN.get(token)
     if spec is None or not spec.available:
         return _UNAVAILABLE
+    if token in _EXTERNAL_TOKENS:
+        # Value already derived in portfolio.external_signals and fed by the router; a
+        # missing key OR an assembler-flagged ``unavailable`` -> the canonical degrade
+        # shape (hard rule #5: missing snapshot renders ``{"unavailable": true}``).
+        value = ctx.external_vars.get(token)
+        if not isinstance(value, dict) or value.get("unavailable") is True:
+            return _UNAVAILABLE
+        return value
     data = ctx.data
     if token == "holdings_json":
         return [h.model_dump() for h in data.holdings]

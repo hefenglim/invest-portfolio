@@ -122,3 +122,107 @@ def test_vix_zone_boundaries() -> None:
     assert ES.vix_zone(Decimal("34.99")) == "elevated"
     assert ES.vix_zone(Decimal("35")) == "high"
     assert ES.vix_zone(Decimal("80")) == "high"
+
+
+# --- snapshot -> variable assemblers (pure; spec 20.5) ------------------------
+
+
+def test_build_institutional_foreign_net_and_streak() -> None:
+    rows = [
+        {"date": "2026-06-09", "name": "Foreign_Investor", "buy": 100, "sell": 200},
+        {"date": "2026-06-10", "name": "Foreign_Investor", "buy": 300, "sell": 100},
+        {"date": "2026-06-11", "name": "Foreign_Investor", "buy": 400, "sell": 100},
+        {"date": "2026-06-11", "name": "Investment_Trust", "buy": 50, "sell": 10},
+    ]
+    out = ES.build_institutional(rows, symbol="2330", as_of="2026-06-11")
+    assert out["symbol"] == "2330"
+    assert out["last_as_of"] == "2026-06-11"
+    assert out["consecutive_buy_days"] == 2  # 06-11 +, 06-10 +, 06-09 - breaks
+    # Foreign net over the window = (-100) + 200 + 300 = 400.
+    assert out["foreign_net_total"] == "400"
+
+
+def test_build_institutional_empty_unavailable() -> None:
+    assert ES.build_institutional([], symbol="2330", as_of="2026-06-11") == {
+        "unavailable": True, "last_as_of": None
+    }
+
+
+def test_build_margin_balance_change() -> None:
+    rows = [
+        {"date": "2026-06-09", "MarginPurchaseTodayBalance": 20000,
+         "ShortSaleTodayBalance": 500},
+        {"date": "2026-06-11", "MarginPurchaseTodayBalance": 19280,
+         "ShortSaleTodayBalance": 540},
+    ]
+    out = ES.build_margin(rows, symbol="2330", as_of="2026-06-11")
+    assert out["margin_balance"] == "19280"
+    assert out["short_balance"] == "540"
+    # (19280 - 20000) / 20000 = -0.036
+    assert out["margin_balance_chg"] == "-0.036"
+
+
+def test_build_valuation_fields() -> None:
+    rows = [{"date": "2026-06-11", "PER": "24.1", "PBR": "6.2", "dividend_yield": "1.8"}]
+    out = ES.build_valuation(rows, symbol="2330", as_of="2026-06-11")
+    assert out["per"] == "24.1" and out["pbr"] == "6.2" and out["dividend_yield"] == "1.8"
+    # 5y percentile of the latest PER over the window's PER history (single point -> 1).
+    assert out["per_percentile"] == "1"
+
+
+def test_build_monthly_revenue_yoy_mom() -> None:
+    rows = [
+        {"date": "2025-05-31", "revenue": 100, "revenue_year": 2025, "revenue_month": 5},
+        {"date": "2026-04-30", "revenue": 120, "revenue_year": 2026, "revenue_month": 4},
+        {"date": "2026-05-31", "revenue": 131, "revenue_year": 2026, "revenue_month": 5},
+    ]
+    out = ES.build_monthly_revenue(rows, symbol="2330", as_of="2026-05-31")
+    assert out["latest_revenue"] == "131"
+    assert out["yoy"] == "0.31"  # vs 2025-05 = 100
+    # mom uses the previous row (2026-04 = 120): (131-120)/120.
+    assert out["mom"] == str(Decimal("11") / Decimal("120"))
+
+
+def test_build_financials_keeps_recent() -> None:
+    rows = [{"date": "2026-03-31", "type": "EPS", "value": "14.2", "origin_name": "EPS"}]
+    out = ES.build_financials(rows, symbol="2330", as_of="2026-03-31")
+    assert out["last_as_of"] == "2026-03-31"
+    assert out["rows"] == rows
+
+
+def test_build_market_sentiment() -> None:
+    out = ES.build_market_sentiment(
+        vix_close=Decimal("14.2"), as_of_vix="2026-06-11",
+        fng={"score": "62", "rating": "greed"}, as_of_fng="2026-06-11",
+    )
+    assert out["vix"] == "14.2" and out["vix_zone"] == "low"
+    assert out["fear_greed"] == "62" and out["fear_greed_rating"] == "greed"
+
+
+def test_build_market_sentiment_partial() -> None:
+    # VIX present, F&G missing -> still available, F&G fields null.
+    out = ES.build_market_sentiment(
+        vix_close=Decimal("30"), as_of_vix="2026-06-11", fng=None, as_of_fng=None
+    )
+    assert out["vix_zone"] == "elevated"
+    assert out["fear_greed"] is None and out["fear_greed_rating"] is None
+
+
+def test_build_market_sentiment_all_missing_unavailable() -> None:
+    out = ES.build_market_sentiment(
+        vix_close=None, as_of_vix=None, fng=None, as_of_fng=None
+    )
+    assert out == {"unavailable": True, "last_as_of": None}
+
+
+def test_build_index_quotes() -> None:
+    out = ES.build_index_quotes(
+        {"^TWII": Decimal("22150.5"), "^GSPC": Decimal("5980.12"), "^KLSE": Decimal("1612")},
+        as_of="2026-06-11",
+    )
+    assert out["TAIEX"] == "22150.5" and out["SPX"] == "5980.12" and out["KLCI"] == "1612"
+    assert out["last_as_of"] == "2026-06-11"
+
+
+def test_build_index_quotes_empty_unavailable() -> None:
+    assert ES.build_index_quotes({}, as_of=None) == {"unavailable": True, "last_as_of": None}

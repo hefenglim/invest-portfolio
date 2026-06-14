@@ -29,7 +29,9 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.store import list_dividends
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
+from portfolio_dash.portfolio import external_signals as ES
 from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.pricing import snapshots_store
 from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.enums import Currency
@@ -56,7 +58,7 @@ class PromptBody(BaseModel):
 @router.get("/prompt-vars")
 def prompt_vars() -> list[dict[str, Any]]:
     """The 26-variable registry (mirrors web/vars.js). ``available`` drives the UI's
-    "需後端新增" markers; chips/sentiment/ai are False until specs 06b / 04."""
+    "需後端新增" markers; chips/sentiment went live (spec 20.2), ai stays False (spec 04)."""
     return [
         {
             "token": v.token,
@@ -137,19 +139,107 @@ def _dividend_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return rows
 
 
+def _finmind_var(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    dataset: str,
+    build: Any,
+) -> dict[str, Any]:
+    """Read the latest FinMind snapshot for ``dataset``/``symbol`` and assemble its var.
+
+    Each FinMind snapshot payload holds the full multi-day window (``{"rows": [...]}``),
+    so the latest snapshot is enough; the pure assembler in ``portfolio.external_signals``
+    derives the value. Absent snapshot -> the assembler's unavailable shape.
+    """
+    snap = snapshots_store.latest_snapshot(
+        conn, source="finmind", dataset=dataset, symbol=symbol
+    )
+    rows = snap.payload.get("rows", []) if snap is not None else []
+    as_of = snap.as_of.isoformat() if snap is not None else ""
+    result: dict[str, Any] = build(rows, symbol=symbol, as_of=as_of)
+    return result
+
+
+def _sentiment_var(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Assemble market_sentiment_json from the latest VIX + Fear & Greed snapshots."""
+    vix_snap = snapshots_store.latest_snapshot(
+        conn, source="sentiment", dataset="vix", symbol=None
+    )
+    fng_snap = snapshots_store.latest_snapshot(
+        conn, source="sentiment", dataset="fng", symbol=None
+    )
+    vix_close = (
+        ES.to_decimal(vix_snap.payload.get("close")) if vix_snap is not None else None
+    )
+    fng = fng_snap.payload if fng_snap is not None else None
+    return ES.build_market_sentiment(
+        vix_close=vix_close,
+        as_of_vix=vix_snap.as_of.isoformat() if vix_snap is not None else None,
+        fng=fng,
+        as_of_fng=fng_snap.as_of.isoformat() if fng_snap is not None else None,
+    )
+
+
+def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Assemble index_quotes_json from the latest index snapshot."""
+    snap = snapshots_store.latest_snapshot(
+        conn, source="index", dataset="index_quotes", symbol=None
+    )
+    if snap is None:
+        return ES.build_index_quotes({}, as_of=None)
+    raw = snap.payload.get("quotes", {})
+    quotes = {sym: d for sym, v in raw.items() if (d := ES.to_decimal(v)) is not None}
+    return ES.build_index_quotes(quotes, as_of=snap.as_of.isoformat())
+
+
+def _external_vars(conn: sqlite3.Connection, symbol: str | None) -> dict[str, Any]:
+    """Assemble the chips/sentiment/index variable values from external snapshots.
+
+    Conn-bearing reads + pure derivation (``portfolio.external_signals``) happen HERE,
+    not in ``llm_insight`` (layering, spec 20.3). Portfolio-scope sentiment/index are
+    always assembled; the per-symbol chips need a symbol. Missing snapshots degrade to
+    the assembler's ``{"unavailable": ...}`` shape, which the var renders as such.
+    """
+    out: dict[str, Any] = {
+        "market_sentiment_json": _sentiment_var(conn),
+        "index_quotes_json": _index_var(conn),
+    }
+    if symbol:
+        out["institutional_json"] = _finmind_var(
+            conn, symbol, dataset="institutional", build=ES.build_institutional
+        )
+        out["margin_json"] = _finmind_var(
+            conn, symbol, dataset="margin", build=ES.build_margin
+        )
+        out["valuation_json"] = _finmind_var(
+            conn, symbol, dataset="valuation", build=ES.build_valuation
+        )
+        out["monthly_revenue_json"] = _finmind_var(
+            conn, symbol, dataset="monthly_revenue", build=ES.build_monthly_revenue
+        )
+        out["financials_json"] = _finmind_var(
+            conn, symbol, dataset="financials", build=ES.build_financials
+        )
+    return out
+
+
 def _build_context(
     conn: sqlite3.Connection, payload: PromptBody, now: datetime, reporting: Currency
 ) -> V.VarContext:
     """Build the render context with the REAL computed dashboard (+ per-symbol history).
 
-    Conn-bearing reads (FX spot rates, dividend ledger rows) are resolved HERE and fed
-    into the context — ``llm_insight`` must not import ``pricing``/``data_ingestion``.
+    Conn-bearing reads (FX spot rates, dividend ledger rows, external snapshots) are
+    resolved HERE and fed into the context — ``llm_insight`` must not import
+    ``pricing``/``data_ingestion``.
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
+    symbol = payload.symbol if payload.scope == "per_symbol" else None
     ctx = V.VarContext(
         data=data,
         fx_rates=_resolve_fx_rates(conn, data, now, reporting),
         dividend_rows=_dividend_rows(conn),
+        external_vars=_external_vars(conn, symbol),
     )
     if payload.scope == "per_symbol" and payload.symbol:
         as_of = now.date()
