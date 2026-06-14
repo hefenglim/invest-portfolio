@@ -193,3 +193,161 @@ def test_status_excludes_shadow_from_last_batch(
     assert body["health"]["last_batch"] is None
     task = next(t for t in body["tasks"] if t["id"] == tid)
     assert task["last_run"] is None  # shadow excluded from the task last_run too
+
+
+# --- §7.6 acceptance scenarios (the 3 frontend failure demos, reproducible) ----
+
+
+def test_scenario_1_disabled_unscheduled(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Demo 1 (股利展望): task disabled + unscheduled → diagnose first_blocker=G0 with
+    enable_task + create_schedule fixes; status trigger node is idle (whole task idle)."""
+    from decimal import Decimal
+
+    from portfolio_dash.shared.llm_config import add_topup
+
+    add_topup(golden_db, Decimal("5"))
+    sp = api_client.post(
+        "/api/strategy-prompts", json={"name": "S", "body": "{{kpis_json}}"}
+    ).json()
+    it = api_client.post(
+        "/api/insight-types",
+        json={
+            "name": "股利展望", "scope": "portfolio", "strategy_ids": [sp["id"]],
+            "enabled": False,
+        },
+    ).json()
+    tid = it["id"]
+    diag = api_client.get(f"/api/insight-tasks/{tid}/diagnose").json()
+    assert diag["first_blocker"] == "G0"
+    fix_kinds = {g["fix"]["kind"] for g in diag["gates"] if g["fix"] is not None}
+    assert {"enable_task", "create_schedule"} <= fix_kinds
+    # status: a disabled task is wholly idle.
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    assert task["enabled"] is False
+    assert task["level"] == "idle"
+    assert task["nodes"]["trigger"]["lv"] == "idle"
+
+
+def test_scenario_2_only_template_disabled_shared_gate(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Demo 2 (動能週報): the only template disabled → preflight R3=fail with an
+    enable_template fix; and a REAL run writes job_runs skipped/R3_no_live_templates — the
+    SAME gate verdict, proving preflight and execution share one gate (the §7.2 hard rule).
+    """
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.api import insight_service
+    from portfolio_dash.shared.llm_config import add_topup
+
+    add_topup(golden_db, Decimal("5"))  # quota so R6 is not the blocker
+    sp = api_client.post(
+        "/api/strategy-prompts", json={"name": "Mom", "body": "{{kpis_json}}"}
+    ).json()
+    it = api_client.post(
+        "/api/insight-types",
+        json={"name": "動能週報", "scope": "portfolio", "strategy_ids": [sp["id"]]},
+    ).json()
+    tid = it["id"]
+    # disable the only template.
+    api_client.put(
+        f"/api/strategy-prompts/{sp['id']}",
+        json={"name": "Mom", "body": "{{kpis_json}}", "enabled": False},
+    )
+    # preflight predicts R3 fail + enable_template fix.
+    pf = api_client.post(f"/api/insight-tasks/{tid}/preflight").json()
+    r3 = next(g for g in pf["gates"] if g["id"] == "R3")
+    assert r3["lv"] == "fail"
+    assert r3["fix"]["kind"] == "enable_template"
+
+    # a REAL run goes through the SAME gate and writes the SAME R3 skip reason.
+    now = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
+    result = insight_service.run_for_id(golden_db, tid, now=now)
+    assert result.status == "skipped"
+    assert result.reason == "R3_no_live_templates"
+    row = golden_db.execute(
+        "SELECT status, reason FROM job_runs WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+        (f"insight:{tid}",),
+    ).fetchone()
+    assert row["status"] == "skipped"
+    assert row["reason"] == "R3_no_live_templates"
+
+    # status assemble node = fail (all templates off).
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    assert task["nodes"]["assemble"]["lv"] == "fail"
+
+
+def test_scenario_3_custom_universe_emptied(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Demo 3 (高息標的體檢): a per_symbol task whose custom universe is emptied → status
+    input node = fail (R2) and preflight R2 = fail."""
+    from decimal import Decimal
+
+    from portfolio_dash.shared.llm_config import add_topup
+
+    add_topup(golden_db, Decimal("5"))
+    sp = api_client.post(
+        "/api/strategy-prompts", json={"name": "Yield", "body": "{{symbol}}"}
+    ).json()
+    it = api_client.post(
+        "/api/insight-types",
+        json={
+            "name": "高息標的體檢", "scope": "per_symbol", "strategy_ids": [sp["id"]],
+            "universe": {"mode": "custom", "symbols": []},  # emptied list
+        },
+    ).json()
+    tid = it["id"]
+    # status: input node fails on the empty universe.
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    assert task["nodes"]["input"]["lv"] == "fail"
+    # preflight: R2 fails too (shared gate).
+    pf = api_client.post(f"/api/insight-tasks/{tid}/preflight").json()
+    r2 = next(g for g in pf["gates"] if g["id"] == "R2")
+    assert r2["lv"] == "fail"
+
+
+def test_scenario_3_missing_price_holding_warns_input(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Demo 3 (R4 source = dashboard freshness, the locked decision): a per_symbol task over
+    a HELD symbol whose stored price is stale/missing surfaces as an input WARN (not a fail);
+    the universe is non-empty, so the task still has work. The input node reuses the SAME
+    dashboard freshness the dashboard itself computes."""
+    from decimal import Decimal
+
+    from portfolio_dash.shared.llm_config import add_topup
+
+    add_topup(golden_db, Decimal("5"))
+    # remove the stored AAPL price so the dashboard freshness reports it missing.
+    golden_db.execute("DELETE FROM prices WHERE instrument = 'AAPL'")
+    golden_db.commit()
+    sp = api_client.post(
+        "/api/strategy-prompts", json={"name": "Yield", "body": "{{symbol}}"}
+    ).json()
+    it = api_client.post(
+        "/api/insight-types",
+        json={
+            "name": "高息標的體檢", "scope": "per_symbol", "strategy_ids": [sp["id"]],
+            "universe": {"mode": "custom", "symbols": ["AAPL"]},
+        },
+    ).json()
+    tid = it["id"]
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    assert task["nodes"]["input"]["lv"] == "warn"  # missing price, not empty
