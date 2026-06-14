@@ -61,6 +61,37 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **AI self-evolution / Loop Engineering (spec 04, Phase 4 — the four-self loop):** the
+  insight-composer + generation + backtest + calibration + shadow-promote system, built in three
+  sub-phases (04a design/CRUD, 04b generation, 04c evolution) under the §4.10 locked decisions
+  (mechanism reviewed + human-signed-off 2026-06-14). **04a** — composer tables
+  (`strategy_prompts`/`insight_types`/`insight_type_strategies`/`calibration_prompts`) +
+  `evolution_config`, CRUD/cascade (4.1)/schedule-binding (4.2 kind=insight)/active-calibration/
+  evolution-config API, R1 create-time gate reusing `validate_tokens`. **04b (Loop 1 自運作)** —
+  `InsightCard`+`Prediction` schema (confidence required with a prediction), `insights` table with
+  fingerprint cache + trading-day `due_at`, layer assembly (system+strategies+active calibration via
+  06a `render_prompt`), the single **R1–R8 runtime gate** (shared with spec-07 preflight),
+  `run_insight_type` generation (default role, R4 zero-LLM anomaly card, R6 partial, cache hits),
+  scheduler `kind=insight` dynamic dispatch via an injected `register_insight_runner` (no scheduler→api
+  cycle), date variables (`now`/`card_created_at`/`eval_date`, ISO-8601 +08:00),
+  `complete_structured` `response_format` enforcement w/ graceful fallback, and the `alert-scan` job +
+  `alert_events` + on_alert (R7) trigger (24h debounce, ≤3-day horizon). **04c (Loops 2–4)** — the
+  **master LLM role** completion path, `insight_evaluations` store + `/api/ai-score` aggregation,
+  pure `score_quant`/calibration-binning/`decide_promotion`, the daily `evaluate_insights` job
+  (objective quant_hit + master narrative_score, **pending_data anti-poison** → `undetermined` after
+  `defer_limit_days`), the weekly `generate_calibrations` job (master writes a validated new version,
+  `min_samples`-gated, append-only), shadow evaluation + auto-promote + `calibration_regression`
+  alert, and the §4.8 calibration validator (keyword denylist + one master review). **Layering held:**
+  `llm_insight/*` import no `pricing`/`data_ingestion`/`api` (the only price-reading seam is
+  `api/insight_service.py`; the wire encoder moved to `shared/wire.py` to kill a pre-existing
+  `llm_insight→api` import). LLM emits no numbers of record (quant_hit is code; master writes only
+  narrative/calibration text); single budget governs all roles. Cross-module senior review:
+  APPROVE-WITH-NITS → fixed insights.model provenance, the reverse import, shadow `job_runs`
+  distinction (`is_shadow` column, excluded from user-facing runs), and single-enum skip reasons.
+  Deferred v1 watch-items: `relative`/`volatility`/`portfolio_return` quant metrics (narrative-only for
+  now, anti-poison-safe). New tables: `insights`, `insight_evaluations`, `alert_events`,
+  `alert_dispatch_log` + the four composer tables; `job_runs += is_shadow`; `insight_types +=
+  horizon_days/eval_prompt`. (+265 tests; 667 → 932 passed.)
 - **Data-source catalog, provider expansion & external-snapshot ingest (spec 20, Phase 4 —
   absorbs the planned 06b):** the data layer that makes the chips/sentiment prompt variables
   live. **Two seams** (control plane = spec 14 settings/keys/health/fallback; data plane =
