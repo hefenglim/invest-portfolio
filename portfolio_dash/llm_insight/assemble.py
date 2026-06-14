@@ -53,14 +53,20 @@ class Assembly(BaseModel):
 
 
 def assemble_layers(
-    conn: sqlite3.Connection, insight_type_id: int, ctx: V.VarContext
+    conn: sqlite3.Connection,
+    insight_type_id: int,
+    ctx: V.VarContext,
+    *,
+    calibration_version: int | None = None,
 ) -> Assembly:
     """Assemble an insight_type's prompt layers in the spec-4.0 hard order.
 
     Renders each layer body against *ctx* (the fed VarContext). Disabled/archived
     strategies are skipped; the calibration layer is appended only when the insight_type
-    has ``self_correct`` on AND a non-archived active calibration version exists. Returns
-    the ordered layers, their concatenation, and the aggregated tokens used.
+    has ``self_correct`` on AND a non-archived calibration version is in effect. The version
+    is the insight_type's ``active_calibration_version`` unless ``calibration_version`` is
+    given (the Loop-4 SHADOW path, spec 4.6) — then that version's body is used instead.
+    Returns the ordered layers, their concatenation, and the aggregated tokens used.
     """
     it = cs.get_insight_type(conn, insight_type_id)
     layers: list[Layer] = []
@@ -88,13 +94,18 @@ def assemble_layers(
             continue
         layers.append(Layer(kind="template", name=sp.name, rendered=_render(sp.body)))
 
-    # 3) active calibration (only when self_correct AND a live active version exists).
-    if it.self_correct and it.active_calibration_version is not None:
+    # 3) calibration (only when self_correct AND a live version is in effect). The shadow
+    #    path overrides the active version with the explicit ``calibration_version``.
+    effective_version = (
+        calibration_version if calibration_version is not None
+        else it.active_calibration_version
+    )
+    if it.self_correct and effective_version is not None:
         active = next(
             (
                 c
                 for c in cs.list_calibrations(conn, insight_type_id)
-                if c.version == it.active_calibration_version
+                if c.version == effective_version
             ),
             None,
         )

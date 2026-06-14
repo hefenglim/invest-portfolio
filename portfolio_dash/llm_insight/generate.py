@@ -71,6 +71,9 @@ class RunInputs(BaseModel):
     prompt_version: str = _DEFAULT_PROMPT_VERSION
     horizon_basis: HorizonBasis = "trading_days"
     is_shadow: bool = False
+    # Loop 4 (spec 4.6): when set, the run uses this calibration version's body instead of
+    # the active one (the SHADOW path) and stamps it on the stored card's calibration_version.
+    calibration_version_override: int | None = None
     # on_alert (R7): the fired event the dispatcher is acting on.
     fired_rule: str | None = None
     fired_symbol: str | None = None
@@ -234,6 +237,13 @@ def run_insight_type(
     created = 0
     stopped_early = False
     anomalies = set(gate.data_anomaly_symbols)
+    # The calibration version stamped on stored cards: the SHADOW override (Loop 4) or the
+    # insight_type's active version.
+    stamp_version = (
+        inputs.calibration_version_override
+        if inputs.calibration_version_override is not None
+        else it.active_calibration_version
+    )
     # on_alert: force a short horizon + a system-prompt note (spec 4.10).
     is_alert = it.scope == "on_alert"
     effective_horizon = (
@@ -252,7 +262,7 @@ def run_insight_type(
             if istore.find_by_fingerprint(conn, fp) is None:
                 istore.add_card(
                     conn, insight_type_id=insight_type_id, card=_anomaly_card(target),
-                    fingerprint=fp, calibration_version=it.active_calibration_version,
+                    fingerprint=fp, calibration_version=stamp_version,
                     horizon_days=effective_horizon, input_snapshot=snapshot, model="(none)",
                     cost_usd=Decimal("0"), now=now, is_shadow=inputs.is_shadow,
                     horizon_basis=inputs.horizon_basis,
@@ -269,7 +279,10 @@ def run_insight_type(
         if ctx is None:
             continue  # no fed context for this target — skip defensively (never crash)
 
-        assembled = assemble.assemble_layers(conn, insight_type_id, ctx)
+        assembled = assemble.assemble_layers(
+            conn, insight_type_id, ctx,
+            calibration_version=inputs.calibration_version_override,
+        )
         prompt = assembled.prompt + (_ON_ALERT_NOTE if is_alert else "")
         snapshot = _snapshot_for(inputs, target, ctx)
         fp = istore.fingerprint(
@@ -304,7 +317,7 @@ def run_insight_type(
             card = card.model_copy(update={"prediction": capped})
         istore.add_card(
             conn, insight_type_id=insight_type_id, card=card, fingerprint=fp,
-            calibration_version=it.active_calibration_version, horizon_days=effective_horizon,
+            calibration_version=stamp_version, horizon_days=effective_horizon,
             input_snapshot=snapshot, model=card.symbol or "default", cost_usd=spent,
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
         )

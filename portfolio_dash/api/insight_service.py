@@ -30,9 +30,9 @@ from portfolio_dash.api.routers.prompts import (
     _external_vars,
     _resolve_fx_rates,
 )
+from portfolio_dash.llm_insight import alerts_bridge, master, promote, scoring
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
-from portfolio_dash.llm_insight import master, scoring
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import Prediction
 from portfolio_dash.llm_insight.generate import RunInputs, RunResult, run_insight_type
@@ -175,9 +175,64 @@ def run_for_id(
         fired_rule=fired_rule,
         fired_symbol=fired_symbol,
     )
-    return run_insight_type(
+    result = run_insight_type(
         conn, insight_type_id, var_contexts=var_contexts, inputs=inputs, now=now,
         run_id=run_id,
+    )
+    # Loop 4 (spec 4.6): if a shadow calibration version exists, also produce the hidden
+    # shadow cards in the same batch (unless this run is itself a shadow / on_alert opt-out).
+    if not is_shadow:
+        _maybe_run_shadow(
+            conn, it, var_contexts=var_contexts, base_inputs=inputs, now=now,
+        )
+    return result
+
+
+def _shadow_card_count(conn: sqlite3.Connection, insight_type_id: int) -> int:
+    """Current number of stored shadow cards for an insight_type (the max_shadows cap)."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM insights WHERE insight_type_id = ? AND is_shadow = 1",
+        (insight_type_id,),
+    ).fetchone()
+    return int(row["c"]) if row is not None else 0
+
+
+def _maybe_run_shadow(
+    conn: sqlite3.Connection,
+    it: cs.InsightType,
+    *,
+    var_contexts: dict[str | None, V.VarContext],
+    base_inputs: RunInputs,
+    now: datetime,
+) -> None:
+    """Generate the SHADOW cards alongside the active run when a shadow version exists.
+
+    No shadow when: the active version is the latest (no shadow); the combo is on_alert and
+    ``shadow_on_alert`` is off; or the max_shadows cap is reached (queued — skip this run).
+    """
+    if not it.self_correct:
+        return
+    cfg = cs.get_evolution_config(conn)
+    if it.scope == "on_alert" and not bool(cfg["shadow_on_alert"]):
+        return
+    versions = cs.list_calibrations(conn, it.id)
+    latest = versions[-1].version if versions else None
+    shadow_v = promote.shadow_version(
+        active_version=it.active_calibration_version, latest_version=latest
+    )
+    if shadow_v is None:
+        return
+    if _shadow_card_count(conn, it.id) >= int(str(cfg["max_shadows"])):
+        return  # cap reached → queue (skip this batch)
+    shadow_inputs = base_inputs.model_copy(
+        update={
+            "is_shadow": True,
+            "calibration_version_override": shadow_v,
+            "budget_remaining": budget_remaining(conn),
+        }
+    )
+    run_insight_type(
+        conn, it.id, var_contexts=var_contexts, inputs=shadow_inputs, now=now,
     )
 
 
@@ -355,6 +410,12 @@ def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
             processed += 1
         except Exception:  # noqa: BLE001 — one insight failing must not abort the pass
             logger.exception("evaluate_due failed for insight %s", due.insight_id)
+    # After scoring, run the Loop-4 promote + regression pass (spec 4.6) over the fresh
+    # accumulated scores. Isolated so an evaluate failure never blocks the promote step.
+    try:
+        promote_and_check(conn, now=now)
+    except Exception:  # noqa: BLE001 — the promote step must not crash the evaluate job
+        logger.exception("promote_and_check failed during evaluate_due")
     return processed
 
 
@@ -421,3 +482,74 @@ def generate_calibrations_for_all(conn: sqlite3.Connection, *, now: datetime) ->
         except Exception:  # noqa: BLE001 — one combo failing must not abort the pass
             logger.exception("generate_calibrations failed for insight_type %s", it.id)
     return made
+
+
+# --- Loop 4: shadow promote + regression check (spec 04.6) --------------------
+# Deterministic (promote.py); the LLM never decides win/loss (spec 4.8). Auto-promote
+# switches the active version; otherwise the win is flagged for the UI. A worsening active
+# rolling score emits a ``calibration_regression`` info alert via alerts_bridge.
+
+# Recent/baseline rolling windows for the regression check (n>=8 split into halves).
+_REGRESSION_WINDOW = 8
+
+
+def _active_eval_rows(conn: sqlite3.Connection, insight_type_id: int) -> list[sqlite3.Row]:
+    """Active (non-shadow) scored eval rows for a combo, newest first."""
+    return conn.execute(
+        "SELECT miss FROM insight_evaluations WHERE insight_type_id = ? AND is_shadow = 0 "
+        "AND status = 'scored' ORDER BY id DESC",
+        (insight_type_id,),
+    ).fetchall()
+
+
+def _check_regression(conn: sqlite3.Connection, it: cs.InsightType, *, now: datetime) -> None:
+    """Emit ``calibration_regression`` when the active rolling score worsens (n≥8)."""
+    rows = _active_eval_rows(conn, it.id)
+    if len(rows) < _REGRESSION_WINDOW:
+        return
+    half = _REGRESSION_WINDOW // 2
+    recent = rows[:half]  # newest
+    baseline = rows[half:_REGRESSION_WINDOW]  # the prior window
+    if promote.is_regressing(
+        recent_miss=sum(1 for r in recent if r["miss"]), recent_n=len(recent),
+        baseline_miss=sum(1 for r in baseline if r["miss"]), baseline_n=len(baseline),
+    ):
+        alerts_bridge.ensure_tables(conn)
+        alerts_bridge.record_event(
+            conn, rule_id="calibration_regression", symbol=str(it.id), now=now
+        )
+
+
+def promote_and_check(conn: sqlite3.Connection, *, now: datetime) -> list[int]:
+    """Loop-4 promote + regression pass over self_correct combos. Returns promoted ids.
+
+    For each combo with a shadow version: compute active vs shadow scores; on a promotion
+    verdict, switch the active version when ``auto_promote`` else leave it (the win is
+    surfaced via ai-score for a manual switch). Always run the regression check. One combo
+    failing never aborts the rest.
+    """
+    es.ensure_tables(conn)
+    cfg = cs.get_evolution_config(conn)
+    auto = bool(cfg["auto_promote"])
+    promoted: list[int] = []
+    for it in cs.list_insight_types(conn):
+        if not it.self_correct:
+            continue
+        try:
+            _check_regression(conn, it, now=now)
+            versions = cs.list_calibrations(conn, it.id)
+            latest = versions[-1].version if versions else None
+            shadow_v = promote.shadow_version(
+                active_version=it.active_calibration_version, latest_version=latest
+            )
+            if shadow_v is None:
+                continue
+            active_score = es.combo_score(conn, it.id, is_shadow=False)
+            shadow_score = es.combo_score(conn, it.id, is_shadow=True)
+            if promote.decide_promotion(active_score, shadow_score, cfg) == "promote":
+                if auto:
+                    cs.set_active_calibration(conn, it.id, shadow_v)
+                promoted.append(it.id)
+        except Exception:  # noqa: BLE001 — one combo failing must not abort the pass
+            logger.exception("promote_and_check failed for insight_type %s", it.id)
+    return promoted
