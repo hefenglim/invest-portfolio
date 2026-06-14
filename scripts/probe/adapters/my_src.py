@@ -80,6 +80,9 @@ def fetch_klse_html(code: str) -> str:
     return resp.text
 
 
+MALAYSIASTOCK = "https://www.malaysiastock.biz/Corporate-Infomation.aspx?securityCode={code}"
+
+
 def parse_klse_price(html: str) -> str | None:
     """Extract the current price string from a klsescreener stock-view page.
 
@@ -98,4 +101,30 @@ def parse_klse_price(html: str) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     text = node.get_text(strip=True)
+    return text or None
+
+
+def fetch_malaysiastock_html(code: str) -> str:
+    resp = requests.get(MALAYSIASTOCK.format(code=code), headers=_HEADERS, timeout=20)
+    resp.raise_for_status()
+    return resp.text
+
+
+def parse_malaysiastock_price(html: str) -> str | None:
+    """Extract the price string from a Malaysiastock.biz corporate-info page.
+
+    Discovery (probe time, 2026-06): the share-price node carries ``id="SharePrice"``
+    whose text is a 3-dp decimal string (e.g. ``"2.260"``, ``"0.075"``), like
+    klsescreener — true Bursa tick precision preserved as text (vs yfinance float64).
+    Returns the trimmed text only when it parses as a number, else None (degrade).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    node = soup.select_one("#SharePrice")
+    if node is None:
+        return None
+    text = node.get_text(strip=True)
+    try:
+        float(text)
+    except ValueError:
+        return None
     return text or None

@@ -192,3 +192,29 @@ Re-run `python -m scripts.probe.run_all` after adding keys to validate and re-ra
   display; for tick-sensitive MY counters prefer/cross-check a string source.
 - **Per-instrument board/suffix resolution** stored on the instrument (TW 上市/上櫃/興櫃;
   `.KL` for MY) and verified at ingestion (coverage alarms, not silent misses).
+
+## 8. Spec-20 source pre-test (2026-06-14, curated)
+
+Spec 20 widened the catalog (chips/sentiment/index + free quote fallbacks + pending
+token-gated adapters). Probe adapters for every **no-token** source type were prepared
+(`scripts/probe/adapters/` + `run_all.py`); the run remained **no-key this round**, so
+token sources are recorded `skipped (no key)` and the free-source rows below are
+hand-noted from adapter discovery (not re-generated live in this environment).
+
+| Source | Type | Status | Pre-test note |
+| --- | --- | --- | --- |
+| FinMind chips (5 datasets) | chips | live (token) | `institutional`/`margin`/`valuation`/`monthly_revenue`/`financials` dataset ids wired (`finmind_datasets.py`); Free 600/hr; **skipped no-key** this run |
+| twstock | TW quote (latest) | live | intraday realtime fallback at TW chain tail (already validated 2026-06-08) |
+| stockprices.dev | US quote (latest) | live | latest-only, flaky (429); US fallback after yfinance |
+| klsescreener | MY quote (latest) | live | 3-dp `#price data-value` string — true Bursa tick precision |
+| Malaysiastock.biz | MY quote (latest) | live | secondary 3-dp `#SharePrice` string source (redundancy) |
+| VIX (yfinance `^VIX`) | sentiment | live | last-close fetch wired (`sentiment_src.fetch_yf_close`) |
+| CNN Fear & Greed | sentiment | live | public graphdata JSON; desktop UA required (else 403) |
+| Indices (`^TWII`/`^GSPC`/`^KLSE`) | index | live | TAIEX/SPX/KLCI closes via yfinance |
+| Alpha Vantage / Finnhub / FRED / Schwab | quote/macro | **pending** | adapters + catalog rows written; `skipped (no key)` until a key is entered, then re-run `python -m scripts.probe.run_all` (spec 20.9) |
+| bursamalaysia.com | MY quote | **blocked** | Cloudflare JS challenge (catalogue only) |
+
+**Future validation workflow (no frontend change):** enter a token on the
+`settings-datasources` panel → it persists to `data_sources.api_key` (spec 14.2) → run
+`python -m scripts.probe.run_all` (or `POST /api/datasources/{id}/test`) → on success
+promote the source `status` `pending → live` and slot it into the fallback order.

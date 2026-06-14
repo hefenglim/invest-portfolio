@@ -5,8 +5,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from scripts.probe.adapters.finmind_src import parse_finmind_close
-from scripts.probe.adapters.my_src import parse_klse_price
+from scripts.probe.adapters.finmind_src import (
+    FINMIND_DATASETS,
+    parse_dataset_rows,
+    parse_finmind_close,
+)
+from scripts.probe.adapters.my_src import parse_klse_price, parse_malaysiastock_price
+from scripts.probe.adapters.sentiment_src import parse_fng
 from scripts.probe.adapters.tw_gov import parse_twse_close, tpex_close_for
 from scripts.probe.adapters.twstock_src import parse_twstock_price
 from scripts.probe.adapters.us_alt import (
@@ -90,3 +95,34 @@ def test_klse_parser() -> None:
     # (e.g. "2.260", 3 dp) -- unlike yfinance's float64 columns.
     assert "." in price
     assert len(price.split(".")[-1]) >= 2
+
+
+# --- spec-20 additions: FinMind datasets, Malaysiastock, CNN F&G ---------------
+
+
+def test_finmind_dataset_mapping_complete() -> None:
+    assert set(FINMIND_DATASETS) == {
+        "institutional", "margin", "valuation", "monthly_revenue", "financials"
+    }
+    assert FINMIND_DATASETS["institutional"] == "TaiwanStockInstitutionalInvestorsBuySell"
+
+
+def test_parse_dataset_rows_tolerant() -> None:
+    assert parse_dataset_rows({"data": [{"x": 1}]}) == [{"x": 1}]
+    assert parse_dataset_rows({"msg": "success"}) == []
+    assert parse_dataset_rows({"data": None}) == []
+
+
+def test_malaysiastock_parser_3dp() -> None:
+    html = '<html><body><span id="SharePrice">0.075</span></body></html>'
+    assert parse_malaysiastock_price(html) == "0.075"
+    # non-numeric / missing node -> None (degrade).
+    assert parse_malaysiastock_price('<span id="SharePrice">N/A</span>') is None
+    assert parse_malaysiastock_price("<html></html>") is None
+
+
+def test_parse_fng() -> None:
+    payload = {"fear_and_greed": {"score": 62.5, "rating": "greed"}}
+    assert parse_fng(payload) == {"score": 62.5, "rating": "greed"}
+    assert parse_fng({"unexpected": {}}) is None
+    assert parse_fng({"fear_and_greed": {"score": None, "rating": "x"}}) is None

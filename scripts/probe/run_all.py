@@ -9,6 +9,7 @@ from pathlib import Path
 from scripts.probe.adapters import (
     finmind_src,
     my_src,
+    sentiment_src,
     tw_gov,
     twstock_src,
     us_alt,
@@ -340,6 +341,103 @@ def _probe_my_klsescreener(results: list[ProbeResult]) -> None:
     results.append(result)
 
 
+def _probe_my_malaysiastock(results: list[ProbeResult]) -> None:
+    """Malaysiastock.biz — secondary MY 3-dp string source (spec 20.8 redundancy)."""
+    sample = my_src.MY[:2]
+    state: dict[str, object] = {}
+
+    def fetch() -> dict[str, str | None]:
+        hits: dict[str, str] = {}
+        misses: list[str] = []
+        for code in sample:
+            html = my_src.fetch_malaysiastock_html(code)
+            price = my_src.parse_malaysiastock_price(html)
+            if price:
+                hits[code] = price
+            else:
+                misses.append(code)
+        state["hits"] = hits
+        state["misses"] = misses
+        return hits
+
+    result = run_probe("malaysiastock", DataType.QUOTE_LATEST, "MY", fetch, requires_key=False)
+    hits: dict[str, str] = state.get("hits", {})
+    misses = state.get("misses", [])
+    result.coverage_hits = len(hits)
+    result.coverage_misses = misses
+    result.batch_max = 1
+    if hits:
+        result.sample_value = Decimal(next(iter(hits.values())))
+        result.decimals_ok = True
+    result.notes = (
+        f"scraped #SharePrice per code for {len(sample)} sample codes: {hits}; "
+        "secondary 3-dp STRING source alongside klsescreener (single-source redundancy)"
+    )
+    results.append(result)
+
+
+def _probe_sentiment_index(results: list[ProbeResult]) -> None:
+    """VIX + CNN Fear & Greed + the three benchmark indices (key-less; spec 20.7)."""
+    # VIX (yfinance ^VIX).
+    vix_state: dict[str, object] = {}
+
+    def fetch_vix() -> object:
+        close = sentiment_src.fetch_yf_close(sentiment_src.VIX_SYMBOL)
+        vix_state["close"] = close
+        return close
+
+    vix = run_probe("yfinance (VIX)", DataType.QUOTE_LATEST, "SENTIMENT",
+                    fetch_vix, requires_key=False)
+    close = vix_state.get("close")
+    if close is not None:
+        vix.sample_value = Decimal(str(close))
+    vix.coverage_hits = 1 if close is not None else 0
+    vix.notes = f"^VIX last close = {close}"
+    results.append(vix)
+
+    # CNN Fear & Greed.
+    fng_state: dict[str, object] = {}
+
+    def fetch_fng() -> object:
+        parsed = sentiment_src.parse_fng(sentiment_src.fetch_cnn_fng())
+        fng_state["fng"] = parsed
+        return parsed
+
+    fng = run_probe("cnn_fng", DataType.QUOTE_LATEST, "SENTIMENT", fetch_fng,
+                    requires_key=False)
+    parsed = fng_state.get("fng")
+    fng.coverage_hits = 1 if parsed else 0
+    fng.notes = f"CNN fear_and_greed = {parsed}"
+    results.append(fng)
+
+    # Indices (TAIEX/SPX/KLCI).
+    idx_state: dict[str, object] = {}
+
+    def fetch_idx() -> object:
+        hits: dict[str, float] = {}
+        misses: list[str] = []
+        for sym in sentiment_src.INDEX_SYMBOLS:
+            c = sentiment_src.fetch_yf_close(sym)
+            if c is not None:
+                hits[sym] = c
+            else:
+                misses.append(sym)
+        idx_state["hits"] = hits
+        idx_state["misses"] = misses
+        return hits
+
+    idx = run_probe("yfinance (index)", DataType.QUOTE_LATEST, "INDEX", fetch_idx,
+                    requires_key=False)
+    hits = idx_state.get("hits", {})
+    idx.coverage_hits = len(hits)
+    idx.coverage_misses = idx_state.get("misses", [])
+    idx.batch_max = len(sentiment_src.INDEX_SYMBOLS)
+    if hits:
+        idx.sample_value = Decimal(str(next(iter(hits.values()))))
+    idx.notes = f"TAIEX/SPX/KLCI closes = {hits}"
+    results.append(idx)
+
+
 def _skipped(source: str, data_type: DataType, market: str, notes: str) -> ProbeResult:
     return ProbeResult(
         source=source, data_type=data_type, market=market,
@@ -353,10 +451,18 @@ def _probe_keyed_skips(results: list[ProbeResult]) -> None:
         results.append(_skipped("finmind", DataType.QUOTE_LATEST, "TW", no_key))
         results.append(_skipped("finmind", DataType.DIVIDEND, "TW", no_key))
         results.append(_skipped("finmind", DataType.FX, "FX", no_key))
+        # spec-20.6 chips datasets ride the same token; skipped together when absent.
+        for ds in finmind_src.FINMIND_DATASETS:
+            results.append(
+                _skipped("finmind", DataType.QUOTE_LATEST, "TW", f"{no_key} ({ds})")
+            )
     if us_alt.alpha_key() is None:
         results.append(_skipped("alphavantage", DataType.QUOTE_LATEST, "US", no_key))
     if us_alt.finnhub_key() is None:
         results.append(_skipped("finnhub", DataType.QUOTE_LATEST, "US", no_key))
+    # spec-20.9 pending token sources catalogued but not validated online this round.
+    results.append(_skipped("fred", DataType.QUOTE_LATEST, "FX", f"{no_key} (macro)"))
+    results.append(_skipped("schwab", DataType.QUOTE_LATEST, "US", f"{no_key} (OAuth)"))
 
 
 def _assign_primary_fallback(results: list[ProbeResult]) -> None:
@@ -419,8 +525,12 @@ def main() -> None:
     # --- us_alt: stockprices.dev (no-key fallback) ---
     _probe_us_alt_stockprices(results)
 
-    # --- my_src: klsescreener (3-dp string corroboration) ---
+    # --- my_src: klsescreener + malaysiastock (3-dp string corroboration) ---
     _probe_my_klsescreener(results)
+    _probe_my_malaysiastock(results)
+
+    # --- sentiment + index reachability (VIX / CNN F&G / TAIEX·SPX·KLCI) ---
+    _probe_sentiment_index(results)
 
     # --- keyed sources without keys: SKIPPED, never called ---
     _probe_keyed_skips(results)
