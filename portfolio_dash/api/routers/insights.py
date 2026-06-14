@@ -632,6 +632,36 @@ def insight_tasks_status(
     return insight_service.build_status(conn, now=now, reporting=reporting)
 
 
+# --- spec 07 §7.2: dry-run preflight (shared 04 gate + 06 preview, zero-cost) --
+
+
+@router.post("/insight-tasks/{insight_type_id}/preflight")
+def insight_task_preflight(
+    insight_type_id: int,
+    draft: insight_service.PreflightDraft | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+) -> Any:
+    """Dry-run preflight for a task (or an unsaved draft via ``draft`` body) — spec 07 §7.2.
+
+    Calls the SAME runtime gate as execution (``gating.evaluate_gates`` via the SAME
+    ``generate._gate_context`` builder), wraps it with G0/G1/G7, computes the verdict, and
+    attaches the 06 assembled preview (layers + est_tokens + est_cost). NEVER calls the LLM
+    and NEVER writes a job_runs row. An unknown saved id with no draft → 404.
+    """
+    cs.ensure_seeded(conn)
+    payload = insight_service.build_preflight(
+        conn, insight_type_id, now=now, reporting=reporting, draft=draft,
+    )
+    if payload is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知洞察任務：{insight_type_id}"),
+        )
+    return payload
+
+
 # --- stored cards list (spec 4.10) --------------------------------------------
 
 

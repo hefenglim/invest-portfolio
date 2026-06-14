@@ -20,10 +20,13 @@ import).
 
 import json
 import logging
+import math
 import sqlite3
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+
+from pydantic import BaseModel, Field
 
 from portfolio_dash.api.routers.prompts import (
     _dividend_rows,
@@ -31,13 +34,22 @@ from portfolio_dash.api.routers.prompts import (
     _external_vars,
     _resolve_fx_rates,
 )
-from portfolio_dash.llm_insight import alerts_bridge, master, promote, scoring
+from portfolio_dash.llm_insight import (
+    alerts_bridge,
+    assemble,
+    gating,
+    generate,
+    master,
+    promote,
+    scoring,
+)
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
 from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import pipeline_status as ps
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import Prediction
+from portfolio_dash.llm_insight.gating import GateContext, GateResult
 from portfolio_dash.llm_insight.generate import RunInputs, RunResult, run_insight_type
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData, FreshnessReport
@@ -51,6 +63,7 @@ from portfolio_dash.shared.llm_config import (
     get_alert_threshold,
     get_role_model_id,
 )
+from portfolio_dash.shared.llm_config import get_model as llm_config_get_model
 
 logger = logging.getLogger(__name__)
 
@@ -743,3 +756,450 @@ def build_status(
         },
         "tasks": tasks,
     }
+
+
+# --- spec 07 §7.2/7.3: preflight (shared 04 gate) + diagnose -------------------
+# HARD RULE (§7.2): preflight calls the SAME runtime gate as execution
+# (``gating.evaluate_gates``, via the SAME ``generate._gate_context`` builder for a saved
+# task), so a "preflight passed, run failed" double-truth is impossible. Preflight NEVER
+# calls the LLM and NEVER writes a job_runs row — it is purely a dry run.
+
+
+class PreflightDraft(BaseModel):
+    """A transient (unsaved) task spec for the wizard's "check before create" (§7.2).
+
+    The same editable fields as the composer's ``InsightTypeIn``; preflight validates +
+    assembles a transient task from these WITHOUT persisting anything.
+    """
+
+    name: str = "(draft)"
+    scope: str = "portfolio"  # 'per_symbol' | 'portfolio' | 'on_alert'
+    strategy_ids: list[int] = Field(default_factory=list)
+    use_system_prompt: bool = True
+    self_correct: bool = False
+    universe: dict[str, Any] | list[Any] | str | None = None
+    alert_rules: dict[str, Any] | list[Any] | str | None = None
+    enabled: bool = True
+
+
+def _resolve_universe_raw(
+    universe: dict[str, Any] | list[Any] | str | None, data: DashboardData
+) -> list[str]:
+    """Resolve a per_symbol universe value (mode:all → holdings, mode:custom → listed)."""
+    held = sorted({h.symbol for h in data.holdings})
+    if isinstance(universe, dict):
+        mode = universe.get("mode")
+        if mode == "custom":
+            syms = universe.get("symbols")
+            return list(syms) if isinstance(syms, list) else []
+        if mode == "all":
+            return held
+    return held
+
+
+def _missing_prices_for(
+    data: DashboardData, scope: str, universe_symbols: list[str], conn: sqlite3.Connection
+) -> list[str]:
+    """The missing-price symbols feeding R4 (same source as ``run_for_id``).
+
+    Dashboard freshness ``missing_prices`` plus, for per_symbol, any universe symbol with
+    NO stored price history at all (a custom-list symbol not in the priced holdings).
+    """
+    missing = list(data.freshness.missing_prices)
+    if scope == "per_symbol":
+        for sym in universe_symbols:
+            if sym in missing:
+                continue
+            if not get_price_history(conn, sym, data.as_of.date(), data.as_of.date()) \
+                    and _has_no_history(conn, sym, data.as_of.date()):
+                missing.append(sym)
+    return missing
+
+
+def _has_no_history(conn: sqlite3.Connection, symbol: str, as_of: date) -> bool:
+    """True when a symbol has no stored price within the standard history window."""
+    history = get_price_history(conn, symbol, as_of - timedelta(days=_HISTORY_DAYS), as_of)
+    return not history
+
+
+def _draft_gate_context(
+    conn: sqlite3.Connection,
+    draft: PreflightDraft,
+    *,
+    universe_symbols: list[str],
+    inputs: RunInputs,
+) -> GateContext:
+    """Build the GateContext for an UNSAVED draft (same fields as the saved-task builder).
+
+    Reads the (already-saved) referenced strategies for the R1 token scan + R3 live count,
+    then feeds the SAME :class:`GateContext` the gate consumes for an executed run.
+    """
+    bodies: list[str] = []
+    live = 0
+    for sid in draft.strategy_ids:
+        sp = cs.get_strategy(conn, sid)
+        if sp is None or not sp.enabled or sp.archived:
+            continue
+        live += 1
+        bodies.append(sp.body)
+    alert_rules = draft.alert_rules if isinstance(draft.alert_rules, (str, list)) else None
+    return GateContext(
+        scope=draft.scope,
+        live_strategy_count=live,
+        budget_remaining=inputs.budget_remaining,
+        strategy_bodies=bodies,
+        universe_symbols=universe_symbols,
+        missing_price_symbols=inputs.missing_price_symbols,
+        self_correct=draft.self_correct,
+        master_configured=inputs.master_configured,
+        alert_rules=alert_rules,
+    )
+
+
+def _preview_var_context(
+    conn: sqlite3.Connection,
+    data: DashboardData,
+    *,
+    scope: str,
+    universe_symbols: list[str],
+    now: datetime,
+    reporting: Currency,
+) -> V.VarContext:
+    """One representative VarContext for the assembled preview (first symbol / portfolio)."""
+    if scope == "per_symbol" and universe_symbols:
+        return _per_symbol_ctx(conn, data, universe_symbols[0], now=now, reporting=reporting)
+    return _portfolio_ctx(conn, data, now=now, reporting=reporting)
+
+
+def _default_input_price(conn: sqlite3.Connection) -> Decimal:
+    """The default-role model's input price per Mtok (USD), or 0 when unset (zero-cost)."""
+    model_id = get_role_model_id(conn, LLMRole.DEFAULT)
+    if model_id is None:
+        return Decimal("0")
+    model = llm_config_get_model(conn, model_id)
+    return model.input_price_per_mtok if model is not None else Decimal("0")
+
+
+def _est_tokens(prompt: str) -> int:
+    """Heuristic token estimate (no tokenizer dep): ~4 chars per token, ceil (spec 06)."""
+    return math.ceil(len(prompt) / 4)
+
+
+# --- gate-finding → display-gate mapping --------------------------------------
+
+# The fixed §7.2 display order. R1..R6 mirror the runtime gate; G0/G1/G7 wrap it.
+_RULE_SLOTS = ("R1", "R2", "R3", "R4", "R5", "R6")
+_RULE_NAMES: dict[str, str] = {
+    "R1": "範圍相容", "R2": "標的宇宙", "R3": "模板啟用",
+    "R4": "價格資料", "R5": "變數可用性", "R6": "LLM 額度",
+}
+# The one-key fix per rule slot (§7.2 fix.kind enum).
+_RULE_FIX: dict[str, str] = {
+    "R2": "edit_universe", "R3": "enable_template", "R4": "edit_universe",
+    "R5": "edit_templates", "R6": "create_schedule",
+}
+
+
+def _finding_for(result: GateResult, rule_id: str) -> gating.GateFinding | None:
+    """The gate finding for a rule id (R1..R6), or None when the rule did not fire."""
+    return next((g for g in result.gates if g.id == rule_id), None)
+
+
+def _lv_of(finding: gating.GateFinding | None) -> str:
+    """Map a gate finding's level (block/warn/info) to the display level; None → ok."""
+    if finding is None:
+        return "ok"
+    return "fail" if finding.lv == "block" else finding.lv
+
+
+def _rule_gates(result: GateResult, *, disabled_template_id: int | None) -> list[dict[str, Any]]:
+    """The R1..R6 display gates (in order), each mapped from the shared gate's findings."""
+    gates: list[dict[str, Any]] = []
+    for rule_id in _RULE_SLOTS:
+        finding = _finding_for(result, rule_id)
+        lv = _lv_of(finding)
+        msg = finding.msg if finding is not None else "通過"
+        fix: dict[str, Any] | None = None
+        if lv != "ok":
+            kind = _RULE_FIX.get(rule_id)
+            if kind is not None:
+                fix = {"kind": kind}
+                if rule_id == "R3" and disabled_template_id is not None:
+                    fix["id"] = disabled_template_id
+        gates.append(
+            {"id": rule_id, "name": _RULE_NAMES[rule_id], "lv": lv, "msg": msg, "fix": fix}
+        )
+    return gates
+
+
+def _disabled_template_id(conn: sqlite3.Connection, strategy_ids: list[int]) -> int | None:
+    """The first linked template that is disabled/archived (drives the R3 one-click fix)."""
+    for sid in strategy_ids:
+        sp = cs.get_strategy(conn, sid)
+        if sp is not None and (not sp.enabled or sp.archived):
+            return sid
+    return None
+
+
+def _g0_g1(
+    *, enabled: bool, scope: str, scheduled: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """G0 (task enabled) + G1 (trigger source) display gates (§7.2).
+
+    G0: a disabled task fails (one-click enable). G1: a non-on_alert task with no schedule
+    binding fails ("won't auto-run", one-click create_schedule); on_alert is event-triggered
+    (spec 03), so its trigger is never "manual" → ok.
+    """
+    g0: dict[str, Any] = (
+        {"id": "G0", "name": "任務啟用", "lv": "ok", "msg": "任務已啟用", "fix": None}
+        if enabled
+        else {
+            "id": "G0", "name": "任務啟用", "lv": "fail", "msg": "任務已停用，不會執行",
+            "fix": {"kind": "enable_task"},
+        }
+    )
+    if scope == "on_alert":
+        g1: dict[str, Any] = {
+            "id": "G1", "name": "觸發來源", "lv": "ok", "msg": "由風險預警事件觸發", "fix": None,
+        }
+    elif scheduled:
+        g1 = {"id": "G1", "name": "觸發來源", "lv": "ok", "msg": "已排程", "fix": None}
+    else:
+        g1 = {
+            "id": "G1", "name": "觸發來源", "lv": "fail", "msg": "未排程（手動），不會自動執行",
+            "fix": {"kind": "create_schedule"},
+        }
+    return g0, g1
+
+
+def _g7(
+    conn: sqlite3.Connection, *, self_correct: bool, master_configured: bool,
+    unapplied_calibration: bool,
+) -> dict[str, Any]:
+    """G7 (calibration pipeline): master unset (with self_correct) → warn; an unapplied
+    calibration version → info; else ok (§7.2)."""
+    if self_correct and not master_configured:
+        return {
+            "id": "G7", "name": "校正管線", "lv": "warn",
+            "msg": "已開啟自我校正但未設定 AI 大師模型；校正管線暫停",
+            "fix": None,
+        }
+    if unapplied_calibration:
+        return {
+            "id": "G7", "name": "校正管線", "lv": "info", "msg": "有未套用的校正版本",
+            "fix": {"kind": "set_active_calibration"},
+        }
+    return {"id": "G7", "name": "校正管線", "lv": "ok", "msg": "校正管線正常", "fix": None}
+
+
+def _verdict(gates: list[dict[str, Any]]) -> str:
+    """blocked when any gate fails; degraded when any warns; else clean (§7.2)."""
+    levels = {g["lv"] for g in gates}
+    if "fail" in levels:
+        return "blocked"
+    if "warn" in levels:
+        return "degraded"
+    return "clean"
+
+
+def _assembled_preview(
+    conn: sqlite3.Connection,
+    *,
+    insight_type_id: int,
+    ctx: V.VarContext,
+    draft: PreflightDraft | None,
+) -> dict[str, Any]:
+    """The §7.2 assembled preview (reuses the 06 assemble path): layers + est tokens + est cost.
+
+    For a saved task the 06 ``assemble.assemble_layers`` is reused verbatim. For a draft
+    (unsaved) the same per-layer render is applied to the draft's referenced strategy bodies
+    (system + enabled templates; a draft has no calibration chain). Est cost =
+    est_tokens × the default model's input price (no spend — preflight is zero-cost).
+    """
+    if draft is None:
+        assembly = assemble.assemble_layers(conn, insight_type_id, ctx)
+        layers = [
+            {"kind": lyr.kind, "name": lyr.name, "rendered": lyr.rendered}
+            for lyr in assembly.layers
+        ]
+        prompt = assembly.prompt
+    else:
+        layers, prompt = _draft_layers(conn, draft, ctx)
+    est_tokens = _est_tokens(prompt)
+    est_cost = Decimal(est_tokens) * _default_input_price(conn) / Decimal("1000000")
+    return {
+        "layers": layers,
+        "est_tokens": est_tokens,
+        "est_cost_usd": str(est_cost),
+    }
+
+
+def _draft_layers(
+    conn: sqlite3.Connection, draft: PreflightDraft, ctx: V.VarContext
+) -> tuple[list[dict[str, Any]], str]:
+    """Render a draft's layers transiently (system + enabled templates) — no persistence."""
+    from portfolio_dash.llm_insight.system_prompt import get_system_prompt
+
+    layers: list[dict[str, Any]] = []
+    rendered_parts: list[str] = []
+    if draft.use_system_prompt:
+        body = get_system_prompt(conn)["body"]
+        rendered, _ = V.render_prompt(body, ctx)
+        layers.append({"kind": "system", "name": "system", "rendered": rendered})
+        rendered_parts.append(rendered)
+    for sid in draft.strategy_ids:
+        sp = cs.get_strategy(conn, sid)
+        if sp is None or not sp.enabled or sp.archived:
+            continue
+        rendered, _ = V.render_prompt(sp.body, ctx)
+        layers.append({"kind": "template", "name": sp.name, "rendered": rendered})
+        rendered_parts.append(rendered)
+    return layers, "\n\n".join(rendered_parts)
+
+
+def build_preflight(
+    conn: sqlite3.Connection,
+    insight_type_id: int,
+    *,
+    now: datetime,
+    reporting: Currency = Currency.TWD,
+    draft: PreflightDraft | None = None,
+    include_preview: bool = True,
+) -> dict[str, Any] | None:
+    """Run the spec-07 §7.2 dry-run preflight for a task (or an unsaved draft).
+
+    Builds the SAME GateContext execution builds (``generate._gate_context`` for a saved
+    task; an equivalent transient context for a draft) and runs the SAME shared gate
+    (``gating.evaluate_gates``). Wraps the R1..R6 findings with G0/G1/G7 in the fixed order,
+    computes the verdict, and (unless ``include_preview`` is False, for diagnose) attaches
+    the 06 assembled preview. NEVER calls the LLM, NEVER writes a job_runs row.
+
+    Returns the payload, or ``None`` when a saved task id is unknown and no draft is given
+    (the router maps that to 404).
+    """
+    cs.ensure_seeded(conn)
+    data = build_dashboard(conn, now=now, reporting=reporting)
+    quota = budget_remaining(conn)
+    master_configured = get_role_model_id(conn, LLMRole.MASTER) is not None
+
+    if draft is not None:
+        return _preflight_draft(
+            conn, draft, data, now=now, reporting=reporting, quota=quota,
+            master_configured=master_configured, include_preview=include_preview,
+        )
+
+    it = cs.get_insight_type(conn, insight_type_id)
+    if it is None:
+        return None
+    return _preflight_saved(
+        conn, it, data, now=now, reporting=reporting, quota=quota,
+        master_configured=master_configured, include_preview=include_preview,
+    )
+
+
+def _preflight_saved(
+    conn: sqlite3.Connection,
+    it: cs.InsightType,
+    data: DashboardData,
+    *,
+    now: datetime,
+    reporting: Currency,
+    quota: Decimal,
+    master_configured: bool,
+    include_preview: bool,
+) -> dict[str, Any]:
+    """Preflight a SAVED task: share ``generate._gate_context`` + ``gating.evaluate_gates``."""
+    universe = _resolve_universe(it, data) if it.scope == "per_symbol" else []
+    missing = _missing_prices_for(data, it.scope, universe, conn)
+    inputs = RunInputs(
+        budget_remaining=quota,
+        master_configured=master_configured,
+        universe_symbols=universe,
+        missing_price_symbols=missing,
+    )
+    ctx = generate._gate_context(conn, it, inputs)
+    result = gating.evaluate_gates(ctx)
+    strategy_ids = [ref.id for ref in cs.get_strategies(conn, it.id)]
+    gates = _compose_gates(
+        conn, result,
+        enabled=it.enabled, scope=it.scope, scheduled=_is_scheduled(conn, it.id),
+        self_correct=it.self_correct, master_configured=master_configured,
+        unapplied_calibration=_unapplied_calibration(conn, it),
+        strategy_ids=strategy_ids,
+    )
+    payload: dict[str, Any] = {"gates": gates, "verdict": _verdict(gates)}
+    if include_preview:
+        preview_ctx = _preview_var_context(
+            conn, data, scope=it.scope, universe_symbols=universe, now=now, reporting=reporting
+        )
+        payload["assembled_preview"] = _assembled_preview(
+            conn, insight_type_id=it.id, ctx=preview_ctx, draft=None
+        )
+    return payload
+
+
+def _preflight_draft(
+    conn: sqlite3.Connection,
+    draft: PreflightDraft,
+    data: DashboardData,
+    *,
+    now: datetime,
+    reporting: Currency,
+    quota: Decimal,
+    master_configured: bool,
+    include_preview: bool,
+) -> dict[str, Any]:
+    """Preflight an UNSAVED draft: same shared gate, transient context, nothing persisted."""
+    universe = (
+        _resolve_universe_raw(draft.universe, data) if draft.scope == "per_symbol" else []
+    )
+    missing = _missing_prices_for(data, draft.scope, universe, conn)
+    inputs = RunInputs(
+        budget_remaining=quota,
+        master_configured=master_configured,
+        universe_symbols=universe,
+        missing_price_symbols=missing,
+    )
+    ctx = _draft_gate_context(conn, draft, universe_symbols=universe, inputs=inputs)
+    result = gating.evaluate_gates(ctx)
+    gates = _compose_gates(
+        conn, result,
+        enabled=draft.enabled, scope=draft.scope, scheduled=False,  # a draft has no schedule
+        self_correct=draft.self_correct, master_configured=master_configured,
+        unapplied_calibration=False,  # a draft has no calibration chain
+        strategy_ids=draft.strategy_ids,
+    )
+    payload: dict[str, Any] = {"gates": gates, "verdict": _verdict(gates)}
+    if include_preview:
+        preview_ctx = _preview_var_context(
+            conn, data, scope=draft.scope, universe_symbols=universe, now=now,
+            reporting=reporting,
+        )
+        payload["assembled_preview"] = _assembled_preview(
+            conn, insight_type_id=0, ctx=preview_ctx, draft=draft
+        )
+    return payload
+
+
+def _compose_gates(
+    conn: sqlite3.Connection,
+    result: GateResult,
+    *,
+    enabled: bool,
+    scope: str,
+    scheduled: bool,
+    self_correct: bool,
+    master_configured: bool,
+    unapplied_calibration: bool,
+    strategy_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Assemble the fixed §7.2 gate list: G0, G1, R1..R6 (shared gate), G7."""
+    g0, g1 = _g0_g1(enabled=enabled, scope=scope, scheduled=scheduled)
+    rule_gates = _rule_gates(
+        result, disabled_template_id=_disabled_template_id(conn, strategy_ids)
+    )
+    g7 = _g7(
+        conn, self_correct=self_correct, master_configured=master_configured,
+        unapplied_calibration=unapplied_calibration,
+    )
+    return [g0, g1, *rule_gates, g7]
