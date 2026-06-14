@@ -19,6 +19,7 @@ from portfolio_dash.api.routers import (
     export,
     health,
     input_center,
+    insights,
     instruments,
     ledgers,
     llm_settings,
@@ -29,6 +30,7 @@ from portfolio_dash.api.routers import (
     users,
 )
 from portfolio_dash.bootstrap import bootstrap_db
+from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.pricing import snapshots_store
 from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded
@@ -48,6 +50,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_alert_rules_seeded(conn)
         ensure_auth_seeded(conn)
         ensure_system_prompt_seeded(conn)
+        ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
@@ -82,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
     app.include_router(prompts.router, prefix="/api")
+    app.include_router(insights.router, prefix="/api")
     if _WEB_DIR.is_dir():
         app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app
