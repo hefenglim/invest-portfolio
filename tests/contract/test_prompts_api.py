@@ -56,7 +56,8 @@ def test_prompt_vars_shape(api_client: TestClient) -> None:
     assert len(rows) == 26
     h = next(r for r in rows if r["token"] == "holdings_json")
     assert h["scope"] == "portfolio" and h["available"] is True
-    assert set(h) == {"token", "name", "category", "scope", "desc", "available", "sample"}
+    assert set(h) == {"token", "name", "category", "scope", "desc", "available", "sample",
+                      "required_tier", "tier_ok", "tier_label"}  # tier fields (spec 20.15.3)
     # chips went live (spec 20.2); the spec-04 'ai' vars stay unavailable.
     inst = next(r for r in rows if r["token"] == "institutional_json")
     assert inst["available"] is True

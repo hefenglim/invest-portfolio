@@ -124,6 +124,58 @@ def test_three_consecutive_failures_warns_and_marks_health(
     assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
 
+def test_tier_error_marks_health_immediately_no_snapshot(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    """A FinMindTierError on the first run (no 3-streak needed) marks finmind health
+    error with the reason, writes NO snapshot, and records the job failure."""
+    from portfolio_dash.pricing.finmind_datasets import FinMindTierError
+
+    _add_tw(conn, "2330")
+
+    def tier_fail(c: sqlite3.Connection, *, dataset: str, data_id: str,
+                  start_date: str) -> list[dict[str, object]]:
+        raise FinMindTierError("需要 Backer 方案", required_tier="backer")
+
+    monkeypatch.setattr(jobs_mod.ingest, "fetch_dataset", tier_fail)
+    rid = run_job(conn, "finmind_chips_daily", now=_NOW)
+    # job_runs records the failure.
+    row = conn.execute("SELECT status, detail FROM job_runs WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "error"
+    # health is marked error immediately (no 3-streak), carrying the reason.
+    assert _health_status(conn, "finmind") == "error"
+    detail = conn.execute(
+        "SELECT detail FROM data_source_health WHERE source_id='finmind'"
+    ).fetchone()["detail"]
+    assert "Backer" in detail
+    # NO snapshot was written.
+    assert snapshots_store.latest_snapshot(
+        conn, source="finmind", dataset="institutional", symbol="2330"
+    ) is None
+
+
+def test_quota_error_marks_health_immediately(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError
+
+    _add_tw(conn, "2330")
+
+    def quota_fail(c: sqlite3.Connection, *, dataset: str, data_id: str,
+                   start_date: str) -> list[dict[str, object]]:
+        raise FinMindQuotaError(
+            "Requests reach the upper limit. https://finmindtrade.com/"
+        )
+
+    monkeypatch.setattr(jobs_mod.ingest, "fetch_dataset", quota_fail)
+    run_job(conn, "finmind_chips_daily", now=_NOW)
+    assert _health_status(conn, "finmind") == "error"
+    detail = conn.execute(
+        "SELECT detail FROM data_source_health WHERE source_id='finmind'"
+    ).fetchone()["detail"]
+    assert "upper limit" in detail
+
+
 def test_failure_streak_resets_on_success(
     monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
 ) -> None:

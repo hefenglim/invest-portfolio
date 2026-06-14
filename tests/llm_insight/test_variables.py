@@ -111,6 +111,45 @@ def test_external_var_degrades_without_fed_value(golden_db: sqlite3.Connection) 
     assert '"unavailable"' in out and "true" in out
 
 
+def test_required_tier_map() -> None:
+    # The 5 FinMind chips vars require the "free" tier; sentiment/index need none.
+    for token in (
+        "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
+        "financials_json",
+    ):
+        assert V.required_tier(token) == "free", token
+    assert V.required_tier("market_sentiment_json") is None
+    assert V.required_tier("index_quotes_json") is None
+    assert V.required_tier("holdings_json") is None
+
+
+def test_tier_ok_helper() -> None:
+    # No required tier -> always ok regardless of token tier.
+    assert V.tier_ok(None, None) is True
+    assert V.tier_ok(None, "free") is True
+    # free required: an unset (None) token tier counts as free -> ok.
+    assert V.tier_ok("free", None) is True
+    assert V.tier_ok("free", "free") is True
+    assert V.tier_ok("free", "backer") is True
+    # backer required: free token is NOT ok; backer/higher is ok.
+    assert V.tier_ok("backer", None) is False
+    assert V.tier_ok("backer", "free") is False
+    assert V.tier_ok("backer", "backer") is True
+    assert V.tier_ok("backer", "sponsor") is True
+
+
+def test_external_var_degrade_carries_reason(golden_db: sqlite3.Connection) -> None:
+    # A reason fed via VarContext.external_reasons surfaces in the degrade payload.
+    data = _data(golden_db)
+    ctx = V.VarContext(data=data, external_reasons={"institutional_json": "需要 Backer 方案"})  # type: ignore[arg-type]
+    out, _ = V.render_prompt("{{institutional_json}}", ctx)
+    import json as _json
+
+    value = _json.loads(out)
+    assert value["unavailable"] is True
+    assert value["reason"] == "需要 Backer 方案"
+
+
 def test_value_for_decimals_are_strings(golden_db: sqlite3.Connection) -> None:
     data = _data(golden_db)
     out, _ = V.render_prompt("{{kpis_json}}", V.VarContext(data=data))  # type: ignore[arg-type]

@@ -221,6 +221,47 @@ REGISTRY: tuple[VarSpec, ...] = (
 BY_TOKEN: dict[str, VarSpec] = {v.token: v for v in REGISTRY}
 
 
+# --- Tier awareness (spec 20.15) ----------------------------------------------------
+# A LOCAL copy of the tier ranking (the authoritative one is pricing.datasources_store;
+# llm_insight must not import pricing — architecture.md). Kept in sync by review.
+TIER_ORDER: dict[str, int] = {"free": 0, "backer": 1, "sponsor": 2, "sponsorpro": 3}
+
+# Each external variable's BASELINE required tier under this app's query mode (spec
+# 20.15.2): the 5 FinMind chips vars need "free" (we always pass data_id). sentiment/
+# index (yfinance/CNN) need none. The router MAY override per the live
+# ``finmind_datasets.DATASET_TIER`` for a future paid dataset; this is the static default.
+_REQUIRED_TIER: dict[str, str] = {
+    "institutional_json": "free",
+    "margin_json": "free",
+    "monthly_revenue_json": "free",
+    "valuation_json": "free",
+    "financials_json": "free",
+}
+
+
+def required_tier(token: str) -> str | None:
+    """The baseline required token tier for a variable (None when none is required)."""
+    return _REQUIRED_TIER.get(token)
+
+
+def _tier_rank(tier: str | None) -> int:
+    """Rank a tier; an unknown/unset tier is the lowest effective rank ("free")."""
+    if tier is None:
+        return TIER_ORDER["free"]
+    return TIER_ORDER.get(tier, TIER_ORDER["free"])
+
+
+def tier_ok(required: str | None, token_tier: str | None) -> bool:
+    """True when a token of ``token_tier`` may access data requiring ``required``.
+
+    No requirement (``required is None``) is always ok; otherwise the token's rank must
+    be ≥ the required rank (an unset token tier counts as "free", the lowest).
+    """
+    if required is None:
+        return True
+    return _tier_rank(token_tier) >= _tier_rank(required)
+
+
 # --- Token extraction + validation (the single reusable core) -----------------------
 
 
@@ -293,6 +334,9 @@ class VarContext:
     # Chips/sentiment/index values, already derived in portfolio.external_signals by the
     # router and keyed by variable token (spec 20.2). Absent token -> the var degrades.
     external_vars: dict[str, Any] = field(default_factory=dict)
+    # Per-token degrade reasons fed by the router from data_source_health (spec 20.15.4),
+    # e.g. "需要 Backer 方案" / "額度已滿". llm_insight does NOT read health itself.
+    external_reasons: dict[str, str] = field(default_factory=dict)
 
 
 _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
@@ -450,10 +494,12 @@ def value_for(token: str, ctx: VarContext) -> Any:
     if token in _EXTERNAL_TOKENS:
         # Value already derived in portfolio.external_signals and fed by the router; a
         # missing key OR an assembler-flagged ``unavailable`` -> the canonical degrade
-        # shape (hard rule #5: missing snapshot renders ``{"unavailable": true}``).
+        # shape (hard rule #5: missing snapshot renders ``{"unavailable": true}``). When
+        # the router fed a reason (from data_source_health, spec 20.15.4) it is attached.
         value = ctx.external_vars.get(token)
         if not isinstance(value, dict) or value.get("unavailable") is True:
-            return _UNAVAILABLE
+            reason = ctx.external_reasons.get(token)
+            return {"unavailable": True, "reason": reason} if reason else _UNAVAILABLE
         return value
     data = ctx.data
     if token == "holdings_json":

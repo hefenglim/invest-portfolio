@@ -13,7 +13,7 @@ from datetime import date, datetime
 from fastapi.testclient import TestClient
 
 from portfolio_dash.api.deps import get_conn
-from portfolio_dash.pricing import snapshots_store
+from portfolio_dash.pricing import datasources_store, snapshots_store
 
 
 def _conn_of(client: TestClient) -> sqlite3.Connection:
@@ -44,6 +44,47 @@ def test_prompt_vars_external_now_available(api_client: TestClient) -> None:
     # The spec-04 'ai' vars stay unavailable this round.
     assert by_token["backtest_json"]["available"] is False
     assert by_token["calibration_gap_json"]["available"] is False
+
+
+# --- (a2) prompt-vars carry tier metadata (spec 20.15.3) ----------------------
+
+
+def test_prompt_vars_carry_tier_fields_free_token(api_client: TestClient) -> None:
+    by_token = {r["token"]: r for r in api_client.get("/api/prompt-vars").json()}
+    # 5 FinMind chips vars require the "free" tier; with an unset/free finmind tier
+    # they are tier_ok and carry no tier_label.
+    for token in (
+        "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
+        "financials_json",
+    ):
+        v = by_token[token]
+        assert v["required_tier"] == "free", token
+        assert v["tier_ok"] is True, token
+        assert v["tier_label"] is None, token
+    # sentiment/index have no tier requirement -> always ok, no label.
+    assert by_token["market_sentiment_json"]["required_tier"] is None
+    assert by_token["market_sentiment_json"]["tier_ok"] is True
+    assert by_token["index_quotes_json"]["required_tier"] is None
+    # non-external vars also carry the fields (null requirement, ok).
+    assert by_token["holdings_json"]["required_tier"] is None
+    assert by_token["holdings_json"]["tier_ok"] is True
+
+
+def test_prompt_vars_tier_not_ok_when_token_below_required(api_client: TestClient) -> None:
+    conn = _conn_of(api_client)
+    # Raise the institutional dataset's requirement to backer; mark finmind tier free.
+    from portfolio_dash.pricing import finmind_datasets
+
+    finmind_datasets.DATASET_TIER["institutional"] = "backer"
+    datasources_store.set_tier(conn, "finmind", "free")
+    try:
+        by_token = {r["token"]: r for r in api_client.get("/api/prompt-vars").json()}
+        v = by_token["institutional_json"]
+        assert v["required_tier"] == "backer"
+        assert v["tier_ok"] is False
+        assert v["tier_label"] and "Backer" in v["tier_label"]
+    finally:
+        finmind_datasets.DATASET_TIER["institutional"] = "free"
 
 
 # --- (b) empty golden_db -> external vars degrade -----------------------------
@@ -87,6 +128,20 @@ def test_institutional_renders_derived_from_snapshot(api_client: TestClient) -> 
     # last two days net-positive; 3rd-from-newest is negative and breaks the run.
     assert value["consecutive_buy_days"] == 2
     assert value["last_as_of"] == "2026-06-11"
+
+
+def test_chips_var_degrade_carries_health_reason(api_client: TestClient) -> None:
+    """No snapshot + a finmind health error -> degrade payload includes the reason
+    (fed by the router from data_source_health; llm_insight never reads health)."""
+    conn = _conn_of(api_client)
+    datasources_store.upsert_health(
+        conn, "finmind", status="error", last_test="2026-06-11T18:00:00",
+        latency_ms=None, detail="finmind_chips_daily: 需要 Backer 方案",
+    )
+    out = _preview(api_client, "{{institutional_json}}", scope="per_symbol", symbol="2330")
+    value = json.loads(out["rendered"])
+    assert value["unavailable"] is True
+    assert "Backer" in value["reason"]
 
 
 def test_valuation_renders_from_snapshot(api_client: TestClient) -> None:

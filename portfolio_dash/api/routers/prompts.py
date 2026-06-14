@@ -31,7 +31,7 @@ from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
 from portfolio_dash.portfolio import external_signals as ES
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.pricing import snapshots_store
+from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
 from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.enums import Currency
@@ -40,6 +40,36 @@ from portfolio_dash.shared.llm_config import budget_remaining
 router = APIRouter()
 
 _HISTORY_DAYS = 180
+
+# FinMind chips variable token -> (source id, FinMind logical dataset) (spec 20.15).
+# The required tier is read live from ``finmind_datasets.DATASET_TIER[dataset]`` and the
+# degrade reason from that source's ``data_source_health`` — both router concerns so
+# ``llm_insight`` keeps importing neither pricing nor health.
+_FINMIND_VAR_DATASET: dict[str, str] = {
+    "institutional_json": "institutional",
+    "margin_json": "margin",
+    "valuation_json": "valuation",
+    "monthly_revenue_json": "monthly_revenue",
+    "financials_json": "financials",
+}
+
+
+def _required_tier_for(token: str) -> str | None:
+    """The live required tier for a variable token (None when none is required).
+
+    FinMind chips read ``DATASET_TIER`` so a future paid dataset re-gates automatically;
+    sentiment/index and all non-external vars require no tier.
+    """
+    dataset = _FINMIND_VAR_DATASET.get(token)
+    if dataset is None:
+        return None
+    return finmind_datasets.DATASET_TIER.get(dataset)
+
+
+def _tier_label(required: str) -> str:
+    """A short Traditional-Chinese label for the tier a variable needs (spec 20.15.3)."""
+    names = {"backer": "Backer", "sponsor": "Sponsor", "sponsorpro": "Sponsor Pro"}
+    return f"需要 {names.get(required, required)} 方案"
 
 
 class SystemPromptIn(BaseModel):
@@ -56,11 +86,21 @@ class PromptBody(BaseModel):
 
 
 @router.get("/prompt-vars")
-def prompt_vars() -> list[dict[str, Any]]:
+def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
     """The 26-variable registry (mirrors web/vars.js). ``available`` drives the UI's
-    "需後端新增" markers; chips/sentiment went live (spec 20.2), ai stays False (spec 04)."""
-    return [
-        {
+    "需後端新增" markers; chips/sentiment went live (spec 20.2), ai stays False (spec 04).
+
+    Each var also carries tier metadata (spec 20.15.3): ``required_tier`` (from the live
+    ``DATASET_TIER`` for FinMind chips, else null), ``tier_ok`` (computed vs the finmind
+    source's marked tier; null requirement → true), and ``tier_label`` (only when not ok).
+    """
+    datasources_store.ensure_seeded(conn)
+    finmind_tier = datasources_store.get_tier(conn, "finmind")
+    rows: list[dict[str, Any]] = []
+    for v in V.REGISTRY:
+        required = _required_tier_for(v.token)
+        ok = V.tier_ok(required, finmind_tier)
+        rows.append({
             "token": v.token,
             "name": v.name,
             "category": v.category,
@@ -68,9 +108,11 @@ def prompt_vars() -> list[dict[str, Any]]:
             "desc": v.desc,
             "available": v.available,
             "sample": v.sample,
-        }
-        for v in V.REGISTRY
-    ]
+            "required_tier": required,
+            "tier_ok": ok,
+            "tier_label": _tier_label(required) if (required and not ok) else None,
+        })
+    return rows
 
 
 # --- 6.2 global system prompt -------------------------------------------------
@@ -224,22 +266,43 @@ def _external_vars(conn: sqlite3.Connection, symbol: str | None) -> dict[str, An
     return out
 
 
+def _external_reasons(conn: sqlite3.Connection, external_vars: dict[str, Any]) -> dict[str, str]:
+    """Degrade reasons per external var, fed from ``data_source_health`` (spec 20.15.4).
+
+    For each FinMind chips var that came back ``unavailable`` (no usable snapshot), if
+    the finmind source's health is ``error`` its detail is surfaced as the reason (e.g.
+    "需要 Backer 方案" / "額度已滿"). ``llm_insight`` never reads health — the router does
+    and feeds the reason in via ``VarContext.external_reasons``.
+    """
+    state = datasources_store.get_state(conn, "finmind")
+    if state is None or state.status != "error" or not state.detail:
+        return {}
+    reasons: dict[str, str] = {}
+    for token in _FINMIND_VAR_DATASET:
+        value = external_vars.get(token)
+        if not isinstance(value, dict) or value.get("unavailable") is True:
+            reasons[token] = state.detail
+    return reasons
+
+
 def _build_context(
     conn: sqlite3.Connection, payload: PromptBody, now: datetime, reporting: Currency
 ) -> V.VarContext:
     """Build the render context with the REAL computed dashboard (+ per-symbol history).
 
-    Conn-bearing reads (FX spot rates, dividend ledger rows, external snapshots) are
-    resolved HERE and fed into the context — ``llm_insight`` must not import
+    Conn-bearing reads (FX spot rates, dividend ledger rows, external snapshots, health
+    reasons) are resolved HERE and fed into the context — ``llm_insight`` must not import
     ``pricing``/``data_ingestion``.
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
     symbol = payload.symbol if payload.scope == "per_symbol" else None
+    external_vars = _external_vars(conn, symbol)
     ctx = V.VarContext(
         data=data,
         fx_rates=_resolve_fx_rates(conn, data, now, reporting),
         dividend_rows=_dividend_rows(conn),
-        external_vars=_external_vars(conn, symbol),
+        external_vars=external_vars,
+        external_reasons=_external_reasons(conn, external_vars),
     )
     if payload.scope == "per_symbol" and payload.symbol:
         as_of = now.date()

@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 from portfolio_dash.pricing import datasources_store, ingest
 from portfolio_dash.pricing.defaults import default_registry
+from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
 from portfolio_dash.pricing.refresh import refresh_dividends, refresh_history, refresh_quotes
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.results import RefreshSummary
@@ -189,16 +190,29 @@ def _prior_consecutive_failures(conn: sqlite3.Connection, job_id: str) -> int:
 def _run_ingest(
     conn: sqlite3.Connection, job_id: str, fn: Callable[[], int], *, now: datetime
 ) -> str:
-    """Run one ingest, escalating source health to ``error`` on 3 consecutive failures.
+    """Run one ingest, escalating source health to ``error`` on failure.
 
     On success returns a short summary (its ``job_runs`` row will log ``ok``, resetting
-    the streak). On failure, if THIS run makes the trailing error streak reach the
-    threshold, it upserts the mapped source's ``data_source_health`` to ``error`` and
-    logs a warn — then re-raises so ``run_job`` records the error row (spec 20.12).
+    the streak). A FinMind tier/quota error (spec 20.15.4) is a clear, actionable
+    failure: it marks health ``error`` with the reason IMMEDIATELY (no 3-streak needed),
+    writes no snapshot, then re-raises so ``run_job`` records the error row. Any other
+    failure escalates health only when THIS run makes the trailing error streak reach the
+    threshold (spec 20.12). Either way the exception re-raises for the ``job_runs`` log.
     """
     try:
         written = fn()
         return f"{written} snapshot(s) written"
+    except (FinMindTierError, FinMindQuotaError) as exc:
+        source_id = _INGEST_JOB_SOURCE.get(job_id, job_id)
+        logger.warning(
+            "ingest job %s hit a FinMind tier/quota limit; marking %s health=error: %s",
+            job_id, source_id, exc,
+        )
+        datasources_store.upsert_health(
+            conn, source_id, status="error", last_test=now.isoformat(),
+            latency_ms=None, detail=f"{job_id}: {exc}",
+        )
+        raise
     except Exception as exc:  # noqa: BLE001 - escalate health, then re-raise to log
         streak = _prior_consecutive_failures(conn, job_id) + 1
         if streak >= _FAIL_STREAK_THRESHOLD:
