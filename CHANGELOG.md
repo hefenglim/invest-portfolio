@@ -9,6 +9,22 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+### Fixed
+- **Atomic batch import (#1 backend hardening, 2026-06-15):** CSV/broker batch import is now
+  all-or-nothing on an unexpected error. `data_ingestion/preview.commit_preview` previously looped
+  accepted rows calling writers that each `conn.commit()` per row, so a mid-batch unexpected exception
+  left a partial ledger (rows 1..k committed, the rest not) — breaking 重算/append-only reproducibility.
+  Now the writer loop runs in ONE transaction (a `commit: bool` param threaded through the four batch
+  store inserts; batch passes `commit=False`), commits once at the end, and `rollback()`s + re-raises on
+  any exception. The single-row/manual path is unchanged (default `commit=True`); intentional skips of
+  hard-issue rows stay contract-level partial success (not a rollback trigger). New
+  `tests/data_ingestion/test_preview_atomicity.py`.
+- **pricing→data_ingestion cross-peer import removed (#2 layering, 2026-06-15):**
+  `pricing/datasources_store.py` no longer imports `data_ingestion.config_seed.DEFAULT_ACCOUNTS`
+  (architecture.md: pricing and data_ingestion are sibling lower layers). It now iterates the file's own
+  local `_ACCOUNT_MARKET` map (already enumerating the 4 accounts) — byte-equivalent fallback-chain
+  seeding. New `tests/pricing/test_layering.py` AST-guards that `pricing/**` imports no `data_ingestion`.
+
 ### Changed
 - **Money/Decimal wire-string unification (#2c/M1 foundation hardening, 2026-06-15):** every Decimal
   now serializes to the JSON wire in ONE canonical form — `format(d, "f")` (fixed-point, full source
