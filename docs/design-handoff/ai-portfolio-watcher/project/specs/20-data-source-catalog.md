@@ -161,23 +161,35 @@ CREATE INDEX IF NOT EXISTS ix_external_snapshots_lookup
 
 ## 20.6 FinMind 多資料集（Free 層，token 已有）
 
-`pricing/finmind_datasets.py`：`GET /api/v4/data?dataset=<DS>&data_id=<ID>&start_date=<D>&token=<T>`，
-token 經 `datasources_store.get_api_key(conn, "finmind")`（DB-backed，承 spec 14.2）。
+`pricing/finmind_datasets.py`：`GET /api/v4/data?dataset=<DS>&data_id=<ID>&start_date=<D>[&end_date=<D>]`，
+**認證走 `Authorization: Bearer {token}` header**（§20.15.1；token 經
+`datasources_store.get_api_key(conn, "finmind")`，DB-backed，承 spec 14.2）。
 
-Free 層（44 資料集）涵蓋本輪全部所需（**付費層才有的「還原股價/恐懼貪婪/即時/逐筆」
-不依賴**）：
+> **Free 層計數澄清（審計 2026-06-14）**：FinMind 行銷的「Free 44 資料集」是方案總數；
+> 以 `llms-full.txt` 逐 dataset `Tier:` 實算，**帶 `data_id` 可免費取得約 52 個**（32 個
+> 無條件 Free + 20 個「Free with data_id / 全市場才需付費」）。本 app **一律帶 data_id**，
+> 故這 ~52 個皆在免費範圍。真正付費才有的是 **即時(Sponsor)/逐筆·分K(Sponsor Pro)/
+> 恐懼貪婪指數·景氣對策信號·產業鏈·市值比重(Backer+)**——本輪皆不依賴
+> （F&G 改走免費 CNN 直連，見 20.7；**勿向 FinMind 付費購買 F&G**）。
 
-| dataset | 變數 | key fields |
+本輪接線 5 個（皆 Free-with-data_id，欄位名已對照 `llms-full.txt` 驗證）：
+
+| dataset | 變數 | key fields（llms-full 驗證） |
 |---|---|---|
-| `TaiwanStockInstitutionalInvestorsBuySell` | institutional | buy, sell, name（法人別） |
-| `TaiwanStockMarginPurchaseShortSale` | margin | MarginPurchase*, ShortSale* 餘額 |
-| `TaiwanStockPER` | valuation | PER, PBR, dividend_yield |
-| `TaiwanStockMonthRevenue` | monthly_revenue | revenue, revenue_month/year |
-| `TaiwanStockFinancialStatements` | financials | type, value, origin_name（EPS/營收/毛利…） |
+| `TaiwanStockInstitutionalInvestorsBuySell` | institutional | buy, sell, name（`Foreign_Investor`/`Investment_Trust`/`Dealer_self`…） |
+| `TaiwanStockMarginPurchaseShortSale` | margin | MarginPurchaseTodayBalance, ShortSaleTodayBalance |
+| `TaiwanStockPER` | valuation | PER, PBR, dividend_yield（無條件 Free） |
+| `TaiwanStockMonthRevenue` | monthly_revenue | revenue, revenue_month, revenue_year |
+| `TaiwanStockFinancialStatements` | financials | type, value, origin_name（Revenue/GrossProfit/EPS…） |
 
 - 速率 600/hr：jobs 依持倉+觀察清單**分批 + backoff**；以日期範圍批次抓，快取入庫。
-- 目錄登錄的其他 Free dataset（`相關新聞`/`美股股價`/`19 幣 FX`/`12 國央行利率`/
-  `美國國債`）**catalogue only 本輪不接線**，未來資訊面板需要時依本契約擴充。
+- **未來可低成本擴充的免費 dataset**（皆 Free 或 Free-with-data_id，依本契約加 client +
+  catalogue 即可）：`TaiwanStockPriceAdj`（還原股價）、`TaiwanStockDividend`/
+  `TaiwanStockDividendResult`（股利政策/除權息結果→除息日曆）、`TaiwanStockShareholding`
+  （外資持股）、`TaiwanStockNews`（相關新聞→llm_insight 敘事）、`TaiwanStockTotalReturnIndex`
+  （報酬指數）、`USStockPrice`（美股日線備援）、`TaiwanExchangeRate`（19 幣 FX）、
+  `InterestRate`（12 國央行利率）、`GovernmentBondsYield`（美債殖利率）、`GoldPrice`/
+  `CrudeOilPrices`（商品）。**本輪 catalogue only 不接線**，未來資訊面板需要時擴充。
 
 ---
 
