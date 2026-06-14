@@ -144,3 +144,63 @@ GET/PUT /api/evolution-config                  → auto_promote/shadow_batches/m
 - `settings-alerts.js` 每條規則的「觸發 AI 解讀」指示 ← 讀 insight-types 的 on_alert 組合。
 - `settings-llm.js` roles → master_model/master_fallback 欄位。
 - `insights.html` 戰績 tab → /api/ai-score。
+
+---
+
+## 4.10 鎖定實作決策（2026-06-14 使用者拍板，取代衝突處）
+
+> 機制深審後定案；implementer 一律照此建。前後端契約明確，供 E2E 全端整合微調。
+
+**技術棧（鎖定）**
+- 資料層 **`sqlite3` DDL + Pydantic（NO ORM / 不引 SQLAlchemy）**，與既有 17 表一致。
+- 即時回饋 **輪詢 `GET /api/insight-tasks/{id}/runs` 的 job_runs 3 態（running/ok/error）**，
+  無 WebSocket（stack 鎖定無框架/無 build step）。細粒度子階段列為日後加值。
+- `shared/llm.complete_structured` **增強：對支援的 provider 傳 `response_format`
+  （json_schema / tool-use 強制結構化），不支援者退回現行 prompt+parse+retry（graceful）**。
+
+**洞察卡 schema（強制 JSON）**：`{title, summary, body_md, tags[], symbol?, confidence, prediction?}`。
+- `prediction`（可省=純敘事卡）：`{metric, direction, target_pct?, horizon_days}`。
+- `confidence` 0–100（有 prediction 時必填；用於校準誤差 calib_gap / calibration_bins）。
+
+**可驗證預測（quant_hit）**：程式比對 `prediction` vs 實際；純敘事卡 `quant_hit=NULL` 只評 narrative。
+- **portfolio-scope 卡 v1 = 純敘事**（`quant_hit=NULL`）；`metric:"portfolio_return"` 日後再規劃。
+
+**Horizon**：`insight_types` 任務預設 `horizon_days`，卡可經 `prediction.horizon_days` 覆寫；
+純敘事卡吃任務預設。**以交易日計**（`evolution_config.horizon_basis` 可改 calendar_days）。
+
+**自評分檢驗（4.4 擴充）**：預設用標準 master-scoring 模板；`insight_types` 加**可選**
+`eval_prompt`（自訂檢驗提示詞）——有設才用自訂。新增**日期/時間變數**到 06a registry，
+格式統一 **ISO-8601 +08:00**（Asia/Taipei）：`{{now}}`、`{{card_created_at}}`、`{{eval_date}}`。
+
+**評分防毒（pending_data）**：評分日缺價/斷線/暫停交易 → `insight_evaluations.status='pending_data'`
+順延，**絕不強判 miss**；`defer_count` 超 `evolution_config.defer_limit_days`（預設 5 交易日）
+→ `status='undetermined'`（非 miss），**排除於校準與校正**（不毒化 Loop 3）。
+
+**快取 fingerprint**：`sha256(insight_type_id + 組裝後提示詞 + input_snapshot digest + prompt_version)`；
+含快照日期 → 每交易日天然不同，同日同輸入重觸發＝命中快取零成本。
+
+**on_alert 觸發（R7 落地）**：新增 `alert-scan` job + `alert_events` 表（嚴禁開頁觸發 LLM）；
+Dispatcher 消費新事件，以 (任務,規則,標的) 為鍵 **24h 防抖**；alert 卡 system prompt 強制
+**極短 horizon（≤3 交易日）**。`evolution_config.shadow_on_alert` 預設 false（on_alert 不跑影子）。
+
+**進化/影子設定（`evolution_config`，前端進化設定面板可調）**：
+`auto_promote, shadow_batches, max_shadows, min_samples, gap_alert_pp, defer_limit_days,
+horizon_basis, shadow_on_alert`。`min_samples` 同時把關 `calib_gap` 與 `generate_calibrations`
+（樣本不足不觸發，避免小樣本誤判）。
+
+**模型階級（config 驅動，非硬編）**：產卡走 `default` 角色（成本低）；評分/校正走 `master`
+角色（高推理）。使用者於 settings-llm 綁定哪個模型。
+
+**校正防暴走（4.8 驗證器）**：master 自校正 system prompt 內含安全鎖——「新增規則時重構精簡舊邏輯、
+總字數不超上限、不得為避免失誤而產出含糊無預測價值的廢話」；輸出過關鍵字 + 一次 LLM 審查。
+
+**優雅降級**：變數 `{"unavailable":true}` → 產卡 system prompt：「略過該維度、不得捏造、適度降低 confidence」。
+
+**刪除模板**：曾被 `insight_type_strategies`（含已封存任務）連結過 → 封存；從未連結 → 可硬刪（04a 已做）。
+
+**核心新表**（04b/04c）：`insights`、`insight_evaluations`（含 status pending_data/scored/undetermined、
+defer_count）、`alert_events`；`calibration_prompts` 04a 已建。`insight_types` 追加 `horizon_days`、
+`eval_prompt`（additive migration）。
+
+**UX（前端，E2E 對接）**：策略編輯器**變數膠囊**插入（保證 token 格式精準）；戰情室
+**校準曲線** + **CSV 匯出**（信心/目標價/實際/命中）；手動觸發走**輪詢 3 態**回饋。
