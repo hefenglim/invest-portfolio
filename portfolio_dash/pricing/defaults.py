@@ -8,10 +8,13 @@ is no until it's justified).
 """
 
 import sqlite3
+from collections.abc import Callable
 
 from portfolio_dash.pricing.enums import DataType
+from portfolio_dash.pricing.providers.alphavantage_provider import AlphaVantageProvider
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
+from portfolio_dash.pricing.providers.finnhub_provider import FinnhubProvider
 from portfolio_dash.pricing.providers.klsescreener_provider import KlseScreenerProvider
 from portfolio_dash.pricing.providers.malaysiastock_provider import MalaysiaStockProvider
 from portfolio_dash.pricing.providers.stockprices_dev_provider import StockPricesDevProvider
@@ -53,11 +56,16 @@ def default_registry(conn: sqlite3.Connection | None = None) -> Registry:
     if conn is not None:
         from portfolio_dash.pricing import datasources_store
 
-        finmind = FinMindProvider(
-            token_getter=lambda: datasources_store.get_api_key(conn, "finmind")
-        )
+        def _getter(source_id: str) -> Callable[[], str | None]:
+            return lambda: datasources_store.get_api_key(conn, source_id)
+
+        finmind = FinMindProvider(token_getter=_getter("finmind"))
+        alphavantage = AlphaVantageProvider(token_getter=_getter("alphavantage"))
+        finnhub = FinnhubProvider(token_getter=_getter("finnhub"))
     else:
         finmind = FinMindProvider()
+        alphavantage = AlphaVantageProvider()
+        finnhub = FinnhubProvider()
     providers: dict[str, ProviderBase] = {
         "yfinance": YFinanceProvider(),
         "twse": TwseProvider(),
@@ -68,5 +76,10 @@ def default_registry(conn: sqlite3.Connection | None = None) -> Registry:
         "stockprices_dev": StockPricesDevProvider(),
         "klsescreener": KlseScreenerProvider(),
         "malaysiastock": MalaysiaStockProvider(),
+        # Pending spec-20.9 token-gated adapters: registered but NOT in the default
+        # order, and key-gated (supports is False without a key) -> inert until a key
+        # is set + the source is promoted into a chain.
+        "alphavantage": alphavantage,
+        "finnhub": finnhub,
     }
     return Registry(providers=providers, order=DEFAULT_PROVIDER_ORDER)
