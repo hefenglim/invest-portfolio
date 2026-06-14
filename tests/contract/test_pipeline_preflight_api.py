@@ -208,3 +208,84 @@ def test_preflight_draft_body_no_persist(
 
 def test_preflight_unknown_id_no_body_404(api_client: TestClient) -> None:
     assert api_client.post("/api/insight-tasks/999/preflight").status_code == 404
+
+
+# --- §7.3 diagnose ------------------------------------------------------------
+
+
+def test_diagnose_same_gates_plus_first_blocker_and_skips(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    tid = _make_combo(api_client)  # unscheduled + quota 0 → G1 + R6 fail
+    # two prior skipped runs to surface in recent_skips.
+    for reason in ("R6_quota", "R3_no_live_templates"):
+        golden_db.execute(
+            "INSERT INTO job_runs (job_id, started_at, finished_at, status, reason, "
+            "payload, is_shadow) VALUES (?, '2026-06-11T08:00:00+08:00', "
+            "'2026-06-11T08:00:01+08:00', 'skipped', ?, ?, 0)",
+            (f"insight:{tid}", reason, str(tid)),
+        )
+    golden_db.commit()
+    r = api_client.get(f"/api/insight-tasks/{tid}/diagnose")
+    assert r.status_code == 200
+    body = r.json()
+    # same gate ids/order as preflight; no assembled_preview in diagnose.
+    assert _gate_ids(body) == ["G0", "G1", "R1", "R2", "R3", "R4", "R5", "R6", "G7"]
+    assert "assembled_preview" not in body
+    # G1 (manual) is the first failing gate.
+    assert body["first_blocker"] == "G1"
+    skips = body["recent_skips"]
+    assert len(skips) == 2
+    assert skips[0]["reason"] == "R3_no_live_templates"  # newest first
+    assert {s["reason"] for s in skips} == {"R6_quota", "R3_no_live_templates"}
+
+
+def test_diagnose_clean_task_has_null_first_blocker(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    from decimal import Decimal as _D
+
+    add_topup(golden_db, _D("5"))
+    tid = _make_combo(api_client)
+    api_client.post(f"/api/insight-tasks/{tid}/schedule", json={"cron": "0 8 * * *"})
+    body = api_client.get(f"/api/insight-tasks/{tid}/diagnose").json()
+    assert body["first_blocker"] is None  # no failing gate
+    assert body["recent_skips"] == []
+
+
+def test_diagnose_unknown_id_404(api_client: TestClient) -> None:
+    assert api_client.get("/api/insight-tasks/999/diagnose").status_code == 404
+
+
+# --- §7.4 task-view runs (via the alias, is_shadow excluded) -------------------
+
+
+def test_runs_alias_filters_by_task_and_excludes_shadow(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    tid = _make_combo(api_client)
+    other = _make_combo(api_client)
+    # an active skipped run for this task, a shadow run, and a run for another task.
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, reason, payload, "
+        "is_shadow) VALUES (?, '2026-06-11T08:00:00+08:00', '2026-06-11T08:00:01+08:00', "
+        "'skipped', 'R6_quota', ?, 0)",
+        (f"insight:{tid}", str(tid)),
+    )
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, reason, payload, "
+        "is_shadow) VALUES (?, '2026-06-11T08:01:00+08:00', '2026-06-11T08:01:01+08:00', "
+        "'ok', NULL, ?, 1)",
+        (f"insight:{tid}", str(tid)),
+    )
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, reason, payload, "
+        "is_shadow) VALUES (?, '2026-06-11T08:02:00+08:00', '2026-06-11T08:02:01+08:00', "
+        "'ok', NULL, ?, 0)",
+        (f"insight:{other}", str(other)),
+    )
+    golden_db.commit()
+    rows = api_client.get(f"/api/insight-tasks/{tid}/runs?limit=20").json()["rows"]
+    assert len(rows) == 1  # only this task's active (non-shadow) run
+    assert rows[0]["reason"] == "R6_quota"
+    assert rows[0]["insight_type_id"] == tid

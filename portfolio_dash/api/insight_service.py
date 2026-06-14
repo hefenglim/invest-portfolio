@@ -1203,3 +1203,60 @@ def _compose_gates(
         unapplied_calibration=unapplied_calibration,
     )
     return [g0, g1, *rule_gates, g7]
+
+
+# --- spec 07 §7.3: diagnose ("why didn't it run") -----------------------------
+# Diagnose = the read-only preflight gates (no preview needed) + the first blocking gate
+# id + the recent skip rows. No new state: it REUSES the same shared-gate preflight build
+# and the existing job_runs query.
+
+_RECENT_SKIPS_LIMIT = 5
+
+
+def _first_blocker(gates: list[dict[str, Any]]) -> str | None:
+    """The id of the first gate that FAILED (the chain's first hard blocker), or None."""
+    for g in gates:
+        if g["lv"] == "fail":
+            return str(g["id"])
+    return None
+
+
+def _recent_skips(conn: sqlite3.Connection, insight_type_id: int) -> list[dict[str, Any]]:
+    """The last 5 SKIPPED non-shadow runs as ``[{at, reason}]`` (reason = the 04b enum)."""
+    rows = conn.execute(
+        "SELECT finished_at, started_at, reason FROM job_runs WHERE job_id = ? "
+        "AND is_shadow = 0 AND status = 'skipped' ORDER BY id DESC LIMIT ?",
+        (insight_job_id(insight_type_id), _RECENT_SKIPS_LIMIT),
+    ).fetchall()
+    return [
+        {"at": r["finished_at"] or r["started_at"], "reason": r["reason"]}
+        for r in rows
+    ]
+
+
+def build_diagnose(
+    conn: sqlite3.Connection,
+    insight_type_id: int,
+    *,
+    now: datetime,
+    reporting: Currency = Currency.TWD,
+) -> dict[str, Any] | None:
+    """Build the spec-07 §7.3 diagnose payload for a SAVED task ("why didn't it run").
+
+    Read-only: the SAME shared-gate preflight gates (without the assembled preview) +
+    ``first_blocker`` (the first failing gate id, or null) + ``recent_skips`` (the last 5
+    skipped runs, each with the single 04b reason enum). Returns ``None`` for an unknown id
+    (the router maps that to 404). Never calls the LLM, never writes a job_runs row.
+    """
+    payload = build_preflight(
+        conn, insight_type_id, now=now, reporting=reporting, include_preview=False,
+    )
+    if payload is None:
+        return None
+    gates = payload["gates"]
+    return {
+        "gates": gates,
+        "verdict": payload["verdict"],
+        "first_blocker": _first_blocker(gates),
+        "recent_skips": _recent_skips(conn, insight_type_id),
+    }

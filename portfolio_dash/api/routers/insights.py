@@ -662,6 +662,34 @@ def insight_task_preflight(
     return payload
 
 
+# --- spec 07 §7.3: diagnose ("why didn't it run") -----------------------------
+
+
+@router.get("/insight-tasks/{insight_type_id}/diagnose")
+def insight_task_diagnose(
+    insight_type_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+) -> Any:
+    """Diagnose why a task did not run (spec 07 §7.3) — read-only, zero-cost.
+
+    Returns the SAME shared-gate gates as preflight (no preview) + ``first_blocker`` (the
+    first failing gate id, or null) + ``recent_skips`` (the last 5 skipped runs with the
+    04b reason enum). Unknown id → 404.
+    """
+    cs.ensure_seeded(conn)
+    payload = insight_service.build_diagnose(
+        conn, insight_type_id, now=now, reporting=reporting,
+    )
+    if payload is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知洞察任務：{insight_type_id}"),
+        )
+    return payload
+
+
 # --- stored cards list (spec 4.10) --------------------------------------------
 
 
