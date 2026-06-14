@@ -8,7 +8,12 @@ import pytest
 from pydantic import BaseModel
 
 from portfolio_dash.shared import llm as llm_mod
-from portfolio_dash.shared.llm import ModelPricing, complete_structured, cost_of
+from portfolio_dash.shared.llm import (
+    ModelPricing,
+    complete_structured,
+    complete_text,
+    cost_of,
+)
 from portfolio_dash.shared.llm_config import (
     AINotActivated,
     LLMBudgetExceeded,
@@ -17,6 +22,7 @@ from portfolio_dash.shared.llm_config import (
     ModelConfig,
     add_topup,
     ensure_llm_seeded,
+    select_role_models,
     set_role,
     upsert_model,
 )
@@ -251,3 +257,93 @@ def test_vision_call_routes_to_vision_role(
     out = complete_structured("describe", Out, agent="vis", conn=conn, images=[b"img"])
     assert out.x == 3
     assert seen == ["openai/v"]  # used the vision role, not the text default 'a'
+
+
+# --- master role selection (spec 04.3) ----------------------------------------
+
+
+def test_select_role_models_orders_primary_then_fallback(conn: sqlite3.Connection) -> None:
+    upsert_model(conn, _model("master_p"))
+    upsert_model(conn, _model("master_f"))
+    set_role(conn, LLMRole.MASTER, "master_p")
+    set_role(conn, LLMRole.MASTER_FALLBACK, "master_f")
+    chain = select_role_models(conn, LLMRole.MASTER, LLMRole.MASTER_FALLBACK)
+    assert [m.id for m in chain] == ["master_p", "master_f"]
+
+
+def test_select_role_models_skips_disabled_and_unbound(conn: sqlite3.Connection) -> None:
+    upsert_model(conn, _model("master_p", enabled=False))  # disabled → skipped
+    upsert_model(conn, _model("master_f"))
+    set_role(conn, LLMRole.MASTER, "master_p")
+    set_role(conn, LLMRole.MASTER_FALLBACK, "master_f")
+    chain = select_role_models(conn, LLMRole.MASTER, LLMRole.MASTER_FALLBACK)
+    assert [m.id for m in chain] == ["master_f"]  # only the enabled fallback
+
+
+def test_select_role_models_unset_raises_not_activated(conn: sqlite3.Connection) -> None:
+    # No master roles bound → AINotActivated (the master pipeline pauses).
+    with pytest.raises(AINotActivated):
+        select_role_models(conn, LLMRole.MASTER, LLMRole.MASTER_FALLBACK)
+
+
+def test_complete_structured_master_role_selects_master_chain(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    upsert_model(conn, _model("m_master"))
+    set_role(conn, LLMRole.MASTER, "m_master")
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        return _Resp('{"x": 11}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("score this", Out, agent="master_score", conn=conn,
+                              role=LLMRole.MASTER)
+    assert out.x == 11
+    assert seen == ["openai/m_master"]  # master role chain, not the default 'a'
+    row = conn.execute(
+        "SELECT agent FROM llm_usage WHERE agent = 'master_score'"
+    ).fetchone()
+    assert row is not None  # usage logged with the master agent label
+
+
+def test_complete_structured_master_unset_raises_not_activated(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    monkeypatch.setattr(llm_mod.litellm, "completion", lambda **kw: _Resp('{"x": 1}'))
+    with pytest.raises(AINotActivated):
+        complete_structured("x", Out, agent="m", conn=conn, role=LLMRole.MASTER)
+
+
+def test_complete_text_master_role_selects_master_chain(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    upsert_model(conn, _model("m_master2"))
+    set_role(conn, LLMRole.MASTER, "m_master2")
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        return _Resp("a free-text review")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_text("review", agent="master_review", conn=conn, role=LLMRole.MASTER)
+    assert out.reply == "a free-text review"
+    assert seen == ["openai/m_master2"]
+
+
+def test_complete_structured_default_role_unchanged(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # Back-compat: omitting role uses the DEFAULT chain (the fixture's model 'a').
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        return _Resp('{"x": 2}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("hi", Out, agent="t", conn=conn)
+    assert out.x == 2
+    assert seen == ["openai/a"]

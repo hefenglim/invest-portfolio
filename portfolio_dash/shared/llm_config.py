@@ -210,19 +210,19 @@ def get_role_model_id(conn: sqlite3.Connection, role: LLMRole) -> str | None:
     return row["model_id"] if row is not None else None
 
 
-def select_models(conn: sqlite3.Connection, *, vision: bool) -> list[ModelConfig]:
-    """Return the ordered [primary, fallback] enabled models for the task kind.
+def select_role_models(
+    conn: sqlite3.Connection, primary: LLMRole, fallback: LLMRole
+) -> list[ModelConfig]:
+    """Return the ordered [primary, fallback] enabled models for a role pair.
 
-    Raises :exc:`AINotActivated` when neither role resolves to an enabled model.
-    The order drives runtime failover in ``shared/llm.py``.
+    The generic core behind :func:`select_models`; used directly for the spec-04.3 master
+    role (``MASTER`` / ``MASTER_FALLBACK``). Skips an unbound or disabled model in either
+    slot. Raises :exc:`AINotActivated` when neither role resolves to an enabled model
+    (e.g. master unset → the self-correct pipeline pauses). The order drives runtime
+    failover in ``shared/llm.py``.
     """
-    roles = (
-        (LLMRole.VISION, LLMRole.VISION_FALLBACK)
-        if vision
-        else (LLMRole.DEFAULT, LLMRole.DEFAULT_FALLBACK)
-    )
     chain: list[ModelConfig] = []
-    for role in roles:
+    for role in (primary, fallback):
         model_id = get_role_model_id(conn, role)
         if model_id is None:
             continue
@@ -230,9 +230,22 @@ def select_models(conn: sqlite3.Connection, *, vision: bool) -> list[ModelConfig
         if model is not None and model.enabled:
             chain.append(model)
     if not chain:
-        kind = "vision" if vision else "text"
-        raise AINotActivated(f"no enabled model configured for {kind} tasks")
+        raise AINotActivated(f"no enabled model configured for the {primary.value} role")
     return chain
+
+
+def select_models(conn: sqlite3.Connection, *, vision: bool) -> list[ModelConfig]:
+    """Return the ordered [primary, fallback] enabled models for the task kind.
+
+    Thin wrapper over :func:`select_role_models` selecting the vision or default role pair.
+    Raises :exc:`AINotActivated` when neither role resolves to an enabled model.
+    """
+    primary, fallback = (
+        (LLMRole.VISION, LLMRole.VISION_FALLBACK)
+        if vision
+        else (LLMRole.DEFAULT, LLMRole.DEFAULT_FALLBACK)
+    )
+    return select_role_models(conn, primary, fallback)
 
 
 def budget_remaining(conn: sqlite3.Connection) -> Decimal:

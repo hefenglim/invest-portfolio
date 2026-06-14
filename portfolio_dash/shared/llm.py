@@ -13,17 +13,41 @@ from portfolio_dash.shared.llm_config import (
     AINotActivated,
     LLMBudgetExceeded,
     LLMError,
+    LLMRole,
     LLMUnavailable,
     ModelConfig,
     check_budget,
     litellm_model_string,
     select_models,
+    select_role_models,
 )
+
+# A role's fallback companion (spec 04.3): role selection tries the primary then this.
+_ROLE_FALLBACK: dict[LLMRole, LLMRole] = {
+    LLMRole.DEFAULT: LLMRole.DEFAULT_FALLBACK,
+    LLMRole.VISION: LLMRole.VISION_FALLBACK,
+    LLMRole.MASTER: LLMRole.MASTER_FALLBACK,
+}
+
+
+def _select_for(
+    conn: sqlite3.Connection, *, role: LLMRole | None, vision: bool
+) -> list[ModelConfig]:
+    """Resolve the candidate model chain for a call.
+
+    When *role* is given it selects that role's [primary, fallback] pair (spec 04.3 master
+    path); otherwise it falls back to the legacy vision/default selection. A role with no
+    registered fallback companion uses the default-fallback slot.
+    """
+    if role is not None:
+        return select_role_models(conn, role, _ROLE_FALLBACK.get(role, LLMRole.DEFAULT_FALLBACK))
+    return select_models(conn, vision=vision)
 
 __all__ = [
     "AINotActivated",
     "LLMBudgetExceeded",
     "LLMError",
+    "LLMRole",
     "LLMUnavailable",
     "ModelPricing",
     "TextCompletion",
@@ -175,18 +199,23 @@ def complete_structured[T: BaseModel](
     agent: str,
     conn: sqlite3.Connection,
     images: list[bytes] | None = None,
+    role: LLMRole | None = None,
 ) -> T:
     """Call the configured LLM and parse the response into *schema*.
 
-    Order: budget gate -> role selection (vision if *images*) -> try each candidate
-    model in order (failover on provider error) -> parse (retry once) -> log cost.
+    Order: budget gate -> role selection (the explicit *role* chain if given, else vision
+    when *images*, else default) -> try each candidate model in order (failover on provider
+    error) -> parse (retry once) -> log cost.
+
+    *role* (spec 04.3) selects an alternate model chain (e.g. ``LLMRole.MASTER`` for
+    scoring/calibration); omitting it preserves the existing default/vision behaviour.
 
     Raises :exc:`AINotActivated` (no model for the role), :exc:`LLMBudgetExceeded`
     (cap hit), or :exc:`LLMUnavailable` (all candidates failed). All subclass
     :exc:`LLMError`, so callers may catch the base for graceful degradation.
     """
     check_budget(conn)
-    candidates = select_models(conn, vision=bool(images))
+    candidates = _select_for(conn, role=role, vision=bool(images))
     messages = _build_messages(prompt, images)
     last: LLMUnavailable | None = None
     for model in candidates:
@@ -268,17 +297,19 @@ def complete_text(
     agent: str,
     conn: sqlite3.Connection,
     system: str | None = None,
+    role: LLMRole | None = None,
 ) -> TextCompletion:
-    """Free-text completion (no JSON schema) via the configured default text model.
+    """Free-text completion (no JSON schema) via the configured text model.
 
-    Order: budget gate -> default role selection -> try each candidate (failover on
-    provider error) -> log cost -> return reply + usage. An optional *system* message is
-    prepended. Raises :exc:`AINotActivated` (no default model), :exc:`LLMBudgetExceeded`
-    (cap hit), or :exc:`LLMUnavailable` (all candidates failed) — callers map these to
-    402 / 409 / 503 via the global handlers.
+    Order: budget gate -> role selection (the explicit *role* chain if given, else the
+    default text role) -> try each candidate (failover on provider error) -> log cost ->
+    return reply + usage. An optional *system* message is prepended. *role* (spec 04.3)
+    selects an alternate chain (e.g. the master review pass). Raises :exc:`AINotActivated`
+    (no model), :exc:`LLMBudgetExceeded` (cap hit), or :exc:`LLMUnavailable` (all
+    candidates failed) — callers map these to 402 / 409 / 503 via the global handlers.
     """
     check_budget(conn)
-    candidates = select_models(conn, vision=False)
+    candidates = _select_for(conn, role=role, vision=False)
     messages: list[dict[str, object]] = []
     if system is not None:
         messages.append({"role": "system", "content": system})
