@@ -229,3 +229,192 @@ def test_r1_enforced_on_update(client: TestClient) -> None:
         json={"name": "N", "scope": "portfolio", "strategy_ids": [bad["id"]]},
     )
     assert r.status_code == 422
+
+
+# --- schedule (spec 4.2) ------------------------------------------------------
+
+
+def test_schedule_post_then_get_echoes_cron(client: TestClient) -> None:
+    it = client.post(
+        "/api/insight-types", json={"name": "N", "scope": "portfolio"}
+    ).json()
+    r = client.post(f"/api/insight-types/{it['id']}/schedule", json={"cron": "0 8 * * *"})
+    assert r.status_code == 200
+    assert r.json()["job_id"] == f"insight:{it['id']}"
+    # Subsequent GET reflects the cron under `schedule`.
+    listed = {x["id"]: x for x in client.get("/api/insight-types").json()}
+    assert listed[it["id"]]["schedule"] == {"cron": "0 8 * * *"}
+
+
+def test_schedule_delete_removes_it(client: TestClient) -> None:
+    it = client.post(
+        "/api/insight-types", json={"name": "N", "scope": "portfolio"}
+    ).json()
+    client.post(f"/api/insight-types/{it['id']}/schedule", json={"cron": "0 8 * * *"})
+    r = client.delete(f"/api/insight-types/{it['id']}/schedule")
+    assert r.status_code == 200
+    listed = {x["id"]: x for x in client.get("/api/insight-types").json()}
+    assert listed[it["id"]]["schedule"] is None
+
+
+def test_schedule_on_alert_rejected_400(client: TestClient) -> None:
+    it = client.post(
+        "/api/insight-types",
+        json={"name": "Alert", "scope": "on_alert", "alert_rules": ["fx_drift"]},
+    ).json()
+    r = client.post(f"/api/insight-types/{it['id']}/schedule", json={"cron": "0 8 * * *"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation_error"
+
+
+def test_schedule_unknown_insight_type_404(client: TestClient) -> None:
+    r = client.post("/api/insight-types/999/schedule", json={"cron": "0 8 * * *"})
+    assert r.status_code == 404
+
+
+# --- active-calibration (spec 4.6) --------------------------------------------
+
+
+def test_active_calibration_set_and_clear(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    it = client.post(
+        "/api/insight-types", json={"name": "N", "scope": "portfolio"}
+    ).json()
+    cs.create_calibration(conn, it["id"], body="v1", cause="seed", now=NOW)  # version 1
+    r = client.put(
+        f"/api/insight-types/{it['id']}/active-calibration", json={"version": 1}
+    )
+    assert r.status_code == 200
+    listed = {x["id"]: x for x in client.get("/api/insight-types").json()}
+    assert listed[it["id"]]["active_calibration_version"] == 1
+    # clear with null
+    r = client.put(
+        f"/api/insight-types/{it['id']}/active-calibration", json={"version": None}
+    )
+    assert r.status_code == 200
+    listed = {x["id"]: x for x in client.get("/api/insight-types").json()}
+    assert listed[it["id"]]["active_calibration_version"] is None
+
+
+def test_active_calibration_nonexistent_version_400(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    it = client.post(
+        "/api/insight-types", json={"name": "N", "scope": "portfolio"}
+    ).json()
+    r = client.put(
+        f"/api/insight-types/{it['id']}/active-calibration", json={"version": 5}
+    )
+    assert r.status_code == 400
+
+
+def test_active_calibration_unknown_insight_type_404(client: TestClient) -> None:
+    r = client.put("/api/insight-types/999/active-calibration", json={"version": None})
+    assert r.status_code == 404
+
+
+# --- calibrations (spec 4.7) --------------------------------------------------
+
+
+def test_calibrations_filter_and_include_archived(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    it = client.post(
+        "/api/insight-types", json={"name": "N", "scope": "portfolio"}
+    ).json()
+    other = client.post(
+        "/api/insight-types", json={"name": "O", "scope": "portfolio"}
+    ).json()
+    c1 = cs.create_calibration(conn, it["id"], body="v1", cause="seed", now=NOW)
+    cs.create_calibration(conn, it["id"], body="v2", cause="miss", now=NOW)
+    cs.create_calibration(conn, other["id"], body="x", cause="seed", now=NOW)
+    cs.archive_calibration(conn, c1.id)
+    # default: filtered to insight_type, archived hidden
+    rows = client.get(f"/api/calibrations?insight_type={it['id']}").json()
+    assert [c["version"] for c in rows] == [2]
+    # include_archived
+    rows = client.get(
+        f"/api/calibrations?insight_type={it['id']}&include_archived=true"
+    ).json()
+    assert [c["version"] for c in rows] == [1, 2]
+
+
+def test_calibration_archive_soft_deletes_and_clears_active(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    it = client.post(
+        "/api/insight-types", json={"name": "N", "scope": "portfolio"}
+    ).json()
+    c1 = cs.create_calibration(conn, it["id"], body="v1", cause="seed", now=NOW)
+    client.put(f"/api/insight-types/{it['id']}/active-calibration", json={"version": 1})
+    r = client.post(f"/api/calibrations/{c1.id}/archive")
+    assert r.status_code == 200
+    # hidden by default
+    assert client.get(f"/api/calibrations?insight_type={it['id']}").json() == []
+    # active cleared
+    listed = {x["id"]: x for x in client.get("/api/insight-types").json()}
+    assert listed[it["id"]]["active_calibration_version"] is None
+
+
+def test_calibration_archive_unknown_404(client: TestClient) -> None:
+    assert client.post("/api/calibrations/999/archive").status_code == 404
+
+
+def test_calibration_samples_empty_shape(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    it = client.post(
+        "/api/insight-types", json={"name": "N", "scope": "portfolio"}
+    ).json()
+    c1 = cs.create_calibration(conn, it["id"], body="v1", cause="seed", now=NOW)
+    r = client.get(f"/api/calibrations/{c1.id}/samples")
+    assert r.status_code == 200
+    assert r.json() == []  # real shape; populated by 04c
+
+
+# --- evolution-config (spec 4.6) ----------------------------------------------
+
+
+def test_evolution_config_get_defaults(client: TestClient) -> None:
+    r = client.get("/api/evolution-config")
+    assert r.status_code == 200
+    assert r.json() == {
+        "auto_promote": False,
+        "shadow_batches": 3,
+        "min_samples": 8,
+        "max_shadows": 2,
+        "gap_alert_pp": "10",
+    }
+
+
+def test_evolution_config_put_roundtrip(client: TestClient) -> None:
+    r = client.put(
+        "/api/evolution-config",
+        json={
+            "auto_promote": True,
+            "shadow_batches": 5,
+            "min_samples": 12,
+            "max_shadows": 3,
+            "gap_alert_pp": "7.5",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["gap_alert_pp"] == "7.5"
+    assert r.json()["auto_promote"] is True
+    # persisted
+    assert client.get("/api/evolution-config").json()["shadow_batches"] == 5
+
+
+def test_evolution_config_put_bad_gap_400(client: TestClient) -> None:
+    r = client.put(
+        "/api/evolution-config",
+        json={
+            "auto_promote": False,
+            "shadow_batches": 3,
+            "min_samples": 8,
+            "max_shadows": 2,
+            "gap_alert_pp": "not-a-number",
+        },
+    )
+    assert r.status_code == 400

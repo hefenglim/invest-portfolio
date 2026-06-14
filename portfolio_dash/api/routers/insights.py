@@ -9,6 +9,7 @@ strategy bodies use a ``per_symbol`` variable is rejected at create/update with 
 
 import sqlite3
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -19,7 +20,11 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import variables as V
-from portfolio_dash.scheduler.jobs import insight_job_id, unbind_insight_schedule
+from portfolio_dash.scheduler.jobs import (
+    bind_insight_schedule,
+    insight_job_id,
+    unbind_insight_schedule,
+)
 
 router = APIRouter()
 
@@ -42,6 +47,22 @@ class InsightTypeIn(BaseModel):
     universe: dict[str, Any] | list[Any] | None = None
     alert_rules: dict[str, Any] | list[Any] | None = None
     enabled: bool | None = None  # None -> defaulted by scope (on_alert -> False, R7)
+
+
+class ScheduleIn(BaseModel):
+    cron: str
+
+
+class ActiveCalibrationIn(BaseModel):
+    version: int | None
+
+
+class EvolutionConfigIn(BaseModel):
+    auto_promote: bool
+    shadow_batches: int
+    min_samples: int
+    max_shadows: int
+    gap_alert_pp: str  # percentage-points Decimal STRING (never float)
 
 
 # --- serialization ------------------------------------------------------------
@@ -259,3 +280,170 @@ def delete_insight_type(
         )
     unbind_insight_schedule(conn, insight_type_id)  # remove the schedule_config row (4.1)
     return _insight_type_wire(conn, it)
+
+
+# --- schedule mount (spec 4.2) ------------------------------------------------
+
+
+@router.post("/insight-types/{insight_type_id}/schedule")
+def mount_schedule(
+    insight_type_id: int,
+    payload: ScheduleIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Bind/update the insight_type's schedule (kind=insight). on_alert combos reject (400).
+
+    on_alert insight_types are event-triggered (spec 03), not scheduled. The runtime
+    dispatch of the kind=insight row is 04b; here we only persist the binding + return
+    its job_id.
+    """
+    cs.ensure_seeded(conn)
+    it = cs.get_insight_type(conn, insight_type_id)
+    if it is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
+        )
+    if it.scope == "on_alert":
+        return JSONResponse(
+            status_code=400,
+            content=error_body(
+                "validation_error", "on_alert 洞察組合由預警事件觸發，不可排程",
+                field="cron",
+            ),
+        )
+    job_id = bind_insight_schedule(conn, insight_type_id, cron=payload.cron)
+    cs.set_job_id(conn, insight_type_id, job_id)  # mirror onto the insight_type row
+    return {"job_id": job_id}
+
+
+@router.delete("/insight-types/{insight_type_id}/schedule")
+def unmount_schedule(
+    insight_type_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    cs.ensure_seeded(conn)
+    if cs.get_insight_type(conn, insight_type_id) is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
+        )
+    unbind_insight_schedule(conn, insight_type_id)
+    cs.set_job_id(conn, insight_type_id, None)
+    return {"job_id": None}
+
+
+# --- active-calibration selector (spec 4.6) -----------------------------------
+
+
+@router.put("/insight-types/{insight_type_id}/active-calibration")
+def set_active_calibration(
+    insight_type_id: int,
+    payload: ActiveCalibrationIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Manually select (or clear with null) the active calibration version.
+
+    A non-null version must exist (non-archived) for this insight_type, else 400.
+    """
+    cs.ensure_seeded(conn)
+    if cs.get_insight_type(conn, insight_type_id) is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
+        )
+    if payload.version is not None:
+        existing = {
+            c.version for c in cs.list_calibrations(conn, insight_type_id)
+        }
+        if payload.version not in existing:
+            return JSONResponse(
+                status_code=400,
+                content=error_body(
+                    "validation_error",
+                    f"該洞察組合無校正版本 {payload.version}",
+                    field="version",
+                ),
+            )
+    cs.set_active_calibration(conn, insight_type_id, payload.version)
+    return {"id": insight_type_id, "active_calibration_version": payload.version}
+
+
+# --- calibrations (spec 4.7) --------------------------------------------------
+
+
+@router.get("/calibrations")
+def list_calibrations(
+    insight_type: int,
+    include_archived: bool = False,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> list[dict[str, Any]]:
+    cs.ensure_seeded(conn)
+    rows = cs.list_calibrations(conn, insight_type, include_archived=include_archived)
+    return [c.model_dump() for c in rows]
+
+
+@router.post("/calibrations/{calibration_id}/archive")
+def archive_calibration(
+    calibration_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Soft-delete a calibration version; clears the active selection if it was active."""
+    cs.ensure_seeded(conn)
+    cal = cs.archive_calibration(conn, calibration_id)
+    if cal is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知校正版本：{calibration_id}"),
+        )
+    return cal.model_dump()
+
+
+@router.get("/calibrations/{calibration_id}/samples")
+def calibration_samples(
+    calibration_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> list[dict[str, Any]]:
+    """Miss samples that drove a calibration version. Real shape; populated by 04c.
+
+    04a has no evaluations table yet, so this always returns the empty list (the
+    contract shape the frontend version manager consumes).
+    """
+    cs.ensure_seeded(conn)
+    return []
+
+
+# --- evolution-config (spec 4.6) ----------------------------------------------
+
+
+@router.get("/evolution-config")
+def get_evolution_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    cs.ensure_seeded(conn)
+    return cs.get_evolution_config(conn)
+
+
+@router.put("/evolution-config")
+def put_evolution_config(
+    payload: EvolutionConfigIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Upsert the evolution knobs. ``gap_alert_pp`` must parse as a Decimal (else 400)."""
+    cs.ensure_seeded(conn)
+    try:
+        gap = Decimal(payload.gap_alert_pp)
+    except (InvalidOperation, ValueError):
+        return JSONResponse(
+            status_code=400,
+            content=error_body(
+                "validation_error", f"gap_alert_pp 非有效數值：{payload.gap_alert_pp}",
+                field="gap_alert_pp",
+            ),
+        )
+    return cs.set_evolution_config(
+        conn,
+        auto_promote=payload.auto_promote,
+        shadow_batches=payload.shadow_batches,
+        min_samples=payload.min_samples,
+        max_shadows=payload.max_shadows,
+        gap_alert_pp=gap,
+    )
