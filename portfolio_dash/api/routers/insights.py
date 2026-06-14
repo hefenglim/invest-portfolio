@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.llm_insight import composer_store as cs
+from portfolio_dash.llm_insight import evaluations_store as es
 from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.scheduler.jobs import (
@@ -421,13 +422,35 @@ def calibration_samples(
     calibration_id: int,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> list[dict[str, Any]]:
-    """Miss samples that drove a calibration version. Real shape; populated by 04c.
+    """The miss-evaluation samples that drove a calibration version (spec 4.7).
 
-    04a has no evaluations table yet, so this always returns the empty list (the
-    contract shape the frontend version manager consumes).
+    Looks up the calibration's insight_type + version, then returns its miss samples from
+    ``insight_evaluations`` (04c). An unknown id → ``[]`` (the contract shape the frontend
+    version manager consumes).
     """
     cs.ensure_seeded(conn)
-    return []
+    es.ensure_tables(conn)
+    cal = cs.get_calibration(conn, calibration_id)
+    if cal is None:
+        return []
+    return es.miss_samples_for_version(
+        conn, insight_type_id=cal.insight_type_id, version=cal.version
+    )
+
+
+# --- ai-score battle record (spec 4.7) ----------------------------------------
+
+
+@router.get("/ai-score")
+def get_ai_score(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """The AI battle-record table: ``{totals, by_combo[], calibration_bins[], rows[]}``.
+
+    Active (non-shadow) scored rows drive the displayed totals/by_combo; shadow rows are
+    kept in ``rows`` for the promotion view. Empty DB → zeroed/[] (CSV export is a frontend
+    concern over this payload).
+    """
+    es.ensure_tables(conn)
+    return es.ai_score(conn)
 
 
 # --- evolution-config (spec 4.6) ----------------------------------------------
