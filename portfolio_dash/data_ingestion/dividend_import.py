@@ -113,8 +113,14 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
     return ImportPreview(rows=rows)
 
 
-def write_dividend_row(conn: sqlite3.Connection, row: PreviewRow) -> int:
-    """Persist one accepted dividends row and return its autoincrement id."""
+def write_dividend_row(
+    conn: sqlite3.Connection, row: PreviewRow, *, commit: bool = True
+) -> int:
+    """Persist one accepted dividends row and return its autoincrement id.
+
+    ``commit`` is forwarded to the store insert; the batch path passes ``commit=False``
+    so the whole batch commits once (all-or-nothing, #1).
+    """
     p = row.payload
     rs_str = p.get("reinvest_shares")
     rp_str = p.get("reinvest_price")
@@ -129,4 +135,5 @@ def write_dividend_row(conn: sqlite3.Connection, row: PreviewRow) -> int:
         net=Decimal(p["net"]),
         reinvest_shares=Decimal(rs_str) if rs_str is not None else None,
         reinvest_price=Decimal(rp_str) if rp_str is not None else None,
+        commit=commit,
     )

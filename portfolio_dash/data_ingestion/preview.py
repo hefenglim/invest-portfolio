@@ -1,8 +1,8 @@
 """Generic import preview/commit core — reused by all CSV ledger importers."""
 
 import sqlite3
-from collections.abc import Callable
 from decimal import Decimal
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
@@ -38,7 +38,17 @@ class ImportSummary(BaseModel):
     skipped: list[int] = Field(default_factory=list)
 
 
-Writer = Callable[[sqlite3.Connection, PreviewRow], int]
+class Writer(Protocol):
+    """A ledger-specific writer that inserts one preview row and returns its id.
+
+    ``commit`` lets the batch path defer the commit so the whole batch is one
+    transaction (all-or-nothing, #1); the writer's default is ``commit=True`` for
+    any single-row caller.
+    """
+
+    def __call__(
+        self, conn: sqlite3.Connection, row: PreviewRow, *, commit: bool = ...
+    ) -> int: ...
 
 
 def commit_preview(
@@ -50,6 +60,12 @@ def commit_preview(
 ) -> ImportSummary:
     """Commit accepted rows from a preview, skipping any with hard issues.
 
+    The batch is **all-or-nothing on an unexpected error**: every accepted row is
+    written with ``commit=False`` and the whole batch is committed once at the end.
+    Any exception rolls the entire batch back and re-raises, so a mid-batch failure
+    never leaves a partial ledger write (CLAUDE.md 重算/append-only). Intentional skips
+    of hard-issue rows are contract-level partial success, NOT a rollback trigger.
+
     Args:
         conn:    Active SQLite connection.
         preview: The preview produced by a ledger-specific builder.
@@ -58,11 +74,19 @@ def commit_preview(
 
     Returns:
         :class:`ImportSummary` listing written row ids and skipped row indices.
+
+    Raises:
+        Exception: re-raises any writer error after rolling the whole batch back.
     """
     summary = ImportSummary()
-    for row in preview.rows:
-        if row.index in accept and not row.has_hard_issue:
-            summary.written.append(writer(conn, row))
-        else:
-            summary.skipped.append(row.index)
+    try:
+        for row in preview.rows:
+            if row.index in accept and not row.has_hard_issue:
+                summary.written.append(writer(conn, row, commit=False))
+            else:
+                summary.skipped.append(row.index)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return summary

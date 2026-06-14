@@ -90,8 +90,14 @@ def build_fx_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     return ImportPreview(rows=rows)
 
 
-def write_fx_row(conn: sqlite3.Connection, row: PreviewRow) -> int:
-    """Persist one accepted fx_conversions row and return its autoincrement id."""
+def write_fx_row(
+    conn: sqlite3.Connection, row: PreviewRow, *, commit: bool = True
+) -> int:
+    """Persist one accepted fx_conversions row and return its autoincrement id.
+
+    ``commit`` is forwarded to the store insert; the batch path passes ``commit=False``
+    so the whole batch commits once (all-or-nothing, #1).
+    """
     p = row.payload
     return insert_fx_conversion(
         conn,
@@ -101,4 +107,5 @@ def write_fx_row(conn: sqlite3.Connection, row: PreviewRow) -> int:
         from_amount=Decimal(p["from_amount"]),
         to_ccy=Currency(p["to_ccy"]),
         to_amount=Decimal(p["to_amount"]),
+        commit=commit,
     )

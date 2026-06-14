@@ -114,8 +114,14 @@ def insert_transaction(
     trade_date: date,
     fee_rule_snapshot: dict[str, str] | None = None,
     note: str | None = None,
+    commit: bool = True,
 ) -> int:
-    """Insert a transaction row and return its new primary-key id."""
+    """Insert a transaction row and return its new primary-key id.
+
+    Pass ``commit=False`` to defer the commit to the caller (the batch-import path
+    runs many inserts in one transaction for all-or-nothing atomicity, #1). Single-row
+    and manual callers keep the default ``commit=True`` and are unchanged.
+    """
     cur = conn.execute(
         """INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax,
                trade_date, fee_rule_snapshot, note)
@@ -133,7 +139,8 @@ def insert_transaction(
             note,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return int(cur.lastrowid or 0)
 
 
@@ -162,8 +169,13 @@ def upsert_opening(
     original_avg_cost: Decimal,
     original_cost_total: Decimal,
     build_date: date,
+    commit: bool = True,
 ) -> None:
-    """Insert or update an opening_inventory row (idempotent on PK account_id+symbol)."""
+    """Insert or update an opening_inventory row (idempotent on PK account_id+symbol).
+
+    Pass ``commit=False`` to defer the commit to the caller (batch-import atomicity, #1).
+    Single-row and manual callers keep the default ``commit=True`` and are unchanged.
+    """
     conn.execute(
         """INSERT INTO opening_inventory
                (account_id, symbol, shares, original_avg_cost, original_cost_total, build_date)
@@ -182,7 +194,8 @@ def upsert_opening(
             build_date.isoformat(),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def list_opening(
@@ -252,8 +265,13 @@ def insert_dividend(
     net: Decimal,
     reinvest_shares: Decimal | None = None,
     reinvest_price: Decimal | None = None,
+    commit: bool = True,
 ) -> int:
-    """Insert a dividends row and return its new primary-key id."""
+    """Insert a dividends row and return its new primary-key id.
+
+    Pass ``commit=False`` to defer the commit to the caller (batch-import atomicity, #1).
+    Single-row and manual callers keep the default ``commit=True`` and are unchanged.
+    """
     cur = conn.execute(
         """INSERT INTO dividends
                (account_id, symbol, date, type, gross, withholding, net,
@@ -271,7 +289,8 @@ def insert_dividend(
             to_db(reinvest_price) if reinvest_price is not None else None,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return int(cur.lastrowid or 0)
 
 
@@ -351,8 +370,13 @@ def insert_fx_conversion(
     from_amount: Decimal,
     to_ccy: Currency,
     to_amount: Decimal,
+    commit: bool = True,
 ) -> int:
-    """Insert an fx_conversions row and return its new primary-key id."""
+    """Insert an fx_conversions row and return its new primary-key id.
+
+    Pass ``commit=False`` to defer the commit to the caller (batch-import atomicity, #1).
+    Single-row and manual callers keep the default ``commit=True`` and are unchanged.
+    """
     cur = conn.execute(
         """INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy,
                to_amount) VALUES (?,?,?,?,?,?)""",
@@ -365,7 +389,8 @@ def insert_fx_conversion(
             to_db(to_amount),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return int(cur.lastrowid or 0)
 
 

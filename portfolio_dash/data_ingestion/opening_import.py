@@ -83,11 +83,16 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
     return ImportPreview(rows=rows)
 
 
-def write_opening_row(conn: sqlite3.Connection, row: PreviewRow) -> int:
+def write_opening_row(
+    conn: sqlite3.Connection, row: PreviewRow, *, commit: bool = True
+) -> int:
     """Persist one accepted opening_inventory row and return its row index.
 
     Uses row index (not an autoincrement id) as the written marker, because
     opening_inventory uses a composite PK with no surrogate key.
+
+    ``commit`` is forwarded to the store upsert; the batch path passes ``commit=False``
+    so the whole batch commits once (all-or-nothing, #1).
     """
     p = row.payload
     upsert_opening(
@@ -98,5 +103,6 @@ def write_opening_row(conn: sqlite3.Connection, row: PreviewRow) -> int:
         original_avg_cost=Decimal(p["original_avg_cost"]),
         original_cost_total=Decimal(p["original_cost_total"]),
         build_date=date.fromisoformat(p["build_date"]),
+        commit=commit,
     )
     return row.index

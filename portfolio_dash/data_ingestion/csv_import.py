@@ -158,11 +158,16 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
     return ImportPreview(rows=rows)
 
 
-def write_transaction_row(conn: sqlite3.Connection, row: PreviewRow) -> int:
+def write_transaction_row(
+    conn: sqlite3.Connection, row: PreviewRow, *, commit: bool = True
+) -> int:
     """Insert one transaction from a committed :class:`PreviewRow`.
 
     Extracts the ``snap.*`` keys from :attr:`PreviewRow.payload` to reconstruct
     the fee-rule snapshot, then delegates to :func:`~store.insert_transaction`.
+
+    ``commit`` is forwarded to the store insert; the batch path (:func:`commit_preview`)
+    passes ``commit=False`` so the whole batch commits once (all-or-nothing, #1).
 
     Returns:
         The new transaction's primary-key id.
@@ -181,4 +186,5 @@ def write_transaction_row(conn: sqlite3.Connection, row: PreviewRow) -> int:
         trade_date=date.fromisoformat(p["trade_date"]),
         fee_rule_snapshot=snapshot,
         note=p["note"] or None,
+        commit=commit,
     )
