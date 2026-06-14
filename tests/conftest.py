@@ -28,6 +28,7 @@ from portfolio_dash.data_ingestion.store import (
     upsert_instrument,
 )
 from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
+from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.results import FxRow, PriceRow
@@ -109,6 +110,7 @@ def golden_db() -> Iterator[sqlite3.Connection]:
     create_auth_tables(conn)  # empty auth tables -> guest mode (spec 09)
     ensure_system_prompt_seeded(conn)  # global system prompt single-row (spec 06a)
     ensure_composer_seeded(conn)  # insight-composer tables: created EMPTY (spec 04a)
+    ensure_insights_tables(conn)  # insights cards table: created EMPTY (spec 04b)
     _seed_golden(conn)
     yield conn
     conn.close()

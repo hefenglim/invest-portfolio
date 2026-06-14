@@ -31,6 +31,7 @@ from portfolio_dash.api.routers import (
 )
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
+from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.pricing import snapshots_store
 from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded
@@ -51,6 +52,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_auth_seeded(conn)
         ensure_system_prompt_seeded(conn)
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
+        ensure_insights_tables(conn)  # insights cards table (spec 04b)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
