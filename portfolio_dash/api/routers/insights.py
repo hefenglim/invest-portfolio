@@ -51,8 +51,8 @@ class InsightTypeIn(BaseModel):
     strategy_ids: list[int] = []
     use_system_prompt: bool = True
     self_correct: bool = False
-    universe: dict[str, Any] | list[Any] | None = None
-    alert_rules: dict[str, Any] | list[Any] | None = None
+    universe: dict[str, Any] | list[Any] | str | None = None
+    alert_rules: dict[str, Any] | list[Any] | str | None = None  # 'all' | [rule_ids]
     enabled: bool | None = None  # None -> defaulted by scope (on_alert -> False, R7)
     horizon_days: int = 5  # task-default prediction horizon (spec 04.10)
     eval_prompt: str | None = None  # optional custom self-evaluation prompt (spec 04.10)

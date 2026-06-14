@@ -31,6 +31,7 @@ from portfolio_dash.api.routers import (
     users,
 )
 from portfolio_dash.bootstrap import bootstrap_db
+from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
 from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
@@ -54,6 +55,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_system_prompt_seeded(conn)
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
         ensure_insights_tables(conn)  # insights cards table (spec 04b)
+        ensure_alert_events_tables(conn)  # alert_events + dispatch log (spec 04b R7)
     # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
     # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
     register_insight_runner(insight_run_for_id)

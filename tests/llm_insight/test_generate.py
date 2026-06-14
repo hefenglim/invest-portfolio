@@ -263,6 +263,30 @@ def test_mid_iteration_budget_exhaustion_is_partial(
     assert len(cards) == 1
 
 
+def test_on_alert_card_forced_short_horizon(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An on_alert card's stored horizon is capped at 3 trading days (spec 4.10), even when
+    # the task default is larger.
+    _patch_llm(monkeypatch)
+    sp = cs.create_strategy(conn, name="S", body="{{symbol_detail_json}}", now=NOW)
+    it = cs.create_insight_type(
+        conn, name="Alert", scope="on_alert", alert_rules=["fx_drift"], enabled=True,
+        horizon_days=10, now=NOW,
+    )
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    generate.run_insight_type(
+        conn, it.id, var_contexts={"schwab": _ctx(conn, "schwab")},
+        inputs=RunInputs(
+            budget_remaining=Decimal("100"), fired_rule="fx_drift", fired_symbol="schwab",
+        ),
+        now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it.id)
+    assert len(cards) == 1
+    assert cards[0].horizon_days <= 3  # forced short horizon for alert cards
+
+
 def test_blocked_run_writes_skipped_job_run(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

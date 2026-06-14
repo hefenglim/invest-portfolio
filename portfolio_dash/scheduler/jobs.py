@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from portfolio_dash.llm_insight import alerts_bridge
 from portfolio_dash.pricing import datasources_store, ingest
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
@@ -20,6 +21,7 @@ from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.strategy.alerts import Alert, compute_alerts
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +333,62 @@ def index_quotes_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     )
 
 
+# --- alert-scan + on_alert dispatch (spec 04.9 R7 / 4.10) ---------------------
+# The job COMPUTES spec-03 alerts (reading the dashboard via strategy.alerts — a scheduler
+# trigger of an existing computation, NEVER on page load), records ``alert_events``, and
+# dispatches subscribing on_alert combos via the registered insight runner. This is the
+# ONLY place an LLM insight is event-triggered; the dispatch is 24h-debounced per
+# (task, rule, symbol) in ``llm_insight.alerts_bridge``.
+
+
+def _compute_alerts_for_scan(conn: sqlite3.Connection, *, now: datetime) -> list[Alert]:
+    """Compute the current spec-03 alerts for the scan (reporting ccy = TWD).
+
+    A thin seam over ``strategy.alerts.compute_alerts`` (overridable in tests) so the scan
+    job stays a trigger: it does not reimplement the rule engine.
+    """
+    return compute_alerts(conn, now=now, reporting=Currency.TWD)
+
+
+def _alert_symbol(alert: Alert) -> str | None:
+    """The symbol an alert pertains to: the suffix of ``rule:symbol`` ids, else None.
+
+    Per-target alerts use ``f"{rule}:{symbol}"`` ids (e.g. ``fx_drift:schwab``); a global
+    alert's id equals its rule (e.g. ``quota_low``) and has no symbol.
+    """
+    prefix = f"{alert.rule}:"
+    if alert.id.startswith(prefix):
+        return alert.id[len(prefix):]
+    return None
+
+
+def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Compute alerts → record events → dispatch subscribing on_alert combos (R7).
+
+    The registered insight runner produces one short-horizon card per subscribing combo
+    per (rule, symbol), 24h-debounced. Returns a short summary for the ``job_runs`` detail.
+    """
+    alerts_bridge.ensure_tables(conn)
+    alerts = _compute_alerts_for_scan(conn, now=now)
+    rules_seen: list[str] = []
+    for alert in alerts:
+        alerts_bridge.record_event(
+            conn, rule_id=alert.rule, symbol=_alert_symbol(alert), now=now
+        )
+        if alert.rule not in rules_seen:
+            rules_seen.append(alert.rule)
+    runner = _INSIGHT_RUNNER
+    dispatched = 0
+    if runner is not None:
+        dispatched = alerts_bridge.dispatch_alert_events(conn, runner, now=now)
+    else:
+        # No runner wired (scheduler-only process): still consume events so they do not
+        # pile up; cards are produced once the app wires the runner on the next scan.
+        for event in alerts_bridge.unconsumed_events(conn):
+            alerts_bridge.mark_consumed(conn, event.id)
+    return f"{len(alerts)} alert(s) [{', '.join(rules_seen)}], {dispatched} dispatched"
+
+
 JOBS: list[JobSpec] = [
     JobSpec(
         "quotes_tw", quotes_tw, "0 14 * * mon-fri", "Asia/Taipei", True,
@@ -372,6 +430,11 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "index_quotes_daily", index_quotes_daily, "50 14 * * mon-fri", "Asia/Taipei", True,
         "TAIEX/SPX/KLCI index closes",
+    ),
+    # on_alert scan (spec 04.9 R7): post-close, after quotes refresh, before insight cron.
+    JobSpec(
+        "alert_scan", alert_scan, "0 15 * * mon-fri", "Asia/Taipei", True,
+        "Risk-alert scan + on_alert AI dispatch",
     ),
 ]
 

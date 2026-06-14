@@ -84,8 +84,8 @@ class InsightType(BaseModel):
     scope: str  # 'per_symbol' | 'portfolio' | 'on_alert'
     use_system_prompt: bool
     self_correct: bool
-    universe: dict[str, Any] | list[Any] | None
-    alert_rules: dict[str, Any] | list[Any] | None
+    universe: dict[str, Any] | list[Any] | str | None
+    alert_rules: dict[str, Any] | list[Any] | str | None  # 'all' | [rule_ids] | None
     enabled: bool
     archived: bool
     job_id: str | None
@@ -302,7 +302,7 @@ def archive_strategy(
 # --- insight_types CRUD -------------------------------------------------------
 
 
-def _json_or_none(value: str | None) -> dict[str, Any] | list[Any] | None:
+def _json_or_none(value: str | None) -> dict[str, Any] | list[Any] | str | None:
     if value is None:
         return None
     parsed: Any = json.loads(value)
@@ -310,7 +310,10 @@ def _json_or_none(value: str | None) -> dict[str, Any] | list[Any] | None:
         return parsed
     if isinstance(parsed, list):
         return parsed
-    # Defensive: a scalar JSON value is not a valid universe/alert_rules shape.
+    # ``alert_rules`` may be the scalar string ``"all"`` (spec 4.0); preserve it. Any other
+    # scalar JSON value is not a valid universe/alert_rules shape and is dropped.
+    if isinstance(parsed, str):
+        return parsed
     return None
 
 
@@ -341,8 +344,8 @@ def create_insight_type(
     scope: str,
     use_system_prompt: bool = True,
     self_correct: bool = False,
-    universe: dict[str, Any] | list[Any] | None = None,
-    alert_rules: dict[str, Any] | list[Any] | None = None,
+    universe: dict[str, Any] | list[Any] | str | None = None,
+    alert_rules: dict[str, Any] | list[Any] | str | None = None,
     enabled: bool = True,
     horizon_days: int = 5,
     eval_prompt: str | None = None,
@@ -408,8 +411,8 @@ def update_insight_type(
     scope: str,
     use_system_prompt: bool = True,
     self_correct: bool = False,
-    universe: dict[str, Any] | list[Any] | None = None,
-    alert_rules: dict[str, Any] | list[Any] | None = None,
+    universe: dict[str, Any] | list[Any] | str | None = None,
+    alert_rules: dict[str, Any] | list[Any] | str | None = None,
     enabled: bool = True,
     horizon_days: int = 5,
     eval_prompt: str | None = None,

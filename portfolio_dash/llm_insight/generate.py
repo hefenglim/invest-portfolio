@@ -42,6 +42,14 @@ from portfolio_dash.shared.llm_config import LLMError
 _AGENT = "insight_generate"
 _DEFAULT_PROMPT_VERSION = "v1"
 
+# on_alert cards force a very short horizon (spec 4.10): an alert reaction is time-critical,
+# so its prediction window is capped at 3 trading days regardless of the task default.
+_ON_ALERT_MAX_HORIZON = 3
+_ON_ALERT_NOTE = (
+    "\n\n[預警解讀守則] 本卡由風險預警觸發，請給出極短期（≤3 個交易日）的觀察與預測，"
+    "聚焦此事件的即時影響。"
+)
+
 
 class RunInputs(BaseModel):
     """The fed gate/run inputs the service layer assembles from conn-bearing reads.
@@ -226,6 +234,11 @@ def run_insight_type(
     created = 0
     stopped_early = False
     anomalies = set(gate.data_anomaly_symbols)
+    # on_alert: force a short horizon + a system-prompt note (spec 4.10).
+    is_alert = it.scope == "on_alert"
+    effective_horizon = (
+        min(it.horizon_days, _ON_ALERT_MAX_HORIZON) if is_alert else it.horizon_days
+    )
 
     for target in gate.target_symbols:
         # R4: a missing-price symbol gets a deterministic zero-LLM card.
@@ -240,7 +253,7 @@ def run_insight_type(
                 istore.add_card(
                     conn, insight_type_id=insight_type_id, card=_anomaly_card(target),
                     fingerprint=fp, calibration_version=it.active_calibration_version,
-                    horizon_days=it.horizon_days, input_snapshot=snapshot, model="(none)",
+                    horizon_days=effective_horizon, input_snapshot=snapshot, model="(none)",
                     cost_usd=Decimal("0"), now=now, is_shadow=inputs.is_shadow,
                     horizon_basis=inputs.horizon_basis,
                 )
@@ -257,9 +270,10 @@ def run_insight_type(
             continue  # no fed context for this target — skip defensively (never crash)
 
         assembled = assemble.assemble_layers(conn, insight_type_id, ctx)
+        prompt = assembled.prompt + (_ON_ALERT_NOTE if is_alert else "")
         snapshot = _snapshot_for(inputs, target, ctx)
         fp = istore.fingerprint(
-            insight_type_id, assembled.prompt,
+            insight_type_id, prompt,
             istore.snapshot_digest(snapshot), inputs.prompt_version,
         )
         if istore.find_by_fingerprint(conn, fp) is not None:
@@ -268,7 +282,7 @@ def run_insight_type(
         before = remaining
         try:
             card = llm.complete_structured(
-                assembled.prompt, InsightCard, agent=_AGENT, conn=conn
+                prompt, InsightCard, agent=_AGENT, conn=conn
             )
         except LLMError:
             # Graceful degradation: a provider/budget/activation failure stops the run as
@@ -281,9 +295,16 @@ def run_insight_type(
         remaining = before - spent
         if target is not None:
             card = card.model_copy(update={"symbol": target})
+        # For an on_alert card, also cap the card's own prediction horizon to the forced
+        # short window so its due_at reflects the ≤3-day rule even if the LLM over-reached.
+        if is_alert and card.prediction is not None and (
+            card.prediction.horizon_days > _ON_ALERT_MAX_HORIZON
+        ):
+            capped = card.prediction.model_copy(update={"horizon_days": _ON_ALERT_MAX_HORIZON})
+            card = card.model_copy(update={"prediction": capped})
         istore.add_card(
             conn, insight_type_id=insight_type_id, card=card, fingerprint=fp,
-            calibration_version=it.active_calibration_version, horizon_days=it.horizon_days,
+            calibration_version=it.active_calibration_version, horizon_days=effective_horizon,
             input_snapshot=snapshot, model=card.symbol or "default", cost_usd=spent,
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
         )
