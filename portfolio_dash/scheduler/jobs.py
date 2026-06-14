@@ -46,6 +46,36 @@ def get_insight_runner() -> InsightRunner | None:
     """The currently-registered insight runner, or None (not wired / scheduler-only)."""
     return _INSIGHT_RUNNER
 
+
+# The Loop-2/3/4 runners (price-bearing evaluate + master-bearing calibrate) live in
+# ``api/insight_service.py`` and are registered at startup, so ``scheduler/`` never imports
+# ``api`` (architecture.md). The static evaluate/calibrate JOBS dispatch through these.
+EvolutionRunner = Callable[..., object]
+_EVALUATION_RUNNER: EvolutionRunner | None = None
+_CALIBRATION_RUNNER: EvolutionRunner | None = None
+
+
+def register_evaluation_runner(fn: EvolutionRunner | None) -> None:
+    """Register (or clear with None) the Loop-2 evaluate runner (app wiring seam)."""
+    global _EVALUATION_RUNNER
+    _EVALUATION_RUNNER = fn
+
+
+def get_evaluation_runner() -> EvolutionRunner | None:
+    """The currently-registered evaluate runner, or None (scheduler-only / not wired)."""
+    return _EVALUATION_RUNNER
+
+
+def register_calibration_runner(fn: EvolutionRunner | None) -> None:
+    """Register (or clear with None) the Loop-3 calibration runner (app wiring seam)."""
+    global _CALIBRATION_RUNNER
+    _CALIBRATION_RUNNER = fn
+
+
+def get_calibration_runner() -> EvolutionRunner | None:
+    """The currently-registered calibration runner, or None (scheduler-only / not wired)."""
+    return _CALIBRATION_RUNNER
+
 # A job does its own trigger+wiring and returns a short run summary for job_runs.detail.
 JobFunc = Callable[..., str]
 
@@ -389,6 +419,41 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     return f"{len(alerts)} alert(s) [{', '.join(rules_seen)}], {dispatched} dispatched"
 
 
+# --- Loop-2 evaluate + Loop-3 calibrate jobs (spec 04.4 / 4.5) ----------------
+# Both dispatch to a runner registered by the app (price-/master-bearing reads live in
+# ``api/insight_service.py``); a scheduler-only process with no runner is a safe no-op.
+
+
+def evaluate_insights(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Loop-2 daily: score every due insight via the registered evaluate runner (spec 4.4).
+
+    The runner (``insight_service.evaluate_due``) reads price-at-create vs price-at-due,
+    feeds the actual into the pure quant scorer, runs master narrative scoring (skipped when
+    master unset), and writes ``insight_evaluations`` rows. Missing actual → pending_data
+    (anti-poison). No runner wired → safe no-op summary (cards/evaluation resume once the
+    app wires it).
+    """
+    runner = _EVALUATION_RUNNER
+    if runner is None:
+        return "no evaluate runner registered"
+    runner(conn, now=now)
+    return "evaluate pass complete"
+
+
+def generate_calibrations(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Loop-3 weekly: generate calibration versions via the registered calibration runner.
+
+    The runner (``insight_service.generate_calibrations_for_all``) applies the §4.5 triggers
+    + the min_samples gate + the §4.8 validator. Master unset → the runner pauses (no crash);
+    no runner wired → safe no-op summary.
+    """
+    runner = _CALIBRATION_RUNNER
+    if runner is None:
+        return "no calibration runner registered"
+    runner(conn, now=now)
+    return "calibration pass complete"
+
+
 JOBS: list[JobSpec] = [
     JobSpec(
         "quotes_tw", quotes_tw, "0 14 * * mon-fri", "Asia/Taipei", True,
@@ -435,6 +500,16 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "alert_scan", alert_scan, "0 15 * * mon-fri", "Asia/Taipei", True,
         "Risk-alert scan + on_alert AI dispatch",
+    ),
+    # Loop-2 evaluate (spec 04.4): daily, after the alert scan / insight cron settle.
+    JobSpec(
+        "evaluate_insights", evaluate_insights, "0 18 * * *", "Asia/Taipei", True,
+        "Daily insight backtest scoring (Loop 2)",
+    ),
+    # Loop-3 calibrate (spec 04.5): weekly (Sun), after a week of evaluations accrue.
+    JobSpec(
+        "generate_calibrations", generate_calibrations, "0 19 * * sun", "Asia/Taipei", True,
+        "Weekly calibration version generation (Loop 3)",
     ),
 ]
 
