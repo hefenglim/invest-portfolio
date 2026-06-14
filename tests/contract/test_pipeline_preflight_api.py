@@ -93,6 +93,9 @@ def test_preflight_quota_zero_r6_fail(api_client: TestClient) -> None:
     r6 = next(g for g in body["gates"] if g["id"] == "R6")
     assert r6["lv"] == "fail"
     assert body["verdict"] == "blocked"
+    # Senior-review fix: the quota gate has NO one-click fix (a top-up is not in the
+    # §7.2 fix.kind enum); R6 must never emit create_schedule (that belongs to G1).
+    assert r6.get("fix") is None
 
 
 def test_preflight_template_disabled_r3_fail_with_enable_fix(

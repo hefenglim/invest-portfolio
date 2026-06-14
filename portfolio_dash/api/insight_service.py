@@ -893,10 +893,12 @@ _RULE_NAMES: dict[str, str] = {
     "R1": "範圍相容", "R2": "標的宇宙", "R3": "模板啟用",
     "R4": "價格資料", "R5": "變數可用性", "R6": "LLM 額度",
 }
-# The one-key fix per rule slot (§7.2 fix.kind enum).
+# The one-key fix per rule slot (§7.2 fix.kind enum). R6 (LLM quota) has NO one-click
+# fix — a budget top-up is not in the §7.2 enum (senior-review fix: it must not emit
+# create_schedule, which belongs to G1 only).
 _RULE_FIX: dict[str, str] = {
     "R2": "edit_universe", "R3": "enable_template", "R4": "edit_universe",
-    "R5": "edit_templates", "R6": "create_schedule",
+    "R5": "edit_templates",
 }
 
 
