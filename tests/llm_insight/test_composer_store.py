@@ -311,3 +311,68 @@ def test_evolution_config_set_roundtrip(conn: sqlite3.Connection) -> None:
     assert isinstance(out["gap_alert_pp"], str)
     # Persisted: a fresh read returns the same.
     assert cs.get_evolution_config(conn)["gap_alert_pp"] == "7.5"
+
+
+# --- insight_types horizon_days + eval_prompt (spec 04.10) --------------------
+
+
+def test_insight_type_horizon_days_defaults_to_five(conn: sqlite3.Connection) -> None:
+    it = cs.create_insight_type(conn, name="Daily", scope="portfolio", now=NOW)
+    assert it.horizon_days == 5
+    assert it.eval_prompt is None
+
+
+def test_insight_type_horizon_and_eval_prompt_roundtrip(conn: sqlite3.Connection) -> None:
+    it = cs.create_insight_type(
+        conn, name="Watch", scope="per_symbol", horizon_days=10,
+        eval_prompt="自訂檢驗：{{now}}", now=NOW,
+    )
+    got = cs.get_insight_type(conn, it.id)
+    assert got is not None
+    assert got.horizon_days == 10
+    assert got.eval_prompt == "自訂檢驗：{{now}}"
+
+
+def test_update_insight_type_changes_horizon_and_eval_prompt(conn: sqlite3.Connection) -> None:
+    it = cs.create_insight_type(conn, name="N", scope="portfolio", now=NOW)
+    updated = cs.update_insight_type(
+        conn, it.id, name="N", scope="portfolio", horizon_days=3,
+        eval_prompt="自訂", now=LATER,
+    )
+    assert updated is not None
+    assert updated.horizon_days == 3
+    assert updated.eval_prompt == "自訂"
+    # Clearing eval_prompt back to None is honoured.
+    cleared = cs.update_insight_type(
+        conn, it.id, name="N", scope="portfolio", eval_prompt=None, now=LATER,
+    )
+    assert cleared is not None
+    assert cleared.eval_prompt is None
+
+
+def test_legacy_insight_types_table_gains_new_columns(conn: sqlite3.Connection) -> None:
+    """A pre-04b insight_types table (no horizon_days/eval_prompt) is migrated additively."""
+    # Simulate a legacy DB: drop the new columns by recreating the table without them.
+    conn.execute("DROP TABLE insight_types")
+    conn.execute(
+        "CREATE TABLE insight_types ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, scope TEXT NOT NULL, "
+        "use_system_prompt INTEGER NOT NULL DEFAULT 1, self_correct INTEGER NOT NULL DEFAULT 0, "
+        "universe TEXT, alert_rules TEXT, enabled INTEGER NOT NULL DEFAULT 1, "
+        "archived INTEGER NOT NULL DEFAULT 0, job_id TEXT, "
+        "active_calibration_version INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO insight_types (name, scope, created_at, updated_at) "
+        "VALUES ('Legacy', 'portfolio', ?, ?)",
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+    conn.commit()
+    cs.ensure_seeded(conn)  # additive migration must add the two columns
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(insight_types)")}
+    assert {"horizon_days", "eval_prompt"} <= cols
+    row = conn.execute("SELECT * FROM insight_types WHERE name = 'Legacy'").fetchone()
+    it = cs.get_insight_type(conn, row["id"])
+    assert it is not None
+    assert it.horizon_days == 5  # migrated rows default to 5
+    assert it.eval_prompt is None

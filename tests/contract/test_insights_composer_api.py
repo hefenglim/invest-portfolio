@@ -156,6 +156,33 @@ def test_insight_type_update_unknown_404(client: TestClient) -> None:
     assert r.status_code == 404
 
 
+def test_insight_type_horizon_and_eval_prompt_in_wire(client: TestClient) -> None:
+    # Defaults: horizon_days 5, eval_prompt null (spec 04.10).
+    created = client.post(
+        "/api/insight-types", json={"name": "N", "scope": "portfolio"}
+    ).json()
+    assert created["horizon_days"] == 5
+    assert created["eval_prompt"] is None
+    # Explicit override on create.
+    custom = client.post(
+        "/api/insight-types",
+        json={
+            "name": "Watch", "scope": "per_symbol",
+            "horizon_days": 10, "eval_prompt": "自訂 {{now}}",
+        },
+    ).json()
+    assert custom["horizon_days"] == 10
+    assert custom["eval_prompt"] == "自訂 {{now}}"
+    # Update changes them; GET echoes.
+    upd = client.put(
+        f"/api/insight-types/{custom['id']}",
+        json={"name": "Watch", "scope": "per_symbol", "horizon_days": 3},
+    ).json()
+    assert upd["horizon_days"] == 3
+    listed = {x["id"]: x for x in client.get("/api/insight-types").json()}
+    assert listed[custom["id"]]["horizon_days"] == 3
+
+
 def test_insight_type_delete_archives_and_clears_schedule(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:

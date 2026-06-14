@@ -47,6 +47,8 @@ class InsightTypeIn(BaseModel):
     universe: dict[str, Any] | list[Any] | None = None
     alert_rules: dict[str, Any] | list[Any] | None = None
     enabled: bool | None = None  # None -> defaulted by scope (on_alert -> False, R7)
+    horizon_days: int = 5  # task-default prediction horizon (spec 04.10)
+    eval_prompt: str | None = None  # optional custom self-evaluation prompt (spec 04.10)
 
 
 class ScheduleIn(BaseModel):
@@ -96,6 +98,8 @@ def _insight_type_wire(conn: sqlite3.Connection, it: cs.InsightType) -> dict[str
         "universe": it.universe,
         "alert_rules": it.alert_rules,
         "enabled": it.enabled,
+        "horizon_days": it.horizon_days,
+        "eval_prompt": it.eval_prompt,
         "schedule": _schedule_for(conn, it.id),
         "active_calibration_version": it.active_calibration_version,
         "calib_summary": None,  # populated by 04c
@@ -228,6 +232,7 @@ def create_insight_type(
         conn, name=payload.name, scope=payload.scope,
         use_system_prompt=payload.use_system_prompt, self_correct=payload.self_correct,
         universe=payload.universe, alert_rules=payload.alert_rules, enabled=enabled,
+        horizon_days=payload.horizon_days, eval_prompt=payload.eval_prompt,
         now=now,
     )
     cs.set_strategies(conn, it.id, [(sid, pos) for pos, sid in enumerate(payload.strategy_ids)])
@@ -255,6 +260,7 @@ def update_insight_type(
         conn, insight_type_id, name=payload.name, scope=payload.scope,
         use_system_prompt=payload.use_system_prompt, self_correct=payload.self_correct,
         universe=payload.universe, alert_rules=payload.alert_rules, enabled=enabled,
+        horizon_days=payload.horizon_days, eval_prompt=payload.eval_prompt,
         now=now,
     )
     assert it is not None  # existence checked above

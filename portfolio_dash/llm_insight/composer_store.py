@@ -90,6 +90,8 @@ class InsightType(BaseModel):
     archived: bool
     job_id: str | None
     active_calibration_version: int | None
+    horizon_days: int  # task-default prediction horizon (spec 04.10); cards may override
+    eval_prompt: str | None  # optional custom self-evaluation prompt (spec 04.10)
     created_at: str
     updated_at: str
 
@@ -128,6 +130,8 @@ CREATE TABLE IF NOT EXISTS insight_types (
     archived INTEGER NOT NULL DEFAULT 0,
     job_id TEXT,
     active_calibration_version INTEGER,
+    horizon_days INTEGER NOT NULL DEFAULT 5,
+    eval_prompt TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -157,8 +161,27 @@ CREATE TABLE IF NOT EXISTS evolution_config (
 """
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    """Add ``column`` to ``table`` if absent (additive, idempotent migration).
+
+    A LOCAL copy of the scheduler/data_ingestion PRAGMA pattern, intentionally NOT
+    imported: ``llm_insight`` must not gain a dependency on those layers
+    (``architecture.md``). ``PRAGMA table_info`` row index 1 is the column name,
+    which is row_factory-agnostic.
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def _create(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
+    # Additive §4.10 migration so legacy (pre-04b) insight_types tables gain the new
+    # task-default horizon + optional custom eval-prompt columns.
+    _add_column_if_missing(conn, "insight_types", "horizon_days", "INTEGER NOT NULL DEFAULT 5")
+    _add_column_if_missing(conn, "insight_types", "eval_prompt", "TEXT")
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -304,6 +327,8 @@ def _insight_type_from_row(row: sqlite3.Row) -> InsightType:
         archived=bool(row["archived"]),
         job_id=row["job_id"],
         active_calibration_version=row["active_calibration_version"],
+        horizon_days=row["horizon_days"],
+        eval_prompt=row["eval_prompt"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -319,18 +344,23 @@ def create_insight_type(
     universe: dict[str, Any] | list[Any] | None = None,
     alert_rules: dict[str, Any] | list[Any] | None = None,
     enabled: bool = True,
+    horizon_days: int = 5,
+    eval_prompt: str | None = None,
     now: datetime,
 ) -> InsightType:
     """Insert a new insight_type (the composition); return the stored row.
 
     ``universe``/``alert_rules`` are stored as JSON TEXT. The on_alert default-disabled
     rule (R7) is the API's concern; this is the raw write (the caller passes ``enabled``).
+    ``horizon_days`` is the task-default prediction horizon (spec 04.10), ``eval_prompt``
+    an optional custom self-evaluation prompt (NULL → standard master-scoring template).
     """
     ts = now.isoformat()
     cur = conn.execute(
         "INSERT INTO insight_types (name, scope, use_system_prompt, self_correct, "
         "universe, alert_rules, enabled, archived, job_id, active_calibration_version, "
-        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)",
+        "horizon_days, eval_prompt, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?, ?, ?)",
         (
             name,
             scope,
@@ -339,6 +369,8 @@ def create_insight_type(
             json.dumps(universe) if universe is not None else None,
             json.dumps(alert_rules) if alert_rules is not None else None,
             1 if enabled else 0,
+            horizon_days,
+            eval_prompt,
             ts,
             ts,
         ),
@@ -379,19 +411,22 @@ def update_insight_type(
     universe: dict[str, Any] | list[Any] | None = None,
     alert_rules: dict[str, Any] | list[Any] | None = None,
     enabled: bool = True,
+    horizon_days: int = 5,
+    eval_prompt: str | None = None,
     now: datetime,
 ) -> InsightType | None:
     """Update an insight_type's editable fields + re-stamp ``updated_at``; None if absent.
 
     Does not touch ``job_id``/``active_calibration_version``/``archived`` (those move via
-    the schedule, active-calibration, and cascade helpers).
+    the schedule, active-calibration, and cascade helpers). ``horizon_days``/``eval_prompt``
+    are overwritten on every update (spec 04.10), so a None ``eval_prompt`` clears it.
     """
     if get_insight_type(conn, insight_type_id) is None:
         return None
     conn.execute(
         "UPDATE insight_types SET name = ?, scope = ?, use_system_prompt = ?, "
-        "self_correct = ?, universe = ?, alert_rules = ?, enabled = ?, updated_at = ? "
-        "WHERE id = ?",
+        "self_correct = ?, universe = ?, alert_rules = ?, enabled = ?, horizon_days = ?, "
+        "eval_prompt = ?, updated_at = ? WHERE id = ?",
         (
             name,
             scope,
@@ -400,6 +435,8 @@ def update_insight_type(
             json.dumps(universe) if universe is not None else None,
             json.dumps(alert_rules) if alert_rules is not None else None,
             1 if enabled else 0,
+            horizon_days,
+            eval_prompt,
             now.isoformat(),
             insight_type_id,
         ),
