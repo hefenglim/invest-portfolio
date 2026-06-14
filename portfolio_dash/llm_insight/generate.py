@@ -294,7 +294,7 @@ def run_insight_type(
 
         before = remaining
         try:
-            card = llm.complete_structured(
+            completion = llm.complete_structured_meta(
                 prompt, InsightCard, agent=_AGENT, conn=conn
             )
         except LLMError:
@@ -302,8 +302,12 @@ def run_insight_type(
             # partial (produced cards kept); never crash the scheduler/dashboard.
             stopped_early = True
             break
-        # Per-call cost = the delta of cumulative usage just logged by shared.llm.
-        spent = _last_usage_cost(conn)
+        card = completion.value
+        # The model that produced this card (its registry alias) and this call's cost,
+        # threaded out of the LLM seam so the stored row records the model used — not a
+        # card field (spec 04 fix #1: insights.model was wrongly set to card.symbol).
+        used_model = completion.model
+        spent = completion.cost
         total_cost += spent
         remaining = before - spent
         if target is not None:
@@ -318,7 +322,7 @@ def run_insight_type(
         istore.add_card(
             conn, insight_type_id=insight_type_id, card=card, fingerprint=fp,
             calibration_version=stamp_version, horizon_days=effective_horizon,
-            input_snapshot=snapshot, model=card.symbol or "default", cost_usd=spent,
+            input_snapshot=snapshot, model=used_model, cost_usd=spent,
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
         )
         created += 1
@@ -332,11 +336,3 @@ def run_insight_type(
     return RunResult(
         status=status, reason=reason, cards_created=created, cost_usd=total_cost
     )
-
-
-def _last_usage_cost(conn: sqlite3.Connection) -> Decimal:
-    """The cost of the most-recent ``llm_usage`` row (the call just logged by shared.llm)."""
-    row = conn.execute(
-        "SELECT cost FROM llm_usage ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    return Decimal(row["cost"]) if row is not None else Decimal("0")

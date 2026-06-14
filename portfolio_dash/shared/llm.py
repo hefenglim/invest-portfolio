@@ -50,8 +50,10 @@ __all__ = [
     "LLMRole",
     "LLMUnavailable",
     "ModelPricing",
+    "StructuredCompletion",
     "TextCompletion",
     "complete_structured",
+    "complete_structured_meta",
     "complete_text",
     "cost_of",
     "log_usage",
@@ -135,19 +137,35 @@ def _build_messages(prompt: str, images: list[bytes] | None) -> list[dict[str, o
     return [{"role": "user", "content": content}]
 
 
-def _complete_with[T: BaseModel](
+class StructuredCompletion[T: BaseModel](BaseModel):
+    """A parsed structured reply plus the metadata of the model that produced it.
+
+    ``model`` is the model ALIAS (the user-facing registry name, e.g. ``claude-sonnet``),
+    the value callers persist as the record's model column (spec 04 fix: the insights row's
+    ``model`` is the model used, never a card field). ``cost`` is this single call's USD cost.
+    """
+
+    model_config = {"protected_namespaces": (), "arbitrary_types_allowed": True}
+
+    value: T
+    model: str
+    cost: Decimal
+
+
+def _complete_with_meta[T: BaseModel](
     model: ModelConfig,
     messages: list[dict[str, object]],
     schema: type[T],
     *,
     agent: str,
     conn: sqlite3.Connection,
-) -> T:
-    """Try one model: call, log usage, parse (retry once). Raise LLMUnavailable on failure.
+) -> StructuredCompletion[T]:
+    """Try one model: call, log usage, parse (retry once); return value + model alias + cost.
 
     When the provider supports it, a json_schema ``response_format`` derived from *schema*
     is sent to FORCE structured output (spec 04.10); unsupported providers fall back to the
-    plain prompt+parse path. The schema-parse retry-once behaviour is unchanged.
+    plain prompt+parse path. The schema-parse retry-once behaviour is unchanged. Raises
+    :exc:`LLMUnavailable` on a provider/parse failure.
     """
     extra: dict[str, object] = {}
     if _supports_response_format(model):
@@ -169,27 +187,68 @@ def _complete_with[T: BaseModel](
 
         content = resp.choices[0].message.content or ""
         usage = resp.usage
+        cost = cost_of(
+            ModelPricing(
+                model=model.model_name,
+                input_price_per_mtok=model.input_price_per_mtok,
+                output_price_per_mtok=model.output_price_per_mtok,
+            ),
+            usage.prompt_tokens,
+            usage.completion_tokens,
+        )
         log_usage(
             conn,
             model=model.model_name,
             agent=agent,
             input_tokens=usage.prompt_tokens,
             output_tokens=usage.completion_tokens,
-            cost=cost_of(
-                ModelPricing(
-                    model=model.model_name,
-                    input_price_per_mtok=model.input_price_per_mtok,
-                    output_price_per_mtok=model.output_price_per_mtok,
-                ),
-                usage.prompt_tokens,
-                usage.completion_tokens,
-            ),
+            cost=cost,
         )
         try:
-            return schema.model_validate_json(content)
+            parsed = schema.model_validate_json(content)
         except (ValidationError, json.JSONDecodeError, ValueError):
             continue
+        return StructuredCompletion(value=parsed, model=model.model_alias, cost=cost)
     raise LLMUnavailable(f"invalid structured output from {model.id}")
+
+
+def _complete_with[T: BaseModel](
+    model: ModelConfig,
+    messages: list[dict[str, object]],
+    schema: type[T],
+    *,
+    agent: str,
+    conn: sqlite3.Connection,
+) -> T:
+    """Try one model and return only the parsed value (thin wrapper over the meta core)."""
+    return _complete_with_meta(model, messages, schema, agent=agent, conn=conn).value
+
+
+def complete_structured_meta[T: BaseModel](
+    prompt: str,
+    schema: type[T],
+    *,
+    agent: str,
+    conn: sqlite3.Connection,
+    images: list[bytes] | None = None,
+    role: LLMRole | None = None,
+) -> StructuredCompletion[T]:
+    """Like :func:`complete_structured`, but also returns the model alias + this call's cost.
+
+    Use this when the caller must persist WHICH model produced the card (insights.model)
+    and/or attribute the per-call cost without a separate ``llm_usage`` lookup. Same gate /
+    role-selection / failover / parse semantics; same exceptions.
+    """
+    check_budget(conn)
+    candidates = _select_for(conn, role=role, vision=bool(images))
+    messages = _build_messages(prompt, images)
+    last: LLMUnavailable | None = None
+    for model in candidates:
+        try:
+            return _complete_with_meta(model, messages, schema, agent=agent, conn=conn)
+        except LLMUnavailable as exc:
+            last = exc
+    raise last or LLMUnavailable("no model produced valid output")
 
 
 def complete_structured[T: BaseModel](
@@ -214,16 +273,9 @@ def complete_structured[T: BaseModel](
     (cap hit), or :exc:`LLMUnavailable` (all candidates failed). All subclass
     :exc:`LLMError`, so callers may catch the base for graceful degradation.
     """
-    check_budget(conn)
-    candidates = _select_for(conn, role=role, vision=bool(images))
-    messages = _build_messages(prompt, images)
-    last: LLMUnavailable | None = None
-    for model in candidates:
-        try:
-            return _complete_with(model, messages, schema, agent=agent, conn=conn)
-        except LLMUnavailable as exc:
-            last = exc
-    raise last or LLMUnavailable("no model produced valid output")
+    return complete_structured_meta(
+        prompt, schema, agent=agent, conn=conn, images=images, role=role
+    ).value
 
 
 class TextCompletion(BaseModel):

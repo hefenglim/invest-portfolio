@@ -301,3 +301,60 @@ def test_blocked_run_writes_skipped_job_run(
     ).fetchone()
     assert row["status"] == "skipped"
     assert row["reason"] is not None
+
+
+# --- fix #1: insights.model stores the model alias, never the symbol ----------
+
+
+def test_stored_model_is_alias_not_symbol(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Register a model whose alias is distinct from any ticker; a per_symbol card must
+    # store that alias in insights.model, NOT the symbol (regression: was card.symbol).
+    upsert_model(conn, ModelConfig(
+        id="sonnet", model_alias="claude-sonnet", provider="anthropic",
+        model_name="claude-sonnet-x", input_price_per_mtok=Decimal("1"),
+        output_price_per_mtok=Decimal("2"),
+    ))
+    set_role(conn, LLMRole.DEFAULT, "sonnet")
+    _patch_llm(monkeypatch)
+    sp = cs.create_strategy(conn, name="S", body="{{symbol_detail_json}}", now=NOW)
+    it = cs.create_insight_type(
+        conn, name="Watch", scope="per_symbol",
+        universe={"mode": "custom", "symbols": ["2330"]}, now=NOW,
+    )
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    generate.run_insight_type(
+        conn, it.id, var_contexts={"2330": _ctx(conn, "2330")},
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=["2330"]),
+        now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it.id)
+    assert len(cards) == 1
+    assert cards[0].symbol == "2330"
+    assert cards[0].model == "claude-sonnet"  # the alias actually used
+    assert cards[0].model != "2330"  # NEVER the ticker symbol
+
+
+def test_anomaly_card_model_stays_none(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The R4 zero-LLM anomaly card keeps model="(none)" (no model was used).
+    _patch_llm(monkeypatch)
+    sp = cs.create_strategy(conn, name="S", body="{{symbol_detail_json}}", now=NOW)
+    it = cs.create_insight_type(
+        conn, name="Watch", scope="per_symbol",
+        universe={"mode": "custom", "symbols": ["MISSING"]}, now=NOW,
+    )
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    generate.run_insight_type(
+        conn, it.id, var_contexts={"MISSING": _ctx(conn, "MISSING")},
+        inputs=RunInputs(
+            budget_remaining=Decimal("100"), universe_symbols=["MISSING"],
+            missing_price_symbols=["MISSING"],
+        ),
+        now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it.id)
+    assert len(cards) == 1
+    assert cards[0].model == "(none)"
