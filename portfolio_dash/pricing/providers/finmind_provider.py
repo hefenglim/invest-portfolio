@@ -87,6 +87,10 @@ class FinMindProvider(ProviderBase):
 
     def fetch_dividends(self, instruments: list[InstrumentRef]) -> list[DividendEvent]:
         token = self._resolve_token()
+        # Bearer auth (spec 20.15.1): the token is an Authorization header, not a query
+        # param. ``supports`` already gated on a present token before the registry calls
+        # us, so ``token`` is non-None here in practice.
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
         out: list[DividendEvent] = []
         for ref in instruments:
             if ref.market is not Market.TW:
@@ -97,8 +101,8 @@ class FinMindProvider(ProviderBase):
                     "dataset": "TaiwanStockDividend",
                     "data_id": ref.symbol,
                     "start_date": "2015-01-01",
-                    "token": token,
                 },
+                headers=headers,
                 timeout=20,
             )
             resp.raise_for_status()

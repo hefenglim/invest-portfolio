@@ -51,9 +51,12 @@ def test_fetch_dataset_returns_data_and_passes_params(
     datasources_store.set_api_key(conn, "finmind", "tok-123")
     captured: dict[str, Any] = {}
 
-    def _fake_get(url: str, *, params: dict[str, Any], timeout: int) -> _FakeResp:
+    def _fake_get(
+        url: str, *, params: dict[str, Any], headers: dict[str, str], timeout: int
+    ) -> _FakeResp:
         captured["url"] = url
         captured["params"] = params
+        captured["headers"] = headers
         captured["timeout"] = timeout
         return _FakeResp(
             {"msg": "success", "status": 200, "data": [{"date": "2026-06-11", "buy": 5}]}
@@ -67,7 +70,9 @@ def test_fetch_dataset_returns_data_and_passes_params(
     assert captured["params"]["dataset"] == "TaiwanStockInstitutionalInvestorsBuySell"
     assert captured["params"]["data_id"] == "2330"
     assert captured["params"]["start_date"] == "2026-05-01"
-    assert captured["params"]["token"] == "tok-123"
+    # Bearer auth header (spec 20.15.1) — token is no longer a query param.
+    assert captured["headers"]["Authorization"] == "Bearer tok-123"
+    assert "token" not in captured["params"]
 
 
 def test_fetch_dataset_empty_data_is_empty_list(
@@ -76,7 +81,7 @@ def test_fetch_dataset_empty_data_is_empty_list(
     datasources_store.set_api_key(conn, "finmind", "tok-123")
     monkeypatch.setattr(
         F.requests, "get",
-        lambda url, *, params, timeout: _FakeResp({"msg": "success", "status": 200}),
+        lambda url, *, params, headers, timeout: _FakeResp({"msg": "success", "status": 200}),
     )
     assert F.fetch_dataset(conn, dataset="margin", data_id="2330", start_date="2026-05-01") == []
 
@@ -105,7 +110,7 @@ def test_fetch_dataset_http_error_propagates(
     datasources_store.set_api_key(conn, "finmind", "tok-123")
     monkeypatch.setattr(
         F.requests, "get",
-        lambda url, *, params, timeout: _FakeResp({"msg": "fail"}, status=500),
+        lambda url, *, params, headers, timeout: _FakeResp({"msg": "fail"}, status=500),
     )
     with pytest.raises(RuntimeError):
         F.fetch_dataset(conn, dataset="financials", data_id="2330", start_date="2026-05-01")

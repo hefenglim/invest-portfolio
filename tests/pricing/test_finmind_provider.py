@@ -1,11 +1,14 @@
 import json
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from portfolio_dash.pricing.enums import DataType
+from portfolio_dash.pricing.providers import finmind_provider as FP
 from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
+from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.shared.enums import Currency, Market
 
 _FIX = Path("tests/pricing/fixtures/finmind/TaiwanStockDividend_2330.json")
@@ -18,6 +21,32 @@ def test_supports_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not FinMindProvider(token=None).supports(DataType.DIVIDEND, Market.TW)
     assert not FinMindProvider(token="x").supports(DataType.DIVIDEND, Market.US)
     assert not FinMindProvider(token="x").supports(DataType.QUOTE_LATEST, Market.TW)
+
+
+def test_fetch_dividends_uses_bearer_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dividend fetch sends ``Authorization: Bearer {token}`` (spec 20.15.1), not a
+    ``token`` query param."""
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"msg": "success", "status": 200, "data": []}
+
+    def _fake_get(url: str, *, params: dict[str, Any], headers: dict[str, str],
+                  timeout: int) -> _Resp:
+        captured["params"] = params
+        captured["headers"] = headers
+        return _Resp()
+
+    monkeypatch.setattr(FP.requests, "get", _fake_get)
+    FinMindProvider(token="tok-9").fetch_dividends(
+        [InstrumentRef(symbol="2330", market=Market.TW)]
+    )
+    assert captured["headers"]["Authorization"] == "Bearer tok-9"
+    assert "token" not in captured["params"]
 
 
 def test_parse_dividends_from_fixture() -> None:
