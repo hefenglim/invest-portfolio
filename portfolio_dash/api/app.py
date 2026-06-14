@@ -30,6 +30,7 @@ from portfolio_dash.api.routers import (
 )
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
+from portfolio_dash.pricing import snapshots_store
 from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.db import session
@@ -42,7 +43,8 @@ _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     with session() as conn:
         bootstrap_db(conn)
-        ensure_scheduler_seeded(conn)
+        snapshots_store.ensure_tables(conn)  # external_snapshots (spec 20.4)
+        ensure_scheduler_seeded(conn)  # also seeds the 5 ingest jobs' schedule rows
         ensure_alert_rules_seeded(conn)
         ensure_auth_seeded(conn)
         ensure_system_prompt_seeded(conn)

@@ -5,11 +5,13 @@ business logic. This module is import-safe without APScheduler so it is fully
 unit-testable; the APScheduler wiring lives in ``runtime.py``.
 """
 
+import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from portfolio_dash.pricing import datasources_store, ingest
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.refresh import refresh_dividends, refresh_history, refresh_quotes
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
@@ -17,6 +19,11 @@ from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
+
+logger = logging.getLogger(__name__)
+
+# 3 consecutive failed runs of an ingest job escalate its source health to "error".
+_FAIL_STREAK_THRESHOLD = 3
 
 # A job does its own trigger+wiring and returns a short run summary for job_runs.detail.
 JobFunc = Callable[..., str]
@@ -148,6 +155,102 @@ def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     return _summarize(summary)
 
 
+# --- External-snapshot ingest jobs (spec 20.4) --------------------------------
+# Map each ingest job to the data source whose health it escalates on a fail streak.
+_INGEST_JOB_SOURCE: dict[str, str] = {
+    "finmind_chips_daily": "finmind",
+    "finmind_valuation_daily": "finmind",
+    "finmind_fundamentals_monthly": "finmind",
+    "sentiment_daily": "yfinance",
+    "index_quotes_daily": "yfinance",
+}
+
+
+def _prior_consecutive_failures(conn: sqlite3.Connection, job_id: str) -> int:
+    """Count the run of trailing ``error`` runs among the job's COMPLETED runs.
+
+    Excludes the current in-progress run (``finished_at IS NULL``), so the caller adds
+    1 for the about-to-fail current run when deciding whether the streak reached 3.
+    """
+    rows = conn.execute(
+        "SELECT status FROM job_runs WHERE job_id = ? AND finished_at IS NOT NULL "
+        "ORDER BY id DESC",
+        (job_id,),
+    ).fetchall()
+    streak = 0
+    for row in rows:
+        if row["status"] == "error":
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def _run_ingest(
+    conn: sqlite3.Connection, job_id: str, fn: Callable[[], int], *, now: datetime
+) -> str:
+    """Run one ingest, escalating source health to ``error`` on 3 consecutive failures.
+
+    On success returns a short summary (its ``job_runs`` row will log ``ok``, resetting
+    the streak). On failure, if THIS run makes the trailing error streak reach the
+    threshold, it upserts the mapped source's ``data_source_health`` to ``error`` and
+    logs a warn — then re-raises so ``run_job`` records the error row (spec 20.12).
+    """
+    try:
+        written = fn()
+        return f"{written} snapshot(s) written"
+    except Exception as exc:  # noqa: BLE001 - escalate health, then re-raise to log
+        streak = _prior_consecutive_failures(conn, job_id) + 1
+        if streak >= _FAIL_STREAK_THRESHOLD:
+            source_id = _INGEST_JOB_SOURCE.get(job_id, job_id)
+            logger.warning(
+                "ingest job %s failed %d times consecutively; marking %s health=error: %s",
+                job_id, streak, source_id, exc,
+            )
+            datasources_store.upsert_health(
+                conn, source_id, status="error", last_test=now.isoformat(),
+                latency_ms=None, detail=f"{job_id}: {exc}",
+            )
+        raise
+
+
+def finmind_chips_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Post-close: institutional + margin chips for the TW universe (FinMind)."""
+    return _run_ingest(
+        conn, "finmind_chips_daily", lambda: ingest.ingest_chips(conn, now=now), now=now
+    )
+
+
+def finmind_valuation_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily: PER/PBR/yield valuation for the TW universe (FinMind)."""
+    return _run_ingest(
+        conn, "finmind_valuation_daily", lambda: ingest.ingest_valuation(conn, now=now),
+        now=now,
+    )
+
+
+def finmind_fundamentals_monthly(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Monthly: revenue + financial statements for the TW universe (FinMind)."""
+    return _run_ingest(
+        conn, "finmind_fundamentals_monthly",
+        lambda: ingest.ingest_fundamentals(conn, now=now), now=now,
+    )
+
+
+def sentiment_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily: VIX (yfinance ^VIX) + CNN Fear & Greed snapshots."""
+    return _run_ingest(
+        conn, "sentiment_daily", lambda: ingest.ingest_sentiment(conn, now=now), now=now
+    )
+
+
+def index_quotes_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Trading-day: TAIEX/SPX/KLCI index closes (yfinance)."""
+    return _run_ingest(
+        conn, "index_quotes_daily", lambda: ingest.ingest_index(conn, now=now), now=now
+    )
+
+
 JOBS: list[JobSpec] = [
     JobSpec(
         "quotes_tw", quotes_tw, "0 14 * * mon-fri", "Asia/Taipei", True,
@@ -168,6 +271,27 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "dividends_daily", dividends_daily, "0 3 * * *", "Asia/Taipei", True,
         "Daily dividend/ex-div sweep",
+    ),
+    # External-snapshot ingest (spec 20.4).
+    JobSpec(
+        "finmind_chips_daily", finmind_chips_daily, "30 14 * * mon-fri", "Asia/Taipei", True,
+        "TW institutional + margin chips (post-close)",
+    ),
+    JobSpec(
+        "finmind_valuation_daily", finmind_valuation_daily, "40 14 * * mon-fri",
+        "Asia/Taipei", True, "TW PER/PBR/yield valuation",
+    ),
+    JobSpec(
+        "finmind_fundamentals_monthly", finmind_fundamentals_monthly, "0 9 12 * *",
+        "Asia/Taipei", True, "TW monthly revenue + financials",
+    ),
+    JobSpec(
+        "sentiment_daily", sentiment_daily, "0 8 * * *", "Asia/Taipei", True,
+        "VIX + CNN Fear & Greed",
+    ),
+    JobSpec(
+        "index_quotes_daily", index_quotes_daily, "50 14 * * mon-fri", "Asia/Taipei", True,
+        "TAIEX/SPX/KLCI index closes",
     ),
 ]
 
