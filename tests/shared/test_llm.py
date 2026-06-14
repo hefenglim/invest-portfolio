@@ -171,6 +171,71 @@ def test_build_messages_with_image_blocks() -> None:
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
+def test_response_format_passed_when_supported(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # complete_structured derives a json_schema response_format from the Pydantic schema
+    # and passes it to litellm.completion when the provider supports it (spec 04.10).
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: True)
+    seen: dict[str, object] = {}
+
+    def completion(**kw: object) -> _Resp:
+        seen.update(kw)
+        return _Resp('{"x": 5}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("hi", Out, agent="t", conn=conn)
+    assert out.x == 5
+    rf = seen.get("response_format")
+    assert isinstance(rf, dict)
+    assert rf["type"] == "json_schema"
+    # the schema name + properties come from the Pydantic model.
+    schema = rf["json_schema"]
+    assert isinstance(schema, dict)
+    assert "x" in schema["schema"]["properties"]
+
+
+def test_response_format_omitted_when_unsupported(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # A provider that does not support a response schema → never receives response_format
+    # (graceful fallback to plain prompt+parse), and the call still parses + logs usage.
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    seen: dict[str, object] = {}
+
+    def completion(**kw: object) -> _Resp:
+        seen.update(kw)
+        return _Resp('{"x": 8}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("hi", Out, agent="rf_off", conn=conn)
+    assert out.x == 8
+    assert "response_format" not in seen
+    row = conn.execute("SELECT agent FROM llm_usage WHERE agent = 'rf_off'").fetchone()
+    assert row is not None  # usage logged on the no-rf path
+
+
+def test_response_format_probe_failure_degrades_to_no_rf(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # If the capability probe itself raises (litellm can't classify the model), we treat
+    # it as unsupported and never send response_format — graceful, never crash.
+    def boom_probe(**kw: object) -> bool:
+        raise RuntimeError("unknown model for probe")
+
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", boom_probe)
+    seen: dict[str, object] = {}
+
+    def completion(**kw: object) -> _Resp:
+        seen.update(kw)
+        return _Resp('{"x": 4}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("hi", Out, agent="t", conn=conn)
+    assert out.x == 4
+    assert "response_format" not in seen
+
+
 def test_vision_call_routes_to_vision_role(
     monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
 ) -> None:

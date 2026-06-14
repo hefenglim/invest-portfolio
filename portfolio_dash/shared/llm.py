@@ -70,6 +70,34 @@ def log_usage(
     conn.commit()
 
 
+def _response_format_for(schema: type[BaseModel]) -> dict[str, object]:
+    """Build an OpenAI-style ``json_schema`` response_format from a Pydantic model.
+
+    Used to FORCE structured output on providers that support it (spec 04.10). The schema
+    name is the model's class name; the JSON schema is its ``model_json_schema()``.
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema.__name__,
+            "schema": schema.model_json_schema(),
+        },
+    }
+
+
+def _supports_response_format(model: ModelConfig) -> bool:
+    """True when the model's provider accepts a ``response_format`` json_schema.
+
+    Probes ``litellm.supports_response_schema`` (capability lookup, not a network call);
+    any probe failure is treated as "unsupported" so we degrade to plain prompt+parse
+    rather than crash (graceful, spec 04.10).
+    """
+    try:
+        return bool(litellm.supports_response_schema(model=litellm_model_string(model)))
+    except Exception:  # noqa: BLE001 — an unclassifiable model degrades to no rf
+        return False
+
+
 def _build_messages(prompt: str, images: list[bytes] | None) -> list[dict[str, object]]:
     """Assemble the chat messages; multimodal content when images are present."""
     if not images:
@@ -91,7 +119,15 @@ def _complete_with[T: BaseModel](
     agent: str,
     conn: sqlite3.Connection,
 ) -> T:
-    """Try one model: call, log usage, parse (retry once). Raise LLMUnavailable on failure."""
+    """Try one model: call, log usage, parse (retry once). Raise LLMUnavailable on failure.
+
+    When the provider supports it, a json_schema ``response_format`` derived from *schema*
+    is sent to FORCE structured output (spec 04.10); unsupported providers fall back to the
+    plain prompt+parse path. The schema-parse retry-once behaviour is unchanged.
+    """
+    extra: dict[str, object] = {}
+    if _supports_response_format(model):
+        extra["response_format"] = _response_format_for(schema)
     for _attempt in range(2):
         try:
             resp = litellm.completion(
@@ -102,6 +138,7 @@ def _complete_with[T: BaseModel](
                 timeout=model.timeout_seconds,
                 num_retries=model.max_retries or 0,
                 max_tokens=model.max_output_tokens,
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001
             raise LLMUnavailable(f"provider error ({model.id}): {exc}") from exc
