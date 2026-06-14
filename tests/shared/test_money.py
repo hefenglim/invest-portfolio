@@ -35,6 +35,28 @@ def test_roundtrip_high_precision_fx() -> None:
     assert from_db(to_db(rate)) == rate
 
 
+def test_wire_decimal_string_round_trip_is_stable_and_never_scientific() -> None:
+    # spec-18 guard, extended for the canonical wire (#2c/M1): the canonical string
+    # round-trips losslessly (string -> Decimal -> string is a fixed point) AND never
+    # carries scientific notation, for every scale incl. tiny rates / large integers /
+    # trailing zeros. The frontend can parse a stable, human-readable fixed-point string.
+    samples = [
+        Decimal("1E-7"),       # tiny rate -> "0.0000001"
+        Decimal("1E+2"),       # large -> "100"
+        Decimal("0.10"),       # trailing zero preserved
+        Decimal("612500.0"),   # shares*price scale artifact preserved
+        Decimal("4.512345"),   # high-precision FX
+        Decimal("0.005"),      # MY 3-dp tick
+        Decimal("639600"),     # plain integer
+    ]
+    for d in samples:
+        wire = decimal_str(d)
+        assert "E" not in wire and "e" not in wire
+        # string -> Decimal -> string is a fixed point (lossless, idempotent).
+        assert decimal_str(from_db(wire)) == wire
+        assert from_db(wire) == d
+
+
 def test_from_db_invalid_raises() -> None:
     with pytest.raises(InvalidOperation):
         from_db("not-a-number")

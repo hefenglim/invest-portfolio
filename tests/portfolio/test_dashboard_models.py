@@ -11,6 +11,7 @@ from portfolio_dash.portfolio.dashboard_models import (
 )
 from portfolio_dash.portfolio.results import Holding, RealizedPnL
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.wire import to_wire
 
 
 def _minimal_dashboard() -> DashboardData:
@@ -40,6 +41,29 @@ def test_dashboard_data_round_trips_and_preserves_decimal() -> None:
     assert isinstance(dumped["kpis"]["total_market_value"], Decimal)
     assert DashboardData.model_validate(dumped) == data
     assert data.insights == []  # placeholder defaults empty
+
+
+def test_dashboard_wire_payload_has_no_scientific_notation_decimal() -> None:
+    # spec-18 guard (#2c/M1): once a DashboardData with a tiny-rate Decimal flows through
+    # the canonical wire encoder, no string field carries scientific notation.
+    data = _minimal_dashboard().model_copy(update={
+        "kpis": KpiSummary(reporting_currency=Currency.TWD,
+                           total_market_value=Decimal("1E-7")),
+    })
+    wire = to_wire(data.model_dump())
+    assert wire["kpis"]["total_market_value"] == "0.0000001"
+
+    def _assert_no_sci(node: object) -> None:
+        if isinstance(node, str):
+            assert "E" not in node and "e-" not in node and "e+" not in node
+        elif isinstance(node, dict):
+            for v in node.values():
+                _assert_no_sci(v)
+        elif isinstance(node, list):
+            for v in node:
+                _assert_no_sci(v)
+
+    _assert_no_sci(wire)
 
 
 def test_holding_row_builds_from_holding_dump_plus_enrichment() -> None:
