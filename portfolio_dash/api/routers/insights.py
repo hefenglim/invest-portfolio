@@ -9,9 +9,10 @@ strategy bodies use a ``per_symbol`` variable is rejected at create/update with 
 
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -35,6 +36,33 @@ from portfolio_dash.scheduler.jobs import (
 router = APIRouter()
 
 _MAX_RUNS_LIMIT = 500
+
+# spec 07 §7.0: ``/api/insight-tasks/*`` is a FULL alias of ``/api/insight-types/*`` —
+# both paths reach the SAME handler (one resource, no logic duplication). The old
+# ``insight_types`` UI name maps to the new ``insight task`` name; the data table is NOT
+# renamed (only the route + UI text). The decorators below register each insight-type
+# resource route under BOTH path prefixes by giving the decorator a tuple of paths.
+_ALIAS_PREFIXES = ("/insight-types", "/insight-tasks")
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _dual(method: str, suffix: str) -> Callable[[_F], _F]:
+    """Register one handler under both the ``/insight-types`` and ``/insight-tasks`` prefixes.
+
+    ``suffix`` is the path AFTER the resource prefix (e.g. ``""`` for the collection,
+    ``"/{insight_type_id}/runs"`` for a sub-resource). The handler is added once per
+    prefix via ``router.add_api_route`` — the SAME function object both times, so there is
+    no logic duplication and the two paths are a true alias of one resource (§7.0).
+    """
+
+    def decorator(fn: _F) -> _F:
+        verb = method.lower()
+        for prefix in _ALIAS_PREFIXES:
+            router.add_api_route(f"{prefix}{suffix}", fn, methods=[verb])
+        return fn
+
+    return decorator
 
 
 # --- request bodies -----------------------------------------------------------
@@ -220,13 +248,13 @@ def delete_strategy_prompt(
 # --- insight-types CRUD -------------------------------------------------------
 
 
-@router.get("/insight-types")
+@_dual("GET", "")
 def list_insight_types(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
     cs.ensure_seeded(conn)
     return [_insight_type_wire(conn, it) for it in cs.list_insight_types(conn)]
 
 
-@router.post("/insight-types")
+@_dual("POST", "")
 def create_insight_type(
     payload: InsightTypeIn,
     conn: sqlite3.Connection = Depends(get_conn),
@@ -251,7 +279,7 @@ def create_insight_type(
     return _insight_type_wire(conn, it)
 
 
-@router.put("/insight-types/{insight_type_id}")
+@_dual("PUT", "/{insight_type_id}")
 def update_insight_type(
     insight_type_id: int,
     payload: InsightTypeIn,
@@ -282,7 +310,7 @@ def update_insight_type(
     return _insight_type_wire(conn, it)
 
 
-@router.delete("/insight-types/{insight_type_id}")
+@_dual("DELETE", "/{insight_type_id}")
 def delete_insight_type(
     insight_type_id: int,
     conn: sqlite3.Connection = Depends(get_conn),
@@ -303,7 +331,7 @@ def delete_insight_type(
 # --- schedule mount (spec 4.2) ------------------------------------------------
 
 
-@router.post("/insight-types/{insight_type_id}/schedule")
+@_dual("POST", "/{insight_type_id}/schedule")
 def mount_schedule(
     insight_type_id: int,
     payload: ScheduleIn,
@@ -335,7 +363,7 @@ def mount_schedule(
     return {"job_id": job_id}
 
 
-@router.delete("/insight-types/{insight_type_id}/schedule")
+@_dual("DELETE", "/{insight_type_id}/schedule")
 def unmount_schedule(
     insight_type_id: int,
     conn: sqlite3.Connection = Depends(get_conn),
@@ -354,7 +382,7 @@ def unmount_schedule(
 # --- active-calibration selector (spec 4.6) -----------------------------------
 
 
-@router.put("/insight-types/{insight_type_id}/active-calibration")
+@_dual("PUT", "/{insight_type_id}/active-calibration")
 def set_active_calibration(
     insight_type_id: int,
     payload: ActiveCalibrationIn,
@@ -508,7 +536,7 @@ def put_evolution_config(
 # --- manual run (spec 4.2 / 4.10 — async 202 + poll) --------------------------
 
 
-@router.post("/insight-types/{insight_type_id}/run")
+@_dual("POST", "/{insight_type_id}/run")
 def run_insight_now(
     insight_type_id: int,
     conn: sqlite3.Connection = Depends(get_conn),
@@ -556,7 +584,7 @@ def _insight_run_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-@router.get("/insight-types/{insight_type_id}/runs")
+@_dual("GET", "/{insight_type_id}/runs")
 def list_insight_runs(
     insight_type_id: int,
     limit: int = 50,
