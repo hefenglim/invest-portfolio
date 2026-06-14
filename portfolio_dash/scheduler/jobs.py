@@ -107,6 +107,10 @@ CREATE TABLE IF NOT EXISTS job_runs (
 );
 """
 
+# job_runs.is_shadow: a Loop-4 shadow batch (spec 4.6) writes its own job_runs row under
+# the SAME insight:{id} job_id as the active run; this flag distinguishes it so the
+# user-facing /runs lists exclude it and spec-07 cost attribution stays per-run-kind.
+
 
 def _add_column_if_missing(
     conn: sqlite3.Connection, table: str, column: str, decl: str
@@ -135,6 +139,7 @@ def create_scheduler_tables(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "job_runs", "payload", "TEXT")
     _add_column_if_missing(conn, "job_runs", "reason", "TEXT")
     _add_column_if_missing(conn, "job_runs", "cost_usd", "TEXT")
+    _add_column_if_missing(conn, "job_runs", "is_shadow", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 

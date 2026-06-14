@@ -566,6 +566,7 @@ def list_insight_runs(
 
     Newest-first; each row carries the 3-state status (running=null finished_at / ok /
     error / skipped) + the skip ``reason`` enum (R1..R8) for the polling UI (spec 04.10).
+    Shadow runs (``is_shadow=1``, Loop 4) are internal and EXCLUDED here (spec 04 fix #3).
     """
     if limit > _MAX_RUNS_LIMIT:
         return JSONResponse(
@@ -576,7 +577,7 @@ def list_insight_runs(
         )
     rows = conn.execute(
         "SELECT id, payload, started_at, finished_at, status, detail, reason, cost_usd "
-        "FROM job_runs WHERE job_id = ? ORDER BY id DESC LIMIT ?",
+        "FROM job_runs WHERE job_id = ? AND is_shadow = 0 ORDER BY id DESC LIMIT ?",
         (insight_job_id(insight_type_id), limit),
     ).fetchall()
     return {"rows": [_insight_run_row(r) for r in rows]}

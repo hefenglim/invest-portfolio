@@ -12,7 +12,7 @@ def test_new_columns_present() -> None:
     conn.row_factory = sqlite3.Row
     create_scheduler_tables(conn)
     assert {"kind", "payload"} <= _cols(conn, "schedule_config")
-    assert {"payload", "reason", "cost_usd"} <= _cols(conn, "job_runs")
+    assert {"payload", "reason", "cost_usd", "is_shadow"} <= _cols(conn, "job_runs")
 
 
 def test_migration_idempotent_on_legacy_db() -> None:
@@ -28,4 +28,4 @@ def test_migration_idempotent_on_legacy_db() -> None:
     create_scheduler_tables(conn)  # must add columns, not crash
     create_scheduler_tables(conn)  # idempotent second run
     assert {"kind", "payload"} <= _cols(conn, "schedule_config")
-    assert {"payload", "reason", "cost_usd"} <= _cols(conn, "job_runs")
+    assert {"payload", "reason", "cost_usd", "is_shadow"} <= _cols(conn, "job_runs")

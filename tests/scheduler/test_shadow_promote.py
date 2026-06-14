@@ -110,6 +110,34 @@ def test_run_generates_active_and_shadow(
     assert shadow_cards[0].calibration_version == 2  # shadow version
 
 
+def test_shadow_job_run_is_flagged_and_excluded_from_user_runs(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One trigger of a shadowed combo writes TWO job_runs rows under insight:{id}: the
+    # active (is_shadow=0) and the shadow (is_shadow=1). The user-facing runs list excludes
+    # shadow rows (spec 04 fix #3 — they are internal; spec 07 cost attribution).
+    from portfolio_dash.scheduler.jobs import insight_job_id
+
+    _default_model(conn)
+    monkeypatch.setattr(llm_mod.litellm, "completion", lambda **kw: _Resp(_CARD_JSON))
+    tid = _combo_with_two_versions(conn)
+
+    insight_service.run_for_id(conn, tid, now=NOW)
+
+    job_id = insight_job_id(tid)
+    rows = conn.execute(
+        "SELECT is_shadow FROM job_runs WHERE job_id = ? ORDER BY id", (job_id,)
+    ).fetchall()
+    flags = sorted(int(r["is_shadow"]) for r in rows)
+    assert flags == [0, 1]  # exactly one active + one shadow row
+
+    # The user-facing query (the /runs endpoint filter) returns ONLY the active row.
+    user_rows = conn.execute(
+        "SELECT id FROM job_runs WHERE job_id = ? AND is_shadow = 0", (job_id,)
+    ).fetchall()
+    assert len(user_rows) == 1
+
+
 def test_no_shadow_when_active_is_latest(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

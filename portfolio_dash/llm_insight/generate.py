@@ -150,41 +150,49 @@ def _write_job_run(
     *,
     status: str,
     reason: str,
+    detail: str | None = None,
     cost: Decimal,
     now: datetime,
     run_id: int | None = None,
+    is_shadow: bool = False,
 ) -> None:
     """Record an insight run in ``job_runs`` (raw SQL; no scheduler import).
 
     When *run_id* is given (the async manual-run path pre-inserted a ``running`` row), that
     row is FINALIZED in place; otherwise a fresh completed row is inserted (the scheduler /
     direct-call path). One row per run either way.
+
+    ``reason`` is the single machine enum (spec 07 §7.4); ``detail`` is the human text
+    (defaults to ``reason`` / ``status``). A SHADOW batch (Loop 4) stamps ``is_shadow=1`` so
+    the user-facing /runs lists can exclude it (spec 04 fix #3).
     """
     job_id = f"insight:{insight_type_id}"
-    detail = reason or f"{status}"
+    detail_text = detail if detail is not None else (reason or f"{status}")
+    shadow_flag = 1 if is_shadow else 0
     if run_id is not None:
         conn.execute(
             "UPDATE job_runs SET finished_at = ?, status = ?, detail = ?, payload = ?, "
-            "reason = ?, cost_usd = ? WHERE id = ?",
+            "reason = ?, cost_usd = ?, is_shadow = ? WHERE id = ?",
             (
-                datetime.now(UTC).isoformat(), status, detail, str(insight_type_id),
-                reason or None, str(cost), run_id,
+                datetime.now(UTC).isoformat(), status, detail_text, str(insight_type_id),
+                reason or None, str(cost), shadow_flag, run_id,
             ),
         )
         conn.commit()
         return
     conn.execute(
         "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
-        "reason, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "reason, cost_usd, is_shadow) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             job_id,
             now.isoformat(),
             datetime.now(UTC).isoformat(),
             status,
-            detail,
+            detail_text,
             str(insight_type_id),
             reason or None,
             str(cost),
+            shadow_flag,
         ),
     )
     conn.commit()
@@ -214,7 +222,7 @@ def run_insight_type(
     if it is None:
         _write_job_run(
             conn, insight_type_id, status="skipped", reason="unknown_insight_type",
-            cost=Decimal("0"), now=now, run_id=run_id,
+            cost=Decimal("0"), now=now, run_id=run_id, is_shadow=inputs.is_shadow,
         )
         return RunResult(
             status="skipped", reason="unknown_insight_type", cards_created=0,
@@ -226,7 +234,7 @@ def run_insight_type(
         reason = _block_reason_text(gate)
         _write_job_run(
             conn, insight_type_id, status="skipped", reason=reason, cost=Decimal("0"),
-            now=now, run_id=run_id,
+            now=now, run_id=run_id, is_shadow=inputs.is_shadow,
         )
         return RunResult(
             status="skipped", reason=reason, cards_created=0, cost_usd=Decimal("0")
@@ -331,7 +339,7 @@ def run_insight_type(
     reason = "budget_exhausted_mid_run" if stopped_early else ""
     _write_job_run(
         conn, insight_type_id, status=status, reason=reason, cost=total_cost, now=now,
-        run_id=run_id,
+        run_id=run_id, is_shadow=inputs.is_shadow,
     )
     return RunResult(
         status=status, reason=reason, cards_created=created, cost_usd=total_cost
