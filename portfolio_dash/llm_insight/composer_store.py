@@ -38,7 +38,18 @@ _EVOLUTION_DEFAULTS: dict[str, Any] = {
     "min_samples": 8,
     "max_shadows": 2,
     "gap_alert_pp": "10",
+    # spec 04.10 new fields:
+    # defer_limit_days — pending_data anti-poison cap (trading days) before an
+    #   unscoreable insight becomes ``undetermined`` (excluded from calibration/score).
+    # horizon_basis — how a card's horizon advances ("trading_days" | "calendar_days").
+    # shadow_on_alert — whether on_alert runs also produce a shadow card (default off).
+    "defer_limit_days": 5,
+    "horizon_basis": "trading_days",
+    "shadow_on_alert": False,
 }
+
+# Allowed horizon-basis values (spec 04.10); the API rejects anything else with 400.
+HORIZON_BASIS_VALUES = ("trading_days", "calendar_days")
 
 
 # --- Errors -------------------------------------------------------------------
@@ -156,7 +167,10 @@ CREATE TABLE IF NOT EXISTS evolution_config (
     shadow_batches INTEGER NOT NULL,
     min_samples INTEGER NOT NULL,
     max_shadows INTEGER NOT NULL,
-    gap_alert_pp TEXT NOT NULL
+    gap_alert_pp TEXT NOT NULL,
+    defer_limit_days INTEGER NOT NULL DEFAULT 5,
+    horizon_basis TEXT NOT NULL DEFAULT 'trading_days',
+    shadow_on_alert INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -182,6 +196,17 @@ def _create(conn: sqlite3.Connection) -> None:
     # task-default horizon + optional custom eval-prompt columns.
     _add_column_if_missing(conn, "insight_types", "horizon_days", "INTEGER NOT NULL DEFAULT 5")
     _add_column_if_missing(conn, "insight_types", "eval_prompt", "TEXT")
+    # Additive §4.10 migration so a legacy single-row evolution_config gains the new
+    # defer-limit / horizon-basis / shadow-on-alert knobs (idempotent ALTER).
+    _add_column_if_missing(
+        conn, "evolution_config", "defer_limit_days", "INTEGER NOT NULL DEFAULT 5"
+    )
+    _add_column_if_missing(
+        conn, "evolution_config", "horizon_basis", "TEXT NOT NULL DEFAULT 'trading_days'"
+    )
+    _add_column_if_missing(
+        conn, "evolution_config", "shadow_on_alert", "INTEGER NOT NULL DEFAULT 0"
+    )
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -193,14 +218,18 @@ def _seed(conn: sqlite3.Connection) -> None:
     d = _EVOLUTION_DEFAULTS
     conn.execute(
         "INSERT INTO evolution_config "
-        "(id, auto_promote, shadow_batches, min_samples, max_shadows, gap_alert_pp) "
-        "VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+        "(id, auto_promote, shadow_batches, min_samples, max_shadows, gap_alert_pp, "
+        "defer_limit_days, horizon_basis, shadow_on_alert) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
         (
             1 if d["auto_promote"] else 0,
             d["shadow_batches"],
             d["min_samples"],
             d["max_shadows"],
             d["gap_alert_pp"],
+            d["defer_limit_days"],
+            d["horizon_basis"],
+            1 if d["shadow_on_alert"] else 0,
         ),
     )
 
@@ -604,17 +633,22 @@ def get_evolution_config(conn: sqlite3.Connection) -> dict[str, Any]:
     """
     ensure_seeded(conn)
     row = conn.execute(
-        "SELECT auto_promote, shadow_batches, min_samples, max_shadows, gap_alert_pp "
-        "FROM evolution_config WHERE id = 1"
+        "SELECT auto_promote, shadow_batches, min_samples, max_shadows, gap_alert_pp, "
+        "defer_limit_days, horizon_basis, shadow_on_alert FROM evolution_config WHERE id = 1"
     ).fetchone()
     if row is None:
         return dict(_EVOLUTION_DEFAULTS)
+    # The §4.10 columns are NOT NULL with defaults; a legacy table is backfilled by the
+    # additive ALTER in ``_create`` (run on every ensure_seeded), so a direct read is safe.
     return {
         "auto_promote": bool(row["auto_promote"]),
         "shadow_batches": int(row["shadow_batches"]),
         "min_samples": int(row["min_samples"]),
         "max_shadows": int(row["max_shadows"]),
         "gap_alert_pp": str(row["gap_alert_pp"]),
+        "defer_limit_days": int(row["defer_limit_days"]),
+        "horizon_basis": str(row["horizon_basis"]),
+        "shadow_on_alert": bool(row["shadow_on_alert"]),
     }
 
 
@@ -626,26 +660,39 @@ def set_evolution_config(
     min_samples: int,
     max_shadows: int,
     gap_alert_pp: Decimal,
+    defer_limit_days: int = 5,
+    horizon_basis: str = "trading_days",
+    shadow_on_alert: bool = False,
 ) -> dict[str, Any]:
     """Upsert the single evolution_config row; return the stored (serialized) view.
 
     ``gap_alert_pp`` arrives as a :class:`Decimal` and is stored as its canonical string
     (the 2-dp rule never applies to a percentage-points knob; it is exact at any scale).
+    ``horizon_basis`` is validated by the caller (API) against
+    :data:`HORIZON_BASIS_VALUES`; the new §4.10 knobs default to their documented values
+    so older callers stay back-compatible.
     """
     ensure_seeded(conn)
     conn.execute(
         "INSERT INTO evolution_config "
-        "(id, auto_promote, shadow_batches, min_samples, max_shadows, gap_alert_pp) "
-        "VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+        "(id, auto_promote, shadow_batches, min_samples, max_shadows, gap_alert_pp, "
+        "defer_limit_days, horizon_basis, shadow_on_alert) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
         "auto_promote = excluded.auto_promote, shadow_batches = excluded.shadow_batches, "
         "min_samples = excluded.min_samples, max_shadows = excluded.max_shadows, "
-        "gap_alert_pp = excluded.gap_alert_pp",
+        "gap_alert_pp = excluded.gap_alert_pp, "
+        "defer_limit_days = excluded.defer_limit_days, "
+        "horizon_basis = excluded.horizon_basis, "
+        "shadow_on_alert = excluded.shadow_on_alert",
         (
             1 if auto_promote else 0,
             shadow_batches,
             min_samples,
             max_shadows,
             str(gap_alert_pp),
+            defer_limit_days,
+            horizon_basis,
+            1 if shadow_on_alert else 0,
         ),
     )
     conn.commit()

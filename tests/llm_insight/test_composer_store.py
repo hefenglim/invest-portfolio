@@ -290,6 +290,10 @@ def test_evolution_config_defaults(conn: sqlite3.Connection) -> None:
         "min_samples": 8,
         "max_shadows": 2,
         "gap_alert_pp": "10",
+        # spec 04.10 new fields.
+        "defer_limit_days": 5,
+        "horizon_basis": "trading_days",
+        "shadow_on_alert": False,
     }
 
 
@@ -301,6 +305,9 @@ def test_evolution_config_set_roundtrip(conn: sqlite3.Connection) -> None:
         min_samples=12,
         max_shadows=3,
         gap_alert_pp=Decimal("7.5"),
+        defer_limit_days=7,
+        horizon_basis="calendar_days",
+        shadow_on_alert=True,
     )
     assert out["auto_promote"] is True
     assert out["shadow_batches"] == 5
@@ -309,8 +316,53 @@ def test_evolution_config_set_roundtrip(conn: sqlite3.Connection) -> None:
     # gap_alert_pp round-trips as an exact Decimal string (never float).
     assert out["gap_alert_pp"] == "7.5"
     assert isinstance(out["gap_alert_pp"], str)
+    # spec 04.10 new fields round-trip.
+    assert out["defer_limit_days"] == 7
+    assert out["horizon_basis"] == "calendar_days"
+    assert out["shadow_on_alert"] is True
     # Persisted: a fresh read returns the same.
-    assert cs.get_evolution_config(conn)["gap_alert_pp"] == "7.5"
+    fresh = cs.get_evolution_config(conn)
+    assert fresh["gap_alert_pp"] == "7.5"
+    assert fresh["defer_limit_days"] == 7
+    assert fresh["horizon_basis"] == "calendar_days"
+    assert fresh["shadow_on_alert"] is True
+
+
+def test_evolution_config_legacy_row_migration() -> None:
+    """A pre-04c single-row evolution_config (no new columns) gains the §4.10 defaults.
+
+    Builds the OLD-schema table + a seeded row, then runs ``ensure_seeded`` (whose
+    create-always step applies the additive ALTERs). The legacy row must read back the
+    documented defaults for the three new knobs (idempotent backfill).
+    """
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    try:
+        # Legacy (pre-04c) evolution_config: no defer/horizon/shadow_on_alert columns.
+        c.execute(
+            "CREATE TABLE evolution_config ("
+            "id INTEGER PRIMARY KEY CHECK (id = 1), auto_promote INTEGER NOT NULL, "
+            "shadow_batches INTEGER NOT NULL, min_samples INTEGER NOT NULL, "
+            "max_shadows INTEGER NOT NULL, gap_alert_pp TEXT NOT NULL)"
+        )
+        c.execute(
+            "INSERT INTO evolution_config "
+            "(id, auto_promote, shadow_batches, min_samples, max_shadows, gap_alert_pp) "
+            "VALUES (1, 1, 4, 6, 1, '15')"
+        )
+        c.commit()
+        cs.ensure_seeded(c)  # create-always step applies the additive migration
+        cfg = cs.get_evolution_config(c)
+        # Pre-existing values preserved …
+        assert cfg["auto_promote"] is True
+        assert cfg["shadow_batches"] == 4
+        assert cfg["gap_alert_pp"] == "15"
+        # … and the new columns backfilled with their defaults.
+        assert cfg["defer_limit_days"] == 5
+        assert cfg["horizon_basis"] == "trading_days"
+        assert cfg["shadow_on_alert"] is False
+    finally:
+        c.close()
 
 
 # --- insight_types horizon_days + eval_prompt (spec 04.10) --------------------

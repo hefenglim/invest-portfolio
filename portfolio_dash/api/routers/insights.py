@@ -72,6 +72,10 @@ class EvolutionConfigIn(BaseModel):
     min_samples: int
     max_shadows: int
     gap_alert_pp: str  # percentage-points Decimal STRING (never float)
+    # spec 04.10 new knobs (defaulted so existing callers stay back-compatible).
+    defer_limit_days: int = 5
+    horizon_basis: str = "trading_days"
+    shadow_on_alert: bool = False
 
 
 # --- serialization ------------------------------------------------------------
@@ -440,7 +444,11 @@ def put_evolution_config(
     payload: EvolutionConfigIn,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
-    """Upsert the evolution knobs. ``gap_alert_pp`` must parse as a Decimal (else 400)."""
+    """Upsert the evolution knobs.
+
+    ``gap_alert_pp`` must parse as a Decimal and ``horizon_basis`` must be one of
+    :data:`composer_store.HORIZON_BASIS_VALUES` (else 400).
+    """
     cs.ensure_seeded(conn)
     try:
         gap = Decimal(payload.gap_alert_pp)
@@ -452,6 +460,15 @@ def put_evolution_config(
                 field="gap_alert_pp",
             ),
         )
+    if payload.horizon_basis not in cs.HORIZON_BASIS_VALUES:
+        return JSONResponse(
+            status_code=400,
+            content=error_body(
+                "validation_error",
+                f"horizon_basis 非有效值：{payload.horizon_basis}",
+                field="horizon_basis",
+            ),
+        )
     return cs.set_evolution_config(
         conn,
         auto_promote=payload.auto_promote,
@@ -459,6 +476,9 @@ def put_evolution_config(
         min_samples=payload.min_samples,
         max_shadows=payload.max_shadows,
         gap_alert_pp=gap,
+        defer_limit_days=payload.defer_limit_days,
+        horizon_basis=payload.horizon_basis,
+        shadow_on_alert=payload.shadow_on_alert,
     )
 
 

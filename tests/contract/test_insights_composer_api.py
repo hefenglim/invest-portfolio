@@ -412,6 +412,9 @@ def test_evolution_config_get_defaults(client: TestClient) -> None:
         "min_samples": 8,
         "max_shadows": 2,
         "gap_alert_pp": "10",
+        "defer_limit_days": 5,
+        "horizon_basis": "trading_days",
+        "shadow_on_alert": False,
     }
 
 
@@ -424,13 +427,22 @@ def test_evolution_config_put_roundtrip(client: TestClient) -> None:
             "min_samples": 12,
             "max_shadows": 3,
             "gap_alert_pp": "7.5",
+            "defer_limit_days": 7,
+            "horizon_basis": "calendar_days",
+            "shadow_on_alert": True,
         },
     )
     assert r.status_code == 200
-    assert r.json()["gap_alert_pp"] == "7.5"
-    assert r.json()["auto_promote"] is True
+    body = r.json()
+    assert body["gap_alert_pp"] == "7.5"
+    assert body["auto_promote"] is True
+    assert body["defer_limit_days"] == 7
+    assert body["horizon_basis"] == "calendar_days"
+    assert body["shadow_on_alert"] is True
     # persisted
-    assert client.get("/api/evolution-config").json()["shadow_batches"] == 5
+    fresh = client.get("/api/evolution-config").json()
+    assert fresh["shadow_batches"] == 5
+    assert fresh["horizon_basis"] == "calendar_days"
 
 
 def test_evolution_config_put_bad_gap_400(client: TestClient) -> None:
@@ -442,6 +454,21 @@ def test_evolution_config_put_bad_gap_400(client: TestClient) -> None:
             "min_samples": 8,
             "max_shadows": 2,
             "gap_alert_pp": "not-a-number",
+        },
+    )
+    assert r.status_code == 400
+
+
+def test_evolution_config_put_bad_horizon_basis_400(client: TestClient) -> None:
+    r = client.put(
+        "/api/evolution-config",
+        json={
+            "auto_promote": False,
+            "shadow_batches": 3,
+            "min_samples": 8,
+            "max_shadows": 2,
+            "gap_alert_pp": "10",
+            "horizon_basis": "weekly",  # not in {trading_days, calendar_days}
         },
     )
     assert r.status_code == 400
