@@ -94,6 +94,46 @@ def test_get_includes_provides_and_status_catalog(client: TestClient) -> None:
     assert by_id["twstock"]["status"] in ("unknown", "ok", "error", "off")
 
 
+def test_get_includes_tier_and_tiers(client: TestClient) -> None:
+    by_id = {s["id"]: s for s in client.get("/api/datasources").json()["sources"]}
+    # tier (current marking) defaults to null; tiers lists the selectable options.
+    assert by_id["finmind"]["tier"] is None
+    assert by_id["finmind"]["tiers"] == ["free", "backer", "sponsor", "sponsorpro"]
+    assert by_id["alphavantage"]["tiers"] == ["free", "premium"]
+    # auth:"none" sources have no selectable tiers.
+    assert by_id["twse"]["tiers"] is None
+    assert by_id["twse"]["tier"] is None
+
+
+# --- PUT /api/datasources/{id}/tier -------------------------------------------
+
+
+def test_put_tier_sets_and_get_reflects(client: TestClient) -> None:
+    r = client.put("/api/datasources/finmind/tier", json={"tier": "backer"})
+    assert r.status_code == 200
+    assert r.json()["id"] == "finmind" and r.json()["tier"] == "backer"
+    by_id = {s["id"]: s for s in client.get("/api/datasources").json()["sources"]}
+    assert by_id["finmind"]["tier"] == "backer"
+
+
+def test_put_tier_unknown_tier_400(client: TestClient) -> None:
+    r = client.put("/api/datasources/finmind/tier", json={"tier": "platinum"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation_error"
+
+
+def test_put_tier_on_auth_none_source_400(client: TestClient) -> None:
+    r = client.put("/api/datasources/twse/tier", json={"tier": "free"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation_error"
+
+
+def test_put_tier_unknown_source_404(client: TestClient) -> None:
+    r = client.put("/api/datasources/nope/tier", json={"tier": "free"})
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
 def test_get_includes_account_fallbacks_and_names(client: TestClient) -> None:
     body = client.get("/api/datasources").json()
     fb = body["account_fallbacks"]

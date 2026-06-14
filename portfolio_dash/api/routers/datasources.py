@@ -74,6 +74,8 @@ def _source_wire(
         "status": status,
         "last_test": last_test,
         "latency_ms": latency_ms,
+        "tier": state.tier if state is not None else None,  # current marking (spec 20.15.2)
+        "tiers": info.tiers,  # selectable options for the panel dropdown
         "note": info.note,
     }
 
@@ -127,6 +129,46 @@ def set_key(
         "token_masked": store.mask_token(body.api_key or None),
         "status": "unknown",
     }
+
+
+# --- PUT /api/datasources/{id}/tier -------------------------------------------
+
+
+class TierBody(BaseModel):
+    tier: str | None  # null clears the marking; must be one of the source's `tiers`
+
+
+@router.put("/datasources/{source_id}/tier")
+def set_tier(
+    source_id: str,
+    body: TierBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Mark a source's token tier (spec 20.15.3). 404 unknown id; 400 if the source has
+    no selectable tiers (auth:"none") or the value is not one of its options."""
+    store.ensure_seeded(conn)
+    info = store.SOURCE_INFO_BY_ID.get(source_id)
+    if info is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知資料來源：{source_id}"),
+        )
+    if not info.tiers:
+        return JSONResponse(
+            status_code=400,
+            content=error_body(
+                "validation_error", f"{info.name} 無資費等級", field="tier"
+            ),
+        )
+    if body.tier is not None and body.tier not in info.tiers:
+        return JSONResponse(
+            status_code=400,
+            content=error_body(
+                "validation_error", f"未知資費等級：{body.tier}", field="tier"
+            ),
+        )
+    store.set_tier(conn, source_id, body.tier)
+    return {"id": source_id, "tier": body.tier}
 
 
 # --- POST /api/datasources/{id}/test ------------------------------------------

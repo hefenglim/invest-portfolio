@@ -27,6 +27,10 @@ from portfolio_dash.shared.masking import mask_secret
 
 CATEGORY = "data_sources"
 
+# Token tier ranks (spec 20.15.2). Higher rank = more entitlements. A null/unset
+# source tier is treated as the lowest effective tier ("free") for tier-gating.
+TIER_ORDER: dict[str, int] = {"free": 0, "backer": 1, "sponsor": 2, "sponsorpro": 3}
+
 
 # --- Static source descriptions (config-as-code; never persisted) -------------
 
@@ -42,6 +46,7 @@ class SourceInfo(BaseModel, frozen=True):
     note: str
     provides: list[str] = []  # data types this source can supply (spec 20.1)
     status: str = "live"  # "live" | "pending" | "blocked" (spec 20.1)
+    tiers: list[str] | None = None  # selectable token tiers (spec 20.15.2); None = N/A
 
 
 # Ordered for stable GET output. ``type`` matches the frontend's grouping keys
@@ -62,6 +67,7 @@ SOURCE_INFO: tuple[SourceInfo, ...] = (
                auth="apikey",
                provides=["dividend", "quote_history", "institutional", "margin",
                          "valuation", "monthly_revenue", "financials", "news", "macro"],
+               tiers=["free", "backer", "sponsor", "sponsorpro"],
                note="台股股利、籌碼、基本面・Free 層 600/hr"),
     SourceInfo(id="twstock", name="twstock", type="stock", markets=["TW"], auth="none",
                provides=["quote_latest"], note="台股盤中即時報價後備・免金鑰"),
@@ -81,7 +87,8 @@ SOURCE_INFO: tuple[SourceInfo, ...] = (
     # --- pending (implemented; awaiting a key to validate) -----------------
     SourceInfo(id="alphavantage", name="Alpha Vantage", type="stock", markets=["US", "FX"],
                auth="apikey", provides=["quote_latest", "quote_history", "fx"],
-               status="pending", note="美股後備來源・免費層約 25/day（待測試）"),
+               tiers=["free", "premium"], status="pending",
+               note="美股後備來源・免費層約 25/day（待測試）"),
     SourceInfo(id="finnhub", name="Finnhub", type="stock", markets=["US"], auth="apikey",
                provides=["quote_latest", "dividend"], status="pending",
                note="美股即時報價 / 股利・60/min（待測試）"),
@@ -122,7 +129,8 @@ _DDL = """
 CREATE TABLE IF NOT EXISTS data_sources (
     id TEXT PRIMARY KEY,
     api_key TEXT,
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    tier TEXT
 );
 CREATE TABLE IF NOT EXISTS data_source_health (
     source_id TEXT PRIMARY KEY,
@@ -138,9 +146,28 @@ CREATE TABLE IF NOT EXISTS data_source_fallbacks (
 """
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    """Add ``column`` to ``table`` if absent (additive, idempotent migration).
+
+    A LOCAL copy of the additive-migration pattern (see ``scheduler/jobs.py``),
+    intentionally not imported so ``pricing/`` gains no upward dependency. ``PRAGMA
+    table_info`` row index 1 is the column name (row_factory-agnostic).
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def create_tables(conn: sqlite3.Connection) -> None:
-    """Create the three data-source tables idempotently (safe on every startup)."""
+    """Create the three data-source tables idempotently (safe on every startup).
+
+    Applies the additive §20.15.2 ``tier`` migration so a legacy ``data_sources``
+    table that predates the column still opens (the CREATE only adds it on a fresh DB).
+    """
     conn.executescript(_DDL)
+    _add_column_if_missing(conn, "data_sources", "tier", "TEXT")
     conn.commit()
 
 
@@ -206,6 +233,7 @@ class SourceState(BaseModel):
     last_test: str | None
     latency_ms: int | None
     detail: str | None
+    tier: str | None = None  # user-marked token tier (spec 20.15.2); None = unset
 
 
 def _row_to_state(row: sqlite3.Row) -> SourceState:
@@ -217,13 +245,14 @@ def _row_to_state(row: sqlite3.Row) -> SourceState:
         last_test=row["last_test"],
         latency_ms=row["latency_ms"],
         detail=row["detail"],
+        tier=row["tier"],
     )
 
 
 def get_state(conn: sqlite3.Connection, source_id: str) -> SourceState | None:
     """Return the persisted state for one source, or None if it has no row."""
     row = conn.execute(
-        "SELECT s.id AS id, s.api_key AS api_key, s.enabled AS enabled, "
+        "SELECT s.id AS id, s.api_key AS api_key, s.enabled AS enabled, s.tier AS tier, "
         "       COALESCE(h.status, 'unknown') AS status, h.last_test AS last_test, "
         "       h.latency_ms AS latency_ms, h.detail AS detail "
         "FROM data_sources s LEFT JOIN data_source_health h ON h.source_id = s.id "
@@ -236,7 +265,7 @@ def get_state(conn: sqlite3.Connection, source_id: str) -> SourceState | None:
 def list_states(conn: sqlite3.Connection) -> dict[str, SourceState]:
     """Return persisted state for every source row, keyed by id."""
     rows = conn.execute(
-        "SELECT s.id AS id, s.api_key AS api_key, s.enabled AS enabled, "
+        "SELECT s.id AS id, s.api_key AS api_key, s.enabled AS enabled, s.tier AS tier, "
         "       COALESCE(h.status, 'unknown') AS status, h.last_test AS last_test, "
         "       h.latency_ms AS latency_ms, h.detail AS detail "
         "FROM data_sources s LEFT JOIN data_source_health h ON h.source_id = s.id"
@@ -301,6 +330,33 @@ def set_api_key(conn: sqlite3.Connection, source_id: str, api_key: str | None) -
         (source_id,),
     )
     conn.commit()
+
+
+def set_tier(conn: sqlite3.Connection, source_id: str, tier: str | None) -> None:
+    """Set or clear a source's marked token tier (spec 20.15.2). Upserts the row.
+
+    ``None`` clears the marking (stored as NULL → treated as the lowest effective tier
+    when gating). Validation of the tier string against the source's selectable
+    ``tiers`` is the router's concern; this is the raw persistence write.
+    """
+    conn.execute(
+        "INSERT INTO data_sources (id, api_key, enabled, tier) VALUES (?, NULL, 1, ?) "
+        "ON CONFLICT(id) DO UPDATE SET tier = excluded.tier",
+        (source_id, tier),
+    )
+    conn.commit()
+
+
+def get_tier(conn: sqlite3.Connection, source_id: str) -> str | None:
+    """Read a source's marked token tier (None if unset/unknown). The single getter the
+    tier-gating preflight reads through (spec 20.15.4)."""
+    row = conn.execute(
+        "SELECT tier FROM data_sources WHERE id = ?", (source_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    tier = row["tier"]
+    return tier if tier else None
 
 
 def upsert_health(
