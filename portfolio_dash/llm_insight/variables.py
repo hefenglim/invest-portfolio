@@ -25,14 +25,21 @@ The single source of truth for the prompt "Lego blocks". Three pieces:
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.portfolio import technicals
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 
 Scope = Literal["portfolio", "per_symbol"]
+
+# Project display timezone for the date/time vars (spec 04.10): all rendered ISO-8601
+# +08:00. A naive datetime is assumed to already be Asia/Taipei; an aware one is
+# converted. This is the LLM-facing wire format, decoupled from UTC storage.
+_TAIPEI = ZoneInfo("Asia/Taipei")
 
 # Identical to web/vars.js: {{token}} with [a-z0-9_] ids, case-insensitive.
 _TOKEN_RE = re.compile(r"\{\{([a-z0-9_]+)\}\}", re.IGNORECASE)
@@ -216,6 +223,25 @@ REGISTRY: tuple[VarSpec, ...] = (
         "本次快照的資料時間戳",
         '"2026-06-11T14:30:00+08:00"',
     ),
+    # --- system date/time (spec 04.10) — backend-only, ISO-8601 +08:00 (Asia/Taipei) ---
+    # Not (yet) in web/vars.js: these are fed by the generation/eval seam, not the
+    # composer UI. ``now`` is fed on every render; ``card_created_at``/``eval_date`` only
+    # in the self-evaluation (04c) context — absent → render JSON null gracefully.
+    VarSpec(
+        "now", "現在時間", "system", "portfolio", True,
+        "本次執行的當下時間（ISO-8601 +08:00）",
+        '"2026-06-11T14:30:00+08:00"',
+    ),
+    VarSpec(
+        "card_created_at", "洞察產生時間", "system", "portfolio", True,
+        "被評估洞察卡的產生時間（ISO-8601 +08:00；僅自評檢驗情境提供）",
+        '"2026-06-01T09:00:00+08:00"',
+    ),
+    VarSpec(
+        "eval_date", "評估時間", "system", "portfolio", True,
+        "自評檢驗的執行時間（ISO-8601 +08:00；僅自評檢驗情境提供）",
+        '"2026-06-08T09:00:00+08:00"',
+    ),
 )
 
 BY_TOKEN: dict[str, VarSpec] = {v.token: v for v in REGISTRY}
@@ -328,6 +354,11 @@ class VarContext:
     symbol: str | None = None
     closes: list[Decimal] | None = None  # chronological closes (pricing.store.get_price_history)
     price_points: list[dict[str, Any]] = field(default_factory=list)  # [{date, close}]
+    # Date/time context (spec 04.10), fed by the generation/eval seam. ``now`` is fed on
+    # every real render; ``card_created_at``/``eval_date`` only in the 04c eval context.
+    now: datetime | None = None
+    card_created_at: datetime | None = None
+    eval_date: datetime | None = None
     # Router-fed (the api layer reads conn; this layer must not import pricing/data_ingestion):
     fx_rates: dict[str, Any] | None = None       # {"USD_TWD": {"rate", "as_of", "stale"}}
     dividend_rows: list[dict[str, Any]] | None = None  # per-event ledger rows incl. ccy
@@ -481,6 +512,27 @@ def _dividend_projection(data: DashboardData) -> dict[str, Any]:
     }
 
 
+def _iso_taipei(value: datetime | None) -> str | None:
+    """Format a datetime as ISO-8601 in Asia/Taipei (+08:00); None → None (renders null).
+
+    A naive datetime is assumed to already be Asia/Taipei; an aware one is converted to it
+    (spec 04.10 — all date/time vars render in +08:00, the LLM-facing convention).
+    """
+    if value is None:
+        return None
+    aware = value.replace(tzinfo=_TAIPEI) if value.tzinfo is None else value.astimezone(_TAIPEI)
+    return aware.isoformat()
+
+
+# Date/time tokens (spec 04.10) → the VarContext field carrying their datetime. Rendered
+# as ISO-8601 +08:00, or JSON null when not fed (graceful degrade; never crash).
+_DATE_TOKENS: dict[str, str] = {
+    "now": "now",
+    "card_created_at": "card_created_at",
+    "eval_date": "eval_date",
+}
+
+
 def value_for(token: str, ctx: VarContext) -> Any:
     """Return the JSON-able value for *token* from already-computed inputs.
 
@@ -491,6 +543,9 @@ def value_for(token: str, ctx: VarContext) -> Any:
     spec = BY_TOKEN.get(token)
     if spec is None or not spec.available:
         return _UNAVAILABLE
+    if token in _DATE_TOKENS:
+        # ISO-8601 +08:00 string, or JSON null when the seam fed no datetime.
+        return _iso_taipei(getattr(ctx, _DATE_TOKENS[token]))
     if token in _EXTERNAL_TOKENS:
         # Value already derived in portfolio.external_signals and fed by the router; a
         # missing key OR an assembler-flagged ``unavailable`` -> the canonical degrade

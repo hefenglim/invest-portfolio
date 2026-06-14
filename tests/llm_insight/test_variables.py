@@ -1,9 +1,11 @@
 """Unit tests for llm_insight.variables — registry, token validation, value assembly.
 
-The registry mirrors web/vars.js EXACTLY (26 vars / 8 categories). validate_tokens is
-the single reusable core (spec 04 R1 + spec 07 preflight): preview lists diagnostics,
-the execution path turns them into 422s. Value assembly reads only already-computed
-DashboardData / per-symbol detail / technicals — it computes no numbers of record.
+The registry mirrors web/vars.js (26 vars / 8 categories) PLUS three backend-only
+date/time system tokens added for spec 04.10 (now / card_created_at / eval_date) — 29
+total. validate_tokens is the single reusable core (spec 04 R1 + spec 07 preflight):
+preview lists diagnostics, the execution path turns them into 422s. Value assembly reads
+only already-computed DashboardData / per-symbol detail / technicals / fed date context —
+it computes no numbers of record.
 """
 
 import sqlite3
@@ -18,33 +20,43 @@ from portfolio_dash.shared.enums import Currency
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_registry_has_26_and_categories() -> None:
-    assert len(V.REGISTRY) == 26
+def test_registry_has_29_and_categories() -> None:
+    # 26 vars.js mirror + 3 backend-only date/time system tokens (spec 04.10).
+    assert len(V.REGISTRY) == 29
     assert len({v.category for v in V.REGISTRY}) == 8
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 26
+    assert len({v.token for v in V.REGISTRY}) == 29
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
 
-def test_category_counts_mirror_vars_js() -> None:
+def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
     counts: dict[str, int] = {}
     for v in V.REGISTRY:
         counts[v.category] = counts.get(v.category, 0) + 1
     assert counts == {
         "position": 6, "price": 4, "dividend": 3, "fx": 2,
-        "chips": 5, "sentiment": 2, "ai": 2, "system": 2,
+        # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
+        "chips": 5, "sentiment": 2, "ai": 2, "system": 5,
     }
 
 
-def test_available_split_24_now_2_later() -> None:
+def test_available_split_27_now_2_later() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    # chips(5) + sentiment(2) went live (spec 20.2): 17 + 7 = 24 available.
-    assert len(available) == 24
+    # chips(5) + sentiment(2) live (spec 20.2) + 3 date vars (spec 04.10): 24 + 3 = 27.
+    assert len(available) == 27
     assert len(unavailable) == 2
     # only the 2 'ai' vars remain deferred (spec 04).
     assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)
+
+
+def test_date_vars_registered_as_available_portfolio_system() -> None:
+    for token in ("now", "card_created_at", "eval_date"):
+        spec = V.BY_TOKEN[token]
+        assert spec.category == "system"
+        assert spec.scope == "portfolio"
+        assert spec.available is True
 
 
 def test_scope_enum_is_english() -> None:
@@ -179,3 +191,47 @@ def test_price_history_and_technicals_assembly(golden_db: sqlite3.Connection) ->
     assert "vol_30d_annualized" in out_vol
     out_pvc, _ = V.render_prompt("{{price_vs_cost_json}}", ctx)
     assert "price_vs_original" in out_pvc
+
+
+# --- date/time vars (spec 04.10) ----------------------------------------------
+
+
+def test_now_var_renders_iso_taipei(golden_db: sqlite3.Connection) -> None:
+    data = _data(golden_db)
+    ctx = V.VarContext(data=data, now=_NOW)  # type: ignore[arg-type]
+    out, used = V.render_prompt("現在：{{now}}", ctx)
+    assert "now" in used
+    assert "2026-06-11T14:30:00+08:00" in out
+
+
+def test_now_var_converts_utc_to_taipei(golden_db: sqlite3.Connection) -> None:
+    data = _data(golden_db)
+    utc_now = datetime(2026, 6, 11, 6, 30, tzinfo=ZoneInfo("UTC"))  # 14:30 Taipei
+    ctx = V.VarContext(data=data, now=utc_now)  # type: ignore[arg-type]
+    out, _ = V.render_prompt("{{now}}", ctx)
+    assert "2026-06-11T14:30:00+08:00" in out
+
+
+def test_eval_context_vars_render_when_fed(golden_db: sqlite3.Connection) -> None:
+    data = _data(golden_db)
+    created = datetime(2026, 6, 1, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    eval_d = datetime(2026, 6, 8, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    ctx = V.VarContext(data=data, now=_NOW, card_created_at=created, eval_date=eval_d)  # type: ignore[arg-type]
+    out, used = V.render_prompt(
+        "{{now}} {{card_created_at}} {{eval_date}}", ctx
+    )
+    assert "2026-06-11T14:30:00+08:00" in out
+    assert "2026-06-01T09:00:00+08:00" in out
+    assert "2026-06-08T09:00:00+08:00" in out
+    assert set(used) == {"now", "card_created_at", "eval_date"}
+
+
+def test_date_vars_degrade_gracefully_when_absent(golden_db: sqlite3.Connection) -> None:
+    # No date context fed (generation path, not eval): card_created_at/eval_date null;
+    # now also unavailable when not fed (the caller always feeds now for a real render).
+    data = _data(golden_db)
+    ctx = V.VarContext(data=data)  # type: ignore[arg-type]
+    out, _ = V.render_prompt(
+        "{{now}}|{{card_created_at}}|{{eval_date}}", ctx
+    )
+    assert out == "null|null|null"

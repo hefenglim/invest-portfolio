@@ -299,6 +299,7 @@ def _build_context(
     external_vars = _external_vars(conn, symbol)
     ctx = V.VarContext(
         data=data,
+        now=now,  # spec 04.10 {{now}} renders ISO-8601 +08:00 in preview/test
         fx_rates=_resolve_fx_rates(conn, data, now, reporting),
         dividend_rows=_dividend_rows(conn),
         external_vars=external_vars,

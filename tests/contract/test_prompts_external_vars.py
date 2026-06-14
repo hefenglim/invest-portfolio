@@ -29,7 +29,7 @@ def _preview(client: TestClient, body: str, *, scope: str = "portfolio",
     return r.json()  # type: ignore[no-any-return]
 
 
-# --- (a) prompt-vars: 7 external vars flip to available (24 total) -------------
+# --- (a) prompt-vars: 7 external vars + 3 date vars available (27 total) -------
 
 
 def test_prompt_vars_external_now_available(api_client: TestClient) -> None:
@@ -40,7 +40,8 @@ def test_prompt_vars_external_now_available(api_client: TestClient) -> None:
         "financials_json", "market_sentiment_json", "index_quotes_json",
     ):
         assert by_token[token]["available"] is True, token
-    assert sum(1 for r in rows if r["available"]) == 24
+    # 24 (vars.js live) + 3 date/time system tokens (spec 04.10) = 27.
+    assert sum(1 for r in rows if r["available"]) == 27
     # The spec-04 'ai' vars stay unavailable this round.
     assert by_token["backtest_json"]["available"] is False
     assert by_token["calibration_gap_json"]["available"] is False
