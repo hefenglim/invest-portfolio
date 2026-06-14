@@ -6,9 +6,11 @@ import pandas as pd
 import pytest
 
 from scripts.probe.adapters.finmind_src import (
+    DATASET_TIER,
     FINMIND_DATASETS,
     parse_dataset_rows,
     parse_finmind_close,
+    tier_from_limit,
 )
 from scripts.probe.adapters.my_src import parse_klse_price, parse_malaysiastock_price
 from scripts.probe.adapters.sentiment_src import parse_fng
@@ -105,6 +107,19 @@ def test_finmind_dataset_mapping_complete() -> None:
         "institutional", "margin", "valuation", "monthly_revenue", "financials"
     }
     assert FINMIND_DATASETS["institutional"] == "TaiwanStockInstitutionalInvestorsBuySell"
+
+
+def test_finmind_tier_from_limit() -> None:
+    # all 5 datasets stay Free under our data_id query mode (spec 20.15.2).
+    assert set(DATASET_TIER) == set(FINMIND_DATASETS)
+    assert all(t == "free" for t in DATASET_TIER.values())
+    # api_request_limit reveals the tier (spec 20.15.5).
+    assert tier_from_limit(600) == "free"
+    assert tier_from_limit(1600) == "backer"
+    assert tier_from_limit(6000) == "sponsor"
+    assert tier_from_limit(20000) == "sponsorpro"
+    assert tier_from_limit(None) is None
+    assert tier_from_limit("nope") is None
 
 
 def test_parse_dataset_rows_tolerant() -> None:

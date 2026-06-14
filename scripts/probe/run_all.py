@@ -447,7 +447,8 @@ def _skipped(source: str, data_type: DataType, market: str, notes: str) -> Probe
 
 def _probe_keyed_skips(results: list[ProbeResult]) -> None:
     no_key = "no key supplied this round"
-    if finmind_src.finmind_token() is None:
+    fm_token = finmind_src.finmind_token()
+    if fm_token is None:
         results.append(_skipped("finmind", DataType.QUOTE_LATEST, "TW", no_key))
         results.append(_skipped("finmind", DataType.DIVIDEND, "TW", no_key))
         results.append(_skipped("finmind", DataType.FX, "FX", no_key))
@@ -456,6 +457,22 @@ def _probe_keyed_skips(results: list[ProbeResult]) -> None:
             results.append(
                 _skipped("finmind", DataType.QUOTE_LATEST, "TW", f"{no_key} ({ds})")
             )
+        # spec-20.15.5 quota/tier note: needs the token; skipped together when absent.
+        results.append(_skipped("finmind", DataType.QUOTE_LATEST, "TW", f"{no_key} (quota)"))
+    else:
+        # spec-20.15.5: with a key, report usage/limit + inferred tier (Bearer auth).
+        try:
+            quota = finmind_src.fetch_quota(fm_token)
+            limit = quota.get("api_request_limit")
+            tier = finmind_src.tier_from_limit(limit) or "unknown"
+            note = f"used {quota.get('user_count')}/{limit}; tier={tier}"
+            verdict = Verdict.FALLBACK
+        except Exception as exc:  # noqa: BLE001 - a quota probe failure is a valid result
+            note, verdict = f"quota probe failed: {exc}", Verdict.UNUSABLE
+        results.append(ProbeResult(
+            source="finmind", data_type=DataType.QUOTE_LATEST, market="TW",
+            requires_key=True, verdict=verdict, notes=note,
+        ))
     if us_alt.alpha_key() is None:
         results.append(_skipped("alphavantage", DataType.QUOTE_LATEST, "US", no_key))
     if us_alt.finnhub_key() is None:

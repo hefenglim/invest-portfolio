@@ -218,3 +218,29 @@ hand-noted from adapter discovery (not re-generated live in this environment).
 `settings-datasources` panel → it persists to `data_sources.api_key` (spec 14.2) → run
 `python -m scripts.probe.run_all` (or `POST /api/datasources/{id}/test`) → on success
 promote the source `status` `pending → live` and slot it into the fallback order.
+
+### 8.1 FinMind auth / tier / quota (spec 20.15, 2026-06-14)
+
+Per the FinMind official AI-agent manual, the client now authenticates with an
+`Authorization: Bearer {token}` header (not a `?token=` query param) for both the
+snapshot client (`finmind_datasets.py`) and the dividend provider; an optional
+`end_date` bounds the date range to save quota.
+
+- **Tier model** — `TIER_ORDER = {free:0, backer:1, sponsor:2, sponsorpro:3}`. Each
+  source carries selectable `tiers` and a user-marked `data_sources.tier`. Every prompt
+  variable reports `required_tier`/`tier_ok`/`tier_label` so the panel can grey out and
+  label items that need a higher plan.
+- **Our query mode stays Free** — all 5 FinMind datasets are queried **with `data_id`**
+  (per-stock), which is the Free tier ("with `data_id`=Free / all-stocks=Backer+"). So
+  `DATASET_TIER` = all `free`; under a free 600/hr token the 5 chips vars are `tier_ok`.
+- **Quota** — `GET /v2/user_info` (Bearer) reports `user_count`/`api_request_limit`;
+  the limit reveals the tier (600=free, 1600=backer, 6000=sponsor, 20000=sponsorpro).
+  A 600/hr exhaustion replies HTTP/JSON `402`
+  (`{'msg':'Requests reach the upper limit...','status':402}`).
+- **Graceful failure** — a local tier preflight raises `FinMindTierError` *before* any
+  network call when the marked tier is too low (saves quota); a 402 raises
+  `FinMindQuotaError`. Ingest catches both → no snapshot, `data_source_health` set
+  `error` with the reason (e.g. 「需要 Backer 方案」/「額度已滿」), job failure recorded;
+  the variable then degrades to `{"unavailable": true, "reason": ...}`.
+- **Probe** — `finmind_src.fetch_quota` + `tier_from_limit` report usage/tier when a key
+  is present; **skipped (no key)** this run.
