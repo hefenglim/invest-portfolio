@@ -1,0 +1,122 @@
+"""Contract tests for the manual insight-run + run-history + stored-cards API (spec 04.2/4.10).
+
+The §4.2 ``/run`` mirrors spec-15: a 202 + run_id with the running row inserted on the
+request connection (the bg thread opens its OWN throwaway session, so its completion is not
+asserted here). ``/runs`` polls the kind=insight job_runs; ``/insights`` lists stored cards.
+Uses the shared golden DB + frozen clock; no LLM (the bg daemon is hermetic).
+"""
+
+import sqlite3
+
+from fastapi.testclient import TestClient
+
+
+def _make_combo(api_client: TestClient) -> int:
+    sp = api_client.post(
+        "/api/strategy-prompts", json={"name": "S", "body": "{{kpis_json}}"}
+    ).json()
+    it = api_client.post(
+        "/api/insight-types",
+        json={"name": "Daily", "scope": "portfolio", "strategy_ids": [sp["id"]]},
+    ).json()
+    return int(it["id"])
+
+
+def test_run_returns_202_and_inserts_running_row(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    it_id = _make_combo(api_client)
+    r = api_client.post(f"/api/insight-types/{it_id}/run")
+    assert r.status_code == 202
+    body = r.json()
+    assert body["insight_type_id"] == it_id
+    assert isinstance(body["run_id"], int)
+    row = golden_db.execute(
+        "SELECT job_id, started_at, payload FROM job_runs WHERE id = ?", (body["run_id"],)
+    ).fetchone()
+    assert row is not None
+    assert row["job_id"] == f"insight:{it_id}"
+    assert row["payload"] == str(it_id)
+
+
+def test_run_unknown_insight_type_404(api_client: TestClient) -> None:
+    assert api_client.post("/api/insight-types/999/run").status_code == 404
+
+
+def test_run_already_running_409(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    it_id = _make_combo(api_client)
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at) VALUES (?, '2026-06-11T14:00:00+08:00')",
+        (f"insight:{it_id}",),
+    )
+    golden_db.commit()
+    r = api_client.post(f"/api/insight-types/{it_id}/run")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "already_running"
+
+
+def test_runs_list_returns_rows_with_reason(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    it_id = _make_combo(api_client)
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, reason, payload, "
+        "cost_usd) VALUES (?, '2026-06-11T08:00:00+08:00', '2026-06-11T08:00:01+08:00', "
+        "'skipped', 'R6_quota', ?, '0')",
+        (f"insight:{it_id}", str(it_id)),
+    )
+    golden_db.commit()
+    r = api_client.get(f"/api/insight-types/{it_id}/runs?limit=10")
+    assert r.status_code == 200
+    rows = r.json()["rows"]
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["reason"] == "R6_quota"
+    assert rows[0]["insight_type_id"] == it_id
+
+
+def test_runs_list_limit_over_max_400(api_client: TestClient) -> None:
+    it_id = _make_combo(api_client)
+    assert api_client.get(f"/api/insight-types/{it_id}/runs?limit=99999").status_code == 400
+
+
+def test_insights_list_empty_returns_empty(api_client: TestClient) -> None:
+    assert api_client.get("/api/insights").json() == []
+
+
+def test_insights_list_returns_stored_card(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # Insert a card directly via the store, then read it through the API.
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard, Prediction
+
+    it_id = _make_combo(api_client)
+    now = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
+    card = InsightCard(
+        title="洞察", summary="s", body_md="b", tags=["TW"], symbol="2330", confidence=70,
+        prediction=Prediction(
+            metric="price_change", direction="up", target_pct=Decimal("0.05"),
+            horizon_days=5,
+        ),
+    )
+    istore.add_card(
+        golden_db, insight_type_id=it_id, card=card,
+        fingerprint=istore.fingerprint(it_id, "p", "d", "v1"), calibration_version=None,
+        horizon_days=5, input_snapshot="{}", model="m", cost_usd=Decimal("0.001"), now=now,
+    )
+    rows = api_client.get("/api/insights").json()
+    assert len(rows) == 1
+    assert rows[0]["title"] == "洞察"
+    assert rows[0]["prediction"]["target_pct"] == "0.05"  # Decimal STRING
+    assert rows[0]["due_at"] is not None
+    # filter by symbol
+    assert len(api_client.get("/api/insights?symbol=2330").json()) == 1
+    assert api_client.get("/api/insights?symbol=NOPE").json() == []
+    # filter by insight_type
+    assert len(api_client.get(f"/api/insights?insight_type={it_id}").json()) == 1

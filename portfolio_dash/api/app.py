@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session
 from portfolio_dash.api.errors import register_error_handlers
+from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
 from portfolio_dash.api.routers import (
     accounts,
     actions,
@@ -34,7 +35,7 @@ from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_co
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.pricing import snapshots_store
-from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded
+from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded, register_insight_runner
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.db import session
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
@@ -53,6 +54,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_system_prompt_seeded(conn)
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
         ensure_insights_tables(conn)  # insights cards table (spec 04b)
+    # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
+    # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
+    register_insight_runner(insight_run_for_id)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()

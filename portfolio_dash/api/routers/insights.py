@@ -8,6 +8,7 @@ strategy bodies use a ``per_symbol`` variable is rejected at create/update with 
 """
 
 import sqlite3
+import threading
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -19,14 +20,20 @@ from pydantic import BaseModel
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.llm_insight import composer_store as cs
+from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.scheduler.jobs import (
     bind_insight_schedule,
     insight_job_id,
+    latest_run_unfinished,
+    run_insight_func,
+    start_insight_run,
     unbind_insight_schedule,
 )
 
 router = APIRouter()
+
+_MAX_RUNS_LIMIT = 500
 
 
 # --- request bodies -----------------------------------------------------------
@@ -453,3 +460,131 @@ def put_evolution_config(
         max_shadows=payload.max_shadows,
         gap_alert_pp=gap,
     )
+
+
+# --- manual run (spec 4.2 / 4.10 — async 202 + poll) --------------------------
+
+
+@router.post("/insight-types/{insight_type_id}/run")
+def run_insight_now(
+    insight_type_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """Fire one insight generation now (async 202; the bg thread opens its own session).
+
+    Inserts a 'running' ``job_runs`` row synchronously (returning its id for polling), then
+    dispatches the registered insight runner in a daemon thread. Mirrors spec-15 ``/run``:
+    progress is polled via ``GET /api/insight-types/{id}/runs`` (running/ok/error/skipped).
+    """
+    cs.ensure_seeded(conn)
+    if cs.get_insight_type(conn, insight_type_id) is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
+        )
+    if latest_run_unfinished(conn, insight_job_id(insight_type_id)):
+        return JSONResponse(
+            status_code=409,
+            content=error_body("already_running", f"洞察組合 {insight_type_id} 執行中"),
+        )
+    run_id = start_insight_run(conn, insight_type_id, now=now)
+    thread = threading.Thread(
+        target=run_insight_func,
+        kwargs={"insight_type_id": insight_type_id, "now": now, "run_id": run_id},
+        daemon=True,
+    )
+    thread.start()
+    return JSONResponse(
+        status_code=202, content={"run_id": run_id, "insight_type_id": insight_type_id}
+    )
+
+
+def _insight_run_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "insight_type_id": int(row["payload"]) if row["payload"] is not None else None,
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "status": row["status"],
+        "detail": row["detail"],
+        "reason": row["reason"],
+        "cost_usd": row["cost_usd"],
+    }
+
+
+@router.get("/insight-types/{insight_type_id}/runs")
+def list_insight_runs(
+    insight_type_id: int,
+    limit: int = 50,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Run history for one insight_type (job_runs filtered by its kind=insight job_id).
+
+    Newest-first; each row carries the 3-state status (running=null finished_at / ok /
+    error / skipped) + the skip ``reason`` enum (R1..R8) for the polling UI (spec 04.10).
+    """
+    if limit > _MAX_RUNS_LIMIT:
+        return JSONResponse(
+            status_code=400,
+            content=error_body(
+                "validation_error", f"limit 不可超過 {_MAX_RUNS_LIMIT}", field="limit"
+            ),
+        )
+    rows = conn.execute(
+        "SELECT id, payload, started_at, finished_at, status, detail, reason, cost_usd "
+        "FROM job_runs WHERE job_id = ? ORDER BY id DESC LIMIT ?",
+        (insight_job_id(insight_type_id), limit),
+    ).fetchall()
+    return {"rows": [_insight_run_row(r) for r in rows]}
+
+
+# --- stored cards list (spec 4.10) --------------------------------------------
+
+
+def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
+    pred = rec.card.prediction
+    return {
+        "id": rec.id,
+        "insight_type_id": rec.insight_type_id,
+        "symbol": rec.symbol,
+        "is_shadow": rec.is_shadow,
+        "calibration_version": rec.calibration_version,
+        "title": rec.card.title,
+        "summary": rec.card.summary,
+        "body_md": rec.card.body_md,
+        "tags": rec.card.tags,
+        "confidence": rec.card.confidence,
+        "prediction": (
+            {
+                "metric": pred.metric,
+                "direction": pred.direction,
+                "target_pct": None if pred.target_pct is None else str(pred.target_pct),
+                "horizon_days": pred.horizon_days,
+            }
+            if pred is not None
+            else None
+        ),
+        "horizon_days": rec.horizon_days,
+        "due_at": rec.due_at,
+        "model": rec.model,
+        "cost_usd": rec.cost_usd,
+        "created_at": rec.created_at,
+    }
+
+
+@router.get("/insights")
+def list_insights(
+    insight_type: int | None = None,
+    symbol: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> list[dict[str, Any]]:
+    """List stored insight cards (newest first), optionally filtered by type and/or symbol.
+
+    Empty DB → ``[]``. Money/target_pct is a Decimal STRING (the frontend never computes).
+    """
+    istore.ensure_tables(conn)
+    return [
+        _card_wire(rec)
+        for rec in istore.list_cards(conn, insight_type_id=insight_type, symbol=symbol)
+    ]

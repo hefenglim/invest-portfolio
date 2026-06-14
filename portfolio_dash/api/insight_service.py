@@ -103,19 +103,21 @@ def run_for_id(
     fired_rule: str | None = None,
     fired_symbol: str | None = None,
     is_shadow: bool = False,
+    run_id: int | None = None,
 ) -> RunResult:
     """Load conn-bearing inputs and run one insight_type generation (the api seam).
 
     Builds the per-target VarContexts + the fed gate inputs, then delegates to the pure
     ``generate.run_insight_type``. ``fired_rule``/``fired_symbol`` are set for an on_alert
-    dispatch (R7). Returns the run result.
+    dispatch (R7). ``run_id`` finalizes a pre-inserted running row (async manual run).
+    Returns the run result.
     """
     it = cs.get_insight_type(conn, insight_type_id)
     if it is None:
         return run_insight_type(
             conn, insight_type_id, var_contexts={}, inputs=RunInputs(
                 budget_remaining=budget_remaining(conn)
-            ), now=now,
+            ), now=now, run_id=run_id,
         )
 
     data = build_dashboard(conn, now=now, reporting=reporting)
@@ -155,5 +157,6 @@ def run_for_id(
         fired_symbol=fired_symbol,
     )
     return run_insight_type(
-        conn, insight_type_id, var_contexts=var_contexts, inputs=inputs, now=now
+        conn, insight_type_id, var_contexts=var_contexts, inputs=inputs, now=now,
+        run_id=run_id,
     )

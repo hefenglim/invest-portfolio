@@ -141,9 +141,27 @@ def _write_job_run(
     reason: str,
     cost: Decimal,
     now: datetime,
+    run_id: int | None = None,
 ) -> None:
-    """Write a completed ``job_runs`` row for an insight run (raw SQL; no scheduler import)."""
+    """Record an insight run in ``job_runs`` (raw SQL; no scheduler import).
+
+    When *run_id* is given (the async manual-run path pre-inserted a ``running`` row), that
+    row is FINALIZED in place; otherwise a fresh completed row is inserted (the scheduler /
+    direct-call path). One row per run either way.
+    """
     job_id = f"insight:{insight_type_id}"
+    detail = reason or f"{status}"
+    if run_id is not None:
+        conn.execute(
+            "UPDATE job_runs SET finished_at = ?, status = ?, detail = ?, payload = ?, "
+            "reason = ?, cost_usd = ? WHERE id = ?",
+            (
+                datetime.now(UTC).isoformat(), status, detail, str(insight_type_id),
+                reason or None, str(cost), run_id,
+            ),
+        )
+        conn.commit()
+        return
     conn.execute(
         "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
         "reason, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -152,7 +170,7 @@ def _write_job_run(
             now.isoformat(),
             datetime.now(UTC).isoformat(),
             status,
-            reason,
+            detail,
             str(insight_type_id),
             reason or None,
             str(cost),
@@ -172,18 +190,20 @@ def run_insight_type(
     var_contexts: dict[str | None, V.VarContext],
     inputs: RunInputs,
     now: datetime,
+    run_id: int | None = None,
 ) -> RunResult:
     """Run one insight_type generation pass (Loop 1). See the module docstring for the flow.
 
     ``var_contexts`` is keyed by symbol (``None`` for a portfolio/on_alert run); the service
-    layer feeds one per resolved target. Returns a :class:`RunResult` and writes a matching
-    ``job_runs`` row. Pure controller — no pricing/data_ingestion read here.
+    layer feeds one per resolved target. Returns a :class:`RunResult` and records the run in
+    ``job_runs`` (finalizing *run_id* when the async path pre-inserted a running row, else
+    inserting a fresh row). Pure controller — no pricing/data_ingestion read here.
     """
     it = cs.get_insight_type(conn, insight_type_id)
     if it is None:
         _write_job_run(
             conn, insight_type_id, status="skipped", reason="unknown_insight_type",
-            cost=Decimal("0"), now=now,
+            cost=Decimal("0"), now=now, run_id=run_id,
         )
         return RunResult(
             status="skipped", reason="unknown_insight_type", cards_created=0,
@@ -195,7 +215,7 @@ def run_insight_type(
         reason = _block_reason_text(gate)
         _write_job_run(
             conn, insight_type_id, status="skipped", reason=reason, cost=Decimal("0"),
-            now=now,
+            now=now, run_id=run_id,
         )
         return RunResult(
             status="skipped", reason=reason, cards_created=0, cost_usd=Decimal("0")
@@ -272,7 +292,8 @@ def run_insight_type(
     status = "partial" if stopped_early else "ok"
     reason = "budget_exhausted_mid_run" if stopped_early else ""
     _write_job_run(
-        conn, insight_type_id, status=status, reason=reason, cost=total_cost, now=now
+        conn, insight_type_id, status=status, reason=reason, cost=total_cost, now=now,
+        run_id=run_id,
     )
     return RunResult(
         status=status, reason=reason, cards_created=created, cost_usd=total_cost

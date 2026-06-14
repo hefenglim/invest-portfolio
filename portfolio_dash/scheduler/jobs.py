@@ -26,6 +26,24 @@ logger = logging.getLogger(__name__)
 # 3 consecutive failed runs of an ingest job escalate its source health to "error".
 _FAIL_STREAK_THRESHOLD = 3
 
+# --- Insight runner registration (spec 04.2) ----------------------------------
+# The scheduler dispatches ``kind=insight`` schedule rows to a runner the app registers
+# at startup, so ``scheduler/`` never imports ``api`` (architecture.md: scheduler triggers
+# only). The runner reads pricing/portfolio (it lives in ``api/insight_service.py``).
+InsightRunner = Callable[..., object]
+_INSIGHT_RUNNER: InsightRunner | None = None
+
+
+def register_insight_runner(fn: InsightRunner | None) -> None:
+    """Register (or clear with None) the kind=insight dispatch runner (app wiring seam)."""
+    global _INSIGHT_RUNNER
+    _INSIGHT_RUNNER = fn
+
+
+def get_insight_runner() -> InsightRunner | None:
+    """The currently-registered insight runner, or None (not wired / scheduler-only)."""
+    return _INSIGHT_RUNNER
+
 # A job does its own trigger+wiring and returns a short run summary for job_runs.detail.
 JobFunc = Callable[..., str]
 
@@ -479,6 +497,37 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
         return
 
 
+def start_insight_run(conn: sqlite3.Connection, insight_type_id: int, *, now: datetime) -> int:
+    """Insert a 'running' insight ``job_runs`` row (kind=insight payload) and return its id.
+
+    Used by the async ``POST /api/insight-types/{id}/run`` to obtain a run id synchronously;
+    the background runner finalizes THIS row (via ``generate.run_insight_type(run_id=...)``).
+    """
+    cur = conn.execute(
+        "INSERT INTO job_runs (job_id, started_at, payload) VALUES (?, ?, ?)",
+        (insight_job_id(insight_type_id), now.isoformat(), str(insight_type_id)),
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def run_insight_func(insight_type_id: int, *, now: datetime, run_id: int) -> None:
+    """Daemon target: dispatch the registered insight runner in a fresh session.
+
+    The request handler already inserted the running row via :func:`start_insight_run`; this
+    opens its OWN connection and calls the runner with ``run_id`` so the same row is
+    finalized. Fully exception-safe (a fire-and-forget worker must never raise out).
+    """
+    try:
+        runner = _INSIGHT_RUNNER
+        if runner is None:
+            return
+        with session() as conn:
+            runner(conn, insight_type_id, now=now, run_id=run_id)
+    except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
+        return
+
+
 def log_export_run(
     conn: sqlite3.Connection, export_type: str, *, now: datetime, detail: str
 ) -> int:
@@ -498,7 +547,46 @@ def log_export_run(
     return int(cur.lastrowid or 0)
 
 
+def _insight_payload(conn: sqlite3.Connection, job_id: str) -> int | None:
+    """The insight_type_id payload of a kind=insight schedule row, or None when not one."""
+    row = conn.execute(
+        "SELECT kind, payload FROM schedule_config WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    if row is None or row["kind"] != "insight" or row["payload"] is None:
+        return None
+    try:
+        return int(row["payload"])
+    except (TypeError, ValueError):
+        return None
+
+
+def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int | None:
+    """Run one scheduled job, dispatching by ``kind`` (spec 04.2).
+
+    A ``kind=insight`` row is dispatched to the REGISTERED insight runner against its
+    payload (the insight_type_id); the runner owns its own ``job_runs`` record. Any other
+    job runs through the static JOBS registry via :func:`run_job` (returning its run id).
+    A kind=insight row with no registered runner is a safe no-op (returns None).
+    """
+    payload = _insight_payload(conn, job_id)
+    if payload is not None:
+        runner = _INSIGHT_RUNNER
+        if runner is None:
+            logger.info("kind=insight job %s fired but no runner is registered; skipping", job_id)
+            return None
+        try:
+            runner(conn, payload, now=now)
+        except Exception:  # noqa: BLE001 — a runner failure must never crash the scheduler
+            logger.exception("insight runner failed for %s", job_id)
+        return None
+    return run_job(conn, job_id, now=now)
+
+
 def trigger_job(job_id: str) -> None:
-    """Manual ad-hoc run of a job (used by the scheduler and a future manual-trigger route)."""
+    """Manual ad-hoc run of a job (used by the scheduler cron triggers).
+
+    Opens its own session and dispatches by kind (kind=insight → registered runner;
+    otherwise the static job). Fire-and-forget: any failure is swallowed by ``dispatch_job``.
+    """
     with session() as conn:
-        run_job(conn, job_id, now=datetime.now(UTC))
+        dispatch_job(conn, job_id, now=datetime.now(UTC))
