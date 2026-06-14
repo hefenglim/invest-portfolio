@@ -29,6 +29,7 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
 from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
+from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure_evaluations_tables
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.pricing import datasources_store, snapshots_store
@@ -113,6 +114,7 @@ def golden_db() -> Iterator[sqlite3.Connection]:
     ensure_composer_seeded(conn)  # insight-composer tables: created EMPTY (spec 04a)
     ensure_insights_tables(conn)  # insights cards table: created EMPTY (spec 04b)
     ensure_alert_events_tables(conn)  # alert_events + dispatch log: created EMPTY (spec 04b)
+    ensure_evaluations_tables(conn)  # insight_evaluations: created EMPTY (spec 04c)
     _seed_golden(conn)
     yield conn
     conn.close()

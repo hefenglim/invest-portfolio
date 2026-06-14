@@ -228,3 +228,13 @@ def test_evaluate_insights_job_no_runner_is_safe(conn: sqlite3.Connection) -> No
     # No runner wired (scheduler-only process) → no crash, returns a summary.
     detail = jobs.evaluate_insights(conn, now=NOW)
     assert isinstance(detail, str)
+
+
+def test_full_degrade_no_master_no_data(conn: sqlite3.Connection) -> None:
+    # The whole loop with NO master + NO due insights degrades to a no-op, never crashes:
+    # evaluate processes nothing; calibrate generates nothing; promote finds nothing.
+    from portfolio_dash.api import insight_service
+
+    assert insight_service.evaluate_due(conn, now=NOW) == 0
+    assert insight_service.generate_calibrations_for_all(conn, now=NOW) == 0
+    assert insight_service.promote_and_check(conn, now=NOW) == []

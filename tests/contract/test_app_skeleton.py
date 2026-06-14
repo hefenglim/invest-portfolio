@@ -36,3 +36,30 @@ def test_unknown_api_route_uses_error_envelope(skeleton_client: TestClient) -> N
     body = r.json()
     assert set(body["error"]) >= {"code", "message"}
     assert body["error"]["code"] == "not_found"
+
+
+def test_lifespan_creates_insight_evaluations(skeleton_client: TestClient) -> None:
+    # ai-score endpoint reads insight_evaluations; an empty boot returns the zeroed shape,
+    # proving the lifespan created the table (spec 04c).
+    r = skeleton_client.get("/api/ai-score")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["totals"]["n"] == 0
+    assert body["rows"] == []
+
+
+def test_lifespan_registers_evolution_runners(skeleton_client: TestClient) -> None:
+    # The app wires the Loop-2/3 runners to the api seam at startup.
+    from portfolio_dash.scheduler import jobs
+
+    assert jobs.get_evaluation_runner() is not None
+    assert jobs.get_calibration_runner() is not None
+
+
+def test_evolution_jobs_in_scheduler_config(skeleton_client: TestClient) -> None:
+    # The static evaluate/calibrate jobs are seeded into schedule_config (spec 04c).
+    r = skeleton_client.get("/api/scheduler/jobs")
+    assert r.status_code == 200
+    job_ids = {row["id"] for row in r.json()["jobs"]}
+    assert "evaluate_insights" in job_ids
+    assert "generate_calibrations" in job_ids
