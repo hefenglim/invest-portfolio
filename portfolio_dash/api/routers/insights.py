@@ -18,7 +18,8 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from portfolio_dash.api.deps import get_conn, get_now
+from portfolio_dash.api import insight_service
+from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
@@ -32,6 +33,7 @@ from portfolio_dash.scheduler.jobs import (
     start_insight_run,
     unbind_insight_schedule,
 )
+from portfolio_dash.shared.enums import Currency
 
 router = APIRouter()
 
@@ -609,6 +611,25 @@ def list_insight_runs(
         (insight_job_id(insight_type_id), limit),
     ).fetchall()
     return {"rows": [_insight_run_row(r) for r in rows]}
+
+
+# --- spec 07 §7.1: pipeline-hub task status -----------------------------------
+
+
+@router.get("/insight-tasks/status")
+def insight_tasks_status(
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+) -> dict[str, Any]:
+    """The converged single-source-of-truth task-status payload (spec 07 §7.1).
+
+    Read-only observability: the health bar + one pipeline card per task (five node states
+    + aggregate level). The fact-gathering lives in ``insight_service`` (it may read
+    pricing/portfolio) and feeds the PURE ``pipeline_status.derive_node_states``. No LLM is
+    called here. Empty DB → ``tasks: []`` + an AI-off health bar.
+    """
+    return insight_service.build_status(conn, now=now, reporting=reporting)
 
 
 # --- stored cards list (spec 4.10) --------------------------------------------

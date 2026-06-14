@@ -97,3 +97,99 @@ def test_old_insight_types_routes_still_work(api_client: TestClient) -> None:
     tid = _make_combo(api_client)
     assert api_client.get("/api/insight-types").status_code == 200
     assert api_client.post(f"/api/insight-types/{tid}/run").status_code == 202
+
+
+# --- §7.1 task-status API -----------------------------------------------------
+
+
+def test_status_empty_db_returns_empty_tasks(api_client: TestClient) -> None:
+    r = api_client.get("/api/insight-tasks/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tasks"] == []
+    assert "as_of" in body
+    health = body["health"]
+    # No master role bound and no top-ups in the golden DB → AI off, quota 0.
+    assert health["master_ok"] is False
+    assert health["quota_remaining"] == "0"  # Decimal STRING, never float
+    assert health["last_batch"] is None
+
+
+def test_status_lists_task_with_nodes_and_level(api_client: TestClient) -> None:
+    tid = _make_combo(api_client, scope="portfolio")
+    body = api_client.get("/api/insight-tasks/status").json()
+    assert len(body["tasks"]) == 1
+    task = body["tasks"][0]
+    assert task["id"] == tid
+    assert task["scope"] == "portfolio"
+    assert task["enabled"] is True
+    assert set(task["nodes"].keys()) == {"trigger", "input", "assemble", "exec", "output"}
+    # Unscheduled + quota 0 → trigger warn, exec fail → aggregate fail.
+    assert task["nodes"]["trigger"]["lv"] == "warn"
+    assert task["nodes"]["exec"]["lv"] == "fail"
+    assert task["level"] == "fail"
+    assert task["last_run"] is None  # never run
+
+
+def test_status_exec_node_reflects_quota(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    from decimal import Decimal
+
+    from portfolio_dash.shared.llm_config import add_topup
+
+    tid = _make_combo(api_client, scope="portfolio")
+    add_topup(golden_db, Decimal("5"), note="test")
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    assert task["nodes"]["exec"]["lv"] == "ok"  # quota 5 > quota_low 1
+
+
+def test_status_last_run_and_last_batch(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    tid = _make_combo(api_client, scope="portfolio")
+    # A finished non-shadow insight run + a card created in the same batch.
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
+        "cost_usd, is_shadow) VALUES (?, '2026-06-11T08:00:00+08:00', "
+        "'2026-06-11T08:00:05+08:00', 'ok', 'done', ?, '0.094', 0)",
+        (f"insight:{tid}", str(tid)),
+    )
+    golden_db.execute(
+        "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
+        "fingerprint, title, summary, body_md, tags, confidence, prediction, horizon_days, "
+        "due_at, input_snapshot, model, cost_usd, created_at) VALUES "
+        "(?, NULL, 0, NULL, 'fp', 't', 's', 'b', '[]', NULL, NULL, 5, NULL, '{}', 'm', "
+        "'0.094', '2026-06-11T08:00:00+08:00')",
+        (tid,),
+    )
+    golden_db.commit()
+    body = api_client.get("/api/insight-tasks/status").json()
+    task = next(t for t in body["tasks"] if t["id"] == tid)
+    assert task["last_run"]["status"] == "ok"
+    assert task["last_run"]["at"] == "2026-06-11T08:00:05+08:00"
+    last_batch = body["health"]["last_batch"]
+    assert last_batch is not None
+    assert last_batch["cost_usd"] == "0.094"  # Decimal STRING
+    assert last_batch["cards"] == 1
+
+
+def test_status_excludes_shadow_from_last_batch(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    tid = _make_combo(api_client, scope="portfolio")
+    # Only a SHADOW run exists → it must NOT surface as last_batch (spec 04 fix #3).
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
+        "cost_usd, is_shadow) VALUES (?, '2026-06-11T08:00:00+08:00', "
+        "'2026-06-11T08:00:05+08:00', 'ok', 'shadow', ?, '0.05', 1)",
+        (f"insight:{tid}", str(tid)),
+    )
+    golden_db.commit()
+    body = api_client.get("/api/insight-tasks/status").json()
+    assert body["health"]["last_batch"] is None
+    task = next(t for t in body["tasks"] if t["id"] == tid)
+    assert task["last_run"] is None  # shadow excluded from the task last_run too

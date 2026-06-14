@@ -23,6 +23,7 @@ import logging
 import sqlite3
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from portfolio_dash.api.routers.prompts import (
     _dividend_rows,
@@ -33,17 +34,21 @@ from portfolio_dash.api.routers.prompts import (
 from portfolio_dash.llm_insight import alerts_bridge, master, promote, scoring
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
+from portfolio_dash.llm_insight import insights_store as istore
+from portfolio_dash.llm_insight import pipeline_status as ps
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import Prediction
 from portfolio_dash.llm_insight.generate import RunInputs, RunResult, run_insight_type
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.portfolio.dashboard_models import DashboardData
+from portfolio_dash.portfolio.dashboard_models import DashboardData, FreshnessReport
 from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.scheduler.jobs import insight_job_id
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import (
     LLMError,
     LLMRole,
     budget_remaining,
+    get_alert_threshold,
     get_role_model_id,
 )
 
@@ -553,3 +558,188 @@ def promote_and_check(conn: sqlite3.Connection, *, now: datetime) -> list[int]:
         except Exception:  # noqa: BLE001 — one combo failing must not abort the pass
             logger.exception("promote_and_check failed for insight_type %s", it.id)
     return promoted
+
+
+# --- spec 07 §7.1: pipeline-hub task status (read-only fact gathering) ---------
+# The api layer reads pricing/portfolio/composer/scheduler to GATHER the facts, then feeds
+# them into the PURE ``pipeline_status.derive_node_states``. No business logic, no LLM, no
+# write. The freshness for a task's symbols REUSES the dashboard's own freshness computation
+# (the locked R4-source decision) — no new freshness path.
+
+
+def _is_scheduled(conn: sqlite3.Connection, insight_type_id: int) -> bool:
+    """True when a kind=insight ``schedule_config`` binding exists for the task."""
+    row = conn.execute(
+        "SELECT 1 FROM schedule_config WHERE job_id = ?",
+        (insight_job_id(insight_type_id),),
+    ).fetchone()
+    return row is not None
+
+
+def _template_counts(conn: sqlite3.Connection, insight_type_id: int) -> tuple[int, int]:
+    """(live, total) strategy counts for a task: live = enabled + non-archived (R3)."""
+    refs = cs.get_strategies(conn, insight_type_id)
+    live = 0
+    for ref in refs:
+        sp = cs.get_strategy(conn, ref.id)
+        if sp is not None and sp.enabled and not sp.archived:
+            live += 1
+    return live, len(refs)
+
+
+def _r1_mismatch(conn: sqlite3.Connection, it: cs.InsightType) -> bool:
+    """True when a non-per_symbol task's linked bodies use a per_symbol variable (R1).
+
+    Reuses the single ``variables.validate_tokens`` core (same as the gate / composer CRUD),
+    so this is observability over the SAME rule, never a re-implementation.
+    """
+    if it.scope == "per_symbol":
+        return False
+    for ref in cs.get_strategies(conn, it.id):
+        sp = cs.get_strategy(conn, ref.id)
+        if sp is None or not sp.enabled or sp.archived:
+            continue
+        if V.validate_tokens(sp.body, it.scope).scope_violations:
+            return True
+    return False
+
+
+def _unapplied_calibration(conn: sqlite3.Connection, it: cs.InsightType) -> bool:
+    """True when a non-archived calibration version exists that is not the active one."""
+    versions = cs.list_calibrations(conn, it.id)
+    if not versions:
+        return False
+    latest = versions[-1].version
+    return it.active_calibration_version != latest
+
+
+def _freshness_affected(freshness: FreshnessReport, symbols: list[str]) -> list[str]:
+    """The given symbols whose dashboard price is missing OR stale (the R4-source view).
+
+    Reuses the dashboard's own freshness (same snapshot): a symbol is affected when it is in
+    ``missing_prices`` or its ``PriceFreshness.stale`` flag is set. Preserves *symbols* order.
+    """
+    missing = set(freshness.missing_prices)
+    stale = {p.symbol for p in freshness.prices if p.stale}
+    affected = missing | stale
+    return [s for s in symbols if s in affected]
+
+
+def _last_run_for(conn: sqlite3.Connection, insight_type_id: int) -> dict[str, Any] | None:
+    """The task's most recent FINISHED non-shadow run (shadow excluded, spec 04 fix #3)."""
+    row = conn.execute(
+        "SELECT started_at, finished_at, status, detail, reason FROM job_runs "
+        "WHERE job_id = ? AND is_shadow = 0 AND finished_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (insight_job_id(insight_type_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    notes = [row["reason"]] if row["reason"] else []
+    return {
+        "at": row["finished_at"],
+        "status": row["status"],
+        "summary": row["detail"],
+        "notes": notes,
+    }
+
+
+def _gather_facts(
+    conn: sqlite3.Connection,
+    it: cs.InsightType,
+    data: DashboardData,
+    *,
+    quota_remaining: Decimal,
+    quota_low: Decimal,
+    master_configured: bool,
+) -> ps.PipelineFacts:
+    """Assemble the fed :class:`PipelineFacts` for one task (no derivation here)."""
+    universe = _resolve_universe(it, data) if it.scope == "per_symbol" else []
+    affected_scope = universe if it.scope == "per_symbol" else [h.symbol for h in data.holdings]
+    live, total = _template_counts(conn, it.id)
+    last_run = _last_run_for(conn, it.id)
+    return ps.PipelineFacts(
+        enabled=it.enabled,
+        scope=it.scope,
+        scheduled=_is_scheduled(conn, it.id),
+        universe_symbols=universe,
+        removed_recently=[],  # R2 removal events are surfaced by the gate; v1 status: none
+        missing_or_stale_symbols=_freshness_affected(data.freshness, affected_scope),
+        live_template_count=live,
+        total_template_count=total,
+        r1_mismatch=_r1_mismatch(conn, it),
+        unapplied_calibration=_unapplied_calibration(conn, it),
+        self_correct=it.self_correct,
+        master_configured=master_configured,
+        quota_remaining=quota_remaining,
+        quota_low=quota_low,
+        last_run_status=last_run["status"] if last_run is not None else None,
+    )
+
+
+def _last_batch(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """The most recent FINISHED non-shadow insight batch: ``{at, cards, cost_usd}`` or None.
+
+    ``cards`` counts the non-shadow insight rows created in that batch (their ``created_at``
+    equals the run's ``started_at`` — both stamped from the same injected ``now``).
+    """
+    row = conn.execute(
+        "SELECT started_at, finished_at, cost_usd FROM job_runs "
+        "WHERE job_id LIKE 'insight:%' AND is_shadow = 0 AND finished_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+    ).fetchone()
+    if row is None:
+        return None
+    cards_row = conn.execute(
+        "SELECT COUNT(*) AS c FROM insights WHERE is_shadow = 0 AND created_at = ?",
+        (row["started_at"],),
+    ).fetchone()
+    return {
+        "at": row["finished_at"],
+        "cards": int(cards_row["c"]) if cards_row is not None else 0,
+        "cost_usd": row["cost_usd"] if row["cost_usd"] is not None else "0",
+    }
+
+
+def build_status(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
+) -> dict[str, Any]:
+    """Build the spec-07 §7.1 task-status payload (health bar + per-task pipeline cards).
+
+    Read-only: gathers facts (schedule/universe/freshness/templates/quota/last-run) and
+    feeds the PURE node-state derivation. Empty DB → ``tasks: []`` + an AI-off health bar.
+    Money/quota are Decimal STRINGS on the wire (the frontend never computes).
+    """
+    cs.ensure_seeded(conn)
+    istore.ensure_tables(conn)
+    quota = budget_remaining(conn)
+    quota_low = get_alert_threshold(conn)
+    master_configured = get_role_model_id(conn, LLMRole.MASTER) is not None
+    data = build_dashboard(conn, now=now, reporting=reporting)
+
+    tasks: list[dict[str, Any]] = []
+    for it in cs.list_insight_types(conn):
+        facts = _gather_facts(
+            conn, it, data, quota_remaining=quota, quota_low=quota_low,
+            master_configured=master_configured,
+        )
+        derived = ps.derive_node_states(facts)
+        tasks.append({
+            "id": it.id,
+            "name": it.name,
+            "scope": it.scope,
+            "enabled": it.enabled,
+            "level": derived.level,
+            "nodes": {k: v.model_dump() for k, v in derived.nodes.items()},
+            "last_run": _last_run_for(conn, it.id),
+        })
+
+    return {
+        "as_of": now.isoformat(),
+        "health": {
+            "master_ok": master_configured,
+            "quota_remaining": str(quota),
+            "last_batch": _last_batch(conn),
+        },
+        "tasks": tasks,
+    }
