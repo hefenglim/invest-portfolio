@@ -20,7 +20,7 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.pricing import datasources_store as store
-from portfolio_dash.pricing import index_source, sentiment_source
+from portfolio_dash.pricing import sentiment_source
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.providers.klsescreener_provider import KlseScreenerProvider
 from portfolio_dash.pricing.providers.malaysiastock_provider import MalaysiaStockProvider
@@ -203,9 +203,6 @@ def _probe_free_source(source_id: str) -> tuple[bool, str | None] | None:
     if source_id == "cnn_fng":
         fng = sentiment_source.fetch_fear_greed()
         return (fng is not None, f"score={fng['score']}" if fng else "CNN 無回應")
-    if source_id == "index":
-        quotes = index_source.fetch_indices()
-        return (bool(quotes), f"{len(quotes)} 指數" if quotes else "指數無回應")
     return None
 
 

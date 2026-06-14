@@ -61,6 +61,43 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **Data-source catalog, provider expansion & external-snapshot ingest (spec 20, Phase 4 —
+  absorbs the planned 06b):** the data layer that makes the chips/sentiment prompt variables
+  live. **Two seams** (control plane = spec 14 settings/keys/health/fallback; data plane =
+  spec 20): the existing `pricing/` registry + providers stays the single interface — adding a
+  source = one adapter + one catalog row + one probe adapter. New `pricing/snapshots_store.py`
+  (append-only `external_snapshots`: source/dataset/symbol/as_of/payload/fetched_at, latest
+  `fetched_at` wins; created EMPTY in `golden_db` so every external var degrades and prior
+  suites stay green); `pricing/finmind_datasets.py` (FinMind Free-tier client for
+  institutional/margin/PER/monthly-revenue/financials, **always per-`data_id` → Free tier**);
+  `pricing/sentiment_source.py` (VIX via yfinance `^VIX` + CNN Fear&Greed free JSON) +
+  `index_source.py` (yfinance `^TWII`/`^GSPC`/`^KLSE`); 4 free quote fallbacks
+  (`twstock`/`stockprices_dev`/`klsescreener`/`malaysiastock`) wired into
+  `DEFAULT_PROVIDER_ORDER`; `portfolio/external_signals.py` (pure Decimal derivations —
+  consecutive-buy-days, net-buy-sum, chg/yoy/mom with None on denom≤0, percentile, vix_zone —
+  numbers of record stay out of `llm_insight`); `pricing/ingest.py` + 5 scheduler ingest jobs
+  (TW universe via direct SQL — `scheduler` imports no `data_ingestion`; 3-consecutive-fail
+  warn → `data_source_health`). Catalog (`datasources_store.SOURCE_INFO`) expanded to the full
+  ~15-source matrix with `provides`/`status` (`live`/`pending`/`blocked`); token-gated adapters
+  (alphavantage/finnhub/fred) catalogued `pending` + key-gated `supports` (inert until a key is
+  entered — not in the fallback order); the 7 chips/sentiment variables flipped `available=true`,
+  served from snapshots via `VarContext` (router-fed; `llm_insight` imports neither `pricing`
+  nor `data_ingestion`), degrading to `{"unavailable": true}` when a snapshot is missing.
+- **FinMind auth & tier-awareness (spec 20.15, per the official AI-agent manual):** both
+  FinMind callers switched to `Authorization: Bearer {token}` (token still DB-resolved), added
+  optional `end_date`. Per-source token tier marking — `data_sources.tier` (additive idempotent
+  migration), `SourceInfo.tiers`, `TIER_ORDER`, `PUT /api/datasources/{id}/tier` (400 unknown
+  tier / `auth:"none"`; 404 unknown id), `tier`/`tiers` on the GET wire. `DATASET_TIER` (all 5
+  = `free`) + a **local tier preflight** that raises `FinMindTierError` BEFORE any network call
+  when the marked token tier is too low; HTTP 402 / JSON `status==402` → `FinMindQuotaError`
+  carrying FinMind's message; `fetch_quota` reads `user_info` (`user_count`/`api_request_limit`).
+  `GET /api/prompt-vars` now carries `required_tier`/`tier_ok`/`tier_label` so the frontend greys
+  out variables/panels needing a higher plan; ingest catching tier/quota errors writes no
+  snapshot and records `data_source_health` (status=error, reason) → the variable degrade payload
+  carries the `reason` (router-fed). Non-regression: under a free/unset token the 5 chips vars
+  stay `tier_ok=true`. Probe harness extended (Bearer, `fetch_quota`, tier-from-limit) +
+  bounded `docs/probes/` refresh; full source matrix authored in
+  `docs/design-handoff/.../specs/20-data-source-catalog.md`.
 - **Data-variable & prompt-rendering foundation (spec 06a, Phase 4 — the AI brain's base):**
   the prompt "Lego-block" layer that specs 04/07 build on. New module `portfolio_dash/llm_insight/`
   (`variables.py` = a **26-variable / 8-category registry** mirroring `web/vars.js` + `render_prompt`

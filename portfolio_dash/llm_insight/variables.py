@@ -157,7 +157,7 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- chips (籌碼與基本面 / FinMind) — live from external_snapshots (spec 20.2) ---
     VarSpec(
         "institutional_json", "法人買賣超", "chips", "per_symbol", True,
-        "外資/投信/自營近 20 日買賣超與連買連賣天數（台股）",
+        "外資近 20 日買賣超與連買連賣天數（台股）",
         '{"symbol":"2330","foreign_net_20d":"+48200","consecutive_buy_days":6}',
     ),
     VarSpec(
