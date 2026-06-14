@@ -303,3 +303,101 @@ add a sentiment/index probe adapter; refresh `docs/probes/2026-06-08-data-source
 - Money discipline: all parse via `Decimal(str(x))`; derivations pure Decimal; ratios None on
   denom≤0 (Task 4). ✓
 - No numbers of record from LLM: derivations in `portfolio/`, assembly in `llm_insight` (Task 4/9). ✓
+
+---
+
+# Enhancement — FinMind auth/tier-awareness (spec 20.15)
+
+> Layered on top of the merged base (Tasks 1–10 are DONE on `main`). Follows the FinMind
+> official AI-agent manual (`docs/data-provider/FinMind/llms.txt` / `llms-full.txt`). Same TDD,
+> gates, layering, and commit rules. Baseline before starting: 630 passed / 4 skipped, mypy
+> clean (121 files), ruff clean. Keep all three green per task.
+
+## Task 11: Token-tier marking in the catalog
+
+**Files:** Modify `portfolio_dash/pricing/datasources_store.py`,
+`portfolio_dash/api/routers/datasources.py`; update `tests/contract/test_datasources_api.py`,
+add `tests/pricing/test_datasource_tiers.py`.
+
+- [ ] **Step 1: Failing tests.** `data_sources` gains a nullable `tier` column (migrate idempotently —
+  reuse the established `_add_column_if_missing`/guarded-ALTER pattern; an existing DB without the
+  column still opens). `set_tier(conn, id, tier)` persists; `SourceState.tier` reads it.
+  `SourceInfo.tiers` lists selectable tiers (finmind=[free,backer,sponsor,sponsorpro];
+  alphavantage=[free,premium]; auth:"none" → None). `GET /api/datasources` wire emits `tier`
+  (current) + `tiers` (options). `PUT /api/datasources/{id}/tier {tier}` sets it; unknown tier →
+  400; `auth:"none"` source → 400; unknown id → 404. Keep all prior datasources assertions green.
+- [ ] **Step 2:** Run → FAIL.
+- [ ] **Step 3: Implement.** Add the column + migration in `datasources_store` (DDL + safe ALTER);
+  `tier` in `SourceState`; `tiers` in `SourceInfo` (+ populate `SOURCE_INFO`); `set_tier`;
+  `TIER_ORDER` constant. Router: emit `tier`/`tiers`; add the PUT tier route with validation.
+- [ ] **Step 4:** Tests → PASS; mypy/ruff clean.
+- [ ] **Step 5: Commit** `feat(pricing,api): per-source token tier marking (spec 20.15.2)`.
+
+## Task 12: FinMind client — Bearer auth, end_date, tier/quota errors
+
+**Files:** Modify `portfolio_dash/pricing/finmind_datasets.py`,
+`portfolio_dash/pricing/providers/finmind_provider.py`; add `tests/pricing/test_finmind_tier.py`;
+extend `tests/pricing/test_finmind_datasets.py`.
+
+- [ ] **Step 1: Failing tests.** (a) `fetch_dataset` sends `Authorization: Bearer {token}` header
+  (assert via the monkeypatched `requests.get` capturing headers) — token still resolved from the
+  DB via `datasources_store.get_api_key`. (b) `end_date` is forwarded when given. (c) HTTP 402 OR
+  JSON `{"status":402,...}` → raises `FinMindQuotaError` carrying the FinMind `msg`. (d)
+  `DATASET_TIER` maps the 5 datasets → `"free"`; a **local preflight** (`required_tier > token tier`)
+  raises `FinMindTierError(required_tier=...)` WITHOUT making a network call (assert `requests.get`
+  not called). (e) `finmind_provider.fetch_dividends` also uses the Bearer header. (f) `fetch_quota`
+  parses `user_count`/`api_request_limit` from a monkeypatched `user_info` response.
+- [ ] **Step 2:** Run → FAIL.
+- [ ] **Step 3: Implement.** Switch both FinMind callers to the Bearer header. Add `end_date`
+  param (optional). `DATASET_TIER: dict[str,str]` (logical name → required tier; all 5 = "free").
+  Reuse `TIER_ORDER` (import from `datasources_store`). `fetch_dataset(conn, *, dataset, data_id,
+  start_date, end_date=None)`: read token tier via the store; if `TIER_ORDER[required] >
+  TIER_ORDER[token_tier or "free"]` → raise `FinMindTierError`; else GET with Bearer; if HTTP 402
+  or json status 402 → `FinMindQuotaError(msg)`; else return `data`. `fetch_quota(conn)` GETs
+  `https://api.web.finmindtrade.com/v2/user_info` (Bearer) → `{"user_count","api_request_limit"}`.
+  Define both exceptions in this module.
+- [ ] **Step 4:** Tests → PASS; mypy/ruff clean.
+- [ ] **Step 5: Commit** `feat(pricing): FinMind Bearer auth + end_date + tier/quota guards (spec 20.15.1/4)`.
+
+## Task 13: Variable tier exposure + graceful ingest degrade
+
+**Files:** Modify `portfolio_dash/llm_insight/variables.py`,
+`portfolio_dash/api/routers/prompts.py`, `portfolio_dash/api/routers/datasources.py` (prompt-vars
+lives in `prompts.py`), `portfolio_dash/pricing/ingest.py`, `portfolio_dash/scheduler/jobs.py`;
+extend `tests/contract/test_prompts_external_vars.py`, `tests/scheduler/test_ingest_jobs.py`,
+`tests/llm_insight/test_variables.py`.
+
+- [ ] **Step 1: Failing tests.** (a) `GET /api/prompt-vars`: each var carries `required_tier`
+  (the 5 FinMind chips = "free"; sentiment/index = null), `tier_ok` (computed vs the finmind
+  source's marked tier; null required → true), and `tier_label` ("需要 Backer 方案") only when
+  `tier_ok=false`. With a finmind tier of "free", all 5 → `tier_ok=true`; simulate a future
+  backer-required var (a tiny fixture/parametrize) → `tier_ok=false` + label. (b) An ingest run
+  whose FinMind client raises `FinMindTierError`/`FinMindQuotaError` writes NO snapshot and upserts
+  `data_source_health` (status="error", detail carries the reason); `job_runs` records the failure.
+  (c) preview of a chips var when the latest health for that (source,dataset) is a tier error and
+  no snapshot exists → degrade payload `{"unavailable": true, "reason": "<reason>"}` (reason fed by
+  the router from health; `llm_insight` does not import pricing/health).
+- [ ] **Step 2:** Run → FAIL.
+- [ ] **Step 3: Implement.** `variables.py`: add `required_tier` to `VarSpec` (or a side map) and a
+  pure `tier_ok(required, token_tier)` helper using `TIER_ORDER`; `value_for` degrade returns
+  `{"unavailable": True, "reason": ...}` when a reason is fed via `VarContext` (else just
+  `{"unavailable": True}`). `prompts.py`: prompt-vars handler computes `tier_ok`/`tier_label` from
+  the finmind source tier (read via store); `_build_context` reads latest `data_source_health`
+  detail per (source,dataset) and feeds reasons into `VarContext`. `ingest.py`/`jobs.py`: wrap each
+  FinMind ingest so `FinMindTierError`/`FinMindQuotaError` → `upsert_health(status="error",
+  detail=reason)` + recorded job failure, no snapshot write (degrade, never crash).
+- [ ] **Step 4:** Tests → PASS; mypy/ruff clean. Full suite green.
+- [ ] **Step 5: Commit** `feat(llm_insight,api,pricing): variable tier-gating + graceful tier/quota degrade (spec 20.15.3/4)`.
+
+## Task 14: Probe quota note + docs
+
+- [ ] Extend the finmind probe adapter to optionally report `fetch_quota` (skipped without a key)
+  and note the tier model in `docs/probes/...` (bounded edit). Commit
+  `test(probe): FinMind quota/tier note (spec 20.15.5)`.
+
+## Enhancement self-review (against spec 20.15)
+- 20.15.1 Bearer+end_date → Task 12. 20.15.2 tier model/columns → Task 11/12. 20.15.3 API+UX
+  fields → Task 13. 20.15.4 graceful failure → Task 12/13. 20.15.5 quota → Task 12/14. ✓
+- Non-regression: 5 FinMind vars stay `tier_ok=true` under a free token; existing suites green
+  (golden_db finmind tier defaults to free/none). ✓
+- Layering: `llm_insight` still imports no pricing/health — reasons fed via `VarContext`. ✓

@@ -299,3 +299,75 @@ twelvedata（候選）。
 
 **驗收：** 全 gate 綠（pytest / mypy --strict / ruff）；chips/sentiment 變數在 golden_db
 （無快照）回 `unavailable`、有快照回衍生值；CHANGELOG 完整性；token 源在面板顯示「待測試」。
+
+---
+
+## 20.15 FinMind 認證、分層權限與額度（官方手冊 2026-06-14 補強）
+
+> 依 FinMind 官方 AI-Agent 手冊（`docs/data-provider/FinMind/llms.txt` / `llms-full.txt`）
+> 補強。涵蓋使用者新需求：**前端面板標記 token 資費等級；變數/資訊面板依等級反灰並標示
+> 需要的方案；free token 誤取付費資料時優雅失敗**。
+
+### 20.15.1 認證與請求（改進既有 client）
+- **認證改用 `Authorization: Bearer {token}` header**（官方標準；取代 `?token=` query param）。
+  套用於 `finmind_provider.py`（股利）與 `finmind_datasets.py`（快照）。
+- `/data` 參數新增 **`end_date`** 支援，做有界日期區間抓取（省額度）。
+- **保證帶 `data_id`（單檔查詢）**：多個資料集「帶 data_id=Free／不帶 data_id 全市場=
+  Backer/Sponsor」。本 app 所有 FinMind ingest **一律逐檔帶 data_id**，恆落 Free 層。
+
+### 20.15.2 分層權限模型（tier-awareness）
+- **TIER_ORDER**：`{"free":0, "backer":1, "sponsor":2, "sponsorpro":3}`。
+- **token 等級**：`data_sources` 表新增欄 `tier TEXT`（使用者於面板標記；null = 未知，
+  視同最低有效層）。`SourceInfo` 新增 `tiers: list[str] | None`（該來源可選等級，供面板
+  下拉；FinMind=[free,backer,sponsor,sponsorpro]；alphavantage=[free,premium]；
+  auth:"none" 來源 = None）。
+- **dataset → 必要等級**：FinMind 專屬 map（`finmind_datasets.DATASET_TIER`），記錄各
+  dataset **以本 app 的查詢方式（帶 data_id）** 所需等級。本輪 5 個全為 `free`。未來付費
+  dataset（如還原股價=backer、可轉債=backer、即時=sponsor）登錄其等級。
+- **變數 → 必要等級**：每個外部變數對應 `(source_id, required_tier)`。本輪 5 個 FinMind
+  chips 變數 = `("finmind","free")`；sentiment/index（VIX/CNN/yfinance）= 無等級（恆可用）。
+
+### 20.15.3 API 與前端體驗
+- `GET /api/prompt-vars` 每個變數新增：`required_tier`（如 `"free"|"backer"|null`）、
+  `tier_ok`（依該來源 token 目前標記等級計算：token_order ≥ required_order；無等級恆 true）、
+  `tier_label`（如 `"需要 Backer 方案"`，僅 `tier_ok=false` 時）。
+- **前端**：`tier_ok=false` 的變數/資訊面板項目**反灰**，標示 `tier_label`；資訊面板同理
+  辨識所需方案。`GET /api/datasources` wire 新增 `tier`（目前標記）+ `tiers`（可選清單）；
+  面板付費源顯示等級下拉 + 用量（見 20.15.5）。
+- 設定等級：`PUT /api/datasources/{id}/key` body 擴充可選 `tier`，或 `PUT
+  /api/datasources/{id}/tier`（擇一；對 `auth:"none"` 來源設等級 → 400）。
+
+### 20.15.4 優雅失敗（誤用付費 / 額度耗盡）
+- `finmind_datasets.fetch_dataset` 偵測非成功回應：
+  - **HTTP 402 或 JSON `status==402`**（`{'msg':'Requests reach the upper limit...','status':402}`）
+    → 拋 `FinMindQuotaError(msg)`。
+  - **權限/層級不足**（JSON `status` 非 200 且訊息屬權限類，或 dataset 必要等級 > token
+    等級的本地預檢）→ 拋 `FinMindTierError(msg, required_tier)`。**本地預檢**：呼叫前先比對
+    `DATASET_TIER[dataset]` 與 token `tier`，不足即不發請求、直接拋 `FinMindTierError`
+    （省額度、訊息明確）。
+- ingest job 捕捉這兩類錯誤：**不寫快照**，改 upsert `data_source_health`
+  （status=`error`，detail = 原因摘要，如「需要 Backer 方案」/「額度已滿」），並記 `job_runs`。
+- 變數降級：快照缺漏時回 `{"unavailable": true, "reason": <可選>}`，`reason` 由 router 從該
+  (source,dataset) 最新 health detail 餵入（`llm_insight` 不直接讀 health，承 06a 分層）。
+  LLM 看得懂、面板可顯示「此資料需 Backer 方案」。
+
+### 20.15.5 額度查詢（面板/測試，選配）
+- `finmind_datasets.fetch_quota(conn) -> {"user_count": int, "api_request_limit": int}`：
+  `GET https://api.web.finmindtrade.com/v2/user_info`（Bearer）。`POST /api/datasources/
+  finmind/test` 可順帶回傳用量 + 由 `api_request_limit` 推斷等級（600=free、1600=backer、
+  6000=sponsor、20000=sponsorpro）供面板顯示與標記校驗。額度耗盡（402）亦為合法測試結果。
+
+### 20.15.6 本次增量建置範圍
+1. `data_sources.tier` 欄 + 遷移；`SourceInfo.tiers`；`set_tier` / 讀取；`GET /api/datasources`
+   wire 出 `tier`/`tiers`；PUT 設定等級（auth:none → 400）。
+2. `finmind_datasets.py`：Bearer header；`end_date`；`DATASET_TIER` map + TIER_ORDER；
+   本地預檢 + `FinMindQuotaError`/`FinMindTierError`；`fetch_quota`（選配）。
+3. `finmind_provider.py`（股利）：同步改 Bearer header。
+4. 變數層：`required_tier`/`tier_ok`/`tier_label` 經 `GET /api/prompt-vars` 輸出；degrade
+   payload 帶 `reason`（router 由 health 餵入）。
+5. ingest：捕捉 tier/quota 錯誤 → health（reason）+ job_runs，不寫快照。
+6. 測試：tier 比較、本地預檢拋錯、402 解析、Bearer header 用法、變數 tier_ok 計算、
+   degrade reason。**全程 monkeypatch，無網路。**
+
+**不破壞既有**：本輪 5 個 FinMind 變數必要等級皆 `free`，使用者註冊 free token（600/hr）
+下 `tier_ok=true`、不反灰；tier 基礎建設主要服務未來付費 dataset 與資訊面板。
