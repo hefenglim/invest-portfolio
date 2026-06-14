@@ -10,6 +10,19 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 ## [Unreleased]
 
 ### Changed
+- **Money/Decimal wire-string unification (#2c/M1 foundation hardening, 2026-06-15):** every Decimal
+  now serializes to the JSON wire in ONE canonical form — `format(d, "f")` (fixed-point, full source
+  precision, trailing zeros preserved, **never scientific notation**) — identical to the DB form
+  (`money.to_db`). New `shared/wire.decimal_str`; `to_wire`'s Decimal branch routes through it (was
+  `str(Decimal)`, which could emit `1E-7`-style sci-notation); `money.to_db` delegates to it
+  (byte-identical, float/non-finite guards kept). All direct `str(<Decimal>)` wire bypasses migrated to
+  the canonical encoder across `api/wire.py` + routers (dashboard `spark_30d`/`llm_quota`, input_center
+  [**`_money_str`/`normalize()` removed**], symbol, ledgers, llm_settings, instruments, strategy,
+  prompts, insights) and `api/insight_service.py`; `str()` on ints/ids/enums left untouched. Done
+  **before frontend wiring** so the UI binds to a stable money format and formats for display itself
+  (full precision stays on the wire; quantize only at display, per `data-and-pricing.md`). One spec-17
+  golden value changed (a trailing zero now preserved: `612500.0`, not `612500`); spec-18 round-trip +
+  a no-scientific-notation guard added. (+21 tests; 980 → 1001 passed.)
 - **LLM budget model — single topup-cumulative (2026-06-13, human sign-off; senior-review
   finding I-1):** the USD budget is now one number — `budget_remaining = Σ top-ups − Σ usage`
   (`shared/llm_config`). `remaining <= 0` blocks (`check_budget` raises `LLMBudgetExceeded`),
