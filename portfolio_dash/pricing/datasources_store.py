@@ -38,31 +38,73 @@ class SourceInfo(BaseModel, frozen=True):
     name: str
     type: str  # "stock" | "dividend" | "fx" | "news" (frontend groups on this)
     markets: list[str]
-    auth: str  # "none" | "apikey"
+    auth: str  # "none" | "apikey" | "oauth"
     note: str
+    provides: list[str] = []  # data types this source can supply (spec 20.1)
+    status: str = "live"  # "live" | "pending" | "blocked" (spec 20.1)
 
 
 # Ordered for stable GET output. ``type`` matches the frontend's grouping keys
-# (settings-datasources.js): stock / dividend / fx / news.
+# (settings-datasources.js): stock / dividend / fx / news. ``provides``/``status``
+# (spec 20.1) carry the full per-source data-type catalog + readiness.
 SOURCE_INFO: tuple[SourceInfo, ...] = (
+    # --- live (implemented + validated) -----------------------------------
+    SourceInfo(id="yfinance", name="Yahoo Finance", type="stock",
+               markets=["US", "TW", "MY", "FX"], auth="none",
+               provides=["quote_latest", "quote_history", "dividend", "fx",
+                         "index", "sentiment"],
+               note="美股、台股、馬股、ETF、匯率、指數、VIX・免金鑰（有速率限制）"),
     SourceInfo(id="twse", name="台灣證券交易所 (TWSE)", type="stock", markets=["TW"],
-               auth="none", note="台股收盤報價・免金鑰"),
+               auth="none", provides=["quote_latest"], note="台股收盤報價・免金鑰"),
     SourceInfo(id="tpex", name="櫃買中心 (TPEx)", type="stock", markets=["TW"],
-               auth="none", note="上櫃股票報價・免金鑰"),
-    SourceInfo(id="yfinance", name="Yahoo Finance", type="stock", markets=["US", "MY"],
-               auth="none", note="美股、馬股、ETF 報價・免金鑰（有速率限制）"),
-    SourceInfo(id="alphavantage", name="Alpha Vantage", type="stock", markets=["US"],
-               auth="apikey", note="美股後備來源・免費層 25 req/day"),
-    SourceInfo(id="klse", name="KLSE Screener", type="stock", markets=["MY"],
-               auth="none", note="馬股後備來源"),
-    SourceInfo(id="finmind", name="FinMind", type="dividend", markets=["TW"],
-               auth="apikey", note="台股股利、除息行事曆・付費 API"),
-    SourceInfo(id="divtracker", name="Dividend Tracker API", type="dividend",
-               markets=["US"], auth="apikey", note="美股股利資料"),
-    SourceInfo(id="newsapi", name="NewsAPI.org", type="news", markets=["ALL"],
-               auth="apikey", note="財經新聞截取"),
+               auth="none", provides=["quote_latest"], note="上櫃股票報價・免金鑰"),
+    SourceInfo(id="finmind", name="FinMind", type="dividend", markets=["TW", "US", "FX"],
+               auth="apikey",
+               provides=["dividend", "quote_history", "institutional", "margin",
+                         "valuation", "monthly_revenue", "financials", "news", "macro"],
+               note="台股股利、籌碼、基本面・Free 層 600/hr"),
+    SourceInfo(id="twstock", name="twstock", type="stock", markets=["TW"], auth="none",
+               provides=["quote_latest"], note="台股盤中即時報價後備・免金鑰"),
+    SourceInfo(id="stockprices_dev", name="stockprices.dev", type="stock", markets=["US"],
+               auth="none", provides=["quote_latest"],
+               note="美股報價後備・免金鑰（flaky，僅後備）"),
+    SourceInfo(id="klsescreener", name="KLSE Screener", type="stock", markets=["MY"],
+               auth="none", provides=["quote_latest"],
+               note="馬股報價後備・3-dp string・免金鑰"),
+    SourceInfo(id="malaysiastock", name="Malaysiastock.biz", type="stock", markets=["MY"],
+               auth="none", provides=["quote_latest"],
+               note="馬股次要 string 報價源・免金鑰"),
+    SourceInfo(id="cnn_fng", name="CNN Fear & Greed", type="sentiment", markets=["ALL"],
+               auth="none", provides=["sentiment"], note="市場情緒指數・免金鑰"),
     SourceInfo(id="fx_ecb", name="ECB 歐洲央行匯率", type="fx", markets=["ALL"],
-               auth="none", note="每日匯率・免金鑰"),
+               auth="none", provides=["fx"], note="每日匯率・免金鑰"),
+    # --- pending (implemented; awaiting a key to validate) -----------------
+    SourceInfo(id="alphavantage", name="Alpha Vantage", type="stock", markets=["US", "FX"],
+               auth="apikey", provides=["quote_latest", "quote_history", "fx"],
+               status="pending", note="美股後備來源・免費層約 25/day（待測試）"),
+    SourceInfo(id="finnhub", name="Finnhub", type="stock", markets=["US"], auth="apikey",
+               provides=["quote_latest", "dividend"], status="pending",
+               note="美股即時報價 / 股利・60/min（待測試）"),
+    SourceInfo(id="fred", name="FRED（聯準會經濟資料）", type="macro", markets=["ALL"],
+               auth="apikey", provides=["macro"], status="pending",
+               note="總體經濟序列・需金鑰（待測試）"),
+    SourceInfo(id="schwab", name="Charles Schwab API", type="stock", markets=["US"],
+               auth="oauth",
+               provides=["quote_latest", "quote_history", "dividend", "positions"],
+               status="pending", note="券商 API・OAuth・待申請（待測試）"),
+    SourceInfo(id="pytrends", name="Google Trends", type="trends", markets=["ALL"],
+               auth="none", provides=["trends"], status="pending",
+               note="搜尋熱度敘事訊號・非官方易限流（待測試）"),
+    SourceInfo(id="divtracker", name="Dividend Tracker API", type="dividend",
+               markets=["US"], auth="apikey", provides=["dividend"], status="pending",
+               note="美股股利資料（待測試）"),
+    SourceInfo(id="newsapi", name="NewsAPI.org", type="news", markets=["ALL"],
+               auth="apikey", provides=["news"], status="pending",
+               note="財經新聞截取（待測試）"),
+    # --- blocked (catalogue only) -----------------------------------------
+    SourceInfo(id="bursa", name="Bursa Malaysia 官網", type="stock", markets=["MY"],
+               auth="none", provides=["quote_latest"], status="blocked",
+               note="Cloudflare JS challenge・需 headless（受阻）"),
 )
 
 SOURCE_INFO_BY_ID: dict[str, SourceInfo] = {s.id: s for s in SOURCE_INFO}

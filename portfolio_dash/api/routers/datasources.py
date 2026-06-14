@@ -20,6 +20,14 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.pricing import datasources_store as store
+from portfolio_dash.pricing import index_source, sentiment_source
+from portfolio_dash.pricing.providers.base import ProviderBase
+from portfolio_dash.pricing.providers.klsescreener_provider import KlseScreenerProvider
+from portfolio_dash.pricing.providers.malaysiastock_provider import MalaysiaStockProvider
+from portfolio_dash.pricing.providers.stockprices_dev_provider import StockPricesDevProvider
+from portfolio_dash.pricing.providers.twstock_provider import TwStockProvider
+from portfolio_dash.pricing.refs import InstrumentRef
+from portfolio_dash.shared.enums import Market
 
 router = APIRouter()
 
@@ -32,7 +40,12 @@ _PROBE_TIMEOUT_S = 10.0
 def _source_wire(
     info: store.SourceInfo, state: store.SourceState | None
 ) -> dict[str, Any]:
-    """Merge a static source description with its persisted (masked) state."""
+    """Merge a static source description with its persisted (masked) state.
+
+    ``provides``/``status`` carry the spec-20.1 catalog. A catalog ``status`` of
+    ``pending``/``blocked`` (not yet validated / unusable) wins over the dynamic
+    health status; a ``live`` source's wire ``status`` follows its health row.
+    """
     api_key = state.api_key if state is not None else None
     token_masked = store.mask_token(api_key)
     # auth:"none" sources have no key; their status follows health, defaulting "ok".
@@ -47,12 +60,16 @@ def _source_wire(
         # An apikey source with no key set surfaces as "off" (spec 14.1).
         if info.auth == "apikey" and not api_key and status == "unknown":
             status = "off"
+    # Catalog readiness overrides the dynamic health status for non-live sources.
+    if info.status != "live":
+        status = info.status
     return {
         "id": info.id,
         "name": info.name,
         "type": info.type,
         "markets": info.markets,
         "auth": info.auth,
+        "provides": info.provides,
         "token_masked": token_masked,
         "status": status,
         "last_test": last_test,
@@ -115,22 +132,62 @@ def set_key(
 # --- POST /api/datasources/{id}/test ------------------------------------------
 
 
+# Free-source probe samples: a single minimal request per source (spec 20.11).
+_PROBE_TW = InstrumentRef(symbol="2330", market=Market.TW)
+_PROBE_US = InstrumentRef(symbol="AAPL", market=Market.US)
+_PROBE_MY = InstrumentRef(symbol="5212", market=Market.MY)
+
+
+def _probe_quote_provider(
+    provider: ProviderBase, ref: InstrumentRef
+) -> tuple[bool, str | None]:
+    """Run a single ``fetch_quote_latest`` and report ok/empty (raising falls through)."""
+    rows = provider.fetch_quote_latest([ref])
+    if rows:
+        return True, f"{ref.symbol} = {rows[0].close}"
+    return False, f"{ref.symbol} 無回應"
+
+
+def _probe_free_source(source_id: str) -> tuple[bool, str | None] | None:
+    """Probe a wired free (key-less) source; None when this id has no wired probe."""
+    if source_id == "twstock":
+        return _probe_quote_provider(TwStockProvider(), _PROBE_TW)
+    if source_id == "stockprices_dev":
+        return _probe_quote_provider(StockPricesDevProvider(), _PROBE_US)
+    if source_id == "klsescreener":
+        return _probe_quote_provider(KlseScreenerProvider(), _PROBE_MY)
+    if source_id == "malaysiastock":
+        return _probe_quote_provider(MalaysiaStockProvider(), _PROBE_MY)
+    if source_id == "cnn_fng":
+        fng = sentiment_source.fetch_fear_greed()
+        return (fng is not None, f"score={fng['score']}" if fng else "CNN 無回應")
+    if source_id == "index":
+        quotes = index_source.fetch_indices()
+        return (bool(quotes), f"{len(quotes)} 指數" if quotes else "指數無回應")
+    return None
+
+
 def probe_source(source_id: str, api_key: str | None) -> tuple[bool, str | None]:
     """Production connection test for a source: True/False + an optional detail.
 
     Real provider call (a single minimal request); raising or returning False is a
-    valid "error" test result. Tests monkeypatch this so no network I/O occurs.
-    This is intentionally a thin, replaceable seam (the per-provider probe wiring
-    can grow here without touching the route).
+    valid "error" test result. Tests monkeypatch this (or the providers) so no
+    network I/O occurs. Catalog-only / token-gated sources report a neutral result.
     """
     info = store.SOURCE_INFO_BY_ID.get(source_id)
     if info is None:
         return False, "未知資料來源"
-    if info.auth == "apikey" and not api_key:
+    if info.status == "blocked":
+        return False, "來源受阻（catalogue only）"
+    if info.auth in ("apikey", "oauth") and not api_key:
         return False, "尚未設定金鑰"
-    # Default seam: real provider probes are wired here later. Until a provider is
-    # wired for a given source, report a neutral non-network result rather than
-    # fabricating success.
+    if info.status == "pending":
+        # Token-gated adapter catalogued but not validated online this round (spec 20.9).
+        return False, "待測試（尚未線上驗證）"
+    free = _probe_free_source(source_id)
+    if free is not None:
+        return free
+    # Live sources without a wired probe yet report a neutral non-network result.
     return False, "尚未實作連線測試"
 
 

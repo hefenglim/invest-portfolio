@@ -76,6 +76,24 @@ def test_get_lists_sources_grouped_with_masking(client: TestClient) -> None:
     assert by_id["finmind"]["status"] == "off"
 
 
+def test_get_includes_provides_and_status_catalog(client: TestClient) -> None:
+    by_id = {s["id"]: s for s in client.get("/api/datasources").json()["sources"]}
+    # spec-20.1 catalog: full source list with provides + status.
+    assert {"twstock", "stockprices_dev", "klsescreener", "malaysiastock", "cnn_fng",
+            "alphavantage", "finnhub", "fred", "schwab", "bursa"} <= set(by_id)
+    # provides is a list of data types per source.
+    assert "quote_latest" in by_id["twse"]["provides"]
+    assert set(by_id["finmind"]["provides"]) >= {"dividend", "institutional", "margin"}
+    # pending token sources surface status "pending" with no key.
+    assert by_id["finnhub"]["status"] == "pending"
+    assert by_id["finnhub"]["token_masked"] is None
+    assert by_id["fred"]["status"] == "pending"
+    # blocked source surfaces status "blocked".
+    assert by_id["bursa"]["status"] == "blocked"
+    # live key-less source keeps its dynamic health status (not overridden).
+    assert by_id["twstock"]["status"] in ("unknown", "ok", "error", "off")
+
+
 def test_get_includes_account_fallbacks_and_names(client: TestClient) -> None:
     body = client.get("/api/datasources").json()
     fb = body["account_fallbacks"]
@@ -148,7 +166,7 @@ def test_post_test_failure_is_200(
     monkeypatch.setattr(
         ds_router, "probe_source", lambda sid, key: (False, "HTTP 502 from provider")
     )
-    r = client.post("/api/datasources/klse/test")
+    r = client.post("/api/datasources/klsescreener/test")
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "error"
@@ -181,13 +199,13 @@ def test_post_test_unknown_source_404(client: TestClient) -> None:
 def test_put_fallbacks_overwrites(client: TestClient) -> None:
     r = client.put(
         "/api/datasources/fallbacks",
-        json={"account_fallbacks": {"moomoo_my_my": ["yfinance", "klse"]}},
+        json={"account_fallbacks": {"moomoo_my_my": ["yfinance", "klsescreener"]}},
     )
     assert r.status_code == 200
-    assert r.json()["account_fallbacks"]["moomoo_my_my"] == ["yfinance", "klse"]
+    assert r.json()["account_fallbacks"]["moomoo_my_my"] == ["yfinance", "klsescreener"]
     # Persisted: GET reflects the new chain.
     fb = client.get("/api/datasources").json()["account_fallbacks"]
-    assert fb["moomoo_my_my"] == ["yfinance", "klse"]
+    assert fb["moomoo_my_my"] == ["yfinance", "klsescreener"]
 
 
 def test_put_fallbacks_unknown_source_400(client: TestClient) -> None:
