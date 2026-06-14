@@ -30,9 +30,9 @@ from decimal import Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.portfolio import technicals
 from portfolio_dash.portfolio.dashboard_models import DashboardData
+from portfolio_dash.shared.wire import to_wire
 
 Scope = Literal["portfolio", "per_symbol"]
 

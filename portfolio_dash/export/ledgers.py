@@ -4,9 +4,9 @@ import json
 import sqlite3
 from datetime import datetime
 
-from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.data_ingestion.config_seed import FEE_RULES
 from portfolio_dash.export.artifact import ExportArtifact, csv_blob, zip_artifact
+from portfolio_dash.shared.wire import to_wire
 
 _LEDGER_TABLES = ["transactions", "dividends", "fx_conversions", "opening_inventory"]
 _SCHEMA_VERSION = 1

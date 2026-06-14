@@ -22,8 +22,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.llm_insight.cards import InsightCard, Prediction
+from portfolio_dash.shared.wire import to_wire
 
 HorizonBasis = Literal["trading_days", "calendar_days"]
 

@@ -6,8 +6,8 @@ omit it. When a prediction is present, ``confidence`` (0–100) is REQUIRED — 
 calibration error (calib_gap) and the confidence bins (calibration_bins) in Loop 3 (04c).
 
 Pure schema only: stdlib + pydantic. No money in float — ``target_pct`` is a
-:class:`~decimal.Decimal`, serialized to a string by the API wire encoder
-(``api.serialize.to_wire``); the LLM emits it as a JSON string, parsed back to Decimal.
+:class:`~decimal.Decimal`, serialized to a string by the shared wire encoder
+(``shared.wire.to_wire``); the LLM emits it as a JSON string, parsed back to Decimal.
 """
 
 from decimal import Decimal

@@ -1,31 +1,11 @@
-"""Wire-format serialization: Decimal -> string, datetime/date -> ISO, Enum -> value.
+"""Wire-format serialization (re-export).
 
-The API layer never emits money as a JSON number (precision); every Decimal is a string.
-Currency enum values stay as-is (uppercase); Side/DividendType lowercasing is added with
-the ledger/input specs that surface them.
+The implementation moved to ``portfolio_dash.shared.wire`` so lower layers
+(``llm_insight``, ``export``) can use it without importing the web layer
+(architecture.md: lower layers never import ``api``). This module re-exports
+:func:`to_wire` unchanged so every existing ``api.serialize.to_wire`` caller keeps working.
 """
 
-from collections.abc import Mapping, Sequence
-from datetime import date, datetime
-from decimal import Decimal
-from enum import Enum
-from typing import Any
+from portfolio_dash.shared.wire import to_wire
 
-
-def to_wire(value: Any) -> Any:
-    """Recursively convert a model_dump()/dict tree into JSON-safe wire values."""
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, datetime | date):
-        return value.isoformat()
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, Mapping):
-        # Transform keys too: a Decimal/Enum/date key would otherwise leak its repr.
-        # Plain str keys are unchanged; Currency/Market StrEnum keys become their value.
-        return {to_wire(k): to_wire(v) for k, v in value.items()}
-    if isinstance(value, str):
-        return value
-    if isinstance(value, Sequence):
-        return [to_wire(v) for v in value]
-    return value
+__all__ = ["to_wire"]
