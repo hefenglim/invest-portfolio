@@ -16,10 +16,23 @@ from enum import Enum
 from typing import Any
 
 
+def decimal_str(value: Decimal) -> str:
+    """The ONE canonical wire form for a Decimal: ``format(value, "f")``.
+
+    Fixed-point, full source precision (trailing zeros preserved as stored), NEVER
+    scientific notation -- e.g. ``Decimal("1E-7")`` -> ``"0.0000001"`` and
+    ``Decimal("1E+2")`` -> ``"100"``, while ``Decimal("0.10")`` -> ``"0.10"``. Identical
+    to :func:`portfolio_dash.shared.money.to_db`; the wire keeps full precision and the
+    frontend quantizes for display (data-and-pricing.md). The sign of a negative zero is
+    preserved (``Decimal("-0.00")`` -> ``"-0.00"``) -- a faithful render of the stored value.
+    """
+    return format(value, "f")
+
+
 def to_wire(value: Any) -> Any:
     """Recursively convert a model_dump()/dict tree into JSON-safe wire values."""
     if isinstance(value, Decimal):
-        return str(value)
+        return decimal_str(value)
     if isinstance(value, datetime | date):
         return value.isoformat()
     if isinstance(value, Enum):

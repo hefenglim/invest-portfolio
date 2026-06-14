@@ -7,6 +7,7 @@ fixed-point strings and quantized to a currency's minor unit only at settlement/
 from decimal import ROUND_HALF_UP, Decimal
 
 from .enums import Currency
+from .wire import decimal_str
 
 # Minor-unit decimal places per currency (settlement precision).
 MINOR_UNITS: dict[Currency, int] = {
@@ -30,7 +31,7 @@ def to_db(value: Decimal) -> str:
         raise TypeError(f"expected Decimal, got {type(value).__name__}")
     if not value.is_finite():
         raise ValueError(f"cannot store non-finite Decimal: {value!r}")
-    return format(value, "f")
+    return decimal_str(value)  # ONE canonical fixed-point form, shared with the wire
 
 
 def from_db(text: str) -> Decimal:

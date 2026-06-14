@@ -4,10 +4,17 @@ import pytest
 
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.money import MINOR_UNITS, from_db, quantize_amount, to_db
+from portfolio_dash.shared.wire import decimal_str
 
 
 def test_to_db_preserves_trailing_zeros() -> None:
     assert to_db(Decimal("38.50")) == "38.50"
+
+
+def test_to_db_agrees_with_canonical_decimal_str() -> None:
+    # to_db and the wire encoder are ONE canonical form (format(d, "f")).
+    for d in [Decimal("38.50"), Decimal("0.005"), Decimal("1E+2"), Decimal("1E-7")]:
+        assert to_db(d) == decimal_str(d)
 
 
 def test_to_db_three_dp_my_price() -> None:
