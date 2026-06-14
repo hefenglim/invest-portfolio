@@ -1,0 +1,108 @@
+# FinMind
+
+> FinMind is an open-source financial data platform providing 75+ Taiwan market datasets and international market data (US, UK, Europe, Japan) via REST API and Python SDK. Data is updated daily. Datasets cover technical analysis, fundamentals, institutional trading, derivatives, convertible bonds, real-time quotes, exchange rates, interest rates, commodities, and US government bond yields.
+
+## API Overview
+
+- Base URL: `https://api.finmindtrade.com/api/v4`
+- Authentication: Register at finmindtrade.com, get token via login API or website. Pass token as `Authorization: Bearer {token}` header.
+- Rate limit: 600 requests/hour (with token), 300/hour (without token).
+- Endpoints:
+  - `POST /login` - Get auth token (params: user_id, password)
+  - `GET /data` - Fetch dataset (params: dataset, data_id, start_date, end_date, token)
+  - `GET /datalist` - List available data_id values for a dataset
+  - `GET /translation` - Get English-Chinese column name mapping for a dataset
+  - Some heavy datasets have dedicated endpoints instead of `/data` — they will return 422 if queried via `/data?dataset=...`. See `llms-full.txt` for the exact endpoint of each dataset. Currently:
+    - `GET /taiwan_stock_trading_daily_report` (params: data_id or securities_trader_id, date) — TaiwanStockTradingDailyReport, single date per request
+    - `GET /taiwan_stock_trading_daily_report_secid_agg` (params: data_id, start_date, end_date) — TaiwanStockTradingDailyReportSecIdAgg
+  - `GET /storage_objects` (params: dataset, date) — sponsorpro-tier whole-day parquet via signed URL, ignores data_id. Currently supports: TaiwanStockPriceTick, TaiwanStockTradingDailyReport, TaiwanStockKBar, TaiwanFuturesTick, TaiwanOptionTick.
+
+## Python SDK
+
+```python
+from FinMind.data import DataLoader
+api = DataLoader()
+api.login_by_token(api_token='your_token')
+df = api.taiwan_stock_daily(stock_id='2330', start_date='2020-01-01')
+```
+
+### Async Batch Query
+
+Use `stock_id_list` with `use_async=True` to query multiple stocks concurrently for faster performance.
+
+```python
+from FinMind.data import DataLoader
+api = DataLoader()
+api.login_by_token(api_token='your_token')
+df = api.taiwan_stock_daily(
+    stock_id_list=['2330', '2317', '2454', '3008'],
+    start_date='2024-01-01',
+    end_date='2024-12-31',
+    use_async=True,
+)
+```
+
+Async batch query is supported by datasets that require `data_id` parameter. Not supported by: info, snapshot, tick, total aggregation, and convertible bond datasets.
+
+## Documentation
+
+- [Quick Start](https://finmind.github.io/quickstart/): API usage guide with examples in Python and R
+- [Login](https://finmind.github.io/login/): Authentication methods
+- [Update Token](https://finmind.github.io/update_token/): Self-service token reset on the [user info page](https://finmindtrade.com/analysis/#/account/user). Old token is invalidated immediately and all devices are signed out — no need to contact support.
+- [API Usage Count](https://finmind.github.io/api_usage_count/): Check API usage via `GET https://api.web.finmindtrade.com/v2/user_info` (Authorization: Bearer {token}). Returns `user_count` (current usage) and `api_request_limit` (quota). HTTP 402 when quota exceeded.
+
+### Taiwan Market (77 datasets)
+
+- [Taiwan DataList](https://finmind.github.io/tutor/TaiwanMarket/DataList/): Full list of 78 Taiwan datasets
+- [Technical](https://finmind.github.io/tutor/TaiwanMarket/Technical/): TaiwanStockInfo, TaiwanStockPrice, TaiwanStockPriceAdj, TaiwanStockPriceTick, TaiwanStockPER, TaiwanStockKBar, TaiwanStockWeekPrice, TaiwanStockMonthPrice, TaiwanStockDayTrading, TaiwanStockTotalReturnIndex, TaiwanVariousIndicators5Seconds, TaiwanStockTradingDate, etc.
+- [Chip (Institutional)](https://finmind.github.io/tutor/TaiwanMarket/Chip/): TaiwanStockMarginPurchaseShortSale, TaiwanStockInstitutionalInvestorsBuySell, TaiwanStockShareholding, TaiwanStockHoldingSharesPer, TaiwanStockSecuritiesLending, TaiwanStockTradingDailyReport, TaiwanStockBlockTradingDailyReport, TaiwanStockBlockTrade, TaiwanStockLoanCollateralBalance, TaiwanstockGovernmentBankBuySell, etc.
+- [Fundamental](https://finmind.github.io/tutor/TaiwanMarket/Fundamental/): TaiwanStockCashFlowsStatement, TaiwanStockFinancialStatements, TaiwanStockBalanceSheet, TaiwanStockDividend, TaiwanStockDividendResult, TaiwanStockMonthRevenue, TaiwanStockMarketValue, etc.
+- [Derivative](https://finmind.github.io/tutor/TaiwanMarket/Derivative/): TaiwanFuturesDaily, TaiwanOptionDaily, TaiwanFuturesTick, TaiwanFuturesSpreadTick, TaiwanOptionTick, TaiwanFuturesInstitutionalInvestors, TaiwanOptionInstitutionalInvestors, TaiwanFuturesDealerTradingVolumeDaily, TaiwanOptionDealerTradingVolumeDaily, TaiwanFuturesSpreadTrading, etc.
+- [Real-Time](https://finmind.github.io/tutor/TaiwanMarket/RealTime/): taiwan_stock_tick_snapshot, TaiwanFutOptTickInfo, taiwan_futures_snapshot, taiwan_options_snapshot
+- [Index Codes](https://finmind.github.io/tutor/TaiwanMarket/IndexCodes/): 91 index codes (3-digit data_id) supported by taiwan_stock_tick_snapshot, e.g. 001 = TAIEX, 101 = OTC weighted
+- [Convertible Bond](https://finmind.github.io/tutor/TaiwanMarket/ConvertibleBond/): TaiwanStockConvertibleBondInfo, TaiwanStockConvertibleBondDaily, TaiwanStockConvertibleBondInstitutionalInvestors, TaiwanStockConvertibleBondDailyOverview
+- [Others](https://finmind.github.io/tutor/TaiwanMarket/Others/): TaiwanStockNews, TaiwanBusinessIndicator, TaiwanStockIndustryChain
+
+### International Markets
+
+- [US Market](https://finmind.github.io/tutor/UnitedStatesMarket/DataList/): USStockInfo, USStockPrice, USStockPriceMinute
+- [UK Market](https://finmind.github.io/tutor/UnitedKingdomMarket/DataList/): UKStockInfo, UKStockPrice
+- [Europe Market](https://finmind.github.io/tutor/EuropeMarket/DataList/): EuropeStockInfo, EuropeStockPrice
+- [Japan Market](https://finmind.github.io/tutor/JapanMarket/DataList/): JapanStockInfo, JapanStockPrice
+
+### Global Economic Data
+
+- [Exchange Rate](https://finmind.github.io/tutor/ExchangeRate/): TaiwanExchangeRate (19 currencies: USD, EUR, JPY, GBP, CNY, HKD, KRW, SGD, AUD, CAD, CHF, NZD, ZAR, SEK, THB, IDR, MYR, PHP, VND)
+- [Interest Rate](https://finmind.github.io/tutor/InterestRate/): InterestRate (12 central banks: FED, ECB, BOJ, BOE, PBOC, RBA, BOC, RBNZ, RBI, CBR, BCB, SNB)
+- [Commodities](https://finmind.github.io/tutor/Materials/): GoldPrice, CrudeOilPrices (Brent, WTI)
+- [US Government Bonds](https://finmind.github.io/tutor/GovernmentBondsYield/): GovernmentBondsYield (1M to 30Y maturities)
+- [CNN Fear & Greed Index](https://finmind.github.io/tutor/Others/): CnnFearGreedIndex
+
+### Analysis Tools
+
+- [Backtesting](https://finmind.github.io/tutor/analysis/Backtesting/): Strategy backtesting framework
+- [K-Line Chart](https://finmind.github.io/tutor/analysis/Kline/): Candlestick chart visualization
+- [Dashboard](https://finmind.github.io/tutor/analysis/CustomerDashboardWebServer/): Custom dashboard web server
+- [Treemap](https://finmind.github.io/tutor/analysis/SnapshotTreemap/): Real-time market treemap
+
+## Full API Reference
+
+- [llms-full.txt](https://finmind.github.io/llms-full.txt): Complete dataset schemas with all parameters, columns, tiers, and code examples
+- [openapi.yaml](https://finmind.github.io/openapi.yaml): OpenAPI 3.1 schema for GPTs, Dify, Coze and other platforms
+
+## Service Status / SLA
+
+- Public status page: [status.finmindtrade.com](https://status.finmindtrade.com) — current API status plus 24-hour and 90-day uptime.
+- Uptime is measured from real API traffic, minute by minute:
+  - valid requests = successful requests (2xx/3xx) + server-side errors (HTTP 5xx and 499 server-side timeouts)
+  - per-minute error rate = server-side errors ÷ valid requests; a minute with traffic and error rate > 5% is counted as down
+  - uptime % = (minutes with traffic − down minutes) ÷ minutes with traffic × 100
+  - client errors (4xx excluding 499) and no-traffic minutes are not counted; scheduled maintenance may be excluded
+- Status levels (when the window has traffic): Operational (100%), Degraded Performance (≥ 99%), Partial Outage (95%–99%), Major Outage (< 95%), No data (no traffic).
+- This uptime is the measurement basis for the FinMind enterprise plan SLA.
+
+## Links
+
+- [GitHub](https://github.com/FinMind/FinMind)
+- [Official Website](https://finmindtrade.com/)
+- [API Schema](https://finmindtrade.com/analysis/#/data/document)

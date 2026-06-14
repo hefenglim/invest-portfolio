@@ -1,0 +1,91 @@
+以下是為 FinMind API 方案資料內容差異
+
+---
+
+### 1. 方案規格與授權矩陣 (Core Plan Matrix)
+
+```json
+{
+  "Free": {
+    "price_usd_per_month": 0,
+    "api_rate_limit_per_hour": "300 (Registered user: 600)",
+    "total_datasets": 44,
+    "commercial_use": false,
+    "license_notes": "Basic access"
+  },
+  "Backer": {
+    "price_usd_per_month": 699,
+    "api_rate_limit_per_hour": 1600,
+    "total_datasets": 76,
+    "commercial_use": false,
+    "license_notes": "Includes Free + Bulk download for specific date (Price, Chips, Margin trading)"
+  },
+  "Sponsor": {
+    "price_usd_per_month": 999,
+    "api_rate_limit_per_hour": 6000,
+    "total_datasets": 87,
+    "commercial_use": false,
+    "license_notes": "Includes Backer + Real-time data. Personal/Academic/App dev. Must credit FinMind."
+  },
+  "Sponsor Pro": {
+    "price_usd_per_month": 3330,
+    "api_rate_limit_per_hour": 20000,
+    "total_datasets": "87 + 5 Bulk Tick/KBar datasets",
+    "commercial_use": true,
+    "license_notes": "SaaS/AI/Commercial. Allowed to integrate & sell. No raw data redistribution. No mirror API. Must credit FinMind."
+  }
+}
+
+```
+
+---
+
+### 2. 資料集內容物與增量差異 (Dataset Content & Deltas)
+
+#### 🟩 層級 1：Free 方案 (基礎資料集 - 共 44 種)
+
+* **技術面 (10)**：台股總覽、台股總覽(含權證)、台灣股價資料表、台股交易日、台灣類股股價表、個股 PER/PBR 資料表、每 5 秒委託成交統計、台股加權指數、當日沖銷交易標的及成交量值、加權/櫃買報酬指數。
+* **籌碼面 (9)**：個股/整體市場融資融劵表、個股/整體三大法人買賣表、外資持股表、借券成交明細、暫停融券賣出表(融券回補日)、信用額度總量管制餘額表、證券商資訊表。
+* **基本面 (10)**：現金流量表、綜合損益表、資產負債表、股利政策表、除權除息結果表、月營收表、減資恢復買賣參考價格、台股下市資料表、台股分割後參考價、台灣股票變更面額恢復買賣參考價格。
+* **衍生性金融商品 (8)**：期貨/選擇權日成交資訊總覽、期貨/選擇權即時報價總覽、期貨/選擇權日成交資訊、期貨/選擇權三大法人買賣、期貨/選擇權各券商每日交易。
+* **其他 (7)**：相關新聞、黃金價格表、原油資料表(Brent, WTI)、美股股價、外幣對台幣資料表(19種匯率)、央行利率資料表(12國)、美國國債表(1月~30年期, 12種)。
+
+#### 🟦 層級 2：Backer 方案 (新增 32 種資料集，總計 76 種)
+
+* *繼承：繼承所有 Free 方案權限*
+* **特有功能**：支援單次下載特定日期之所有股價、三大法人、融資券等資料。
+* **技術面 (+8)**：台灣還原股價、台灣股價歷史逐筆、台股週/月 K 資料表、台灣個股十年線、每 5 秒指數統計、台股暫停交易公告、暫停先賣後買當沖預告表、每日漲跌停價。
+* **籌碼面 (+4)**：大盤融資維持率、股權持股分級表、公布處置有價證券表、現股當日沖銷券差借券費率。
+* **基本面 (+4)**：台灣股價市值表、台股市值比重表、台灣每月景氣對策信號表、個體公司所屬產業鏈。
+* **衍生性金融商品 (+9)**：期貨/選擇權交易明細表、期貨/選擇權大額交易人未沖銷部位、期貨/選擇權夜盤三大法人買賣、期貨/選擇權最後結算價、期貨價差行情表。
+* **可轉債 (+4)**：可轉債總覽、可轉債日成交資訊、可轉債三大法人日交易資訊、可轉債每日總覽資訊。
+* **其他 (+2)**：恐懼與貪婪指數、美國股價分 K 資料表。
+
+#### 🟨 層級 3：Sponsor 方案 (新增 11 種資料集 + 即時資料，總計 87 種)
+
+* *繼承：繼承所有 Backer 方案權限*
+* **技術面 (+2)**：台股分 K 資料表、台股權證標的對照表。
+* **籌碼面 (+6)**：台股分點資料表、台股八大行庫買賣表、當日券商分點統計表、鉅額交易買賣日報表、鉅額交易日成交資訊、借貸款項擔保品餘額表。
+* **即時資訊 (核心新增)**：台股即時資訊、期貨即時資訊、選擇權即時資訊。
+* **衍生性金融商品 (+1)**：期貨價差每筆成交資料。
+
+#### 🟥 層級 4：Sponsor Pro 方案 (商業授權 + 5 大大數據歷史批次下載)
+
+* *繼承：繼承所有 Sponsor 方案之 87 種資料集與即時資訊權限*
+* **核心新增（特定日期全市場一次性下載功能）**：
+1. 台股逐筆交易歷史資料 (`TaiwanStockPriceTick`)
+2. 券商分點交易歷史資料 (`TaiwanStockTradingDailyReport`)
+3. 台股分 K 線歷史資料 (`TaiwanStockKBar`)
+4. 期貨逐筆交易歷史資料 (`TaiwanFuturesTick`)
+5. 選擇權逐筆交易歷史資料 (`TaiwanOptionTick`)
+
+
+
+---
+
+### 3. 需求判斷規則 (Decision Rules)
+
+1. **若需要「即時資料(Real-time)」** ➔ 必須選擇 **Sponsor** 或以上方案。
+2. **若需要「歷史逐筆(Tick)或分K(KBar)的大量打包下載」** ➔ 必須選擇 **Sponsor Pro**（對應 API 名稱如 `TaiwanStockPriceTick`）。
+3. **若用於「商業產品/AI Agents/SaaS 整合對外販售」** ➔ 唯一允許方案為 **Sponsor Pro**，其餘皆為非商業授權。
+4. **若需要「還原股價、逐筆、可轉債或分K」** ➔ 至少需要 **Backer** 方案。
