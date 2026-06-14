@@ -61,6 +61,24 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   stays original invested cost; cost basis is all-in (incl. buy fees+tax).
 
 ### Added
+- **Insight pipeline-hub UX — status / preflight / diagnose (spec 07, Phase 4 — the observability
+  layer):** read-only convergence over the spec-04 machinery — NO new tables, NO LLM calls, NO new
+  business logic (03/04/06 reused). `GET /api/insight-tasks/status` returns a single source of truth:
+  health (master_ok, quota_remaining, last_batch) + per-task 5-node states (trigger/input/assemble/exec/
+  output, §7.1.1 derivation) aggregated to a level — the pure `llm_insight/pipeline_status.py`
+  `derive_node_states` over facts gathered in `api/insight_service.py` (schedule_config, resolved
+  universe, **reused dashboard freshness**, templates, budget/quota_low/master, last non-shadow run).
+  `POST /api/insight-tasks/{id}/preflight` (also a draft `body` for the wizard's check-before-create) is
+  a zero-cost dry run that calls the **SAME `gating.evaluate_gates` as execution** (the §7.2 hard rule —
+  no "preflight passed, run failed"; asserted via a spy + an end-to-end demo) wrapped with G0/G1/G7,
+  returns ordered gates + verdict (blocked/degraded/clean) + the spec-06 assembled preview + `fix.kind`
+  one-click hints — never calls the LLM, never writes job_runs/llm_usage. `GET …/diagnose` adds
+  first_blocker + recent_skips (single-enum reasons); `GET …/runs` is the task-view job_runs (is_shadow
+  excluded). §7.0 naming: `/api/insight-tasks/*` is a full **alias of the same resource** as
+  `/api/insight-types/*` (one `_dual` route registration, no logic duplication; old routes + table names
+  kept). Senior review: APPROVE-WITH-NITS → fixed the R6 (quota) gate emitting a wrong `create_schedule`
+  fix (quota has no one-click action in the enum). The 3 §7.6 failure demos reproduced. **This completes
+  the 04→07 insight chain backend.** (+48 tests; 932 → 980 passed.)
 - **AI self-evolution / Loop Engineering (spec 04, Phase 4 — the four-self loop):** the
   insight-composer + generation + backtest + calibration + shadow-promote system, built in three
   sub-phases (04a design/CRUD, 04b generation, 04c evolution) under the §4.10 locked decisions
