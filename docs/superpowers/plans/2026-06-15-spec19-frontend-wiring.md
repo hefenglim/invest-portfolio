@@ -110,17 +110,24 @@ exist yet**), `portfolio_dash/strategy/alerts.py` (`compute_alerts_from` gains a
 `portfolio_dash/api/routers/dashboard.py` + `routers/strategy.py` (compute + pass in), `tests/strategy/
 test_rules_config.py` + `test_alerts.py` + `tests/contract/test_alerts_api.py`.
 - [ ] **F2 — add the rule first:** `AlertRules` (rules_config.py) currently has 7 rules and NO `calib_gap`
-  (explicitly deferred). Add `calib_gap` to the `AlertRules` model + `RULE_META`/`RULE_IDS`
-  (default `value="0.15"`, unit `pp`, min/max per spec 03 §3.1 line 43) with serialize/parse round-trip;
-  extend `test_rules_config.py`. (Otherwise `rules.calib_gap.enabled` cannot compile.)
+  (explicitly deferred). Add `calib_gap` to the `AlertRules` model + `RULE_META`/`RULE_IDS` with
+  serialize/parse round-trip; extend `test_rules_config.py`. (Otherwise `rules.calib_gap.enabled` cannot compile.)
+  **War-game Finding 2 (UNIT — must match): `scoring.calibration_error` returns PERCENTAGE POINTS (e.g.
+  `8.5`), NOT a ratio.** So the threshold is in **pp**: default `value="15"`, `unit="pp"`, `min=5`, `max=50`
+  (matches `settings-alerts.js` + spec 03 ">15pp"). Do NOT use `"0.15"` (ratio) — `8.5 > 0.15` is always
+  true → the alert would fire on every load.
 - [ ] Keep `compute_alerts_from` PURE: add a `calib_gap: Decimal | None` param; when
-  `rules.calib_gap.enabled` and `calib_gap` is not None and `> threshold` → emit the `calib_gap` alert
-  (spec 03 §3.1, warn).
-- [ ] **F3 — correct gap source:** the gap is a SCALAR Decimal = `scoring.calibration_error(rows)` where
-  `rows: list[tuple[int, bool]]` are scored (confidence, hit) pairs; `evaluations_store.ai_score()` returns
-  a `calibration_bins` LIST (not a scalar) and ignores min_samples. The CALLER (dashboard + /api/alerts)
-  gathers the scored rows, applies the `evolution_config.min_samples` gate (→ None when insufficient,
-  per spec 04.10), computes the scalar via `scoring.calibration_error(...)`, and passes it in.
+  `rules.calib_gap.enabled` and `calib_gap` is not None and `> threshold` (pp vs pp) → emit the `calib_gap`
+  alert (spec 03 §3.1, warn).
+- [ ] **F3 + War-game Finding 1 — gap source + the MISSING helper:** the gap is a SCALAR =
+  `scoring.calibration_error(rows)` where `rows: list[tuple[int, bool]]` = scored (confidence, hit) pairs.
+  **No store method yields those rows today** (`ai_score()` returns `calibration_bins` buckets; `combo_score`
+  aggregates; `resolved_sample_count` is per-combo). **Add `evaluations_store.scored_confidence_hits(conn)
+  -> list[tuple[int,bool]]`** (`SELECT confidence, miss WHERE status='scored' AND is_shadow=0 AND confidence
+  IS NOT NULL`; `hit = not miss`). The CALLER (dashboard + /api/alerts) gathers these rows, applies a
+  **GLOBAL** `evolution_config.min_samples` gate (len(rows) ≥ min_samples → else None; `resolved_sample_count`
+  is per-combo, wrong for the portfolio-wide alert), computes `scoring.calibration_error(rows)`, passes it in.
+  Add `evaluations_store.py` to this task's files.
 - [ ] **W3 — `calibration_regression` stays event-only:** it is emitted by 04c into `alert_events` (the
   event/bell feed); `/api/alerts` stays the rule-derived view and does NOT surface it. Document this in the
   router (no change to `compute_alerts_from`).
@@ -151,6 +158,14 @@ test_rules_config.py` + `test_alerts.py` + `tests/contract/test_alerts_api.py`.
 > `(x*100).toFixed` and `Number(x).toFixed` are already string-safe via coercion (e.g. `settings-llm.js:78/368`,
 > `insights.html:349`, `rebalance.js`); only BARE `field.toFixed()` and `+`-summation of money break.** Extra
 > money sites to fmt: `pipeline-wizard.js:60` / `pipeline-preflight.js:76` quota/cost (Task 2.8));
+> **War-game Finding 6 (sync→async refactor — applies to EVERY page): each page IIFE currently runs
+> synchronously at module-eval reading `window.*_DATA`. Wiring is NOT a one-line global swap — naively
+> assigning `D = pdApi.get(...)` (a Promise) makes every `D.field` `undefined` → TypeError cascade. Each
+> Phase-2 task MUST (a) remove the mock `<script src="*-mock*.js">` from the page HTML, (b) wrap boot in an
+> async fn that `await`s `pdApi.get(...)` THEN renders.** The smoke harness (zero console errors) catches a
+> botched conversion. **Finding 9:** `ledger.js:234` / `pipeline-*` compute money client-side (coerce, don't
+> crash, but violate the no-client-money rule) — consume the backend-provided implied rate / `est_cost_usd`
+> instead of recomputing.
 > **delete the retired mock entirely** (no fallback branch — spec 19 §6; the two documented exceptions:
 > detail.js feeTax offline mirror, alerts cache); add a Playwright **page smoke** (loads vs golden DB, zero
 > console errors, key element renders). Backend contract tests already guard each endpoint shape.
@@ -158,7 +173,11 @@ test_rules_config.py` + `test_alerts.py` + `tests/contract/test_alerts_api.py`.
 ## Task 2.1 — shell.js global scaffold (nav, quota chip, 401 tie-in)
 - [ ] Wire the global shell (nav active state, the AI quota chip, login/lock state) through `pdApi`; the
   quota chip reads `/api/dashboard` `llm_quota`/`/api/llm` and renders via `fmt` (fix any bare `.toFixed`).
-  Commit `feat(web): shell global scaffold via pdApi (spec 19)`.
+  **War-game Finding 7:** `shell.js:50-62` currently does a SYNCHRONOUS localStorage auth guard
+  (`pd_users`/`pd_session` → redirect login.html), divorced from the backend. Replace it with an async
+  `GET /api/auth/session` check (guest mode → no redirect; protected + signed-out → login.html), and let
+  `api.js`'s 401-intercept be the enforcement. This is a whole-block rewrite, not a one-liner.
+  Commit `feat(web): shell global scaffold + /api/auth/session guard via pdApi (spec 19/09)`.
 
 ## Task 2.2 — Dashboard (index / app.js) — the central page
 - [ ] Wire `app.js` to `GET /api/dashboard` (replace `DASHBOARD_DATA`). **Fix C2 break site**
@@ -167,7 +186,14 @@ test_rules_config.py` + `test_alerts.py` + `tests/contract/test_alerts_api.py`.
   `ins.created_at`, `ins.token_cost_usd`→`ins.cost_usd` (else the card renders `undefined`). Ensure
   kpis/holdings/returns/allocation/fx/dividends/trend all render via `fmt`; verify NO `+`-sum of money in
   bar/alloc calcs (use `Number()` only for display widths). Embedded `alerts` array (no second build) +
-  insights from Task 1.5. Retire `mock-data.js`. Page smoke. Commit
+  insights from Task 1.5. **War-game Finding 3 (sparkline silently breaks): `sparkline()` (app.js:272) reads
+  `window.PD_HISTORY.series(sym)`, NOT `holdings[].spark_30d`. After retiring `history-mock.js` it returns
+  `undefined` → em-dash everywhere (no crash, but the real injected `spark_30d` array goes unrendered).
+  Rewire `sparkline()` to consume `h.spark_30d` (Decimal-string array → `Number()` per point for the SVG).**
+  **Finding 4 (dead alert links): backend `Alert.href` is `/symbol/AAPL` / `/settings`, which has no
+  StaticFiles page → 404 (the zero-console-error smoke won't catch a nav 404). Map backend hrefs → the
+  static scheme (`index.html#sym=…` / `settings.html#llm` / `insights.html`) in api.js or the alerts
+  renderer.** Retire `mock-data.js` (+ `history-mock.js`). Page smoke. Commit
   `feat(web): dashboard wired to /api/dashboard; money via fmt; mock retired (spec 19/08)`.
 
 ## Task 2.3 — Symbol detail (detail.js)
@@ -186,12 +212,19 @@ test_rules_config.py` + `test_alerts.py` + `tests/contract/test_alerts_api.py`.
 ## Task 2.6 — Input center (input.js)
 - [ ] Wire to `/api/input/*` preview/commit (manual + CSV import). Form-field `parseFloat`/`Number` on
   USER INPUT stays (input side, sent to backend which computes). Render server-returned amounts via `fmt`.
-  Retire `INPUT_DATA`/`input-mock-data.js`. Page smoke (preview round-trip). Commit
+  **War-game Finding 5: distinguish form-local calc vs server-fed.** `input.js:329`
+  (`r.price.toFixed(2)` on a preview row) breaks once `/api/input/preview` feeds Decimal STRINGS into the
+  editable table → route preview-row server amounts via `fmt`/`Number()`. (The local feeTax/DRIP calc fields
+  that stay numeric are fine; only the server-fed values flip to strings.) Commit `ImportSummary{written,
+  skipped}` are ints (safe). Retire `INPUT_DATA`/`input-mock-data.js`. Page smoke (preview round-trip). Commit
   `feat(web): input center wired to /api/input/* (spec 19/12)`.
 
 ## Task 2.7 — Settings group (accounts, datasources, llm, scheduler, prompts, alerts, users)
 - [ ] Wire each settings page to its endpoint; **fix C2 bare-`.toFixed` sites**: `settings-llm.js:98/99/161/
   162` (remaining/threshold/price_in/price_out) and `settings-scheduler.js:186` (cost_usd) → `fmt`/`Number`.
+  **War-game Finding 8:** `settings-scheduler.js:185` `if (!h.cost_usd)` treats the Decimal STRING `"0"`/
+  `"0.00"` as truthy → falls through to `.toFixed` → throws. Use `h.cost_usd == null` as the nil check, then
+  `fmt.num(h.cost_usd, 3)`. (Apply the same string-nil discipline to any `if (!moneyField)` guard.)
   **alerts retire (I1):** `settings-alerts.js`/`alerts.js` stop client-computing alerts → read `/api/alerts`
   (+ `/api/alert-rules` for the rules page); calib_gap now comes from the backend (Task 1.4); keep the
   documented alerts cache only. Retire `LLM_DATA`/`DATASOURCES_DATA`/`SCHED_DATA`/`PROMPTS_DATA`/`PD_VARS`/
