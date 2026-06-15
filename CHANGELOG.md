@@ -9,7 +9,33 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+### Added
+- **Frontend wiring foundation — spec 19 Phase 0 (2026-06-16):** the static `web/` frontend's single
+  fetch layer + a Playwright smoke harness, landed ahead of per-page wiring.
+  - **`web/api.js` (`window.pdApi`, spec 19.1):** the ONE fetch seam — `{get, post, put, del, download,
+    abortable}` + `window.PdApiError`. Parses the `api/errors.py` envelope `{error:{code,message,field,
+    issues}}` into a structured `PdApiError`; **401** → `window.location.replace('login.html')` (the single
+    redirect site) then throws; **402/409/503** → rethrow with NO redirect (the AI block renders a degraded
+    state); response Decimal **strings pass through untouched** (no `parseFloat`/`Number`/`+` — the frontend
+    never computes money); `credentials:'same-origin'` (carries `pd_session`); `abortable(key)` cancels a
+    prior same-key in-flight request. No page calls `fetch` directly.
+  - **Playwright smoke harness (`tests/e2e/conftest.py`, reuses the spec-17 golden seed):** a subprocess
+    uvicorn serves the real `create_app()` (StaticFiles `web/` + `/api/*`) against an on-disk golden DB
+    (DRY-reuse of `tests/conftest.py::_seed_golden`); headless chromium drives it; reusable
+    `assert_page_ok(page, base_url, path, root_selector="body")` asserts **zero console errors + zero uncaught
+    pageerrors** (catches Decimal-string `.toFixed` TypeErrors once pages bind to `/api`). The global
+    `--disable-socket` ban is re-enabled **for loopback only, scoped to `tests/e2e`** (autouse
+    `_e2e_loopback_socket`, restored on teardown) — external network stays banned. Baseline smokes for
+    `login.html` + `index.html`; per-page smokes are added by Phase 2. (`playwright>=1.44` was already a
+    declared dep; raw `playwright.sync_api` used — no `pytest-playwright` added.)
+
 ### Fixed
+- **Makefile runs the full suite (spec 19 Phase 0, 2026-06-16):** `make test`/`make regress`/`make all` now
+  run `pytest tests --ignore=tests/e2e` (the whole tree minus browser e2e) — previously `make test` targeted
+  only `tests/unit tests/contract`, collecting **266 of 1012** tests, so `make all` was not real regression.
+  `make e2e` is the explicit Playwright gate; the `e2e` pytest marker is registered in `pyproject.toml`.
+  Added a guarded `make restore FILE=... [DB=...]` ops target (copies a backup over the live SQLite DB at
+  `data/portfolio.db`).
 - **Atomic batch import (#1 backend hardening, 2026-06-15):** CSV/broker batch import is now
   all-or-nothing on an unexpected error. `data_ingestion/preview.commit_preview` previously looped
   accepted rows calling writers that each `conn.commit()` per row, so a mid-batch unexpected exception
