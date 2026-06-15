@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
+from portfolio_dash.api import insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.ops import backup as backup_ops
@@ -53,10 +54,13 @@ def dashboard(
 
     # alerts: the SAME rule engine as GET /api/alerts, run over the already-built `data`
     # (no second build_dashboard) so the embedded array can never diverge from the endpoint.
+    # calib_gap is fed in from the single-source helper (None below the min_samples gate).
+    calib = insight_service.calibration_gap(conn)
     alerts = compute_alerts_from(
         data, get_alert_rules(conn),
         quota_remaining=budget_remaining(conn),
         quota_threshold=get_alert_threshold(conn),
+        calib_gap=calib,
     )
     payload["alerts"] = to_wire([a.model_dump() for a in alerts])
     return payload

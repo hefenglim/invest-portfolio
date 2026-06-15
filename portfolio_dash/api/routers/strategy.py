@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from portfolio_dash.api import insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.serialize import to_wire
@@ -51,7 +52,10 @@ def get_rules(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
 def get_alerts(conn: sqlite3.Connection = Depends(get_conn),
                now: datetime = Depends(get_now),
                reporting: Currency = Depends(get_reporting)) -> dict[str, Any]:
-    alerts = compute_alerts(conn, now=now, reporting=reporting)
+    # calib_gap fed from the single-source helper so this matches the dashboard embed.
+    # calibration_regression (the spec-04c event) stays in alert_events and is NOT here (W3).
+    calib = insight_service.calibration_gap(conn)
+    alerts = compute_alerts(conn, now=now, reporting=reporting, calib_gap=calib)
     return {"as_of": now.isoformat(), "alerts": to_wire([a.model_dump() for a in alerts])}
 
 
@@ -95,7 +99,10 @@ def put_rules(body: AlertRulesBody,
         if _dv is not None:
             rule.value = value
     set_alert_rules(conn, current)
-    alerts = compute_alerts(conn, now=now, reporting=reporting)
+    # calib_gap fed from the single-source helper (matches the dashboard embed + GET /alerts).
+    # calibration_regression (the spec-04c event) stays in alert_events and is NOT here (W3).
+    calib = insight_service.calibration_gap(conn)
+    alerts = compute_alerts(conn, now=now, reporting=reporting, calib_gap=calib)
     return {"rules": _rules_wire(current),
             "alerts": to_wire([a.model_dump() for a in alerts])}
 

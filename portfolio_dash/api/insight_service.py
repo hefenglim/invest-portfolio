@@ -77,6 +77,24 @@ _NARRATIVE_MISS_THRESHOLD = 60
 _EVAL_LOOKBACK_DAYS = 14
 
 
+def calibration_gap(conn: sqlite3.Connection) -> Decimal | None:
+    """Portfolio-wide AI calibration error in PERCENTAGE POINTS, or None below the gate.
+
+    The SINGLE source for the ``calib_gap`` alert rule (spec 03/04 I1): collects the active
+    scored ``(confidence, hit)`` pairs, gates on the GLOBAL ``min_samples`` (portfolio-wide,
+    NOT a per-combo ``resolved_sample_count``) so a small sample never fires, and returns
+    ``scoring.calibration_error`` (pp) when the gate passes. Returns None below the gate so
+    the dashboard / alerts degrade silently. Note: ``evolution_config['gap_alert_pp']`` is
+    the SEPARATE spec-04c calibration-regression EVENT threshold — only ``min_samples`` is
+    read here; the calib_gap rule threshold lives in ``AlertRules.calib_gap.value``.
+    """
+    rows = es.scored_confidence_hits(conn)
+    min_samples = int(cs.get_evolution_config(conn)["min_samples"])
+    if len(rows) < min_samples:
+        return None
+    return scoring.calibration_error(rows)
+
+
 def _resolve_universe(it: cs.InsightType, data: DashboardData) -> list[str]:
     """The per_symbol universe: custom list, or all current holdings for ``mode:all``."""
     held = sorted({h.symbol for h in data.holdings})

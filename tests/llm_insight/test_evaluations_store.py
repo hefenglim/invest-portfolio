@@ -308,3 +308,45 @@ def _insert_insight(
         (insight_id, due_at, rec.id),
     )
     conn.commit()
+
+
+# --- scored_confidence_hits (calib_gap input, spec 03/04 I1) ------------------
+
+
+def test_scored_confidence_hits_filters_and_maps(conn: sqlite3.Connection) -> None:
+    # A scored, non-shadow, confidence=80, NOT a miss -> (80, True).
+    es.add_evaluation(
+        conn, insight_id=1, insight_type_id=10, calibration_version=None,
+        is_shadow=False, status="scored", quant_hit=True, narrative_score=80,
+        miss=False, actual_value=None, confidence=80, now=NOW,
+    )
+    # A scored, non-shadow, confidence=60, a miss -> (60, False) (hit = not miss).
+    es.add_evaluation(
+        conn, insight_id=2, insight_type_id=10, calibration_version=None,
+        is_shadow=False, status="scored", quant_hit=False, narrative_score=40,
+        miss=True, actual_value=None, confidence=60, now=NOW,
+    )
+    # Excluded: shadow row.
+    es.add_evaluation(
+        conn, insight_id=3, insight_type_id=10, calibration_version=None,
+        is_shadow=True, status="scored", quant_hit=True, narrative_score=80,
+        miss=False, actual_value=None, confidence=90, now=NOW,
+    )
+    # Excluded: pending_data status.
+    es.add_evaluation(
+        conn, insight_id=4, insight_type_id=10, calibration_version=None,
+        is_shadow=False, status="pending_data", quant_hit=None, narrative_score=None,
+        miss=False, actual_value=None, confidence=50, now=NOW,
+    )
+    # Excluded: scored but NULL confidence.
+    es.add_evaluation(
+        conn, insight_id=5, insight_type_id=10, calibration_version=None,
+        is_shadow=False, status="scored", quant_hit=True, narrative_score=80,
+        miss=False, actual_value=None, confidence=None, now=NOW,
+    )
+    pairs = es.scored_confidence_hits(conn)
+    assert sorted(pairs) == [(60, False), (80, True)]
+
+
+def test_scored_confidence_hits_empty(conn: sqlite3.Connection) -> None:
+    assert es.scored_confidence_hits(conn) == []

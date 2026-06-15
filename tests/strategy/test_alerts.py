@@ -122,3 +122,44 @@ def test_exdiv_upcoming_fires() -> None:
                                  quota_remaining=Decimal("5"), quota_threshold=Decimal("1"))
     ev = next(a for a in alerts if a.id == "exdiv_upcoming:2330")
     assert ev.sev == "info" and ev.href == "/symbol/2330"
+
+
+def test_calib_gap_fires_above_threshold() -> None:
+    # 20pp > 15pp default -> a single global warn alert (no symbol).
+    data = _minimal_data(fx=None, calendar=[])
+    alerts = compute_alerts_from(data, DEFAULT_RULES,
+                                 quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
+                                 calib_gap=Decimal("20"))
+    cg = next(a for a in alerts if a.id == "calib_gap")
+    assert cg.sev == "warn" and cg.rule == "calib_gap" and cg.href == "/settings"
+    assert "20pp > 15pp" in cg.detail
+
+
+def test_calib_gap_silent_at_or_below_threshold() -> None:
+    # 10pp <= 15pp default -> does NOT fire (and equality at 15pp must not fire either).
+    data = _minimal_data(fx=None, calendar=[])
+    for gap in (Decimal("10"), Decimal("15")):
+        alerts = compute_alerts_from(data, DEFAULT_RULES,
+                                     quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
+                                     calib_gap=gap)
+        assert not any(a.id == "calib_gap" for a in alerts)
+
+
+def test_calib_gap_silent_when_none() -> None:
+    # None (below the global min_samples gate) -> silent, never fires.
+    data = _minimal_data(fx=None, calendar=[])
+    alerts = compute_alerts_from(data, DEFAULT_RULES,
+                                 quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
+                                 calib_gap=None)
+    assert not any(a.id == "calib_gap" for a in alerts)
+
+
+def test_calib_gap_silent_when_rule_disabled() -> None:
+    # A high gap but the rule is off -> silent.
+    data = _minimal_data(fx=None, calendar=[])
+    rules = DEFAULT_RULES.model_copy(deep=True)
+    rules.calib_gap.enabled = False
+    alerts = compute_alerts_from(data, rules,
+                                 quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
+                                 calib_gap=Decimal("40"))
+    assert not any(a.id == "calib_gap" for a in alerts)

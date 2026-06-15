@@ -1,6 +1,13 @@
 """Editable alert-rule thresholds (spec 03 §3.1). Single-row JSON config; pure config,
-no ledger writes. quota_low's threshold lives in shared.llm_config (spec 16). The
-calib_gap / calibration_regression rules are deferred to spec 04 (absent here)."""
+no ledger writes. quota_low's threshold lives in shared.llm_config (spec 16).
+
+``calib_gap`` (spec 03/04 I1) is a global rule: when the portfolio-wide AI calibration
+error (``llm_insight.scoring.calibration_error``, in PERCENTAGE POINTS) exceeds its
+threshold, a single warn alert fires. The threshold is therefore in **pp** (default
+15pp), NOT a ratio — the engine compares pp-vs-pp. The gap value itself is fed into the
+PURE engine by ``api.insight_service`` (strategy/ never imports llm_insight). The
+``calibration_regression`` event (spec 04c) is a separate concern — it is recorded in
+``alert_events`` (the bell feed), NOT surfaced by this rule-derived view."""
 
 import json
 import sqlite3
@@ -24,6 +31,7 @@ class AlertRules(BaseModel):
     fx_drift: Rule
     exdiv_upcoming: Rule
     quota_low: Rule
+    calib_gap: Rule
 
 
 # id -> (default_value | None, unit | None, min | None, max | None); all numerics are strings.
@@ -35,6 +43,9 @@ RULE_META: dict[str, tuple[str | None, str | None, str | None, str | None]] = {
     "fx_drift": ("0.03", "ratio", "0.005", "0.50"),
     "exdiv_upcoming": ("14", "days", "1", "90"),
     "quota_low": (None, None, None, None),
+    # calib_gap threshold is in PERCENTAGE POINTS (matches scoring.calibration_error's
+    # pp output) — NOT a ratio. 15pp default, clamped 5..50pp.
+    "calib_gap": ("15", "pp", "5", "50"),
 }
 RULE_IDS = list(RULE_META)  # preserves order
 

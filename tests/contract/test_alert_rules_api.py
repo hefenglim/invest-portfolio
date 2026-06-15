@@ -9,7 +9,12 @@ def test_get_alert_rules(api_client: TestClient) -> None:
     assert rules["single_weight"]["unit"] == "ratio"
     assert rules["single_weight"]["min"] == "0.05" and rules["single_weight"]["max"] == "1"
     assert rules["quota_low"]["value"] is None
-    assert "calib_gap" not in rules and "calibration_regression" not in rules
+    # calib_gap is now a rule (spec 03/04 I1): threshold in PERCENTAGE POINTS, default 15pp.
+    assert rules["calib_gap"]["value"] == "15"
+    assert rules["calib_gap"]["unit"] == "pp"
+    assert rules["calib_gap"]["min"] == "5" and rules["calib_gap"]["max"] == "50"
+    # calibration_regression stays a spec-04c EVENT (alert_events), NOT a rule here (W3).
+    assert "calibration_regression" not in rules
 
 
 def test_put_alert_rules_merges_over_current(api_client: TestClient) -> None:

@@ -404,6 +404,22 @@ def calibration_bins(
     return out
 
 
+def scored_confidence_hits(conn: sqlite3.Connection) -> list[tuple[int, bool]]:
+    """Portfolio-wide scored ``(confidence, hit)`` pairs feeding ``scoring.calibration_error``.
+
+    Active (non-shadow), ``status = 'scored'`` rows with a stated confidence only; a row's
+    hit is ``not miss``. This is the calibration-error input for the global ``calib_gap``
+    alert rule (spec 03/04 I1) — the same anti-poison filter as ``calibration_bins``, but
+    flattened across all combos (no per-bucket grouping). Returns ``[]`` when there are no
+    such rows.
+    """
+    rows = conn.execute(
+        "SELECT confidence, miss FROM insight_evaluations "
+        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL"
+    ).fetchall()
+    return [(int(r["confidence"]), not bool(r["miss"])) for r in rows]
+
+
 def miss_samples_for_version(
     conn: sqlite3.Connection, *, insight_type_id: int, version: int
 ) -> list[dict[str, Any]]:

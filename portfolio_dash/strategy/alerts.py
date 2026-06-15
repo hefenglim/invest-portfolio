@@ -1,7 +1,15 @@
 """Risk-alert rule engine (spec 03 §3.1). Pure over DashboardData — the SINGLE source
-for both GET /api/alerts and the dashboard payload's embedded alerts. Six v1 rules;
-calib_gap/calibration_regression are deferred to spec 04. Degrades silently when an
-input is absent (never raises on missing market data)."""
+for both GET /api/alerts and the dashboard payload's embedded alerts. Seven market/quota
+rules plus ``calib_gap`` (spec 03/04 I1, the AI calibration-error rule). Degrades
+silently when an input is absent (never raises on missing market data).
+
+``calib_gap`` is the one rule whose signal lives outside DashboardData: the portfolio-
+wide AI calibration error in PERCENTAGE POINTS is FED IN as ``calib_gap: Decimal | None``
+(the gate-and-compute lives in ``api.insight_service.calibration_gap`` — strategy/ stays
+pure and never imports llm_insight). The threshold (``rules.calib_gap.value``) is also in
+pp, so the comparison is pp-vs-pp. None means "below the global min_samples gate" → the
+rule degrades silently. ``calibration_regression`` (spec 04c) is a separate EVENT in
+``alert_events``; it is intentionally NOT a rule here."""
 
 import sqlite3
 from datetime import datetime
@@ -33,6 +41,7 @@ class Alert(BaseModel):
 def compute_alerts_from(
     data: DashboardData, rules: AlertRules, *,
     quota_remaining: Decimal, quota_threshold: Decimal,
+    calib_gap: Decimal | None = None,
 ) -> list[Alert]:
     alerts: list[Alert] = []
     as_of = data.as_of.date()
@@ -94,16 +103,35 @@ def compute_alerts_from(
             id="quota_low", sev=sev, rule="quota_low", title="LLM 額度偏低",
             detail=f"remaining {quota_remaining} < {quota_threshold}", href="/settings"))
 
+    # calib_gap: pp-vs-pp comparison (both `calib_gap` and the threshold are percentage
+    # points). None → below the global min_samples gate → silent (no alert). Single global
+    # alert (no symbol).
+    if (rules.calib_gap.enabled and rules.calib_gap.value is not None
+            and calib_gap is not None and calib_gap > rules.calib_gap.value):
+        alerts.append(Alert(
+            id="calib_gap", sev="warn", rule="calib_gap", title="AI 校準誤差偏高",
+            detail=f"calibration error {calib_gap}pp > {rules.calib_gap.value}pp",
+            href="/settings"))
+
     return alerts
 
 
 def compute_alerts(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency,
+    calib_gap: Decimal | None = None,
 ) -> list[Alert]:
-    """Build the dashboard once, read rules + quota, run the single rule core."""
+    """Build the dashboard once, read rules + quota, run the single rule core.
+
+    ``calib_gap`` (the portfolio-wide AI calibration error in pp) is FED IN by the api
+    layer (``api.insight_service.calibration_gap`` — strategy/ never imports llm_insight).
+    The scheduler's ``_compute_alerts_for_scan`` calls this WITHOUT ``calib_gap`` → None →
+    no calib_gap alert in the scan; that is intentional/acceptable (the calib_gap rule is
+    a dashboard/settings surface, not a scan trigger).
+    """
     data = build_dashboard(conn, now=now, reporting=reporting)
     return compute_alerts_from(
         data, get_alert_rules(conn),
         quota_remaining=budget_remaining(conn),
         quota_threshold=get_alert_threshold(conn),
+        calib_gap=calib_gap,
     )
