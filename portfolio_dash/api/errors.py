@@ -1,5 +1,6 @@
 """Common error envelope (spec 08 §8.0) + exception handlers, incl. LLM 402/409/503."""
 
+import logging
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -12,6 +13,8 @@ from portfolio_dash.shared.llm_config import (
     LLMBudgetExceeded,
     LLMUnavailable,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def error_body(code: str, message: str, *, field: str | None = None,
@@ -58,3 +61,12 @@ def register_error_handlers(app: FastAPI) -> None:
     async def _unavailable(_r: Request, exc: LLMUnavailable) -> JSONResponse:
         return JSONResponse(status_code=503,
                             content=error_body("llm_unavailable", str(exc) or "LLM 服務不可用"))
+
+    @app.exception_handler(Exception)
+    async def _unhandled(_r: Request, exc: Exception) -> JSONResponse:
+        # Catch-all: the specific handlers above keep precedence for their own types;
+        # this records the traceback (via the JSON formatter's exc_info path) and returns
+        # a generic envelope WITHOUT leaking the exception detail into the response body.
+        logger.exception("unhandled error: %s", exc)
+        return JSONResponse(status_code=500,
+                            content=error_body("internal_error", "internal error"))

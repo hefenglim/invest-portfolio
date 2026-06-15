@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -21,6 +22,8 @@ from portfolio_dash.shared.llm_config import (
     select_models,
     select_role_models,
 )
+
+logger = logging.getLogger(__name__)
 
 # A role's fallback companion (spec 04.3): role selection tries the primary then this.
 _ROLE_FALLBACK: dict[LLMRole, LLMRole] = {
@@ -94,6 +97,19 @@ def log_usage(
         (datetime.now(UTC).isoformat(), model, agent, input_tokens, output_tokens, str(cost)),
     )
     conn.commit()
+    # Structured log of the LLM call (spec 19.4): one point covers both call paths
+    # (complete_structured + complete_text) — same values written to the DB row, cost as
+    # its canonical string. Logging only; no LLM behaviour or numbers change.
+    logger.info(
+        "llm_usage",
+        extra={
+            "agent": agent,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": str(cost),
+        },
+    )
 
 
 def _response_format_for(schema: type[BaseModel]) -> dict[str, object]:

@@ -51,6 +51,7 @@ from portfolio_dash.scheduler.jobs import (
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.db import session
+from portfolio_dash.shared.logging_config import configure_logging
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
@@ -58,6 +59,10 @@ _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Configure structured JSON-lines logging once on real-server boot (spec 19.4).
+    # In lifespan (not create_app) so hermetic TestClient(app) tests — which skip
+    # lifespan — never write log files.
+    configure_logging()
     with session() as conn:
         bootstrap_db(conn)
         snapshots_store.ensure_tables(conn)  # external_snapshots (spec 20.4)
