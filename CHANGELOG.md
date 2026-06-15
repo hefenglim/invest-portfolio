@@ -28,6 +28,32 @@ headings. (`## [Unreleased]` is intentionally not counted.)
     `_e2e_loopback_socket`, restored on teardown) — external network stays banned. Baseline smokes for
     `login.html` + `index.html`; per-page smokes are added by Phase 2. (`playwright>=1.44` was already a
     declared dep; raw `playwright.sync_api` used — no `pytest-playwright` added.)
+- **Backend completeness — spec 19 Phase 1 (2026-06-16):** ops/observability + dashboard-completeness so
+  Phase-2 pages wire against a complete backend.
+  - **Ops 保全 (spec 19.3):** new leaf `portfolio_dash/ops/backup.py` — `backup_database` (sqlite3 online
+    `.backup` API → gzip → `data/backups/portfolio_{YYYY-MM-DD}.db.gz`, keep-30 rotation), `check_integrity`
+    (`PRAGMA integrity_check`), `pre_write_snapshot` (prefixed one-off snapshots for CSV/AI commit + migrations).
+    `scheduler/jobs.py` `backup_daily` job (default 01:30 Asia/Taipei): integrity-fail → error run + structured
+    warn; logs recovery after a 3-consecutive-fail streak. Pairs with the Phase-0 `make restore` target.
+  - **`/api/dashboard` freshness `last_backup_at` (spec 19.3):** `ops.backup.latest_backup_at()` (newest backup
+    mtime as a UTC ISO string, or None); `FreshnessReport.last_backup_at`; router-fed after `to_wire`
+    (build_dashboard stays pure).
+  - **Structured JSON-lines logging (spec 19.4):** new leaf `shared/logging_config.py` (`JsonLinesFormatter`
+    + idempotent `configure_logging`, RotatingFileHandler 10 MB×5 → `data/logs/app.log`), configured in the app
+    lifespan; a catch-all `Exception` handler in `api/errors.py` logs the traceback + returns the generic 500
+    envelope (no detail leak); one `llm_usage` structured log point in `shared/llm.py` (alias/tokens/cost,
+    reconciled with the `llm_usage` row). stdlib only.
+  - **`calib_gap` alert rule (spec 03/04 I1):** `AlertRules.calib_gap` (default **15 pp**, not a ratio); the
+    pure `compute_alerts_from`/`compute_alerts` gain a fed `calib_gap: Decimal | None`; `evaluations_store.
+    scored_confidence_hits` + the SINGLE-SOURCE `api/insight_service.calibration_gap(conn)` (global `min_samples`
+    gate → `scoring.calibration_error`, in pp) feed BOTH the dashboard embed and `GET /api/alerts` (they cannot
+    diverge). `calibration_regression` stays an `alert_events` event, not surfaced here. (`evolution_config.
+    gap_alert_pp` is the separate spec-04c regression threshold — NOT this rule's threshold.)
+  - **Dashboard embeds latest N real insight cards (spec 08/04 I3):** `insights_store.latest_cards(conn, n)`
+    (`is_shadow=0`, newest-first, LIMIT n); the router overwrites `payload["insights"]` after `to_wire` with the
+    latest 3 as `{id, title, summary, body_md, symbol, created_at, cost_usd}` (cost_usd stays the canonical
+    Decimal string; empty table → `[]`). NOTE the field names differ from the older `web/mock-data.js` insight
+    shape — reconciled when Phase 2 wires the dashboard page.
 
 ### Fixed
 - **Makefile runs the full suite (spec 19 Phase 0, 2026-06-16):** `make test`/`make regress`/`make all` now
