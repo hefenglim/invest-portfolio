@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from portfolio_dash.llm_insight import alerts_bridge
+from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.pricing import datasources_store, ingest
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
@@ -459,6 +460,36 @@ def generate_calibrations(conn: sqlite3.Connection, *, now: datetime) -> str:
     return "calibration pass complete"
 
 
+# --- Ops 保全: daily SQLite backup + integrity check (spec 19.3) --------------
+# Downward call (scheduler → ops, fine per architecture.md). The job runs the integrity
+# pragma FIRST; a failed check RAISES so run_job records an error run (the v1 "warn" is the
+# structured logger.warning + that error row — NOT a new spec-03 alert rule). A healthy DB
+# is backed up + rotated. After an error streak that reached the threshold on PRIOR runs, a
+# best-effort 3-consecutive-fail warning is logged (non-fatal).
+
+
+def backup_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily: integrity-check the SQLite DB then write a rotated gzipped backup.
+
+    On a FAILED ``PRAGMA integrity_check`` the job logs a structured warning and RAISES
+    ``RuntimeError`` so ``run_job`` records an ``error`` run (the v1 保全 "warn" signal).
+    On success it writes the daily backup via ``ops.backup.backup_database`` and, when the
+    trailing consecutive-failure streak had already reached the threshold on prior runs,
+    logs a best-effort 3-consecutive-fail warning. Returns a short ``job_runs.detail``.
+    """
+    ok, detail = backup_ops.check_integrity()
+    if not ok:
+        logger.warning("backup_daily integrity_check failed: %s", detail)
+        raise RuntimeError(f"integrity_check failed: {detail}")
+    if _prior_consecutive_failures(conn, "backup_daily") >= _FAIL_STREAK_THRESHOLD:
+        logger.warning(
+            "backup_daily recovered after %d+ consecutive failed run(s); backup resuming",
+            _FAIL_STREAK_THRESHOLD,
+        )
+    path = backup_ops.backup_database(now=now)
+    return f"backup ok -> {path.name}"
+
+
 JOBS: list[JobSpec] = [
     JobSpec(
         "quotes_tw", quotes_tw, "0 14 * * mon-fri", "Asia/Taipei", True,
@@ -515,6 +546,11 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "generate_calibrations", generate_calibrations, "0 19 * * sun", "Asia/Taipei", True,
         "Weekly calibration version generation (Loop 3)",
+    ),
+    # Ops 保全 (spec 19.3): daily SQLite backup + integrity check (01:30 Asia/Taipei).
+    JobSpec(
+        "backup_daily", backup_daily, "30 1 * * *", "Asia/Taipei", True,
+        "Daily SQLite backup + integrity check",
     ),
 ]
 
