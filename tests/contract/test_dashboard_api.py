@@ -1,7 +1,13 @@
+import sqlite3
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
+from portfolio_dash.llm_insight import insights_store
+from portfolio_dash.llm_insight.cards import InsightCard
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.shared.config import get_settings
 
@@ -55,6 +61,70 @@ def test_dashboard_last_backup_at_surfaces_latest_iso(api_client: TestClient) ->
         assert body["freshness"]["last_backup_at"] == expected
     finally:
         gz.unlink(missing_ok=True)
+
+
+# --- insights embed (spec 08/04 I3) -------------------------------------------
+
+_TPE = ZoneInfo("Asia/Taipei")
+
+
+def _seed_card(
+    conn: sqlite3.Connection, *, insight_type_id: int, title: str, symbol: str | None,
+    when: datetime, cost: str = "0.0021", is_shadow: bool = False,
+) -> None:
+    card = InsightCard(title=title, summary=f"{title} summary", body_md=f"# {title}",
+                       tags=[], symbol=symbol)
+    insights_store.add_card(
+        conn, insight_type_id=insight_type_id, card=card,
+        fingerprint=insights_store.fingerprint(insight_type_id, title, "d", "v1"),
+        calibration_version=None, horizon_days=5, input_snapshot="{}", model="m",
+        cost_usd=Decimal(cost), now=when, is_shadow=is_shadow,
+    )
+
+
+def test_dashboard_insights_empty_when_no_cards(api_client: TestClient) -> None:
+    # The golden DB seeds the insights table EMPTY -> the dashboard embeds [].
+    body = api_client.get("/api/dashboard").json()
+    assert body["insights"] == []
+
+
+def test_dashboard_embeds_real_cards_newest_first(
+    golden_db: sqlite3.Connection, api_client: TestClient
+) -> None:
+    # golden_db and api_client share the same in-memory connection: seed, then GET.
+    _seed_card(golden_db, insight_type_id=1, title="older", symbol="2330",
+               when=datetime(2026, 6, 9, 9, 0, tzinfo=_TPE))
+    _seed_card(golden_db, insight_type_id=1, title="newer", symbol=None,
+               when=datetime(2026, 6, 10, 9, 0, tzinfo=_TPE), cost="0.0050")
+    # a shadow card on the newest day must NOT surface
+    _seed_card(golden_db, insight_type_id=1, title="shadow", symbol="AAPL",
+               when=datetime(2026, 6, 11, 9, 0, tzinfo=_TPE), is_shadow=True)
+
+    body = api_client.get("/api/dashboard").json()
+    insights = body["insights"]
+    assert [c["title"] for c in insights] == ["newer", "older"]  # newest first, shadow gone
+
+    newer = insights[0]
+    assert set(newer.keys()) == {
+        "id", "title", "summary", "body_md", "symbol", "created_at", "cost_usd"
+    }
+    assert newer["summary"] == "newer summary"
+    assert newer["body_md"] == "# newer"
+    assert newer["symbol"] is None  # portfolio card -> null symbol passes through
+    assert isinstance(newer["id"], str)  # id stringified to match the stub wire type
+    assert isinstance(newer["cost_usd"], str)  # money is a STRING, never a number
+    assert newer["cost_usd"] == "0.0050"  # canonical Decimal string, untouched
+    assert insights[1]["symbol"] == "2330"
+
+
+def test_dashboard_insights_capped_at_three(
+    golden_db: sqlite3.Connection, api_client: TestClient
+) -> None:
+    for i in range(5):
+        _seed_card(golden_db, insight_type_id=1, title=f"c{i}", symbol="2330",
+                   when=datetime(2026, 6, 6 + i, 9, 0, tzinfo=_TPE))
+    body = api_client.get("/api/dashboard").json()
+    assert [c["title"] for c in body["insights"]] == ["c4", "c3", "c2"]  # latest 3
 
 
 def test_latest_backup_at_newest_wins_and_none_paths(tmp_path: Path) -> None:

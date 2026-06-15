@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Query
 from portfolio_dash.api import insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.serialize import to_wire
+from portfolio_dash.llm_insight import insights_store
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing.store import get_price_history
@@ -26,6 +27,7 @@ from portfolio_dash.strategy.rules_config import get_alert_rules
 router = APIRouter()
 
 _SPARK_DAYS = 30
+_INSIGHT_N = 3
 
 
 @router.get("/dashboard")
@@ -63,4 +65,23 @@ def dashboard(
         calib_gap=calib,
     )
     payload["alerts"] = to_wire([a.model_dump() for a in alerts])
+
+    # insights: the latest N real non-shadow cards (spec 08/04 I3). Router-fed (the pure
+    # build_dashboard returns insights=[] — it does not read the insights table), overwriting
+    # the stub list AFTER to_wire so the real read is never shadowed. cost_usd is already a
+    # canonical Decimal STRING in storage — pass it through untouched (no float/coerce); id is
+    # stringified to match the InsightCardStub.id wire type. Empty table -> [].
+    cards = insights_store.latest_cards(conn, _INSIGHT_N)
+    payload["insights"] = [
+        {
+            "id": str(c.id),
+            "title": c.card.title,
+            "summary": c.card.summary,
+            "body_md": c.card.body_md,
+            "symbol": c.card.symbol,
+            "created_at": c.created_at,
+            "cost_usd": c.cost_usd,
+        }
+        for c in cards
+    ]
     return payload

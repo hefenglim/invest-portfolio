@@ -208,6 +208,66 @@ def test_list_cards_filters_by_type_and_symbol(conn: sqlite3.Connection) -> None
     assert len(by_symbol) == 1 and by_symbol[0].symbol == "2330"
 
 
+# --- latest_cards (dashboard embed) -------------------------------------------
+
+
+def _add_at(
+    conn: sqlite3.Connection, *, insight_type_id: int, title: str, when: datetime,
+    is_shadow: bool = False,
+) -> None:
+    """Add one narrative card stamped at *when* (created_at drives the latest_cards order)."""
+    card = InsightCard(title=title, summary="s", body_md="b", tags=[])
+    store.add_card(
+        conn, insight_type_id=insight_type_id, card=card,
+        fingerprint=store.fingerprint(insight_type_id, title, "d", "v1"),
+        calibration_version=None, horizon_days=5, input_snapshot="{}", model="m",
+        cost_usd=Decimal("0"), now=when, is_shadow=is_shadow,
+    )
+
+
+def test_latest_cards_empty_store_is_empty(conn: sqlite3.Connection) -> None:
+    assert store.latest_cards(conn, 3) == []
+
+
+def test_latest_cards_caps_at_n_newest_first_and_excludes_shadow(
+    conn: sqlite3.Connection,
+) -> None:
+    # Four non-shadow cards on distinct days + one shadow card on the newest day.
+    _add_at(conn, insight_type_id=1, title="oldest", when=datetime(2026, 6, 8, 9, 0))
+    _add_at(conn, insight_type_id=1, title="older", when=datetime(2026, 6, 9, 9, 0))
+    _add_at(conn, insight_type_id=1, title="newer", when=datetime(2026, 6, 10, 9, 0))
+    _add_at(conn, insight_type_id=1, title="newest", when=datetime(2026, 6, 11, 9, 0))
+    _add_at(
+        conn, insight_type_id=1, title="shadow", when=datetime(2026, 6, 11, 9, 0),
+        is_shadow=True,
+    )
+
+    got = store.latest_cards(conn, 3)
+    assert len(got) == 3  # capped at N
+    assert [r.card.title for r in got] == ["newest", "newer", "older"]  # created_at desc
+    assert all(not r.is_shadow for r in got)  # shadow excluded
+    assert "shadow" not in {r.card.title for r in got}
+
+
+def test_latest_cards_id_desc_tiebreak_for_same_created_at(
+    conn: sqlite3.Connection,
+) -> None:
+    same = datetime(2026, 6, 11, 9, 0)
+    _add_at(conn, insight_type_id=1, title="first", when=same)
+    _add_at(conn, insight_type_id=1, title="second", when=same)
+    got = store.latest_cards(conn, 2)
+    # Same created_at -> higher id (the later insert, "second") comes first.
+    assert [r.card.title for r in got] == ["second", "first"]
+
+
+def test_latest_cards_returns_fewer_than_n_when_few_rows(conn: sqlite3.Connection) -> None:
+    _add_at(conn, insight_type_id=1, title="only", when=datetime(2026, 6, 11, 9, 0))
+    got = store.latest_cards(conn, 5)
+    assert len(got) == 1
+    assert got[0].card.title == "only"
+    assert got[0].cost_usd == "0"  # cost passes through as a canonical Decimal string
+
+
 def test_add_card_records_is_shadow_flag(conn: sqlite3.Connection) -> None:
     fp = store.fingerprint(7, "p", "d", "v1")
     store.add_card(

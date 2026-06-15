@@ -272,3 +272,19 @@ def list_cards(
         f"SELECT * FROM insights{where} ORDER BY id DESC", tuple(params)
     ).fetchall()
     return [_record_from_row(r) for r in rows]
+
+
+def latest_cards(conn: sqlite3.Connection, n: int) -> list[InsightRecord]:
+    """The latest *n* non-shadow cards, newest first (spec 4.6 / 08 dashboard embed).
+
+    Ordered ``created_at`` desc with an ``id`` desc tiebreak for determinism (two cards
+    stamped from the same run share a ``created_at``). Shadow cards (``is_shadow = 1``)
+    are excluded — they are hidden calibration trials, never surfaced on the dashboard
+    (spec 4.6). An empty table (or non-positive *n*) yields an empty list.
+    """
+    rows = conn.execute(
+        "SELECT * FROM insights WHERE is_shadow = 0 "
+        "ORDER BY created_at DESC, id DESC LIMIT ?",
+        (n,),
+    ).fetchall()
+    return [_record_from_row(r) for r in rows]
