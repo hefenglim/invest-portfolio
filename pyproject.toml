@@ -71,3 +71,4 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
 testpaths = ["tests"]
 addopts = "-q --disable-socket --allow-unix-socket"
 asyncio_mode = "strict"
+markers = ["e2e: browser end-to-end (sockets enabled)"]
