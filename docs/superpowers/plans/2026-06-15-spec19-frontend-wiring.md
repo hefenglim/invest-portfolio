@@ -30,13 +30,19 @@ Playwright smoke (frontend tasks). Baseline: **1009 passed / 4 skipped, mypy cle
 # PHASE 0 — Fetch layer + smoke harness + tooling (the gate; everything depends on it)
 
 ## Task 0.1 — Makefile test-target fix (#3 / tooling) — DO FIRST (enables real regression)
-**Files:** `Makefile`; (no code).
-- [ ] `make test` currently targets `tests/unit tests/contract` but **`tests/unit` does not exist** — the
-  1009 tests live in `tests/<module>/`. Fix targets so `make all` runs the FULL suite:
-  `test:` → `$(PY) -m pytest tests -q` (whole tree, excludes e2e via marker/path); add
-  `e2e:` → `$(PY) -m pytest tests/e2e -q` (Playwright); `regress:` → full suite + golden;
-  `all: ruff mypy test`. Confirm `make all` actually runs all 1009.
-- [ ] Commit `fix(ops): Makefile test targets run the full suite (was tests/unit which doesn't exist)`.
+**Files:** `Makefile`, `pyproject.toml` (register the `e2e` marker); (no app code).
+- [ ] **Corrected premise (review F4):** `tests/unit/` DOES exist (`test_dividend_net.py`) and `tests/e2e/`
+  DOES exist (`test_smoke.py`). The REAL bug: `make test` targets `tests/unit tests/contract`, so it **misses
+  the bulk of the 1009 tests in `tests/<module>/`** (`tests/strategy/`, `tests/scheduler/`, `tests/llm_insight/`,
+  `tests/portfolio/`, `tests/pricing/`, `tests/shared/`, `tests/data_ingestion/`, `tests/api/`).
+- [ ] Fix targets so `make all` runs the FULL suite, excluding e2e by an EXPLICIT mechanism:
+  `test:` → `$(PY) -m pytest tests --ignore=tests/e2e -q` (whole tree minus Playwright);
+  `e2e:` → `$(PY) -m pytest tests/e2e -q`; `regress:` → `$(PY) -m pytest tests --ignore=tests/e2e -q` (+golden);
+  register `markers = ["e2e: browser end-to-end (sockets enabled)"]` in `[tool.pytest.ini_options]` so the
+  `-m`/path split is clean. `all: ruff mypy test`. Confirm `make all` runs all ~1009 (not just contract).
+- [ ] **`make restore` (spec 19.3 §3 — was missing):** add `restore: ` target = stop scheduler → swap DB file
+  from `FILE=...` → restart (documented, FILE arg required). Pairs with the `backup_daily` job (Task 1.1).
+- [ ] Commit `fix(ops): Makefile runs full suite (excl e2e) + register e2e marker + make restore (spec 19)`.
 
 ## Task 0.2 — `web/api.js` single fetch layer (spec 19.1)
 **Files:** create `web/api.js`; `tests/e2e/test_api_js_smoke.py` (Playwright, new) OR a jsdom unit test.
@@ -55,6 +61,13 @@ Playwright smoke (frontend tasks). Baseline: **1009 passed / 4 skipped, mypy cle
 ## Task 0.3 — Playwright smoke harness (so each wired page is guarded)
 **Files:** `tests/e2e/conftest.py` (Playwright + a seeded golden DB served by the app), `tests/e2e/
 test_pages_smoke.py`; `pyproject`/`Makefile` Playwright dep already declared (stack.md).
+- [ ] **Sockets (review F1 — CRITICAL):** `pyproject.toml` sets `--disable-socket --allow-unix-socket`
+  globally (spec 17.1), which BANS the TCP loopback the harness needs (uvicorn port + headless Chromium →
+  `localhost:PORT`). The existing `tests/e2e/test_smoke.py` only passes because it `pytest.skip`s at import.
+  The harness MUST re-enable loopback for `tests/e2e` ONLY: add `--allow-hosts=127.0.0.1,localhost` (or a
+  `socket_enabled`/`@pytest.mark.enable_socket` autouse fixture scoped to `tests/e2e/conftest.py`). Document
+  this is the **spec-17-sanctioned exception** — real EXTERNAL network stays banned (LLM/pricing via the
+  FakeProvider/FakeCompleter seams); only loopback to the app-under-test is allowed.
 - [ ] Harness: start the FastAPI app (StaticFiles `web/` + `/api/*`) against a **seeded golden DB**
   (reuse the golden fixtures), drive a headless browser. A reusable `assert_page_ok(path)` =
   navigate, wait for the page's key root element, assert **zero console errors** (this is what catches the
@@ -92,33 +105,52 @@ read in the router, not the pure calc), `tests/contract/test_dashboard_api.py`.
   Commit `feat(shared): structured JSON-lines logging (spec 19.4)`.
 
 ## Task 1.4 — calib_gap wired into the alert engine (#3 / I1)
-**Files:** `portfolio_dash/strategy/alerts.py` (`compute_alerts_from` gains a fed `calib_gap: Decimal|None`),
-`portfolio_dash/api/routers/dashboard.py` + `routers/strategy.py` (read ai-score calibration_error, pass in),
-`tests/strategy/test_alerts.py` + `tests/contract/test_alerts_api.py`.
-- [ ] Keep `compute_alerts_from` PURE: add a `calib_gap` param (the ai-score calibration error, or None);
-  when `rules.calib_gap.enabled` and `calib_gap` > threshold → emit the `calib_gap` alert (spec 03 §3.1,
-  warn). The caller (dashboard + /api/alerts) computes calibration error via
-  `evaluations_store.ai_score(...)` (gated by `min_samples`; None when insufficient) and passes it in.
-  (`calibration_regression` is already emitted as an alert_event by 04c — confirm /api/alerts surfaces
-  recent alert_events too, or document it stays event-only.)
-- [ ] Commit `feat(strategy,api): wire calib_gap alert from ai-score calibration error (spec 03/04 I1)`.
+**Files:** `portfolio_dash/strategy/rules_config.py` (**review F2: add the `calib_gap` rule — it does NOT
+exist yet**), `portfolio_dash/strategy/alerts.py` (`compute_alerts_from` gains a fed `calib_gap: Decimal|None`),
+`portfolio_dash/api/routers/dashboard.py` + `routers/strategy.py` (compute + pass in), `tests/strategy/
+test_rules_config.py` + `test_alerts.py` + `tests/contract/test_alerts_api.py`.
+- [ ] **F2 — add the rule first:** `AlertRules` (rules_config.py) currently has 7 rules and NO `calib_gap`
+  (explicitly deferred). Add `calib_gap` to the `AlertRules` model + `RULE_META`/`RULE_IDS`
+  (default `value="0.15"`, unit `pp`, min/max per spec 03 §3.1 line 43) with serialize/parse round-trip;
+  extend `test_rules_config.py`. (Otherwise `rules.calib_gap.enabled` cannot compile.)
+- [ ] Keep `compute_alerts_from` PURE: add a `calib_gap: Decimal | None` param; when
+  `rules.calib_gap.enabled` and `calib_gap` is not None and `> threshold` → emit the `calib_gap` alert
+  (spec 03 §3.1, warn).
+- [ ] **F3 — correct gap source:** the gap is a SCALAR Decimal = `scoring.calibration_error(rows)` where
+  `rows: list[tuple[int, bool]]` are scored (confidence, hit) pairs; `evaluations_store.ai_score()` returns
+  a `calibration_bins` LIST (not a scalar) and ignores min_samples. The CALLER (dashboard + /api/alerts)
+  gathers the scored rows, applies the `evolution_config.min_samples` gate (→ None when insufficient,
+  per spec 04.10), computes the scalar via `scoring.calibration_error(...)`, and passes it in.
+- [ ] **W3 — `calibration_regression` stays event-only:** it is emitted by 04c into `alert_events` (the
+  event/bell feed); `/api/alerts` stays the rule-derived view and does NOT surface it. Document this in the
+  router (no change to `compute_alerts_from`).
+- [ ] Commit `feat(strategy,api): add calib_gap rule + wire from ai-score calibration error (spec 03/04 I1)`.
 
 ## Task 1.5 — Dashboard embeds latest N real insight cards (#4 / I3)
-**Files:** `portfolio_dash/api/routers/dashboard.py`, `dashboard_models.py` (replace `InsightCardStub`
-usage), `tests/contract/test_dashboard_api.py`.
-- [ ] `/api/dashboard` `insights` = the latest **N (e.g. 3)** non-shadow cards from the `insights` table
-  (spec 04), serialized to the dashboard shape `{id, title, summary, body_md, symbol, created_at,
-  cost_usd}`. Empty table → `[]` (no LLM call — pure read). Update the golden + retire `InsightCardStub`'s
-  placeholder. (Reconciles the mock's `body`/`token_cost_usd` → `body_md`/`cost_usd`; note the field rename
-  for the frontend wiring in Task 2.2.)
-- [ ] Commit `feat(api): dashboard embeds latest N real insight cards (spec 08/04 I3)`.
+**Files:** `portfolio_dash/llm_insight/insights_store.py` (**W2: new `latest_cards(conn, n)` helper**),
+`portfolio_dash/api/routers/dashboard.py`, `tests/llm_insight/test_insights_store.py` +
+`tests/contract/test_dashboard_api.py`.
+- [ ] **W2 — store helper:** `list_cards()` returns ALL cards with no shadow filter / no LIMIT. Add
+  `latest_cards(conn, n)` → `WHERE is_shadow = 0 ORDER BY created_at DESC LIMIT n` (keep the SQL in the
+  store, not the router).
+- [ ] `/api/dashboard` `insights` = the latest **N (e.g. 3)** non-shadow cards, serialized to the dashboard
+  shape `{id, title, summary, body_md, symbol, created_at, cost_usd}`. Empty table → `[]` (no LLM — pure read).
+- [ ] **W4 — overwrite, don't shadow:** `build_dashboard` keeps `insights: list[InsightCardStub]` = `[]`
+  (stays pure); the router **OVERWRITES** `payload["insights"]` AFTER `to_wire(data.model_dump())`, mirroring
+  the existing `payload["alerts"]` / `payload["llm_quota"]` injection — so the empty stub list does not shadow
+  the real read. Update the golden.
+- [ ] Commit `feat(api): dashboard embeds latest N real insight cards via insights_store.latest_cards (spec 08/04 I3)`.
 
 ---
 
 # PHASE 2 — Page wiring (each: mock → pdApi, fold money rules, retire mock, add page smoke)
 
 > Per-task checklist (applies to every Phase-2 task): replace the page's `window.*_DATA`/mock-file read with
-> `pdApi.*`; route every Decimal field through `fmt.*` (fix the named `.toFixed` break sites → `fmt`/`Number()`);
+> `pdApi.*`; route every Decimal field through `fmt.*` (fix the named `.toFixed` break sites → `fmt`/`Number()`
+> — **W5: the named list is NOT exhaustive; grep each page for `.toFixed(`/`+`-on-money and audit. Note:
+> `(x*100).toFixed` and `Number(x).toFixed` are already string-safe via coercion (e.g. `settings-llm.js:78/368`,
+> `insights.html:349`, `rebalance.js`); only BARE `field.toFixed()` and `+`-summation of money break.** Extra
+> money sites to fmt: `pipeline-wizard.js:60` / `pipeline-preflight.js:76` quota/cost (Task 2.8));
 > **delete the retired mock entirely** (no fallback branch — spec 19 §6; the two documented exceptions:
 > detail.js feeTax offline mirror, alerts cache); add a Playwright **page smoke** (loads vs golden DB, zero
 > console errors, key element renders). Backend contract tests already guard each endpoint shape.
@@ -130,7 +162,9 @@ usage), `tests/contract/test_dashboard_api.py`.
 
 ## Task 2.2 — Dashboard (index / app.js) — the central page
 - [ ] Wire `app.js` to `GET /api/dashboard` (replace `DASHBOARD_DATA`). **Fix C2 break site**
-  `app.js:743 ins.token_cost_usd.toFixed(3)` → `fmt` (and rename to `cost_usd` per Task 1.5); ensure
+  `app.js:743 ins.token_cost_usd.toFixed(3)` → `fmt`. **W1 — the insight card read (app.js ~737-743) needs
+  THREE field renames** to the Task-1.5 shape: `ins.body`→`ins.body_md` (or `summary`), `ins.generated_at`→
+  `ins.created_at`, `ins.token_cost_usd`→`ins.cost_usd` (else the card renders `undefined`). Ensure
   kpis/holdings/returns/allocation/fx/dividends/trend all render via `fmt`; verify NO `+`-sum of money in
   bar/alloc calcs (use `Number()` only for display widths). Embedded `alerts` array (no second build) +
   insights from Task 1.5. Retire `mock-data.js`. Page smoke. Commit
