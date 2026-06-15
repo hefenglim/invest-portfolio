@@ -18,7 +18,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from portfolio_dash.shared.config import get_settings
@@ -139,3 +139,27 @@ def pre_write_snapshot(
     _online_backup_to_gz(src_db, dest_gz)
     logger.info("pre-write snapshot written: %s", dest_gz)
     return dest_gz
+
+
+def latest_backup_at(
+    backup_dir: Path | None = None, *, db_path: Path | None = None
+) -> str | None:
+    """Return the newest daily backup's mtime as a UTC ISO-8601 string, or None.
+
+    Scans ``backup_dir`` (default ``db_path.parent / "backups"`` — the same default as
+    :func:`backup_database`) for ``portfolio_*.db.gz`` files and returns the modification
+    time of the most recent one as a timezone-aware ISO-8601 string in UTC. Returns
+    ``None`` when the directory is missing or holds no matching backup (read-only and
+    side-effect free — never creates the directory). The router calls this to surface
+    backup freshness on the dashboard; ``build_dashboard`` stays pure and never reads it.
+    """
+    target_dir = (
+        backup_dir if backup_dir is not None else _resolve_db_path(db_path).parent / "backups"
+    )
+    if not target_dir.is_dir():
+        return None
+    files = sorted(target_dir.glob(_BACKUP_GLOB), key=lambda p: p.stat().st_mtime)
+    if not files:
+        return None
+    newest = files[-1]
+    return datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC).isoformat()

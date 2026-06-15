@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.serialize import to_wire
+from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.enums import Currency
@@ -45,6 +46,10 @@ def dashboard(
 
     # Single source of truth (Σ top-ups − Σ usage); never None, $0 when nothing funded.
     payload["llm_quota"] = {"remaining_usd": decimal_str(budget_remaining(conn))}
+
+    # Backup freshness: ops/file state, not pure calc — build_dashboard leaves it None,
+    # the router fills it. ISO-8601 UTC string of the newest backup, or None if none yet.
+    payload["freshness"]["last_backup_at"] = backup_ops.latest_backup_at()
 
     # alerts: the SAME rule engine as GET /api/alerts, run over the already-built `data`
     # (no second build_dashboard) so the embedded array can never diverge from the endpoint.

@@ -140,6 +140,9 @@ class FreshnessReport(BaseModel):
     missing_fx: list[str]
     xirr_unavailable_reason: str | None = None
     trend_unavailable_reason: str | None = None
+    # Router-fed (ops/file state, not pure calc): build_dashboard leaves this None;
+    # the dashboard router fills it from ops.backup.latest_backup_at() after to_wire.
+    last_backup_at: str | None = None
 
 
 class InsightCardStub(BaseModel):
