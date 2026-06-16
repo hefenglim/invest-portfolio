@@ -7,12 +7,14 @@ dependency override (frozen GOLDEN_NOW); the network is banned at the pytest lev
 
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pytest_socket import disable_socket, enable_socket
 
@@ -95,14 +97,11 @@ def _seed_golden(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-@pytest.fixture
-def golden_db() -> Iterator[sqlite3.Connection]:
-    # check_same_thread=False: TestClient drives the ASGI app through an anyio portal
-    # worker thread, so a route reading this connection runs off the fixture's thread.
-    # Requests are serialized through the single portal (no true concurrency), so the
-    # shared in-memory connection is safe to use across threads here.
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+def init_golden_base(conn: sqlite3.Connection) -> None:
+    """Create the full empty schema (the same ordered table setup golden_db uses) on
+    *conn*, WITHOUT any ledger rows. Callers seed their own scenario afterwards. Reused
+    by golden_db (subset scenario) and the dashboard_client_factory (custom scenarios),
+    so the table-setup sequence lives in exactly one place (DRY)."""
     bootstrap_db(conn)
     create_pricing_tables(conn)
     create_scheduler_tables(conn)
@@ -115,6 +114,17 @@ def golden_db() -> Iterator[sqlite3.Connection]:
     ensure_insights_tables(conn)  # insights cards table: created EMPTY (spec 04b)
     ensure_alert_events_tables(conn)  # alert_events + dispatch log: created EMPTY (spec 04b)
     ensure_evaluations_tables(conn)  # insight_evaluations: created EMPTY (spec 04c)
+
+
+@pytest.fixture
+def golden_db() -> Iterator[sqlite3.Connection]:
+    # check_same_thread=False: TestClient drives the ASGI app through an anyio portal
+    # worker thread, so a route reading this connection runs off the fixture's thread.
+    # Requests are serialized through the single portal (no true concurrency), so the
+    # shared in-memory connection is safe to use across threads here.
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    init_golden_base(conn)
     _seed_golden(conn)
     yield conn
     conn.close()
@@ -140,4 +150,62 @@ def api_client(golden_db: sqlite3.Connection) -> Iterator[TestClient]:
         yield client
     finally:
         app.dependency_overrides.clear()
+        disable_socket(allow_unix_socket=True)
+
+
+SeedFn = Callable[[sqlite3.Connection], None]
+
+
+class DashboardClientFactory(Protocol):
+    """A factory that builds a TestClient over a fresh, custom-seeded golden-base DB."""
+
+    def __call__(
+        self,
+        seed: SeedFn,
+        *,
+        reporting: Currency = ...,
+        now: datetime = ...,
+    ) -> TestClient: ...
+
+
+@pytest.fixture
+def dashboard_client_factory() -> Iterator[DashboardClientFactory]:
+    """Build a TestClient over a FRESH golden-base DB seeded by a caller-supplied
+    ``seed(conn)`` function — for custom multi-account / multi-currency scenarios that
+    the fixed subset ``golden_db`` does not cover (spec-17 §17.2 financial verification).
+
+    Mirrors ``api_client``'s socket handling. Each call yields an independent in-memory
+    DB + app; multiple clients per test are supported. All connections and dependency
+    overrides are torn down when the test ends.
+    """
+    apps: list[FastAPI] = []
+    conns: list[sqlite3.Connection] = []
+    enable_socket()
+
+    def _make(
+        seed: SeedFn,
+        *,
+        reporting: Currency = Currency.TWD,
+        now: datetime = GOLDEN_NOW,
+    ) -> TestClient:
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        init_golden_base(conn)
+        seed(conn)
+        conn.commit()
+        app = create_app()
+        app.dependency_overrides[get_conn] = lambda: conn
+        app.dependency_overrides[get_now] = lambda: now
+        app.dependency_overrides[get_reporting] = lambda: reporting
+        apps.append(app)
+        conns.append(conn)
+        return TestClient(app)
+
+    try:
+        yield _make
+    finally:
+        for app in apps:
+            app.dependency_overrides.clear()
+        for conn in conns:
+            conn.close()
         disable_socket(allow_unix_socket=True)

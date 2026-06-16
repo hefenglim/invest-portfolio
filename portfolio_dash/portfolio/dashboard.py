@@ -331,11 +331,17 @@ def build_dashboard(
                        stale=pr.stale if pr is not None else True)
         for sym, pr in price_reads.items()
     ]
+    # Stable order: resolver.reads insertion order derives from set iteration over
+    # quote currencies (hash-seed-dependent across processes), so sort by (base, quote)
+    # to make the fx freshness + missing_fx lists deterministic in the API payload.
+    fx_reads_sorted = sorted(
+        resolver.reads.items(), key=lambda kv: (kv[0][0].value, kv[0][1].value)
+    )
     fx_fresh = [
         FxFreshness(base=base, quote=quote,
                     as_of=read.as_of if read is not None else None,
                     stale=read.stale if read is not None else True)
-        for (base, quote), read in resolver.reads.items()
+        for (base, quote), read in fx_reads_sorted
     ]
     freshness = FreshnessReport(
         prices=price_fresh,
@@ -343,7 +349,7 @@ def build_dashboard(
         any_stale=any(p.stale for p in price_fresh) or any(f.stale for f in fx_fresh),
         missing_prices=[sym for sym, pr in price_reads.items() if pr is None],
         missing_fx=[f"{base.value}/{quote.value}"
-                    for (base, quote), read in resolver.reads.items() if read is None],
+                    for (base, quote), read in fx_reads_sorted if read is None],
         xirr_unavailable_reason=xirr_reason,
         trend_unavailable_reason=trend_reason,
     )

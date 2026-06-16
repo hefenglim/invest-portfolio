@@ -1,0 +1,1445 @@
+{
+  "as_of": "2026-06-11T14:30:00+08:00",
+  "reporting_currency": "TWD",
+  "kpis": {
+    "reporting_currency": "TWD",
+    "total_market_value": "2937965.000",
+    "total_return": "470765.0000000000000000000000",
+    "total_return_rate": "0.1754229393352213444626620957",
+    "realized_total": "8000.0",
+    "unrealized_total": "462765.0000000000000000000000",
+    "xirr": null,
+    "fx_realized": "2000",
+    "fx_unrealized": "10545.0"
+  },
+  "holdings": [
+    {
+      "account_id": "tw_broker",
+      "account_name": "TW Broker",
+      "symbol": "2330",
+      "name": "TSMC",
+      "market": "TW",
+      "sector": "Semiconductors",
+      "board": "TWSE",
+      "quote_ccy": "TWD",
+      "shares": "2000",
+      "original_avg": "510",
+      "adjusted_avg": "500",
+      "original_cost_total": "1020000",
+      "adjusted_cost_total": "1000000",
+      "dividend_portion": "20000",
+      "payback_ratio": "0.01960784313725490196078431373",
+      "market_price": "600",
+      "market_value": "1200000",
+      "unrealized_pnl": "200000",
+      "capital_gain": "180000",
+      "price_stale": false,
+      "price_as_of": "2026-06-09",
+      "weight": "0.4084459821679291618518260088",
+      "spark_30d": [
+        "600"
+      ]
+    },
+    {
+      "account_id": "tw_broker",
+      "account_name": "TW Broker",
+      "symbol": "0056",
+      "name": "元大高股息",
+      "market": "TW",
+      "sector": "ETF",
+      "board": "TWSE",
+      "quote_ccy": "TWD",
+      "shares": "8000",
+      "original_avg": "36.0",
+      "adjusted_avg": "36.0",
+      "original_cost_total": "288000.0",
+      "adjusted_cost_total": "288000.0",
+      "dividend_portion": "0.0",
+      "payback_ratio": "0",
+      "market_price": "38",
+      "market_value": "304000",
+      "unrealized_pnl": "16000.0",
+      "capital_gain": "16000.0",
+      "price_stale": false,
+      "price_as_of": "2026-06-09",
+      "weight": "0.1034729821492087210024625889",
+      "spark_30d": [
+        "38"
+      ]
+    },
+    {
+      "account_id": "tw_broker",
+      "account_name": "TW Broker",
+      "symbol": "2603",
+      "name": "長榮",
+      "market": "TW",
+      "sector": "Shipping",
+      "board": "TWSE",
+      "quote_ccy": "TWD",
+      "shares": "1100",
+      "original_avg": "90.90909090909090909090909091",
+      "adjusted_avg": "90.90909090909090909090909091",
+      "original_cost_total": "100000",
+      "adjusted_cost_total": "100000",
+      "dividend_portion": "0",
+      "payback_ratio": "0",
+      "market_price": "110",
+      "market_value": "121000",
+      "unrealized_pnl": "21000.00000000000000000000000",
+      "capital_gain": "21000.00000000000000000000000",
+      "price_stale": false,
+      "price_as_of": "2026-06-09",
+      "weight": "0.04118496986859952382005912256",
+      "spark_30d": [
+        "110"
+      ]
+    },
+    {
+      "account_id": "tw_broker",
+      "account_name": "TW Broker",
+      "symbol": "00919",
+      "name": "群益台灣精選高息",
+      "market": "TW",
+      "sector": "ETF",
+      "board": "TWSE",
+      "quote_ccy": "TWD",
+      "shares": "5000",
+      "original_avg": "23",
+      "adjusted_avg": "23",
+      "original_cost_total": "115000",
+      "adjusted_cost_total": "115000",
+      "dividend_portion": "0",
+      "payback_ratio": "0",
+      "market_price": null,
+      "market_value": null,
+      "unrealized_pnl": null,
+      "capital_gain": null,
+      "price_stale": true,
+      "price_as_of": null,
+      "weight": null,
+      "spark_30d": []
+    },
+    {
+      "account_id": "schwab",
+      "account_name": "Charles Schwab",
+      "symbol": "AAPL",
+      "name": "Apple",
+      "market": "US",
+      "sector": "Tech",
+      "board": "",
+      "quote_ccy": "USD",
+      "shares": "100.4",
+      "original_avg": "250",
+      "adjusted_avg": "250",
+      "original_cost_total": "25100",
+      "adjusted_cost_total": "25100",
+      "dividend_portion": "0",
+      "payback_ratio": "0",
+      "market_price": "300",
+      "market_value": "30120.0",
+      "unrealized_pnl": "5020.0",
+      "capital_gain": "5020.0",
+      "price_stale": false,
+      "price_as_of": "2026-06-09",
+      "weight": "0.3280638128772807027993866503",
+      "spark_30d": [
+        "300"
+      ]
+    },
+    {
+      "account_id": "schwab",
+      "account_name": "Charles Schwab",
+      "symbol": "MSFT",
+      "name": "Microsoft",
+      "market": "US",
+      "sector": "Tech",
+      "board": "",
+      "quote_ccy": "USD",
+      "shares": "10",
+      "original_avg": "400",
+      "adjusted_avg": "400",
+      "original_cost_total": "4000",
+      "adjusted_cost_total": "4000",
+      "dividend_portion": "0",
+      "payback_ratio": "0",
+      "market_price": "450",
+      "market_value": "4500",
+      "unrealized_pnl": "500",
+      "capital_gain": "500",
+      "price_stale": true,
+      "price_as_of": "2026-06-06",
+      "weight": "0.04901351786015149942221912106",
+      "spark_30d": [
+        "450"
+      ]
+    },
+    {
+      "account_id": "moomoo_my_my",
+      "account_name": "Moomoo MY (MY)",
+      "symbol": "1155.KL",
+      "name": "Maybank",
+      "market": "MY",
+      "sector": "Financials",
+      "board": ".KL",
+      "quote_ccy": "MYR",
+      "shares": "1000",
+      "original_avg": "9",
+      "adjusted_avg": "8.8",
+      "original_cost_total": "9000",
+      "adjusted_cost_total": "8800",
+      "dividend_portion": "200",
+      "payback_ratio": "0.02222222222222222222222222222",
+      "market_price": "9.875",
+      "market_value": "9875.000",
+      "unrealized_pnl": "1075.000",
+      "capital_gain": "875.000",
+      "price_stale": false,
+      "price_as_of": "2026-06-09",
+      "weight": "0.02352819043113175276083956072",
+      "spark_30d": [
+        "9.875"
+      ]
+    },
+    {
+      "account_id": "moomoo_my_us",
+      "account_name": "Moomoo MY (US)",
+      "symbol": "NVDA",
+      "name": "NVIDIA",
+      "market": "US",
+      "sector": "Tech",
+      "board": "",
+      "quote_ccy": "USD",
+      "shares": "25",
+      "original_avg": "118",
+      "adjusted_avg": "118",
+      "original_cost_total": "2950",
+      "adjusted_cost_total": "2950",
+      "dividend_portion": "0",
+      "payback_ratio": "0",
+      "market_price": "170",
+      "market_value": "4250",
+      "unrealized_pnl": "1300",
+      "capital_gain": "1300",
+      "price_stale": false,
+      "price_as_of": "2026-06-09",
+      "weight": "0.04629054464569863834320694767",
+      "spark_30d": [
+        "170"
+      ]
+    }
+  ],
+  "realized": {
+    "rows": [
+      {
+        "account_id": "tw_broker",
+        "symbol": "0056",
+        "quote_ccy": "TWD",
+        "sell_date": "2026-04-10",
+        "shares_sold": "2000",
+        "proceeds_net": "80000",
+        "original_cost_removed": "72000.0",
+        "adjusted_cost_removed": "72000.0",
+        "realized": "8000.0"
+      }
+    ],
+    "by_currency": {
+      "TWD": "8000.0"
+    }
+  },
+  "returns": {
+    "by_currency": {
+      "MYR": {
+        "realized": "0",
+        "unrealized": "1075.000",
+        "total_return": "1075.000",
+        "gross_invested": "9000",
+        "rate": "0.1194444444444444444444444444"
+      },
+      "USD": {
+        "realized": "0",
+        "unrealized": "6820.0",
+        "total_return": "6820.0",
+        "gross_invested": "32050",
+        "rate": "0.2127925117004680187207488300"
+      },
+      "TWD": {
+        "realized": "8000.0",
+        "unrealized": "237000.0000000000000000000000",
+        "total_return": "245000.0000000000000000000000",
+        "gross_invested": "1595000",
+        "rate": "0.1536050156739811912225705329"
+      }
+    },
+    "reporting_currency": "TWD",
+    "reporting_total_return": "470765.0000000000000000000000",
+    "xirr": null
+  },
+  "allocation": {
+    "by_sector": {
+      "Semiconductors": "1200000",
+      "ETF": "304000",
+      "Shipping": "121000",
+      "Tech": "1243840.0",
+      "Financials": "69125.000"
+    },
+    "weights": {
+      "Semiconductors": "0.4084459821679291618518260088",
+      "ETF": "0.1034729821492087210024625889",
+      "Shipping": "0.04118496986859952382005912256",
+      "Tech": "0.4233678753831308405648127190",
+      "Financials": "0.02352819043113175276083956072"
+    },
+    "reporting_currency": "TWD"
+  },
+  "currency_view": {
+    "by_currency_value": {
+      "TWD": "1625000",
+      "USD": "38870.0",
+      "MYR": "9875.000"
+    },
+    "reporting_total_value": "2937965.000",
+    "reporting_currency": "TWD"
+  },
+  "fx": {
+    "by_account": {
+      "moomoo_my_us": {
+        "account_id": "moomoo_my_us",
+        "home_ccy": "MYR",
+        "foreign_ccy": "USD",
+        "avg_rate": "4.5",
+        "current_spot": "4.4",
+        "foreign_cash": "0",
+        "foreign_stock_value": "4250",
+        "realized_fx": "0",
+        "unrealized_fx_stocks": "-425.0",
+        "unrealized_fx_cash": "-0.0"
+      },
+      "schwab": {
+        "account_id": "schwab",
+        "home_ccy": "TWD",
+        "foreign_ccy": "USD",
+        "avg_rate": "31",
+        "current_spot": "32",
+        "foreign_cash": "-21100",
+        "foreign_stock_value": "34620.0",
+        "realized_fx": "2000",
+        "unrealized_fx_stocks": "34620.0",
+        "unrealized_fx_cash": "-21100"
+      }
+    },
+    "reporting_currency": "TWD",
+    "reporting_realized_fx": "2000",
+    "reporting_unrealized_fx": "10545.0"
+  },
+  "dividends": {
+    "by_year": [
+      {
+        "year": 2026,
+        "by_currency": {
+          "TWD": "20000",
+          "USD": "70",
+          "MYR": "200"
+        }
+      }
+    ],
+    "total_by_currency": {
+      "TWD": "20000",
+      "USD": "70",
+      "MYR": "200"
+    }
+  },
+  "ex_dividend_calendar": [],
+  "trend": {
+    "points": [
+      {
+        "date": "2026-01-05",
+        "total_value": "0",
+        "net_invested": "500000",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-06",
+        "total_value": "0",
+        "net_invested": "860000",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-07",
+        "total_value": "0",
+        "net_invested": "960000",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-08",
+        "total_value": "0",
+        "net_invested": "1075000",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-09",
+        "total_value": "0",
+        "net_invested": "1075000",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-10",
+        "total_value": "0",
+        "net_invested": "1853100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-11",
+        "total_value": "0",
+        "net_invested": "1853100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-12",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-13",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-14",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-15",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-16",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-17",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-18",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-19",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-20",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-21",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-22",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-23",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-24",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-25",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-26",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-27",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-28",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-29",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-30",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-01-31",
+        "total_value": "0",
+        "net_invested": "1977100",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-01",
+        "total_value": "0",
+        "net_invested": "2038300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-02",
+        "total_value": "0",
+        "net_invested": "2038300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-03",
+        "total_value": "0",
+        "net_invested": "2038300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-04",
+        "total_value": "0",
+        "net_invested": "2038300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-05",
+        "total_value": "0",
+        "net_invested": "2558300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-06",
+        "total_value": "0",
+        "net_invested": "2558300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-07",
+        "total_value": "0",
+        "net_invested": "2558300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-08",
+        "total_value": "0",
+        "net_invested": "2558300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-09",
+        "total_value": "0",
+        "net_invested": "2558300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-10",
+        "total_value": "0",
+        "net_invested": "2558300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-11",
+        "total_value": "0",
+        "net_invested": "2558300.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-12",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-13",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-14",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-15",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-16",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-17",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-18",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-19",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-20",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-21",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-22",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-23",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-24",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-25",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-26",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-27",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-02-28",
+        "total_value": "0",
+        "net_invested": "2651225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-01",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-02",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-03",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-04",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-05",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-06",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-07",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-08",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-09",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-10",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-11",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-12",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-13",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-14",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-15",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-16",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-17",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-18",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-19",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-20",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-21",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-22",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-23",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-24",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-25",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-26",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-27",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-28",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-29",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-30",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-03-31",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-01",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-02",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-03",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-04",
+        "total_value": "0",
+        "net_invested": "2631225.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-05",
+        "total_value": "0",
+        "net_invested": "2629865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-06",
+        "total_value": "0",
+        "net_invested": "2629865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-07",
+        "total_value": "0",
+        "net_invested": "2629865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-08",
+        "total_value": "0",
+        "net_invested": "2629865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-09",
+        "total_value": "0",
+        "net_invested": "2629865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-10",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-11",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-12",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-13",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-14",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-15",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-16",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-17",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-18",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-19",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-20",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-21",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-22",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-23",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-24",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-25",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-26",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-27",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-28",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-29",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-04-30",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-01",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-02",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-03",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-04",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-05",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-06",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-07",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-08",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-09",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-10",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-11",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-12",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-13",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-14",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-15",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-16",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-17",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-18",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-19",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-20",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-21",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-22",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-23",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-24",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-25",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-26",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-27",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-28",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-29",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-30",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-05-31",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-01",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-02",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-03",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-04",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-05",
+        "total_value": "0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-06",
+        "total_value": "141750.0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-07",
+        "total_value": "141750.0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-08",
+        "total_value": "141750.0",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-09",
+        "total_value": "2937965.000",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-10",
+        "total_value": "2937965.000",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      },
+      {
+        "date": "2026-06-11",
+        "total_value": "2937965.000",
+        "net_invested": "2549865.0",
+        "incomplete": true
+      }
+    ],
+    "reporting_currency": "TWD",
+    "available": true
+  },
+  "freshness": {
+    "prices": [
+      {
+        "symbol": "0056",
+        "as_of": "2026-06-09",
+        "stale": false
+      },
+      {
+        "symbol": "00919",
+        "as_of": null,
+        "stale": true
+      },
+      {
+        "symbol": "1155.KL",
+        "as_of": "2026-06-09",
+        "stale": false
+      },
+      {
+        "symbol": "2330",
+        "as_of": "2026-06-09",
+        "stale": false
+      },
+      {
+        "symbol": "2603",
+        "as_of": "2026-06-09",
+        "stale": false
+      },
+      {
+        "symbol": "AAPL",
+        "as_of": "2026-06-09",
+        "stale": false
+      },
+      {
+        "symbol": "MSFT",
+        "as_of": "2026-06-06",
+        "stale": true
+      },
+      {
+        "symbol": "NVDA",
+        "as_of": "2026-06-09",
+        "stale": false
+      }
+    ],
+    "fx": [
+      {
+        "base": "MYR",
+        "quote": "TWD",
+        "as_of": "2026-06-09",
+        "stale": false
+      },
+      {
+        "base": "USD",
+        "quote": "MYR",
+        "as_of": "2026-06-09",
+        "stale": false
+      },
+      {
+        "base": "USD",
+        "quote": "TWD",
+        "as_of": "2026-06-09",
+        "stale": false
+      }
+    ],
+    "any_stale": true,
+    "missing_prices": [
+      "00919"
+    ],
+    "missing_fx": [],
+    "xirr_unavailable_reason": "not computable (missing current price, no sign change, or non-convergence)",
+    "trend_unavailable_reason": null,
+    "last_backup_at": null
+  },
+  "insights": [],
+  "dividend_projection": {
+    "year": 2026,
+    "by_currency": {},
+    "basis": "declared_only"
+  },
+  "llm_quota": {
+    "remaining_usd": "0"
+  },
+  "alerts": [
+    {
+      "id": "single_weight:2330",
+      "sev": "risk",
+      "rule": "single_weight",
+      "title": "2330 單一持股權重偏高",
+      "detail": "weight 0.4084459821679291618518260088 > 0.30",
+      "href": "/symbol/2330"
+    },
+    {
+      "id": "single_weight:AAPL",
+      "sev": "risk",
+      "rule": "single_weight",
+      "title": "AAPL 單一持股權重偏高",
+      "detail": "weight 0.3280638128772807027993866503 > 0.30",
+      "href": "/symbol/AAPL"
+    },
+    {
+      "id": "stale_price:00919",
+      "sev": "warn",
+      "rule": "stale_price",
+      "title": "00919 報價過期",
+      "detail": "stored price is stale",
+      "href": "/symbol/00919"
+    },
+    {
+      "id": "stale_price:MSFT",
+      "sev": "warn",
+      "rule": "stale_price",
+      "title": "MSFT 報價過期",
+      "detail": "stored price is stale",
+      "href": "/symbol/MSFT"
+    },
+    {
+      "id": "missing_price:00919",
+      "sev": "warn",
+      "rule": "missing_price",
+      "title": "00919 無報價",
+      "detail": "no stored price",
+      "href": "/symbol/00919"
+    },
+    {
+      "id": "fx_drift:schwab",
+      "sev": "info",
+      "rule": "fx_drift",
+      "title": "schwab 匯率偏離成本",
+      "detail": "drift 0.032258064516129032258064516 > 0.03",
+      "href": null
+    },
+    {
+      "id": "quota_low",
+      "sev": "risk",
+      "rule": "quota_low",
+      "title": "LLM 額度偏低",
+      "detail": "remaining 0 < 1.00",
+      "href": "/settings"
+    }
+  ]
+}

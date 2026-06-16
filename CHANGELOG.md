@@ -54,8 +54,34 @@ headings. (`## [Unreleased]` is intentionally not counted.)
     latest 3 as `{id, title, summary, body_md, symbol, created_at, cost_usd}` (cost_usd stays the canonical
     Decimal string; empty table → `[]`). NOTE the field names differ from the older `web/mock-data.js` insight
     shape — reconciled when Phase 2 wires the dashboard page.
+- **spec-17 full-stack regression — financial golden verification + E2E user flows (2026-06-17):**
+  the final acceptance pass over the wired full stack.
+  - **Multi-stock financial verification (`tests/contract/test_spec17_financials.py`, spec-17 §17.2):**
+    a rich 8-instrument / 4-account / 3-currency scenario (`seed_full`) seeded through the REAL write paths
+    and driven through `GET /api/dashboard`, asserted against **independent first-principles oracles** derived
+    from `rules/domain-ledger.md` (NOT by re-calling the calc core). Covers weighted-average cost (2330), TW
+    cash-dividend cost-reduction (2330), partial-sell realized P&L (0056), 配股 stock dividend (2603),
+    missing-price degradation + XIRR all-or-nothing (00919), US DRIP $0-cost reinvest with 30% withholding
+    (AAPL), age-stale-but-valued price (MSFT), MY cash dividend + 3-dp price fidelity (1155.KL), the
+    cross-currency reporting blend at spot, and **invariant #6 — FX gain/loss is an attribution of the
+    reporting total, never added on top** (`total_return == realized + unrealized`; realized FX 2,000 TWD
+    hand-verified). A frozen `tests/golden/dashboard_full.json` snapshot (regenerated deliberately via
+    `scripts/regen_golden_full.py`) pins the whole payload for regression (spec-17 §17.6.1). New reusable
+    `tests/conftest.py::dashboard_client_factory` (+ extracted `init_golden_base`) builds a TestClient over a
+    fresh, custom-seeded golden-base DB; the fixed subset `golden_db` (and the 1067 tests on it) are untouched.
+  - **E2E user flows (`tests/e2e/test_flows_e1_e10.py`, spec-17 §17.5):** Playwright against per-flow ISOLATED
+    uvicorn subprocesses (new `tests/e2e/conftest.py::flow_server` factory + `fresh_page` isolated context) so
+    write/auth flows are order-independent. E1 dashboard (golden KPIs + 00919 缺價 badge + asof/stale chip), E2
+    manual buy commit (form → preview → confirm 201 → position grows 1000→2000 in the API), E4 oversell soft
+    warning (ack gates the confirm button, then writable), E6 login loop (protected mode: wrong pass 401 stays
+    on /login.html → correct → dashboard). Expect-polling only, no sleeps (§17.7.4).
 
 ### Fixed
+- **Deterministic `/api/dashboard` freshness ordering (spec-17 regression, 2026-06-17):** `freshness.fx` and
+  `freshness.missing_fx` iterated `RateResolver.reads`, whose order derives from set iteration over quote
+  currencies (PYTHONHASHSEED-dependent across processes) — so the API list order was non-deterministic and a
+  golden snapshot flapped between runs. `portfolio/dashboard.py` now sorts both by `(base, quote)`. (`prices`
+  was already stable via `sorted(held_symbols)`.)
 - **`/api/health` exempt from the protected-mode auth gate (2026-06-17, human-approved):** the liveness probe is
   added to `auth_store._OPEN_PATHS` (alongside `/api/auth/login` + `/api/auth/session`). It returns only
   `{"status":"ok"}` (no data), so it must answer regardless of login — previously, once ≥1 user existed (protected

@@ -31,15 +31,18 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page, sync_playwright
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
+from portfolio_dash.api.auth_store import create_user
+
 # Reuse the spec-17 golden-DB seed sequence verbatim (DRY) — see tests/conftest.py.
 from tests.conftest import (
+    GOLDEN_NOW,
     _seed_golden,
     bootstrap_db,
     create_auth_tables,
@@ -52,6 +55,7 @@ from tests.conftest import (
     ensure_evaluations_tables,
     ensure_insights_tables,
     ensure_system_prompt_seeded,
+    init_golden_base,
     snapshots_store,
 )
 
@@ -246,3 +250,125 @@ def assert_page_ok(
     assert not console_errors and not page_errors, (
         f"{path}: console errors={console_errors!r}; page errors={page_errors!r}"
     )
+
+
+# --- isolated per-flow servers + pages (spec-17 §17.5 E1-E10) ---------------------
+#
+# Write/auth flows (manual buy, CSV import, oversell ack, login loop, AI input) mutate
+# the DB or the auth mode, so they CANNOT share the session `live_server` (guest, subset
+# golden) without polluting later tests. The `flow_server` factory spawns an ISOLATED
+# uvicorn subprocess against a fresh on-disk DB seeded by a caller-supplied function, so
+# each flow is order-independent and reproducible. `fresh_page` gives each flow its own
+# browser context (clean cookies/localStorage — required for the login + bell flows).
+
+SeedFn = Callable[[sqlite3.Connection], None]
+FlowServerFactory = Callable[..., str]
+
+
+def _terminate(proc: "subprocess.Popen[bytes]") -> None:
+    """Reap a uvicorn subprocess robustly (terminate -> wait -> kill -> wait).
+
+    Single-process server (no --workers/--reload), so terminate/kill reaps it; the final
+    taskkill tree-kill on Windows is belt-and-suspenders against any orphan, only if the
+    process is somehow still alive after kill()."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    if sys.platform == "win32" and proc.poll() is None:  # pragma: no cover (defensive)
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True, check=False)
+
+
+@pytest.fixture
+def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
+    """Factory: spawn an ISOLATED uvicorn subprocess against a fresh on-disk DB seeded
+    by `seed`. Optional `users=[(username, password), ...]` makes the DB protected
+    (spec-09) for the login flow. Returns the base URL. All spawns are torn down at the
+    end of the test."""
+    procs: list[subprocess.Popen[bytes]] = []
+    handles: list[object] = []
+    tmp_dirs: list[Path] = []
+
+    def _make(
+        seed: SeedFn,
+        *,
+        users: list[tuple[str, str]] | None = None,
+    ) -> str:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pd_flow_"))
+        tmp_dirs.append(tmp_dir)
+        db_path = tmp_dir / "flow.db"
+        stderr_path = tmp_dir / "uvicorn.stderr.log"
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            init_golden_base(conn)
+            seed(conn)
+            for username, password in users or []:
+                create_user(conn, username=username, name=username,
+                            password=password, now=GOLDEN_NOW)
+            conn.commit()
+        finally:
+            conn.close()
+
+        port = _free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = {**os.environ, "DB_PATH": str(db_path), "PD_DISABLE_SCHEDULER": "1"}
+        stderr_file = stderr_path.open("wb")
+        handles.append(stderr_file)
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn",
+                "portfolio_dash.api.app:create_app", "--factory",
+                "--host", "127.0.0.1", "--port", str(port),
+            ],
+            cwd=str(_WORKTREE_ROOT), env=env, stdout=stderr_file, stderr=stderr_file,
+        )
+        procs.append(proc)
+        _wait_ready(base_url, proc, stderr_path)
+        return base_url
+
+    try:
+        yield _make
+    finally:
+        for proc in procs:
+            _terminate(proc)
+        for h in handles:
+            try:
+                h.close()  # type: ignore[attr-defined]
+            except OSError:
+                pass
+        for d in tmp_dirs:
+            try:
+                for child in d.iterdir():
+                    child.unlink(missing_ok=True)
+                d.rmdir()
+            except OSError:
+                pass  # best-effort temp cleanup; never fail teardown on it
+
+
+@pytest.fixture
+def fresh_page(browser_page: Page) -> Iterator[Page]:
+    """A browser context+page with clean cookies/localStorage per flow test.
+
+    Reuses the session browser (via the existing `browser_page`'s underlying Browser) —
+    a second `sync_playwright()` context would collide with the first ("Sync API inside
+    the asyncio loop"). A new context isolates cookies/localStorage (the login + bell
+    flows depend on a clean slate)."""
+    browser = browser_page.context.browser
+    assert browser is not None
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        yield page
+    finally:
+        page.close()
+        context.close()
