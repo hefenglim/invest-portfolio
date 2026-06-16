@@ -127,156 +127,35 @@
       <button class="btn btn-primary" type="button" disabled="disabled" title="llm_insight 模組完工後啟用">產生洞察</button>
     </div>
 
-    <!-- ===== Tab: 洞察卡 ===== -->
+    <!-- ===== Tab: 洞察卡 (booted from GET /api/insights) ===== -->
     <div class="mode-pane active" id="ins-pane-cards" data-screen-label="洞察卡">
-      <div class="insight-grid-page">
-        <div class="insight-card dimmed">
-          <span class="preview-tag">設計預覽</span>
-          <div class="insight-head">
-            <span class="badge badge-ai">AI</span>
-            <h3 class="insight-title">半導體部位集中度偏高</h3>
-          </div>
-          <p class="insight-body">台積電與科技股合計約占組合 71%。若半導體景氣反轉，組合波動將顯著放大；可留意 ETF 與金融股的再平衡空間。</p>
-          <div class="insight-foot"><span class="insight-time">2026-06-11 08:00</span><span class="insight-conf" title="信心：AI 對本次預測的自評；校準：「組合洞察」組合歷史信心 vs 實際命中的偏差 — 與 F4 預警規則同源">信心 <b>0.78</b>・組合校準 <b>+8pp</b></span><span class="insight-cost num">AI Token $0.043</span></div>
-        </div>
-        <div class="insight-card dimmed">
-          <span class="preview-tag">設計預覽</span>
-          <div class="insight-head">
-            <span class="badge badge-ai">AI</span>
-            <h3 class="insight-title">USD 匯率順風貢獻明顯</h3>
-          </div>
-          <p class="insight-body">Schwab 美元部位平均取得匯率 31.80，現時 32.90，未實現匯兌貢獻約 +15,115 TWD。若 USD 回落，此部分收益將回吐。</p>
-          <div class="insight-foot"><span class="insight-time">2026-06-11 08:00</span><span class="insight-conf" title="信心：AI 對本次預測的自評；校準：該組合歷史偏差">信心 <b>0.71</b>・組合校準 <b>+8pp</b></span><span class="insight-cost num">AI Token $0.038</span></div>
-        </div>
-        <div class="insight-card dimmed">
-          <span class="preview-tag">設計預覽</span>
-          <div class="insight-head">
-            <span class="badge badge-ai">AI</span>
-            <h3 class="insight-title">本月報酬歸因：資本利得為主、股利與匯兌為輔</h3>
-          </div>
-          <p class="insight-body">5 月報酬主要來自 NVDA 與台積電的資本利得（約佔 78%）；股利貢獻 12%、USD 匯兌順風 10%。XIRR（+21.6%）高於累計報酬率，反映資金分批投入的時間加權效果。</p>
-          <div class="insight-foot"><span class="insight-time">2026-06-01 08:00</span><span class="insight-conf" title="歸因型洞察無可驗證預測 — 不附信心值">純描述・無預測</span><span class="insight-cost num">AI Token $0.051</span></div>
-        </div>
-        <div class="insight-card dimmed">
-          <span class="preview-tag">設計預覽</span>
-          <div class="insight-head">
-            <span class="badge badge-ai">AI</span>
-            <h3 class="insight-title">0056 即將除息 — 入帳後調整成本將下修</h3>
-          </div>
-          <p class="insight-body">0056 於 7/16 除息，每股 1.07 元；持有 10,000 股預估入帳 10,700 元，依台灣券商股利模式沖減後，調整均價將由 34.85 降至約 33.78，回本率升至 6.7%。</p>
-          <div class="insight-foot"><span class="insight-time">2026-06-11 08:00</span><span class="insight-conf" title="「股利展望」組合的專屬校正 v1 仍在影子測試 — 本則由現行版產出"><span class="gap-warn">校正 v1 影子測試中 2/5</span></span><span class="insight-cost num">AI Token $0.029</span></div>
-        </div>
-      </div>
-      <div class="backtest-note">洞察卡由排程批次產生（也可手動觸發）。每張卡附 token 成本並記入 AI 額度。目前為設計預覽 — llm_insight 模組完工後顯示真實輸出。</div>
+      <div class="insight-grid-page" id="ins-cards-grid"></div>
+      <div class="backtest-note">洞察卡由排程批次產生（也可手動觸發）。每張卡附 token 成本並記入 AI 額度。</div>
     </div>
 
-    <!-- ===== Tab: 持倉健診 ===== -->
+    <!-- ===== Tab: 持倉健診 (per-symbol cards from GET /api/insights) ===== -->
     <div class="mode-pane" id="ins-pane-health" data-screen-label="持倉健診">
-      <div class="hc-grid">
-
-        <div class="hc-card dimmed">
-          <span class="preview-tag">設計預覽</span>
-          <div class="hc-head">
-            <span class="sym-code">2330</span><span class="sym-name">台積電</span>
-            <span class="badge badge-ai">AI</span>
-            <span class="hc-verdict v-watch">持有・留意集中度</span>
-          </div>
-          <div class="hc-signals">
-            <span class="hc-sig s-up">權重 <b>37.8%</b></span>
-            <span class="hc-sig">PER <b>24.1×</b>（5 年 78 百分位）</span>
-            <span class="hc-sig s-up">月營收 YoY <b>+31%</b></span>
-            <span class="hc-sig s-up">外資連買 <b>6 日</b></span>
-            <span class="hc-sig">回本率 <b>1.0%</b></span>
-          </div>
-          <div class="hc-section"><span class="hc-dim">基本面</span><p class="hc-text">月營收動能強勁、AI 需求帶動先進製程滿載；但估值已處於五年區間高檔，安全邊際收窄。</p></div>
-          <div class="hc-section"><span class="hc-dim">籌碼面</span><p class="hc-text">外資連續買超、融資餘額平穩，籌碼結構健康。</p></div>
-          <div class="hc-section"><span class="hc-dim">部位面</span><p class="hc-text">單一標的權重 37.8% 已超過 30% 警戒線，與組合的半導體集中度疊加。</p></div>
-          <p class="hc-conclusion">基本面與籌碼面皆正向，惟部位過度集中 — 上行續抱合理，但任何加碼都會放大單一公司風險。</p>
-          <div class="insight-foot"><span class="insight-time">2026-06-11 08:05</span><span class="insight-conf" title="「持倉健診」組合專屬校正 v3（含 2330 動能下修條款）已套用於本卡">信心 <b>0.72</b>・套用校正 v3</span><span class="insight-cost num">AI Token $0.062</span></div>
-        </div>
-
-        <div class="hc-card dimmed">
-          <span class="preview-tag">設計預覽</span>
-          <div class="hc-head">
-            <span class="sym-code">NVDA</span><span class="sym-name">NVIDIA</span>
-            <span class="badge badge-ai">AI</span>
-            <span class="hc-verdict v-ok">持有</span>
-          </div>
-          <div class="hc-signals">
-            <span class="hc-sig">權重 <b>8.8%</b></span>
-            <span class="hc-sig s-up">未實現 <b>+46.1%</b></span>
-            <span class="hc-sig s-up">營收 YoY <b>+62%</b></span>
-            <span class="hc-sig">Beta <b>1.8</b></span>
-          </div>
-          <div class="hc-section"><span class="hc-dim">基本面</span><p class="hc-text">資料中心營收持續超預期，盈餘上修循環未止。</p></div>
-          <div class="hc-section"><span class="hc-dim">部位面</span><p class="hc-text">權重不高、成本優勢大（+46%），波動承受空間充足；分批建立的均價 118.0 提供良好緩衝。</p></div>
-          <p class="hc-conclusion">部位健康、基本面領先 — 無需動作；若權重因上漲超過 15% 再檢視。</p>
-          <div class="insight-foot"><span class="insight-time">2026-06-11 08:05</span><span class="insight-conf" title="「持倉健診」組合專屬校正 v3 已套用（NVDA 動能條款）">信心 <b>0.69</b>・套用校正 v3</span><span class="insight-cost num">AI Token $0.044</span></div>
-        </div>
-
-        <div class="hc-card dimmed">
-          <span class="preview-tag">設計預覽</span>
-          <div class="hc-head">
-            <span class="sym-code">00919</span><span class="sym-name">群益台灣精選高息</span>
-            <span class="badge badge-ai">AI</span>
-            <span class="hc-verdict v-risk">資料異常</span>
-          </div>
-          <div class="hc-signals">
-            <span class="hc-sig">權重 <b>—</b>（缺價）</span>
-            <span class="hc-sig">最後報價 <b>2026-05-30</b></span>
-          </div>
-          <div class="hc-section"><span class="hc-dim">資料面</span><p class="hc-text">連續多日無報價，市值與權重已不含此標的。請先確認代號與板別（TWSE/TPEx）設定，或檢查報價來源狀態。</p></div>
-          <p class="hc-conclusion">先解決資料問題 — 缺價狀態下的任何分析都不可信，本卡不提供投資觀點。</p>
-          <div class="insight-foot"><span class="insight-time">2026-06-11 08:05</span><span class="insight-cost num">AI Token $0.018</span></div>
-        </div>
-
-        <div class="hc-card dimmed">
-          <span class="preview-tag">設計預覽</span>
-          <div class="hc-head">
-            <span class="sym-code">0056</span><span class="sym-name">元大高股息</span>
-            <span class="badge badge-ai">AI</span>
-            <span class="hc-verdict v-ok">持有・除息將至</span>
-          </div>
-          <div class="hc-signals">
-            <span class="hc-sig">權重 <b>24.1%</b></span>
-            <span class="hc-sig s-up">回本率 <b>3.7%</b></span>
-            <span class="hc-sig">7/16 除息 <b>NT$1.07</b></span>
-          </div>
-          <div class="hc-section"><span class="hc-dim">部位面</span><p class="hc-text">配息沖減持續壓低調整成本（36.20 → 34.85），收息策略運作正常。7/16 除息後調整均價將再降至約 33.78。</p></div>
-          <p class="hc-conclusion">符合收息目標 — 維持；除息日前後留意填息走勢即可。</p>
-          <div class="insight-foot"><span class="insight-time">2026-06-11 08:05</span><span class="insight-cost num">AI Token $0.035</span></div>
-        </div>
-
-      </div>
-      <div class="backtest-note">健診卡輸入：後端已算好的部位/回本/權重數字 ＋ FinMind 的 PER/PBR、月營收、法人買賣超。LLM 僅做三段式敘事合成，不重新計算任何數字。</div>
+      <div class="hc-grid" id="ins-health-grid"></div>
+      <div class="backtest-note">健診卡輸入：後端已算好的部位/回本/權重數字 ＋ FinMind 的 PER/PBR、月營收、法人買賣超。LLM 僅做敘事合成，不重新計算任何數字。</div>
     </div>
 
-    <!-- ===== Tab: AI 戰績 ===== -->
+    <!-- ===== Tab: AI 戰績 (booted from GET /api/ai-score) ===== -->
     <div class="mode-pane" id="ins-pane-score" data-screen-label="AI 戰績">
-      <div class="score-band">
-        <div class="score-card"><span class="k">累計預測數</span><span class="v">24</span><span class="s">已到期 16・追蹤中 8</span></div>
-        <div class="score-card"><span class="k">命中率（已到期）</span><span class="v">62.5%</span><span class="s">10 / 16</span></div>
-        <div class="score-card"><span class="k">平均信心</span><span class="v">0.71</span><span class="s">命中組 0.74・未命中組 0.66</span></div>
-        <div class="score-card"><span class="k">校準誤差</span><span class="v">+8.5pp</span><span class="s">信心高於實際命中 — 略為過度自信</span></div>
-      </div>
+      <div class="score-band" id="score-band"></div>
 
       <div class="panel-head" style="padding-top: 6px;">
         <h3 class="panel-title" style="font-size: 12px;">信心校準曲線</h3>
-        <span class="panel-sub">預測信心 vs 實際命中率 — 越貼近對角線越誚實；低於對角線 = 過度自信</span>
+        <span class="panel-sub">預測信心 vs 實際命中率 — 越貼近對角線越誠實；低於對角線 = 過度自信</span>
       </div>
       <div style="padding: 4px var(--pad) 8px;">
         <div id="calib-chart" style="height: 230px;"></div>
       </div>
 
       <div class="panel-head" style="padding-top: 6px;">
-        <h3 class="panel-title" style="font-size: 12px;">各策略提示詞命中率</h3>
-        <span class="panel-sub">同一資料、不同提示詞的可比成績</span>
+        <h3 class="panel-title" style="font-size: 12px;">各洞察任務命中率</h3>
+        <span class="panel-sub">同一資料、不同任務的可比成績</span>
       </div>
-      <div class="strat-rows">
-        <div class="strat-row"><span class="name">動能追蹤 v3</span><span class="track"><span class="fill" style="width: 75%;"></span></span><span class="pct">75.0%</span><span class="n">n=8</span></div>
-        <div class="strat-row"><span class="name">基本面反轉 v2</span><span class="track"><span class="fill" style="width: 60%;"></span></span><span class="pct">60.0%</span><span class="n">n=5</span></div>
-        <div class="strat-row"><span class="name">高息防禦 v1</span><span class="track"><span class="fill" style="width: 33%;"></span></span><span class="pct">33.3%</span><span class="n">n=3</span></div>
-      </div>
+      <div class="strat-rows" id="combo-rows"></div>
 
       <div class="panel-head" style="padding-top: 0;">
         <h3 class="panel-title" style="font-size: 12px;">預測明細</h3>
@@ -287,19 +166,12 @@
       <div class="table-wrap" style="padding-bottom: 8px;">
         <table class="data" id="score-table">
           <thead><tr>
-            <th>預測日</th><th class="col-text">策略</th><th class="col-text">標的</th><th class="col-text">預測</th><th>期限</th><th>信心</th><th class="col-text">實際</th><th class="col-text">結果</th>
+            <th class="col-text">任務</th><th>校正版</th><th class="col-text">影子</th><th class="col-text">量化</th><th>敘事分</th><th class="col-text">結果</th><th class="col-text">實際</th><th>評估時間</th>
           </tr></thead>
-          <tbody>
-            <tr><td class="num">2026-05-12</td><td class="col-text">動能追蹤 v3</td><td class="col-text num">NVDA</td><td class="col-text">20 日內 +5%</td><td class="num">06-09</td><td><span class="conf-cell num">0.82 <span class="conf-track"><span class="conf-fill" style="width: 82%;"></span></span></span></td><td class="col-text num">+9.4%</td><td class="col-text hit-yes">✓ 命中</td></tr>
-            <tr><td class="num">2026-05-12</td><td class="col-text">動能追蹤 v3</td><td class="col-text num">2330</td><td class="col-text">20 日內 +3%</td><td class="num">06-09</td><td><span class="conf-cell num">0.74 <span class="conf-track"><span class="conf-fill" style="width: 74%;"></span></span></span></td><td class="col-text num">+4.6%</td><td class="col-text hit-yes">✓ 命中</td></tr>
-            <tr><td class="num">2026-05-05</td><td class="col-text">高息防禦 v1</td><td class="col-text num">0056</td><td class="col-text">月內波動 &lt; 3%</td><td class="num">06-05</td><td><span class="conf-cell num">0.66 <span class="conf-track"><span class="conf-fill" style="width: 66%;"></span></span></span></td><td class="col-text num">5.1% 波動</td><td class="col-text hit-no">✗ 未命中</td></tr>
-            <tr><td class="num">2026-04-28</td><td class="col-text">基本面反轉 v2</td><td class="col-text num">1155.KL</td><td class="col-text">財報後 +4%</td><td class="num">05-28</td><td><span class="conf-cell num">0.61 <span class="conf-track"><span class="conf-fill" style="width: 61%;"></span></span></span></td><td class="col-text num">+5.5%</td><td class="col-text hit-yes">✓ 命中</td></tr>
-            <tr><td class="num">2026-06-02</td><td class="col-text">動能追蹤 v3</td><td class="col-text num">MSFT</td><td class="col-text">20 日內 +4%</td><td class="num">06-30</td><td><span class="conf-cell num">0.69 <span class="conf-track"><span class="conf-fill" style="width: 69%;"></span></span></span></td><td class="col-text sign-nil">—</td><td class="col-text hit-open">追蹤中</td></tr>
-            <tr><td class="num">2026-06-09</td><td class="col-text">高息防禦 v1</td><td class="col-text num">00919</td><td class="col-text">除息前 +2%</td><td class="num">07-09</td><td><span class="conf-cell num">0.58 <span class="conf-track"><span class="conf-fill" style="width: 58%;"></span></span></span></td><td class="col-text sign-nil">—</td><td class="col-text hit-open">追蹤中</td></tr>
-          </tbody>
+          <tbody id="score-body"></tbody>
         </table>
       </div>
-      <div class="backtest-note">自我回測：每次洞察產生時，AI 的可驗證預測（方向、幅度、期限）被結構化存檔；到期由排程以實際價格對答案。命中率與校準誤差回饋給提示詞調校。（設計預覽 — 後端 self-backtest 完工後顯示真實成績）</div>
+      <div class="backtest-note">自我回測：每次洞察產生時，AI 的可驗證預測（方向、幅度、期限）被結構化存檔；到期由排程以實際價格對答案。命中率與校準誤差回饋給提示詞調校。</div>
     </div>
 
   </section>
@@ -308,13 +180,34 @@
 </div>
 </div>
 
+<script src="api.js"></script>
 <script src="shell.js"></script>
 <script src="format.js"></script>
 <script src="export.js"></script>
 <script src="alerts.js"></script>
 <script>
+/* AI 洞察 — async-booted from the REAL API (decision B, spec 19/04).
+   洞察卡 + 持倉健診 ← GET /api/insights (stored cards; cost_usd is a Decimal STRING).
+   AI 戰績 ← GET /api/ai-score (totals / by_combo / calibration_bins / rows; all
+   percentages/rates are Decimal STRINGS). The frontend NEVER computes money/returns —
+   every numeric value is rendered through window.fmt (which Number()-coerces internally
+   from the canonical string). No inline mock remains. */
 (function () {
+  'use strict';
+  var f = window.fmt;
+  var pdApi = window.pdApi;
+  var EM = f.NULL_GLYPH;
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = text;
+    return n;
+  }
+
+  /* ---- tab switching ---- */
   var tabs = document.getElementById('ins-tabs');
+  var calibChart = null;
   tabs.addEventListener('click', function (e) {
     var btn = e.target.closest('button[data-tab]');
     if (!btn) return;
@@ -322,21 +215,177 @@
     ['cards', 'health', 'score'].forEach(function (t) {
       document.getElementById('ins-pane-' + t).classList.toggle('active', t === btn.dataset.tab);
     });
+    /* echarts needs a laid-out container; resize once the score tab is shown. */
+    if (btn.dataset.tab === 'score' && calibChart) setTimeout(function () { calibChart.resize(); }, 60);
   });
-  var slot = document.getElementById('score-export-slot');
-  if (slot && window.pdExport) {
-    slot.appendChild(window.pdExport.tableButton(document.getElementById('score-table'), 'ai_predictions.csv'));
+
+  /* ============ 洞察卡 + 持倉健診 (GET /api/insights) ============ */
+  /* A per_symbol card (symbol present) goes to the health grid; portfolio cards to the
+     cards grid. cost_usd is a Decimal STRING -> f.num (USD, 3 dp like the design's token
+     cost). created_at is an ISO string -> f.datetime. NEVER bare .toFixed on cost_usd. */
+  function emptyState(text) {
+    var box = el('div', 'wz-note', text);
+    box.style.cssText = 'grid-column: 1 / -1; padding: 20px; text-align: center; color: var(--text-3);';
+    return box;
   }
 
-  /* E5: 信心校準曲線 (reliability diagram) */
-  var calibBox = document.getElementById('calib-chart');
-  var calibChart = null;
-  function drawCalib() {
-    if (!calibBox || !window.echarts || calibChart) return;
+  function tokenCost(cost) {
+    /* cost_usd Decimal STRING -> "AI Token $X.XXX" via f.num (no bare .toFixed). */
+    return 'AI Token $' + (cost == null ? '0.000' : f.num(cost, 3));
+  }
+
+  function confChip(card) {
+    if (card.confidence == null) {
+      return el('span', 'insight-conf', '純描述・無預測');
+    }
+    var chip = el('span', 'insight-conf');
+    chip.appendChild(document.createTextNode('信心 '));
+    chip.appendChild(el('b', null, f.num(card.confidence / 100, 2)));
+    if (card.calibration_version != null) {
+      chip.appendChild(document.createTextNode('・校正 v' + card.calibration_version));
+    }
+    return chip;
+  }
+
+  function cardNode(card) {
+    var c = el('div', 'insight-card');
+    var head = el('div', 'insight-head');
+    head.appendChild(el('span', 'badge badge-ai', 'AI'));
+    head.appendChild(el('h3', 'insight-title', card.title || '(未命名洞察)'));
+    if (card.symbol) head.appendChild(el('span', 'insight-time', card.symbol));
+    c.appendChild(head);
+    c.appendChild(el('p', 'insight-body', card.summary || card.body_md || ''));
+    var foot = el('div', 'insight-foot');
+    foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
+    foot.appendChild(confChip(card));
+    foot.appendChild(el('span', 'insight-cost num', tokenCost(card.cost_usd)));
+    c.appendChild(foot);
+    return c;
+  }
+
+  function healthCardNode(card) {
+    var c = el('div', 'hc-card');
+    var head = el('div', 'hc-head');
+    head.appendChild(el('span', 'sym-code', card.symbol || ''));
+    head.appendChild(el('span', 'badge badge-ai', 'AI'));
+    c.appendChild(head);
+    var sec = el('div', 'hc-section');
+    sec.appendChild(el('p', 'hc-text', card.summary || card.body_md || ''));
+    c.appendChild(sec);
+    if (card.title) c.appendChild(el('p', 'hc-conclusion', card.title));
+    var foot = el('div', 'insight-foot');
+    foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
+    foot.appendChild(confChip(card));
+    foot.appendChild(el('span', 'insight-cost num', tokenCost(card.cost_usd)));
+    c.appendChild(foot);
+    return c;
+  }
+
+  function renderCards(cards) {
+    var cardsGrid = document.getElementById('ins-cards-grid');
+    var healthGrid = document.getElementById('ins-health-grid');
+    cardsGrid.replaceChildren();
+    healthGrid.replaceChildren();
+    var portfolio = cards.filter(function (c) { return !c.symbol; });
+    var perSymbol = cards.filter(function (c) { return !!c.symbol; });
+    if (!portfolio.length) cardsGrid.appendChild(emptyState('尚無洞察卡 — 由排程批次產生或手動觸發後顯示。'));
+    else portfolio.forEach(function (c) { cardsGrid.appendChild(cardNode(c)); });
+    if (!perSymbol.length) healthGrid.appendChild(emptyState('尚無持倉健診卡 — 由單一標的洞察任務產生後顯示。'));
+    else perSymbol.forEach(function (c) { healthGrid.appendChild(healthCardNode(c)); });
+  }
+
+  /* ============ AI 戰績 (GET /api/ai-score) ============ */
+  function scoreCard(k, v, s) {
+    var c = el('div', 'score-card');
+    c.appendChild(el('span', 'k', k));
+    c.appendChild(el('span', 'v', v));
+    c.appendChild(el('span', 's', s));
+    return c;
+  }
+
+  function renderScore(score) {
+    var totals = score.totals || {};
+    var band = document.getElementById('score-band');
+    band.replaceChildren();
+    /* miss_rate / quant_hit_rate are RATIO Decimal STRINGS (0..1); render as percentages
+       via f.pct (Number()-coerced internally). avg_narrative is a 0..100 score string. */
+    band.appendChild(scoreCard('累計評估數', f.num(totals.n), '已評分樣本'));
+    band.appendChild(scoreCard('量化命中率', totals.quant_hit_rate == null ? EM : f.pct(totals.quant_hit_rate),
+      '命中 ' + f.num(totals.quant_hit_count) + ' 筆'));
+    band.appendChild(scoreCard('失誤率', totals.miss_rate == null ? EM : f.pct(totals.miss_rate),
+      '失誤 ' + f.num(totals.miss_count) + ' 筆'));
+    band.appendChild(scoreCard('平均敘事分', totals.avg_narrative == null ? EM : f.num(totals.avg_narrative, 2),
+      '滿分 100'));
+
+    renderCombos(score.by_combo || []);
+    renderScoreRows(score.rows || []);
+    drawCalib(score.calibration_bins || []);
+  }
+
+  function renderCombos(combos) {
+    var wrap = document.getElementById('combo-rows');
+    wrap.replaceChildren();
+    if (!combos.length) {
+      wrap.appendChild(el('div', 'wz-note', '尚無已評分的洞察任務。'));
+      return;
+    }
+    combos.forEach(function (c) {
+      /* quant_hit_rate is a RATIO Decimal STRING (0..1). The bar width is a presentation
+         concern; Number() the ratio purely for the CSS width %, never for a number of record. */
+      var ratio = c.quant_hit_rate == null ? 0 : Number(c.quant_hit_rate);
+      var row = el('div', 'strat-row');
+      row.appendChild(el('span', 'name', '任務 #' + c.insight_type_id));
+      var track = el('span', 'track');
+      var fill = el('span', 'fill');
+      fill.style.width = Math.max(0, Math.min(100, ratio * 100)) + '%';
+      track.appendChild(fill);
+      row.appendChild(track);
+      row.appendChild(el('span', 'pct', c.quant_hit_rate == null ? EM : f.pct(c.quant_hit_rate)));
+      row.appendChild(el('span', 'n', 'n=' + f.num(c.n)));
+      wrap.appendChild(row);
+    });
+  }
+
+  function renderScoreRows(rows) {
+    var body = document.getElementById('score-body');
+    body.replaceChildren();
+    if (!rows.length) {
+      var tr = el('tr');
+      var td = el('td', null, '尚無預測評估記錄。');
+      td.colSpan = 8;
+      tr.appendChild(td);
+      body.appendChild(tr);
+      return;
+    }
+    rows.forEach(function (r) {
+      var tr = el('tr');
+      tr.appendChild(el('td', 'col-text', '任務 #' + r.insight_type_id));
+      tr.appendChild(el('td', 'num', r.calibration_version == null ? EM : 'v' + r.calibration_version));
+      tr.appendChild(el('td', 'col-text', r.is_shadow ? '影子' : '生效'));
+      var quant = r.quant_hit == null ? EM : (r.quant_hit ? '✓' : '✗');
+      tr.appendChild(el('td', 'col-text', quant));
+      tr.appendChild(el('td', 'num', r.narrative_score == null ? EM : f.num(r.narrative_score)));
+      var res = el('td', 'col-text ' + (r.miss ? 'hit-no' : 'hit-yes'), r.miss ? '✗ 失誤' : '✓ 命中');
+      tr.appendChild(res);
+      /* actual_value is a Decimal STRING ratio (move pct) -> f.signedPct (no bare .toFixed). */
+      tr.appendChild(el('td', 'col-text num', r.actual_value == null ? EM : f.signedPct(r.actual_value)));
+      tr.appendChild(el('td', 'num', f.datetime(r.evaluated_at)));
+      body.appendChild(tr);
+    });
+  }
+
+  /* 信心校準曲線 (reliability diagram) from calibration_bins.
+     Each bin: {bucket, n, hit_count, claimed_pct, actual_pct, calibration_error_pp} —
+     claimed_pct / actual_pct are PERCENTAGE Decimal STRINGS (0..100). */
+  function drawCalib(bins) {
+    var box = document.getElementById('calib-chart');
+    if (!box || !window.echarts) return;
     var css = function (n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); };
-    /* mock bins: [信心區間中點, 實際命中率, 樣本數] — 後端 self-backtest 接線後換真值 */
-    var bins = [[0.55, 0.50, 4], [0.65, 0.50, 4], [0.75, 0.75, 5], [0.85, 0.67, 3]];
-    calibChart = echarts.init(calibBox);
+    if (!calibChart) calibChart = echarts.init(box);
+    /* Number() the percentage strings purely for chart geometry (presentation), not money. */
+    var pts = bins.map(function (b) {
+      return [Number(b.claimed_pct) / 100, Number(b.actual_pct) / 100, b.n, b.bucket];
+    });
     calibChart.setOption({
       animation: false,
       grid: { left: 50, right: 20, top: 16, bottom: 34 },
@@ -345,11 +394,11 @@
         textStyle: { color: css('--text'), fontSize: 11 },
         formatter: function (p) {
           if (p.seriesName === '完美校準') return '';
-          var b = bins[p.dataIndex];
-          return '信心 ' + (b[0] * 100).toFixed(0) + '% 區間<br>實際命中 ' + (b[1] * 100).toFixed(0) + '%・n=' + b[2];
+          var b = pts[p.dataIndex];
+          return b[3] + '<br>聲稱信心 ' + f.pct(b[0]) + '・實際命中 ' + f.pct(b[1]) + '・n=' + b[2];
         }
       },
-      xAxis: { type: 'value', min: 0.4, max: 1, name: '預測信心',
+      xAxis: { type: 'value', min: 0, max: 1, name: '聲稱信心',
         nameTextStyle: { color: css('--text-3'), fontSize: 10 },
         axisLabel: { color: css('--text-3'), fontSize: 10, formatter: function (v) { return (v * 100) + '%'; } },
         splitLine: { lineStyle: { color: css('--border-soft') } } },
@@ -358,21 +407,39 @@
         axisLabel: { color: css('--text-3'), fontSize: 10, formatter: function (v) { return (v * 100) + '%'; } },
         splitLine: { lineStyle: { color: css('--border-soft') } } },
       series: [
-        { name: '完美校準', type: 'line', data: [[0.4, 0.4], [1, 1]], showSymbol: false, silent: true,
+        { name: '完美校準', type: 'line', data: [[0, 0], [1, 1]], showSymbol: false, silent: true,
           lineStyle: { color: css('--text-3'), type: 'dashed', width: 1 } },
-        { name: '實際', type: 'line', data: bins.map(function (b) { return [b[0], b[1]]; }),
+        { name: '實際', type: 'line', data: pts.map(function (b) { return [b[0], b[1]]; }),
           symbol: 'circle',
-          symbolSize: function (v, p) { return 6 + bins[p.dataIndex][2] * 1.6; },
+          symbolSize: function (v, p) { return 6 + (pts[p.dataIndex][2] || 0) * 1.6; },
           lineStyle: { color: css('--accent'), width: 1.6 },
           itemStyle: { color: css('--accent') } }
       ]
     });
   }
-  /* draw when the score tab first becomes visible (echarts needs layout) */
-  tabs.addEventListener('click', function (e) {
-    var btn = e.target.closest('button[data-tab]');
-    if (btn && btn.dataset.tab === 'score') setTimeout(drawCalib, 60);
-  });
+
+  /* CSV export over the live table (built lazily once score rows render). */
+  var slot = document.getElementById('score-export-slot');
+  if (slot && window.pdExport) {
+    slot.appendChild(window.pdExport.tableButton(document.getElementById('score-table'), 'ai_predictions.csv'));
+  }
+
+  /* ---- async boot (graceful: degrade to empty states, never crash) ---- */
+  (function boot() {
+    if (!pdApi) { renderCards([]); return; }
+    pdApi.get('/api/insights').then(function (cards) {
+      renderCards(Array.isArray(cards) ? cards : []);
+    }).catch(function () {
+      renderCards([]);
+      if (window.toast) window.toast('洞察卡載入失敗', 'fail', '已顯示空狀態');
+    });
+    pdApi.get('/api/ai-score').then(function (score) {
+      renderScore(score || {});
+    }).catch(function () {
+      renderScore({});
+      if (window.toast) window.toast('AI 戰績載入失敗', 'fail', '已顯示空狀態');
+    });
+  })();
 })();
 </script>
 </body>

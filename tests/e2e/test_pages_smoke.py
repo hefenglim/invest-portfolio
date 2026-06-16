@@ -975,3 +975,99 @@ def test_settings_alert_rules_editor_wired(
         f"/settings.html (alert-rules editor): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_insights_page_smoke(live_server: str, browser_page: object) -> None:
+    """/insights.html boots from GET /api/insights + GET /api/ai-score (spec 19, Task 2.8).
+
+    The page drops its inline design-preview mock and async-boots two endpoints: the 洞察卡
+    grid from GET /api/insights (stored cards; cost_usd is a Decimal STRING rendered via
+    window.fmt — never a bare .toFixed) and the AI 戰績 panel from GET /api/ai-score
+    (totals / by_combo / calibration_bins / rows, all Decimal STRINGS). The golden DB seeds
+    ZERO insight cards (composer + insights tables created EMPTY), so this exercises the
+    graceful empty path: the cards grid renders its empty-state affordance.
+
+    insights.html ALSO loads api.js + alerts.js, so the off-dashboard /api/alerts +
+    /api/llm/config path now runs here too (Task 2.7c); this asserts that coexists clean.
+    Waits for the empty-state node inside #ins-cards-grid (rendered only after GET
+    /api/insights resolves to []), then asserts ZERO console + ZERO page errors — catching a
+    Decimal-string `.toFixed` TypeError on cost_usd, an undefined field, or a botched async
+    boot.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/insights.html", wait_until="load")
+        # Golden DB has ZERO cards -> GET /api/insights returns [] -> the empty-state div
+        # renders inside #ins-cards-grid (proves the async boot landed, not the empty shell).
+        page.wait_for_selector("#ins-cards-grid .wz-note")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/insights.html (insights + ai-score wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None:
+    """/AI Pipeline Hub.html boots from GET /api/insight-tasks/status (spec 19, Task 2.8).
+
+    The page drops its window.PIPE mock (pipeline-data.js no longer loaded) and async-boots
+    the task list + health bar from GET /api/insight-tasks/status. The golden DB seeds ZERO
+    insight types (composer tables created EMPTY), so the status payload returns tasks:[]
+    and an AI-off health bar -> the task list renders its empty-state ("尚無洞察任務 …").
+    quota_remaining + last_batch.cost_usd are Decimal STRINGS routed through window.fmt.
+
+    The space in the filename is URL-encoded. The page ALSO loads api.js + alerts.js, so the
+    off-dashboard /api/alerts + /api/llm/config path runs here too (Task 2.7c) and must be
+    console-clean. Waits for the empty-state node inside #pp-list (rendered only after GET
+    /api/insight-tasks/status resolves to tasks:[]), then asserts ZERO console + ZERO page
+    errors — catching a botched PIPE retirement, a Decimal-string `.toFixed` on quota/cost,
+    or an undefined node-state field.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        # The space in the filename must be URL-encoded for the navigation.
+        page.goto(live_server + "/AI%20Pipeline%20Hub.html", wait_until="load")
+        # Golden DB has ZERO insight types -> tasks:[] -> the empty-state div renders inside
+        # #pp-list (proves the async status boot landed, not the empty shell).
+        page.wait_for_selector("#pp-list .wz-note")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/AI Pipeline Hub.html (status wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
