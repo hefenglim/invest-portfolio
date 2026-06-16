@@ -15,7 +15,13 @@ def get_connection() -> sqlite3.Connection:
     """
     settings = get_settings()
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.db_path)
+    # check_same_thread=False: FastAPI runs the sync `get_conn` dependency in an anyio
+    # threadpool, so a connection may be created on one worker thread and closed on
+    # another (session() ENTER vs. finally: close() can straddle threads). Each request
+    # gets its OWN connection — never shared or used concurrently across threads — so
+    # only the create-vs-close thread can differ, with no concurrent access. Disabling
+    # the same-thread guard is therefore safe and necessary here.
+    conn = sqlite3.connect(settings.db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # must be set per connection
     # WAL persists per database file; re-setting it per connection is harmless. It
