@@ -41,9 +41,16 @@
   }
   /* true once shell boot has confirmed: no authorized users (public-browse). */
   function pdIsGuest() { return !_backendSession || _backendSession.mode === 'guest'; }
+  /* Transitional no-op: the session is now BACKEND-sourced (GET /api/auth/session)
+     and read-only from the shell. settings-users.js still drives a localStorage auth
+     flow and calls pdAuth.setSession(...) on add-first-user / remove-self; this no-op
+     keeps that page from TypeError-ing until Task 2.7 rewires user management to the
+     backend, at which point setSession is removed. */
+  function pdSetSessionNoop(_s) { /* transitional no-op — see comment above (retired in Task 2.7) */ }
   window.pdAuth = {
     getUsers: pdGetUsers, saveUsers: pdSaveUsers,
-    getSession: pdGetSession, displayName: pdDisplayName, isGuest: pdIsGuest
+    getSession: pdGetSession, displayName: pdDisplayName, isGuest: pdIsGuest,
+    setSession: pdSetSessionNoop
   };
 
   /* api.js (the single fetch layer) may not yet be on the page — no HTML currently

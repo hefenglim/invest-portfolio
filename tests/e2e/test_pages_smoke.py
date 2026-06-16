@@ -25,6 +25,22 @@ def test_index_page_smoke(live_server: str, browser_page: object) -> None:
 
 
 @pytest.mark.e2e
+def test_settings_accounts_shell_smoke(
+    live_server: str, browser_page: object
+) -> None:
+    """/settings-accounts.html (shell-bearing) boots clean (spec 19, Task 2.1 fix).
+
+    This page loads shell.js + settings-users.js; the latter aliases
+    `const A = window.pdAuth` at module scope and depends on `pdAuth.setSession`
+    existing. After Task 2.1 made the session backend-sourced, setSession was removed
+    from pdAuth; this asserts the transitional no-op shim is in place so the settings
+    shell loads with ZERO console/page errors. (User add/remove is still the localStorage
+    mock flow, rewired to the backend in Task 2.7 — NOT driven here.)
+    """
+    assert_page_ok(browser_page, live_server, "/settings-accounts.html")
+
+
+@pytest.mark.e2e
 def test_shell_session_guard_guest_no_redirect(
     live_server: str, browser_page: object
 ) -> None:
