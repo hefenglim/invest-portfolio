@@ -246,6 +246,61 @@ def test_trades_ledger_smoke(live_server: str, browser_page: object) -> None:
 
 
 @pytest.mark.e2e
+def test_trades_ledger_account_filter_keeps_rows(
+    live_server: str, browser_page: object
+) -> None:
+    """Clicking a specific-account chip filters by account_id, NOT the display name.
+
+    Regression guard (spec 19, Task 2.4 senior review): the chips + the byAccount filter
+    used to match the hardcoded Chinese DISPLAY name against rows whose `account` carries
+    the ENGLISH name ("TW Broker"), so any specific-account chip filtered to EMPTY against
+    real data. The default 全部 view masked it, so the load-smoke missed it. The fix keys
+    the chips + predicate on the stable `account_id`; this asserts an INTERACTION (click)
+    keeps the table NON-empty.
+
+    The golden DB seeds a 2330 BUY under `tw_broker`, so its chip is rendered with a
+    `data-account-id="tw_broker"` attribute. Navigate /trades.html, wait for the default
+    transactions tab to populate, click that chip, then assert (a) at least one
+    `#tx-body tr` row survives the filter (did NOT go empty) and (b) ZERO console + page
+    errors over the interaction.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/trades.html", wait_until="load")
+        # Transactions tab populated once the parallel /api/ledgers/* fetches resolve.
+        page.wait_for_selector("#tx-body tr.expandable")
+        # The tw_broker chip is built only after boot() re-runs initFilters off real rows.
+        page.wait_for_selector('#ledger-filters .chip[data-account-id="tw_broker"]')
+        page.click('#ledger-filters .chip[data-account-id="tw_broker"]')
+        # Filter keyed on account_id -> 2330 (tw_broker) rows survive (NOT empty).
+        page.wait_for_selector("#tx-body tr.expandable")
+        rows = page.query_selector_all("#tx-body tr.expandable")
+        assert rows, "account-id filter (tw_broker) went EMPTY — regression not fixed"
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/trades.html (account filter): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_ledger_page_smoke(live_server: str, browser_page: object) -> None:
     """/ledger.html (standalone ledger view) wired to /api/ledgers/* (spec 19, Task 2.4).
 

@@ -38,14 +38,31 @@
     });
   }
 
-  /* ===== filter chips (shared bar; 帳戶 + 代號搜尋 + 日期區間) ===== */
+  /* ===== filter chips (shared bar; 帳戶 + 代號搜尋 + 日期區間) =====
+     `state.account` holds an account_id ('all' = no filter), NOT the display name —
+     the backend rows carry both a stable `account_id` (e.g. "tw_broker") and an English
+     `account` display name; filtering/chips key on the stable id and show the zh-TW label
+     via ACCOUNT_ZH (the same map app.js uses). */
+  const ACCOUNT_ZH = {
+    tw_broker: '台灣券商',
+    schwab: '嘉信 Schwab',
+    moomoo_my_us: 'Moomoo 美股',
+    moomoo_my_my: 'Moomoo 馬股',
+  };
   const state = { account: 'all', q: '', from: '', to: '' };
   function initFilters() {
     const bar = $('#ledger-filters');
-    const accounts = ['台灣券商', '嘉信 Schwab', 'Moomoo 美股', 'Moomoo 馬股'];
+    /* Derive the chip set from the distinct account_ids present across all four fetched
+       ledgers, so empty accounts are not shown. Pre-boot (D empty) this renders just the
+       全部 chip; boot() re-invokes initFilters() once the ledgers resolve. */
+    const ids = [];
+    [D.transactions, D.dividends, D.fx, D.openings].forEach((rows) => {
+      rows.forEach((r) => { if (r.account_id && !ids.includes(r.account_id)) ids.push(r.account_id); });
+    });
     const mk = (val, label) => {
       const c = el('button', 'chip' + (state.account === val ? ' active' : ''), label);
       c.type = 'button';
+      if (val !== 'all') c.dataset.accountId = val;
       c.addEventListener('click', () => {
         state.account = val;
         bar.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
@@ -54,12 +71,13 @@
       });
       return c;
     };
+    bar.replaceChildren();
     bar.appendChild(el('span', 'group-label', '帳戶'));
     bar.appendChild(mk('all', '全部'));
-    accounts.forEach((a) => bar.appendChild(mk(a, a)));
+    ids.forEach((id) => bar.appendChild(mk(id, ACCOUNT_ZH[id] || id)));
   }
   const byAccount = (rows) => rows.filter((r) => {
-    if (state.account !== 'all' && r.account !== state.account) return false;
+    if (state.account !== 'all' && r.account_id !== state.account) return false;
     if (state.q) {
       const sym = (r.symbol || '').toLowerCase();
       if (!sym.includes(state.q)) return false;
@@ -271,6 +289,7 @@
       fx: (fx && fx.rows) || [],
       openings: (op && op.rows) || [],
     };
+    initFilters();      // rebuild account chips from the account_ids now present in D
     renderAll();
   }
 
