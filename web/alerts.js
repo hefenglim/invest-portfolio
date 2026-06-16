@@ -137,17 +137,35 @@
     return alerts;
   }
 
-  /* ---- compute (dashboard) or read cache (other pages) ---- */
-  function currentAlerts() {
-    if (window.DASHBOARD_DATA) {
-      const a = computeAlerts(window.DASHBOARD_DATA);
-      try { localStorage.setItem('pd_alerts_cache', JSON.stringify(a)); } catch (e) { /* noop */ }
-      return a;
+  /* Is this the dashboard? Only there do we consume the backend D.alerts + D.llm_quota
+     (from the shared /api/dashboard promise). Other pages still run the legacy
+     client-compute / cache path (their mock-data + history-mock are retired in Task 2.7). */
+  const isDashboard = document.body.dataset.page === 'dashboard';
+
+  /* Map a backend Alert.href onto the static-frontend routing scheme. Backend hrefs are
+     server-route shaped (/symbol/{sym}, /settings, …) with no matching StaticFiles page,
+     so we translate them HERE in the renderer (route knowledge stays out of api.js).
+     Returns { href, sym? }: sym set when the alert points at a symbol (→ drawer). */
+  function mapAlertHref(href) {
+    if (!href) return { href: '#' };
+    const sym = href.match(/^\/symbol\/(.+)$/);
+    if (sym) return { href: 'index.html#sym=' + encodeURIComponent(sym[1]), sym: sym[1] };
+    if (href.match(/#sym=(.+)$/)) {
+      return { href: href, sym: decodeURIComponent(href.match(/#sym=(.+)$/)[1]) };
     }
+    if (href === '/settings') return { href: 'settings.html' };
+    if (href === '/settings#llm') return { href: 'settings.html#llm' };
+    if (href === '/insights') return { href: 'insights.html' };
+    if (href === '/pipeline') return { href: 'AI Pipeline Hub.html' };
+    return { href: href };  // already a static page (e.g. settings.html#llm) — pass through
+  }
+
+  /* Non-dashboard cache path: read the last cached alerts written by the dashboard. */
+  function cachedAlerts() {
     try { return JSON.parse(localStorage.getItem('pd_alerts_cache') || '[]'); } catch (e) { return []; }
   }
 
-  let alerts = currentAlerts();
+  let alerts = isDashboard ? [] : cachedAlerts();
   window.PD_ALERTS = alerts;
 
   /* ---- topbar UI: quota chip + bell ---- */
@@ -155,23 +173,46 @@
   if (!tb) return;
   const spacer = tb.querySelector('.header-spacer');
 
-  /* AI 額度 chip（常駐） */
-  const q = window.PD_QUOTA;
+  /* AI 額度 chip（常駐）。On the dashboard the value is a Decimal STRING from
+     D.llm_quota.remaining_usd (formatted via fmt, never .toFixed); on other pages it
+     is the legacy mock PD_QUOTA number. `remaining` may be null = 無上限. */
   const chip = el('a', 'badge quota-chip');
   chip.href = 'settings.html#llm';
   chip.title = '剩餘 AI 額度（點擊前往額度設定）';
-  if (q.remaining === null) {
-    chip.classList.add('badge-fresh-ok');
-    chip.textContent = 'AI 額度 無上限';
-  } else if (q.remaining <= 0) {
-    chip.classList.add('badge-missing');
-    chip.textContent = 'AI 額度 $0.00';
-  } else if (q.remaining < q.threshold) {
-    chip.classList.add('badge-fresh-stale');
-    chip.innerHTML = '<span class="dot"></span>AI 額度 $' + q.remaining.toFixed(2);
-  } else {
-    chip.textContent = 'AI 額度 $' + q.remaining.toFixed(2);
+  /* 2-dp amount for the chip. The dashboard always loads format.js, so the Decimal
+     STRING from D.llm_quota.remaining_usd goes through fmt there (per spec). On the
+     non-dashboard pages that load alerts.js WITHOUT format.js, fall back to a Number
+     formatter for the legacy mock value (never .toFixed on a wire string). */
+  function money2(v) {
+    if (window.fmt) return window.fmt.num(v, 2);
+    return Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
+  function renderQuotaChip(remaining, threshold) {
+    chip.className = 'badge quota-chip';
+    chip.replaceChildren();
+    if (remaining === null || remaining === undefined) {
+      chip.classList.add('badge-fresh-ok');
+      chip.textContent = 'AI 額度 無上限';
+      return;
+    }
+    const rNum = Number(remaining);            // Decimal string OR number → number for compare
+    const tNum = threshold == null ? null : Number(threshold);
+    const amt = money2(remaining);             // fmt (dashboard) or Number fallback (other pages)
+    if (rNum <= 0) {
+      chip.classList.add('badge-missing');
+      chip.textContent = 'AI 額度 $' + money2(0);
+    } else if (tNum !== null && rNum < tNum) {
+      chip.classList.add('badge-fresh-stale');
+      chip.appendChild(el('span', 'dot'));
+      chip.appendChild(document.createTextNode('AI 額度 $' + amt));
+    } else {
+      chip.textContent = 'AI 額度 $' + amt;
+    }
+  }
+  /* synchronous initial paint: dashboard threshold is not known until data arrives, so
+     render from the legacy mock first (other pages keep this as their final state). */
+  const mq = window.PD_QUOTA || {};
+  renderQuotaChip(mq.remaining, mq.threshold);
 
   /* bell */
   const bellWrap = el('div', 'bell-wrap');
@@ -204,15 +245,15 @@
       return;
     }
     alerts.forEach((a) => {
+      const mapped = mapAlertHref(a.href);
       const item = el('a', 'bell-item sev-' + a.sev);
-      item.href = a.href || '#';
+      item.href = mapped.href || '#';
       /* 含個股代號的預警 → 就地彈出抽屜，不跳轉（保留 href 供中鍵/可及性） */
-      const symMatch = (a.href || '').match(/#sym=(.+)$/);
-      if (symMatch && window.pdOpenSymbol) {
+      if (mapped.sym && window.pdOpenSymbol) {
         item.addEventListener('click', (ev) => {
           ev.preventDefault();
           panel.hidden = true;
-          window.pdOpenSymbol(decodeURIComponent(symMatch[1]));
+          window.pdOpenSymbol(mapped.sym);
         });
       }
       item.appendChild(el('span', 'sev-dot'));
@@ -236,10 +277,12 @@
   });
 
   /* 體驗債修復：其他已開啟頁面在規則變更後即時同步（無需重新整理）。
-     storage 事件只在「別的分頁」觸發 — 正是要修的場景。 */
+     storage 事件只在「別的分頁」觸發 — 正是要修的場景。dashboard 以後端 D.alerts
+     為準，不隨 storage 重算（避免和後端來源分歧）。 */
   window.addEventListener('storage', (e) => {
+    if (isDashboard) return;
     if (e.key !== 'pd_alert_rules' && e.key !== 'pd_alerts_cache') return;
-    alerts = currentAlerts();
+    alerts = cachedAlerts();
     window.PD_ALERTS = alerts;
     renderCount();
     fillPanel();
@@ -251,5 +294,29 @@
   } else {
     tb.appendChild(bellWrap);
     tb.appendChild(chip);
+  }
+
+  /* ---- dashboard boot: consume the SAME shared /api/dashboard payload ---- */
+  /* On the dashboard, replace the synchronous mock paint with backend data: D.alerts
+     (the embedded rule-engine output — no client recompute) and D.llm_quota.remaining_usd
+     (Decimal string). Cache the alerts so other open pages' bells stay in sync. On
+     failure (non-401; api.js handles 401) leave the empty state — never throw (the e2e
+     smoke asserts ZERO console errors / pageerrors). */
+  if (isDashboard) {
+    (async function bootDashboardAlerts() {
+      let D;
+      try {
+        D = await (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
+      } catch (e) {
+        return;  // app.js surfaces the load-failure UI; bell/chip stay in their default state.
+      }
+      alerts = Array.isArray(D.alerts) ? D.alerts : [];
+      window.PD_ALERTS = alerts;
+      try { localStorage.setItem('pd_alerts_cache', JSON.stringify(alerts)); } catch (e) { /* noop */ }
+      const quota = D.llm_quota || {};
+      renderQuotaChip(quota.remaining_usd, mq.threshold);
+      renderCount();
+      fillPanel();
+    })();
   }
 })();

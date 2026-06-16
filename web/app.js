@@ -1,7 +1,12 @@
-/* portfolio-dash — DOM rendering. All rows are generated from DASHBOARD_DATA. */
+/* portfolio-dash — DOM rendering. All rows are generated from /api/dashboard.
+   The dashboard payload is fetched ONCE via a shared promise (window.pdDashboard)
+   that app.js / charts.js / alerts.js race-safely reuse (they load in different
+   orders; whichever runs first creates the single in-flight request). Money/price/
+   rate values arrive as Decimal STRINGS — the frontend never computes money; all
+   numbers route through window.fmt (which coerces internally for display only). */
 (function () {
   'use strict';
-  const D = window.DASHBOARD_DATA;
+  let D;                       // set in boot() from the shared /api/dashboard promise
   const f = window.fmt;
 
   /* zh-TW display names (brief §5) */
@@ -257,28 +262,34 @@
     const k = holdingsState.sortKey;
     if (k) {
       const dir = holdingsState.sortDir;
+      /* Numeric columns now arrive as Decimal STRINGS over the wire, so we cannot rely
+         on typeof to pick string-vs-number compare. Use the column's declared `text`
+         flag instead: text columns sort lexically, numeric columns compare as numbers
+         (string−string coerces to a number; that is display-ordering, not money math). */
+      const col = HOLDING_COLS.find((c) => c.key === k);
+      const isText = !!(col && col.text);
       rows = rows.slice().sort((a, b) => {
         const av = a[k], bv = b[k];
         if (av === null || av === undefined) return 1;   /* nulls last */
         if (bv === null || bv === undefined) return -1;
-        if (typeof av === 'string') return av.localeCompare(bv) * dir;
-        return (av - bv) * dir;
+        if (isText) return String(av).localeCompare(String(bv)) * dir;
+        return (Number(av) - Number(bv)) * dir;
       });
     }
     return rows;
   }
 
-  /* E2: 30日迷你走勢圖（inline SVG，紅漲綠跌依 30 日變動） */
-  function sparkline(symbol) {
-    const H = window.PD_HISTORY;
-    if (!H) return el('span', 'sign-nil', f.NULL_GLYPH);
-    const s = H.series(symbol);
-    if (!s.available || s.points.length < 2) {
+  /* E2: 30日迷你走勢圖（inline SVG，紅漲綠跌依 30 日變動）
+     Consumes the holding's spark_30d (a Decimal-STRING array from /api/dashboard);
+     each point is mapped through Number() for the SVG geometry only (the coordinate
+     math is display-derived, not money of record). */
+  function sparkline(spark) {
+    if (!Array.isArray(spark) || spark.length < 2) {
       const sp = el('span', 'sign-nil', f.NULL_GLYPH);
       sp.title = '無歷史價格';
       return sp;
     }
-    const pts = s.points.slice(-22).map((p) => p.close);
+    const pts = spark.slice(-22).map((p) => Number(p));
     const w = 72, hh = 22, pad = 2;
     const min = Math.min(...pts), max = Math.max(...pts);
     const span = max - min || 1;
@@ -307,7 +318,7 @@
     dot.setAttribute('fill', color);
     svg.appendChild(dot);
     const wrap = el('span', 'spark-wrap');
-    wrap.title = '30 日 ' + f.signedPct(chg) + (s.note ? '（' + s.note + '）' : '');
+    wrap.title = '30 日 ' + f.signedPct(chg);
     wrap.appendChild(svg);
     return wrap;
   }
@@ -364,9 +375,9 @@
       }
       tr.appendChild(tdPrice);
 
-      /* 30日 sparkline (E2) */
+      /* 30日 sparkline (E2) — from the holding's spark_30d (Decimal-string array) */
       const tdSpark = el('td', 'spark-cell');
-      tdSpark.appendChild(sparkline(h.symbol));
+      tdSpark.appendChild(sparkline(h.spark_30d));
       tr.appendChild(tdSpark);
 
       /* 市值 (native ccy) */
@@ -544,8 +555,12 @@
       card.appendChild(rates);
 
       const stats = el('div', 'fx-stats');
+      /* Per-account combined unrealized FX is a DISPLAY attribution of two components
+         the backend already broke out (no combined per-account field on the wire). Both
+         are Decimal STRINGS — coerce via Number() so we add, not string-concatenate
+         ("1"+"2"="12"). The authoritative reporting-currency total is backend-supplied. */
       const unrelSum = (a.unrealized_fx_stocks ?? null) === null || (a.unrealized_fx_cash ?? null) === null
-        ? null : a.unrealized_fx_stocks + a.unrealized_fx_cash;
+        ? null : Number(a.unrealized_fx_stocks) + Number(a.unrealized_fx_cash);
       const items = [
         ['外幣現金', a.foreign_cash, a.foreign_ccy, false],
         ['外幣股票市值', a.foreign_stock_value, a.foreign_ccy, false],
@@ -736,11 +751,14 @@
       head.appendChild(el('span', 'badge badge-ai', 'AI'));
       head.appendChild(el('h3', 'insight-title', ins.title));
       card.appendChild(head);
-      card.appendChild(el('p', 'insight-body', ins.body));
+      /* Task-1.5 card shape: summary = concise body (body_md is the full markdown). */
+      card.appendChild(el('p', 'insight-body', ins.summary));
       const foot = el('div', 'insight-foot');
-      foot.appendChild(el('span', 'insight-time', f.datetime(ins.generated_at)));
-      if (ins.token_cost_usd !== undefined && ins.token_cost_usd !== null) {
-        foot.appendChild(el('span', 'insight-cost num', 'AI Token $' + ins.token_cost_usd.toFixed(3)));
+      foot.appendChild(el('span', 'insight-time', f.datetime(ins.created_at)));
+      /* cost_usd is a Decimal STRING — format via fmt (NOT .toFixed). "0" is a valid
+         truthy-safe value, so nil-check with != null (catches null + undefined only). */
+      if (ins.cost_usd != null) {
+        foot.appendChild(el('span', 'insight-cost num', 'AI Token $' + f.num(ins.cost_usd, 3)));
       }
       card.appendChild(foot);
       grid.appendChild(card);
@@ -947,18 +965,50 @@
   }
 
   /* ============ boot ============ */
-  renderHeader();
-  renderKpis();
-  renderCcyReturns();
-  renderFilterChips();
-  renderHoldingsHead();
-  renderHoldings();
-  renderCurrencyView();
-  renderFx();
-  renderRealized();
-  renderDividendChips();
-  renderExDivCalendar();
-  renderInsights();
-  renderFreshness();
-  wireExports();
+  /* All renders depend on D, so fetch the shared /api/dashboard payload first, then
+     run the render sequence. The promise is shared with charts.js / alerts.js via
+     window.pdDashboard so exactly ONE request is made regardless of script order.
+     On failure (api.js already handles 401 → login redirect) we render a graceful
+     empty state instead of letting an unhandled rejection hit the console (the e2e
+     smoke asserts ZERO console errors / pageerrors). */
+  async function boot() {
+    try {
+      D = await (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
+    } catch (err) {
+      bootError(err);
+      return;
+    }
+    renderHeader();
+    renderKpis();
+    renderCcyReturns();
+    renderFilterChips();
+    renderHoldingsHead();
+    renderHoldings();
+    renderCurrencyView();
+    renderFx();
+    renderRealized();
+    renderDividendChips();
+    renderExDivCalendar();
+    renderInsights();
+    renderFreshness();
+    wireExports();
+  }
+
+  /* Graceful degradation when the dashboard payload cannot be loaded (non-401; 401 is
+     handled by api.js). Show a single empty state in the holdings area; never throw. */
+  function bootError(err) {
+    const body = $('#holdings-body');
+    if (body) body.replaceChildren(el('tr', null, ''));
+    const host = document.querySelector('.page');
+    if (host && window.emptyState && !document.getElementById('dash-load-error')) {
+      const box = emptyState('儀表板資料載入失敗，請稍後重新整理。');
+      box.id = 'dash-load-error';
+      host.insertBefore(box, host.firstChild);
+    }
+    if (window.toast) {
+      window.toast('儀表板資料載入失敗', 'fail', err && err.message ? err.message : undefined);
+    }
+  }
+
+  boot();
 })();

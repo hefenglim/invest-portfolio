@@ -20,8 +20,21 @@ def test_login_page_smoke(live_server: str, browser_page: object) -> None:
 
 @pytest.mark.e2e
 def test_index_page_smoke(live_server: str, browser_page: object) -> None:
-    """/index.html (dashboard shell) loads clean from mock-data.js (self-contained)."""
-    assert_page_ok(browser_page, live_server, "/index.html")
+    """/index.html (dashboard) loads clean from the REAL /api/dashboard (Task 2.2).
+
+    After Task 2.2, index.html no longer loads mock-data.js / history-mock.js: app.js,
+    charts.js and alerts.js all boot off the single shared window.pdDashboard promise
+    (one GET /api/dashboard against the golden DB). This asserts the full async wiring
+    renders with ZERO console errors + ZERO uncaught page errors — catching a botched
+    async conversion, a Decimal-string `.toFixed` TypeError, sparkline/echarts breakage,
+    or an undefined insight field. ECharts loads from the jsdelivr CDN (the browser
+    subprocess has network); the page must be console-error-clean WITH echarts available.
+
+    Waits for a POST-render selector (.kpi-card, produced by renderKpis only after the
+    /api/dashboard payload resolves) so the assertion observes the full async render —
+    not just the empty shell — before checking the console/pageerror sinks.
+    """
+    assert_page_ok(browser_page, live_server, "/index.html", root_selector=".kpi-card")
 
 
 @pytest.mark.e2e
@@ -51,8 +64,8 @@ def test_shell_session_guard_guest_no_redirect(
     async GET /api/auth/session to RESOLVE (it lazily loads api.js then fetches), and
     asserts: (a) the session call returned 200, (b) the page stayed on index.html (no
     login redirect), and (c) ZERO console errors + ZERO uncaught page errors with the
-    new async shell layered over the existing mock-data.js body render (app.js arrives
-    in Task 2.2).
+    async shell over the Task-2.2 async body render (app/charts/alerts boot off the
+    shared /api/dashboard promise).
     """
     page = browser_page
     assert isinstance(page, Page)

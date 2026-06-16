@@ -1,7 +1,10 @@
-/* portfolio-dash — ECharts setup (trend, sector allocation, dividends by year). */
+/* portfolio-dash — ECharts setup (trend, sector allocation, dividends by year).
+   Reads the SAME /api/dashboard payload as app.js via the shared window.pdDashboard
+   promise (one network request, identical data). Money in tooltips/labels routes
+   through window.fmt (Decimal strings coerced for display only). */
 (function () {
   'use strict';
-  const D = window.DASHBOARD_DATA;
+  let D;                       // set in boot() from the shared /api/dashboard promise
   const f = window.fmt;
 
   let C, baseTooltip;
@@ -65,7 +68,7 @@
       const p = nearestPoint(ev.date);
       const isBuy = ev.side !== 'sell';
       return {
-        coord: [p.date, p.total_value],
+        coord: [p.date, Number(p.total_value)],
         symbol: isBuy ? 'triangle' : 'arrow', symbolSize: 9,
         symbolRotate: isBuy ? 0 : 180,
         symbolOffset: [0, isBuy ? 12 : -12],
@@ -135,7 +138,7 @@
       ],
       series: [
         {
-          name: '總市值', type: 'line', data: t.points.map((p) => p.total_value),
+          name: '總市值', type: 'line', data: t.points.map((p) => Number(p.total_value)),
           symbol: 'circle', symbolSize: 5, showSymbol: false,
           lineStyle: { color: C.accent, width: 2 },
           itemStyle: { color: C.accent },
@@ -152,13 +155,13 @@
           }
         },
         {
-          name: '累計淨投入', type: 'line', data: t.points.map((p) => p.net_invested),
+          name: '累計淨投入', type: 'line', data: t.points.map((p) => Number(p.net_invested)),
           symbol: 'none', lineStyle: { color: C.gray, width: 1.2, type: 'dashed' },
           itemStyle: { color: C.gray }
         },
         {
           name: '部分標的當日無價格', type: 'scatter',
-          data: incompletePts.map((p) => [p.date, p.total_value]),
+          data: incompletePts.map((p) => [p.date, Number(p.total_value)]),
           symbolSize: 8,
           itemStyle: { color: 'transparent', borderColor: C.amber, borderWidth: 1.5 },
           tooltip: { show: false }, legendHoverLink: false
@@ -203,7 +206,7 @@
     }
     const palette = ['#58a6dd', '#9b86d8', '#d9a13f', '#5bb8a5', '#c97ba6', '#8a96a6'];
     const data = Object.keys(a.by_sector).map((sector, i) => ({
-      name: sector, value: a.by_sector[sector],
+      name: sector, value: Number(a.by_sector[sector]),  // Decimal string → number for plotting
       itemStyle: { color: palette[i % palette.length] }
     }));
     const chart = echarts.init(host);
@@ -290,24 +293,41 @@
         name: ccy, type: 'bar', stack: 'div', barWidth: 36,
         itemStyle: { color: C.ccy[ccy] || '#777' },
         data: dv.by_year.map((y) =>
-          y.by_currency[ccy] !== undefined ? y.by_currency[ccy] : null)
+          y.by_currency[ccy] !== undefined ? Number(y.by_currency[ccy]) : null)
       }))
     });
   }
 
-  buildPalette();
-  initTrend();
-  initSector();
-  initDividends();
-  window.addEventListener('resize', () => charts.forEach((c) => c.resize()));
-
-  /* theme change: destroy and re-init all charts */
-  window.addEventListener('pd-theme-change', () => {
-    charts.forEach((c) => c.dispose());
-    charts.length = 0;
+  function initAll() {
     buildPalette();
     initTrend();
     initSector();
     initDividends();
+  }
+
+  /* ============ boot ============ */
+  /* Await the SAME shared /api/dashboard promise as app.js (created by whichever script
+     runs first) before building charts, so the trend/sector/dividend series read real
+     data. On failure (non-401; api.js handles 401) leave the chart hosts empty rather
+     than throwing — the e2e smoke asserts ZERO console errors / pageerrors. */
+  async function boot() {
+    try {
+      D = await (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
+    } catch (e) {
+      return;  // app.js's boot surfaces the load-failure UI; charts stay empty.
+    }
+    initAll();
+  }
+
+  /* Resize + theme handlers are registered synchronously; they operate on whatever
+     charts exist at event time (none until boot resolves — both are harmless no-ops). */
+  window.addEventListener('resize', () => charts.forEach((c) => c.resize()));
+  window.addEventListener('pd-theme-change', () => {
+    if (!D) return;  // nothing built yet
+    charts.forEach((c) => c.dispose());
+    charts.length = 0;
+    initAll();
   });
+
+  boot();
 })();
