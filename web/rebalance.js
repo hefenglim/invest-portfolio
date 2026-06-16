@@ -1,18 +1,23 @@
 /* portfolio-dash — E4 再平衡試算器 (compute-only, never writes).
-   持倉面板「再平衡試算」按鈕 → 抽屜：調整各標的目標權重，
-   即時算出需買/賣股數、預估費稅、新權重。費稅估算共用 detail.js 的 pdFeeTax。
+   持倉面板「再平衡試算」按鈕 → 抽屜：調整各標的目標權重，由後端
+   POST /api/rebalance/preview 算出需買/賣股數、費稅、試算後權重。
    體驗債修復：列建立一次、輸入時僅更新計算欄（250ms debounce），輸入框不重繪不失焦。
 
-   DATA SOURCE (spec 19, Task 3.1): holdings come from the SHARED window.pdDashboard
-   promise (GET /api/dashboard, reused from app.js / charts.js / alerts.js / detail.js —
-   one fetch per page). The retired window.DASHBOARD_DATA mock is no longer read.
-   Money/price values (h.market_price, h.market_value, h.weight, kpis.total_market_value)
-   are Decimal STRINGS displayed via window.fmt (f.*), which coerce internally. The
-   interactive what-if (target weights → buy/sell qty, pdFeeTax fee estimate, new weights)
-   is the documented spec-03 exception: a CLIENT-SIDE estimate over USER INPUT + approximate
-   spot rates, NOT a display of backend money-of-record.
+   DATA SOURCE (spec 19, Task 3.1 + defer ③): holdings come from the SHARED
+   window.pdDashboard promise (GET /api/dashboard, reused from app.js / charts.js /
+   alerts.js / detail.js — one fetch per page). The retired window.DASHBOARD_DATA mock
+   is no longer read. Money/price values (h.market_price, h.weight) are Decimal STRINGS
+   displayed via window.fmt (f.*), which coerce internally.
 
-   Requires: api.js (window.pdApi), format.js, detail.js (window.pdFeeTax mirror). */
+   BACKEND-AUTHORITATIVE (defer ③): the trade plan is NO LONGER a client-side estimate.
+   On each (debounced) target edit this POSTs the user's target weight RATIOS as STRINGS
+   to /api/rebalance/preview — the AUTHORITATIVE computation (REAL fee engine compute_fees,
+   real FX via RateResolver, integer-share / MY-100-lot snapping). This module computes NO
+   money: it renders the backend `rows` (side/shares/amount/fee+tax/new_weight) + `summary`
+   (turnover_reporting / total_fees_reporting / cash_after), all Decimal STRINGS via f.*.
+   The only client number is the target-weight RATIO state — a UI percentage, not money.
+
+   Requires: api.js (window.pdApi), format.js (window.fmt). */
 (function () {
   'use strict';
   const f = window.fmt;
@@ -22,8 +27,10 @@
     if (text !== undefined) n.textContent = text;
     return n;
   };
-  const FX_TWD = { TWD: 1, USD: 32.90, MYR: 7.05 };
   const CAP = 0.30; /* 預警門檻：單一標的上限（與 alerts.js 規則一致） */
+  /* Reporting ccy for the summary footer (turnover / fees / cash are reporting-ccy). The
+     dashboard's combined view reports in TWD; the backend keys the values *_reporting. */
+  const REPORTING = 'TWD';
 
   function close() {
     const b = document.querySelector('.rb-backdrop');
@@ -49,7 +56,6 @@
     }
     const priced = D.holdings.filter((h) => h.market_price !== null && h.market_price !== undefined && h.weight !== null);
     const unpriced = D.holdings.filter((h) => h.market_price === null || h.market_price === undefined || h.weight === null);
-    const total = D.kpis.total_market_value;
 
     const backdrop = el('div', 'sd-backdrop rb-backdrop');
     const drawer = el('div', 'sd-drawer rb-drawer');
@@ -100,18 +106,18 @@
         '缺價標的不參與試算：' + unpriced.map((h) => h.symbol).join('、')));
     }
     body.appendChild(el('div', 'sd-mock-note',
-      '費稅依各帳戶費率規則估算（買賣皆計）；金額換算採現匯參考價。整數股限制：台股/美股 1 股、馬股 100 股一手。正式版由後端 /api/rebalance/preview 計算（spec 03）。'));
+      '費稅與股數由後端 /api/rebalance/preview 依各帳戶費率規則與現匯計算（買賣皆計，整數股／馬股 100 股一手；缺價標的排除）。試算不寫入帳本（spec 03）。'));
 
-    /* state — the what-if target weight per symbol, seeded from the backend weight.
-       h.weight is a Decimal STRING; Number() makes the coercion into the what-if's
-       numeric estimate explicit (this seed feeds the spec-03 client-side estimate, it
-       is NOT a money-of-record display — those go through f.* below). */
+    /* state — the what-if target weight RATIO per symbol, seeded from the backend weight.
+       h.weight is a Decimal STRING; Number() makes the seed into a numeric UI ratio. This
+       is a target PERCENTAGE (a UI weight), NOT money — the only money/share numbers come
+       back from the backend preview below and render through f.*. */
     const state = {};
     priced.forEach((h) => { state[h.symbol] = Number(h.weight); });
-    function lotOf(h) { return h.market === 'MY' ? 100 : 1; }
 
-    /* build rows ONCE; keep refs to computed cells */
-    const rows = priced.map((h) => {
+    /* build rows ONCE; keep refs to computed cells, keyed by symbol for backend matching */
+    const rowsBySym = {};
+    priced.forEach((h) => {
       const tr = el('tr');
       const tdSym = el('td', 'col-text');
       const cell = el('div', 'sym-cell');
@@ -141,48 +147,40 @@
         state[h.symbol] = Math.max(0, Number(inp.value) / 100 || 0);
         schedule();
       });
-      return { h, inp, tdAct, tdAmt, tdFee, tdNew };
+      rowsBySym[h.symbol] = { h, inp, tdAct, tdAmt, tdFee, tdNew };
     });
+    const rows = priced.map((h) => rowsBySym[h.symbol]);
 
-    let timer = null;
-    function schedule() { clearTimeout(timer); timer = setTimeout(update, 250); }
-
-    function update() {
-      let sumTarget = 0;
-      let totalFeeTwd = 0;
-      let turnoverTwd = 0;
+    /* clear all computed cells to the null glyph (used while a preview is in flight / on error) */
+    function clearComputed() {
       rows.forEach((r) => {
-        const h = r.h;
-        const target = state[h.symbol];
-        sumTarget += target;
-        const fx = FX_TWD[h.quote_ccy] || 1;
-        const curTwd = h.market_value * fx;
-        const deltaTwd = total * target - curTwd;
-        const lot = lotOf(h);
-        const qty = Math.floor(Math.abs(deltaTwd / fx / h.market_price) / lot) * lot;
-        const side = deltaTwd >= 0 ? 'buy' : 'sell';
-        let ft = { fee: 0, tax: 0 };
-        let amount = 0;
-        if (qty > 0 && window.pdFeeTax) {
-          ft = window.pdFeeTax(h, side, qty, h.market_price);
-          amount = qty * h.market_price;
-          totalFeeTwd += (ft.fee + ft.tax) * fx;
-          turnoverTwd += amount * fx;
-        }
-        const newW = (curTwd + (side === 'buy' ? 1 : -1) * qty * h.market_price * fx) / total;
         r.tdAct.replaceChildren();
-        if (qty <= 0) {
-          r.tdAct.appendChild(el('span', 'sign-nil', '—'));
-        } else {
-          r.tdAct.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'), side === 'buy' ? '買' : '賣'));
-          r.tdAct.appendChild(document.createTextNode(' ' + f.num(qty) + ' 股'));
-        }
-        r.tdAmt.textContent = qty > 0 ? f.money(amount, h.quote_ccy) + ' ' + h.quote_ccy : '—';
-        r.tdFee.textContent = qty > 0 ? f.money(ft.fee + ft.tax, h.quote_ccy) : '—';
-        r.tdNew.textContent = f.pct(newW);
-        r.tdNew.classList.toggle('sign-up', newW > CAP);
+        r.tdAct.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
+        r.tdAmt.textContent = f.NULL_GLYPH;
+        r.tdFee.textContent = f.NULL_GLYPH;
+        r.tdNew.textContent = f.NULL_GLYPH;
+        r.tdNew.classList.remove('sign-up');
       });
+    }
 
+    /* render ONE backend row (a Decimal-STRING trade) into its table row via f.* */
+    function renderRow(r, br) {
+      r.tdAct.replaceChildren();
+      const side = br.side;
+      r.tdAct.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
+        side === 'buy' ? '買' : '賣'));
+      r.tdAct.appendChild(document.createTextNode(' ' + f.num(br.shares) + ' 股'));
+      const ccy = br.ccy;
+      r.tdAmt.textContent = f.money(br.amount, ccy) + ' ' + ccy;
+      /* fee + tax are separate Decimal strings; show their combined cost (display only,
+         the backend already computed both — Number() here is presentation, not money math). */
+      const feeTax = Number(br.fee) + Number(br.tax);
+      r.tdFee.textContent = f.money(feeTax, ccy);
+      r.tdNew.textContent = f.pct(br.new_weight);
+      r.tdNew.classList.toggle('sign-up', Number(br.new_weight) > CAP);
+    }
+
+    function renderFoot(summary, sumTarget) {
       foot.replaceChildren();
       const cash = 1 - sumTarget;
       const kv = (k, v, cls) => {
@@ -193,11 +191,63 @@
       };
       foot.appendChild(kv('目標合計', f.pct(sumTarget), sumTarget > 1.0001 ? 'sign-up' : ''));
       foot.appendChild(kv('現金水位', f.pct(Math.max(0, cash))));
-      foot.appendChild(kv('預估周轉額', f.money(turnoverTwd, 'TWD') + ' TWD'));
-      foot.appendChild(kv('預估總費稅', f.money(totalFeeTwd, 'TWD') + ' TWD', totalFeeTwd > 0 ? 'sign-up' : ''));
+      const turnover = summary ? summary.turnover_reporting : null;
+      const fees = summary ? summary.total_fees_reporting : null;
+      foot.appendChild(kv('預估周轉額', f.money(turnover, REPORTING) + ' ' + REPORTING));
+      foot.appendChild(kv('預估總費稅', f.money(fees, REPORTING) + ' ' + REPORTING,
+        fees != null && Number(fees) > 0 ? 'sign-up' : ''));
       if (sumTarget > 1.0001) {
         foot.appendChild(el('span', 'rb-warn', '⚠ 目標合計超過 100% — 請下調部分標的'));
       }
+    }
+
+    let timer = null;
+    function schedule() { clearTimeout(timer); timer = setTimeout(update, 250); }
+
+    async function update() {
+      /* sumTarget is a pure UI percentage (NOT money) — drives the 目標合計 / 現金水位 hints. */
+      let sumTarget = 0;
+      const targets = {};
+      rows.forEach((r) => {
+        const ratio = state[r.h.symbol];
+        sumTarget += ratio;
+        /* send ratios as STRINGS so Pydantic parses EXACT Decimals (avoids JS-float drift). */
+        targets[r.h.symbol] = String(ratio);
+      });
+
+      /* cancel any prior in-flight preview so a newer edit wins (typeahead-style). */
+      const ctrl = window.pdApi.abortable('rebalance-preview');
+      let result;
+      try {
+        result = await window.pdApi.post('/api/rebalance/preview', { targets },
+          { signal: ctrl.signal });
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;  /* superseded by a newer edit */
+        if (window.toast) {
+          window.toast(err && err.message ? err.message : '再平衡試算失敗',
+            'fail', err && err.code);
+        }
+        return;
+      }
+
+      const backendRows = (result && Array.isArray(result.rows)) ? result.rows : [];
+      const byRow = {};
+      backendRows.forEach((br) => { byRow[br.symbol] = br; });
+      rows.forEach((r) => {
+        const br = byRow[r.h.symbol];
+        if (br) {
+          renderRow(r, br);
+        } else {
+          /* no trade for this symbol (on target, rounds to nothing, or excluded) */
+          r.tdAct.replaceChildren();
+          r.tdAct.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
+          r.tdAmt.textContent = f.NULL_GLYPH;
+          r.tdFee.textContent = f.NULL_GLYPH;
+          r.tdNew.textContent = f.NULL_GLYPH;
+          r.tdNew.classList.remove('sign-up');
+        }
+      });
+      renderFoot(result && result.summary, sumTarget);
     }
 
     capBtn.addEventListener('click', () => {
@@ -215,6 +265,7 @@
       update();
     });
 
+    clearComputed();
     update();
     document.body.appendChild(backdrop);
   }

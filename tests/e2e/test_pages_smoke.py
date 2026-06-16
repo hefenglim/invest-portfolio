@@ -1160,6 +1160,86 @@ def test_rebalance_drawer_smoke(live_server: str, browser_page: object) -> None:
 
 
 @pytest.mark.e2e
+def test_rebalance_preview_roundtrip(live_server: str, browser_page: object) -> None:
+    """Setting a target weight hits the REAL POST /api/rebalance/preview (spec 19 defer ③).
+
+    After defer ③, rebalance.js drops its client-side what-if math (the FX_TWD mock rates,
+    the window.pdFeeTax fee estimate, the client turnover/new-weight) and instead POSTs the
+    user's target weight RATIOS (as STRINGS) to /api/rebalance/preview — the AUTHORITATIVE
+    backend computation (real fee engine, real FX, integer-share / MY-100-lot snapping). The
+    drawer renders the backend rows (side/shares/amount/fee+tax/new_weight) + summary
+    (turnover/fees/cash_after), all Decimal STRINGS via window.fmt.
+
+    The golden DB holds 2330 at ~94% of the portfolio. Navigate /index.html, open the drawer,
+    wait for the 2330 row + its target input, then DROP 2330's target sharply (94% -> 20%) to
+    force a SELL. Assert (a) the debounced POST /api/rebalance/preview fires + returns 200, and
+    (b) the result renders — the summary 預估周轉額 shows a backend-computed value (not the
+    em-dash null glyph). Zero console + zero page errors over the round-trip (catching a bare
+    `.toFixed` on a Decimal string, an unhandled POST rejection, or a botched render).
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")  # dashboard async render landed
+        page.wait_for_selector(".rb-open-btn")  # rebalance trigger mounted
+        page.click(".rb-open-btn")
+        page.wait_for_selector(".rb-drawer")
+        # The 2330 row carries a .rb-input (its target-weight control). Locate it by the row
+        # whose .sym-code text is 2330, then fill its input — the input dispatch debounces
+        # (~250ms) into the backend POST.
+        row_input = page.locator(
+            ".rb-drawer .rb-table tbody tr",
+            has=page.locator(".sym-code", has_text="2330"),
+        ).locator(".rb-input")
+        row_input.wait_for(state="attached")
+        # Drop 2330 sharply (~94% -> 20%) to force a SELL trade. expect_response catches the
+        # debounced POST the fill triggers.
+        with page.expect_response("**/api/rebalance/preview") as resp_info:
+            row_input.fill("20")
+        resp = resp_info.value
+        assert resp.request.method == "POST", f"expected a POST, got {resp.request.method}"
+        assert resp.status == 200, f"/api/rebalance/preview status {resp.status}"
+        # The summary 預估周轉額 renders a backend-computed value (not the em-dash null glyph).
+        # The .rb-foot is re-rendered only after the preview resolves; wait for its turnover
+        # KV value to carry a non-em-dash string.
+        page.wait_for_function(
+            "() => {"
+            " const kvs = document.querySelectorAll('.rb-foot .rb-kv');"
+            " for (const kv of kvs) {"
+            "  const k = kv.querySelector('.k');"
+            "  if (k && k.textContent && k.textContent.indexOf('\\u5468\\u8f49\\u984d') !== -1) {"
+            "   const v = kv.querySelector('.v');"
+            "   const t = v && v.textContent ? v.textContent.trim() : '';"
+            "   return t && t.indexOf('\\u2014') === -1;"
+            "  }"
+            " }"
+            " return false; }"
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"rebalance preview round-trip (/index.html): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None:
     """/AI Pipeline Hub.html boots from GET /api/insight-tasks/status (spec 19, Task 2.8).
 
