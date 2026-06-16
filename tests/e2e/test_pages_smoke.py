@@ -1026,6 +1026,58 @@ def test_insights_page_smoke(live_server: str, browser_page: object) -> None:
 
 
 @pytest.mark.e2e
+def test_rebalance_drawer_smoke(live_server: str, browser_page: object) -> None:
+    """Rebalance what-if drawer boots off the shared /api/dashboard promise (Task 3.1).
+
+    After Task 3.1, rebalance.js drops `window.DASHBOARD_DATA` (mock-data.js is deleted)
+    and sources its holdings from the SAME shared window.pdDashboard promise app.js /
+    charts.js / alerts.js / detail.js use (one GET /api/dashboard). The drawer is opened by
+    INTERACTION, not a page load, so this navigates /index.html (golden DB), waits for the
+    dashboard render + the mounted '再平衡試算' trigger, clicks it, and asserts the drawer
+    renders a holdings table sourced from the backend payload.
+
+    The golden DB seeds 2330 (TW, priced 600) and AAPL (US, priced 120) — both priced with
+    a non-null weight — so the drawer's priced table renders at least one row. Asserts the
+    FULL async wiring (await pdDashboard -> build rows -> what-if estimate via window.pdFeeTax
+    + window.fmt on the backend Decimal-STRING weights/prices) runs with ZERO console errors
+    + ZERO uncaught page errors — proving rebalance.js boots off /api/dashboard, not the
+    deleted mock, and that no bare `.toFixed` on a backend Decimal string slipped in.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")  # dashboard async render landed
+        page.wait_for_selector(".rb-open-btn")  # rebalance trigger mounted on holdings panel
+        page.click(".rb-open-btn")
+        page.wait_for_selector(".rb-drawer")  # drawer opened
+        # The priced holdings table renders >=1 row sourced from the /api/dashboard payload
+        # (golden 2330 + AAPL are priced) — proves holdings came from the backend, not a mock.
+        page.wait_for_selector(".rb-drawer .rb-table tbody tr .sym-code")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"rebalance drawer (/index.html): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None:
     """/AI Pipeline Hub.html boots from GET /api/insight-tasks/status (spec 19, Task 2.8).
 

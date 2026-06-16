@@ -1,7 +1,18 @@
 /* portfolio-dash — E4 再平衡試算器 (compute-only, never writes).
    持倉面板「再平衡試算」按鈕 → 抽屜：調整各標的目標權重，
    即時算出需買/賣股數、預估費稅、新權重。費稅估算共用 detail.js 的 pdFeeTax。
-   體驗債修復：列建立一次、輸入時僅更新計算欄（250ms debounce），輸入框不重繪不失焦。 */
+   體驗債修復：列建立一次、輸入時僅更新計算欄（250ms debounce），輸入框不重繪不失焦。
+
+   DATA SOURCE (spec 19, Task 3.1): holdings come from the SHARED window.pdDashboard
+   promise (GET /api/dashboard, reused from app.js / charts.js / alerts.js / detail.js —
+   one fetch per page). The retired window.DASHBOARD_DATA mock is no longer read.
+   Money/price values (h.market_price, h.market_value, h.weight, kpis.total_market_value)
+   are Decimal STRINGS displayed via window.fmt (f.*), which coerce internally. The
+   interactive what-if (target weights → buy/sell qty, pdFeeTax fee estimate, new weights)
+   is the documented spec-03 exception: a CLIENT-SIDE estimate over USER INPUT + approximate
+   spot rates, NOT a display of backend money-of-record.
+
+   Requires: api.js (window.pdApi), format.js, detail.js (window.pdFeeTax mirror). */
 (function () {
   'use strict';
   const f = window.fmt;
@@ -21,10 +32,21 @@
   }
   function onKey(e) { if (e.key === 'Escape') close(); }
 
-  function open() {
+  async function open() {
     close();
-    const D = window.DASHBOARD_DATA;
-    if (!D || !D.holdings) return;
+    let D;
+    try {
+      D = await (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
+    } catch (e) {
+      /* api.js already redirected on 401; for other failures surface a toast and bail —
+         never throw (the e2e smoke asserts ZERO console errors / pageerrors). */
+      if (window.toast) window.toast('無法載入持倉資料，請稍後再試', 'fail');
+      return;
+    }
+    if (!D || !Array.isArray(D.holdings) || !D.holdings.length) {
+      if (window.toast) window.toast('目前沒有可試算的持倉', 'info');
+      return;
+    }
     const priced = D.holdings.filter((h) => h.market_price !== null && h.market_price !== undefined && h.weight !== null);
     const unpriced = D.holdings.filter((h) => h.market_price === null || h.market_price === undefined || h.weight === null);
     const total = D.kpis.total_market_value;
@@ -80,9 +102,12 @@
     body.appendChild(el('div', 'sd-mock-note',
       '費稅依各帳戶費率規則估算（買賣皆計）；金額換算採現匯參考價。整數股限制：台股/美股 1 股、馬股 100 股一手。正式版由後端 /api/rebalance/preview 計算（spec 03）。'));
 
-    /* state */
+    /* state — the what-if target weight per symbol, seeded from the backend weight.
+       h.weight is a Decimal STRING; Number() makes the coercion into the what-if's
+       numeric estimate explicit (this seed feeds the spec-03 client-side estimate, it
+       is NOT a money-of-record display — those go through f.* below). */
     const state = {};
-    priced.forEach((h) => { state[h.symbol] = h.weight; });
+    priced.forEach((h) => { state[h.symbol] = Number(h.weight); });
     function lotOf(h) { return h.market === 'MY' ? 100 : 1; }
 
     /* build rows ONCE; keep refs to computed cells */
@@ -94,13 +119,13 @@
       cell.appendChild(el('span', 'sym-name', h.name));
       tdSym.appendChild(cell);
       tr.appendChild(tdSym);
-      const tdCur = el('td', 'num', f.pct(h.weight));
-      if (h.weight > CAP) tdCur.classList.add('sign-up');
+      const tdCur = el('td', 'num', f.pct(h.weight));  /* backend weight via f.* */
+      if (state[h.symbol] > CAP) tdCur.classList.add('sign-up');  /* numeric what-if seed */
       tr.appendChild(tdCur);
       const tdT = el('td', 'num');
       const inp = el('input', 'rb-input');
       inp.type = 'number'; inp.min = '0'; inp.max = '100'; inp.step = '0.5';
-      inp.value = (h.weight * 100).toFixed(1);
+      inp.value = (state[h.symbol] * 100).toFixed(1);  /* seed control from numeric what-if state */
       tdT.appendChild(inp);
       tr.appendChild(tdT);
       const tdAct = el('td', 'col-text');
@@ -177,15 +202,15 @@
 
     capBtn.addEventListener('click', () => {
       rows.forEach((r) => {
-        state[r.h.symbol] = Math.min(r.h.weight, CAP);
+        state[r.h.symbol] = Math.min(Number(r.h.weight), CAP);  /* numeric what-if seed */
         r.inp.value = (state[r.h.symbol] * 100).toFixed(1);
       });
       update();
     });
     resetBtn.addEventListener('click', () => {
       rows.forEach((r) => {
-        state[r.h.symbol] = r.h.weight;
-        r.inp.value = (r.h.weight * 100).toFixed(1);
+        state[r.h.symbol] = Number(r.h.weight);  /* reset to backend weight (numeric) */
+        r.inp.value = (state[r.h.symbol] * 100).toFixed(1);
       });
       update();
     });
