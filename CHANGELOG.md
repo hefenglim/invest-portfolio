@@ -56,6 +56,11 @@ headings. (`## [Unreleased]` is intentionally not counted.)
     shape — reconciled when Phase 2 wires the dashboard page.
 
 ### Fixed
+- **`/api/health` exempt from the protected-mode auth gate (2026-06-17, human-approved):** the liveness probe is
+  added to `auth_store._OPEN_PATHS` (alongside `/api/auth/login` + `/api/auth/session`). It returns only
+  `{"status":"ok"}` (no data), so it must answer regardless of login — previously, once ≥1 user existed (protected
+  mode) an unauthenticated Docker/k8s/monitoring liveness probe got a 401. Every OTHER `/api/*` path still requires a
+  session in protected mode (regression test pins protected `/api/health`→200 AND `/api/dashboard`→401).
 - **Makefile runs the full suite (spec 19 Phase 0, 2026-06-16):** `make test`/`make regress`/`make all` now
   run `pytest tests --ignore=tests/e2e` (the whole tree minus browser e2e) — previously `make test` targeted
   only `tests/unit tests/contract`, collecting **266 of 1012** tests, so `make all` was not real regression.
