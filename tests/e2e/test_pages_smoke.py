@@ -393,6 +393,108 @@ def test_instruments_probe_shows_board_guess(
 
 
 @pytest.mark.e2e
+def test_input_page_smoke(live_server: str, browser_page: object) -> None:
+    """/input.html boots from the REAL /api/input/context (spec 19, Task 2.6).
+
+    After Task 2.6 input.js drops window.INPUT_DATA and sources ALL form structural
+    data (accounts / instruments / fee-rule context / holdings) from GET
+    /api/input/context, then runs the manual tab's first live preview against
+    /api/input/manual/preview. The golden DB seeds the four accounts + 2330/AAPL
+    instruments + a tw_broker 2330 holding, so the account/symbol dropdowns populate
+    and the seeded default draft (2330 買 1,000 @ 612.5) previews cleanly.
+
+    Waits for a post-boot selector (#m-account option, populated only after the context
+    fetch resolves) so the assertion observes the full async boot — then asserts ZERO
+    console errors + ZERO uncaught page errors (catching a Decimal-string `.toFixed`
+    TypeError on the server-fed preview fee/tax/total, an undefined field, or an
+    unhandled fetch rejection).
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/input.html", wait_until="load")
+        # Account dropdown populated only after GET /api/input/context resolves. <option>
+        # nodes live inside a collapsed <select> (never "visible"), so wait for ATTACHED.
+        page.wait_for_selector("#m-account option", state="attached")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/input.html (context wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_input_manual_preview_roundtrip(
+    live_server: str, browser_page: object
+) -> None:
+    """Manual tab live preview hits the REAL POST /api/input/manual/preview (Task 2.6).
+
+    The preview round-trip: navigate /input.html (golden DB), wait for the context-fed
+    account dropdown, fill the manual form (account tw_broker / symbol 2330 / 1000 @
+    612.5 — all golden), and trigger a preview by editing the price. Then assert (a) the
+    real POST /api/input/manual/preview returns 200, (b) the preview card renders the
+    server-computed total (#m-pc-value is non-empty, NOT the em-dash null glyph — i.e.
+    the Decimal-STRING fee/tax/total went through fmt and the confirm enabled), and
+    (c) ZERO console + page errors over the interaction.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/input.html", wait_until="load")
+        # <option> nodes are inside a collapsed <select> -> wait for ATTACHED, not visible.
+        page.wait_for_selector("#m-account option", state="attached")  # context landed
+        # The seeded default draft already previews on boot; edit the price to fire a
+        # fresh, deterministic POST we can wait on (golden 2330 under tw_broker).
+        page.fill("#m-symbol", "2330")
+        with page.expect_response("**/api/input/manual/preview") as resp_info:
+            page.fill("#m-price", "612.5")
+        assert resp_info.value.status == 200, f"preview status {resp_info.value.status}"
+        # The preview card big value renders the server total (not the null em-dash).
+        page.wait_for_function(
+            "() => { const v = document.querySelector('#m-pc-value');"
+            " const t = v && v.textContent ? v.textContent.trim() : '';"
+            " return t && t !== '\\u2014'; }"
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/input.html (manual preview): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_ledger_page_smoke(live_server: str, browser_page: object) -> None:
     """/ledger.html (standalone ledger view) wired to /api/ledgers/* (spec 19, Task 2.4).
 
