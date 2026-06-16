@@ -358,8 +358,10 @@
     }
     /* cap / div are backend Decimal STRINGS; coerce to local numbers ONLY for the bar-width
        geometry and sign decisions. The displayed cap / div values render via f.* on the
-       original strings; the 合計 total is the numeric decomposition sum (presentation-only —
-       the cap-vs-dividend split is a UI breakdown, not a money figure of record). */
+       original strings; the 合計 total displayed is the backend money-of-record
+       h.unrealized_pnl (Decimal STRING) — by the proven identity capital_gain +
+       dividend_portion ≡ unrealized_pnl (price×shares − adjusted_total) — never a client
+       money-sum. totalN below stays a float ONLY for the bar-width geometry (presentation). */
     const cap = h.capital_gain;
     const div = h.dividend_portion != null ? h.dividend_portion : 0;
     const capN = Number(cap);
@@ -389,7 +391,7 @@
     };
     legend.appendChild(item('cap', '資本利得', f.signed(cap, h.quote_ccy) + ' ' + h.quote_ccy));
     legend.appendChild(item('div', '股利貢獻', f.money(div, h.quote_ccy) + ' ' + h.quote_ccy));
-    legend.appendChild(item('cap', '合計', f.signed(totalN, h.quote_ccy) + ' ' + h.quote_ccy));
+    legend.appendChild(item('cap', '合計', f.signed(h.unrealized_pnl, h.quote_ccy) + ' ' + h.quote_ccy));
     wrap.appendChild(legend);
     sec.appendChild(wrap);
     return sec;
