@@ -109,6 +109,22 @@ def test_users_gated_in_protected_mode(
     assert r.status_code == 401 and r.json()["error"]["code"] == "unauthorized"
 
 
+def test_health_exempt_from_gate_in_protected_mode(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # /api/health is in _OPEN_PATHS -> the liveness probe answers WITHOUT a cookie
+    # even in protected mode, while a DIFFERENT protected path still 401s (gate intact).
+    api_client.post(
+        "/api/users", json={"name": "家明", "username": "chiaming", "password": "password123"}
+    )  # activates protected mode
+    api_client.cookies.clear()
+    r = api_client.get("/api/health")
+    assert r.status_code == 200 and r.json() == {"status": "ok"}
+    # The gate is NOT broadly open: another protected /api/* path still requires a cookie.
+    blocked = api_client.get("/api/dashboard")
+    assert blocked.status_code == 401 and blocked.json()["error"]["code"] == "unauthorized"
+
+
 def test_create_user_empty_username_400(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:

@@ -26,8 +26,11 @@ _SCRYPT_R = 8
 _SCRYPT_P = 1
 _DKLEN = 32
 
-# Paths exempt from the session gate (login + the gate-query endpoint itself).
-_OPEN_PATHS = {"/api/auth/login", "/api/auth/session"}
+# Paths exempt from the session gate (login + the gate-query endpoint itself +
+# the liveness probe). ``/api/health`` returns only ``{"status": "ok"}`` (no data),
+# so it is unauthenticated by design: a liveness probe must answer regardless of
+# login state. Every OTHER ``/api/*`` path still requires a session in protected mode.
+_OPEN_PATHS = {"/api/auth/login", "/api/auth/session", "/api/health"}
 
 
 def create_auth_tables(conn: sqlite3.Connection) -> None:
