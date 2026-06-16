@@ -46,38 +46,6 @@
     const incompletePts = t.points.filter((p) => p.incomplete);
     document.getElementById('trend-note').hidden = incompletePts.length === 0;
 
-    /* E8: 大額買賣事件標記（閾值：約報告幣別 100k） */
-    const FX_TWD = { TWD: 1, USD: 32.9, MYR: 7.05 };
-    const events = [];
-    if (window.PD_HISTORY) {
-      const SYMS = ['2330', '0056', '00919', 'AAPL', 'MSFT', 'NVDA', '1155.KL'];
-      SYMS.forEach((sym) => {
-        const ccy = sym.endsWith('.KL') ? 'MYR' : /^[0-9]/.test(sym) ? 'TWD' : 'USD';
-        (window.PD_HISTORY.events(sym).trades || []).forEach((tr) => {
-          const twd = tr.shares * tr.price * FX_TWD[ccy];
-          if (twd >= 100000) events.push({ date: tr.date, sym, side: tr.side, twd });
-        });
-      });
-    }
-    const nearestPoint = (date) => {
-      let best = null;
-      t.points.forEach((p) => { if (p.date >= date && (best === null || p.date < best.date)) best = p; });
-      return best || t.points[t.points.length - 1];
-    };
-    const evMarks = events.map((ev) => {
-      const p = nearestPoint(ev.date);
-      const isBuy = ev.side !== 'sell';
-      return {
-        coord: [p.date, Number(p.total_value)],
-        symbol: isBuy ? 'triangle' : 'arrow', symbolSize: 9,
-        symbolRotate: isBuy ? 0 : 180,
-        symbolOffset: [0, isBuy ? 12 : -12],
-        itemStyle: { color: isBuy ? C.accent : C.faint },
-        value: (ev.side === 'open' ? '期初 ' : isBuy ? '買 ' : '賣 ') + ev.sym +
-          ' 約 ' + f.money(ev.twd, 'TWD') + ' TWD（' + ev.date + '）'
-      };
-    });
-
     const chart = echarts.init(host);
     charts.push(chart);
     chart.setOption({
@@ -142,11 +110,6 @@
           symbol: 'circle', symbolSize: 5, showSymbol: false,
           lineStyle: { color: C.accent, width: 2 },
           itemStyle: { color: C.accent },
-          markPoint: {
-            data: evMarks,
-            tooltip: { formatter: (p) => p.data.value || '' },
-            label: { show: false }
-          },
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
               { offset: 0, color: 'rgba(88,166,221,0.28)' },

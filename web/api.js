@@ -15,9 +15,11 @@
      { "error": { "code", "message", "field"?, "issues"? } }.
    pdApi does NOT toast. It THROWS a structured `PdApiError`; the CALLER catches
    and does `window.toast(err.message, 'fail', err.code)`. The ONE exception is
-   401 → `window.location.replace('login.html')` (the single place that redirect
-   lives), EXCEPT when already on login.html (a wrong-password POST /api/auth/login
-   returns 401; redirecting there would self-reload and swallow the form's error).
+   401 → `window.location.replace('login.html')`. Both redirect sites — the shared
+   `_handle` (GET/POST/PUT/DELETE) and `download()` — apply the IDENTICAL guard,
+   redirecting EXCEPT when already on login.html (a wrong-password POST
+   /api/auth/login returns 401; redirecting there would self-reload and swallow the
+   form's error).
    In all cases the PdApiError is still thrown so in-flight callers stop. 402 / 409 /
    503 are re-thrown WITHOUT redirect so the AI/insight block can catch them and
    render a degraded state. */
@@ -149,7 +151,9 @@
     const resp = await fetch(_normPath(path), _jsonInit(method, body, opts));
     if (!resp.ok) {
       const err = await _toError(resp);
-      if (resp.status === 401) window.location.replace('login.html');
+      if (resp.status === 401 && !window.location.pathname.endsWith('login.html')) {
+        window.location.replace('login.html');
+      }
       throw err;
     }
     const blob = await resp.blob();

@@ -1205,3 +1205,80 @@ def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None
         f"/AI Pipeline Hub.html (status wired): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_dashboard_trend_chart_mounts(
+    live_server: str, browser_page: object
+) -> None:
+    """Trend chart still mounts after the dead PD_HISTORY marker code is removed (defer ②).
+
+    charts.js dropped the unreachable E8 large-trade-marker block (window.PD_HISTORY was
+    permanently undefined once history-mock.js was deleted in Phase 3) plus its downstream
+    `markPoint` render. This guards that initTrend STILL builds the trend chart off the real
+    /api/dashboard payload: navigate /index.html (golden DB), wait for the dashboard render,
+    then assert #trend-chart mounted an echarts instance (a <canvas> inside the host). The
+    existing test_index_page_smoke already covers ZERO console/page errors after the removal.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")  # dashboard async render landed
+        # initTrend runs after the shared /api/dashboard promise resolves; ECharts mounts a
+        # <canvas> inside the #trend-chart host. Its presence proves the trend chart built
+        # cleanly without the removed dead block.
+        page.wait_for_selector("#trend-chart canvas")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/index.html (trend chart mount): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_favicon_present_no_ico_404(live_server: str, browser_page: object) -> None:
+    """Every page references favicon.svg so the browser never 404s on /favicon.ico (defer ⑥).
+
+    shell.js injects <link rel="icon" type="image/svg+xml" href="favicon.svg"> into the head
+    at boot (covering all shell-bearing pages); login.html (no shell.js) declares the same
+    <link> directly. This asserts: (a) /index.html (shell) carries a link[rel="icon"] whose
+    href ends 'favicon.svg'; (b) /login.html carries the same; and (c) GET /favicon.svg
+    returns 200 (the asset exists, so the default /favicon.ico request is never made).
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    # (a) Shell page: shell.js injected the favicon link at boot.
+    page.goto(live_server + "/index.html", wait_until="load")
+    href = page.get_attribute('link[rel="icon"]', "href")
+    assert href is not None and href.endswith("favicon.svg"), (
+        f"/index.html missing favicon link[rel=icon] -> favicon.svg (got {href!r})"
+    )
+
+    # (b) Login page: the <link> is declared directly in its <head>.
+    page.goto(live_server + "/login.html", wait_until="load")
+    href = page.get_attribute('link[rel="icon"]', "href")
+    assert href is not None and href.endswith("favicon.svg"), (
+        f"/login.html missing favicon link[rel=icon] -> favicon.svg (got {href!r})"
+    )
+
+    # (c) The asset is actually served (200), so the browser uses it instead of /favicon.ico.
+    resp = page.request.get(live_server + "/favicon.svg")
+    assert resp.status == 200, f"GET /favicon.svg returned {resp.status}, expected 200"

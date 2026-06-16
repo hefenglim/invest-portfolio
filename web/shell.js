@@ -16,6 +16,17 @@
   const LS_KEY = 'pd_sidebar_collapsed';
   const page = document.body.dataset.page || '';
 
+  /* Favicon: point every shell-bearing page at favicon.svg so the browser uses it
+     instead of requesting the default /favicon.ico (which 404s app-wide). Synchronous
+     DOM, no fetch; guarded against double-injection. login.html sets its own <link>. */
+  if (!document.querySelector('link[rel="icon"]')) {
+    const _fav = document.createElement('link');
+    _fav.rel = 'icon';
+    _fav.type = 'image/svg+xml';
+    _fav.href = 'favicon.svg';
+    document.head.appendChild(_fav);
+  }
+
   /* ===== 工作階段：以後端 GET /api/auth/session 為準（war-game Finding 7） =====
      後端回傳三態：
        · {mode:'guest'}                              → 無授權用戶，公開瀏覽，不導頁。
