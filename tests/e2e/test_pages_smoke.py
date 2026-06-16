@@ -822,3 +822,109 @@ def test_settings_accounts_users_wired_smoke(
         f"/settings-accounts.html (users wired): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_offdashboard_bell_reads_api_alerts(
+    live_server: str, browser_page: object
+) -> None:
+    """Topbar bell on a NON-dashboard page renders from GET /api/alerts (spec 19/03 I1).
+
+    After the Task-2.7c I1 retirement, alerts.js off the dashboard drops the legacy
+    localStorage client-compute path and instead fetches GET /api/alerts -> {as_of,
+    alerts} through pdApi, mapping each Alert.href via mapAlertHref and rendering the bell
+    count + panel. The golden DB holds 2330 at ~94% of the portfolio (single_weight rule,
+    default 30% threshold) so the rule engine returns at least one risk alert -> the bell
+    count badge (.bell-count, appended only when alerts.length > 0) renders.
+
+    /instruments.html is a non-dashboard page that loads api.js + format.js + alerts.js.
+    Navigate it, wait for the bell count to land (proving GET /api/alerts resolved and the
+    bell rendered from the backend), then assert ZERO console + ZERO page errors over the
+    async fetch — catching an unhandled rejection or a botched render of the Alert wire.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        # Deterministically catch the off-dashboard /api/alerts fetch (alerts.js boot).
+        with page.expect_response("**/api/alerts") as resp_info:
+            page.goto(live_server + "/instruments.html", wait_until="load")
+        assert resp_info.value.status == 200, f"/api/alerts status {resp_info.value.status}"
+        # 2330 ~94% weight > 30% single_weight default -> >=1 alert -> the count badge lands.
+        page.wait_for_selector(".bell-count")
+        count_text = page.inner_text(".bell-count")
+        assert count_text.strip().isdigit() and int(count_text.strip()) >= 1, (
+            f"bell count did not render a positive count: {count_text!r}"
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/instruments.html (off-dashboard bell): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_alert_rules_editor_wired(
+    live_server: str, browser_page: object
+) -> None:
+    """Alert-rules editor on /settings.html renders from GET /api/alert-rules (Task 2.7c).
+
+    After the Task-2.7c wiring, settings-alerts.js drops its localStorage 'pd_alert_rules'
+    editor and boots off GET /api/alert-rules -> {rules:[{id,enabled,value,unit,min,max}]},
+    rendering one editor row per backend rule (rules_config.py RULE_META has 8 rules,
+    including the calib_gap rule). The golden DB seeds the default rules, so the editor
+    renders rows with the toggle switches + numeric inputs.
+
+    Navigate /settings.html (which loads api.js + settings-alerts.js), wait for the editor
+    rows to mount inside #alert-rules-wrap (proving GET /api/alert-rules resolved), then
+    assert ZERO console + ZERO page errors over the async boot.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        with page.expect_response("**/api/alert-rules") as resp_info:
+            page.goto(live_server + "/settings.html", wait_until="load")
+        assert resp_info.value.status == 200, (
+            f"/api/alert-rules status {resp_info.value.status}"
+        )
+        # Editor rows mount only after GET /api/alert-rules resolves. The 預警規則 tab is
+        # not the active tab, so rows are ATTACHED (in the DOM) but not visible.
+        page.wait_for_selector("#alert-rules-wrap .ar-row", state="attached")
+        rows = page.query_selector_all("#alert-rules-wrap .ar-row")
+        assert len(rows) >= 8, f"expected >=8 alert-rule rows, got {len(rows)}"
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings.html (alert-rules editor): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
