@@ -1,48 +1,14 @@
-/* portfolio-dash — 帳本檢視 (mock + rendering, read-only append-only ledgers) */
-window.LEDGER_DATA = {
-  "transactions": [
-    { "date": "2026-06-09", "account": "台灣券商", "symbol": "0056", "name": "元大高股息", "side": "buy",
-      "shares": 2000, "price": 38.60, "fee": 110, "tax": 0, "total": -77310, "ccy": "TWD",
-      "fee_snapshot": { "rate": "0.1425%", "discount": "1.0", "min_fee": "NT$20", "rounding": "整數 NT$" }, "note": null },
-    { "date": "2026-06-05", "account": "嘉信 Schwab", "symbol": "AAPL", "name": "Apple", "side": "sell",
-      "shares": 5, "price": 200.50, "fee": 0, "tax": 0.04, "total": 1002.46, "ccy": "USD",
-      "fee_snapshot": { "commission": "$0", "sec_fee": "$0.04" }, "note": "減碼" },
-    { "date": "2026-05-28", "account": "Moomoo 美股", "symbol": "NVDA", "name": "NVIDIA", "side": "buy",
-      "shares": 10, "price": 165.20, "fee": 0.99, "tax": 0, "total": -1652.99, "ccy": "USD",
-      "fee_snapshot": { "platform_fee": "USD 0.99/筆" }, "note": null },
-    { "date": "2026-05-28", "account": "Moomoo 馬股", "symbol": "1155.KL", "name": "Maybank", "side": "buy",
-      "shares": 300, "price": 9.620, "fee": 3.00, "tax": 2.89, "total": -2891.89, "ccy": "MYR",
-      "fee_snapshot": { "clearing": "0.03% (cap RM1,000)", "stamp_duty": "0.1%" }, "note": null },
-    { "date": "2026-05-15", "account": "台灣券商", "symbol": "2330", "name": "台積電", "side": "sell",
-      "shares": 200, "price": 598.00, "fee": 170, "tax": 359, "total": 119071, "ccy": "TWD",
-      "fee_snapshot": { "rate": "0.1425%", "discount": "1.0", "tax": "證交稅 0.3%" }, "note": "AI 輸入" },
-    { "date": "2026-05-02", "account": "台灣券商", "symbol": "00919", "name": "群益台灣精選高息", "side": "buy",
-      "shares": 5000, "price": 23.50, "fee": 167, "tax": 0, "total": -117667, "ccy": "TWD",
-      "fee_snapshot": { "rate": "0.1425%", "discount": "1.0", "min_fee": "NT$20" }, "note": null }
-  ],
-  "dividends": [
-    { "date": "2026-06-03", "account": "台灣券商", "symbol": "2330", "type": "現金",
-      "gross": 5000, "withhold": 0, "net": 5000, "reinvest_shares": null, "reinvest_price": null, "ccy": "TWD" },
-    { "date": "2026-05-20", "account": "嘉信 Schwab", "symbol": "AAPL", "type": "DRIP",
-      "gross": 7.50, "withhold": 2.25, "net": 5.25, "reinvest_shares": 0.0248, "reinvest_price": 211.40, "ccy": "USD" },
-    { "date": "2026-04-28", "account": "Moomoo 馬股", "symbol": "1155.KL", "type": "淨額",
-      "gross": null, "withhold": null, "net": 170.00, "reinvest_shares": null, "reinvest_price": null, "ccy": "MYR" },
-    { "date": "2026-04-15", "account": "台灣券商", "symbol": "0056", "type": "現金",
-      "gross": 8500, "withhold": 0, "net": 8500, "reinvest_shares": null, "reinvest_price": null, "ccy": "TWD" }
-  ],
-  "fx": [
-    { "date": "2026-05-26", "account": "嘉信 Schwab", "from_ccy": "TWD", "from_amt": 32000, "to_ccy": "USD", "to_amt": 1000.00 },
-    { "date": "2026-04-08", "account": "Moomoo 美股", "from_ccy": "MYR", "from_amt": 4450, "to_ccy": "USD", "to_amt": 1000.00 }
-  ],
-  "openings": [
-    { "account": "台灣券商", "symbol": "2330", "shares": 500, "avg": 480.00, "total": 240000, "ccy": "TWD", "date": "2026-01-02" },
-    { "account": "嘉信 Schwab", "symbol": "MSFT", "shares": 12, "avg": 405.00, "total": 4860.00, "ccy": "USD", "date": "2026-01-02" }
-  ]
-};
+/* portfolio-dash — 帳本檢視 (read-only append-only ledgers, wired to /api/ledgers/*).
 
+   The four ledgers are fetched in parallel through the single pdApi fetch layer
+   (spec 19/11). All money / price / rate values arrive as Decimal STRINGS and are
+   formatted ONLY via window.fmt — this module never computes money. The implied FX
+   rate comes from the backend (`implied_rate`), never recomputed client-side. */
 (function () {
   'use strict';
-  const D = window.LEDGER_DATA;
+  /* D is set once the four ledgers resolve; render fns read it. Default to empty
+     arrays so any pre-boot render (or a fetch failure) degrades to empty tables. */
+  let D = { transactions: [], dividends: [], fx: [], openings: [] };
   const f = window.fmt;
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
@@ -145,7 +111,7 @@ window.LEDGER_DATA = {
       const tr = el('tr', 'expandable');
       const tdCaret = el('td', 'num caret-cell', '▸');
       tr.appendChild(tdCaret);
-      tr.appendChild(el('td', 'num', t.date));
+      tr.appendChild(el('td', 'num', f.date(t.date)));
       tr.appendChild(el('td', 'col-text', t.account));
       tr.appendChild(symCell(t.symbol, t.name));
       const tdSide = el('td', 'col-text');
@@ -168,10 +134,12 @@ window.LEDGER_DATA = {
       const box = el('div', 'snapshot-box');
       box.appendChild(el('span', 'snap-title', '費率規則快照'));
       const kv = el('div', 'snap-kv');
-      Object.keys(t.fee_snapshot).forEach((k) => {
-        const item = el('span', 'num', k + ': ' + t.fee_snapshot[k]);
+      const snap = t.fee_snapshot || {};
+      Object.keys(snap).forEach((k) => {
+        const item = el('span', 'num', k + ': ' + snap[k]);
         kv.appendChild(item);
       });
+      if (!Object.keys(snap).length) kv.appendChild(el('span', 'num', f.NULL_GLYPH));
       box.appendChild(kv);
       if (t.note) box.appendChild(el('span', 'snap-note', '備註：' + t.note));
       td.appendChild(box);
@@ -189,17 +157,25 @@ window.LEDGER_DATA = {
   }
 
   /* ===== 股利 ===== */
+  /* Dividend type arrives as a lowercase wire value (cash/stock/drip/net); map to a
+     display label + chip class. Unknown types fall back to the raw wire string. */
+  const DIV_TYPE = {
+    cash: { label: '現金', cls: 'chip-cash' },
+    stock: { label: '配股', cls: 'chip-stock' },
+    drip: { label: 'DRIP', cls: 'chip-drip' },
+    net: { label: '淨額', cls: 'chip-net' },
+  };
   function renderDiv() {
     const tbody = $('#div-body');
     tbody.replaceChildren();
-    const TYPE_CLS = { '現金': 'chip-cash', '配股': 'chip-stock', 'DRIP': 'chip-drip', '淨額': 'chip-net' };
     byAccount(D.dividends).forEach((d) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', d.date));
+      tr.appendChild(el('td', 'num', f.date(d.date)));
       tr.appendChild(el('td', 'col-text', d.account));
       tr.appendChild(symCell(d.symbol));
+      const meta = DIV_TYPE[d.type] || { label: d.type, cls: '' };
       const tdType = el('td', 'col-text');
-      tdType.appendChild(el('span', 'type-chip ' + (TYPE_CLS[d.type] || ''), d.type));
+      tdType.appendChild(el('span', 'type-chip ' + meta.cls, meta.label));
       tr.appendChild(tdType);
       const mkAmt = (v) => {
         const td = el('td', 'num');
@@ -212,7 +188,7 @@ window.LEDGER_DATA = {
       tr.appendChild(mkAmt(d.net));
       const tdRe = el('td', 'num');
       if (d.reinvest_shares === null) { tdRe.textContent = f.NULL_GLYPH; tdRe.classList.add('sign-nil'); }
-      else tdRe.textContent = d.reinvest_shares + ' 股 @ ' + f.price(d.reinvest_price, d.ccy);
+      else tdRe.textContent = f.num(d.reinvest_shares, 4) + ' 股 @ ' + f.price(d.reinvest_price, d.ccy);
       tr.appendChild(tdRe);
       const tdAct = el('td');
       tdAct.appendChild(correctBtn(d));
@@ -227,11 +203,13 @@ window.LEDGER_DATA = {
     tbody.replaceChildren();
     byAccount(D.fx).forEach((x) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', x.date));
+      tr.appendChild(el('td', 'num', f.date(x.date)));
       tr.appendChild(el('td', 'col-text', x.account));
       tr.appendChild(el('td', 'num', f.money(x.from_amt, x.from_ccy) + ' ' + x.from_ccy));
       tr.appendChild(el('td', 'num', f.money(x.to_amt, x.to_ccy) + ' ' + x.to_ccy));
-      tr.appendChild(el('td', 'num', '1 ' + x.to_ccy + ' = ' + (x.from_amt / x.to_amt).toFixed(4) + ' ' + x.from_ccy));
+      /* Finding 9: the implied rate is computed by the backend (from_amount / to_amount,
+         home units per one foreign unit) — never recomputed here. */
+      tr.appendChild(el('td', 'num', '1 ' + x.to_ccy + ' = ' + f.rate(x.implied_rate) + ' ' + x.from_ccy));
       const tdAct = el('td');
       tdAct.appendChild(correctBtn(x));
       tr.appendChild(tdAct);
@@ -250,7 +228,7 @@ window.LEDGER_DATA = {
       tr.appendChild(el('td', 'num', f.num(o.shares)));
       tr.appendChild(el('td', 'num', f.price(o.avg, o.ccy)));
       tr.appendChild(el('td', 'num', f.money(o.total, o.ccy) + ' ' + o.ccy));
-      tr.appendChild(el('td', 'num', o.date));
+      tr.appendChild(el('td', 'num', f.date(o.date)));
       const tdAct = el('td');
       tdAct.appendChild(correctBtn(o));
       tr.appendChild(tdAct);
@@ -259,7 +237,44 @@ window.LEDGER_DATA = {
   }
 
   function renderAll() { renderTx(); renderDiv(); renderFx(); renderOpen(); }
-  initFilters();
-  renderAll();
+
+  /* Graceful degradation: leave the four tables empty and surface ONE toast. Never let
+     a failed fetch become an unhandled rejection (the e2e smoke asserts zero console
+     errors). 401 is already handled by api.js (login redirect). */
+  function bootError(err) {
+    renderAll();  // render the empty default D -> four blank tables, not a half-state
+    if (window.toast) {
+      window.toast('帳本資料載入失敗', 'fail', err && err.message ? err.message : undefined);
+    }
+  }
+
+  /* Fetch the four append-only ledgers in parallel through the single pdApi layer, then
+     render. A generous `limit` is passed so the whole (small) ledger shows on one page;
+     the backend caps it at 500. */
+  async function boot() {
+    const P = { limit: 500 };
+    let tx, dv, fx, op;
+    try {
+      [tx, dv, fx, op] = await Promise.all([
+        window.pdApi.get('/api/ledgers/transactions', P),
+        window.pdApi.get('/api/ledgers/dividends', P),
+        window.pdApi.get('/api/ledgers/fx', P),
+        window.pdApi.get('/api/ledgers/openings', P),
+      ]);
+    } catch (err) {
+      bootError(err);
+      return;
+    }
+    D = {
+      transactions: (tx && tx.rows) || [],
+      dividends: (dv && dv.rows) || [],
+      fx: (fx && fx.rows) || [],
+      openings: (op && op.rows) || [],
+    };
+    renderAll();
+  }
+
+  initFilters();        // account chip bar (DOM only, no data) — safe before boot
   if (ownsTabs) showTab('tx');
+  boot();
 })();

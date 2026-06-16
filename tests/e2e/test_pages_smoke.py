@@ -196,3 +196,87 @@ def test_shell_session_guard_guest_no_redirect(
         f"/index.html (async shell): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_trades_ledger_smoke(live_server: str, browser_page: object) -> None:
+    """/trades.html ledger view wired to the REAL /api/ledgers/* (spec 19, Task 2.4).
+
+    After Task 2.4, ledger.js drops its inline window.LEDGER_DATA mock and instead
+    fetches the four append-only ledgers in PARALLEL through pdApi
+    (transactions/dividends/fx/openings), then renders the four tabs. The golden DB
+    seeds a 2330 BUY, an AAPL BUY, a 2330 CASH dividend and a TWD->USD fx conversion
+    (no opening row), so the default 交易 tab renders at least one expandable row.
+
+    trades.html ALSO loads input.js (still the Task-2.6 mock) and the input-mock-data
+    glue; this asserts the now-wired ledger coexists with that mock and the WHOLE page
+    is console-error-clean. Waits for a POST-fetch selector (#tx-body tr.expandable,
+    produced only after /api/ledgers/transactions resolves) so the assertion observes
+    the populated table — catching a Decimal-string `.toFixed` TypeError, the implied_rate
+    rewire, an undefined field, or an unhandled fetch rejection.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/trades.html", wait_until="load")
+        # Transactions tab is the default; one expandable row lands once the parallel
+        # /api/ledgers/* fetches resolve (golden DB has a 2330 + an AAPL buy).
+        page.wait_for_selector("#tx-body tr.expandable")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/trades.html (ledger wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_ledger_page_smoke(live_server: str, browser_page: object) -> None:
+    """/ledger.html (standalone ledger view) wired to /api/ledgers/* (spec 19, Task 2.4).
+
+    The alternate ledger page owns its own tabs (it has no #pane-ldiv) and carries a
+    default date-range filter (2026-01-01 .. 2026-06-11) that spans all golden flows.
+    Asserts the four parallel fetches render the default 交易 tab with ZERO console +
+    ZERO page errors, waiting for the populated #tx-body row.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/ledger.html", wait_until="load")
+        page.wait_for_selector("#tx-body tr.expandable")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/ledger.html (ledger wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
