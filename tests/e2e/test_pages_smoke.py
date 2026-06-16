@@ -826,6 +826,88 @@ def test_settings_prompts_page_smoke(live_server: str, browser_page: object) -> 
 
 
 @pytest.mark.e2e
+def test_evolution_config_panel_roundtrip(
+    live_server: str, browser_page: object
+) -> None:
+    """自我進化設定 panel wired to GET/PUT /api/evolution-config (spec 19 defer ①).
+
+    settings-prompts.js drops the localStorage 'pd_evolution_cfg' read/write and instead
+    boots the 自我進化設定 panel off GET /api/evolution-config, then saves via PUT (a
+    read-then-PUT that preserves the non-panel knobs — horizon_basis / defer_limit_days /
+    shadow_on_alert — and sends gap_alert_pp as a Decimal STRING). The golden DB seeds the
+    evolution_config defaults (min_samples=8) via ensure_composer_seeded.
+
+    This proves a REAL backend round-trip (not localStorage): navigate /settings-prompts.html
+    (no tabs -> the panel mounts directly), assert (1) the min_samples input reflects the
+    backend GET (default 8); (2) change it to 12 and click 儲存; (3) the PUT fired + returned
+    200; (4) reload and assert the value PERSISTED to 12 (a fresh GET returns it). Asserts
+    ZERO console + ZERO page errors throughout.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings-prompts.html", wait_until="load")
+        # Panel mounts (with its fields populated from GET /api/evolution-config) before
+        # the page dispatches pd-prompts-mounted, since the IIFE is awaited in boot(). The
+        # standalone prompts page has no shell CSS, so the panel's fields are ATTACHED but
+        # not "visible" to Playwright — drive them via state="attached" + evaluate (the
+        # established pattern in this file for tabbed/hidden nodes).
+        min_sel = '[data-evo-field="min_samples"]'
+        page.wait_for_selector(min_sel, state="attached")
+        # (1) The field reflects the backend GET (golden default min_samples=8).
+        assert page.input_value(min_sel) == "8", (
+            f"min_samples did not reflect the backend GET: {page.input_value(min_sel)!r}"
+        )
+
+        # (2) change to a different valid value (the save handler reads inp.value on click),
+        # then (3) save -> PUT /api/evolution-config returns 200.
+        page.eval_on_selector(
+            min_sel, "(el) => { el.value = '12'; }"
+        )
+        with page.expect_response("**/api/evolution-config") as resp_info:
+            page.eval_on_selector("[data-evo-save]", "(btn) => btn.click()")
+        resp = resp_info.value
+        assert resp.request.method == "PUT", f"expected a PUT, got {resp.request.method}"
+        assert resp.status == 200, f"PUT /api/evolution-config status {resp.status}"
+        # The non-panel knobs survive the read-then-PUT (lossless round-trip).
+        body = resp.json()
+        assert body.get("min_samples") == 12, f"PUT did not persist min_samples: {body!r}"
+        assert body.get("horizon_basis") == "trading_days", (
+            f"read-then-PUT dropped a non-panel knob: {body!r}"
+        )
+
+        # (4) reload -> a fresh GET must return the changed value (proves the backend
+        # round-trip, NOT localStorage which has been removed).
+        page.goto(live_server + "/settings-prompts.html", wait_until="load")
+        page.wait_for_selector(min_sel, state="attached")
+        assert page.input_value(min_sel) == "12", (
+            "min_samples did not PERSIST across reload — round-trip to the backend failed "
+            f"(got {page.input_value(min_sel)!r})"
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings-prompts.html (evolution-config round-trip): "
+        f"console errors={console_errors!r}; page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_settings_accounts_users_wired_smoke(
     live_server: str, browser_page: object
 ) -> None:

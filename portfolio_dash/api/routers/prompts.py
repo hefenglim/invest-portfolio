@@ -88,7 +88,7 @@ class PromptBody(BaseModel):
 
 @router.get("/prompt-vars")
 def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
-    """The 26-variable registry (mirrors web/vars.js). ``available`` drives the UI's
+    """The 29-variable registry (mirrors web/vars.js). ``available`` drives the UI's
     "需後端新增" markers; chips/sentiment went live (spec 20.2), ai stays False (spec 04).
 
     Each var also carries tier metadata (spec 20.15.3): ``required_tier`` (from the live

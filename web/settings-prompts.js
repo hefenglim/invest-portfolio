@@ -1201,16 +1201,29 @@
     mount(panel);
   })();
 
-  /* ================= 自我進化設定 ================= */
-  (function () {
+  /* ================= 自我進化設定 (GET/PUT /api/evolution-config) ================= */
+  await (async function () {
     const panel = el('section', 'panel');
     const head = el('div', 'panel-head');
     head.appendChild(el('h2', 'panel-title', '自我進化設定'));
     head.appendChild(el('span', 'panel-sub', '安全邊界與成本上限 — 儲存後套用於下次校正產生批次'));
     panel.appendChild(head);
 
-    let cfg = { auto_promote: false, shadow_batches: 5, min_samples: 8, max_shadows: 2, gap_alert_pp: 15 };
-    try { cfg = Object.assign(cfg, JSON.parse(localStorage.getItem('pd_evolution_cfg') || '{}')); } catch (e) { /* defaults */ }
+    /* Read the backend config so the 5 visible fields reflect the stored knobs AND the
+       non-panel knobs (horizon_basis / defer_limit_days / shadow_on_alert) are kept for a
+       lossless round-trip on save. gap_alert_pp is a Decimal STRING on the wire; coerce to
+       a number only for the numeric input's display value (never recompute money here). */
+    const cfg = { auto_promote: false, shadow_batches: 5, min_samples: 8, max_shadows: 2, gap_alert_pp: '15' };
+    let serverCfg = {};
+    try {
+      const got = await api.get('/api/evolution-config');
+      if (got && typeof got === 'object') {
+        serverCfg = got;
+        Object.assign(cfg, got);
+      }
+    } catch (err) {
+      _toast('進化設定載入失敗', 'fail', (err && err.message) || undefined);
+    }
 
     const FIELDS = [
       { id: 'auto_promote', name: '影子評估勝出後自動切換生效版', kind: 'toggle',
@@ -1238,12 +1251,14 @@
         const tg = el('button', 'toggle' + (cfg[fd.id] ? ' on' : ''));
         tg.type = 'button';
         tg.setAttribute('role', 'switch');
+        tg.setAttribute('data-evo-field', fd.id);  // stable e2e hook
         tg.addEventListener('click', () => tg.classList.toggle('on'));
         inputs[fd.id] = () => tg.classList.contains('on');
         ctrl.appendChild(tg);
       } else {
         const inp = el('input', 'input evo-cfg-input');
         inp.type = 'number'; inp.min = fd.min; inp.max = fd.max; inp.step = fd.step;
+        inp.setAttribute('data-evo-field', fd.id);  // stable e2e hook
         inp.value = cfg[fd.id];
         inputs[fd.id] = () => Number(inp.value);
         ctrl.appendChild(inp);
@@ -1258,11 +1273,28 @@
     acts.style.padding = '4px var(--pad) 14px';
     const save = el('button', 'btn btn-primary', '儲存進化設定');
     save.type = 'button';
-    save.addEventListener('click', () => {
-      const out = {};
-      Object.keys(inputs).forEach((k) => { out[k] = inputs[k](); });
-      try { localStorage.setItem('pd_evolution_cfg', JSON.stringify(out)); } catch (e) { /* noop */ }
-      window.toast('進化設定已儲存', 'ok', '下次校正產生批次生效（設計稿 — 後端接線後存伺服器）');
+    save.setAttribute('data-evo-save', '1');  // stable e2e hook
+    save.addEventListener('click', async () => {
+      /* Build the PUT body from the FULL fetched config, then OVERRIDE only the 5 visible
+         fields — this preserves the non-panel knobs (horizon_basis / defer_limit_days /
+         shadow_on_alert) across the round-trip. gap_alert_pp goes back as a Decimal STRING. */
+      const body = Object.assign({}, serverCfg, {
+        auto_promote: inputs.auto_promote(),
+        shadow_batches: inputs.shadow_batches(),
+        min_samples: inputs.min_samples(),
+        max_shadows: inputs.max_shadows(),
+        gap_alert_pp: String(inputs.gap_alert_pp()),
+      });
+      save.disabled = true;
+      try {
+        const got = await api.put('/api/evolution-config', body);
+        if (got && typeof got === 'object') serverCfg = got;  // keep the canonical view
+        _toast('進化設定已儲存', 'ok', '下次校正產生批次生效');
+      } catch (err) {
+        _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
+      } finally {
+        save.disabled = false;
+      }
     });
     acts.appendChild(save);
     panel.appendChild(acts);
