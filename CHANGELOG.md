@@ -78,6 +78,48 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   seeding. New `tests/pricing/test_layering.py` AST-guards that `pricing/**` imports no `data_ingestion`.
 
 ### Changed
+- **Frontend wired to the live API — spec 19 Phase 2 (page wiring) + Phase 3 (cleanup) (2026-06-16):** every
+  static `web/` page now consumes the real `/api/*` through the single `window.pdApi` fetch layer; ALL mock-data
+  globals are retired and the mock FILES deleted. No framework, no build step (decision B). Per page (each: mock →
+  `pdApi`, money via `fmt.*` [Decimal strings, never client-computed], async boot, Playwright page-smoke):
+  - **shell.js** — async `GET /api/auth/session` guard (guest / signed-in / signed-out→`login.html`), replacing the
+    localStorage guard; sync globals (`toast`/`confirmDialog`/`pdOpenSymbol`/search/nav) preserved; logout/lock via pdApi.
+  - **dashboard** (index/app.js + charts.js + alerts.js) — one shared `window.pdDashboard = pdApi.get('/api/dashboard')`
+    promise consumed by all three; sparkline from `spark_30d`; insight cards from the real `{summary,body_md,created_at,
+    cost_usd}` shape; alert `href` mapped to static routes; the embedded `alerts`/`llm_quota` rendered (no client recompute).
+  - **symbol detail drawer** — `GET /api/symbol/{symbol}/detail` + the shared dashboard promise; feeTax offline mirror
+    kept (documented exception); 合計 consumes backend `unrealized_pnl` (no client money-sum).
+  - **ledger** — `GET /api/ledgers/*` (implied_rate from the backend; account filter keys on `account_id`).
+  - **instruments** — `GET /api/instruments` + probe/register/edit (`POST /probe`, `POST/PUT /instruments`).
+  - **input center** — `GET /api/input/context` + manual/CSV/AI preview+commit (oversell + warnings ack-confirm flows);
+    manual dividend/FX/opening forms are design-stage (no single-entry endpoint — CSV import is the path).
+  - **settings** — LLM (`/api/llm/config`), scheduler (`/api/scheduler/jobs`+`/runs`), datasources (`/api/datasources`),
+    prompts + vars (`/api/system-prompt`, `/api/prompt-vars`, `/api/prompts/{preview,test}`), users (`/api/users`),
+    alert-rules editor (`GET/PUT /api/alert-rules`). Fixed the C2 bare-`.toFixed` money sites + war-game Finding 8
+    (`cost_usd == null` nil-check). Retired the shell `setSession` transitional shim.
+  - **alerts.js (I1)** — off-dashboard pages now read `GET /api/alerts` (bell) + `GET /api/llm/config` (quota chip);
+    the client-side rule-compute orphan removed.
+  - **login.html** — `POST /api/auth/login` (cookie session); api.js's 401-redirect is suppressed ON `login.html` so a
+    wrong-password 401 surfaces in the form instead of self-reloading.
+  - **insights + AI Pipeline Hub** — `/api/insights`, `/api/ai-score`, `/api/insight-tasks/{status,preflight,diagnose,
+    runs}`, `/api/calibrations`; folded the 07 watch-items (`'off'`→`'idle'`, `fix.kind`→one-click buttons,
+    `recent_skips` reason labels, calibration version chain).
+  - **Phase 3 cleanup** — wired rebalance.js to the shared `/api/dashboard`; DELETED the 4 mock files
+    (`mock-data.js`/`history-mock.js`/`input-mock-data.js`/`pipeline-data.js`); added `tests/contract/test_web_pdapi_only.py`
+    asserting **no `web/*.js` except `api.js` calls `fetch(` directly** (single-fetch-layer guardrail, spec 19 §6).
+  - **Backend fix exposed by the real-server e2e:** `shared/db.py` now opens the SQLite connection with
+    `check_same_thread=False` — FastAPI runs the sync `get_conn` dependency in an anyio threadpool, so a per-request
+    connection can be created on one worker thread and closed on another (no concurrent use); the default same-thread
+    guard wrongly raised on close → a 500 under the real subprocess server (the in-process TestClient never hit it).
+    Guarded by a cross-thread regression test.
+  - **Test harness:** the Playwright smoke harness (spec 17 seed) now guards every wired page + key interactions
+    (drawer, account filter, input preview, instrument probe, rebalance drawer, alert bell, login) — 29 e2e smokes,
+    zero console/page errors per page. Suite: 1009 → **1067 passed / 3 skipped**.
+  - **Deferred (tracked follow-ups, none ship-blocking for 1–2 users):** wire the 進化設定 panel to `GET/PUT
+    /api/evolution-config` (backend already implemented; panel still uses localStorage); the dashboard trend's
+    trade-event markers no longer render (`charts.js` `window.PD_HISTORY` is now dead code after the mock deletion —
+    remove or source from `/api/dashboard` trend); rebalance.js authoritative result could use `POST /api/rebalance/preview`
+    (currently a documented client what-if estimate); `prompts.py` docstring says "26 variables" (registry is 29).
 - **Money/Decimal wire-string unification (#2c/M1 foundation hardening, 2026-06-15):** every Decimal
   now serializes to the JSON wire in ONE canonical form — `format(d, "f")` (fixed-point, full source
   precision, trailing zeros preserved, **never scientific notation**) — identical to the DB form
