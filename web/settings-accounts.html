@@ -79,7 +79,7 @@
       <div class="field"><label for="nu-pass">密碼</label><input class="input" id="nu-pass" type="password" autocomplete="new-password" placeholder="登入用密碼"></input></div>
       <button class="btn btn-primary" id="nu-add" type="button">新增用戶</button>
     </div>
-    <div class="user-note">設計稿：帳號密碼存於本機瀏覽器（localStorage）。後端接線後改為伺服器端帶雜湊儲存，並支援角色權限。</div>
+    <div class="user-note">帳號密碼由後端帶雜湊儲存（/api/users）。新增第一個用戶即啟用帳密保護，下次進入需登入。</div>
   </section>
 
   <!-- A 帳戶卡 -->
@@ -185,6 +185,7 @@
 </div>
 </div>
 
+<script src="api.js"></script>
 <script src="shell.js"></script>
 <script src="alerts.js"></script>
 <script src="settings-users.js"></script>

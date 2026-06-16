@@ -1,36 +1,49 @@
-/* portfolio-dash — 設定 · AI 提示詞.
+/* portfolio-dash — 設定 · AI 提示詞 (system prompt + vars wired to /api/*, spec 19/06/20).
    定案模型（2026-06-12）：
    - 策略提示詞 = 純設計物件（無排程、無校正掛載），搭配數據變數系統組裝，
-     可「預覽提示詞」（變數代入）與「測試送出」（走 LiteLLM，費用照記）。
+     可「預覽提示詞」（POST /api/prompts/preview，真實計算值、不呼叫 LLM）與
+     「測試送出」（POST /api/prompts/test，走真實 LiteLLM、費用照記、422/402 錯誤照拋）。
    - 刪除策略 → 檢查組合器引用：被引用則阻擋；未引用則封存（軟刪除）。
    - 洞察類型組合器 = 排程與自我校正的唯一掛載點：系統(可選)＋1..n 策略＋自我校正開關。
      啟動排程 → 週期設定表（與排程工作表共用）→ 寫入排程工作表；刪除組合同步刪排程。
    - 校正提示詞 1:1 掛組合；版本管理器：active=手動選定版，active≠最新版時最新版自動影子評估；
-     版本封存制（軟刪除），歸因鏈永不斷。校正產生與回測評分由「AI 大師模型」執行。 */
-window.PROMPTS_DATA = {
-  "system_prompt": "你是資深投資組合分析師，服務一位同時持有台股、美股、馬股的個人投資者。\n\n原則：\n1. 一律使用繁體中文（台灣用語）回答。\n2. 金額必須標注幣別；不同幣別不可加總。\n3. 損益語意採台灣慣例：紅漲綠跌。\n4. 每則洞察 2–3 句，必須引用輸入資料中的具體數字。\n5. 不提供買賣建議，只描述風險與現象。",
-  "system_updated_at": "2026-05-28",
-  "strategies": [
-    { "id": "st-concentration", "name": "集中度風險", "enabled": true, "archived": false,
-      "updated_at": "2026-05-30",
-      "body": "根據 {{holdings_json}} 與 {{allocation_json}}，找出產業與個股集中度風險，輸出洞察並附具體權重數字。" },
-    { "id": "st-fx", "name": "匯率影響", "enabled": true, "archived": false,
-      "updated_at": "2026-05-30",
-      "body": "根據 {{fx_json}} 分析各帳戶外幣部位的已實現與未實現匯損益，並估算 {{fx_rates_json}} 變動 1% 對報告幣別損益的敏感度。" },
-    { "id": "st-dividend", "name": "股利展望", "enabled": true, "archived": false,
-      "updated_at": "2026-04-18",
-      "body": "根據 {{dividends_json}} 與 {{ex_dividend_calendar_json}}，摘要未來 60 天的股利現金流與除息事件，標注幣別；參考 {{dividend_projection_json}} 給出年度視角。" },
-    { "id": "st-momentum", "name": "動能追蹤", "enabled": true, "archived": false,
-      "updated_at": "2026-06-02",
-      "body": "根據 {{price_history_json}} 與 {{ma_signals_json}}，描述 {{symbol_detail_json}} 標的之趨勢與動能現象，搭配 {{institutional_json}} 籌碼佐證；信心值需參考 {{backtest_json}}。" }
-  ]
-};
+     版本封存制（軟刪除），歸因鏈永不斷。校正產生與回測評分由「AI 大師模型」執行。
+
+   WIRED (Task 2.7b): the global system prompt loads from GET /api/system-prompt and
+   saves via PUT /api/system-prompt; the variable registry loads from GET /api/prompt-vars
+   (via PD_VARS.load(), with per-var tier-greyout); preview/test hit the real /api/prompts/*
+   endpoints. The former window.PROMPTS_DATA + PD_VARS inline mocks are RETIRED. The
+   strategy cards / composer / calibration chains remain DESIGN-STAGE objects (no /api/*
+   backing yet) — kept inline as local consts, NOT a window global. */
 
 (function () {
   'use strict';
-  const D = window.PROMPTS_DATA;
   const V = window.PD_VARS;
+  const api = window.pdApi;
   const f = window.fmt;
+
+  /* Strategy seed objects — DESIGN-STAGE (no /api/strategy-prompts endpoint yet, so these
+     stay inline like the composer/calibration mocks below; NOT a window global). */
+  const D = {
+    /* system_prompt + system_updated_at are filled from GET /api/system-prompt on boot. */
+    system_prompt: '',
+    system_updated_at: '',
+    strategies: [
+      { id: 'st-concentration', name: '集中度風險', enabled: true, archived: false,
+        updated_at: '2026-05-30',
+        body: '根據 {{holdings_json}} 與 {{allocation_json}}，找出產業與個股集中度風險，輸出洞察並附具體權重數字。' },
+      { id: 'st-fx', name: '匯率影響', enabled: true, archived: false,
+        updated_at: '2026-05-30',
+        body: '根據 {{fx_json}} 分析各帳戶外幣部位的已實現與未實現匯損益，並估算 {{fx_rates_json}} 變動 1% 對報告幣別損益的敏感度。' },
+      { id: 'st-dividend', name: '股利展望', enabled: true, archived: false,
+        updated_at: '2026-04-18',
+        body: '根據 {{dividends_json}} 與 {{ex_dividend_calendar_json}}，摘要未來 60 天的股利現金流與除息事件，標注幣別；參考 {{dividend_projection_json}} 給出年度視角。' },
+      { id: 'st-momentum', name: '動能追蹤', enabled: true, archived: false,
+        updated_at: '2026-06-02',
+        body: '根據 {{price_history_json}} 與 {{ma_signals_json}}，描述 {{symbol_detail_json}} 標的之趨勢與動能現象，搭配 {{institutional_json}} 籌碼佐證；信心值需參考 {{backtest_json}}。' },
+    ],
+  };
+  function _toast(msg, kind, code) { if (window.toast) window.toast(msg, kind, code); }
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -78,6 +91,9 @@ window.PROMPTS_DATA = {
   ];
   window.PD_COMPOSERS = COMPOSER_DATA;
 
+  /* 持倉代號（設計稿示意；正式執行由組合範圍逐檔代入）。在外層宣告，供 universeLabel 與
+     boot() 內的選擇器共用（boot 內外皆需引用）。 */
+  const HELD_SYMBOLS = ['2330', '0056', '00919', 'AAPL', 'MSFT', 'NVDA', '1155.KL'];
   /* 標的宇宙（per_symbol 組合的可選清單）與預警規則名冊 */
   const WATCHLIST_SYMBOLS = [['6488', '環球晶'], ['8069', '元太']];
   const ALERT_RULE_NAMES = [
@@ -150,14 +166,35 @@ window.PROMPTS_DATA = {
     return { text: '專屬 v' + ch.activeVer + ' 生效' + shadow, dim: false };
   }
 
-  /* ================= 系統提示詞 ================= */
+  /* ===== async boot: load the variable registry (GET /api/prompt-vars, populates V in
+     place) + the global system prompt (GET /api/system-prompt), THEN build the page.
+     Graceful: a fetch failure surfaces ONE toast and falls through with whatever loaded
+     so the page still renders (never an unhandled rejection — the e2e smoke asserts ZERO
+     console errors). Everything below runs inside boot() so V.CATEGORIES is populated. ===== */
+  async function boot() {
+    try {
+      await V.load();              // populates V.CATEGORIES / index from /api/prompt-vars
+    } catch (err) {
+      _toast('變數總表載入失敗', 'fail', (err && err.message) || undefined);
+    }
+
+  /* ================= 系統提示詞 (GET /api/system-prompt) ================= */
+  try {
+    const sp = await api.get('/api/system-prompt');
+    D.system_prompt = (sp && sp.body) || '';
+    D.system_updated_at = (sp && sp.updated_at) || '';
+  } catch (err) {
+    _toast('系統提示詞載入失敗', 'fail', (err && err.message) || undefined);
+  }
   $('#sys-prompt').value = D.system_prompt;
-  $('#sys-prompt-meta').textContent = '更新 ' + D.system_updated_at + '・套用於所有策略提示詞之前';
+  $('#sys-prompt-meta').textContent =
+    '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') + '・套用於所有策略提示詞之前';
+  /* save the global system prompt -> PUT /api/system-prompt (toast + restamp meta). */
+  const sysSave = document.getElementById('prompts-save');
 
   /* ================= 策略提示詞卡 ================= */
   const list = $('#tpl-list');
 
-  const HELD_SYMBOLS = ['2330', '0056', '00919', 'AAPL', 'MSFT', 'NVDA', '1155.KL'];
   const hasPerSymbolVars = (text) => V.tokensIn(text).some((tk) => {
     const v = V.find(tk);
     return v && v.scope === '單一標的';
@@ -189,8 +226,13 @@ window.PROMPTS_DATA = {
       const og = document.createElement('optgroup');
       og.label = cat.name + (cat.source === 'ingest' ? '（需後端新增）' : '');
       cat.vars.forEach((v) => {
-        const o = el('option', null, v.name + '  {{' + v.token + '}}');
+        /* tier-greyout (spec 20.15): a var whose required tier is unavailable is shown
+           but DISABLED, with the tier label appended so the user sees why. */
+        const tierOk = v.tier_ok !== false;
+        const suffix = tierOk ? '' : '（' + (v.tier_label || '方案受限') + '）';
+        const o = el('option', null, v.name + '  {{' + v.token + '}}' + suffix);
         o.value = v.token;
+        if (!tierOk) o.disabled = true;
         og.appendChild(o);
       });
       sel.appendChild(og);
@@ -218,72 +260,121 @@ window.PROMPTS_DATA = {
     return varRow;
   }
 
+  /* scope for a prompt body: per_symbol if it references any 單一標的 variable, else portfolio. */
+  const scopeOf = (text) => (hasPerSymbolVars(text) ? 'per_symbol' : 'portfolio');
+
+  /* 預覽提示詞 — POST /api/prompts/preview (always 200, real computed values, NO LLM call). */
   function previewPrompt(t, ta) {
     openModal('預覽提示詞 — ' + t.name, (body) => {
       body.appendChild(el('div', 'pv-note',
-        '變數已代入目前快照資料（預覽截斷版）。實際送出 = 系統提示詞 ＋ 本策略；組合器執行時再附加組合的生效校正提示詞。'));
-      let sym = HELD_SYMBOLS[0];
-      let renderedPre = null;
+        '變數已代入目前快照的真實計算值（不呼叫 LLM，零成本）。實際送出 = 系統提示詞 ＋ 本策略；組合器執行時再附加組合的生效校正提示詞。'));
+      const out = el('div'); /* re-rendered on each fetch (symbol change) */
+      let sym = hasPerSymbolVars(ta.value) ? HELD_SYMBOLS[0] : null;
+
+      const fetchAndRender = async () => {
+        out.replaceChildren(el('div', 'pv-testing', '⏳ 載入預覽…'));
+        try {
+          const resp = await api.post('/api/prompts/preview',
+            { body: ta.value, scope: scopeOf(ta.value), symbol: sym });
+          out.replaceChildren();
+          const sys = el('div', 'pv-section');
+          sys.appendChild(el('div', 'pv-sec-label', '系統提示詞'));
+          sys.appendChild(el('pre', 'pv-pre', (resp && resp.system_prompt) || ''));
+          out.appendChild(sys);
+          const st = el('div', 'pv-section');
+          st.appendChild(el('div', 'pv-sec-label', '策略提示詞（變數代入後）'));
+          st.appendChild(el('pre', 'pv-pre pv-rendered', (resp && resp.rendered) || ''));
+          out.appendChild(st);
+          /* token-count chip (tokens_used / est_tokens are plain JSON numbers). */
+          const meta = el('div', 'pv-cost num',
+            '代入變數 ' + ((resp && resp.tokens_used) || 0) + ' 個・估算 ' +
+            f.num((resp && resp.est_tokens) || 0) + ' tokens');
+          out.appendChild(meta);
+          /* unknown / scope-violation diagnostics (preview lists them, never blocks). */
+          const unknown = (resp && resp.unknown_tokens) || [];
+          const violations = (resp && resp.scope_violations) || [];
+          if (unknown.length || violations.length) {
+            const warn = el('div', 'pv-toklist');
+            warn.appendChild(el('span', 'pv-sec-label',
+              '⚠ 送出時會被擋下（unknown：' + unknown.length + '・範圍不符：' + violations.length + '）'));
+            unknown.forEach((tk) => {
+              const chip = el('code', 'pv-tok bad', '{{' + tk + '}}');
+              chip.title = '未知變數';
+              warn.appendChild(chip);
+            });
+            violations.forEach((tk) => {
+              const chip = el('code', 'pv-tok bad', '{{' + tk + '}}');
+              chip.title = '單一標的變數用於全組合範圍';
+              warn.appendChild(chip);
+            });
+            out.appendChild(warn);
+          }
+        } catch (err) {
+          out.replaceChildren(el('div', 'pv-note', '預覽載入失敗：' + ((err && err.message) || '')));
+          _toast((err && err.message) || '預覽載入失敗', 'fail', err && err.code);
+        }
+      };
+
       if (hasPerSymbolVars(ta.value)) {
-        const pk = symbolPicker((v) => {
-          sym = v;
-          if (renderedPre) renderedPre.textContent = V.render(ta.value, sym);
-        });
+        const pk = symbolPicker((v) => { sym = v; fetchAndRender(); });
         const note = el('div', 'pv-note',
-          '正式排程執行時不需選 — 組合範圍為「單一標的」時，系統自動對每檔持倉跡一次並逐檔代入。');
+          '正式排程執行時不需選 — 組合範圍為「單一標的」時，系統自動對每檔持倉跑一次並逐檔代入。');
         const wrap = el('div', 'pv-fields');
         wrap.appendChild(pk.row);
         body.appendChild(wrap);
         body.appendChild(note);
       }
-      const sys = el('div', 'pv-section');
-      sys.appendChild(el('div', 'pv-sec-label', '系統提示詞'));
-      sys.appendChild(el('pre', 'pv-pre', $('#sys-prompt').value));
-      body.appendChild(sys);
-      const st = el('div', 'pv-section');
-      st.appendChild(el('div', 'pv-sec-label', '策略提示詞（變數代入後）'));
-      renderedPre = el('pre', 'pv-pre pv-rendered', V.render(ta.value, hasPerSymbolVars(ta.value) ? sym : null));
-      st.appendChild(renderedPre);
-      body.appendChild(st);
-      const toks = V.tokensIn(ta.value);
-      if (toks.length) {
-        const tl = el('div', 'pv-toklist');
-        tl.appendChild(el('span', 'pv-sec-label', '引用變數（' + toks.length + '）'));
-        toks.forEach((tk) => {
-          const v = V.find(tk);
-          const chip = el('code', 'pv-tok' + (v ? '' : ' bad'), '{{' + tk + '}}');
-          chip.title = v ? v.name + '：' + v.desc : '未知變數 — 送出時會被擋下';
-          tl.appendChild(chip);
-        });
-        body.appendChild(tl);
-      }
+      body.appendChild(out);
+      fetchAndRender();
     }, true);
   }
 
+  /* 測試送出 — POST /api/prompts/test (real LiteLLM; 422 bad tokens, 402 budget, 409 role).
+     cost_usd / quota_remaining arrive as Decimal STRINGS -> rendered via window.fmt only. */
   function testSend(t, ta) {
     openModal('測試送出 — ' + t.name, (body) => {
       body.appendChild(el('div', 'pv-note',
-        '以目前快照資料組裝（系統＋本策略），經 LiteLLM 送至 Default 模型分析；費用照記入 llm_usage 與額度。不寫入洞察卡。'));
-      const run = (sym) => {
-        const old = body.querySelector('.pv-testing, .pv-section, .pv-cost');
-        body.querySelectorAll('.pv-testing, .pv-section, .pv-cost').forEach((n) => n.remove());
-        const status = el('div', 'pv-testing', '⏳ 送出中…（claude-sonnet via LiteLLM' + (sym ? '・代入 ' + sym : '') + '）');
-        body.appendChild(status);
-        setTimeout(() => {
-          status.remove();
+        '以目前快照資料組裝（系統＋本策略），經真實 LiteLLM 送至 Default 模型分析；費用照記入 llm_usage 與額度。不寫入洞察卡。'));
+      const out = el('div'); /* re-rendered per run */
+      const run = async (sym) => {
+        out.replaceChildren(
+          el('div', 'pv-testing', '⏳ 送出中…（via LiteLLM' + (sym ? '・代入 ' + sym : '') + '）'));
+        try {
+          const resp = await api.post('/api/prompts/test',
+            { body: ta.value, scope: scopeOf(ta.value), symbol: sym });
+          out.replaceChildren();
           const res = el('div', 'pv-section');
-          res.appendChild(el('div', 'pv-sec-label', '回傳洞察（測試' + (sym ? '・' + sym : '') + '）'));
-          const mockReply = t.id === 'st-fx'
-            ? 'Schwab 美元部位平均取得匯率 31.80、現匯 32.90，未實現匯兌貢獻 +15,115 TWD（股票 +13,552、現金 +1,563）。USD_TWD 每變動 1%，報告幣別損益約變動 ±4,052 TWD。'
-            : sym && t.id === 'st-momentum'
-            ? sym + ' 現價高於 20 日均線 +2.4%、高於 60 日均線 +7.2%，趨勢結構完整；外資連買 6 日籌碼面佐證。依歷史回測同類預測命中率 66%，信心值設為 0.68。'
-            : '台積電權重 37.8% 已超過單一標的 30% 警戒線；半導體＋科技合計 57.4%，產業反轉時組合波動將顯著放大。ETF（30.5%）與金融（12.1%）為現有的分散緩衝。';
-          res.appendChild(el('pre', 'pv-pre', mockReply));
-          body.appendChild(res);
-          const cost = el('div', 'pv-cost num', '消耗：1,842 tokens in / 96 out・$0.0070・已記入額度（剩餘 $0.83）');
-          body.appendChild(cost);
-          if (window.toast) window.toast('測試完成', 'ok', t.name + '：費用 $0.0070 已記入 llm_usage（設計預覽 — 接線後為真實 LiteLLM 回應）');
-        }, 900);
+          res.appendChild(el('div', 'pv-sec-label',
+            '回傳洞察（' + ((resp && resp.model) || 'LLM') + (sym ? '・' + sym : '') + '）'));
+          res.appendChild(el('pre', 'pv-pre', (resp && resp.reply) || ''));
+          out.appendChild(res);
+          /* tokens are plain numbers; cost_usd / quota_remaining are Decimal STRINGS. */
+          const cost = el('div', 'pv-cost num',
+            '消耗：' + f.num((resp && resp.tokens_in) || 0) + ' tokens in / ' +
+            f.num((resp && resp.tokens_out) || 0) + ' out・$' + f.num((resp && resp.cost_usd) || '0', 4) +
+            '・已記入額度（剩餘 $' + f.num((resp && resp.quota_remaining) || '0', 2) + '）');
+          out.appendChild(cost);
+          _toast('測試完成', 'ok',
+            t.name + '：費用 $' + f.num((resp && resp.cost_usd) || '0', 4) + ' 已記入 llm_usage');
+        } catch (err) {
+          out.replaceChildren();
+          const note = el('div', 'pv-note', '測試失敗：' + ((err && err.message) || ''));
+          out.appendChild(note);
+          /* 422 carries per-token issues (unknown_token / scope_violation). */
+          const issues = (err && err.issues) || [];
+          if (issues.length) {
+            const tl = el('div', 'pv-toklist');
+            issues.forEach((iss) => {
+              const tk = iss && iss.token ? iss.token : '';
+              const chip = el('code', 'pv-tok bad', '{{' + tk + '}}');
+              chip.title = iss && iss.code === 'scope_violation'
+                ? '單一標的變數用於全組合範圍' : '未知變數';
+              tl.appendChild(chip);
+            });
+            out.appendChild(tl);
+          }
+          _toast((err && err.message) || '測試失敗', 'fail', err && err.code);
+        }
       };
       if (hasPerSymbolVars(ta.value)) {
         let sym = HELD_SYMBOLS[0];
@@ -291,8 +382,10 @@ window.PROMPTS_DATA = {
         const wrap = el('div', 'pv-fields');
         wrap.appendChild(pk.row);
         body.appendChild(wrap);
+        body.appendChild(out);
         run(sym);
       } else {
+        body.appendChild(out);
         run(null);
       }
     }, true);
@@ -442,8 +535,23 @@ window.PROMPTS_DATA = {
     }, true);
   });
 
-  $('#prompts-save').addEventListener('click', () =>
-    window.toast('已儲存', 'ok', '提示詞設定已更新（設計稿）'));
+  /* 儲存設定：將系統提示詞寫入後端 (PUT /api/system-prompt)；策略卡仍為設計稿（無端點）。 */
+  if (sysSave) sysSave.addEventListener('click', async () => {
+    const body = $('#sys-prompt').value;
+    sysSave.disabled = true;
+    try {
+      const sp = await api.put('/api/system-prompt', { body: body });
+      D.system_prompt = (sp && sp.body) || body;
+      D.system_updated_at = (sp && sp.updated_at) || D.system_updated_at;
+      $('#sys-prompt-meta').textContent =
+        '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') + '・套用於所有策略提示詞之前';
+      _toast('已儲存', 'ok', '系統提示詞已更新（策略卡為設計稿，尚未接線）');
+    } catch (err) {
+      _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
+    } finally {
+      sysSave.disabled = false;
+    }
+  });
 
   /* mount point */
   const promptsView = document.getElementById('view-prompts') || document.querySelector('.page');
@@ -487,7 +595,10 @@ window.PROMPTS_DATA = {
       table.innerHTML = '<thead><tr><th class="col-text">變數</th><th class="col-text">名稱</th><th class="col-text">說明</th><th class="col-text">範圍</th><th class="col-text"></th></tr></thead>';
       const tb = el('tbody');
       cat.vars.forEach((v) => {
+        /* tier-greyout (spec 20.15): vars whose required tier is unavailable are dimmed. */
+        const tierOk = v.tier_ok !== false;
         const tr = el('tr');
+        if (!tierOk) { tr.classList.add('tier-locked'); tr.style.opacity = '0.5'; }
         const tdTok = el('td', 'col-text');
         tdTok.appendChild(el('code', 'pv-tok', '{{' + v.token + '}}'));
         tr.appendChild(tdTok);
@@ -495,7 +606,14 @@ window.PROMPTS_DATA = {
         const tdDesc = el('td', 'col-text vars-desc', v.desc);
         tdDesc.title = '預覽範例：' + v.sample;
         tr.appendChild(tdDesc);
-        tr.appendChild(el('td', 'col-text vars-scope', v.scope));
+        const tdScope = el('td', 'col-text vars-scope', v.scope);
+        if (!tierOk) {
+          tdScope.appendChild(document.createTextNode(' '));
+          const lock = el('span', 'pill pill-off', v.tier_label || '方案受限');
+          lock.style.fontSize = '10px';
+          tdScope.appendChild(lock);
+        }
+        tr.appendChild(tdScope);
         const tdCopy = el('td', 'col-text');
         const cp = el('button', 'btn-link', '複製');
         cp.type = 'button';
@@ -1150,4 +1268,11 @@ window.PROMPTS_DATA = {
     panel.appendChild(acts);
     mount(panel);
   })();
+
+  /* Signal that all dynamic panels (組合器 / 校正庫 / 進化設定) are now in the DOM, so the
+     page's trailing legacy-view collector runs AFTER they exist (panels mount async now). */
+  document.dispatchEvent(new CustomEvent('pd-prompts-mounted'));
+  } /* end boot() */
+
+  boot();
 })();

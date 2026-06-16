@@ -24,8 +24,8 @@
      同步取得的 window.pdAuth.getSession()/displayName() 在 shell 啟動後以「快取的後端
      工作階段」回答；啟動前回傳安全的訪客預設值，避免相依頁面崩潰。
      ⚠️ 一律經由 window.pdApi（單一 fetch 層），不直接呼叫 fetch。
-     localStorage 的「授權用戶 CRUD」(getUsers/saveUsers) 暫時保留 — 使用者頁於後續
-     任務（2.7）接線；本任務不退役。 */
+     授權用戶管理已於 Task 2.7b 接線至後端 /api/users；localStorage 的 getUsers/saveUsers
+     僅保留為無害的舊存取器，已非事實來源。 */
   const DEFAULT_NAME = '投資人';
   let _backendSession = { mode: 'guest', username: null, name: DEFAULT_NAME, locked: false };
 
@@ -41,16 +41,14 @@
   }
   /* true once shell boot has confirmed: no authorized users (public-browse). */
   function pdIsGuest() { return !_backendSession || _backendSession.mode === 'guest'; }
-  /* Transitional no-op: the session is now BACKEND-sourced (GET /api/auth/session)
-     and read-only from the shell. settings-users.js still drives a localStorage auth
-     flow and calls pdAuth.setSession(...) on add-first-user / remove-self; this no-op
-     keeps that page from TypeError-ing until Task 2.7 rewires user management to the
-     backend, at which point setSession is removed. */
-  function pdSetSessionNoop(_s) { /* transitional no-op — see comment above (retired in Task 2.7) */ }
+  /* setSession is RETIRED (Task 2.7b): user management (settings-users.js) is now wired to
+     the backend (GET/POST/DELETE /api/users) and no longer mutates a client session, so the
+     transitional no-op shim is gone. The session is BACKEND-sourced (GET /api/auth/session)
+     and read-only from the shell. getUsers/saveUsers remain only as harmless legacy
+     accessors (no page uses them as a source of truth anymore). */
   window.pdAuth = {
     getUsers: pdGetUsers, saveUsers: pdSaveUsers,
-    getSession: pdGetSession, displayName: pdDisplayName, isGuest: pdIsGuest,
-    setSession: pdSetSessionNoop
+    getSession: pdGetSession, displayName: pdDisplayName, isGuest: pdIsGuest
   };
 
   /* api.js (the single fetch layer) may not yet be on the page — no HTML currently

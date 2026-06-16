@@ -668,17 +668,19 @@ def test_settings_datasources_page_smoke(
 
 @pytest.mark.e2e
 def test_settings_combined_page_smoke(live_server: str, browser_page: object) -> None:
-    """/settings.html (combined) loads ALL settings scripts console-clean (Task 2.7a).
+    """/settings.html (combined) loads ALL settings scripts console-clean (Task 2.7a/b).
 
-    settings.html loads api.js + every settings script: the three NOW-WIRED ones
-    (settings-llm/scheduler/datasources, each booting off its real /api/* endpoint) AND
-    the still-mock ones (settings-prompts/users/alerts + vars), which keep their inline
-    mocks in this task. This asserts the three wired sections coexist with the remaining
-    mock scripts on a single page with ZERO console + ZERO page errors.
+    settings.html loads api.js + every settings script: the NOW-WIRED ones
+    (settings-llm/scheduler/datasources from 2.7a + settings-prompts/users from 2.7b, each
+    booting off its real /api/* endpoint) AND the still-mock alerts (settings-alerts, 2.7c).
+    This asserts the wired sections coexist with the remaining mock script on a single page
+    with ZERO console + ZERO page errors.
 
-    Waits for the wired LLM quota value, a scheduler job row, AND a datasource section to
-    all render — proving all three async boots landed on the shared page before the
-    console/pageerror sinks are checked.
+    Waits for the wired LLM quota value, a scheduler job row, a datasource section, the
+    prompts variable-total panel (#vars-panel, mounted only after GET /api/prompt-vars
+    resolves), AND the system-prompt textarea carrying text (GET /api/system-prompt) — so
+    all the async boots, including the two newly-wired 2.7b ones, landed before the sinks
+    are checked.
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -697,14 +699,21 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: object) ->
     page.on("pageerror", _on_pageerror)
     try:
         page.goto(live_server + "/settings.html", wait_until="load")
-        # All three wired boots landed: scheduler jobs + datasource section + LLM quota.
-        # settings.html tabs all sections into one page; only the active tab's nodes are
-        # VISIBLE, so wait for ATTACHED (the rows/sections exist once each boot resolves).
+        # All wired boots landed: scheduler jobs + datasource section + LLM quota (2.7a) AND
+        # the prompts vars panel + system-prompt textarea (2.7b). settings.html tabs all
+        # sections into one page; only the active tab's nodes are VISIBLE, so wait for
+        # ATTACHED (the rows/sections exist once each boot resolves).
         page.wait_for_selector("#jobs-body tr", state="attached")
         page.wait_for_selector("#sources-wrap .ds-section", state="attached")
+        page.wait_for_selector("#vars-panel", state="attached")  # GET /api/prompt-vars landed
         page.wait_for_function(
             "() => { const v = document.querySelector('#quota-value');"
             " return v && v.textContent && v.textContent.trim().length > 0; }"
+        )
+        # system-prompt textarea is filled only after GET /api/system-prompt resolves.
+        page.wait_for_function(
+            "() => { const v = document.querySelector('#sys-prompt');"
+            " return v && v.value && v.value.trim().length > 0; }"
         )
     finally:
         page.remove_listener("console", _on_console)
@@ -712,5 +721,104 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: object) ->
 
     assert not console_errors and not page_errors, (
         f"/settings.html (all settings wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_prompts_page_smoke(live_server: str, browser_page: object) -> None:
+    """/settings-prompts.html boots from /api/prompt-vars + /api/system-prompt (Task 2.7b).
+
+    settings-prompts.js drops its inline window.PROMPTS_DATA + (vars.js) PD_VARS mocks and
+    boots async: V.load() fetches GET /api/prompt-vars (the 29-var registry with per-var
+    tier metadata) and GET /api/system-prompt fills the editor. The golden DB seeds the
+    default system prompt and the finmind source at its default tier, so the variable-total
+    panel renders rows and tier-locked FinMind chips (if any) are greyed out (option.disabled
+    in the insert-variable selects + .tier-locked rows in the total table).
+
+    Waits for the system-prompt textarea to carry text (proving GET /api/system-prompt
+    resolved) AND the #vars-panel variable-total to mount with rendered rows (proving GET
+    /api/prompt-vars resolved + the registry rendered), then asserts ZERO console + ZERO
+    page errors — catching a botched async boot, a missing tier field, or an unhandled
+    fetch rejection.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings-prompts.html", wait_until="load")
+        # system-prompt editor filled only after GET /api/system-prompt resolves.
+        page.wait_for_function(
+            "() => { const v = document.querySelector('#sys-prompt');"
+            " return v && v.value && v.value.trim().length > 0; }"
+        )
+        # The variable-total panel (and its rows) mount only after GET /api/prompt-vars
+        # resolves and V.CATEGORIES is populated — proving the registry render + tier pills.
+        # #vars-panel is a collapsed <details>, so its rows are ATTACHED but not visible.
+        page.wait_for_selector("#vars-panel .vars-table tbody tr", state="attached")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings-prompts.html (prompts/vars wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_accounts_users_wired_smoke(
+    live_server: str, browser_page: object
+) -> None:
+    """/settings-accounts.html users list wired to GET /api/users (spec 19, Task 2.7b).
+
+    settings-users.js drops the localStorage pdAuth CRUD and boots off GET /api/users; the
+    page now loads api.js BEFORE shell.js. The golden DB seeds EMPTY auth tables (guest
+    mode = ZERO users), so the users panel must render the empty-state affordance ("尚無
+    授權用戶 … 新增第一個用戶後即啟用帳密保護") rather than a table — and do so with ZERO
+    console + ZERO page errors. This supersedes the Task-2.1 shell-only smoke: the page no
+    longer depends on the (now-removed) pdAuth.setSession shim.
+
+    Waits for #users-wrap to carry the empty-state text (rendered only after GET /api/users
+    resolves to []), then asserts ZERO console + ZERO page errors.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings-accounts.html", wait_until="load")
+        # Golden DB has ZERO users -> GET /api/users returns [] -> the empty-state div
+        # renders inside #users-wrap (proves the async boot landed, not the empty shell).
+        page.wait_for_selector("#users-wrap .users-empty")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings-accounts.html (users wired): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
