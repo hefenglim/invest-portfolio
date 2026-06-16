@@ -1,32 +1,24 @@
-/* portfolio-dash — 資料來源設定頁 (mock + rendering) */
-window.DATASOURCES_DATA = {
-  "sources": [
-    { "id": "twse",       "name": "台灣證券交易所 (TWSE)", "type": "stock",    "markets": ["TW"],     "auth": "none",  "token_masked": null,   "status": "ok",    "last_test": "2026-06-11T14:30:04+08:00", "latency_ms": 312,  "note": "台股收盤報價・免金鑰" },
-    { "id": "tpex",       "name": "櫃買中心 (TPEx)",       "type": "stock",    "markets": ["TW"],     "auth": "none",  "token_masked": null,   "status": "ok",    "last_test": "2026-06-11T14:30:06+08:00", "latency_ms": 445,  "note": "上櫃股票報價・免金鑰" },
-    { "id": "yfinance",   "name": "Yahoo Finance",         "type": "stock",    "markets": ["US","MY"],"auth": "none",  "token_masked": null,   "status": "ok",    "last_test": "2026-06-11T05:30:02+08:00", "latency_ms": 820,  "note": "美股、馬股、ETF 報價・免金鑰（有速率限制）" },
-    { "id": "alphavantage","name": "Alpha Vantage",        "type": "stock",    "markets": ["US"],     "auth": "apikey","token_masked": "ak-•••4F2","status": "ok","last_test": "2026-06-10T12:00:00+08:00","latency_ms": 1240, "note": "美股後備來源・免費層 25 req/day" },
-    { "id": "klse",       "name": "KLSE Screener",         "type": "stock",    "markets": ["MY"],     "auth": "none",  "token_masked": null,   "status": "error", "last_test": "2026-06-10T17:30:06+08:00", "latency_ms": null, "note": "馬股後備來源・HTTP 502" },
-    { "id": "finmind",    "name": "FinMind",               "type": "dividend", "markets": ["TW"],     "auth": "apikey","token_masked": "fm-•••9b1","status": "ok","last_test": "2026-06-11T03:00:05+08:00","latency_ms": 650,  "note": "台股股利、除息行事曆・付費 API" },
-    { "id": "divtracker", "name": "Dividend Tracker API",  "type": "dividend", "markets": ["US"],     "auth": "apikey","token_masked": null,   "status": "off",   "last_test": null, "latency_ms": null, "note": "美股股利資料・尚未設定金鑰" },
-    { "id": "newsapi",    "name": "NewsAPI.org",           "type": "news",     "markets": ["ALL"],    "auth": "apikey","token_masked": null,   "status": "off",   "last_test": null, "latency_ms": null, "note": "財經新聞截取・尚未設定金鑰" },
-    { "id": "fx_ecb",     "name": "ECB 歐洲央行匯率",      "type": "fx",       "markets": ["ALL"],    "auth": "none",  "token_masked": null,   "status": "ok",    "last_test": "2026-06-11T00:00:02+08:00", "latency_ms": 290,  "note": "每日匯率・免金鑰" }
-  ],
-  "account_fallbacks": {
-    "tw_broker":    ["twse", "tpex", "yfinance"],
-    "schwab":       ["yfinance", "alphavantage"],
-    "moomoo_my_us": ["yfinance", "alphavantage"],
-    "moomoo_my_my": ["yfinance", "klse"]
-  },
-  "account_names": {
-    "tw_broker": "台灣券商", "schwab": "嘉信 Schwab",
-    "moomoo_my_us": "Moomoo 美股", "moomoo_my_my": "Moomoo 馬股"
-  }
-};
+/* portfolio-dash — 資料來源設定頁 (wired to /api/datasources/*, spec 14/20/19).
 
+   Boot: GET /api/datasources -> { sources:[...], account_fallbacks:{acc:[srcId,...]},
+   account_names:{acc:name} }. The inline window.DATASOURCES_DATA mock is RETIRED.
+
+   A source: { id, name, type, markets, auth, provides, token_masked, status, last_test,
+   latency_ms, tier, tiers, note }. `latency_ms` is a COUNT (not money) — no fmt-money
+   path needed; no `.toFixed` on any value here. Real `type` set spans stock/dividend/
+   sentiment/fx/macro/trends/news; `status` spans ok/error/off/unknown/pending/blocked;
+   `auth` spans none/apikey/oauth — the render is robust to all of them.
+
+   Write paths (all via pdApi; success -> toast + re-fetch; PdApiError -> toast(message,
+   'fail', code); try/catch graceful so a failure never throws an unhandled rejection):
+   - PUT /api/datasources/{id}/key        (set / clear API key)
+   - PUT /api/datasources/{id}/tier       (mark token tier — spec 20)
+   - POST /api/datasources/{id}/test      (connection test -> health row)
+   - PUT /api/datasources/fallbacks       (per-account fallback chain reorder) */
 (function () {
   'use strict';
-  const D = window.DATASOURCES_DATA;
   const f = window.fmt;
+  const api = window.pdApi;
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -35,126 +27,257 @@ window.DATASOURCES_DATA = {
     return n;
   };
 
-  const TYPE_LABEL = { stock: '報價', dividend: '股利', fx: '匯率', news: '新聞' };
-  const TYPE_CLS   = { stock: 'type-chip chip-cash', dividend: 'type-chip chip-drip', fx: 'type-chip chip-net', news: 'type-chip chip-stock' };
-  const STATUS_CLASS = { ok: 'dot-ok', error: 'dot-err', off: 'dot-gray', unknown: 'dot-gray' };
+  function _toast(msg, kind, code) {
+    if (window.toast) window.toast(msg, kind, code);
+  }
+
+  /* Structural data from GET /api/datasources. Starts empty so a pre-fetch render
+     is blank; populated on boot. */
+  let sources = [];
+  let accountFallbacks = {};
+  let accountNames = {};
+
+  /* Display order + labels for the type groups (any unknown type falls under 其他). */
+  const TYPE_ORDER = ['stock', 'dividend', 'fx', 'sentiment', 'macro', 'trends', 'news'];
+  const TYPE_LABEL = {
+    stock: '報價', dividend: '股利', fx: '匯率', sentiment: '情緒',
+    macro: '總經', trends: '趨勢', news: '新聞', other: '其他',
+  };
+  const TYPE_CLS = {
+    stock: 'type-chip chip-cash', dividend: 'type-chip chip-drip', fx: 'type-chip chip-net',
+    sentiment: 'type-chip chip-stock', macro: 'type-chip', trends: 'type-chip',
+    news: 'type-chip chip-stock', other: 'type-chip',
+  };
+  const STATUS_CLASS = {
+    ok: 'dot-ok', error: 'dot-err', off: 'dot-gray', unknown: 'dot-gray',
+    pending: 'dot-gray', blocked: 'dot-err',
+  };
+  const STATUS_TITLE = {
+    ok: '連線正常', error: '連線失敗', off: '未啟用', unknown: '未測試',
+    pending: '待測試', blocked: '受阻',
+  };
+
+  function srcById(id) { return sources.find((s) => s.id === id); }
 
   /* ---- source table ---- */
   function renderSources() {
-    const groups = { stock: [], dividend: [], fx: [], news: [] };
-    D.sources.forEach((s) => (groups[s.type] = groups[s.type] || []).push(s));
     const wrap = $('#sources-wrap');
+    if (!wrap) return;
     wrap.replaceChildren();
-    Object.keys(groups).forEach((type) => {
-      if (!groups[type].length) return;
+    /* group by type, preserving TYPE_ORDER then any leftover types as 其他. */
+    const groups = {};
+    sources.forEach((s) => {
+      const key = TYPE_ORDER.indexOf(s.type) === -1 ? 'other' : s.type;
+      (groups[key] = groups[key] || []).push(s);
+    });
+    const order = TYPE_ORDER.filter((t) => groups[t]);
+    if (groups.other) order.push('other');
+    order.forEach((type) => {
       const sec = el('div', 'ds-section');
       const secHead = el('div', 'ds-sec-head');
-      secHead.appendChild(el('span', TYPE_CLS[type], TYPE_LABEL[type]));
+      secHead.appendChild(el('span', TYPE_CLS[type] || 'type-chip', TYPE_LABEL[type] || type));
       sec.appendChild(secHead);
       const table = el('table', 'data');
       const thead = el('thead');
       const hr = el('tr');
-      ['狀態','來源','市場','認證','延遲','上次測試','備註',''].forEach((h, i) => {
-        const th = el('th', i <= 1 || i === 6 ? 'col-text' : null, h);
-        hr.appendChild(th);
+      ['狀態', '來源', '市場', '認證', '延遲', '上次測試', '備註', ''].forEach((h, i) => {
+        hr.appendChild(el('th', i <= 1 || i === 6 ? 'col-text' : null, h));
       });
       thead.appendChild(hr);
       table.appendChild(thead);
       const tbody = el('tbody');
-      groups[type].forEach((s) => {
-        const tr = el('tr');
-        /* status dot */
-        const tdSt = el('td');
-        const dot = el('span', 'run-dot ' + STATUS_CLASS[s.status]);
-        dot.title = s.status === 'ok' ? '連線正常' : s.status === 'error' ? '連線失敗' : '未啟用';
-        tdSt.appendChild(dot);
-        tr.appendChild(tdSt);
-        /* name */
-        const tdName = el('td', 'col-text');
-        tdName.appendChild(el('span', null, s.name));
-        if (s.status === 'error') tdName.appendChild(el('div', 'err-inline', '連線失敗・見備註'));
-        tr.appendChild(tdName);
-        /* markets */
-        const tdM = el('td', 'col-text');
-        s.markets.forEach((m) => {
-          const chip = el('span', 'board-badge', m);
-          chip.style.marginRight = '4px';
-          tdM.appendChild(chip);
-        });
-        tr.appendChild(tdM);
-        /* auth */
-        const tdAuth = el('td', 'col-text');
-        if (s.auth === 'none') {
-          tdAuth.appendChild(el('span', 'sign-nil', '免金鑰'));
-        } else {
-          const row = el('div', 'ds-key-row');
-          const hasKey = !!s.token_masked;
-          row.appendChild(el('span', 'cron-code', s.token_masked || '未設定'));
-          const resetBtn = el('button', 'btn', hasKey ? '重設' : '設定金鑰');
-          resetBtn.type = 'button';
-          resetBtn.style.fontSize = '10px';
-          resetBtn.style.padding = '1px 8px';
-          if (!hasKey) resetBtn.classList.add('btn-primary');
-          resetBtn.addEventListener('click', () =>
-            window.toast(hasKey ? '金鑰已更新' : '金鑰已設定', 'ok', s.name + '（設計稿）'));
-          row.appendChild(resetBtn);
-          tdAuth.appendChild(row);
-        }
-        tr.appendChild(tdAuth);
-        /* latency */
-        const tdLat = el('td', 'num');
-        if (!s.latency_ms) { tdLat.textContent = f.NULL_GLYPH; tdLat.classList.add('sign-nil'); }
-        else tdLat.textContent = s.latency_ms + ' ms';
-        tr.appendChild(tdLat);
-        /* last test */
-        tr.appendChild(el('td', 'num', s.last_test ? f.datetime(s.last_test) : f.NULL_GLYPH));
-        /* note */
-        tr.appendChild(el('td', 'col-text', s.note || ''));
-        /* test button */
-        const tdTest = el('td');
-        const testBtn = el('button', 'btn', '測試');
-        testBtn.type = 'button';
-        testBtn.addEventListener('click', () => {
-          testBtn.disabled = true; testBtn.textContent = '…';
-          setTimeout(() => {
-            testBtn.disabled = false; testBtn.textContent = '測試';
-            if (s.status === 'error') window.toast('連線失敗', 'fail', s.name + '：' + (s.note || ''));
-            else window.toast('連線正常', 'ok', s.name + '・' + (s.latency_ms || '?') + ' ms');
-          }, 800);
-        });
-        tdTest.appendChild(testBtn);
-        tr.appendChild(tdTest);
-        tbody.appendChild(tr);
-      });
+      groups[type].forEach((s) => tbody.appendChild(renderSourceRow(s)));
       table.appendChild(tbody);
       sec.appendChild(table);
       wrap.appendChild(sec);
     });
   }
 
-  /* ---- per-account fallback order — real drag-and-drop ---- */
+  function renderSourceRow(s) {
+    const tr = el('tr');
+    /* status dot */
+    const tdSt = el('td');
+    const dot = el('span', 'run-dot ' + (STATUS_CLASS[s.status] || 'dot-gray'));
+    dot.title = STATUS_TITLE[s.status] || s.status || '';
+    tdSt.appendChild(dot);
+    tr.appendChild(tdSt);
+    /* name */
+    const tdName = el('td', 'col-text');
+    tdName.appendChild(el('span', null, s.name));
+    if (s.status === 'error') tdName.appendChild(el('div', 'err-inline', '連線失敗・見備註'));
+    tr.appendChild(tdName);
+    /* markets */
+    const tdM = el('td', 'col-text');
+    (s.markets || []).forEach((m) => {
+      const chip = el('span', 'board-badge', m);
+      chip.style.marginRight = '4px';
+      tdM.appendChild(chip);
+    });
+    tr.appendChild(tdM);
+    /* auth */
+    const tdAuth = el('td', 'col-text');
+    if (s.auth === 'none') {
+      tdAuth.appendChild(el('span', 'sign-nil', '免金鑰'));
+    } else {
+      const row = el('div', 'ds-key-row');
+      const hasKey = !!s.token_masked;
+      row.appendChild(el('span', 'cron-code', s.token_masked || '未設定'));
+      const resetBtn = el('button', 'btn', hasKey ? '重設' : '設定金鑰');
+      resetBtn.type = 'button';
+      resetBtn.style.fontSize = '10px';
+      resetBtn.style.padding = '1px 8px';
+      if (!hasKey) resetBtn.classList.add('btn-primary');
+      resetBtn.addEventListener('click', () => openKeyModal(s));
+      row.appendChild(resetBtn);
+      /* tier dropdown when the source offers selectable tiers (spec 20). */
+      if (s.tiers && s.tiers.length) {
+        const tierSel = el('select', 'select');
+        tierSel.style.fontSize = '10px';
+        tierSel.style.padding = '1px 6px';
+        tierSel.title = '資費等級';
+        const none = el('option', null, '（未標記）'); none.value = '';
+        tierSel.appendChild(none);
+        s.tiers.forEach((t) => {
+          const o = el('option', null, t); o.value = t;
+          if (s.tier === t) o.selected = true;
+          tierSel.appendChild(o);
+        });
+        if (s.tier == null) none.selected = true;
+        tierSel.addEventListener('change', async () => {
+          try {
+            await api.put('/api/datasources/' + encodeURIComponent(s.id) + '/tier',
+              { tier: tierSel.value || null });
+            _toast('資費等級已更新', 'ok', s.name + (tierSel.value ? ' · ' + tierSel.value : ''));
+            await boot();
+          } catch (err) {
+            _toast((err && err.message) || '更新失敗', 'fail', err && err.code);
+            await boot();
+          }
+        });
+        row.appendChild(tierSel);
+      }
+      tdAuth.appendChild(row);
+    }
+    tr.appendChild(tdAuth);
+    /* latency (a count, not money) */
+    const tdLat = el('td', 'num');
+    if (s.latency_ms == null) { tdLat.textContent = f.NULL_GLYPH; tdLat.classList.add('sign-nil'); }
+    else tdLat.textContent = f.num(s.latency_ms) + ' ms';
+    tr.appendChild(tdLat);
+    /* last test */
+    tr.appendChild(el('td', 'num', s.last_test ? f.datetime(s.last_test) : f.NULL_GLYPH));
+    /* note */
+    tr.appendChild(el('td', 'col-text', s.note || ''));
+    /* test button -> POST /api/datasources/{id}/test */
+    const tdTest = el('td');
+    const testBtn = el('button', 'btn', '測試');
+    testBtn.type = 'button';
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true; testBtn.textContent = '…';
+      try {
+        const resp = await api.post('/api/datasources/' + encodeURIComponent(s.id) + '/test');
+        const ok = resp && resp.status === 'ok';
+        const lat = resp && resp.latency_ms;
+        _toast(ok ? '連線正常' : '連線失敗', ok ? 'ok' : 'fail',
+          s.name + (ok && lat != null ? '・' + lat + ' ms'
+            : '・' + ((resp && resp.detail) || '無法連線')));
+        await boot();
+      } catch (err) {
+        _toast((err && err.message) || '測試失敗', 'fail', err && err.code);
+      } finally {
+        testBtn.disabled = false; testBtn.textContent = '測試';
+      }
+    });
+    tdTest.appendChild(testBtn);
+    tr.appendChild(tdTest);
+    return tr;
+  }
+
+  /* ---- API-key modal -> PUT /api/datasources/{id}/key ---- */
+  function openKeyModal(s) {
+    const hasKey = !!s.token_masked;
+    const backdrop = el('div', 'modal-backdrop');
+    const modal = el('div', 'modal');
+    const head = el('div', 'modal-head');
+    head.appendChild(el('h3', 'modal-title', (hasKey ? '重設金鑰 — ' : '設定金鑰 — ') + s.name));
+    const close = el('button', 'modal-close', '✕'); close.type = 'button';
+    head.appendChild(close);
+    modal.appendChild(head);
+    const body = el('div', 'modal-body');
+    const field = el('div', 'field');
+    field.appendChild(el('label', null, 'API Key'));
+    const inp = el('input', 'input');
+    inp.type = 'text'; inp.spellcheck = false; inp.placeholder = '貼上新的 API Key…';
+    inp.style.fontFamily = 'var(--font-num)';
+    field.appendChild(inp);
+    field.appendChild(el('span', 'hint', '永不顯示既存金鑰；留空並送出可清除金鑰。'));
+    body.appendChild(field);
+    modal.appendChild(body);
+    const foot = el('div', 'modal-foot');
+    const cancel = el('button', 'btn', '取消'); cancel.type = 'button';
+    const ok = el('button', 'btn btn-primary', '儲存'); ok.type = 'button';
+    foot.appendChild(cancel); foot.appendChild(ok);
+    modal.appendChild(foot);
+    backdrop.appendChild(modal);
+    const dismiss = () => backdrop.remove();
+    close.addEventListener('click', dismiss);
+    cancel.addEventListener('click', dismiss);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
+    ok.addEventListener('click', async () => {
+      ok.disabled = true;
+      try {
+        await api.put('/api/datasources/' + encodeURIComponent(s.id) + '/key',
+          { api_key: inp.value });
+        dismiss();
+        _toast(inp.value ? '金鑰已更新' : '金鑰已清除', 'ok', s.name);
+        await boot();
+      } catch (err) {
+        ok.disabled = false;
+        _toast((err && err.message) || '金鑰更新失敗', 'fail', err && err.code);
+      }
+    });
+    document.body.appendChild(backdrop);
+    setTimeout(() => inp.focus(), 50);
+  }
+
+  /* ---- per-account fallback order — drag-and-drop -> PUT /api/datasources/fallbacks ---- */
   function renderFallbacks() {
     const wrap = $('#fallback-wrap');
+    if (!wrap) return;
     wrap.replaceChildren();
-    Object.keys(D.account_fallbacks).forEach((accId) => {
-      const order = [...D.account_fallbacks[accId]]; // mutable copy
+    Object.keys(accountFallbacks).forEach((accId) => {
+      const order = [...(accountFallbacks[accId] || [])]; /* mutable copy */
       const card = el('div', 'fallback-card');
-      card.appendChild(el('div', 'fallback-acct', D.account_names[accId] || accId));
+      card.appendChild(el('div', 'fallback-acct', accountNames[accId] || accId));
       const chips = el('div', 'fallback-chips');
       card.appendChild(chips);
       card.appendChild(el('div', 'fb-hint', '拖曳排序・順序即 fallback 優先順序'));
+
+      function persist() {
+        /* send only the changed account's chain; the backend merges by key. */
+        const payload = {}; payload[accId] = [...order];
+        api.put('/api/datasources/fallbacks', { account_fallbacks: payload })
+          .then(() => {
+            accountFallbacks[accId] = [...order];
+            _toast('順序已更新', 'ok', (accountNames[accId] || accId) + ' fallback 順序已調整');
+          })
+          .catch((err) => {
+            _toast((err && err.message) || '順序更新失敗', 'fail', err && err.code);
+            boot(); /* re-sync to server's last-good order */
+          });
+      }
 
       function buildChips() {
         chips.replaceChildren();
         let dragSrc = null;
         order.forEach((srcId, i) => {
-          const src = D.sources.find((s) => s.id === srcId);
+          const src = srcById(srcId);
           const chip = el('div', 'fb-chip');
           chip.draggable = true;
           chip.dataset.idx = String(i);
           chip.appendChild(el('span', 'fb-num', String(i + 1)));
-          chip.appendChild(el('span', 'fb-name', src ? src.name.split(/s/)[0] : srcId));
-          const dot = el('span', 'run-dot ' + STATUS_CLASS[(src && src.status) || 'unknown']);
+          chip.appendChild(el('span', 'fb-name', src ? src.name : srcId));
+          const dot = el('span', 'run-dot ' + (STATUS_CLASS[(src && src.status) || 'unknown'] || 'dot-gray'));
           dot.style.marginLeft = 'auto';
           chip.appendChild(dot);
           chip.addEventListener('dragstart', (e) => {
@@ -178,9 +301,8 @@ window.DATASOURCES_DATA = {
             dragSrc = null;
             const moved = order.splice(from, 1)[0];
             order.splice(to, 0, moved);
-            D.account_fallbacks[accId] = [...order];
             buildChips();
-            window.toast('順序已更新', 'ok', D.account_names[accId] + ' fallback 順序已調整');
+            persist();
           });
           chips.appendChild(chip);
         });
@@ -190,6 +312,22 @@ window.DATASOURCES_DATA = {
     });
   }
 
-  renderSources();
-  renderFallbacks();
+  /* ===== boot: GET /api/datasources, then render. Graceful: on failure leave the page
+     empty + surface ONE toast (never an unhandled rejection — the e2e smoke asserts ZERO
+     console errors). 401 is handled inside api.js. ===== */
+  async function boot() {
+    try {
+      const resp = await api.get('/api/datasources');
+      sources = (resp && resp.sources) || [];
+      accountFallbacks = (resp && resp.account_fallbacks) || {};
+      accountNames = (resp && resp.account_names) || {};
+    } catch (err) {
+      _toast('資料來源載入失敗', 'fail', (err && err.message) || undefined);
+      sources = []; accountFallbacks = {}; accountNames = {};
+    }
+    renderSources();
+    renderFallbacks();
+  }
+
+  boot();
 })();

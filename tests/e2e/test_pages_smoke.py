@@ -529,3 +529,188 @@ def test_ledger_page_smoke(live_server: str, browser_page: object) -> None:
         f"/ledger.html (ledger wired): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_settings_llm_page_smoke(live_server: str, browser_page: object) -> None:
+    """/settings-llm.html boots from the REAL /api/llm/config (spec 19, Task 2.7a).
+
+    settings-llm.js drops its inline window.LLM_DATA mock and boots off GET
+    /api/llm/config -> { models, roles, quota, usage }. The golden DB seeds the LLM
+    tables to the AI-off state (NO models, all roles NULL, quota remaining "0"), so this
+    exercises the empty/graceful path: the model table stays empty, the role selects show
+    "（空 = 關閉）", and the quota chip + value render from the Decimal-STRING quota.
+
+    Waits for #quota-value to carry text (rendered only after the config fetch resolves —
+    the quota object is always present), proving the full async boot landed, then asserts
+    ZERO console + ZERO page errors. This catches the C2 fix: the former bare
+    `remaining.toFixed(2)` / `m.price_in.toFixed(2)` would TypeError on a Decimal STRING;
+    routed through window.fmt they do not.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings-llm.html", wait_until="load")
+        # #quota-value gets text only after GET /api/llm/config resolves (renderQuota).
+        page.wait_for_function(
+            "() => { const v = document.querySelector('#quota-value');"
+            " return v && v.textContent && v.textContent.trim().length > 0; }"
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings-llm.html (llm config wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_scheduler_page_smoke(live_server: str, browser_page: object) -> None:
+    """/settings-scheduler.html boots from the REAL /api/scheduler/* (spec 19, Task 2.7a).
+
+    settings-scheduler.js drops window.SCHED_DATA and boots off GET /api/scheduler/jobs +
+    GET /api/scheduler/runs (parallel). The golden DB seeds the registry jobs (so the jobs
+    table renders rows) and an EMPTY run log (so the history table renders empty cleanly).
+
+    Waits for a populated #jobs-body tr (rendered only after the jobs fetch resolves), then
+    asserts ZERO console + ZERO page errors. This catches war-game Finding 8: a run's
+    Decimal-STRING cost_usd "0"/"0.00" is truthy, so the nil-check is `== null` and the
+    value is shown via f.num — never `bareString.toFixed`.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings-scheduler.html", wait_until="load")
+        # One job row lands once GET /api/scheduler/jobs resolves (registry-seeded jobs).
+        page.wait_for_selector("#jobs-body tr")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings-scheduler.html (scheduler wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_datasources_page_smoke(
+    live_server: str, browser_page: object
+) -> None:
+    """/settings-datasources.html boots from the REAL /api/datasources (Task 2.7a).
+
+    settings-datasources.js drops window.DATASOURCES_DATA and boots off GET
+    /api/datasources -> { sources, account_fallbacks, account_names }. The golden DB seeds
+    the data_sources catalog (so source groups render) and the four accounts (so the
+    per-account fallback cards render). The render is robust to all real type/status/auth
+    values (stock/dividend/sentiment/fx/macro/trends/news; ok/error/off/unknown/pending/
+    blocked; none/apikey/oauth).
+
+    Waits for a rendered source section (#sources-wrap .ds-section, produced only after the
+    fetch resolves), then asserts ZERO console + ZERO page errors.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings-datasources.html", wait_until="load")
+        # A source section lands once GET /api/datasources resolves (seeded catalog).
+        page.wait_for_selector("#sources-wrap .ds-section")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings-datasources.html (datasources wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_combined_page_smoke(live_server: str, browser_page: object) -> None:
+    """/settings.html (combined) loads ALL settings scripts console-clean (Task 2.7a).
+
+    settings.html loads api.js + every settings script: the three NOW-WIRED ones
+    (settings-llm/scheduler/datasources, each booting off its real /api/* endpoint) AND
+    the still-mock ones (settings-prompts/users/alerts + vars), which keep their inline
+    mocks in this task. This asserts the three wired sections coexist with the remaining
+    mock scripts on a single page with ZERO console + ZERO page errors.
+
+    Waits for the wired LLM quota value, a scheduler job row, AND a datasource section to
+    all render — proving all three async boots landed on the shared page before the
+    console/pageerror sinks are checked.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings.html", wait_until="load")
+        # All three wired boots landed: scheduler jobs + datasource section + LLM quota.
+        # settings.html tabs all sections into one page; only the active tab's nodes are
+        # VISIBLE, so wait for ATTACHED (the rows/sections exist once each boot resolves).
+        page.wait_for_selector("#jobs-body tr", state="attached")
+        page.wait_for_selector("#sources-wrap .ds-section", state="attached")
+        page.wait_for_function(
+            "() => { const v = document.querySelector('#quota-value');"
+            " return v && v.textContent && v.textContent.trim().length > 0; }"
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings.html (all settings wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
