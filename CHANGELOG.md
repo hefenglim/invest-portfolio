@@ -78,6 +78,18 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   seeding. New `tests/pricing/test_layering.py` AST-guards that `pricing/**` imports no `data_ingestion`.
 
 ### Changed
+- **spec 19 deferred follow-ups resolved (2026-06-16):** ① the 自我進化設定 panel is wired to `GET/PUT
+  /api/evolution-config` (read-then-PUT preserves the non-panel knobs `horizon_basis`/`defer_limit_days`/
+  `shadow_on_alert`; `gap_alert_pp` sent as a Decimal string; the `localStorage pd_evolution_cfg` path removed);
+  ② removed the dead `window.PD_HISTORY` trend trade-marker code in `charts.js` (the E8 large-trade markers had no
+  backend source for the portfolio-level trend after the mock deletion); ③ `rebalance.js` now derives trades/fees via
+  the authoritative `POST /api/rebalance/preview` (debounced + `pdApi.abortable`) instead of a client-side estimate —
+  the module computes NO money (`FX_TWD`/`pdFeeTax`-call/lot-snapping/turnover removed); ④ `api.js` `download()`'s
+  401-redirect now carries the same `!endsWith('login.html')` guard as `_handle`; ⑤ `prompts.py` registry docstring
+  26→29; ⑥ added `web/favicon.svg` (+ a `shell.js`-injected `<link>` and a login.html `<link>`) to retire the app-wide
+  `/favicon.ico` 404. Each fix shipped with a per-change senior review + page smoke + an E2E Playwright flow
+  (evolution-config round-trip, trend-chart mount, rebalance-preview round-trip, favicon presence). Suite now
+  **1067 passed / 3 skipped + 33 e2e**.
 - **Frontend wired to the live API — spec 19 Phase 2 (page wiring) + Phase 3 (cleanup) (2026-06-16):** every
   static `web/` page now consumes the real `/api/*` through the single `window.pdApi` fetch layer; ALL mock-data
   globals are retired and the mock FILES deleted. No framework, no build step (decision B). Per page (each: mock →
