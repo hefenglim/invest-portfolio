@@ -16,49 +16,96 @@
   const LS_KEY = 'pd_sidebar_collapsed';
   const page = document.body.dataset.page || '';
 
-  /* ===== 授權用戶與工作階段（mock：localStorage；後端接線後改 server session） ===== */
+  /* ===== 工作階段：以後端 GET /api/auth/session 為準（war-game Finding 7） =====
+     後端回傳三態：
+       · {mode:'guest'}                              → 無授權用戶，公開瀏覽，不導頁。
+       · {mode:'user', username:'…', name, locked}   → 受保護且已登入。
+       · {mode:'user', username:null, …}             → 受保護但未登入，需導回登入。
+     同步取得的 window.pdAuth.getSession()/displayName() 在 shell 啟動後以「快取的後端
+     工作階段」回答；啟動前回傳安全的訪客預設值，避免相依頁面崩潰。
+     ⚠️ 一律經由 window.pdApi（單一 fetch 層），不直接呼叫 fetch。
+     localStorage 的「授權用戶 CRUD」(getUsers/saveUsers) 暫時保留 — 使用者頁於後續
+     任務（2.7）接線；本任務不退役。 */
+  const DEFAULT_NAME = '投資人';
+  let _backendSession = { mode: 'guest', username: null, name: DEFAULT_NAME, locked: false };
+
   function pdGetUsers() {
     try { return JSON.parse(localStorage.getItem('pd_users') || '[]') || []; } catch (e) { return []; }
   }
   function pdSaveUsers(list) {
     try { localStorage.setItem('pd_users', JSON.stringify(list || [])); } catch (e) { /* noop */ }
   }
-  function pdGetSession() {
-    try { return JSON.parse(localStorage.getItem('pd_session') || 'null'); } catch (e) { return null; }
-  }
-  function pdSetSession(s) {
-    try {
-      if (s) localStorage.setItem('pd_session', JSON.stringify(s));
-      else localStorage.removeItem('pd_session');
-    } catch (e) { /* noop */ }
-  }
+  function pdGetSession() { return _backendSession; }
   function pdDisplayName() {
-    const s = pdGetSession();
-    if (s && s.name) return s.name;
-    const u = pdGetUsers();
-    if (u.length && u[0].name) return u[0].name;
-    return '投資人';
+    return (_backendSession && _backendSession.name) ? _backendSession.name : DEFAULT_NAME;
   }
+  /* true once shell boot has confirmed: no authorized users (public-browse). */
+  function pdIsGuest() { return !_backendSession || _backendSession.mode === 'guest'; }
   window.pdAuth = {
     getUsers: pdGetUsers, saveUsers: pdSaveUsers,
-    getSession: pdGetSession, setSession: pdSetSession, displayName: pdDisplayName
+    getSession: pdGetSession, displayName: pdDisplayName, isGuest: pdIsGuest
   };
 
-  /* 工作階段守門：
-     · 尚無授權用戶 → 自動啟用訪客工作階段，全瀏覽、不鎖定（公開瀏覽不跳登入）。
-     · 已有授權用戶 → 需有效登入（非訪客、未鎖定、帳號存在），否則導回登入。 */
-  if (page && page !== 'login') {
-    const _users = pdGetUsers();
-    const _sess = pdGetSession();
-    if (_users.length === 0) {
-      if (!_sess || !_sess.guest) {
-        pdSetSession({ username: null, name: '投資人', guest: true, ts: Date.now() });
-      }
-    } else {
-      const _valid = _sess && !_sess.guest && !_sess.locked &&
-        _users.some((u) => u.username === _sess.username);
-      if (!_valid) { window.location.replace('login.html'); return; }
+  /* api.js (the single fetch layer) may not yet be on the page — no HTML currently
+     loads it before shell.js. Lazily ensure it so the shell still routes EVERY call
+     through window.pdApi (never raw fetch). Resolves to true if pdApi is available. */
+  let _apiPromise = null;
+  function pdEnsureApi() {
+    if (window.pdApi) return Promise.resolve(true);
+    if (!_apiPromise) {
+      _apiPromise = pdLoadScript('api.js')
+        .then(() => !!window.pdApi)
+        .catch(() => false);
     }
+    return _apiPromise;
+  }
+
+  /* 鎖定畫面 / 登出：經由 pdApi（單一 fetch 層），完成後導回登入。失敗仍導回登入，
+     避免使用者卡在「按了登出卻沒走」的狀態（api.js 已負責真正的 401 強制）。 */
+  function pdLockAndLeave() {
+    pdEnsureApi()
+      .then((ok) => (ok ? window.pdApi.post('/api/auth/lock') : null))
+      .catch(() => { /* swallow: still leave to login below */ })
+      .then(() => { window.location.href = 'login.html'; });
+  }
+  function pdLogoutAndLeave() {
+    pdEnsureApi()
+      .then((ok) => (ok ? window.pdApi.post('/api/auth/logout') : null))
+      .catch(() => { /* swallow: still leave to login below */ })
+      .then(() => { window.location.href = 'login.html'; });
+  }
+
+  /* Async session guard (replaces the old synchronous localStorage guard).
+     · login page: skip entirely (it owns POST /api/auth/login).
+     · fetch GET /api/auth/session via pdApi; cache the result.
+     · protected + signed-out (mode==='user' && username==null) → redirect to login.
+     · guest OR signed-in → stay; api.js's 401 interceptor is the real enforcement
+       for protected API calls. A failed session fetch degrades to guest/no-redirect
+       so the page still renders (never hard-crash the shell). */
+  function pdInitSession() {
+    if (page === 'login') return;
+    pdEnsureApi()
+      .then((ok) => (ok ? window.pdApi.get('/api/auth/session') : null))
+      .then((sess) => {
+        if (sess && typeof sess === 'object') {
+          _backendSession = {
+            mode: sess.mode === 'user' ? 'user' : 'guest',
+            username: sess.username != null ? sess.username : null,
+            name: sess.name != null ? sess.name : DEFAULT_NAME,
+            locked: !!sess.locked
+          };
+        }
+        if (_backendSession.mode === 'user' && _backendSession.username == null) {
+          window.location.replace('login.html');
+          return;
+        }
+        _refreshGreeting();
+        _refreshUserMenu();
+      })
+      .catch(() => {
+        /* graceful degradation: treat as guest, no redirect — api.js redirects on a
+           real 401 from protected calls. Keep the synchronous scaffold as-is. */
+      });
   }
 
   /* ===== 全域個股抽屜：任何頁面點擊代號都「就地」彈出，不再跳轉儀表板 =====
@@ -176,14 +223,21 @@
 
   /* ---- topbar ---- */
   const tb = document.getElementById('topbar');
+  /* hooks the async session resolver calls once GET /api/auth/session returns. */
+  let _refreshGreeting = function () { /* set below when topbar exists */ };
+  let _refreshUserMenu = function () { /* set below when topbar exists */ };
   if (tb) {
-    let titleText = document.body.dataset.title || '';
-    if (page === 'dashboard') {
+    /* dashboard greeting depends on the backend session name; render a placeholder
+       ('投資人') synchronously, then update after the async session resolves. */
+    const titleEl = el('h1', 'page-title', document.body.dataset.title || '');
+    _refreshGreeting = function () {
+      if (page !== 'dashboard') return;
       const hr = new Date().getHours();
       const greet = hr < 5 ? '夜深了' : hr < 11 ? '早安' : hr < 18 ? '午安' : '晚安';
-      titleText = greet + '，' + pdDisplayName();
-    }
-    tb.appendChild(el('h1', 'page-title', titleText));
+      titleEl.textContent = greet + '，' + pdDisplayName();
+    };
+    _refreshGreeting();
+    tb.appendChild(titleEl);
     if (document.body.dataset.chips === '1') {
       const asof = el('span', 'asof');
       asof.appendChild(el('span', 'label', '資料時間'));
@@ -257,22 +311,14 @@
       wrap.appendChild(menu);
       tb.appendChild(wrap);
     }
-    /* ---- user menu ---- */
+    /* ---- user menu ---- (rebuilt from the backend session; render guest placeholder
+       synchronously, then re-render via _refreshUserMenu once the session resolves) */
     const uwrap = el('div', 'user-wrap');
-    const uname = pdDisplayName();
-    const initials = (uname || 'PD').trim().slice(0, 2).toUpperCase();
     const av = el('button', 'avatar');
     av.type = 'button';
-    av.textContent = initials;
     av.title = '使用者選單';
     const umenu = el('div', 'user-menu');
     umenu.hidden = true;
-    const sess0 = pdGetSession();
-    const isGuest = !sess0 || sess0.guest;
-    const uhead = el('div', 'user-head');
-    uhead.appendChild(el('div', 'user-name', uname));
-    uhead.appendChild(el('div', 'user-id', isGuest ? '公開瀏覽 · 未啟用帳密保護' : '@' + sess0.username));
-    umenu.appendChild(uhead);
     const mkU = (label, sub, fn, danger) => {
       const o = el('button', 'user-opt' + (danger ? ' danger' : ''));
       o.type = 'button';
@@ -281,24 +327,36 @@
       o.addEventListener('click', () => { umenu.hidden = true; fn(); });
       return o;
     };
-    if (isGuest) {
-      umenu.appendChild(mkU('啟用帳密保護', '新增授權用戶後啟用登入與鎖定', () => {
-        window.location.href = 'settings.html#accounts';
-      }));
-    } else {
-      umenu.appendChild(mkU('帳戶與費率', '授權用戶、費率與一般設定', () => {
-        window.location.href = 'settings.html#accounts';
-      }));
-      umenu.appendChild(mkU('鎖定畫面', '保留身分，重新輸入密碼解鎖', () => {
-        const s = pdGetSession();
-        if (s) { s.locked = true; pdSetSession(s); }
-        window.location.href = 'login.html';
-      }));
-      umenu.appendChild(mkU('登出', '結束工作階段', () => {
-        pdSetSession(null);
-        window.location.href = 'login.html';
-      }, true));
-    }
+    _refreshUserMenu = function () {
+      const wasOpen = !umenu.hidden;
+      const uname = pdDisplayName();
+      av.textContent = (uname || 'PD').trim().slice(0, 2).toUpperCase();
+      const guest = pdIsGuest();
+      const username = _backendSession && _backendSession.username;
+      umenu.replaceChildren();
+      const uhead = el('div', 'user-head');
+      uhead.appendChild(el('div', 'user-name', uname));
+      uhead.appendChild(el('div', 'user-id',
+        guest ? '公開瀏覽 · 未啟用帳密保護' : '@' + (username || '')));
+      umenu.appendChild(uhead);
+      if (guest) {
+        umenu.appendChild(mkU('啟用帳密保護', '新增授權用戶後啟用登入與鎖定', () => {
+          window.location.href = 'settings.html#accounts';
+        }));
+      } else {
+        umenu.appendChild(mkU('帳戶與費率', '授權用戶、費率與一般設定', () => {
+          window.location.href = 'settings.html#accounts';
+        }));
+        umenu.appendChild(mkU('鎖定畫面', '保留身分，重新輸入密碼解鎖', () => {
+          pdLockAndLeave();
+        }));
+        umenu.appendChild(mkU('登出', '結束工作階段', () => {
+          pdLogoutAndLeave();
+        }, true));
+      }
+      umenu.hidden = !wasOpen;
+    };
+    _refreshUserMenu();
     av.addEventListener('click', (e) => { e.stopPropagation(); umenu.hidden = !umenu.hidden; });
     document.addEventListener('click', (e) => { if (!umenu.hidden && !uwrap.contains(e.target)) umenu.hidden = true; });
     uwrap.appendChild(av);
@@ -414,4 +472,9 @@
     ok.addEventListener('click', () => { dismiss(); if (opts.onConfirm) opts.onConfirm(); });
     document.body.appendChild(backdrop);
   };
+
+  /* ---- async session guard (runs LAST, after the synchronous scaffold above is
+     rendered: sidebar, topbar, toast, confirmDialog, search, pdOpenSymbol are all
+     defined/usable immediately; the session-dependent UI updates after this resolves) */
+  pdInitSession();
 })();
