@@ -14,8 +14,55 @@ from tests.e2e.conftest import assert_page_ok
 
 @pytest.mark.e2e
 def test_login_page_smoke(live_server: str, browser_page: object) -> None:
-    """/login.html loads clean (guest mode renders it without auth)."""
-    assert_page_ok(browser_page, live_server, "/login.html")
+    """/login.html loads clean and makes NO /api/* call on load (spec 19, 9.x).
+
+    After wiring login to POST /api/auth/login, the page loads api.js + an inline auth
+    script, but the inline script must NOT fire any network call on load (the shell — not
+    this page — routes signed-out users here). This asserts: (a) the form is present
+    (#login-btn / #login-user / #login-pass), (b) the page stays on /login.html (no
+    redirect), (c) ZERO /api/* requests were issued on load, and (d) ZERO console + page
+    errors. A login ATTEMPT is NOT triggered here (a 401 would emit a "Failed to load
+    resource: 401" console message); the 401 logic is covered by the auth.py contract
+    tests + the api.js 401-redirect smoke.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    api_requests: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    def _on_request(req: object) -> None:
+        url = getattr(req, "url", "")
+        if "/api/" in url:
+            api_requests.append(url)
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    page.on("request", _on_request)
+    try:
+        page.goto(live_server + "/login.html", wait_until="load")
+        # Form markup present (the page rendered, not a redirect).
+        page.wait_for_selector("#login-btn")
+        page.wait_for_selector("#login-user")
+        page.wait_for_selector("#login-pass")
+        assert page.url.endswith("login.html"), f"unexpected redirect to {page.url}"
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+        page.remove_listener("request", _on_request)
+
+    assert not api_requests, f"login.html fired /api/* on load: {api_requests!r}"
+    assert not console_errors and not page_errors, (
+        f"/login.html: console errors={console_errors!r}; page errors={page_errors!r}"
+    )
 
 
 @pytest.mark.e2e

@@ -81,11 +81,27 @@ def test_error_envelope_becomes_pdapierror(live_server: str, browser_page: Page)
 
 @pytest.mark.e2e
 def test_401_redirects_to_login(live_server: str, browser_page: Page) -> None:
-    """401 → window.location.replace('login.html'); page navigates to login.html."""
-    page = _fresh_api_page(browser_page, live_server)
+    """401 from a NON-login page → window.location.replace('login.html').
+
+    The redirect is GUARDED to fire only when NOT already on login.html (so a
+    wrong-password POST /api/auth/login on the login page itself surfaces its error
+    instead of self-reloading). So this drives the redirect from /index.html: navigate
+    there, inject the served /api.js, then a stubbed 401 must navigate to login.html.
+
+    Only the explicit /api/protected probe is stubbed 401 — the page's own boot
+    /api/* calls are left to hit the real (guest-mode) backend, so the redirect is
+    driven deterministically by our probe, not a racing boot call.
+    """
+    browser = browser_page.context.browser
+    assert browser is not None
+    context = browser.new_context()
+    page = context.new_page()
     try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.add_script_tag(url="/api.js")
+        assert page.evaluate("() => typeof window.pdApi === 'object' && !!window.pdApi") is True
         page.route(
-            "**/api/**",
+            "**/api/protected",
             lambda route: route.fulfill(
                 status=401,
                 content_type="application/json",
@@ -98,7 +114,7 @@ def test_401_redirects_to_login(live_server: str, browser_page: Page) -> None:
         page.wait_for_url("**/login.html")
         assert page.url.endswith("login.html")
     finally:
-        page.context.close()
+        context.close()
 
 
 @pytest.mark.e2e

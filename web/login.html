@@ -57,52 +57,44 @@
     <button class="btn btn-primary login-btn" id="login-btn" type="submit">登入</button>
   </form>
 </div>
+<script src="api.js"></script>
 <script>
-  /* 工作階段：mock 存 localStorage；後端接線後改 server session。
-     首次使用（尚無授權用戶）→ 任意帳密皆可進入；新增用戶後 → 帳密驗證。 */
+  /* Backend-driven auth (spec 9.1). Submit POSTs /api/auth/login through the single
+     pdApi fetch layer; on success the server sets the HttpOnly pd_session cookie and
+     returns { username, name }, then we go to index.html. On a PdApiError (401 bad
+     creds, or 400 body validation) we show the message in #login-error — the api.js
+     401-redirect is suppressed on this page, so the error survives to be rendered.
+     No network call on load (the shell, not this page, routes signed-out users here);
+     empty-field validation stays client-side. */
   (function () {
-    function getUsers() { try { return JSON.parse(localStorage.getItem('pd_users') || '[]') || []; } catch (e) { return []; } }
-    function setSession(s) { try { localStorage.setItem('pd_session', JSON.stringify(s)); } catch (e) { /* noop */ } }
-    function getSession() { try { return JSON.parse(localStorage.getItem('pd_session') || 'null'); } catch (e) { return null; } }
-
     var userInput = document.getElementById('login-user');
     var passInput = document.getElementById('login-pass');
     var errEl = document.getElementById('login-error');
-    var hintEl = document.getElementById('login-hint');
-    var users = getUsers();
-    var sess = getSession();
+    var btn = document.getElementById('login-btn');
 
-    if (users.length === 0) {
-      hintEl.hidden = false;
-      hintEl.textContent = '首次使用：輸入任意帳號與密碼即可進入。稍後可於「系統設定 › 帳戶與費率 › 授權用戶」新增帳號與投資人稱號。';
-    } else if (sess && sess.locked && sess.username) {
-      userInput.value = sess.username;
-      hintEl.hidden = false;
-      hintEl.textContent = '畫面已鎖定 — 請輸入密碼解除鎖定。';
-      setTimeout(function () { passInput.focus(); }, 30);
-    }
+    function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
 
-    function submit() {
+    async function submit() {
       var u = userInput.value.trim();
       var p = passInput.value;
       errEl.hidden = true;
-      if (!u || !p) { errEl.textContent = '請輸入帳號與密碼'; errEl.hidden = false; return; }
-      if (users.length === 0) {
-        setSession({ username: u, name: u, ts: Date.now(), locked: false });
+      if (!u || !p) { showError('請輸入帳號與密碼'); return; }
+      btn.disabled = true;
+      try {
+        await window.pdApi.post('/api/auth/login', { username: u, password: p });
+        // Server set the pd_session cookie; head to the dashboard.
         window.location.href = 'index.html';
-        return;
-      }
-      var match = users.filter(function (x) { return x.username === u && x.password === p; })[0];
-      if (match) {
-        setSession({ username: match.username, name: match.name || match.username, ts: Date.now(), locked: false });
-        window.location.href = 'index.html';
-      } else {
-        errEl.textContent = '帳號或密碼錯誤';
-        errEl.hidden = false;
+      } catch (e) {
+        btn.disabled = false;
+        if (e && e.status === 401) {
+          showError('帳號或密碼錯誤');
+        } else {
+          showError((e && e.message) || '登入失敗');
+        }
       }
     }
 
-    document.getElementById('login-btn').addEventListener('click', submit);
+    btn.addEventListener('click', submit);
     userInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
     passInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
   })();

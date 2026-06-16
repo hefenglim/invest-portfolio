@@ -16,9 +16,11 @@
    pdApi does NOT toast. It THROWS a structured `PdApiError`; the CALLER catches
    and does `window.toast(err.message, 'fail', err.code)`. The ONE exception is
    401 → `window.location.replace('login.html')` (the single place that redirect
-   lives), after which the PdApiError is still thrown so in-flight callers stop.
-   402 / 409 / 503 are re-thrown WITHOUT redirect so the AI/insight block can
-   catch them and render a degraded state. */
+   lives), EXCEPT when already on login.html (a wrong-password POST /api/auth/login
+   returns 401; redirecting there would self-reload and swallow the form's error).
+   In all cases the PdApiError is still thrown so in-flight callers stop. 402 / 409 /
+   503 are re-thrown WITHOUT redirect so the AI/insight block can catch them and
+   render a degraded state. */
 (function () {
   'use strict';
 
@@ -99,8 +101,10 @@
       return JSON.parse(text);         // strings stay strings — NO coercion
     }
     const err = await _toError(resp);
-    if (resp.status === 401) {
-      // The ONE place the login redirect lives.
+    if (resp.status === 401 && !window.location.pathname.endsWith('login.html')) {
+      // The ONE place the login redirect lives — but NOT when we are already on the
+      // login page (a wrong-password POST /api/auth/login returns 401; redirecting
+      // there would self-reload and swallow the error the form needs to show).
       window.location.replace('login.html');
     }
     // 402 / 409 / 503 and all other non-2xx: throw so the caller can handle.
