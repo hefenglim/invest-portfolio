@@ -301,6 +301,98 @@ def test_trades_ledger_account_filter_keeps_rows(
 
 
 @pytest.mark.e2e
+def test_instruments_page_smoke(live_server: str, browser_page: object) -> None:
+    """/instruments.html list wired to the REAL /api/instruments (spec 19, Task 2.5).
+
+    After Task 2.5, instruments.js drops its inline window.INSTRUMENTS_DATA mock and
+    instead fetches GET /api/instruments through pdApi, then renders the list table from
+    Decimal-STRING money (last / chg_pct / target_low via window.fmt). The golden DB
+    seeds two instruments (2330 TWSE + AAPL US), so the table renders at least one row.
+
+    Waits for a POST-fetch selector (#inst-body tr, produced only after the
+    /api/instruments fetch resolves) so the assertion observes the populated table — not
+    just the empty shell — catching a Decimal-string `.toFixed`/`<=` TypeError, an
+    undefined field, or an unhandled fetch rejection. ZERO console + ZERO page errors.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/instruments.html", wait_until="load")
+        # One row lands once GET /api/instruments resolves (golden DB has 2330 + AAPL).
+        page.wait_for_selector("#inst-body tr")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/instruments.html (list wired): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_instruments_probe_shows_board_guess(
+    live_server: str, browser_page: object
+) -> None:
+    """Probe step hits the REAL POST /api/instruments/probe (spec 19, Task 2.5).
+
+    The TW board probe no longer reads an inline mock: clicking #probe-btn for a TW
+    symbol POSTs {symbol} to /api/instruments/probe and renders the returned board guess
+    into the probe card. Navigate /instruments.html, type 2330, click probe, then assert
+    (a) the probe card un-hides with a board guess and (b) ZERO console + page errors over
+    the interaction (catching an unhandled POST rejection or a botched response read).
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/instruments.html", wait_until="load")
+        page.wait_for_selector("#inst-body tr")  # list landed (page fully booted)
+        page.fill("#new-symbol", "2330")
+        # Market defaults to TW; clicking probe POSTs and un-hides the probe card.
+        with page.expect_response("**/api/instruments/probe") as resp_info:
+            page.click("#probe-btn")
+        assert resp_info.value.status == 200, f"probe status {resp_info.value.status}"
+        # The probe card un-hides with the rendered board guess.
+        page.wait_for_selector("#probe-card:not([hidden])")
+        text = page.inner_text("#probe-text")
+        assert text.strip(), "probe card rendered no board guess"
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/instruments.html (probe): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_ledger_page_smoke(live_server: str, browser_page: object) -> None:
     """/ledger.html (standalone ledger view) wired to /api/ledgers/* (spec 19, Task 2.4).
 

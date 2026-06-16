@@ -1,26 +1,15 @@
-/* portfolio-dash — 標的管理 (mock + rendering) */
-window.INSTRUMENTS_DATA = {
-  "as_of": "2026-06-11T14:30:00+08:00",
-  "probe_example": { "symbol": "2330", "name": "台積電", "board": "TWSE", "board_label": "TWSE 上市" },
-  "list": [
-    { "symbol": "2330", "name": "台積電", "market": "TW", "board": "TWSE", "sector": "半導體", "ccy": "TWD",
-      "held": true, "last": 612.5, "chg_pct": 0.012, "target_low": null },
-    { "symbol": "0056", "name": "元大高股息", "market": "TW", "board": "TWSE", "sector": "ETF", "ccy": "TWD",
-      "held": true, "last": 38.95, "chg_pct": 0.0021, "target_low": null },
-    { "symbol": "6488", "name": "環球晶", "market": "TW", "board": "TPEx", "sector": "半導體", "ccy": "TWD",
-      "held": false, "last": 488.00, "chg_pct": -0.008, "target_low": 450 },
-    { "symbol": "8069", "name": "元太", "market": "TW", "board": null, "sector": "光電", "ccy": "TWD",
-      "held": false, "last": null, "chg_pct": null, "target_low": 220 },
-    { "symbol": "AAPL", "name": "Apple", "market": "US", "board": "", "sector": "科技", "ccy": "USD",
-      "held": true, "last": 211.40, "chg_pct": 0.004, "target_low": null },
-    { "symbol": "1155.KL", "name": "Maybank", "market": "MY", "board": ".KL", "sector": "金融", "ccy": "MYR",
-      "held": true, "last": 9.870, "chg_pct": -0.003, "target_low": null }
-  ]
-};
+/* portfolio-dash — 標的管理 (wired to /api/instruments, spec 19/10).
 
+   The instrument list is fetched from GET /api/instruments through the single
+   pdApi fetch layer; the page no longer carries an inline mock. The probe step
+   (TW board guess) and registration both POST through pdApi. Money values
+   (last / chg_pct / target_low) arrive as Decimal STRINGS and are formatted via
+   window.fmt ONLY — the frontend never computes money. */
 (function () {
   'use strict';
-  const D = window.INSTRUMENTS_DATA;
+  /* D.list is mutable: starts empty (any pre-fetch render shows a blank table)
+     and is replaced by the fetched rows once GET /api/instruments resolves. */
+  let D = { list: [] };
   const f = window.fmt;
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
@@ -31,39 +20,101 @@ window.INSTRUMENTS_DATA = {
   };
   const MARKET_ZH = { TW: '台股', US: '美股', MY: '馬股' };
 
+  /* The confirmed board from the probe step, fed into the register POST. Set by
+     the probe flow; reset whenever a new probe begins. */
+  let probedSymbol = '';
+  let probedName = null;
+  let confirmedBoard = null;
+
   /* ---- probe flow ---- */
   const probeCard = $('#probe-card');
-  $('#probe-btn').addEventListener('click', () => {
-    const sym = $('#new-symbol').value.trim() || D.probe_example.symbol;
+  $('#probe-btn').addEventListener('click', async () => {
+    const sym = $('#new-symbol').value.trim();
     const market = $('#new-market').value;
-    if (market !== 'TW') {
-      probeCard.hidden = true;
-      $('#detail-form').hidden = false;
-      $('#df-title').textContent = sym + ' — 板別固定（' + (market === 'US' ? '美股' : '馬股 .KL') + '），直接填寫明細';
+    if (!sym) {
+      if (window.toast) window.toast('請先輸入代號', 'fail');
       return;
     }
+    probedSymbol = sym;
+    if (market !== 'TW') {
+      // US / MY: board is fixed (no TW board probe); go straight to detail form.
+      probedName = null;
+      confirmedBoard = market === 'US' ? '' : '.KL';
+      probeCard.hidden = true;
+      $('#unresolved-banner').hidden = true;
+      $('#detail-form').hidden = false;
+      $('#df-title').textContent =
+        sym + ' — 板別固定（' + (market === 'US' ? '美股' : '馬股 .KL') + '），直接填寫明細';
+      return;
+    }
+    // TW: probe the board through the real endpoint.
+    let resp;
+    try {
+      resp = await window.pdApi.post('/api/instruments/probe', { symbol: sym });
+    } catch (err) {
+      if (window.toast) window.toast('板別探測失敗', 'fail', err && err.message ? err.message : undefined);
+      return;
+    }
+    probedName = resp && resp.name ? resp.name : null;
+    confirmedBoard = (resp && resp.board) || 'TWSE';
     probeCard.hidden = false;
     $('#detail-form').hidden = true;
-    $('#probe-text').innerHTML = '<b class="num">' + sym + '</b> → ' + D.probe_example.name +
-      '，判定 <b>' + D.probe_example.board_label + '</b> — 正確嗎？';
+    $('#unresolved-banner').hidden = true;
+    const nameTxt = probedName ? '（' + probedName + '）' : '';
+    $('#probe-text').innerHTML = '<b class="num">' + sym + '</b>' + nameTxt +
+      ' → 判定 <b>' + (resp && resp.board_label ? resp.board_label : '未解析') + '</b> — 正確嗎？';
   });
   $('#probe-ok').addEventListener('click', () => {
+    confirmedBoard = confirmedBoard || 'TWSE';
     probeCard.hidden = true;
     $('#detail-form').hidden = false;
-    $('#df-title').textContent = D.probe_example.symbol + ' ' + D.probe_example.name + '（TWSE 上市）— 填寫明細後註冊';
+    $('#df-title').textContent =
+      probedSymbol + (probedName ? ' ' + probedName : '') + '（TWSE 上市）— 填寫明細後註冊';
   });
   $('#probe-tpex').addEventListener('click', () => {
+    confirmedBoard = 'TPEx';
     probeCard.hidden = true;
     $('#detail-form').hidden = false;
-    $('#df-title').textContent = D.probe_example.symbol + '（改判 TPEx 上櫃）— 填寫明細後註冊';
+    $('#df-title').textContent = probedSymbol + '（改判 TPEx 上櫃）— 填寫明細後註冊';
   });
   $('#probe-fail').addEventListener('click', () => {
+    // Unresolved: register with no board; the backend defaults to TWSE for pricing.
+    confirmedBoard = null;
     probeCard.hidden = true;
+    $('#detail-form').hidden = false;
+    $('#df-title').textContent = probedSymbol + '（板別未解析 — 以預設 TWSE 抓報價）— 填寫明細後註冊';
     $('#unresolved-banner').hidden = false;
-    window.toast('已暫存', 'ok', '8069 以預設 TWSE 抓報價，板別待確認');
+    if (window.toast) window.toast('已暫存', 'ok', probedSymbol + ' 以預設 TWSE 抓報價，板別待確認');
   });
-  $('#df-register').addEventListener('click', () =>
-    window.toast('註冊成功', 'ok', '標的已加入清單（設計稿）'));
+
+  /* ---- register: POST /api/instruments, then re-fetch the list ---- */
+  $('#df-register').addEventListener('click', async () => {
+    const market = $('#new-market').value;
+    const symbol = probedSymbol || $('#new-symbol').value.trim();
+    if (!symbol) {
+      if (window.toast) window.toast('請先查詢代號', 'fail');
+      return;
+    }
+    const body = {
+      symbol: symbol,
+      market: market,
+      name: ($('#df-name').value || '').trim(),
+      sector: ($('#df-sector').value || '').trim(),
+    };
+    // TW carries the confirmed board; US/MY leave board to the backend default.
+    if (market === 'TW' && confirmedBoard) body.board = confirmedBoard;
+    try {
+      await window.pdApi.post('/api/instruments', body);
+    } catch (err) {
+      // 409 duplicate_symbol / 400 validation_error -> surface the backend message.
+      if (window.toast) window.toast(err && err.message ? err.message : '註冊失敗', 'fail', err && err.code);
+      return;
+    }
+    if (window.toast) window.toast('註冊成功', 'ok', symbol + ' 已加入清單');
+    $('#detail-form').hidden = true;
+    $('#unresolved-banner').hidden = true;
+    await refresh();
+  });
 
   /* ---- list table ---- */
   const BOARD_BADGE = {
@@ -75,7 +126,7 @@ window.INSTRUMENTS_DATA = {
     tbody.replaceChildren();
     const q = (filter || '').trim().toLowerCase();
     D.list
-      .filter((i) => !q || i.symbol.toLowerCase().includes(q) || i.name.toLowerCase().includes(q))
+      .filter((i) => !q || i.symbol.toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q))
       .forEach((i) => {
         const tr = el('tr');
         const tdSym = el('td', 'col-text');
@@ -102,9 +153,9 @@ window.INSTRUMENTS_DATA = {
         tr.appendChild(el('td', 'col-text', i.sector));
         tr.appendChild(el('td', 'col-text', i.ccy));
 
-        /* 現價 + 漲跌 */
+        /* 現價 + 漲跌 (Decimal strings -> via fmt, never computed in JS) */
         const tdLast = el('td', 'num');
-        if (i.last === null) {
+        if (i.last === null || i.last === undefined) {
           tdLast.appendChild(el('span', 'sign-nil', f.NULL_GLYPH + ' '));
           const b = el('span', 'badge badge-missing', '缺價');
           b.title = '板別未解析或來源無資料';
@@ -117,12 +168,16 @@ window.INSTRUMENTS_DATA = {
 
         /* 目標價提醒 */
         const tdTgt = el('td', 'num');
-        if (i.target_low === null) {
+        if (i.target_low === null || i.target_low === undefined) {
           tdTgt.textContent = f.NULL_GLYPH;
           tdTgt.classList.add('sign-nil');
         } else {
           tdTgt.textContent = '≤ ' + f.price(i.target_low, i.ccy);
-          if (i.last !== null && i.last <= i.target_low) {
+          /* Display-only触價 flag: a boolean UI decision, not a money value of record.
+             Coerce the two Decimal strings purely to pick the badge; nothing computed
+             from money is stored or shown. */
+          if (i.last !== null && i.last !== undefined &&
+              Number(i.last) <= Number(i.target_low)) {
             tdTgt.appendChild(document.createTextNode(' '));
             tdTgt.appendChild(el('span', 'badge badge-stale-mini', '已觸價'));
           }
@@ -142,8 +197,19 @@ window.INSTRUMENTS_DATA = {
         if (i.market === 'TW') {
           const rp = el('button', 'btn', '重新探測'); rp.type = 'button';
           rp.title = '重新探測 TWSE / TPEx 板別';
-          rp.addEventListener('click', () =>
-            window.toast('探測完成', 'ok', i.symbol + ' 板別維持 ' + (i.board || '未解析') + '（設計稿）'));
+          rp.addEventListener('click', async () => {
+            let resp;
+            try {
+              resp = await window.pdApi.post('/api/instruments/probe', { symbol: i.symbol });
+            } catch (err) {
+              if (window.toast) window.toast('探測失敗', 'fail', err && err.message ? err.message : undefined);
+              return;
+            }
+            if (window.toast) {
+              window.toast('探測完成', 'ok',
+                i.symbol + ' 判定 ' + (resp && resp.board_label ? resp.board_label : '未解析'));
+            }
+          });
           acts.appendChild(rp);
         }
         tdAct.appendChild(acts);
@@ -173,7 +239,7 @@ window.INSTRUMENTS_DATA = {
     const tgtIn = el('input', 'input');
     tgtIn.type = 'number'; tgtIn.min = '0'; tgtIn.step = i.ccy === 'MYR' ? '0.001' : '0.01';
     tgtIn.placeholder = '留空 = 不提醒';
-    if (i.target_low !== null) tgtIn.value = i.target_low;
+    if (i.target_low !== null && i.target_low !== undefined) tgtIn.value = i.target_low;
     body.appendChild(fld('目標價提醒（現價 ≤ 此值時提醒，' + i.ccy + '）', tgtIn));
     body.appendChild(el('div', 'hint', '市場與幣別由註冊流程決定，不可更改；台股板別請用「重新探測」。'));
     modal.appendChild(body);
@@ -187,18 +253,45 @@ window.INSTRUMENTS_DATA = {
     close.addEventListener('click', dismiss);
     cancel.addEventListener('click', dismiss);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
-    ok.addEventListener('click', () => {
-      i.sector = secIn.value.trim() || i.sector;
-      const t = parseFloat(tgtIn.value);
-      i.target_low = (tgtIn.value.trim() === '' || isNaN(t) || t <= 0) ? null : t;
+    ok.addEventListener('click', async () => {
+      const sector = secIn.value.trim();
+      const raw = tgtIn.value.trim();
+      /* target_low rides through as a STRING (never parseFloat'd into money). Empty
+         clears it; otherwise pass the raw string to the backend Decimal column. */
+      const body2 = { sector: sector || i.sector };
+      body2.target_low = raw === '' ? null : raw;
+      try {
+        await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol), body2);
+      } catch (err) {
+        if (window.toast) window.toast(err && err.message ? err.message : '儲存失敗', 'fail', err && err.code);
+        return;
+      }
       dismiss();
-      render($('#inst-search').value);
-      window.toast('已儲存', 'ok', i.symbol + '：目標價' + (i.target_low === null ? '已關閉' : ' ≤ ' + f.price(i.target_low, i.ccy)) + '（設計稿）');
+      if (window.toast) window.toast('已儲存', 'ok', i.symbol + ' 已更新');
+      await refresh();
     });
     document.body.appendChild(backdrop);
     setTimeout(() => tgtIn.focus(), 50);
   }
 
-  render();
+  /* Fetch the instrument list and (re)render. Graceful degradation: on failure leave
+     the table empty and surface ONE toast — never an unhandled rejection (the e2e smoke
+     asserts zero console errors). 401 is handled inside api.js. */
+  async function refresh() {
+    let resp;
+    try {
+      resp = await window.pdApi.get('/api/instruments');
+    } catch (err) {
+      D = { list: [] };
+      render($('#inst-search').value);
+      if (window.toast) window.toast('標的清單載入失敗', 'fail', err && err.message ? err.message : undefined);
+      return;
+    }
+    D = { list: (resp && resp.list) || [] };
+    render($('#inst-search').value);
+  }
+
+  render();  // empty table before the fetch resolves
   $('#inst-search').addEventListener('input', (e) => render(e.target.value));
+  refresh();
 })();
