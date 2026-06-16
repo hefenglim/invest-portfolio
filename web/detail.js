@@ -1,11 +1,23 @@
 /* portfolio-dash — 個股詳情抽屜.
    openSymbolDrawer(symbol): price history + cost lines + dividend/trade markers,
    報酬貢獻拆分 (capital gain vs dividends), 配息史, 已實現記錄, 試算 (compute-only).
-   Requires: format.js, history-mock.js, echarts; uses DASHBOARD_DATA when present. */
+
+   DATA SOURCE (spec 19, Task 2.3): the drawer fetches its OWN data on open —
+     · GET /api/symbol/{symbol}/detail  → price_history / cost_basis / dividend_events /
+       trade_events / realized_rows (all Decimal money/price as STRINGS).
+     · the shared window.pdDashboard promise (GET /api/dashboard, reused from app.js /
+       charts.js / alerts.js) → the rich holding summary `h` (name, market, market_price,
+       weight, market_value, unrealized_pnl, capital_gain, …) which the detail endpoint
+       does NOT carry. Fetched ONCE per page; created here when not already present.
+   Money/price values are Decimal STRINGS — displayed via window.fmt (f.*), which coerces
+   internally; the drawer NEVER sums or compares them as money. The 試算 (what-if) block
+   is the documented spec-03 exception: a local fee/P&L estimate over USER INPUT only
+   (window.pdFeeTax mirror), never a display of backend money-of-record.
+
+   Requires: api.js (window.pdApi), format.js, echarts. */
 (function () {
   'use strict';
   const f = window.fmt;
-  const H = window.PD_HISTORY;
   const $ = (s, root) => (root || document).querySelector(s);
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -19,13 +31,32 @@
     moomoo_my_us: 'Moomoo 美股', moomoo_my_my: 'Moomoo 馬股'
   };
   const MARKET_ZH = { TW: '台股', US: '美股', MY: '馬股' };
-  /* mock spot rates to reporting ccy (derived from the dashboard mock) */
+  /* dividend wire type (lowercase, from /detail) -> display chip label */
+  const DIV_TYPE_ZH = { cash: '現金', drip: 'DRIP', stock: '配股', net: '淨額' };
+  /* 試算-only approximate spot rates to the reporting ccy (TWD), used SOLELY inside the
+     local what-if weight estimate (documented spec-03 exception). NOT a display path for
+     backend money — every backend Decimal is rendered via f.* untouched. The dashboard
+     payload carries no per-currency spot table, so the what-if weight is an estimate; the
+     real权重 shown in 部位摘要 comes from the backend (h.weight). */
   const FX_TO_TWD = { TWD: 1, USD: 32.90, MYR: 7.05 };
 
+  /* Shared /api/dashboard promise — the SAME one app.js / charts.js / alerts.js use, so
+     opening the drawer on the dashboard reuses the in-flight/resolved payload (one fetch).
+     Off-dashboard, this creates it once. holdings[] here is the rich holding summary. */
+  function dashboardPromise() {
+    return (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
+  }
+
+  /* The resolved holdings list (set once both fetches land in openSymbolDrawer); used by
+     prev/next cycling. Null until a successful open; cycling is disabled while null. */
+  let currentHoldings = null;
+  /* The resolved dashboard payload (set alongside currentHoldings); the 試算 block reads
+     kpis.total_market_value from it for the local 新權重 estimate. Null until first open. */
+  let currentDash = null;
+
   function holdingOf(symbol) {
-    const D = window.DASHBOARD_DATA;
-    if (!D || !D.holdings) return null;
-    return D.holdings.find((h) => h.symbol === symbol) || null;
+    if (!currentHoldings) return null;
+    return currentHoldings.find((h) => h.symbol === symbol) || null;
   }
 
   function cssVar(name) {
@@ -70,11 +101,10 @@
   }
   function onKey(e) {
     if (e.key === 'Escape') { close(); return; }
-    /* E6: ←/→ 切換上一檔/下一檔持倉 */
+    /* E6: ←/→ 切換上一檔/下一檔持倉（持倉清單來自已載入的 /api/dashboard；未就緒則停用） */
     if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.target.closest('input, textarea, select')) {
-      const D = window.DASHBOARD_DATA;
-      if (!D || !D.holdings || !currentSymbol) return;
-      const syms = D.holdings.map((h) => h.symbol);
+      if (!currentHoldings || !currentHoldings.length || !currentSymbol) return;
+      const syms = currentHoldings.map((h) => h.symbol);
       const i = syms.indexOf(currentSymbol);
       if (i < 0) return;
       e.preventDefault();
@@ -87,15 +117,64 @@
   window.openSymbolDrawer = function (symbol) {
     close();
     currentSymbol = symbol;
-    const h = holdingOf(symbol);
+
+    /* Synchronous scaffold: backdrop + drawer + keydown are wired immediately so Esc /
+       backdrop-click / open-close work even while data is loading; the data-dependent
+       head + sections render AFTER both fetches resolve. */
     const backdrop = el('div', 'sd-backdrop');
     const drawer = el('div', 'sd-drawer');
     backdrop.appendChild(drawer);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
     document.addEventListener('keydown', onKey);
 
-    /* head */
     const head = el('div', 'sd-head');
+    head.appendChild(el('span', 'sym-code', symbol));
+    head.appendChild(el('span', 'sd-loading', '載入中…'));
+    const x = el('button', 'sd-close', '✕');
+    x.type = 'button';
+    x.title = '關閉（Esc）・←/→ 切換持倉';
+    x.addEventListener('click', close);
+    head.appendChild(x);
+    drawer.appendChild(head);
+
+    const body = el('div', 'sd-body');
+    drawer.appendChild(body);
+    document.body.appendChild(backdrop);
+
+    /* Fetch BOTH in parallel: the per-symbol detail + the shared dashboard payload (the
+       latter supplies the rich holding summary `h`). Render only after both land; on any
+       failure, show a graceful in-drawer error — never an unhandled rejection (the e2e
+       smoke asserts ZERO console errors). */
+    Promise.all([
+      window.pdApi.get('/api/symbol/' + encodeURIComponent(symbol) + '/detail'),
+      dashboardPromise()
+    ]).then(([detail, dash]) => {
+      if (currentSymbol !== symbol) return;  // a newer open superseded this one
+      currentDash = dash || null;
+      currentHoldings = (dash && dash.holdings) || [];
+      const h = holdingOf(symbol);
+      renderDrawer(drawer, head, body, symbol, detail, h);
+    }).catch((err) => {
+      if (currentSymbol !== symbol) return;
+      head.replaceChildren(el('span', 'sym-code', symbol));
+      const x2 = el('button', 'sd-close', '✕'); x2.type = 'button';
+      x2.addEventListener('click', close);
+      head.appendChild(x2);
+      body.replaceChildren(window.emptyState
+        ? window.emptyState('標的資料載入失敗，請稍後再試。')
+        : el('div', 'sd-empty', '標的資料載入失敗，請稍後再試。'));
+      if (window.toast) {
+        window.toast('標的資料載入失敗', 'fail', err && err.message ? err.message : undefined);
+      }
+    });
+  };
+
+  /* Render head + sections once both /detail and /dashboard have resolved. `h` is the
+     rich dashboard holding summary (null for an unheld / watchlist symbol); `detail` is
+     the /api/symbol/{symbol}/detail payload. */
+  function renderDrawer(drawer, head, body, symbol, detail, h) {
+    /* head */
+    head.replaceChildren();
     head.appendChild(el('span', 'sym-code', symbol));
     if (h) {
       head.appendChild(el('span', 'sym-name', h.name));
@@ -125,24 +204,21 @@
     x.title = '關閉（Esc）・←/→ 切換持倉';
     x.addEventListener('click', close);
     head.appendChild(x);
-    drawer.appendChild(head);
 
     /* body */
-    const body = el('div', 'sd-body');
-    drawer.appendChild(body);
-    body.appendChild(chartSection(symbol, h));
+    body.replaceChildren();
+    body.appendChild(chartSection(detail, h));
     if (h) {
       body.appendChild(statsSection(h));
       body.appendChild(splitSection(h));
       body.appendChild(simSection(h));
-      body.appendChild(dividendSection(symbol, h));
-      body.appendChild(realizedSection(symbol, h));
+      body.appendChild(dividendSection(symbol, detail));
+      body.appendChild(realizedSection(symbol, detail));
     } else {
       body.appendChild(el('div', 'sd-empty', '此標的不在持倉中 — 僅顯示價格走勢（觀察清單標的）。'));
     }
-    document.body.appendChild(backdrop);
-    renderChart(symbol, h);
-  };
+    renderChart(detail, h);
+  }
 
   /* ---------- sections ---------- */
   function secHead(title, sub, extra) {
@@ -154,36 +230,40 @@
     return head;
   }
 
-  function chartSection(symbol, h) {
+  function chartSection(detail, h) {
     const sec = el('div', 'sd-section');
     sec.appendChild(secHead('價格與成本', '日線・配息與買賣事件標記'));
-    const s = H.series(symbol);
-    if (!s.available) {
-      sec.appendChild(window.emptyState ? window.emptyState(s.note) : el('div', 'sd-empty', s.note));
+    const ph = detail.price_history || {};
+    if (!ph.available) {
+      const note = ph.note || '無歷史價格資料';
+      sec.appendChild(window.emptyState ? window.emptyState(note) : el('div', 'sd-empty', note));
       return sec;
     }
-    if (s.note) sec.appendChild(el('div', 'sd-chart-note', s.note));
+    if (ph.note) sec.appendChild(el('div', 'sd-chart-note', ph.note));
+    if (ph.stale && ph.last_date) {
+      sec.appendChild(el('div', 'sd-chart-note', '價格過期：最後報價 ' + f.date(ph.last_date)));
+    }
     const box = el('div'); box.id = 'sd-chart';
     sec.appendChild(box);
-    sec.appendChild(el('div', 'sd-mock-note', '歷史價格為設計用模擬序列 — 後端 get_price_history 接線後顯示真實日線。'));
     return sec;
   }
 
-  function renderChart(symbol, h) {
+  function renderChart(detail, h) {
     const box = document.getElementById('sd-chart');
     if (!box || !window.echarts) return;
-    const s = H.series(symbol);
-    if (!s.available) return;
-    const ev = H.events(symbol);
+    const ph = detail.price_history || {};
+    if (!ph.available || !ph.points || !ph.points.length) return;
     chart = echarts.init(box, null, { renderer: 'canvas' });
-    const dates = s.points.map((p) => p.date);
-    const closes = s.points.map((p) => p.close);
+    const dates = ph.points.map((p) => p.date);
+    /* close is a Decimal STRING from the API; Number() it ONLY to feed the ECharts numeric
+       series + markPoint coords (chart plotting). All DISPLAY labels go through f.*. */
+    const closes = ph.points.map((p) => Number(p.close));
     const markLines = [];
     if (h) {
-      markLines.push({ yAxis: h.original_avg, name: '原始均價',
+      markLines.push({ yAxis: Number(h.original_avg), name: '原始均價',
         lineStyle: { color: cssVar('--series-gray'), type: 'dashed' },
         label: { formatter: '原始均價 ' + f.price(h.original_avg, h.quote_ccy), position: 'insideEndTop', color: cssVar('--text-3'), fontSize: 10 } });
-      markLines.push({ yAxis: h.adjusted_avg, name: '調整均價',
+      markLines.push({ yAxis: Number(h.adjusted_avg), name: '調整均價',
         lineStyle: { color: cssVar('--series-myr'), type: 'dashed' },
         label: { formatter: '調整均價 ' + f.price(h.adjusted_avg, h.quote_ccy), position: 'insideEndBottom', color: cssVar('--series-myr'), fontSize: 10 } });
     }
@@ -192,21 +272,23 @@
       for (let i = 0; i < dates.length; i++) { if (dates[i] > date) break; last = closes[i]; }
       return last;
     };
+    const quoteCcy = h ? h.quote_ccy : null;
     const markPoints = [];
-    ev.dividends.forEach((d) => {
+    (detail.dividend_events || []).forEach((d) => {
       if (d.date < dates[0]) return;
+      const label = DIV_TYPE_ZH[d.type] || d.type;
       markPoints.push({ coord: [d.date, closeOn(d.date)], name: '配息',
         symbol: 'pin', symbolSize: 26, itemStyle: { color: cssVar('--series-myr') },
         label: { formatter: '息', fontSize: 9, color: '#0c1015' },
-        value: d.type + ' ' + (d.net !== null ? f.money(d.net, d.ccy) + ' ' + d.ccy : '') });
+        value: label + ' ' + (d.net !== null && d.net !== undefined ? f.money(d.net, d.ccy) + ' ' + (d.ccy || '') : '') });
     });
-    ev.trades.forEach((t) => {
+    (detail.trade_events || []).forEach((t) => {
       if (t.date < dates[0]) return;
       const isBuy = t.side !== 'sell';
       markPoints.push({ coord: [t.date, closeOn(t.date)], name: isBuy ? '買進' : '賣出',
         symbol: isBuy ? 'triangle' : 'arrow', symbolSize: 9, symbolRotate: isBuy ? 0 : 180,
         itemStyle: { color: isBuy ? cssVar('--accent') : cssVar('--text-2') },
-        value: (t.side === 'open' ? '期初 ' : isBuy ? '買 ' : '賣 ') + f.num(t.shares) + ' 股 @ ' + t.price });
+        value: (t.side === 'open' ? '期初 ' : isBuy ? '買 ' : '賣 ') + f.num(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
     });
     chart.setOption({
       animation: false,
@@ -215,7 +297,7 @@
         trigger: 'axis',
         backgroundColor: cssVar('--panel-2'), borderColor: cssVar('--border'),
         textStyle: { color: cssVar('--text'), fontSize: 11 },
-        valueFormatter: (v) => f.price(v, h ? h.quote_ccy : 'USD')
+        valueFormatter: (v) => f.price(v, quoteCcy)
       },
       xAxis: { type: 'category', data: dates, boundaryGap: false,
         axisLine: { lineStyle: { color: cssVar('--border') } },
@@ -248,8 +330,11 @@
       if (sub) d.appendChild(el('span', 's', sub));
       return d;
     };
-    const pnlPct = (h.unrealized_pnl !== null && h.adjusted_cost_total)
-      ? f.signedPct(h.unrealized_pnl / h.adjusted_cost_total) : null;
+    /* unrealized % vs adjusted cost: both are Decimal STRINGS; coerce locally for the
+       ratio (a derived display percentage), guarding a zero/empty denominator. */
+    const adjTotalN = Number(h.adjusted_cost_total);
+    const pnlPct = (h.unrealized_pnl != null && adjTotalN)
+      ? f.signedPct(Number(h.unrealized_pnl) / adjTotalN) : null;
     grid.appendChild(stat('股數', f.num(h.shares)));
     grid.appendChild(stat('市值', h.market_value === null ? f.NULL_GLYPH : f.money(h.market_value, h.quote_ccy), h.market_value === null ? '缺價' : h.quote_ccy));
     grid.appendChild(stat('未實現損益', h.unrealized_pnl === null ? f.NULL_GLYPH : f.signed(h.unrealized_pnl, h.quote_ccy), pnlPct, f.signClass(h.unrealized_pnl)));
@@ -271,16 +356,22 @@
       sec.appendChild(wrap);
       return sec;
     }
+    /* cap / div are backend Decimal STRINGS; coerce to local numbers ONLY for the bar-width
+       geometry and sign decisions. The displayed cap / div values render via f.* on the
+       original strings; the 合計 total is the numeric decomposition sum (presentation-only —
+       the cap-vs-dividend split is a UI breakdown, not a money figure of record). */
     const cap = h.capital_gain;
-    const div = h.dividend_portion || 0;
-    const total = cap + div;
+    const div = h.dividend_portion != null ? h.dividend_portion : 0;
+    const capN = Number(cap);
+    const divN = Number(div);
+    const totalN = capN + divN;
     const bar = el('div', 'sd-split-bar');
-    if (total > 0) {
-      const capSeg = el('span', cap >= 0 ? 'seg-cap' : 'seg-neg');
-      capSeg.style.width = Math.max(0, (cap / total) * 100) + '%';
+    if (totalN > 0) {
+      const capSeg = el('span', capN >= 0 ? 'seg-cap' : 'seg-neg');
+      capSeg.style.width = Math.max(0, (capN / totalN) * 100) + '%';
       capSeg.title = '資本利得 ' + f.signed(cap, h.quote_ccy);
       const divSeg = el('span', 'seg-div');
-      divSeg.style.width = Math.max(0, (div / total) * 100) + '%';
+      divSeg.style.width = Math.max(0, (divN / totalN) * 100) + '%';
       divSeg.title = '股利貢獻 ' + f.money(div, h.quote_ccy);
       bar.appendChild(capSeg);
       bar.appendChild(divSeg);
@@ -298,22 +389,24 @@
     };
     legend.appendChild(item('cap', '資本利得', f.signed(cap, h.quote_ccy) + ' ' + h.quote_ccy));
     legend.appendChild(item('div', '股利貢獻', f.money(div, h.quote_ccy) + ' ' + h.quote_ccy));
-    legend.appendChild(item('cap', '合計', f.signed(total, h.quote_ccy) + ' ' + h.quote_ccy));
+    legend.appendChild(item('cap', '合計', f.signed(totalN, h.quote_ccy) + ' ' + h.quote_ccy));
     wrap.appendChild(legend);
     sec.appendChild(wrap);
     return sec;
   }
 
-  function dividendSection(symbol, h) {
+  function dividendSection(symbol, detail) {
     const sec = el('div', 'sd-section');
-    const ev = H.events(symbol);
-    const rows = ev.dividends;
+    const rows = detail.dividend_events || [];
+    const typeZh = (d) => DIV_TYPE_ZH[d.type] || d.type;
     let exportBtn = null;
     if (window.pdExport && rows.length) {
       exportBtn = window.pdExport.button(() => ({
         filename: symbol + '_dividends.csv',
         headers: ['日期', '類型', 'Gross', 'Net', '再投資股數', '再投資價格', '幣別'],
-        rows: rows.map((d) => [d.date, d.type, d.gross, d.net, d.reinvest_shares || '', d.reinvest_price || '', d.ccy])
+        rows: rows.map((d) => [d.date, typeZh(d),
+          d.gross == null ? '' : d.gross, d.net == null ? '' : d.net,
+          d.reinvest_shares || '', d.reinvest_price || '', d.ccy || ''])
       }));
     }
     sec.appendChild(secHead('配息史', '帳本 dividends・' + rows.length + ' 筆', exportBtn));
@@ -333,9 +426,10 @@
       const tr = el('tr');
       tr.appendChild(el('td', 'col-text num', d.date));
       const tdType = el('td', 'col-text');
-      tdType.appendChild(el('span', 'type-chip ' + (d.type === 'DRIP' ? 'chip-drip' : d.type === '配股' ? 'chip-stock' : d.type === '淨額' ? 'chip-net' : 'chip-cash'), d.type));
+      const chipCls = d.type === 'drip' ? 'chip-drip' : d.type === 'stock' ? 'chip-stock' : d.type === 'net' ? 'chip-net' : 'chip-cash';
+      tdType.appendChild(el('span', 'type-chip ' + chipCls, typeZh(d)));
       tr.appendChild(tdType);
-      tr.appendChild(el('td', 'num', d.gross === null ? f.NULL_GLYPH : f.money(d.gross, d.ccy)));
+      tr.appendChild(el('td', 'num', d.gross == null ? f.NULL_GLYPH : f.money(d.gross, d.ccy)));
       tr.appendChild(el('td', 'num', f.money(d.net, d.ccy)));
       tr.appendChild(el('td', 'num', d.reinvest_shares ? f.num(d.reinvest_shares, 4) + ' 股 @ ' + f.price(d.reinvest_price, d.ccy) : f.NULL_GLYPH));
       tbody.appendChild(tr);
@@ -346,10 +440,9 @@
     return sec;
   }
 
-  function realizedSection(symbol, h) {
+  function realizedSection(symbol, detail) {
     const sec = el('div', 'sd-section');
-    const D = window.DASHBOARD_DATA;
-    const rows = (D && D.realized && D.realized.rows || []).filter((r) => r.symbol === symbol);
+    const rows = detail.realized_rows || [];
     sec.appendChild(secHead('已實現記錄', rows.length ? rows.length + ' 筆' : null));
     if (!rows.length) {
       sec.appendChild(el('div', 'sd-empty', '此標的尚無已實現損益'));
@@ -398,8 +491,17 @@
       return { fd, inp };
     };
     const dp = h.quote_ccy === 'MYR' ? '0.001' : '0.01';
-    const shares = mkField('股數', 'sim-shares', Math.min(h.shares, h.shares), '1');
-    const price = mkField('價格（' + h.quote_ccy + '）', 'sim-price', h.market_price !== null ? h.market_price : '', dp);
+    /* 試算-LOCAL numeric copies of the holding's Decimal-STRING fields. The what-if is the
+       documented spec-03 exception (a local estimate over user input, not money-of-record
+       display): coerce ONCE here so the local arithmetic (+/-) is numeric, never string
+       concatenation. Every DISPLAY of these still routes through f.* on the computed value. */
+    const hShares = Number(h.shares);
+    const hAdjAvg = Number(h.adjusted_avg);
+    const hMktPrice = (h.market_price === null || h.market_price === undefined) ? null : Number(h.market_price);
+    const hOrigTotal = Number(h.original_cost_total);
+    const hAdjTotal = Number(h.adjusted_cost_total);
+    const shares = mkField('股數', 'sim-shares', hShares, '1');
+    const price = mkField('價格（' + h.quote_ccy + '）', 'sim-price', hMktPrice !== null ? hMktPrice : '', dp);
     controls.appendChild(shares.fd);
     controls.appendChild(price.fd);
     box.appendChild(controls);
@@ -410,7 +512,7 @@
     box.appendChild(note);
 
     let mode = 'sell';
-    bSell.addEventListener('click', () => { mode = 'sell'; bSell.classList.add('active'); bBuy.classList.remove('active'); shares.inp.value = h.shares; compute(); });
+    bSell.addEventListener('click', () => { mode = 'sell'; bSell.classList.add('active'); bBuy.classList.remove('active'); shares.inp.value = hShares; compute(); });
     bBuy.addEventListener('click', () => { mode = 'buy'; bBuy.classList.add('active'); bSell.classList.remove('active'); shares.inp.value = ''; compute(); });
     shares.inp.addEventListener('input', compute);
     price.inp.addEventListener('input', compute);
@@ -433,19 +535,21 @@
       }
       const ft = feeTax(h, mode, qty, px);
       const amount = qty * px;
-      const D = window.DASHBOARD_DATA;
-      const totalTwd = D && D.kpis && D.kpis.total_market_value;
+      /* total reporting-ccy market value for the local 新權重 estimate — Decimal STRING
+         from the shared dashboard payload; Number() ONCE for the local what-if math. */
+      const totalRaw = currentDash && currentDash.kpis && currentDash.kpis.total_market_value;
+      const totalTwd = (totalRaw === null || totalRaw === undefined) ? null : Number(totalRaw);
       const fxRate = FX_TO_TWD[h.quote_ccy] || 1;
 
       if (mode === 'sell') {
-        if (qty > h.shares) {
-          note.textContent = '⚠ 賣出股數 ' + f.num(qty) + ' 超過持有 ' + f.num(h.shares) + ' — 實際寫入時將要求確認（輸入錯誤或放空）。';
+        if (qty > hShares) {
+          note.textContent = '⚠ 賣出股數 ' + f.num(qty) + ' 超過持有 ' + f.num(hShares) + ' — 實際寫入時將要求確認（輸入錯誤或放空）。';
         }
         const proceeds = amount - ft.fee - ft.tax;
-        const costRemoved = h.adjusted_avg * qty;
+        const costRemoved = hAdjAvg * qty;
         const realized = proceeds - costRemoved;
-        const remainShares = Math.max(0, h.shares - qty);
-        const remainValue = h.market_price !== null ? remainShares * h.market_price : null;
+        const remainShares = Math.max(0, hShares - qty);
+        const remainValue = hMktPrice !== null ? remainShares * hMktPrice : null;
         result.appendChild(kv('成交金額', f.money(amount, h.quote_ccy) + ' ' + h.quote_ccy));
         result.appendChild(kv('手續費', f.money(ft.fee, h.quote_ccy)));
         result.appendChild(kv('稅', f.money(ft.tax, h.quote_ccy)));
@@ -454,16 +558,16 @@
         result.appendChild(kv('已實現損益', f.signed(realized, h.quote_ccy) + ' ' + h.quote_ccy, f.signClass(realized)));
         result.appendChild(kv('剩餘股數', f.num(remainShares)));
         if (remainValue !== null && totalTwd) {
-          const newTotal = totalTwd - (qty * h.market_price * fxRate) + (proceeds - amount) * fxRate;
+          const newTotal = totalTwd - (qty * hMktPrice * fxRate) + (proceeds - amount) * fxRate;
           result.appendChild(kv('剩餘市值', f.money(remainValue, h.quote_ccy) + ' ' + h.quote_ccy));
           result.appendChild(kv('新權重（約）', f.pct((remainValue * fxRate) / newTotal)));
         }
         if (!note.textContent) note.textContent = '費稅規則：' + ft.rule + '。已實現損益以調整均價計算。';
       } else {
         const cost = amount + ft.fee + ft.tax;
-        const newShares = h.shares + qty;
-        const newOrigTotal = h.original_cost_total + cost;
-        const newAdjTotal = h.adjusted_cost_total + cost;
+        const newShares = hShares + qty;
+        const newOrigTotal = hOrigTotal + cost;
+        const newAdjTotal = hAdjTotal + cost;
         result.appendChild(kv('成交金額', f.money(amount, h.quote_ccy) + ' ' + h.quote_ccy));
         result.appendChild(kv('手續費', f.money(ft.fee, h.quote_ccy)));
         result.appendChild(kv('稅', f.money(ft.tax, h.quote_ccy)));
@@ -471,9 +575,9 @@
         result.appendChild(kv('新持股', f.num(newShares)));
         result.appendChild(kv('新原始均價', f.price(newOrigTotal / newShares, h.quote_ccy)));
         result.appendChild(kv('新調整均價', f.price(newAdjTotal / newShares, h.quote_ccy)));
-        if (h.market_price !== null && totalTwd) {
-          const newValue = newShares * h.market_price;
-          const newTotal = totalTwd + (qty * h.market_price * fxRate);
+        if (hMktPrice !== null && totalTwd) {
+          const newValue = newShares * hMktPrice;
+          const newTotal = totalTwd + (qty * hMktPrice * fxRate);
           result.appendChild(kv('新權重（約）', f.pct((newValue * fxRate) / newTotal)));
         }
         note.textContent = '費稅規則：' + ft.rule + '。';

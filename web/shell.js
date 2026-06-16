@@ -116,8 +116,10 @@
   }
 
   /* ===== 全域個股抽屜：任何頁面點擊代號都「就地」彈出，不再跳轉儀表板 =====
-     抽屜本體在 detail.js。非儀表板頁首次呼叫時惰性載入相依檔（echarts／格式／
-     mock／history），之後即時開啟；唯有載入失敗才退回深連結導頁。 */
+     抽屜本體在 detail.js。非儀表板頁首次呼叫時惰性載入相依檔（api／echarts／格式），
+     之後即時開啟；唯有載入失敗才退回深連結導頁。抽屜自行 fetch
+     GET /api/symbol/{symbol}/detail + 共用的 /api/dashboard（Task 2.3），不再載入
+     mock-data.js／history-mock.js（那些檔案的退役為 Phase-3 的 Task 3.1）。 */
   function pdScriptLoaded(src) {
     const name = src.split('/').pop().split('?')[0];
     return Array.from(document.scripts).some((s) =>
@@ -147,10 +149,11 @@
     if (pdDrawerPromise) return pdDrawerPromise;
     pdLoadCss('detail.css');
     const echartsCdn = 'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js';
-    pdDrawerPromise = (window.echarts ? Promise.resolve() : pdLoadScript(echartsCdn))
+    /* detail.js fetches its own data via window.pdApi, so ensure the fetch layer + format
+       + echarts are present; it no longer needs mock-data.js / history-mock.js. */
+    pdDrawerPromise = pdEnsureApi()
+      .then(() => (window.echarts ? null : pdLoadScript(echartsCdn)))
       .then(() => (window.fmt ? null : pdLoadScript('format.js')))
-      .then(() => (window.DASHBOARD_DATA ? null : pdLoadScript('mock-data.js')))
-      .then(() => (window.PD_HISTORY ? null : pdLoadScript('history-mock.js')))
       .then(() => pdLoadScript('detail.js'));
     return pdDrawerPromise;
   }

@@ -54,6 +54,99 @@ def test_settings_accounts_shell_smoke(
 
 
 @pytest.mark.e2e
+def test_symbol_detail_drawer_held_smoke(
+    live_server: str, browser_page: object
+) -> None:
+    """Symbol-detail drawer wired to /api/symbol/{symbol}/detail (spec 19, Task 2.3).
+
+    The drawer is opened by INTERACTION, not a page load, so this navigates /index.html
+    (golden DB), waits for the dashboard render, then triggers the drawer via
+    window.pdOpenSymbol('2330') (2330 is a held golden symbol with one stored price row).
+    The drawer fetches BOTH /api/symbol/2330/detail AND the shared /api/dashboard promise,
+    then renders head + chart (#sd-chart) + the holding sections from Decimal-STRING money.
+
+    Asserts the FULL async wiring renders with ZERO console errors + ZERO uncaught page
+    errors — catching the async boot, the chart rewire (price_history/trade_events), and
+    any undefined-field / Decimal-string `.toFixed` TypeError.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")  # dashboard async render landed
+        page.evaluate("() => window.pdOpenSymbol('2330')")
+        page.wait_for_selector(".sd-drawer")
+        page.wait_for_selector("#sd-chart")  # chart rendered from real price_history
+        # The head re-renders with the holding summary after both fetches resolve.
+        page.wait_for_selector(".sd-drawer .sym-name")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"symbol drawer (held 2330): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_symbol_detail_drawer_watchlist_smoke(
+    live_server: str, browser_page: object
+) -> None:
+    """Drawer watchlist (unheld) variant (spec 19, Task 2.3).
+
+    MSFT is not an instrument in the golden DB, so /api/symbol/MSFT/detail returns
+    cost_basis=null + price_history.available=false and it is absent from /api/dashboard
+    holdings -> the rich holding `h` is null. The drawer must NOT crash: it renders the
+    '非持倉標的' head + a chart-only / empty-price variant, skipping the holding sections.
+    Asserts ZERO console + ZERO page errors over that null-holding path.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")
+        page.evaluate("() => window.pdOpenSymbol('MSFT')")
+        page.wait_for_selector(".sd-drawer")
+        # Unheld -> '非持倉標的' badge in the head + chart-only body (no holding sections).
+        page.wait_for_selector(".sd-drawer .sd-empty")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"symbol drawer (unheld MSFT): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_shell_session_guard_guest_no_redirect(
     live_server: str, browser_page: object
 ) -> None:
