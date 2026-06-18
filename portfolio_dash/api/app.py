@@ -37,12 +37,14 @@ from portfolio_dash.api.routers import (
     users,
 )
 from portfolio_dash.bootstrap import bootstrap_db
+from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
 from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
 from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure_evaluations_tables
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
-from portfolio_dash.pricing import snapshots_store
+from portfolio_dash.pricing import datasources_store, snapshots_store
+from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
     ensure_scheduler_seeded,
     register_calibration_runner,
@@ -64,7 +66,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # lifespan — never write log files.
     configure_logging()
     with session() as conn:
-        bootstrap_db(conn)
+        # First-run bootstrap: create EVERY table the running app reads + seed config, so a
+        # fresh 0-byte DB is usable out of the box (guarded by tests/contract/
+        # test_first_run_bootstrap.py — an empty DB hid the missing `prices` table until the
+        # first holding queried it).
+        bootstrap_db(conn)  # ledger tables (accounts, instruments, transactions, ...)
+        create_pricing_tables(conn)  # prices + fx_rates (the dashboard valuation reads these)
+        datasources_store.ensure_seeded(conn)  # data_sources + tiers + health (spec 14)
+        # Seed the broker accounts from the single canonical config (DEFAULT_ACCOUNTS). Idempotent
+        # upsert: adding a future account THERE auto-seeds it on next launch; today there is no
+        # account-edit UI so the defaults are fixed config. (When an add/edit-account UI lands,
+        # switch this to a settings_meta-gated seed-once so launches don't clobber user edits.)
+        seed_accounts(conn)
         snapshots_store.ensure_tables(conn)  # external_snapshots (spec 20.4)
         ensure_scheduler_seeded(conn)  # also seeds the 5 ingest jobs' schedule rows
         ensure_alert_rules_seeded(conn)
