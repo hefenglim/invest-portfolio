@@ -9,15 +9,23 @@ AI-implemented by Claude Code from human specifications (spec-first).
 
 ## Status
 
-Pre-implementation. Conventions, rules, and the specification scaffold are in place;
-no application code yet. Next step: spec the `portfolio/` cost-basis & return core,
-then run the data-source availability probe.
+**v0.1.1 — first usable release** (see `CHANGELOG.md`). The calculation core (cost basis,
+realized / unrealized P&L, returns / XIRR, sector allocation, FX attribution, per-account
+dividend models), data ingestion, pricing + in-process scheduler, and LLM-insight are
+implemented — served through a FastAPI JSON API + a static vanilla-JS dashboard, and
+covered by unit + contract + Playwright E2E tests (incl. a spec-17 full-stack financial
+regression). Self-hostable — see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). AI insights
+are optional (off until an LLM is configured). Roadmap items are tracked in `CHANGELOG.md`
+under `[Unreleased]` / Planned.
 
 ## Stack
 
-Python 3.12 monolith — FastAPI + Jinja2 + HTMX + Alpine.js + ECharts + SQLite +
-LiteLLM + APScheduler. Type-checked with mypy (strict), tested with pytest.
-See `.claude/rules/stack.md`.
+Python 3.12 monolith — a **FastAPI JSON API** (`/api/*`) serving a **static vanilla-JS
+frontend** (`web/`; no framework, no build step) with **ECharts** (CDN); **SQLite**;
+`Decimal` money (never `float`); pandas / numpy + pyxirr (XIRR); **LiteLLM**;
+**APScheduler**. Type-checked with mypy (strict); tested with pytest + httpx + Playwright.
+(The web layer is JSON + static JS per decision (B); the earlier Jinja2 / HTMX / Alpine
+plan was superseded — see `CHANGELOG.md`.) See `.claude/rules/stack.md`.
 
 ## Deployment
 
@@ -37,8 +45,10 @@ Self-host on a small VM (e.g. GCP `e2-micro` / Ubuntu): see
 ## Workflow
 
 1. `/resume-dev` at session start.
-2. Human provides the spec; Claude Code confirms understanding, then implements (TDD).
-3. `/ship-version` before delivery (tests green, mypy clean, CHANGELOG updated).
+2. Spec-first: the human provides the spec; Claude Code confirms understanding, then
+   implements test-first (TDD).
+3. Gate before delivery — ruff + `mypy --strict` + `pytest` (unit / contract) + Playwright
+   E2E all green; `/ship-version` cuts the `CHANGELOG.md` version entry + an annotated tag.
 
 ## Privacy
 
