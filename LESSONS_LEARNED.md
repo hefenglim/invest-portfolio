@@ -59,3 +59,13 @@ prevents recurrence.
   the real `make e2e` (`-q`) gate never shows it. (The harness hardening it prompted — 60s readiness/
   Playwright ceilings, `flow_server` spawn-retry on the `_free_port` TOCTOU race, best-effort teardown —
   is still valid robustness and was kept.)
+- **Test the REAL first-run boot path, not just a harness-seeded DB (2026-06-19):** the entire suite
+  built its DB via the test harness (`tests/conftest.py::init_golden_base` / `_build_golden_db`), so the
+  app's actual `_lifespan` bootstrap was NEVER exercised — it silently omitted `create_pricing_tables`
+  (`prices`/`fx_rates`), `datasources_store.ensure_seeded`, and `seed_accounts`. A fresh 0-byte DB looked
+  fine because an empty portfolio never queries the (missing) `prices` table; the FIRST transaction made
+  `GET /api/dashboard` 500 with `no such table: prices`. Lesson: a green suite that always seeds via a
+  helper can hide a broken production bootstrap — add at least one test that drives `create_app()` through
+  its real `lifespan` against a throwaway DB (`tests/contract/test_first_run_bootstrap.py`). Keep all
+  bootstrap steps idempotent (`CREATE TABLE IF NOT EXISTS` / `ON CONFLICT`) so re-running on an existing
+  DB (e.g. the e2e server re-bootstrapping the harness-built golden DB) is safe.

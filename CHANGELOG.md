@@ -9,20 +9,6 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
-### Fixed
-- **First-run bootstrap completeness — fresh 0-byte DB (2026-06-19):** the app lifespan now creates EVERY
-  table the running app reads AND seeds the broker accounts, so a brand-new install works out of the box.
-  `_lifespan` previously omitted `create_pricing_tables` (`prices`/`fx_rates`), `datasources_store.ensure_seeded`
-  (`data_sources`/tiers/health), and `seed_accounts` — an empty DB looked fine (no holdings → no price query),
-  but the FIRST transaction made `GET /api/dashboard` 500 with `no such table: prices`, and with zero accounts
-  no trade could be entered at all (there is no add-account UI in v0.1.0). The bug hid because the whole test
-  suite seeds via the harness (`init_golden_base`), never the real boot path. Accounts seed from the single
-  canonical `DEFAULT_ACCOUNTS` (idempotent upsert — add a future account there and it auto-seeds next launch;
-  when an add/edit-account UI lands, switch to a settings_meta-gated seed-once so launches don't clobber edits).
-  New `tests/contract/test_first_run_bootstrap.py` drives `create_app()` through its REAL lifespan against a
-  throwaway DB (table creation + account seed + a holding must not 500 the dashboard). All bootstrap steps are
-  idempotent (`CREATE TABLE IF NOT EXISTS` / `ON CONFLICT`), safe to re-run on an existing DB.
-
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
   (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a
@@ -58,6 +44,22 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   provider/strategy protocols + registries, swappable adapters, decoupled layers — so future
   changes are config edits + small additions, not rewrites; keep YAGNI on features/scale (per
   `stack.md`), deferring concrete specifics until real use surfaces them.
+
+## [v0.1.1] - 2026-06-19
+
+### Fixed
+- **First-run bootstrap completeness — fresh 0-byte DB (2026-06-19):** the app lifespan now creates EVERY
+  table the running app reads AND seeds the broker accounts, so a brand-new install works out of the box.
+  `_lifespan` previously omitted `create_pricing_tables` (`prices`/`fx_rates`), `datasources_store.ensure_seeded`
+  (`data_sources`/tiers/health), and `seed_accounts` — an empty DB looked fine (no holdings → no price query),
+  but the FIRST transaction made `GET /api/dashboard` 500 with `no such table: prices`, and with zero accounts
+  no trade could be entered at all (there is no add-account UI in v0.1.0). The bug hid because the whole test
+  suite seeds via the harness (`init_golden_base`), never the real boot path. Accounts seed from the single
+  canonical `DEFAULT_ACCOUNTS` (idempotent upsert — add a future account there and it auto-seeds next launch;
+  when an add/edit-account UI lands, switch to a settings_meta-gated seed-once so launches don't clobber edits).
+  New `tests/contract/test_first_run_bootstrap.py` drives `create_app()` through its REAL lifespan against a
+  throwaway DB (table creation + account seed + a holding must not 500 the dashboard). All bootstrap steps are
+  idempotent (`CREATE TABLE IF NOT EXISTS` / `ON CONFLICT`), safe to re-run on an existing DB.
 
 ## [v0.1.0] - 2026-06-19
 
