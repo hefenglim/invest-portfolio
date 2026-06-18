@@ -48,3 +48,14 @@ prevents recurrence.
   broken test. The correct fix was the opposite: keep `reset_budget` a plain `now()` event and make
   the test deterministic with explicit timestamps. When a test forces awkward production logic,
   suspect the test first.
+- **Verify a "flaky test" against the EXIT CODE, not a grep of `-rA` output (2026-06-18):** chasing an
+  intermittent e2e "1 ERROR", I grepped pytest `-rA` output for `^ERROR` — which matched a benign
+  **captured-log line** `ERROR  asyncio: Task was destroyed but it is pending!` (Playwright's internal
+  `Page._on_route` task GC'd at page close on the Windows ProactorEventLoop), NOT a pytest ERROR
+  *outcome*. The suite was green the whole time (exit 0; zero `^(FAILED|ERROR) tests::` lines). Cost
+  ~15 needless multi-minute e2e runs + three wrong-location "fixes". Rule: confirm flakiness with the
+  process **exit code** (and `^(FAILED|ERROR) (tests/|at )` for real outcomes); ERROR-*level* log lines
+  are not test failures. The asyncio log only appears under `-rA`/`-rE` (passed-test captured logs);
+  the real `make e2e` (`-q`) gate never shows it. (The harness hardening it prompted — 60s readiness/
+  Playwright ceilings, `flow_server` spawn-retry on the `_free_port` TOCTOU race, best-effort teardown —
+  is still valid robustness and was kept.)

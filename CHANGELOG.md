@@ -74,7 +74,15 @@ headings. (`## [Unreleased]` is intentionally not counted.)
     write/auth flows are order-independent. E1 dashboard (golden KPIs + 00919 缺價 badge + asof/stale chip), E2
     manual buy commit (form → preview → confirm 201 → position grows 1000→2000 in the API), E4 oversell soft
     warning (ack gates the confirm button, then writable), E6 login loop (protected mode: wrong pass 401 stays
-    on /login.html → correct → dashboard). Expect-polling only, no sleeps (§17.7.4).
+    on /login.html → correct → dashboard). Expect-polling only, no sleeps (§17.7.4). Harness robustness
+    added during a senior full-stack review (the suite is green — exit 0 — every run; these prevent rare
+    real infra races, NOT a failing assertion): 60s readiness + Playwright ceilings (not 30s) absorb
+    Windows subprocess cold-start contention (one genuine TimeoutError seen under review load);
+    `flow_server` retries the spawn with a fresh port on early-exit (the `_free_port` bind→release→spawn
+    TOCTOU race, amplified by spawning a server per flow); best-effort `fresh_page` / `_terminate`
+    teardown so a passed test never errors on Playwright/subprocess cleanup. NOTE: the benign captured
+    log `asyncio: Task was destroyed but it is pending!` (Playwright `Page._on_route` GC at close) is
+    NOT a failure and only shows under `-rA`/`-rE`, never under the `-q` gate (see LESSONS_LEARNED).
 
 ### Fixed
 - **Deterministic `/api/dashboard` freshness ordering (spec-17 regression, 2026-06-17):** `freshness.fx` and

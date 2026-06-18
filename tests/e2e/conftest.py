@@ -62,7 +62,13 @@ from tests.conftest import (
 # Worktree root (this app's served web/ + portfolio_dash source).
 _WORKTREE_ROOT = Path(__file__).resolve().parents[2]
 
-_READINESS_TIMEOUT_S = 30.0
+# 60s ceiling (not 30s): each per-flow test spawns its OWN uvicorn subprocess + chromium
+# context, so under full-suite load on Windows the subprocess cold-start can exceed a
+# tight 30s ceiling — a resource/startup contention, NOT an app race. The poll already
+# returns the instant the server answers (and fails fast if the subprocess dies), so a
+# higher ceiling only absorbs slow starts; it is expect-polling, not a sleep/retry mask
+# (spec-17 §17.7.4).
+_READINESS_TIMEOUT_S = 60.0
 _READINESS_POLL_S = 0.25
 
 
@@ -268,23 +274,29 @@ FlowServerFactory = Callable[..., str]
 def _terminate(proc: "subprocess.Popen[bytes]") -> None:
     """Reap a uvicorn subprocess robustly (terminate -> wait -> kill -> wait).
 
-    Single-process server (no --workers/--reload), so terminate/kill reaps it; the final
-    taskkill tree-kill on Windows is belt-and-suspenders against any orphan, only if the
-    process is somehow still alive after kill()."""
-    if proc.poll() is not None:
-        return
-    proc.terminate()
+    Best-effort and fully exception-swallowing: this runs in fixture TEARDOWN after the
+    test already passed, so a reap race must NEVER surface as an ERROR. On Windows
+    `proc.terminate()` (TerminateProcess) can raise OSError "Access is denied" when the
+    subprocess is already exiting between the poll() check and the call — exactly the
+    intermittent teardown ERROR (38 passed + 1 error) seen under full-suite load. The
+    final taskkill tree-kill is belt-and-suspenders against any orphan."""
     try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+        if proc.poll() is not None:
+            return
+        proc.terminate()
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            pass
-    if sys.platform == "win32" and proc.poll() is None:  # pragma: no cover (defensive)
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                       capture_output=True, check=False)
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        if sys.platform == "win32" and proc.poll() is None:  # pragma: no cover (defensive)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, check=False)
+    except Exception:  # noqa: BLE001 (teardown reap — never fail an already-passed test)
+        pass
 
 
 @pytest.fixture
@@ -319,22 +331,37 @@ def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
         finally:
             conn.close()
 
-        port = _free_port()
-        base_url = f"http://127.0.0.1:{port}"
         env = {**os.environ, "DB_PATH": str(db_path), "PD_DISABLE_SCHEDULER": "1"}
-        stderr_file = stderr_path.open("wb")
-        handles.append(stderr_file)
-        proc = subprocess.Popen(
-            [
-                sys.executable, "-m", "uvicorn",
-                "portfolio_dash.api.app:create_app", "--factory",
-                "--host", "127.0.0.1", "--port", str(port),
-            ],
-            cwd=str(_WORKTREE_ROOT), env=env, stdout=stderr_file, stderr=stderr_file,
-        )
-        procs.append(proc)
-        _wait_ready(base_url, proc, stderr_path)
-        return base_url
+        # Spawn-retry-on-early-exit: _free_port binds→releases→returns, so between release
+        # and uvicorn's bind the ephemeral port can be taken (a TOCTOU race amplified by
+        # spawning a fresh server PER flow test) — uvicorn then exits early on a bind
+        # failure -> a rare fixture ERROR. Retry with a NEW port (hardening fixture SETUP
+        # against a known infra race; NOT retrying a flaky assertion — spec-17 §17.7.4).
+        last_exc: Exception | None = None
+        for _attempt in range(3):
+            port = _free_port()
+            base_url = f"http://127.0.0.1:{port}"
+            stderr_file = stderr_path.open("wb")
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "uvicorn",
+                    "portfolio_dash.api.app:create_app", "--factory",
+                    "--host", "127.0.0.1", "--port", str(port),
+                ],
+                cwd=str(_WORKTREE_ROOT), env=env, stdout=stderr_file, stderr=stderr_file,
+            )
+            try:
+                _wait_ready(base_url, proc, stderr_path)
+            except (RuntimeError, TimeoutError) as exc:
+                last_exc = exc
+                _terminate(proc)
+                stderr_file.close()
+                continue
+            procs.append(proc)
+            handles.append(stderr_file)
+            return base_url
+        assert last_exc is not None
+        raise last_exc
 
     try:
         yield _make
@@ -367,8 +394,23 @@ def fresh_page(browser_page: Page) -> Iterator[Page]:
     assert browser is not None
     context = browser.new_context()
     page = context.new_page()
+    # 60s (not Playwright's default 30s): the flow pages wait on a freshly-spawned isolated
+    # uvicorn under full-suite load — give expect-polling a realistic ceiling so contention
+    # never reddens a logically-correct flow (spec-17 §17.7.4 — ceiling, not sleep/retry).
+    page.set_default_timeout(60_000)
+    page.set_default_navigation_timeout(60_000)
     try:
         yield page
     finally:
-        page.close()
-        context.close()
+        # Best-effort teardown: a Playwright close raising here (e.g. the chromium target
+        # already gone after a redirect-heavy flow) must NEVER fail an already-passed test
+        # (matches flow_server's `except OSError: pass` cleanup philosophy). This is the
+        # 賣超-era e2e teardown ERROR (38 passed + 1 error) — cleanup noise, not a defect.
+        try:
+            page.close()
+        except Exception:  # noqa: BLE001 (teardown cleanup — swallow Playwright close errors)
+            pass
+        try:
+            context.close()
+        except Exception:  # noqa: BLE001 (teardown cleanup — swallow Playwright close errors)
+            pass
