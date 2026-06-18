@@ -41,7 +41,7 @@
     if (href === '/settings') return { href: 'settings.html' };
     if (href === '/settings#llm') return { href: 'settings.html#llm' };
     if (href === '/insights') return { href: 'insights.html' };
-    if (href === '/pipeline') return { href: 'AI Pipeline Hub.html' };
+    if (href === '/pipeline') return { href: 'pipeline-hub.html' };
     return { href: href };  // already a static page (e.g. settings.html#llm) — pass through
   }
 

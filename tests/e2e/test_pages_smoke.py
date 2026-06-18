@@ -1241,7 +1241,7 @@ def test_rebalance_preview_roundtrip(live_server: str, browser_page: object) -> 
 
 @pytest.mark.e2e
 def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None:
-    """/AI Pipeline Hub.html boots from GET /api/insight-tasks/status (spec 19, Task 2.8).
+    """/pipeline-hub.html boots from GET /api/insight-tasks/status (spec 19, Task 2.8).
 
     The page drops its window.PIPE mock (pipeline-data.js no longer loaded) and async-boots
     the task list + health bar from GET /api/insight-tasks/status. The golden DB seeds ZERO
@@ -1249,9 +1249,9 @@ def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None
     and an AI-off health bar -> the task list renders its empty-state ("尚無洞察任務 …").
     quota_remaining + last_batch.cost_usd are Decimal STRINGS routed through window.fmt.
 
-    The space in the filename is URL-encoded. The page ALSO loads api.js + alerts.js, so the
-    off-dashboard /api/alerts + /api/llm/config path runs here too (Task 2.7c) and must be
-    console-clean. Waits for the empty-state node inside #pp-list (rendered only after GET
+    The page ALSO loads api.js + alerts.js, so the off-dashboard /api/alerts + /api/llm/config
+    path runs here too (Task 2.7c) and must be console-clean. Waits for the empty-state node
+    inside #pp-list (rendered only after GET
     /api/insight-tasks/status resolves to tasks:[]), then asserts ZERO console + ZERO page
     errors — catching a botched PIPE retirement, a Decimal-string `.toFixed` on quota/cost,
     or an undefined node-state field.
@@ -1272,8 +1272,7 @@ def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
     try:
-        # The space in the filename must be URL-encoded for the navigation.
-        page.goto(live_server + "/AI%20Pipeline%20Hub.html", wait_until="load")
+        page.goto(live_server + "/pipeline-hub.html", wait_until="load")
         # Golden DB has ZERO insight types -> tasks:[] -> the empty-state div renders inside
         # #pp-list (proves the async status boot landed, not the empty shell).
         page.wait_for_selector("#pp-list .wz-note")
@@ -1282,7 +1281,7 @@ def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None
         page.remove_listener("pageerror", _on_pageerror)
 
     assert not console_errors and not page_errors, (
-        f"/AI Pipeline Hub.html (status wired): console errors={console_errors!r}; "
+        f"/pipeline-hub.html (status wired): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 

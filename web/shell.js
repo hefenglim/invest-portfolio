@@ -10,7 +10,7 @@
     { id: 'ledger',      href: 'trades.html',       label: '交易帳本', ico: '≣' },
     { id: 'instruments', href: 'instruments.html',  label: '觀察清單', ico: '◎' },
     { id: 'insights',    href: 'insights.html',     label: 'AI 洞察',  ico: '◈' },
-    { id: 'pipeline',    href: 'AI Pipeline Hub.html', label: '洞察管線', ico: '⧉' },
+    { id: 'pipeline',    href: 'pipeline-hub.html', label: '洞察管線', ico: '⧉' },
     { id: 'settings',    href: 'settings.html',     label: '系統設定', ico: '⚙' }
   ];
   const LS_KEY = 'pd_sidebar_collapsed';

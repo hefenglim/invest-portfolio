@@ -131,6 +131,13 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   seeding. New `tests/pricing/test_layering.py` AST-guards that `pricing/**` imports no `data_ingestion`.
 
 ### Changed
+- **Renamed `web/AI Pipeline Hub.html` → `web/pipeline-hub.html` (2026-06-19):** the only frontend page
+  whose filename had spaces + Title Case, out of step with the lowercase-hyphenated convention
+  (`index.html`, `settings-scheduler.html`, …). `git mv` + updated all LIVE references —
+  `web/shell.js` (sidebar nav), `web/alerts.js` (`/pipeline` href map), `web/settings-prompts.html`
+  (cross-link), and the e2e smoke (`/pipeline-hub.html`, dropping the `%20` URL-encoding). The frozen
+  `docs/design-handoff/` export bundle (its own `AI Pipeline Hub.html` + shell.js + spec-07 reference)
+  is left untouched — it is a self-consistent historical snapshot, not the served app.
 - **spec 19 deferred follow-ups resolved (2026-06-16):** ① the 自我進化設定 panel is wired to `GET/PUT
   /api/evolution-config` (read-then-PUT preserves the non-panel knobs `horizon_basis`/`defer_limit_days`/
   `shadow_on_alert`; `gap_alert_pp` sent as a Decimal string; the `localStorage pd_evolution_cfg` path removed);
