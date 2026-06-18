@@ -19,6 +19,11 @@ Python 3.12 monolith — FastAPI + Jinja2 + HTMX + Alpine.js + ECharts + SQLite 
 LiteLLM + APScheduler. Type-checked with mypy (strict), tested with pytest.
 See `.claude/rules/stack.md`.
 
+## Deployment
+
+Self-host on a small VM (e.g. GCP `e2-micro` / Ubuntu): see
+**[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)** — copy-paste setup + maintenance SOP.
+
 ## Project conventions (for Claude Code)
 
 - `CLAUDE.md` — root index: locked decisions, module map, core invariants.
