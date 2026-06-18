@@ -337,6 +337,11 @@
         tr.title = h.market_price === null || h.market_price === undefined
           ? '缺價 — 此列數字不可信' : '價格過期 — 損益以舊價計算';
       }
+      if (h.oversold) {
+        tr.classList.add('row-stale');
+        tr.title = '賣超：賣出數量超過持股，部位為負、損益待釐清'
+          + '（請補記期初庫存或遺漏的買進）';
+      }
 
       /* 代號 + 名稱 + board badge — 點擊開啟個股詳情 */
       const tdSym = el('td', 'col-text');
@@ -345,6 +350,11 @@
       cell.appendChild(el('span', 'sym-code', h.symbol));
       cell.appendChild(el('span', 'sym-name', h.name));
       if (h.board) cell.appendChild(el('span', 'board-badge', h.board));
+      if (h.oversold) {
+        const ob = el('span', 'badge badge-missing', '賣超');
+        ob.title = '賣出數量超過持股，部位為負、損益待釐清';
+        cell.appendChild(ob);
+      }
       cell.addEventListener('click', () => {
         if (window.openSymbolDrawer) window.openSymbolDrawer(h.symbol);
       });

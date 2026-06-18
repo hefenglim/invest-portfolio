@@ -36,6 +36,7 @@
       "price_stale": false,
       "price_as_of": "2026-06-09",
       "weight": "0.4084459821679291618518260088",
+      "oversold": false,
       "spark_30d": [
         "600"
       ]
@@ -63,6 +64,7 @@
       "price_stale": false,
       "price_as_of": "2026-06-09",
       "weight": "0.1034729821492087210024625889",
+      "oversold": false,
       "spark_30d": [
         "38"
       ]
@@ -90,6 +92,7 @@
       "price_stale": false,
       "price_as_of": "2026-06-09",
       "weight": "0.04118496986859952382005912256",
+      "oversold": false,
       "spark_30d": [
         "110"
       ]
@@ -117,6 +120,7 @@
       "price_stale": true,
       "price_as_of": null,
       "weight": null,
+      "oversold": false,
       "spark_30d": []
     },
     {
@@ -142,6 +146,7 @@
       "price_stale": false,
       "price_as_of": "2026-06-09",
       "weight": "0.3280638128772807027993866503",
+      "oversold": false,
       "spark_30d": [
         "300"
       ]
@@ -169,6 +174,7 @@
       "price_stale": true,
       "price_as_of": "2026-06-06",
       "weight": "0.04901351786015149942221912106",
+      "oversold": false,
       "spark_30d": [
         "450"
       ]
@@ -196,6 +202,7 @@
       "price_stale": false,
       "price_as_of": "2026-06-09",
       "weight": "0.02352819043113175276083956072",
+      "oversold": false,
       "spark_30d": [
         "9.875"
       ]
@@ -223,6 +230,7 @@
       "price_stale": false,
       "price_as_of": "2026-06-09",
       "weight": "0.04629054464569863834320694767",
+      "oversold": false,
       "spark_30d": [
         "170"
       ]
@@ -248,12 +256,12 @@
   },
   "returns": {
     "by_currency": {
-      "MYR": {
-        "realized": "0",
-        "unrealized": "1075.000",
-        "total_return": "1075.000",
-        "gross_invested": "9000",
-        "rate": "0.1194444444444444444444444444"
+      "TWD": {
+        "realized": "8000.0",
+        "unrealized": "237000.0000000000000000000000",
+        "total_return": "245000.0000000000000000000000",
+        "gross_invested": "1595000",
+        "rate": "0.1536050156739811912225705329"
       },
       "USD": {
         "realized": "0",
@@ -262,12 +270,12 @@
         "gross_invested": "32050",
         "rate": "0.2127925117004680187207488300"
       },
-      "TWD": {
-        "realized": "8000.0",
-        "unrealized": "237000.0000000000000000000000",
-        "total_return": "245000.0000000000000000000000",
-        "gross_invested": "1595000",
-        "rate": "0.1536050156739811912225705329"
+      "MYR": {
+        "realized": "0",
+        "unrealized": "1075.000",
+        "total_return": "1075.000",
+        "gross_invested": "9000",
+        "rate": "0.1194444444444444444444444444"
       }
     },
     "reporting_currency": "TWD",

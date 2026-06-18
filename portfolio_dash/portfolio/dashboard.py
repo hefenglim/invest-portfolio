@@ -136,8 +136,10 @@ def build_dashboard(
     instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
 
-    # 2. Book and valuation.
-    book = build_book(txs, divs, opening, instruments)
+    # 2. Book and valuation. allow_oversell: an acked oversell must not crash the
+    # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
+    book = build_book(txs, divs, opening, instruments, allow_oversell=True)
+    has_oversold = any(h.oversold for h in book.holdings)
     held_symbols = sorted({h.symbol for h in book.holdings})
     price_reads: dict[str, PriceRead | None] = {
         sym: get_latest_price(conn, sym, now=now) for sym in held_symbols
@@ -181,11 +183,15 @@ def build_dashboard(
 
     xirr_value: Decimal | None = None
     xirr_reason: str | None = None
-    try:
-        xirr_value = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
-                                    price_map, resolver.rate, as_of, reporting)
-    except KeyError as exc:
-        xirr_reason = str(exc).strip("'\"")
+    if has_oversold:
+        # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
+        xirr_reason = "ledger has an oversold (賣超) position — 待釐清"
+    else:
+        try:
+            xirr_value = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
+                                        price_map, resolver.rate, as_of, reporting)
+        except KeyError as exc:
+            xirr_reason = str(exc).strip("'\"")
     if xirr_value is None and xirr_reason is None:
         xirr_reason = ("not computable (missing current price, no sign change, "
                        "or non-convergence)")

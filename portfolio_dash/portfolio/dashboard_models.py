@@ -44,6 +44,7 @@ class HoldingRow(BaseModel):
     price_stale: bool = False
     price_as_of: date | None = None
     weight: Decimal | None = None
+    oversold: bool = False  # 賣超: negative shares, 待釐清 value (see Holding.oversold)
 
 
 class KpiSummary(BaseModel):

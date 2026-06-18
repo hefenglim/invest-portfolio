@@ -25,6 +25,7 @@ from playwright.sync_api import Page
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from tests.conftest import _seed_golden
+from tests.contract.test_oversell_graceful import _seed_oversold
 from tests.contract.test_spec17_financials import seed_full
 from tests.e2e.conftest import FlowServerFactory
 
@@ -164,6 +165,27 @@ def test_e4_oversell_soft_warning_gates_confirm_until_ack(
 
     assert not console_errors and not page_errors, (
         f"E4: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_oversell_position_renders_badge_no_crash(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """An oversold (賣超) ledger renders the dashboard with a 賣超 badge and ZERO console/
+    page errors — the lightweight degradation (decided 2026-06-18) holds end-to-end: the
+    negative-share / null-value row does not throw in the browser."""
+    base = flow_server(_seed_oversold)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    page.wait_for_selector("#holdings-body tr")
+    assert page.get_by_text("賣超").count() > 0
+
+    assert not console_errors and not page_errors, (
+        f"oversell display: console={console_errors!r} page={page_errors!r}"
     )
 
 

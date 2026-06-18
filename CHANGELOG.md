@@ -82,6 +82,20 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   currencies (PYTHONHASHSEED-dependent across processes) — so the API list order was non-deterministic and a
   golden snapshot flapped between runs. `portfolio/dashboard.py` now sorts both by `(base, quote)`. (`prices`
   was already stable via `sorted(held_symbols)`.)
+- **Oversold (賣超) ledger no longer 500s the dashboard (2026-06-18, human sign-off — lightweight, NOT short
+  accounting):** an acked oversell (`POST /api/input/manual/commit` `side=sell` qty>held + `ack_oversell=true`)
+  writes a sell exceeding holdings; the NEXT `GET /api/dashboard` then crashed (`build_book` raised
+  `OversellError`, uncaught → 500). Surfaced by the spec-17 regression. Fix: `build_book(allow_oversell=True)`
+  (the dashboard path) DEGRADES GRACEFULLY — nets the position to negative shares, drops its now-undefined cost
+  basis, emits no realized row; the holding is flagged `oversold` with 待釐清 (null) value/P&L and is **excluded
+  from portfolio aggregates** (auto via the existing `market_value is not None` gates). XIRR degrades to None
+  with a reason when any position is oversold. The 重算/rebuild action (`actions.py`) and all input-time
+  oversell warnings (preview/whatif detect it independently) are unchanged — `build_book` still raises by
+  default. `Holding`/`HoldingRow` gain an `oversold` flag; the holdings table renders a **賣超** badge +
+  tooltip prompting the user to record the missing opening inventory / buy. New
+  `tests/contract/test_oversell_graceful.py` + an e2e display flow; full short-position accounting is
+  deliberately out of scope (it would invert cost basis, dividend direction, weights/allocation/XIRR — over
+  scope for a 1–2-user long-only tracker; revisit only if real short trades are needed).
 - **`/api/health` exempt from the protected-mode auth gate (2026-06-17, human-approved):** the liveness probe is
   added to `auth_store._OPEN_PATHS` (alongside `/api/auth/login` + `/api/auth/session`). It returns only
   `{"status":"ok"}` (no data), so it must answer regardless of login — previously, once ≥1 user existed (protected

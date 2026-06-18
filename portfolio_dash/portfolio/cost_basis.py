@@ -31,10 +31,20 @@ def build_book(
     dividends: list[Dividend],
     opening: list[OpeningInventory],
     instruments: dict[str, Instrument],
+    *,
+    allow_oversell: bool = False,
 ) -> Book:
     """Replay the ledger in date order; return open holdings, realized P&L, gross invested.
 
     Same-day ordering: opening (0) -> buy (1) -> sell (2) -> dividend (3).
+
+    Oversell (a sell exceeding holdings): by default raise ``OversellError`` (validation
+    callers — e.g. the 重算/rebuild action — want to reject it). With ``allow_oversell=True``
+    (the dashboard path), DEGRADE GRACEFULLY instead of crashing: net the position to
+    negative shares, drop its (now-undefined) cost basis, and emit NO realized row — the
+    resulting holding is flagged ``oversold`` with 待釐清 value (decided 2026-06-18). This
+    keeps the dashboard alive after an acked oversell; the user fixes it by recording the
+    missing opening inventory / buy. It is NOT short-position accounting.
     """
 
     def quote_ccy(symbol: str) -> Currency:
@@ -78,9 +88,16 @@ def build_book(
                 gross[ccy] += cost
             else:
                 if ev.quantity > pos.shares:
-                    raise OversellError(
-                        f"sell {ev.quantity} > held {pos.shares} for {ev.symbol}"
-                    )
+                    if not allow_oversell:
+                        raise OversellError(
+                            f"sell {ev.quantity} > held {pos.shares} for {ev.symbol}"
+                        )
+                    # Graceful: net to a negative (賣超) position; its cost basis is
+                    # undefined, so drop it and emit no realized row (待釐清).
+                    pos.shares -= ev.quantity
+                    pos.original_total = _ZERO
+                    pos.adjusted_total = _ZERO
+                    continue
                 frac = ev.quantity / pos.shares
                 original_removed = pos.original_total * frac
                 adjusted_removed = pos.adjusted_total * frac
@@ -143,6 +160,7 @@ def build_book(
                 adjusted_cost_total=pos.adjusted_total,
                 dividend_portion=dividend_portion,
                 payback_ratio=payback,
+                oversold=pos.shares < _ZERO,
             )
         )
 

@@ -26,6 +26,11 @@ class Holding(BaseModel):
     unrealized_pnl: Decimal | None = None
     capital_gain: Decimal | None = None
     price_stale: bool = False
+    # 賣超/oversold: net shares went negative (a sell exceeded holdings, written after an
+    # acked oversell). Cost basis + P&L are 待釐清 (not computed — see cost_basis.build_book);
+    # the position is excluded from portfolio aggregates and flagged for the user to fix
+    # (e.g. record the missing opening inventory / buy). Lightweight: NOT short accounting.
+    oversold: bool = False
 
 
 class RealizedRow(BaseModel):
