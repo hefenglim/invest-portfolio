@@ -35,12 +35,6 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   default**, optionally **selecting 0..1** from the library (per-stock assignment — option A; data model pre-reserves tag/category binding for a
   later upgrade). All prompts live in the settings (config) page, versioned and folded into the
   cache fingerprint + self-backtest attribution (per `llm-insight.md`).
-- **User authentication / access control** (`web_ui/`, future): basic login + permission gating
-  so the self-hosted instance (1–2 users) is not publicly exposed on the network — kept minimal.
-- `web_ui/` dashboard UI/UX (future): as strategy info, data, and ECharts charts grow, the page
-  can get long — evaluate clear categorization + non-cluttered tabs/sections (avoid endless
-  scroll) for this AI-stock-strategy / position-management / watchlist assistant. Optimize the
-  human-computer interface then, not pre-emptively.
 - **AI cost-info + LLM settings page** (`web_ui/`, future): the **backend is now built** (model
   registry, four role-defaults, USD budget governance, `llm_usage` log + cost calc, vision plumbing —
   see Added). Remaining is the `web_ui/` page: usage stats + history-trend + per-model cost charts;
