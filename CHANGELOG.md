@@ -9,6 +9,50 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+### Planned
+- **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
+  (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a
+  **user-confirmed** auto-import into the ledger following the account's accounting rules —
+  cutting manual entry, never bypassing confirmation, never double-counting (calc reads only the
+  ledger), `original_cost` never overwritten; **manual entry always retained**.
+- `data_ingestion/` confirmed auto-import (future): match `pricing/`'s fetched dividend/ex-div
+  events (and Schwab transactions) to the holdings list → prompt "new distribution detected —
+  auto-import?" → on confirm, write a ledger entry per the account's dividend model (TW cash →
+  cost reduction, US DRIP $0-cost, MY cash). `web_ui/` provides the prompt UI.
+- `llm_insight/` prediction self-tracking + backtest loop (future sub-project): the LLM
+  records each recommendation/forecast, later replays and scores its own past predictions
+  against realized outcomes, accumulating a per-prediction confidence index and a
+  corrective feedback loop that informs future advice. Gets its own brainstorm at the
+  `llm_insight/` stage.
+- `llm_insight/` insight inputs & per-stock prompt (future): per-holding decision signals from
+  FinMind (財報 / 月營收 / 法人 / 融資券 / PER-PBR / news URL) plus **US sentiment indicators —
+  CNN Fear & Greed Index and VIX** — as buy/sell context. **Prompt architecture (decided
+  2026-06-08):** one editable **default system prompt** (ships as a Claude-recommended best prompt; user
+  fine-tunes in config) holds the output contract + invariants (JSON schema, no
+  numbers-of-record, batch-only) and is immutable by overrides; reusable, named
+  **Strategy Prompts** (the library ships with several Claude-generated optimized templates;
+  users can add their own) add a per-type analytical focus, and each stock's Strategy is **blank by
+  default**, optionally **selecting 0..1** from the library (per-stock assignment — option A; data model pre-reserves tag/category binding for a
+  later upgrade). All prompts live in the settings (config) page, versioned and folded into the
+  cache fingerprint + self-backtest attribution (per `llm-insight.md`).
+- **User authentication / access control** (`web_ui/`, future): basic login + permission gating
+  so the self-hosted instance (1–2 users) is not publicly exposed on the network — kept minimal.
+- `web_ui/` dashboard UI/UX (future): as strategy info, data, and ECharts charts grow, the page
+  can get long — evaluate clear categorization + non-cluttered tabs/sections (avoid endless
+  scroll) for this AI-stock-strategy / position-management / watchlist assistant. Optimize the
+  human-computer interface then, not pre-emptively.
+- **AI cost-info + LLM settings page** (`web_ui/`, future): the **backend is now built** (model
+  registry, four role-defaults, USD budget governance, `llm_usage` log + cost calc, vision plumbing —
+  see Added). Remaining is the `web_ui/` page: usage stats + history-trend + per-model cost charts;
+  model add/edit (provider / endpoint / key / vision / pricing); role-default pickers; budget
+  set/reset; and the screenshot-upload widget for vision (statement → draft → confirm).
+- **Design principle (all modules):** invest in adjustable structure — config-driven behavior,
+  provider/strategy protocols + registries, swappable adapters, decoupled layers — so future
+  changes are config edits + small additions, not rewrites; keep YAGNI on features/scale (per
+  `stack.md`), deferring concrete specifics until real use surfaces them.
+
+## [v0.1.0] - 2026-06-19
+
 ### Added
 - **Frontend wiring foundation — spec 19 Phase 0 (2026-06-16):** the static `web/` frontend's single
   fetch layer + a Playwright smoke harness, landed ahead of per-page wiring.
@@ -655,48 +699,6 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   `stamp_duty_rate` / `stamp_duty_cap` and US/MY `min_fee`; MY stamp duty books to `tax`;
   worked examples W1–W9; US/MY rates backfilled from the spec-18.0 truth table (pending
   real-statement confirmation). `DividendType += NET` (MY single-tier).
-
-### Planned
-- **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
-  (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a
-  **user-confirmed** auto-import into the ledger following the account's accounting rules —
-  cutting manual entry, never bypassing confirmation, never double-counting (calc reads only the
-  ledger), `original_cost` never overwritten; **manual entry always retained**.
-- `data_ingestion/` confirmed auto-import (future): match `pricing/`'s fetched dividend/ex-div
-  events (and Schwab transactions) to the holdings list → prompt "new distribution detected —
-  auto-import?" → on confirm, write a ledger entry per the account's dividend model (TW cash →
-  cost reduction, US DRIP $0-cost, MY cash). `web_ui/` provides the prompt UI.
-- `llm_insight/` prediction self-tracking + backtest loop (future sub-project): the LLM
-  records each recommendation/forecast, later replays and scores its own past predictions
-  against realized outcomes, accumulating a per-prediction confidence index and a
-  corrective feedback loop that informs future advice. Gets its own brainstorm at the
-  `llm_insight/` stage.
-- `llm_insight/` insight inputs & per-stock prompt (future): per-holding decision signals from
-  FinMind (財報 / 月營收 / 法人 / 融資券 / PER-PBR / news URL) plus **US sentiment indicators —
-  CNN Fear & Greed Index and VIX** — as buy/sell context. **Prompt architecture (decided
-  2026-06-08):** one editable **default system prompt** (ships as a Claude-recommended best prompt; user
-  fine-tunes in config) holds the output contract + invariants (JSON schema, no
-  numbers-of-record, batch-only) and is immutable by overrides; reusable, named
-  **Strategy Prompts** (the library ships with several Claude-generated optimized templates;
-  users can add their own) add a per-type analytical focus, and each stock's Strategy is **blank by
-  default**, optionally **selecting 0..1** from the library (per-stock assignment — option A; data model pre-reserves tag/category binding for a
-  later upgrade). All prompts live in the settings (config) page, versioned and folded into the
-  cache fingerprint + self-backtest attribution (per `llm-insight.md`).
-- **User authentication / access control** (`web_ui/`, future): basic login + permission gating
-  so the self-hosted instance (1–2 users) is not publicly exposed on the network — kept minimal.
-- `web_ui/` dashboard UI/UX (future): as strategy info, data, and ECharts charts grow, the page
-  can get long — evaluate clear categorization + non-cluttered tabs/sections (avoid endless
-  scroll) for this AI-stock-strategy / position-management / watchlist assistant. Optimize the
-  human-computer interface then, not pre-emptively.
-- **AI cost-info + LLM settings page** (`web_ui/`, future): the **backend is now built** (model
-  registry, four role-defaults, USD budget governance, `llm_usage` log + cost calc, vision plumbing —
-  see Added). Remaining is the `web_ui/` page: usage stats + history-trend + per-model cost charts;
-  model add/edit (provider / endpoint / key / vision / pricing); role-default pickers; budget
-  set/reset; and the screenshot-upload widget for vision (statement → draft → confirm).
-- **Design principle (all modules):** invest in adjustable structure — config-driven behavior,
-  provider/strategy protocols + registries, swappable adapters, decoupled layers — so future
-  changes are config edits + small additions, not rewrites; keep YAGNI on features/scale (per
-  `stack.md`), deferring concrete specifics until real use surfaces them.
 
 ## [v0.0.0] - 2026-06-05
 
