@@ -11,7 +11,9 @@ all of that, plus the §7.2 gate ordering, verdict, and one-key fixes; and the d
 
 import sqlite3
 from decimal import Decimal
+from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.shared.llm_config import add_topup
@@ -28,8 +30,8 @@ def _make_combo(
     return int(it["id"])
 
 
-def _gate_ids(body: dict[str, object]) -> list[str]:
-    return [g["id"] for g in body["gates"]]  # type: ignore[index,union-attr]
+def _gate_ids(body: dict[str, Any]) -> list[str]:
+    return [g["id"] for g in body["gates"]]
 
 
 # --- §7.2 preflight shape + ordering ------------------------------------------
@@ -135,7 +137,7 @@ def test_preflight_writes_no_job_run(
 
 
 def test_preflight_never_calls_llm(
-    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch
+    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     add_topup(golden_db, Decimal("5"))
     tid = _make_combo(api_client)
@@ -157,7 +159,7 @@ def test_preflight_never_calls_llm(
 
 
 def test_preflight_uses_the_shared_gate_fn(
-    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch
+    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Preflight routes through ``llm_insight.gating.evaluate_gates`` — the SAME function
     object ``generate.run_insight_type`` calls (asserted by spying on the gating module)."""

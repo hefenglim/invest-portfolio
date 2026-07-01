@@ -45,6 +45,35 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   changes are config edits + small additions, not rewrites; keep YAGNI on features/scale (per
   `stack.md`), deferring concrete specifics until real use surfaces them.
 
+## [v0.1.2] - 2026-07-02
+
+### Fixed
+- **Data-source connection tests wired (2026-07-02):** the settings → 資料來源 "測試" buttons now
+  run a real minimal probe for the primary live sources — `yfinance` (AAPL), `twse` (2330), `tpex`
+  (5347 OTC), and `finmind` (a keyed dividend request) — instead of returning the neutral
+  `尚未實作連線測試` stub. `fx_ecb` is reclassified `pending` (it has no adapter — the FX path is
+  yfinance), so it honestly shows 待測試 rather than the stub. A regression test asserts that no
+  `live` source can fall through to the not-implemented fallback. Verified against the live VM (all
+  three 官方 sources reachable from the deploy IP; the FinMind key returns data). Real quote fetching
+  was never affected — only the diagnostic button was unwired.
+
+### Added
+- **App version display + `/api/health` version (2026-07-02):** a single source of truth,
+  `portfolio_dash.__version__`, now (a) drives the packaging version via pyproject `dynamic` version,
+  (b) is served by the open `GET /api/health` as `{"status":"ok","version":"…"}` — a quick post-deploy
+  check (`curl -s …/api/health`), and (c) is displayed in the UI: a version tag under the sidebar
+  `portfolio-dash` brand (every page) and the settings → 帳戶與費率 → 一般 (唯讀) row. `web/shell.js`
+  fetches `/api/health` once and fills both, so the two displays share the one source.
+
+### Changed
+- **mypy strict baseline restored to clean (chore, 2026-07-02):** the type gate had accumulated 65
+  pre-existing errors, all in `tests/` (production code was clean). Fixed the real ones — missing
+  parameter annotations, `dict`→`dict[str, Any]` generics, a Protocol parameter-name mismatch,
+  `Page`/`Writer` argument types, two stale `# type: ignore`s, a `dict.__setitem__` value-context
+  hack — and relaxed only `no_implicit_reexport` for test/monkeypatched modules (it adds no value
+  there); also dropped the now-unused FinMind/freezegun `ignore_missing_imports`. `mypy --strict` is
+  green across all source files again.
+
 ## [v0.1.1] - 2026-06-19
 
 ### Fixed

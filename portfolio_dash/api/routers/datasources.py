@@ -22,10 +22,14 @@ from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.pricing import datasources_store as store
 from portfolio_dash.pricing import sentiment_source
 from portfolio_dash.pricing.providers.base import ProviderBase
+from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
 from portfolio_dash.pricing.providers.klsescreener_provider import KlseScreenerProvider
 from portfolio_dash.pricing.providers.malaysiastock_provider import MalaysiaStockProvider
 from portfolio_dash.pricing.providers.stockprices_dev_provider import StockPricesDevProvider
+from portfolio_dash.pricing.providers.tpex_provider import TpexProvider
+from portfolio_dash.pricing.providers.twse_provider import TwseProvider
 from portfolio_dash.pricing.providers.twstock_provider import TwStockProvider
+from portfolio_dash.pricing.providers.yfinance_provider import YFinanceProvider
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.shared.enums import Market
 
@@ -175,7 +179,8 @@ def set_tier(
 
 
 # Free-source probe samples: a single minimal request per source (spec 20.11).
-_PROBE_TW = InstrumentRef(symbol="2330", market=Market.TW)
+_PROBE_TW = InstrumentRef(symbol="2330", market=Market.TW)  # TWSE-listed (twse/yfinance/finmind)
+_PROBE_TPEX = InstrumentRef(symbol="5347", market=Market.TW)  # a TPEx OTC counter (2330 is TWSE)
 _PROBE_US = InstrumentRef(symbol="AAPL", market=Market.US)
 _PROBE_MY = InstrumentRef(symbol="5212", market=Market.MY)
 
@@ -192,6 +197,12 @@ def _probe_quote_provider(
 
 def _probe_free_source(source_id: str) -> tuple[bool, str | None] | None:
     """Probe a wired free (key-less) source; None when this id has no wired probe."""
+    if source_id == "yfinance":
+        return _probe_quote_provider(YFinanceProvider(), _PROBE_US)
+    if source_id == "twse":
+        return _probe_quote_provider(TwseProvider(), _PROBE_TW)
+    if source_id == "tpex":
+        return _probe_quote_provider(TpexProvider(), _PROBE_TPEX)
     if source_id == "twstock":
         return _probe_quote_provider(TwStockProvider(), _PROBE_TW)
     if source_id == "stockprices_dev":
@@ -223,6 +234,11 @@ def probe_source(source_id: str, api_key: str | None) -> tuple[bool, str | None]
     if info.status == "pending":
         # Token-gated adapter catalogued but not validated online this round (spec 20.9).
         return False, "待測試（尚未線上驗證）"
+    if source_id == "finmind":
+        # Keyed live source: one minimal FinMind dividend request (spec 14 / 20.11). A raised
+        # HTTPError (bad/expired key, over quota) becomes an "error" result in ``_run_probe``.
+        events = FinMindProvider(token=api_key).fetch_dividends([_PROBE_TW])
+        return True, f"{len(events)} 筆股利回應"
     free = _probe_free_source(source_id)
     if free is not None:
         return free

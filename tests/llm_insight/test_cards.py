@@ -38,7 +38,7 @@ def test_prediction_metric_literal_rejects_unknown() -> None:
 
 def test_prediction_metric_accepts_three_kinds() -> None:
     for metric in ("price_change", "volatility", "relative"):
-        p = Prediction(metric=metric, direction="up", horizon_days=5)  # type: ignore[arg-type]
+        p = Prediction(metric=metric, direction="up", horizon_days=5)
         assert p.metric == metric
 
 

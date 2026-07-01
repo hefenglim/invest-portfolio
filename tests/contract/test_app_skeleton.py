@@ -27,7 +27,8 @@ def skeleton_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
 def test_app_boots_and_health_ok(skeleton_client: TestClient) -> None:
     r = skeleton_client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json()["status"] == "ok"
+    assert r.json()["version"]  # single-source app version now included (post-deploy check)
 
 
 def test_unknown_api_route_uses_error_envelope(skeleton_client: TestClient) -> None:

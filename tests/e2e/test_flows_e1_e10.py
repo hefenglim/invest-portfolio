@@ -19,6 +19,7 @@ import re
 import urllib.request
 from collections.abc import Iterator
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from playwright.sync_api import Page
@@ -42,15 +43,17 @@ def _loopback_sockets() -> Iterator[None]:
     disable_socket(allow_unix_socket=True)
 
 
-def _get_json(base_url: str, path: str) -> dict:
+def _get_json(base_url: str, path: str) -> dict[str, Any]:
     with urllib.request.urlopen(base_url + path, timeout=5) as r:  # noqa: S310 (loopback)
-        return json.loads(r.read().decode("utf-8"))
+        data: dict[str, Any] = json.loads(r.read().decode("utf-8"))
+        return data
 
 
-def _shares_of(body: dict, symbol: str) -> str | None:
+def _shares_of(body: dict[str, Any], symbol: str) -> str | None:
     for h in body["holdings"]:
         if h["symbol"] == symbol:
-            return h["shares"]
+            shares: str = h["shares"]
+            return shares
     return None
 
 

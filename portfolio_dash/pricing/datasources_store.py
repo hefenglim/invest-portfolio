@@ -81,9 +81,10 @@ SOURCE_INFO: tuple[SourceInfo, ...] = (
                note="馬股次要 string 報價源・免金鑰"),
     SourceInfo(id="cnn_fng", name="CNN Fear & Greed", type="sentiment", markets=["ALL"],
                auth="none", provides=["sentiment"], note="市場情緒指數・免金鑰"),
-    SourceInfo(id="fx_ecb", name="ECB 歐洲央行匯率", type="fx", markets=["ALL"],
-               auth="none", provides=["fx"], note="每日匯率・免金鑰"),
     # --- pending (implemented; awaiting a key to validate) -----------------
+    SourceInfo(id="fx_ecb", name="ECB 歐洲央行匯率", type="fx", markets=["ALL"],
+               auth="none", provides=["fx"], status="pending",
+               note="每日匯率・免金鑰（adapter 待接上，尚無連線測試）"),
     SourceInfo(id="alphavantage", name="Alpha Vantage", type="stock", markets=["US", "FX"],
                auth="apikey", provides=["quote_latest", "quote_history", "fx"],
                tiers=["free", "premium"], status="pending",

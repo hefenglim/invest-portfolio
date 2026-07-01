@@ -9,6 +9,7 @@ so the holding cost basis is the one build_book produces, not a hand-rolled fixt
 import sqlite3
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.bootstrap import bootstrap_db
@@ -48,7 +49,7 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
-def _whatif(conn: sqlite3.Connection, **kw: object) -> dict[str, object]:
+def _whatif(conn: sqlite3.Connection, **kw: object) -> dict[str, Any]:
     base: dict[str, object] = dict(now=_NOW, reporting=Currency.TWD)
     base.update(kw)
     return compute_whatif(conn, **base)  # type: ignore[arg-type]

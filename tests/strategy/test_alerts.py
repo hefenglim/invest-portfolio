@@ -3,6 +3,7 @@ GET /api/alerts and the dashboard payload's embedded alerts; these tests pin the
 v1 rules over the golden DB plus a hand-built DashboardData for fx_drift/exdiv_upcoming
 (which do not fire on golden: avg≈spot and the only dividend is in the past)."""
 
+import sqlite3
 from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -26,7 +27,7 @@ from portfolio_dash.strategy.rules_config import DEFAULT_RULES
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_single_weight_fires_on_golden(golden_db) -> None:
+def test_single_weight_fires_on_golden(golden_db: sqlite3.Connection) -> None:
     data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
     alerts = compute_alerts_from(data, DEFAULT_RULES,
                                  quota_remaining=Decimal("5"), quota_threshold=Decimal("1"))
@@ -36,7 +37,7 @@ def test_single_weight_fires_on_golden(golden_db) -> None:
     assert sw.sev == "risk" and sw.href == "/symbol/2330"
 
 
-def test_quota_low_zero_is_risk(golden_db) -> None:
+def test_quota_low_zero_is_risk(golden_db: sqlite3.Connection) -> None:
     data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
     alerts = compute_alerts_from(data, DEFAULT_RULES,
                                  quota_remaining=Decimal("0"), quota_threshold=Decimal("1"))
@@ -44,7 +45,7 @@ def test_quota_low_zero_is_risk(golden_db) -> None:
     assert q.sev == "risk"
 
 
-def test_quota_low_below_threshold_is_warn(golden_db) -> None:
+def test_quota_low_below_threshold_is_warn(golden_db: sqlite3.Connection) -> None:
     data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
     alerts = compute_alerts_from(data, DEFAULT_RULES,
                                  quota_remaining=Decimal("0.5"), quota_threshold=Decimal("1"))
@@ -52,7 +53,7 @@ def test_quota_low_below_threshold_is_warn(golden_db) -> None:
     assert q.sev == "warn"
 
 
-def test_disabled_rule_silent(golden_db) -> None:
+def test_disabled_rule_silent(golden_db: sqlite3.Connection) -> None:
     data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
     rules = DEFAULT_RULES.model_copy(deep=True)
     rules.single_weight.enabled = False
@@ -61,7 +62,7 @@ def test_disabled_rule_silent(golden_db) -> None:
     assert not any(a.id.startswith("single_weight") for a in alerts)
 
 
-def test_compute_alerts_wrapper_uses_db(golden_db) -> None:
+def test_compute_alerts_wrapper_uses_db(golden_db: sqlite3.Connection) -> None:
     # golden DB has no topups -> budget_remaining 0; set $1 threshold explicitly (the
     # default is now 1.00) so 0 < 1 fires quota_low. single_weight fires regardless.
     set_alert_threshold(golden_db, Decimal("1"))

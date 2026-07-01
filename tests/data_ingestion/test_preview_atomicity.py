@@ -68,12 +68,12 @@ def test_mid_batch_error_rolls_back_whole_batch(conn: sqlite3.Connection) -> Non
 
     calls = {"n": 0}
 
-    def flaky_writer(c: sqlite3.Connection, row: PreviewRow, *, commit: bool = True) -> int:
+    def flaky_writer(conn: sqlite3.Connection, row: PreviewRow, *, commit: bool = True) -> int:
         # Persist rows 0..2 via the real (non-committing) writer, then blow up on row 3.
         if calls["n"] == 3:
             raise RuntimeError("simulated unexpected DB error mid-batch")
         calls["n"] += 1
-        return write_transaction_row(c, row, commit=commit)
+        return write_transaction_row(conn, row, commit=commit)
 
     with pytest.raises(RuntimeError, match="simulated unexpected DB error"):
         commit_preview(

@@ -217,10 +217,11 @@ def test_backup_daily_integrity_failure_records_error_run(
     )
     # On failure the func RAISES → run_job records an error row; backup_database is not called.
     called = {"backup": False}
-    monkeypatch.setattr(
-        backup_ops, "backup_database",
-        lambda **k: called.__setitem__("backup", True) or Path("nope"),
-    )
+    def _fake_backup(**k: object) -> Path:
+        called["backup"] = True
+        return Path("nope")
+
+    monkeypatch.setattr(backup_ops, "backup_database", _fake_backup)
     caplog.set_level(logging.WARNING)
 
     rid = run_job(conn, "backup_daily", now=_NOW)

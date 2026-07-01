@@ -35,6 +35,7 @@ import sqlite3
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -207,14 +208,15 @@ def seed_full(conn: sqlite3.Connection) -> None:
     ], fetched_at=GOLDEN_NOW)
 
 
-def _dashboard(factory: DashboardClientFactory) -> dict:
+def _dashboard(factory: DashboardClientFactory) -> dict[str, Any]:
     client: TestClient = factory(seed_full)
     r = client.get("/api/dashboard")
     assert r.status_code == 200
-    return r.json()
+    body: dict[str, Any] = r.json()
+    return body
 
 
-def _by_symbol(body: dict) -> dict[str, dict]:
+def _by_symbol(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {h["symbol"]: h for h in body["holdings"]}
 
 

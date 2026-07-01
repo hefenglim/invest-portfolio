@@ -10,6 +10,7 @@ import logging
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,7 +33,7 @@ def _clean_root_handler() -> Iterator[None]:
             handler.close()
 
 
-def _read_lines(log_dir: Path) -> list[dict[str, object]]:
+def _read_lines(log_dir: Path) -> list[dict[str, Any]]:
     text = (log_dir / "app.log").read_text(encoding="utf-8")
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 

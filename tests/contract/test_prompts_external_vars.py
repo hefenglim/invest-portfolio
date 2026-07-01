@@ -9,6 +9,7 @@ and feeds the value into the rendered prompt. No LLM is called (preview path).
 import json
 import sqlite3
 from datetime import date, datetime
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -21,7 +22,7 @@ def _conn_of(client: TestClient) -> sqlite3.Connection:
 
 
 def _preview(client: TestClient, body: str, *, scope: str = "portfolio",
-             symbol: str | None = None) -> dict[str, object]:
+             symbol: str | None = None) -> dict[str, Any]:
     r = client.post(
         "/api/prompts/preview", json={"body": body, "scope": scope, "symbol": symbol}
     )

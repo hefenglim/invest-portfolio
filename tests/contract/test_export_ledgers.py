@@ -1,5 +1,6 @@
 import io
 import json
+import sqlite3
 import zipfile
 
 from fastapi.testclient import TestClient
@@ -26,7 +27,9 @@ def test_export_ledgers_zip_members(api_client: TestClient) -> None:
         assert "tw" in fee and "schwab" in fee
 
 
-def test_export_ledgers_writes_audit_row(api_client: TestClient, golden_db) -> None:
+def test_export_ledgers_writes_audit_row(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
     api_client.post("/api/export/ledgers")
     row = golden_db.execute(
         "SELECT * FROM job_runs WHERE job_id = 'export:ledgers'"

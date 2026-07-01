@@ -13,7 +13,7 @@ from tests.e2e.conftest import assert_page_ok
 
 
 @pytest.mark.e2e
-def test_login_page_smoke(live_server: str, browser_page: object) -> None:
+def test_login_page_smoke(live_server: str, browser_page: Page) -> None:
     """/login.html loads clean and makes NO /api/* call on load (spec 19, 9.x).
 
     After wiring login to POST /api/auth/login, the page loads api.js + an inline auth
@@ -66,7 +66,7 @@ def test_login_page_smoke(live_server: str, browser_page: object) -> None:
 
 
 @pytest.mark.e2e
-def test_index_page_smoke(live_server: str, browser_page: object) -> None:
+def test_index_page_smoke(live_server: str, browser_page: Page) -> None:
     """/index.html (dashboard) loads clean from the REAL /api/dashboard (Task 2.2).
 
     After Task 2.2, index.html no longer loads mock-data.js / history-mock.js: app.js,
@@ -86,7 +86,7 @@ def test_index_page_smoke(live_server: str, browser_page: object) -> None:
 
 @pytest.mark.e2e
 def test_settings_accounts_shell_smoke(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """/settings-accounts.html (shell-bearing) boots clean (spec 19, Task 2.1 fix).
 
@@ -102,7 +102,7 @@ def test_settings_accounts_shell_smoke(
 
 @pytest.mark.e2e
 def test_symbol_detail_drawer_held_smoke(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """Symbol-detail drawer wired to /api/symbol/{symbol}/detail (spec 19, Task 2.3).
 
@@ -151,7 +151,7 @@ def test_symbol_detail_drawer_held_smoke(
 
 @pytest.mark.e2e
 def test_symbol_detail_drawer_watchlist_smoke(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """Drawer watchlist (unheld) variant (spec 19, Task 2.3).
 
@@ -195,7 +195,7 @@ def test_symbol_detail_drawer_watchlist_smoke(
 
 @pytest.mark.e2e
 def test_shell_session_guard_guest_no_redirect(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """shell.js global scaffold (Task 2.1): the async /api/auth/session guard via pdApi.
 
@@ -246,7 +246,7 @@ def test_shell_session_guard_guest_no_redirect(
 
 
 @pytest.mark.e2e
-def test_trades_ledger_smoke(live_server: str, browser_page: object) -> None:
+def test_trades_ledger_smoke(live_server: str, browser_page: Page) -> None:
     """/trades.html ledger view wired to the REAL /api/ledgers/* (spec 19, Task 2.4).
 
     After Task 2.4, ledger.js drops its inline window.LEDGER_DATA mock and instead
@@ -294,7 +294,7 @@ def test_trades_ledger_smoke(live_server: str, browser_page: object) -> None:
 
 @pytest.mark.e2e
 def test_trades_ledger_account_filter_keeps_rows(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """Clicking a specific-account chip filters by account_id, NOT the display name.
 
@@ -348,7 +348,7 @@ def test_trades_ledger_account_filter_keeps_rows(
 
 
 @pytest.mark.e2e
-def test_instruments_page_smoke(live_server: str, browser_page: object) -> None:
+def test_instruments_page_smoke(live_server: str, browser_page: Page) -> None:
     """/instruments.html list wired to the REAL /api/instruments (spec 19, Task 2.5).
 
     After Task 2.5, instruments.js drops its inline window.INSTRUMENTS_DATA mock and
@@ -392,7 +392,7 @@ def test_instruments_page_smoke(live_server: str, browser_page: object) -> None:
 
 @pytest.mark.e2e
 def test_instruments_probe_shows_board_guess(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """Probe step hits the REAL POST /api/instruments/probe (spec 19, Task 2.5).
 
@@ -440,7 +440,7 @@ def test_instruments_probe_shows_board_guess(
 
 
 @pytest.mark.e2e
-def test_input_page_smoke(live_server: str, browser_page: object) -> None:
+def test_input_page_smoke(live_server: str, browser_page: Page) -> None:
     """/input.html boots from the REAL /api/input/context (spec 19, Task 2.6).
 
     After Task 2.6 input.js drops window.INPUT_DATA and sources ALL form structural
@@ -488,7 +488,7 @@ def test_input_page_smoke(live_server: str, browser_page: object) -> None:
 
 @pytest.mark.e2e
 def test_input_manual_preview_roundtrip(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """Manual tab live preview hits the REAL POST /api/input/manual/preview (Task 2.6).
 
@@ -542,7 +542,7 @@ def test_input_manual_preview_roundtrip(
 
 
 @pytest.mark.e2e
-def test_ledger_page_smoke(live_server: str, browser_page: object) -> None:
+def test_ledger_page_smoke(live_server: str, browser_page: Page) -> None:
     """/ledger.html (standalone ledger view) wired to /api/ledgers/* (spec 19, Task 2.4).
 
     The alternate ledger page owns its own tabs (it has no #pane-ldiv) and carries a
@@ -579,7 +579,7 @@ def test_ledger_page_smoke(live_server: str, browser_page: object) -> None:
 
 
 @pytest.mark.e2e
-def test_settings_llm_page_smoke(live_server: str, browser_page: object) -> None:
+def test_settings_llm_page_smoke(live_server: str, browser_page: Page) -> None:
     """/settings-llm.html boots from the REAL /api/llm/config (spec 19, Task 2.7a).
 
     settings-llm.js drops its inline window.LLM_DATA mock and boots off GET
@@ -627,7 +627,7 @@ def test_settings_llm_page_smoke(live_server: str, browser_page: object) -> None
 
 
 @pytest.mark.e2e
-def test_settings_scheduler_page_smoke(live_server: str, browser_page: object) -> None:
+def test_settings_scheduler_page_smoke(live_server: str, browser_page: Page) -> None:
     """/settings-scheduler.html boots from the REAL /api/scheduler/* (spec 19, Task 2.7a).
 
     settings-scheduler.js drops window.SCHED_DATA and boots off GET /api/scheduler/jobs +
@@ -670,7 +670,7 @@ def test_settings_scheduler_page_smoke(live_server: str, browser_page: object) -
 
 @pytest.mark.e2e
 def test_settings_datasources_page_smoke(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """/settings-datasources.html boots from the REAL /api/datasources (Task 2.7a).
 
@@ -714,7 +714,7 @@ def test_settings_datasources_page_smoke(
 
 
 @pytest.mark.e2e
-def test_settings_combined_page_smoke(live_server: str, browser_page: object) -> None:
+def test_settings_combined_page_smoke(live_server: str, browser_page: Page) -> None:
     """/settings.html (combined) loads ALL settings scripts console-clean (Task 2.7a/b).
 
     settings.html loads api.js + every settings script: the NOW-WIRED ones
@@ -773,7 +773,7 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: object) ->
 
 
 @pytest.mark.e2e
-def test_settings_prompts_page_smoke(live_server: str, browser_page: object) -> None:
+def test_settings_prompts_page_smoke(live_server: str, browser_page: Page) -> None:
     """/settings-prompts.html boots from /api/prompt-vars + /api/system-prompt (Task 2.7b).
 
     settings-prompts.js drops its inline window.PROMPTS_DATA + (vars.js) PD_VARS mocks and
@@ -827,7 +827,7 @@ def test_settings_prompts_page_smoke(live_server: str, browser_page: object) -> 
 
 @pytest.mark.e2e
 def test_evolution_config_panel_roundtrip(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """自我進化設定 panel wired to GET/PUT /api/evolution-config (spec 19 defer ①).
 
@@ -909,7 +909,7 @@ def test_evolution_config_panel_roundtrip(
 
 @pytest.mark.e2e
 def test_settings_accounts_users_wired_smoke(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """/settings-accounts.html users list wired to GET /api/users (spec 19, Task 2.7b).
 
@@ -955,7 +955,7 @@ def test_settings_accounts_users_wired_smoke(
 
 @pytest.mark.e2e
 def test_offdashboard_bell_reads_api_alerts(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """Topbar bell on a NON-dashboard page renders from GET /api/alerts (spec 19/03 I1).
 
@@ -1009,7 +1009,7 @@ def test_offdashboard_bell_reads_api_alerts(
 
 @pytest.mark.e2e
 def test_settings_alert_rules_editor_wired(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """Alert-rules editor on /settings.html renders from GET /api/alert-rules (Task 2.7c).
 
@@ -1060,7 +1060,7 @@ def test_settings_alert_rules_editor_wired(
 
 
 @pytest.mark.e2e
-def test_insights_page_smoke(live_server: str, browser_page: object) -> None:
+def test_insights_page_smoke(live_server: str, browser_page: Page) -> None:
     """/insights.html boots from GET /api/insights + GET /api/ai-score (spec 19, Task 2.8).
 
     The page drops its inline design-preview mock and async-boots two endpoints: the 洞察卡
@@ -1108,7 +1108,7 @@ def test_insights_page_smoke(live_server: str, browser_page: object) -> None:
 
 
 @pytest.mark.e2e
-def test_rebalance_drawer_smoke(live_server: str, browser_page: object) -> None:
+def test_rebalance_drawer_smoke(live_server: str, browser_page: Page) -> None:
     """Rebalance what-if drawer boots off the shared /api/dashboard promise (Task 3.1).
 
     After Task 3.1, rebalance.js drops `window.DASHBOARD_DATA` (mock-data.js is deleted)
@@ -1160,7 +1160,7 @@ def test_rebalance_drawer_smoke(live_server: str, browser_page: object) -> None:
 
 
 @pytest.mark.e2e
-def test_rebalance_preview_roundtrip(live_server: str, browser_page: object) -> None:
+def test_rebalance_preview_roundtrip(live_server: str, browser_page: Page) -> None:
     """Setting a target weight hits the REAL POST /api/rebalance/preview (spec 19 defer ③).
 
     After defer ③, rebalance.js drops its client-side what-if math (the FX_TWD mock rates,
@@ -1240,7 +1240,7 @@ def test_rebalance_preview_roundtrip(live_server: str, browser_page: object) -> 
 
 
 @pytest.mark.e2e
-def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None:
+def test_pipeline_hub_page_smoke(live_server: str, browser_page: Page) -> None:
     """/pipeline-hub.html boots from GET /api/insight-tasks/status (spec 19, Task 2.8).
 
     The page drops its window.PIPE mock (pipeline-data.js no longer loaded) and async-boots
@@ -1288,7 +1288,7 @@ def test_pipeline_hub_page_smoke(live_server: str, browser_page: object) -> None
 
 @pytest.mark.e2e
 def test_dashboard_trend_chart_mounts(
-    live_server: str, browser_page: object
+    live_server: str, browser_page: Page
 ) -> None:
     """Trend chart still mounts after the dead PD_HISTORY marker code is removed (defer ②).
 
@@ -1332,7 +1332,7 @@ def test_dashboard_trend_chart_mounts(
 
 
 @pytest.mark.e2e
-def test_favicon_present_no_ico_404(live_server: str, browser_page: object) -> None:
+def test_favicon_present_no_ico_404(live_server: str, browser_page: Page) -> None:
     """Every page references favicon.svg so the browser never 404s on /favicon.ico (defer ⑥).
 
     shell.js injects <link rel="icon" type="image/svg+xml" href="favicon.svg"> into the head

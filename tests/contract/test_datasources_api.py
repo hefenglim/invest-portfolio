@@ -9,7 +9,8 @@ touches the network (a real provider call only happens in production).
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -23,6 +24,13 @@ from portfolio_dash.api.routers import datasources as ds_router
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.pricing import datasources_store as store
+from portfolio_dash.pricing import sentiment_source
+from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
+from portfolio_dash.pricing.providers.tpex_provider import TpexProvider
+from portfolio_dash.pricing.providers.twse_provider import TwseProvider
+from portfolio_dash.pricing.providers.yfinance_provider import YFinanceProvider
+from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.shared.enums import Market
 
 NOW = datetime(2026, 6, 12, 10, 0, tzinfo=ZoneInfo("Asia/Taipei"))
 
@@ -271,3 +279,67 @@ def test_put_fallbacks_unknown_account_400(client: TestClient) -> None:
         json={"account_fallbacks": {"ghost_acct": ["twse"]}},
     )
     assert r.status_code == 400
+
+
+# --- probe_source wiring (primary live sources now have a real probe) ----------
+
+
+def _fake_price(symbol: str) -> PriceRow:
+    return PriceRow(
+        instrument=symbol, market=Market.TW, as_of=date(2026, 6, 12),
+        close=Decimal("100"), source="test",
+    )
+
+
+@pytest.mark.parametrize(
+    "source_id, provider_cls",
+    [("yfinance", YFinanceProvider), ("twse", TwseProvider), ("tpex", TpexProvider)],
+)
+def test_probe_quote_sources_are_wired(
+    monkeypatch: pytest.MonkeyPatch, source_id: str, provider_cls: type
+) -> None:
+    """The primary key-less quote sources dispatch to a real provider call (no stub)."""
+    monkeypatch.setattr(
+        provider_cls, "fetch_quote_latest", lambda self, refs: [_fake_price(refs[0].symbol)]
+    )
+    ok, detail = ds_router.probe_source(source_id, None)
+    assert ok is True
+    assert detail is not None and "尚未實作" not in detail
+
+
+def test_probe_finmind_with_key_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(FinMindProvider, "fetch_dividends", lambda self, refs: [])
+    ok, detail = ds_router.probe_source("finmind", "fm-key")
+    assert ok is True
+    assert detail is not None and "尚未實作" not in detail
+
+
+def test_probe_finmind_without_key_reports_missing() -> None:
+    ok, detail = ds_router.probe_source("finmind", None)
+    assert ok is False
+    assert detail == "尚未設定金鑰"
+
+
+def test_probe_fx_ecb_is_pending_not_stub() -> None:
+    ok, detail = ds_router.probe_source("fx_ecb", None)
+    assert ok is False
+    assert detail == "待測試（尚未線上驗證）"
+
+
+def test_no_live_source_falls_through_to_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression guard: every ``live`` source must have a wired probe. Mock all network
+    boundaries so no live source reaches the ``尚未實作連線測試`` fallback."""
+    monkeypatch.setattr(ds_router, "_probe_quote_provider", lambda prov, ref: (True, "mock"))
+    monkeypatch.setattr(FinMindProvider, "fetch_dividends", lambda self, refs: [])
+    monkeypatch.setattr(sentiment_source, "fetch_fear_greed", lambda: {"score": 50})
+    for info in store.SOURCE_INFO:
+        if info.status != "live":
+            continue
+        key = "k" if info.auth in ("apikey", "oauth") else None
+        _ok, detail = ds_router.probe_source(info.id, key)
+        assert detail != "尚未實作連線測試", f"{info.id} still returns the not-implemented stub"
+
+
+def test_fx_ecb_wire_status_is_pending(client: TestClient) -> None:
+    by_id = {s["id"]: s for s in client.get("/api/datasources").json()["sources"]}
+    assert by_id["fx_ecb"]["status"] == "pending"

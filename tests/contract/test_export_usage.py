@@ -1,3 +1,5 @@
+import sqlite3
+
 from fastapi.testclient import TestClient
 
 
@@ -28,7 +30,9 @@ def test_export_bad_range_400(api_client: TestClient) -> None:
     assert r.json()["error"]["field"] == "from"
 
 
-def test_export_usage_writes_audit_rows(api_client: TestClient, golden_db) -> None:
+def test_export_usage_writes_audit_rows(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
     api_client.post("/api/export/llm-usage", json={})
     api_client.post("/api/export/job-runs", json={})
     kinds = {row["job_id"] for row in golden_db.execute(

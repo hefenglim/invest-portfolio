@@ -202,6 +202,7 @@
     const brand = el('div', 'brand');
     brand.innerHTML = 'p<span class="full">ortfolio</span><span class="tld">-dash</span>';
     sb.appendChild(brand);
+    sb.appendChild(el('div', 'brand-ver'));  // version tag under the brand; filled by pdInitVersion()
 
     const mkItem = (item, child) => {
       const a = el('a', 'sb-item' + (item.id === page ? ' active' : ''));
@@ -496,4 +497,19 @@
      rendered: sidebar, topbar, toast, confirmDialog, search, pdOpenSymbol are all
      defined/usable immediately; the session-dependent UI updates after this resolves) */
   pdInitSession();
+
+  /* App version tag — single source: backend GET /api/health ({"version": "…"}). Fills the
+     sidebar brand tag (every page) AND the settings 一般 read-only row (#gen-version), so both
+     share ONE version source. Non-critical: degrades silently if the health call fails. */
+  function pdInitVersion() {
+    pdEnsureApi()
+      .then((ok) => (ok ? window.pdApi.get('/api/health') : null))
+      .then((h) => {
+        const v = (h && h.version) ? ('v' + h.version) : '';
+        if (!v) return;
+        document.querySelectorAll('.brand-ver, #gen-version').forEach((n) => { n.textContent = v; });
+      })
+      .catch(() => { /* silent: version tag is non-critical */ });
+  }
+  pdInitVersion();
 })();

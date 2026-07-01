@@ -119,7 +119,7 @@ def test_health_exempt_from_gate_in_protected_mode(
     )  # activates protected mode
     api_client.cookies.clear()
     r = api_client.get("/api/health")
-    assert r.status_code == 200 and r.json() == {"status": "ok"}
+    assert r.status_code == 200 and r.json()["status"] == "ok"
     # The gate is NOT broadly open: another protected /api/* path still requires a cookie.
     blocked = api_client.get("/api/dashboard")
     assert blocked.status_code == 401 and blocked.json()["error"]["code"] == "unauthorized"

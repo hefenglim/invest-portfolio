@@ -1,6 +1,6 @@
 [project]
 name = "portfolio-dash"
-version = "0.0.0"
+dynamic = ["version"]  # sourced from portfolio_dash.__version__ (single source of truth)
 description = "Personal multi-currency, multi-account stock portfolio dashboard"
 requires-python = ">=3.12"
 dependencies = [
@@ -41,6 +41,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["portfolio_dash*"]
 
+[tool.setuptools.dynamic]
+version = { attr = "portfolio_dash.__version__" }
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
@@ -53,8 +56,21 @@ module = "scripts.probe.adapters.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["yfinance.*", "FinMind.*", "twstock.*", "bs4.*", "pandas.*", "numpy.*", "litellm.*", "apscheduler.*", "uvicorn.*", "freezegun.*", "pytest_socket.*"]
+module = ["yfinance.*", "twstock.*", "bs4.*", "pandas.*", "numpy.*", "litellm.*", "apscheduler.*", "uvicorn.*", "pytest_socket.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# no_implicit_reexport (from strict) adds no value here: tests re-export shared helpers
+# from tests.conftest, and a few provider modules are monkeypatched at their use-site
+# (e.g. finmind_datasets.requests, jobs.ingest). Relax only that one check for these
+# modules; every other strict check still applies.
+module = [
+    "tests.*",
+    "portfolio_dash.pricing.finmind_datasets",
+    "portfolio_dash.pricing.providers.finmind_provider",
+    "portfolio_dash.scheduler.jobs",
+]
+implicit_reexport = true
 
 [tool.ruff]
 line-length = 100
