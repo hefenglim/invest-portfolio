@@ -24,6 +24,10 @@ htmlcov/
 .env.*
 !.env.example
 
+# --- Private ops / server notes: real VM IP, SSH host keys, operation logs ---
+#     (deployment docs in docs/ use placeholders; the REAL host details live here) ---
+docs/human_noted/
+
 # --- Personal financial data: NEVER commit the ledger ---
 *.db
 *.sqlite
