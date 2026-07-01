@@ -231,3 +231,40 @@ Private access (Tailscale/SSH) is strongly preferred. If you must expose it publ
    sudo systemctl restart caddy
    ```
 Keep the app bound to `127.0.0.1` (step 5) so only Caddy can reach it.
+
+---
+
+## Appendix — Debian 13 (trixie) deployment differences
+
+The main SOP assumes **Ubuntu 24.04**. If the VM runs **Debian 13 (trixie)** instead (the
+default image on some VMs), the procedure is identical **except Step 2's Python install**:
+Debian 13 ships **Python 3.13** by default and has **no `python3.12` package**. The app
+requires `>=3.12`, so **Python 3.13 is fine** — just use the system `python3`.
+
+Substitute **Step 2's package install** with:
+```bash
+sudo apt update && sudo apt -y upgrade
+sudo apt -y install python3 python3-venv python3-dev build-essential git
+python3 --version            # confirm >= 3.12 (Debian 13 ships 3.13)
+sudo apt -y install unattended-upgrades && sudo dpkg-reconfigure -plow unattended-upgrades
+```
+> **Why `python3-venv` is mandatory on Debian:** the base `python3` ships **without `pip`
+> or `ensurepip`**, so `python3 -m venv` fails with `No module named 'ensurepip'` until
+> `python3-venv` is installed. `build-essential` / `python3-dev` are a fallback for any
+> dependency lacking a prebuilt cp313 wheel (most ship wheels, so it is usually unused).
+
+Then in **Step 3** build the venv with the system interpreter (not a versioned name):
+```bash
+python3 -m venv .venv        # NOT python3.12 -m venv
+./.venv/bin/pip install --upgrade pip
+./.venv/bin/pip install -e .
+```
+
+Everything else is **distro-agnostic and unchanged**: swap (Step 2), `pip install -e .`
+(Step 3), the systemd unit (Step 5 — its `ExecStart` calls `.venv/bin/python`, so the
+runtime version is whatever the venv was built with), Tailscale / SSH access (Step 6), and
+all of Maintenance. `unattended-upgrades`, `systemctl`, `journalctl`, `make`, and `caddy`
+all exist on Debian 13 the same way.
+
+> This appendix is the **Debian 13 delta only** — the Ubuntu path above is kept verbatim as
+> the reference. Pick the Step 2/3 block matching your VM's OS; the rest of the SOP is shared.
