@@ -234,37 +234,37 @@ Keep the app bound to `127.0.0.1` (step 5) so only Caddy can reach it.
 
 ---
 
-## Appendix — Debian 13 (trixie) deployment differences
+## Appendix — Debian 13 (trixie): run on Python 3.12 via `uv` (NOT the system 3.13)
 
-The main SOP assumes **Ubuntu 24.04**. If the VM runs **Debian 13 (trixie)** instead (the
-default image on some VMs), the procedure is identical **except Step 2's Python install**:
-Debian 13 ships **Python 3.13** by default and has **no `python3.12` package**. The app
-requires `>=3.12`, so **Python 3.13 is fine** — just use the system `python3`.
+The main SOP assumes **Ubuntu 24.04** (which ships Python 3.12). **Debian 13 (trixie)** ships
+**Python 3.13** and has no `python3.12` package — and this project **cannot run on Python 3.13**.
 
-Substitute **Step 2's package install** with:
+**Why 3.13 fails (verified on a live Debian 13 VM, 2026-07):** `FinMind` pins `lxml<5.0.0`.
+lxml < 5 has **no cp313 wheel**, and its source **fails to compile on CPython 3.13**
+(`error: too few arguments to function '_PyLong_AsByteArray'` — that C-API signature changed in
+3.13). lxml 5.x supports 3.13, but FinMind caps it below 5. So the app must run on **Python 3.12**.
+
+**Fix — provision Python 3.12 with `uv`** (downloads a prebuilt CPython 3.12; no compiling on the
+`e2-micro`). This replaces Step 2's `python3.12` apt install and Step 3's venv creation:
 ```bash
-sudo apt update && sudo apt -y upgrade
-sudo apt -y install python3 python3-venv python3-dev build-essential git
-python3 --version            # confirm >= 3.12 (Debian 13 ships 3.13)
-sudo apt -y install unattended-upgrades && sudo dpkg-reconfigure -plow unattended-upgrades
+# Step 2: system packages — git only (do the 2 GB swap from the main Step 2 too).
+sudo apt update && sudo apt -y install git
+curl -LsSf https://astral.sh/uv/install.sh | sh          # installs uv into ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
+
+# Step 3: build the venv on a prebuilt Python 3.12, then install as usual.
+cd ~/invest-portfolio
+uv venv --seed --python 3.12 .venv                       # fetches CPython 3.12; --seed adds pip
+./.venv/bin/python --version                             # -> Python 3.12.x
+./.venv/bin/pip install -e .                             # lxml 4.9.4 installs from a cp312 wheel
 ```
-> **Why `python3-venv` is mandatory on Debian:** the base `python3` ships **without `pip`
-> or `ensurepip`**, so `python3 -m venv` fails with `No module named 'ensurepip'` until
-> `python3-venv` is installed. `build-essential` / `python3-dev` are a fallback for any
-> dependency lacking a prebuilt cp313 wheel (most ship wheels, so it is usually unused).
+`--seed` puts `pip` in the venv so the Maintenance "update" flow (`./.venv/bin/pip install -e .`)
+keeps working unchanged. `uv` only supplies the interpreter; installation still uses the venv's pip.
 
-Then in **Step 3** build the venv with the system interpreter (not a versioned name):
-```bash
-python3 -m venv .venv        # NOT python3.12 -m venv
-./.venv/bin/pip install --upgrade pip
-./.venv/bin/pip install -e .
-```
+Everything else is **distro-agnostic and unchanged**: swap (Step 2), the systemd unit (Step 5 —
+its `ExecStart` calls `.venv/bin/python`, so it runs whatever the venv was built with, here 3.12),
+Tailscale / SSH access (Step 6), and all of Maintenance. `unattended-upgrades`, `systemctl`,
+`journalctl`, `make`, and `caddy` all exist on Debian 13 the same way.
 
-Everything else is **distro-agnostic and unchanged**: swap (Step 2), `pip install -e .`
-(Step 3), the systemd unit (Step 5 — its `ExecStart` calls `.venv/bin/python`, so the
-runtime version is whatever the venv was built with), Tailscale / SSH access (Step 6), and
-all of Maintenance. `unattended-upgrades`, `systemctl`, `journalctl`, `make`, and `caddy`
-all exist on Debian 13 the same way.
-
-> This appendix is the **Debian 13 delta only** — the Ubuntu path above is kept verbatim as
-> the reference. Pick the Step 2/3 block matching your VM's OS; the rest of the SOP is shared.
+> This appendix is the **Debian 13 delta only** — the Ubuntu path above is kept verbatim as the
+> reference. On Debian 13 use the `uv` + Python 3.12 block above; the rest of the SOP is shared.
