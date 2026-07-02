@@ -17,7 +17,7 @@ from portfolio_dash.data_ingestion.store import (
     list_transactions,
 )
 from portfolio_dash.portfolio.cost_basis import OversellError, build_book
-from portfolio_dash.scheduler.jobs import run_job
+from portfolio_dash.scheduler.jobs import backfill_history_all, run_job
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
 
@@ -44,6 +44,26 @@ def refresh_quotes_action(
     jobs = [_MARKET_JOB[m] for m in markets]
     run_ids = [run_job(conn, job_id, now=now) for job_id in jobs]
     return {"run_ids": run_ids, "jobs": jobs}
+
+
+class BackfillBody(BaseModel):
+    days: int = 92  # default = the 3-month presentation window
+
+
+@router.post("/actions/backfill-history", status_code=200)
+def backfill_history(
+    body: BackfillBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """Backfill daily close history for ALL instruments (manual, idempotent).
+
+    Gives existing instruments the ~3-month drawer-chart window immediately; newly
+    registered symbols get theirs at registration. Clamped to [1, 730] days.
+    """
+    days = max(1, min(body.days, 730))
+    detail = backfill_history_all(conn, days=days, now=now)
+    return {"days": days, "detail": detail}
 
 
 @router.post("/actions/recompute", status_code=200)

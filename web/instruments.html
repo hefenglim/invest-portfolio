@@ -53,12 +53,12 @@
   <section class="panel" data-screen-label="新增標的">
     <div class="panel-head">
       <h2 class="panel-title">新增標的</h2>
-      <span class="panel-sub">台股需經板別探測（TWSE / TPEx）；美股、馬股板別固定</span>
+      <span class="panel-sub">輸入代號直接加入 — 自動判定板別、查詢名稱與即時報價，並回補近 3 個月歷史</span>
     </div>
     <div class="add-row">
       <div class="field">
         <label for="new-symbol">代號</label>
-        <input class="input" id="new-symbol" placeholder="例：2330" value="2330" spellcheck="false"></input>
+        <input class="input" id="new-symbol" placeholder="例：2330、AAPL" spellcheck="false"></input>
       </div>
       <div class="field">
         <label for="new-market">市場</label>
@@ -68,49 +68,8 @@
           <option value="MY">馬股</option>
         </select>
       </div>
-      <button class="btn btn-primary" id="probe-btn" type="button" style="margin-bottom: 1px;">查詢</button>
-    </div>
-
-    <div class="probe-card" id="probe-card" hidden="hidden" data-screen-label="板別探測">
-      <span id="probe-text"></span>
-      <span class="acts">
-        <button class="btn btn-primary" id="probe-ok" type="button">確認</button>
-        <button class="btn" id="probe-tpex" type="button">改為 TPEx</button>
-        <button class="btn" id="probe-fail" type="button" title="模擬探測失敗的未解析狀態">模擬探測失敗</button>
-      </span>
-    </div>
-
-    <div class="unres-banner" id="unresolved-banner" hidden="hidden">
-      ⚠ 板別未解析 — 已以預設 TWSE 抓報價，請稍後手動確認。此標的會在清單中帶琥珀色「未解析」徽章。
-    </div>
-
-    <div class="detail-form" id="detail-form" hidden="hidden" data-screen-label="標的明細表單">
-      <h3 id="df-title"></h3>
-      <div class="form-grid">
-        <div class="field">
-          <label for="df-name">名稱</label>
-          <input class="input" id="df-name" value="台積電"></input>
-        </div>
-        <div class="field">
-          <label for="df-sector">產業</label>
-          <input class="input" id="df-sector" list="sector-list" placeholder="自由輸入，含建議"></input>
-          <datalist id="sector-list">
-            <option value="半導體"></option>
-            <option value="ETF"></option>
-            <option value="科技"></option>
-            <option value="金融"></option>
-            <option value="光電"></option>
-          </datalist>
-        </div>
-        <div class="field">
-          <label for="df-ccy">幣別（依市場自動）</label>
-          <input class="input" id="df-ccy" value="TWD" readonly="readonly"></input>
-        </div>
-      </div>
-      <div class="form-actions" style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;">
-        <button class="btn" type="button">取消</button>
-        <button class="btn btn-primary" id="df-register" type="button">確認註冊</button>
-      </div>
+      <button class="btn btn-primary" id="quick-add-btn" type="button" style="margin-bottom: 1px;">＋ 加入</button>
+      <span class="panel-sub" id="quick-add-hint"></span>
     </div>
     <div style="height: 14px;"></div>
   </section>
@@ -123,6 +82,7 @@
     <div class="inst-toolbar">
       <input class="input" id="inst-search" type="search" placeholder="搜尋代號或名稱…"></input>
       <span class="spacer"></span>
+      <button class="btn" id="backfill-btn" type="button" title="為所有標的回補近 3 個月的日線收盤價（個股圖表用）">回補 3 個月歷史</button>
     </div>
     <div class="table-wrap">
       <table class="data">

@@ -1,10 +1,12 @@
 /* portfolio-dash — 標的管理 (wired to /api/instruments, spec 19/10).
 
    The instrument list is fetched from GET /api/instruments through the single
-   pdApi fetch layer; the page no longer carries an inline mock. The probe step
-   (TW board guess) and registration both POST through pdApi. Money values
-   (last / chg_pct / target_low) arrive as Decimal STRINGS and are formatted via
-   window.fmt ONLY — the frontend never computes money. */
+   pdApi fetch layer; the page no longer carries an inline mock. Adding is ONE
+   step (2026-07-02): POST /api/instruments/quick probes the board, requires a
+   real quote (typo guard; force after explicit confirm), auto-fills the name and
+   backfills ~3 months of history. Money values (last / chg_pct / target_low)
+   arrive as Decimal STRINGS and are formatted via window.fmt ONLY — the frontend
+   never computes money. */
 (function () {
   'use strict';
   /* D.list is mutable: starts empty (any pre-fetch render shows a blank table)
@@ -20,100 +22,69 @@
   };
   const MARKET_ZH = { TW: '台股', US: '美股', MY: '馬股' };
 
-  /* The confirmed board from the probe step, fed into the register POST. Set by
-     the probe flow; reset whenever a new probe begins. */
-  let probedSymbol = '';
-  let probedName = null;
-  let confirmedBoard = null;
-
-  /* ---- probe flow ---- */
-  const probeCard = $('#probe-card');
-  $('#probe-btn').addEventListener('click', async () => {
+  /* ---- one-step add (2026-07-02, supersedes the probe→confirm→detail flow) ----
+     Symbol + market → POST /api/instruments/quick: the backend probes the board,
+     requires a REAL quote (typo guard), auto-fills the name, and backfills ~3 months
+     of history in one call. 422 quote_not_found → explicit confirm → force re-send.
+     The button carries a pdBusy spinner (real network work, several seconds). */
+  async function quickAdd(force) {
     const sym = $('#new-symbol').value.trim();
     const market = $('#new-market').value;
     if (!sym) {
       if (window.toast) window.toast('請先輸入代號', 'fail');
       return;
     }
-    probedSymbol = sym;
-    if (market !== 'TW') {
-      // US / MY: board is fixed (no TW board probe); go straight to detail form.
-      probedName = null;
-      confirmedBoard = market === 'US' ? '' : '.KL';
-      probeCard.hidden = true;
-      $('#unresolved-banner').hidden = true;
-      $('#detail-form').hidden = false;
-      $('#df-title').textContent =
-        sym + ' — 板別固定（' + (market === 'US' ? '美股' : '馬股 .KL') + '），直接填寫明細';
-      return;
-    }
-    // TW: probe the board through the real endpoint.
+    const btn = $('#quick-add-btn');
+    const restore = window.pdBusy ? window.pdBusy(btn, '查詢並加入中…') : () => {};
+    $('#quick-add-hint').textContent = '正在查詢報價、名稱與歷史資料（數秒）…';
     let resp;
     try {
-      resp = await window.pdApi.post('/api/instruments/probe', { symbol: sym });
+      resp = await window.pdApi.post('/api/instruments/quick',
+        { symbol: sym, market: market, force: !!force });
     } catch (err) {
-      if (window.toast) window.toast('板別探測失敗', 'fail', err && err.message ? err.message : undefined);
-      return;
-    }
-    probedName = resp && resp.name ? resp.name : null;
-    confirmedBoard = (resp && resp.board) || 'TWSE';
-    probeCard.hidden = false;
-    $('#detail-form').hidden = true;
-    $('#unresolved-banner').hidden = true;
-    const nameTxt = probedName ? '（' + probedName + '）' : '';
-    $('#probe-text').innerHTML = '<b class="num">' + sym + '</b>' + nameTxt +
-      ' → 判定 <b>' + (resp && resp.board_label ? resp.board_label : '未解析') + '</b> — 正確嗎？';
-  });
-  $('#probe-ok').addEventListener('click', () => {
-    confirmedBoard = confirmedBoard || 'TWSE';
-    probeCard.hidden = true;
-    $('#detail-form').hidden = false;
-    $('#df-title').textContent =
-      probedSymbol + (probedName ? ' ' + probedName : '') + '（TWSE 上市）— 填寫明細後註冊';
-  });
-  $('#probe-tpex').addEventListener('click', () => {
-    confirmedBoard = 'TPEx';
-    probeCard.hidden = true;
-    $('#detail-form').hidden = false;
-    $('#df-title').textContent = probedSymbol + '（改判 TPEx 上櫃）— 填寫明細後註冊';
-  });
-  $('#probe-fail').addEventListener('click', () => {
-    // Unresolved: register with no board; the backend defaults to TWSE for pricing.
-    confirmedBoard = null;
-    probeCard.hidden = true;
-    $('#detail-form').hidden = false;
-    $('#df-title').textContent = probedSymbol + '（板別未解析 — 以預設 TWSE 抓報價）— 填寫明細後註冊';
-    $('#unresolved-banner').hidden = false;
-    if (window.toast) window.toast('已暫存', 'ok', probedSymbol + ' 以預設 TWSE 抓報價，板別待確認');
-  });
-
-  /* ---- register: POST /api/instruments, then re-fetch the list ---- */
-  $('#df-register').addEventListener('click', async () => {
-    const market = $('#new-market').value;
-    const symbol = probedSymbol || $('#new-symbol').value.trim();
-    if (!symbol) {
-      if (window.toast) window.toast('請先查詢代號', 'fail');
-      return;
-    }
-    const body = {
-      symbol: symbol,
-      market: market,
-      name: ($('#df-name').value || '').trim(),
-      sector: ($('#df-sector').value || '').trim(),
-    };
-    // TW carries the confirmed board; US/MY leave board to the backend default.
-    if (market === 'TW' && confirmedBoard) body.board = confirmedBoard;
-    try {
-      await window.pdApi.post('/api/instruments', body);
-    } catch (err) {
+      restore();
+      $('#quick-add-hint').textContent = '';
+      if (err && err.status === 422 && err.code === 'quote_not_found') {
+        window.confirmDialog({
+          title: '查無報價',
+          body: (err.message || '查無 ' + sym + ' 的報價') +
+            '。仍要加入嗎？（加入後將顯示「缺價」，直到資料來源提供報價）',
+          confirmLabel: '仍要加入',
+          danger: true,
+          onConfirm: () => quickAdd(true)
+        });
+        return;
+      }
       // 409 duplicate_symbol / 400 validation_error -> surface the backend message.
-      if (window.toast) window.toast(err && err.message ? err.message : '註冊失敗', 'fail', err && err.code);
+      if (window.toast) window.toast(err && err.message ? err.message : '加入失敗', 'fail', err && err.code);
       return;
     }
-    if (window.toast) window.toast('註冊成功', 'ok', symbol + ' 已加入清單');
-    $('#detail-form').hidden = true;
-    $('#unresolved-banner').hidden = true;
+    restore();
+    $('#quick-add-hint').textContent = '';
+    $('#new-symbol').value = '';
+    const label = [resp.name || null, resp.board_label || null,
+      resp.last != null ? '現價 ' + f.price(resp.last, resp.ccy) + ' ' + resp.ccy : '暫無報價']
+      .filter(Boolean).join('・');
+    if (window.toast) window.toast('已加入 ' + resp.symbol, 'ok', label);
     await refresh();
+  }
+  $('#quick-add-btn').addEventListener('click', () => quickAdd(false));
+  $('#new-symbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') quickAdd(false); });
+
+  /* ---- 3-month history backfill for ALL instruments (drawer-chart data) ---- */
+  $('#backfill-btn').addEventListener('click', async () => {
+    const btn = $('#backfill-btn');
+    const restore = window.pdBusy ? window.pdBusy(btn, '回補中…') : () => {};
+    const prog = window.toastProgress
+      ? window.toastProgress('歷史回補中…', '正在為所有標的抓取近 3 個月日線（可能需要十餘秒）')
+      : { done: () => {}, fail: () => {} };
+    try {
+      const resp = await window.pdApi.post('/api/actions/backfill-history', { days: 92 });
+      prog.done('歷史回補完成', (resp && resp.detail) || '');
+    } catch (err) {
+      prog.fail('歷史回補失敗', (err && err.message) || '請稍後再試');
+    }
+    restore();
   });
 
   /* ---- list table ---- */

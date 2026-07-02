@@ -3,7 +3,6 @@
 Thin over data_ingestion.store + pricing.store reads. Computes nothing of record.
 """
 
-import logging
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
@@ -15,8 +14,8 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
 from portfolio_dash.data_ingestion.holdings import current_shares
-from portfolio_dash.data_ingestion.register import register_instrument
 from portfolio_dash.data_ingestion.store import (
     get_instrument,
     list_accounts,
@@ -25,12 +24,9 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
-from portfolio_dash.scheduler.jobs import refresh_instrument_quote
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.wire import decimal_str
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -95,7 +91,6 @@ def probe(body: ProbeBody) -> dict[str, Any]:
             "board_label": _BOARD_LABEL.get(board or "", "未解析")}
 
 
-_DEFAULT_CCY = {Market.TW: Currency.TWD, Market.US: Currency.USD, Market.MY: Currency.MYR}
 _TW_BOARDS = {"TWSE", "TPEx"}
 
 
@@ -124,32 +119,68 @@ def register(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    if get_instrument(conn, body.symbol) is not None:
-        return JSONResponse(status_code=409,
-                            content=error_body("duplicate_symbol", f"{body.symbol} 已註冊"))
+    """Classic (detail-form) registration: registers even when no quote is found.
+
+    Delegates to the shared quick_register service (probe + instant quote + name
+    fill-in + 3-month history backfill) with ``force=True`` so its behavior stays
+    backward compatible: a provider outage never blocks an explicit registration.
+    """
     if body.market in (Market.US, Market.MY) and (body.board or "") in _TW_BOARDS:
         return JSONResponse(status_code=400,
                             content=error_body("validation_error", "US/MY 不可帶台股板別",
                                                field="board"))
-    ccy = body.quote_ccy or _DEFAULT_CCY[body.market]
-    inst = Instrument(symbol=body.symbol, market=body.market, quote_ccy=ccy,
-                      sector=body.sector, name=body.name, board=body.board or "",
-                      target_low=body.target_low, is_etf=body.is_etf)
-    register_instrument(conn, inst, prober=probe_tw_board, confirm=True)
-    saved = get_instrument(conn, body.symbol)
-    assert saved is not None
-    # Best-effort initial quote (2026-07-02): fetch this symbol's latest price (+ the
-    # reporting FX pairs) right away so the user is not stuck price-less until the
-    # market's next post-close cron. NEVER fails the registration — a provider error
-    # just leaves the price missing (the dashboard already shows 缺價 honestly).
     try:
-        refresh_instrument_quote(conn, symbol=saved.symbol, market=saved.market,
-                                 board=saved.board, now=now)
-    except Exception:  # noqa: BLE001 - registration must survive any provider failure
-        logger.warning("initial quote fetch failed for %s (registration kept)",
-                       saved.symbol, exc_info=True)
+        outcome = quick_register(
+            conn, symbol=body.symbol, market=body.market, now=now, name=body.name,
+            sector=body.sector, board=body.board or None, quote_ccy=body.quote_ccy,
+            target_low=body.target_low, is_etf=body.is_etf, force=True,
+        )
+    except QuickRegisterError as exc:
+        return JSONResponse(status_code=exc.status,
+                            content=error_body(exc.code, exc.message))
     account_ids = [a.account_id for a in list_accounts(conn)]
-    return _element(conn, saved, account_ids, now)
+    return _element(conn, outcome.instrument, account_ids, now)
+
+
+class QuickBody(BaseModel):
+    symbol: str
+    market: Market
+    sector: str = ""
+    force: bool = False  # true: register even when no source supplies a quote
+
+
+_QUICK_BOARD_LABEL = {"TWSE": "TWSE 上市", "TPEx": "TPEx 上櫃", ".KL": "馬股 .KL", "": "美股"}
+
+
+@router.post("/instruments/quick", status_code=201)
+def quick(
+    body: QuickBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """One-step add (2026-07-02): symbol -> probe + real quote + name + history.
+
+    422 ``quote_not_found`` when no source supplies a price (typo guard); the
+    frontend re-sends with ``force=true`` only after an explicit user confirm.
+    """
+    try:
+        outcome = quick_register(
+            conn, symbol=body.symbol, market=body.market, now=now,
+            sector=body.sector, force=body.force,
+        )
+    except QuickRegisterError as exc:
+        return JSONResponse(status_code=exc.status,
+                            content=error_body(exc.code, exc.message))
+    account_ids = [a.account_id for a in list_accounts(conn)]
+    elem = _element(conn, outcome.instrument, account_ids, now)
+    elem["board_label"] = (
+        _QUICK_BOARD_LABEL.get(outcome.board or "", "板別未解析（暫以 TWSE 抓報價）")
+        if body.market is Market.TW
+        else _QUICK_BOARD_LABEL[".KL" if body.market is Market.MY else ""]
+    )
+    elem["name_source"] = outcome.name_source
+    elem["history_backfilled"] = outcome.history_points
+    return elem
 
 
 @router.put("/instruments/{symbol}")

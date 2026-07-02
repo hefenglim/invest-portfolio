@@ -1,7 +1,55 @@
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
+from portfolio_dash.api import instrument_service
 from portfolio_dash.api.routers import instruments as instruments_router
+from portfolio_dash.pricing.results import PriceRow, RefreshSummary
+from portfolio_dash.pricing.store import upsert_prices
+from portfolio_dash.shared.enums import Market
+
+_NOW = datetime(2026, 7, 2, 12, 0, tzinfo=UTC)
+
+
+def _stub_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    quote_ok: bool = True,
+    price: str = "185.50",
+    name: str | None = None,
+    record: list[str] | None = None,
+) -> None:
+    """Stub the instrument_service provider seams (hermetic: no sockets).
+
+    A successful stub ALSO upserts a real price row so the response element's
+    ``last`` reflects what the UI would see after a live fetch.
+    """
+
+    def fake_quotes(conn: Any, registry: Any, instruments: list[Any],
+                    fx_pairs: Any, *, now: datetime) -> RefreshSummary:
+        syms = [r.symbol for r in instruments]
+        if record is not None:
+            record.extend(syms)
+        if not quote_ok:
+            return RefreshSummary(ok={}, failed=syms, fetched_at=now)
+        rows = [PriceRow(instrument=r.symbol, market=r.market, as_of=now.date(),
+                         close=Decimal(price), source="stub") for r in instruments]
+        upsert_prices(conn, rows, fetched_at=now)
+        return RefreshSummary(ok={s: "stub" for s in syms}, failed=[], fetched_at=now)
+
+    def fake_history(conn: Any, registry: Any, instruments: list[Any],
+                     start: date, *, now: datetime) -> RefreshSummary:
+        return RefreshSummary(ok={r.symbol: "stub" for r in instruments}, failed=[],
+                              fetched_at=now)
+
+    monkeypatch.setattr(instrument_service, "refresh_quotes", fake_quotes)
+    monkeypatch.setattr(instrument_service, "refresh_history", fake_history)
+    monkeypatch.setattr(instrument_service, "lookup_name",
+                        lambda sym, market, *, board=None: name)
+    monkeypatch.setattr(instrument_service, "probe_tw_board", lambda s, **k: "TWSE")
 
 
 def test_instruments_list_shape_and_enrichment(api_client: TestClient) -> None:
@@ -40,7 +88,10 @@ def test_probe_blank_symbol_400(api_client: TestClient) -> None:
     assert r.status_code == 400
 
 
-def test_register_new_instrument(api_client: TestClient) -> None:
+def test_register_new_instrument(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pricing(monkeypatch)
     r = api_client.post("/api/instruments", json={
         "symbol": "6488", "market": "TW", "name": "環球晶", "sector": "Semis",
         "board": "TPEx", "quote_ccy": "TWD", "target_low": "450"})
@@ -55,31 +106,88 @@ def test_register_triggers_initial_quote_fetch(
     """Registration immediately fetches the symbol's quote (2026-07-02) so the user
     is not price-less until the market's next post-close cron."""
     calls: list[str] = []
-
-    def _record(conn: object, *, symbol: str, market: object, board: object,
-                now: object) -> str:
-        calls.append(symbol)
-        return "1 ok"
-
-    monkeypatch.setattr(instruments_router, "refresh_instrument_quote", _record)
+    _stub_pricing(monkeypatch, record=calls, price="245.90")
     r = api_client.post("/api/instruments", json={
         "symbol": "TSLA", "market": "US", "name": "Tesla"})
     assert r.status_code == 201
     assert calls == ["TSLA"]
+    assert r.json()["last"] == "245.90"
 
 
 def test_register_survives_quote_fetch_failure(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The initial fetch is best-effort: a provider failure NEVER fails registration."""
-    def _boom(conn: object, **kw: object) -> str:
+    """The classic register path is best-effort (force=True): a provider failure
+    NEVER fails an explicit registration — it just leaves the price missing."""
+    def _boom(conn: Any, *a: Any, **kw: Any) -> RefreshSummary:
         raise RuntimeError("provider down")
 
-    monkeypatch.setattr(instruments_router, "refresh_instrument_quote", _boom)
+    monkeypatch.setattr(instrument_service, "refresh_quotes", _boom)
+    monkeypatch.setattr(instrument_service, "refresh_history", _boom)
+    monkeypatch.setattr(instrument_service, "lookup_name",
+                        lambda sym, market, *, board=None: None)
     r = api_client.post("/api/instruments", json={
         "symbol": "TSLA", "market": "US", "name": "Tesla"})
     assert r.status_code == 201
     assert r.json()["symbol"] == "TSLA" and r.json()["last"] is None
+
+
+def test_quick_add_one_step(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /instruments/quick: probe + real quote + auto name + history, one call."""
+    _stub_pricing(monkeypatch, price="185.50", name="長榮")
+    r = api_client.post("/api/instruments/quick", json={"symbol": "2603", "market": "TW"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["symbol"] == "2603" and body["name"] == "長榮"
+    assert body["board"] == "TWSE" and body["board_label"] == "TWSE 上市"
+    assert body["last"] == "185.50"
+    assert body["name_source"] == "provider" and body["history_backfilled"] is True
+
+
+def test_quick_add_no_quote_422_then_force(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No source supplies a quote -> 422 quote_not_found (typo guard); an explicit
+    force=true registers anyway (price-less, shown as 缺價)."""
+    _stub_pricing(monkeypatch, quote_ok=False)
+    r = api_client.post("/api/instruments/quick", json={"symbol": "FAKE9", "market": "US"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "quote_not_found"
+    # nothing was registered by the refused attempt
+    listed = {i["symbol"] for i in api_client.get("/api/instruments").json()["list"]}
+    assert "FAKE9" not in listed
+
+    r2 = api_client.post("/api/instruments/quick",
+                         json={"symbol": "FAKE9", "market": "US", "force": True})
+    assert r2.status_code == 201 and r2.json()["last"] is None
+
+
+def test_quick_add_duplicate_409(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pricing(monkeypatch)
+    r = api_client.post("/api/instruments/quick", json={"symbol": "2330", "market": "TW"})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "duplicate_symbol"
+
+
+def test_quick_add_uppercases_symbol(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pricing(monkeypatch, price="245.90", name="Tesla")
+    r = api_client.post("/api/instruments/quick", json={"symbol": " tsla ", "market": "US"})
+    assert r.status_code == 201 and r.json()["symbol"] == "TSLA"
+
+
+def test_quick_add_market_enum_and_ccy(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pricing(monkeypatch, price="1.230", name="MYEG")
+    r = api_client.post("/api/instruments/quick", json={"symbol": "0138", "market": "MY"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["ccy"] == "MYR" and body["board"] == ".KL"
+    assert body["board_label"] == "馬股 .KL"
 
 
 def test_register_duplicate_409(api_client: TestClient) -> None:

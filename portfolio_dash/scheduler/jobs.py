@@ -554,14 +554,17 @@ JOBS: list[JobSpec] = [
     ),
 ]
 
-_DEFAULT_BOARD: dict[Market, str] = {Market.US: "", Market.MY: ".KL", Market.TW: "TWSE"}
+DEFAULT_BOARD: dict[Market, str] = {Market.US: "", Market.MY: ".KL", Market.TW: "TWSE"}
+_DEFAULT_BOARD = DEFAULT_BOARD  # back-compat alias (internal callers below)
 
 # Reporting-currency FX pairs needed for the combined view (reporting ccy = TWD).
-_FX_PAIRS: list[FxPair] = [
+# Public: the api-layer instrument service reuses the same fixed set.
+REPORTING_FX_PAIRS: list[FxPair] = [
     FxPair(base=Currency.USD, quote=Currency.TWD),
     FxPair(base=Currency.USD, quote=Currency.MYR),
     FxPair(base=Currency.MYR, quote=Currency.TWD),
 ]
+_FX_PAIRS = REPORTING_FX_PAIRS  # back-compat alias (internal callers below)
 
 
 def build_worklist(
@@ -599,6 +602,20 @@ def refresh_instrument_quote(
     """
     ref = InstrumentRef(symbol=symbol, market=market, board=board or _DEFAULT_BOARD[market])
     summary = refresh_quotes(conn, default_registry(conn), [ref], _FX_PAIRS, now=now)
+    return _summarize(summary)
+
+
+def backfill_history_all(conn: sqlite3.Connection, *, days: int, now: datetime) -> str:
+    """Backfill *days* of daily close history for ALL instruments (manual action).
+
+    Used by ``POST /api/actions/backfill-history`` so EXISTING instruments get the
+    3-month presentation window immediately (newly registered symbols get theirs at
+    registration; the daily cron only maintains a 7-day rolling window). Idempotent
+    upserts; per-symbol failures degrade into the summary, never raise.
+    """
+    instruments, _ = build_worklist(conn, None)
+    start = (now - timedelta(days=days)).date()
+    summary = refresh_history(conn, default_registry(conn), instruments, start, now=now)
     return _summarize(summary)
 
 
