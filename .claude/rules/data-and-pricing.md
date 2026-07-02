@@ -13,6 +13,13 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
     tick at 0.005, ETFs at 0.001 — see `markets-and-fees.md`).
 - **FX rates** — **high precision (4–6 dp)**. Rates are NOT money; the 2-dp rule never
   applies to them. Dedicated high-scale column.
+- **Float-noise cap (decided 2026-07-03, human sign-off):** float-sourced providers
+  (yfinance et al.) emit binary-float tails (e.g. `305.364990234375`) that are NOT
+  source precision. At the single write seam (`pricing/store.upsert_prices/upsert_fx`)
+  prices are **capped at 4 dp** (covers every market tick above) and FX rates at
+  **6 dp**, ROUND_HALF_UP — cap only, never pad (clean values store byte-identical).
+  This refines, not contradicts, "store at full source precision": the cap removes
+  representation noise, not information.
 - **Average cost** — never stored as an authoritative rounded value. Store
   `total_cost` + `shares`; compute `average = total_cost / shares` on read
   (see `domain-ledger.md`).
