@@ -47,6 +47,39 @@ Before declaring a version done, do a dedicated self-review pass over the diff:
 correctness, boundary adherence (`architecture.md`), money-type discipline
 (`data-and-pricing.md`), and test coverage of the change.
 
+## Two-environment loop-engineering (test site → promote to prod)
+
+The live deployment runs **two isolated instances of the app on one host** — a **prod**
+instance (real ledger, login-gated, pinned to a released **tag**) and a **test/demo** instance
+(synthetic data, tracks work-in-progress). They are isolated at **three levels** so iterating
+on the test site never touches prod:
+
+- **separate code checkout** (own git working tree),
+- **separate venv** — the test venv installs `.[dev]` so the regression suite runs **on the
+  site**; prod's venv is prod-deps only (`pip install -e .`),
+- **separate data folder** — own `DB_PATH`; db + logs + backups all derive from `db_path.parent`.
+
+**The loop (AI self-iteration / regression):**
+1. Iterate on the **test** checkout (edit code on a branch, not `main`).
+2. Deploy to the **test** instance; run the gate **on the site** (`pytest` / `mypy --strict` /
+   `ruff`) + behaviour-verify against the test URL. The test instance's scheduler is disabled,
+   so its data is deterministic and regressions are reproducible.
+3. Fix → repeat until the gate is green.
+4. **Promote only when green:** merge to `main`, cut a version + tag (`/ship-version`), and
+   deploy **that tag** to prod. Prod only ever moves forward to a validated tag — experiments
+   never reach it.
+
+**Invariants (never violate):**
+- Prod runs a released **tag**; the test site tracks a branch / WIP commits. Never point prod at
+  an untested branch.
+- Test data is **synthetic** (`scripts/seed_demo.py`). NEVER copy real data into the test set;
+  NEVER point the test `DB_PATH` at the prod data folder.
+- Keep prod and the test site **physically separate** (checkout + venv + data folder) so a
+  restart/crash of one can't pick up the other's code or data.
+- Concrete host paths, URLs, ports, systemd units, and Tailscale node names for BOTH instances
+  live in the git-ignored `docs/human_noted/` deployment note — **never commit real host
+  details** (public docs use placeholders).
+
 ## `ship-version` checklist
 
 1. Tests green (`pytest`).

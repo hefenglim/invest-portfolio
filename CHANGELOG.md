@@ -44,6 +44,11 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   provider/strategy protocols + registries, swappable adapters, decoupled layers — so future
   changes are config edits + small additions, not rewrites; keep YAGNI on features/scale (per
   `stack.md`), deferring concrete specifics until real use surfaces them.
+- **Per-user dataset management (future):** the earlier folder/dataset-switching idea is deferred
+  and reframed as a **multi-user** feature — different users each independently manage their own
+  dataset(s) within one deployment. (The current prod/test split is achieved by **separate
+  instances** — own checkout + venv + data folder per instance — not by switching datasets on one
+  site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
 ## [v0.1.2] - 2026-07-02
 
