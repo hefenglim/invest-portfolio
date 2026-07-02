@@ -111,10 +111,11 @@
         <span class="hint" id="csv-kind-note"></span>
       </div>
       <div class="dc-grid" style="padding-bottom: 0;">
-        <div class="dropzone" title="此為設計稿 — 實際由後端解析">
+        <div class="dropzone" id="csv-dropzone" title="拖放或點擊選取 .csv 檔">
           <span class="glyph">⇪</span>
           <span class="big">拖放 CSV 檔案，或點擊選取</span>
-          <span class="dz-hint">欄位：date・side・symbol・shares・price・fee（選）・tax（選）</span>
+          <span class="dz-hint" id="csv-dz-hint">交易欄位：date・side・symbol・shares・price・fee（選）・tax（選）</span>
+          <input type="file" id="csv-file-input" accept=".csv,text/csv,text/plain" hidden="hidden"></input>
         </div>
         <div class="field">
           <label for="csv-paste">或直接貼上 CSV 文字</label>
@@ -147,21 +148,16 @@
 
     <!-- ===== Tab 3 AI 輸入 ===== -->
     <div class="mode-pane" id="pane-ai" data-screen-label="AI 輸入">
-      <div class="state-switch">
-        <span>設計檢視：</span>
-        <span id="ai-states" style="display: flex; gap: 6px;"></span>
-      </div>
-
       <div id="ai-normal">
         <div class="dc-grid" style="padding-bottom: 0;">
           <div class="field">
             <label for="ai-text">貼上對帳單文字…</label>
             <textarea class="input" id="ai-text" style="min-height: 110px;" placeholder="例：6/11 嘉信 買 AAPL 10股 @211.40…" spellcheck="false"></textarea>
           </div>
-          <div class="dropzone" title="此為設計稿 — 實際由 Vision 模型解析">
+          <div class="dropzone" id="ai-dropzone" title="Vision 截圖解析尚未開通">
             <span class="glyph">⌗</span>
             <span class="big">或上傳券商 App 截圖</span>
-            <span class="dz-hint">Vision 模型解析為結構化交易草稿</span>
+            <span class="dz-hint">Vision 截圖解析尚未開通 — 目前請貼上文字解析</span>
           </div>
         </div>
         <div class="ai-actions">
@@ -236,16 +232,16 @@
               <div class="field">
                 <label>類型</label>
                 <div class="segmented">
-                  <button type="button" class="active">現金股利</button>
-                  <button type="button">配股</button>
+                  <button type="button" id="d-type-cash" class="active">現金股利</button>
+                  <button type="button" id="d-type-stock">配股</button>
                 </div>
               </div>
               <div class="field">
-                <label for="d-tw-gross">Gross（總額）</label>
+                <label for="d-tw-gross" id="d-tw-gross-label">Gross（總額）</label>
                 <input class="input" id="d-tw-gross" type="number"></input>
               </div>
-              <div class="field">
-                <label for="d-tw-net">Net（淨入帳）</label>
+              <div class="field" id="d-tw-net-field">
+                <label for="d-tw-net">Net（淨入帳，留空 = 同總額）</label>
                 <input class="input" id="d-tw-net" type="number"></input>
               </div>
             </div>

@@ -63,6 +63,8 @@
 .issue-warn { color: var(--amber); background: var(--amber-soft); border: 1px solid rgba(217, 161, 63, 0.3); }
 .issue-ok { color: var(--ok); background: var(--ok-soft); border: 1px solid rgba(79, 174, 108, 0.3); }
 .issue-info { color: var(--accent); background: var(--accent-soft); border: 1px solid rgba(88, 166, 221, 0.3); }
+/* drag-over highlight for the REAL csv dropzone */
+.dropzone.dz-over { border-color: var(--accent); background: var(--accent-soft); }
 .issue label { display: flex; gap: 7px; align-items: flex-start; cursor: pointer; color: var(--text-2); }
 .issue input[type="checkbox"] { accent-color: var(--amber); margin-top: 1px; }
 

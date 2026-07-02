@@ -16,13 +16,14 @@
    Write paths:
    - Manual transaction: live preview (POST /input/manual/preview) + commit
      (POST /input/manual/commit; 422 unacked-oversell -> confirmDialog -> re-commit
-     with ack_oversell:true).
-   - CSV import: POST /import/preview (real table) + POST /import/commit ({written,skipped}).
-   - AI input: POST /input/ai/preview (preview + meta; 402/409/503 -> degraded toast).
-   - Dividend / FX-conversion / Opening-inventory have NO single-entry commit endpoint
-     (those ledgers are written via the CSV import path). Their dropdowns are sourced
-     from /input/context and their local calc previews are kept, but the COMMIT button is
-     a clearly-labelled design-preview toast pointing the user at CSV import. */
+     with ack_oversell:true; unknown symbols auto-register).
+   - CSV import: POST /import/preview (real table) + POST /import/commit
+     ({written,skipped}); the dropzone is a REAL client-side file read (2026-07-03).
+   - AI input: POST /input/ai/preview (preview + meta; 402/409/503 -> degraded panels,
+     driven ONLY by real API errors — the design state-switcher is retired).
+   - Dividend / FX-conversion / Opening-inventory single-entry forms commit through
+     the SAME import path as a one-row CSV (preview-validate -> ack warnings ->
+     commit) — one write seam, no extra endpoints (2026-07-03, items 1+2). */
 (function () {
   'use strict';
   const f = window.fmt;
@@ -363,6 +364,14 @@
   const CSV_KINDS = [['交易', 'transactions'], ['股利', 'dividends'], ['換匯', 'fx'], ['期初', 'openings']];
   let csvKind = 'transactions';
 
+  /* per-kind CSV header hints shown in the dropzone */
+  const CSV_HINTS = {
+    transactions: '交易欄位：date・side・symbol・shares・price・fee（選）・tax（選）',
+    dividends: '股利欄位：account・symbol・date・type(CASH/STOCK/DRIP/NET)・gross・net（選）・reinvest_shares（選）・reinvest_price（選）',
+    fx: '換匯欄位：account・date・from_ccy・from_amount・to_ccy・to_amount',
+    openings: '期初欄位：account・symbol・shares・original_avg_cost・build_date・original_cost_total（選）',
+  };
+
   function initCsv() {
     const bar = $('#csv-kinds');
     CSV_KINDS.forEach(([label, kind], i) => {
@@ -374,6 +383,8 @@
         csvKind = kind;
         const note = $('#csv-kind-note');
         if (note) note.textContent = kind === 'transactions' ? '' : '（' + label + ' CSV：解析同此模式）';
+        const hint = $('#csv-dz-hint');
+        if (hint) hint.textContent = CSV_HINTS[kind] || '';
       });
       bar.appendChild(c);
     });
@@ -382,6 +393,36 @@
     if (paste) paste.addEventListener('input', scheduleCsvPreview);
     $('#csv-confirm').addEventListener('click', commitCsv);
     $('#csv-confirm').disabled = true;
+
+    /* ---- REAL file upload (2026-07-03, item 2): the dropzone reads the .csv
+       client-side (FileReader) into the paste area and previews — the import
+       path stays text-based, so no backend upload endpoint is needed. ---- */
+    const dz = $('#csv-dropzone');
+    const fileIn = $('#csv-file-input');
+    const loadFile = (f) => {
+      if (!f) return;
+      const r = new FileReader();
+      r.onload = () => {
+        if (paste) paste.value = String(r.result || '').trim();
+        $('#csv-file').textContent = f.name;
+        if (window.toast) window.toast('已載入 ' + f.name, 'ok', '解析預覽已更新，確認後寫入');
+        scheduleCsvPreview();
+      };
+      r.onerror = () => { if (window.toast) window.toast('檔案讀取失敗', 'fail', f.name); };
+      r.readAsText(f, 'utf-8');
+    };
+    if (dz && fileIn) {
+      dz.style.cursor = 'pointer';
+      dz.addEventListener('click', () => fileIn.click());
+      fileIn.addEventListener('change', () => { loadFile(fileIn.files && fileIn.files[0]); fileIn.value = ''; });
+      dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dz-over'); });
+      dz.addEventListener('dragleave', () => dz.classList.remove('dz-over'));
+      dz.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dz.classList.remove('dz-over');
+        loadFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
+      });
+    }
   }
 
   let csvTimer = null;
@@ -498,28 +539,15 @@
     if (window.toast) window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆');
   }
 
-  /* ================= Tab 3 AI 輸入 ================= */
+  /* ================= Tab 3 AI 輸入 =================
+     The design-review state switcher is RETIRED (2026-07-03, item 3): the three
+     degraded panels are now driven ONLY by real API errors (402 額度 / 409 未啟用 /
+     503 不可用) — they double as the usage-time hints when AI is later enabled. */
   function initAi() {
-    /* design-review state switcher (local-only preview of the degraded states) */
-    const states = [['normal', '正常'], ['off', 'AI 未啟用'], ['quota', '額度用盡'], ['down', '服務不可用']];
-    const sw = $('#ai-states');
-    states.forEach(([id, label], i) => {
-      const c = el('button', 'chip' + (i === 0 ? ' active' : ''), label);
-      c.type = 'button';
-      c.addEventListener('click', () => {
-        sw.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
-        c.classList.add('active');
-        showAiState(id);
-      });
-      sw.appendChild(c);
-    });
-    function showAiState(id) {
-      $('#ai-normal').hidden = id !== 'normal';
-      $('#ai-degrade-off').hidden = id !== 'off';
-      $('#ai-degrade-quota').hidden = id !== 'quota';
-      $('#ai-degrade-down').hidden = id !== 'down';
-    }
-    showAiState('normal');
+    $('#ai-normal').hidden = false;
+    $('#ai-degrade-off').hidden = true;
+    $('#ai-degrade-quota').hidden = true;
+    $('#ai-degrade-down').hidden = true;
     $('#ai-parse').addEventListener('click', runAiPreview);
     const writeAll = $('#ai-write-all');
     if (writeAll) writeAll.addEventListener('click', commitAi);
@@ -649,11 +677,64 @@
     }
   }
 
+  /* ================= 單筆寫入共用：一列 CSV 走匯入通道 =================
+     (2026-07-03, items 1+2) 股利/換匯/期初的單筆表單把欄位組成「一列 CSV」，
+     經過與批次匯入完全相同的 /api/import/preview 檢核 → /api/import/commit 寫入
+     —— 單一寫入縫隙，不新增後端端點；警告列沿用確認機制。 */
+  function csvEscape(v) {
+    const s = String(v === null || v === undefined ? '' : v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function oneRowCsv(header, values) {
+    return header.join(',') + '\n' + values.map(csvEscape).join(',');
+  }
+  async function commitOneRow(kind, csvText, btn, okSub, onDone) {
+    const restore = window.pdBusy ? window.pdBusy(btn, '寫入中…') : () => {};
+    const finishOk = (resp) => {
+      if (resp && resp.written >= 1) {
+        if (window.toast) window.toast('寫入成功', 'ok', okSub);
+        if (onDone) onDone();
+      } else if (window.toast) {
+        window.toast('未寫入', 'fail', '資料列被跳過，請檢查欄位');
+      }
+    };
+    try {
+      const pv = await api.post('/api/import/preview', { kind: kind, csv_text: csvText });
+      const row = pv && pv.rows && pv.rows[0];
+      if (!row) throw new Error('預覽無資料列');
+      if (row.status === 'error') {
+        restore();
+        if (window.toast) window.toast('資料檢核未通過', 'fail', row.reason || '');
+        return;
+      }
+      if (row.status === 'warn') {
+        restore();
+        window.confirmDialog({
+          title: '警告確認',
+          body: (row.reason || '此筆資料有警告') + ' — 確認後仍要寫入？',
+          confirmLabel: '確認寫入',
+          onConfirm: async () => {
+            try {
+              finishOk(await api.post('/api/import/commit',
+                { kind: kind, csv_text: csvText, ack_warnings: true }));
+            } catch (e2) {
+              if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail', e2 && e2.code);
+            }
+          }
+        });
+        return;
+      }
+      const resp = await api.post('/api/import/commit',
+        { kind: kind, csv_text: csvText, ack_warnings: false });
+      restore();
+      finishOk(resp);
+    } catch (err) {
+      restore();
+      if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
+    }
+  }
+
   /* ================= Tab 4 股利 ================= */
-  /* NO single-entry dividend commit endpoint exists — dividends are written via the
-     CSV import path (kind=dividends). Dropdowns come from /input/context; the local
-     DRIP/net calc preview (user-input numbers) is kept; commit is a labelled design
-     toast pointing the user at CSV import. */
   function initDiv() {
     const accSel = $('#d-account');
     ctx.accounts.forEach((a) => {
@@ -664,17 +745,60 @@
     accSel.addEventListener('change', renderDivForm);
     $('#d-date').value = TODAY;
     const typeSeg = document.querySelectorAll('#d-tw .segmented button');
+    const isStock = () => {
+      const b = document.querySelector('#d-type-stock');
+      return !!(b && b.classList.contains('active'));
+    };
     typeSeg.forEach((b) => b.addEventListener('click', () => {
       typeSeg.forEach((x) => x.classList.toggle('active', x === b));
-      const stock = b.textContent.indexOf('配股') >= 0;
+      const stock = isStock();
+      /* 配股時 Gross 欄位轉為「配股股數」、Net 欄位隱藏（$0 成本入帳） */
+      $('#d-tw-gross-label').textContent = stock ? '配股股數' : 'Gross（總額）';
+      $('#d-tw-net-field').hidden = stock;
       $('#d-model-note').textContent = stock
-        ? '台股模式（配股）：以 $0 成本股數入帳，調整均價下降；現金欄位改填配股股數。'
+        ? '台股模式（配股）：以 $0 成本股數入帳，調整均價下降。'
         : '台股模式：現金股利沖減成本（調整均價下降）；配股以 $0 成本股數入帳。';
     }));
     renderDivForm();
-    $('#d-confirm').addEventListener('click', () =>
-      window.toast('單筆股利請改用 CSV 匯入', 'fail',
-        '後端未提供單筆股利寫入端點 — 請於「CSV 匯入 › 股利」貼上 CSV 寫入帳本'));
+    $('#d-confirm').addEventListener('click', () => {
+      const a = acc($('#d-account').value) || ctx.accounts[0];
+      const sym = $('#d-symbol').value.trim();
+      const dte = $('#d-date').value;
+      if (!a || !sym || !dte) {
+        if (window.toast) window.toast('請填寫帳戶、代號與日期', 'fail');
+        return;
+      }
+      const header = ['account', 'symbol', 'date', 'type', 'gross', 'withholding', 'net',
+        'reinvest_shares', 'reinvest_price'];
+      let values;
+      if (a.div_model === 'tw') {
+        if (isStock()) {
+          const shares = $('#d-tw-gross').value.trim();
+          if (!shares) { if (window.toast) window.toast('請輸入配股股數', 'fail'); return; }
+          values = [a.id, sym, dte, 'STOCK', '0', '', '', shares, ''];
+        } else {
+          const gross = $('#d-tw-gross').value.trim();
+          if (!gross) { if (window.toast) window.toast('請輸入股利總額', 'fail'); return; }
+          values = [a.id, sym, dte, 'CASH', gross, '', $('#d-tw-net').value.trim(), '', ''];
+        }
+      } else if (a.div_model === 'drip') {
+        const gross = $('#d-drip-gross').value.trim();
+        if (!gross) { if (window.toast) window.toast('請輸入股利總額', 'fail'); return; }
+        values = [a.id, sym, dte, 'DRIP', gross, '', '',
+          $('#d-drip-shares').value.trim(), $('#d-drip-price').value.trim()];
+      } else {
+        const amt = $('#d-net-amt').value.trim();
+        if (!amt) { if (window.toast) window.toast('請輸入淨額', 'fail'); return; }
+        values = [a.id, sym, dte, 'NET', amt, '', '', '', ''];
+      }
+      commitOneRow('dividends', oneRowCsv(header, values), $('#d-confirm'),
+        sym + ' 股利已寫入帳本（' + a.name + '）', () => {
+          ['d-tw-gross', 'd-tw-net', 'd-drip-gross', 'd-drip-wh', 'd-drip-net',
+            'd-drip-shares', 'd-drip-price', 'd-net-amt'].forEach((id) => {
+            const n = $('#' + id); if (n) n.value = '';
+          });
+        });
+    });
   }
   function renderDivForm() {
     const a = acc($('#d-account').value) || ctx.accounts[0];
@@ -702,9 +826,7 @@
   }
 
   /* ================= Tab 5 換匯 + 期初 ================= */
-  /* NO single-entry FX / opening commit endpoint exists — both are written via the CSV
-     import path (kind=fx / kind=openings). Dropdowns come from /input/context; the local
-     implied-rate what-if (user-input numbers) is kept; commit is a labelled design toast. */
+  /* Both commit through the one-row-CSV import path (2026-07-03, item 1). */
   function initFxOpen() {
     const accSel = $('#fx-account');
     ctx.accounts.forEach((a) => {
@@ -727,9 +849,24 @@
     ['fx-from-amt', 'fx-to-amt', 'fx-from-ccy', 'fx-to-ccy'].forEach((id) =>
       $('#' + id).addEventListener('input', upd));
     upd();
-    $('#fx-confirm').addEventListener('click', () =>
-      window.toast('單筆換匯請改用 CSV 匯入', 'fail',
-        '後端未提供單筆換匯寫入端點 — 請於「CSV 匯入 › 換匯」貼上 CSV 寫入帳本'));
+    $('#fx-confirm').addEventListener('click', () => {
+      const accId = $('#fx-account').value || (ctx.accounts[0] && ctx.accounts[0].id) || '';
+      const dte = $('#fx-date').value;
+      const fromA = $('#fx-from-amt').value.trim();
+      const toA = $('#fx-to-amt').value.trim();
+      if (!accId || !dte || !fromA || !toA) {
+        if (window.toast) window.toast('請填寫帳戶、日期與兩側金額', 'fail');
+        return;
+      }
+      const csv = oneRowCsv(
+        ['account', 'date', 'from_ccy', 'from_amount', 'to_ccy', 'to_amount'],
+        [accId, dte, $('#fx-from-ccy').value, fromA, $('#fx-to-ccy').value, toA]);
+      commitOneRow('fx', csv, $('#fx-confirm'), '換匯已寫入帳本', () => {
+        $('#fx-from-amt').value = '';
+        $('#fx-to-amt').value = '';
+        upd();
+      });
+    });
 
     const oAccSel = $('#o-account');
     ctx.accounts.forEach((a) => {
@@ -737,9 +874,27 @@
       oAccSel.appendChild(o);
     });
     $('#o-date').value = TODAY;
-    $('#o-confirm').addEventListener('click', () =>
-      window.toast('單筆期初請改用 CSV 匯入', 'fail',
-        '後端未提供單筆期初寫入端點 — 請於「CSV 匯入 › 期初」貼上 CSV 建檔'));
+    $('#o-confirm').addEventListener('click', () => {
+      const accId = $('#o-account').value || (ctx.accounts[0] && ctx.accounts[0].id) || '';
+      const sym = $('#o-symbol').value.trim();
+      const shares = $('#o-shares').value.trim();
+      const avg = $('#o-avg').value.trim();
+      const dte = $('#o-date').value;
+      if (!accId || !sym || !shares || !avg || !dte) {
+        if (window.toast) window.toast('請填寫帳戶、代號、股數、均價與建檔日', 'fail');
+        return;
+      }
+      const csv = oneRowCsv(
+        ['account', 'symbol', 'shares', 'original_avg_cost', 'build_date',
+          'original_cost_total'],
+        [accId, sym, shares, avg, dte, $('#o-total').value.trim()]);
+      commitOneRow('openings', csv, $('#o-confirm'),
+        sym + ' 期初庫存已建檔（同鍵覆蓋更新）', () => {
+          ['o-symbol', 'o-shares', 'o-avg', 'o-total'].forEach((id) => {
+            const n = $('#' + id); if (n) n.value = '';
+          });
+        });
+    });
   }
 
   /* ===== boot: fetch /input/context, then init every tab. Graceful: on failure leave
@@ -768,11 +923,13 @@
 
   boot();
 
-  /* 拖放區：設計預覽回饋（後端接線後換為真實上傳；目前以貼上 CSV / 文字示範） */
-  document.querySelectorAll('.dropzone').forEach((dz) => {
+  /* AI 截圖拖放區：Vision 解析尚未開通 — 誠實提示（CSV 拖放區已是真上傳，見 initCsv） */
+  (function () {
+    const dz = document.getElementById('ai-dropzone');
+    if (!dz) return;
     dz.style.cursor = 'pointer';
     dz.addEventListener('click', () => {
-      if (window.toast) window.toast('檔案上傳為設計預覽', 'ok', '目前請以下方「貼上 CSV / 文字」示範流程');
+      if (window.toast) window.toast('截圖解析尚未開通', 'fail', 'Vision 模型解析將於 AI 功能開通時提供 — 目前請貼上文字解析');
     });
-  });
+  })();
 })();

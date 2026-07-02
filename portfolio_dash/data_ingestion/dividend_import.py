@@ -45,7 +45,13 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
             account_id = raw["account"]
             symbol = raw["symbol"]
             div_date = date.fromisoformat(raw["date"])
-            div_type = raw["type"]
+            # Normalize + validate type (2026-07-03): the raw value used to be
+            # stored as-is, so a lowercase "cash" poisoned the ledger (readers do
+            # DividendType(s.type) and raise). Same write/read invariant as ever:
+            # never store what the read path cannot represent.
+            div_type = raw["type"].strip().upper()
+            if div_type not in {"CASH", "STOCK", "DRIP", "NET"}:
+                raise ValueError(f"unknown dividend type {raw['type']!r}")
             gross = Decimal(raw["gross"])
         except (KeyError, ValueError, InvalidOperation) as exc:
             rows.append(

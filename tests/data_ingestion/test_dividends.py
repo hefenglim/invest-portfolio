@@ -42,3 +42,25 @@ def test_csv_unknown_account_hard_blocks(conn: sqlite3.Connection) -> None:
     csv = "account,symbol,date,type,gross\nnope,X,2026-06-01,cash,10\n"
     p = build_dividend_preview(conn, csv)
     assert p.rows[0].has_hard_issue
+
+
+def test_csv_type_normalized_to_upper(conn: sqlite3.Connection) -> None:
+    """Regression (2026-07-03): a lowercase type ("cash") used to be stored RAW,
+    poisoning the ledger (readers do DividendType(s.type) and raise). The importer
+    now normalizes to upper and hard-rejects unknown types."""
+    seed_accounts(conn)
+    csv = ("account,symbol,date,type,gross\n"
+           "tw_broker,2330,2026-06-01,cash,50\n")
+    p = build_dividend_preview(conn, csv)
+    commit_preview(conn, p, accept={0}, writer=write_dividend_row)
+    stored = list_dividends(conn, account_id="tw_broker")[-1]
+    assert stored.type == "CASH"
+
+
+def test_csv_unknown_type_hard_blocks(conn: sqlite3.Connection) -> None:
+    seed_accounts(conn)
+    csv = ("account,symbol,date,type,gross\n"
+           "tw_broker,2330,2026-06-01,bogus,50\n")
+    p = build_dividend_preview(conn, csv)
+    assert p.rows[0].has_hard_issue
+    assert any(i.kind == "parse_error" for i in p.rows[0].issues)
