@@ -143,6 +143,10 @@ CREATE TABLE IF NOT EXISTS data_source_fallbacks (
     account_id TEXT PRIMARY KEY,
     chain TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS data_source_market_order (
+    market TEXT PRIMARY KEY,
+    chain TEXT NOT NULL
+);
 """
 
 
@@ -174,6 +178,36 @@ def create_tables(conn: sqlite3.Connection) -> None:
 def _default_quote_chain(market: Market) -> list[str]:
     """The default QUOTE_LATEST provider order for a market (from pricing/defaults)."""
     return list(DEFAULT_PROVIDER_ORDER.get((DataType.QUOTE_LATEST, market), []))
+
+
+# --- per-MARKET quote order (2026-07-03, item 9) -------------------------------
+# Supersedes the per-ACCOUNT fallback chains conceptually: a quote's source
+# depends on the instrument's MARKET (accounts decide fees/dividend rules, never
+# quote routing). The stored order is consumed by
+# ``pricing.defaults.default_registry(conn)``, so editing it on the settings page
+# changes the REAL fetch chain — not a display-only list.
+
+
+def quote_order(conn: sqlite3.Connection) -> dict[Market, list[str]]:
+    """Per-market QUOTE_LATEST provider order: stored override, else the default."""
+    out: dict[Market, list[str]] = {}
+    for market in Market:
+        row = conn.execute(
+            "SELECT chain FROM data_source_market_order WHERE market=?", (market.value,)
+        ).fetchone()
+        chain = json.loads(row["chain"]) if row is not None else None
+        out[market] = list(chain) if chain else _default_quote_chain(market)
+    return out
+
+
+def set_quote_order(conn: sqlite3.Connection, market: Market, chain: list[str]) -> None:
+    """Persist one market's quote-source order (idempotent upsert)."""
+    conn.execute(
+        "INSERT INTO data_source_market_order (market, chain) VALUES (?, ?) "
+        "ON CONFLICT(market) DO UPDATE SET chain=excluded.chain",
+        (market.value, json.dumps(chain)),
+    )
+    conn.commit()
 
 
 # Each account's fallback chain seeds from its market's default quote order. This

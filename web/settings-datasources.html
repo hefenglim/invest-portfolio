@@ -62,13 +62,13 @@
     <div id="sources-wrap"></div>
   </section>
 
-  <!-- 各帳戶 fallback 順序 -->
-  <section class="panel" data-screen-label="帳戶抓取順序">
+  <!-- 各市場報價抓取順位 (2026-07-03, item 9 — 取代舊「帳戶抓取順序」) -->
+  <section class="panel" data-screen-label="市場報價抓取順位">
     <div class="panel-head">
-      <h2 class="panel-title">帳戶抓取順序</h2>
-      <span class="panel-sub">系統依序嘗試各來源，第一個成功即採用・拖曳調整優先順序</span>
+      <h2 class="panel-title">市場報價抓取順位</h2>
+      <span class="panel-sub">抓報價時依此順序詢問來源，第一個成功即採用；順位改了就是真的改（排程與手動更新都走這條鏈）。來源的健康狀態與金鑰見上方清單</span>
     </div>
-    <div class="fallback-grid" id="fallback-wrap"></div>
+    <div class="fallback-grid" id="market-order-wrap" style="grid-template-columns: repeat(3, 1fr);"></div>
   </section>
 
 </div>

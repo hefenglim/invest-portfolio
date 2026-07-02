@@ -50,9 +50,14 @@ def default_registry(conn: sqlite3.Connection | None = None) -> Registry:
     ``conn`` is ``None`` (standalone / tests), the providers keep their env/ctor
     fallback so zero-arg callers are unaffected.
 
+    When ``conn`` is given, the per-market QUOTE_LATEST order also honors the
+    user-edited override stored by the settings page (2026-07-03, item 9) — the
+    stored order is REAL, not display-only.
+
     The ``datasources_store`` import is function-local to avoid a circular import
     (``datasources_store`` imports ``DEFAULT_PROVIDER_ORDER`` from this module).
     """
+    order: dict[tuple[DataType, Market | None], list[str]] = dict(DEFAULT_PROVIDER_ORDER)
     if conn is not None:
         from portfolio_dash.pricing import datasources_store
 
@@ -62,6 +67,11 @@ def default_registry(conn: sqlite3.Connection | None = None) -> Registry:
         finmind = FinMindProvider(token_getter=_getter("finmind"))
         alphavantage = AlphaVantageProvider(token_getter=_getter("alphavantage"))
         finnhub = FinnhubProvider(token_getter=_getter("finnhub"))
+        try:
+            for market, chain in datasources_store.quote_order(conn).items():
+                order[(DataType.QUOTE_LATEST, market)] = chain
+        except Exception:  # noqa: BLE001 — a legacy DB w/o the table keeps defaults
+            pass
     else:
         finmind = FinMindProvider()
         alphavantage = AlphaVantageProvider()
@@ -82,4 +92,4 @@ def default_registry(conn: sqlite3.Connection | None = None) -> Registry:
         "alphavantage": alphavantage,
         "finnhub": finnhub,
     }
-    return Registry(providers=providers, order=DEFAULT_PROVIDER_ORDER)
+    return Registry(providers=providers, order=order)

@@ -33,6 +33,13 @@ class Registry:
                 out.append(p)
         return out
 
+    def capable_ids(self, data_type: DataType, market: Market | None) -> list[str]:
+        """Provider ids whose ``supports`` says yes — the settings page's pick list
+        for the per-market order editor (capability probe only, no network)."""
+        return sorted(
+            name for name, p in self._providers.items() if p.supports(data_type, market)
+        )
+
     def fetch_quote_latest(
         self, instruments: list[InstrumentRef],
     ) -> tuple[list[PriceRow], dict[str, str], list[str]]:

@@ -1,9 +1,10 @@
-"""Data-source management API (spec 14): keys, health, per-account fallback chains.
+"""Data-source management API (spec 14): keys, health, per-MARKET quote order.
 
-Thin over ``pricing.datasources_store``: it reads/writes the three data_sources
-tables and serializes the masked view. It computes no money and no returns; the
+Thin over ``pricing.datasources_store``: it reads/writes the data_sources tables
+and serializes the masked view. It computes no money and no returns; the
 ``/test`` endpoint performs a single, time-bounded provider probe (run off the event
-loop) and records the result into ``data_source_health``.
+loop) and records the result into ``data_source_health``. The per-market quote
+order (2026-07-03, item 9) is the REAL chain ``default_registry`` walks.
 """
 
 import sqlite3
@@ -18,8 +19,9 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.pricing import datasources_store as store
+from portfolio_dash.pricing.defaults import default_registry
+from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing import sentiment_source
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
@@ -91,12 +93,17 @@ def list_datasources(
     store.ensure_seeded(conn)
     states = store.list_states(conn)
     sources = [_source_wire(info, states.get(info.id)) for info in store.SOURCE_INFO]
-    account_fallbacks = store.account_chains(conn)
-    account_names = {a.account_id: a.name for a in list_accounts(conn)}
+    # Per-MARKET quote order (2026-07-03, item 9 — supersedes the per-account
+    # fallback wire): `market_order` is the REAL fetch chain default_registry
+    # uses; `market_order_available` lists every provider capable of quoting
+    # that market (the editor's pick list).
+    registry = default_registry(conn)
     return {
         "sources": sources,
-        "account_fallbacks": account_fallbacks,
-        "account_names": account_names,
+        "market_order": {m.value: chain for m, chain in store.quote_order(conn).items()},
+        "market_order_available": {
+            m.value: registry.capable_ids(DataType.QUOTE_LATEST, m) for m in Market
+        },
     }
 
 
@@ -291,44 +298,36 @@ async def test_source(
     }
 
 
-# --- PUT /api/datasources/fallbacks -------------------------------------------
+# --- PUT /api/datasources/market-order ------------------------------------------
+# Supersedes PUT /datasources/fallbacks (2026-07-03, item 9): quote routing is a
+# property of the MARKET, and the stored order is consumed by default_registry —
+# what you see is what the fetcher does.
 
 
-class FallbacksBody(BaseModel):
-    account_fallbacks: dict[str, list[str]]
+class MarketOrderBody(BaseModel):
+    market: Market
+    order: list[str]
 
 
-@router.put("/datasources/fallbacks")
-def set_fallbacks(
-    body: FallbacksBody,
+@router.put("/datasources/market-order")
+def set_market_order(
+    body: MarketOrderBody,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
     store.ensure_seeded(conn)
-    known_accounts = {a.account_id for a in list_accounts(conn)}
-    for account_id, chain in body.account_fallbacks.items():
-        if account_id not in known_accounts:
-            return JSONResponse(
-                status_code=400,
-                content=error_body(
-                    "validation_error", f"未知帳戶：{account_id}", field="account_fallbacks"
-                ),
-            )
-        if not chain:
-            return JSONResponse(
-                status_code=400,
-                content=error_body(
-                    "validation_error", f"{account_id} 的 fallback 鏈不可為空",
-                    field="account_fallbacks",
-                ),
-            )
-        for src in chain:
-            if src not in store.KNOWN_SOURCE_IDS:
-                return JSONResponse(
-                    status_code=400,
-                    content=error_body(
-                        "validation_error", f"未知資料來源：{src}",
-                        field="account_fallbacks",
-                    ),
-                )
-    store.set_account_chains(conn, body.account_fallbacks)
-    return {"account_fallbacks": store.account_chains(conn)}
+    if not body.order:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"{body.market.value} 的抓取順位不可為空", field="order"))
+    if len(set(body.order)) != len(body.order):
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "順位清單含重複來源", field="order"))
+    capable = set(default_registry(conn).capable_ids(DataType.QUOTE_LATEST, body.market))
+    for src in body.order:
+        if src not in capable:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error",
+                f"{src} 不支援 {body.market.value} 市場報價", field="order"))
+    store.set_quote_order(conn, body.market, body.order)
+    return {
+        "market_order": {m.value: chain for m, chain in store.quote_order(conn).items()}
+    }

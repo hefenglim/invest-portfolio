@@ -142,15 +142,18 @@ def test_put_tier_unknown_source_404(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_get_includes_account_fallbacks_and_names(client: TestClient) -> None:
+def test_get_includes_market_order_and_available(client: TestClient) -> None:
+    """Item 9 (2026-07-03): the wire carries the REAL per-market quote chain +
+    the capability pick list (supersedes the per-account fallback wire)."""
     body = client.get("/api/datasources").json()
-    fb = body["account_fallbacks"]
-    # Seeded from the market default quote chains (spec 20.8 appended free fallbacks).
-    assert fb["tw_broker"] == ["twse", "tpex", "yfinance", "twstock"]
-    assert fb["schwab"] == ["yfinance", "stockprices_dev"]
-    names = body["account_names"]
-    assert names["tw_broker"] == "TW Broker"
-    assert set(names) == {"tw_broker", "schwab", "moomoo_my_us", "moomoo_my_my"}
+    mo = body["market_order"]
+    # Defaults mirror DEFAULT_PROVIDER_ORDER (spec 20.8 free fallbacks appended).
+    assert mo["TW"] == ["twse", "tpex", "yfinance", "twstock"]
+    assert mo["US"] == ["yfinance", "stockprices_dev"]
+    assert mo["MY"] == ["yfinance", "klsescreener", "malaysiastock"]
+    avail = body["market_order_available"]
+    assert set(mo["TW"]).issubset(set(avail["TW"]))
+    assert set(mo["MY"]).issubset(set(avail["MY"]))
 
 
 # --- PUT /api/datasources/{id}/key --------------------------------------------
@@ -241,42 +244,51 @@ def test_post_test_unknown_source_404(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "not_found"
 
 
-# --- PUT /api/datasources/fallbacks -------------------------------------------
+# --- PUT /api/datasources/market-order ------------------------------------------
 
 
-def test_put_fallbacks_overwrites(client: TestClient) -> None:
+def test_put_market_order_persists_and_registry_honors_it(client: TestClient) -> None:
+    """The stored order is the REAL chain: default_registry(conn) must walk it."""
     r = client.put(
-        "/api/datasources/fallbacks",
-        json={"account_fallbacks": {"moomoo_my_my": ["yfinance", "klsescreener"]}},
+        "/api/datasources/market-order",
+        json={"market": "TW", "order": ["yfinance", "twse"]},
     )
     assert r.status_code == 200
-    assert r.json()["account_fallbacks"]["moomoo_my_my"] == ["yfinance", "klsescreener"]
+    assert r.json()["market_order"]["TW"] == ["yfinance", "twse"]
     # Persisted: GET reflects the new chain.
-    fb = client.get("/api/datasources").json()["account_fallbacks"]
-    assert fb["moomoo_my_my"] == ["yfinance", "klsescreener"]
+    mo = client.get("/api/datasources").json()["market_order"]
+    assert mo["TW"] == ["yfinance", "twse"]
 
 
-def test_put_fallbacks_unknown_source_400(client: TestClient) -> None:
+def test_put_market_order_unknown_source_400(client: TestClient) -> None:
     r = client.put(
-        "/api/datasources/fallbacks",
-        json={"account_fallbacks": {"tw_broker": ["twse", "ghost"]}},
+        "/api/datasources/market-order",
+        json={"market": "TW", "order": ["twse", "ghost"]},
     )
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "validation_error"
 
 
-def test_put_fallbacks_empty_chain_400(client: TestClient) -> None:
+def test_put_market_order_incapable_source_400(client: TestClient) -> None:
+    # twse only quotes TW — putting it into the US chain must be refused.
     r = client.put(
-        "/api/datasources/fallbacks",
-        json={"account_fallbacks": {"tw_broker": []}},
+        "/api/datasources/market-order",
+        json={"market": "US", "order": ["twse"]},
     )
     assert r.status_code == 400
 
 
-def test_put_fallbacks_unknown_account_400(client: TestClient) -> None:
+def test_put_market_order_empty_400(client: TestClient) -> None:
     r = client.put(
-        "/api/datasources/fallbacks",
-        json={"account_fallbacks": {"ghost_acct": ["twse"]}},
+        "/api/datasources/market-order", json={"market": "TW", "order": []}
+    )
+    assert r.status_code == 400
+
+
+def test_put_market_order_duplicates_400(client: TestClient) -> None:
+    r = client.put(
+        "/api/datasources/market-order",
+        json={"market": "TW", "order": ["twse", "twse"]},
     )
     assert r.status_code == 400
 

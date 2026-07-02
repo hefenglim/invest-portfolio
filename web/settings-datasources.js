@@ -1,7 +1,9 @@
 /* portfolio-dash — 資料來源設定頁 (wired to /api/datasources/*, spec 14/20/19).
 
-   Boot: GET /api/datasources -> { sources:[...], account_fallbacks:{acc:[srcId,...]},
-   account_names:{acc:name} }. The inline window.DATASOURCES_DATA mock is RETIRED.
+   Boot: GET /api/datasources -> { sources:[...], market_order:{TW:[srcId,...]},
+   market_order_available:{TW:[srcId,...]} }. The old per-ACCOUNT fallback wire is
+   superseded (2026-07-03, item 9): quote routing belongs to the MARKET, and the
+   stored order is consumed by the real fetch chain (default_registry).
 
    A source: { id, name, type, markets, auth, provides, token_masked, status, last_test,
    latency_ms, tier, tiers, note }. `latency_ms` is a COUNT (not money) — no fmt-money
@@ -14,7 +16,7 @@
    - PUT /api/datasources/{id}/key        (set / clear API key)
    - PUT /api/datasources/{id}/tier       (mark token tier — spec 20)
    - POST /api/datasources/{id}/test      (connection test -> health row)
-   - PUT /api/datasources/fallbacks       (per-account fallback chain reorder) */
+   - PUT /api/datasources/market-order    (per-market quote-chain reorder) */
 (function () {
   'use strict';
   const f = window.fmt;
@@ -34,8 +36,9 @@
   /* Structural data from GET /api/datasources. Starts empty so a pre-fetch render
      is blank; populated on boot. */
   let sources = [];
-  let accountFallbacks = {};
-  let accountNames = {};
+  let marketOrder = {};      // {TW: [srcId,...], US: [...], MY: [...]} — the REAL chain
+  let marketAvailable = {};  // {TW: [srcId,...]} — providers capable of that market
+  const MARKET_LABEL = { TW: '台股', US: '美股', MY: '馬股' };
 
   /* Display order + labels for the type groups (any unknown type falls under 其他). */
   const TYPE_ORDER = ['stock', 'dividend', 'fx', 'sentiment', 'macro', 'trends', 'news'];
@@ -240,31 +243,61 @@
     setTimeout(() => inp.focus(), 50);
   }
 
-  /* ---- per-account fallback order — drag-and-drop -> PUT /api/datasources/fallbacks ---- */
-  function renderFallbacks() {
-    const wrap = $('#fallback-wrap');
+  /* ---- per-MARKET quote order (item 9) — drag-and-drop + add/remove ->
+     PUT /api/datasources/market-order. One coherent logic: the LIST above says
+     which sources exist and how healthy they are; the ORDER below says, per
+     market, who gets asked first when fetching quotes — and it is the REAL
+     chain default_registry walks (scheduler + manual refresh alike). ---- */
+  function renderMarketOrder() {
+    const wrap = $('#market-order-wrap');
     if (!wrap) return;
     wrap.replaceChildren();
-    Object.keys(accountFallbacks).forEach((accId) => {
-      const order = [...(accountFallbacks[accId] || [])]; /* mutable copy */
+    ['TW', 'US', 'MY'].forEach((mkt) => {
+      const order = [...(marketOrder[mkt] || [])]; /* mutable copy */
+      const available = marketAvailable[mkt] || [];
       const card = el('div', 'fallback-card');
-      card.appendChild(el('div', 'fallback-acct', accountNames[accId] || accId));
+      card.appendChild(el('div', 'fallback-acct', (MARKET_LABEL[mkt] || mkt) + '（' + mkt + '）'));
       const chips = el('div', 'fallback-chips');
       card.appendChild(chips);
-      card.appendChild(el('div', 'fb-hint', '拖曳排序・順序即 fallback 優先順序'));
+      const addRow = el('div', 'fb-hint');
+      card.appendChild(addRow);
+      card.appendChild(el('div', 'fb-hint', '拖曳排序・第 1 順位優先；✕ 移出鏈（來源仍在上方清單）'));
 
       function persist() {
-        /* send only the changed account's chain; the backend merges by key. */
-        const payload = {}; payload[accId] = [...order];
-        api.put('/api/datasources/fallbacks', { account_fallbacks: payload })
-          .then(() => {
-            accountFallbacks[accId] = [...order];
-            _toast('順序已更新', 'ok', (accountNames[accId] || accId) + ' fallback 順序已調整');
+        api.put('/api/datasources/market-order', { market: mkt, order: [...order] })
+          .then((resp) => {
+            marketOrder = (resp && resp.market_order) || marketOrder;
+            _toast('抓取順位已更新', 'ok',
+              (MARKET_LABEL[mkt] || mkt) + '：' + order.join(' → '));
+            renderMarketOrder();
           })
           .catch((err) => {
-            _toast((err && err.message) || '順序更新失敗', 'fail', err && err.code);
+            _toast((err && err.message) || '順位更新失敗', 'fail', err && err.code);
             boot(); /* re-sync to server's last-good order */
           });
+      }
+
+      function buildAddRow() {
+        addRow.replaceChildren();
+        const missing = available.filter((id) => order.indexOf(id) === -1);
+        if (!missing.length) return;
+        const sel = el('select', 'select');
+        sel.style.fontSize = '10px'; sel.style.padding = '1px 6px';
+        const ph = el('option', null, '＋ 加入來源…'); ph.value = '';
+        sel.appendChild(ph);
+        missing.forEach((id) => {
+          const src = srcById(id);
+          const o = el('option', null, src ? src.name : id); o.value = id;
+          sel.appendChild(o);
+        });
+        sel.addEventListener('change', () => {
+          if (!sel.value) return;
+          order.push(sel.value);
+          buildChips();
+          buildAddRow();
+          persist();
+        });
+        addRow.appendChild(sel);
       }
 
       function buildChips() {
@@ -278,8 +311,22 @@
           chip.appendChild(el('span', 'fb-num', String(i + 1)));
           chip.appendChild(el('span', 'fb-name', src ? src.name : srcId));
           const dot = el('span', 'run-dot ' + (STATUS_CLASS[(src && src.status) || 'unknown'] || 'dot-gray'));
+          dot.title = STATUS_TITLE[(src && src.status) || 'unknown'] || '';
           dot.style.marginLeft = 'auto';
           chip.appendChild(dot);
+          if (order.length > 1) {
+            const rm = el('button', 'modal-close', '✕');
+            rm.type = 'button';
+            rm.title = '從此市場的抓取鏈移除';
+            rm.style.fontSize = '10px';
+            rm.addEventListener('click', () => {
+              order.splice(i, 1);
+              buildChips();
+              buildAddRow();
+              persist();
+            });
+            chip.appendChild(rm);
+          }
           chip.addEventListener('dragstart', (e) => {
             dragSrc = i;
             chip.style.opacity = '0.45';
@@ -308,6 +355,7 @@
         });
       }
       buildChips();
+      buildAddRow();
       wrap.appendChild(card);
     });
   }
@@ -319,14 +367,14 @@
     try {
       const resp = await api.get('/api/datasources');
       sources = (resp && resp.sources) || [];
-      accountFallbacks = (resp && resp.account_fallbacks) || {};
-      accountNames = (resp && resp.account_names) || {};
+      marketOrder = (resp && resp.market_order) || {};
+      marketAvailable = (resp && resp.market_order_available) || {};
     } catch (err) {
       _toast('資料來源載入失敗', 'fail', (err && err.message) || undefined);
-      sources = []; accountFallbacks = {}; accountNames = {};
+      sources = []; marketOrder = {}; marketAvailable = {};
     }
     renderSources();
-    renderFallbacks();
+    renderMarketOrder();
   }
 
   boot();
