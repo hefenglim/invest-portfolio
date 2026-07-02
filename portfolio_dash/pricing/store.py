@@ -12,7 +12,7 @@ data with a clear staleness indicator, never crash, never fabricate.
 
 import sqlite3
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from portfolio_dash.pricing.results import DividendEvent, FxRead, FxRow, PriceRead, PriceRow
 from portfolio_dash.shared.enums import Currency, Market
@@ -20,13 +20,33 @@ from portfolio_dash.shared.money import from_db, to_db
 
 _DEFAULT_MAX_AGE = 4  # days
 
+# Float-noise caps (2026-07-03, human sign-off): float-sourced providers (yfinance
+# et al.) emit binary-float tails ("305.364990234375") that are NOT source
+# precision. Prices cap at 4 dp (covers every market tick: US/TW 2 dp, MY 3 dp);
+# FX rates cap at 6 dp (rates are not money; rules allow 4-6 dp). CAP, never pad:
+# values already at or under the cap store byte-identical.
+_PRICE_DP = 4
+_FX_DP = 6
+
+
+def _cap_dp(v: Decimal, places: int) -> Decimal:
+    """Round ``v`` to at most ``places`` decimals; values within the cap unchanged."""
+    exp = v.as_tuple().exponent
+    if isinstance(exp, int) and exp < -places:
+        return v.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    return v
+
 
 def _opt(v: Decimal | None) -> str | None:
-    return to_db(v) if v is not None else None
+    return to_db(_cap_dp(v, _PRICE_DP)) if v is not None else None
 
 
 def upsert_prices(conn: sqlite3.Connection, rows: list[PriceRow], *, fetched_at: datetime) -> None:
-    """Upsert quote rows into ``prices``, keyed on (instrument, as_of_date)."""
+    """Upsert quote rows into ``prices``, keyed on (instrument, as_of_date).
+
+    OHLC values are float-noise-capped to 4 dp on the way in (the ONLY price
+    write seam, so every provider is covered).
+    """
     conn.executemany(
         """INSERT INTO prices (instrument, market, as_of_date, close, open, high, low,
                volume, source, fetched_at)
@@ -34,8 +54,9 @@ def upsert_prices(conn: sqlite3.Connection, rows: list[PriceRow], *, fetched_at:
            ON CONFLICT(instrument, as_of_date) DO UPDATE SET
                close=excluded.close, open=excluded.open, high=excluded.high, low=excluded.low,
                volume=excluded.volume, source=excluded.source, fetched_at=excluded.fetched_at""",
-        [(r.instrument, r.market.value, r.as_of.isoformat(), to_db(r.close), _opt(r.open),
-          _opt(r.high), _opt(r.low), _opt(r.volume), r.source, fetched_at.isoformat())
+        [(r.instrument, r.market.value, r.as_of.isoformat(), to_db(_cap_dp(r.close, _PRICE_DP)),
+          _opt(r.open), _opt(r.high), _opt(r.low), _opt(r.volume), r.source,
+          fetched_at.isoformat())
          for r in rows],
     )
     conn.commit()
@@ -91,14 +112,18 @@ def get_price_history(
 
 
 def upsert_fx(conn: sqlite3.Connection, rows: list[FxRow], *, fetched_at: datetime) -> None:
-    """Upsert FX rate rows into ``fx_rates``, keyed on (base, quote, as_of_date)."""
+    """Upsert FX rate rows into ``fx_rates``, keyed on (base, quote, as_of_date).
+
+    Rates are float-noise-capped to 6 dp on the way in (rates are not money;
+    the 4-6 dp high-precision rule in data-and-pricing.md still holds).
+    """
     conn.executemany(
         """INSERT INTO fx_rates (base, quote, as_of_date, rate, source, fetched_at)
            VALUES (?,?,?,?,?,?)
            ON CONFLICT(base, quote, as_of_date) DO UPDATE SET
                rate=excluded.rate, source=excluded.source, fetched_at=excluded.fetched_at""",
-        [(r.base.value, r.quote.value, r.as_of.isoformat(), to_db(r.rate), r.source,
-          fetched_at.isoformat()) for r in rows],
+        [(r.base.value, r.quote.value, r.as_of.isoformat(), to_db(_cap_dp(r.rate, _FX_DP)),
+          r.source, fetched_at.isoformat()) for r in rows],
     )
     conn.commit()
 

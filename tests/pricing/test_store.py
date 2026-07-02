@@ -98,3 +98,25 @@ def test_get_fx_history_bounds_and_order(conn: sqlite3.Connection) -> None:
     assert [r.rate for r in rows] == [Decimal("32.1"), Decimal("32.3")]
     assert [r.as_of for r in rows] == [date(2026, 6, 1), date(2026, 6, 3)]
     assert all(r.stale is False for r in rows)
+
+
+def test_price_float_noise_capped_at_4dp(conn: sqlite3.Connection) -> None:
+    """Float-noise cap (2026-07-03, human sign-off): a float-tail close stores at
+    4 dp max, rounded half-up; clean values stay byte-identical (cap, never pad)."""
+    upsert_prices(conn, [_price("305.364990234375", date(2026, 6, 6))], fetched_at=_NOW)
+    r = get_latest_price(conn, "AAPL", now=_NOW)
+    assert r is not None and r.value == Decimal("305.3650")
+    # a clean 2-dp / integer value is NOT padded to 4 dp
+    upsert_prices(conn, [_price("600", date(2026, 6, 7))], fetched_at=_NOW)
+    row = conn.execute(
+        "SELECT close FROM prices WHERE instrument='AAPL' AND as_of_date='2026-06-07'"
+    ).fetchone()
+    assert row["close"] == "600"
+
+
+def test_fx_rate_capped_at_6dp(conn: sqlite3.Connection) -> None:
+    upsert_fx(conn, [FxRow(base=Currency.USD, quote=Currency.TWD, as_of=date(2026, 6, 6),
+                           rate=Decimal("32.55500012340001"), source="yfinance")],
+              fetched_at=_NOW)
+    r = get_fx(conn, Currency.USD, Currency.TWD, now=_NOW)
+    assert r is not None and r.rate == Decimal("32.555000")
