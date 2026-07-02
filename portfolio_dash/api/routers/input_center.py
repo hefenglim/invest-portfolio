@@ -1,7 +1,7 @@
 """Input center API (spec 12): read context + manual/CSV/AI write paths (12a: context+manual)."""
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -9,8 +9,9 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from portfolio_dash.api.deps import get_conn
+from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
 from portfolio_dash.api.wire import div_model_wire, fee_rules_wire, issue_wire, parse_side
 from portfolio_dash.data_ingestion.agents import ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
@@ -31,10 +32,23 @@ from portfolio_dash.data_ingestion.opening_import import (
 )
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, commit_preview
 from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
-from portfolio_dash.data_ingestion.validate import TxnInput
+from portfolio_dash.data_ingestion.validate import Issue, TxnInput
+from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
+
+# The account's settlement currency determines the market a bare symbol entered
+# under it belongs to (TW broker→TWD/TW, Schwab & Moomoo-US→USD/US, Moomoo-MY→
+# MYR/MY) — the basis for auto-registering unknown symbols from trade input.
+_CCY_MARKET = {"TWD": Market.TW, "USD": Market.US, "MYR": Market.MY}
+
+
+def _account_market(conn: sqlite3.Connection, account_id: str) -> Market | None:
+    row = conn.execute(
+        "SELECT settlement_ccy FROM accounts WHERE account_id=?", (account_id,)
+    ).fetchone()
+    return _CCY_MARKET.get(row["settlement_ccy"]) if row is not None else None
 
 
 @router.get("/input/context")
@@ -112,6 +126,24 @@ def _rule_for(conn: sqlite3.Connection, account_id: str) -> FeeRuleSet | None:
     return get_fee_rule_set(row["fee_rule_set"]) if row is not None else None
 
 
+def _issue_wire_manual(issue: Issue, symbol: str) -> dict[str, Any]:
+    """issue_wire + the manual-entry auto-register overlay (2026-07-02).
+
+    ``symbol_unresolved`` is a HARD block at the data_ingestion layer (the ledger
+    safety net stands), but the manual COMMIT path auto-registers unknown symbols,
+    so the PREVIEW presents it as an info-severity note instead of an error — the
+    confirm button must not be gated on a condition the commit resolves itself.
+    """
+    if issue.kind == "symbol_unresolved":
+        return {
+            "sev": "info", "code": "symbol_auto_register",
+            "text": f"未註冊標的 {symbol} — 寫入時將自動查詢並註冊（查無報價則無法寫入）",
+            "field": "symbol",
+        }
+    wired: dict[str, Any] = issue_wire(issue)
+    return wired
+
+
 @router.post("/input/manual/preview")
 def manual_preview(
     body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)
@@ -130,14 +162,48 @@ def manual_preview(
         "fee_rule_label": fee_rules_wire(rule)["label"] if rule is not None else None,
         "fee_overridden": body.fee_override is not None,
         "tax_overridden": body.tax_override is not None,
-        "issues": [issue_wire(i) for i in draft.issues],
+        "issues": [_issue_wire_manual(i, body.symbol) for i in draft.issues],
     }
 
 
 @router.post("/input/manual/commit", status_code=201)
-def manual_commit(body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def manual_commit(
+    body: ManualBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
     inp = _txn_input(body)
     draft = enter_transaction(conn, inp, confirm=False)  # inspect, no write
+
+    # Auto-register an unknown symbol (2026-07-02): infer the market from the
+    # account's settlement currency and run the one-step registration (which
+    # REQUIRES a real quote — the typo guard). Success -> the entry proceeds as if
+    # the symbol had been registered first; failure -> a clear 400, nothing written.
+    auto_registered: dict[str, Any] | None = None
+    if any(i.kind == "symbol_unresolved" for i in draft.issues):
+        market = _account_market(conn, body.account_id)
+        if market is None:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", f"帳戶 {body.account_id} 不存在，無法自動註冊標的",
+                field="account_id"))
+        try:
+            outcome = quick_register(
+                conn, symbol=body.symbol, market=market, now=now, force=False)
+        except QuickRegisterError as exc:
+            if exc.code != "duplicate_symbol":  # duplicate = registered meanwhile -> proceed
+                return JSONResponse(status_code=400, content=error_body(
+                    "symbol_auto_register_failed",
+                    f"自動註冊失敗：{exc.message}", field="symbol"))
+        else:
+            auto_registered = {
+                "symbol": outcome.instrument.symbol,
+                "name": outcome.instrument.name,
+                "last": decimal_str(outcome.last) if outcome.last is not None else None,
+            }
+            body = body.model_copy(update={"symbol": outcome.instrument.symbol})
+        inp = _txn_input(body)
+        draft = enter_transaction(conn, inp, confirm=False)  # re-validate, resolved now
+
     hard = [i for i in draft.issues if not i.needs_confirm]
     if hard:
         return JSONResponse(status_code=400, content=error_body(
@@ -152,7 +218,8 @@ def manual_commit(body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)
     gross = body.shares * body.price
     total = (-(gross + written.fee + written.tax) if inp.side.value == "BUY"
              else (gross - written.fee - written.tax))
-    return {"txn_id": written.transaction_id, "total": decimal_str(total)}
+    return {"txn_id": written.transaction_id, "total": decimal_str(total),
+            "auto_registered": auto_registered}
 
 
 # --- CSV import: preview (12.3) + commit (12.4) shared infrastructure ---

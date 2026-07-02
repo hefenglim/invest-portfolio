@@ -1,4 +1,11 @@
+from typing import Any
+
+import pytest
 from fastapi.testclient import TestClient
+
+from portfolio_dash.api.instrument_service import QuickRegisterError, QuickRegisterOutcome
+from portfolio_dash.api.routers import input_center
+from portfolio_dash.shared.models.assets import Instrument
 
 
 def test_manual_preview_buy_computes_fee_and_total(api_client: TestClient) -> None:
@@ -67,29 +74,81 @@ def test_manual_commit_hard_error_400(api_client: TestClient) -> None:
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
 
 
-# --- unregistered symbol is a HARD block (2026-07-02) --------------------------
-# An unregistered symbol has no Instrument row (no quote ccy, not in the pricing
-# worklist) — committing it would poison the ledger. Preview surfaces sev "error"
-# (which also disables the frontend commit button); commit is a 400.
+# --- unknown symbol: auto-register on commit (2026-07-02, round 2) ------------
+# The data_ingestion hard block stands (a ledger row must always resolve to an
+# Instrument), but the manual COMMIT path now resolves it ITSELF: it infers the
+# market from the account's settlement ccy and runs the one-step quick_register
+# (which requires a REAL quote — the typo guard). Preview shows an info-severity
+# note (never gates the button); an unregistrable symbol still commits nothing.
 
 
-def test_manual_preview_unregistered_symbol_is_hard_issue(api_client: TestClient) -> None:
+def test_manual_preview_unregistered_symbol_is_info(api_client: TestClient) -> None:
     r = api_client.post("/api/input/manual/preview", json={
         "account_id": "tw_broker", "symbol": "GHOST", "side": "buy",
         "date": "2026-06-11", "shares": "100", "price": "10"})
     assert r.status_code == 200
     codes = {i["code"]: i for i in r.json()["issues"]}
-    assert "symbol_unresolved" in codes
-    assert codes["symbol_unresolved"]["sev"] == "error"  # hard, not confirmable
+    assert "symbol_auto_register" in codes
+    assert codes["symbol_auto_register"]["sev"] == "info"  # notice, not a gate
+    assert "自動查詢並註冊" in codes["symbol_auto_register"]["text"]
 
 
-def test_manual_commit_unregistered_symbol_400(api_client: TestClient) -> None:
+def _fake_quick_register_ok(symbol: str = "GHOST", name: str = "Ghost Corp") -> Any:
+    def fake(conn: Any, **kw: Any) -> QuickRegisterOutcome:
+        from portfolio_dash.data_ingestion.store import upsert_instrument
+        from portfolio_dash.shared.enums import Currency, Market
+
+        inst = Instrument(symbol=symbol, market=Market.TW, quote_ccy=Currency.TWD,
+                          sector="", name=name, board="TWSE")
+        upsert_instrument(conn, inst)
+        return QuickRegisterOutcome(instrument=inst, board="TWSE", last=None,
+                                    name_source="provider", history_points=True)
+    return fake
+
+
+def test_manual_commit_auto_registers_unknown_symbol(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(input_center, "quick_register", _fake_quick_register_ok())
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "tw_broker", "symbol": "GHOST", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "10"})
+    assert r.status_code == 201
+    b = r.json()
+    assert b["auto_registered"]["symbol"] == "GHOST"
+    assert b["auto_registered"]["name"] == "Ghost Corp"
+    # The trade itself landed in the ledger.
+    lg = api_client.get("/api/ledgers/transactions", params={"account_id": "tw_broker"}).json()
+    assert any(t["symbol"] == "GHOST" for t in lg["rows"])
+
+
+def test_manual_commit_auto_register_fails_when_no_quote(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake(conn: Any, **kw: Any) -> QuickRegisterOutcome:
+        raise QuickRegisterError("quote_not_found", "查無 GHOST 的報價", 422)
+
+    monkeypatch.setattr(input_center, "quick_register", fake)
     r = api_client.post("/api/input/manual/commit", json={
         "account_id": "tw_broker", "symbol": "GHOST", "side": "buy",
         "date": "2026-06-11", "shares": "100", "price": "10"})
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "validation_error"
-    assert "未註冊" in r.json()["error"]["message"]
+    assert r.json()["error"]["code"] == "symbol_auto_register_failed"
+    assert "查無" in r.json()["error"]["message"]
     # Nothing was written.
     lg = api_client.get("/api/ledgers/transactions", params={"account_id": "tw_broker"}).json()
     assert all(t["symbol"] != "GHOST" for t in lg["rows"])
+
+
+def test_manual_commit_registered_symbol_skips_auto_register(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(conn: Any, **kw: Any) -> QuickRegisterOutcome:
+        raise AssertionError("quick_register must not run for a registered symbol")
+
+    monkeypatch.setattr(input_center, "quick_register", boom)
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "600"})
+    assert r.status_code == 201
+    assert r.json()["auto_registered"] is None

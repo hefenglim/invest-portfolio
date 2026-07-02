@@ -64,6 +64,13 @@
   const m = { side: 'buy', feeOverride: false, taxOverride: false, acked: false };
   /* Latest server preview (Decimal STRINGS) — null until the first preview lands. */
   let mPreview = null;
+  /* Today (local) — the natural default trade date; retires the design-stub
+     2026-06-11 / 2330 / 1000 / 612.5 fake prefill (2026-07-02). */
+  const TODAY = (() => {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  })();
 
   function initManual() {
     const accSel = $('#m-account');
@@ -77,10 +84,10 @@
       const o = el('option'); o.value = i.symbol; o.label = i.name;
       dl.appendChild(o);
     });
-    $('#m-date').value = '2026-06-11';
-    $('#m-symbol').value = '2330';
-    $('#m-shares').value = '1000';
-    $('#m-price').value = '612.5';
+    $('#m-date').value = TODAY;
+    $('#m-symbol').value = '';
+    $('#m-shares').value = '';
+    $('#m-price').value = '';
 
     $('#m-side-buy').addEventListener('click', () => setSide('buy'));
     $('#m-side-sell').addEventListener('click', () => setSide('sell'));
@@ -124,7 +131,7 @@
       account_id: $('#m-account').value || (ctx.accounts[0] && ctx.accounts[0].id) || '',
       symbol: sym,
       side: m.side,
-      date: $('#m-date').value || '2026-06-11',
+      date: $('#m-date').value || TODAY,
       shares: sharesRaw === '' ? '0' : sharesRaw,
       price: priceRaw === '' ? '0' : priceRaw,
     };
@@ -153,10 +160,7 @@
     const symHint = $('#m-sym-hint');
     symHint.replaceChildren();
     if (sym && !it) {
-      symHint.appendChild(document.createTextNode('未註冊 — '));
-      const link = el('a', 'hint-link', '前往標的管理');
-      link.href = 'instruments.html';
-      symHint.appendChild(link);
+      symHint.textContent = '未註冊 — 寫入時將自動查詢並註冊（依帳戶判定市場）';
     } else if (it) {
       symHint.textContent = it.name + '・' + it.ccy + (it.etf ? '・ETF' : '');
     }
@@ -211,9 +215,11 @@
     $('#m-fee-ovr').hidden = !m.feeOverride;
     $('#m-tax-ovr').hidden = !m.taxOverride;
 
-    /* split server issues into hard (error) vs soft (warn, e.g. oversell) */
+    /* split server issues: hard (error) gates the confirm; soft (warn, e.g. oversell)
+       needs an ack; info (e.g. 未註冊將自動註冊) is a notice only — never gates. */
     const hard = issues.filter((i) => i.sev === 'error');
     const soft = issues.filter((i) => i.sev === 'warn');
+    const infos = issues.filter((i) => i.sev === 'info');
     const oversell = soft.find((i) => i.code === 'sell_exceeds_holdings') || soft[0] || null;
 
     /* field-error highlight from issue.field (mapped to the m-* input ids) */
@@ -254,6 +260,12 @@
       div.appendChild(el('span', null, i.text));
       issueBox.appendChild(div);
     });
+    infos.forEach((i) => {
+      const div = el('div', 'issue issue-info');
+      div.appendChild(el('span', null, 'ℹ'));
+      div.appendChild(el('span', null, i.text));
+      issueBox.appendChild(div);
+    });
     let ackOk = true;
     if (oversell) {
       const div = el('div', 'issue issue-warn');
@@ -287,10 +299,15 @@
   async function commitManual() {
     const body = manualBody();
     body.ack_oversell = m.acked;
+    /* busy state: the commit may auto-register an unknown symbol (real provider
+       fetch, seconds) — the button must show that work, not appear frozen. */
+    const restore = window.pdBusy ? window.pdBusy($('#m-confirm'), '寫入中…') : () => {};
     try {
       const resp = await api.post('/api/input/manual/commit', body);
+      restore();
       onManualWritten(resp);
     } catch (err) {
+      restore();
       if (err && err.status === 422 && err.code === 'oversell_unacknowledged') {
         const msg = (err.issues && err.issues[0] && err.issues[0].text) || '賣出股數超過持有 — 確認後寫入？';
         window.confirmDialog({
@@ -318,7 +335,12 @@
   function onManualWritten(resp) {
     if (window.toast) {
       const id = resp && resp.txn_id !== undefined ? '（#' + resp.txn_id + '）' : '';
-      window.toast('寫入成功', 'ok', '交易已寫入帳本 ' + id);
+      const ar = resp && resp.auto_registered;
+      const arTxt = ar
+        ? '；已自動註冊 ' + ar.symbol + (ar.name ? ' ' + ar.name : '') +
+          (ar.last != null ? '（現價 ' + ar.last + '）' : '')
+        : '';
+      window.toast('寫入成功', 'ok', '交易已寫入帳本 ' + id + arTxt);
     }
     /* reset draft state and re-preview a clean form */
     m.feeOverride = false; m.taxOverride = false; m.acked = false;
@@ -632,7 +654,7 @@
       accSel.appendChild(o);
     });
     accSel.addEventListener('change', renderDivForm);
-    $('#d-date').value = '2026-06-11';
+    $('#d-date').value = TODAY;
     const typeSeg = document.querySelectorAll('#d-tw .segmented button');
     typeSeg.forEach((b) => b.addEventListener('click', () => {
       typeSeg.forEach((x) => x.classList.toggle('active', x === b));
@@ -681,7 +703,7 @@
       const o = el('option', null, a.name); o.value = a.id;
       accSel.appendChild(o);
     });
-    $('#fx-date').value = '2026-06-11';
+    $('#fx-date').value = TODAY;
     const upd = () => {
       const fromA = parseFloat($('#fx-from-amt').value) || 0;
       const toA = parseFloat($('#fx-to-amt').value) || 0;
@@ -706,7 +728,7 @@
       const o = el('option', null, a.name); o.value = a.id;
       oAccSel.appendChild(o);
     });
-    $('#o-date').value = '2026-01-02';
+    $('#o-date').value = TODAY;
     $('#o-confirm').addEventListener('click', () =>
       window.toast('單筆期初請改用 CSV 匯入', 'fail',
         '後端未提供單筆期初寫入端點 — 請於「CSV 匯入 › 期初」貼上 CSV 建檔'));
