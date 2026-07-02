@@ -391,16 +391,16 @@ def test_instruments_page_smoke(live_server: str, browser_page: Page) -> None:
 
 
 @pytest.mark.e2e
-def test_instruments_probe_shows_board_guess(
+def test_instruments_quick_add_duplicate_surfaces_backend_error(
     live_server: str, browser_page: Page
 ) -> None:
-    """Probe step hits the REAL POST /api/instruments/probe (spec 19, Task 2.5).
+    """One-step add hits the REAL POST /api/instruments/quick (2026-07-02).
 
-    The TW board probe no longer reads an inline mock: clicking #probe-btn for a TW
-    symbol POSTs {symbol} to /api/instruments/probe and renders the returned board guess
-    into the probe card. Navigate /instruments.html, type 2330, click probe, then assert
-    (a) the probe card un-hides with a board guess and (b) ZERO console + page errors over
-    the interaction (catching an unhandled POST rejection or a botched response read).
+    Deterministic + provider-free path: adding golden-registered 2330 answers 409
+    duplicate_symbol BEFORE any quote fetch, so the e2e never touches the network.
+    Asserts (a) the button POSTs the real endpoint and receives the 409, (b) the
+    backend message surfaces as a fail toast, and (c) ZERO console + page errors
+    over the interaction (an unhandled POST rejection would fail this).
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -421,20 +421,23 @@ def test_instruments_probe_shows_board_guess(
         page.goto(live_server + "/instruments.html", wait_until="load")
         page.wait_for_selector("#inst-body tr")  # list landed (page fully booted)
         page.fill("#new-symbol", "2330")
-        # Market defaults to TW; clicking probe POSTs and un-hides the probe card.
-        with page.expect_response("**/api/instruments/probe") as resp_info:
-            page.click("#probe-btn")
-        assert resp_info.value.status == 200, f"probe status {resp_info.value.status}"
-        # The probe card un-hides with the rendered board guess.
-        page.wait_for_selector("#probe-card:not([hidden])")
-        text = page.inner_text("#probe-text")
-        assert text.strip(), "probe card rendered no board guess"
+        # Market defaults to TW; the one-step add POSTs /api/instruments/quick.
+        with page.expect_response("**/api/instruments/quick") as resp_info:
+            page.click("#quick-add-btn")
+        assert resp_info.value.status == 409, f"quick status {resp_info.value.status}"
+        # The backend duplicate message surfaces as a fail toast.
+        page.wait_for_selector(".toast-fail")
+        assert "已註冊" in page.inner_text(".toast-fail")
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
 
-    assert not console_errors and not page_errors, (
-        f"/instruments.html (probe): console errors={console_errors!r}; "
+    # Chrome logs a console "error" for ANY non-2xx fetch ("Failed to load
+    # resource: ... 409") — that is network logging of the DELIBERATE 409, not an
+    # app error. Filter it; everything else (and all page errors) stays fatal.
+    app_errors = [e for e in console_errors if "Failed to load resource" not in e]
+    assert not app_errors and not page_errors, (
+        f"/instruments.html (quick add): console errors={app_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
@@ -519,9 +522,10 @@ def test_input_manual_preview_roundtrip(
         page.goto(live_server + "/input.html", wait_until="load")
         # <option> nodes are inside a collapsed <select> -> wait for ATTACHED, not visible.
         page.wait_for_selector("#m-account option", state="attached")  # context landed
-        # The seeded default draft already previews on boot; edit the price to fire a
-        # fresh, deterministic POST we can wait on (golden 2330 under tw_broker).
+        # The form boots EMPTY now (design-stub prefill retired 2026-07-02): fill every
+        # field; the preview POST fires only once the local checks pass (price last).
         page.fill("#m-symbol", "2330")
+        page.fill("#m-shares", "1000")
         with page.expect_response("**/api/input/manual/preview") as resp_info:
             page.fill("#m-price", "612.5")
         assert resp_info.value.status == 200, f"preview status {resp_info.value.status}"

@@ -176,6 +176,14 @@
     const shares = Number($('#m-shares').value) || 0;
     const price = Number($('#m-price').value) || 0;
 
+    /* pristine form (boots empty since 2026-07-02): no red errors on an untouched
+       page — render the neutral empty state with the confirm disabled. */
+    if (!sym && $('#m-shares').value.trim() === '' && $('#m-price').value.trim() === '') {
+      mPreview = null;
+      renderManual(null, [], false);
+      return;
+    }
+
     const localIssues = [];
     if (!sym) localIssues.push({ sev: 'error', text: '請輸入代號', field: 'm-symbol' });
     if (shares <= 0) localIssues.push({ sev: 'error', text: '股數必須大於 0', field: 'm-shares' });

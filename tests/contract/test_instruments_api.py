@@ -9,7 +9,6 @@ from portfolio_dash.api import instrument_service
 from portfolio_dash.api.routers import instruments as instruments_router
 from portfolio_dash.pricing.results import PriceRow, RefreshSummary
 from portfolio_dash.pricing.store import upsert_prices
-from portfolio_dash.shared.enums import Market
 
 _NOW = datetime(2026, 7, 2, 12, 0, tzinfo=UTC)
 

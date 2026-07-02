@@ -42,6 +42,26 @@ prevents recurrence.
   "needs confirmation" issue has NO valid confirm semantics downstream, it must be a
   hard block, not a soft warn.
 
+- **A never-500 degradation must cover EVERY replay call site (2026-07-02):** the
+  acked-oversell dashboard fix passed `allow_oversell=True` to the MAIN
+  `build_book` call, but `timeseries.daily_value_series` builds its OWN per-day
+  books and still raised `OversellError` → the dashboard 500'd through the trend
+  path anyway. Found only when a new mutation test asserted `GET /api/dashboard`
+  is 200 after producing the state. Rules: (1) when adding a degradation
+  flag/behavior, grep ALL callers of the guarded function and audit each; (2) any
+  test that creates a degraded-but-legal ledger state should end by asserting the
+  dashboard still answers 200.
+
+- **A derived quantity needs ONE definition, not per-caller reimplementations
+  (2026-07-02):** `data_ingestion.holdings.current_shares` re-derived "shares
+  held" as buys−sells over the transactions table only, silently drifting from
+  `build_book`'s four-source replay (opening inventory + buys − sells + stock/DRIP
+  reinvest shares). Result: FALSE oversell warnings when selling opening-backed
+  positions and wrong `held` flags — a core position-management basic broken for
+  any user whose holdings predate the app. When two modules answer the same
+  domain question, either share the implementation or add a test pinning them to
+  each other.
+
 - **`StrEnum` + Pydantic v2 serialization (2026-06-06):** `Currency`/`Market` are
   `enum.StrEnum` (ruff UP042 prefers this over `(str, Enum)` on 3.11+). A `StrEnum`
   member *is* a `str` (`isinstance` is `True`, SQLite binds it as TEXT, `json.dumps`

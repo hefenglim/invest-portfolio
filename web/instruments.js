@@ -167,19 +167,38 @@
         acts.appendChild(edit);
         if (i.market === 'TW') {
           const rp = el('button', 'btn', '重新探測'); rp.type = 'button';
-          rp.title = '重新探測 TWSE / TPEx 板別';
+          rp.title = '重新探測 TWSE / TPEx 板別並儲存結果';
           rp.addEventListener('click', async () => {
+            const restore = window.pdBusy ? window.pdBusy(rp, '探測中…') : () => {};
             let resp;
             try {
               resp = await window.pdApi.post('/api/instruments/probe', { symbol: i.symbol });
             } catch (err) {
+              restore();
               if (window.toast) window.toast('探測失敗', 'fail', err && err.message ? err.message : undefined);
               return;
             }
-            if (window.toast) {
-              window.toast('探測完成', 'ok',
-                i.symbol + ' 判定 ' + (resp && resp.board_label ? resp.board_label : '未解析'));
+            /* persist the probe result (2026-07-02) — the old flow only toasted it,
+               leaving an unresolved board unresolved forever. */
+            const board = resp && resp.board;
+            if (board) {
+              try {
+                await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol),
+                  { board: board });
+              } catch (err) {
+                restore();
+                if (window.toast) window.toast('板別儲存失敗', 'fail', err && err.message ? err.message : undefined);
+                return;
+              }
             }
+            restore();
+            if (window.toast) {
+              window.toast(board ? '板別已更新' : '探測完成',
+                board ? 'ok' : 'fail',
+                i.symbol + ' 判定 ' + (resp && resp.board_label ? resp.board_label : '未解析') +
+                (board ? '（已儲存）' : '，未變更'));
+            }
+            if (board) await refresh();
           });
           acts.appendChild(rp);
         }

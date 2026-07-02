@@ -201,6 +201,13 @@ def update(
     fields = body.model_dump(exclude_none=True)
     updated = existing.model_copy(update=fields)
     upsert_instrument(conn, updated)
+    # An explicit board set on a TW instrument resolves its board_status (the
+    # 重新探測-and-save flow, 2026-07-02); upsert_instrument itself never touches
+    # board_status (owned by registration).
+    if "board" in fields and updated.market is Market.TW and updated.board:
+        conn.execute("UPDATE instruments SET board_status='resolved' WHERE symbol=?",
+                     (symbol,))
+        conn.commit()
     saved = get_instrument(conn, symbol)
     assert saved is not None
     account_ids = [a.account_id for a in list_accounts(conn)]
