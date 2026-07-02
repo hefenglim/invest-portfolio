@@ -183,6 +183,8 @@ a { color: inherit; }
   letter-spacing: .02em;
 }
 .sidebar.collapsed .brand-ver { display: none; }
+/* non-tag build marker: unreleased code stays visible on every page */
+.sidebar .brand-ver.unreleased { color: var(--amber, #d9a13f); font-weight: 600; }
 /* unregistered-symbol ledger warning (dashboard) */
 .unreg-banner {
   display: flex; align-items: center; gap: 10px;

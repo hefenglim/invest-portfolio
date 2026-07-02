@@ -544,16 +544,27 @@
      defined/usable immediately; the session-dependent UI updates after this resolves) */
   pdInitSession();
 
-  /* App version tag — single source: backend GET /api/health ({"version": "…"}). Fills the
-     sidebar brand tag (every page) AND the settings 一般 read-only row (#gen-version), so both
-     share ONE version source. Non-critical: degrades silently if the health call fails. */
+  /* App build identity — single source: backend GET /api/health
+     ({version, commit, release}). Fills the sidebar brand tag (every page) AND the
+     settings 一般 read-only row (#gen-version), so both share ONE source. A build whose
+     HEAD is not exactly a release tag shows an amber「未發行」suffix on every page, so
+     running non-released code (e.g. on prod by mistake) is visible at a glance.
+     Non-critical: degrades silently if the health call fails. */
   function pdInitVersion() {
     pdEnsureApi()
       .then((ok) => (ok ? window.pdApi.get('/api/health') : null))
       .then((h) => {
-        const v = (h && h.version) ? ('v' + h.version) : '';
-        if (!v) return;
-        document.querySelectorAll('.brand-ver, #gen-version').forEach((n) => { n.textContent = v; });
+        if (!h || !h.version) return;
+        const commit = h.commit && h.commit !== 'unknown' ? h.commit : '';
+        const released = !!h.release && h.release !== 'unreleased';
+        const brief = 'v' + h.version + (commit ? ' · ' + commit : '');
+        const full = brief + (released ? '（正式發行 ' + h.release + '）' : '（未發行版）');
+        document.querySelectorAll('.brand-ver').forEach((n) => {
+          n.textContent = brief + (released ? '' : ' · 未發行');
+          n.classList.toggle('unreleased', !released);
+          n.title = full;
+        });
+        document.querySelectorAll('#gen-version').forEach((n) => { n.textContent = full; });
       })
       .catch(() => { /* silent: version tag is non-critical */ });
   }
