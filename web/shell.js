@@ -324,12 +324,13 @@
         return o;
       };
       /* 更新報價：POST /api/actions/refresh-quotes（同步執行 quotes_tw/us/my，
-         real provider fetch — 可能需要數秒）。成功後儀表板頁自動重載以顯示新價。 */
+         real provider fetch — 約 10 秒）。進度以常駐 toastProgress 顯示（Progress 系統），
+         成功後自動重載以顯示新價。 */
       let refreshBusy = false;
-      menu.appendChild(mkOpt('更新報價', '報告模式：抓取最新報價與匯率（數秒）', () => {
+      menu.appendChild(mkOpt('更新報價', '報告模式：抓取最新報價與匯率（約 10 秒）', () => {
         if (refreshBusy) return;
         refreshBusy = true;
-        if (window.toast) window.toast('報價更新中…', 'ok', '正在向資料來源抓取最新報價與匯率');
+        const prog = window.toastProgress('報價更新中…', '正在向 TW / US / MY 資料來源抓取最新報價與匯率（約 10 秒）');
         pdEnsureApi()
           .then((ok) => {
             if (!ok) throw new Error('API 層載入失敗');
@@ -338,12 +339,12 @@
           .then((resp) => {
             refreshBusy = false;
             const jobs = (resp && resp.jobs) ? resp.jobs.join(' / ') : 'quotes';
-            if (window.toast) window.toast('報價更新完成', 'ok', jobs + ' 已執行，正在重新整理…');
+            prog.done('報價更新完成', jobs + ' 已執行，正在重新整理…');
             setTimeout(() => { window.location.reload(); }, 900);
           })
           .catch((e) => {
             refreshBusy = false;
-            if (window.toast) window.toast('報價更新失敗', 'fail', (e && e.message) || '請稍後再試');
+            prog.fail('報價更新失敗', (e && e.message) || '請稍後再試');
           });
       }));
       menu.appendChild(mkOpt('重算（重建統計）', '由四帳本完整重建所有統計 — 較耗時', () => {
@@ -353,17 +354,18 @@
             body: '將由期初庫存、交易、股利、換匯四帳本完整重建所有持倉與報酬統計。帳本本身不會被修改。',
             confirmLabel: '開始重算',
             onConfirm: () => {
+              const prog = window.toastProgress('重算中…', '正在由四帳本重建所有統計');
               pdEnsureApi()
                 .then((ok) => {
                   if (!ok) throw new Error('API 層載入失敗');
                   return window.pdApi.post('/api/actions/recompute');
                 })
                 .then(() => {
-                  if (window.toast) window.toast('重算完成', 'ok', '四帳本重放驗證通過，正在重新整理…');
+                  prog.done('重算完成', '四帳本重放驗證通過，正在重新整理…');
                   setTimeout(() => { window.location.reload(); }, 900);
                 })
                 .catch((e) => {
-                  if (window.toast) window.toast('重算失敗', 'fail', (e && e.message) || '請稍後再試');
+                  prog.fail('重算失敗', (e && e.message) || '請稍後再試');
                 });
             }
           });
@@ -493,6 +495,45 @@
     }
   });
 
+  /* ---- global network progress bar (Progress system, 2026-07-02) ----
+     Fed by the `pd-net` events api.js dispatches around EVERY pdApi request, so any
+     network wait anywhere in the app shows the slim top bar — no per-page wiring.
+     A 150ms show-delay keeps sub-perceptual requests from flickering it. */
+  const netBar = el('div', 'net-progress');
+  netBar.hidden = true;
+  document.body.appendChild(netBar);
+  let netShowTimer = null;
+  document.addEventListener('pd-net', (e) => {
+    const pending = (e.detail && e.detail.pending) || 0;
+    if (pending > 0) {
+      if (netBar.hidden && !netShowTimer) {
+        netShowTimer = setTimeout(() => { netBar.hidden = false; netShowTimer = null; }, 150);
+      }
+    } else {
+      if (netShowTimer) { clearTimeout(netShowTimer); netShowTimer = null; }
+      netBar.hidden = true;
+    }
+  });
+
+  /* pdBusy(btn, busyLabel): put an action button into a spinner/disabled busy state;
+     returns a restore() fn. Guards double-clicks by construction (disabled while busy). */
+  window.pdBusy = function (btn, busyLabel) {
+    if (!btn || btn.dataset.pdBusy === '1') return function () {};
+    btn.dataset.pdBusy = '1';
+    const prev = btn.textContent;
+    btn.disabled = true;
+    btn.classList.add('is-busy');
+    btn.textContent = '';
+    btn.appendChild(el('span', 'busy-spin'));
+    btn.appendChild(el('span', null, busyLabel || prev));
+    return function restore() {
+      delete btn.dataset.pdBusy;
+      btn.disabled = false;
+      btn.classList.remove('is-busy');
+      btn.textContent = prev;
+    };
+  };
+
   /* ---- toasts ---- */
   const host = el('div', 'toast-host');
   document.body.appendChild(host);
@@ -509,6 +550,39 @@
     t.appendChild(x);
     host.appendChild(t);
     if (kind !== 'fail') setTimeout(() => t.remove(), 4200); /* 失敗訊息常駐直到關閉 */
+  };
+
+  /* toastProgress(msg, sub): a persistent spinner toast for LONG network operations
+     (quote refresh, recompute, history backfill). Stays until the caller settles it:
+       const p = window.toastProgress('報價更新中…', '約 10 秒');
+       … p.done('報價更新完成', detail) / p.fail('更新失敗', detail) / p.update(msg, sub)
+     Settling replaces it with a normal ok/fail toast (ok auto-dismisses). */
+  window.toastProgress = function (msg, sub) {
+    const t = el('div', 'toast toast-progress');
+    t.appendChild(el('span', 'busy-spin'));
+    const txt = el('div');
+    const mEl = el('div', 'msg', msg);
+    txt.appendChild(mEl);
+    const sEl = el('div', 'sub', sub || '');
+    if (sub) txt.appendChild(sEl);
+    t.appendChild(txt);
+    host.appendChild(t);
+    let settled = false;
+    const settle = (kind, msg2, sub2) => {
+      if (settled) return;
+      settled = true;
+      t.remove();
+      window.toast(msg2 || msg, kind, sub2);
+    };
+    return {
+      update: (msg2, sub2) => {
+        if (settled) return;
+        if (msg2) mEl.textContent = msg2;
+        if (sub2) { sEl.textContent = sub2; if (!sEl.parentNode) txt.appendChild(sEl); }
+      },
+      done: (msg2, sub2) => settle('ok', msg2, sub2),
+      fail: (msg2, sub2) => settle('fail', msg2, sub2)
+    };
   };
 
   /* ---- confirm dialog ---- */

@@ -43,6 +43,28 @@
   /* abortable(): same-key in-flight request controllers (typeahead/search-cancel). */
   const _controllers = new Map();
 
+  /* ---- global network-activity tracking (Progress system, 2026-07-02) ----
+     Every pdApi call increments/decrements one in-flight counter and dispatches a
+     `pd-net` CustomEvent on document with {pending}. shell.js renders the global
+     top progress bar off these events, so EVERY network wait in the app gets a
+     visible indicator with no per-page wiring. Decrement runs on settle (success,
+     HTTP error, network error, abort alike). */
+  let _pending = 0;
+  function _netEvent() {
+    try {
+      document.dispatchEvent(new CustomEvent('pd-net', { detail: { pending: _pending } }));
+    } catch (e) { /* dispatch must never break a request */ }
+  }
+  function _track(p) {
+    _pending += 1;
+    _netEvent();
+    const dec = function () { _pending = Math.max(0, _pending - 1); _netEvent(); };
+    return p.then(
+      function (v) { dec(); return v; },
+      function (e) { dec(); throw e; }
+    );
+  }
+
   /** Normalize a path to a single leading slash; used verbatim (no /api prefix). */
   function _normPath(path) {
     const p = String(path == null ? '' : path);
@@ -115,19 +137,19 @@
 
   function get(path, params, opts) {
     const url = _withParams(_normPath(path), params);
-    return fetch(url, _jsonInit('GET', undefined, opts)).then(_handle);
+    return _track(fetch(url, _jsonInit('GET', undefined, opts)).then(_handle));
   }
 
   function post(path, body, opts) {
-    return fetch(_normPath(path), _jsonInit('POST', body, opts)).then(_handle);
+    return _track(fetch(_normPath(path), _jsonInit('POST', body, opts)).then(_handle));
   }
 
   function put(path, body, opts) {
-    return fetch(_normPath(path), _jsonInit('PUT', body, opts)).then(_handle);
+    return _track(fetch(_normPath(path), _jsonInit('PUT', body, opts)).then(_handle));
   }
 
   function del(path, opts) {
-    return fetch(_normPath(path), _jsonInit('DELETE', undefined, opts)).then(_handle);
+    return _track(fetch(_normPath(path), _jsonInit('DELETE', undefined, opts)).then(_handle));
   }
 
   /** Derive a download filename from Content-Disposition, else a fallback. */
@@ -147,6 +169,10 @@
       on 2xx read a Blob, name it from Content-Disposition, and trigger a browser
       download via a temporary <a download>. Resolves when the click is issued. */
   async function download(path, body, opts) {
+    return _track(_download(path, body, opts));
+  }
+
+  async function _download(path, body, opts) {
     const method = body !== undefined && body !== null ? 'POST' : 'GET';
     const resp = await fetch(_normPath(path), _jsonInit(method, body, opts));
     if (!resp.ok) {
@@ -188,6 +214,7 @@
     put: put,
     del: del,
     download: download,
-    abortable: abortable
+    abortable: abortable,
+    pending: function () { return _pending; }
   };
 })();

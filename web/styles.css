@@ -300,6 +300,30 @@ a { color: inherit; }
   margin-left: auto; background: none; border: none;
   color: var(--text-3); cursor: pointer; font-size: 13px; padding: 0;
 }
+.toast-progress { border-color: rgba(88, 166, 221, 0.5); color: var(--accent); }
+
+/* ---------- Progress system: global net bar + busy buttons (2026-07-02) ---------- */
+.net-progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 300;
+  overflow: hidden; pointer-events: none; background: transparent;
+}
+.net-progress::after {
+  content: ""; position: absolute; top: 0; left: -40%; width: 40%; height: 100%;
+  background: var(--accent); border-radius: 2px;
+  animation: pd-net-slide 1.1s ease-in-out infinite;
+}
+@keyframes pd-net-slide { 0% { left: -40%; } 60% { left: 100%; } 100% { left: 100%; } }
+.busy-spin {
+  display: inline-block; width: 11px; height: 11px; flex: none;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%;
+  animation: pd-spin 0.7s linear infinite;
+}
+button.is-busy {
+  opacity: 0.75; cursor: progress;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+}
+@keyframes pd-spin { to { transform: rotate(360deg); } }
 
 /* neutral direction chips (買賣是方向不是損益 — 不用紅綠) */
 .dir-chip {
