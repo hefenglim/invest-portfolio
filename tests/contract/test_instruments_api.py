@@ -209,3 +209,19 @@ def test_put_updates_target_low(api_client: TestClient) -> None:
 def test_put_missing_404(api_client: TestClient) -> None:
     r = api_client.put("/api/instruments/NOPE", json={"sector": "z"})
     assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
+
+
+def test_put_explicit_null_clears_target_low(api_client: TestClient) -> None:
+    """Regression (2026-07-03): PUT {"target_low": null} must CLEAR the alert —
+    the old exclude_none dump silently dropped explicit nulls (clear never worked)."""
+    r = api_client.put("/api/instruments/2330", json={"target_low": "550"})
+    assert r.status_code == 200 and r.json()["target_low"] == "550"
+    r2 = api_client.put("/api/instruments/2330", json={"target_low": None})
+    assert r2.status_code == 200 and r2.json()["target_low"] is None
+
+
+def test_list_and_update_carry_is_etf(api_client: TestClient) -> None:
+    lst = api_client.get("/api/instruments").json()["list"]
+    assert all(isinstance(i["is_etf"], bool) for i in lst)
+    r = api_client.put("/api/instruments/2330", json={"is_etf": True})
+    assert r.status_code == 200 and r.json()["is_etf"] is True

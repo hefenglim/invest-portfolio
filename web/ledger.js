@@ -79,8 +79,10 @@
   const byAccount = (rows) => rows.filter((r) => {
     if (state.account !== 'all' && r.account_id !== state.account) return false;
     if (state.q) {
+      /* 代號優先、名稱其次(2026-07-03 user decision):符合任一即命中 */
       const sym = (r.symbol || '').toLowerCase();
-      if (!sym.includes(state.q)) return false;
+      const name = (r.name || '').toLowerCase();
+      if (!sym.includes(state.q) && !name.includes(state.q)) return false;
     }
     const d = r.date || '';
     if (state.from && d && d < state.from) return false;
@@ -241,9 +243,15 @@
     const fFee = inp(t.fee, 'number', 'any');
     const fTax = inp(t.tax, 'number', 'any');
     const fNote = inp(t.note || '');
+    /* 改「代號 / 帳戶」= 把這筆帳移到另一個持倉：兩邊的成本與損益都會由帳本重建。
+       合法（改正輸錯的代號），但要讓使用者知道影響範圍（2026-07-03, item 12）。 */
+    const warn = el('div', 'hint',
+      '⚠ 更改「代號」或「帳戶」會把這筆交易移到另一個持倉，兩邊的成本、損益與報酬將自動重建；' +
+      '新代號必須已註冊，且會先做賣超檢核。');
     editModal('編輯交易 #' + t.id + ' — ' + t.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['方向', fSide],
       ['股數', fShares], ['價格', fPrice], ['手續費', fFee], ['交易稅', fTax], ['備註', fNote],
+      ['', warn],
     ], async (dismiss) => {
       dismiss();
       /* values ride through as the user's raw STRINGS; the backend parses Decimal */

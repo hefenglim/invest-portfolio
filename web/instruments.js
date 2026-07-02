@@ -207,7 +207,7 @@
         tbody.appendChild(tr);
       });
   }
-  /* ---- edit modal（產業、目標價提醒）---- */
+  /* ---- edit modal（名稱、產業、板別(TW)、ETF、目標價 — 全市場一致，2026-07-03）---- */
   function openEdit(i) {
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal');
@@ -223,15 +223,37 @@
       w.appendChild(node);
       return w;
     };
+    const nameIn = el('input', 'input');
+    nameIn.value = i.name || '';
+    nameIn.placeholder = '顯示名稱（可自動查詢失敗後手動補）';
+    body.appendChild(fld('名稱', nameIn));
     const secIn = el('input', 'input');
     secIn.value = i.sector || '';
     body.appendChild(fld('產業', secIn));
+    /* TW 板別可直接改（重新探測仍可自動判定並儲存）；US/MY 板別固定 */
+    let boardSel = null;
+    if (i.market === 'TW') {
+      boardSel = el('select', 'select');
+      [['TWSE', 'TWSE 上市'], ['TPEx', 'TPEx 上櫃']].forEach(([v, label]) => {
+        const o = el('option', null, label); o.value = v;
+        if (i.board === v) o.selected = true;
+        boardSel.appendChild(o);
+      });
+      body.appendChild(fld('板別', boardSel));
+    }
+    const etfWrap = el('label', 'hint');
+    const etfCb = el('input');
+    etfCb.type = 'checkbox';
+    etfCb.checked = !!i.etf || !!i.is_etf;
+    etfWrap.appendChild(etfCb);
+    etfWrap.appendChild(el('span', null, ' 此標的為 ETF（影響台股賣出稅率 0.1%）'));
+    body.appendChild(fld('類別', etfWrap));
     const tgtIn = el('input', 'input');
     tgtIn.type = 'number'; tgtIn.min = '0'; tgtIn.step = i.ccy === 'MYR' ? '0.001' : '0.01';
     tgtIn.placeholder = '留空 = 不提醒';
     if (i.target_low !== null && i.target_low !== undefined) tgtIn.value = i.target_low;
     body.appendChild(fld('目標價提醒（現價 ≤ 此值時提醒，' + i.ccy + '）', tgtIn));
-    body.appendChild(el('div', 'hint', '市場與幣別由註冊流程決定，不可更改；台股板別請用「重新探測」。'));
+    body.appendChild(el('div', 'hint', '市場與幣別由註冊流程決定，不可更改。'));
     modal.appendChild(body);
     const foot = el('div', 'modal-foot');
     const cancel = el('button', 'btn', '取消'); cancel.type = 'button';
@@ -244,12 +266,16 @@
     cancel.addEventListener('click', dismiss);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
     ok.addEventListener('click', async () => {
-      const sector = secIn.value.trim();
       const raw = tgtIn.value.trim();
       /* target_low rides through as a STRING (never parseFloat'd into money). Empty
          clears it; otherwise pass the raw string to the backend Decimal column. */
-      const body2 = { sector: sector || i.sector };
-      body2.target_low = raw === '' ? null : raw;
+      const body2 = {
+        name: nameIn.value.trim() || i.name,
+        sector: secIn.value.trim(),
+        is_etf: etfCb.checked,
+        target_low: raw === '' ? null : raw,
+      };
+      if (boardSel) body2.board = boardSel.value;
       try {
         await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol), body2);
       } catch (err) {
@@ -261,7 +287,7 @@
       await refresh();
     });
     document.body.appendChild(backdrop);
-    setTimeout(() => tgtIn.focus(), 50);
+    setTimeout(() => nameIn.focus(), 50);
   }
 
   /* Fetch the instrument list and (re)render. Graceful degradation: on failure leave

@@ -60,6 +60,7 @@ def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
         "ccy": inst.quote_ccy.value, "held": _held(conn, account_ids, inst.symbol),
         "last": last, "chg_pct": chg_pct,
         "target_low": decimal_str(inst.target_low) if inst.target_low is not None else None,
+        "is_etf": inst.is_etf,
     }
 
 
@@ -198,7 +199,10 @@ def update(
         return JSONResponse(status_code=400,
                             content=error_body("validation_error", "US/MY 不可帶台股板別",
                                                field="board"))
-    fields = body.model_dump(exclude_none=True)
+    # exclude_unset (2026-07-03): an EXPLICIT null must clear the field (target_low
+    # null = remove the alert) — the old exclude_none silently dropped it, so
+    # clearing a target price never worked.
+    fields = body.model_dump(exclude_unset=True)
     updated = existing.model_copy(update=fields)
     upsert_instrument(conn, updated)
     # An explicit board set on a TW instrument resolves its board_status (the
