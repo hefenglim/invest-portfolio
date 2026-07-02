@@ -20,9 +20,9 @@ from pydantic import BaseModel
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.pricing import datasources_store as store
+from portfolio_dash.pricing import sentiment_source
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.enums import DataType
-from portfolio_dash.pricing import sentiment_source
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.providers.finmind_provider import FinMindProvider
 from portfolio_dash.pricing.providers.klsescreener_provider import KlseScreenerProvider
