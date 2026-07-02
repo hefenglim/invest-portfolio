@@ -109,10 +109,11 @@ read bounded sections only.
   the spec is acknowledged.
 - **Loop-engineering (two environments).** The live deployment runs an isolated **test/demo**
   instance (its own checkout + venv + synthetic data) alongside **prod** (released tag, real
-  data). Iterate and run the gate on the TEST site; promote to prod only when green — prod never
-  runs untested code. Full flow + invariants: `.claude/rules/engineering-process.md` →
-  "Two-environment loop-engineering". Concrete host settings (paths / URLs / ports / units) are
-  in the git-ignored `docs/human_noted/` deployment note (never commit real host details).
+  data). Heavy gates (pytest/e2e/mypy/ruff) run on the DEV machine; the TEST site is verified
+  behaviourally from outside (`scripts/verify_live.py` + browser flows). Promote to prod only
+  when green — prod never runs untested code. Full flow + invariants:
+  `.claude/rules/engineering-process.md` → "Two-environment loop-engineering". Concrete host
+  settings (paths / URLs / ports / units) are in the git-ignored `docs/human_noted/` note.
 
 ## Repository layout (non-app files)
 

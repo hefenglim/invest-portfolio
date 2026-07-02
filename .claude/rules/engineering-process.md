@@ -60,14 +60,30 @@ on the test site never touches prod:
 - **separate data folder** — own `DB_PATH`; db + logs + backups all derive from `db_path.parent`.
 
 **The loop (AI self-iteration / regression):**
-1. Iterate on the **test** checkout (edit code on a branch, not `main`).
-2. Deploy to the **test** instance; run the gate **on the site** (`pytest` / `mypy --strict` /
-   `ruff`) + behaviour-verify against the test URL. The test instance's scheduler is disabled,
-   so its data is deterministic and regressions are reproducible.
-3. Fix → repeat until the gate is green.
-4. **Promote only when green:** merge to `main`, cut a version + tag (`/ship-version`), and
-   deploy **that tag** to prod. Prod only ever moves forward to a validated tag — experiments
-   never reach it.
+1. Iterate on a branch (not `main`); run the **heavy gates on the dev machine**
+   (`pytest` incl. browser e2e / `mypy --strict` / `ruff`) — it is orders of magnitude
+   faster than the host and doesn't disturb the live instances.
+2. Deploy the branch to the **test** instance. The deploy itself is the first
+   environment gate (`pip install -e .` + service start + `/api/health`).
+3. **Behaviour-verify from outside** against the test URL: `scripts/verify_live.py
+   <test-url> [--refresh]`, plus a real-browser click-through of any changed frontend
+   flow. This exercises the REAL stack (uvicorn, SQLite file, live providers, TLS) —
+   things the hermetic suite deliberately cannot see. The test instance's scheduler is
+   disabled, so its data stays deterministic between verifications.
+4. Fix → repeat until everything is green.
+5. **Promote only when green:** merge to `main`, cut a version + tag (`/ship-version`),
+   deploy **that tag** to prod, then `verify_live.py <prod-url> --expect-version vX.Y.Z`.
+   Prod only ever moves forward to a validated tag — experiments never reach it.
+
+**Gate placement (decided 2026-07-02, human sign-off):** do NOT run the full suite or
+mypy on the host — measured on the `e2-micro`: pytest ~25 min (identical verdict to the
+local run = zero new signal), mypy >20 min, and both compete with the LIVE instances for
+the 1 GB of RAM. Environment-specific risk is covered by step 2 (install/boot failures
+surface there — that is where the lxml/py3.13 class of problem appears) and step 3.
+**Escape hatch:** for platform-sensitive changes (dependency bumps, path/FS handling,
+provider adapters), run a *targeted* on-site subset — e.g. `pytest tests/pricing -q
+--ignore=tests/e2e --ignore=tests/probe` — minutes, not the whole suite; never heavy
+tooling on the box that serves prod.
 
 **Invariants (never violate):**
 - Prod runs a released **tag**; the test site tracks a branch / WIP commits. Never point prod at
