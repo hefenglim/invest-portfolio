@@ -38,16 +38,26 @@ def _yf_name(yf_symbol: str) -> str | None:
 
 
 def lookup_name(symbol: str, market: Market, *, board: str | None = None) -> str | None:
-    """The instrument's display name, or None when no source can supply one."""
-    try:
-        if market is Market.TW:
+    """The instrument's display name, or None when no source can supply one.
+
+    Each source degrades INDEPENDENTLY (a broken/missing twstock must still fall
+    through to yfinance — that nesting gap left names empty on the live site,
+    2026-07-02).
+    """
+    if market is Market.TW:
+        try:
             name = _tw_name(symbol)
             if name:
                 return name
-            # TPEx/edge codes missing from the static table: fall through to yfinance.
-            suffix = ".TWO" if board == "TPEx" else ".TW"
-            return _yf_name(f"{symbol}{suffix}")
-        return _yf_name(f"{symbol}{_YF_SUFFIX[market]}")
+        except Exception:  # noqa: BLE001 — static-table miss/import error -> yfinance
+            logger.info("twstock name lookup failed for %s", symbol, exc_info=True)
+        # TPEx/edge codes missing from the static table: fall through to yfinance.
+        suffix = ".TWO" if board == "TPEx" else ".TW"
+        yf_symbol = f"{symbol}{suffix}"
+    else:
+        yf_symbol = f"{symbol}{_YF_SUFFIX[market]}"
+    try:
+        return _yf_name(yf_symbol)
     except Exception:  # noqa: BLE001 — name lookup is best-effort by contract
-        logger.info("name lookup failed for %s (%s)", symbol, market.value, exc_info=True)
+        logger.info("yfinance name lookup failed for %s", yf_symbol, exc_info=True)
         return None

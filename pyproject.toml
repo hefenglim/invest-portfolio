@@ -14,6 +14,10 @@ dependencies = [
     "APScheduler>=3.10,<4",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
+    # Runtime provider (TW quote-chain fallback + TW name lookup). Was mis-grouped
+    # under the [probe] extra, which silently disabled BOTH on deployed instances
+    # (registry/lookup swallow ImportError) — found live 2026-07-02.
+    "twstock>=1.3",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +31,6 @@ dev = [
     "pytest-socket>=0.7",
 ]
 probe = [
-    "twstock>=1.3",
     "beautifulsoup4>=4.12",
 ]
 e2e = [

@@ -38,6 +38,20 @@ def test_us_and_my_suffixes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == ["AAPL", "0138.KL"]
 
 
+def test_tw_static_table_failure_still_falls_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (live 2026-07-02): a missing/broken twstock must NOT abort the
+    lookup — the yfinance fallback still runs (deployed venvs lacked twstock and
+    every TW name came back empty)."""
+    def boom(sym: str) -> str | None:
+        raise ModuleNotFoundError("No module named 'twstock'")
+
+    monkeypatch.setattr(names, "_tw_name", boom)
+    monkeypatch.setattr(names, "_yf_name", lambda s: "TSMC")
+    assert names.lookup_name("2330", Market.TW) == "TSMC"
+
+
 def test_lookup_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(sym: str) -> str | None:
         raise RuntimeError("network down")
