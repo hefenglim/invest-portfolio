@@ -223,7 +223,26 @@ _HISTORY_LOOKBACK_DAYS = 7
 
 
 def _summarize(summary: RefreshSummary) -> str:
-    return f"{len(summary.ok)} ok, {len(summary.failed)} failed"
+    """Human-readable run detail: counts + WHICH source answered WHAT (item 8).
+
+    The old "N ok, M failed" told the user nothing about data sources or targets;
+    now: ``3 ok, 1 failed [twse: 2330, 2603; yfinance: AAPL] failed: 8299``.
+    Long lists truncate so job_runs.detail stays a one-liner.
+    """
+    parts = [f"{len(summary.ok)} ok, {len(summary.failed)} failed"]
+    if summary.ok:
+        by_src: dict[str, list[str]] = {}
+        for key, src in summary.ok.items():
+            by_src.setdefault(src, []).append(key)
+        srcs = "; ".join(
+            f"{src}: {', '.join(sorted(keys)[:8])}" + ("…" if len(keys) > 8 else "")
+            for src, keys in sorted(by_src.items())
+        )
+        parts.append(f"[{srcs}]")
+    if summary.failed:
+        failed = sorted(summary.failed)
+        parts.append("failed: " + ", ".join(failed[:8]) + ("…" if len(failed) > 8 else ""))
+    return " ".join(parts)
 
 
 def refresh_quotes_for(conn: sqlite3.Connection, market: Market, *, now: datetime) -> str:

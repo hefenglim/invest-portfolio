@@ -96,3 +96,18 @@ def test_run_job_returns_run_id(conn: sqlite3.Connection) -> None:
     rid = run_job(conn, "history_daily", now=datetime(2026, 6, 11, tzinfo=UTC))
     assert isinstance(rid, int) and rid > 0
     assert conn.execute("SELECT id FROM job_runs WHERE id=?", (rid,)).fetchone() is not None
+
+
+def test_summarize_names_sources_and_failures() -> None:
+    """Item 8 (2026-07-03): the run detail must say WHICH source answered WHAT."""
+    from datetime import UTC, datetime
+
+    from portfolio_dash.pricing.results import RefreshSummary
+    from portfolio_dash.scheduler.jobs import _summarize
+
+    s = RefreshSummary(ok={"2330": "twse", "2603": "twse", "AAPL": "yfinance"},
+                       failed=["8299"], fetched_at=datetime(2026, 7, 3, tzinfo=UTC))
+    out = _summarize(s)
+    assert out.startswith("3 ok, 1 failed")
+    assert "twse: 2330, 2603" in out and "yfinance: AAPL" in out
+    assert "failed: 8299" in out

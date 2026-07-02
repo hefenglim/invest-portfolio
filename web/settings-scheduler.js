@@ -30,10 +30,31 @@
     if (window.toast) window.toast(msg, kind, code);
   }
 
-  /* Structural data from the two GETs. Starts empty so a pre-fetch render is blank. */
+  /* Structural data from the GETs. Starts empty so a pre-fetch render is blank. */
   let jobs = [];
   let runs = [];
+  let sysRows = [];
   let jobFilter = 'all';
+
+  /* zh labels for the registered jobs (item 8: the run history must read like
+     "what the system did", not internal ids). Unmapped ids fall back to desc/id. */
+  const JOB_ZH = {
+    quotes_tw: '台股報價＋匯率（收盤後）',
+    quotes_us: '美股報價＋匯率（收盤後）',
+    quotes_my: '馬股報價＋匯率（收盤後）',
+    history_daily: '日線歷史回補（近 7 天滾動）',
+    dividends_daily: '股利／除息事件掃描',
+    finmind_chips_daily: '台股籌碼（法人＋融資券）',
+    finmind_valuation_daily: '台股估值（PER／PBR／殖利率）',
+    finmind_fundamentals_monthly: '台股月營收＋財報（每月）',
+    sentiment_daily: '市場情緒（VIX＋恐懼貪婪）',
+    index_quotes_daily: '大盤指數收盤（台／美／馬）',
+    alert_scan: '風險警示掃描＋AI 派發',
+    evaluate_insights: 'AI 洞察每日評分（Loop 2）',
+    generate_calibrations: 'AI 校準版本週產生（Loop 3）',
+    backup_daily: '資料庫備份＋完整性檢查',
+  };
+  const jobLabel = (id, desc) => JOB_ZH[id] || desc || id;
 
   /* ---- Section A jobs ---- */
   function renderJobs() {
@@ -43,8 +64,8 @@
     jobs.forEach((j) => {
       const tr = el('tr');
       const tdJob = el('td', 'col-text');
-      tdJob.appendChild(el('div', 'cron-code', j.id));
-      tdJob.appendChild(el('div', 'sym-name', j.desc || ''));
+      tdJob.appendChild(el('div', null, jobLabel(j.id, j.desc)));
+      tdJob.appendChild(el('div', 'sym-name cron-code', j.id));
       tr.appendChild(tdJob);
 
       /* enable toggle -> PUT /api/scheduler/jobs/{id} {enabled} */
@@ -166,7 +187,8 @@
         const tr = el('tr');
         tr.appendChild(el('td', 'num', f.datetime(h.started_at)));
         const tdJob = el('td', 'col-text');
-        tdJob.appendChild(el('span', 'cron-code', h.job_id));
+        tdJob.appendChild(el('div', null, jobLabel(h.job_id, '')));
+        tdJob.appendChild(el('div', 'sym-name cron-code', h.job_id));
         tr.appendChild(tdJob);
         const tdSt = el('td');
         const pill = el('span', 'pill ' + (h.status === 'ok' ? 'pill-ok' : 'pill-fail'));
@@ -174,7 +196,9 @@
         pill.appendChild(document.createTextNode(h.status === 'ok' ? '成功' : '失敗'));
         tdSt.appendChild(pill);
         tr.appendChild(tdSt);
-        tr.appendChild(el('td', 'log-msg', h.detail || ''));
+        const tdDetail = el('td', 'log-msg', h.detail || '');
+        tdDetail.title = h.detail || '';  // full source/target breakdown on hover
+        tr.appendChild(tdDetail);
         /* duration_s is a count (seconds) -> num, not money. */
         const tdDur = el('td', 'num');
         tdDur.textContent = h.duration_s == null ? f.NULL_GLYPH : f.num(h.duration_s, 1) + 's';
@@ -205,7 +229,7 @@
     };
     bar.appendChild(el('span', 'group-label', '工作'));
     bar.appendChild(mk('all', '全部'));
-    jobs.forEach((j) => bar.appendChild(mk(j.id, j.id)));
+    jobs.forEach((j) => bar.appendChild(mk(j.id, jobLabel(j.id, j.desc))));
   }
 
   async function refreshRuns() {
@@ -217,6 +241,47 @@
       runs = [];
     }
     renderHistory();
+  }
+
+  /* ---- Section C 系統操作記錄 (item 8) ---- */
+  function renderSyslog() {
+    const tbody = $('#syslog-body');
+    if (!tbody) return;
+    tbody.replaceChildren();
+    sysRows.forEach((r) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'num', f.datetime(r.ts)));
+      tr.appendChild(el('td', 'col-text', r.action));
+      const tdUser = el('td', 'col-text');
+      if (r.username) tdUser.textContent = r.username;
+      else { tdUser.textContent = '訪客'; tdUser.classList.add('sign-nil'); }
+      tr.appendChild(tdUser);
+      const tdPath = el('td', 'col-text');
+      tdPath.appendChild(el('span', 'cron-code', r.method + ' ' + r.path));
+      tr.appendChild(tdPath);
+      const tdSt = el('td');
+      const ok = r.status < 400;
+      const pill = el('span', 'pill ' + (ok ? 'pill-ok' : 'pill-fail'));
+      pill.appendChild(el('span', 'dot'));
+      pill.appendChild(document.createTextNode(String(r.status)));
+      pill.title = ok ? '成功' : '被拒絕／失敗（未寫入或需修正）';
+      tdSt.appendChild(pill);
+      tr.appendChild(tdSt);
+      const tdDur = el('td', 'num');
+      tdDur.textContent = r.duration_ms == null ? f.NULL_GLYPH : f.num(r.duration_ms) + 'ms';
+      tr.appendChild(tdDur);
+      tbody.appendChild(tr);
+    });
+  }
+  async function refreshSyslog() {
+    try {
+      const resp = await api.get('/api/system-log', { limit: 100 });
+      sysRows = (resp && resp.rows) || [];
+    } catch (err) {
+      sysRows = [];
+      _toast('系統操作記錄載入失敗', 'fail', (err && err.message) || undefined);
+    }
+    renderSyslog();
   }
 
   /* ===== boot: GET jobs + runs in PARALLEL, then render. Graceful: on failure leave the
@@ -238,6 +303,7 @@
     renderJobs();
     initHistFilter();
     renderHistory();
+    refreshSyslog();  // section C, independent fetch (graceful on failure)
   }
 
   boot();

@@ -1,14 +1,19 @@
 """FastAPI app factory: lifespan (DB + scheduler), /api routers, static web/ frontend."""
 
 import os
-from collections.abc import AsyncIterator
+import sqlite3
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 
-from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session
+from portfolio_dash.api import action_log
+from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
+from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.errors import register_error_handlers
 from portfolio_dash.api.insight_service import (
     evaluate_due as insight_evaluate_due,
@@ -34,6 +39,7 @@ from portfolio_dash.api.routers import (
     scheduler,
     strategy,
     symbol,
+    system_log,
     users,
 )
 from portfolio_dash.bootstrap import bootstrap_db
@@ -111,6 +117,42 @@ def create_app() -> FastAPI:
         dependencies=[Depends(require_session)],
     )
     register_error_handlers(app)
+
+    # 系統操作記錄 (2026-07-03, item 8): record every mutating /api call — actor,
+    # zh action label, endpoint, HTTP outcome, duration; NEVER bodies. Best-effort
+    # on its own session: a logging failure must never break the request.
+    @app.middleware("http")
+    async def _action_log_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if not action_log.should_log(request.method, request.url.path):
+            return await call_next(request)
+        start = time.perf_counter()
+        response = await call_next(request)
+        try:
+            duration_ms = int((time.perf_counter() - start) * 1000)
+
+            def _write(conn_w: sqlite3.Connection) -> None:
+                token = request.cookies.get("pd_session")
+                username = session_user(conn_w, token) if token else None
+                action_log.record(
+                    conn_w, ts=datetime.now(UTC), username=username,
+                    method=request.method, path=request.url.path,
+                    status=response.status_code, duration_ms=duration_ms,
+                )
+
+            # Respect the get_conn dependency override so the log lands in the SAME
+            # DB the routes use (hermetic tests inject an in-memory golden conn).
+            override = app.dependency_overrides.get(get_conn)
+            if override is not None:
+                _write(override())
+            else:
+                with session() as conn:
+                    _write(conn)
+        except Exception:  # noqa: BLE001 — the log is an observer, never a gate
+            pass
+        return response
+
     app.include_router(auth.router, prefix="/api")
     app.include_router(users.router, prefix="/api")
     app.include_router(health.router, prefix="/api")
@@ -126,6 +168,7 @@ def create_app() -> FastAPI:
     app.include_router(symbol.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
+    app.include_router(system_log.router, prefix="/api")
     app.include_router(prompts.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
     if _WEB_DIR.is_dir():
