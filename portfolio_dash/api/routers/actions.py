@@ -73,6 +73,15 @@ def recompute(
         for s in list_opening(conn)
     ]
     instruments = {i.symbol: i for i in list_instruments(conn)}
+    # Unregistered symbols make the ledger un-bookable (no quote ccy) — report them
+    # explicitly instead of letting build_book KeyError into a 500 (2026-07-02).
+    ledger_syms = ({t.symbol for t in txs} | {d.symbol for d in divs}
+                   | {o.symbol for o in opening})
+    unregistered = sorted(ledger_syms - instruments.keys())
+    if unregistered:
+        return JSONResponse(status_code=422, content=error_body(
+            "unregistered_symbol",
+            f"帳本含未註冊標的：{', '.join(unregistered)} — 請先至「標的管理」註冊後再重算"))
     try:
         build_book(txs, divs, opening, instruments)
     except OversellError as exc:

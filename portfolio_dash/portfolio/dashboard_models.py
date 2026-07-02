@@ -141,6 +141,10 @@ class FreshnessReport(BaseModel):
     missing_fx: list[str]
     xirr_unavailable_reason: str | None = None
     trend_unavailable_reason: str | None = None
+    # Ledger symbols with no Instrument row: their events are EXCLUDED from all
+    # computation (cannot be booked without a quote currency) and listed here so the
+    # UI can prompt the user to register them (2026-07-02).
+    unregistered_symbols: list[str] = Field(default_factory=list)
     # Router-fed (ops/file state, not pure calc): build_dashboard leaves this None;
     # the dashboard router fills it from ops.backup.latest_backup_at() after to_wire.
     last_backup_at: str | None = None

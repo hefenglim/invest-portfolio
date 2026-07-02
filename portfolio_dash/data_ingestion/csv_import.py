@@ -37,17 +37,18 @@ def txn_preview_row(
     """
     issues: list[Issue] = list(validate_transaction(conn, inp))
 
-    # --- symbol resolution: surface soft issues; write the RESOLVED symbol ---
-    # NEEDS_AI -> soft issue, keep the raw symbol; FUZZY -> soft issue + resolved
-    # symbol (no silent phantom write); EXACT -> resolved symbol.
+    # --- symbol resolution: write the RESOLVED symbol ---
+    # NEEDS_AI -> HARD issue (unregistered symbol: no quote ccy, not in the pricing
+    # worklist — the row would be uninterpretable; register first). FUZZY -> soft
+    # issue + resolved symbol (no silent phantom write); EXACT -> resolved symbol.
     res = resolve(conn, inp.symbol)
     symbol = inp.symbol
     if res.status is ResolutionStatus.NEEDS_AI:
         issues.append(
             Issue(
                 kind="symbol_unresolved",
-                needs_confirm=True,
-                message=f"unresolved {inp.symbol}",
+                needs_confirm=False,
+                message=f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊",
             )
         )
     elif res.status is ResolutionStatus.FUZZY and res.instrument is not None:

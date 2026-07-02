@@ -136,6 +136,22 @@ def build_dashboard(
     instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
 
+    # 1b. Unregistered-symbol guard (2026-07-02): a ledger row whose symbol has no
+    # Instrument row has no quote currency — it cannot be booked, valued, or priced.
+    # NEVER crash the dashboard over it: exclude those events from ALL computation
+    # (book, XIRR, trend, dividends — consistently) and surface the symbols in
+    # freshness.unregistered_symbols so the UI can tell the user exactly how to fix it
+    # (register the symbol, then the next build includes the rows). Same degradation
+    # philosophy as the oversold (賣超) path.
+    ledger_syms = ({t.symbol for t in txs} | {d.symbol for d in divs}
+                   | {o.symbol for o in opening})
+    unregistered = sorted(ledger_syms - instruments.keys())
+    if unregistered:
+        skip = set(unregistered)
+        txs = [t for t in txs if t.symbol not in skip]
+        divs = [d for d in divs if d.symbol not in skip]
+        opening = [o for o in opening if o.symbol not in skip]
+
     # 2. Book and valuation. allow_oversell: an acked oversell must not crash the
     # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
     book = build_book(txs, divs, opening, instruments, allow_oversell=True)
@@ -358,6 +374,7 @@ def build_dashboard(
                     for (base, quote), read in fx_reads_sorted if read is None],
         xirr_unavailable_reason=xirr_reason,
         trend_unavailable_reason=trend_reason,
+        unregistered_symbols=unregistered,
     )
 
     return DashboardData(

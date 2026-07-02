@@ -49,6 +49,39 @@ def test_register_new_instrument(api_client: TestClient) -> None:
     assert body["symbol"] == "6488" and body["board"] == "TPEx" and body["target_low"] == "450"
 
 
+def test_register_triggers_initial_quote_fetch(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registration immediately fetches the symbol's quote (2026-07-02) so the user
+    is not price-less until the market's next post-close cron."""
+    calls: list[str] = []
+
+    def _record(conn: object, *, symbol: str, market: object, board: object,
+                now: object) -> str:
+        calls.append(symbol)
+        return "1 ok"
+
+    monkeypatch.setattr(instruments_router, "refresh_instrument_quote", _record)
+    r = api_client.post("/api/instruments", json={
+        "symbol": "TSLA", "market": "US", "name": "Tesla"})
+    assert r.status_code == 201
+    assert calls == ["TSLA"]
+
+
+def test_register_survives_quote_fetch_failure(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The initial fetch is best-effort: a provider failure NEVER fails registration."""
+    def _boom(conn: object, **kw: object) -> str:
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(instruments_router, "refresh_instrument_quote", _boom)
+    r = api_client.post("/api/instruments", json={
+        "symbol": "TSLA", "market": "US", "name": "Tesla"})
+    assert r.status_code == 201
+    assert r.json()["symbol"] == "TSLA" and r.json()["last"] is None
+
+
 def test_register_duplicate_409(api_client: TestClient) -> None:
     r = api_client.post("/api/instruments", json={"symbol": "2330", "market": "TW",
                                                   "name": "x", "sector": "y", "board": "TWSE"})

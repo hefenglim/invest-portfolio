@@ -3,6 +3,7 @@
 Thin over data_ingestion.store + pricing.store reads. Computes nothing of record.
 """
 
+import logging
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
@@ -24,9 +25,12 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
+from portfolio_dash.scheduler.jobs import refresh_instrument_quote
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.wire import decimal_str
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -134,6 +138,16 @@ def register(
     register_instrument(conn, inst, prober=probe_tw_board, confirm=True)
     saved = get_instrument(conn, body.symbol)
     assert saved is not None
+    # Best-effort initial quote (2026-07-02): fetch this symbol's latest price (+ the
+    # reporting FX pairs) right away so the user is not stuck price-less until the
+    # market's next post-close cron. NEVER fails the registration — a provider error
+    # just leaves the price missing (the dashboard already shows 缺價 honestly).
+    try:
+        refresh_instrument_quote(conn, symbol=saved.symbol, market=saved.market,
+                                 board=saved.board, now=now)
+    except Exception:  # noqa: BLE001 - registration must survive any provider failure
+        logger.warning("initial quote fetch failed for %s (registration kept)",
+                       saved.symbol, exc_info=True)
     account_ids = [a.account_id for a in list_accounts(conn)]
     return _element(conn, saved, account_ids, now)
 

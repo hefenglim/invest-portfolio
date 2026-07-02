@@ -65,11 +65,15 @@ def enter_transaction(
     res = resolve(conn, inp.symbol)
     instrument: Instrument | None = res.instrument
     if res.status is ResolutionStatus.NEEDS_AI:
+        # HARD issue (2026-07-02): an unregistered symbol has no Instrument row — no
+        # quote currency, no pricing worklist entry — so the ledger row would be
+        # uninterpretable downstream (dashboard KeyError, permanently missing price).
+        # There is no valid "confirm" path; the fix is to register the symbol first.
         issues.append(
             Issue(
                 kind="symbol_unresolved",
-                needs_confirm=True,
-                message=f"could not resolve {inp.symbol!r}",
+                needs_confirm=False,
+                message=f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊後再入帳",
             )
         )
     elif res.status is ResolutionStatus.FUZZY and instrument is not None:

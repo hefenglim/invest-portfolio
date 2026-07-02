@@ -586,6 +586,22 @@ def build_worklist(
     return refs, _FX_PAIRS
 
 
+def refresh_instrument_quote(
+    conn: sqlite3.Connection, *, symbol: str, market: Market, board: str | None,
+    now: datetime,
+) -> str:
+    """Fetch the latest quote for ONE instrument (+ the reporting FX pairs).
+
+    Used by the registration flow (POST /api/instruments) so a newly registered
+    symbol gets a price immediately instead of waiting for its market's next
+    post-close cron. Idempotent upserts; a provider failure raises (the caller
+    treats the fetch as best-effort and never fails the registration over it).
+    """
+    ref = InstrumentRef(symbol=symbol, market=market, board=board or _DEFAULT_BOARD[market])
+    summary = refresh_quotes(conn, default_registry(conn), [ref], _FX_PAIRS, now=now)
+    return _summarize(summary)
+
+
 def _jobs_by_id() -> dict[str, JobSpec]:
     return {j.id: j for j in JOBS}
 

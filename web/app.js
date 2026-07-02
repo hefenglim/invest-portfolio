@@ -41,6 +41,29 @@
       chip.innerHTML = '<span class="dot"></span>資料新鮮';
       chip.removeAttribute('href');
     }
+    renderUnregisteredBanner();
+  }
+
+  /* Unregistered-symbol warning (2026-07-02): ledger rows whose symbol has no
+     instrument registration are EXCLUDED from every number on this page — surface
+     that loudly with a fix link, or the exclusion would look like silent data loss. */
+  function renderUnregisteredBanner() {
+    const syms = (D.freshness && D.freshness.unregistered_symbols) || [];
+    const page = document.querySelector('.page');
+    const old = document.getElementById('unreg-banner');
+    if (old) old.remove();
+    if (!syms.length || !page) return;
+    const bar = el('div', 'unreg-banner');
+    bar.id = 'unreg-banner';
+    bar.appendChild(el('span', 'unreg-ico', '⚠'));
+    const txt = el('span', 'unreg-text',
+      '帳本中有 ' + syms.length + ' 檔未註冊標的（' + syms.join('、') +
+      '）— 相關交易未納入任何統計。');
+    bar.appendChild(txt);
+    const link = el('a', 'unreg-link', '前往標的管理註冊');
+    link.href = 'instruments.html';
+    bar.appendChild(link);
+    page.insertBefore(bar, page.firstChild);
   }
 
   /* ============ B. KPI band v2 — 3 hero + 2 combo (5 visual units) ============ */

@@ -66,3 +66,17 @@ def test_recompute_oversell_422(
     r = api_client.post("/api/actions/recompute", json={})
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "oversell"
+
+
+def test_recompute_unregistered_symbol_422(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # A ledger row whose symbol has no Instrument registration cannot be booked
+    # (no quote ccy) — recompute reports it as 422, never a KeyError 500 (2026-07-02).
+    insert_transaction(golden_db, account_id="tw_broker", symbol="GHOST", side=Side.BUY,
+                       quantity=Decimal("100"), price=Decimal("10"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 2, 1))
+    r = api_client.post("/api/actions/recompute", json={})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "unregistered_symbol"
+    assert "GHOST" in r.json()["error"]["message"]

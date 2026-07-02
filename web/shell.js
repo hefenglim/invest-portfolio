@@ -176,18 +176,31 @@
       else window.location.href = fallback;
     }).catch(() => { window.location.href = fallback; });
   };
-  /* known instruments registry (instruments table mirror; 後端接線後由 server 提供) */
-  const SYMBOLS = [
-    { sym: '2330', name: '台積電', mkt: '台股', held: true },
-    { sym: '0056', name: '元大高股息', mkt: '台股', held: true },
-    { sym: '00919', name: '群益台灣精選高息', mkt: '台股', held: true },
-    { sym: 'AAPL', name: 'Apple', mkt: '美股', held: true },
-    { sym: 'MSFT', name: 'Microsoft', mkt: '美股', held: true },
-    { sym: 'NVDA', name: 'NVIDIA', mkt: '美股', held: true },
-    { sym: '1155.KL', name: 'Maybank', mkt: '馬股', held: true },
-    { sym: '6488', name: '環球晶', mkt: '台股', held: false },
-    { sym: '8069', name: '元太', mkt: '台股', held: false }
-  ];
+  /* known instruments registry — loaded from the backend (GET /api/instruments).
+     The old hardcoded design-mock list is retired (2026-07-02): search now reflects
+     the REAL 觀察清單. Cached per page load; degrades to an empty list (search shows
+     the register hint) if the API is unreachable. */
+  let SYMBOLS = [];
+  let _symbolsPromise = null;
+  const MKT_LABEL = { TW: '台股', US: '美股', MY: '馬股' };
+  function pdLoadSymbols() {
+    if (_symbolsPromise) return _symbolsPromise;
+    _symbolsPromise = pdEnsureApi()
+      .then((ok) => (ok ? window.pdApi.get('/api/instruments') : null))
+      .then((resp) => {
+        if (resp && Array.isArray(resp.list)) {
+          SYMBOLS = resp.list.map((i) => ({
+            sym: i.symbol,
+            name: i.name || i.symbol,
+            mkt: MKT_LABEL[i.market] || i.market || '',
+            held: !!i.held
+          }));
+        }
+        return SYMBOLS;
+      })
+      .catch(() => SYMBOLS);
+    return _symbolsPromise;
+  }
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -310,10 +323,28 @@
         o.addEventListener('click', () => { menu.hidden = true; fn(); });
         return o;
       };
-      menu.appendChild(mkOpt('更新報價', '報告模式：抓取最新報價與匯率，重新產出快照', () => {
-        if (window.toast) {
-          window.toast('已觸發報價更新', 'ok', '排程 quotes_* 立即執行（設計預覽 — 後端接線後生效）');
-        }
+      /* 更新報價：POST /api/actions/refresh-quotes（同步執行 quotes_tw/us/my，
+         real provider fetch — 可能需要數秒）。成功後儀表板頁自動重載以顯示新價。 */
+      let refreshBusy = false;
+      menu.appendChild(mkOpt('更新報價', '報告模式：抓取最新報價與匯率（數秒）', () => {
+        if (refreshBusy) return;
+        refreshBusy = true;
+        if (window.toast) window.toast('報價更新中…', 'ok', '正在向資料來源抓取最新報價與匯率');
+        pdEnsureApi()
+          .then((ok) => {
+            if (!ok) throw new Error('API 層載入失敗');
+            return window.pdApi.post('/api/actions/refresh-quotes', {});
+          })
+          .then((resp) => {
+            refreshBusy = false;
+            const jobs = (resp && resp.jobs) ? resp.jobs.join(' / ') : 'quotes';
+            if (window.toast) window.toast('報價更新完成', 'ok', jobs + ' 已執行，正在重新整理…');
+            setTimeout(() => { window.location.reload(); }, 900);
+          })
+          .catch((e) => {
+            refreshBusy = false;
+            if (window.toast) window.toast('報價更新失敗', 'fail', (e && e.message) || '請稍後再試');
+          });
       }));
       menu.appendChild(mkOpt('重算（重建統計）', '由四帳本完整重建所有統計 — 較耗時', () => {
         if (window.confirmDialog) {
@@ -321,7 +352,20 @@
             title: '重算（重建統計）',
             body: '將由期初庫存、交易、股利、換匯四帳本完整重建所有持倉與報酬統計。帳本本身不會被修改。',
             confirmLabel: '開始重算',
-            onConfirm: () => { if (window.toast) window.toast('重算已開始', 'ok', '完成後儀表板將自動更新（設計預覽）'); }
+            onConfirm: () => {
+              pdEnsureApi()
+                .then((ok) => {
+                  if (!ok) throw new Error('API 層載入失敗');
+                  return window.pdApi.post('/api/actions/recompute');
+                })
+                .then(() => {
+                  if (window.toast) window.toast('重算完成', 'ok', '四帳本重放驗證通過，正在重新整理…');
+                  setTimeout(() => { window.location.reload(); }, 900);
+                })
+                .catch((e) => {
+                  if (window.toast) window.toast('重算失敗', 'fail', (e && e.message) || '請稍後再試');
+                });
+            }
           });
         }
       }));
@@ -439,6 +483,8 @@
     input.addEventListener('input', () => { active = 0; render(); });
     render();
     input.focus();
+    /* real registry loads async on first open; re-render when it arrives */
+    pdLoadSymbols().then(() => { if (document.body.contains(backdrop)) render(); });
   }
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {

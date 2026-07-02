@@ -65,3 +65,31 @@ def test_manual_commit_hard_error_400(api_client: TestClient) -> None:
         "account_id": "tw_broker", "symbol": "2330", "side": "buy",
         "date": "2026-06-11", "shares": "0", "price": "600"})
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+
+
+# --- unregistered symbol is a HARD block (2026-07-02) --------------------------
+# An unregistered symbol has no Instrument row (no quote ccy, not in the pricing
+# worklist) — committing it would poison the ledger. Preview surfaces sev "error"
+# (which also disables the frontend commit button); commit is a 400.
+
+
+def test_manual_preview_unregistered_symbol_is_hard_issue(api_client: TestClient) -> None:
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "GHOST", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "10"})
+    assert r.status_code == 200
+    codes = {i["code"]: i for i in r.json()["issues"]}
+    assert "symbol_unresolved" in codes
+    assert codes["symbol_unresolved"]["sev"] == "error"  # hard, not confirmable
+
+
+def test_manual_commit_unregistered_symbol_400(api_client: TestClient) -> None:
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "tw_broker", "symbol": "GHOST", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "10"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation_error"
+    assert "未註冊" in r.json()["error"]["message"]
+    # Nothing was written.
+    lg = api_client.get("/api/ledgers/transactions", params={"account_id": "tw_broker"}).json()
+    assert all(t["symbol"] != "GHOST" for t in lg["rows"])
