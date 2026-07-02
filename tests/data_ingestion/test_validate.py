@@ -28,6 +28,46 @@ def test_current_shares_sums_buys_minus_sells(conn: sqlite3.Connection) -> None:
     assert current_shares(conn, "tw_broker", "2330") == Decimal("700")
 
 
+def test_current_shares_counts_opening_and_noncash_dividends(
+    conn: sqlite3.Connection,
+) -> None:
+    """Regression (fixed 2026-07-02): opening inventory + stock/DRIP shares count.
+
+    The original transactions-only sum made opening-backed positions look smaller
+    -> FALSE oversell warnings when selling them.
+    """
+    seed_accounts(conn)
+    conn.execute(
+        "INSERT INTO opening_inventory (account_id, symbol, shares, original_avg_cost, "
+        "original_cost_total, build_date) VALUES ('tw_broker','2330','500','450',"
+        "'225000','2026-01-02')")
+    _raw_tx(conn, "tw_broker", "2330", Side.BUY, "1000")
+    _raw_tx(conn, "tw_broker", "2330", Side.SELL, "300")
+    # 配股 (stock dividend): +100 zero-cost shares; CASH dividend adds none.
+    conn.execute(
+        "INSERT INTO dividends (account_id, symbol, date, type, gross, withholding, net, "
+        "reinvest_shares) VALUES ('tw_broker','2330','2026-03-01','STOCK','0','0','0','100')")
+    conn.execute(
+        "INSERT INTO dividends (account_id, symbol, date, type, gross, withholding, net) "
+        "VALUES ('tw_broker','2330','2026-04-01','CASH','5000','0','5000')")
+    conn.commit()
+    # 500 opening + 1000 buy - 300 sell + 100 stock-dividend = 1300
+    assert current_shares(conn, "tw_broker", "2330") == Decimal("1300")
+
+
+def test_sell_of_opening_backed_position_no_false_oversell(
+    conn: sqlite3.Connection,
+) -> None:
+    seed_accounts(conn)
+    conn.execute(
+        "INSERT INTO opening_inventory (account_id, symbol, shares, original_avg_cost, "
+        "original_cost_total, build_date) VALUES ('tw_broker','2330','1000','450',"
+        "'450000','2026-01-02')")
+    conn.commit()
+    issues = validate_transaction(conn, _inp("tw_broker", "2330", Side.SELL, "800"))
+    assert "sell_exceeds_holdings" not in {i.kind for i in issues}
+
+
 def test_sell_exceeds_holdings_blocks(conn: sqlite3.Connection) -> None:
     seed_accounts(conn)
     _raw_tx(conn, "tw_broker", "2330", Side.BUY, "100")

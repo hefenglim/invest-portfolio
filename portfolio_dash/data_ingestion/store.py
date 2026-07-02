@@ -467,3 +467,158 @@ def list_transactions(
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Ledger row corrections: explicit edit / delete (2026-07-02)
+# ---------------------------------------------------------------------------
+# The ledgers stay "append-only in spirit": corrections are EXPLICIT user actions
+# through these helpers (never silent mutation), and every report rebuilds from
+# the stored rows afterward, so the 重算 semantics are preserved. The API layer
+# replays the mutated ledger through build_book BEFORE writing (oversell guard).
+
+
+def get_transaction(conn: sqlite3.Connection, txn_id: int) -> StoredTransaction | None:
+    """Return one transaction by id, or None."""
+    for t in list_transactions(conn):
+        if t.id == txn_id:
+            return t
+    return None
+
+
+def update_transaction(
+    conn: sqlite3.Connection,
+    txn_id: int,
+    *,
+    account_id: str,
+    symbol: str,
+    side: Side,
+    quantity: Decimal,
+    price: Decimal,
+    fees: Decimal,
+    tax: Decimal,
+    trade_date: date,
+    note: str | None = None,
+) -> bool:
+    """Full-row transaction correction; returns False when the id does not exist.
+
+    ``fee_rule_snapshot`` is intentionally NOT touched: it records the rule set in
+    force when the row was first written (audit trail), even across corrections.
+    """
+    cur = conn.execute(
+        """UPDATE transactions SET account_id=?, symbol=?, side=?, quantity=?, price=?,
+               fees=?, tax=?, trade_date=?, note=? WHERE id=?""",
+        (
+            account_id, symbol, side.value, to_db(quantity), to_db(price),
+            to_db(fees), to_db(tax), trade_date.isoformat(), note, txn_id,
+        ),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> bool:
+    cur = conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_dividend(conn: sqlite3.Connection, div_id: int) -> StoredDividend | None:
+    """Return one dividend by id, or None."""
+    for d in list_dividends(conn):
+        if d.id == div_id:
+            return d
+    return None
+
+
+def update_dividend(
+    conn: sqlite3.Connection,
+    div_id: int,
+    *,
+    account_id: str,
+    symbol: str,
+    div_date: date,
+    div_type: str,
+    gross: Decimal,
+    withholding: Decimal,
+    net: Decimal,
+    reinvest_shares: Decimal | None = None,
+    reinvest_price: Decimal | None = None,
+) -> bool:
+    """Full-row dividend correction; returns False when the id does not exist."""
+    cur = conn.execute(
+        """UPDATE dividends SET account_id=?, symbol=?, date=?, type=?, gross=?,
+               withholding=?, net=?, reinvest_shares=?, reinvest_price=? WHERE id=?""",
+        (
+            account_id, symbol, div_date.isoformat(), div_type, to_db(gross),
+            to_db(withholding), to_db(net),
+            to_db(reinvest_shares) if reinvest_shares is not None else None,
+            to_db(reinvest_price) if reinvest_price is not None else None,
+            div_id,
+        ),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_dividend(conn: sqlite3.Connection, div_id: int) -> bool:
+    cur = conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_fx_conversion(conn: sqlite3.Connection, fx_id: int) -> StoredFxConversion | None:
+    """Return one fx_conversions row by id, or None."""
+    for c in list_fx_conversions(conn):
+        if c.id == fx_id:
+            return c
+    return None
+
+
+def update_fx_conversion(
+    conn: sqlite3.Connection,
+    fx_id: int,
+    *,
+    account_id: str,
+    date: date,
+    from_ccy: Currency,
+    from_amount: Decimal,
+    to_ccy: Currency,
+    to_amount: Decimal,
+) -> bool:
+    """Full-row FX-conversion correction; returns False when the id does not exist."""
+    cur = conn.execute(
+        """UPDATE fx_conversions SET account_id=?, date=?, from_ccy=?, from_amount=?,
+               to_ccy=?, to_amount=? WHERE id=?""",
+        (
+            account_id, date.isoformat(), from_ccy.value, to_db(from_amount),
+            to_ccy.value, to_db(to_amount), fx_id,
+        ),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_fx_conversion(conn: sqlite3.Connection, fx_id: int) -> bool:
+    cur = conn.execute("DELETE FROM fx_conversions WHERE id=?", (fx_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_opening(
+    conn: sqlite3.Connection, account_id: str, symbol: str
+) -> StoredOpening | None:
+    """Return one opening_inventory row by its (account_id, symbol) key, or None."""
+    for o in list_opening(conn, account_id=account_id):
+        if o.symbol == symbol:
+            return o
+    return None
+
+
+def delete_opening(conn: sqlite3.Connection, account_id: str, symbol: str) -> bool:
+    cur = conn.execute(
+        "DELETE FROM opening_inventory WHERE account_id=? AND symbol=?",
+        (account_id, symbol),
+    )
+    conn.commit()
+    return cur.rowcount > 0

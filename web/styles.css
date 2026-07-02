@@ -325,6 +325,11 @@ button.is-busy {
 }
 @keyframes pd-spin { to { transform: rotate(360deg); } }
 
+/* ledger row-correction actions (編輯 / 刪除) */
+.wl-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.btn-row-del { color: var(--up); border-color: rgba(240, 84, 79, 0.4); }
+.btn-row-del:hover { background: var(--up-soft); }
+
 /* neutral direction chips (買賣是方向不是損益 — 不用紅綠) */
 .dir-chip {
   font-size: 10px;

@@ -110,16 +110,24 @@ def daily_value_series(
     points: list[TrendPoint] = []
     day = start
     while day <= end:
+        # allow_oversell (2026-07-02): an acked-oversold ledger must NEVER 500 the
+        # dashboard through the trend replay either — mirror the main book's
+        # degradation. An oversold (negative-share) day has no honest value, so it
+        # marks the point incomplete instead of contributing a fabricated number.
         book = build_book(
             [t for t in transactions if t.trade_date <= day],
             [d for d in dividends if d.date <= day],
             [o for o in opening if o.build_date <= day],
             instruments,
+            allow_oversell=True,
         )
         total = _ZERO
         incomplete = False
         for h in book.holdings:
             if h.shares == _ZERO:
+                continue
+            if h.shares < _ZERO:
+                incomplete = True  # 賣超 day — value undefined (待釐清)
                 continue
             price = _at_or_before(price_history.get(h.symbol, []), day)
             if price is None:
