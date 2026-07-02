@@ -4,9 +4,9 @@ The division of labor (engineering-process.md, "Two-environment loop-engineering
 heavy gates (pytest / mypy / ruff / browser e2e) run on the dev machine; the deployed
 instance is verified BEHAVIOURALLY from outside. This script is that outside check.
 
-    .venv/Scripts/python scripts/verify_live.py https://<test-or-prod-host>            # read-only
+    .venv/Scripts/python scripts/verify_live.py https://<host>                # read-only
     .venv/Scripts/python scripts/verify_live.py https://<host> --expect-version 0.1.3
-    .venv/Scripts/python scripts/verify_live.py https://<host> --refresh              # + POST refresh-quotes
+    .venv/Scripts/python scripts/verify_live.py https://<host> --refresh      # + quote refresh
 
 Auth-aware: on a protected (login-gated) instance, gated endpoints answering 401 is
 treated as PASS (service up + auth posture correct); on a guest/demo instance they
@@ -96,7 +96,8 @@ def main() -> int:
     else:
         ok = st == 200 and isinstance(dash, dict) and "holdings" in dash
         n = len(dash.get("holdings", [])) if isinstance(dash, dict) else "?"
-        unreg = dash.get("freshness", {}).get("unregistered_symbols") if isinstance(dash, dict) else None
+        unreg = (dash.get("freshness", {}).get("unregistered_symbols")
+                 if isinstance(dash, dict) else None)
         check("dashboard", ok, f"HTTP {st}, holdings={n}, unregistered={unreg}")
 
     st, insts = _get(base, "/api/instruments")
