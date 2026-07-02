@@ -23,6 +23,25 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **Design-handoff stubs look wired — audit them against the real API surface
+  (2026-07-02):** the topbar 更新報價/重算 buttons shipped v0.1.0→v0.1.2 as
+  design-preview stubs (toast only) even though the real endpoints
+  (`/api/actions/refresh-quotes|recompute`) existed and were tested — the user saw a
+  success toast and nothing happened, and no test failed because the CONTRACT tests hit
+  the endpoint while the SMOKE tests only asserted "page renders clean". A stub that
+  *renders* fine is invisible to both suites. Rule: after any design-handoff
+  integration round, grep the frontend for `設計預覽/後端接線後/mock` and reconcile each
+  hit against the router table before calling a page "wired"; a page is wired only when
+  its **actions**, not just its renders, hit the backend (assert with expect_request /
+  expect_response in at least one flow test).
+- **A write path must not accept what the read path cannot represent (2026-07-02):**
+  committing a transaction for an unregistered symbol passed (soft issue bypassed on
+  confirm) but the dashboard could only KeyError on it — the same class of bug as the
+  earlier acked-oversell 500. Invariant now enforced from both sides (hard issue at
+  commit + graceful exclusion with `freshness.unregistered_symbols` on read). When a
+  "needs confirmation" issue has NO valid confirm semantics downstream, it must be a
+  hard block, not a soft warn.
+
 - **`StrEnum` + Pydantic v2 serialization (2026-06-06):** `Currency`/`Market` are
   `enum.StrEnum` (ruff UP042 prefers this over `(str, Enum)` on 3.11+). A `StrEnum`
   member *is* a `str` (`isinstance` is `True`, SQLite binds it as TEXT, `json.dumps`

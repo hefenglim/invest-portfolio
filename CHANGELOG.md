@@ -50,6 +50,40 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.3] - 2026-07-02
+
+### Fixed
+- **Core position management stabilized (2026-07-02)** — root-caused from live-prod evidence
+  (registered symbol stuck on a stale close, zero successful ledger writes):
+  - **Topbar 更新報價/重算 wired for real** (`web/shell.js`): both buttons were design-preview
+    stubs (success toast, no API call) since v0.1.0 even though `POST /api/actions/refresh-quotes`
+    and `/api/actions/recompute` existed and were tested. Now: busy-guarded call, result toast,
+    auto-reload. On-demand quote freshness is restored (each market's cron remains the scheduled
+    path). Verified by a real browser click against the live test site (~10 s for all 3 markets).
+  - **Unregistered symbol is a HARD block at commit** (manual + CSV): `symbol_unresolved` was a
+    soft issue that `confirm=True` bypassed, so a trade for a never-registered symbol could enter
+    the ledger where it could never be priced (`build_worklist` reads `instruments`) and crashed
+    `GET /api/dashboard` with a bare `KeyError` (same bug class as the acked-oversell 500).
+    Commit now returns 400 with a register-first message; the existing sev=error frontend gate
+    disables the commit button automatically.
+  - **Dashboard never 500s over legacy unregistered rows:** their events are excluded from ALL
+    computation (book, XIRR, trend, dividend summary — consistently) and surfaced in
+    `freshness.unregistered_symbols`; `web/app.js` renders a warning banner with a register link.
+    `POST /api/actions/recompute` pre-checks and returns 422 (was a KeyError 500).
+  - **Cmd+K search reads the real registry:** the hardcoded 9-symbol design mock in `shell.js` is
+    retired; search lazy-loads `GET /api/instruments` (cached, degrades to the register hint).
+
+### Added
+- **Instant first quote on registration:** `POST /api/instruments` now fetches the new symbol's
+  latest quote (+ reporting FX pairs) immediately via `scheduler.jobs.refresh_instrument_quote`
+  — best-effort, never fails the registration — so a newly added stock is priced right away
+  instead of waiting for its market's post-close cron. Verified live: registering 2603 returned
+  `last=185.50` (real TWSE close) in the same request.
+
+### Changed
+- Golden dashboard payload regenerated: `freshness` gains `unregistered_symbols` (all numeric
+  values byte-identical; `by_currency` key order in the file is serialization noise only).
+
 ## [v0.1.2] - 2026-07-02
 
 ### Fixed
