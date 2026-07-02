@@ -50,6 +50,78 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.4] - 2026-07-02
+
+Position-management UX round 2 (user-directed): one-step onboarding, ledger row
+corrections, app-wide progress visibility, deploy build identity — plus three real
+bugs the new tests/live-verification forced out. All changes verified on the live
+test instance with real providers (16 API checks + 18 real-browser click-through
+steps, all green) before promote.
+
+### Added
+- **One-step instrument add** — `POST /api/instruments/quick` (new shared
+  `api/instrument_service.py`): probes the TW board, **requires a real fetched
+  quote** before registering (typo guard; 422 `quote_not_found` → explicit
+  user-confirmed `force` retry), auto-fills the display name (TW: twstock static
+  code table → yfinance fallback; US/MY: yfinance), and **backfills ~92 days of
+  daily closes** so the symbol drawer chart renders immediately. 觀察清單 add UI
+  collapses probe→confirm→detail-form into symbol + market + one button (verified
+  live: `2884` → 玉山金, TWSE 上市, 現價 33.70, history backfilled).
+- **Trade input auto-registers unknown symbols** — the manual commit infers the
+  market from the account's settlement currency (TWD→TW / USD→US / MYR→MY) and
+  runs the same quick-register (same real-quote guard); an unregistrable symbol
+  still writes **nothing** (400 `symbol_auto_register_failed`). Preview shows an
+  info-severity note instead of a hard error; success responses carry
+  `auto_registered {symbol, name, last}`.
+- **Ledger row corrections** — `PUT/DELETE /api/ledgers/{transactions,dividends,fx}/{id}`
+  and `/ledgers/openings/{account}/{symbol}` ("append-only in spirit": explicit
+  user corrections, never silent mutation). Every mutation **replays the would-be
+  ledger through build_book first**; a correction that would strand a later sell
+  answers 422 `oversell` until explicitly acked (dashboard then shows the flagged
+  賣超 state). Frontend rows gain 編輯/刪除 with per-kind modals + danger confirms.
+- **Progress system (app-wide)** — `web/api.js` (the single fetch seam) tracks all
+  in-flight requests and drives a global top progress bar (150 ms anti-flicker);
+  `pdBusy()` spinner/disabled states on action buttons (double-click-safe);
+  `toastProgress()` persistent toasts for long operations (更新報價 / 重算 /
+  歷史回補) — no network wait can look frozen anymore.
+- **Build identity** — `GET /api/health` now reports `{version, commit, release}`
+  (short git hash + exact tag on HEAD or `"unreleased"`, via new
+  `shared/buildinfo.py`; env-overridable, never raises). Sidebar shows
+  `vX.Y.Z · hash` on every page with an amber 未發行 marker for non-tag builds;
+  settings 一般 row carries the full string; `verify_live.py --expect-release`
+  asserts a prod promote runs the tag.
+- **`POST /api/actions/backfill-history {days}`** + 觀察清單「回補 3 個月歷史」
+  button — gives existing instruments the 3-month chart window (new registrations
+  get it automatically).
+
+### Fixed
+- **Trend replay could 500 the dashboard on an acked-oversold ledger** —
+  `timeseries.daily_value_series` built its per-day books without
+  `allow_oversell`, bypassing the 2026-06-18 degradation the main book already
+  had. Now degrades: an oversold day marks the trend point `incomplete` instead of
+  raising. (Never-500 degradations must cover EVERY replay call site — LESSONS.)
+- **False oversell warnings for opening-backed positions** —
+  `data_ingestion.holdings.current_shares` summed only the transactions table,
+  ignoring opening inventory (期初) and stock/DRIP dividend shares; selling such a
+  position raised bogus 賣超 warnings and `held` flags undercounted. Now counts
+  all four share sources (same replay rule as `build_book`).
+- **twstock was mis-grouped as a `[probe]` extra** — deployed venvs never had it,
+  silently disabling both the TW quote-chain twstock fallback AND the TW name
+  lookup (found live: names came back empty). Moved to runtime dependencies;
+  `lookup_name` now degrades per-source (twstock failure still falls through to
+  yfinance).
+- **重新探測 now persists** — it probed and toasted but never saved, so an
+  unresolved TW board stayed unresolved forever; it now PUTs the result and
+  resolves `board_status`.
+- **Input-center design-stub prefill retired** — the form booted with fake
+  2026-06-11 / 2330 / 1000 / 612.5 values; now today + empty fields with a neutral
+  pristine state (no red errors on an untouched form).
+
+### Changed
+- Classic `POST /api/instruments` delegates to the shared quick-register service
+  with `force=true` (back-compatible: a provider outage never blocks an explicit
+  registration) and gains the same name auto-fill + history backfill.
+
 ## [v0.1.3] - 2026-07-02
 
 ### Fixed
