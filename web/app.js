@@ -509,12 +509,19 @@
     panel.appendChild(head);
 
     /* share of each currency derived from holdings[].weight (reporting terms);
-       holdings with null weight (缺價) are excluded. */
+       holdings with null weight (缺價) are excluded. weight is a RATIO (not money)
+       and arrives as a Decimal STRING — summing with `+` concatenated strings and
+       rendered NaN% whenever a currency held 2+ positions (fixed 2026-07-03).
+       Coercing a display-only ratio is the documented input-side exception. */
     const shareByCcy = {};
     let excluded = 0;
     D.holdings.forEach((h) => {
-      if (h.weight === null || h.weight === undefined) { excluded += 1; return; }
-      shareByCcy[h.quote_ccy] = (shareByCcy[h.quote_ccy] || 0) + h.weight;
+      const w = Number(h.weight);
+      if (h.weight === null || h.weight === undefined || !isFinite(w)) {
+        excluded += 1;
+        return;
+      }
+      shareByCcy[h.quote_ccy] = (shareByCcy[h.quote_ccy] || 0) + w;
     });
 
     const stack = el('div', 'ccy-stack');
