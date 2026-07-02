@@ -52,6 +52,16 @@ prevents recurrence.
   test that creates a degraded-but-legal ledger state should end by asserting the
   dashboard still answers 200.
 
+- **JS `+` on Decimal-string wire values concatenates, then renders NaN
+  (2026-07-03):** the currency-composition panel summed `holdings[].weight`
+  (Decimal STRINGS) with `+` — one holding per currency parsed by luck, two+
+  concatenated into garbage → 權重 NaN% on the live dashboard, invisible to every
+  hermetic suite (golden held one holding per currency). Rules: display-only
+  RATIO aggregation must coerce explicitly (`Number()` + isFinite guard, the
+  documented non-money exception); when a panel aggregates a wire array, test it
+  with 2+ rows per group; full-site screenshot review catches what selector
+  assertions miss.
+
 - **A derived quantity needs ONE definition, not per-caller reimplementations
   (2026-07-02):** `data_ingestion.holdings.current_shares` re-derived "shares
   held" as buys−sells over the transactions table only, silently drifting from

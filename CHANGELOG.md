@@ -50,6 +50,60 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.5] - 2026-07-03
+
+Round 3 (user-directed, 12 items): input-center completion, ops observability
+(system action log + run-history sources), per-market quote routing made real,
+full-field instrument editing, float-noise price caps — verified live on the test
+instance (23 API checks + 16 browser steps + full-site screenshot review, all
+green) before promote.
+
+### Added
+- **Single-entry 股利/換匯/期初 write for real** — the three forms build a
+  one-row CSV and commit through the SAME tested `/api/import` preview+commit
+  seam (error rows block with the backend reason; warn rows go through the ack
+  confirm). 配股 mode relabels the amount field to 配股股數 and hides Net. The
+  CSV dropzone is a REAL client-side file upload (FileReader → textarea →
+  preview; drag-drop; per-kind column hints).
+- **系統操作記錄 (system action log)** — an app middleware records every
+  mutating `/api` call (timestamp, actor, Chinese action label, endpoint, HTTP
+  outcome, duration; never bodies); `GET /api/system-log` + a third panel on the
+  排程 page. Previews/what-ifs excluded; newest 5000 kept.
+- **Run history names its sources** — job detail now reads
+  `12 ok, 0 failed [yfinance: 0056, 2330, …] failed: 8299` (one `_summarize`
+  seam covers every quote/history/dividend job); scheduler page shows Chinese
+  job names with ids beneath, full detail on hover.
+- **Per-market quote order, stored and REAL** — `data_source_market_order` +
+  `PUT /api/datasources/market-order`, consumed by `default_registry(conn)`
+  (scheduler crons, manual refresh, quick-add alike). Settings page: three
+  market cards, drag to reorder, ✕ remove, ＋ add capable source, health dots
+  from the source list. Live-verified: putting yfinance first made the next TW
+  refresh answer entirely from yfinance. Supersedes the per-ACCOUNT fallback
+  chains, which were stored/editable but consumed by NOTHING (and keyed on the
+  wrong concept — accounts decide fees/dividends, markets decide quote routing);
+  that endpoint + wire fields are removed.
+- **Instruments full-field edit** — 名稱/產業/板別(TW dropdown)/ETF/目標價
+  editable for ALL markets (US included); ledger search matches 代號 first then
+  名稱; tx edit modal warns that changing 代號/帳戶 moves the row to another
+  position.
+
+### Fixed
+- **幣別組成 rendered 權重 NaN%** for any currency holding 2+ positions —
+  Decimal-string weights were summed with `+` (string concatenation). Ratios are
+  display-only; now coerced explicitly.
+- **PUT /api/instruments target_low null now CLEARS the alert** — exclude_none
+  silently dropped explicit nulls, so clearing never worked (exclude_unset now).
+- **Dividend CSV type normalization** — a lowercase `cash` was stored raw and
+  poisoned `DividendType()` readers; the importer now uppercases and
+  hard-rejects unknown types.
+- **Float-noise cap at the price write seam** (human sign-off 2026-07-03) —
+  prices capped at 4 dp, FX rates at 6 dp, ROUND_HALF_UP, cap-never-pad
+  (yfinance float tails like `305.364990234375` no longer stored); recorded in
+  `data-and-pricing.md`.
+- The AI-input design state-switcher is retired (degraded panels driven only by
+  real API errors, doubling as usage-time hints when AI is enabled later); the
+  AI screenshot dropzone honestly reports Vision is not yet wired.
+
 ## [v0.1.4] - 2026-07-02
 
 Position-management UX round 2 (user-directed): one-step onboarding, ledger row
