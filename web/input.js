@@ -842,49 +842,10 @@
     };
   }
 
-  /* ================= Tab 5 換匯 + 期初 ================= */
-  /* Both commit through the one-row-CSV import path (2026-07-03, item 1). */
+  /* ================= Tab 5 期初庫存 =================
+     (換匯已移至「資金管理」統一管理 — 2026-07-03 R6 item 7；opening 單筆仍走
+     one-row-CSV import path。) */
   function initFxOpen() {
-    const accSel = $('#fx-account');
-    ctx.accounts.forEach((a) => {
-      const o = el('option', null, a.name); o.value = a.id;
-      accSel.appendChild(o);
-    });
-    $('#fx-date').value = TODAY;
-    const upd = () => {
-      const fromA = parseFloat($('#fx-from-amt').value) || 0;
-      const toA = parseFloat($('#fx-to-amt').value) || 0;
-      const fromC = $('#fx-from-ccy').value;
-      const toC = $('#fx-to-ccy').value;
-      /* implied-rate what-if on the USER's own entry (documented input-side calc). */
-      if (fromA > 0 && toA > 0) {
-        $('#fx-implied').textContent = '1 ' + toC + ' = ' + (fromA / toA).toFixed(4) + ' ' + fromC;
-      } else {
-        $('#fx-implied').textContent = f.NULL_GLYPH;
-      }
-    };
-    ['fx-from-amt', 'fx-to-amt', 'fx-from-ccy', 'fx-to-ccy'].forEach((id) =>
-      $('#' + id).addEventListener('input', upd));
-    upd();
-    $('#fx-confirm').addEventListener('click', () => {
-      const accId = $('#fx-account').value || (ctx.accounts[0] && ctx.accounts[0].id) || '';
-      const dte = $('#fx-date').value;
-      const fromA = $('#fx-from-amt').value.trim();
-      const toA = $('#fx-to-amt').value.trim();
-      if (!accId || !dte || !fromA || !toA) {
-        if (window.toast) window.toast('請填寫帳戶、日期與兩側金額', 'fail');
-        return;
-      }
-      const csv = oneRowCsv(
-        ['account', 'date', 'from_ccy', 'from_amount', 'to_ccy', 'to_amount'],
-        [accId, dte, $('#fx-from-ccy').value, fromA, $('#fx-to-ccy').value, toA]);
-      commitOneRow('fx', csv, $('#fx-confirm'), '換匯已寫入帳本', () => {
-        $('#fx-from-amt').value = '';
-        $('#fx-to-amt').value = '';
-        upd();
-      });
-    });
-
     const oAccSel = $('#o-account');
     ctx.accounts.forEach((a) => {
       const o = el('option', null, a.name); o.value = a.id;

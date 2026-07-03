@@ -325,6 +325,18 @@ button.is-busy {
 }
 @keyframes pd-spin { to { transform: rotate(360deg); } }
 
+/* dashboard 各帳戶現金 mini cards (R6 item 7) */
+.cash-mini { padding: 10px var(--pad) 14px; display: flex; flex-direction: column; gap: 8px; }
+.cash-mini-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); }
+.cash-mini-card {
+  background: var(--panel-2); border: 1px solid var(--border-soft);
+  border-radius: var(--radius); padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 4px; font-size: 12px;
+}
+.cash-mini-card .acct { font-weight: 700; }
+.cash-mini-card .line.neg { color: var(--up); font-weight: 700; }
+@media (max-width: 1100px) { .cash-mini-grid { grid-template-columns: repeat(2, 1fr); } }
+
 /* ledger row-correction actions (編輯 / 刪除) */
 .wl-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .btn-row-del { color: var(--up); border-color: rgba(240, 84, 79, 0.4); }

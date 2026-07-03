@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — 資金管理</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="settings.css"></link>
+<link rel="stylesheet" href="trades.css"></link>
+<link rel="stylesheet" href="input.css"></link>
+<style>
+  .cash-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px var(--pad) 14px; }
+  .cash-card {
+    background: var(--panel-2); border: 1px solid var(--border-soft);
+    border-radius: var(--radius); padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .cash-card .acct { font-weight: 700; font-size: 12px; }
+  .cash-line { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; }
+  .cash-line .ccy { color: var(--text-3); font-family: var(--font-num); font-size: 10px; }
+  .cash-line .amt { font-family: var(--font-num); }
+  .cash-line .amt.neg { color: var(--up); font-weight: 700; }
+  .cash-total { padding: 4px var(--pad) 0; font-size: 12px; color: var(--text-2); }
+  .cash-forms { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); padding: 0 var(--pad) 14px; }
+  @media (max-width: 1100px) { .cash-cards { grid-template-columns: repeat(2, 1fr); } .cash-forms { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-page="cash" data-title="資金管理">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <!-- A. 各帳戶現金池 -->
+  <section class="panel" data-screen-label="現金池">
+    <div class="panel-head">
+      <h2 class="panel-title">各帳戶現金池</h2>
+      <span class="panel-sub">入金 − 出金 ± 換匯 ± 買賣收付 ＋ 現金股利；期初庫存不動現金（需要的話補一筆初始入金）</span>
+    </div>
+    <div class="cash-total" id="cash-total"></div>
+    <div class="cash-cards" id="cash-cards"></div>
+  </section>
+
+  <!-- B. 入金/出金 + 換匯 -->
+  <section class="panel" data-screen-label="資金異動">
+    <div class="panel-head">
+      <h2 class="panel-title">資金異動</h2>
+      <span class="panel-sub">會讓現金變負的寫入將先要求確認（通常代表漏記）</span>
+    </div>
+    <div class="cash-forms">
+      <div class="stack-card" data-screen-label="入金出金">
+        <h3>入金／出金</h3>
+        <div class="form-grid">
+          <div class="field">
+            <label for="cm-account">帳戶</label>
+            <select class="select" id="cm-account"></select>
+          </div>
+          <div class="field">
+            <label for="cm-date">日期</label>
+            <input class="input" id="cm-date" type="date"></input>
+          </div>
+          <div class="field">
+            <label>方向</label>
+            <div class="segmented">
+              <button type="button" id="cm-kind-in" class="active">入金</button>
+              <button type="button" id="cm-kind-out">出金</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="cm-ccy">幣別</label>
+            <select class="select" id="cm-ccy">
+              <option value="TWD">TWD</option>
+              <option value="USD">USD</option>
+              <option value="MYR">MYR</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cm-amount">金額</label>
+            <input class="input" id="cm-amount" type="number" step="0.01" min="0"></input>
+          </div>
+          <div class="field">
+            <label for="cm-note">備註（選）</label>
+            <input class="input" id="cm-note"></input>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="cm-confirm" type="button">確認寫入</button>
+        </div>
+      </div>
+
+      <div class="stack-card" data-screen-label="換匯">
+        <h3>換匯</h3>
+        <div class="form-grid">
+          <div class="field">
+            <label for="cfx-account">帳戶</label>
+            <select class="select" id="cfx-account"></select>
+          </div>
+          <div class="field">
+            <label for="cfx-date">日期</label>
+            <input class="input" id="cfx-date" type="date"></input>
+          </div>
+          <div class="field"></div>
+          <div class="field">
+            <label for="cfx-from-ccy">賣出幣別</label>
+            <select class="select" id="cfx-from-ccy">
+              <option value="TWD" selected="selected">TWD</option>
+              <option value="USD">USD</option>
+              <option value="MYR">MYR</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cfx-from-amt">賣出金額</label>
+            <input class="input" id="cfx-from-amt" type="number" step="0.01" min="0"></input>
+          </div>
+          <div class="field"></div>
+          <div class="field">
+            <label for="cfx-to-ccy">買入幣別</label>
+            <select class="select" id="cfx-to-ccy">
+              <option value="TWD">TWD</option>
+              <option value="USD" selected="selected">USD</option>
+              <option value="MYR">MYR</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cfx-to-amt">買入金額</label>
+            <input class="input" id="cfx-to-amt" type="number" step="0.01" min="0"></input>
+          </div>
+        </div>
+        <div class="fx-implied">
+          <span class="k">隱含匯率</span>
+          <span class="v num" id="cfx-implied"></span>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="cfx-confirm" type="button">確認寫入</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- C. 入金/出金紀錄 -->
+  <section class="panel" data-screen-label="資金紀錄">
+    <div class="panel-head">
+      <h2 class="panel-title">入金／出金紀錄</h2>
+      <span class="panel-sub">換匯紀錄在「交易帳本 › 換匯」分頁（同一本帳）</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th>日期</th><th class="col-text">帳戶</th><th class="col-text">方向</th>
+            <th>金額</th><th class="col-text">備註</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="cm-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+</div>
+</div>
+</div>
+
+<script src="api.js"></script>
+<script src="shell.js"></script>
+<script src="format.js"></script>
+<script src="alerts.js"></script>
+<script src="cash.js"></script>
+</body>
+</html>

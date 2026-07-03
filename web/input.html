@@ -30,7 +30,7 @@
         <button type="button" id="tab-csv">CSV 匯入</button>
         <button type="button" id="tab-ai">AI 輸入</button>
         <button type="button" id="tab-div">股利</button>
-        <button type="button" id="tab-fxopen">換匯＋期初</button>
+        <button type="button" id="tab-fxopen">期初庫存</button>
       </div>
     </div>
 
@@ -295,53 +295,16 @@
       </div>
     </div>
 
-    <!-- ===== Tab 5 換匯 + 期初 ===== -->
-    <div class="mode-pane" id="pane-fxopen" data-screen-label="換匯與期初">
+    <!-- ===== Tab 5 期初庫存（換匯已移至「資金管理」— 2026-07-03 R6 item 7） ===== -->
+    <div class="mode-pane" id="pane-fxopen" data-screen-label="期初庫存">
       <div class="two-stack">
-        <div class="stack-card" data-screen-label="換匯">
+        <div class="stack-card" data-screen-label="換匯指引">
           <h3>換匯</h3>
-          <div class="form-grid">
-            <div class="field">
-              <label for="fx-account">帳戶</label>
-              <select class="select" id="fx-account"></select>
-            </div>
-            <div class="field">
-              <label for="fx-date">日期</label>
-              <input class="input" id="fx-date" type="date"></input>
-            </div>
-            <div class="field"></div>
-            <div class="field">
-              <label for="fx-from-ccy">賣出幣別</label>
-              <select class="select" id="fx-from-ccy">
-                <option value="TWD" selected="selected">TWD</option>
-                <option value="USD">USD</option>
-                <option value="MYR">MYR</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="fx-from-amt">賣出金額</label>
-              <input class="input" id="fx-from-amt" type="number" step="0.01"></input>
-            </div>
-            <div class="field"></div>
-            <div class="field">
-              <label for="fx-to-ccy">買入幣別</label>
-              <select class="select" id="fx-to-ccy">
-                <option value="TWD">TWD</option>
-                <option value="USD" selected="selected">USD</option>
-                <option value="MYR">MYR</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="fx-to-amt">買入金額</label>
-              <input class="input" id="fx-to-amt" type="number" step="0.01"></input>
-            </div>
+          <div class="hint" style="margin: 8px 0 12px;">
+            換匯與入金／出金已整合到「資金管理」頁統一管理（含現金池餘額檢核）。
           </div>
-          <div class="fx-implied">
-            <span class="k">隱含匯率</span>
-            <span class="v num" id="fx-implied"></span>
-          </div>
-          <div class="form-actions">
-            <button class="btn btn-primary" id="fx-confirm" type="button">確認寫入</button>
+          <div class="form-actions" style="justify-content: flex-start;">
+            <a class="btn btn-primary" href="cash.html">前往資金管理</a>
           </div>
         </div>
 

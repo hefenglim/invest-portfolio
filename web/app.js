@@ -557,6 +557,55 @@
       (excluded ? '，缺價標的（' + excluded + '）不計入權重。' : '。')));
   }
 
+  /* ============ F2. 各帳戶現金 (R6 item 7) ============
+     Separate lightweight GET /api/cash (dashboard payload untouched); degrades
+     to a hint on failure. Amounts are Decimal STRINGS via fmt. */
+  async function renderCashMini() {
+    const host = $('#cash-mini');
+    if (!host) return;
+    let resp;
+    try {
+      resp = await window.pdApi.get('/api/cash');
+    } catch (err) {
+      host.replaceChildren(el('div', 'hint', '現金資料載入失敗'));
+      return;
+    }
+    host.replaceChildren();
+    const balances = (resp && resp.balances) || [];
+    if (!balances.length) {
+      host.appendChild(el('div', 'hint',
+        '尚無現金紀錄 — 到「資金管理」補一筆初始入金，現金池就會開始追蹤。'));
+      return;
+    }
+    const grid = el('div', 'cash-mini-grid');
+    const byAcct = new Map();
+    balances.forEach((b) => {
+      if (!byAcct.has(b.account_id)) byAcct.set(b.account_id, { name: b.account, lines: [] });
+      byAcct.get(b.account_id).lines.push(b);
+    });
+    byAcct.forEach((entry) => {
+      const card = el('div', 'cash-mini-card');
+      card.appendChild(el('div', 'acct', entry.name));
+      entry.lines.forEach((b) => {
+        const line = el('div', 'line num');
+        const neg = String(b.amount).indexOf('-') === 0;
+        line.textContent = b.ccy + '  ' + f.money(b.amount, b.ccy);
+        if (neg) {
+          line.classList.add('neg');
+          line.title = '負現金 — 通常代表漏記入金或換匯';
+        }
+        card.appendChild(line);
+      });
+      grid.appendChild(card);
+    });
+    host.appendChild(grid);
+    if (resp.reporting_total != null) {
+      host.appendChild(el('div', 'hint',
+        '合併現金（' + resp.reporting_currency + '）: ' +
+        f.money(resp.reporting_total, resp.reporting_currency) + ' ' + resp.reporting_currency));
+    }
+  }
+
   /* ============ F. 換匯損益 ============ */
   function renderFx() {
     const grid = $('#fx-grid');
@@ -1026,6 +1075,7 @@
     renderHoldings();
     renderCurrencyView();
     renderFx();
+    renderCashMini();
     renderRealized();
     renderDividendChips();
     renderExDivCalendar();

@@ -8,6 +8,7 @@
   const NAV = [
     { id: 'dashboard',   href: 'index.html',       label: '儀表板',   ico: '◫' },
     { id: 'ledger',      href: 'trades.html',       label: '交易帳本', ico: '≣' },
+    { id: 'cash',        href: 'cash.html',          label: '資金管理', ico: '＄' },
     { id: 'instruments', href: 'instruments.html',  label: '觀察清單', ico: '◎' },
     { id: 'insights',    href: 'insights.html',     label: 'AI 洞察',  ico: '◈' },
     { id: 'pipeline',    href: 'pipeline-hub.html', label: '洞察管線', ico: '⧉' },
