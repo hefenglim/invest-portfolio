@@ -80,6 +80,15 @@
       o.value = a.id;
       accSel.appendChild(o);
     });
+    /* item 5 (2026-07-03): remember the last-used account — the alphabetical
+       default (Moomoo first) forced an extra click on every TW entry. */
+    try {
+      const last = localStorage.getItem('pd_last_account');
+      if (last && ctx.accounts.some((a) => a.id === last)) accSel.value = last;
+    } catch (e) { /* noop */ }
+    accSel.addEventListener('change', () => {
+      try { localStorage.setItem('pd_last_account', accSel.value); } catch (e) { /* noop */ }
+    });
     const dl = $('#m-symbols');
     ctx.instruments.forEach((i) => {
       const o = el('option'); o.value = i.symbol; o.label = i.name;
@@ -89,6 +98,14 @@
     $('#m-symbol').value = '';
     $('#m-shares').value = '';
     $('#m-price').value = '';
+    /* item 6 (2026-07-03): 新增標的 → 記一筆買入 handoff — ?symbol=XXXX prefills. */
+    try {
+      const pre = new URLSearchParams(window.location.search).get('symbol');
+      if (pre) {
+        $('#m-symbol').value = pre.trim().toUpperCase();
+        setTimeout(() => { const n = $('#m-shares'); if (n) n.focus(); }, 100);
+      }
+    } catch (e) { /* noop */ }
 
     $('#m-side-buy').addEventListener('click', () => setSide('buy'));
     $('#m-side-sell').addEventListener('click', () => setSide('sell'));

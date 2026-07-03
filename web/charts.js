@@ -182,7 +182,9 @@
           a.reporting_currency + '</b>&nbsp;&nbsp;' + f.pct(a.weights[p.name])
       },
       legend: {
-        orient: 'vertical', right: 8, top: 'middle',
+        /* item 3 (2026-07-03): anchor the legend at 46% width instead of
+           right-edge so long sector lines never run under the donut. */
+        orient: 'vertical', left: '46%', top: 'middle',
         icon: 'rect', itemWidth: 10, itemHeight: 10,
         textStyle: { color: C.text, fontSize: 11, fontFamily: C.fontNum },
         formatter: (name) =>
@@ -190,7 +192,7 @@
           '  ' + f.pct(a.weights[name])
       },
       series: [{
-        type: 'pie', radius: ['52%', '76%'], center: ['32%', '50%'],
+        type: 'pie', radius: ['48%', '72%'], center: ['23%', '50%'],
         avoidLabelOverlap: true,
         itemStyle: { borderColor: C.panel, borderWidth: 2 },
         label: { show: false },

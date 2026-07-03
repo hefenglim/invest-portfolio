@@ -67,6 +67,18 @@
       .filter(Boolean).join('・');
     if (window.toast) window.toast('已加入 ' + resp.symbol, 'ok', label);
     await refresh();
+    /* item 6 (2026-07-03): 新增 → 買入 is the most common next step — offer the
+       handoff (input.html prefills via ?symbol=). 稍後 keeps the add-several flow. */
+    if (window.confirmDialog) {
+      window.confirmDialog({
+        title: '已加入 ' + resp.symbol + (resp.name ? ' ' + resp.name : ''),
+        body: '要現在記一筆買入嗎？（交易輸入將自動帶入代號）',
+        confirmLabel: '記一筆買入',
+        onConfirm: () => {
+          window.location.href = 'input.html?symbol=' + encodeURIComponent(resp.symbol);
+        }
+      });
+    }
   }
   $('#quick-add-btn').addEventListener('click', () => quickAdd(false));
   $('#new-symbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') quickAdd(false); });
