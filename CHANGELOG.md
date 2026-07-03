@@ -50,6 +50,41 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.8] - 2026-07-03
+
+Round 6 (all 8 user-approved items): the system now manages MONEY, not just
+stocks — per-account cash pools with a dedicated 資金管理 page — plus monthly
+KPI snapshots, an inbox badge, and a handful of daily-flow refinements.
+
+### Added
+- **Cash pools (item 7, user spec)** — the fifth ledger: ``cash_movements``
+  (入金/出金) + pure ``portfolio/cash.py`` balances per (account, currency):
+  deposits − withdrawals ± FX sides ± trade settlements + cash-family dividend
+  nets; opening inventory deliberately cash-neutral (record an initial deposit
+  to balance history); operational view only — XIRR untouched. New 資金管理
+  page manages all of it in one place (balance cards with negative-pool
+  highlighting, deposit/withdraw + FX forms, movements ledger with
+  edit/delete); dashboard gains a 各帳戶現金 mini panel; 換匯 entry moved here
+  from 交易輸入 (one guarded door; CSV bulk path unchanged).
+- **Negative-pool guard (item 2)** — the cash analog of the oversell guard:
+  any entry / FX conversion / edit / delete that would drive a pool below zero
+  answers 422 ``negative_cash`` (pure delta check, nothing written) until
+  explicitly acked; live-verified (schwab pool −184,000 → covering deposit →
+  conversion passed → USD pool math exact).
+- **月度 KPI 快照 (item 8)** — nightly job upserts the current month's row
+  (total value / return / rate / XIRR / by-currency); the value standing at
+  month rollover IS the month-end record; ``GET /api/snapshots`` + a 月度成績
+  dashboard panel (table lookup, no history replay).
+- **Inbox sidebar badge (item 4)** — pending dividend count on the 交易帳本
+  nav item, visible from every page.
+
+### Changed
+- 交易帳本 gains the 代號/名稱 search + date-range filters (item 1); the
+  sector donut legend no longer overlaps the chart (item 3); trade input
+  remembers the last-used account (item 5); one-step add offers a 記一筆買入
+  handoff with the symbol prefilled (item 6 — the reverse direction, entering
+  a trade for an unlisted symbol, already auto-registers since v0.1.4).
+
 ## [v0.1.7] - 2026-07-03
 
 Round 5: the dividend inbox goes all-market and self-feeding — and booking a MY
