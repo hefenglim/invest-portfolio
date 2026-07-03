@@ -35,6 +35,13 @@ CREATE TABLE IF NOT EXISTS opening_inventory (
     build_date TEXT NOT NULL,
     PRIMARY KEY (account_id, symbol)
 );
+CREATE TABLE IF NOT EXISTS cash_movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL, date TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ccy TEXT NOT NULL, amount TEXT NOT NULL,
+    note TEXT
+);
 """
 
 

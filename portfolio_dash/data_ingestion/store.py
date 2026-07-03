@@ -622,3 +622,101 @@ def delete_opening(conn: sqlite3.Connection, account_id: str, symbol: str) -> bo
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Cash movements (入金 / 出金) — the fifth ledger (2026-07-03, R6 item 7)
+# ---------------------------------------------------------------------------
+# Deposits/withdrawals per account+currency. Together with fx_conversions and
+# trade/dividend settlements they yield the per-account cash pools
+# (portfolio/cash.py). Same corrections discipline as the other ledgers.
+
+
+class StoredCashMovement(BaseModel):
+    """Pydantic model for a persisted cash_movements row."""
+
+    id: int
+    account_id: str
+    date: date
+    kind: str  # DEPOSIT | WITHDRAW
+    ccy: Currency
+    amount: Decimal
+    note: str | None = None
+
+
+def insert_cash_movement(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    move_date: date,
+    kind: str,
+    ccy: Currency,
+    amount: Decimal,
+    note: str | None = None,
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO cash_movements (account_id, date, kind, ccy, amount, note) "
+        "VALUES (?,?,?,?,?,?)",
+        (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note),
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def list_cash_movements(
+    conn: sqlite3.Connection, *, account_id: str | None = None
+) -> list[StoredCashMovement]:
+    where = ""
+    params: list[str] = []
+    if account_id is not None:
+        where = " WHERE account_id=?"
+        params = [account_id]
+    rows = conn.execute(
+        f"SELECT id, account_id, date, kind, ccy, amount, note "
+        f"FROM cash_movements{where} ORDER BY date ASC, id ASC",
+        params,
+    ).fetchall()
+    return [
+        StoredCashMovement(
+            id=r["id"], account_id=r["account_id"],
+            date=date.fromisoformat(r["date"]), kind=r["kind"],
+            ccy=Currency(r["ccy"]), amount=from_db(r["amount"]), note=r["note"],
+        )
+        for r in rows
+    ]
+
+
+def get_cash_movement(
+    conn: sqlite3.Connection, move_id: int
+) -> StoredCashMovement | None:
+    for m in list_cash_movements(conn):
+        if m.id == move_id:
+            return m
+    return None
+
+
+def update_cash_movement(
+    conn: sqlite3.Connection,
+    move_id: int,
+    *,
+    account_id: str,
+    move_date: date,
+    kind: str,
+    ccy: Currency,
+    amount: Decimal,
+    note: str | None = None,
+) -> bool:
+    cur = conn.execute(
+        "UPDATE cash_movements SET account_id=?, date=?, kind=?, ccy=?, amount=?, "
+        "note=? WHERE id=?",
+        (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note,
+         move_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_cash_movement(conn: sqlite3.Connection, move_id: int) -> bool:
+    cur = conn.execute("DELETE FROM cash_movements WHERE id=?", (move_id,))
+    conn.commit()
+    return cur.rowcount > 0
