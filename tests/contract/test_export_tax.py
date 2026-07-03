@@ -46,11 +46,14 @@ def test_export_tax_package(api_client: TestClient) -> None:
         assert "TWD" in summary
 
 
-def test_export_tax_writes_audit_row(api_client: TestClient, golden_db: sqlite3.Connection) -> None:
+def test_export_tax_no_job_runs_audit(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """2026-07-03: exports audit via 系統操作記錄, no job_runs rows (user decision)."""
     api_client.post("/api/export/tax-package", json={"year": 2026})
     row = golden_db.execute(
         "SELECT * FROM job_runs WHERE job_id = 'export:tax_package'").fetchone()
-    assert row is not None and row["status"] == "ok"
+    assert row is None
 
 
 def test_export_tax_bad_year_400(api_client: TestClient) -> None:

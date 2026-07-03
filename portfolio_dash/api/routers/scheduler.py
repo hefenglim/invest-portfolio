@@ -215,15 +215,23 @@ def list_runs(
     limit: int = 50,
     offset: int = 0,
 ) -> Any:
-    """§15.4 — run history (settings page + 15.3 completion polling), started_at DESC."""
+    """§15.4 — run history (settings page + 15.3 completion polling), started_at DESC.
+
+    Excludes ``export:*`` rows (2026-07-03, human decision): exports are user
+    actions recorded by the 系統操作記錄, not scheduler work — legacy rows written
+    before this change stay in the table but out of this view.
+    """
     if limit > _MAX_RUNS_LIMIT:
         return JSONResponse(
             status_code=400,
             content=error_body("validation_error", f"limit 不可超過 {_MAX_RUNS_LIMIT}",
                                field="limit"),
         )
-    where = "WHERE job_id = ?" if job_id is not None else ""
-    params: tuple[Any, ...] = (job_id,) if job_id is not None else ()
+    where = "WHERE job_id NOT LIKE 'export:%'"
+    params: tuple[Any, ...] = ()
+    if job_id is not None:
+        where += " AND job_id = ?"
+        params = (job_id,)
     total = conn.execute(
         f"SELECT COUNT(*) AS n FROM job_runs {where}", params
     ).fetchone()["n"]

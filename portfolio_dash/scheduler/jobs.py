@@ -759,23 +759,9 @@ def run_insight_func(insight_type_id: int, *, now: datetime, run_id: int) -> Non
         return
 
 
-def log_export_run(
-    conn: sqlite3.Connection, export_type: str, *, now: datetime, detail: str
-) -> int:
-    """Write a `job_runs` audit row for a completed export (spec 02 §3).
-
-    Exports are not registered jobs, so the row uses a namespaced ``job_id``
-    (``export:<type>``) rather than a ``kind`` column — spec 15.0 places ``kind`` on
-    ``schedule_config``, not ``job_runs``. ``started_at`` == ``finished_at`` (synchronous).
-    """
-    ts = now.isoformat()
-    cur = conn.execute(
-        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
-        "VALUES (?, ?, ?, 'ok', ?)",
-        (f"export:{export_type}", ts, ts, detail),
-    )
-    conn.commit()
-    return int(cur.lastrowid or 0)
+# log_export_run REMOVED (2026-07-03, human decision): exports are user actions,
+# recorded by the api-layer 系統操作記錄 middleware — not scheduler work. The runs
+# view filters legacy ``export:*`` rows.
 
 
 def _insight_payload(conn: sqlite3.Connection, job_id: str) -> int | None:

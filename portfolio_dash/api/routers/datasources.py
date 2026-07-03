@@ -254,16 +254,27 @@ def probe_source(source_id: str, api_key: str | None) -> tuple[bool, str | None]
 
 
 def _run_probe(source_id: str, api_key: str | None) -> tuple[str, int | None, str | None]:
-    """Run ``probe_source`` with latency timing; map exceptions to an error result."""
-    start = time.monotonic()
-    try:
-        ok, detail = probe_source(source_id, api_key)
-    except Exception as exc:  # noqa: BLE001 - any probe failure is a valid "error" result
-        return "error", None, str(exc) or exc.__class__.__name__
-    latency_ms = int((time.monotonic() - start) * 1000)
-    if ok:
-        return "ok", latency_ms, detail
-    return "error", None, detail
+    """Run ``probe_source`` with latency timing; map exceptions to an error result.
+
+    One retry (2026-07-03, human sign-off): TWSE/twstock probes fail transiently
+    from the VM (rate limits / momentary refusals) even though the fetch chain
+    degrades fine — a single second attempt keeps the health light honest without
+    hammering the source.
+    """
+    last_detail: str | None = None
+    for attempt in (1, 2):
+        start = time.monotonic()
+        try:
+            ok, detail = probe_source(source_id, api_key)
+        except Exception as exc:  # noqa: BLE001 - any probe failure is a valid "error"
+            ok, detail = False, str(exc) or exc.__class__.__name__
+        if ok:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            return "ok", latency_ms, detail
+        last_detail = detail
+        if attempt == 1:
+            time.sleep(1.5)
+    return "error", None, last_detail
 
 
 @router.post("/datasources/{source_id}/test")
