@@ -1614,6 +1614,8 @@ details.freshness > summary > span:not(.sum-chips) {
 
   /* --- overflow stragglers found by the 390px probe --- */
   .segmented { flex-wrap: wrap; }              /* 5-tab bars wrap instead of pushing */
-  table.ccyret { display: block; overflow-x: auto; max-width: 100%; }  /* 幣別報酬小表 */
+  .ccyret-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .ds-section { overflow-x: auto; -webkit-overflow-scrolling: touch; } /* 資料源清單表 */
+  .freshness summary { flex-wrap: wrap; }      /* 折分/新鮮度標頭 chips 換行 */
+  .freshness summary .chips { flex-wrap: wrap; }
 }
