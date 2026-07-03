@@ -284,6 +284,36 @@ def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     return _summarize(summary)
 
 
+# --- 待確認匯入 daily scan (R5 item 2, 2026-07-03) ------------------------------
+# The full scan (event refresh + PENDING COUNT) lives in the api layer
+# (api/dividend_inbox.scan_job) and is registered here at app startup — the same
+# runner seam the insight jobs use, so scheduler/ never imports api/. A
+# scheduler-only process without the runner falls back to the event refresh
+# (the inbox computes on read, so items still appear).
+DividendScanRunner = Callable[..., str]
+_DIVIDEND_SCAN_RUNNER: DividendScanRunner | None = None
+
+
+def register_dividend_scan_runner(fn: DividendScanRunner | None) -> None:
+    """Register (or clear with None) the dividend-inbox scan runner (app wiring seam)."""
+    global _DIVIDEND_SCAN_RUNNER
+    _DIVIDEND_SCAN_RUNNER = fn
+
+
+def dividend_inbox_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily: refresh dividend events for acquired symbols + report pending count."""
+    runner = _DIVIDEND_SCAN_RUNNER
+    if runner is not None:
+        return str(runner(conn, now=now))
+    acq = earliest_acquisitions(conn)
+    instruments, _ = build_worklist(conn, None)
+    refs = [r for r in instruments if r.symbol in acq]
+    if not refs:
+        return "no acquired symbols"
+    summary = refresh_dividends(conn, default_registry(conn), refs, now=now)
+    return _summarize(summary)
+
+
 # --- External-snapshot ingest jobs (spec 20.4) --------------------------------
 # Map each ingest job to the data source whose health it escalates on a fail streak.
 _INGEST_JOB_SOURCE: dict[str, str] = {
@@ -534,6 +564,11 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "dividends_daily", dividends_daily, "0 3 * * *", "Asia/Taipei", True,
         "Daily dividend/ex-div sweep",
+    ),
+    # 待確認匯入 feeder (R5): post-close, after the quote refreshes settle.
+    JobSpec(
+        "dividend_inbox_scan", dividend_inbox_scan, "30 15 * * mon-fri", "Asia/Taipei",
+        True, "Dividend detection sweep + pending count (feeds 待確認匯入)",
     ),
     # External-snapshot ingest (spec 20.4).
     JobSpec(

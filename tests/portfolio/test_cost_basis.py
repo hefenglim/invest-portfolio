@@ -225,3 +225,17 @@ def test_realized_row_carries_sell_date() -> None:
     book = build_book(txs, [], [], inst)
     assert len(book.realized.rows) == 1
     assert book.realized.rows[0].sell_date == date(2026, 5, 20)
+
+
+def test_net_dividend_reduces_adjusted_like_cash() -> None:
+    """Regression (2026-07-03): NET (MY 單層淨額) is CASH-family — it must reduce
+    adjusted cost, NOT fall into the shares-branch (which raised
+    "requires reinvest_shares" and crashed every rebuild that held a MY dividend)."""
+    txs = [_buy("AAPL", "10", "100", date(2025, 1, 1))]
+    divs = [Dividend(account_id="a", symbol="AAPL", date=date(2025, 3, 1),
+                     type=DividendType.NET, gross=Decimal("30"),
+                     withholding=Decimal("0"), net=Decimal("30"))]
+    book = build_book(txs, divs, [], INSTR)  # must not raise
+    h = book.holdings[0]
+    assert h.adjusted_cost_total == Decimal("970")   # 1000 - 30 net received
+    assert h.original_cost_total == Decimal("1000")  # never overwritten

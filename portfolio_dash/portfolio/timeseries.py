@@ -16,7 +16,7 @@ from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.enums import DividendType, Side
+from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
 
 _ZERO = Decimal("0")
@@ -95,7 +95,7 @@ def daily_value_series(
         else:
             flows.append((t.trade_date, quote_ccy(t.symbol), -(gross - t.fees - t.tax)))
     for dv in dividends:
-        if dv.type is DividendType.CASH:
+        if dv.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY) — one definition
             flows.append((dv.date, quote_ccy(dv.symbol), -dv.net))
 
     # Convert each flow at its own date's carry-forward FX; bail honestly if any

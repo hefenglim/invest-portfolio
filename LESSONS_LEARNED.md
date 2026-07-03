@@ -52,6 +52,16 @@ prevents recurrence.
   test that creates a degraded-but-legal ledger state should end by asserting the
   dashboard still answers 200.
 
+- **An enum member nobody exercised end-to-end is a landmine (2026-07-03):**
+  ``DividendType.NET`` (馬股單層淨額) existed since the schema, was bookable via
+  CSV import, and CRASHED every rebuild (cost_basis routed non-CASH to the
+  shares-branch → "requires reinvest_shares" ValueError → dashboard 500) — plus
+  trend/XIRR silently dropped NET cashflows. Found only when the dividend inbox
+  expansion booked one for real. Fixes: ONE definition
+  (``shared.models.enums.CASH_DIVIDEND_TYPES``) used by all three replay sites;
+  rule: when adding an enum member, grep every ``is Enum.X`` dispatch over that
+  enum and cover the new member with an end-to-end (book → rebuild) test.
+
 - **JS `+` on Decimal-string wire values concatenates, then renders NaN
   (2026-07-03):** the currency-composition panel summed `holdings[].weight`
   (Decimal STRINGS) with `+` — one holding per currency parsed by luck, two+

@@ -68,16 +68,20 @@
       head.appendChild(el('span', 'sym-code', symbol));
       head.appendChild(el('span', 'sym-name', items[0].name));
       head.appendChild(el('span', 'inbox-count-badge', String(items.length) + ' 筆'));
+      const confirmables = items.filter((x) => x.confirmable !== false);
       const groupBtn = el('button', 'btn', '全部確認');
       groupBtn.type = 'button';
+      if (!confirmables.length) { groupBtn.disabled = true; groupBtn.title = '本組暫無可入帳項目'; }
       groupBtn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!confirmables.length) return;
         window.confirmDialog({
           title: '批次確認入帳 — ' + symbol,
-          body: '將 ' + items.length + ' 筆偵測到的配息寫入股利帳本（金額由後端依除息日持股重新計算）。',
+          body: '將 ' + confirmables.length + ' 筆偵測到的配息寫入股利帳本（金額由後端依除息日持股重新計算）。',
           confirmLabel: '全部確認',
-          onConfirm: () => act('confirm', items.map((x) => x.fingerprint), symbol + ' ×' + items.length)
+          onConfirm: () => act('confirm', confirmables.map((x) => x.fingerprint),
+            symbol + ' ×' + confirmables.length)
         });
       });
       head.appendChild(groupBtn);
@@ -87,21 +91,52 @@
         const item = el('div', 'inbox-item');
         item.appendChild(el('span', 'src-badge', r.source));
         const main = el('div', 'inbox-main');
+        const KIND_TITLE = {
+          cash: '偵測到配息', drip: '偵測到配息（DRIP 再投資）',
+          net: '偵測到配息（淨額）', stock: '偵測到配股',
+        };
         main.appendChild(el('span', 'inbox-title',
-          '偵測到配息：' + r.symbol + ' ' + r.name + '（' + r.account_name + '）'));
-        main.appendChild(el('span', 'inbox-sub',
-          '除息日 ' + f.date(r.ex_date) + '・每股 ' + f.price(r.per_share, r.ccy) +
-          '・除息時持有 ' + f.num(r.shares_held) + ' 股 → 預估現金股利 ' +
-          f.money(r.est_gross, r.ccy) + ' ' + r.ccy));
+          (KIND_TITLE[r.kind] || '偵測到配息') + '：' + r.symbol + ' ' + r.name +
+          '（' + r.account_name + '）'));
+        let sub;
+        if (r.kind === 'stock') {
+          sub = '除息日 ' + f.date(r.ex_date) + '・股票股利 ' + r.per_share +
+            ' 元（面額制）・除權時持有 ' + f.num(r.shares_held) + ' 股 → 預估配得 ' +
+            f.num(r.est_reinvest_shares, 2) + ' 股（$0 成本）';
+        } else if (r.kind === 'drip') {
+          sub = '除息日 ' + f.date(r.ex_date) + '・每股 ' + f.price(r.per_share, r.ccy) +
+            '・持有 ' + f.num(r.shares_held) + ' 股 → Gross ' +
+            f.money(r.est_gross, r.ccy) + '・預扣 30% → Net ' + f.money(r.est_net, r.ccy) +
+            (r.est_reinvest_price != null
+              ? '・估再投資 ' + f.num(r.est_reinvest_shares, 4) + ' 股 @ ' +
+                f.price(r.est_reinvest_price, r.ccy) + '（估值，入帳後可編輯）'
+              : '');
+        } else {
+          sub = '除息日 ' + f.date(r.ex_date) + '・每股 ' + f.price(r.per_share, r.ccy) +
+            '・除息時持有 ' + f.num(r.shares_held) + ' 股 → 預估現金股利 ' +
+            f.money(r.est_gross, r.ccy) + ' ' + r.ccy;
+        }
+        main.appendChild(el('span', 'inbox-sub', sub));
+        const RULE = {
+          cash: '入帳後依台股模式沖減調整成本',
+          drip: 'DRIP：淨額以 $0 成本股數入帳，調整均價下降',
+          net: '馬股單層淨額入帳，沖減調整成本',
+          stock: '配股：新增 $0 成本股數，調整均價下降',
+        };
         main.appendChild(el('span', 'inbox-rule',
-          '入帳後依帳戶股利模式沖減調整成本；金額入帳日為' +
+          (r.note ? r.note + '；' : '') + (RULE[r.kind] || '') + '；入帳日為' +
           (r.pay_date ? '發放日 ' + f.date(r.pay_date) : '除息日') + '。'));
         item.appendChild(main);
         const acts = el('div', 'inbox-actions');
         const ok = el('button', 'btn btn-primary', '確認入帳');
         ok.type = 'button';
-        ok.addEventListener('click', () => act('confirm', [r.fingerprint],
-          r.symbol + ' ' + f.date(r.ex_date)));
+        if (r.confirmable === false) {
+          ok.disabled = true;
+          ok.title = r.note || '暫不可入帳';
+        } else {
+          ok.addEventListener('click', () => act('confirm', [r.fingerprint],
+            r.symbol + ' ' + f.date(r.ex_date)));
+        }
         const sk = el('button', 'btn', '略過');
         sk.type = 'button';
         sk.addEventListener('click', () => act('skip', [r.fingerprint],

@@ -8,7 +8,7 @@ from decimal import Decimal
 from portfolio_dash.portfolio.results import Book, Holding, RealizedPnL, RealizedRow
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.enums import DividendType, Side
+from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
 
 _ZERO = Decimal("0")
@@ -129,7 +129,7 @@ def build_book(
                 raise ValueError(
                     f"dividend for unknown position {key} (no prior buy/opening inventory)"
                 )
-            if ev.type is DividendType.CASH:
+            if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
                 existing.adjusted_total -= ev.net
             else:  # DRIP / STOCK add shares at zero cost
                 if ev.reinvest_shares is None:

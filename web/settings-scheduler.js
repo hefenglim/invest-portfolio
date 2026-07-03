@@ -44,6 +44,7 @@
     quotes_my: '馬股報價＋匯率（收盤後）',
     history_daily: '日線歷史回補（近 7 天滾動）',
     dividends_daily: '股利／除息事件掃描',
+    dividend_inbox_scan: '配息偵測（餵入待確認匯入）',
     finmind_chips_daily: '台股籌碼（法人＋融資券）',
     finmind_valuation_daily: '台股估值（PER／PBR／殖利率）',
     finmind_fundamentals_monthly: '台股月營收＋財報（每月）',

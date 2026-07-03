@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from portfolio_dash.api import action_log
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
 from portfolio_dash.api.deps import get_conn
+from portfolio_dash.api.dividend_inbox import scan_job as dividend_scan_job
 from portfolio_dash.api.errors import register_error_handlers
 from portfolio_dash.api.insight_service import (
     evaluate_due as insight_evaluate_due,
@@ -55,6 +56,7 @@ from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
     ensure_scheduler_seeded,
     register_calibration_runner,
+    register_dividend_scan_runner,
     register_evaluation_runner,
     register_insight_runner,
 )
@@ -100,6 +102,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Wire the Loop-2/3 evolution runners (price-/master-bearing reads live in the api seam).
     register_evaluation_runner(insight_evaluate_due)
     register_calibration_runner(insight_generate_calibrations)
+    # 待確認匯入 daily scan (R5): full scan (events + pending count) via the api seam.
+    register_dividend_scan_runner(dividend_scan_job)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()

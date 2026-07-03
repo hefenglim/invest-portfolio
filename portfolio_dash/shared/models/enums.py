@@ -17,3 +17,10 @@ class DividendType(StrEnum):
     STOCK = "STOCK"
     DRIP = "DRIP"
     NET = "NET"
+
+
+# The cash-money dividend family (domain-ledger.md: TW cash AND MY single-tier
+# net both reduce adjusted cost and count as XIRR inflows). ONE definition for
+# every replay site — cost basis, trend deltas, XIRR — so they can never drift
+# (found 2026-07-03: NET fell into the shares-branch and crashed rebuilds).
+CASH_DIVIDEND_TYPES = frozenset({DividendType.CASH, DividendType.NET})
