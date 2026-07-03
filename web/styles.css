@@ -1620,4 +1620,7 @@ details.freshness > summary > span:not(.sum-chips) {
   .freshness summary .chips { flex-wrap: wrap; }
   .kpi-card { min-width: 0; overflow: hidden; }   /* 2-col KPIs clip, never push */
   .kpi-card .kpi-subline { white-space: normal; }
+  /* ECharts canvases initialize at pre-collapse width — clip until they resize */
+  .row-trend > .panel { min-width: 0; }
+  #trend-chart, #sector-chart, #dividend-chart { max-width: 100%; overflow: hidden; }
 }
