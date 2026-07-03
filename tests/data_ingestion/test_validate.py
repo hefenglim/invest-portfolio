@@ -93,3 +93,27 @@ def test_non_positive_qty_price_flagged(conn: sqlite3.Connection) -> None:
     issues = validate_transaction(conn, _inp("tw_broker", "2330", Side.BUY, "0", price="0"))
     kinds = {i.kind for i in issues}
     assert "non_positive_quantity" in kinds and "non_positive_price" in kinds
+
+
+def test_shares_on_counts_strictly_before_date(conn: sqlite3.Connection) -> None:
+    """Dividend entitlement (R4): events dated ON the cutoff do NOT count."""
+    from datetime import date as _date
+
+    from portfolio_dash.data_ingestion.holdings import shares_on
+
+    seed_accounts(conn)
+    conn.execute(
+        "INSERT INTO opening_inventory (account_id, symbol, shares, original_avg_cost, "
+        "original_cost_total, build_date) VALUES ('tw_broker','2330','500','450',"
+        "'225000','2026-01-02')")
+    _raw_tx(conn, "tw_broker", "2330", Side.BUY, "1000")      # 2026-01-01
+    conn.execute(
+        "INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax, "
+        "trade_date) VALUES ('tw_broker','2330','SELL','200','100','0','0','2026-03-01')")
+    conn.commit()
+    # cutoff 2026-01-02: only the 01-01 buy counts (opening ON the date excluded)
+    assert shares_on(conn, "tw_broker", "2330", before=_date(2026, 1, 2)) == Decimal("1000")
+    # cutoff 2026-02-01: opening + buy
+    assert shares_on(conn, "tw_broker", "2330", before=_date(2026, 2, 1)) == Decimal("1500")
+    # cutoff 2026-04-01: after the sell
+    assert shares_on(conn, "tw_broker", "2330", before=_date(2026, 4, 1)) == Decimal("1300")

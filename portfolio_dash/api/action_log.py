@@ -47,6 +47,8 @@ _LABELS: list[tuple[str, str, str]] = [
     ("POST", "/api/input/manual/commit", "手動交易寫入"),
     ("POST", "/api/import/commit", "匯入寫入（CSV / 單筆表單）"),
     ("POST", "/api/input/ai", "AI 輸入解析"),
+    ("POST", "/api/dividend-inbox/confirm", "配息確認入帳"),
+    ("POST", "/api/dividend-inbox/skip", "配息略過"),
     ("POST", "/api/instruments/quick", "一步新增標的"),
     ("POST", "/api/instruments/probe", "板別探測"),
     ("POST", "/api/instruments", "註冊標的"),

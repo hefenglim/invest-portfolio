@@ -1341,6 +1341,20 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
 /* ---------- 待確認匯入收件匣 ---------- */
 
 .inbox-list { display: flex; flex-direction: column; gap: 8px; padding: 10px var(--pad) 14px; }
+/* symbol groups (2026-07-03 R4: long backfills stay manageable) */
+.inbox-group {
+  border: 1px solid var(--border-soft); border-radius: var(--radius);
+  background: var(--panel-2); padding: 4px 10px 8px;
+}
+.inbox-group-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 4px; cursor: pointer; font-size: 12px; list-style: none;
+}
+.inbox-group-head::-webkit-details-marker { display: none; }
+.inbox-group-head::before { content: "▸"; color: var(--text-3); font-size: 10px; }
+.inbox-group[open] > .inbox-group-head::before { content: "▾"; }
+.inbox-group-head .btn { margin-left: auto; font-size: 10px; padding: 2px 10px; }
+.inbox-group .inbox-item { margin: 4px 0; }
 .inbox-item {
   display: flex; align-items: center; gap: 14px;
   background: var(--panel-2);

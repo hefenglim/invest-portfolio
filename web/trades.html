@@ -232,36 +232,11 @@
   <section class="panel" id="inbox-section" data-screen-label="待確認匯入">
     <div class="panel-head">
       <h2 class="panel-title">待確認匯入</h2>
-      <span class="inbox-count-badge" id="inbox-count">2</span>
-      <span class="panel-sub">自動偵測結果需你確認後才寫入帳本 — 絕不自動入帳</span>
+      <span class="inbox-count-badge" id="inbox-count">0</span>
+      <span class="panel-sub">FinMind 配息偵測（自每檔持倉最早取得日起）— 需你確認後才寫入帳本，絕不自動入帳</span>
     </div>
-    <div class="inbox-list" id="inbox-list">
-      <div class="inbox-item">
-        <span class="src-badge">FinMind</span>
-        <div class="inbox-main">
-          <span class="inbox-title">偵測到新配息：0056 元大高股息</span>
-          <span class="inbox-sub">除息日 2026-07-16・每股 NT$1.07・持有 10,000 股 → 預估現金股利 NT$10,700</span>
-          <span class="inbox-rule">入帳後依「台灣券商」股利模式沖減調整成本：調整均價 34.85 → 約 33.78</span>
-        </div>
-        <div class="inbox-actions">
-          <button type="button" class="btn btn-primary inbox-accept" data-title="0056 配息">確認入帳</button>
-          <button type="button" class="btn inbox-skip">略過</button>
-        </div>
-      </div>
-      <div class="inbox-item">
-        <span class="src-badge">Schwab</span>
-        <div class="inbox-main">
-          <span class="inbox-title">偵測到 DRIP 再投資：AAPL</span>
-          <span class="inbox-sub">2026-06-10・Gross $7.50・預扣 30% → Net $5.25・再投資 0.0248 股 @ $211.40</span>
-          <span class="inbox-rule">DRIP：淨額計入成本並增加股數，調整均價不變</span>
-        </div>
-        <div class="inbox-actions">
-          <button type="button" class="btn btn-primary inbox-accept" data-title="AAPL DRIP">確認入帳</button>
-          <button type="button" class="btn inbox-skip">略過</button>
-        </div>
-      </div>
-    </div>
-    <div class="inbox-note">來源：排程偵測（FinMind 配息・Schwab 交易）。確認後以一般規則寫入帳本並留下來源註記；略過的項目不會再次提示。（設計預覽 — 後端自動匯入完工後生效）</div>
+    <div class="inbox-list" id="inbox-list"></div>
+    <div class="inbox-note">確認後寫入股利帳本並依帳戶股利模式沖減調整成本；略過的項目不會再次提示。金額由後端依「除息日前持有股數 × 每股配息」重新計算，帳本列可再編輯。</div>
   </section>
 
   <section class="panel ledger-section" data-screen-label="帳本記錄">
@@ -317,6 +292,7 @@
 <script src="alerts.js"></script>
 <script src="input.js"></script>
 <script src="ledger.js"></script>
+<script src="inbox.js"></script>
 <script>
 /* glue: collapse toggle */
 document.getElementById('input-toggle').addEventListener('click', function (e) {
@@ -356,31 +332,7 @@ document.getElementById('tab-tx').click();
     };
   }));
 })();
-/* glue: 待確認匯入收件匣 */
-(function () {
-  var section = document.getElementById('inbox-section');
-  if (!section) return;
-  function refreshCount() {
-    var left = section.querySelectorAll('.inbox-item').length;
-    document.getElementById('inbox-count').textContent = String(left);
-    if (!left) {
-      var empty = document.createElement('div');
-      empty.className = 'inbox-note';
-      empty.textContent = '目前沒有待確認項目 — 排程偵測到新配息或交易時會出現在這裡。';
-      document.getElementById('inbox-list').appendChild(empty);
-    }
-  }
-  section.addEventListener('click', function (e) {
-    var accept = e.target.closest('.inbox-accept');
-    var skip = e.target.closest('.inbox-skip');
-    if (!accept && !skip) return;
-    var item = e.target.closest('.inbox-item');
-    if (accept && window.toast) window.toast('已確認入帳：' + accept.dataset.title, 'ok', '寫入股利帳本並重算調整成本（設計預覽）');
-    if (skip && window.toast) window.toast('已略過', 'ok', '此項目不會再次提示');
-    item.remove();
-    refreshCount();
-  });
-})();
+/* 待確認匯入收件匣：真實接線在 inbox.js（2026-07-03, R4）。 */
 /* glue: on confirm write — flash new row in ledger */
 var origConfirm = document.getElementById('m-confirm');
 if (origConfirm) {
