@@ -21,5 +21,8 @@ class ProviderBase:
     def fetch_fx(self, pairs: list[FxPair]) -> list[FxRow]:
         raise NotImplementedError
 
+    def fetch_fx_history(self, pair: FxPair, start: date) -> list[FxRow]:
+        raise NotImplementedError
+
     def fetch_dividends(self, instruments: list[InstrumentRef]) -> list[DividendEvent]:
         raise NotImplementedError

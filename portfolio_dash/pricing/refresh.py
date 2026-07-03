@@ -64,6 +64,26 @@ def refresh_history(
     return RefreshSummary(ok=sources, failed=failed, fetched_at=now)
 
 
+def refresh_fx_history(
+    conn: sqlite3.Connection,
+    registry: Registry,
+    pairs: list[FxPair],
+    start: date,
+    *,
+    now: datetime,
+) -> RefreshSummary:
+    """Fetch historical daily FX rates via ``registry`` from ``start``, upsert, summarize.
+
+    Backfills the reporting-currency pairs so the trend replay and XIRR have a
+    rate on-or-before EVERY ledger flow date (2026-07-03, R4 item 2). Same
+    graceful-degradation contract as the quote history refresh.
+    """
+    rows, sources, failed = registry.fetch_fx_history(pairs, start)
+    if rows:
+        upsert_fx(conn, rows, fetched_at=now)
+    return RefreshSummary(ok=sources, failed=failed, fetched_at=now)
+
+
 def refresh_dividends(
     conn: sqlite3.Connection,
     registry: Registry,

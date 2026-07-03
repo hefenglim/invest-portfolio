@@ -36,9 +36,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_CCY = {Market.TW: Currency.TWD, Market.US: Currency.USD, Market.MY: Currency.MYR}
 
-# Initial history window (2026-07-02, user decision): ~3 months of daily closes so a
-# freshly added symbol renders a meaningful drawer chart immediately.
-HISTORY_BACKFILL_DAYS = 92
+# Initial history window (2026-07-03, user decision — supersedes the 92-day round-2
+# value): 12 months of daily closes. A freshly added symbol has no position yet, so
+# the default window applies; positions predating 12 months get their fuller window
+# through the smart backfill action (scheduler.jobs.backfill_history_all).
+HISTORY_BACKFILL_DAYS = 365
 
 
 class QuickRegisterError(Exception):

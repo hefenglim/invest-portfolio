@@ -9,14 +9,19 @@ import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from portfolio_dash.llm_insight import alerts_bridge
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.pricing import datasources_store, ingest
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
-from portfolio_dash.pricing.refresh import refresh_dividends, refresh_history, refresh_quotes
+from portfolio_dash.pricing.refresh import (
+    refresh_dividends,
+    refresh_fx_history,
+    refresh_history,
+    refresh_quotes,
+)
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.shared import config_store
@@ -624,18 +629,86 @@ def refresh_instrument_quote(
     return _summarize(summary)
 
 
-def backfill_history_all(conn: sqlite3.Connection, *, days: int, now: datetime) -> str:
-    """Backfill *days* of daily close history for ALL instruments (manual action).
+# Smart backfill windows (2026-07-03, R4 item 2, human decision): default 12
+# months; a symbol whose position began EARLIER backfills from its first
+# acquisition date; the FX pairs backfill from the earliest ledger flow date —
+# so the trend replay / XIRR have a rate on-or-before every flow.
+_BACKFILL_DEFAULT_DAYS = 365
 
-    Used by ``POST /api/actions/backfill-history`` so EXISTING instruments get the
-    3-month presentation window immediately (newly registered symbols get theirs at
-    registration; the daily cron only maintains a 7-day rolling window). Idempotent
-    upserts; per-symbol failures degrade into the summary, never raise.
+
+def earliest_acquisitions(conn: sqlite3.Connection) -> dict[str, date]:
+    """Per-symbol earliest acquisition date: min(first BUY trade, opening build)."""
+    out: dict[str, date] = {}
+    for row in conn.execute(
+        "SELECT symbol, MIN(trade_date) AS d FROM transactions "
+        "WHERE side='BUY' GROUP BY symbol"
+    ):
+        out[row["symbol"]] = date.fromisoformat(row["d"])
+    for row in conn.execute(
+        "SELECT symbol, MIN(build_date) AS d FROM opening_inventory GROUP BY symbol"
+    ):
+        d = date.fromisoformat(row["d"])
+        if row["symbol"] not in out or d < out[row["symbol"]]:
+            out[row["symbol"]] = d
+    return out
+
+
+def earliest_ledger_flow(conn: sqlite3.Connection) -> date | None:
+    """The earliest dated flow across all four ledgers (None on an empty ledger)."""
+    dates: list[str] = []
+    for sql in (
+        "SELECT MIN(trade_date) AS d FROM transactions",
+        "SELECT MIN(date) AS d FROM dividends",
+        "SELECT MIN(date) AS d FROM fx_conversions",
+        "SELECT MIN(build_date) AS d FROM opening_inventory",
+    ):
+        row = conn.execute(sql).fetchone()
+        if row is not None and row["d"]:
+            dates.append(row["d"])
+    return date.fromisoformat(min(dates)) if dates else None
+
+
+def backfill_history_all(
+    conn: sqlite3.Connection, *, now: datetime, days: int | None = None
+) -> str:
+    """Backfill daily close history for ALL instruments + the reporting FX pairs.
+
+    ``days=None`` (the default, 2026-07-03 decision) uses the SMART windows:
+    12 months back, extended per symbol to its first acquisition date when that
+    is older, and for FX to the earliest ledger flow date. An explicit ``days``
+    keeps the old uniform-window behavior. Idempotent upserts; per-key failures
+    degrade into the summary, never raise.
     """
-    instruments, _ = build_worklist(conn, None)
-    start = (now - timedelta(days=days)).date()
-    summary = refresh_history(conn, default_registry(conn), instruments, start, now=now)
-    return _summarize(summary)
+    instruments, fx_pairs = build_worklist(conn, None)
+    registry = default_registry(conn)
+    default_start = (now - timedelta(days=days or _BACKFILL_DEFAULT_DAYS)).date()
+
+    if days is not None:
+        p_summary = refresh_history(conn, registry, instruments, default_start, now=now)
+        f_summary = refresh_fx_history(conn, registry, fx_pairs, default_start, now=now)
+        return f"prices: {_summarize(p_summary)} · fx: {_summarize(f_summary)}"
+
+    acq = earliest_acquisitions(conn)
+    by_start: dict[date, list[InstrumentRef]] = {}
+    for ref in instruments:
+        first = acq.get(ref.symbol)
+        start = min(default_start, first) if first is not None else default_start
+        by_start.setdefault(start, []).append(ref)
+    p_ok: dict[str, str] = {}
+    p_failed: list[str] = []
+    for start, refs in sorted(by_start.items()):
+        s = refresh_history(conn, registry, refs, start, now=now)
+        p_ok.update(s.ok)
+        p_failed.extend(s.failed)
+    p_summary = RefreshSummary(ok=p_ok, failed=p_failed, fetched_at=now)
+
+    flow = earliest_ledger_flow(conn)
+    fx_start = min(default_start, flow) if flow is not None else default_start
+    f_summary = refresh_fx_history(conn, registry, fx_pairs, fx_start, now=now)
+    return (
+        f"prices: {_summarize(p_summary)} · fx(from {fx_start.isoformat()}): "
+        f"{_summarize(f_summary)}"
+    )
 
 
 def _jobs_by_id() -> dict[str, JobSpec]:

@@ -71,15 +71,18 @@
   $('#quick-add-btn').addEventListener('click', () => quickAdd(false));
   $('#new-symbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') quickAdd(false); });
 
-  /* ---- 3-month history backfill for ALL instruments (drawer-chart data) ---- */
+  /* ---- smart history backfill (2026-07-03): prices 12mo (or since a position's
+     first acquisition when older) + the reporting FX pairs since the earliest
+     ledger flow — so drawer charts, the trend line, and XIRR are complete. ---- */
   $('#backfill-btn').addEventListener('click', async () => {
     const btn = $('#backfill-btn');
     const restore = window.pdBusy ? window.pdBusy(btn, '回補中…') : () => {};
     const prog = window.toastProgress
-      ? window.toastProgress('歷史回補中…', '正在為所有標的抓取近 3 個月日線（可能需要十餘秒）')
+      ? window.toastProgress('歷史回補中…',
+        '個股：12 個月（持倉自最早買入日）＋匯率：自帳本最早一筆 — 可能需要一分鐘')
       : { done: () => {}, fail: () => {} };
     try {
-      const resp = await window.pdApi.post('/api/actions/backfill-history', { days: 92 });
+      const resp = await window.pdApi.post('/api/actions/backfill-history', {});
       prog.done('歷史回補完成', (resp && resp.detail) || '');
     } catch (err) {
       prog.fail('歷史回補失敗', (err && err.message) || '請稍後再試');

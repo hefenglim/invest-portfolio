@@ -97,6 +97,21 @@ class YFinanceProvider(ProviderBase):
                     break
         return out
 
+    def fetch_fx_history(self, pair: FxPair, start: date) -> list[FxRow]:
+        df = yf.Ticker(f"{pair.base.value}{pair.quote.value}=X").history(
+            start=start.isoformat(), auto_adjust=False)
+        if df is None or df.empty:
+            return []
+        rows: list[FxRow] = []
+        for ts, rate in df["Close"].items():
+            fr = _finite(rate)
+            if fr is None:
+                continue
+            rows.append(FxRow(base=pair.base, quote=pair.quote, as_of=ts.date(),
+                              rate=fr, source=self.name))
+        rows.sort(key=lambda r: r.as_of)
+        return rows
+
     def fetch_dividends(self, instruments: list[InstrumentRef]) -> list[DividendEvent]:
         out: list[DividendEvent] = []
         for ref in instruments:

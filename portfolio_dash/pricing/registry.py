@@ -129,3 +129,31 @@ class Registry:
                     sources[key] = provider.name
                     del remaining[key]
         return rows, sources, list(remaining.keys())
+
+    def fetch_fx_history(
+        self, pairs: list[FxPair], start: date,
+    ) -> tuple[list[FxRow], dict[str, str], list[str]]:
+        """Historical daily FX rates from ``start`` per pair (mirrors quote history).
+
+        Same graceful-degradation contract: per-pair provider fall-through, failed
+        pairs recorded, never raised.
+        """
+        rows: list[FxRow] = []
+        sources: dict[str, str] = {}
+        failed: list[str] = []
+        for pair in pairs:
+            key = f"{pair.base.value}{pair.quote.value}"
+            filled = False
+            for provider in self._chain(DataType.FX, None):
+                try:
+                    got = provider.fetch_fx_history(pair, start)
+                except Exception:  # noqa: BLE001 - any provider failure -> fall back
+                    continue
+                if got:
+                    rows.extend(got)
+                    sources[key] = provider.name
+                    filled = True
+                    break
+            if not filled:
+                failed.append(key)
+        return rows, sources, failed

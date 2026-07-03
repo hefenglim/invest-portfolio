@@ -47,7 +47,7 @@ def refresh_quotes_action(
 
 
 class BackfillBody(BaseModel):
-    days: int = 92  # default = the 3-month presentation window
+    days: int | None = None  # None = smart windows (12mo / first-acquisition / ledger)
 
 
 @router.post("/actions/backfill-history", status_code=200)
@@ -56,12 +56,14 @@ def backfill_history(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    """Backfill daily close history for ALL instruments (manual, idempotent).
+    """Backfill price + FX history for ALL instruments (manual, idempotent).
 
-    Gives existing instruments the ~3-month drawer-chart window immediately; newly
-    registered symbols get theirs at registration. Clamped to [1, 730] days.
+    Default (days omitted, 2026-07-03 decision): SMART windows — 12 months back,
+    extended per symbol to its first acquisition date when older, and FX pairs
+    from the earliest ledger flow date. Explicit ``days`` = uniform window,
+    clamped to [1, 3650].
     """
-    days = max(1, min(body.days, 730))
+    days = max(1, min(body.days, 3650)) if body.days is not None else None
     detail = backfill_history_all(conn, days=days, now=now)
     return {"days": days, "detail": detail}
 
