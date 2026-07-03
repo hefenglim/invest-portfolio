@@ -255,6 +255,31 @@
     sb.appendChild(col);
   }
 
+  /* ---- mobile nav drawer (R7, layout only): hamburger toggles the off-canvas
+     sidebar; backdrop / nav click closes. Hidden on desktop via CSS. ---- */
+  function pdInitMobileNav(tbEl) {
+    if (!sb || !tbEl) return;
+    const navBtn = el('button', 'btn-refresh', '☰');
+    navBtn.id = 'mobile-nav-btn';
+    navBtn.type = 'button';
+    navBtn.title = '選單';
+    let backdrop = null;
+    const closeNav = () => {
+      sb.classList.remove('mobile-open');
+      if (backdrop) { backdrop.remove(); backdrop = null; }
+    };
+    navBtn.addEventListener('click', () => {
+      if (sb.classList.contains('mobile-open')) { closeNav(); return; }
+      sb.classList.add('mobile-open');
+      backdrop = el('div', 'nav-backdrop');
+      backdrop.addEventListener('click', closeNav);
+      document.body.appendChild(backdrop);
+    });
+    sb.addEventListener('click', (e) => { if (e.target.closest('a')) closeNav(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNav(); });
+    tbEl.insertBefore(navBtn, tbEl.firstChild);
+  }
+
   /* ---- topbar ---- */
   const tb = document.getElementById('topbar');
   /* hooks the async session resolver calls once GET /api/auth/session returns. */
@@ -429,6 +454,7 @@
     uwrap.appendChild(av);
     uwrap.appendChild(umenu);
     tb.appendChild(uwrap);
+    pdInitMobileNav(tb);  // R7: hamburger first-child, CSS-hidden on desktop
   }
 
   /* ---- global symbol search (Cmd+K) ---- */

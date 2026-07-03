@@ -1546,3 +1546,66 @@ details.freshness > summary > span:not(.sum-chips) {
   .app-header { flex-wrap: wrap; }
   .sum-chips { display: none; }
 }
+
+/* ==================== Mobile layer (<=760px) — R7 2026-07-03 ====================
+   Layout only, zero functional change: the fixed 196px sidebar becomes an
+   off-canvas drawer behind a hamburger; every multi-column grid collapses;
+   tables scroll inside their own wrap (the page body never scrolls sideways);
+   iOS specifics: 16px inputs (no focus auto-zoom), touch-sized targets,
+   safe-area padding. Desktop is untouched. */
+#mobile-nav-btn { display: none; }
+
+@media (max-width: 760px) {
+  /* --- off-canvas sidebar drawer --- */
+  .shell { display: block; }
+  .sidebar {
+    position: fixed; top: 0; left: 0; height: 100dvh; width: 240px;
+    transform: translateX(-105%); transition: transform 0.2s ease;
+    z-index: 400; box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+  }
+  .sidebar.mobile-open { transform: none; }
+  /* neutralize the desktop collapse state inside the drawer */
+  .sidebar.collapsed { width: 240px; padding: 14px 10px 12px; }
+  .sidebar.collapsed .brand .full, .sidebar.collapsed .brand-ver { display: initial; }
+  .sidebar.collapsed .sb-item { padding: 12px 10px; justify-content: flex-start; }
+  .sidebar.collapsed .sb-item .label, .sidebar.collapsed .sb-item .sb-badge { display: inline; }
+  .sidebar .sb-item { padding: 12px 10px; font-size: 14px; }  /* touch targets */
+  .sb-collapse { display: none; }
+  .nav-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 390; }
+  #mobile-nav-btn { display: inline-flex; font-size: 16px; padding: 4px 10px; }
+
+  /* --- topbar wraps + compacts --- */
+  .topbar { flex-wrap: wrap; gap: 6px 8px; padding: 8px 10px; }
+  .search-btn kbd { display: none; }
+  .header-spacer { display: none; }
+
+  /* --- page scaffolding --- */
+  :root { --pad: 12px; --gap: 10px; }
+  .page { padding: 10px 8px calc(16px + env(safe-area-inset-bottom)); }
+
+  /* --- grids collapse (weekday calendar keeps its 7 columns) --- */
+  .kpi-band, .kpi-band.v2 { grid-template-columns: 1fr 1fr; }
+  .row-2, .row-trend, .fx-grid, .insight-grid, .fresh-body,
+  .cash-mini-grid, .cash-cards, .cash-forms, .fallback-grid,
+  .form-grid, .acct-grid, .roles-grid, .hc-grid, .score-band,
+  .dc-grid, .trades-layout, .billing-grid, .settings-layout,
+  .insight-grid-page { grid-template-columns: 1fr !important; }
+  .add-row { flex-direction: column; align-items: stretch; }
+  .add-row .field { min-width: 0; }
+
+  /* --- tables scroll inside their wrap, never the body --- */
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-wrap table { min-width: 640px; }
+
+  /* --- iOS input + touch ergonomics --- */
+  input.input, select.select, textarea.input { font-size: 16px; min-height: 40px; }
+  .btn { min-height: 38px; }
+  .segmented button { min-height: 36px; }
+  .chip { min-height: 30px; }
+  .pencil { min-width: 38px; min-height: 38px; }
+
+  /* --- overlays fit the screen --- */
+  .modal { width: calc(100vw - 20px); max-height: 88dvh; overflow-y: auto; }
+  .toast-host { left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); max-width: none; }
+  .search-box { width: calc(100vw - 24px); }
+}
