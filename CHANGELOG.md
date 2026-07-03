@@ -50,6 +50,48 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.6] - 2026-07-03
+
+Round 4 (user decisions on the round-3 report): the auto-import inbox becomes
+real, history backfill gets position-aware windows + FX history, export audits
+consolidate into the action log. Live-verified with REAL FinMind data (a genuine
+TSMC dividend detected, confirmed, and booked on the test instance) before
+promote.
+
+### Added
+- **FinMind 配息偵測 → 待確認匯入 for real** (decision A). Detection window per
+  TW symbol = its earliest acquisition date (first BUY or opening build) →
+  today; entitlement = shares held going INTO the ex-date (new dated
+  ``holdings.shares_on``, strictly-before rule). Items suppress themselves when
+  the dividend ledger already has a row within ±45 days of the ex-date or when
+  explicitly skipped (fingerprint persisted); the pending list is computed on
+  read — self-healing, nothing auto-written, 絕不自動入帳. CONFIRM recomputes
+  server-side and writes a CASH row (TW model: net = gross) dated
+  pay-date-else-ex-date. Endpoints: ``GET /api/dividend-inbox[?refresh=1]``
+  (targeted FinMind sweep) + bulk ``confirm``/``skip``; inbox UI groups by
+  symbol (collapsible, per-group 全部確認) with a 重新偵測 progress flow.
+  v1 scope: TW cash (US DRIP needs broker data; MY a small extension;
+  stock-only events excluded) — recorded as roadmap.
+- **Smart backfill windows** (item 2): prices default 12 months, extended per
+  symbol to its first acquisition date when older (watch-only symbols keep the
+  default); NEW FX-history backfill (USD/TWD, USD/MYR, MYR/TWD via yfinance
+  ``fetch_fx_history`` + registry/refresh seams) from the earliest ledger flow
+  date — the trend chart and XIRR now have a rate on-or-before every flow
+  (live-verified: the demo trend went from empty to 179 points). Registration
+  initial window 92d → 365d; ``backfill-history`` with explicit ``days`` keeps a
+  uniform window.
+
+### Changed
+- **Exports audit only in 系統操作記錄** (item 3): ``log_export_run`` removed;
+  ``GET /api/scheduler/runs`` filters legacy ``export:*`` rows — the 排程執行歷史
+  is a pure scheduler view again (double-recording gone).
+- **Datasource connection test retries once** (item 5, 1.5 s spacing): transient
+  TWSE/twstock probe failures from the VM stop tripping the health light; the
+  fetch chain itself always degraded correctly.
+- Ledger symbol/account editability stays as-is (item 4, decision A): guarded by
+  registration requirement + oversell replay + the in-modal impact warning, with
+  every correction traceable in the action log.
+
 ## [v0.1.5] - 2026-07-03
 
 Round 3 (user-directed, 12 items): input-center completion, ops observability
