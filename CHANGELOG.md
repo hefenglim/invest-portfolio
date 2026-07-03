@@ -50,6 +50,37 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.7] - 2026-07-03
+
+Round 5: the dividend inbox goes all-market and self-feeding — and booking a MY
+dividend for real exposed (and fixed) a core rebuild crash that had been latent
+since the schema was born.
+
+### Added
+- **All-market dividend detection** (R5 item 1): the inbox books per the
+  ACCOUNT dividend model — TW cash (as before) · **US DRIP** with 30%
+  withholding and an ESTIMATED reinvest (price = last stored close ≤ pay/ex
+  date, shares = net/price; clearly marked and ledger-editable; without a
+  stored price the item is not confirmable 缺再投資價) · **MY single-tier
+  NET** · **TW 配股** (股票股利 X 元面額制 → held × X/10 zero-cost shares;
+  cash+stock of one event are independent items with per-family ledger
+  suppression). Live-verified with real yfinance events: NVDA DRIP (withhold
+  1.50, reinvest 0.016 sh @ the real backfilled close) and Maybank NET 990
+  booked on the test instance.
+- **dividend_inbox_scan job** (R5 item 2): daily post-close sweep (runner seam —
+  scheduler never imports api) refreshing events for acquired symbols and
+  reporting the pending count in the run history (`… · 待確認 N 筆`), so the
+  inbox grows by itself.
+
+### Fixed
+- **CORE: `DividendType.NET` crashed every rebuild** — bookable via CSV since
+  the schema existed, but `cost_basis` routed every non-CASH type to the
+  shares-branch ("requires reinvest_shares" ValueError → dashboard 500), and
+  trend/XIRR silently dropped NET cashflows. Per domain-ledger.md, NET is
+  cash-family (reduces adjusted cost, counts as an XIRR inflow): ONE definition
+  (`shared.models.enums.CASH_DIVIDEND_TYPES`) now feeds all three replay sites;
+  regression tests book a NET row end-to-end (dashboard + recompute stay 200).
+
 ## [v0.1.6] - 2026-07-03
 
 Round 4 (user decisions on the round-3 report): the auto-import inbox becomes
