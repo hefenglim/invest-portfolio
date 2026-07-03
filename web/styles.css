@@ -1618,4 +1618,6 @@ details.freshness > summary > span:not(.sum-chips) {
   .ds-section { overflow-x: auto; -webkit-overflow-scrolling: touch; } /* 資料源清單表 */
   .freshness summary { flex-wrap: wrap; }      /* 折分/新鮮度標頭 chips 換行 */
   .freshness summary .chips { flex-wrap: wrap; }
+  .kpi-card { min-width: 0; overflow: hidden; }   /* 2-col KPIs clip, never push */
+  .kpi-card .kpi-subline { white-space: normal; }
 }
