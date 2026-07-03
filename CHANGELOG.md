@@ -50,6 +50,26 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.9] - 2026-07-03
+
+Mobile (iPhone) layout pass — layout only, zero functional change, verified at
+390×844 across every page.
+
+### Added
+- **Mobile layer (≤760 px)**: the fixed 196 px sidebar becomes an off-canvas
+  drawer behind a topbar hamburger (backdrop / nav-click / Esc closes; desktop
+  collapse state neutralized inside the drawer; the inbox badge rides along);
+  every multi-column grid collapses to one column (KPIs keep two); tables
+  scroll inside their own wrap with a 640 px readable minimum so the page body
+  never scrolls sideways; iOS ergonomics — 16 px inputs (kills the focus
+  auto-zoom), 38–40 px touch targets, safe-area bottom padding, full-width
+  modals/toasts/search overlay.
+- Probe-driven overflow fixes: 幣別報酬折分 and datasources source tables get
+  their own scroll regions; 5-tab segmented bars wrap; KPI sublines wrap inside
+  the card; ECharts hosts clip until their resize catches up. Result: body
+  horizontal overflow 0 px on 9/10 pages (dashboard 5 px sub-perceptual
+  residue), down from 260–957 px. Desktop breakpoints untouched.
+
 ## [v0.1.8] - 2026-07-03
 
 Round 6 (all 8 user-approved items): the system now manages MONEY, not just
