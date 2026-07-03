@@ -1606,6 +1606,14 @@ details.freshness > summary > span:not(.sum-chips) {
 
   /* --- overlays fit the screen --- */
   .modal { width: calc(100vw - 20px); max-height: 88dvh; overflow-y: auto; }
-  .toast-host { left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); max-width: none; }
+  .toast-host {
+    left: 10px; right: 10px; width: auto; max-width: none;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+  }
   .search-box { width: calc(100vw - 24px); }
+
+  /* --- overflow stragglers found by the 390px probe --- */
+  .segmented { flex-wrap: wrap; }              /* 5-tab bars wrap instead of pushing */
+  table.ccyret { display: block; overflow-x: auto; max-width: 100%; }  /* 幣別報酬小表 */
+  .ds-section { overflow-x: auto; -webkit-overflow-scrolling: touch; } /* 資料源清單表 */
 }
