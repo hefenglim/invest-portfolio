@@ -300,6 +300,26 @@ def register_dividend_scan_runner(fn: DividendScanRunner | None) -> None:
     _DIVIDEND_SCAN_RUNNER = fn
 
 
+# 月度快照 runner seam (R6 item 8) — the writer needs build_dashboard (portfolio
+# via the api service), registered at app startup like the other runners.
+SnapshotRunner = Callable[..., str]
+_SNAPSHOT_RUNNER: SnapshotRunner | None = None
+
+
+def register_snapshot_runner(fn: SnapshotRunner | None) -> None:
+    """Register (or clear with None) the monthly-snapshot runner (app wiring seam)."""
+    global _SNAPSHOT_RUNNER
+    _SNAPSHOT_RUNNER = fn
+
+
+def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily: upsert the current month's KPI snapshot (month-rollover = final)."""
+    runner = _SNAPSHOT_RUNNER
+    if runner is None:
+        return "no snapshot runner registered"
+    return str(runner(conn, now=now))
+
+
 def dividend_inbox_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Daily: refresh dividend events for acquired symbols + report pending count."""
     runner = _DIVIDEND_SCAN_RUNNER
@@ -569,6 +589,12 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "dividend_inbox_scan", dividend_inbox_scan, "30 15 * * mon-fri", "Asia/Taipei",
         True, "Dividend detection sweep + pending count (feeds 待確認匯入)",
+    ),
+    # 月度快照 (R6 item 8): nightly upsert of the current month's KPI row — the
+    # value standing at month rollover IS the month-end record.
+    JobSpec(
+        "snapshot_monthly", snapshot_monthly, "50 23 * * *", "Asia/Taipei", True,
+        "Monthly KPI snapshot (nightly upsert of the current month)",
     ),
     # External-snapshot ingest (spec 20.4).
     JobSpec(

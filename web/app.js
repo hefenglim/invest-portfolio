@@ -606,6 +606,45 @@
     }
   }
 
+  /* ============ I2. 月度成績 (R6 item 8) ============ */
+  async function renderSnapshots() {
+    const tbody = $('#snapshots-body');
+    if (!tbody) return;
+    let resp;
+    try {
+      resp = await window.pdApi.get('/api/snapshots', { limit: 12 });
+    } catch (err) {
+      return;  // non-critical panel: stay empty on failure
+    }
+    const rows = (resp && resp.rows) || [];
+    tbody.replaceChildren();
+    if (!rows.length) {
+      const tr = el('tr');
+      const td = el('td', 'sign-nil', '尚無快照 — 排程每晚 23:50 產生當月快照，月底值即定格。');
+      td.colSpan = 5;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      return;
+    }
+    rows.forEach((s) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'col-text num', s.month));
+      const cell = (v, pct) => {
+        const td = el('td', 'num');
+        if (v == null) { td.textContent = f.NULL_GLYPH; td.classList.add('sign-nil'); }
+        else td.textContent = pct ? f.signedPct(v) : f.money(v, s.reporting_ccy);
+        return td;
+      };
+      tr.appendChild(cell(s.total_value, false));
+      const ret = el('td', 'num ' + f.signClass(s.total_return));
+      ret.textContent = s.total_return == null ? f.NULL_GLYPH : f.signed(s.total_return, s.reporting_ccy);
+      tr.appendChild(ret);
+      tr.appendChild(cell(s.total_return_rate, true));
+      tr.appendChild(cell(s.xirr, true));
+      tbody.appendChild(tr);
+    });
+  }
+
   /* ============ F. 換匯損益 ============ */
   function renderFx() {
     const grid = $('#fx-grid');
@@ -1076,6 +1115,7 @@
     renderCurrencyView();
     renderFx();
     renderCashMini();
+    renderSnapshots();
     renderRealized();
     renderDividendChips();
     renderExDivCalendar();

@@ -13,6 +13,7 @@ from day one. This is operational cash tracking; it feeds NO return metric
 (XIRR stays trade-flow based per domain-ledger.md).
 """
 
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Protocol
 
@@ -58,10 +59,10 @@ class _DivRow(Protocol):
 
 
 def cash_balances(
-    movements: list[_MovementRow],
-    fx_conversions: list[_FxRow],
-    transactions: list[_TxRow],
-    dividends: list[_DivRow],
+    movements: Sequence[_MovementRow],
+    fx_conversions: Sequence[_FxRow],
+    transactions: Sequence[_TxRow],
+    dividends: Sequence[_DivRow],
     instruments: dict[str, Instrument],
 ) -> dict[tuple[str, Currency], Decimal]:
     """All (account, currency) pool balances, including zero/negative ones.

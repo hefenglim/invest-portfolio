@@ -325,6 +325,14 @@ button.is-busy {
 }
 @keyframes pd-spin { to { transform: rotate(360deg); } }
 
+/* 待確認匯入 sidebar badge (R6 item 4) */
+.sb-badge-alert {
+  color: #fff !important;
+  background: var(--accent);
+  border-color: var(--accent) !important;
+  font-weight: 700;
+}
+
 /* dashboard 各帳戶現金 mini cards (R6 item 7) */
 .cash-mini { padding: 10px var(--pad) 14px; display: flex; flex-direction: column; gap: 8px; }
 .cash-mini-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); }

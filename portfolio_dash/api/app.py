@@ -40,11 +40,13 @@ from portfolio_dash.api.routers import (
     llm_settings,
     prompts,
     scheduler,
+    snapshots_router,
     strategy,
     symbol,
     system_log,
     users,
 )
+from portfolio_dash.api.snapshots import snapshot_job
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
@@ -60,6 +62,7 @@ from portfolio_dash.scheduler.jobs import (
     register_dividend_scan_runner,
     register_evaluation_runner,
     register_insight_runner,
+    register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.db import session
@@ -105,6 +108,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_calibration_runner(insight_generate_calibrations)
     # 待確認匯入 daily scan (R5): full scan (events + pending count) via the api seam.
     register_dividend_scan_runner(dividend_scan_job)
+    # 月度快照 (R6 item 8): nightly current-month KPI upsert via the api seam.
+    register_snapshot_runner(snapshot_job)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
@@ -177,6 +182,7 @@ def create_app() -> FastAPI:
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")
+    app.include_router(snapshots_router.router, prefix="/api")
     app.include_router(prompts.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
     if _WEB_DIR.is_dir():

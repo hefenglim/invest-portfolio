@@ -35,6 +35,15 @@ def list_inbox(
     }
 
 
+@router.get("/dividend-inbox/count")
+def inbox_count(
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, int]:
+    """Pending-count for the sidebar badge (R6 item 4) — detection on read."""
+    return {"count": len(inbox.detect(conn, now=now))}
+
+
 class FingerprintsBody(BaseModel):
     fingerprints: list[str]
 

@@ -644,4 +644,27 @@
       .catch(() => { /* silent: version tag is non-critical */ });
   }
   pdInitVersion();
+
+  /* 待確認匯入 sidebar badge (R6 item 4): pending-count on the 交易帳本 nav item
+     so detections are visible from ANY page. Non-critical: silent on failure. */
+  function pdInitInboxBadge() {
+    if (page === 'login') return;
+    pdEnsureApi()
+      .then((ok) => (ok ? window.pdApi.get('/api/dividend-inbox/count') : null))
+      .then((resp) => {
+        const n = resp && resp.count;
+        if (!n) return;
+        const items = document.querySelectorAll('#sidebar .sb-item');
+        for (const a of items) {
+          if (a.getAttribute('href') === 'trades.html') {
+            const b = el('span', 'sb-badge sb-badge-alert', String(n));
+            b.title = n + ' 筆偵測到的配息待確認';
+            a.appendChild(b);
+            break;
+          }
+        }
+      })
+      .catch(() => { /* silent: the badge is a hint, not a gate */ });
+  }
+  pdInitInboxBadge();
 })();
