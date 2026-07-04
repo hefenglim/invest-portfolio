@@ -85,3 +85,24 @@ def test_ai_input_degrades_with_kind(
 
     result = ai_agents_input(conn, "buy ...", completer=boom)
     assert result.preview.rows[0].issues[0].kind == kind
+
+
+def test_ai_input_prompt_carries_live_account_catalog(conn: sqlite3.Connection) -> None:
+    # The model can only use VALID account ids if the prompt lists them — without
+    # the catalog it guessed ("嘉信" → a made-up charles_schwab) and every
+    # non-example account failed validation with "unknown account" (2026-07-05,
+    # found live on the test instance).
+    _setup(conn)
+    seen: dict[str, str] = {}
+
+    def spy_completer(
+        prompt: str, schema: type, *, agent: str, conn: object = None
+    ) -> AiDraftList:
+        seen["prompt"] = prompt
+        return AiDraftList(drafts=[])
+
+    ai_agents_input(conn, "在嘉信買 10 股 AAPL @211.40", completer=spy_completer)
+    prompt = seen["prompt"]
+    assert "<accounts>" in prompt
+    for account_id in ("tw_broker", "schwab", "moomoo_my_us", "moomoo_my_my"):
+        assert account_id in prompt

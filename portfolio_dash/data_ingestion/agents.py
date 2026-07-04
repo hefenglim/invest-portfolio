@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.csv_import import txn_preview_row
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
+from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
 from portfolio_dash.shared.llm import LLMError, complete_structured
 from portfolio_dash.shared.models.enums import Side
@@ -78,12 +79,27 @@ _PROMPT = (
     "<task>Extract stock transactions from the user's text into JSON.</task>\n"
     '<schema>{{"drafts": [{{"account_id","symbol","side":"BUY|SELL","date":"YYYY-MM-DD",\n'
     '"shares","price","daytrade":false,"is_etf":false,"note"}}]}}</schema>\n'
+    "<accounts>{accounts}</accounts>\n"
     "<example_input>在元大買 10 股 2330 @ 600</example_input>\n"
     '<example_output>{{"drafts":[{{"account_id":"tw_broker","symbol":"2330","side":"BUY",\n'
     '"date":"2026-06-01","shares":"10","price":"600"}}]}}</example_output>\n'
-    "<rules>Return JSON only, no prose. Use the account ids the system knows.</rules>\n"
+    "<rules>Return JSON only, no prose. account_id MUST be one of the ids listed in\n"
+    "<accounts> (match the user's broker wording to the account name); never invent\n"
+    "an id.</rules>\n"
     "<user_text>{text}</user_text>"
 )
+
+
+def _accounts_catalog(conn: sqlite3.Connection) -> str:
+    """The live account ids the model may use, as compact ``id=name (ccy)`` lines.
+
+    Without this the model had to GUESS ids ("嘉信" → a made-up ``charles_schwab``)
+    and every non-example account failed validation with "unknown account".
+    """
+    return "; ".join(
+        f"{a.account_id}={a.name} ({a.settlement_ccy.value})"
+        for a in list_accounts(conn)
+    )
 
 
 def ai_agents_input(
@@ -118,7 +134,7 @@ def ai_agents_input(
     completer = completer or complete_structured
     try:
         result = completer(
-            _PROMPT.format(text=text),
+            _PROMPT.format(text=text, accounts=_accounts_catalog(conn)),
             AiDraftList,
             agent="ai_agents_input",
             conn=conn,
