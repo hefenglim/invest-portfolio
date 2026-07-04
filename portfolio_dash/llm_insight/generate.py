@@ -36,7 +36,7 @@ from portfolio_dash.llm_insight.cards import InsightCard
 from portfolio_dash.llm_insight.gating import GateContext, GateResult, evaluate_gates, skip_reasons
 from portfolio_dash.llm_insight.insights_store import HorizonBasis
 from portfolio_dash.shared import llm
-from portfolio_dash.shared.llm_config import LLMError
+from portfolio_dash.shared.llm_config import LLMBudgetExceeded, LLMError
 
 # The agent tag recorded in llm_usage for an insight generation call.
 _AGENT = "insight_generate"
@@ -169,12 +169,15 @@ def _write_job_run(
     job_id = f"insight:{insight_type_id}"
     detail_text = detail if detail is not None else (reason or f"{status}")
     shadow_flag = 1 if is_shadow else 0
+    # finished_at shares started_at's timezone (get_now feeds +08:00); a UTC finish next
+    # to a +08:00 start renders as an 8-hour-negative run in any naive display.
+    finished_at = datetime.now(tz=now.tzinfo or UTC).isoformat()
     if run_id is not None:
         conn.execute(
             "UPDATE job_runs SET finished_at = ?, status = ?, detail = ?, payload = ?, "
             "reason = ?, cost_usd = ?, is_shadow = ? WHERE id = ?",
             (
-                datetime.now(UTC).isoformat(), status, detail_text, str(insight_type_id),
+                finished_at, status, detail_text, str(insight_type_id),
                 reason or None, str(cost), shadow_flag, run_id,
             ),
         )
@@ -186,7 +189,7 @@ def _write_job_run(
         (
             job_id,
             now.isoformat(),
-            datetime.now(UTC).isoformat(),
+            finished_at,
             status,
             detail_text,
             str(insight_type_id),
@@ -262,6 +265,8 @@ def run_insight_type(
     total_cost = Decimal("0")
     created = 0
     stopped_early = False
+    stop_reason = ""
+    stop_detail: str | None = None
     anomalies = set(gate.data_anomaly_symbols)
     # The calibration version stamped on stored cards: the SHADOW override (Loop 4) or the
     # insight_type's active version.
@@ -299,6 +304,7 @@ def run_insight_type(
         # R6 mid-iteration: stop before spending past the cap; keep produced cards.
         if remaining <= 0:
             stopped_early = True
+            stop_reason = "budget_exhausted_mid_run"
             break
 
         ctx = var_contexts.get(target)
@@ -323,10 +329,18 @@ def run_insight_type(
             completion = llm.complete_structured_meta(
                 prompt, InsightCard, agent=_AGENT, conn=conn
             )
-        except LLMError:
+        except LLMError as exc:
             # Graceful degradation: a provider/budget/activation failure stops the run as
-            # partial (produced cards kept); never crash the scheduler/dashboard.
+            # partial (produced cards kept); never crash the scheduler/dashboard. The
+            # reason must say WHICH failure — a provider/parse failure reported as budget
+            # exhaustion sends the operator to the wrong fix.
             stopped_early = True
+            stop_reason = (
+                "budget_exhausted_mid_run"
+                if isinstance(exc, LLMBudgetExceeded)
+                else f"{exc.kind}_mid_run"
+            )
+            stop_detail = f"{stop_reason}: {str(exc)[:300]}"
             break
         card = completion.value
         # The model that produced this card (its registry alias) and this call's cost,
@@ -354,10 +368,10 @@ def run_insight_type(
         created += 1
 
     status = "partial" if stopped_early else "ok"
-    reason = "budget_exhausted_mid_run" if stopped_early else ""
+    reason = stop_reason if stopped_early else ""
     _write_job_run(
-        conn, insight_type_id, status=status, reason=reason, cost=total_cost, now=now,
-        run_id=run_id, is_shadow=inputs.is_shadow,
+        conn, insight_type_id, status=status, reason=reason, detail=stop_detail,
+        cost=total_cost, now=now, run_id=run_id, is_shadow=inputs.is_shadow,
     )
     return RunResult(
         status=status, reason=reason, cards_created=created, cost_usd=total_cost

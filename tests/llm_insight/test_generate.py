@@ -23,6 +23,7 @@ from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.shared import llm as llm_mod
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import (
+    LLMBudgetExceeded,
     LLMRole,
     ModelConfig,
     add_topup,
@@ -260,6 +261,7 @@ def test_mid_iteration_budget_exhaustion_is_partial(
     cards = istore.list_cards(conn, insight_type_id=it.id)
     # at least one produced; the run is partial (budget ran out mid-iteration)
     assert result.status == "partial"
+    assert result.reason == "budget_exhausted_mid_run"  # the true budget path keeps its enum
     assert len(cards) == 1
 
 
@@ -390,3 +392,67 @@ def test_anomaly_card_model_stays_none(
     cards = istore.list_cards(conn, insight_type_id=it.id)
     assert len(cards) == 1
     assert cards[0].model == "(none)"
+
+
+# --- honest mid-run failure classification (2026-07-05 live-ignition fix) ------
+# Before the fix, EVERY LLMError mid-run was reported as budget_exhausted_mid_run —
+# a provider/parse failure sent the operator to the top-up page instead of the
+# provider/prompt. The reason now carries the exception's kind.
+
+
+def test_llm_unavailable_mid_run_reason_not_budget(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+
+    def boom(**kw: object) -> object:
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    it_id = _portfolio_combo(conn)
+    result = generate.run_insight_type(
+        conn, it_id, var_contexts={None: _ctx(conn)},
+        inputs=RunInputs(budget_remaining=Decimal("100")), now=NOW,
+    )
+    assert result.status == "partial"
+    assert result.reason == "llm_unavailable_mid_run"
+    row = conn.execute(
+        "SELECT reason, detail FROM job_runs WHERE job_id = ?", (f"insight:{it_id}",)
+    ).fetchone()
+    assert row["reason"] == "llm_unavailable_mid_run"
+    assert "provider down" in row["detail"]  # diagnosable from the runs list
+
+
+def test_budget_exception_mid_run_keeps_budget_reason(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def raise_budget(*a: object, **kw: object) -> object:
+        raise LLMBudgetExceeded("token budget exhausted")
+
+    monkeypatch.setattr(generate.llm, "complete_structured_meta", raise_budget)
+    it_id = _portfolio_combo(conn)
+    result = generate.run_insight_type(
+        conn, it_id, var_contexts={None: _ctx(conn)},
+        inputs=RunInputs(budget_remaining=Decimal("100")), now=NOW,
+    )
+    assert result.status == "partial"
+    assert result.reason == "budget_exhausted_mid_run"
+
+
+def test_job_run_timestamps_share_timezone(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # started_at comes from get_now (+08:00); finished_at must share that offset —
+    # a UTC finish next to a +08:00 start displayed as an 8-hour-negative run.
+    _patch_llm(monkeypatch)
+    it_id = _portfolio_combo(conn)
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: _ctx(conn)},
+        inputs=RunInputs(budget_remaining=Decimal("100")), now=NOW,
+    )
+    row = conn.execute(
+        "SELECT started_at, finished_at FROM job_runs WHERE job_id = ?",
+        (f"insight:{it_id}",),
+    ).fetchone()
+    assert row["started_at"].endswith("+08:00")
+    assert row["finished_at"].endswith("+08:00")

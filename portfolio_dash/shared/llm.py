@@ -140,6 +140,45 @@ def _supports_response_format(model: ModelConfig) -> bool:
         return False
 
 
+def _json_instruction(schema: type[BaseModel]) -> str:
+    """The provider-agnostic structured-output contract appended to every structured call.
+
+    ``response_format`` is only sent when LiteLLM's capability map says the model supports
+    it — which is ``False`` for every ``openrouter/*`` id — so the prompt itself must always
+    carry the JSON-only contract (llm-insight.md: "return JSON only, no fences"). Redundant
+    when response_format IS honoured; decisive when it is not.
+    """
+    return (
+        "\n\n<output_format>\n"
+        "Respond with ONLY one JSON object that conforms to the JSON Schema below.\n"
+        "No markdown code fences, no commentary, nothing before or after the JSON object.\n"
+        f"{json.dumps(schema.model_json_schema(), ensure_ascii=False)}\n"
+        "</output_format>"
+    )
+
+
+def _extract_json(content: str) -> str:
+    """Best-effort recovery of the JSON object from a non-conforming reply.
+
+    Models occasionally ignore the no-fence instruction (``` fences, or prose around the
+    object). Strip one outer fence pair, else slice from the first ``{`` to the last ``}``.
+    Returns the input unchanged when no candidate is found; the caller treats a second
+    parse failure as this attempt failed.
+    """
+    text = content.strip()
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        last_fence = text.rfind("```")
+        if first_nl != -1 and last_fence > first_nl:
+            text = text[first_nl + 1 : last_fence].strip()
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            text = text[start : end + 1]
+    return text
+
+
 def _build_messages(prompt: str, images: list[bytes] | None) -> list[dict[str, object]]:
     """Assemble the chat messages; multimodal content when images are present."""
     if not images:
@@ -223,7 +262,10 @@ def _complete_with_meta[T: BaseModel](
         try:
             parsed = schema.model_validate_json(content)
         except (ValidationError, json.JSONDecodeError, ValueError):
-            continue
+            try:
+                parsed = schema.model_validate_json(_extract_json(content))
+            except (ValidationError, json.JSONDecodeError, ValueError):
+                continue
         return StructuredCompletion(value=parsed, model=model.model_alias, cost=cost)
     raise LLMUnavailable(f"invalid structured output from {model.id}")
 
@@ -257,7 +299,7 @@ def complete_structured_meta[T: BaseModel](
     """
     check_budget(conn)
     candidates = _select_for(conn, role=role, vision=bool(images))
-    messages = _build_messages(prompt, images)
+    messages = _build_messages(prompt + _json_instruction(schema), images)
     last: LLMUnavailable | None = None
     for model in candidates:
         try:

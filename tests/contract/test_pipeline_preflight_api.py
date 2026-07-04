@@ -215,6 +215,21 @@ def test_preflight_unknown_id_no_body_404(api_client: TestClient) -> None:
     assert api_client.post("/api/insight-tasks/999/preflight").status_code == 404
 
 
+def test_preflight_empty_object_body_means_saved_task(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # An empty JSON body ({}) must behave exactly like no body — before the guard, the
+    # all-defaults draft (strategy_ids=[]) shadowed the saved combo and R3 reported a
+    # bogus "no live templates" on a perfectly healthy task.
+    add_topup(golden_db, Decimal("5"))
+    tid = _make_combo(api_client)
+    with_empty = api_client.post(f"/api/insight-tasks/{tid}/preflight", json={}).json()
+    without = api_client.post(f"/api/insight-tasks/{tid}/preflight").json()
+    r3 = next(g for g in with_empty["gates"] if g["id"] == "R3")
+    assert r3["lv"] == "ok"
+    assert [g["lv"] for g in with_empty["gates"]] == [g["lv"] for g in without["gates"]]
+
+
 # --- §7.3 diagnose ------------------------------------------------------------
 
 

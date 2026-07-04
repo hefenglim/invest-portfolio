@@ -333,6 +333,63 @@ def test_complete_text_master_role_selects_master_chain(
     assert seen == ["openai/m_master2"]
 
 
+# --- structured-output contract for live providers (2026-07-05 fix) ------------
+# LiteLLM's capability map returns False for e.g. every ``openrouter/*`` id, so
+# response_format never reaches those providers — the prompt itself must always
+# carry the JSON-only contract, and parsing must tolerate fenced/prose-wrapped
+# replies (both observed live on the test instance).
+
+
+def test_structured_prompt_always_carries_json_contract(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    seen: dict[str, object] = {}
+
+    def completion(**kw: object) -> _Resp:
+        seen.update(kw)
+        return _Resp('{"x": 1}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    complete_structured("hi", Out, agent="t", conn=conn)
+    messages = seen["messages"]
+    assert isinstance(messages, list)
+    content = str(messages[0]["content"])
+    assert content.startswith("hi")
+    assert "<output_format>" in content
+    assert '"properties"' in content and '"x"' in content  # the Out JSON schema inlined
+
+
+def test_parses_fenced_json_reply(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    monkeypatch.setattr(
+        llm_mod.litellm, "completion", lambda **kw: _Resp('```json\n{"x": 6}\n```')
+    )
+    out = complete_structured("hi", Out, agent="t", conn=conn)
+    assert out.x == 6
+
+
+def test_parses_prose_wrapped_json_reply(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    monkeypatch.setattr(
+        llm_mod.litellm, "completion",
+        lambda **kw: _Resp('好的，以下是結果：\n{"x": 12}\n以上。'),
+    )
+    out = complete_structured("hi", Out, agent="t", conn=conn)
+    assert out.x == 12
+
+
+def test_extract_json_passthrough_and_slicing() -> None:
+    from portfolio_dash.shared.llm import _extract_json
+
+    assert _extract_json('{"x": 1}') == '{"x": 1}'
+    assert _extract_json("no json here") == "no json here"  # unchanged, caller re-fails
+    assert _extract_json('```json\n{"x": 2}\n```') == '{"x": 2}'
+    assert _extract_json('前言 {"x": 3} 後記') == '{"x": 3}'
+
+
 def test_complete_structured_default_role_unchanged(
     monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
 ) -> None:

@@ -652,6 +652,11 @@ def insight_task_preflight(
     and NEVER writes a job_runs row. An unknown saved id with no draft → 404.
     """
     cs.ensure_seeded(conn)
+    if draft is not None and not draft.model_fields_set:
+        # An empty JSON body ({}) means "preflight the saved task" — otherwise the
+        # all-defaults draft (strategy_ids=[]) silently shadows the saved combo and
+        # every gate reports a bogus R3 "no live templates".
+        draft = None
     payload = insight_service.build_preflight(
         conn, insight_type_id, now=now, reporting=reporting, draft=draft,
     )

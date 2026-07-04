@@ -811,7 +811,8 @@ def start_job_run(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> in
     (on the request conn) before the background thread finalizes the row.
     """
     cur = conn.execute(
-        "INSERT INTO job_runs (job_id, started_at) VALUES (?, ?)", (job_id, now.isoformat())
+        "INSERT INTO job_runs (job_id, started_at, status) VALUES (?, ?, 'running')",
+        (job_id, now.isoformat()),
     )
     conn.commit()
     return int(cur.lastrowid or 0)
@@ -869,7 +870,8 @@ def start_insight_run(conn: sqlite3.Connection, insight_type_id: int, *, now: da
     the background runner finalizes THIS row (via ``generate.run_insight_type(run_id=...)``).
     """
     cur = conn.execute(
-        "INSERT INTO job_runs (job_id, started_at, payload) VALUES (?, ?, ?)",
+        "INSERT INTO job_runs (job_id, started_at, status, payload) "
+        "VALUES (?, ?, 'running', ?)",
         (insight_job_id(insight_type_id), now.isoformat(), str(insight_type_id)),
     )
     conn.commit()

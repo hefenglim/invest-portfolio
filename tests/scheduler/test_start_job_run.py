@@ -23,7 +23,9 @@ def test_start_job_run_inserts_running_row() -> None:
     rid = start_job_run(conn, "quotes_tw", now=NOW)
     row = conn.execute("SELECT * FROM job_runs WHERE id=?", (rid,)).fetchone()
     assert row["job_id"] == "quotes_tw" and row["started_at"] == NOW.isoformat()
-    assert row["finished_at"] is None and row["status"] is None
+    # The row IS the 'running' marker (2026-07-05 fix: it used to insert status NULL,
+    # so the runs API showed a blank status while a run was in flight).
+    assert row["finished_at"] is None and row["status"] == "running"
     assert latest_run_unfinished(conn, "quotes_tw") is True
 
 
