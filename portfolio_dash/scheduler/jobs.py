@@ -818,11 +818,23 @@ def start_job_run(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> in
     return int(cur.lastrowid or 0)
 
 
-def finish_job_run(conn: sqlite3.Connection, run_id: int, *, status: str, detail: str) -> None:
-    """Finalize a running ``job_runs`` row with its terminal status + detail."""
+def finish_job_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    status: str,
+    detail: str,
+    now: datetime | None = None,
+) -> None:
+    """Finalize a running ``job_runs`` row with its terminal status + detail.
+
+    ``finished_at`` shares *now*'s timezone when given (started_at comes from get_now
+    in +08:00; a UTC finish next to it reads as a negative-duration run).
+    """
+    finished_at = datetime.now(tz=now.tzinfo if now is not None else UTC).isoformat()
     conn.execute(
         "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
-        (datetime.now(UTC).isoformat(), status, detail, run_id),
+        (finished_at, status, detail, run_id),
     )
     conn.commit()
 
@@ -858,7 +870,7 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
                 status = "ok"
             except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
                 detail, status = str(exc), "error"
-            finish_job_run(conn, int(rid["id"]), status=status, detail=detail)
+            finish_job_run(conn, int(rid["id"]), status=status, detail=detail, now=now)
     except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
         return
 
