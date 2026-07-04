@@ -23,6 +23,27 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A mocked seam hides a missing REQUEST contract — put the contract in-band
+  (2026-07-05):** the LLM structured-output path was 100% broken on the live test
+  site (every Loop-1 run: 4 provider calls, $0.036 spent, zero cards) while 1,000+
+  mocked tests stayed green. Two stacked causes: (1) `response_format` was only sent
+  when `litellm.supports_response_schema()` said yes — and that capability map
+  returns **False for every `openrouter/*` id** — and (2) nothing in the assembled
+  prompt itself asked for JSON, so models returned beautiful Chinese prose and
+  `model_validate_json` failed on both role models. The mocks always returned valid
+  JSON, so no test could see it. Rules: (1) at an external seam, never rely on an
+  out-of-band capability flag for a REQUIRED output contract — put the contract
+  in-band (schema appended to the prompt) so it holds for every provider; (2) parse
+  defensively (fence strip / object slice) before failing an attempt; (3) a feature
+  gated on external behavior is unverified until a LIVE Loop-1 pass runs on the test
+  instance — schedule nothing before that.
+- **Don't hardcode one failure reason on a multi-cause path (2026-07-05):** every
+  mid-run `LLMError` in `generate.run_insight_type` was reported as
+  `budget_exhausted_mid_run`, so a provider/parse failure told the operator to top
+  up a budget that had $4.96 remaining. When one except-branch covers several
+  exception kinds, the recorded reason must carry the kind (`exc.kind`), and the
+  human `detail` must carry the message.
+
 - **Design-handoff stubs look wired — audit them against the real API surface
   (2026-07-02):** the topbar 更新報價/重算 buttons shipped v0.1.0→v0.1.2 as
   design-preview stubs (toast only) even though the real endpoints
