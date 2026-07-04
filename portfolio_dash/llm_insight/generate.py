@@ -23,7 +23,9 @@ import — sharing a table is not importing a module).
 """
 
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
+from datetime import time as dt_time
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -124,13 +126,41 @@ def _snapshot_for(inputs: RunInputs, symbol: str | None, ctx: V.VarContext) -> s
     """The input-snapshot string for a target; fed by the service, else the as_of+symbol.
 
     The snapshot's content feeds the fingerprint digest, so its DATE makes the fingerprint
-    distinct per trading day (spec 04.10 cache semantics).
+    distinct per trading day (spec 04.10 cache semantics). The fallback uses the DAY, not
+    the full timestamp — a second-granular as_of made every re-run a fresh fingerprint
+    (duplicate anomaly cards, cache that never hit).
     """
     key = symbol or ""
     fed = inputs.input_snapshots.get(key)
     if fed is not None:
         return fed
-    return f"{ctx.data.as_of}|{symbol or 'portfolio'}"
+    return f"{ctx.data.as_of.date()}|{symbol or 'portfolio'}"
+
+
+def _canonical_fingerprint_prompt(
+    conn: sqlite3.Connection,
+    insight_type_id: int,
+    ctx: V.VarContext,
+    *,
+    calibration_version: int | None,
+    alert_note: str,
+) -> str:
+    """Assemble the DAY-ANCHORED render used only for the cache fingerprint.
+
+    Spec 04.10 cache semantics are "same trading day + identical inputs → reuse", but the
+    LLM-facing render embeds the run clock ({{as_of}} / {{now}} carry seconds), so
+    fingerprinting that render can never hit twice — observed live: every manual re-run
+    billed a fresh LLM call and stored a duplicate card. This second render floors the two
+    run-clock stamps to the day; every other value (prices, holdings, external snapshots)
+    stays live, so a same-day DATA change still misses the cache and regenerates.
+    """
+    anchor_src = ctx.now or ctx.data.as_of
+    anchor = datetime.combine(anchor_src.date(), dt_time.min, tzinfo=anchor_src.tzinfo)
+    canon_ctx = replace(ctx, now=anchor, data=ctx.data.model_copy(update={"as_of": anchor}))
+    assembled = assemble.assemble_layers(
+        conn, insight_type_id, canon_ctx, calibration_version=calibration_version
+    )
+    return assembled.prompt + alert_note
 
 
 def _anomaly_card(symbol: str) -> InsightCard:
@@ -315,10 +345,16 @@ def run_insight_type(
             conn, insight_type_id, ctx,
             calibration_version=inputs.calibration_version_override,
         )
-        prompt = assembled.prompt + (_ON_ALERT_NOTE if is_alert else "")
+        alert_note = _ON_ALERT_NOTE if is_alert else ""
+        prompt = assembled.prompt + alert_note
         snapshot = _snapshot_for(inputs, target, ctx)
+        canon_prompt = _canonical_fingerprint_prompt(
+            conn, insight_type_id, ctx,
+            calibration_version=inputs.calibration_version_override,
+            alert_note=alert_note,
+        )
         fp = istore.fingerprint(
-            insight_type_id, prompt,
+            insight_type_id, canon_prompt,
             istore.snapshot_digest(snapshot), inputs.prompt_version,
         )
         if istore.find_by_fingerprint(conn, fp) is not None:

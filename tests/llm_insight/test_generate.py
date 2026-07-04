@@ -456,3 +456,94 @@ def test_job_run_timestamps_share_timezone(
     ).fetchone()
     assert row["started_at"].endswith("+08:00")
     assert row["finished_at"].endswith("+08:00")
+
+
+# --- same-day cache must survive clock drift (2026-07-05 live fix) --------------
+# {{as_of}}/{{now}} render the run clock with seconds; fingerprinting the LLM-facing
+# render meant a re-run minutes later NEVER hit the cache (observed live: every
+# manual re-click billed a fresh call and stored a duplicate card). The fingerprint
+# now uses a day-anchored render.
+
+
+def _clocked_combo(conn: sqlite3.Connection) -> int:
+    sp = cs.create_strategy(
+        conn, name="S-clock", body="資料時間 {{as_of}} 現在 {{now}} 觀察 {{kpis_json}}", now=NOW
+    )
+    it = cs.create_insight_type(conn, name="Clocked", scope="portfolio", now=NOW)
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    return it.id
+
+
+def test_same_day_rerun_hits_cache_despite_clock_drift(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {"n": 0}
+
+    def completion(**kw: object) -> _Resp:
+        calls["n"] += 1
+        return _Resp(_CARD_JSON)
+
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    it_id = _clocked_combo(conn)
+    later_same_day = NOW.replace(hour=16, minute=45)
+    for t in (NOW, later_same_day):
+        generate.run_insight_type(
+            conn, it_id, var_contexts={None: V.VarContext(data=build_dashboard(
+                conn, now=t, reporting=Currency.TWD), now=t)},
+            inputs=RunInputs(budget_remaining=Decimal("100")), now=t,
+        )
+    assert calls["n"] == 1  # the 16:45 re-run reused the 14:30 card
+    assert len(istore.list_cards(conn, insight_type_id=it_id)) == 1
+
+
+def test_next_day_rerun_regenerates(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {"n": 0}
+
+    def completion(**kw: object) -> _Resp:
+        calls["n"] += 1
+        return _Resp(_CARD_JSON)
+
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    it_id = _clocked_combo(conn)
+    from datetime import timedelta
+
+    for t in (NOW, NOW + timedelta(days=1)):
+        generate.run_insight_type(
+            conn, it_id, var_contexts={None: V.VarContext(data=build_dashboard(
+                conn, now=t, reporting=Currency.TWD), now=t)},
+            inputs=RunInputs(budget_remaining=Decimal("100")), now=t,
+        )
+    assert calls["n"] == 2  # a new trading day is a new fingerprint
+    assert len(istore.list_cards(conn, insight_type_id=it_id)) == 2
+
+
+def test_same_day_anomaly_rerun_does_not_duplicate(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The R4 anomaly fingerprint uses the day-granular snapshot fallback too — a
+    # second-granular as_of used to store a duplicate 資料異常 card per re-run.
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    monkeypatch.setattr(llm_mod.litellm, "completion", lambda **kw: _Resp(_CARD_JSON))
+    sp = cs.create_strategy(conn, name="S-anom", body="{{symbol_detail_json}}", now=NOW)
+    it = cs.create_insight_type(
+        conn, name="Anom", scope="per_symbol",
+        universe={"mode": "custom", "symbols": ["MISSING"]}, now=NOW,
+    )
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    later = NOW.replace(hour=16, minute=45)
+    for t in (NOW, later):
+        generate.run_insight_type(
+            conn, it.id,
+            var_contexts={"MISSING": V.VarContext(data=build_dashboard(
+                conn, now=t, reporting=Currency.TWD), now=t, symbol="MISSING")},
+            inputs=RunInputs(
+                budget_remaining=Decimal("100"), universe_symbols=["MISSING"],
+                missing_price_symbols=["MISSING"],
+            ),
+            now=t,
+        )
+    assert len(istore.list_cards(conn, insight_type_id=it.id)) == 1
