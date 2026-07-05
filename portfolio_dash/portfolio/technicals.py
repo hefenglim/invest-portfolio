@@ -106,6 +106,145 @@ def max_drawdown(closes: list[Decimal], window: int = 90) -> Decimal | None:
     return worst
 
 
+# --- Technical signals (batch ③, 2026-07-05 mini-spec) ------------------------
+# Market-standard entry/exit-aid signals for the checkup card's 加碼/減碼 framework.
+# All pure Decimal; each returns None (or a null sub-field) when the series is too short
+# — never a fabricated value. Bundled by :func:`technical_signals` into one variable.
+
+
+def rsi(closes: list[Decimal], period: int = 14) -> Decimal | None:
+    """Wilder's Relative Strength Index over the whole series (0–100), or None.
+
+    Needs ``period + 1`` closes (to form ``period`` changes). Seeds the average gain/loss
+    with the first ``period`` changes, then applies Wilder's smoothing. A series with no
+    losses yields 100 (all gains) / 50 (flat); no gains yields 0.
+    """
+    if period < 1 or len(closes) < period + 1:
+        return None
+    changes = [b - a for a, b in zip(closes, closes[1:], strict=False)]
+    gains = [c if c > _ZERO else _ZERO for c in changes]
+    losses = [-c if c < _ZERO else _ZERO for c in changes]
+    avg_gain = sum(gains[:period], _ZERO) / Decimal(period)
+    avg_loss = sum(losses[:period], _ZERO) / Decimal(period)
+    for i in range(period, len(changes)):
+        avg_gain = (avg_gain * Decimal(period - 1) + gains[i]) / Decimal(period)
+        avg_loss = (avg_loss * Decimal(period - 1) + losses[i]) / Decimal(period)
+    if avg_loss == _ZERO:
+        return Decimal("100") if avg_gain > _ZERO else Decimal("50")
+    rs = avg_gain / avg_loss
+    return Decimal("100") - Decimal("100") / (Decimal("1") + rs)
+
+
+def ma_cross(
+    closes: list[Decimal], fast: int = 20, slow: int = 60, lookback: int = 90
+) -> dict[str, object | None]:
+    """Most recent fast/slow MA crossover within ``lookback`` bars + how many bars ago.
+
+    ``cross`` is ``"golden"`` (fast crossed above slow) / ``"death"`` (below) / ``None``
+    (no crossover in range). ``days_ago`` is the bar index of the newer sign of the
+    flipped pair (0 = the crossover established at the latest close). Needs ``slow + 1``
+    points to compare two consecutive MA pairs.
+    """
+    n = len(closes)
+    if n < slow + 1:
+        return {"cross": None, "days_ago": None}
+    max_back = min(lookback, n - slow)
+    signs: list[int] = []
+    for k in range(max_back + 1):
+        window = closes[: n - k] if k > 0 else closes
+        fma = moving_average(window, fast)
+        sma = moving_average(window, slow)
+        if fma is None or sma is None:
+            break
+        signs.append(1 if fma >= sma else -1)
+    for i in range(len(signs) - 1):
+        if signs[i] != signs[i + 1]:
+            return {"cross": "golden" if signs[i] > 0 else "death", "days_ago": i}
+    return {"cross": None, "days_ago": None}
+
+
+def week52_position(closes: list[Decimal], window: int = 252) -> dict[str, Decimal | int | None]:
+    """Current price relative to the trailing 52-week (``window``-bar) high and low.
+
+    ``pct_from_high`` (``<= 0``) and ``pct_from_low`` (``>= 0``) are ``(price - X) / X``.
+    ``window_days`` reports the ACTUAL window used, so an under-a-year listing is honest
+    (the position is computed over whatever history exists, not padded). Empty → nulls.
+    """
+    if not closes:
+        return {"high": None, "low": None, "pct_from_high": None,
+                "pct_from_low": None, "window_days": 0}
+    series = closes[-window:] if window > 0 else closes
+    hi, lo, price = max(series), min(series), closes[-1]
+    return {
+        "high": hi,
+        "low": lo,
+        "pct_from_high": (price - hi) / hi if hi > _ZERO else None,
+        "pct_from_low": (price - lo) / lo if lo > _ZERO else None,
+        "window_days": len(series),
+    }
+
+
+def trend_structure(closes: list[Decimal], window: int = 60) -> dict[str, object | None]:
+    """Swing structure over the last ``window`` bars: uptrend / downtrend / range.
+
+    Splits the window in half and compares the two halves' highs and lows:
+    higher-high & higher-low → ``"uptrend"`` (HH-HL); lower-high & lower-low →
+    ``"downtrend"`` (LH-LL); otherwise ``"range"``. Needs ≥ 4 bars.
+    """
+    series = closes[-window:] if window > 0 else closes
+    if len(series) < 4:
+        return {"structure": None, "window_days": len(series)}
+    mid = len(series) // 2
+    first, second = series[:mid], series[mid:]
+    higher_high, higher_low = max(second) > max(first), min(second) > min(first)
+    lower_high, lower_low = max(second) < max(first), min(second) < min(first)
+    if higher_high and higher_low:
+        structure = "uptrend"
+    elif lower_high and lower_low:
+        structure = "downtrend"
+    else:
+        structure = "range"
+    return {"structure": structure, "window_days": len(series)}
+
+
+def volume_signal(volumes: list[Decimal], window: int = 20) -> dict[str, object | None]:
+    """Latest volume vs its ``window``-bar average + a surge flag (≥ 2× average).
+
+    Probe-gated at the call site: only invoked when the provider actually backfilled
+    volume (no source does yet — a clean deferred seam). Needs ``window + 1`` bars.
+    """
+    if len(volumes) < window + 1:
+        return {"ratio_to_avg": None, "surge": None}
+    avg = sum(volumes[-(window + 1):-1], _ZERO) / Decimal(window)
+    latest = volumes[-1]
+    if avg == _ZERO:
+        return {"ratio_to_avg": None, "surge": None}
+    ratio = latest / avg
+    return {"ratio_to_avg": ratio, "surge": ratio >= Decimal("2")}
+
+
+def technical_signals(
+    closes: list[Decimal], volumes: list[Decimal] | None = None
+) -> dict[str, object]:
+    """The one integrated technical-signal variable (mini-spec: one block, not five vars).
+
+    Bundles RSI(14), the 20/60 MA crossover, 52-week position, and swing structure over
+    ``closes``; adds a volume section only when ``volumes`` is fed (probe-gated). Empty
+    series → ``{"unavailable": True}`` so the card renders it honestly.
+    """
+    if not closes:
+        return {"unavailable": True}
+    out: dict[str, object] = {
+        "rsi14": rsi(closes, 14),
+        "ma_cross": ma_cross(closes),
+        "week52": week52_position(closes),
+        "trend": trend_structure(closes),
+    }
+    if volumes and any(v is not None for v in volumes):
+        out["volume"] = volume_signal(volumes)
+    return out
+
+
 def price_vs_cost(
     price: Decimal, original_avg: Decimal, adjusted_avg: Decimal
 ) -> dict[str, Decimal | None]:

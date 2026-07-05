@@ -95,6 +95,49 @@ def vix_zone(vix: Decimal) -> str:
     return "high"
 
 
+def fear_greed_zone(score: Decimal) -> str:
+    """CNN Fear & Greed five-zone classification (batch ③, 2026-07-05).
+
+    Derived LOCALLY from the numeric score so we do not depend on the provider's rating
+    string: ``0-24`` extreme_fear · ``25-44`` fear · ``45-55`` neutral · ``56-75`` greed ·
+    ``76-100`` extreme_greed.
+    """
+    if score <= Decimal("24"):
+        return "extreme_fear"
+    if score <= Decimal("44"):
+        return "fear"
+    if score <= Decimal("55"):
+        return "neutral"
+    if score <= Decimal("75"):
+        return "greed"
+    return "extreme_greed"
+
+
+def fear_greed_trend(scores_newest_first: list[Decimal]) -> dict[str, Any]:
+    """7-day Fear & Greed move from a newest-first score series (the process, not the level).
+
+    Compares the newest score to the oldest in the (≤7-point) window. ``direction`` is
+    ``rising`` (toward greed) / ``falling`` (toward fear) / ``flat``; ``change`` is the
+    point delta. A single point yields a flat, zero-change trend; empty yields nulls.
+    """
+    if not scores_newest_first:
+        return {"direction": None, "change": None, "window_days": 0}
+    newest = scores_newest_first[0]
+    oldest = scores_newest_first[-1]
+    change = newest - oldest
+    if change > _ZERO:
+        direction = "rising"
+    elif change < _ZERO:
+        direction = "falling"
+    else:
+        direction = "flat"
+    return {
+        "direction": direction,
+        "change": _s(change),
+        "window_days": len(scores_newest_first),
+    }
+
+
 # --- Snapshot -> variable assemblers (pure; LLM-facing dicts; spec 20.2/20.5) ---
 # These take already-read snapshot rows (the router does the conn-bearing read) and
 # return JSON-able dicts. Numeric values are emitted as canonical strings (no float),
@@ -248,15 +291,27 @@ def build_market_sentiment(
     as_of_vix: str | None,
     fng: dict[str, Any] | None,
     as_of_fng: str | None,
+    fng_scores_newest_first: list[Decimal] | None = None,
 ) -> dict[str, Any]:
-    """VIX + its zone + Fear & Greed score/rating from the latest sentiment snapshots."""
+    """VIX + its zone + Fear & Greed score/local-zone/7-day-trend from sentiment snapshots.
+
+    ``fng_scores_newest_first`` (the last ≤7 daily F&G scores, newest first) drives the
+    LOCAL five-zone classification and the trend — batch ③ upgrade so the card reads the
+    move (fear→greed process) as a reversal-context signal, not just the raw number.
+    """
     if vix_close is None and fng is None:
         return dict(_UNAVAILABLE)
+    fng_score = _dec(fng.get("score")) if fng else None
     return {
         "vix": _s(vix_close),
         "vix_zone": vix_zone(vix_close) if vix_close is not None else None,
         "fear_greed": fng["score"] if fng else None,
         "fear_greed_rating": fng["rating"] if fng else None,
+        "fear_greed_zone": fear_greed_zone(fng_score) if fng_score is not None else None,
+        "fear_greed_trend": (
+            fear_greed_trend(fng_scores_newest_first)
+            if fng_scores_newest_first else None
+        ),
         "last_as_of": as_of_vix or as_of_fng,
     }
 
@@ -287,6 +342,8 @@ __all__ = [
     "chg_pct",
     "consecutive_buy_days",
     "consecutive_sell_days",
+    "fear_greed_trend",
+    "fear_greed_zone",
     "mom",
     "net_buy_sum",
     "percentile",

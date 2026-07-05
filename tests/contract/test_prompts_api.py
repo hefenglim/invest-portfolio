@@ -53,10 +53,12 @@ def _seed_llm(conn: sqlite3.Connection, *, topup: str = "10.00") -> None:
 
 def test_prompt_vars_shape(api_client: TestClient) -> None:
     rows = api_client.get("/api/prompt-vars").json()
-    # 26 vars.js mirror + 3 backend-only date/time system tokens (spec 04.10).
-    assert len(rows) == 29
+    # 26 vars.js mirror + 3 date/time system tokens + 2 batch-③ signals = 31.
+    assert len(rows) == 31
     date_tokens = {r["token"] for r in rows} & {"now", "card_created_at", "eval_date"}
     assert date_tokens == {"now", "card_created_at", "eval_date"}
+    # the batch-③ signal vars surface in the variable area for custom prompts.
+    assert {"technical_signals_json", "fear_greed_json"} <= {r["token"] for r in rows}
     h = next(r for r in rows if r["token"] == "holdings_json")
     assert h["scope"] == "portfolio" and h["available"] is True
     assert set(h) == {"token", "name", "category", "scope", "desc", "available", "sample",

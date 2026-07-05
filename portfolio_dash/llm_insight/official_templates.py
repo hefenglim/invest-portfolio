@@ -74,9 +74,11 @@ _CHECKUP_BODY = (
 同一標的可能分佈於多個帳戶：請分帳戶列示或明確標注「合計」，不得把單一帳戶數字當成總計。
 {{price_vs_cost_json}}
 
-二、技術面 — 均線位置與乖離、30 日波動與回撤；價格序列為「近 30 個交易日逐日＋其餘每 5 日
-取樣」：以近 30 日為主要判讀窗口，較早的取樣點僅作趨勢脈絡。
+二、技術面 — 均線位置與乖離、30 日波動與回撤；並解讀整合技術訊號：RSI(14) 的超買/超賣、
+20/60 均線的黃金/死亡交叉與距今天數、52 週位階、趨勢結構（上升/下降/區間）。價格序列為
+「近 30 個交易日逐日＋其餘每 5 日取樣」：以近 30 日為主要判讀窗口，較早的取樣點僅作趨勢脈絡。
 {{ma_signals_json}}
+{{technical_signals_json}}
 {{volatility_json}}
 {{price_history_json}}
 
@@ -95,8 +97,10 @@ _CHECKUP_BODY = (
 {{market_sentiment_json}}
 
 五、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
-1) 條件式情境：明確的觸發條件與對應的重新評估方向，作為長期持倉加碼/減碼評估的參考框架
-（不是買賣指令）；
+1) 加碼／減碼參考框架（作為長期持倉評估依據，不是買賣指令）：以技術訊號描述條件式情境，
+例「黃金交叉成立且 RSI 未過熱（<70）、趨勢結構為上升 → 屬偏多的加碼評估情境」、
+「跌破 60 日均線且趨勢結構轉為下降、RSI 走弱 → 屬減碼重新評估情境」；明確寫出觸發條件
+與對應方向，只到條件與方向，不給部位大小或買賣指令；
 2) prediction：metric 一律用 price_change；direction 用 up/down/flat（預期兩週內漲跌幅在
 ±0.5% 以內才用 flat）；target_pct 僅在有明確依據時提供（小數比率，如 0.03＝+3%）；
 3) confidence＝此預測命中的真實機率估計（0-100，寧可保守）。
@@ -140,7 +144,7 @@ _MARKET_BODY = (
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.1", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "個股健檢策略", "version": "v2.2", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
 ]
 

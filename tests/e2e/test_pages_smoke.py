@@ -781,7 +781,7 @@ def test_settings_prompts_page_smoke(live_server: str, browser_page: Page) -> No
     """/settings-prompts.html boots from /api/prompt-vars + /api/system-prompt (Task 2.7b).
 
     settings-prompts.js drops its inline window.PROMPTS_DATA + (vars.js) PD_VARS mocks and
-    boots async: V.load() fetches GET /api/prompt-vars (the 29-var registry with per-var
+    boots async: V.load() fetches GET /api/prompt-vars (the 31-var registry with per-var
     tier metadata) and GET /api/system-prompt fills the editor. The golden DB seeds the
     default system prompt and the finmind source at its default tier, so the variable-total
     panel renders rows and tier-locked FinMind chips (if any) are greyed out (option.disabled

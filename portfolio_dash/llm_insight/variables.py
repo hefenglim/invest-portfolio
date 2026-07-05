@@ -2,13 +2,15 @@
 
 The single source of truth for the prompt "Lego blocks". Three pieces:
 
-1. **REGISTRY** — the 26 data variables across 8 categories, mirroring ``web/vars.js``
-   exactly (token ids, categories, scope, description, sample). 24 are available now;
-   the chips/sentiment 7 went live from ``external_snapshots`` (spec 20.2). The 2
-   AI-self variables (ai → spec 04) remain ``available=False`` and render
-   ``{"unavailable": true}``. External values are derived in the calc core
-   (``portfolio/external_signals.py``) and FED IN via ``VarContext.external_vars`` —
-   this layer never reads a connection or recomputes a number.
+1. **REGISTRY** — the data variables across 8 categories, mirroring ``web/vars.js``
+   (token ids, categories, scope, description, sample), plus 3 backend date/time tokens
+   (spec 04.10) and 2 batch-③ signal vars (``technical_signals_json`` calc-core derived;
+   ``fear_greed_json`` external-fed). The chips/sentiment external vars went live from
+   ``external_snapshots`` (spec 20.2). The 2 AI-self variables (ai → spec 04) remain
+   ``available=False`` and render ``{"unavailable": true}``. External values are derived
+   in the calc core (``portfolio/external_signals.py``) and FED IN via
+   ``VarContext.external_vars`` — this layer never reads a connection or recomputes a
+   number.
 
 2. **validate_tokens** — THE single validation core, reused by the preview endpoint
    (diagnostic, always 200), ``/prompts/test`` (execution path, 422), spec 04 R1
@@ -136,6 +138,13 @@ REGISTRY: tuple[VarSpec, ...] = (
         "現價相對原始/調整均價的距離（決策核心比值）",
         '{"price_vs_original":"+0.2250","price_vs_adjusted":"+0.2374"}',
     ),
+    VarSpec(
+        "technical_signals_json", "技術訊號", "price", "per_symbol", True,
+        "整合技術訊號：RSI(14)、20/60 均線交叉＋距今天數、52 週位階、趨勢結構（量能有料才附）",
+        '{"rsi14":"58.3","ma_cross":{"cross":"golden","days_ago":4},'
+        '"week52":{"pct_from_high":"-0.061","pct_from_low":"+0.452","window_days":180},'
+        '"trend":{"structure":"uptrend","window_days":60}}',
+    ),
     # --- dividend (股利) — all available ---
     VarSpec(
         "dividends_json", "配息史", "dividend", "portfolio", True,
@@ -197,8 +206,14 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- sentiment (市場情緒) — live from external_snapshots (spec 20.2) ---
     VarSpec(
         "market_sentiment_json", "情緒指標", "sentiment", "portfolio", True,
-        "VIX、Fear & Greed 指數與所處區間",
+        "VIX、Fear & Greed 指數與所處區間（綜合視圖）",
         '{"vix":"14.2","vix_zone":"low","fear_greed":62,"fear_greed_zone":"greed"}',
+    ),
+    VarSpec(
+        "fear_greed_json", "恐懼貪婪指數", "sentiment", "portfolio", True,
+        "CNN 恐懼貪婪指數：分數、本地五區分類、近 7 日趨勢（可獨立用於自訂提示詞）",
+        '{"score":62,"zone":"greed","trend":{"direction":"rising","change":"+8",'
+        '"window_days":7},"last_as_of":"2026-07-04"}',
     ),
     VarSpec(
         "index_quotes_json", "大盤指數", "sentiment", "portfolio", True,
@@ -364,6 +379,9 @@ class VarContext:
     # market so the card cannot misquote another market's numbers (2026-07-05 spec).
     market: str | None = None
     closes: list[Decimal] | None = None  # chronological closes (pricing.store.get_price_history)
+    # chronological volumes aligned to ``closes`` — fed ONLY when a provider backfilled
+    # volume (none does yet); drives the probe-gated technical volume signal (batch ③).
+    volumes: list[Decimal] | None = None
     price_points: list[dict[str, Any]] = field(default_factory=list)  # [{date, close}]
     # Date/time context (spec 04.10), fed by the generation/eval seam. ``now`` is fed on
     # every real render; ``card_created_at``/``eval_date`` only in the 04c eval context.
@@ -386,7 +404,7 @@ _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
 # Chips/sentiment tokens whose value is fed via VarContext.external_vars (spec 20.2).
 _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
-    "financials_json", "market_sentiment_json", "index_quotes_json",
+    "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
 })
 
 
@@ -480,6 +498,17 @@ def _volatility(ctx: VarContext) -> dict[str, Any]:
         "vol_30d_annualized": technicals.annualized_volatility(ctx.closes, window=30),
         "max_drawdown_90d": technicals.max_drawdown(ctx.closes, window=90),
     }
+
+
+def _technical_signals(ctx: VarContext) -> dict[str, Any]:
+    """Integrated technical signals from the fed daily closes (batch ③).
+
+    Volume is probe-gated: ``ctx.volumes`` is fed only when a provider backfilled it
+    (none does yet), so the volume section is honestly absent by default.
+    """
+    if not ctx.closes:
+        return {"unavailable": True}
+    return technicals.technical_signals(ctx.closes, ctx.volumes)
 
 
 def _price_vs_cost(ctx: VarContext) -> dict[str, Any]:
@@ -674,6 +703,8 @@ def value_for(token: str, ctx: VarContext) -> Any:
         return _ma_signals(ctx)
     if token == "volatility_json":
         return _volatility(ctx)
+    if token == "technical_signals_json":
+        return _technical_signals(ctx)
     if token == "price_vs_cost_json":
         return _price_vs_cost(ctx)
     if token == "dividends_json":

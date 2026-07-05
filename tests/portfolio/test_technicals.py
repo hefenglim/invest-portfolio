@@ -87,3 +87,84 @@ def test_price_vs_cost_nonpositive_adjusted_keeps_original() -> None:
     r = T.price_vs_cost(Decimal("100"), Decimal("80"), Decimal("0"))
     assert r["price_vs_original"] == (Decimal("100") - Decimal("80")) / Decimal("80")
     assert r["price_vs_adjusted"] is None
+
+
+# --- batch ③ technical signals (2026-07-05) -----------------------------------
+
+
+def _dec_series(vals: list[float]) -> list[Decimal]:
+    return [Decimal(str(v)) for v in vals]
+
+
+def test_rsi_all_gains_is_100_all_losses_is_0() -> None:
+    up = _dec_series([float(i) for i in range(1, 20)])       # strictly rising
+    down = _dec_series([float(i) for i in range(20, 1, -1)])  # strictly falling
+    assert T.rsi(up, 14) == Decimal("100")
+    assert T.rsi(down, 14) == Decimal("0")
+
+
+def test_rsi_none_when_too_short_and_midrange_when_balanced() -> None:
+    assert T.rsi(_dec_series([1, 2, 3]), 14) is None
+    # a symmetric zig-zag hovers near 50
+    zig = _dec_series([10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10])
+    r = T.rsi(zig, 14)
+    assert r is not None and Decimal("30") < r < Decimal("70")
+
+
+def test_ma_cross_detects_golden_and_days_ago() -> None:
+    # A long decline (MA20 well BELOW MA60) then a sharp rise that lifts MA20 back above
+    # MA60 -> a genuine golden cross landing within the detectable window.
+    decline = [200.0 - 1.0 * i for i in range(80)]   # 200 -> 121
+    rise = [121.0 + 6.0 * i for i in range(1, 31)]   # 127 -> 301
+    sig = T.ma_cross(_dec_series(decline + rise))
+    assert sig["cross"] == "golden"
+    assert isinstance(sig["days_ago"], int) and sig["days_ago"] >= 0
+
+
+def test_ma_cross_detects_death() -> None:
+    # A long rise then a sharp decline that drags MA20 below MA60 -> death.
+    rise = [100.0 + 1.0 * i for i in range(80)]        # 100 -> 179
+    decline = [179.0 - 6.0 * i for i in range(1, 31)]  # 173 -> -1 (values only, not price)
+    assert T.ma_cross(_dec_series(rise + decline))["cross"] == "death"
+
+
+def test_ma_cross_none_when_no_cross_or_too_short() -> None:
+    assert T.ma_cross(_dec_series([1.0] * 30))["cross"] is None  # < slow+1
+    flat = _dec_series([50.0] * 120)
+    assert T.ma_cross(flat)["cross"] is None  # never crosses
+
+
+def test_week52_position_pct_from_high_low() -> None:
+    closes = _dec_series([100, 120, 80, 90])  # hi 120, lo 80, price 90
+    pos = T.week52_position(closes)
+    assert pos["high"] == Decimal("120") and pos["low"] == Decimal("80")
+    assert pos["pct_from_high"] == (Decimal("90") - Decimal("120")) / Decimal("120")
+    assert pos["pct_from_low"] == (Decimal("90") - Decimal("80")) / Decimal("80")
+    assert pos["window_days"] == 4  # honest actual window, not padded to 252
+
+
+def test_trend_structure_uptrend_downtrend_range() -> None:
+    up = _dec_series([float(i) for i in range(1, 21)])
+    down = _dec_series([float(i) for i in range(20, 0, -1)])
+    rng = _dec_series([10, 12, 9, 11, 10, 12, 9, 11])
+    assert T.trend_structure(up)["structure"] == "uptrend"
+    assert T.trend_structure(down)["structure"] == "downtrend"
+    assert T.trend_structure(rng)["structure"] == "range"
+    assert T.trend_structure(_dec_series([1, 2]))["structure"] is None
+
+
+def test_volume_signal_surge_and_gate() -> None:
+    vols = _dec_series([100.0] * 20 + [250.0])  # latest 2.5x the 20-bar avg
+    sig = T.volume_signal(vols)
+    assert sig["surge"] is True
+    assert sig["ratio_to_avg"] == Decimal("250") / Decimal("100")
+    assert T.volume_signal(_dec_series([1.0, 2.0]))["surge"] is None  # too short
+
+
+def test_technical_signals_bundles_and_omits_volume_by_default() -> None:
+    closes = _dec_series([100.0 + i for i in range(1, 80)])
+    out = T.technical_signals(closes)
+    assert set(out) == {"rsi14", "ma_cross", "week52", "trend"}  # no volume without data
+    assert T.technical_signals([]) == {"unavailable": True}
+    with_vol = T.technical_signals(closes, _dec_series([100.0] * 79))
+    assert "volume" in with_vol  # fed volumes -> section present

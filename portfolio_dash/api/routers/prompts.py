@@ -228,8 +228,25 @@ def _finmind_var(
     return result
 
 
+_FNG_TREND_DAYS = 7
+
+
+def _fng_scores_newest_first(conn: sqlite3.Connection) -> list[Decimal]:
+    """The last ≤7 daily Fear & Greed scores, newest first (for the local trend)."""
+    series = snapshots_store.latest_series(
+        conn, source="sentiment", dataset="fng", symbol=None, n=_FNG_TREND_DAYS
+    )
+    scores: list[Decimal] = []
+    for snap in series:  # latest_series is already newest-first
+        score = ES.to_decimal(snap.payload.get("score"))
+        if score is not None:
+            scores.append(score)
+    return scores
+
+
 def _sentiment_var(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Assemble market_sentiment_json from the latest VIX + Fear & Greed snapshots."""
+    """Assemble market_sentiment_json from the latest VIX + Fear & Greed snapshots
+    (VIX zone + F&G local five-zone + 7-day F&G trend — batch ③)."""
     vix_snap = snapshots_store.latest_snapshot(
         conn, source="sentiment", dataset="vix", symbol=None
     )
@@ -245,7 +262,29 @@ def _sentiment_var(conn: sqlite3.Connection) -> dict[str, Any]:
         as_of_vix=vix_snap.as_of.isoformat() if vix_snap is not None else None,
         fng=fng,
         as_of_fng=fng_snap.as_of.isoformat() if fng_snap is not None else None,
+        fng_scores_newest_first=_fng_scores_newest_first(conn),
     )
+
+
+def _fear_greed_var(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Assemble the standalone fear_greed_json (score + local zone + 7-day trend).
+
+    A dedicated variable so custom prompts can reference F&G independently of VIX
+    (2026-07-05 user request); derived from the same snapshots as market_sentiment_json.
+    """
+    fng_snap = snapshots_store.latest_snapshot(
+        conn, source="sentiment", dataset="fng", symbol=None
+    )
+    if fng_snap is None:
+        return {"unavailable": True, "last_as_of": None}
+    score = ES.to_decimal(fng_snap.payload.get("score"))
+    scores = _fng_scores_newest_first(conn)
+    return {
+        "score": fng_snap.payload.get("score"),
+        "zone": ES.fear_greed_zone(score) if score is not None else None,
+        "trend": ES.fear_greed_trend(scores) if scores else None,
+        "last_as_of": fng_snap.as_of.isoformat(),
+    }
 
 
 def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -270,6 +309,7 @@ def _external_vars(conn: sqlite3.Connection, symbol: str | None) -> dict[str, An
     """
     out: dict[str, Any] = {
         "market_sentiment_json": _sentiment_var(conn),
+        "fear_greed_json": _fear_greed_var(conn),
         "index_quotes_json": _index_var(conn),
     }
     if symbol:
