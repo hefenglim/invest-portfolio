@@ -220,9 +220,11 @@
   });
 
   /* ============ 洞察卡 + 持倉健診 (GET /api/insights) ============ */
-  /* A per_symbol card (symbol present) goes to the health grid; portfolio cards to the
-     cards grid. cost_usd is a Decimal STRING -> f.num (USD, 3 dp like the design's token
-     cost). created_at is an ISO string -> f.datetime. NEVER bare .toFixed on cost_usd. */
+  /* Card routing: a per_symbol card (real symbol) goes to the health grid; portfolio
+     cards AND per_market cards (symbol carries the market code TW/US/MY, 2026-07-05
+     spec) go to the cards grid with a market chip. cost_usd is a Decimal STRING ->
+     f.num (USD, 3 dp). created_at is ISO -> f.datetime. NEVER bare .toFixed. */
+  var MARKET_LABEL = { TW: '台股', US: '美股', MY: '馬股' };
   function emptyState(text) {
     var box = el('div', 'wz-note', text);
     box.style.cssText = 'grid-column: 1 / -1; padding: 20px; text-align: center; color: var(--text-3);';
@@ -252,7 +254,9 @@
     var head = el('div', 'insight-head');
     head.appendChild(el('span', 'badge badge-ai', 'AI'));
     head.appendChild(el('h3', 'insight-title', card.title || '(未命名洞察)'));
-    if (card.symbol) head.appendChild(el('span', 'insight-time', card.symbol));
+    if (card.symbol) {
+      head.appendChild(el('span', 'insight-time', MARKET_LABEL[card.symbol] || card.symbol));
+    }
     c.appendChild(head);
     c.appendChild(el('p', 'insight-body', card.summary || card.body_md || ''));
     var foot = el('div', 'insight-foot');
@@ -286,8 +290,8 @@
     var healthGrid = document.getElementById('ins-health-grid');
     cardsGrid.replaceChildren();
     healthGrid.replaceChildren();
-    var portfolio = cards.filter(function (c) { return !c.symbol; });
-    var perSymbol = cards.filter(function (c) { return !!c.symbol; });
+    var portfolio = cards.filter(function (c) { return !c.symbol || MARKET_LABEL[c.symbol]; });
+    var perSymbol = cards.filter(function (c) { return !!c.symbol && !MARKET_LABEL[c.symbol]; });
     if (!portfolio.length) cardsGrid.appendChild(emptyState('尚無洞察卡 — 由排程批次產生或手動觸發後顯示。'));
     else portfolio.forEach(function (c) { cardsGrid.appendChild(cardNode(c)); });
     if (!perSymbol.length) healthGrid.appendChild(emptyState('尚無持倉健診卡 — 由單一標的洞察任務產生後顯示。'));

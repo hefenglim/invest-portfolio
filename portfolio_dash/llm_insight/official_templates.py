@@ -130,6 +130,8 @@ _MARKET_BODY = (
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
 檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；愈近期的資料權重愈高。
+金額一律照輸入數字的原始數值與單位逐字引用，不得自行換算成「萬／百萬」等單位
+（例：輸入 4290.80 就寫 4,290.80，不得寫成 429 萬）。
 匯率換算與換匯損益屬全組合層次，請見全組合週報，本卡不評匯率歸因。
 本卡為純敘事回顧，不附預測（prediction 留空）；tags 請包含市場名稱（台股／美股／馬股）。"""
 )
@@ -139,7 +141,7 @@ _MARKET_BODY = (
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
     {"name": "個股健檢策略", "version": "v2.1", "scope": "per_symbol", "body": _CHECKUP_BODY},
-    {"name": "市場週報策略", "version": "v1", "scope": "per_market", "body": _MARKET_BODY},
+    {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
 ]
 
 
