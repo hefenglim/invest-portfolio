@@ -50,6 +50,61 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.10] - 2026-07-05
+
+LLM pillar IGNITED: the first live batch runs on the test instance exposed seven
+defects invisible to the mocked suite — all fixed with regression tests — followed
+by the AI-input optimization program (audited all 7 LLM surfaces, shipped the
+official-v2 template library) per the 2026-07-05 user directives.
+
+### Fixed
+- **Structured output was 100% broken on live providers**: LiteLLM's capability map
+  returns False for every ``openrouter/*`` id, so ``response_format`` was never sent
+  and nothing in the prompt asked for JSON — models replied prose and every insight
+  run failed both role models. ``shared/llm.py`` now always appends a schema-derived
+  JSON-only contract and tolerates fenced/prose-wrapped replies before failing.
+- **Same-day cache never hit live**: the fingerprint hashed the LLM-facing render
+  whose ``{{as_of}}``/``{{now}}`` carry seconds — every re-run billed a fresh call and
+  stored a duplicate card. The fingerprint now hashes a day-anchored second render
+  (same-day identical data reuses; an intra-day data change still regenerates); the
+  R4 anomaly snapshot fallback drops to day granularity (no same-day duplicates).
+- Mid-run LLM failures were all reported as ``budget_exhausted_mid_run`` — the reason
+  now carries the exception kind (+ message in ``detail``).
+- AI text input was unusable beyond the example account: the parse prompt never
+  listed valid account ids (the model invented ``charles_schwab``). It now carries the
+  live account catalog, a ``<today>`` anchor (yearless dates resolve to the most
+  recent PAST occurrence), and a multi-transaction example.
+- Run rows showed a blank status while running and finished with a UTC stamp next to
+  a +08:00 start; ``{}`` preflight bodies shadowed the saved combo into a bogus R3.
+
+### Added
+- **Official template library** (``llm_insight/official_templates.py``, versioned;
+  ``GET /api/prompt-templates`` / ``POST /api/system-prompt/reset`` /
+  ``POST /api/strategy-prompts/from-template``): system prompt v2 (timeliness-first,
+  output structure, tags vocabulary, confidence calibration), 持倉週報 v2.1 and
+  個股健檢 v2.1 (prediction spec, multi-account-total + FX-magnitude guards found by
+  the live A/B). Fresh installs seed the official system prompt.
+- **Master scoring rubric v2**: four weighted dimensions (direction 40 / citation 30
+  / scenario 20 / timeliness 10), score anchors, an explicit miss definition,
+  evidence-required notes — the narrative score is Loop-3's learning signal and had
+  no rubric. Calibration safety lock now has a concrete 600-word cap + a timeliness
+  rule; miss samples join the failed card's own claim/prediction/outcome.
+- **Data diet**: ``price_history_json`` sends the last 30 sessions daily + every 5th
+  beyond (checkup input −33%); ``fx_json`` carries an in-band unit note.
+- ``settings-prompts``: the strategy-card section — still a design stub with local-only
+  saves — is now fully wired to ``/api/strategy-prompts`` (load/save/toggle/archive/
+  add) plus 重置回官方版 / 從官方模板庫新增 buttons. ``settings-llm``: the add-model
+  drawer prefills the provider's public ``api_base`` and reuses the last same-provider
+  model's context/output/timeout/retry settings.
+
+### Changed
+- Preflight G1 (unscheduled) now WARNS instead of hard-failing the verdict — manual
+  triggering is a legitimate mode and the pipeline hub's trigger node already said
+  warn (human sign-off 2026-07-05; supersedes the §7.2 fail).
+- Deleting an insight task hides its historical cards/evaluations from
+  ``/api/insights``, the dashboard embed, and ``/api/ai-score`` (rows stay in the
+  tables — spec 4.1 archive semantics).
+
 ## [v0.1.9] - 2026-07-03
 
 Mobile (iPhone) layout pass — layout only, zero functional change, verified at
