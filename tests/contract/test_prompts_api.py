@@ -272,3 +272,18 @@ def test_system_prompt_reset_restores_official(api_client: TestClient) -> None:
     b = api_client.post("/api/system-prompt/reset").json()
     assert "時效第一" in b["body"]
     assert api_client.get("/api/system-prompt").json()["body"] == b["body"]
+
+
+def test_preview_per_market_slices_values(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # SR gap-fill: PromptBody gained scope=per_market + market; the preview must
+    # render the market slice (TW body contains no US holding) with clean tokens.
+    r = api_client.post(
+        "/api/prompts/preview",
+        json={"body": "{{holdings_json}}", "scope": "per_market", "market": "TW"},
+    )
+    assert r.status_code == 200
+    b = r.json()
+    assert b["unknown_tokens"] == [] and b["scope_violations"] == []
+    assert "2330" in b["rendered"] and "AAPL" not in b["rendered"]

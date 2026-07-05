@@ -304,3 +304,17 @@ def test_per_market_scope_rejects_per_symbol_vars() -> None:
     v = V.validate_tokens("{{symbol_detail_json}} {{holdings_json}}", "per_market")
     assert v.scope_violations == ["symbol_detail_json"]
     assert v.unknown_tokens == []
+
+
+def test_market_freshness_filters_to_own_symbols(golden_db: sqlite3.Connection) -> None:
+    # SR gap-fill: the freshness slice was implemented but untested.
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    full = V.value_for("freshness_json", V.VarContext(data=data, now=_NOW))
+    tw = V.value_for("freshness_json", V.VarContext(data=data, now=_NOW, market="TW"))
+    tw_symbols = {h.symbol for h in data.holdings if h.market.value == "TW"}
+    assert all(
+        p.get("symbol") in tw_symbols for p in tw.get("prices", []) if isinstance(p, dict)
+    )
+    assert all(s in tw_symbols for s in tw.get("missing_prices", []))
+    # the unfiltered dump is a superset
+    assert len(full.get("prices", [])) >= len(tw.get("prices", []))
