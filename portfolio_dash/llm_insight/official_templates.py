@@ -105,11 +105,41 @@ _CHECKUP_BODY = (
 標記新鮮度；缺漏資料如實說明；愈近期的資料權重愈高。"""
 )
 
+_MARKET_BODY = (
+    "讀者是長期投資人。以下輸入已由系統切成「單一市場」的資料切片"
+    "（只含這個市場的持倉），\n"
+    + """請產出這個市場的部位週報卡（title 含市場名稱與本週重點）：
+
+〇、本市場一句話 — 指出這個市場部位本週最值得注意的一件事及其數據依據（放在最前面）。
+
+一、部位與配置 — 這個市場的持倉明細與市場內產業配置：點出最大部位、集中度與風險意涵，
+引用具體數字與資料基準日。
+{{holdings_json}}
+{{allocation_json}}
+
+二、報酬 — 這個市場（原幣別）的已實現/未實現與報酬率；只談本市場，不與其他市場比較加總。
+{{returns_by_ccy_json}}
+
+三、股利現金流 — 本市場未來除息事件與年度已宣告股利：下一筆現金流的時點、金額、距今天數。
+{{ex_dividend_calendar_json}}
+{{dividend_projection_json}}
+
+四、市場環境 — 以本市場大盤指數與全球情緒指標定調環境，標注資料時點。
+{{index_quotes_json}}
+{{market_sentiment_json}}
+
+守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
+檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；愈近期的資料權重愈高。
+匯率換算與換匯損益屬全組合層次，請見全組合週報，本卡不評匯率歸因。
+本卡為純敘事回顧，不附預測（prediction 留空）；tags 請包含市場名稱（台股／美股／馬股）。"""
+)
+
 # Strategy templates: (name, version, scope hint, body). ``scope`` is advisory — the
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
     {"name": "個股健檢策略", "version": "v2.1", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "市場週報策略", "version": "v1", "scope": "per_market", "body": _MARKET_BODY},
 ]
 
 
@@ -153,6 +183,17 @@ TASK_PRESETS: list[TaskPreset] = [
         "horizon_days": 14,
         "suggested_cron": "0 9 * * mon",
         "description": "逐持股健檢（帶方向預測＋信心值，宇宙跟隨持倉）",
+    },
+    {
+        "name": "市場週報",
+        "version": "v1",
+        "scope": "per_market",
+        "strategy": "市場週報策略",
+        "use_system_prompt": True,
+        "self_correct": False,
+        "horizon_days": 14,
+        "suggested_cron": "30 9 * * sat",
+        "description": "台股／美股／馬股各一張市場部位週報（純敘事，資料自動市場切片）",
     },
 ]
 

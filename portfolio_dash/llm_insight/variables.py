@@ -30,11 +30,16 @@ from decimal import Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from portfolio_dash.portfolio import technicals
+from portfolio_dash.portfolio import market_view, technicals
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.shared.wire import to_wire
 
 Scope = Literal["portfolio", "per_symbol"]
+
+# per_market rendering (2026-07-05 spec): each market card sees ONLY its own market's
+# slice of the portfolio-scope variables, plus its own benchmark index. Sentiment
+# (VIX / Fear & Greed) stays global — it is a world-risk mood, not a market slice.
+_MARKET_INDEX: dict[str, str] = {"TW": "TAIEX", "US": "SPX", "MY": "KLCI"}
 
 # Project display timezone for the date/time vars (spec 04.10): all rendered ISO-8601
 # +08:00. A naive datetime is assumed to already be Asia/Taipei; an aware one is
@@ -324,11 +329,13 @@ def validate_tokens(body: str, scope: str) -> TokenValidation:
 
     * a token absent from the registry → ``unknown_tokens``;
     * a registry variable whose ``scope == 'per_symbol'`` used when the body's *scope*
-      is ``'portfolio'`` → ``scope_violations`` (= spec 04 R1).
+      is ``'portfolio'`` or ``'per_market'`` → ``scope_violations`` (= spec 04 R1;
+      a market card has no single symbol to bind them to).
 
-    ``per_symbol`` bodies may use ``portfolio`` variables freely (no violation). The
-    preview path lists these as diagnostics (always 200); the execution path turns any
-    non-empty list into a 422.
+    ``per_symbol`` bodies may use ``portfolio`` variables freely (no violation), and so
+    may ``per_market`` bodies (they render the market's slice). The preview path lists
+    these as diagnostics (always 200); the execution path turns any non-empty list
+    into a 422.
     """
     used = tokens_in(body)
     unknown: list[str] = []
@@ -338,7 +345,7 @@ def validate_tokens(body: str, scope: str) -> TokenValidation:
         if spec is None:
             unknown.append(token)
             continue
-        if scope == "portfolio" and spec.scope == "per_symbol":
+        if scope in ("portfolio", "per_market") and spec.scope == "per_symbol":
             violations.append(token)
     return TokenValidation(tokens_used=used, unknown_tokens=unknown, scope_violations=violations)
 
@@ -353,6 +360,9 @@ class VarContext:
 
     data: DashboardData
     symbol: str | None = None
+    # per_market render target ("TW"/"US"/"MY"): portfolio-scope variables slice to this
+    # market so the card cannot misquote another market's numbers (2026-07-05 spec).
+    market: str | None = None
     closes: list[Decimal] | None = None  # chronological closes (pricing.store.get_price_history)
     price_points: list[dict[str, Any]] = field(default_factory=list)  # [{date, close}]
     # Date/time context (spec 04.10), fed by the generation/eval seam. ``now`` is fed on
@@ -494,10 +504,11 @@ def _allocation(data: DashboardData) -> dict[str, Any]:
     return dict(data.allocation.weights)
 
 
-def _returns_by_ccy(data: DashboardData) -> dict[str, Any]:
+def _returns_by_ccy(data: DashboardData, *, market: str | None = None) -> dict[str, Any]:
     if data.returns is None:
         return {"unavailable": True}
-    return {
+    only_ccy = market_view.MARKET_QUOTE_CCY.get(market or "")
+    out = {
         ccy.value: {
             "realized": cr.realized,
             "unrealized": cr.unrealized,
@@ -506,7 +517,9 @@ def _returns_by_ccy(data: DashboardData) -> dict[str, Any]:
             "rate": cr.rate,
         }
         for ccy, cr in data.returns.by_currency.items()
+        if only_ccy is None or ccy.value == only_ccy
     }
+    return out or {"unavailable": True}
 
 
 def _fx(data: DashboardData) -> dict[str, Any]:
@@ -539,19 +552,46 @@ def _fx_rates(ctx: VarContext) -> dict[str, Any]:
 
 def _dividends(ctx: VarContext) -> Any:
     """Per-event dividend ledger rows (symbol/date/type/gross/net/ccy), fed by the router.
-    Falls back to the computed yearly summary when no rows are supplied (conn-less callers)."""
+    A market card sees only its market-currency events. Falls back to the computed yearly
+    summary when no rows are supplied (conn-less callers; unfiltered — documented)."""
     if ctx.dividend_rows is not None:
+        ccy = market_view.MARKET_QUOTE_CCY.get(ctx.market or "")
+        if ccy is not None:
+            return [r for r in ctx.dividend_rows if r.get("ccy") == ccy]
         return ctx.dividend_rows
     return ctx.data.dividends.model_dump()
 
 
-def _dividend_projection(data: DashboardData) -> dict[str, Any]:
+def _dividend_projection(data: DashboardData, *, market: str | None = None) -> dict[str, Any]:
     if data.dividend_projection is None:
         return {"unavailable": True}
-    return {
+    only_ccy = market_view.MARKET_QUOTE_CCY.get(market or "")
+    out: dict[str, Any] = {
         ccy.value: dpc.model_dump()
         for ccy, dpc in data.dividend_projection.by_currency.items()
+        if only_ccy is None or ccy.value == only_ccy
     }
+    return out or {"unavailable": True}
+
+
+def _freshness(ctx: VarContext) -> dict[str, Any]:
+    """The freshness report; a market card sees only its own market's symbols."""
+    dump = ctx.data.freshness.model_dump()
+    if ctx.market is None:
+        return dump
+    market_symbols = {
+        h.symbol for h in market_view.market_holdings(ctx.data.holdings, ctx.market)
+    }
+    if isinstance(dump.get("missing_prices"), list):
+        dump["missing_prices"] = [
+            s for s in dump["missing_prices"] if s in market_symbols
+        ]
+    if isinstance(dump.get("prices"), list):
+        dump["prices"] = [
+            p for p in dump["prices"]
+            if not isinstance(p, dict) or p.get("symbol") in market_symbols
+        ]
+    return dump
 
 
 def _iso_taipei(value: datetime | None) -> str | None:
@@ -597,18 +637,35 @@ def value_for(token: str, ctx: VarContext) -> Any:
         if not isinstance(value, dict) or value.get("unavailable") is True:
             reason = ctx.external_reasons.get(token)
             return {"unavailable": True, "reason": reason} if reason else _UNAVAILABLE
+        if token == "index_quotes_json" and ctx.market in _MARKET_INDEX:
+            # A market card sees only its OWN benchmark (TW→TAIEX, US→SPX, MY→KLCI).
+            label = _MARKET_INDEX[ctx.market]
+            return {
+                k: v for k, v in value.items() if k == label or k == "last_as_of"
+            } or _UNAVAILABLE
         return value
     data = ctx.data
     if token == "holdings_json":
+        if ctx.market is not None:
+            return [
+                h.model_dump()
+                for h in market_view.market_holdings(data.holdings, ctx.market)
+            ]
         return [h.model_dump() for h in data.holdings]
     if token == "allocation_json":
+        if ctx.market is not None:
+            return market_view.market_allocation(data.holdings, ctx.market) or _UNAVAILABLE
         return _allocation(data)
     if token == "kpis_json":
         return data.kpis.model_dump()
     if token == "returns_by_ccy_json":
-        return _returns_by_ccy(data)
+        return _returns_by_ccy(data, market=ctx.market)
     if token == "realized_json":
-        return [r.model_dump() for r in data.realized.rows]
+        rows = data.realized.rows
+        ccy = market_view.MARKET_QUOTE_CCY.get(ctx.market or "")
+        if ccy is not None:
+            rows = [r for r in rows if r.quote_ccy.value == ccy]
+        return [r.model_dump() for r in rows]
     if token == "symbol_detail_json":
         return _symbol_detail(ctx)
     if token == "price_history_json":
@@ -622,15 +679,22 @@ def value_for(token: str, ctx: VarContext) -> Any:
     if token == "dividends_json":
         return _dividends(ctx)
     if token == "ex_dividend_calendar_json":
-        return [e.model_dump() for e in data.ex_dividend_calendar]
+        events = data.ex_dividend_calendar
+        ccy = market_view.MARKET_QUOTE_CCY.get(ctx.market or "")
+        if ccy is not None:
+            events = [
+                e for e in events
+                if e.currency is not None and e.currency.value == ccy
+            ]
+        return [e.model_dump() for e in events]
     if token == "dividend_projection_json":
-        return _dividend_projection(data)
+        return _dividend_projection(data, market=ctx.market)
     if token == "fx_json":
         return _fx(data)
     if token == "fx_rates_json":
         return _fx_rates(ctx)
     if token == "freshness_json":
-        return data.freshness.model_dump()
+        return _freshness(ctx)
     if token == "as_of":
         return data.as_of
     # Defensive: a registered-available token with no mapping (should not happen).

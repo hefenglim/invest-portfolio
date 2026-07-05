@@ -547,3 +547,93 @@ def test_same_day_anomaly_rerun_does_not_duplicate(
             now=t,
         )
     assert len(istore.list_cards(conn, insight_type_id=it.id)) == 1
+
+
+# --- per_market scope (2026-07-05 spec): one card per held market ----------------
+
+
+def _market_combo(conn: sqlite3.Connection) -> int:
+    sp = cs.create_strategy(
+        conn, name="S-market", body="市場部位：{{holdings_json}} 配置：{{allocation_json}}",
+        now=NOW,
+    )
+    it = cs.create_insight_type(conn, name="MarketWeekly", scope="per_market", now=NOW)
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    return it.id
+
+
+def _market_ctxs(conn: sqlite3.Connection) -> tuple[dict[str | None, V.VarContext], list[str]]:
+    data = build_dashboard(conn, now=NOW, reporting=Currency.TWD)
+    markets = sorted({h.market.value for h in data.holdings})
+    ctxs: dict[str | None, V.VarContext] = {}
+    for mk in markets:
+        ctxs[mk] = V.VarContext(data=data, now=NOW, market=mk)
+    return ctxs, markets
+
+
+def test_per_market_run_one_card_per_held_market(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_llm(monkeypatch)
+    it_id = _market_combo(conn)
+    ctxs, markets = _market_ctxs(conn)
+    assert len(markets) >= 2  # the golden book spans TW + US at least
+    result = generate.run_insight_type(
+        conn, it_id, var_contexts=ctxs,
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=markets),
+        now=NOW,
+    )
+    assert result.status == "ok"
+    cards = istore.list_cards(conn, insight_type_id=it_id)
+    assert len(cards) == len(markets)
+    # the market code rides the symbol column (spec: API/前端以此篩選).
+    assert sorted(c.symbol for c in cards) == markets
+
+
+def test_per_market_prompt_never_leaks_other_market(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # THE guard of the spec: a TW card's assembled input must not contain any
+    # US-held symbol (cross-market misquotes die at the source).
+    prompts: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        msgs = kw["messages"]
+        assert isinstance(msgs, list)
+        prompts.append(str(msgs[0]["content"]))
+        return _Resp(_CARD_JSON)
+
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    it_id = _market_combo(conn)
+    ctxs, markets = _market_ctxs(conn)
+    generate.run_insight_type(
+        conn, it_id, var_contexts=ctxs,
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=markets),
+        now=NOW,
+    )
+    data = build_dashboard(conn, now=NOW, reporting=Currency.TWD)
+    by_market: dict[str, set[str]] = {}
+    for h in data.holdings:
+        by_market.setdefault(h.market.value, set()).add(h.symbol)
+    assert len(prompts) == len(markets)
+    for mk, prompt in zip(markets, prompts, strict=True):
+        for other_mk, symbols in by_market.items():
+            if other_mk == mk:
+                continue
+            for sym in symbols:
+                assert sym not in prompt, f"{mk} card leaked {other_mk} symbol {sym}"
+
+
+def test_per_market_empty_universe_blocks_r2(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_llm(monkeypatch)
+    it_id = _market_combo(conn)
+    result = generate.run_insight_type(
+        conn, it_id, var_contexts={},
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=[]),
+        now=NOW,
+    )
+    assert result.status == "skipped"
+    assert result.reason == "R2_universe_empty"

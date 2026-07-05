@@ -95,6 +95,15 @@ def calibration_gap(conn: sqlite3.Connection) -> Decimal | None:
     return scoring.calibration_error(rows)
 
 
+def _resolve_markets(data: DashboardData) -> list[str]:
+    """The per_market universe: the sorted market codes among current holdings.
+
+    Holdings carry their market directly (HoldingRow.market); an emptied market simply
+    stops appearing — its card is not produced (spec: 自動跟隨持有市場).
+    """
+    return sorted({h.market.value for h in data.holdings})
+
+
 def _resolve_universe(it: cs.InsightType, data: DashboardData) -> list[str]:
     """The per_symbol universe: custom list, or all current holdings for ``mode:all``."""
     held = sorted({h.symbol for h in data.holdings})
@@ -194,6 +203,15 @@ def run_for_id(
             # not in the holdings/prices) is a missing-price anomaly → zero-LLM card.
             if not ctx.closes and sym not in missing_prices:
                 missing_prices.append(sym)
+    elif it.scope == "per_market":
+        # One card per HELD market (2026-07-05 spec): the market code is the R8 target
+        # key AND the card's symbol column; the VarContext.market filter guarantees the
+        # card's inputs contain only that market's slice.
+        universe_symbols = _resolve_markets(data)
+        for mk in universe_symbols:
+            ctx = _portfolio_ctx(conn, data, now=now, reporting=reporting)
+            ctx.market = mk
+            var_contexts[mk] = ctx
     elif it.scope == "on_alert":
         target = fired_symbol
         if target is not None:
@@ -688,7 +706,11 @@ def _gather_facts(
     master_configured: bool,
 ) -> ps.PipelineFacts:
     """Assemble the fed :class:`PipelineFacts` for one task (no derivation here)."""
-    universe = _resolve_universe(it, data) if it.scope == "per_symbol" else []
+    universe = (
+        _resolve_universe(it, data) if it.scope == "per_symbol"
+        else _resolve_markets(data) if it.scope == "per_market"
+        else []
+    )
     affected_scope = universe if it.scope == "per_symbol" else [h.symbol for h in data.holdings]
     live, total = _template_counts(conn, it.id)
     last_run = _last_run_for(conn, it.id)
@@ -1134,7 +1156,11 @@ def _preflight_saved(
     include_preview: bool,
 ) -> dict[str, Any]:
     """Preflight a SAVED task: share ``generate._gate_context`` + ``gating.evaluate_gates``."""
-    universe = _resolve_universe(it, data) if it.scope == "per_symbol" else []
+    universe = (
+        _resolve_universe(it, data) if it.scope == "per_symbol"
+        else _resolve_markets(data) if it.scope == "per_market"
+        else []
+    )
     missing = _missing_prices_for(data, it.scope, universe, conn)
     inputs = RunInputs(
         budget_remaining=quota,
@@ -1176,7 +1202,9 @@ def _preflight_draft(
 ) -> dict[str, Any]:
     """Preflight an UNSAVED draft: same shared gate, transient context, nothing persisted."""
     universe = (
-        _resolve_universe_raw(draft.universe, data) if draft.scope == "per_symbol" else []
+        _resolve_universe_raw(draft.universe, data) if draft.scope == "per_symbol"
+        else _resolve_markets(data) if draft.scope == "per_market"
+        else []
     )
     missing = _missing_prices_for(data, draft.scope, universe, conn)
     inputs = RunInputs(

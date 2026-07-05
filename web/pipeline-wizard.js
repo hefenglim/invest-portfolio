@@ -97,7 +97,8 @@
         });
         if (d.self_correct) stack.appendChild(layer('校正', '自我校正（累積樣本後生成）', 'l-calib'));
         stack.appendChild(layer('產出', d.scope === 'per_symbol'
-          ? symCount() + ' 張洞察卡/次' : '1 張洞察卡/次'));
+          ? symCount() + ' 張洞察卡/次'
+          : d.scope === 'per_market' ? '每持有市場 1 張/次' : '1 張洞察卡/次'));
         rail.appendChild(stack);
         var est = el('div', 'wz-note');
         est.style.marginTop = '8px';
@@ -195,8 +196,9 @@
           } else {
             stage.appendChild(el('div', 'pv-note', '一次執行要看整個組合，還是逐檔各看一次？'));
             var grid3 = el('div', 'wz-opts');
-            grid3.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            grid3.style.gridTemplateColumns = 'repeat(3, 1fr)';
             grid3.appendChild(opt('全組合', '單一快照、產 1 張卡', d.scope === 'portfolio', function () { d.scope = 'portfolio'; d.templates = d.templates.filter(function (tid) { var t = tplOf(tid); return t && t.scope !== 'per_symbol'; }); renderStage(); }));
+            grid3.appendChild(opt('單一市場', '台/美/馬各一張；資料自動市場切片', d.scope === 'per_market', function () { d.scope = 'per_market'; d.templates = d.templates.filter(function (tid) { var t = tplOf(tid); return t && t.scope !== 'per_symbol'; }); renderStage(); }));
             grid3.appendChild(opt('單一標的', '每檔一張卡；可用個股級變數', d.scope === 'per_symbol', function () { d.scope = 'per_symbol'; renderStage(); }));
             stage.appendChild(grid3);
             if (d.scope === 'per_symbol') {

@@ -126,6 +126,7 @@
 
   var SCOPE_META = {
     per_symbol: { cls: 's-sym', label: '單一標的・每檔一張' },
+    per_market: { cls: 's-pf', label: '單一市場・每市場一張' },
     portfolio: { cls: 's-pf', label: '全組合' },
     on_alert: { cls: 's-alert', label: '預警觸發' }
   };

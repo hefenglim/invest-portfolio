@@ -258,3 +258,49 @@ def test_downsample_keeps_daily_tail_and_sparse_head() -> None:
     dates = [p["date"] for p in out]
     assert dates == sorted(dates, key=lambda d: int(d[1:]))  # chronological order kept
     assert out[-31] == pts[149]  # sparse walk starts at the last head point (149,144,...)
+
+
+# --- per_market slicing (2026-07-05 spec) ---------------------------------------
+
+
+def _mctx(conn: sqlite3.Connection, market: str) -> V.VarContext:
+    data = build_dashboard(conn, now=_NOW, reporting=Currency.TWD)
+    return V.VarContext(data=data, now=_NOW, market=market)
+
+
+def test_market_holdings_slice_only_own_market(golden_db: sqlite3.Connection) -> None:
+    out, _ = V.render_prompt("{{holdings_json}}", _mctx(golden_db, "TW"))
+    assert "2330" in out
+    assert "AAPL" not in out  # the US holding never reaches a TW card
+
+
+def test_market_allocation_reweights_within_market(golden_db: sqlite3.Connection) -> None:
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    tw = V.value_for("allocation_json", V.VarContext(data=data, now=_NOW, market="TW"))
+    assert isinstance(tw, dict) and "unavailable" not in tw
+    total = sum(Decimal(str(w)) for w in tw.values())
+    assert Decimal("0.999") < total < Decimal("1.001")  # weights re-normalized in-market
+
+
+def test_market_returns_only_own_currency(golden_db: sqlite3.Connection) -> None:
+    out, _ = V.render_prompt("{{returns_by_ccy_json}}", _mctx(golden_db, "US"))
+    assert "USD" in out and "TWD" not in out
+
+
+def test_market_index_filtered_to_own_benchmark(golden_db: sqlite3.Connection) -> None:
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    ctx = V.VarContext(
+        data=data, now=_NOW, market="TW",
+        external_vars={"index_quotes_json": {
+            "TAIEX": {"chg_20d": "+0.042"}, "SPX": {"chg_20d": "+0.031"},
+            "KLCI": {"chg_20d": "+0.008"}, "last_as_of": "2026-06-11",
+        }},
+    )
+    value = V.value_for("index_quotes_json", ctx)
+    assert set(value) == {"TAIEX", "last_as_of"}
+
+
+def test_per_market_scope_rejects_per_symbol_vars() -> None:
+    v = V.validate_tokens("{{symbol_detail_json}} {{holdings_json}}", "per_market")
+    assert v.scope_violations == ["symbol_detail_json"]
+    assert v.unknown_tokens == []

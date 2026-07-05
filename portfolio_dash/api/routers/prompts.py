@@ -80,8 +80,9 @@ class SystemPromptIn(BaseModel):
 
 class PromptBody(BaseModel):
     body: str
-    scope: str  # "portfolio" | "per_symbol"
+    scope: str  # "portfolio" | "per_symbol" | "per_market"
     symbol: str | None = None
+    market: str | None = None  # per_market preview target ("TW"/"US"/"MY")
 
 
 # --- 6.1 variable registry ----------------------------------------------------
@@ -329,6 +330,8 @@ def _build_context(
         external_vars=external_vars,
         external_reasons=_external_reasons(conn, external_vars),
     )
+    if payload.scope == "per_market" and payload.market:
+        ctx.market = payload.market  # market-sliced preview (2026-07-05 spec)
     if payload.scope == "per_symbol" and payload.symbol:
         as_of = now.date()
         start = as_of - timedelta(days=_HISTORY_DAYS)

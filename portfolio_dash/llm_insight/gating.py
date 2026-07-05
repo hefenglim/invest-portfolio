@@ -95,8 +95,9 @@ def _alert_matches(alert_rules: str | list[str] | None, fired_rule: str | None) 
 
 
 def _resolve_targets(ctx: GateContext) -> list[str | None]:
-    """R8 execution unit: one card per symbol for per_symbol, else one card per combo."""
-    if ctx.scope == "per_symbol":
+    """R8 execution unit: one card per symbol (per_symbol) / per market code
+    (per_market — ``universe_symbols`` carries "TW"/"US"/"MY"), else one per combo."""
+    if ctx.scope in ("per_symbol", "per_market"):
         return list(ctx.universe_symbols)
     if ctx.scope == "on_alert":
         return [ctx.fired_symbol]
@@ -126,8 +127,9 @@ def evaluate_gates(ctx: GateContext) -> GateResult:
             reason="R3_no_live_templates",
         ))
 
-    # R2 — per_symbol universe lifecycle.
-    if ctx.scope == "per_symbol":
+    # R2 — per_symbol / per_market universe lifecycle (a market card needs at least
+    # one held market; an emptied portfolio blocks instead of producing hollow cards).
+    if ctx.scope in ("per_symbol", "per_market"):
         if not ctx.universe_symbols:
             blocked = True
             gates.append(GateFinding(

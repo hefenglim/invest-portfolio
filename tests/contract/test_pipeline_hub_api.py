@@ -362,19 +362,21 @@ def test_official_pack_creates_tasks_with_schedules(
     r = api_client.post("/api/insight-tasks/official-pack")
     assert r.status_code == 200
     body = r.json()
-    assert [c["name"] for c in body["created"]] == ["持倉週報", "個股健檢"]
+    assert [c["name"] for c in body["created"]] == ["持倉週報", "個股健檢", "市場週報"]
     assert body["skipped"] == []
     # tasks exist with the preset knobs + a mounted schedule.
     types = {t["name"]: t for t in api_client.get("/api/insight-types").json()}
-    weekly, checkup = types["持倉週報"], types["個股健檢"]
+    weekly, checkup, market = types["持倉週報"], types["個股健檢"], types["市場週報"]
     assert weekly["scope"] == "portfolio" and weekly["self_correct"] is False
     assert checkup["scope"] == "per_symbol" and checkup["self_correct"] is True
+    assert market["scope"] == "per_market" and market["self_correct"] is False
     assert checkup["horizon_days"] == 14
-    assert weekly["schedule"] and checkup["schedule"]
+    assert weekly["schedule"] and checkup["schedule"] and market["schedule"]
     assert [s["name"] for s in weekly["strategies"]] == ["持倉週報策略"]
+    assert [s["name"] for s in market["strategies"]] == ["市場週報策略"]
     # strategies were created from the library.
     names = {s["name"] for s in api_client.get("/api/strategy-prompts").json()}
-    assert {"持倉週報策略", "個股健檢策略"} <= names
+    assert {"持倉週報策略", "個股健檢策略", "市場週報策略"} <= names
 
 
 def test_official_pack_is_idempotent_and_reuses_strategies(
@@ -392,4 +394,40 @@ def test_official_pack_is_idempotent_and_reuses_strategies(
     assert len(weeklies) == 1 and "我的自訂版" in weeklies[0]["body"]
     second = api_client.post("/api/insight-tasks/official-pack").json()
     assert second["created"] == []
-    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢"])
+    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+
+
+# --- per_market tasks over the API (2026-07-05 spec) ----------------------------
+
+
+def test_per_market_task_create_preflight_run(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    from decimal import Decimal as _D
+
+    from portfolio_dash.shared.llm_config import add_topup
+
+    add_topup(golden_db, _D("5"))
+    sp = api_client.post(
+        "/api/strategy-prompts", json={"name": "M", "body": "{{holdings_json}}"}
+    ).json()
+    it = api_client.post(
+        "/api/insight-types",
+        json={"name": "市場卡", "scope": "per_market", "strategy_ids": [sp["id"]]},
+    ).json()
+    assert it["scope"] == "per_market"
+    # preflight: the shared gate accepts the scope; R1/R2 pass on the golden book.
+    pf = api_client.post(f"/api/insight-tasks/{it['id']}/preflight").json()
+    gates = {g["id"]: g["lv"] for g in pf["gates"]}
+    assert gates["R1"] == "ok" and gates["R2"] == "ok"
+    # a per_symbol variable in the template is an R1 block for per_market.
+    sp2 = api_client.post(
+        "/api/strategy-prompts", json={"name": "M2", "body": "{{symbol_detail_json}}"}
+    ).json()
+    r = api_client.post(
+        "/api/insight-types",
+        json={"name": "市場卡2", "scope": "per_market", "strategy_ids": [sp2["id"]]},
+    )
+    assert r.status_code == 422  # R1 rejected at create, same as portfolio scope
+    # manual run dispatches (bg thread is hermetic here; 202 + running row is the contract).
+    assert api_client.post(f"/api/insight-types/{it['id']}/run").status_code == 202
