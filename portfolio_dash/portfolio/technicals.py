@@ -15,9 +15,16 @@ Discipline (``rules/data-and-pricing.md``):
   compute honestly — the caller renders that as missing/unavailable.
 """
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 _ZERO = Decimal("0")
+
+
+def _q(value: Decimal | None, exp: str) -> Decimal | None:
+    """Quantize an LLM-facing display value (None-safe). Rounding is a display concern
+    (data-and-pricing.md: quantize at display) — the raw computation stays full-precision.
+    """
+    return value.quantize(Decimal(exp), rounding=ROUND_HALF_UP) if value is not None else None
 
 
 def moving_average(closes: list[Decimal], window: int) -> Decimal | None:
@@ -234,15 +241,32 @@ def technical_signals(
     """
     if not closes:
         return {"unavailable": True}
+    # Quantize the display-facing ratios so the prompt carries clean values (RSI 1 dp,
+    # position ratios 4 dp) instead of 26-digit Decimal noise — cleaner + fewer tokens.
+    w52 = week52_position(closes)
+    w52_display: dict[str, object | None] = {
+        "high": w52["high"],
+        "low": w52["low"],
+        "pct_from_high": _q(_as_decimal(w52["pct_from_high"]), "0.0001"),
+        "pct_from_low": _q(_as_decimal(w52["pct_from_low"]), "0.0001"),
+        "window_days": w52["window_days"],
+    }
     out: dict[str, object] = {
-        "rsi14": rsi(closes, 14),
+        "rsi14": _q(rsi(closes, 14), "0.1"),
         "ma_cross": ma_cross(closes),
-        "week52": week52_position(closes),
+        "week52": w52_display,
         "trend": trend_structure(closes),
     }
     if volumes and any(v is not None for v in volumes):
-        out["volume"] = volume_signal(volumes)
+        vol = volume_signal(volumes)
+        vol["ratio_to_avg"] = _q(_as_decimal(vol["ratio_to_avg"]), "0.01")
+        out["volume"] = vol
     return out
+
+
+def _as_decimal(value: object) -> Decimal | None:
+    """Narrow a bundled signal field back to Decimal|None for quantization (mypy-safe)."""
+    return value if isinstance(value, Decimal) else None
 
 
 def price_vs_cost(

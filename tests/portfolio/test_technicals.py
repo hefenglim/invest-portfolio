@@ -168,3 +168,16 @@ def test_technical_signals_bundles_and_omits_volume_by_default() -> None:
     assert T.technical_signals([]) == {"unavailable": True}
     with_vol = T.technical_signals(closes, _dec_series([100.0] * 79))
     assert "volume" in with_vol  # fed volumes -> section present
+
+
+def test_technical_signals_are_quantized_for_display() -> None:
+    # RSI to 1 dp, position ratios to 4 dp — no 26-digit Decimal noise in the prompt.
+    closes = _dec_series([100.0 + (i % 7) - 3 for i in range(1, 90)])
+    out = T.technical_signals(closes)
+    rsi_v = out["rsi14"]
+    assert isinstance(rsi_v, Decimal)
+    assert rsi_v == rsi_v.quantize(Decimal("0.1"))  # exactly 1 dp
+    w52 = out["week52"]
+    assert isinstance(w52, dict)
+    pfh = w52["pct_from_high"]
+    assert pfh is None or pfh == pfh.quantize(Decimal("0.0001"))
