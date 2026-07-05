@@ -2,8 +2,9 @@
 
 import sqlite3
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
@@ -13,6 +14,8 @@ from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
 from portfolio_dash.shared.llm import LLMError, complete_structured
 from portfolio_dash.shared.models.enums import Side
+
+_TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 class AiDraft(BaseModel):
@@ -80,12 +83,21 @@ _PROMPT = (
     '<schema>{{"drafts": [{{"account_id","symbol","side":"BUY|SELL","date":"YYYY-MM-DD",\n'
     '"shares","price","daytrade":false,"is_etf":false,"note"}}]}}</schema>\n'
     "<accounts>{accounts}</accounts>\n"
+    "<today>{today}</today>\n"
     "<example_input>在元大買 10 股 2330 @ 600</example_input>\n"
     '<example_output>{{"drafts":[{{"account_id":"tw_broker","symbol":"2330","side":"BUY",\n'
     '"date":"2026-06-01","shares":"10","price":"600"}}]}}</example_output>\n'
+    "<example_input>7/1 嘉信買 AAPL 5股 @210，隔天再買 5 股 @212</example_input>\n"
+    '<example_output>{{"drafts":[{{"account_id":"schwab","symbol":"AAPL","side":"BUY",\n'
+    '"date":"2026-07-01","shares":"5","price":"210"}},{{"account_id":"schwab",\n'
+    '"symbol":"AAPL","side":"BUY","date":"2026-07-02","shares":"5","price":"212"}}]}}\n'
+    "</example_output>\n"
     "<rules>Return JSON only, no prose. account_id MUST be one of the ids listed in\n"
     "<accounts> (match the user's broker wording to the account name); never invent\n"
-    "an id.</rules>\n"
+    "an id. Dates resolve against <today>: a month/day without a year means the most\n"
+    "recent PAST occurrence (a trade date is never in the future); relative words\n"
+    "(今天/昨天/上週五) resolve from <today>. One draft per transaction — text may\n"
+    "contain several.</rules>\n"
     "<user_text>{text}</user_text>"
 )
 
@@ -107,6 +119,7 @@ def ai_agents_input(
     text: str,
     *,
     completer: Completer | None = None,
+    today: date | None = None,
 ) -> AiInputResult:
     """Extract transactions from natural-language *text* and return a preview.
 
@@ -132,9 +145,15 @@ def ai_agents_input(
         the LLM call fails), the latest-run :class:`AiMeta`, and a commit-ready CSV.
     """
     completer = completer or complete_structured
+    # ``today`` anchors relative/yearless dates (audit §2.7: "7/3" must resolve to the
+    # most recent PAST occurrence, never a future trade date). The router feeds get_now's
+    # date; the fallback keeps direct callers working.
+    anchor = today if today is not None else datetime.now(_TAIPEI).date()
     try:
         result = completer(
-            _PROMPT.format(text=text, accounts=_accounts_catalog(conn)),
+            _PROMPT.format(
+                text=text, accounts=_accounts_catalog(conn), today=anchor.isoformat()
+            ),
             AiDraftList,
             agent="ai_agents_input",
             conn=conn,

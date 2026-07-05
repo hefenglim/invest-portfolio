@@ -297,6 +297,7 @@ def _insert_insight(
         title=f"{symbol} view", summary="s", body_md="b", tags=[], symbol=symbol,
         confidence=70 if pred is not None else None, prediction=pred,
     )
+    istore.ensure_tables(conn)
     rec = istore.add_card(
         conn, insight_type_id=type_id, card=card, fingerprint=f"fp-{insight_id}",
         calibration_version=None, horizon_days=5, input_snapshot="snap", model="m",
@@ -350,3 +351,37 @@ def test_scored_confidence_hits_filters_and_maps(conn: sqlite3.Connection) -> No
 
 def test_scored_confidence_hits_empty(conn: sqlite3.Connection) -> None:
     assert es.scored_confidence_hits(conn) == []
+
+
+def test_miss_samples_carry_card_context(conn: sqlite3.Connection) -> None:
+    # Loop-3 rewrites rules from FIRST-HAND failed claims: the sample joins the
+    # card's symbol/title/summary/prediction when the insights row exists
+    # (2026-07-05 audit §2.5 — id+notes alone was a game of telephone).
+    from decimal import Decimal as _D
+
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard, Prediction
+
+    istore.ensure_tables(conn)
+    rec = istore.add_card(
+        conn, insight_type_id=10,
+        card=InsightCard(
+            title="2330 回測", summary="偏多主張", body_md="b", tags=[], symbol="2330",
+            confidence=70,
+            prediction=Prediction(metric="price_change", direction="up",
+                                  target_pct=_D("0.03"), horizon_days=5),
+        ),
+        fingerprint=istore.fingerprint(10, "p", "d", "v1"), calibration_version=1,
+        horizon_days=5, input_snapshot="{}", model="m", cost_usd=_D("0"), now=NOW,
+    )
+    es.add_evaluation(conn, insight_id=rec.id, insight_type_id=10, calibration_version=1,
+                      is_shadow=False, status="scored", quant_hit=False, narrative_score=20,
+                      miss=True, actual_value=_D("-0.02"), confidence=70, now=NOW,
+                      notes="方向相反")
+    samples = es.miss_samples_for_version(conn, insight_type_id=10, version=1)
+    assert len(samples) == 1
+    s = samples[0]
+    assert s["card_symbol"] == "2330"
+    assert s["card_title"] == "2330 回測"
+    assert s["card_summary"] == "偏多主張"
+    assert s["card_prediction"] and "price_change" in s["card_prediction"]

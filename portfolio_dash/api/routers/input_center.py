@@ -309,8 +309,12 @@ class AiBody(BaseModel):
 
 
 @router.post("/input/ai/preview")
-def ai_preview(body: AiBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
-    result = ai_agents_input(conn, body.text)
+def ai_preview(
+    body: AiBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    result = ai_agents_input(conn, body.text, today=now.date())
     for r in result.preview.rows:
         for issue in r.issues:
             if issue.kind in _LLM_HTTP:

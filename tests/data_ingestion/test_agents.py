@@ -106,3 +106,20 @@ def test_ai_input_prompt_carries_live_account_catalog(conn: sqlite3.Connection) 
     assert "<accounts>" in prompt
     for account_id in ("tw_broker", "schwab", "moomoo_my_us", "moomoo_my_my"):
         assert account_id in prompt
+
+
+def test_ai_input_prompt_carries_today_anchor(conn: sqlite3.Connection) -> None:
+    # Yearless dates ("7/3") must resolve against a known today — the prompt now
+    # carries <today> fed by the router's clock (audit §2.7).
+    _setup(conn)
+    seen: dict[str, str] = {}
+
+    def spy_completer(
+        prompt: str, schema: type, *, agent: str, conn: object = None
+    ) -> AiDraftList:
+        seen["prompt"] = prompt
+        return AiDraftList(drafts=[])
+
+    ai_agents_input(conn, "7/3 買 2330", completer=spy_completer, today=date(2026, 7, 5))
+    assert "<today>2026-07-05</today>" in seen["prompt"]
+    assert "recent PAST occurrence" in seen["prompt"]  # rule text wraps across a newline

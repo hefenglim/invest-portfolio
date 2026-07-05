@@ -235,3 +235,26 @@ def test_date_vars_degrade_gracefully_when_absent(golden_db: sqlite3.Connection)
         "{{now}}|{{card_created_at}}|{{eval_date}}", ctx
     )
     assert out == "null|null|null"
+
+
+# --- price-history data diet (2026-07-05 audit §3) -----------------------------
+
+
+def test_downsample_short_series_untouched() -> None:
+    from portfolio_dash.llm_insight.variables import _downsample_points
+
+    pts = [{"date": f"d{i}", "close": str(i)} for i in range(30)]
+    assert _downsample_points(pts) == pts
+
+
+def test_downsample_keeps_daily_tail_and_sparse_head() -> None:
+    from portfolio_dash.llm_insight.variables import _downsample_points
+
+    pts = [{"date": f"d{i}", "close": str(i)} for i in range(180)]
+    out = _downsample_points(pts)
+    # 150 head points every 5th (aligned from the tail) + 30 daily tail = 60.
+    assert len(out) == 30 + 30
+    assert out[-30:] == pts[-30:]  # the timeliness-critical window is untouched
+    dates = [p["date"] for p in out]
+    assert dates == sorted(dates, key=lambda d: int(d[1:]))  # chronological order kept
+    assert out[-31] == pts[149]  # sparse walk starts at the last head point (149,144,...)

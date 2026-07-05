@@ -111,9 +111,9 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- price (價格與技術) — all available ---
     VarSpec(
         "price_history_json", "歷史日線", "price", "per_symbol", True,
-        "近 180 個交易日收盤序列（含 staleness 標記）",
-        '{"symbol":"2330","points":[{"date":"2026-06-11","close":"612.50"}, …180 點],'
-        '"stale":false}',
+        "收盤序列：近 30 個交易日逐日＋其餘每 5 日取樣（覆蓋 180 日趨勢，含 staleness 標記）",
+        '{"symbol":"2330","points":[{"date":"2026-06-11","close":"612.50"}, …約 60 點],'
+        '"stale":false,"sampling":"last 30 sessions daily; older every 5 sessions"}',
     ),
     VarSpec(
         "ma_signals_json", "均線位置", "price", "per_symbol", True,
@@ -414,6 +414,25 @@ def _symbol_detail(ctx: VarContext) -> dict[str, Any]:
     }
 
 
+# Data-diet (2026-07-05 audit §3, human sign-off): the raw 180-point daily series was
+# ~40% of a checkup card's input while MA/vol/drawdown already summarize it. Keep the
+# last 30 sessions daily (the timeliness-critical window) and one point per 5 sessions
+# beyond — the 180-day trend survives at half the tokens. Representation only: every
+# kept point is the untouched stored close.
+_HISTORY_DAILY_TAIL = 30
+_HISTORY_SPARSE_STEP = 5
+
+
+def _downsample_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Last ``_HISTORY_DAILY_TAIL`` points daily; earlier points every Nth (kept in order)."""
+    if len(points) <= _HISTORY_DAILY_TAIL:
+        return points
+    head = points[: -_HISTORY_DAILY_TAIL]
+    # Walk the head from its END backwards so the sparse grid aligns with the daily tail.
+    kept = [head[i] for i in range(len(head) - 1, -1, -_HISTORY_SPARSE_STEP)]
+    return list(reversed(kept)) + points[-_HISTORY_DAILY_TAIL:]
+
+
 def _price_history(ctx: VarContext) -> dict[str, Any]:
     if not ctx.price_points:
         return {"symbol": ctx.symbol, "points": [], "unavailable": True}
@@ -423,7 +442,18 @@ def _price_history(ctx: VarContext) -> dict[str, Any]:
         if pf.symbol == ctx.symbol:
             stale = pf.stale
             break
-    return {"symbol": ctx.symbol, "points": ctx.price_points, "stale": stale}
+    points = _downsample_points(ctx.price_points)
+    return {
+        "symbol": ctx.symbol,
+        "points": points,
+        "stale": stale,
+        "sampling": (
+            "daily"
+            if len(ctx.price_points) <= _HISTORY_DAILY_TAIL
+            else f"last {_HISTORY_DAILY_TAIL} sessions daily; older every "
+                 f"{_HISTORY_SPARSE_STEP} sessions"
+        ),
+    }
 
 
 def _ma_signals(ctx: VarContext) -> dict[str, Any]:

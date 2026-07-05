@@ -428,12 +428,22 @@ def miss_samples_for_version(
     These are the failures that drive (or drove) a calibration version. Returns the raw
     sample dicts the master uses for the next version + the frontend's version manager.
     """
+    from portfolio_dash.llm_insight import insights_store as istore  # no cycle: one-way
+
+    istore.ensure_tables(conn)  # the LEFT JOIN needs the insights table to exist
     rows = conn.execute(
-        "SELECT id, insight_id, narrative_score, quant_hit, confidence, actual_value, notes, "
-        "evaluated_at FROM insight_evaluations WHERE insight_type_id = ? "
-        "AND calibration_version = ? AND status = 'scored' AND miss = 1 ORDER BY id",
+        "SELECT e.id, e.insight_id, e.narrative_score, e.quant_hit, e.confidence, "
+        "e.actual_value, e.notes, e.evaluated_at, "
+        "i.symbol AS card_symbol, i.title AS card_title, i.summary AS card_summary, "
+        "i.prediction AS card_prediction "
+        "FROM insight_evaluations e LEFT JOIN insights i ON i.id = e.insight_id "
+        "WHERE e.insight_type_id = ? AND e.calibration_version = ? "
+        "AND e.status = 'scored' AND e.miss = 1 ORDER BY e.id",
         (insight_type_id, version),
     ).fetchall()
+    # Card context (symbol/title/summary/prediction) rides along so the Loop-3 master
+    # rewrites rules from the ACTUAL failed claims, not just second-hand notes
+    # (2026-07-05 audit §2.5: thin samples made calibration a game of telephone).
     return [
         {
             "id": r["id"],
@@ -444,6 +454,10 @@ def miss_samples_for_version(
             "actual_value": r["actual_value"],
             "notes": r["notes"],
             "evaluated_at": r["evaluated_at"],
+            "card_symbol": r["card_symbol"],
+            "card_title": r["card_title"],
+            "card_summary": r["card_summary"],
+            "card_prediction": r["card_prediction"],
         }
         for r in rows
     ]
