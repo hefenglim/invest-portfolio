@@ -24,12 +24,13 @@ window.PD_VARS = (function () {
     dividend:  { name: '股利',                  source: 'ready' },
     fx:        { name: '匯率',                  source: 'ready' },
     chips:     { name: '籌碼與基本面（FinMind）', source: 'ingest' },
+    news:      { name: '個股新聞', source: 'ingest' },
     sentiment: { name: '市場情緒',              source: 'ingest' },
     ai:        { name: 'AI 自身（校正用）',      source: 'ready' },
     system:    { name: '系統狀態',              source: 'ready' },
   };
   /* Stable category order for rendering (matches the backend REGISTRY order). */
-  const CAT_ORDER = ['position', 'price', 'dividend', 'fx', 'chips', 'sentiment', 'ai', 'system'];
+  const CAT_ORDER = ['position', 'price', 'dividend', 'fx', 'chips', 'news', 'sentiment', 'ai', 'system'];
   /* API scope (English) -> the Chinese display string the UI compares against. */
   const SCOPE_LABEL = { per_symbol: '單一標的', portfolio: '全組合' };
 

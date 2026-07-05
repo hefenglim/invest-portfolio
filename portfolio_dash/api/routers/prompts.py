@@ -19,6 +19,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -30,6 +31,8 @@ from portfolio_dash.data_ingestion.store import list_dividends
 from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
+from portfolio_dash.news import organizer_prompt as news_organizer_prompt
+from portfolio_dash.news import store as news_store
 from portfolio_dash.portfolio import external_signals as ES
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
@@ -40,6 +43,8 @@ from portfolio_dash.shared.llm_config import budget_remaining
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
+
+_TAIPEI = ZoneInfo("Asia/Taipei")  # default clock for the news window when now is absent
 
 _HISTORY_DAYS = 180
 
@@ -90,7 +95,8 @@ class PromptBody(BaseModel):
 
 @router.get("/prompt-vars")
 def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
-    """The 29-variable registry (mirrors web/vars.js). ``available`` drives the UI's
+    """The 32-variable registry (vars.js mirror + backend signal/news vars). ``available``
+    drives the UI's
     "需後端新增" markers; chips/sentiment went live (spec 20.2), ai stays False (spec 04).
 
     Each var also carries tier metadata (spec 20.15.3): ``required_tier`` (from the live
@@ -155,6 +161,34 @@ def reset_system_prompt(
 ) -> dict[str, str]:
     """Restore the global system prompt to the official library version."""
     return set_system_prompt(conn, official_templates.SYSTEM_PROMPT_BODY, now=now)
+
+
+# --- news-organizer prompt (batch ④; user-viewable + editable, with reset) -----
+
+
+@router.get("/news-prompt")
+def read_news_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, str]:
+    """The editable news-organizer system prompt (default-seeded from the official library)."""
+    return news_organizer_prompt.get_news_prompt(conn)
+
+
+@router.put("/news-prompt")
+def write_news_prompt(
+    payload: SystemPromptIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, str]:
+    """Overwrite the news-organizer prompt (applies to the next nightly news run)."""
+    return news_organizer_prompt.set_news_prompt(conn, payload.body, now=now)
+
+
+@router.post("/news-prompt/reset")
+def reset_news_prompt(
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, str]:
+    """Restore the news-organizer prompt to the official library version."""
+    return news_organizer_prompt.reset_news_prompt(conn, now=now)
 
 
 # --- shared assembly ----------------------------------------------------------
@@ -287,6 +321,38 @@ def _fear_greed_var(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+_NEWS_WINDOW_DAYS = 7
+_NEWS_MAX_ITEMS = 10
+
+
+def _news_var(symbol: str, *, now: datetime) -> dict[str, Any]:
+    """Assemble symbol_news_json from the separate news DB (batch ④).
+
+    Reads AI-organized news mentioning *symbol* within the last ``_NEWS_WINDOW_DAYS``
+    days from ``news.db``. Degrades to an honest empty payload when the news DB is absent
+    or has nothing (the nightly pipeline may not have run). Only the summary + metadata are
+    exposed — never full article bodies.
+    """
+    since = (now.date() - timedelta(days=_NEWS_WINDOW_DAYS)).isoformat()
+    try:
+        with news_store.news_session() as nconn:
+            rows = news_store.query_by_symbol(
+                nconn, symbol, since_date=since, limit=_NEWS_MAX_ITEMS
+            )
+    except Exception:  # noqa: BLE001 — a news-DB hiccup must never break card rendering
+        rows = []
+    if not rows:
+        return {"symbol": symbol, "since": since, "items": [], "count": 0}
+    items = [
+        {
+            "date": r.news_date, "title": r.title, "summary": r.body_summary,
+            "source": r.source, "lang": r.lang, "link": r.link,
+        }
+        for r in rows
+    ]
+    return {"symbol": symbol, "since": since, "items": items, "count": len(items)}
+
+
 def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
     """Assemble index_quotes_json from the latest index snapshot."""
     snap = snapshots_store.latest_snapshot(
@@ -299,8 +365,10 @@ def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
     return ES.build_index_quotes(quotes, as_of=snap.as_of.isoformat())
 
 
-def _external_vars(conn: sqlite3.Connection, symbol: str | None) -> dict[str, Any]:
-    """Assemble the chips/sentiment/index variable values from external snapshots.
+def _external_vars(
+    conn: sqlite3.Connection, symbol: str | None, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Assemble the chips/sentiment/index/news variable values from external snapshots.
 
     Conn-bearing reads + pure derivation (``portfolio.external_signals``) happen HERE,
     not in ``llm_insight`` (layering, spec 20.3). Portfolio-scope sentiment/index are
@@ -328,6 +396,7 @@ def _external_vars(conn: sqlite3.Connection, symbol: str | None) -> dict[str, An
         out["financials_json"] = _finmind_var(
             conn, symbol, dataset="financials", build=ES.build_financials
         )
+        out["symbol_news_json"] = _news_var(symbol, now=now or datetime.now(_TAIPEI))
     return out
 
 

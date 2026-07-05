@@ -53,12 +53,13 @@ def _seed_llm(conn: sqlite3.Connection, *, topup: str = "10.00") -> None:
 
 def test_prompt_vars_shape(api_client: TestClient) -> None:
     rows = api_client.get("/api/prompt-vars").json()
-    # 26 vars.js mirror + 3 date/time system tokens + 2 batch-③ signals = 31.
-    assert len(rows) == 31
+    # + 1 batch-④ news var (symbol_news_json) = 32.
+    assert len(rows) == 32
     date_tokens = {r["token"] for r in rows} & {"now", "card_created_at", "eval_date"}
     assert date_tokens == {"now", "card_created_at", "eval_date"}
     # the batch-③ signal vars surface in the variable area for custom prompts.
-    assert {"technical_signals_json", "fear_greed_json"} <= {r["token"] for r in rows}
+    tokens = {r["token"] for r in rows}
+    assert {"technical_signals_json", "fear_greed_json", "symbol_news_json"} <= tokens
     h = next(r for r in rows if r["token"] == "holdings_json")
     assert h["scope"] == "portfolio" and h["available"] is True
     assert set(h) == {"token", "name", "category", "scope", "desc", "available", "sample",
@@ -68,8 +69,8 @@ def test_prompt_vars_shape(api_client: TestClient) -> None:
     assert inst["available"] is True
     ai = next(r for r in rows if r["token"] == "backtest_json")
     assert ai["available"] is False
-    # 8 categories present
-    assert len({r["category"] for r in rows}) == 8
+    # 9 categories present (+ the batch-④ 'news' category)
+    assert len({r["category"] for r in rows}) == 9
 
 
 # --- 6.2 GET/PUT /api/system-prompt -------------------------------------------

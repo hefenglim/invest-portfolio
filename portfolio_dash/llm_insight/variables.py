@@ -221,6 +221,14 @@ REGISTRY: tuple[VarSpec, ...] = (
         '{"TAIEX":{"chg_20d":"+0.042"},"SPX":{"chg_20d":"+0.031"},'
         '"KLCI":{"chg_20d":"+0.008"}}',
     ),
+    # --- news (個股新聞) — live from the separate news DB (batch ④, 2026-07-06) ---
+    VarSpec(
+        "symbol_news_json", "個股新聞", "news", "per_symbol", True,
+        "該標的近 7 日經 AI 整理的新聞（標題／日期／摘要／來源／連結；提及此股的皆納入）",
+        '{"symbol":"2330","since":"2026-06-29","items":[{"date":"2026-07-05",'
+        '"title":"台積電法說 7/16 登場","summary":"聚焦全年成長…","source":"中央社",'
+        '"lang":"zh","link":"https://…"}],"count":1}',
+    ),
     # --- ai (AI 自身 / 校正用) — available=False until spec 04 ---
     VarSpec(
         "backtest_json", "回測命中分佈", "ai", "portfolio", False,
@@ -405,6 +413,7 @@ _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
 _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
     "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
+    "symbol_news_json",
 })
 
 

@@ -23,6 +23,7 @@ from portfolio_dash.api.insight_service import (
     generate_calibrations_for_all as insight_generate_calibrations,
 )
 from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
+from portfolio_dash.api.news_service import run_news_daily
 from portfolio_dash.api.routers import (
     accounts,
     actions,
@@ -54,6 +55,7 @@ from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_co
 from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure_evaluations_tables
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
+from portfolio_dash.news.organizer_prompt import ensure_news_prompt_seeded
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
@@ -62,6 +64,7 @@ from portfolio_dash.scheduler.jobs import (
     register_dividend_scan_runner,
     register_evaluation_runner,
     register_insight_runner,
+    register_news_runner,
     register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
@@ -96,6 +99,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_alert_rules_seeded(conn)
         ensure_auth_seeded(conn)
         ensure_system_prompt_seeded(conn)
+        ensure_news_prompt_seeded(conn)  # editable news-organizer prompt (batch ④)
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
         ensure_insights_tables(conn)  # insights cards table (spec 04b)
         ensure_alert_events_tables(conn)  # alert_events + dispatch log (spec 04b R7)
@@ -110,6 +114,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_dividend_scan_runner(dividend_scan_job)
     # 月度快照 (R6 item 8): nightly current-month KPI upsert via the api seam.
     register_snapshot_runner(snapshot_job)
+    # News pipeline (batch ④): nightly fetch + AI-organize into the separate news DB.
+    register_news_runner(run_news_daily)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()

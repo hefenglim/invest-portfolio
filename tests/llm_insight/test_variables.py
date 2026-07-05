@@ -21,13 +21,12 @@ from portfolio_dash.shared.enums import Currency
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_registry_has_31_and_categories() -> None:
-    # 26 vars.js mirror + 3 date/time system tokens (spec 04.10) + 2 batch-③ signals
-    # (technical_signals_json price, fear_greed_json sentiment) = 31.
-    assert len(V.REGISTRY) == 31
-    assert len({v.category for v in V.REGISTRY}) == 8
+def test_registry_has_32_and_categories() -> None:
+    # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news = 32.
+    assert len(V.REGISTRY) == 32
+    assert len({v.category for v in V.REGISTRY}) == 9  # + the 'news' category
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 31
+    assert len({v.token for v in V.REGISTRY}) == 32
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
@@ -38,18 +37,18 @@ def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
         counts[v.category] = counts.get(v.category, 0) + 1
     assert counts == {
         # price gained technical_signals_json (4 → 5); sentiment gained
-        # fear_greed_json (2 → 3) — batch ③ (2026-07-05).
+        # fear_greed_json (2 → 3) — batch ③; news gained symbol_news_json — batch ④.
         "position": 6, "price": 5, "dividend": 3, "fx": 2,
         # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
-        "chips": 5, "sentiment": 3, "ai": 2, "system": 5,
+        "chips": 5, "news": 1, "sentiment": 3, "ai": 2, "system": 5,
     }
 
 
-def test_available_split_29_now_2_later() -> None:
+def test_available_split_30_now_2_later() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    # 27 previously live + 2 batch-③ signals = 29; only the 2 'ai' vars stay deferred.
-    assert len(available) == 29
+    # 29 previously live + 1 batch-④ news = 30; only the 2 'ai' vars stay deferred.
+    assert len(available) == 30
     assert len(unavailable) == 2
     # only the 2 'ai' vars remain deferred (spec 04).
     assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)

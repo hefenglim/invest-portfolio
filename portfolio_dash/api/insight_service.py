@@ -127,7 +127,7 @@ def _per_symbol_ctx(
     reporting: Currency,
 ) -> V.VarContext:
     """Build a per-symbol VarContext (dashboard + history + external snapshots + fx)."""
-    external_vars = _external_vars(conn, symbol)
+    external_vars = _external_vars(conn, symbol, now=now)
     ctx = V.VarContext(
         data=data,
         symbol=symbol,

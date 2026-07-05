@@ -53,6 +53,20 @@ def get_insight_runner() -> InsightRunner | None:
     return _INSIGHT_RUNNER
 
 
+# --- News runner registration (batch ④) ---------------------------------------
+# Same seam as the insight runner: the app registers the news-pipeline runner at startup
+# so ``scheduler/`` never imports ``api``/``news``. The runner (api/news_service.py) reads
+# holdings + fetches + organizes into the separate news DB.
+NewsRunner = Callable[..., object]
+_NEWS_RUNNER: NewsRunner | None = None
+
+
+def register_news_runner(fn: NewsRunner | None) -> None:
+    """Register (or clear with None) the news_daily pipeline runner (app wiring seam)."""
+    global _NEWS_RUNNER
+    _NEWS_RUNNER = fn
+
+
 # The Loop-2/3/4 runners (price-bearing evaluate + master-bearing calibrate) live in
 # ``api/insight_service.py`` and are registered at startup, so ``scheduler/`` never imports
 # ``api`` (architecture.md). The static evaluate/calibrate JOBS dispatch through these.
@@ -534,6 +548,21 @@ def generate_calibrations(conn: sqlite3.Connection, *, now: datetime) -> str:
     return "calibration pass complete"
 
 
+def news_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Batch ④ nightly: run the news pipeline (discover→fetch→organize→store) via the
+    registered runner (``news_service.run_news_daily``). No runner wired → safe no-op."""
+    runner = _NEWS_RUNNER
+    if runner is None:
+        return "no news runner registered"
+    result = runner(conn, now=now)
+    if isinstance(result, dict):
+        return (f"news: organized {result.get('organized', 0)}, "
+                f"headline {result.get('headline_only', 0)}, "
+                f"skipped {result.get('skipped_existing', 0)}"
+                + (" (budget stop)" if result.get("stopped_budget") else ""))
+    return "news pass complete"
+
+
 # --- Ops 保全: daily SQLite backup + integrity check (spec 19.3) --------------
 # Downward call (scheduler → ops, fine per architecture.md). The job runs the integrity
 # pragma FIRST; a failed check RAISES so run_job records an error run (the v1 "warn" is the
@@ -636,6 +665,12 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "backup_daily", backup_daily, "30 1 * * *", "Asia/Taipei", True,
         "Daily SQLite backup + integrity check",
+    ),
+    # News pipeline (batch ④): nightly, before the morning insight crons so cards read
+    # fresh organized news. Runs after quotes/chips ingest settle.
+    JobSpec(
+        "news_daily", news_daily, "0 6 * * *", "Asia/Taipei", True,
+        "Nightly news fetch + AI-organize into the news DB",
     ),
 ]
 

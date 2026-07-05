@@ -41,10 +41,11 @@ def test_prompt_vars_external_now_available(api_client: TestClient) -> None:
         "financials_json", "market_sentiment_json", "index_quotes_json",
     ):
         assert by_token[token]["available"] is True, token
-    # 27 previously live + 2 batch-③ signals (technical_signals_json / fear_greed_json) = 29.
-    assert sum(1 for r in rows if r["available"]) == 29
+    # 29 previously live + 1 batch-④ news (symbol_news_json) = 30.
+    assert sum(1 for r in rows if r["available"]) == 30
     assert by_token["technical_signals_json"]["available"] is True
     assert by_token["fear_greed_json"]["available"] is True
+    assert by_token["symbol_news_json"]["available"] is True
     # The spec-04 'ai' vars stay unavailable this round.
     assert by_token["backtest_json"]["available"] is False
     assert by_token["calibration_gap_json"]["available"] is False

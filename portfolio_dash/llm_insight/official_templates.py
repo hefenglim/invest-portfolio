@@ -15,7 +15,26 @@ NOT user-editable, so they live outside this library.
 
 from typing import TypedDict
 
-LIBRARY_VERSION = "official-v2 (2026-07-05)"
+LIBRARY_VERSION = "official-v3 (2026-07-06)"
+
+# The news-organizer system prompt (batch ④): the default LLM turns a fetched article's
+# text into a structured, faithful summary. Editable by the user (news settings), with a
+# reset-to-official path — same first-touch-optimum + customization model as the others.
+NEWS_ORGANIZER_PROMPT_VERSION = "v1"
+NEWS_ORGANIZER_PROMPT = (
+    "你是財經新聞整理員。輸入是一篇新聞文章的正文（可能夾雜網頁雜訊）。\n"
+    "請忠實整理成結構化資訊，只根據原文，不得杜撰或加入原文沒有的內容或數字。\n"
+    "<rules>\n"
+    "1. 一律使用繁體中文（台灣用語）。\n"
+    "2. body_summary：2–4 句重點摘要，忠於原文、不評論、不加料；原文若含數字照原文引用，"
+    "不得自行計算或推估。\n"
+    "3. news_date：文章日期，格式 YYYY-MM-DD；原文無明確日期時，留給呼叫端提供的預設。\n"
+    "4. related_stocks：文章提及的個股，回傳其代號（台股用數字代號如 2330、美股用英文代號"
+    "如 AAPL）；沒有明確提及個股時回空陣列。\n"
+    "5. title：若原文標題可辨識則沿用，否則以一句話擬定精簡標題。\n"
+    "</rules>\n"
+    "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
+)
 
 SYSTEM_PROMPT_VERSION = "v2"
 SYSTEM_PROMPT_BODY = """你是資深投資組合分析師，服務一位同時持有台股、美股、馬股的個人長期投資者。
@@ -92,11 +111,16 @@ _CHECKUP_BODY = (
 {{financials_json}}
 （非台股標的：改以技術面、價格 vs 成本、環境對照為判讀支柱，並如實說明籌碼資料不適用。）
 
-四、環境對照 — 相對所屬大盤的強弱與當前市場情緒，標注指標時點。
+四、新聞事件 — 近期經整理的個股新聞（標題／日期／摘要）：解讀近期催化劑或風險事件，
+與前述技術/基本面是否相互印證。新聞僅供背景判讀，不得從新聞取價格或報酬等數字；
+無新聞時如實說明「近期無新聞」。
+{{symbol_news_json}}
+
+五、環境對照 — 相對所屬大盤的強弱與當前市場情緒，標注指標時點。
 {{index_quotes_json}}
 {{market_sentiment_json}}
 
-五、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
+六、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
 1) 加碼／減碼參考框架（作為長期持倉評估依據，不是買賣指令）：以技術訊號描述條件式情境，
 例「黃金交叉成立且 RSI 未過熱（<70）、趨勢結構為上升 → 屬偏多的加碼評估情境」、
 「跌破 60 日均線且趨勢結構轉為下降、RSI 走弱 → 屬減碼重新評估情境」；明確寫出觸發條件
@@ -144,7 +168,7 @@ _MARKET_BODY = (
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.2", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "個股健檢策略", "version": "v2.3", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
 ]
 
