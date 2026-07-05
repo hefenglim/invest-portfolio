@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.store import list_dividends
+from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
 from portfolio_dash.portfolio import external_signals as ES
@@ -131,6 +132,28 @@ def write_system_prompt(
     now: datetime = Depends(get_now),
 ) -> dict[str, str]:
     return set_system_prompt(conn, payload.body, now=now)
+
+
+# --- official template library (AI-input optimization program, 2026-07-05) -----
+
+
+@router.get("/prompt-templates")
+def read_prompt_templates() -> dict[str, Any]:
+    """The official template library: versioned system prompt + strategy templates.
+
+    Pure constants — the UI's「重置回官方版」/「從官方模板庫新增」read from here so the
+    shipped optimum stays one click away regardless of user customization.
+    """
+    return official_templates.library_wire()
+
+
+@router.post("/system-prompt/reset")
+def reset_system_prompt(
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, str]:
+    """Restore the global system prompt to the official library version."""
+    return set_system_prompt(conn, official_templates.SYSTEM_PROMPT_BODY, now=now)
 
 
 # --- shared assembly ----------------------------------------------------------

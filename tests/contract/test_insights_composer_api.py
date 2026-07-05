@@ -472,3 +472,26 @@ def test_evolution_config_put_bad_horizon_basis_400(client: TestClient) -> None:
         },
     )
     assert r.status_code == 400
+
+
+# --- strategy from the official template library (2026-07-05 program) ----------
+
+
+def test_strategy_from_template_copies_and_suffixes(api_client: TestClient) -> None:
+    r = api_client.post(
+        "/api/strategy-prompts/from-template", json={"name": "持倉週報策略"}
+    )
+    assert r.status_code == 200
+    first = r.json()
+    assert first["name"] == "持倉週報策略"
+    assert "{{kpis_json}}" in first["body"]
+    # A taken name gets an official-version suffix (re-add after customization).
+    second = api_client.post(
+        "/api/strategy-prompts/from-template", json={"name": "持倉週報策略"}
+    ).json()
+    assert second["name"].startswith("持倉週報策略（官方")
+    assert second["id"] != first["id"]
+    # Unknown template name -> 404.
+    assert api_client.post(
+        "/api/strategy-prompts/from-template", json={"name": "沒有這個模板"}
+    ).status_code == 404

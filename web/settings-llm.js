@@ -200,14 +200,38 @@
 
   /* ---- edit drawer ---- */
   let drawerAlias = null; /* null = create (POST), else PUT path */
+
+  /* 新增模型的預填（2026-07-05）：API Base 依供應商自動代入（openrouter/anthropic 為
+     公開固定端點）；context/output/timeout/retries 沿用同供應商最近一個模型的設定。 */
+  const PROVIDER_API_BASE = {
+    openrouter: 'https://openrouter.ai/api/v1',
+    anthropic: '', /* LiteLLM 原生 anthropic 供應商不需 api_base */
+    openai: '',
+  };
+  function createDefaults(provider) {
+    const sib = D.models.filter((m) => m.provider === provider).slice(-1)[0];
+    const base = provider in PROVIDER_API_BASE
+      ? PROVIDER_API_BASE[provider]
+      : (sib && sib.api_base) || '';
+    return {
+      alias: '', provider: provider, model_name: '',
+      api_base: (sib && sib.api_base) || base,
+      api_key_masked: '', vision: false, price_in: '0', price_out: '0',
+      context_window: (sib && sib.context_window) || 128000,
+      max_output_tokens: (sib && sib.max_output_tokens) || 4096,
+      timeout_seconds: (sib && sib.timeout_seconds) || 60,
+      max_retries: (sib && sib.max_retries != null) ? sib.max_retries : 2,
+      notes: '',
+    };
+  }
+
   function openDrawer(m) {
     drawerAlias = m ? m.alias : null;
     $('#drawer-backdrop').hidden = false;
     $('#drawer-title').textContent = m ? '編輯模型 — ' + m.alias : '新增模型';
     const set = (id, v) => { $('#' + id).value = v; };
-    const x = m || { alias: '', provider: 'anthropic', model_name: '', api_base: '',
-      api_key_masked: '', vision: false, price_in: '0', price_out: '0', context_window: 128000,
-      max_output_tokens: 4096, timeout_seconds: 60, max_retries: 2, notes: '' };
+    const x = m || createDefaults(
+      (D.models.length && D.models[D.models.length - 1].provider) || 'openrouter');
     set('dr-alias', x.alias); set('dr-provider', x.provider); set('dr-model', x.model_name);
     set('dr-base', x.api_base || ''); set('dr-key', x.api_key_masked || '（尚未設定）');
     set('dr-pin', x.price_in); set('dr-pout', x.price_out);
@@ -226,6 +250,16 @@
   $('#drawer-cancel').addEventListener('click', closeDrawer);
   $('#drawer-backdrop').addEventListener('click', (e) => {
     if (e.target === $('#drawer-backdrop')) closeDrawer();
+  });
+  /* 新增模式下切換供應商 → 重新代入該供應商的 API Base 與最近設定值（編輯模式不動）。 */
+  $('#dr-provider').addEventListener('change', () => {
+    if (drawerAlias !== null) return;
+    const d = createDefaults($('#dr-provider').value);
+    $('#dr-base').value = d.api_base;
+    $('#dr-ctx').value = d.context_window;
+    $('#dr-maxout').value = d.max_output_tokens;
+    $('#dr-timeout').value = d.timeout_seconds;
+    $('#dr-retries').value = d.max_retries;
   });
   $('#drawer-save').addEventListener('click', async () => {
     /* Build a body of EDITABLE fields. Price fields are sent as the user's raw string;

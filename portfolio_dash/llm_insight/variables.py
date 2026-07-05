@@ -152,9 +152,10 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- fx (匯率) — all available ---
     VarSpec(
         "fx_json", "換匯損益", "fx", "portfolio", True,
-        "各帳戶外幣池均價、現匯、已實現/未實現匯損益（股+現金拆分）",
-        '{"schwab":{"avg_rate":"31.80","current_spot":"32.90",'
-        '"unrealized_fx_stocks":"13552"}, …}',
+        "各帳戶外幣池均價、現匯、已實現/未實現匯損益（股+現金拆分；含單位說明 note）",
+        '{"note":"rates are home_ccy per 1 foreign_ccy; …","by_account":'
+        '{"schwab":{"home_ccy":"TWD","foreign_ccy":"USD","avg_rate":"31.80",'
+        '"current_spot":"32.90","unrealized_fx_stocks":"13552"}, …}}',
     ),
     VarSpec(
         "fx_rates_json", "即期匯率", "fx", "portfolio", True,
@@ -511,7 +512,18 @@ def _returns_by_ccy(data: DashboardData) -> dict[str, Any]:
 def _fx(data: DashboardData) -> dict[str, Any]:
     if data.fx is None:
         return {"unavailable": True}
-    return {acct_id: r.model_dump() for acct_id, r in data.fx.by_account.items()}
+    # In-band unit explainer (2026-07-05 A/B finding: FX was the most misquoted
+    # variable — both prompt versions garbled its magnitude). Labels, not new numbers.
+    return {
+        "note": (
+            "rates are home_ccy per 1 foreign_ccy; all *_fx amounts are in that "
+            "account's home_ccy; FX P&L is an attribution slice of total return, "
+            "never additive on top"
+        ),
+        "by_account": {
+            acct_id: r.model_dump() for acct_id, r in data.fx.by_account.items()
+        },
+    }
 
 
 def _fx_rates(ctx: VarContext) -> dict[str, Any]:

@@ -11,18 +11,12 @@ the default is the ``web/settings-prompts.js`` ``PROMPTS_DATA.system_prompt`` te
 import sqlite3
 from datetime import datetime
 
+from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.shared import config_store
 
-# Mirrors web/settings-prompts.js PROMPTS_DATA.system_prompt (the design default).
-DEFAULT_SYSTEM_PROMPT = (
-    "你是資深投資組合分析師，服務一位同時持有台股、美股、馬股的個人投資者。\n\n"
-    "原則：\n"
-    "1. 一律使用繁體中文（台灣用語）回答。\n"
-    "2. 金額必須標注幣別；不同幣別不可加總。\n"
-    "3. 損益語意採台灣慣例：紅漲綠跌。\n"
-    "4. 每則洞察 2–3 句，必須引用輸入資料中的具體數字。\n"
-    "5. 不提供買賣建議，只描述風險與現象。"
-)
+# The shipped default IS the official library's system prompt (2026-07-05 program:
+# first-touch experience = the official optimum; the old inline v1 text is superseded).
+DEFAULT_SYSTEM_PROMPT = official_templates.SYSTEM_PROMPT_BODY
 
 _CATEGORY = "system_prompt"
 

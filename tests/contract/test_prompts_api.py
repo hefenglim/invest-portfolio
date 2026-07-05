@@ -243,3 +243,32 @@ def test_prompts_test_budget_exhausted_402(
     )
     assert r.status_code == 402
     assert r.json()["error"]["code"] == "budget_exceeded"
+
+
+# --- official template library (2026-07-05 program) ----------------------------
+
+
+def test_prompt_templates_library_shape(api_client: TestClient) -> None:
+    b = api_client.get("/api/prompt-templates").json()
+    assert b["library_version"].startswith("official-")
+    assert "時效第一" in b["system_prompt"]["body"]
+    assert b["system_prompt"]["version"]
+    names = [t["name"] for t in b["strategies"]]
+    assert "持倉週報策略" in names and "個股健檢策略" in names
+    assert all(t["version"] and t["body"] and t["scope"] for t in b["strategies"])
+
+
+def test_fresh_default_system_prompt_is_official(api_client: TestClient) -> None:
+    # First-touch experience = the official optimum: a fresh DB seeds the library
+    # version, not the retired v1 text.
+    body = api_client.get("/api/system-prompt").json()["body"]
+    assert "時效第一" in body
+    assert "不提供買賣建議，只描述風險與現象" not in body  # the v1 rule is superseded
+
+
+def test_system_prompt_reset_restores_official(api_client: TestClient) -> None:
+    api_client.put("/api/system-prompt", json={"body": "使用者自訂版"})
+    assert api_client.get("/api/system-prompt").json()["body"] == "使用者自訂版"
+    b = api_client.post("/api/system-prompt/reset").json()
+    assert "時效第一" in b["body"]
+    assert api_client.get("/api/system-prompt").json()["body"] == b["body"]

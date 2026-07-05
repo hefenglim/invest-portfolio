@@ -22,26 +22,14 @@
   const api = window.pdApi;
   const f = window.fmt;
 
-  /* Strategy seed objects — DESIGN-STAGE (no /api/strategy-prompts endpoint yet, so these
-     stay inline like the composer/calibration mocks below; NOT a window global). */
+  /* Strategies load from GET /api/strategy-prompts on boot (wired 2026-07-05 — the
+     inline DESIGN-STAGE seeds are retired; the composer/calibration mocks further
+     below are still design-stage). */
   const D = {
     /* system_prompt + system_updated_at are filled from GET /api/system-prompt on boot. */
     system_prompt: '',
     system_updated_at: '',
-    strategies: [
-      { id: 'st-concentration', name: '集中度風險', enabled: true, archived: false,
-        updated_at: '2026-05-30',
-        body: '根據 {{holdings_json}} 與 {{allocation_json}}，找出產業與個股集中度風險，輸出洞察並附具體權重數字。' },
-      { id: 'st-fx', name: '匯率影響', enabled: true, archived: false,
-        updated_at: '2026-05-30',
-        body: '根據 {{fx_json}} 分析各帳戶外幣部位的已實現與未實現匯損益，並估算 {{fx_rates_json}} 變動 1% 對報告幣別損益的敏感度。' },
-      { id: 'st-dividend', name: '股利展望', enabled: true, archived: false,
-        updated_at: '2026-04-18',
-        body: '根據 {{dividends_json}} 與 {{ex_dividend_calendar_json}}，摘要未來 60 天的股利現金流與除息事件，標注幣別；參考 {{dividend_projection_json}} 給出年度視角。' },
-      { id: 'st-momentum', name: '動能追蹤', enabled: true, archived: false,
-        updated_at: '2026-06-02',
-        body: '根據 {{price_history_json}} 與 {{ma_signals_json}}，描述 {{symbol_detail_json}} 標的之趨勢與動能現象，搭配 {{institutional_json}} 籌碼佐證；信心值需參考 {{backtest_json}}。' },
-    ],
+    strategies: [],
   };
   function _toast(msg, kind, code) { if (window.toast) window.toast(msg, kind, code); }
   const $ = (s) => document.querySelector(s);
@@ -185,6 +173,11 @@
     D.system_updated_at = (sp && sp.updated_at) || '';
   } catch (err) {
     _toast('系統提示詞載入失敗', 'fail', (err && err.message) || undefined);
+  }
+  try {
+    D.strategies = (await api.get('/api/strategy-prompts')) || [];
+  } catch (err) {
+    _toast('策略提示詞載入失敗', 'fail', (err && err.message) || undefined);
   }
   $('#sys-prompt').value = D.system_prompt;
   $('#sys-prompt-meta').textContent =
@@ -392,24 +385,20 @@
   }
 
   function deleteStrategy(t, card) {
-    const usedBy = COMPOSER_DATA.filter((c) => c.strategies.includes(t.id));
-    if (usedBy.length) {
-      window.confirmDialog({
-        title: '無法刪除 — ' + t.name,
-        body: '此策略正被以下洞察類型使用中：' + usedBy.map((c) => '「' + c.name + '」').join('、') +
-          '。請先在洞察類型組合器中移除引用，或刪除該洞察類型後再試。',
-        confirmLabel: '我知道了'
-      });
-      return;
-    }
     window.confirmDialog({
       title: '封存策略 — ' + t.name,
-      body: '未被任何洞察類型引用，可封存。封存後從可選清單移除；曾使用它的歷史洞察仍可反查內文（軟刪除，可復原）。',
+      body: '封存後從可選清單移除；仍被洞察任務引用時後端會阻擋。歷史洞察仍可反查內文（軟刪除）。',
       confirmLabel: '確認封存', danger: true,
-      onConfirm: () => {
+      onConfirm: async () => {
+        try {
+          await api.del('/api/strategy-prompts/' + t.id);
+        } catch (err) {
+          _toast((err && err.message) || '無法封存', 'fail', err && err.code);
+          return;
+        }
         t.archived = true;
         card.remove();
-        window.toast('已封存', 'ok', t.name + ' 已移出可選清單（設計稿）');
+        window.toast('已封存', 'ok', t.name + ' 已移出可選清單');
       }
     });
   }
@@ -424,20 +413,27 @@
       ? '含「單一標的」變數 — 只能被範圍為「單一標的」的洞察類型引用'
       : '僅使用全組合變數 — 任何範圍的洞察類型皆可引用';
     head.appendChild(scopeBadge);
-    const used = COMPOSER_DATA.filter((c) => c.strategies.includes(t.id)).length;
-    head.appendChild(el('span', 'tpl-meta',
-      '更新 ' + t.updated_at + '・被 ' + used + ' 個洞察類型引用'));
+    head.appendChild(el('span', 'tpl-meta', '更新 ' + f.date(t.updated_at)));
     const right = el('span', 'right');
     if (!t.enabled) right.appendChild(el('span', 'pill pill-off', '停用'));
     const tg = el('button', 'toggle' + (t.enabled ? ' on' : ''));
     tg.type = 'button';
     tg.setAttribute('role', 'switch');
     tg.title = '啟用/停用此策略：停用後，引用它的洞察類型下次執行時跳過此策略段（其餘策略照常），新組合也不可選用；不影響歷史洞察';
-    tg.addEventListener('click', () => {
-      tg.classList.toggle('on');
-      const on = tg.classList.contains('on');
+    tg.addEventListener('click', async () => {
+      const on = !tg.classList.contains('on');
+      try {
+        await api.put('/api/strategy-prompts/' + t.id,
+          { name: t.name, body: t.body, enabled: on });
+      } catch (err) {
+        _toast((err && err.message) || '切換失敗', 'fail', err && err.code);
+        return;
+      }
+      t.enabled = on;
+      tg.classList.toggle('on', on);
       window.toast(on ? '策略已啟用' : '策略已停用', 'ok',
-        on ? t.name + '：引用此策略的洞察類型恢復執行此段' : t.name + '：引用此策略的洞察類型將跳過此段，新組合不可選用（設計稿）');
+        on ? t.name + '：引用此策略的洞察任務恢復執行此段'
+           : t.name + '：引用此策略的洞察任務將跳過此段，新組合不可選用');
     });
     right.appendChild(tg);
     head.appendChild(right);
@@ -460,13 +456,20 @@
       b.addEventListener('click', fn);
       return b;
     };
-    actions.appendChild(mkBtn('儲存', 'btn-primary', () => {
+    actions.appendChild(mkBtn('儲存', 'btn-primary', async () => {
       if (!ta.value.trim()) {
         window.toast('內文不可為空', 'fail', '請填寫提示詞內文');
         return;
       }
-      t.body = ta.value;
-      t.updated_at = '2026-06-12';
+      try {
+        const sp = await api.put('/api/strategy-prompts/' + t.id,
+          { name: t.name, body: ta.value, enabled: t.enabled !== false });
+        t.body = (sp && sp.body) || ta.value;
+        t.updated_at = (sp && sp.updated_at) || t.updated_at;
+      } catch (err) {
+        _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
+        return;
+      }
       /* 重新檢查範圍徽章（變數可能增減） */
       const ps = hasPerSymbolVars(ta.value);
       scopeBadge.textContent = ps ? '單一標的' : '全組合';
@@ -474,7 +477,7 @@
       scopeBadge.title = ps
         ? '含「單一標的」變數 — 只能被範圍為「單一標的」的洞察類型引用'
         : '僅使用全組合變數 — 任何範圍的洞察類型皆可引用';
-      window.toast('已儲存', 'ok', t.name + '：內文已更新、範圍徽章已重新檢查（設計稿 — 後端接線後寫入資料庫）');
+      window.toast('已儲存', 'ok', t.name + '：內文已寫入資料庫，下次執行生效');
     }, '寫入資料庫並依最新內文重新檢查範圍徽章'));
     actions.appendChild(mkBtn('預覽提示詞', null, () => previewPrompt(t, ta),
       '變數代入目前快照，檢視實際送出的完整提示詞'));
@@ -516,19 +519,25 @@
       const acts = el('div', 'cal-actions');
       const ok = el('button', 'btn btn-primary', '建立策略');
       ok.type = 'button';
-      ok.addEventListener('click', () => {
+      ok.addEventListener('click', async () => {
         const nm = nameInp.value.trim();
         if (!nm || !ta2.value.trim()) {
           window.toast('請填寫完整', 'fail', '名稱與內文皆為必填');
           return;
         }
-        const t = { id: 'st-custom-' + Date.now(), name: nm, enabled: true, archived: false,
-          updated_at: '2026-06-12', body: ta2.value.trim() };
-        D.strategies.push(t);
-        const card = addStrategyCard(t);
+        let sp;
+        try {
+          sp = await api.post('/api/strategy-prompts',
+            { name: nm, body: ta2.value.trim(), enabled: true });
+        } catch (err) {
+          _toast((err && err.message) || '建立失敗', 'fail', err && err.code);
+          return;
+        }
+        D.strategies.push(sp);
+        const card = addStrategyCard(sp);
         card.classList.add('open');
         close();
-        window.toast('已建立', 'ok', nm + '：可在洞察類型組合器中勾選使用（設計稿）');
+        window.toast('已建立', 'ok', sp.name + '：可在洞察任務中掛載使用');
       });
       acts.appendChild(ok);
       body.appendChild(acts);
@@ -545,12 +554,79 @@
       D.system_updated_at = (sp && sp.updated_at) || D.system_updated_at;
       $('#sys-prompt-meta').textContent =
         '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') + '・套用於所有策略提示詞之前';
-      _toast('已儲存', 'ok', '系統提示詞已更新（策略卡為設計稿，尚未接線）');
+      _toast('已儲存', 'ok', '系統提示詞已更新，下次 AI 呼叫生效');
     } catch (err) {
       _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
     } finally {
       sysSave.disabled = false;
     }
+  });
+
+  /* 重置回官方版（官方模板庫 2026-07-05）：POST /api/system-prompt/reset */
+  const sysReset = document.getElementById('sys-reset');
+  if (sysReset) sysReset.addEventListener('click', () => {
+    window.confirmDialog({
+      title: '重置系統提示詞',
+      body: '將以官方模板庫的最新版本覆蓋目前內容；自訂修改將遺失（策略提示詞不受影響）。',
+      confirmLabel: '重置回官方版', danger: true,
+      onConfirm: async () => {
+        try {
+          const sp = await api.post('/api/system-prompt/reset');
+          D.system_prompt = (sp && sp.body) || '';
+          D.system_updated_at = (sp && sp.updated_at) || '';
+          $('#sys-prompt').value = D.system_prompt;
+          $('#sys-prompt-meta').textContent =
+            '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') +
+            '・套用於所有策略提示詞之前';
+          _toast('已重置', 'ok', '系統提示詞已回到官方版');
+        } catch (err) {
+          _toast((err && err.message) || '重置失敗', 'fail', err && err.code);
+        }
+      }
+    });
+  });
+
+  /* 從官方模板庫新增策略副本：GET /api/prompt-templates → POST from-template */
+  const tplFromLib = document.getElementById('tpl-from-lib');
+  if (tplFromLib) tplFromLib.addEventListener('click', async () => {
+    let lib;
+    try {
+      lib = await api.get('/api/prompt-templates');
+    } catch (err) {
+      _toast('模板庫載入失敗', 'fail', (err && err.message) || undefined);
+      return;
+    }
+    openModal('官方模板庫 ' + (lib.library_version || ''), (body, close) => {
+      (lib.strategies || []).forEach((tpl) => {
+        const row = el('div', 'pv-field');
+        const head = el('div', null);
+        head.appendChild(el('strong', null, tpl.name + '　' + tpl.version +
+          '（' + (tpl.scope === 'per_symbol' ? '單一標的' : '全組合') + '）'));
+        const btn = el('button', 'btn btn-primary', '新增副本');
+        btn.type = 'button';
+        btn.style.marginLeft = '8px';
+        btn.addEventListener('click', async () => {
+          try {
+            const sp = await api.post('/api/strategy-prompts/from-template',
+              { name: tpl.name });
+            D.strategies.push(sp);
+            const card = addStrategyCard(sp);
+            card.classList.add('open');
+            close();
+            window.toast('已新增', 'ok', sp.name + '：官方 ' + tpl.version + ' 副本，可自由修改');
+          } catch (err) {
+            _toast((err && err.message) || '新增失敗', 'fail', err && err.code);
+          }
+        });
+        head.appendChild(btn);
+        row.appendChild(head);
+        const pre = el('pre', 'pv-pre', tpl.body);
+        pre.style.maxHeight = '180px';
+        pre.style.overflow = 'auto';
+        row.appendChild(pre);
+        body.appendChild(row);
+      });
+    }, true);
   });
 
   /* mount point */

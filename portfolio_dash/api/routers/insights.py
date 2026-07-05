@@ -24,6 +24,7 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
 from portfolio_dash.llm_insight import insights_store as istore
+from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.scheduler.jobs import (
     bind_insight_schedule,
@@ -201,6 +202,43 @@ def create_strategy_prompt(
 ) -> dict[str, Any]:
     cs.ensure_seeded(conn)
     sp = cs.create_strategy(conn, name=payload.name, body=payload.body, now=now)
+    return sp.model_dump()
+
+
+class FromTemplateIn(BaseModel):
+    name: str  # the official template's name (official_templates.STRATEGY_TEMPLATES)
+
+
+@router.post("/strategy-prompts/from-template")
+def create_strategy_from_template(
+    payload: FromTemplateIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """Copy an official library strategy into the user's editable set (2026-07-05 program).
+
+    The copy is the user's own row (editing it never touches the library). A taken name
+    gets an「（官方vX）」suffix so re-adding after customization is always possible.
+    """
+    cs.ensure_seeded(conn)
+    tpl = next(
+        (t for t in official_templates.STRATEGY_TEMPLATES if t["name"] == payload.name),
+        None,
+    )
+    if tpl is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"官方模板庫沒有：{payload.name}"),
+        )
+    taken = {s.name for s in cs.list_strategies(conn)}
+    name = tpl["name"]
+    if name in taken:
+        name = f"{tpl['name']}（官方{tpl['version']}）"
+        n = 2
+        while name in taken:
+            name = f"{tpl['name']}（官方{tpl['version']}·{n}）"
+            n += 1
+    sp = cs.create_strategy(conn, name=name, body=tpl["body"], now=now)
     return sp.model_dump()
 
 

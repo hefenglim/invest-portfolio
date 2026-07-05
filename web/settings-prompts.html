@@ -24,6 +24,8 @@
     <div class="panel-head">
       <h2 class="panel-title">系統提示詞</h2>
       <span class="panel-sub" id="sys-prompt-meta"></span>
+      <span class="spacer"></span>
+      <button class="btn" id="sys-reset" type="button" title="以官方模板庫最新版覆蓋目前內容">重置回官方版</button>
     </div>
     <div class="sys-prompt-card">
       <textarea class="input" id="sys-prompt" spellcheck="false"></textarea>
@@ -36,6 +38,7 @@
       <h2 class="panel-title">策略提示詞</h2>
       <span class="panel-sub">啟用中的策略會在洞察批次依序執行，各產生一張洞察卡片</span>
       <span class="spacer"></span>
+      <button class="btn" id="tpl-from-lib" type="button" title="從官方模板庫複製一份可自訂的副本">從官方模板庫新增</button>
       <button class="btn btn-primary" id="tpl-add" type="button">＋ 新增策略</button>
     </div>
     <div class="set-body">
@@ -44,8 +47,7 @@
   </section>
 
   <div class="save-bar" data-screen-label="儲存列">
-    <span class="note">提示詞寫入本機 config — 此頁為設計稿，不會真的儲存</span>
-    <button class="btn" type="button">還原變更</button>
+    <span class="note">系統提示詞由「儲存設定」寫入；策略卡各自的「儲存」即時寫入資料庫</span>
     <button class="btn btn-primary" id="prompts-save" type="button">儲存設定</button>
   </div>
 
