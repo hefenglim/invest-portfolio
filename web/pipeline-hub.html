@@ -47,6 +47,8 @@
       <h2 class="panel-title">洞察任務</h2>
       <span class="panel-sub">每張卡 = 一條完整管線；點任一節點直接跳到該節設定</span>
       <span class="spacer"></span>
+      <button class="btn" id="pp-official-pack" type="button"
+        title="一鍵建立官方洞察套組：持倉週報＋個股健檢（含策略與週排程；已存在的任務會跳過）">啟用官方套組</button>
       <button class="btn btn-primary" id="pp-add" type="button">＋ 新增洞察任務</button>
     </div>
     <div class="pp-filter" id="pp-filter"></div>
@@ -73,6 +75,20 @@
 <script src="pipeline-wizard.js"></script>
 <script>
   document.getElementById('pp-add').addEventListener('click', function () { window.ppWizard(); });
+  document.getElementById('pp-official-pack').addEventListener('click', function () {
+    var btn = document.getElementById('pp-official-pack');
+    btn.disabled = true;
+    window.pdApi.post('/api/insight-tasks/official-pack').then(function (r) {
+      var made = (r && r.created || []).map(function (c) { return c.name; });
+      var skip = (r && r.skipped) || [];
+      window.toast(made.length ? '官方套組已建立' : '官方套組已存在', made.length ? 'ok' : 'warn',
+        (made.length ? '建立：' + made.join('、') + '（含週排程）' : '') +
+        (skip.length ? (made.length ? '；' : '') + '已存在跳過：' + skip.join('、') : ''));
+      if (window.ppRefresh) window.ppRefresh();
+    }).catch(function (err) {
+      window.toast((err && err.message) || '套組建立失敗', 'fail', err && err.code);
+    }).finally(function () { btn.disabled = false; });
+  });
   document.getElementById('pp-naming-toggle').addEventListener('click', function () {
     var d = document.getElementById('pp-naming');
     d.open = !d.open;

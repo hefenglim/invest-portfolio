@@ -351,3 +351,45 @@ def test_scenario_3_missing_price_holding_warns_input(
         if t["id"] == tid
     )
     assert task["nodes"]["input"]["lv"] == "warn"  # missing price, not empty
+
+
+# --- one-click official pack (usability decision ①, 2026-07-05) ----------------
+
+
+def test_official_pack_creates_tasks_with_schedules(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    r = api_client.post("/api/insight-tasks/official-pack")
+    assert r.status_code == 200
+    body = r.json()
+    assert [c["name"] for c in body["created"]] == ["持倉週報", "個股健檢"]
+    assert body["skipped"] == []
+    # tasks exist with the preset knobs + a mounted schedule.
+    types = {t["name"]: t for t in api_client.get("/api/insight-types").json()}
+    weekly, checkup = types["持倉週報"], types["個股健檢"]
+    assert weekly["scope"] == "portfolio" and weekly["self_correct"] is False
+    assert checkup["scope"] == "per_symbol" and checkup["self_correct"] is True
+    assert checkup["horizon_days"] == 14
+    assert weekly["schedule"] and checkup["schedule"]
+    assert [s["name"] for s in weekly["strategies"]] == ["持倉週報策略"]
+    # strategies were created from the library.
+    names = {s["name"] for s in api_client.get("/api/strategy-prompts").json()}
+    assert {"持倉週報策略", "個股健檢策略"} <= names
+
+
+def test_official_pack_is_idempotent_and_reuses_strategies(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # A pre-existing customized strategy with the official name is REUSED, not
+    # duplicated; a second click skips both tasks.
+    api_client.post("/api/strategy-prompts",
+                    json={"name": "持倉週報策略", "body": "我的自訂版 {{kpis_json}}"})
+    first = api_client.post("/api/insight-tasks/official-pack").json()
+    weekly_created = next(c for c in first["created"] if c["name"] == "持倉週報")
+    assert weekly_created["strategy_reused"] is True
+    weeklies = [s for s in api_client.get("/api/strategy-prompts").json()
+                if s["name"] == "持倉週報策略"]
+    assert len(weeklies) == 1 and "我的自訂版" in weeklies[0]["body"]
+    second = api_client.post("/api/insight-tasks/official-pack").json()
+    assert second["created"] == []
+    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢"])

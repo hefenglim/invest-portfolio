@@ -369,6 +369,54 @@ def delete_insight_type(
     return _insight_type_wire(conn, it)
 
 
+# --- one-click official pack (usability decision ①, 2026-07-05) ----------------
+
+
+@_dual("POST", "/official-pack")
+def enable_official_pack(
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, Any]:
+    """Create every official task preset in one click (strategy + knobs + schedule).
+
+    Idempotent: a non-archived insight task carrying a preset's name is skipped (a
+    second click reports it under ``skipped``). A same-name strategy is REUSED — the
+    user's customized copy wins over the library body; only a missing strategy is
+    created from the template.
+    """
+    cs.ensure_seeded(conn)
+    existing_types = {t.name for t in cs.list_insight_types(conn)}
+    strategies_by_name = {s.name: s for s in cs.list_strategies(conn) if not s.archived}
+    created: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    templates_by_name = {t["name"]: t for t in official_templates.STRATEGY_TEMPLATES}
+    for preset in official_templates.TASK_PRESETS:
+        if preset["name"] in existing_types:
+            skipped.append(preset["name"])
+            continue
+        tpl = templates_by_name[preset["strategy"]]
+        sp = strategies_by_name.get(tpl["name"])
+        strategy_reused = sp is not None
+        if sp is None:
+            sp = cs.create_strategy(conn, name=tpl["name"], body=tpl["body"], now=now)
+            strategies_by_name[sp.name] = sp
+        it = cs.create_insight_type(
+            conn, name=preset["name"], scope=preset["scope"],
+            use_system_prompt=preset["use_system_prompt"],
+            self_correct=preset["self_correct"],
+            universe=None, alert_rules=None, enabled=True,
+            horizon_days=preset["horizon_days"], eval_prompt=None, now=now,
+        )
+        cs.set_strategies(conn, it.id, [(sp.id, 0)])
+        job_id = bind_insight_schedule(conn, it.id, cron=preset["suggested_cron"])
+        cs.set_job_id(conn, it.id, job_id)
+        created.append({
+            "id": it.id, "name": it.name, "cron": preset["suggested_cron"],
+            "strategy": sp.name, "strategy_reused": strategy_reused,
+        })
+    return {"created": created, "skipped": skipped}
+
+
 # --- schedule mount (spec 4.2) ------------------------------------------------
 
 

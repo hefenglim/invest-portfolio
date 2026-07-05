@@ -13,6 +13,8 @@ master-role and AI-parse prompts are code-owned (``master.py`` / ``agents.py``) 
 NOT user-editable, so they live outside this library.
 """
 
+from typing import TypedDict
+
 LIBRARY_VERSION = "official-v2 (2026-07-05)"
 
 SYSTEM_PROMPT_VERSION = "v2"
@@ -111,8 +113,53 @@ STRATEGY_TEMPLATES: list[dict[str, str]] = [
 ]
 
 
+class TaskPreset(TypedDict):
+    """One official-pack insight-task preset (a complete, schedulable task)."""
+
+    name: str
+    version: str
+    scope: str
+    strategy: str  # references a STRATEGY_TEMPLATES entry by name
+    use_system_prompt: bool
+    self_correct: bool
+    horizon_days: int
+    suggested_cron: str  # Asia/Taipei; the pack mounts this on creation
+    description: str
+
+
+# The official pack (usability decision ①, 2026-07-05): one click creates these tasks
+# complete with strategy, knobs, and a mounted weekly schedule — prod ignition becomes
+# key → roles → top-up → one click. Crons: weekly report Saturday morning (after the US
+# Friday close); per-symbol checkup Monday morning (TW chips from Friday are in).
+TASK_PRESETS: list[TaskPreset] = [
+    {
+        "name": "持倉週報",
+        "version": "v1",
+        "scope": "portfolio",
+        "strategy": "持倉週報策略",
+        "use_system_prompt": True,
+        "self_correct": False,
+        "horizon_days": 14,
+        "suggested_cron": "0 9 * * sat",
+        "description": "全組合敘事週報（純敘事，不附預測）",
+    },
+    {
+        "name": "個股健檢",
+        "version": "v1",
+        "scope": "per_symbol",
+        "strategy": "個股健檢策略",
+        "use_system_prompt": True,
+        "self_correct": True,
+        "horizon_days": 14,
+        "suggested_cron": "0 9 * * mon",
+        "description": "逐持股健檢（帶方向預測＋信心值，宇宙跟隨持倉）",
+    },
+]
+
+
 def library_wire() -> dict[str, object]:
-    """The ``GET /api/prompt-templates`` payload: version + system prompt + strategies."""
+    """The ``GET /api/prompt-templates`` payload: version + system prompt + strategies
+    + task presets (the one-click official pack)."""
     return {
         "library_version": LIBRARY_VERSION,
         "system_prompt": {
@@ -120,4 +167,5 @@ def library_wire() -> dict[str, object]:
             "body": SYSTEM_PROMPT_BODY,
         },
         "strategies": [dict(t) for t in STRATEGY_TEMPLATES],
+        "task_presets": [dict(p) for p in TASK_PRESETS],
     }
