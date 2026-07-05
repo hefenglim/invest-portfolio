@@ -69,8 +69,43 @@
 
 ## 六、Opus 4.8 subagent 系統級深審結果
 
-> __狀態:背景執行中(think mode xHigh);審查範圍涵蓋整條分支(v0.1.10→HEAD),
-> 重點為新聞管線的 runtime/coding/spec/risk bug 與穩定度。裁決與發現完成後補於此節。__
+**裁決:APPROVE-WITH-FOLLOWUPS** —— 無 critical/high 缺陷,五大不變式全數成立,閘門全綠
+(subagent 自行實跑:pytest **1270 passed / 3 skipped**、mypy 160 檔零錯、ruff 全過)。
+發現 6 個 MEDIUM + 若干 LOW,**皆非出版阻擋項**(降級皆優雅、無資料損壞)。
+
+**不變式與層界稽核(subagent 逐項)**:①LLM 不出數字 PASS(訊號皆純 Decimal;新聞只存摘要)
+· ②金錢不用 float PASS(Decimal.sqrt、Decimal(str(x)))· ③LLM 批次+快取 PASS(整理只在
+news_daily cron,`_news_var` 讀快取零 LLM)· ④單向層界 PASS(news/ 只依賴 shared+stdlib+
+llm_insight 常數,不碰 api/web;排程用 register_news_runner)· ⑤優雅降級 PASS(強;每個失敗
+模式都追過)。
+
+**穩定度**:網路斷、付費牆、bot 擋、預算耗盡中途、空持股、重複重跑 —— subagent 逐一追蹤,
+全部乾淨降級。
+
+## 七、深審發現的即時修復(出版前三項 + 三項 trivial,已修並重驗)
+
+趁夜間把 subagent 標為「出版前該修」的三項(清楚、低風險、真實)加上三個 trivial LOW
+一併修掉,並補回歸測試、重跑全閘門:
+
+| # | subagent 發現 | 修復 |
+| --- | --- | --- |
+| 1 (MED) | 去重時漏記「本股」提及 → 同類股可能查不到自己來源的新聞 | 去重分支改為 `add_mention(link, 本股)` 補記提及索引(+回歸測試) |
+| 2 (MED) | 技術訊號只餵 180 日曆天(≈123 交易日),52 週位階/MA120 名不副實 | 技術訊號改餵 **400 天** close 序列(回填已存 365 天);price_history_json 仍只取近 180 天再降採樣(token 不變) |
+| 3 (MED) | HTML 抓取器無 scheme 白名單(file:///SSRF 風險) | `_default_opener` 只允許 http(s),其餘請求前即拒(+回歸測試) |
+| 4 (LOW) | from_yfinance 把 UNIX epoch 當成 "1720" 垃圾日期 | `_parse_yf_date`:strptime 驗真日期 + 轉換 epoch 秒(+回歸測試) |
+| 5 (LOW) | 死碼 `llm_off` flag | 移除 |
+| 6 (LOW) | 預覽路徑未把 now 傳入新聞窗口 | `_build_context` 補 `now=now` |
+
+**修後重驗**:mypy 160 檔零錯、ruff 全過、full suite exit 0(新增 3 個 SR 回歸測試)。
+
+**記錄為待你裁決的 follow-up(取捨型,未擅自改)**:
+- (MED-4)自訂 per_market 提示詞若引用 `kpis_json/fx_json/fx_rates_json` 會看到全組合彙總
+  (官方市場模板已刻意不用,故現況安全)—— 要「切片」還是「在 validate_tokens 擋下」由你定。
+- (MED-5)整理器抽出的 `related_stocks` 用於跨股索引 → 惡意文章可能讓假關聯股現身他股卡
+  (僅敘事層,不變式 #1 不破)—— 要不要「只信 discovered_for/限held 清單」由你定。
+- (MED-3)抓不到的降級列永不重整理 → 一次性 blip 會讓該文永遠只剩標題(7 日內自然滾出)
+  —— 要「隔日重試」還是「維持不重試省成本」由你定。
+- 其餘 LOW:Big5 解碼、news.db 保留策略/納入備份 —— 皆可延後。
 
 ## 七、交付狀態與下一步
 

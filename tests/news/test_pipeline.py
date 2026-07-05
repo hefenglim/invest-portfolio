@@ -113,3 +113,19 @@ def test_discovery_failure_for_one_symbol_is_swallowed() -> None:
         conn, [("2330", "TW"), ("AAPL", "US")],
         discover=discover, fetch=lambda u: "t", organize=_org, now=NOW)
     assert res["organized"] == 1  # AAPL still processed
+
+
+def test_skip_unions_discovered_for_into_mentions() -> None:
+    # SR fix: an already-stored article surfaced by a second symbol's feed must still
+    # add THAT symbol to the mentions index (same-sector coverage).
+    conn = _conn()
+    ns.upsert_news(conn, _org(NewsLink(title="n", link="http://x"), "t"),
+                   discovered_for="2330")
+    assert ns.query_by_symbol(conn, "2317", since_date="2026-07-01") == []  # not yet
+    res = P.run_news_pipeline(
+        conn, [("2317", "TW")],  # a different holding whose feed surfaces the same link
+        discover=lambda s, m: [NewsLink(title="n", link="http://x")],
+        fetch=lambda u: "t", organize=_org, now=NOW)
+    assert res["skipped_existing"] == 1
+    # 2317 now finds the article even though it was first ingested under 2330.
+    assert ns.query_by_symbol(conn, "2317", since_date="2026-07-01")[0].link == "http://x"

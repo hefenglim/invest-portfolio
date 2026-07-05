@@ -44,3 +44,12 @@ def test_fetch_respects_max_chars() -> None:
     text = F.fetch_article_text("http://x", opener=lambda u: big.encode("utf-8"),
                                 max_chars=500)
     assert text is not None and len(text) <= 500
+
+
+def test_default_opener_rejects_non_http_scheme() -> None:
+    # SR fix: file://, ftp:// etc. must be refused before any request (SSRF/LFI guard).
+    import pytest
+    with pytest.raises(ValueError, match="non-http"):
+        F._default_opener("file:///etc/passwd")
+    with pytest.raises(ValueError, match="non-http"):
+        F._default_opener("ftp://internal/secret")

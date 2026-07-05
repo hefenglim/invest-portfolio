@@ -71,3 +71,12 @@ def test_discover_swallows_a_failing_source() -> None:
     out = S.discover_links("2330", "TW", finmind_client=boom, yf_client=yf,
                            finmind_start="2026-07-01")
     assert [n.link for n in out] == ["http://ok"]  # yfinance still delivered
+
+
+def test_parse_yf_date_iso_and_epoch_and_garbage() -> None:
+    assert S._parse_yf_date("2026-07-04T10:00:00Z") == "2026-07-04"
+    assert S._parse_yf_date(1751600000) == "2025-07-04"  # UNIX epoch -> real date
+    assert S._parse_yf_date("1720000000") == "2024-07-03"  # epoch string, not "1720"
+    assert S._parse_yf_date("not-a-date") is None
+    assert S._parse_yf_date(None) is None
+    assert S._parse_yf_date(42) is None  # too small to be epoch seconds

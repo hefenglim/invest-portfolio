@@ -7,19 +7,22 @@ DB path derives from the configured db_path.parent, which the golden fixture poi
 temp dir, so the test writes/reads an isolated news.db.
 """
 
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
 
 from portfolio_dash.news import store as ns
 from portfolio_dash.news.store import OrganizedNews
 
-_NOW = datetime.now(ZoneInfo("Asia/Taipei"))
+# The api_client's get_now returns GOLDEN_NOW (2026-06-11); the news window is computed
+# from THAT, so seed relative to it, not wall-clock today.
+from tests.conftest import GOLDEN_NOW
+
+_NOW = GOLDEN_NOW
 
 
 def _seed_news(symbol: str, *, days_ago: int = 1) -> None:
-    d = (date.today()).fromordinal(date.today().toordinal() - days_ago).isoformat()
+    d = (GOLDEN_NOW.date() - timedelta(days=days_ago)).isoformat()
     with ns.news_session() as conn:
         ns.upsert_news(conn, OrganizedNews(
             link=f"http://news/{symbol}", title=f"{symbol} 重大新聞",

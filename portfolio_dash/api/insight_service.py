@@ -69,6 +69,9 @@ from portfolio_dash.shared.wire import decimal_str
 logger = logging.getLogger(__name__)
 
 _HISTORY_DAYS = 180
+# Longer close series fed to the technical signals so 52-week position / MA120 are honest
+# (52w ≈ 252 sessions ≈ 365 calendar days; the daily backfill stores 365d).
+_TECHNICAL_HISTORY_DAYS = 400
 
 # A pure-narrative card (or a quant card whose narrative is the deciding signal) is a "miss"
 # when the master narrative score is below this threshold (spec 4.4 / decide_miss).
@@ -138,10 +141,17 @@ def _per_symbol_ctx(
         external_reasons=_external_reasons(conn, external_vars),
     )
     as_of = now.date()
-    history = get_price_history(conn, symbol, as_of - timedelta(days=_HISTORY_DAYS), as_of)
-    ctx.closes = [p.value for p in history]
+    # SR fix (2026-07-06): the technical signals (52-week position, MA120) need up to ~252
+    # trading sessions, but 180 CALENDAR days ≈ 123 sessions — so fetch a longer close
+    # series (the backfill already stores 365d) for ctx.closes, while price_history_json
+    # keeps only the recent 180d window (then downsampled) to stay token-bounded.
+    long_hist = get_price_history(
+        conn, symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+    )
+    ctx.closes = [p.value for p in long_hist]
+    recent = [p for p in long_hist if p.as_of >= as_of - timedelta(days=_HISTORY_DAYS)]
     ctx.price_points = [
-        {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in history
+        {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in recent
     ]
     return ctx
 

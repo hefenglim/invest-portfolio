@@ -35,6 +35,11 @@ _BLANKLINES = re.compile(r"\n\s*\n+")
 
 
 def _default_opener(url: str) -> bytes:
+    # SR fix (2026-07-06): only fetch http(s). urllib honours file://, ftp://, etc.;
+    # a malicious/compromised feed link (file:///etc/passwd) must never be read + shipped
+    # to the organizer LLM. Reject anything else BEFORE the request.
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) URL: {url[:40]}")
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
         ctype = resp.headers.get("Content-Type", "")

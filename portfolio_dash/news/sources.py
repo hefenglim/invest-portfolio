@@ -10,6 +10,7 @@ than raising (a nightly job must not crash on one bad row).
 
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -63,6 +64,31 @@ def _yf_field(item: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _parse_yf_date(raw: Any) -> str | None:
+    """Parse a yfinance date to ``YYYY-MM-DD``: ISO strings AND UNIX-epoch ints.
+
+    SR fix (2026-07-06): the old ``str(raw)[:4].isdigit()`` accepted a UNIX epoch
+    (``1720000000`` → ``"1720"``) and produced a bogus ``news_date`` that sorted below
+    every real date. Validate a real ISO date via ``strptime`` and convert epoch seconds.
+    """
+    if raw is None:
+        return None
+    s = str(raw)
+    if len(s) >= 10 and s[4:5] == "-":
+        try:
+            datetime.strptime(s[:10], "%Y-%m-%d")
+            return s[:10]
+        except ValueError:
+            pass
+    try:  # providerPublishTime = UNIX seconds
+        ts = int(raw)
+    except (ValueError, TypeError):
+        return None
+    if ts > 1_000_000_000:  # plausible epoch seconds (2001+)
+        return datetime.fromtimestamp(ts, tz=UTC).date().isoformat()
+    return None
+
+
 def from_yfinance(items: list[dict[str, Any]], *, lang: str = "en") -> list[NewsLink]:
     """Normalize yfinance ``Ticker.news`` items (shape varies across versions)."""
     out: list[NewsLink] = []
@@ -75,8 +101,7 @@ def from_yfinance(items: list[dict[str, Any]], *, lang: str = "en") -> list[News
             continue
         provider = _yf_field(it, "provider")
         source = provider.get("displayName") if isinstance(provider, dict) else provider
-        raw_date = _yf_field(it, "pubDate", "displayTime", "providerPublishTime")
-        date = str(raw_date)[:10] if raw_date and str(raw_date)[:4].isdigit() else None
+        date = _parse_yf_date(_yf_field(it, "pubDate", "displayTime", "providerPublishTime"))
         out.append(NewsLink(title=str(title), link=str(url),
                             source=str(source) if source else None, date=date, lang=lang))
     return out

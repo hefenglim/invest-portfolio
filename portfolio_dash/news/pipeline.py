@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from portfolio_dash.news.sources import NewsLink
-from portfolio_dash.news.store import OrganizedNews, link_exists, upsert_news
+from portfolio_dash.news.store import OrganizedNews, add_mention, link_exists, upsert_news
 from portfolio_dash.shared.llm_config import AINotActivated, LLMBudgetExceeded, LLMUnavailable
 
 # Injected seams:
@@ -53,7 +53,6 @@ def run_news_pipeline(
     """
     organized = headline = skipped = 0
     stopped_budget = False
-    llm_off = False
     for symbol, market in holdings:
         if stopped_budget:
             break
@@ -66,11 +65,14 @@ def run_news_pipeline(
             if taken >= per_symbol_cap:
                 break
             if link_exists(conn_news, link.link):
+                # SR fix: still record THIS symbol as a mention of the already-stored
+                # article, so same-sector holdings don't miss news their own feed found.
+                add_mention(conn_news, link.link, symbol)
                 skipped += 1
                 continue
             taken += 1
             text = fetch(link.link)
-            if text is None or llm_off:
+            if text is None:
                 upsert_news(conn_news, _headline_only(link, now=now), discovered_for=symbol)
                 headline += 1
                 continue

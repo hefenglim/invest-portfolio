@@ -147,6 +147,25 @@ def upsert_news(
     return news_id
 
 
+def add_mention(conn: sqlite3.Connection, link: str, symbol: str) -> bool:
+    """Add *symbol* to an already-stored article's mentions (SR fix, 2026-07-06).
+
+    When a link is skipped by the cross-symbol dedup, the symbol whose feed surfaced it
+    this run must STILL be recorded as a mention — otherwise a same-sector holding whose
+    feed found an article first-ingested under another symbol would never see it. Idempotent
+    (``INSERT OR IGNORE``); no-op when the link is not stored. Returns True if a row exists.
+    """
+    row = conn.execute("SELECT id FROM organized_news WHERE link = ?", (link,)).fetchone()
+    if row is None:
+        return False
+    conn.execute(
+        "INSERT OR IGNORE INTO news_mentions (news_id, symbol) VALUES (?, ?)",
+        (int(row["id"]), symbol),
+    )
+    conn.commit()
+    return True
+
+
 def query_by_symbol(
     conn: sqlite3.Connection, symbol: str, *, since_date: str, limit: int = 10
 ) -> list[OrganizedNews]:

@@ -430,7 +430,7 @@ def _build_context(
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
     symbol = payload.symbol if payload.scope == "per_symbol" else None
-    external_vars = _external_vars(conn, symbol)
+    external_vars = _external_vars(conn, symbol, now=now)  # SR: thread now → news window
     ctx = V.VarContext(
         data=data,
         now=now,  # spec 04.10 {{now}} renders ISO-8601 +08:00 in preview/test
