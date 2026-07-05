@@ -481,7 +481,8 @@ def get_ai_score(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]
     concern over this payload).
     """
     es.ensure_tables(conn)
-    return es.ai_score(conn)
+    cs.ensure_seeded(conn)
+    return es.ai_score(conn, exclude_type_ids=cs.archived_type_ids(conn))
 
 
 # --- evolution-config (spec 4.6) ----------------------------------------------
@@ -740,10 +741,16 @@ def list_insights(
 ) -> list[dict[str, Any]]:
     """List stored insight cards (newest first), optionally filtered by type and/or symbol.
 
-    Empty DB → ``[]``. Money/target_pct is a Decimal STRING (the frontend never computes).
+    Archived (deleted) tasks' cards are hidden — history stays in the table (spec 4.1)
+    but stops surfacing. Empty DB → ``[]``. Money/target_pct is a Decimal STRING (the
+    frontend never computes).
     """
     istore.ensure_tables(conn)
+    cs.ensure_seeded(conn)
     return [
         _card_wire(rec)
-        for rec in istore.list_cards(conn, insight_type_id=insight_type, symbol=symbol)
+        for rec in istore.list_cards(
+            conn, insight_type_id=insight_type, symbol=symbol,
+            exclude_type_ids=cs.archived_type_ids(conn),
+        )
     ]

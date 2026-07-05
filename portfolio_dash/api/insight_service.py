@@ -970,8 +970,10 @@ def _g0_g1(
     """G0 (task enabled) + G1 (trigger source) display gates (§7.2).
 
     G0: a disabled task fails (one-click enable). G1: a non-on_alert task with no schedule
-    binding fails ("won't auto-run", one-click create_schedule); on_alert is event-triggered
-    (spec 03), so its trigger is never "manual" → ok.
+    binding WARNS ("won't auto-run", one-click create_schedule) — manual triggering is a
+    legitimate mode, so a healthy task must not read as blocked (softened from fail,
+    human sign-off 2026-07-05; §7.2 originally hard-failed it). on_alert is
+    event-triggered (spec 03), so its trigger is never "manual" → ok.
     """
     g0: dict[str, Any] = (
         {"id": "G0", "name": "任務啟用", "lv": "ok", "msg": "任務已啟用", "fix": None}
@@ -989,7 +991,7 @@ def _g0_g1(
         g1 = {"id": "G1", "name": "觸發來源", "lv": "ok", "msg": "已排程", "fix": None}
     else:
         g1 = {
-            "id": "G1", "name": "觸發來源", "lv": "fail", "msg": "未排程（手動），不會自動執行",
+            "id": "G1", "name": "觸發來源", "lv": "warn", "msg": "未排程（手動），不會自動執行",
             "fix": {"kind": "create_schedule"},
         }
     return g0, g1

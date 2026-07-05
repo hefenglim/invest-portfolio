@@ -432,6 +432,20 @@ def list_insight_types(
     return [_insight_type_from_row(r) for r in conn.execute(sql)]
 
 
+def archived_type_ids(conn: sqlite3.Connection) -> set[int]:
+    """The archived insight_type ids — the read-side exclusion set.
+
+    Deleting a task is an ARCHIVE (spec 4.1: history is never physically removed),
+    but its historical cards/evaluations must stop surfacing on the insights list,
+    the dashboard embed, and the AI battle record. The api layer feeds this set to
+    the store readers' ``exclude_type_ids``.
+    """
+    return {
+        int(r["id"])
+        for r in conn.execute("SELECT id FROM insight_types WHERE archived = 1")
+    }
+
+
 def update_insight_type(
     conn: sqlite3.Connection,
     insight_type_id: int,

@@ -56,16 +56,20 @@ def test_preflight_gate_order_and_shape(
     assert isinstance(preview["est_cost_usd"], str)  # Decimal STRING, never float
 
 
-def test_preflight_unscheduled_g1_fail_with_create_schedule_fix(
+def test_preflight_unscheduled_g1_warns_with_create_schedule_fix(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
+    # Manual triggering is a legitimate mode: an otherwise-healthy unscheduled task
+    # WARNS ("won't auto-run") instead of reading as blocked (softened 2026-07-05,
+    # human sign-off — this also aligns preflight G1 with the pipeline hub's
+    # trigger node, which always treated unscheduled as warn).
     add_topup(golden_db, Decimal("5"))
     tid = _make_combo(api_client)
     body = api_client.post(f"/api/insight-tasks/{tid}/preflight").json()
     g1 = next(g for g in body["gates"] if g["id"] == "G1")
-    assert g1["lv"] == "fail"  # manual / unscheduled won't auto-run
+    assert g1["lv"] == "warn"  # manual / unscheduled won't auto-run
     assert g1["fix"]["kind"] == "create_schedule"
-    assert body["verdict"] == "blocked"
+    assert body["verdict"] == "degraded"  # not blocked — the run itself is healthy
 
 
 def test_preflight_disabled_task_g0_fail_with_enable_fix(
@@ -236,7 +240,7 @@ def test_preflight_empty_object_body_means_saved_task(
 def test_diagnose_same_gates_plus_first_blocker_and_skips(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    tid = _make_combo(api_client)  # unscheduled + quota 0 → G1 + R6 fail
+    tid = _make_combo(api_client)  # unscheduled (G1 warn) + quota 0 → R6 fail
     # two prior skipped runs to surface in recent_skips.
     for reason in ("R6_quota", "R3_no_live_templates"):
         golden_db.execute(
@@ -252,8 +256,8 @@ def test_diagnose_same_gates_plus_first_blocker_and_skips(
     # same gate ids/order as preflight; no assembled_preview in diagnose.
     assert _gate_ids(body) == ["G0", "G1", "R1", "R2", "R3", "R4", "R5", "R6", "G7"]
     assert "assembled_preview" not in body
-    # G1 (manual) is the first failing gate.
-    assert body["first_blocker"] == "G1"
+    # G1 (manual) only warns now — the first FAILING gate is the quota (R6).
+    assert body["first_blocker"] == "R6"
     skips = body["recent_skips"]
     assert len(skips) == 2
     assert skips[0]["reason"] == "R3_no_live_templates"  # newest first

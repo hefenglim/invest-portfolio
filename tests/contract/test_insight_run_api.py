@@ -120,3 +120,51 @@ def test_insights_list_returns_stored_card(
     assert api_client.get("/api/insights?symbol=NOPE").json() == []
     # filter by insight_type
     assert len(api_client.get(f"/api/insights?insight_type={it_id}").json()) == 1
+
+
+def test_deleted_task_history_hidden_but_preserved(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # Deleting a task is an ARCHIVE (spec 4.1) — its cards/evaluations must stop
+    # surfacing on /api/insights, the dashboard embed, and /api/ai-score, while the
+    # rows stay in the tables (2026-07-05 fix: orphan cards polluted all three).
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.llm_insight import evaluations_store as es
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard
+
+    it_id = _make_combo(api_client)
+    now = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
+    card = InsightCard(title="孤兒卡", summary="s", body_md="b", tags=[])
+    card_id = istore.add_card(
+        golden_db, insight_type_id=it_id, card=card,
+        fingerprint=istore.fingerprint(it_id, "p2", "d2", "v1"), calibration_version=None,
+        horizon_days=5, input_snapshot="{}", model="m", cost_usd=Decimal("0"), now=now,
+    ).id
+    es.ensure_tables(golden_db)
+    es.add_evaluation(
+        golden_db, insight_id=card_id, insight_type_id=it_id, calibration_version=None,
+        is_shadow=False, status="scored", quant_hit=True, narrative_score=80,
+        miss=False, actual_value=Decimal("0.01"), confidence=70, now=now,
+    )
+    assert len(api_client.get("/api/insights").json()) == 1
+    assert len(api_client.get("/api/ai-score").json()["rows"]) == 1
+
+    assert api_client.delete(f"/api/insight-types/{it_id}").status_code == 200
+
+    assert api_client.get("/api/insights").json() == []
+    score = api_client.get("/api/ai-score").json()
+    assert score["rows"] == [] and score["totals"]["n"] == 0
+    dash = api_client.get("/api/dashboard").json()
+    assert all(c["title"] != "孤兒卡" for c in dash["insights"])
+    # archive semantics: the history rows are still in the tables.
+    n_cards = golden_db.execute(
+        "SELECT COUNT(*) FROM insights WHERE insight_type_id = ?", (it_id,)
+    ).fetchone()[0]
+    n_evals = golden_db.execute(
+        "SELECT COUNT(*) FROM insight_evaluations WHERE insight_type_id = ?", (it_id,)
+    ).fetchone()[0]
+    assert n_cards == 1 and n_evals == 1

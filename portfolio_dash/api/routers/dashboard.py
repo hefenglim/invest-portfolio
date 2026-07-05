@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query
 from portfolio_dash.api import insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.serialize import to_wire
-from portfolio_dash.llm_insight import insights_store
+from portfolio_dash.llm_insight import composer_store, insights_store
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing.store import get_price_history
@@ -71,7 +71,10 @@ def dashboard(
     # the stub list AFTER to_wire so the real read is never shadowed. cost_usd is already a
     # canonical Decimal STRING in storage — pass it through untouched (no float/coerce); id is
     # stringified to match the InsightCardStub.id wire type. Empty table -> [].
-    cards = insights_store.latest_cards(conn, _INSIGHT_N)
+    composer_store.ensure_seeded(conn)
+    cards = insights_store.latest_cards(
+        conn, _INSIGHT_N, exclude_type_ids=composer_store.archived_type_ids(conn)
+    )
     payload["insights"] = [
         {
             "id": str(c.id),

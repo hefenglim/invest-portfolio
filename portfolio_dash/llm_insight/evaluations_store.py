@@ -466,20 +466,26 @@ def _row_wire(r: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def ai_score(conn: sqlite3.Connection) -> dict[str, Any]:
+def ai_score(
+    conn: sqlite3.Connection, *, exclude_type_ids: set[int] | None = None
+) -> dict[str, Any]:
     """The battle-record table (spec 4.7): ``{totals, by_combo[], calibration_bins[], rows[]}``.
 
     ``totals``/``by_combo`` reflect the DISPLAYED active score (non-shadow scored rows);
     shadow rows are excluded from the displayed totals but kept in ``rows`` (and reachable
-    via ``combo_score(is_shadow=True)`` for promotion). Empty DB → zeroed/[] (the contract
-    shape the frontend consumes).
+    via ``combo_score(is_shadow=True)`` for promotion). ``exclude_type_ids`` hides archived
+    tasks' history from the displayed record (spec 4.1 archive: rows stay in the table);
+    ``calibration_bins`` stays global — it is a calibration diagnostic, not a scoreboard.
+    Empty DB → zeroed/[] (the contract shape the frontend consumes).
     """
+    excluded = exclude_type_ids or set()
     combo_ids = [
         int(r["insight_type_id"])
         for r in conn.execute(
             "SELECT DISTINCT insight_type_id FROM insight_evaluations "
             "WHERE is_shadow = 0 AND status = 'scored' ORDER BY insight_type_id"
         )
+        if int(r["insight_type_id"]) not in excluded
     ]
     by_combo = [combo_score(conn, cid) for cid in combo_ids]
     total_n = sum(c["n"] for c in by_combo)
@@ -489,9 +495,10 @@ def ai_score(conn: sqlite3.Connection) -> dict[str, Any]:
     total_narr_sum = sum(c["narrative_sum"] for c in by_combo)
     total_narr_n = sum(
         1 for r in conn.execute(
-            "SELECT 1 FROM insight_evaluations WHERE is_shadow = 0 AND status = 'scored' "
-            "AND narrative_score IS NOT NULL"
+            "SELECT insight_type_id FROM insight_evaluations WHERE is_shadow = 0 "
+            "AND status = 'scored' AND narrative_score IS NOT NULL"
         )
+        if int(r["insight_type_id"]) not in excluded
     )
     totals = {
         "n": total_n,
@@ -506,6 +513,7 @@ def ai_score(conn: sqlite3.Connection) -> dict[str, Any]:
         for r in conn.execute(
             "SELECT * FROM insight_evaluations ORDER BY id DESC"
         )
+        if int(r["insight_type_id"]) not in excluded
     ]
     return {
         "totals": totals,

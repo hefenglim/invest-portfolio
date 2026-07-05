@@ -252,13 +252,29 @@ def find_by_fingerprint(conn: sqlite3.Connection, fingerprint: str) -> InsightRe
     return _record_from_row(row) if row is not None else None
 
 
+def _exclusion_clause(
+    exclude_type_ids: set[int] | None,
+) -> tuple[str, list[Any]]:
+    """SQL fragment + params hiding archived tasks' cards (empty set → no clause)."""
+    if not exclude_type_ids:
+        return "", []
+    placeholders = ",".join("?" * len(exclude_type_ids))
+    return f"insight_type_id NOT IN ({placeholders})", list(exclude_type_ids)
+
+
 def list_cards(
     conn: sqlite3.Connection,
     *,
     insight_type_id: int | None = None,
     symbol: str | None = None,
+    exclude_type_ids: set[int] | None = None,
 ) -> list[InsightRecord]:
-    """List stored cards (newest first), optionally filtered by type and/or symbol."""
+    """List stored cards (newest first), optionally filtered by type and/or symbol.
+
+    ``exclude_type_ids`` hides archived tasks' history from read surfaces (the api
+    layer feeds ``composer_store.archived_type_ids``); the rows stay in the table
+    (spec 4.1 archive semantics — never physically removed).
+    """
     clauses: list[str] = []
     params: list[Any] = []
     if insight_type_id is not None:
@@ -267,6 +283,10 @@ def list_cards(
     if symbol is not None:
         clauses.append("symbol = ?")
         params.append(symbol)
+    excl_sql, excl_params = _exclusion_clause(exclude_type_ids)
+    if excl_sql:
+        clauses.append(excl_sql)
+        params.extend(excl_params)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         f"SELECT * FROM insights{where} ORDER BY id DESC", tuple(params)
@@ -274,17 +294,22 @@ def list_cards(
     return [_record_from_row(r) for r in rows]
 
 
-def latest_cards(conn: sqlite3.Connection, n: int) -> list[InsightRecord]:
+def latest_cards(
+    conn: sqlite3.Connection, n: int, *, exclude_type_ids: set[int] | None = None
+) -> list[InsightRecord]:
     """The latest *n* non-shadow cards, newest first (spec 4.6 / 08 dashboard embed).
 
     Ordered ``created_at`` desc with an ``id`` desc tiebreak for determinism (two cards
     stamped from the same run share a ``created_at``). Shadow cards (``is_shadow = 1``)
     are excluded — they are hidden calibration trials, never surfaced on the dashboard
-    (spec 4.6). An empty table (or non-positive *n*) yields an empty list.
+    (spec 4.6) — as are archived tasks' cards via ``exclude_type_ids``. An empty table
+    (or non-positive *n*) yields an empty list.
     """
+    excl_sql, excl_params = _exclusion_clause(exclude_type_ids)
+    where = "is_shadow = 0" + (f" AND {excl_sql}" if excl_sql else "")
     rows = conn.execute(
-        "SELECT * FROM insights WHERE is_shadow = 0 "
+        f"SELECT * FROM insights WHERE {where} "
         "ORDER BY created_at DESC, id DESC LIMIT ?",
-        (n,),
+        (*excl_params, n),
     ).fetchall()
     return [_record_from_row(r) for r in rows]
