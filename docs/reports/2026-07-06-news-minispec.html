@@ -1,0 +1,125 @@
+<title>新聞變數 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f5f4f0; --card: #ffffff; --ink: #22201c; --ink-2: #5c574e;
+    --line: #ddd8cc; --accent: #b5482e; --accent-soft: #f6e7e1;
+    --tw: #c4453c; --us: #3b6ea5; --ok: #3d7a4a; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #171613; --card: #201e1a; --ink: #ece8df; --ink-2: #a8a294;
+            --line: #35322b; --accent: #e07354; --accent-soft: #2e211c;
+            --tw: #e06158; --us: #6b9bd2; --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #171613; --card: #201e1a; --ink: #ece8df;
+    --ink-2: #a8a294; --line: #35322b; --accent: #e07354; --accent-soft: #2e211c;
+    --tw: #e06158; --us: #6b9bd2; --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f5f4f0; --card: #ffffff; --ink: #22201c;
+    --ink-2: #5c574e; --line: #ddd8cc; --accent: #b5482e; --accent-soft: #f6e7e1;
+    --tw: #c4453c; --us: #3b6ea5; --ok: #3d7a4a; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; } .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; } ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); font-weight: 700; }
+  .mk { display: inline-block; border-radius: 5px; padding: 1px 7px; font-size: 12px;
+    color: #fff; font-weight: 700; } .mk.tw { background: var(--tw); } .mk.us { background: var(--us); }
+  .verdict { font-weight: 700; color: var(--ok); }
+  .mock { border: 1.5px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    background: var(--paper); margin-top: 10px; font-size: 14.5px; }
+  .mock .h { font-weight: 800; margin-bottom: 4px; }
+  .mock .row { display: flex; gap: 8px; margin: 3px 0; }
+  .mock .src { color: var(--ink-2); font-size: 12.5px; flex: none; }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .scroll { overflow-x: auto; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・批次④</div>
+    <h1>新聞變數：給個股健檢真實的「近期催化劑」背景</h1>
+    <p class="lede">研究已完成、兩個源都實測可用。看完回「確認」即開工。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>新聞源研究結論（皆已實測）</h2>
+    <div class="scroll">
+    <table>
+      <tr><th>市場</th><th>採用來源</th><th>實測</th><th>性質</th></tr>
+      <tr><td><span class="mk us">美股</span></td><td>yfinance 逐標的新聞</td>
+        <td>AAPL 回 10 則</td><td>免費、免金鑰</td></tr>
+      <tr><td><span class="mk tw">台股</span></td>
+        <td><b>FinMind（中文）＋ yfinance .TW（英文）雙源合併</b></td>
+        <td>2330：FinMind 9 則＋yfinance 10 則</td><td class="verdict">中文精準＋英文全球脈絡</td></tr>
+    </table>
+    </div>
+    <p class="dim">FinMind 欄位：date／title／source／link（結構化）。限制：單日一請求 → 抓近幾日拼窗口。
+    台股一併納入英文新聞（你 2026-07-06 確認）：兩源合併去重，中文為主、英文補全球視角。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>為什麼台股用 FinMind 而不是 Yahoo 爬取</h2>
+    <ul class="tight">
+      <li><b>FinMind＝官方 API</b>：免費、結構化、我們已整合（tier-aware＋快照 ingest 現成），零額外脆弱點。</li>
+      <li><b>Yahoo 股市台灣</b>：標題雖可從 HTML 取得，但屬<b>爬取</b>——無官方 API/條款、HTML 一改就壞、要自寫解析器、無法接現有快照機制。</li>
+      <li>決定：<b>FinMind 為台股主源</b>；Yahoo 記錄為「日後若覆蓋不足再評估的補充源」，本批不建。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>怎麼落地（延續你先前定案：新聞餵進現有任務）</h2>
+    <ul class="tight">
+      <li>新增變數 <code>symbol_news_json</code>（單一標的）：近 7 日最多 10 則標題＋來源＋日期＋連結（含語言標記）；台股走 FinMind＋yfinance 合併、美股走 yfinance、馬股有則附無則誠實缺席。</li>
+      <li>新增排程 <code>news_daily</code>：逐持股抓新聞 → 存進 external_snapshots（走現有 seam），與其他快照同機制、可回測重現。</li>
+      <li>個股健檢模板升 <b>v2.3</b>：新增「新聞事件」一節 —— 以新聞標題解讀近期催化劑/風險。</li>
+      <li>新聞也自動出現在<b>變數區</b>，可用於自訂組合提示詞。</li>
+    </ul>
+    <div class="mock">
+      <div class="h">健檢卡「新聞事件」節（示意）</div>
+      <div class="row"><span class="src">7/5・CMoney</span><span>半導體營收飆升！台積電擴產與記憶體動態解析</span></div>
+      <div class="row"><span class="src">7/4・中央社</span><span>台積電法說會 7/16 登場，聚焦全年成長目標</span></div>
+      <div class="dim" style="margin-top:6px">AI 解讀：近期新聞聚焦法說會前的成長預期，屬正向催化背景……</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>鐵律＋成本</h2>
+    <ul class="tight keep">
+      <li>新聞是<b>質化輸入</b>：AI 只讀標題做背景判讀，<b>絕不從新聞取數字</b>（價格/報酬仍 100% 本地計算，不變式 #1）。</li>
+      <li>只餵標題＋來源＋日期（不餵全文）→ token 有上限、雜訊少。</li>
+      <li>快取、額度、評分迴路照舊。成本每檔健檢多約 300–500 tokens，<b>每月不到 US$0.1</b>。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span>我會照這 4 個預設做（不同意再說）</h2>
+    <ul class="tight">
+      <li>每檔近 <b>7 日、最多 10 則</b>；只取標題／來源／日期／連結＋語言標記（不取全文）。</li>
+      <li>來源按市場自動選：<b>台股→FinMind（中文）＋yfinance（英文）合併</b>、美股→yfinance、馬股→yfinance(.KL) 或缺席。</li>
+      <li>合併去重（同標題/連結只留一則），中文優先、英文補位；抓不到誠實標「近期無新聞」。</li>
+      <li>Yahoo 台股記錄為補充源，本批不建（避免爬取脆弱點）。</li>
+    </ul>
+  </section>
+
+  <div class="cta">
+    沒問題回「<b>確認</b>」即開工；要調整直接講哪一條（例：「改 10 則」「馬股先不用」「Yahoo 也要建」）。
+  </div>
+
+</div>
