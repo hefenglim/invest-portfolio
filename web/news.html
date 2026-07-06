@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — 新聞庫</title>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css"></link>
+<link rel="stylesheet" href="settings.css"></link>
+<style>
+  .nw-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
+    padding: 12px var(--pad); }
+  .nw-field { display: flex; flex-direction: column; gap: 4px; }
+  .nw-field label { font-size: 11px; color: var(--text-3); letter-spacing: .04em; }
+  .nw-field select, .nw-field input { min-height: 34px; }
+  .nw-totals { margin-left: auto; text-align: right; font-size: 12.5px; color: var(--text-2); }
+  .nw-totals b { color: var(--text-1); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .nw-list { padding: 0 var(--pad) 20px; display: flex; flex-direction: column; gap: 8px; }
+  .nw-row { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+    background: var(--surface-1); cursor: pointer; transition: border-color .12s; }
+  .nw-row:hover { border-color: var(--accent); }
+  .nw-row-top { display: flex; gap: 10px; align-items: baseline; }
+  .nw-date { flex: none; font-size: 12px; color: var(--text-3);
+    font-variant-numeric: tabular-nums; min-width: 78px; }
+  .nw-title { font-weight: 600; font-size: 14.5px; flex: 1; line-height: 1.4; }
+  .nw-cost { flex: none; font-size: 11.5px; color: var(--text-3);
+    font-variant-numeric: tabular-nums; }
+  .nw-row-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
+  .nw-src { font-size: 11.5px; color: var(--text-3); }
+  .nw-tag { font-size: 11px; border: 1px solid var(--line); border-radius: 999px;
+    padding: 0 8px; color: var(--text-2); }
+  .nw-lang { font-size: 10.5px; border-radius: 3px; padding: 0 5px; color: #fff; }
+  .nw-lang.zh { background: var(--tw, #c4453c); } .nw-lang.en { background: var(--us, #3b6ea5); }
+  .nw-hl { font-size: 10.5px; color: var(--amber, #b0812f); }
+  .nw-empty { padding: 40px; text-align: center; color: var(--text-3); }
+  /* modal */
+  .nw-back { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none;
+    align-items: center; justify-content: center; z-index: 60; padding: 16px; }
+  .nw-back.open { display: flex; }
+  .nw-modal { background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px;
+    max-width: 620px; width: 100%; max-height: 82vh; overflow: auto; padding: 18px 20px; }
+  .nw-modal h3 { margin: 0 0 4px; font-size: 17px; line-height: 1.4; }
+  .nw-modal .m-meta { font-size: 12px; color: var(--text-3); margin-bottom: 12px;
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .nw-modal .m-summary { font-size: 15px; line-height: 1.75; white-space: pre-wrap; }
+  .nw-modal .m-foot { margin-top: 14px; display: flex; gap: 12px; align-items: center;
+    flex-wrap: wrap; font-size: 12px; color: var(--text-3); }
+  .nw-modal .m-foot a { color: var(--accent); }
+  .nw-x { float: right; cursor: pointer; color: var(--text-3); font-size: 18px;
+    line-height: 1; border: none; background: none; }
+</style>
+</head>
+<body data-page="news" data-title="新聞庫">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <section class="panel" data-screen-label="新聞庫">
+    <div class="panel-head">
+      <h2 class="panel-title">個股新聞庫</h2>
+      <span class="panel-sub">每晚整理入庫 · 點列開全文摘要 · 逐則 token/成本追蹤,協助評估用量</span>
+    </div>
+
+    <div class="nw-filters">
+      <div class="nw-field">
+        <label>相關股票</label>
+        <select class="select" id="nw-stock"><option value="">全部</option></select>
+      </div>
+      <div class="nw-field">
+        <label>來源</label>
+        <select class="select" id="nw-source"><option value="">全部</option></select>
+      </div>
+      <div class="nw-field">
+        <label>起日</label>
+        <input class="input" id="nw-from" type="date"></input>
+      </div>
+      <div class="nw-field">
+        <label>迄日</label>
+        <input class="input" id="nw-to" type="date"></input>
+      </div>
+      <button class="btn" id="nw-clear" type="button">清除</button>
+      <div class="nw-totals" id="nw-totals"></div>
+    </div>
+
+    <div class="nw-list" id="nw-list"></div>
+  </section>
+
+</div>
+</div>
+</div>
+
+<div class="nw-back" id="nw-back">
+  <div class="nw-modal" id="nw-modal"></div>
+</div>
+
+<script src="api.js"></script>
+<script src="shell.js"></script>
+<script src="format.js"></script>
+<script src="news.js"></script>
+</body>
+</html>

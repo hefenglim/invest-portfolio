@@ -360,3 +360,19 @@ def test_new_signal_vars_registered_scopes() -> None:
     assert V.BY_TOKEN["technical_signals_json"].category == "price"
     assert V.BY_TOKEN["fear_greed_json"].scope == "portfolio"
     assert V.BY_TOKEN["fear_greed_json"].category == "sentiment"
+
+
+def test_per_market_kpis_and_fx_carry_scope_note(golden_db: sqlite3.Connection) -> None:
+    # SR fix: whole-portfolio vars used in a per_market card are labelled, not fabricated.
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    ctx = V.VarContext(data=data, now=_NOW, market="TW",
+                       fx_rates={"USD_TWD": {"rate": "32.9"}})
+    kpis = V.value_for("kpis_json", ctx)
+    assert "scope_note" in kpis and "全組合" in kpis["scope_note"]
+    fx = V.value_for("fx_json", ctx)
+    assert isinstance(fx, dict) and ("scope_note" in fx or fx.get("unavailable"))
+    rates = V.value_for("fx_rates_json", ctx)
+    assert "scope_note" in rates
+    # without a market, no scope_note (portfolio card unchanged)
+    p = V.value_for("kpis_json", V.VarContext(data=data, now=_NOW))
+    assert "scope_note" not in p

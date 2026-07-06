@@ -695,7 +695,15 @@ def value_for(token: str, ctx: VarContext) -> Any:
             return market_view.market_allocation(data.holdings, ctx.market) or _UNAVAILABLE
         return _allocation(data)
     if token == "kpis_json":
-        return data.kpis.model_dump()
+        kpis = data.kpis.model_dump()
+        if ctx.market is not None:
+            # SR fix: KPIs (total market value / total return / XIRR) are whole-portfolio;
+            # a per_market card must not read them as this market's numbers. XIRR is not
+            # computed per market, so label rather than fabricate. Market-level figures
+            # come from holdings_json / returns_by_ccy_json (both sliced).
+            return {"scope_note": "以下為全組合彙總，非本市場切片；"
+                                  "本市場數字見 holdings_json 與 returns_by_ccy_json", **kpis}
+        return kpis
     if token == "returns_by_ccy_json":
         return _returns_by_ccy(data, market=ctx.market)
     if token == "realized_json":
@@ -730,9 +738,15 @@ def value_for(token: str, ctx: VarContext) -> Any:
     if token == "dividend_projection_json":
         return _dividend_projection(data, market=ctx.market)
     if token == "fx_json":
-        return _fx(data)
+        fx = _fx(data)
+        if ctx.market is not None and "unavailable" not in fx:
+            fx = {"scope_note": "匯率與換匯損益為全組合層級（非本市場切片）", **fx}
+        return fx
     if token == "fx_rates_json":
-        return _fx_rates(ctx)
+        rates = _fx_rates(ctx)
+        if ctx.market is not None and "unavailable" not in rates:
+            rates = {"scope_note": "即期匯率為全組合層級（非本市場切片）", **rates}
+        return rates
     if token == "freshness_json":
         return _freshness(ctx)
     if token == "as_of":

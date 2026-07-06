@@ -1365,3 +1365,10 @@ def test_favicon_present_no_ico_404(live_server: str, browser_page: Page) -> Non
     # (c) The asset is actually served (200), so the browser uses it instead of /favicon.ico.
     resp = page.request.get(live_server + "/favicon.svg")
     assert resp.status == 200, f"GET /favicon.svg returned {resp.status}, expected 200"
+
+
+@pytest.mark.e2e
+def test_news_page_smoke(live_server: str, browser_page: Page) -> None:
+    """/news.html boots from GET /api/news + /api/news/filters, renders zero-error even
+    with an empty news DB (the batch-④ news library page)."""
+    assert_page_ok(browser_page, live_server, "/news.html", root_selector="#nw-list")

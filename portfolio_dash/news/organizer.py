@@ -69,6 +69,9 @@ def organize(
         related_stocks=stocks,
         source=link.source,
         lang=link.lang,
+        cost_usd=completion.cost,
+        tokens_in=completion.tokens_in,
+        tokens_out=completion.tokens_out,
         fetched_at=stamp,
         organized_at=stamp,
     )

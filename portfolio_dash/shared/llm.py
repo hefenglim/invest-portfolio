@@ -205,6 +205,8 @@ class StructuredCompletion[T: BaseModel](BaseModel):
     value: T
     model: str
     cost: Decimal
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 def _complete_with_meta[T: BaseModel](
@@ -266,7 +268,10 @@ def _complete_with_meta[T: BaseModel](
                 parsed = schema.model_validate_json(_extract_json(content))
             except (ValidationError, json.JSONDecodeError, ValueError):
                 continue
-        return StructuredCompletion(value=parsed, model=model.model_alias, cost=cost)
+        return StructuredCompletion(
+            value=parsed, model=model.model_alias, cost=cost,
+            tokens_in=usage.prompt_tokens, tokens_out=usage.completion_tokens,
+        )
     raise LLMUnavailable(f"invalid structured output from {model.id}")
 
 

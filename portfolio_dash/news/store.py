@@ -14,7 +14,9 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -68,6 +70,9 @@ CREATE TABLE IF NOT EXISTS organized_news (
     related_stocks TEXT NOT NULL,
     source TEXT,
     lang TEXT,
+    cost_usd TEXT NOT NULL DEFAULT '0',
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
     fetched_at TEXT NOT NULL,
     organized_at TEXT NOT NULL
 );
@@ -80,10 +85,26 @@ CREATE INDEX IF NOT EXISTS ix_news_mentions_symbol ON news_mentions(symbol);
 CREATE INDEX IF NOT EXISTS ix_organized_news_date ON organized_news(news_date);
 """
 
+# Columns added after the first schema (batch ④ cost tracking); added to a pre-existing
+# organized_news via ALTER-if-missing so an already-populated news.db upgrades in place.
+_ADDED_COLUMNS = (
+    ("cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+    ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
+    ("tokens_out", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
+    existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if col not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
 
 def create_tables(conn: sqlite3.Connection) -> None:
-    """Create the news tables idempotently."""
+    """Create the news tables idempotently + migrate the cost columns onto older DBs."""
     conn.executescript(_DDL)
+    for col, decl in _ADDED_COLUMNS:
+        _add_column_if_missing(conn, "organized_news", col, decl)
     conn.commit()
 
 
@@ -97,6 +118,9 @@ class OrganizedNews(BaseModel):
     related_stocks: list[str] = Field(default_factory=list)
     source: str | None = None
     lang: str | None = None  # "zh" | "en"
+    cost_usd: Decimal = Decimal("0")  # LLM cost to organize this item (0 for degrades)
+    tokens_in: int = 0
+    tokens_out: int = 0
     fetched_at: str
     organized_at: str
 
@@ -108,26 +132,48 @@ def link_exists(conn: sqlite3.Connection, link: str) -> bool:
     ).fetchone() is not None
 
 
+def is_fully_organized(conn: sqlite3.Connection, link: str) -> bool:
+    """True if this link is stored WITH an AI summary (not a headline-only degrade).
+
+    SR fix (2026-07-06): dedup skips only fully-organized rows, so a headline-only row
+    left by a one-off fetch/LLM miss is retried (and upgraded) on a later run.
+    """
+    row = conn.execute(
+        "SELECT body_summary FROM organized_news WHERE link = ?", (link,)
+    ).fetchone()
+    return row is not None and bool((row["body_summary"] or "").strip())
+
+
 def upsert_news(
-    conn: sqlite3.Connection, item: OrganizedNews, *, discovered_for: str | None = None
+    conn: sqlite3.Connection,
+    item: OrganizedNews,
+    *,
+    discovered_for: str | None = None,
+    index_symbols: set[str] | None = None,
 ) -> int:
     """Insert (or update on link) one organized news item + its mentions index.
 
-    ``discovered_for`` is the symbol whose feed surfaced the article; it is always added
-    to the mentions set (union with the LLM-extracted ``related_stocks``) so a card for
-    that symbol finds the news even if the model did not name the ticker in the body.
-    Returns the news row id.
+    ``discovered_for`` is the symbol whose feed surfaced the article; it is ALWAYS
+    indexed. The LLM-extracted ``related_stocks`` are stored for display, but only those
+    in ``index_symbols`` (the held universe) enter the mentions index — SR fix 2026-07-06:
+    an untrusted/hallucinated/injected ticker must not surface the article under an
+    unrelated holding's card. ``index_symbols=None`` indexes all related_stocks (back-compat
+    for tests/callers that don't constrain). Returns the news row id.
     """
     cur = conn.execute(
         "INSERT INTO organized_news "
         "(link, title, news_date, body_summary, related_stocks, source, lang, "
-        " fetched_at, organized_at) VALUES (?,?,?,?,?,?,?,?,?) "
+        " cost_usd, tokens_in, tokens_out, fetched_at, organized_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(link) DO UPDATE SET title=excluded.title, news_date=excluded.news_date, "
         "body_summary=excluded.body_summary, related_stocks=excluded.related_stocks, "
-        "source=excluded.source, lang=excluded.lang, organized_at=excluded.organized_at",
+        "source=excluded.source, lang=excluded.lang, cost_usd=excluded.cost_usd, "
+        "tokens_in=excluded.tokens_in, tokens_out=excluded.tokens_out, "
+        "organized_at=excluded.organized_at",
         (
             item.link, item.title, item.news_date, item.body_summary,
             json.dumps(item.related_stocks, ensure_ascii=False), item.source, item.lang,
+            str(item.cost_usd), item.tokens_in, item.tokens_out,
             item.fetched_at, item.organized_at,
         ),
     )
@@ -135,9 +181,10 @@ def upsert_news(
         "SELECT id FROM organized_news WHERE link = ?", (item.link,)
     ).fetchone()
     news_id = int(row["id"]) if row is not None else int(cur.lastrowid or 0)
-    mentions = {s for s in item.related_stocks if s}
+    related = {s for s in item.related_stocks if s}
+    mentions = related if index_symbols is None else (related & index_symbols)
     if discovered_for:
-        mentions.add(discovered_for)
+        mentions.add(discovered_for)  # the discovering symbol is always trusted
     conn.execute("DELETE FROM news_mentions WHERE news_id = ?", (news_id,))
     conn.executemany(
         "INSERT OR IGNORE INTO news_mentions (news_id, symbol) VALUES (?, ?)",
@@ -186,10 +233,81 @@ def query_by_symbol(
 
 
 def _from_row(r: sqlite3.Row) -> OrganizedNews:
+    keys = r.keys()
     return OrganizedNews(
         link=r["link"], title=r["title"], news_date=r["news_date"],
         body_summary=r["body_summary"],
         related_stocks=json.loads(r["related_stocks"]) if r["related_stocks"] else [],
         source=r["source"], lang=r["lang"],
+        cost_usd=Decimal(r["cost_usd"]) if "cost_usd" in keys and r["cost_usd"] else Decimal("0"),
+        tokens_in=r["tokens_in"] if "tokens_in" in keys and r["tokens_in"] else 0,
+        tokens_out=r["tokens_out"] if "tokens_out" in keys and r["tokens_out"] else 0,
         fetched_at=r["fetched_at"], organized_at=r["organized_at"],
     )
+
+
+def distinct_symbols(conn: sqlite3.Connection) -> list[str]:
+    """All symbols that appear in the mentions index (for the browse-page stock filter)."""
+    return [
+        r["symbol"]
+        for r in conn.execute("SELECT DISTINCT symbol FROM news_mentions ORDER BY symbol")
+    ]
+
+
+def distinct_sources(conn: sqlite3.Connection) -> list[str]:
+    """All news sources present (for the browse-page source filter)."""
+    return [
+        r["source"]
+        for r in conn.execute(
+            "SELECT DISTINCT source FROM organized_news WHERE source IS NOT NULL "
+            "ORDER BY source"
+        )
+    ]
+
+
+def query_news(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    source: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[OrganizedNews], dict[str, Any]]:
+    """Filtered news list (newest first) + aggregate totals over the WHOLE filtered set.
+
+    Filters: ``symbol`` (precise mention match), ``date_from``/``date_to`` (inclusive
+    YYYY-MM-DD), ``source``. Returns ``(rows, totals)`` where ``totals`` = ``{count,
+    total_cost_usd}`` across every matching row (not just the page), for the browse
+    page's cost-assessment header.
+    """
+    joins = ""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if symbol:
+        joins = "JOIN news_mentions AS m ON m.news_id = o.id"
+        clauses.append("m.symbol = ?")
+        params.append(symbol)
+    if date_from:
+        clauses.append("o.news_date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("o.news_date <= ?")
+        params.append(date_to)
+    if source:
+        clauses.append("o.source = ?")
+        params.append(source)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    # Cost summed with Decimal (never float) over EVERY matching row for the header total.
+    cost_rows = conn.execute(
+        f"SELECT o.cost_usd FROM organized_news AS o {joins}{where}", tuple(params)
+    ).fetchall()
+    total_cost = sum((Decimal(r["cost_usd"] or "0") for r in cost_rows), Decimal("0"))
+    rows = conn.execute(
+        f"SELECT o.* FROM organized_news AS o {joins}{where} "
+        f"ORDER BY o.news_date DESC, o.id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    totals = {"count": len(cost_rows), "total_cost_usd": total_cost}
+    return [_from_row(r) for r in rows], totals

@@ -129,3 +129,36 @@ def test_skip_unions_discovered_for_into_mentions() -> None:
     assert res["skipped_existing"] == 1
     # 2317 now finds the article even though it was first ingested under 2330.
     assert ns.query_by_symbol(conn, "2317", since_date="2026-07-01")[0].link == "http://x"
+
+
+def test_headline_only_row_is_retried_on_later_run() -> None:
+    # SR fix: a transient fetch miss leaves a headline-only row; a later run re-fetches
+    # and upgrades it (dedup skips only fully-organized links).
+    conn = _conn()
+    # run 1: fetch fails -> headline-only
+    P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://x")],
+        fetch=lambda u: None, organize=_org, now=NOW)
+    assert ns.is_fully_organized(conn, "http://x") is False
+    # run 2: fetch works -> organized, upgraded
+    res = P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://x")],
+        fetch=lambda u: "body", organize=_org, now=NOW)
+    assert res["organized"] == 1 and res["skipped_existing"] == 0
+    assert ns.is_fully_organized(conn, "http://x") is True
+
+
+def test_pipeline_indexes_only_held_symbols() -> None:
+    # SR fix: the organizer says an article relates to 9999 (not held); it must NOT be
+    # retrievable under 9999, but IS under the held discovering symbol.
+    conn = _conn()
+    def organize(link: NewsLink, text: str) -> ns.OrganizedNews:
+        return ns.OrganizedNews(
+            link=link.link, title="t", news_date="2026-07-05", body_summary="s",
+            related_stocks=["9999"], source="s", lang="zh",
+            fetched_at=NOW.isoformat(), organized_at=NOW.isoformat())
+    P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://x")],
+        fetch=lambda u: "t", organize=organize, now=NOW)
+    assert ns.query_by_symbol(conn, "9999", since_date="2026-07-01") == []  # not indexed
+    assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].link == "http://x"

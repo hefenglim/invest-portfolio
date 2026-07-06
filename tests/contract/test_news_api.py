@@ -9,6 +9,7 @@ temp dir, so the test writes/reads an isolated news.db.
 
 from datetime import timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.news import store as ns
@@ -19,6 +20,14 @@ from portfolio_dash.news.store import OrganizedNews
 from tests.conftest import GOLDEN_NOW
 
 _NOW = GOLDEN_NOW
+
+
+@pytest.fixture(autouse=True)
+def _clean_news_db() -> None:
+    """The news DB is a session-scoped file; clear it before each test for isolation."""
+    with ns.news_session() as conn:
+        conn.execute("DELETE FROM news_mentions")
+        conn.execute("DELETE FROM organized_news")
 
 
 def _seed_news(symbol: str, *, days_ago: int = 1) -> None:
@@ -73,3 +82,46 @@ def test_news_prompt_get_put_reset(api_client: TestClient) -> None:
     reset = api_client.post("/api/news-prompt/reset").json()
     assert "新聞整理員" in reset["body"]
     assert api_client.get("/api/news-prompt").json()["body"] == reset["body"]
+
+
+# --- /api/news browse endpoint (batch ④ news library page) ---------------------
+
+
+def _seed_full(link: str, symbol: str, *, date: str, source: str, cost: str) -> None:
+    from decimal import Decimal
+    with ns.news_session() as conn:
+        ns.upsert_news(conn, OrganizedNews(
+            link=link, title=f"{symbol} 新聞", news_date=date,
+            body_summary="AI 整理摘要。", related_stocks=[symbol], source=source,
+            lang="zh", cost_usd=Decimal(cost), tokens_in=500, tokens_out=60,
+            fetched_at=_NOW.isoformat(), organized_at=_NOW.isoformat()),
+            discovered_for=symbol)
+
+
+def test_news_list_filters_and_totals(api_client: TestClient) -> None:
+    _seed_full("http://a", "2330", date="2026-07-05", source="CMoney", cost="0.003")
+    _seed_full("http://b", "AAPL", date="2026-06-20", source="Reuters", cost="0.004")
+    all_r = api_client.get("/api/news").json()
+    assert all_r["totals"]["count"] == 2
+    assert all_r["totals"]["total_cost_usd"] == "0.007"  # Decimal string, summed
+    assert {i["title"] for i in all_r["items"]} == {"2330 新聞", "AAPL 新聞"}
+    it = next(i for i in all_r["items"] if i["title"] == "2330 新聞")
+    assert it["cost_usd"] == "0.003" and it["tokens_in"] == 500 and it["headline_only"] is False
+    # symbol + date filters
+    tw = api_client.get("/api/news?symbol=2330").json()
+    assert tw["totals"]["count"] == 1 and tw["items"][0]["link"] == "http://a"
+    recent = api_client.get("/api/news?date_from=2026-07-01").json()
+    assert [i["link"] for i in recent["items"]] == ["http://a"]
+    src = api_client.get("/api/news?source=Reuters").json()
+    assert [i["link"] for i in src["items"]] == ["http://b"]
+
+
+def test_news_filters_endpoint(api_client: TestClient) -> None:
+    _seed_full("http://c", "2454", date="2026-07-05", source="鉅亨網", cost="0.002")
+    f = api_client.get("/api/news/filters").json()
+    assert "2454" in f["stocks"] and "鉅亨網" in f["sources"]
+
+
+def test_news_list_empty_ok(api_client: TestClient) -> None:
+    r = api_client.get("/api/news").json()
+    assert r["items"] == [] and r["totals"]["count"] == 0 and r["totals"]["total_cost_usd"] == "0"

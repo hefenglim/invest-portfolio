@@ -12,7 +12,12 @@ from collections.abc import Callable
 from datetime import datetime
 
 from portfolio_dash.news.sources import NewsLink
-from portfolio_dash.news.store import OrganizedNews, add_mention, link_exists, upsert_news
+from portfolio_dash.news.store import (
+    OrganizedNews,
+    add_mention,
+    is_fully_organized,
+    upsert_news,
+)
 from portfolio_dash.shared.llm_config import AINotActivated, LLMBudgetExceeded, LLMUnavailable
 
 # Injected seams:
@@ -53,6 +58,7 @@ def run_news_pipeline(
     """
     organized = headline = skipped = 0
     stopped_budget = False
+    held = {sym for sym, _ in holdings}  # SR fix: only held tickers enter the mentions index
     for symbol, market in holdings:
         if stopped_budget:
             break
@@ -64,32 +70,35 @@ def run_news_pipeline(
         for link in links:
             if taken >= per_symbol_cap:
                 break
-            if link_exists(conn_news, link.link):
-                # SR fix: still record THIS symbol as a mention of the already-stored
-                # article, so same-sector holdings don't miss news their own feed found.
+            # SR fix: skip only FULLY-organized links (a headline-only degrade is retried);
+            # either way record THIS symbol's mention of an already-stored article.
+            if is_fully_organized(conn_news, link.link):
                 add_mention(conn_news, link.link, symbol)
                 skipped += 1
                 continue
             taken += 1
             text = fetch(link.link)
             if text is None:
-                upsert_news(conn_news, _headline_only(link, now=now), discovered_for=symbol)
+                upsert_news(conn_news, _headline_only(link, now=now),
+                            discovered_for=symbol, index_symbols=held)
                 headline += 1
                 continue
             try:
                 item = organize(link, text)
             except (LLMBudgetExceeded, AINotActivated):
                 # persistent — store this one headline-only and end the run.
-                upsert_news(conn_news, _headline_only(link, now=now), discovered_for=symbol)
+                upsert_news(conn_news, _headline_only(link, now=now),
+                            discovered_for=symbol, index_symbols=held)
                 headline += 1
                 stopped_budget = True
                 break
             except LLMUnavailable:
                 # transient — degrade this article, keep going.
-                upsert_news(conn_news, _headline_only(link, now=now), discovered_for=symbol)
+                upsert_news(conn_news, _headline_only(link, now=now),
+                            discovered_for=symbol, index_symbols=held)
                 headline += 1
                 continue
-            upsert_news(conn_news, item, discovered_for=symbol)
+            upsert_news(conn_news, item, discovered_for=symbol, index_symbols=held)
             organized += 1
     return {
         "organized": organized,
