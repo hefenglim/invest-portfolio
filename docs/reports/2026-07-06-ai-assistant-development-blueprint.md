@@ -4,6 +4,23 @@
 **性質:** 規劃文件（決策就緒版）。本文不改任何鎖定決策；凡涉及鬆動之處，一律列為第 10 節的明確決策請求。
 **依據:** 全庫能力盤點（strategy / portfolio / llm_insight / pricing / scheduler / api / web 逐檔清查）+ 業界實證研究（引用於各節）。
 
+## 執行狀態（2026-07-07 更新）
+
+2026-07-07 深審修復批次完成（本批，同分支）：
+
+- **Part A 後端已修：** H1（排程掛載同步 live APScheduler）、H2（enabled/archived 執行層強制，Q2a）、
+  M1（Asia/Taipei 單一日錨時鐘，Q6）、M2（新聞提及合併）、M3（官方套組 preset_key 溯源鍵，Q3a）、
+  M4（Loop-2 產卡時快照所見價，Q1c）、M5（cron 重疊防護）、Q5（per_market 預測剝除）、
+  L1（news.db 納入每日備份，Q4a）、L2（封存任務不再評分）、L3（預覽/實跑收盤窗口統一 400d）、
+  L4（影子指紋分道）、L6（TPEx .TWO 新聞回退）、L7（評分函數注入時鐘）。L5（session 過期）業主緩議。
+- **Part B 前端已修：** FH1（新聞彈窗 CSS token）、FH2（預警鈴格式化＋帳戶顯示名＋中文化）、
+  FH3（產生洞察按鈕接活＋全域 disabled 樣式）、FM1–FM10（手機 CJK 塌縮、收件匣堆疊、CLS min-height、
+  pipeline-hub 文案產品化＋資產卡 API 取數、額度 2dp、遺留頁重導 trades、健診分頁改「每標的最新＋判定色＋歷史下鑽」、
+  settings-prompts 儲存列歸位、auth 文案更正、爬取垃圾防護＋整理提示詞 v2）；
+  LOW 精選：戰績空狀態文案、觸控目標 40px、行動表格右緣捲動提示、新聞頁關鍵字搜尋＋代號顯示名。
+- **P0 其餘項待辦：** 出版 v0.1.11、prod LLM 點火（Loop-2 樣本斷糧的阻擋項）。
+- **P1 以後：** 待與 owner 討論排程（資料地基 → 規則引擎 → 監控升級 → 回測驗證 → Vision → 顧問合成）。
+
 ---
 
 ## 1. 願景與誠實的目標函數
