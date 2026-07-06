@@ -1624,3 +1624,55 @@ details.freshness > summary > span:not(.sum-chips) {
   .row-trend > .panel { min-width: 0; }
   #trend-chart, #sector-chart, #dividend-chart { max-width: 100%; overflow: hidden; }
 }
+
+/* ==================== Review-fix layer (2026-07-07: FH3 / FM1 / FM2 / FM3 + LOW) ====================
+   Deep-review remediation (docs/reports/2026-07-06-full-system-deep-review.md Part B).
+   CSS-only; zero functional change. */
+
+/* FH3: global disabled affordance — a disabled control must LOOK disabled. */
+button[disabled], .btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* FM3: CLS — reserve the typical loaded height of async-filled regions so data arrival
+   does not shove the layout (measured CLS up to 0.94 on the mobile dashboard). The
+   reservations are conservative (≈ the loaded single-row/first-screen state); loaded
+   content larger than the reservation grows naturally. */
+#kpi-band { min-height: 96px; }
+#cash-cards { min-height: 120px; }
+#cash-total { min-height: 22px; }
+.table-wrap:has(#holdings-body) { min-height: 280px; }
+.table-wrap:has(#tx-body) { min-height: 280px; }
+#ins-cards-grid, #ins-health-grid { min-height: 140px; }
+
+@media (max-width: 640px) {
+  /* FM1: mobile CJK vertical collapse — a squeezed flex child wraps CJK one char per
+     line. Short fixed labels keep their intrinsic width; longer ones ellipsize. */
+  .panel-title { flex-shrink: 0; }
+  .input-toggle > span:not(.caret):not(.panel-sub):not(.spacer) {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .kpi-card .kpi-subline {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* FM2: 待確認匯入 rows stack vertically on phones (chip → text → actions) instead of
+     keeping the 3-column desktop row (one dividend card ≈ two screens tall before). */
+  .inbox-item { flex-direction: column; align-items: stretch; gap: 8px; }
+  .inbox-item .src-badge { align-self: flex-start; }
+  .inbox-actions { justify-content: flex-end; }
+  .inbox-group-head { flex-wrap: wrap; }
+
+  /* LOW: topbar icon buttons reach a 40px touch target. */
+  .topbar button { min-height: 40px; min-width: 40px; }
+
+  /* LOW: horizontally-scrollable tables get a right-edge fade as a scroll affordance. */
+  .table-wrap {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), rgba(0,0,0,0.25));
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), rgba(0,0,0,0.25));
+  }
+}
