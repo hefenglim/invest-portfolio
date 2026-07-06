@@ -116,16 +116,23 @@ def _assemble(f: PipelineFacts) -> NodeState:
     return NodeState(lv="ok", text=f"{f.live_template_count} 模板啟用")
 
 
+def _usd_display(x: Decimal) -> str:
+    """USD for NodeState display text: 2 dp（FM5 fix — the task card printed the raw
+    full-precision Decimal「$3.8014615」）. Display-only quantize; the comparisons
+    above it stay full precision."""
+    return f"${x.quantize(Decimal('0.01'))}"
+
+
 def _exec(f: PipelineFacts) -> NodeState:
     """Exec node: quota 0 (R6) → fail; quota < quota_low OR (master unset & self_correct)
     → warn; else ok. Master-unset alone (no self_correct) does not degrade exec."""
     if f.quota_remaining <= 0:
-        return NodeState(lv="fail", text="額度耗盡", sub=f"餘 ${f.quota_remaining}")
+        return NodeState(lv="fail", text="額度耗盡", sub=f"餘 {_usd_display(f.quota_remaining)}")
     if f.quota_remaining < f.quota_low:
-        return NodeState(lv="warn", text="額度偏低", sub=f"餘 ${f.quota_remaining}")
+        return NodeState(lv="warn", text="額度偏低", sub=f"餘 {_usd_display(f.quota_remaining)}")
     if f.self_correct and not f.master_configured:
         return NodeState(lv="warn", text="校正暫停", sub="未設定 AI 大師模型")
-    return NodeState(lv="ok", text=f"額度餘 ${f.quota_remaining}")
+    return NodeState(lv="ok", text=f"額度餘 {_usd_display(f.quota_remaining)}")
 
 
 _OUTPUT_FAIL = {"skipped", "error"}

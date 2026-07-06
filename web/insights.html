@@ -45,8 +45,38 @@
   }
   .dimmed { opacity: 0.7; }
 
+  /* ---- 產生洞察 dropdown (FH3) ---- */
+  .gen-menu {
+    position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
+    min-width: 220px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    padding: 4px; display: flex; flex-direction: column; gap: 2px;
+  }
+  .gen-item {
+    display: flex; align-items: center; gap: 8px; text-align: left;
+    border: none; background: none; color: var(--text); cursor: pointer;
+    font-size: 12.5px; padding: 7px 10px; border-radius: var(--radius-sm);
+  }
+  .gen-item:hover { background: var(--panel-2); }
+  .gen-item .gen-scope { margin-left: auto; font-size: 10px; color: var(--text-3); }
+
   /* ---- 持倉健診卡 ---- */
   .hc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); padding: 12px var(--pad) 14px; }
+  /* FM7: 每標的一疊 — 最新卡帶判定色左框（台灣慣例：紅多綠空），歷史卡收合 */
+  .hc-stack { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .hc-card.hv-up { border-left: 3px solid var(--up); }
+  .hc-card.hv-down { border-left: 3px solid var(--down); }
+  .hc-card.hv-watch { border-left: 3px solid var(--amber); }
+  .hc-verdict.v-up { color: var(--up); border: 1px solid rgba(240, 84, 79, 0.4); background: var(--up-soft); }
+  .hc-verdict.v-down { color: var(--down); border: 1px solid rgba(47, 180, 124, 0.4); background: var(--down-soft); }
+  .hc-hist-toggle {
+    align-self: flex-start; border: 1px solid var(--border-soft); background: none;
+    color: var(--text-3); font-size: 10.5px; border-radius: 999px; padding: 1px 10px;
+    cursor: pointer;
+  }
+  .hc-hist-toggle:hover { color: var(--text-2); border-color: var(--border); }
+  .hc-history { display: flex; flex-direction: column; gap: 6px; }
+  .hc-history[hidden] { display: none; }
   .hc-card {
     background: var(--panel-2); border: 1px solid var(--border-soft);
     border-radius: var(--radius); padding: 12px 14px;
@@ -124,7 +154,10 @@
         <button type="button" data-tab="health">持倉健診</button>
         <button type="button" data-tab="score">AI 戰績</button>
       </div>
-      <button class="btn btn-primary" type="button" disabled="disabled" title="llm_insight 模組完工後啟用">產生洞察</button>
+      <div class="gen-wrap" style="position: relative;">
+        <button class="btn btn-primary" type="button" id="ins-generate" title="立即手動執行一個洞察任務">產生洞察</button>
+        <div class="gen-menu" id="ins-generate-menu" hidden></div>
+      </div>
     </div>
 
     <!-- ===== Tab: 洞察卡 (booted from GET /api/insights) ===== -->
@@ -267,11 +300,35 @@
     return c;
   }
 
-  function healthCardNode(card) {
+  /* FM7: verdict of a health card — the stored prediction.direction when present,
+     else a CONSERVATIVE keyword scan of title+summary; null = neutral (no accent).
+     Colors follow the app's locked Taiwan convention (紅漲綠跌): 偏多=red 偏空=green. */
+  function verdictOf(card) {
+    var p = card.prediction;
+    if (p && p.direction) {
+      if (p.direction === 'up') return 'up';
+      if (p.direction === 'down') return 'down';
+      if (p.direction === 'flat') return 'watch';
+    }
+    var text = (card.title || '') + '｜' + (card.summary || '');
+    if (/偏多|看多|看漲/.test(text)) return 'up';
+    if (/偏空|看空|看跌/.test(text)) return 'down';
+    if (/觀望|中性|持平/.test(text)) return 'watch';
+    return null;
+  }
+  var VERDICT_LABEL = { up: '偏多', down: '偏空', watch: '觀望' };
+
+  function healthCardNode(card, opts) {
+    opts = opts || {};
     var c = el('div', 'hc-card');
     var head = el('div', 'hc-head');
     head.appendChild(el('span', 'sym-code', card.symbol || ''));
     head.appendChild(el('span', 'badge badge-ai', 'AI'));
+    var v = verdictOf(card);
+    if (v) {
+      c.classList.add('hv-' + v);
+      head.appendChild(el('span', 'hc-verdict v-' + v, VERDICT_LABEL[v]));
+    }
     c.appendChild(head);
     var sec = el('div', 'hc-section');
     sec.appendChild(el('p', 'hc-text', card.summary || card.body_md || ''));
@@ -282,7 +339,30 @@
     foot.appendChild(confChip(card));
     foot.appendChild(el('span', 'insight-cost num', tokenCost(card.cost_usd)));
     c.appendChild(foot);
+    if (opts.dimmed) c.classList.add('dimmed');
     return c;
+  }
+
+  /* FM7: one stack per symbol — the LATEST card (verdict accent) + a collapsed
+     「歷史 N 筆」 toggle with the older cards. Pure display grouping (zero computation). */
+  function healthStackNode(list) {
+    var wrap = el('div', 'hc-stack');
+    wrap.appendChild(healthCardNode(list[0]));
+    if (list.length > 1) {
+      var older = list.slice(1);
+      var btn = el('button', 'hc-hist-toggle', '歷史 ' + older.length + ' 筆 ▾');
+      btn.type = 'button';
+      var hist = el('div', 'hc-history');
+      hist.hidden = true;
+      older.forEach(function (c) { hist.appendChild(healthCardNode(c, { dimmed: true })); });
+      btn.addEventListener('click', function () {
+        hist.hidden = !hist.hidden;
+        btn.textContent = '歷史 ' + older.length + ' 筆 ' + (hist.hidden ? '▾' : '▴');
+      });
+      wrap.appendChild(btn);
+      wrap.appendChild(hist);
+    }
+    return wrap;
   }
 
   function renderCards(cards) {
@@ -294,8 +374,18 @@
     var perSymbol = cards.filter(function (c) { return !!c.symbol && !MARKET_LABEL[c.symbol]; });
     if (!portfolio.length) cardsGrid.appendChild(emptyState('尚無洞察卡 — 由排程批次產生或手動觸發後顯示。'));
     else portfolio.forEach(function (c) { cardsGrid.appendChild(cardNode(c)); });
-    if (!perSymbol.length) healthGrid.appendChild(emptyState('尚無持倉健診卡 — 由單一標的洞察任務產生後顯示。'));
-    else perSymbol.forEach(function (c) { healthGrid.appendChild(healthCardNode(c)); });
+    if (!perSymbol.length) {
+      healthGrid.appendChild(emptyState('尚無持倉健診卡 — 由單一標的洞察任務產生後顯示。'));
+    } else {
+      /* group per symbol, preserving newest-first order within and across groups */
+      var order = [];
+      var bySym = {};
+      perSymbol.forEach(function (c) {
+        if (!bySym[c.symbol]) { bySym[c.symbol] = []; order.push(c.symbol); }
+        bySym[c.symbol].push(c);
+      });
+      order.forEach(function (sym) { healthGrid.appendChild(healthStackNode(bySym[sym])); });
+    }
   }
 
   /* ============ AI 戰績 (GET /api/ai-score) ============ */
@@ -307,10 +397,32 @@
     return c;
   }
 
+  /* earliest FUTURE due_at across loaded cards (display copy for the empty 戰績). */
+  var earliestDue = null;
+  function trackEarliestDue(cards) {
+    earliestDue = null;
+    var nowIso = new Date().toISOString();
+    cards.forEach(function (c) {
+      if (!c.due_at || c.due_at <= nowIso) return;
+      if (!earliestDue || c.due_at < earliestDue) earliestDue = c.due_at;
+    });
+  }
+
   function renderScore(score) {
     var totals = score.totals || {};
     var band = document.getElementById('score-band');
     band.replaceChildren();
+    if (!totals.n) {
+      /* LOW fix: zero evaluated rows must not render a 0.00% failing-grade wall. */
+      var msg = earliestDue
+        ? '尚無到期預測 — 最早 ' + f.date(earliestDue) + ' 對答案'
+        : '尚無到期預測 — 預測到期後由排程自動對答案';
+      band.appendChild(emptyState(msg));
+      renderCombos(score.by_combo || []);
+      renderScoreRows(score.rows || []);
+      drawCalib(score.calibration_bins || []);
+      return;
+    }
     /* miss_rate / quant_hit_rate are RATIO Decimal STRINGS (0..1); render as percentages
        via f.pct (Number()-coerced internally). avg_narrative is a 0..100 score string. */
     band.appendChild(scoreCard('累計評估數', f.num(totals.n), '已評分樣本'));
@@ -428,20 +540,102 @@
     slot.appendChild(window.pdExport.tableButton(document.getElementById('score-table'), 'ai_predictions.csv'));
   }
 
-  /* ---- async boot (graceful: degrade to empty states, never crash) ---- */
-  (function boot() {
+  /* ---- async boot / refresh (graceful: degrade to empty states, never crash) ---- */
+  function refresh(opts) {
+    opts = opts || {};
     if (!pdApi) { renderCards([]); return; }
     pdApi.get('/api/insights').then(function (cards) {
-      renderCards(Array.isArray(cards) ? cards : []);
+      cards = Array.isArray(cards) ? cards : [];
+      trackEarliestDue(cards);
+      renderCards(cards);
     }).catch(function () {
       renderCards([]);
-      if (window.toast) window.toast('洞察卡載入失敗', 'fail', '已顯示空狀態');
+      if (!opts.quiet && window.toast) window.toast('洞察卡載入失敗', 'fail', '已顯示空狀態');
     });
     pdApi.get('/api/ai-score').then(function (score) {
       renderScore(score || {});
     }).catch(function () {
       renderScore({});
-      if (window.toast) window.toast('AI 戰績載入失敗', 'fail', '已顯示空狀態');
+      if (!opts.quiet && window.toast) window.toast('AI 戰績載入失敗', 'fail', '已顯示空狀態');
+    });
+  }
+  refresh();
+
+  /* ============ 產生洞察 (FH3 fix) ============
+     One enabled task → run it directly; several → a small picker menu; none → guide
+     to the pipeline hub. Uses the existing manual-run endpoint (202 + run polling via
+     GET /runs) and this page's refresh(). All failures degrade to a toast. */
+  (function initGenerate() {
+    var btn = document.getElementById('ins-generate');
+    var menu = document.getElementById('ins-generate-menu');
+    if (!btn || !menu || !pdApi) return;
+    var POLL_MS = 3000, POLL_MAX = 20; // ≤60s of polling per run
+
+    function pollRun(taskId, runId, name, tries) {
+      if (tries >= POLL_MAX) {
+        if (window.toast) window.toast('仍在執行', 'ok', name + '：完成後重新整理即可看到新卡');
+        return;
+      }
+      pdApi.get('/api/insight-types/' + taskId + '/runs', { limit: 5 }).then(function (resp) {
+        var row = (resp.rows || []).find(function (r) { return r.id === runId; });
+        if (!row || !row.finished_at) {
+          setTimeout(function () { pollRun(taskId, runId, name, tries + 1); }, POLL_MS);
+          return;
+        }
+        if (row.status === 'ok' || row.status === 'partial') {
+          if (window.toast) window.toast('產生完成', 'ok', name + (row.detail ? '：' + row.detail : ''));
+        } else if (window.toast) {
+          window.toast(row.status === 'skipped' ? '本次略過' : '執行失敗', 'fail',
+            name + '：' + (row.reason || row.detail || row.status));
+        }
+        refresh({ quiet: true });
+      }).catch(function () { /* polling is best-effort */ });
+    }
+
+    function runTask(t) {
+      menu.hidden = true;
+      if (window.toast) window.toast('已觸發', 'ok', t.name + '：產生中…');
+      pdApi.post('/api/insight-types/' + t.id + '/run').then(function (resp) {
+        pollRun(t.id, resp.run_id, t.name, 0);
+      }).catch(function (err) {
+        if (window.toast) window.toast((err && err.message) || '觸發失敗', 'fail', err && err.code);
+      });
+    }
+
+    function openMenu(tasks) {
+      menu.replaceChildren();
+      tasks.forEach(function (t) {
+        var item = el('button', 'gen-item');
+        item.type = 'button';
+        item.appendChild(el('span', null, t.name));
+        item.appendChild(el('span', 'gen-scope',
+          { per_symbol: '逐標的', portfolio: '全組合', per_market: '逐市場', on_alert: '預警' }[t.scope] || t.scope));
+        item.addEventListener('click', function () { runTask(t); });
+        menu.appendChild(item);
+      });
+      menu.hidden = false;
+    }
+
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (!menu.hidden) { menu.hidden = true; return; }
+      pdApi.get('/api/insight-types').then(function (tasks) {
+        var runnable = (Array.isArray(tasks) ? tasks : []).filter(function (t) {
+          return t.enabled && t.scope !== 'on_alert'; // on_alert is event-triggered
+        });
+        if (!runnable.length) {
+          if (window.toast) window.toast('尚無可執行的洞察任務', 'fail', '前往「洞察管線」建立或啟用任務');
+          window.location.href = 'pipeline-hub.html';
+          return;
+        }
+        if (runnable.length === 1) { runTask(runnable[0]); return; }
+        openMenu(runnable);
+      }).catch(function (err) {
+        if (window.toast) window.toast((err && err.message) || '任務清單載入失敗', 'fail', err && err.code);
+      });
+    });
+    document.addEventListener('click', function (e) {
+      if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) menu.hidden = true;
     });
   })();
 })();

@@ -21,7 +21,7 @@ from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import budget_remaining, get_alert_threshold
 from portfolio_dash.shared.wire import decimal_str
-from portfolio_dash.strategy.alerts import compute_alerts_from
+from portfolio_dash.strategy.alerts import account_display_names, compute_alerts_from
 from portfolio_dash.strategy.rules_config import get_alert_rules
 
 router = APIRouter()
@@ -63,6 +63,7 @@ def dashboard(
         quota_remaining=budget_remaining(conn),
         quota_threshold=get_alert_threshold(conn),
         calib_gap=calib,
+        account_names=account_display_names(conn),  # FH2: same display names as GET /api/alerts
     )
     payload["alerts"] = to_wire([a.model_dump() for a in alerts])
 

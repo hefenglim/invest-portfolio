@@ -10,7 +10,10 @@
   const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.className = c;
     if (txt !== undefined) n.textContent = txt; return n; };
 
-  const state = { stock: '', source: '', from: '', to: '' };
+  const state = { stock: '', source: '', from: '', to: '', q: '' };
+  let lastItems = [];          // the last server-filtered page (client keyword filter input)
+  let lastTotals = { count: 0, total_cost_usd: '0' };
+  const instrumentNames = {};  // symbol -> display name (GET /api/instruments)
 
   function langBadge(lang) {
     if (!lang) return null;
@@ -74,30 +77,61 @@
     return p.length ? '?' + p.join('&') : '';
   }
 
+  /* client-side keyword filter over the LOADED list (title/summary substring; display
+     logic only — the server filters stock/source/date). */
+  function keywordFiltered(items) {
+    const q = state.q.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter((it) =>
+      ((it.title || '') + '\n' + (it.summary || '')).toLowerCase().includes(q));
+  }
+
+  function render() {
+    const list = $('#nw-list');
+    const items = keywordFiltered(lastItems);
+    $('#nw-totals').replaceChildren();
+    $('#nw-totals').append(
+      document.createTextNode('符合 '),
+      Object.assign(el('b'), { textContent: lastTotals.count }),
+      document.createTextNode(' 則 · 整理成本累計 '),
+      Object.assign(el('b'), { textContent: '$' + f.num(lastTotals.total_cost_usd, 4) }));
+    if (state.q.trim()) {
+      $('#nw-totals').append(document.createTextNode(' · 關鍵字符合 ' + items.length + ' 則'));
+    }
+    list.replaceChildren();
+    if (!items.length) { list.appendChild(el('div', 'nw-empty',
+      '無符合條件的新聞。每晚 news_daily 批次整理入庫後於此顯示。')); return; }
+    items.forEach((it) => list.appendChild(rowNode(it)));
+  }
+
   function load() {
     const list = $('#nw-list');
     api.get('/api/news' + qs()).then((resp) => {
-      const items = (resp && resp.items) || [];
-      const t = (resp && resp.totals) || { count: 0, total_cost_usd: '0' };
-      $('#nw-totals').replaceChildren();
-      $('#nw-totals').append(
-        document.createTextNode('符合 '),
-        Object.assign(el('b'), { textContent: t.count }),
-        document.createTextNode(' 則 · 整理成本累計 '),
-        Object.assign(el('b'), { textContent: '$' + f.num(t.total_cost_usd, 4) }));
-      list.replaceChildren();
-      if (!items.length) { list.appendChild(el('div', 'nw-empty',
-        '無符合條件的新聞。每晚 news_daily 批次整理入庫後於此顯示。')); return; }
-      items.forEach((it) => list.appendChild(rowNode(it)));
+      lastItems = (resp && resp.items) || [];
+      lastTotals = (resp && resp.totals) || { count: 0, total_cost_usd: '0' };
+      render();
     }).catch((err) => {
       list.replaceChildren(el('div', 'nw-empty', '新聞載入失敗：' + ((err && err.message) || '')));
     });
   }
 
   function initFilters() {
-    api.get('/api/news/filters').then((f2) => {
+    /* instrument display names ride along in the stock filter（LOW: 代號＋名稱）；
+       both fetches degrade independently. */
+    Promise.all([
+      api.get('/api/news/filters').catch(() => null),
+      api.get('/api/instruments').catch(() => null),
+    ]).then(([f2, instruments]) => {
+      const rows = instruments && Array.isArray(instruments.list) ? instruments.list : [];
+      rows.forEach((i) => {
+        if (i && i.symbol && i.name) instrumentNames[i.symbol] = i.name;
+      });
+      if (!f2) return;
       const stockSel = $('#nw-stock'), srcSel = $('#nw-source');
-      (f2.stocks || []).forEach((s) => { const o = el('option', null, s); o.value = s; stockSel.appendChild(o); });
+      (f2.stocks || []).forEach((s) => {
+        const label = instrumentNames[s] ? s + ' ' + instrumentNames[s] : s;
+        const o = el('option', null, label); o.value = s; stockSel.appendChild(o);
+      });
       (f2.sources || []).forEach((s) => { const o = el('option', null, s); o.value = s; srcSel.appendChild(o); });
     }).catch(() => {});
   }
@@ -106,10 +140,11 @@
   $('#nw-source').addEventListener('change', (e) => { state.source = e.target.value; load(); });
   $('#nw-from').addEventListener('change', (e) => { state.from = e.target.value; load(); });
   $('#nw-to').addEventListener('change', (e) => { state.to = e.target.value; load(); });
+  $('#nw-q').addEventListener('input', () => { state.q = $('#nw-q').value; render(); });
   $('#nw-clear').addEventListener('click', () => {
-    state.stock = state.source = state.from = state.to = '';
+    state.stock = state.source = state.from = state.to = state.q = '';
     $('#nw-stock').value = ''; $('#nw-source').value = '';
-    $('#nw-from').value = ''; $('#nw-to').value = '';
+    $('#nw-from').value = ''; $('#nw-to').value = ''; $('#nw-q').value = '';
     load();
   });
 

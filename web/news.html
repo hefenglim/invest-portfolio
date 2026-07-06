@@ -14,10 +14,10 @@
   .nw-field label { font-size: 11px; color: var(--text-3); letter-spacing: .04em; }
   .nw-field select, .nw-field input { min-height: 34px; }
   .nw-totals { margin-left: auto; text-align: right; font-size: 12.5px; color: var(--text-2); }
-  .nw-totals b { color: var(--text-1); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .nw-totals b { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
   .nw-list { padding: 0 var(--pad) 20px; display: flex; flex-direction: column; gap: 8px; }
-  .nw-row { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
-    background: var(--surface-1); cursor: pointer; transition: border-color .12s; }
+  .nw-row { border: 1px solid var(--border-soft); border-radius: 8px; padding: 10px 12px;
+    background: var(--panel); cursor: pointer; transition: border-color .12s; }
   .nw-row:hover { border-color: var(--accent); }
   .nw-row-top { display: flex; gap: 10px; align-items: baseline; }
   .nw-date { flex: none; font-size: 12px; color: var(--text-3);
@@ -27,7 +27,7 @@
     font-variant-numeric: tabular-nums; }
   .nw-row-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
   .nw-src { font-size: 11.5px; color: var(--text-3); }
-  .nw-tag { font-size: 11px; border: 1px solid var(--line); border-radius: 999px;
+  .nw-tag { font-size: 11px; border: 1px solid var(--border-soft); border-radius: 999px;
     padding: 0 8px; color: var(--text-2); }
   .nw-lang { font-size: 10.5px; border-radius: 3px; padding: 0 5px; color: #fff; }
   .nw-lang.zh { background: var(--tw, #c4453c); } .nw-lang.en { background: var(--us, #3b6ea5); }
@@ -37,7 +37,7 @@
   .nw-back { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none;
     align-items: center; justify-content: center; z-index: 60; padding: 16px; }
   .nw-back.open { display: flex; }
-  .nw-modal { background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px;
+  .nw-modal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     max-width: 620px; width: 100%; max-height: 82vh; overflow: auto; padding: 18px 20px; }
   .nw-modal h3 { margin: 0 0 4px; font-size: 17px; line-height: 1.4; }
   .nw-modal .m-meta { font-size: 12px; color: var(--text-3); margin-bottom: 12px;
@@ -79,6 +79,10 @@
       <div class="nw-field">
         <label>迄日</label>
         <input class="input" id="nw-to" type="date"></input>
+      </div>
+      <div class="nw-field">
+        <label>關鍵字</label>
+        <input class="input" id="nw-q" type="search" placeholder="標題或摘要…" spellcheck="false"></input>
       </div>
       <button class="btn" id="nw-clear" type="button">清除</button>
       <div class="nw-totals" id="nw-totals"></div>

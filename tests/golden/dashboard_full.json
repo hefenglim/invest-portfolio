@@ -256,6 +256,13 @@
   },
   "returns": {
     "by_currency": {
+      "TWD": {
+        "realized": "8000.0",
+        "unrealized": "237000.0000000000000000000000",
+        "total_return": "245000.0000000000000000000000",
+        "gross_invested": "1595000",
+        "rate": "0.1536050156739811912225705329"
+      },
       "USD": {
         "realized": "0",
         "unrealized": "6820.0",
@@ -269,13 +276,6 @@
         "total_return": "1075.000",
         "gross_invested": "9000",
         "rate": "0.1194444444444444444444444444"
-      },
-      "TWD": {
-        "realized": "8000.0",
-        "unrealized": "237000.0000000000000000000000",
-        "total_return": "245000.0000000000000000000000",
-        "gross_invested": "1595000",
-        "rate": "0.1536050156739811912225705329"
       }
     },
     "reporting_currency": "TWD",
@@ -1399,7 +1399,7 @@
       "sev": "risk",
       "rule": "single_weight",
       "title": "2330 單一持股權重偏高",
-      "detail": "weight 0.4084459821679291618518260088 > 0.30",
+      "detail": "單一持股權重 40.8%＞門檻 30.0%",
       "href": "/symbol/2330"
     },
     {
@@ -1407,7 +1407,7 @@
       "sev": "risk",
       "rule": "single_weight",
       "title": "AAPL 單一持股權重偏高",
-      "detail": "weight 0.3280638128772807027993866503 > 0.30",
+      "detail": "單一持股權重 32.8%＞門檻 30.0%",
       "href": "/symbol/AAPL"
     },
     {
@@ -1415,7 +1415,7 @@
       "sev": "warn",
       "rule": "stale_price",
       "title": "00919 報價過期",
-      "detail": "stored price is stale",
+      "detail": "庫存報價已過期，尚未更新",
       "href": "/symbol/00919"
     },
     {
@@ -1423,7 +1423,7 @@
       "sev": "warn",
       "rule": "stale_price",
       "title": "MSFT 報價過期",
-      "detail": "stored price is stale",
+      "detail": "庫存報價已過期，尚未更新",
       "href": "/symbol/MSFT"
     },
     {
@@ -1431,15 +1431,15 @@
       "sev": "warn",
       "rule": "missing_price",
       "title": "00919 無報價",
-      "detail": "no stored price",
+      "detail": "無庫存報價，無法評價",
       "href": "/symbol/00919"
     },
     {
       "id": "fx_drift:schwab",
       "sev": "info",
       "rule": "fx_drift",
-      "title": "schwab 匯率偏離成本",
-      "detail": "drift 0.032258064516129032258064516 > 0.03",
+      "title": "Charles Schwab 匯率偏離成本",
+      "detail": "即期匯率偏離成本匯率 3.2%＞門檻 3.0%",
       "href": null
     },
     {
@@ -1447,7 +1447,7 @@
       "sev": "risk",
       "rule": "quota_low",
       "title": "LLM 額度偏低",
-      "detail": "remaining 0 < 1.00",
+      "detail": "剩餘額度 $0.00＜警戒值 $1.00",
       "href": "/settings"
     }
   ]

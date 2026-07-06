@@ -35,6 +35,12 @@ def test_single_weight_fires_on_golden(golden_db: sqlite3.Connection) -> None:
     assert "single_weight:2330" in ids
     sw = next(a for a in alerts if a.id == "single_weight:2330")
     assert sw.sev == "risk" and sw.href == "/symbol/2330"
+    # FH2 fix: the detail is display copy — a quantized percent + zh phrasing, never
+    # the raw full-precision Decimal ("weight 0.7528455359… > 0.30").
+    assert "門檻" in sw.detail and "%" in sw.detail
+    assert "weight" not in sw.detail
+    frac = sw.detail.split("%")[0].rsplit(" ", 1)[-1]
+    assert len(frac.split(".")[-1]) <= 1  # at most 1 dp on the displayed percent
 
 
 def test_quota_low_zero_is_risk(golden_db: sqlite3.Connection) -> None:
@@ -113,6 +119,25 @@ def test_fx_drift_fires() -> None:
     # drift = |33/30 - 1| = 0.10 > 0.03 default -> fires info
     fd = next(a for a in alerts if a.id == "fx_drift:schwab")
     assert fd.sev == "info"
+    assert "10.0%" in fd.detail and "門檻" in fd.detail  # FH2 display percent
+
+
+def test_fx_drift_uses_account_display_name() -> None:
+    # FH2 fix: the bell shows the accounts table's display name, not the raw id.
+    acct = AccountFXResult(
+        account_id="moomoo_my_us", home_ccy=Currency.MYR, foreign_ccy=Currency.USD,
+        avg_rate=Decimal("4.0"), current_spot=Decimal("4.6"),
+        foreign_cash=Decimal("0"), foreign_stock_value=Decimal("0"),
+        realized_fx=None, unrealized_fx_stocks=None, unrealized_fx_cash=None)
+    fx = FXSummary(by_account={"moomoo_my_us": acct}, reporting_currency=Currency.TWD,
+                   reporting_realized_fx=Decimal("0"), reporting_unrealized_fx=Decimal("0"))
+    data = _minimal_data(fx=fx, calendar=[])
+    alerts = compute_alerts_from(
+        data, DEFAULT_RULES, quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
+        account_names={"moomoo_my_us": "Moomoo MY (US)"})
+    fd = next(a for a in alerts if a.id == "fx_drift:moomoo_my_us")
+    assert "Moomoo MY (US)" in fd.title
+    assert "moomoo_my_us" not in fd.title
 
 
 def test_exdiv_upcoming_fires() -> None:
@@ -123,6 +148,7 @@ def test_exdiv_upcoming_fires() -> None:
                                  quota_remaining=Decimal("5"), quota_threshold=Decimal("1"))
     ev = next(a for a in alerts if a.id == "exdiv_upcoming:2330")
     assert ev.sev == "info" and ev.href == "/symbol/2330"
+    assert ev.detail == "7 天後除息"  # FH2: zh phrasing, not "ex-date in 7d"
 
 
 def test_calib_gap_fires_above_threshold() -> None:
@@ -133,7 +159,8 @@ def test_calib_gap_fires_above_threshold() -> None:
                                  calib_gap=Decimal("20"))
     cg = next(a for a in alerts if a.id == "calib_gap")
     assert cg.sev == "warn" and cg.rule == "calib_gap" and cg.href == "/settings"
-    assert "20pp > 15pp" in cg.detail
+    assert "20pp" in cg.detail and "15pp" in cg.detail
+    assert "門檻" in cg.detail  # FH2: display copy is zh, not a debug log
 
 
 def test_calib_gap_silent_at_or_below_threshold() -> None:
