@@ -57,6 +57,33 @@ def test_run_already_running_409(
     assert r.json()["error"]["code"] == "already_running"
 
 
+def test_run_disabled_task_409(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # H2 fix (decision Q2a): a disabled task must not run (previously the flag was
+    # display-only and the run generated + billed anyway).
+    it_id = _make_combo(api_client)
+    golden_db.execute("UPDATE insight_types SET enabled = 0 WHERE id = ?", (it_id,))
+    golden_db.commit()
+    r = api_client.post(f"/api/insight-types/{it_id}/run")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "task_disabled"
+    assert "任務已停用" in r.json()["error"]["message"]
+
+
+def test_run_archived_task_409(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # H2 fix: get_insight_type returns archived rows — that's how an archived re-run
+    # used to slip through the 404 check.
+    it_id = _make_combo(api_client)
+    assert api_client.delete(f"/api/insight-types/{it_id}").status_code == 200  # archive
+    r = api_client.post(f"/api/insight-types/{it_id}/run")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "task_archived"
+    assert "任務已刪除" in r.json()["error"]["message"]
+
+
 def test_runs_list_returns_rows_with_reason(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:

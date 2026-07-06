@@ -320,7 +320,7 @@ def run_insight_type(
                 insight_type_id, "DATA_ANOMALY",
                 istore.snapshot_digest(snapshot), inputs.prompt_version,
             )
-            if istore.find_by_fingerprint(conn, fp) is None:
+            if istore.find_by_fingerprint(conn, fp, is_shadow=inputs.is_shadow) is None:
                 istore.add_card(
                     conn, insight_type_id=insight_type_id, card=_anomaly_card(target),
                     fingerprint=fp, calibration_version=stamp_version,
@@ -357,7 +357,7 @@ def run_insight_type(
             insight_type_id, canon_prompt,
             istore.snapshot_digest(snapshot), inputs.prompt_version,
         )
-        if istore.find_by_fingerprint(conn, fp) is not None:
+        if istore.find_by_fingerprint(conn, fp, is_shadow=inputs.is_shadow) is not None:
             continue  # cache hit — same-day identical inputs, no LLM, no duplicate row
 
         before = remaining
@@ -395,11 +395,20 @@ def run_insight_type(
         ):
             capped = card.prediction.model_copy(update={"horizon_days": _ON_ALERT_MAX_HORIZON})
             card = card.model_copy(update={"prediction": capped})
+        # per_market (Q5, 2026-07-07): a market card is pure narrative by contract; a
+        # model-emitted prediction would make Loop 2 look up a price for "TW"/"US" —
+        # an endless defer→undetermined churn. Strip it at store time.
+        if it.scope == "per_market" and card.prediction is not None:
+            card = card.model_copy(update={"prediction": None})
+        # M4 fix (decision Q1c): snapshot the last close the model actually saw — the
+        # Loop-2 scoring baseline. None when no close series was fed (portfolio/market).
+        seen_price = ctx.closes[-1] if ctx.closes else None
         istore.add_card(
             conn, insight_type_id=insight_type_id, card=card, fingerprint=fp,
             calibration_version=stamp_version, horizon_days=effective_horizon,
             input_snapshot=snapshot, model=used_model, cost_usd=spent,
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
+            price_at_create=seen_price,
         )
         created += 1
 

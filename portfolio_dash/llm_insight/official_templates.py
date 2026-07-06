@@ -20,7 +20,7 @@ LIBRARY_VERSION = "official-v3 (2026-07-06)"
 # The news-organizer system prompt (batch ④): the default LLM turns a fetched article's
 # text into a structured, faithful summary. Editable by the user (news settings), with a
 # reset-to-official path — same first-touch-optimum + customization model as the others.
-NEWS_ORGANIZER_PROMPT_VERSION = "v1"
+NEWS_ORGANIZER_PROMPT_VERSION = "v2"
 NEWS_ORGANIZER_PROMPT = (
     "你是財經新聞整理員。輸入是一篇新聞文章的正文（可能夾雜網頁雜訊）。\n"
     "請忠實整理成結構化資訊，只根據原文，不得杜撰或加入原文沒有的內容或數字。\n"
@@ -32,6 +32,8 @@ NEWS_ORGANIZER_PROMPT = (
     "4. related_stocks：文章提及的個股，回傳其代號（台股用數字代號如 2330、美股用英文代號"
     "如 AAPL）；沒有明確提及個股時回空陣列。\n"
     "5. title：若原文標題可辨識則沿用，否則以一句話擬定精簡標題。\n"
+    "6. 若正文並非實質新聞內容（如程式碼、樣式表、導覽選單雜訊），body_summary 一律留空"
+    "字串，不得描述或摘要這些雜訊。\n"
     "</rules>\n"
     "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
 )
@@ -176,6 +178,7 @@ STRATEGY_TEMPLATES: list[dict[str, str]] = [
 class TaskPreset(TypedDict):
     """One official-pack insight-task preset (a complete, schedulable task)."""
 
+    preset_key: str  # stable provenance key stamped on created tasks (M3 fix)
     name: str
     version: str
     scope: str
@@ -193,6 +196,7 @@ class TaskPreset(TypedDict):
 # Friday close); per-symbol checkup Monday morning (TW chips from Friday are in).
 TASK_PRESETS: list[TaskPreset] = [
     {
+        "preset_key": "weekly",
         "name": "持倉週報",
         "version": "v1",
         "scope": "portfolio",
@@ -204,6 +208,7 @@ TASK_PRESETS: list[TaskPreset] = [
         "description": "全組合敘事週報（純敘事，不附預測）",
     },
     {
+        "preset_key": "checkup",
         "name": "個股健檢",
         "version": "v1",
         "scope": "per_symbol",
@@ -215,6 +220,7 @@ TASK_PRESETS: list[TaskPreset] = [
         "description": "逐持股健檢（帶方向預測＋信心值，宇宙跟隨持倉）",
     },
     {
+        "preset_key": "market",
         "name": "市場週報",
         "version": "v1",
         "scope": "per_market",

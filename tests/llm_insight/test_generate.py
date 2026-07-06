@@ -637,3 +637,102 @@ def test_per_market_empty_universe_blocks_r2(
     )
     assert result.status == "skipped"
     assert result.reason == "R2_universe_empty"
+
+
+# --- Q5 fix (2026-07-07): per_market cards never store a prediction --------------
+
+
+def test_per_market_prediction_stripped_at_store(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The _CARD_JSON reply CARRIES a prediction; a per_market card must store it as
+    # None (otherwise Loop 2 looks up a price for "TW" → endless defer→undetermined).
+    _patch_llm(monkeypatch)
+    it_id = _market_combo(conn)
+    ctxs, markets = _market_ctxs(conn)
+    generate.run_insight_type(
+        conn, it_id, var_contexts=ctxs,
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=markets),
+        now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it_id)
+    assert len(cards) == len(markets)
+    for card in cards:
+        assert card.card.prediction is None
+        assert card.due_at is None  # never enters the Loop-2 due set
+
+
+# --- M4 fix (decision Q1c): the seen price is snapshotted at card-store time ------
+
+
+def test_per_symbol_card_stores_seen_price(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_llm(monkeypatch)
+    sp = cs.create_strategy(conn, name="S", body="{{symbol_detail_json}}", now=NOW)
+    it = cs.create_insight_type(
+        conn, name="Watch", scope="per_symbol",
+        universe={"mode": "custom", "symbols": ["2330"]}, now=NOW,
+    )
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    ctx = _ctx(conn, "2330")
+    ctx.closes = [Decimal("580"), Decimal("600")]  # the close series the model saw
+    generate.run_insight_type(
+        conn, it.id, var_contexts={"2330": ctx},
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=["2330"]),
+        now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it.id)
+    assert len(cards) == 1
+    assert cards[0].price_at_create == "600"  # the LAST close fed in, Decimal string
+
+
+def test_portfolio_card_has_no_seen_price(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_llm(monkeypatch)
+    it_id = _portfolio_combo(conn)
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: _ctx(conn)},
+        inputs=RunInputs(budget_remaining=Decimal("100")), now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it_id)
+    assert cards[0].price_at_create is None  # no close series fed → no baseline
+
+
+# --- L4 fix: shadow and active lanes never cache-hit each other -------------------
+
+
+def test_shadow_and_active_fingerprints_are_separate_lanes(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {"n": 0}
+
+    def completion(**kw: object) -> _Resp:
+        calls["n"] += 1
+        return _Resp(_CARD_JSON)
+
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    it_id = _portfolio_combo(conn)
+    ctx = _ctx(conn)
+    # active run stores the active-lane card…
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: ctx},
+        inputs=RunInputs(budget_remaining=Decimal("100")), now=NOW,
+    )
+    assert calls["n"] == 1
+    # …a SHADOW run with identical inputs must NOT cache-hit the active card.
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: ctx},
+        inputs=RunInputs(budget_remaining=Decimal("100"), is_shadow=True), now=NOW,
+    )
+    assert calls["n"] == 2  # generated its own shadow card
+    cards = istore.list_cards(conn, insight_type_id=it_id)
+    assert sorted(c.is_shadow for c in cards) == [False, True]
+    # and a REPEAT of each lane is a cache hit within that lane (no third call).
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: ctx},
+        inputs=RunInputs(budget_remaining=Decimal("100"), is_shadow=True), now=NOW,
+    )
+    assert calls["n"] == 2

@@ -290,3 +290,46 @@ def test_preview_per_market_slices_values(
     b = r.json()
     assert b["unknown_tokens"] == [] and b["scope_violations"] == []
     assert "2330" in b["rendered"] and "AAPL" not in b["rendered"]
+
+
+# --- L3 fix (2026-07-07): preview and run share ONE close-window ---------------
+
+
+def test_preview_context_uses_technical_window_for_closes(
+    golden_db: sqlite3.Connection,
+) -> None:
+    # ctx.closes spans the 400d technical window (honest 52w/MA120 signals in preview,
+    # same as the run path); price_points stays bounded to the recent 180d.
+    from datetime import timedelta
+
+    from portfolio_dash.api.routers.prompts import (
+        _HISTORY_DAYS,
+        _TECHNICAL_HISTORY_DAYS,
+        PromptBody,
+        _build_context,
+    )
+    from portfolio_dash.pricing.results import PriceRow
+    from portfolio_dash.pricing.store import upsert_prices
+    from portfolio_dash.shared.enums import Currency as C
+    from portfolio_dash.shared.enums import Market as M
+    from tests.conftest import GOLDEN_NOW
+
+    assert _TECHNICAL_HISTORY_DAYS == 400 and _HISTORY_DAYS == 180
+    as_of = GOLDEN_NOW.date()
+    old = as_of - timedelta(days=300)   # inside 400d, outside 180d
+    recent = as_of - timedelta(days=10)
+    upsert_prices(golden_db, [
+        PriceRow(instrument="2330", market=M.TW, as_of=old,
+                 close=Decimal("450"), source="test"),
+        PriceRow(instrument="2330", market=M.TW, as_of=recent,
+                 close=Decimal("610"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+
+    ctx = _build_context(
+        golden_db, PromptBody(body="x", scope="per_symbol", symbol="2330"),
+        GOLDEN_NOW, C.TWD,
+    )
+    assert Decimal("450") in ctx.closes            # long window feeds the signals
+    dates = {p["date"] for p in ctx.price_points}
+    assert old.isoformat() not in dates            # …but not the rendered history
+    assert recent.isoformat() in dates

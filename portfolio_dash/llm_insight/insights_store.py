@@ -44,6 +44,10 @@ class InsightRecord(BaseModel):
     model: str
     cost_usd: str
     created_at: str
+    # The last close the model actually saw at generation time (M4 fix, decision Q1c):
+    # Loop-2 scores from THIS baseline instead of the first close AFTER create (a number
+    # the model never reasoned about). Decimal STRING; None for legacy/portfolio cards.
+    price_at_create: str | None = None
 
 
 _DDL = """
@@ -65,16 +69,32 @@ CREATE TABLE IF NOT EXISTS insights (
     input_snapshot TEXT NOT NULL,
     model TEXT NOT NULL,
     cost_usd TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    price_at_create TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_insights_fingerprint ON insights (fingerprint);
 CREATE INDEX IF NOT EXISTS idx_insights_type_symbol ON insights (insight_type_id, symbol);
 """
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    """Add ``column`` to ``table`` if absent (additive, idempotent migration).
+
+    A LOCAL copy of the composer_store PRAGMA pattern (``llm_insight`` layering keeps
+    these stores import-light). ``PRAGMA table_info`` row index 1 is the column name.
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
     """Create the ``insights`` table + indexes idempotently (create-always, no seed)."""
     conn.executescript(_DDL)
+    # M4 fix (decision Q1c, 2026-07-07): additive migration — the seen-at-create price.
+    _add_column_if_missing(conn, "insights", "price_at_create", "TEXT")
     conn.commit()
 
 
@@ -157,12 +177,15 @@ def add_card(
     now: datetime,
     is_shadow: bool = False,
     horizon_basis: HorizonBasis = "trading_days",
+    price_at_create: Decimal | None = None,
 ) -> InsightRecord:
     """Append one generated card; compute ``due_at``; return the stored record.
 
     Append-only (spec 04 invariant): every run inserts a new row, never mutating history.
     ``cost_usd`` is stored as a canonical Decimal string. ``due_at`` is the prediction's
     maturity date (trading- or calendar-day horizon) or NULL for a narrative card.
+    ``price_at_create`` (M4 fix) is the last close the model saw in its inputs — the
+    Loop-2 scoring baseline; None when no close series was fed (portfolio/market card).
     """
     due_at = _compute_due_at(
         card, horizon_days=horizon_days, now=now, horizon_basis=horizon_basis
@@ -170,8 +193,9 @@ def add_card(
     cur = conn.execute(
         "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
-        "horizon_days, due_at, input_snapshot, model, cost_usd, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
+        "price_at_create) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -190,6 +214,7 @@ def add_card(
             model,
             str(cost_usd),
             now.isoformat(),
+            None if price_at_create is None else str(price_at_create),
         ),
     )
     conn.commit()
@@ -230,6 +255,11 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         model=row["model"],
         cost_usd=row["cost_usd"],
         created_at=row["created_at"],
+        # Tolerate a pre-migration row shape (a reader hitting an old DB before
+        # ensure_tables ran its ALTER).
+        price_at_create=(
+            row["price_at_create"] if "price_at_create" in row.keys() else None
+        ),
     )
 
 
@@ -238,16 +268,22 @@ def _get(conn: sqlite3.Connection, insight_id: int) -> InsightRecord | None:
     return _record_from_row(row) if row is not None else None
 
 
-def find_by_fingerprint(conn: sqlite3.Connection, fingerprint: str) -> InsightRecord | None:
-    """Return the most-recent card stored under *fingerprint*, or None (cache miss).
+def find_by_fingerprint(
+    conn: sqlite3.Connection, fingerprint: str, *, is_shadow: bool = False
+) -> InsightRecord | None:
+    """Return the most-recent card stored under *fingerprint* IN THE GIVEN LANE, or None.
 
     A hit means identical inputs were already generated (same trading day) → reuse it,
     no LLM call (spec 04.10). Append-only history may hold several rows with the same
-    fingerprint across days; the latest is returned.
+    fingerprint across days; the latest is returned. ``is_shadow`` scopes the lookup
+    (L4 fix): the shadow lane (Loop 4) and the active lane must never cache-hit each
+    other — a shadow card is a hidden calibration trial, not a substitute for the
+    user-facing card (and vice versa).
     """
     row = conn.execute(
-        "SELECT * FROM insights WHERE fingerprint = ? ORDER BY id DESC LIMIT 1",
-        (fingerprint,),
+        "SELECT * FROM insights WHERE fingerprint = ? AND is_shadow = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (fingerprint, 1 if is_shadow else 0),
     ).fetchone()
     return _record_from_row(row) if row is not None else None
 

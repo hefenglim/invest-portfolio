@@ -397,6 +397,49 @@ def test_official_pack_is_idempotent_and_reuses_strategies(
     assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
 
 
+def test_official_pack_rename_then_repack_no_duplicate(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # M3 fix (decision Q3a): the pack's idempotency keys on preset_key provenance, so a
+    # RENAMED official task is never re-created (no double cron, no double cost).
+    first = api_client.post("/api/insight-tasks/official-pack").json()
+    assert len(first["created"]) == 3
+    weekly = next(c for c in first["created"] if c["name"] == "持倉週報")
+    # user renames the official weekly task (PUT keeps preset_key untouched).
+    detail = api_client.get("/api/insight-types").json()
+    weekly_full = next(t for t in detail if t["id"] == weekly["id"])
+    r = api_client.put(f"/api/insight-types/{weekly['id']}", json={
+        "name": "我的週報", "scope": weekly_full["scope"],
+        "strategy_ids": [s["id"] for s in weekly_full["strategies"]],
+    })
+    assert r.status_code == 200
+
+    second = api_client.post("/api/insight-tasks/official-pack").json()
+
+    assert second["created"] == []  # nothing re-created despite the rename
+    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+    names = [t["name"] for t in api_client.get("/api/insight-types").json()]
+    assert names.count("持倉週報") == 0 and names.count("我的週報") == 1
+    # exactly one schedule binding for the renamed task (no double cron).
+    n = golden_db.execute(
+        "SELECT COUNT(*) AS n FROM schedule_config WHERE job_id LIKE 'insight:%'"
+    ).fetchone()["n"]
+    assert n == 3
+
+
+def test_official_pack_name_fallback_for_precolumn_installs(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # An install created BEFORE the preset_key column has official tasks with NULL
+    # provenance — the pack must still skip them by exact name (no duplicate).
+    api_client.post("/api/insight-tasks/official-pack")
+    golden_db.execute("UPDATE insight_types SET preset_key = NULL")
+    golden_db.commit()
+    second = api_client.post("/api/insight-tasks/official-pack").json()
+    assert second["created"] == []
+    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+
+
 # --- per_market tasks over the API (2026-07-05 spec) ----------------------------
 
 

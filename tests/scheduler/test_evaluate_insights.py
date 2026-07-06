@@ -177,6 +177,102 @@ def test_evaluate_defer_cap_becomes_undetermined(
     assert ev.miss is False  # undetermined is NEVER a miss
 
 
+# --- M4 fix (decision Q1c): the stored seen-price is the scoring baseline -------
+
+
+def test_evaluate_uses_stored_price_at_create(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model saw Friday's close (100, stored on the card); Monday's close (110)
+    # is the first close AFTER create. A +5% target with a due close of 104 must
+    # MISS against the seen price but would (wrongly) be judged against 110 → the
+    # stored baseline must win.
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("master must not be called (unset)")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    created = NOW - timedelta(days=10)
+    due = NOW - timedelta(days=1)
+    pred = Prediction(metric="price_change", direction="up", target_pct=Decimal("0.05"),
+                      horizon_days=5)
+    card = InsightCard(title="T", summary="s", body_md="b", tags=[], symbol="SNAP",
+                       confidence=70, prediction=pred)
+    rec = istore.add_card(
+        conn, insight_type_id=10, card=card, fingerprint="fp-snap",
+        calibration_version=1, horizon_days=5, input_snapshot="snap",
+        model="default", cost_usd=Decimal("0"), now=created,
+        price_at_create=Decimal("100"),  # the close the model actually saw
+    )
+    conn.execute("UPDATE insights SET due_at = ? WHERE id = ?",
+                 (due.isoformat(), rec.id))
+    conn.commit()
+    # first stored close AFTER create is 110 (the OLD, wrong baseline).
+    _prices(conn, "SNAP", [((created + timedelta(days=1)).date(), "110"),
+                           (due.date(), "104")])
+
+    insight_service.evaluate_due(conn, now=NOW)
+
+    ev = es.latest_for_insight(conn, rec.id)
+    assert ev is not None and ev.status == "scored"
+    # 100 → 104 = +4% < +5% target → quant miss. (Against 110 it would also miss,
+    # but assert the measured actual proves the seen-price baseline was used.)
+    assert ev.quant_hit is False
+    assert ev.actual_value == "0.04"  # (104-100)/100, Decimal string
+
+
+def test_evaluate_legacy_card_without_seen_price_falls_back(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Legacy cards (price_at_create NULL) keep scoring on the old on-or-after basis.
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("master must not be called (unset)")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    created = NOW - timedelta(days=10)
+    pred = Prediction(metric="price_change", direction="up", horizon_days=5)
+    insight_id = _add_due_card(conn, symbol="LEGACY", prediction=pred,
+                               created=created, due=NOW - timedelta(days=1))
+    _prices(conn, "LEGACY",
+            [(created.date(), "100"), ((NOW - timedelta(days=1)).date(), "108")])
+    insight_service.evaluate_due(conn, now=NOW)
+    ev = es.latest_for_insight(conn, insight_id)
+    assert ev is not None and ev.status == "scored"
+    assert ev.quant_hit is True  # up prediction, +8% on the legacy baseline
+
+
+# --- L2 fix: archived tasks' due cards are not scored ---------------------------
+
+
+def test_evaluate_skips_archived_tasks_cards(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("no scoring may happen for an archived task")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    it = cs.create_insight_type(conn, name="Old", scope="per_symbol", now=NOW)
+    created = NOW - timedelta(days=10)
+    pred = Prediction(metric="price_change", direction="up", horizon_days=5)
+    card = InsightCard(title="T", summary="s", body_md="b", tags=[], symbol="ARCH",
+                       confidence=70, prediction=pred)
+    rec = istore.add_card(
+        conn, insight_type_id=it.id, card=card, fingerprint="fp-arch",
+        calibration_version=None, horizon_days=5, input_snapshot="snap",
+        model="default", cost_usd=Decimal("0"), now=created,
+    )
+    conn.execute("UPDATE insights SET due_at = ? WHERE id = ?",
+                 ((NOW - timedelta(days=1)).isoformat(), rec.id))
+    conn.commit()
+    _prices(conn, "ARCH", [(created.date(), "100"),
+                           ((NOW - timedelta(days=1)).date(), "105")])
+    cs.delete_insight_type(conn, it.id, now=NOW)  # archive
+
+    processed = insight_service.evaluate_due(conn, now=NOW)
+
+    assert processed == 0
+    assert es.latest_for_insight(conn, rec.id) is None  # no evaluation row at all
+
+
 # --- master unavailable → quant-only scored (graceful degrade) -----------------
 
 

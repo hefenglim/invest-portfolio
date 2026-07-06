@@ -46,7 +46,13 @@ router = APIRouter()
 
 _TAIPEI = ZoneInfo("Asia/Taipei")  # default clock for the news window when now is absent
 
+# The recent window rendered into price_history_json / price_points (token-bounded).
 _HISTORY_DAYS = 180
+# Longer close series fed to the technical signals so 52-week position / MA120 are honest
+# (52w ≈ 252 sessions ≈ 365 calendar days). SINGLE definition (L3 fix, 2026-07-07):
+# the run path (api/insight_service) imports THIS constant, so preview and execution
+# always see the same technical-signal window.
+_TECHNICAL_HISTORY_DAYS = 400
 
 # FinMind chips variable token -> (source id, FinMind logical dataset) (spec 20.15).
 # The required tier is read live from ``finmind_datasets.DATASET_TIER[dataset]`` and the
@@ -443,12 +449,17 @@ def _build_context(
         ctx.market = payload.market  # market-sliced preview (2026-07-05 spec)
     if payload.scope == "per_symbol" and payload.symbol:
         as_of = now.date()
-        start = as_of - timedelta(days=_HISTORY_DAYS)
-        history = get_price_history(conn, payload.symbol, start, as_of)
+        # L3 fix: same split as the run path (insight_service._per_symbol_ctx) —
+        # ctx.closes gets the LONG series (honest 52w/MA120 technical signals);
+        # price_points keeps only the recent window (token-bounded).
+        long_hist = get_price_history(
+            conn, payload.symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+        )
         ctx.symbol = payload.symbol
-        ctx.closes = [p.value for p in history]
+        ctx.closes = [p.value for p in long_hist]
+        recent = [p for p in long_hist if p.as_of >= as_of - timedelta(days=_HISTORY_DAYS)]
         ctx.price_points = [
-            {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in history
+            {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in recent
         ]
     return ctx
 
