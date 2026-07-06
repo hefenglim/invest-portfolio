@@ -119,6 +119,11 @@ llm_insight 常數,不碰 api/web;排程用 register_news_runner)· ⑤優雅降
 | 成本評估 | 表頭即時顯示「符合 N 則 · 整理成本累計 $X」(隨過濾條件更新)—— 直接評估任一股/區間的整理花費 |
 | 資料面 | news 資料表加 `cost_usd/tokens_in/tokens_out` 欄(ALTER-if-missing 遷移舊庫);整理成本由 organizer 逐則寫入;`GET /api/news`(過濾+分頁+總計)、`GET /api/news/filters`(下拉選項) |
 
+**真站瀏覽器驗證(7/7 PASS)**:清空 demo 新聞庫重跑 news_daily(43 則帶真實成本)→ 頁面
+渲染 45 列、表頭「符合 45 則 · 整理成本累計 **$0.1597**」、過濾下拉(10 檔股/18 來源)、
+點列彈窗顯示完整摘要+token/成本、股票過濾(0056 → 45 縮到 5)、零 console 錯誤。閘門:
+mypy 161 檔零錯、ruff 全過、full suite exit 0、e2e news smoke 綠。
+
 ## 七、交付狀態與下一步
 
 - 分支累計多個 commit(批次①任務包/收斂 + ②per_market + ③技術訊號/F&G + ④新聞管線),
