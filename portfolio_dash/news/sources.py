@@ -35,9 +35,15 @@ class NewsLink(BaseModel):
 
 
 def _tw_ticker(symbol: str) -> str:
-    """yfinance TW ticker: 4-digit TWSE → .TW (TPEx .TWO is not distinguished here; the
-    real client may try both). Kept simple; a miss just yields no yfinance links."""
+    """yfinance TW ticker, TWSE-first: ``.TW``. TPEx symbols fall back to ``.TWO`` in
+    :func:`discover_links` when ``.TW`` yields zero items (L6 fix — cheap: the second
+    call happens only on an empty first result)."""
     return f"{symbol}.TW"
+
+
+def _tw_ticker_tpex(symbol: str) -> str:
+    """The TPEx (上櫃) yfinance ticker fallback."""
+    return f"{symbol}.TWO"
 
 
 def from_finmind(rows: list[dict[str, Any]]) -> list[NewsLink]:
@@ -159,7 +165,14 @@ def discover_links(
         if finmind_client is not None and finmind_start is not None:
             _safe(lambda: from_finmind(finmind_client(symbol, finmind_start)))
         if yf_client is not None:
-            _safe(lambda: from_yfinance(yf_client(_tw_ticker(symbol)), lang="en"))
+            def _yf_tw() -> list[NewsLink]:
+                # L6 fix: a TPEx (上櫃) symbol yields nothing under .TW — retry .TWO
+                # only on an empty result (no extra call for TWSE symbols).
+                links = from_yfinance(yf_client(_tw_ticker(symbol)), lang="en")
+                if not links:
+                    links = from_yfinance(yf_client(_tw_ticker_tpex(symbol)), lang="en")
+                return links
+            _safe(_yf_tw)
         if yahoo_fetcher is not None:
             def _yahoo() -> list[NewsLink]:
                 html = yahoo_fetcher(

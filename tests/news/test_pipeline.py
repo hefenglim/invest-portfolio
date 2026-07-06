@@ -148,6 +148,25 @@ def test_headline_only_row_is_retried_on_later_run() -> None:
     assert ns.is_fully_organized(conn, "http://x") is True
 
 
+def test_headline_upgrade_under_other_symbol_keeps_first_mention() -> None:
+    # M2 fix (2026-07-07): night 1 stores the link headline-only under A; night 2 B's
+    # feed retries the same link and the fetch succeeds → the upgrade must PRESERVE A's
+    # legitimate discovered_for mention (the old DELETE-then-rewrite wiped it).
+    conn = _conn()
+    P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://x")],
+        fetch=lambda u: None, organize=_org, now=NOW)  # headline-only under 2330
+    assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].link == "http://x"
+    res = P.run_news_pipeline(conn, [("2317", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://x")],
+        fetch=lambda u: "body", organize=_org, now=NOW)  # upgraded under 2317
+    assert res["organized"] == 1
+    assert ns.is_fully_organized(conn, "http://x") is True
+    # BOTH holdings still surface the article.
+    assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].link == "http://x"
+    assert ns.query_by_symbol(conn, "2317", since_date="2026-07-01")[0].link == "http://x"
+
+
 def test_pipeline_indexes_only_held_symbols() -> None:
     # SR fix: the organizer says an article relates to 9999 (not held); it must NOT be
     # retrievable under 9999, but IS under the held discovering symbol.

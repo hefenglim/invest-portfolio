@@ -159,6 +159,12 @@ def upsert_news(
     an untrusted/hallucinated/injected ticker must not surface the article under an
     unrelated holding's card. ``index_symbols=None`` indexes all related_stocks (back-compat
     for tests/callers that don't constrain). Returns the news row id.
+
+    Mentions MERGE on re-upsert (M2 fix, 2026-07-07): a link first stored headline-only
+    under symbol A and later upgraded under symbol B keeps A's legitimate discovered_for
+    mention — the PK (news_id, symbol) + ``INSERT OR IGNORE`` gives the natural union
+    (the old DELETE-then-rewrite wiped A's mention). The ``index_symbols`` allowlist
+    still constrains only the NEW mentions being added in this call.
     """
     cur = conn.execute(
         "INSERT INTO organized_news "
@@ -185,7 +191,6 @@ def upsert_news(
     mentions = related if index_symbols is None else (related & index_symbols)
     if discovered_for:
         mentions.add(discovered_for)  # the discovering symbol is always trusted
-    conn.execute("DELETE FROM news_mentions WHERE news_id = ?", (news_id,))
     conn.executemany(
         "INSERT OR IGNORE INTO news_mentions (news_id, symbol) VALUES (?, ?)",
         [(news_id, s) for s in sorted(mentions)],

@@ -97,6 +97,38 @@ def test_is_fully_organized_vs_headline_only() -> None:
     assert ns.is_fully_organized(conn, "http://h") is True
 
 
+def test_upsert_merges_mentions_across_symbols() -> None:
+    # M2 fix (2026-07-07): a link first stored headline-only under A, later upgraded
+    # under B, must keep BOTH mentions (the old DELETE-then-rewrite wiped A's).
+    conn = _conn()
+    ns.upsert_news(conn, ns.OrganizedNews(
+        link="http://l", title="t", news_date="2026-07-05", body_summary="",
+        related_stocks=[], source="s", lang="zh",
+        fetched_at="x", organized_at="x"), discovered_for="2330",
+        index_symbols={"2330", "2317"})
+    assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].link == "http://l"
+    # second night: B's feed retries the same link and the fetch/LLM succeeds.
+    ns.upsert_news(conn, _item("http://l", "2026-07-05", ["2317"]),
+                   discovered_for="2317", index_symbols={"2330", "2317"})
+    assert ns.is_fully_organized(conn, "http://l") is True
+    # BOTH symbols still surface the article.
+    assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].link == "http://l"
+    assert ns.query_by_symbol(conn, "2317", since_date="2026-07-01")[0].link == "http://l"
+
+
+def test_upsert_merge_still_respects_index_allowlist() -> None:
+    # The merge unions with EXISTING mentions, but new mentions still pass the
+    # held-universe allowlist (a hallucinated ticker never enters the index).
+    conn = _conn()
+    ns.upsert_news(conn, _item("http://m", "2026-07-05", ["2330"]),
+                   discovered_for="2330", index_symbols={"2330"})
+    ns.upsert_news(conn, _item("http://m", "2026-07-05", ["9999"]),
+                   discovered_for="2317", index_symbols={"2330", "2317"})
+    assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].link == "http://m"
+    assert ns.query_by_symbol(conn, "2317", since_date="2026-07-01")[0].link == "http://m"
+    assert ns.query_by_symbol(conn, "9999", since_date="2026-07-01") == []
+
+
 def test_query_news_filters_and_cost_totals() -> None:
     from decimal import Decimal
     conn = _conn()

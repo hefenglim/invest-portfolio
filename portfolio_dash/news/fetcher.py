@@ -33,6 +33,29 @@ _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"[ \t\r\f\v]+")
 _BLANKLINES = re.compile(r"\n\s*\n+")
 
+# Non-prose guard (FM10 backend fix, 2026-07-07): thresholds for _looks_like_prose.
+# Real article prose (zh or en) is dominated by letters/ideographs and nearly free of
+# code punctuation; CSS/JS soup that survives the block-strip (e.g. a <style> block cut
+# mid-way by the byte cap) fails one of the two.
+_MIN_PROSE_RATIO = 0.5     # (letters + CJK) / non-whitespace chars
+_MAX_CODE_DENSITY = 0.05   # {};:=<># density among non-whitespace chars
+_CODE_CHARS = set("{};:=<>#")
+
+
+def _looks_like_prose(text: str) -> bool:
+    """True when *text* reads like article prose, not CSS/JS/nav soup.
+
+    ``str.isalpha`` covers both latin letters and CJK ideographs, so the ratio check
+    works for zh and en articles alike.
+    """
+    chars = [ch for ch in text if not ch.isspace()]
+    if not chars:
+        return False
+    n = len(chars)
+    wordish = sum(1 for ch in chars if ch.isalpha())
+    code = sum(1 for ch in chars if ch in _CODE_CHARS)
+    return wordish / n >= _MIN_PROSE_RATIO and code / n <= _MAX_CODE_DENSITY
+
 
 def _default_opener(url: str) -> bytes:
     # SR fix (2026-07-06): only fetch http(s). urllib honours file://, ftp://, etc.;
@@ -83,8 +106,11 @@ def fetch_article_text(
     """Fetch *url* and return up to ``max_chars`` of readable text, or ``None`` on failure.
 
     Never raises — a fetch/parse failure (timeout, paywall, bot-block, non-HTML, empty)
-    yields ``None`` so the pipeline degrades to the headline. ``opener`` is injectable
-    for tests (defaults to a UA-bearing urllib fetch).
+    yields ``None`` so the pipeline degrades to the headline. A page whose extracted
+    text is clearly NON-PROSE (CSS/JS soup that survived the block-strip) also yields
+    ``None`` (FM10 fix) — degrading to headline-only, which stays retriable, instead of
+    paying the LLM to summarize a stylesheet. ``opener`` is injectable for tests
+    (defaults to a UA-bearing urllib fetch).
     """
     fetch = opener or _default_opener
     try:
@@ -100,4 +126,7 @@ def fetch_article_text(
     text = html_to_text(html)
     if len(text) < 40:  # nothing usable extracted (paywall shell / JS-only page)
         return None
-    return text[:max_chars]
+    clipped = text[:max_chars]
+    if not _looks_like_prose(clipped):  # scraper garbage — never ship it to the LLM
+        return None
+    return clipped

@@ -26,6 +26,8 @@ from portfolio_dash.shared.config import get_settings
 logger = logging.getLogger(__name__)
 
 _BACKUP_GLOB = "portfolio_*.db.gz"
+# The news DB backup rides along (L1 fix, decision Q4a 2026-07-07) under its own prefix.
+_NEWS_BACKUP_GLOB = "news_*.db.gz"
 
 
 def _resolve_db_path(db_path: Path | None) -> Path:
@@ -60,13 +62,13 @@ def _online_backup_to_gz(src_db: Path, dest_gz: Path) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-def _rotate(backup_dir: Path, *, keep: int) -> None:
-    """Keep the newest ``keep`` ``portfolio_*.db.gz`` files in ``backup_dir``.
+def _rotate(backup_dir: Path, *, keep: int, glob: str = _BACKUP_GLOB) -> None:
+    """Keep the newest ``keep`` files matching ``glob`` in ``backup_dir``.
 
     Files are ordered by name (which is date-prefixed, so lexical == chronological),
     newest last; everything before the trailing ``keep`` is deleted.
     """
-    files = sorted(backup_dir.glob(_BACKUP_GLOB))
+    files = sorted(backup_dir.glob(glob))
     if keep < 0:
         keep = 0
     for stale in files[: max(0, len(files) - keep)]:
@@ -86,7 +88,13 @@ def backup_database(
     defaults to ``db_path.parent / "backups"`` (created if missing). The backup is named
     ``portfolio_{now:%Y-%m-%d}.db.gz`` and OVERWRITES a same-day re-run. After writing,
     only the newest ``keep`` (default 30) ``portfolio_*.db.gz`` files are retained.
-    Returns the ``.gz`` path.
+
+    The news DB rides along (L1 fix, decision Q4a): when ``news.db`` exists next to the
+    ledger DB it is backed up too, as ``news_{date}.db.gz`` with the same rotation;
+    absent → silently skipped. The path is derived locally as ``db_path.parent /
+    "news.db"`` — the same convention as ``news.store.news_db_path()`` — because ops/
+    stays news-agnostic (it imports only stdlib + ``shared``; see the module docstring).
+    Returns the ledger backup's ``.gz`` path.
     """
     src_db = _resolve_db_path(db_path)
     target_dir = backup_dir if backup_dir is not None else src_db.parent / "backups"
@@ -94,6 +102,12 @@ def backup_database(
     dest_gz = target_dir / f"portfolio_{now:%Y-%m-%d}.db.gz"
     _online_backup_to_gz(src_db, dest_gz)
     _rotate(target_dir, keep=keep)
+    news_db = src_db.parent / "news.db"  # mirrors news.store.news_db_path() (no import)
+    if news_db.exists():
+        news_gz = target_dir / f"news_{now:%Y-%m-%d}.db.gz"
+        _online_backup_to_gz(news_db, news_gz)
+        _rotate(target_dir, keep=keep, glob=_NEWS_BACKUP_GLOB)
+        logger.info("news sqlite backup written: %s (keep=%d)", news_gz, keep)
     logger.info("sqlite backup written: %s (keep=%d)", dest_gz, keep)
     return dest_gz
 

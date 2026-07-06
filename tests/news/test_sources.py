@@ -73,6 +73,35 @@ def test_discover_swallows_a_failing_source() -> None:
     assert [n.link for n in out] == ["http://ok"]  # yfinance still delivered
 
 
+def test_discover_tw_falls_back_to_two_when_tw_empty() -> None:
+    # L6 fix: a TPEx (上櫃) symbol yields nothing under .TW — retry .TWO on empty only.
+    seen: list[str] = []
+
+    def yf(tkr: str) -> list:
+        seen.append(tkr)
+        if tkr.endswith(".TWO"):
+            return [{"content": {"title": "TPEx news",
+                                 "clickThroughUrl": {"url": "http://tpex"}}}]
+        return []
+
+    out = S.discover_links("8069", "TW", yf_client=yf)
+    assert seen == ["8069.TW", "8069.TWO"]
+    assert [n.link for n in out] == ["http://tpex"]
+
+
+def test_discover_tw_no_second_call_when_tw_yields() -> None:
+    # The fallback is cheap: a TWSE symbol answering under .TW never triggers .TWO.
+    seen: list[str] = []
+
+    def yf(tkr: str) -> list:
+        seen.append(tkr)
+        return [{"content": {"title": "T", "clickThroughUrl": {"url": "http://tw"}}}]
+
+    out = S.discover_links("2330", "TW", yf_client=yf)
+    assert seen == ["2330.TW"]
+    assert [n.link for n in out] == ["http://tw"]
+
+
 def test_parse_yf_date_iso_and_epoch_and_garbage() -> None:
     assert S._parse_yf_date("2026-07-04T10:00:00Z") == "2026-07-04"
     assert S._parse_yf_date(1751600000) == "2025-07-04"  # UNIX epoch -> real date
