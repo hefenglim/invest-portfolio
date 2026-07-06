@@ -31,6 +31,12 @@
       <textarea class="input" id="sys-prompt" spellcheck="false"></textarea>
       <span class="hint">定義角色、語言與全域規則；所有 AI 呼叫（輸入解析、洞察批次）皆先套用此提示詞。</span>
     </div>
+    <!-- FM8 (2026-07-07): the save bar belongs to THIS panel (it writes the system
+         prompt) — it used to float at page bottom, interleaved with 自我進化設定. -->
+    <div class="save-bar" data-screen-label="儲存列" style="border-top: 1px solid var(--border-soft);">
+      <span class="note">「儲存設定」寫入系統提示詞；策略卡各自的「儲存」即時寫入資料庫</span>
+      <button class="btn btn-primary" id="prompts-save" type="button">儲存設定</button>
+    </div>
   </section>
 
   <section class="panel" data-screen-label="策略提示詞">
@@ -45,11 +51,6 @@
       <div class="tpl-list" id="tpl-list"></div>
     </div>
   </section>
-
-  <div class="save-bar" data-screen-label="儲存列">
-    <span class="note">系統提示詞由「儲存設定」寫入；策略卡各自的「儲存」即時寫入資料庫</span>
-    <button class="btn btn-primary" id="prompts-save" type="button">儲存設定</button>
-  </div>
 
 </div>
 </div>
@@ -81,16 +82,10 @@
   page.insertBefore(banner, page.firstElementChild);
 
   /* The mock 組合器/校正庫 blocks were REMOVED (2026-07-05 usability decision ② — task
-     management has ONE entry point: the pipeline hub). 自我進化設定 is real (wired to
-     /api/evolution-config) and now renders as a normal panel; move it above the save
-     bar once settings-prompts.js has mounted it (the 'pd-prompts-mounted' event). */
-  document.addEventListener('pd-prompts-mounted', function () {
-    var saveBar = page.querySelector('.save-bar');
-    Array.prototype.slice.call(document.querySelectorAll('.panel')).forEach(function (p) {
-      var h = p.querySelector('.panel-title');
-      if (h && h.textContent === '自我進化設定' && saveBar) page.insertBefore(p, saveBar);
-    });
-  });
+     management has ONE entry point: the pipeline hub). FM8 (2026-07-07): the old
+     'pd-prompts-mounted' repositioning is gone — the system-prompt save bar now lives
+     INSIDE its panel, and 自我進化設定 (with its own 儲存進化設定) mounts contiguously
+     at the page end. */
 })();
 </script>
 </body>

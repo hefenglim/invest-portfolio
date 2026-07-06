@@ -258,7 +258,7 @@
         <div class="field"><label for="nu-pass">密碼</label><input class="input" id="nu-pass" type="password" autocomplete="new-password" placeholder="登入用密碼"></input></div>
         <button class="btn btn-primary" id="nu-add" type="button">新增用戶</button>
       </div>
-      <div class="user-note">設計稿：帳號密碼存於本機瀏覽器（localStorage）。後端接線後改為伺服器端帶雜湊儲存，並支援角色權限。</div>
+      <div class="user-note">後端 session 認證：密碼以加鹽 scrypt 雜湊儲存於伺服器資料庫，瀏覽器僅保存登入 session cookie。</div>
     </section>
     <section class="panel">
       <div class="panel-head"><h2 class="panel-title">帳戶</h2><span class="panel-sub">v1 唯讀</span></div>

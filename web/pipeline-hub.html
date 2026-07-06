@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"></meta>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
-<title>portfolio-dash — 洞察管線中心（重構提案）</title>
+<title>portfolio-dash — 洞察管線中心</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"></link>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
@@ -19,26 +19,10 @@
 <header id="topbar" class="topbar"></header>
 <div class="page">
 
-  <div class="pp-banner" data-screen-label="提案橫幅">
-    <b>重構提案 v1 — 洞察管線中心</b>
-    <span>以「洞察任務」為唯一主角：觸發 → 輸入 → 組裝 → 執行 → 產出，一張卡看完一條管線。既有 9 個模組功能不變，只改組織方式。</span>
-    <span class="spacer"></span>
-    <button class="btn-link" id="pp-naming-toggle" type="button">命名對照 ▾</button>
+  <div class="pp-banner" data-screen-label="管線橫幅">
+    <b>洞察管線中心</b>
+    <span>以洞察任務為主角：觸發 → 輸入 → 組裝 → 執行 → 產出，一張卡看完一條管線。</span>
   </div>
-
-  <details class="pp-naming panel" id="pp-naming" style="padding: 10px 14px; margin-bottom: 12px;">
-    <summary style="cursor:pointer; font-size:12px; color:var(--text-2);">新舊命名對照（提案一套，可全部退回原名）</summary>
-    <table>
-      <tbody>
-        <tr><td>洞察類型（組合器）</td><td>→ <b>洞察任務</b> — 唯一可排程、可校正的「執行單位」</td></tr>
-        <tr><td>策略提示詞</td><td>→ <b>分析模板</b> — 純設計物件，放在資產庫，本身不會跑</td></tr>
-        <tr><td>系統提示詞</td><td>→ <b>全域守則</b> — 所有任務共用的第一層</td></tr>
-        <tr><td>自我校正提示詞庫</td><td>→ <b>校正版本鏈</b> — 1:1 掛在任務上，不再是獨立頁</td></tr>
-        <tr><td>排程頁＋排程工作表＋執行歷史</td><td>→ <b>運行中心</b> — 任務抽屜內看單一任務、原頁看全部</td></tr>
-        <tr><td>預警規則（觸發 AI 解讀）</td><td>→ <b>觸發來源</b>之一 — 在任務的「① 觸發」節點設定</td></tr>
-      </tbody>
-    </table>
-  </details>
 
   <div class="pp-health" id="pp-health" data-screen-label="全局健康列"></div>
 
@@ -56,8 +40,8 @@
   </section>
 
   <div class="pp-assets" data-screen-label="資產庫">
-    <a class="pp-asset" href="settings-prompts.html"><b>分析模板庫</b><span class="cnt">4 個模板・1 停用</span><span>原「策略提示詞」頁 — 設計物件，與執行解耦</span></a>
-    <a class="pp-asset" href="settings-prompts.html"><b>數據變數庫</b><span class="cnt">9 類 32 個</span><span>變數總表＋預覽/測試送出</span></a>
+    <a class="pp-asset" href="settings-prompts.html"><b>分析模板庫</b><span class="cnt" id="pp-cnt-templates">…</span><span>分析模板 — 設計物件，與執行解耦</span></a>
+    <a class="pp-asset" href="settings-prompts.html"><b>數據變數庫</b><span class="cnt" id="pp-cnt-vars">…</span><span>變數總表＋預覽/測試送出</span></a>
     <a class="pp-asset" href="news.html"><b>新聞資料庫</b><span class="cnt">每晚整理入庫</span><span>個股新聞瀏覽＋過濾＋逐則 token/成本評估</span></a>
     <a class="pp-asset" href="settings-scheduler.html"><b>運行中心</b><span class="cnt">全部 jobs</span><span>跨任務的排程工作表與完整歷史</span></a>
     <a class="pp-asset" href="settings.html"><b>進化設定</b><span class="cnt">5 項安全邊界</span><span>影子批次數/最低樣本/自動晉升…</span></a>
@@ -90,10 +74,23 @@
       window.toast((err && err.message) || '套組建立失敗', 'fail', err && err.code);
     }).finally(function () { btn.disabled = false; });
   });
-  document.getElementById('pp-naming-toggle').addEventListener('click', function () {
-    var d = document.getElementById('pp-naming');
-    d.open = !d.open;
-  });
+  /* FM4: the asset-card counts come from the APIs at load (hardcoded numbers rot);
+     any failure degrades to neutral fallback text (never an error). */
+  (function fillAssetCounts() {
+    var tplEl = document.getElementById('pp-cnt-templates');
+    var varEl = document.getElementById('pp-cnt-vars');
+    window.pdApi.get('/api/strategy-prompts').then(function (rows) {
+      rows = Array.isArray(rows) ? rows : [];
+      var off = rows.filter(function (r) { return !r.enabled; }).length;
+      tplEl.textContent = rows.length + ' 個模板' + (off ? '・' + off + ' 停用' : '');
+    }).catch(function () { tplEl.textContent = '模板庫'; });
+    window.pdApi.get('/api/prompt-vars').then(function (rows) {
+      rows = Array.isArray(rows) ? rows : [];
+      var cats = {};
+      rows.forEach(function (r) { if (r.category) cats[r.category] = 1; });
+      varEl.textContent = Object.keys(cats).length + ' 類 ' + rows.length + ' 個';
+    }).catch(function () { varEl.textContent = '變數總表'; });
+  })();
 </script>
 </body>
 </html>

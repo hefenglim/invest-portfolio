@@ -537,14 +537,12 @@
     }, true);
   });
 
-  /* mount point */
+  /* mount point — FM8 (2026-07-07): the save bar now lives INSIDE the system-prompt
+     panel, so dynamic panels simply append at the page end (vars table, then the
+     self-contained 自我進化設定 with its own 儲存進化設定 button). */
   const promptsView = document.getElementById('view-prompts') || document.querySelector('.page');
-  const saveBar = promptsView ? promptsView.querySelector('.save-bar') : null;
   if (!promptsView) return;
-  const mount = (node) => {
-    if (saveBar) promptsView.insertBefore(node, saveBar);
-    else promptsView.appendChild(node);
-  };
+  const mount = (node) => { promptsView.appendChild(node); };
 
   /* ================= 數據變數總表 ================= */
   (function () {
