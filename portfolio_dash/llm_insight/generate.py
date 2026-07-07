@@ -409,6 +409,7 @@ def run_insight_type(
             input_snapshot=snapshot, model=used_model, cost_usd=spent,
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
             price_at_create=seen_price,
+            tokens_in=completion.tokens_in, tokens_out=completion.tokens_out,
         )
         created += 1
 

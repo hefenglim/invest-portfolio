@@ -264,9 +264,11 @@
     return box;
   }
 
-  function tokenCost(cost) {
-    /* cost_usd Decimal STRING -> "AI Token $X.XXX" via f.num (no bare .toFixed). */
-    return 'AI Token $' + (cost == null ? '0.000' : f.num(cost, 3));
+  function attribNode(card) {
+    /* Unified AI attribution (2026-07-07): model · token N · $cost — via fmt.aiAttrib
+       (cost_usd is a Decimal STRING; the frontend never computes money). */
+    return el('span', 'insight-cost ai-attrib num',
+      f.aiAttrib(card.model, card.tokens_in, card.tokens_out, card.cost_usd));
   }
 
   function confChip(card) {
@@ -295,7 +297,7 @@
     var foot = el('div', 'insight-foot');
     foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
     foot.appendChild(confChip(card));
-    foot.appendChild(el('span', 'insight-cost num', tokenCost(card.cost_usd)));
+    foot.appendChild(attribNode(card));
     c.appendChild(foot);
     return c;
   }
@@ -337,7 +339,7 @@
     var foot = el('div', 'insight-foot');
     foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
     foot.appendChild(confChip(card));
-    foot.appendChild(el('span', 'insight-cost num', tokenCost(card.cost_usd)));
+    foot.appendChild(attribNode(card));
     c.appendChild(foot);
     if (opts.dimmed) c.classList.add('dimmed');
     return c;

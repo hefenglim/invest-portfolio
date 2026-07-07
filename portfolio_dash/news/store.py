@@ -85,12 +85,13 @@ CREATE INDEX IF NOT EXISTS ix_news_mentions_symbol ON news_mentions(symbol);
 CREATE INDEX IF NOT EXISTS ix_organized_news_date ON organized_news(news_date);
 """
 
-# Columns added after the first schema (batch ④ cost tracking); added to a pre-existing
-# organized_news via ALTER-if-missing so an already-populated news.db upgrades in place.
+# Columns added after the first schema (batch ④ cost tracking + AI attribution); added to
+# a pre-existing organized_news via ALTER-if-missing so a populated news.db upgrades in place.
 _ADDED_COLUMNS = (
     ("cost_usd", "TEXT NOT NULL DEFAULT '0'"),
     ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
     ("tokens_out", "INTEGER NOT NULL DEFAULT 0"),
+    ("model", "TEXT"),
 )
 
 
@@ -121,6 +122,7 @@ class OrganizedNews(BaseModel):
     cost_usd: Decimal = Decimal("0")  # LLM cost to organize this item (0 for degrades)
     tokens_in: int = 0
     tokens_out: int = 0
+    model: str | None = None  # model alias that organized this item (AI attribution)
     fetched_at: str
     organized_at: str
 
@@ -169,17 +171,17 @@ def upsert_news(
     cur = conn.execute(
         "INSERT INTO organized_news "
         "(link, title, news_date, body_summary, related_stocks, source, lang, "
-        " cost_usd, tokens_in, tokens_out, fetched_at, organized_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+        " cost_usd, tokens_in, tokens_out, model, fetched_at, organized_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(link) DO UPDATE SET title=excluded.title, news_date=excluded.news_date, "
         "body_summary=excluded.body_summary, related_stocks=excluded.related_stocks, "
         "source=excluded.source, lang=excluded.lang, cost_usd=excluded.cost_usd, "
         "tokens_in=excluded.tokens_in, tokens_out=excluded.tokens_out, "
-        "organized_at=excluded.organized_at",
+        "model=excluded.model, organized_at=excluded.organized_at",
         (
             item.link, item.title, item.news_date, item.body_summary,
             json.dumps(item.related_stocks, ensure_ascii=False), item.source, item.lang,
-            str(item.cost_usd), item.tokens_in, item.tokens_out,
+            str(item.cost_usd), item.tokens_in, item.tokens_out, item.model,
             item.fetched_at, item.organized_at,
         ),
     )
@@ -247,6 +249,7 @@ def _from_row(r: sqlite3.Row) -> OrganizedNews:
         cost_usd=Decimal(r["cost_usd"]) if "cost_usd" in keys and r["cost_usd"] else Decimal("0"),
         tokens_in=r["tokens_in"] if "tokens_in" in keys and r["tokens_in"] else 0,
         tokens_out=r["tokens_out"] if "tokens_out" in keys and r["tokens_out"] else 0,
+        model=r["model"] if "model" in keys else None,
         fetched_at=r["fetched_at"], organized_at=r["organized_at"],
     )
 

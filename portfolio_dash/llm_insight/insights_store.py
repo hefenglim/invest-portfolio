@@ -48,6 +48,10 @@ class InsightRecord(BaseModel):
     # Loop-2 scores from THIS baseline instead of the first close AFTER create (a number
     # the model never reasoned about). Decimal STRING; None for legacy/portfolio cards.
     price_at_create: str | None = None
+    # Per-card token usage (AI attribution, 2026-07-07): one LLM call = one card, so the
+    # call's usage maps 1:1. Zero for legacy cards (the UI omits the token segment then).
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 _DDL = """
@@ -95,6 +99,9 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
     # M4 fix (decision Q1c, 2026-07-07): additive migration — the seen-at-create price.
     _add_column_if_missing(conn, "insights", "price_at_create", "TEXT")
+    # AI attribution (2026-07-07): per-card token usage for the unified model/token/cost line.
+    _add_column_if_missing(conn, "insights", "tokens_in", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "insights", "tokens_out", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -178,6 +185,8 @@ def add_card(
     is_shadow: bool = False,
     horizon_basis: HorizonBasis = "trading_days",
     price_at_create: Decimal | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
 ) -> InsightRecord:
     """Append one generated card; compute ``due_at``; return the stored record.
 
@@ -194,8 +203,8 @@ def add_card(
         "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
         "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
-        "price_at_create) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "price_at_create, tokens_in, tokens_out) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -215,6 +224,8 @@ def add_card(
             str(cost_usd),
             now.isoformat(),
             None if price_at_create is None else str(price_at_create),
+            tokens_in,
+            tokens_out,
         ),
     )
     conn.commit()
@@ -260,6 +271,8 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         price_at_create=(
             row["price_at_create"] if "price_at_create" in row.keys() else None
         ),
+        tokens_in=(row["tokens_in"] or 0) if "tokens_in" in row.keys() else 0,
+        tokens_out=(row["tokens_out"] or 0) if "tokens_out" in row.keys() else 0,
     )
 
 

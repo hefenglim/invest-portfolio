@@ -885,8 +885,11 @@
       foot.appendChild(el('span', 'insight-time', f.datetime(ins.created_at)));
       /* cost_usd is a Decimal STRING — format via fmt (NOT .toFixed). "0" is a valid
          truthy-safe value, so nil-check with != null (catches null + undefined only). */
-      if (ins.cost_usd != null) {
-        foot.appendChild(el('span', 'insight-cost num', 'AI Token $' + f.num(ins.cost_usd, 3)));
+      /* Unified AI attribution (2026-07-07): model · token N · $cost — via fmt.aiAttrib;
+         segments degrade when absent (legacy cards lack token counts). */
+      const attrib = f.aiAttrib(ins.model, ins.tokens_in, ins.tokens_out, ins.cost_usd);
+      if (attrib) {
+        foot.appendChild(el('span', 'insight-cost ai-attrib num', attrib));
       }
       card.appendChild(foot);
       grid.appendChild(card);

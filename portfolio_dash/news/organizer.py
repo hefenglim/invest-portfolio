@@ -72,6 +72,7 @@ def organize(
         cost_usd=completion.cost,
         tokens_in=completion.tokens_in,
         tokens_out=completion.tokens_out,
+        model=completion.model,
         fetched_at=stamp,
         organized_at=stamp,
     )

@@ -41,8 +41,8 @@
       const a = el('a', null, '前往原文 ↗'); a.href = item.link; a.target = '_blank';
       a.rel = 'noopener noreferrer'; foot.appendChild(a);
     }
-    foot.appendChild(el('span', null,
-      'token ' + (item.tokens_in + item.tokens_out) + ' · $' + f.num(item.cost_usd, 4)));
+    var attrib = f.aiAttrib(item.model, item.tokens_in, item.tokens_out, item.cost_usd);
+    if (attrib) foot.appendChild(el('span', 'ai-attrib', attrib));
     m.appendChild(foot);
     $('#nw-back').classList.add('open');
   }

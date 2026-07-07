@@ -866,6 +866,8 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
         "due_at": rec.due_at,
         "model": rec.model,
         "cost_usd": rec.cost_usd,
+        "tokens_in": rec.tokens_in,
+        "tokens_out": rec.tokens_out,
         "created_at": rec.created_at,
     }
 

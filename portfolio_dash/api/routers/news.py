@@ -30,6 +30,7 @@ def _item_wire(n: news_store.OrganizedNews) -> dict[str, Any]:
         "cost_usd": decimal_str(n.cost_usd),
         "tokens_in": n.tokens_in,
         "tokens_out": n.tokens_out,
+        "model": n.model,
         "headline_only": not n.body_summary.strip(),
     }
 

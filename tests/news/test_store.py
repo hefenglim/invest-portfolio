@@ -157,3 +157,13 @@ def test_query_news_filters_and_cost_totals() -> None:
     assert ns.distinct_sources(conn) == ["CMoney", "Reuters"]
     # cost round-trips on the stored row
     assert tw[0].cost_usd == Decimal("0.003") and tw[0].tokens_in == 500
+
+
+def test_model_column_round_trips() -> None:
+    # AI attribution (2026-07-07): the organizing model's alias persists per item.
+    conn = _conn()
+    item = _item("http://m", "2026-07-05", ["2330"])
+    item = item.model_copy(update={"model": "haiku-4.5"})
+    ns.upsert_news(conn, item, discovered_for="2330")
+    row = ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0]
+    assert row.model == "haiku-4.5"

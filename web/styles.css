@@ -1334,6 +1334,15 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   padding: 6px;
   display: flex; flex-direction: column; gap: 3px;
 }
+/* Mobile: a 380px panel anchored right of the bell overflows the LEFT viewport edge
+   (measured x=-74 @390px — severity chips + title starts invisible). Pin it to the
+   viewport instead so the whole alert list is on screen. */
+@media (max-width: 640px) {
+  .bell-panel {
+    position: fixed; left: 8px; right: 8px; top: 56px;
+    width: auto; max-height: calc(100vh - 72px);
+  }
+}
 .bell-head {
   display: flex; align-items: baseline; gap: 8px;
   padding: 7px 10px 5px;
@@ -1676,3 +1685,7 @@ button[disabled], .btn[disabled] {
     mask-image: linear-gradient(to right, #000 calc(100% - 28px), rgba(0,0,0,0.25));
   }
 }
+
+/* Unified AI attribution line (model · token N · $cost) on every LLM-generated card. */
+.ai-attrib { font-size: 10px; color: var(--text-3); font-family: var(--font-num);
+  letter-spacing: 0.02em; white-space: nowrap; }

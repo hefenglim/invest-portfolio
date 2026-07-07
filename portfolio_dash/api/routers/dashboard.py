@@ -85,6 +85,10 @@ def dashboard(
             "symbol": c.card.symbol,
             "created_at": c.created_at,
             "cost_usd": c.cost_usd,
+            # AI attribution (2026-07-07): every LLM output carries model + tokens.
+            "model": c.model,
+            "tokens_in": c.tokens_in,
+            "tokens_out": c.tokens_out,
         }
         for c in cards
     ]
