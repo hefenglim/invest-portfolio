@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from portfolio_dash.api import action_log
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
@@ -74,6 +75,31 @@ from portfolio_dash.shared.logging_config import configure_logging
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that adds ``Cache-Control: no-cache`` to every response (2026-07-07).
+
+    Bare StaticFiles sends only ETag/Last-Modified — NO Cache-Control — so browsers fall
+    back to HEURISTIC freshness (~10% of the asset's age since Last-Modified) and can keep
+    serving a cached ``web/*.js`` for days without ever revalidating. After a deploy that
+    ships an HTML page together with a new helper it calls (e.g. insights.html →
+    ``fmt.aiAttrib``), a returning browser then mixes the fresh HTML with a STALE cached
+    script and the page dies client-side (live incident 2026-07-07: insights/news/index
+    lost every AI card to a swallowed ``f.aiAttrib is not a function``).
+
+    ``no-cache`` keeps caching but forces conditional revalidation on every use: an ETag
+    304 while unchanged, the new body immediately after every future deploy. This is the
+    class fix that fits the no-build-step rule (there is no bundler to fingerprint
+    filenames); the ``?v=<version>`` query on the HTML tags (see web/*.html + the
+    ``test_static_cache_discipline`` contract tests) additionally flushes clients that
+    cached assets BEFORE this header existed.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 @asynccontextmanager
@@ -194,5 +220,5 @@ def create_app() -> FastAPI:
     app.include_router(news.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
     if _WEB_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
+        app.mount("/", _NoCacheStaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app

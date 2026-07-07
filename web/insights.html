@@ -8,8 +8,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css"></link>
-<link rel="stylesheet" href="settings.css"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.10"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.10"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   .mode-pane { display: none; }
@@ -213,11 +213,11 @@
 </div>
 </div>
 
-<script src="api.js"></script>
-<script src="shell.js"></script>
-<script src="format.js"></script>
-<script src="export.js"></script>
-<script src="alerts.js"></script>
+<script src="api.js?v=0.1.10"></script>
+<script src="shell.js?v=0.1.10"></script>
+<script src="format.js?v=0.1.10"></script>
+<script src="export.js?v=0.1.10"></script>
+<script src="alerts.js?v=0.1.10"></script>
 <script>
 /* AI 洞察 — async-booted from the REAL API (decision B, spec 19/04).
    洞察卡 + 持倉健診 ← GET /api/insights (stored cards; cost_usd is a Decimal STRING).
@@ -550,13 +550,18 @@
       cards = Array.isArray(cards) ? cards : [];
       trackEarliestDue(cards);
       renderCards(cards);
-    }).catch(function () {
+    }).catch(function (err) {
+      /* console.warn (NOT error): the e2e smokes assert zero console.errors on healthy
+         pages, but a swallowed render exception must leave a trace — the 2026-07-07
+         stale-format.js incident blanked all cards with ZERO console signal. */
+      if (window.console && console.warn) console.warn('insights render failed:', err);
       renderCards([]);
       if (!opts.quiet && window.toast) window.toast('洞察卡載入失敗', 'fail', '已顯示空狀態');
     });
     pdApi.get('/api/ai-score').then(function (score) {
       renderScore(score || {});
-    }).catch(function () {
+    }).catch(function (err) {
+      if (window.console && console.warn) console.warn('ai-score render failed:', err);
       renderScore({});
       if (!opts.quiet && window.toast) window.toast('AI 戰績載入失敗', 'fail', '已顯示空狀態');
     });
