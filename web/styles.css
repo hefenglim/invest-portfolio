@@ -1324,7 +1324,11 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
 .bell-count.risk { background: var(--up); color: #fff; }
 
 .bell-panel {
-  position: absolute; right: 0; top: calc(100% + 8px);
+  /* Portaled to <body> by alerts.js (2026-07-07 iPhone fix): position:fixed inside the
+     topbar gets its containing block HIJACKED by the topbar's backdrop-filter on
+     Safari/iOS (per spec), so the panel must have NO filtered ancestor. alerts.js sets
+     top/left/right inline from the bell's rect on open; sizing/skin live here. */
+  position: fixed;
   width: 380px; max-height: 70vh; overflow-y: auto;
   z-index: 65;
   background: var(--panel);
@@ -1335,12 +1339,14 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   display: flex; flex-direction: column; gap: 3px;
 }
 /* Mobile: a 380px panel anchored right of the bell overflows the LEFT viewport edge
-   (measured x=-74 @390px — severity chips + title starts invisible). Pin it to the
-   viewport instead so the whole alert list is on screen. */
+   (measured x=-74 @390px — severity chips + title starts invisible). alerts.js pins it
+   left/right:8px there; dvh (where supported) tracks the iOS dynamic-toolbar viewport
+   so the list bottom stays reachable. */
 @media (max-width: 640px) {
   .bell-panel {
-    position: fixed; left: 8px; right: 8px; top: 56px;
-    width: auto; max-height: calc(100vh - 72px);
+    width: auto;
+    max-height: calc(100vh - 72px);
+    max-height: calc(100dvh - 72px);
   }
 }
 .bell-head {

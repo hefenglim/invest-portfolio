@@ -98,9 +98,29 @@
   bell.title = '風險預警（規則引擎，每次資料更新時重算）';
   bell.appendChild(el('span', 'bell-ico', '⚠'));
   bellWrap.appendChild(bell);
+  /* The panel is PORTALED to <body>, NOT nested in the topbar (2026-07-07 iPhone fix):
+     .topbar carries backdrop-filter, and per the CSS spec (enforced by Safari/iOS) a
+     backdrop-filter ancestor becomes the CONTAINING BLOCK for position:fixed
+     descendants — a fixed panel inside the topbar mispositions/clips on real iOS
+     Safari even though desktop Chromium renders it fine. With <body> as the parent no
+     ancestor filter/transform can hijack its coordinates. Geometry (top/left/right)
+     is set from the bell's rect on open + on resize; skin/sizing stay in styles.css. */
   const panel = el('div', 'bell-panel');
   panel.hidden = true;
-  bellWrap.appendChild(panel);
+  document.body.appendChild(panel);
+
+  function positionPanel() {
+    const r = bell.getBoundingClientRect();
+    panel.style.top = Math.round(r.bottom + 8) + 'px';
+    if (window.matchMedia('(max-width: 640px)').matches) {
+      /* mobile: pin to the viewport edges so the whole list is on screen */
+      panel.style.left = '8px';
+      panel.style.right = '8px';
+    } else {
+      panel.style.left = 'auto';
+      panel.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
+    }
+  }
 
   function renderCount() {
     const old = bell.querySelector('.bell-count');
@@ -147,10 +167,17 @@
 
   bell.addEventListener('click', (e) => {
     e.stopPropagation();
+    if (panel.hidden) positionPanel();
     panel.hidden = !panel.hidden;
   });
+  window.addEventListener('resize', () => {
+    if (!panel.hidden) positionPanel();
+  });
   document.addEventListener('click', (e) => {
-    if (!panel.hidden && !bellWrap.contains(e.target)) panel.hidden = true;
+    /* panel lives on <body> now — clicks inside it must not count as "outside" */
+    if (!panel.hidden && !bellWrap.contains(e.target) && !panel.contains(e.target)) {
+      panel.hidden = true;
+    }
   });
 
   /* 跨分頁同步：dashboard 重新整理時寫入 pd_alerts_cache；其他已開啟的非 dashboard

@@ -23,6 +23,25 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A no-build-step frontend still needs explicit cache control (2026-07-07):**
+  Starlette StaticFiles sends ETag/Last-Modified but NO `Cache-Control`, so browsers
+  apply HEURISTIC freshness (~10% of asset age) and serve cached `web/*.js` for days
+  without revalidating. Deploying HTML that calls a new helper (`fmt.aiAttrib`) paired
+  fresh insights.html with the owner's stale cached format.js → `f.aiAttrib is not a
+  function` → the graceful-degrade `.catch` wiped every AI card to empty states with
+  ZERO console signal, on insights + news + dashboard. A fresh-browser Playwright pass
+  cannot see this class — reproduce stale-cache bugs by route-intercepting the old
+  asset. Fixes: `Cache-Control: no-cache` on the static mount (ETag revalidation every
+  use) + `?v=<version>` stamps on all local asset tags (poison flush; rerun
+  `scripts/stamp_asset_version.py` on version bump; contract-tested). Also: degrade
+  paths must at least `console.warn` the swallowed error.
+- **Desktop Chromium at 390px is NOT iOS Safari (2026-07-07):** `position: fixed`
+  inside `.topbar` is hijacked on Safari/iOS because a `backdrop-filter` ancestor
+  becomes the containing block for fixed descendants (per spec; Chromium is lenient,
+  and a sticky-topbar-at-origin geometry can make the bug invisible even in Playwright
+  WebKit). Overlays that must be viewport-fixed are PORTALED to `<body>` (no filtered/
+  transformed ancestor), positioned by JS from the anchor's rect; use `dvh` alongside
+  `vh` for iOS dynamic-toolbar height. Real-device confirmation stays with the owner.
 - **A mocked seam hides a missing REQUEST contract — put the contract in-band
   (2026-07-05):** the LLM structured-output path was 100% broken on the live test
   site (every Loop-1 run: 4 provider calls, $0.036 spent, zero cards) while 1,000+
