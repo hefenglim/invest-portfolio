@@ -595,6 +595,71 @@
 
   boot();
 
+  /* ---- Request 明細 (2026-07-07): per-request LiteLLM ledger ---- */
+  const reqState = { agent: '', offset: 0, limit: 50 };
+
+  function reqQuery() {
+    const parts = ['limit=' + reqState.limit, 'offset=' + reqState.offset];
+    if (reqState.agent) parts.push('agent=' + encodeURIComponent(reqState.agent));
+    return '/api/llm/requests?' + parts.join('&');
+  }
+
+  function reqRow(r) {
+    const tr = document.createElement('tr');
+    function td(cls, text) {
+      const c = document.createElement('td');
+      if (cls) c.className = cls;
+      c.textContent = text;
+      tr.appendChild(c);
+    }
+    td('col-text num', r.ts);
+    td('col-text', r.model);
+    td('col-text', r.agent);
+    td('num', f.num(r.tokens_in, 0));
+    td('num', f.num(r.tokens_out, 0));
+    td('num', r.cache_tokens ? f.num(r.cache_tokens, 0) : '—');
+    td('num', '$' + f.num(r.cost_usd, 4));
+    return tr;
+  }
+
+  function loadRequests(append) {
+    window.pdApi.get(reqQuery()).then(function (resp) {
+      const body = document.getElementById('req-body');
+      if (!append) body.replaceChildren();
+      (resp.rows || []).forEach(function (r) { body.appendChild(reqRow(r)); });
+      const t = resp.totals || { count: 0, total_cost_usd: '0' };
+      document.getElementById('req-totals').textContent =
+        '共 ' + f.num(t.count, 0) + ' 次 · 累計 $' + f.num(t.total_cost_usd, 4);
+      // fill the agent filter once (stable option list from the API)
+      const sel = document.getElementById('req-agent');
+      if (sel.options.length <= 1 && resp.agents) {
+        resp.agents.forEach(function (a) {
+          const o = document.createElement('option');
+          o.value = a; o.textContent = a;
+          sel.appendChild(o);
+        });
+      }
+      const shown = body.children.length;
+      const more = document.getElementById('req-more');
+      more.hidden = shown >= t.count;
+      document.getElementById('req-note').textContent =
+        shown ? ('顯示 ' + f.num(shown, 0) + ' / ' + f.num(t.count, 0) + ' 筆（新→舊）') : '尚無請求記錄';
+    }).catch(function () {
+      document.getElementById('req-note').textContent = 'Request 明細載入失敗';
+    });
+  }
+
+  document.getElementById('req-agent').addEventListener('change', function (e) {
+    reqState.agent = e.target.value;
+    reqState.offset = 0;
+    loadRequests(false);
+  });
+  document.getElementById('req-more').addEventListener('click', function () {
+    reqState.offset += reqState.limit;
+    loadRequests(true);
+  });
+  loadRequests(false);
+
   window.addEventListener('pd-settings-tab', function (e) {
     if (e.detail === 'llm') maybeRenderLlmChart();
   });

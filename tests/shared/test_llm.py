@@ -404,3 +404,49 @@ def test_complete_structured_default_role_unchanged(
     out = complete_structured("hi", Out, agent="t", conn=conn)
     assert out.x == 2
     assert seen == ["openai/a"]
+
+
+# --- Request ledger (2026-07-07): cache-token capture ---------------------------
+
+
+def test_cached_tokens_of_shapes() -> None:
+    from portfolio_dash.shared.llm import cached_tokens_of
+
+    class _Details:
+        cached_tokens = 384
+
+    class _UsageOpenAI:
+        prompt_tokens_details = _Details()
+
+    class _UsageAnthropic:
+        prompt_tokens_details = None
+        cache_read_input_tokens = 512
+
+    class _UsageBare:
+        pass
+
+    assert cached_tokens_of(_UsageOpenAI()) == 384
+    assert cached_tokens_of(_UsageAnthropic()) == 512
+    assert cached_tokens_of(_UsageBare()) == 0
+    assert cached_tokens_of(None) == 0
+
+
+def test_log_usage_stores_cache_tokens() -> None:
+    import sqlite3
+    from decimal import Decimal as D
+
+    from portfolio_dash.shared.llm import log_usage
+    from portfolio_dash.shared.llm_config import create_llm_tables
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    create_llm_tables(conn)
+    log_usage(conn, model="m", agent="a", input_tokens=100, output_tokens=20,
+              cost=D("0.001"), cache_tokens=64)
+    row = conn.execute("SELECT * FROM llm_usage").fetchone()
+    assert row["cache_tokens"] == 64 and row["input_tokens"] == 100
+    # legacy default path
+    log_usage(conn, model="m", agent="a", input_tokens=1, output_tokens=1, cost=D("0"))
+    row2 = conn.execute("SELECT cache_tokens FROM llm_usage ORDER BY id DESC").fetchone()
+    assert row2["cache_tokens"] == 0
+    conn.close()

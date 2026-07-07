@@ -8,10 +8,12 @@ Decimal strings. Errors use the common ``error_body`` envelope.
 
 import sqlite3
 import time
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -136,6 +138,75 @@ def get_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         "roles": _roles_wire(conn),
         "quota": _quota_wire(conn),
         "usage": _usage_wire(conn),
+    }
+
+
+# --- LLM request ledger (2026-07-07): per-request detail below 用量與趨勢 -------
+
+_REQ_MAX_LIMIT = 200
+
+
+def _req_ts_display(raw: str) -> str:
+    """Normalize a stored ts (UTC legacy rows or Asia/Taipei rows) to Taipei display."""
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw[:19]
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(ZoneInfo("Asia/Taipei"))
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+@router.get("/llm/requests")
+def list_llm_requests(
+    agent: str | None = None,
+    model: str | None = None,
+    limit: int = Query(50, ge=1, le=_REQ_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Per-request LiteLLM ledger, newest first: date/time, model, agent, in/out/cache
+    tokens, cost. ``totals`` covers the WHOLE filtered set (count + Decimal-string cost)
+    so the page can show an honest aggregate above the pager. Filters: agent, model.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if agent:
+        clauses.append("agent = ?")
+        params.append(agent)
+    if model:
+        clauses.append("model = ?")
+        params.append(model)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    cost_rows = conn.execute(
+        f"SELECT cost FROM llm_usage{where}", tuple(params)
+    ).fetchall()
+    total_cost = sum((Decimal(r["cost"] or "0") for r in cost_rows), Decimal("0"))
+    rows = conn.execute(
+        f"SELECT * FROM llm_usage{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    keys_probe = rows[0].keys() if rows else []
+    items = [
+        {
+            "ts": _req_ts_display(r["ts"]),
+            "model": r["model"],
+            "agent": r["agent"],
+            "tokens_in": r["input_tokens"],
+            "tokens_out": r["output_tokens"],
+            "cache_tokens": (r["cache_tokens"] or 0) if "cache_tokens" in keys_probe else 0,
+            "cost_usd": decimal_str(Decimal(r["cost"] or "0")),
+        }
+        for r in rows
+    ]
+    agents = [r["agent"] for r in conn.execute(
+        "SELECT DISTINCT agent FROM llm_usage ORDER BY agent")]
+    return {
+        "rows": items,
+        "totals": {"count": len(cost_rows), "total_cost_usd": decimal_str(total_cost)},
+        "agents": agents,
+        "limit": limit,
+        "offset": offset,
     }
 
 

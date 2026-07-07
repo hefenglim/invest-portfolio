@@ -326,3 +326,34 @@ def test_put_quota_threshold(client: TestClient) -> None:
 def _conn_of(client: TestClient) -> sqlite3.Connection:
     """Recover the overridden connection so a test can seed extra rows."""
     return client.app.dependency_overrides[get_conn]()  # type: ignore[attr-defined,no-any-return]
+
+
+# --- GET /api/llm/requests (2026-07-07 request ledger) ---------------------------
+
+
+def test_llm_requests_ledger_lists_and_filters(api_client: TestClient) -> None:
+    from decimal import Decimal as D
+
+    from portfolio_dash.api.deps import get_conn as _dep
+    from portfolio_dash.shared.llm import log_usage
+
+    conn = api_client.app.dependency_overrides[_dep]()  # type: ignore[attr-defined]
+    log_usage(conn, model="gemini-2.5-flash-lite", agent="insight_generate",
+              input_tokens=6257, output_tokens=1357, cost=D("0.0011685"),
+              cache_tokens=1024)
+    log_usage(conn, model="haiku-4.5", agent="news_organize",
+              input_tokens=500, output_tokens=60, cost=D("0.0006"))
+    r = api_client.get("/api/llm/requests").json()
+    assert r["totals"]["count"] >= 2
+    newest = r["rows"][0]
+    assert set(newest) == {"ts", "model", "agent", "tokens_in", "tokens_out",
+                           "cache_tokens", "cost_usd"}
+    assert newest["model"] == "haiku-4.5" and newest["cache_tokens"] == 0
+    second = r["rows"][1]
+    assert second["cache_tokens"] == 1024 and second["cost_usd"] == "0.0011685"
+    # ts is Taipei-normalized "YYYY-MM-DD HH:MM:SS"
+    assert len(newest["ts"]) == 19 and newest["ts"][10] == " "
+    # agent filter narrows + totals follow the filter
+    news = api_client.get("/api/llm/requests?agent=news_organize").json()
+    assert news["totals"]["count"] == 1 and news["rows"][0]["agent"] == "news_organize"
+    assert "insight_generate" in news["agents"]  # option list stays global

@@ -192,7 +192,34 @@
     </div>
   </section>
 
-  
+  <!-- E LLM Request 明細 (2026-07-07): per-request LiteLLM ledger -->
+  <section class="panel" data-screen-label="Request 明細">
+    <div class="panel-head">
+      <h2 class="panel-title">Request 明細</h2>
+      <span class="panel-sub">每一次 LiteLLM 底層請求的完整記錄</span>
+      <span class="spacer"></span>
+      <select class="select" id="req-agent" style="min-height:30px; font-size:11.5px;">
+        <option value="">全部用途</option>
+      </select>
+      <span class="panel-sub num" id="req-totals"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th class="col-text">日期時間</th><th class="col-text">模型</th>
+            <th class="col-text">用途</th><th>輸入</th><th>輸出</th>
+            <th>快取</th><th>金額</th>
+          </tr>
+        </thead>
+        <tbody id="req-body"></tbody>
+      </table>
+    </div>
+    <div class="set-body" style="padding-top:6px;">
+      <button class="btn" id="req-more" type="button" hidden="hidden">載入更多</button>
+      <span class="panel-sub" id="req-note"></span>
+    </div>
+  </section>
 
 </div>
 </div>
