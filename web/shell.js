@@ -672,6 +672,33 @@
   }
   pdInitVersion();
 
+  /* ---- UI preferences (WPC 2026-07-07): backend-persisted display prefs ----
+     window.pdPrefs is readable synchronously by every pager consumer at boot:
+     localStorage cache (pd_prefs) gives the pre-fetch value; GET /api/ui-prefs
+     converges it (and refreshes the cache). Counts only — never money. */
+  window.pdPrefs = { page_size: 50 };
+  try {
+    const cachedPrefs = JSON.parse(localStorage.getItem('pd_prefs') || 'null');
+    if (cachedPrefs && typeof cachedPrefs.page_size === 'number') {
+      window.pdPrefs.page_size = cachedPrefs.page_size;
+    }
+  } catch (e) { /* cache is best-effort */ }
+  function pdInitPrefs() {
+    if (page === 'login') return;
+    pdEnsureApi()
+      .then((ok) => (ok ? window.pdApi.get('/api/ui-prefs') : null))
+      .then((p) => {
+        if (p && typeof p.page_size === 'number') {
+          window.pdPrefs.page_size = p.page_size;
+          try {
+            localStorage.setItem('pd_prefs', JSON.stringify({ page_size: p.page_size }));
+          } catch (e) { /* noop */ }
+        }
+      })
+      .catch(() => { /* silent: prefs default to 50 */ });
+  }
+  pdInitPrefs();
+
   /* 待確認匯入 sidebar badge (R6 item 4): pending-count on the 交易帳本 nav item
      so detections are visible from ANY page. Non-critical: silent on failure. */
   function pdInitInboxBadge() {

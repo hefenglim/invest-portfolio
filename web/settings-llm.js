@@ -599,7 +599,12 @@
      WPB: 載入更多 replaced by the shared windowed pager (pager.js); an incoming
      ?req_since/?req_until (the 執行歷史 cross-link's run window) pre-filters the
      ledger at boot and shows a dismissible window pill. */
-  const reqState = { agent: '', offset: 0, limit: 50, since: '', until: '' };
+  /* page size: the user's global 每頁筆數 clamped to this endpoint's max (200) */
+  const reqState = {
+    agent: '', offset: 0,
+    limit: Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 200),
+    since: '', until: '',
+  };
   let reqPager = null;
 
   (function initReqWindowFromUrl() {

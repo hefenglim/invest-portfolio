@@ -48,6 +48,7 @@ from portfolio_dash.api.routers import (
     strategy,
     symbol,
     system_log,
+    ui_prefs,
     users,
 )
 from portfolio_dash.api.snapshots import snapshot_job
@@ -217,6 +218,7 @@ def create_app() -> FastAPI:
     app.include_router(scheduler.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")
     app.include_router(db_stats.router, prefix="/api")
+    app.include_router(ui_prefs.router, prefix="/api")
     app.include_router(snapshots_router.router, prefix="/api")
     app.include_router(prompts.router, prefix="/api")
     app.include_router(news.router, prefix="/api")

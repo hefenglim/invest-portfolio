@@ -308,11 +308,20 @@
       <details class="fee-detail"><summary><span class="caret">▶</span>Moomoo 馬股 <span class="panel-sub num">moomoo_my</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">Clearing fee</span><span class="v">0.03%</span></div><div class="fee-row"><span class="k">Stamp duty</span><span class="v placeholder">依設定檔</span></div></div></details>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">一般</h2><span class="panel-sub">唯讀</span></div>
+      <div class="panel-head"><h2 class="panel-title">一般</h2><span class="panel-sub">系統資訊與介面偏好</span></div>
       <div class="gen-rows">
         <div class="gen-row"><span class="k">系統版本</span><span class="v num" id="gen-version">—</span></div>
         <div class="gen-row"><span class="k">報告幣別</span><span class="v num">TWD</span></div>
         <div class="gen-row"><span class="k">顯示時區</span><span class="v num">Asia/Taipei</span></div>
+        <!-- 每頁筆數 (WPC): backend-persisted global page size for every pager -->
+        <div class="gen-row"><span class="k">每頁筆數</span><span class="v">
+          <select class="select" id="pref-page-size" style="width:90px;min-height:28px;">
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+          </select>
+        </span></div>
       </div>
     </section>
     <!-- 資料庫統計 (2026-07-07 owner decision): read-only observation panel — canonical
@@ -410,6 +419,7 @@
 <script src="settings-alerts.js?v=0.1.10"></script>
 <script src="settings-users.js?v=0.1.10"></script>
 <script src="settings-dbstats.js?v=0.1.10"></script>
+<script src="settings-prefs.js?v=0.1.10"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs） */
 (function () {
