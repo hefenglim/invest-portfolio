@@ -117,8 +117,12 @@
       panel.style.left = '8px';
       panel.style.right = '8px';
     } else {
+      /* clientWidth (NOT innerWidth): fixed-position `right` resolves against the
+         viewport EXCLUDING the scrollbar, same space as getBoundingClientRect —
+         innerWidth includes the scrollbar and misaligns the panel by its width. */
+      const vw = document.documentElement.clientWidth;
       panel.style.left = 'auto';
-      panel.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
+      panel.style.right = Math.max(8, Math.round(vw - r.right)) + 'px';
     }
   }
 
