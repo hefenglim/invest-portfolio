@@ -9,6 +9,7 @@ generate or bill. The LLM seam would raise if reached (no model configured).
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -54,7 +55,7 @@ def _last_run(conn: sqlite3.Connection, it_id: int) -> sqlite3.Row:
         (f"insight:{it_id}",),
     ).fetchone()
     assert row is not None
-    return row
+    return cast(sqlite3.Row, row)
 
 
 def test_run_for_id_disabled_task_skips_and_records(conn: sqlite3.Connection) -> None:

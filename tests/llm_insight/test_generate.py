@@ -429,7 +429,7 @@ def test_budget_exception_mid_run_keeps_budget_reason(
     def raise_budget(*a: object, **kw: object) -> object:
         raise LLMBudgetExceeded("token budget exhausted")
 
-    monkeypatch.setattr(generate.llm, "complete_structured_meta", raise_budget)
+    monkeypatch.setattr(llm_mod, "complete_structured_meta", raise_budget)
     it_id = _portfolio_combo(conn)
     result = generate.run_insight_type(
         conn, it_id, var_contexts={None: _ctx(conn)},
@@ -587,7 +587,7 @@ def test_per_market_run_one_card_per_held_market(
     cards = istore.list_cards(conn, insight_type_id=it_id)
     assert len(cards) == len(markets)
     # the market code rides the symbol column (spec: API/前端以此篩選).
-    assert sorted(c.symbol for c in cards) == markets
+    assert sorted(c.symbol or "" for c in cards) == markets
 
 
 def test_per_market_prompt_never_leaks_other_market(

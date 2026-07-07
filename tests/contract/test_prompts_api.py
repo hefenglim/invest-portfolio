@@ -329,7 +329,8 @@ def test_preview_context_uses_technical_window_for_closes(
         golden_db, PromptBody(body="x", scope="per_symbol", symbol="2330"),
         GOLDEN_NOW, C.TWD,
     )
-    assert Decimal("450") in ctx.closes            # long window feeds the signals
+    assert ctx.closes is not None
+    assert Decimal("450") in ctx.closes    # long window feeds the signals
     dates = {p["date"] for p in ctx.price_points}
     assert old.isoformat() not in dates            # …but not the rendered history
     assert recent.isoformat() in dates

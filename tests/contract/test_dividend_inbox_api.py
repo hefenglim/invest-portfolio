@@ -122,7 +122,7 @@ def test_us_drip_without_stored_price_not_confirmable(
     rows = _rows(api_client)
     hit = next((x for x in rows if x["symbol"] == "AAPL"), None)
     assert hit is not None and hit["kind"] == "drip"
-    assert hit["confirmable"] is False and "缺再投資價" in (hit["note"] or "")
+    assert hit["confirmable"] is False and "缺再投資價" in str(hit["note"] or "")
     r = api_client.post("/api/dividend-inbox/confirm",
                         json={"fingerprints": [hit["fingerprint"]]})
     assert r.status_code == 200 and r.json()["written"] == 0  # cannot force through

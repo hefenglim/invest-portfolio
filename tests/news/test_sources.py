@@ -64,7 +64,7 @@ def test_discover_us_uses_yfinance_only() -> None:
 
 
 def test_discover_swallows_a_failing_source() -> None:
-    def boom(sid: str, start: str) -> list:
+    def boom(sid: str, start: str) -> list[dict[str, object]]:
         raise RuntimeError("finmind down")
 
     yf = lambda tkr: [{"content": {"title": "T", "clickThroughUrl": {"url": "http://ok"}}}]  # noqa: E731
@@ -77,7 +77,7 @@ def test_discover_tw_falls_back_to_two_when_tw_empty() -> None:
     # L6 fix: a TPEx (上櫃) symbol yields nothing under .TW — retry .TWO on empty only.
     seen: list[str] = []
 
-    def yf(tkr: str) -> list:
+    def yf(tkr: str) -> list[dict[str, object]]:
         seen.append(tkr)
         if tkr.endswith(".TWO"):
             return [{"content": {"title": "TPEx news",
@@ -93,7 +93,7 @@ def test_discover_tw_no_second_call_when_tw_yields() -> None:
     # The fallback is cheap: a TWSE symbol answering under .TW never triggers .TWO.
     seen: list[str] = []
 
-    def yf(tkr: str) -> list:
+    def yf(tkr: str) -> list[dict[str, object]]:
         seen.append(tkr)
         return [{"content": {"title": "T", "clickThroughUrl": {"url": "http://tw"}}}]
 
