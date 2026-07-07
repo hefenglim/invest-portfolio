@@ -509,7 +509,11 @@ def _row_wire(r: sqlite3.Row) -> dict[str, Any]:
 
 
 def ai_score(
-    conn: sqlite3.Connection, *, exclude_type_ids: set[int] | None = None
+    conn: sqlite3.Connection,
+    *,
+    exclude_type_ids: set[int] | None = None,
+    rows_limit: int | None = None,
+    rows_offset: int = 0,
 ) -> dict[str, Any]:
     """The battle-record table (spec 4.7): ``{totals, by_combo[], calibration_bins[], rows[]}``.
 
@@ -519,6 +523,11 @@ def ai_score(
     tasks' history from the displayed record (spec 4.1 archive: rows stay in the table);
     ``calibration_bins`` stays global — it is a calibration diagnostic, not a scoreboard.
     Empty DB → zeroed/[] (the contract shape the frontend consumes).
+
+    WPE (2026-07-07): ``rows`` pages via ``rows_limit``/``rows_offset`` (applied AFTER
+    the archived-task exclusion so page boundaries are honest); the AGGREGATES always
+    cover the whole set. ``rows_total_count`` reports the filtered total.
+    ``rows_limit=None`` keeps the legacy everything-in-one shape for internal callers.
     """
     excluded = exclude_type_ids or set()
     combo_ids = [
@@ -550,16 +559,18 @@ def ai_score(
         "quant_hit_rate": _ratio_str(total_quant_hit, total_quant_n),
         "avg_narrative": _avg_str(total_narr_sum, total_narr_n),
     }
-    rows = [
+    all_rows = [
         _row_wire(r)
         for r in conn.execute(
             "SELECT * FROM insight_evaluations ORDER BY id DESC"
         )
         if int(r["insight_type_id"]) not in excluded
     ]
+    rows = all_rows if rows_limit is None else all_rows[rows_offset:rows_offset + rows_limit]
     return {
         "totals": totals,
         "by_combo": by_combo,
         "calibration_bins": calibration_bins(conn),
         "rows": rows,
+        "rows_total_count": len(all_rows),
     }

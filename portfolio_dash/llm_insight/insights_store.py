@@ -311,19 +311,31 @@ def _exclusion_clause(
     return f"insight_type_id NOT IN ({placeholders})", list(exclude_type_ids)
 
 
-def list_cards(
-    conn: sqlite3.Connection,
-    *,
-    insight_type_id: int | None = None,
-    symbol: str | None = None,
-    exclude_type_ids: set[int] | None = None,
-) -> list[InsightRecord]:
-    """List stored cards (newest first), optionally filtered by type and/or symbol.
+# Wire convention (2026-07-05 per_market spec): a per_market card stores the MARKET
+# CODE in its symbol column, so "portfolio-style" cards = symbol NULL or a market code
+# and "per-symbol" cards = any other non-null symbol. The scope filter below encodes
+# that convention ONCE so paginated reads stay honest (WPE, 2026-07-07).
+_MARKET_CODES = ("TW", "US", "MY")
 
-    ``exclude_type_ids`` hides archived tasks' history from read surfaces (the api
-    layer feeds ``composer_store.archived_type_ids``); the rows stay in the table
-    (spec 4.1 archive semantics — never physically removed).
-    """
+
+def _scope_clause(scope: str | None) -> str | None:
+    """SQL fragment for the ``scope`` filter ('portfolio' | 'symbol' | None)."""
+    codes = ", ".join(f"'{c}'" for c in _MARKET_CODES)
+    if scope == "portfolio":
+        return f"(symbol IS NULL OR symbol IN ({codes}))"
+    if scope == "symbol":
+        return f"(symbol IS NOT NULL AND symbol NOT IN ({codes}))"
+    return None
+
+
+def _filters(
+    *,
+    insight_type_id: int | None,
+    symbol: str | None,
+    exclude_type_ids: set[int] | None,
+    scope: str | None = None,
+) -> tuple[str, list[Any]]:
+    """Shared WHERE builder for the list/count reads (one filter definition)."""
     clauses: list[str] = []
     params: list[Any] = []
     if insight_type_id is not None:
@@ -332,15 +344,104 @@ def list_cards(
     if symbol is not None:
         clauses.append("symbol = ?")
         params.append(symbol)
+    scope_sql = _scope_clause(scope)
+    if scope_sql:
+        clauses.append(scope_sql)
     excl_sql, excl_params = _exclusion_clause(exclude_type_ids)
     if excl_sql:
         clauses.append(excl_sql)
         params.extend(excl_params)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def list_cards(
+    conn: sqlite3.Connection,
+    *,
+    insight_type_id: int | None = None,
+    symbol: str | None = None,
+    exclude_type_ids: set[int] | None = None,
+    scope: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[InsightRecord]:
+    """List stored cards (newest first), optionally filtered by type and/or symbol.
+
+    ``exclude_type_ids`` hides archived tasks' history from read surfaces (the api
+    layer feeds ``composer_store.archived_type_ids``); the rows stay in the table
+    (spec 4.1 archive semantics — never physically removed). ``scope``/``limit``/
+    ``offset`` (WPE): 'portfolio' keeps portfolio + per-market cards, 'symbol' keeps
+    per-symbol health cards; ``limit=None`` returns everything (legacy callers).
+    """
+    where, params = _filters(
+        insight_type_id=insight_type_id, symbol=symbol,
+        exclude_type_ids=exclude_type_ids, scope=scope,
+    )
+    page = ""
+    if limit is not None:
+        page = " LIMIT ? OFFSET ?"
+        params = [*params, limit, offset]
     rows = conn.execute(
-        f"SELECT * FROM insights{where} ORDER BY id DESC", tuple(params)
+        f"SELECT * FROM insights{where} ORDER BY id DESC{page}", tuple(params)
     ).fetchall()
     return [_record_from_row(r) for r in rows]
+
+
+def count_cards(
+    conn: sqlite3.Connection,
+    *,
+    insight_type_id: int | None = None,
+    symbol: str | None = None,
+    exclude_type_ids: set[int] | None = None,
+    scope: str | None = None,
+) -> int:
+    """COUNT over the same filter set as :func:`list_cards` (honest pager totals)."""
+    where, params = _filters(
+        insight_type_id=insight_type_id, symbol=symbol,
+        exclude_type_ids=exclude_type_ids, scope=scope,
+    )
+    row = conn.execute(
+        f"SELECT COUNT(*) AS n FROM insights{where}", tuple(params)
+    ).fetchone()
+    return int(row["n"])
+
+
+def list_symbol_groups(
+    conn: sqlite3.Connection,
+    *,
+    history_limit: int,
+    limit: int,
+    offset: int,
+    exclude_type_ids: set[int] | None = None,
+) -> tuple[list[tuple[str, int, list[InsightRecord]]], int]:
+    """持倉健診 grouping (WPE): per-symbol latest + capped history, paged over SYMBOLS.
+
+    Returns ``([(symbol, symbol_total, cards<=history_limit newest-first)], total_symbols)``.
+    Symbols are ordered by their LATEST card (id desc) so the most recently diagnosed
+    holding leads. Grouping lives server-side because pagination is over symbols —
+    a client slice of a flat card feed cannot know symbol boundaries honestly.
+    """
+    where, params = _filters(
+        insight_type_id=None, symbol=None,
+        exclude_type_ids=exclude_type_ids, scope="symbol",
+    )
+    total_row = conn.execute(
+        f"SELECT COUNT(DISTINCT symbol) AS n FROM insights{where}", tuple(params)
+    ).fetchone()
+    total_symbols = int(total_row["n"])
+    sym_rows = conn.execute(
+        f"SELECT symbol, MAX(id) AS latest_id, COUNT(*) AS total FROM insights{where} "
+        "GROUP BY symbol ORDER BY latest_id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    groups: list[tuple[str, int, list[InsightRecord]]] = []
+    for sr in sym_rows:
+        cards = list_cards(
+            conn, symbol=str(sr["symbol"]), exclude_type_ids=exclude_type_ids,
+            scope="symbol", limit=history_limit, offset=0,
+        )
+        groups.append((str(sr["symbol"]), int(sr["total"]), cards))
+    return groups, total_symbols
 
 
 def latest_cards(

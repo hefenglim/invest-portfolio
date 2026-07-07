@@ -26,6 +26,21 @@
   let accounts = [];  // from /api/input/context (id, name, ccy)
   let cmKind = 'deposit';
 
+  /* WPE (2026-07-07): movements ledger pages via the endpoint's limit/offset */
+  const cmState = {
+    offset: 0,
+    limit: Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500),
+    total: 0,
+  };
+  let cmPager = null;
+  if (window.pdPager) {
+    cmPager = window.pdPager.create({
+      host: document.getElementById('cm-pager'),
+      limit: cmState.limit, offset: 0, totalCount: 0,
+      onPage: (offset) => { cmState.offset = offset; boot(); },
+    });
+  }
+
   /* ---- A. balance cards ---- */
   function renderCards() {
     const wrap = $('#cash-cards');
@@ -284,10 +299,12 @@
   async function boot() {
     let resp;
     try {
-      resp = await api.get('/api/cash');
+      resp = await api.get('/api/cash', { limit: cmState.limit, offset: cmState.offset });
     } catch (err) {
       D = { balances: [], movements: [] };
+      cmState.total = 0;
       renderCards(); renderMovements();
+      if (cmPager) cmPager.update({});
       if (window.toast) window.toast('資金資料載入失敗', 'fail', (err && err.message) || undefined);
       return;
     }
@@ -298,8 +315,10 @@
       reporting_currency: (resp && resp.reporting_currency) || 'TWD',
       reporting_total_unavailable_reason: resp && resp.reporting_total_unavailable_reason,
     };
+    cmState.total = (resp && resp.movements && resp.movements.total_count) || 0;
     renderCards();
     renderMovements();
+    if (cmPager) cmPager.update({ offset: cmState.offset, totalCount: cmState.total });
   }
 
   (async function init() {

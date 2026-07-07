@@ -160,15 +160,17 @@
       </div>
     </div>
 
-    <!-- ===== Tab: 洞察卡 (booted from GET /api/insights) ===== -->
+    <!-- ===== Tab: 洞察卡 (booted from GET /api/insights?scope=portfolio, paged) ===== -->
     <div class="mode-pane active" id="ins-pane-cards" data-screen-label="洞察卡">
       <div class="insight-grid-page" id="ins-cards-grid"></div>
+      <div id="ins-cards-pager" hidden="hidden"></div>
       <div class="backtest-note">洞察卡由排程批次產生（也可手動觸發）。每張卡附 token 成本並記入 AI 額度。</div>
     </div>
 
-    <!-- ===== Tab: 持倉健診 (per-symbol cards from GET /api/insights) ===== -->
+    <!-- ===== Tab: 持倉健診 (GET /api/insights?group=symbol — per-symbol latest + capped history, paged over symbols) ===== -->
     <div class="mode-pane" id="ins-pane-health" data-screen-label="持倉健診">
       <div class="hc-grid" id="ins-health-grid"></div>
+      <div id="ins-health-pager" hidden="hidden"></div>
       <div class="backtest-note">健診卡輸入：後端已算好的部位/回本/權重數字 ＋ FinMind 的 PER/PBR、月營收、法人買賣超。LLM 僅做敘事合成，不重新計算任何數字。</div>
     </div>
 
@@ -204,6 +206,7 @@
           <tbody id="score-body"></tbody>
         </table>
       </div>
+      <div id="score-pager" hidden="hidden"></div>
       <div class="backtest-note">自我回測：每次洞察產生時，AI 的可驗證預測（方向、幅度、期限）被結構化存檔；到期由排程以實際價格對答案。命中率與校準誤差回饋給提示詞調校。</div>
     </div>
 
@@ -216,6 +219,7 @@
 <script src="api.js?v=0.1.10"></script>
 <script src="shell.js?v=0.1.10"></script>
 <script src="format.js?v=0.1.10"></script>
+<script src="pager.js?v=0.1.10"></script>
 <script src="export.js?v=0.1.10"></script>
 <script src="alerts.js?v=0.1.10"></script>
 <script>
@@ -345,21 +349,29 @@
     return c;
   }
 
-  /* FM7: one stack per symbol — the LATEST card (verdict accent) + a collapsed
-     「歷史 N 筆」 toggle with the older cards. Pure display grouping (zero computation). */
-  function healthStackNode(list) {
+  /* FM7 + WPE: one stack per symbol — the LATEST card (verdict accent) + a collapsed
+     「歷史 N 筆」 toggle with the older cards. The grouping now comes from the SERVER
+     (GET /api/insights?group=symbol — per-symbol latest + capped history, pagination
+     over SYMBOLS); rendering the stack stays pure display (zero computation). */
+  function healthStackNode(group) {
+    var list = group.cards || [];
     var wrap = el('div', 'hc-stack');
+    if (!list.length) return wrap;
     wrap.appendChild(healthCardNode(list[0]));
-    if (list.length > 1) {
-      var older = list.slice(1);
-      var btn = el('button', 'hc-hist-toggle', '歷史 ' + older.length + ' 筆 ▾');
+    var older = list.slice(1);
+    var histTotal = Math.max(older.length, (group.total || list.length) - 1);
+    if (older.length) {
+      var btn = el('button', 'hc-hist-toggle', '歷史 ' + histTotal + ' 筆 ▾');
       btn.type = 'button';
       var hist = el('div', 'hc-history');
       hist.hidden = true;
       older.forEach(function (c) { hist.appendChild(healthCardNode(c, { dimmed: true })); });
+      if (histTotal > older.length) {
+        hist.appendChild(el('div', 'insight-time', '僅顯示最近 ' + older.length + ' 筆歷史'));
+      }
       btn.addEventListener('click', function () {
         hist.hidden = !hist.hidden;
-        btn.textContent = '歷史 ' + older.length + ' 筆 ' + (hist.hidden ? '▾' : '▴');
+        btn.textContent = '歷史 ' + histTotal + ' 筆 ' + (hist.hidden ? '▾' : '▴');
       });
       wrap.appendChild(btn);
       wrap.appendChild(hist);
@@ -367,26 +379,20 @@
     return wrap;
   }
 
-  function renderCards(cards) {
+  function renderCards(rows) {
     var cardsGrid = document.getElementById('ins-cards-grid');
-    var healthGrid = document.getElementById('ins-health-grid');
     cardsGrid.replaceChildren();
+    if (!rows.length) cardsGrid.appendChild(emptyState('尚無洞察卡 — 由排程批次產生或手動觸發後顯示。'));
+    else rows.forEach(function (c) { cardsGrid.appendChild(cardNode(c)); });
+  }
+
+  function renderHealth(groups) {
+    var healthGrid = document.getElementById('ins-health-grid');
     healthGrid.replaceChildren();
-    var portfolio = cards.filter(function (c) { return !c.symbol || MARKET_LABEL[c.symbol]; });
-    var perSymbol = cards.filter(function (c) { return !!c.symbol && !MARKET_LABEL[c.symbol]; });
-    if (!portfolio.length) cardsGrid.appendChild(emptyState('尚無洞察卡 — 由排程批次產生或手動觸發後顯示。'));
-    else portfolio.forEach(function (c) { cardsGrid.appendChild(cardNode(c)); });
-    if (!perSymbol.length) {
+    if (!groups.length) {
       healthGrid.appendChild(emptyState('尚無持倉健診卡 — 由單一標的洞察任務產生後顯示。'));
     } else {
-      /* group per symbol, preserving newest-first order within and across groups */
-      var order = [];
-      var bySym = {};
-      perSymbol.forEach(function (c) {
-        if (!bySym[c.symbol]) { bySym[c.symbol] = []; order.push(c.symbol); }
-        bySym[c.symbol].push(c);
-      });
-      order.forEach(function (sym) { healthGrid.appendChild(healthStackNode(bySym[sym])); });
+      groups.forEach(function (g) { healthGrid.appendChild(healthStackNode(g)); });
     }
   }
 
@@ -399,10 +405,10 @@
     return c;
   }
 
-  /* earliest FUTURE due_at across loaded cards (display copy for the empty 戰績). */
+  /* earliest FUTURE due_at across loaded cards (display copy for the empty 戰績).
+     Accumulates across the two card fetches (cards + health); refresh() resets it. */
   var earliestDue = null;
   function trackEarliestDue(cards) {
-    earliestDue = null;
     var nowIso = new Date().toISOString();
     cards.forEach(function (c) {
       if (!c.due_at || c.due_at <= nowIso) return;
@@ -542,29 +548,108 @@
     slot.appendChild(window.pdExport.tableButton(document.getElementById('score-table'), 'ai_predictions.csv'));
   }
 
-  /* ---- async boot / refresh (graceful: degrade to empty states, never crash) ---- */
-  function refresh(opts) {
-    opts = opts || {};
-    if (!pdApi) { renderCards([]); return; }
-    pdApi.get('/api/insights').then(function (cards) {
-      cards = Array.isArray(cards) ? cards : [];
-      trackEarliestDue(cards);
-      renderCards(cards);
+  /* ---- async boot / refresh (graceful: degrade to empty states, never crash) ----
+     WPE: three paged loads — 洞察卡 (scope=portfolio), 持倉健診 (group=symbol),
+     AI 戰績 rows — each with its own pdPager over the server's limit/offset. */
+  var PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
+  var cardsState = { offset: 0 };
+  var healthState = { offset: 0 };
+  var scoreState = { offset: 0 };
+  var cardsPager = null;
+  var healthPager = null;
+  var scorePager = null;
+  if (window.pdPager) {
+    cardsPager = window.pdPager.create({
+      host: document.getElementById('ins-cards-pager'),
+      limit: PAGE, offset: 0, totalCount: 0,
+      onPage: function (offset) {
+        cardsState.offset = offset;
+        loadCards({});
+        /* card grid scrolls back to its top on page change */
+        var g = document.getElementById('ins-cards-grid');
+        if (g && g.scrollIntoView) g.scrollIntoView({ block: 'start' });
+      },
+    });
+    healthPager = window.pdPager.create({
+      host: document.getElementById('ins-health-pager'),
+      limit: PAGE, offset: 0, totalCount: 0,
+      onPage: function (offset) {
+        healthState.offset = offset;
+        loadHealth({});
+        var g = document.getElementById('ins-health-grid');
+        if (g && g.scrollIntoView) g.scrollIntoView({ block: 'start' });
+      },
+    });
+    scorePager = window.pdPager.create({
+      host: document.getElementById('score-pager'),
+      limit: PAGE, offset: 0, totalCount: 0,
+      onPage: function (offset) { scoreState.offset = offset; loadScore({}); },
+    });
+  }
+
+  function loadCards(opts) {
+    pdApi.get('/api/insights', {
+      scope: 'portfolio', limit: PAGE, offset: cardsState.offset,
+    }).then(function (resp) {
+      var rows = (resp && resp.rows) || [];
+      trackEarliestDue(rows);
+      renderCards(rows);
+      if (cardsPager) {
+        cardsPager.update({ offset: cardsState.offset,
+          totalCount: (resp && resp.total_count) || 0 });
+      }
     }).catch(function (err) {
       /* console.warn (NOT error): the e2e smokes assert zero console.errors on healthy
          pages, but a swallowed render exception must leave a trace — the 2026-07-07
          stale-format.js incident blanked all cards with ZERO console signal. */
       if (window.console && console.warn) console.warn('insights render failed:', err);
       renderCards([]);
+      if (cardsPager) cardsPager.update({});
       if (!opts.quiet && window.toast) window.toast('洞察卡載入失敗', 'fail', '已顯示空狀態');
     });
-    pdApi.get('/api/ai-score').then(function (score) {
+  }
+
+  function loadHealth(opts) {
+    pdApi.get('/api/insights', {
+      group: 'symbol', history_limit: 5, limit: PAGE, offset: healthState.offset,
+    }).then(function (resp) {
+      var groups = (resp && resp.groups) || [];
+      groups.forEach(function (g) { trackEarliestDue(g.cards || []); });
+      renderHealth(groups);
+      if (healthPager) {
+        healthPager.update({ offset: healthState.offset,
+          totalCount: (resp && resp.total_count) || 0 });
+      }
+    }).catch(function (err) {
+      if (window.console && console.warn) console.warn('health render failed:', err);
+      renderHealth([]);
+      if (healthPager) healthPager.update({});
+      if (!opts.quiet && window.toast) window.toast('持倉健診載入失敗', 'fail', '已顯示空狀態');
+    });
+  }
+
+  function loadScore(opts) {
+    pdApi.get('/api/ai-score', { limit: PAGE, offset: scoreState.offset }).then(function (score) {
       renderScore(score || {});
+      if (scorePager) {
+        scorePager.update({ offset: scoreState.offset,
+          totalCount: (score && score.rows_total_count) || 0 });
+      }
     }).catch(function (err) {
       if (window.console && console.warn) console.warn('ai-score render failed:', err);
       renderScore({});
+      if (scorePager) scorePager.update({});
       if (!opts.quiet && window.toast) window.toast('AI 戰績載入失敗', 'fail', '已顯示空狀態');
     });
+  }
+
+  function refresh(opts) {
+    opts = opts || {};
+    if (!pdApi) { renderCards([]); renderHealth([]); return; }
+    earliestDue = null;
+    loadCards(opts);
+    loadHealth(opts);
+    loadScore(opts);
   }
   refresh();
 

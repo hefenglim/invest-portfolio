@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, TypeVar
 
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -597,16 +597,24 @@ def calibration_samples(
 
 
 @router.get("/ai-score")
-def get_ai_score(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def get_ai_score(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
     """The AI battle-record table: ``{totals, by_combo[], calibration_bins[], rows[]}``.
 
     Active (non-shadow) scored rows drive the displayed totals/by_combo; shadow rows are
     kept in ``rows`` for the promotion view. Empty DB → zeroed/[] (CSV export is a frontend
-    concern over this payload).
+    concern over this payload). WPE (2026-07-07): the previously-unbounded ``rows`` pages
+    via ``limit``/``offset`` (+ ``rows_total_count``); the aggregates stay whole-set.
     """
     es.ensure_tables(conn)
     cs.ensure_seeded(conn)
-    return es.ai_score(conn, exclude_type_ids=cs.archived_type_ids(conn))
+    return es.ai_score(
+        conn, exclude_type_ids=cs.archived_type_ids(conn),
+        rows_limit=limit, rows_offset=offset,
+    )
 
 
 # --- evolution-config (spec 4.6) ----------------------------------------------
@@ -876,20 +884,61 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
 def list_insights(
     insight_type: int | None = None,
     symbol: str | None = None,
+    scope: str | None = None,
+    group: str | None = None,
+    history_limit: int = Query(5, ge=1, le=20),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
-) -> list[dict[str, Any]]:
-    """List stored insight cards (newest first), optionally filtered by type and/or symbol.
+) -> Any:
+    """List stored insight cards (newest first) — paginated (WPE, 2026-07-07).
+
+    Flat shape: ``{rows, total_count, limit, offset}`` filtered by ``insight_type`` /
+    ``symbol`` / ``scope`` ('portfolio' = portfolio + per-market cards; 'symbol' =
+    per-symbol health cards — the market-code-in-symbol wire convention is encoded once
+    in the store). Grouped shape (``group=symbol``, the 持倉健診 treatment): pagination
+    runs over SYMBOLS — ``{groups: [{symbol, total, cards<=history_limit}], total_count,
+    limit, offset, history_limit}``. Grouping is server-side because a client slice of a
+    flat feed cannot know symbol boundaries; the cards keep coming from the same
+    ``_card_wire`` serializer (no client-computed numbers either way).
 
     Archived (deleted) tasks' cards are hidden — history stays in the table (spec 4.1)
-    but stops surfacing. Empty DB → ``[]``. Money/target_pct is a Decimal STRING (the
-    frontend never computes).
+    but stops surfacing. Empty DB → empty rows/groups. Money/target_pct is a Decimal
+    STRING (the frontend never computes).
     """
     istore.ensure_tables(conn)
     cs.ensure_seeded(conn)
-    return [
+    if scope not in (None, "portfolio", "symbol"):
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"scope 非有效值：{scope}", field="scope"))
+    if group not in (None, "symbol"):
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"group 非有效值：{group}", field="group"))
+    excluded = cs.archived_type_ids(conn)
+    if group == "symbol":
+        groups, total_symbols = istore.list_symbol_groups(
+            conn, history_limit=history_limit, limit=limit, offset=offset,
+            exclude_type_ids=excluded,
+        )
+        return {
+            "groups": [
+                {"symbol": sym, "total": total, "cards": [_card_wire(c) for c in cards]}
+                for sym, total, cards in groups
+            ],
+            "total_count": total_symbols,
+            "limit": limit,
+            "offset": offset,
+            "history_limit": history_limit,
+        }
+    rows = [
         _card_wire(rec)
         for rec in istore.list_cards(
             conn, insight_type_id=insight_type, symbol=symbol,
-            exclude_type_ids=cs.archived_type_ids(conn),
+            exclude_type_ids=excluded, scope=scope, limit=limit, offset=offset,
         )
     ]
+    total = istore.count_cards(
+        conn, insight_type_id=insight_type, symbol=symbol,
+        exclude_type_ids=excluded, scope=scope,
+    )
+    return {"rows": rows, "total_count": total, "limit": limit, "offset": offset}
