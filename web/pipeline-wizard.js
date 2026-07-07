@@ -263,7 +263,7 @@
             stage.appendChild(row);
           });
           var lib = el('a', 'btn btn-sm', '＋ 需要新模板？前往模板庫');
-          lib.href = 'settings-prompts.html';
+          lib.href = 'settings.html#prompts';
           stage.appendChild(lib);
         }
 

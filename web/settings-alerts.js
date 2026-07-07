@@ -94,7 +94,7 @@
         ai.addEventListener('click', () => {
           const tab = document.querySelector('.set-tab[data-tab="prompts"]') || document.querySelector('[data-view="prompts"]');
           if (tab) tab.click();
-          else window.location.href = 'settings-prompts.html';
+          else window.location.href = 'settings.html#prompts';
         });
       } else {
         ai.textContent = '不觸發 AI 解讀（僅鈴鐺警示）— 可在洞察類型組合器新增「預警事件觸發」組合';
