@@ -314,6 +314,21 @@
         <div class="gen-row"><span class="k">顯示時區</span><span class="v num">Asia/Taipei</span></div>
       </div>
     </section>
+    <!-- 資料庫統計 (2026-07-07 owner decision): read-only observation panel — canonical
+         tabbed surface ONLY (the standalone settings pages are redirect stubs). -->
+    <section class="panel" data-screen-label="資料庫統計">
+      <div class="panel-head">
+        <h2 class="panel-title">資料庫統計</h2>
+        <span class="panel-sub">唯讀 — 各資料表筆數與最早記錄，供保留期限評估；目前不做任何自動清理</span>
+        <span class="spacer"></span>
+        <button class="btn" id="dbstats-refresh" type="button">⟳ 重新整理</button>
+      </div>
+      <div class="gen-rows" id="dbstats-files" style="padding-bottom:0;"></div>
+      <div class="table-wrap"><table class="data"><thead><tr>
+        <th class="col-text">類別</th><th class="col-text">資料表</th><th>筆數</th><th>最早記錄</th>
+      </tr></thead><tbody id="dbstats-body"></tbody></table></div>
+      <div class="set-body" style="padding-top:6px;"><span class="panel-sub" id="dbstats-note"></span></div>
+    </section>
   </div>
 
   <!-- ===== 資料來源 ===== -->
@@ -392,6 +407,7 @@
 <script src="settings-datasources.js?v=0.1.10"></script>
 <script src="settings-alerts.js?v=0.1.10"></script>
 <script src="settings-users.js?v=0.1.10"></script>
+<script src="settings-dbstats.js?v=0.1.10"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs） */
 (function () {

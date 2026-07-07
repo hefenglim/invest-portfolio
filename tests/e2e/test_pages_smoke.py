@@ -766,6 +766,14 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: Page) -> N
             "() => { const v = document.querySelector('#sys-prompt');"
             " return v && v.value && v.value.trim().length > 0; }"
         )
+        # 資料庫統計 (WPA, 2026-07-07): the read-only stats panel boots off
+        # GET /api/db-stats — wait for its boot signal (the note text renders on
+        # BOTH success and failure paths; file-size rows land with it).
+        page.wait_for_function(
+            "() => { const n = document.querySelector('#dbstats-note');"
+            " return n && n.textContent && n.textContent.indexOf('唯讀統計') !== -1; }"
+        )
+        page.wait_for_selector("#dbstats-body tr", state="attached")
         # Q1 fix (2026-07-07): the Request 明細 panel must exist on the CANONICAL tabbed
         # surface (previously only on standalone settings-llm.html), and clicking the
         # AI 與額度 tab must still render the daily chart (an unguarded ledger wiring

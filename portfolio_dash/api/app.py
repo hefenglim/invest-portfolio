@@ -32,6 +32,7 @@ from portfolio_dash.api.routers import (
     cash,
     dashboard,
     datasources,
+    db_stats,
     dividend_inbox,
     export,
     health,
@@ -215,6 +216,7 @@ def create_app() -> FastAPI:
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")
+    app.include_router(db_stats.router, prefix="/api")
     app.include_router(snapshots_router.router, prefix="/api")
     app.include_router(prompts.router, prefix="/api")
     app.include_router(news.router, prefix="/api")
