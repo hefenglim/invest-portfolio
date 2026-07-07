@@ -117,12 +117,15 @@
       panel.style.left = '8px';
       panel.style.right = '8px';
     } else {
-      /* clientWidth (NOT innerWidth): fixed-position `right` resolves against the
-         viewport EXCLUDING the scrollbar, same space as getBoundingClientRect —
-         innerWidth includes the scrollbar and misaligns the panel by its width. */
-      const vw = document.documentElement.clientWidth;
-      panel.style.left = 'auto';
-      panel.style.right = Math.max(8, Math.round(vw - r.right)) + 'px';
+      /* Anchor by LEFT — the only offset that shares the bell rect's client
+         coordinate space. A `right` offset resolves against the fixed-position
+         viewport, whose width differs from clientWidth/innerWidth when the root's
+         scrollbar-gutter reserves space (measured live: ICB 1425 vs both 1440),
+         which skewed the panel by the gutter width. Called with the panel already
+         unhidden so its CSS width (380px) is measurable. */
+      panel.style.right = 'auto';
+      const w = panel.getBoundingClientRect().width || 380;
+      panel.style.left = Math.max(8, Math.round(r.right - w)) + 'px';
     }
   }
 
@@ -171,8 +174,11 @@
 
   bell.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (panel.hidden) positionPanel();
+    const opening = panel.hidden;
     panel.hidden = !panel.hidden;
+    /* position AFTER unhiding (layout exists → width measurable); JS runs to
+       completion before the browser paints, so no mispositioned frame shows. */
+    if (opening) positionPanel();
   });
   window.addEventListener('resize', () => {
     if (!panel.hidden) positionPanel();
