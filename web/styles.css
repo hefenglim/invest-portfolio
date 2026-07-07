@@ -1695,3 +1695,33 @@ button[disabled], .btn[disabled] {
 /* Unified AI attribution line (model · token N · $cost) on every LLM-generated card. */
 .ai-attrib { font-size: 10px; color: var(--text-3); font-family: var(--font-num);
   letter-spacing: 0.02em; white-space: nowrap; }
+
+/* ==================== Shared pager (pager.js, WPB 2026-07-07) ==================== */
+.pd-pager { display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 10px var(--pad) 12px; }
+.pd-pager .pg-btn { min-width: 30px; min-height: 30px; padding: 2px 8px;
+  font-family: var(--font-num); font-size: 11.5px; background: var(--panel-2);
+  border: 1px solid var(--border-soft); color: var(--text-2);
+  border-radius: var(--radius-sm); cursor: pointer; }
+.pd-pager .pg-btn:hover { border-color: var(--border); color: var(--text); }
+.pd-pager .pg-btn.active { background: var(--accent-soft);
+  border-color: rgba(88, 166, 221, 0.45); color: var(--accent); font-weight: 700; }
+.pd-pager .pg-btn:disabled { opacity: 0.45; cursor: default; }
+.pd-pager .pg-gap { color: var(--text-3); font-size: 11px; padding: 0 2px; }
+.pd-pager .pg-label { margin-left: 8px; font-size: 10.5px; color: var(--text-3);
+  font-family: var(--font-num); white-space: nowrap; }
+.pd-pager .pg-jump { display: inline-flex; align-items: center; gap: 4px;
+  margin-left: auto; font-size: 10.5px; color: var(--text-3); }
+.pd-pager .pg-jump-input { width: 56px; min-height: 28px; text-align: right;
+  font-family: var(--font-num); padding: 2px 6px; }
+.pd-pager[aria-busy="true"] { opacity: 0.7; }
+@media (max-width: 600px) {
+  /* mobile: >=40px touch targets; jump input follows */
+  .pd-pager .pg-btn { min-width: 40px; min-height: 40px; }
+  .pd-pager .pg-jump-input { min-height: 40px; }
+  .pd-pager .pg-jump { margin-left: 0; }
+}
+
+/* 執行歷史 -> Request 明細 cross-link (WPB): LLM-kind runs deep-link the AI ledger. */
+.runs-ai-link { font-size: 10px; color: var(--accent); text-decoration: none; }
+.runs-ai-link:hover { text-decoration: underline; }

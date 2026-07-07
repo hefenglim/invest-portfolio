@@ -198,6 +198,7 @@
       <h2 class="panel-title">Request 明細</h2>
       <span class="panel-sub">每一次 LiteLLM 底層請求的完整記錄</span>
       <span class="spacer"></span>
+      <span class="pill" id="req-window" hidden="hidden"></span>
       <select class="select" id="req-agent" style="min-height:30px; font-size:11.5px;">
         <option value="">全部用途</option>
       </select>
@@ -215,8 +216,8 @@
         <tbody id="req-body"></tbody>
       </table>
     </div>
+    <div id="req-pager" hidden="hidden"></div>
     <div class="set-body" style="padding-top:6px;">
-      <button class="btn" id="req-more" type="button" hidden="hidden">載入更多</button>
       <span class="panel-sub" id="req-note"></span>
     </div>
   </section>
@@ -307,6 +308,7 @@
 <script src="api.js?v=0.1.10"></script>
 <script src="shell.js?v=0.1.10"></script>
 <script src="format.js?v=0.1.10"></script>
+<script src="pager.js?v=0.1.10"></script>
 <script src="export.js?v=0.1.10"></script>
 <script src="alerts.js?v=0.1.10"></script>
 <script src="settings-llm.js?v=0.1.10"></script>

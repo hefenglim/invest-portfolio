@@ -191,6 +191,18 @@
         const tdJob = el('td', 'col-text');
         tdJob.appendChild(el('div', null, jobLabel(h.job_id, '')));
         tdJob.appendChild(el('div', 'sym-name cron-code', h.job_id));
+        /* WPB cross-link: an LLM-kind run (insight:* / news_daily) deep-links the
+           Request 明細 pre-filtered to this run's started_at→finished_at window. */
+        if ((h.job_id.indexOf('insight:') === 0 || h.job_id === 'news_daily') && h.started_at) {
+          const qs = ['req_since=' + encodeURIComponent(h.started_at)];
+          if (h.finished_at) qs.push('req_until=' + encodeURIComponent(h.finished_at));
+          const link = el('a', 'runs-ai-link', '查看 AI 請求 ↗');
+          link.href = 'settings.html?' + qs.join('&') + '#llm';
+          link.title = '在 Request 明細以此執行的時間窗篩選 AI 請求';
+          const wrap = el('div');
+          wrap.appendChild(link);
+          tdJob.appendChild(wrap);
+        }
         tr.appendChild(tdJob);
         const tdSt = el('td');
         const pill = el('span', 'pill ' + (h.status === 'ok' ? 'pill-ok' : 'pill-fail'));

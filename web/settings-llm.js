@@ -595,13 +595,57 @@
 
   boot();
 
-  /* ---- Request 明細 (2026-07-07): per-request LiteLLM ledger ---- */
-  const reqState = { agent: '', offset: 0, limit: 50 };
+  /* ---- Request 明細 (2026-07-07): per-request LiteLLM ledger ----
+     WPB: 載入更多 replaced by the shared windowed pager (pager.js); an incoming
+     ?req_since/?req_until (the 執行歷史 cross-link's run window) pre-filters the
+     ledger at boot and shows a dismissible window pill. */
+  const reqState = { agent: '', offset: 0, limit: 50, since: '', until: '' };
+  let reqPager = null;
+
+  (function initReqWindowFromUrl() {
+    try {
+      const qs = new URLSearchParams(window.location.search);
+      reqState.since = qs.get('req_since') || '';
+      reqState.until = qs.get('req_until') || '';
+    } catch (e) { /* URL parsing must never break boot */ }
+  })();
 
   function reqQuery() {
     const parts = ['limit=' + reqState.limit, 'offset=' + reqState.offset];
     if (reqState.agent) parts.push('agent=' + encodeURIComponent(reqState.agent));
+    if (reqState.since) parts.push('since=' + encodeURIComponent(reqState.since));
+    if (reqState.until) parts.push('until=' + encodeURIComponent(reqState.until));
     return '/api/llm/requests?' + parts.join('&');
+  }
+
+  function renderReqWindowPill() {
+    const pill = document.getElementById('req-window');
+    if (!pill) return;
+    if (!reqState.since && !reqState.until) { pill.hidden = true; return; }
+    pill.hidden = false;
+    pill.className = 'pill';
+    pill.style.cursor = 'pointer';
+    pill.replaceChildren();
+    const span = (reqState.since ? f.datetime(reqState.since) : '…') +
+      ' → ' + (reqState.until ? f.datetime(reqState.until) : '現在');
+    pill.appendChild(document.createTextNode('時間窗 ' + span + ' ✕'));
+    pill.title = '僅顯示此排程執行期間的 AI 請求 — 點擊清除時間篩選';
+    pill.onclick = function () {
+      reqState.since = '';
+      reqState.until = '';
+      reqState.offset = 0;
+      /* strip the window params from the URL so a reload doesn't resurrect them */
+      try {
+        const qs = new URLSearchParams(window.location.search);
+        qs.delete('req_since');
+        qs.delete('req_until');
+        const rest = qs.toString();
+        history.replaceState(null, '',
+          window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+      } catch (e) { /* URL cleanup is cosmetic */ }
+      renderReqWindowPill();
+      loadRequests();
+    };
   }
 
   function reqRow(r) {
@@ -622,10 +666,10 @@
     return tr;
   }
 
-  function loadRequests(append) {
+  function loadRequests() {
     window.pdApi.get(reqQuery()).then(function (resp) {
       const body = document.getElementById('req-body');
-      if (!append) body.replaceChildren();
+      body.replaceChildren();
       (resp.rows || []).forEach(function (r) { body.appendChild(reqRow(r)); });
       const t = resp.totals || { count: 0, total_cost_usd: '0' };
       document.getElementById('req-totals').textContent =
@@ -639,12 +683,14 @@
           sel.appendChild(o);
         });
       }
-      const shown = body.children.length;
-      const more = document.getElementById('req-more');
-      more.hidden = shown >= t.count;
+      if (reqPager) reqPager.update({ offset: reqState.offset, totalCount: t.count });
+      const shown = (resp.rows || []).length;
       document.getElementById('req-note').textContent =
-        shown ? ('顯示 ' + f.num(shown, 0) + ' / ' + f.num(t.count, 0) + ' 筆（新→舊）') : '尚無請求記錄';
+        shown ? ('顯示 ' + f.num(reqState.offset + 1, 0) + '–' +
+          f.num(reqState.offset + shown, 0) + ' / ' + f.num(t.count, 0) + ' 筆（新→舊）')
+          : '尚無請求記錄';
     }).catch(function () {
+      if (reqPager) reqPager.update({});
       document.getElementById('req-note').textContent = 'Request 明細載入失敗';
     });
   }
@@ -654,16 +700,25 @@
      unguarded addEventListener here previously threw on settings.html and killed the
      tab listener below, breaking the 用量與趨勢 chart on the canonical path. */
   if (document.getElementById('req-body')) {
+    if (window.pdPager && document.getElementById('req-pager')) {
+      reqPager = window.pdPager.create({
+        host: document.getElementById('req-pager'),
+        limit: reqState.limit,
+        offset: 0,
+        totalCount: 0,
+        onPage: function (offset) {
+          reqState.offset = offset;
+          loadRequests();
+        },
+      });
+    }
     document.getElementById('req-agent').addEventListener('change', function (e) {
       reqState.agent = e.target.value;
       reqState.offset = 0;
-      loadRequests(false);
+      loadRequests();
     });
-    document.getElementById('req-more').addEventListener('click', function () {
-      reqState.offset += reqState.limit;
-      loadRequests(true);
-    });
-    loadRequests(false);
+    renderReqWindowPill();
+    loadRequests();
   }
 
   window.addEventListener('pd-settings-tab', function (e) {
