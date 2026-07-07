@@ -81,7 +81,7 @@
         <input class="input" id="nw-to" type="date"></input>
       </div>
       <div class="nw-field">
-        <label>關鍵字</label>
+        <label>關鍵字（全庫搜尋）</label>
         <input class="input" id="nw-q" type="search" placeholder="標題或摘要…" spellcheck="false"></input>
       </div>
       <button class="btn" id="nw-clear" type="button">清除</button>
@@ -89,6 +89,7 @@
     </div>
 
     <div class="nw-list" id="nw-list"></div>
+    <div id="nw-pager" hidden="hidden"></div>
   </section>
 
 </div>
@@ -102,6 +103,7 @@
 <script src="api.js?v=0.1.10"></script>
 <script src="shell.js?v=0.1.10"></script>
 <script src="format.js?v=0.1.10"></script>
+<script src="pager.js?v=0.1.10"></script>
 <script src="news.js?v=0.1.10"></script>
 </body>
 </html>

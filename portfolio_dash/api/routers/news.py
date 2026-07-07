@@ -41,19 +41,22 @@ def list_news(
     date_from: str | None = None,
     date_to: str | None = None,
     source: str | None = None,
+    q: str | None = None,
     limit: int = Query(100, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
     """Filtered, paginated organized-news list + totals over the whole filtered set.
 
     Filters: ``symbol`` (precise mention), ``date_from``/``date_to`` (inclusive
-    YYYY-MM-DD), ``source``. ``totals`` carries the count + total cost across every match
-    (not just the page) for the cost-assessment header. Empty/absent news DB → empty list.
+    YYYY-MM-DD), ``source``, ``q`` (keyword over title/summary, LIKE — WPD so the
+    keyword filter matches the WHOLE library, not just the loaded page). ``totals``
+    carries the count + total cost across every match (not just the page) for the
+    cost-assessment header. Empty/absent news DB → empty list.
     """
     with news_store.news_session() as conn:
         rows, totals = news_store.query_news(
             conn, symbol=symbol, date_from=date_from, date_to=date_to,
-            source=source, limit=limit, offset=offset,
+            source=source, q=q, limit=limit, offset=offset,
         )
     return {
         "items": [_item_wire(n) for n in rows],

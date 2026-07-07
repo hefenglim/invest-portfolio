@@ -1,7 +1,10 @@
 /* portfolio-dash — 新聞庫 (batch ④). Reads GET /api/news + /api/news/filters.
-   Filters (stock / source / date range) → filtered list; click a row → modal with the
-   full summary + link + token/cost. Cost is a Decimal STRING from the API — displayed via
-   f.num, never recomputed. */
+   Filters (stock / source / date range / keyword) → server-filtered list; click a row →
+   modal with the full summary + link + token/cost. Cost is a Decimal STRING from the
+   API — displayed via f.num, never recomputed.
+   WPD (2026-07-07): the 200-row dump is replaced by the shared pdPager over the
+   endpoint's limit/offset, and the keyword filter moved SERVER-side (`q` over
+   title/summary via LIKE) so it matches the whole library, not just the loaded page. */
 'use strict';
 (function () {
   const api = window.pdApi;
@@ -10,8 +13,13 @@
   const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.className = c;
     if (txt !== undefined) n.textContent = txt; return n; };
 
-  const state = { stock: '', source: '', from: '', to: '', q: '' };
-  let lastItems = [];          // the last server-filtered page (client keyword filter input)
+  const state = {
+    stock: '', source: '', from: '', to: '', q: '',
+    offset: 0,
+    limit: Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 200),
+  };
+  let pager = null;
+  let lastItems = [];          // the current server page
   let lastTotals = { count: 0, total_cost_usd: '0' };
   const instrumentNames = {};  // symbol -> display name (GET /api/instruments)
 
@@ -73,32 +81,23 @@
     if (state.source) p.push('source=' + encodeURIComponent(state.source));
     if (state.from) p.push('date_from=' + state.from);
     if (state.to) p.push('date_to=' + state.to);
-    p.push('limit=200');
-    return p.length ? '?' + p.join('&') : '';
-  }
-
-  /* client-side keyword filter over the LOADED list (title/summary substring; display
-     logic only — the server filters stock/source/date). */
-  function keywordFiltered(items) {
-    const q = state.q.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((it) =>
-      ((it.title || '') + '\n' + (it.summary || '')).toLowerCase().includes(q));
+    if (state.q.trim()) p.push('q=' + encodeURIComponent(state.q.trim()));
+    p.push('limit=' + state.limit);
+    p.push('offset=' + state.offset);
+    return '?' + p.join('&');
   }
 
   function render() {
     const list = $('#nw-list');
-    const items = keywordFiltered(lastItems);
+    const items = lastItems;
     $('#nw-totals').replaceChildren();
     $('#nw-totals').append(
       document.createTextNode('符合 '),
       Object.assign(el('b'), { textContent: lastTotals.count }),
       document.createTextNode(' 則 · 整理成本累計 '),
       Object.assign(el('b'), { textContent: '$' + f.num(lastTotals.total_cost_usd, 4) }));
-    if (state.q.trim()) {
-      $('#nw-totals').append(document.createTextNode(' · 關鍵字符合 ' + items.length + ' 則'));
-    }
     list.replaceChildren();
+    if (pager) pager.update({ offset: state.offset, totalCount: lastTotals.count });
     if (!items.length) { list.appendChild(el('div', 'nw-empty',
       '無符合條件的新聞。每晚 news_daily 批次整理入庫後於此顯示。')); return; }
     items.forEach((it) => list.appendChild(rowNode(it)));
@@ -111,7 +110,17 @@
       lastTotals = (resp && resp.totals) || { count: 0, total_cost_usd: '0' };
       render();
     }).catch((err) => {
+      if (pager) pager.update({});
       list.replaceChildren(el('div', 'nw-empty', '新聞載入失敗：' + ((err && err.message) || '')));
+    });
+  }
+
+  /* shared pager over the server's limit/offset (missing host -> no-op controller) */
+  if (window.pdPager) {
+    pager = window.pdPager.create({
+      host: document.getElementById('nw-pager'),
+      limit: state.limit, offset: 0, totalCount: 0,
+      onPage: (offset) => { state.offset = offset; load(); },
     });
   }
 
@@ -136,13 +145,23 @@
     }).catch(() => {});
   }
 
-  $('#nw-stock').addEventListener('change', (e) => { state.stock = e.target.value; load(); });
-  $('#nw-source').addEventListener('change', (e) => { state.source = e.target.value; load(); });
-  $('#nw-from').addEventListener('change', (e) => { state.from = e.target.value; load(); });
-  $('#nw-to').addEventListener('change', (e) => { state.to = e.target.value; load(); });
-  $('#nw-q').addEventListener('input', () => { state.q = $('#nw-q').value; render(); });
+  $('#nw-stock').addEventListener('change', (e) => { state.stock = e.target.value; state.offset = 0; load(); });
+  $('#nw-source').addEventListener('change', (e) => { state.source = e.target.value; state.offset = 0; load(); });
+  $('#nw-from').addEventListener('change', (e) => { state.from = e.target.value; state.offset = 0; load(); });
+  $('#nw-to').addEventListener('change', (e) => { state.to = e.target.value; state.offset = 0; load(); });
+  /* keyword is a SERVER filter now (whole library) — debounce the round-trip */
+  let qTimer = null;
+  $('#nw-q').addEventListener('input', () => {
+    if (qTimer) clearTimeout(qTimer);
+    qTimer = setTimeout(() => {
+      state.q = $('#nw-q').value;
+      state.offset = 0;
+      load();
+    }, 300);
+  });
   $('#nw-clear').addEventListener('click', () => {
     state.stock = state.source = state.from = state.to = state.q = '';
+    state.offset = 0;
     $('#nw-stock').value = ''; $('#nw-source').value = '';
     $('#nw-from').value = ''; $('#nw-to').value = ''; $('#nw-q').value = '';
     load();

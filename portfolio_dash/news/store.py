@@ -273,6 +273,11 @@ def distinct_sources(conn: sqlite3.Connection) -> list[str]:
     ]
 
 
+def _escape_like(term: str) -> str:
+    """Escape LIKE wildcards in a user keyword (used with ``ESCAPE '\\'``)."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def query_news(
     conn: sqlite3.Connection,
     *,
@@ -280,13 +285,16 @@ def query_news(
     date_from: str | None = None,
     date_to: str | None = None,
     source: str | None = None,
+    q: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> tuple[list[OrganizedNews], dict[str, Any]]:
     """Filtered news list (newest first) + aggregate totals over the WHOLE filtered set.
 
     Filters: ``symbol`` (precise mention match), ``date_from``/``date_to`` (inclusive
-    YYYY-MM-DD), ``source``. Returns ``(rows, totals)`` where ``totals`` = ``{count,
+    YYYY-MM-DD), ``source``, ``q`` (WPD 2026-07-07: case-insensitive keyword over
+    title OR body_summary via LIKE, wildcards escaped — server-side so pagination
+    stays honest). Returns ``(rows, totals)`` where ``totals`` = ``{count,
     total_cost_usd}`` across every matching row (not just the page), for the browse
     page's cost-assessment header.
     """
@@ -306,6 +314,12 @@ def query_news(
     if source:
         clauses.append("o.source = ?")
         params.append(source)
+    if q and q.strip():
+        like = f"%{_escape_like(q.strip())}%"
+        clauses.append(
+            "(o.title LIKE ? ESCAPE '\\' OR o.body_summary LIKE ? ESCAPE '\\')"
+        )
+        params.extend([like, like])
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     # Cost summed with Decimal (never float) over EVERY matching row for the header total.
     cost_rows = conn.execute(

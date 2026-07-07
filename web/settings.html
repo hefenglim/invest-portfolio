@@ -268,11 +268,24 @@
       </tr></thead><tbody id="jobs-body"></tbody></table></div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">最近 10 筆</span></div>
+      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">新→舊・可依工作篩選・LLM 類執行可跳查 AI 請求</span></div>
       <div class="filter-bar" id="hist-filter"></div>
       <div class="table-wrap"><table class="data"><thead><tr>
         <th>時間</th><th class="col-text">工作</th><th>狀態</th><th class="col-text">摘要</th><th>耗時</th><th>費用</th>
       </tr></thead><tbody id="hist-body"></tbody></table></div>
+      <div id="hist-pager" hidden="hidden"></div>
+    </section>
+    <!-- 系統操作記錄 (WPD 2026-07-07): folded in from the standalone scheduler page —
+         the canonical tabbed surface now carries every scheduler-area panel. -->
+    <section class="panel" data-screen-label="系統操作記錄">
+      <div class="panel-head">
+        <h2 class="panel-title">系統操作記錄</h2>
+        <span class="panel-sub">網頁上每一筆「會改變資料」的動作（寫入、更正、更新報價、設定變更…）；試算與預覽不記錄</span>
+      </div>
+      <div class="table-wrap"><table class="data"><thead><tr>
+        <th>時間</th><th class="col-text">動作</th><th class="col-text">使用者</th><th class="col-text">端點</th><th>結果</th><th>耗時</th>
+      </tr></thead><tbody id="syslog-body"></tbody></table></div>
+      <div id="syslog-pager" hidden="hidden"></div>
     </section>
   </div>
 

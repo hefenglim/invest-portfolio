@@ -125,3 +125,37 @@ def test_news_filters_endpoint(api_client: TestClient) -> None:
 def test_news_list_empty_ok(api_client: TestClient) -> None:
     r = api_client.get("/api/news").json()
     assert r["items"] == [] and r["totals"]["count"] == 0 and r["totals"]["total_cost_usd"] == "0"
+
+
+def test_news_keyword_q_matches_title_and_summary(api_client: TestClient) -> None:
+    """WPD: `q` is a SERVER filter over title OR body_summary (whole library)."""
+    _seed_full("http://q1", "2330", date="2026-07-05", source="CMoney", cost="0.001")
+    _seed_full("http://q2", "AAPL", date="2026-07-04", source="Reuters", cost="0.002")
+    by_title = api_client.get("/api/news", params={"q": "2330 新聞"}).json()
+    assert by_title["totals"]["count"] == 1
+    assert by_title["items"][0]["link"] == "http://q1"
+    # summary text is shared by both seeds -> both match; totals follow the filter
+    by_summary = api_client.get("/api/news", params={"q": "整理摘要"}).json()
+    assert by_summary["totals"]["count"] == 2
+    assert by_summary["totals"]["total_cost_usd"] == "0.003"
+    none = api_client.get("/api/news", params={"q": "毫無此字"}).json()
+    assert none["totals"]["count"] == 0 and none["items"] == []
+
+
+def test_news_keyword_q_escapes_like_wildcards(api_client: TestClient) -> None:
+    """A literal % / _ in the keyword must not act as a SQL wildcard."""
+    _seed_full("http://w1", "2330", date="2026-07-05", source="CMoney", cost="0.001")
+    r = api_client.get("/api/news", params={"q": "%"}).json()
+    assert r["totals"]["count"] == 0  # no title/summary contains a literal %
+
+
+def test_news_pagination_offset_with_q(api_client: TestClient) -> None:
+    for i in range(5):
+        _seed_full(f"http://p{i}", "2330", date=f"2026-07-0{i + 1}",
+                   source="CMoney", cost="0.001")
+    page1 = api_client.get("/api/news", params={"q": "新聞", "limit": 2, "offset": 0}).json()
+    page2 = api_client.get("/api/news", params={"q": "新聞", "limit": 2, "offset": 2}).json()
+    assert page1["totals"]["count"] == 5 and page2["totals"]["count"] == 5
+    assert len(page1["items"]) == 2 and len(page2["items"]) == 2
+    assert {i["link"] for i in page1["items"]}.isdisjoint(
+        {i["link"] for i in page2["items"]})
