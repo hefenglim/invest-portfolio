@@ -649,16 +649,22 @@
     });
   }
 
-  document.getElementById('req-agent').addEventListener('change', function (e) {
-    reqState.agent = e.target.value;
-    reqState.offset = 0;
+  /* Q1 fix (2026-07-07): the ledger section may be absent on a surface (settings.html
+     vs settings-llm.html duplication) — guard, per this file's 略過 convention. An
+     unguarded addEventListener here previously threw on settings.html and killed the
+     tab listener below, breaking the 用量與趨勢 chart on the canonical path. */
+  if (document.getElementById('req-body')) {
+    document.getElementById('req-agent').addEventListener('change', function (e) {
+      reqState.agent = e.target.value;
+      reqState.offset = 0;
+      loadRequests(false);
+    });
+    document.getElementById('req-more').addEventListener('click', function () {
+      reqState.offset += reqState.limit;
+      loadRequests(true);
+    });
     loadRequests(false);
-  });
-  document.getElementById('req-more').addEventListener('click', function () {
-    reqState.offset += reqState.limit;
-    loadRequests(true);
-  });
-  loadRequests(false);
+  }
 
   window.addEventListener('pd-settings-tab', function (e) {
     if (e.detail === 'llm') maybeRenderLlmChart();

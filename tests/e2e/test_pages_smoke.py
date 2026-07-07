@@ -766,6 +766,21 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: Page) -> N
             "() => { const v = document.querySelector('#sys-prompt');"
             " return v && v.value && v.value.trim().length > 0; }"
         )
+        # Q1 fix (2026-07-07): the Request 明細 panel must exist on the CANONICAL tabbed
+        # surface (previously only on standalone settings-llm.html), and clicking the
+        # AI 與額度 tab must still render the daily chart (an unguarded ledger wiring
+        # used to throw here and kill the tab listener → chart never rendered).
+        # The hermetic golden DB has no llm_usage rows — wait for the ledger BOOT signal
+        # (#req-note gets text either way: row counts, or 「尚無請求記錄」 on empty).
+        page.wait_for_function(
+            "() => { const n = document.querySelector('#req-note');"
+            " return n && n.textContent && n.textContent.trim().length > 0; }"
+        )
+        page.click(".set-tab[data-tab='llm']")
+        page.wait_for_function(
+            "() => { const c = document.querySelector('#llm-daily-chart');"
+            " return c && c.querySelector('canvas') !== null; }"
+        )
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
