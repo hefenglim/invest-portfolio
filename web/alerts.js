@@ -177,6 +177,14 @@
   window.addEventListener('resize', () => {
     if (!panel.hidden) positionPanel();
   });
+  if (document.fonts && document.fonts.addEventListener) {
+    /* The FIRST open can lazily load the mono font face the panel items use, which
+       re-metrics the topbar (its clock/chips share that face) and shifts the bell
+       ~15px after the panel was anchored. Re-anchor when a font load settles. */
+    document.fonts.addEventListener('loadingdone', () => {
+      if (!panel.hidden) positionPanel();
+    });
+  }
   document.addEventListener('click', (e) => {
     /* panel lives on <body> now — clicks inside it must not count as "outside" */
     if (!panel.hidden && !bellWrap.contains(e.target) && !panel.contains(e.target)) {
