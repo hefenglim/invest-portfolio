@@ -168,3 +168,14 @@ prevents recurrence.
   its real `lifespan` against a throwaway DB (`tests/contract/test_first_run_bootstrap.py`). Keep all
   bootstrap steps idempotent (`CREATE TABLE IF NOT EXISTS` / `ON CONFLICT`) so re-running on an existing
   DB (e.g. the e2e server re-bootstrapping the harness-built golden DB) is safe.
+
+- **2026-07-08 — Duplicated static surfaces drift; keep ONE canonical page.** The settings
+  area shipped as a tabbed `settings.html` PLUS five standalone `settings-*.html` sharing
+  the same JS but duplicating markup. They drifted in BOTH directions (a new panel added
+  only to the standalone; a panel that only ever existed on the standalone; a stale label
+  on the tab) and an unguarded `getElementById(...).addEventListener` for a node present
+  on one surface threw on the other, silently killing later wiring. Fixes: standalone
+  pages became redirect stubs (same as `ledger.html`/`input.html`); all per-node wiring
+  is guarded on element existence; e2e walks the REAL nav path (tab click), not the
+  convenient standalone URL. Lesson: when two pages share JS, either they share ONE
+  markup source or one of them redirects — never hand-sync.
