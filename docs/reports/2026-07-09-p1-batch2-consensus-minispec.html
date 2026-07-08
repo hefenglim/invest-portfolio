@@ -1,0 +1,119 @@
+<title>P1 資料地基・批次2 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #2b6cb0; --accent-soft: #e8f0f9;
+    --ok: #2f7a4f; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #131519; --card: #1b1f26; --ink: #e8ecf2; --ink-2: #9aa6b5;
+            --line: #323a46; --accent: #6ea8dc; --accent-soft: #22303f;
+            --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #131519; --card: #1b1f26; --ink: #e8ecf2;
+    --ink-2: #9aa6b5; --line: #323a46; --accent: #6ea8dc; --accent-soft: #22303f;
+    --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #2b6cb0; --accent-soft: #e8f0f9;
+    --ok: #2f7a4f; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  .skip li::marker { content: "✕ "; color: var(--warn); }
+  .sig { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px; }
+  .sigrow { border: 1.5px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    background: var(--paper); font-size: 14.5px; line-height: 1.55; }
+  .sigrow b { color: var(--accent); }
+  pre { background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; font-size: 12.5px; line-height: 1.5; overflow-x: auto; margin: 10px 0 0;
+    font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・P1 批次2（1C）</div>
+    <h1>分析師共識變數：目標價＋評級分布進入變數系統</h1>
+    <p class="lede">已按指令開工（欄位為加法式，審到要改直接講）。30 秒讀完。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>為什麼做</h2>
+    <p>健檢卡目前只有技術面與籌碼面，<b>沒有任何「市場對這檔股票的集體看法」</b>。分析師目標價與評級分布是估值疊加的基準線（藍圖 P3／Phase 6 的前置資料）。</p>
+    <p class="dim">數字一律 finance API 取得、本地存檔，LLM 只詮釋——invariant #1 合規（藍圖 D9 慣例）。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>探測結果（2026-07-08 實測，超出藍圖預期）</h2>
+    <p>yfinance <code>analyst_price_targets</code>＋<code>recommendations_summary</code> 三市場全通：AAPL 42 位分析師、2330.TW 33 位、<b>連 1155.KL 也有 19 位</b>（藍圖原估 MY 稀薄）。無覆蓋的個股（如部分 TPEx 小型股）仍需誠實降級。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>欄位提案（最小可靠集）＋管線</h2>
+    <pre>consensus_json（per_symbol，snapshot 模式）：
+{
+ "as_of": "2026-07-09",
+ "price_targets": { "current": "2465.00",
+   "mean": "2819.8484", "median": "2780.00",
+   "high": "3800.00", "low": "2051.00" },   ← Decimal 字串（報價幣別）
+ "ratings": { "strong_buy": 9, "buy": 23,
+   "hold": 1, "sell": 0, "strong_sell": 0,
+   "total": 33 },                            ← 本月評級分布
+ "ratings_prev_month": { … },                ← 上月（看趨勢）
+ "rating_score": "1.76",                     ← 1=強力買進…5=強力賣出（本地加權計算）
+ "upside_vs_mean_pct": "0.1440",             ← (mean−current)/current（本地計算）
+ "source": "yfinance"
+}</pre>
+    <div class="sig">
+      <div class="sigrow"><b>① 來源模組</b>：<code>pricing/consensus_source.py</code>，走既有 snapshot 慣例（比照籌碼/情緒五件套：SOURCE_INFO＋冪等 upsert＋健康降級）。不用重型的 <code>Ticker.info</code>，只打兩個輕端點。價格類數字沿用 4dp 噪音帽。</div>
+      <div class="sigrow"><b>② 排程＋手動</b>：每日一次 <code>consensus_daily</code> job（比照 sentiment/index 的既有時段慣例）；沿用既有手動觸發機制供 demo 驗證（demo 排程停用）。</div>
+      <div class="sigrow"><b>③ 變數註冊</b>：<code>consensus_json</code> 上 registry（32→33 變數），經 <code>external_vars</code> 餵入（籌碼前例，架構層向不變）；vars.js／var-count 契約測試同步。</div>
+      <div class="sigrow"><b>④ 健檢 v2.4</b>：官方個股健檢模板 v2.3→v2.4，引用共識（目標價區間、評級分布、與現價差距），無覆蓋時明講「無分析師覆蓋」；官方模板位元組凍結＋版本戳慣例不變。</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>驗收（退出條件）</h2>
+    <ul class="tight keep">
+      <li>demo 站手動觸發後,持有標的的 <code>consensus_json</code> 出現真實目標價＋評級分布</li>
+      <li>無覆蓋個股誠實降級（unavailable＋原因），永不編造</li>
+      <li>健檢 v2.4 引用共識；reset-to-official／指紋回歸測試全綠</li>
+      <li>重跑抓取冪等；var-count／模板凍結／job 註冊測試同步更新</li>
+      <li>全閘門綠（pytest／mypy --strict／ruff）</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span>不做什麼（本批次外）</h2>
+    <ul class="tight skip">
+      <li>EPS 預估／營收預估欄位 → 覆蓋品質未驗證，等真需求</li>
+      <li>共識「變化事件」進警示 → Phase 3 警示分類法 v2 的範圍</li>
+      <li>PER 百分位估值疊加 → Phase 6 季報範圍</li>
+      <li>Loop-2 評分規則變更 → 本批不動 rubric</li>
+    </ul>
+  </section>
+
+  <section class="cta">
+    <b>執行中</b>：Opus 4.8 xHigh subagent 依本規格實作,批次累積於 <code>feat/p1-data-foundation</code> 分支。欄位要增減直接講——snapshot JSON 為加法式,調整成本低。完成＝<b>P1 資料地基整段收工</b>。
+  </section>
+
+</div>
