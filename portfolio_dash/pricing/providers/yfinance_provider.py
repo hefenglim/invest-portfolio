@@ -25,6 +25,17 @@ def _finite(value: object) -> Decimal | None:
     return d if d.is_finite() else None
 
 
+def _volume(value: object) -> Decimal | None:
+    """Volume as an integer Decimal — NOT money, so the 2-dp rule never applies.
+
+    Reuses ``_finite`` to reject NaN/inf/None gaps, then normalizes to a whole
+    integer (yfinance emits volume as float64, e.g. ``3323800.0``). A genuine 0
+    (a no-trade session) stays 0; only missing/NaN becomes None.
+    """
+    d = _finite(value)
+    return Decimal(int(d)) if d is not None else None
+
+
 def yf_symbol(ref: InstrumentRef) -> str:
     if ref.market is Market.TW and ref.board == "TPEx":
         return f"{ref.symbol}.TWO"
@@ -43,13 +54,15 @@ class YFinanceProvider(ProviderBase):
         self, payload: dict[str, Any], *, instrument: str, market: Market,
     ) -> list[PriceRow]:
         rows: list[PriceRow] = []
+        volumes = payload.get("Volume", {})
         for ts_ms, close in payload.get("Close", {}).items():
             fc = _finite(close)
             if fc is None:
                 continue
             d = datetime.fromtimestamp(int(ts_ms) / 1000, tz=UTC).date()
             rows.append(PriceRow(instrument=instrument, market=market, as_of=d,
-                                 close=fc, source=self.name))
+                                 close=fc, volume=_volume(volumes.get(ts_ms)),
+                                 source=self.name))
         rows.sort(key=lambda r: r.as_of)
         return rows
 
@@ -59,12 +72,15 @@ class YFinanceProvider(ProviderBase):
             df = yf.Ticker(yf_symbol(ref)).history(period="5d", auto_adjust=False)
             if df is None or df.empty:
                 continue
+            volumes = df["Volume"] if "Volume" in df.columns else None
             # most recent row with a finite close (today's row can be NaN intraday)
             for ts, close in reversed(list(df["Close"].items())):
                 fc = _finite(close)
                 if fc is not None:
+                    vol = _volume(volumes.get(ts)) if volumes is not None else None
                     out.append(PriceRow(instrument=ref.symbol, market=ref.market,
-                                        as_of=ts.date(), close=fc, source=self.name))
+                                        as_of=ts.date(), close=fc, volume=vol,
+                                        source=self.name))
                     break
         return out
 
@@ -72,13 +88,15 @@ class YFinanceProvider(ProviderBase):
         df = yf.Ticker(yf_symbol(instrument)).history(start=start.isoformat(), auto_adjust=False)
         if df is None or df.empty:
             return []
+        volumes = df["Volume"] if "Volume" in df.columns else None
         rows: list[PriceRow] = []
         for ts, close in df["Close"].items():
             fc = _finite(close)
             if fc is None:
                 continue
+            vol = _volume(volumes.get(ts)) if volumes is not None else None
             rows.append(PriceRow(instrument=instrument.symbol, market=instrument.market,
-                                 as_of=ts.date(), close=fc, source=self.name))
+                                 as_of=ts.date(), close=fc, volume=vol, source=self.name))
         rows.sort(key=lambda r: r.as_of)
         return rows
 

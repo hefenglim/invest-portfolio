@@ -31,7 +31,9 @@ DEFAULT_PROVIDER_ORDER: dict[tuple[DataType, Market | None], list[str]] = {
     (DataType.QUOTE_LATEST, Market.TW): ["twse", "tpex", "yfinance", "twstock"],
     (DataType.QUOTE_LATEST, Market.MY): ["yfinance", "klsescreener", "malaysiastock"],
     (DataType.QUOTE_HISTORY, Market.US): ["yfinance"],
-    (DataType.QUOTE_HISTORY, Market.TW): ["yfinance"],
+    # FinMind (TaiwanStockPrice) is a token-gated fallback behind yfinance for TW
+    # history (P1-②): closes the "TW history is a yfinance single point" risk.
+    (DataType.QUOTE_HISTORY, Market.TW): ["yfinance", "finmind"],
     (DataType.QUOTE_HISTORY, Market.MY): ["yfinance"],
     (DataType.FX, None): ["yfinance"],
     (DataType.DIVIDEND, Market.TW): ["finmind", "yfinance"],
