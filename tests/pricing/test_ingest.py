@@ -175,3 +175,89 @@ def test_ingest_index_degrades_when_empty(conn: sqlite3.Connection) -> None:
     assert snapshots_store.latest_snapshot(
         conn, source="index", dataset="index_quotes", symbol=None
     ) is None
+
+
+# --- consensus ingest (P1 batch 2): all-market universe + yf symbol mapping ----
+
+
+def test_all_universe_all_markets(conn: sqlite3.Connection) -> None:
+    _add_instrument(conn, "2330", "TW")
+    _add_instrument(conn, "AAPL", "US")
+    _add_instrument(conn, "1155", "MY")
+    refs = ingest.all_universe(conn)
+    assert {r.symbol for r in refs} == {"2330", "AAPL", "1155"}
+
+
+def test_ingest_consensus_maps_yf_symbols_and_keys_by_portfolio_symbol(
+    conn: sqlite3.Connection,
+) -> None:
+    _add_instrument(conn, "2330", "TW")
+    _add_instrument(conn, "AAPL", "US")
+    _add_instrument(conn, "1155", "MY")
+    seen: list[str] = []
+
+    def fake_fetch(yf_sym: str, *, as_of: date) -> dict[str, Any]:
+        seen.append(yf_sym)
+        return {"as_of": as_of.isoformat(), "ratings": {"total": 1}, "source": "yfinance"}
+
+    n = ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=fake_fetch)
+    assert n == 3
+    # yfinance symbol mapping is reused (.TW / .KL / bare US).
+    assert set(seen) == {"2330.TW", "AAPL", "1155.KL"}
+    # stored keyed by the PORTFOLIO symbol, not the yf symbol.
+    snap = snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="consensus", symbol="2330"
+    )
+    assert snap is not None and snap.as_of == date(2026, 6, 11)
+
+
+def test_ingest_consensus_skips_uncovered(conn: sqlite3.Connection) -> None:
+    _add_instrument(conn, "2330", "TW")
+    _add_instrument(conn, "ZZZ", "US")
+
+    def fake_fetch(yf_sym: str, *, as_of: date) -> dict[str, Any] | None:
+        return None if yf_sym == "ZZZ" else {"as_of": as_of.isoformat(), "source": "x"}
+
+    n = ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=fake_fetch)
+    assert n == 1
+    assert snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="consensus", symbol="ZZZ"
+    ) is None
+
+
+def test_ingest_consensus_isolates_symbol_exception(conn: sqlite3.Connection) -> None:
+    # One symbol raising must not drop the others.
+    _add_instrument(conn, "2330", "TW")
+    _add_instrument(conn, "AAPL", "US")
+
+    def flaky(yf_sym: str, *, as_of: date) -> dict[str, Any]:
+        if yf_sym == "AAPL":
+            raise RuntimeError("boom")
+        return {"as_of": as_of.isoformat(), "source": "yfinance"}
+
+    n = ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=flaky)
+    assert n == 1
+    assert snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="consensus", symbol="2330"
+    ) is not None
+    assert snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="consensus", symbol="AAPL"
+    ) is None
+
+
+def test_ingest_consensus_reread_is_idempotent(conn: sqlite3.Connection) -> None:
+    # Append-only store: a re-run leaves latest_snapshot returning the newest payload.
+    _add_instrument(conn, "2330", "TW")
+    calls = {"n": 0}
+
+    def fake_fetch(yf_sym: str, *, as_of: date) -> dict[str, Any]:
+        calls["n"] += 1
+        return {"as_of": as_of.isoformat(), "rating_score": str(calls["n"]),
+                "source": "yfinance"}
+
+    ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=fake_fetch)
+    ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=fake_fetch)
+    snap = snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="consensus", symbol="2330"
+    )
+    assert snap is not None and snap.payload["rating_score"] == "2"  # newest wins on read

@@ -18,9 +18,12 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from portfolio_dash.pricing import index_source, sentiment_source
+from portfolio_dash.pricing import consensus_source, index_source, sentiment_source
 from portfolio_dash.pricing import snapshots_store as S
 from portfolio_dash.pricing.finmind_datasets import fetch_dataset
+from portfolio_dash.pricing.providers.yfinance_provider import yf_symbol
+from portfolio_dash.pricing.refs import InstrumentRef
+from portfolio_dash.shared.enums import Market
 
 # Default lookback window for FinMind date-range batch fetches.
 _FINMIND_START = "2025-01-01"
@@ -44,6 +47,22 @@ def tw_universe(conn: sqlite3.Connection) -> list[str]:
         "SELECT symbol FROM instruments WHERE market = 'TW' ORDER BY symbol"
     ).fetchall()
     return [r["symbol"] for r in rows]
+
+
+def all_universe(conn: sqlite3.Connection) -> list[InstrumentRef]:
+    """Every registered instrument as an InstrumentRef, via direct SQL (all markets).
+
+    Consensus is fetched across US/TW/MY (unlike the TW-only FinMind chips), so this
+    reads the full ``instruments`` table. ``board`` carries the TPEx flag so ``yf_symbol``
+    maps櫃買 counters to ``.TWO``. No ``data_ingestion`` import (layering, spec 20.3).
+    """
+    rows = conn.execute(
+        "SELECT symbol, market, board FROM instruments ORDER BY symbol"
+    ).fetchall()
+    return [
+        InstrumentRef(symbol=r["symbol"], market=Market(r["market"]), board=r["board"] or "")
+        for r in rows
+    ]
 
 
 def _latest_as_of(rows: list[dict[str, Any]], *, default: date) -> date:
@@ -183,3 +202,46 @@ def ingest_index(
         payload={"quotes": {sym: str(val) for sym, val in quotes.items()}}, fetched_at=now,
     )
     return 1
+
+
+FetchConsensus = Callable[..., dict[str, Any] | None]
+
+
+def ingest_consensus(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    fetch_consensus: FetchConsensus | None = None,
+) -> int:
+    """Ingest analyst-consensus snapshots per registered instrument (all markets).
+
+    Maps each instrument to its yfinance symbol (``yf_symbol`` — reuses the TPEx
+    ``.TWO`` mapping), fetches the consensus payload, and appends a snapshot keyed by the
+    PORTFOLIO symbol (not the yf symbol) so the variable layer looks it up by the same
+    symbol it renders per-symbol cards for. A per-symbol failure/absence writes no row
+    and never stops the rest (per-symbol isolation). Returns rows written.
+
+    The client resolves to the live ``consensus_source.fetch_consensus`` at call time
+    when not overridden, so a monkeypatch of the module is honoured (scheduler-job tests).
+    """
+    fetch = fetch_consensus or consensus_source.fetch_consensus
+    as_of = now.date()
+    written = 0
+    for ref in all_universe(conn):
+        try:
+            payload = fetch(yf_symbol(ref), as_of=as_of)
+        except Exception:  # noqa: BLE001 — one bad symbol must not drop the rest
+            continue
+        if not payload:
+            continue
+        S.add_snapshot(
+            conn,
+            source=consensus_source.SOURCE,
+            dataset=consensus_source.DATASET,
+            symbol=ref.symbol,
+            as_of=as_of,
+            payload=payload,
+            fetched_at=now,
+        )
+        written += 1
+    return written
