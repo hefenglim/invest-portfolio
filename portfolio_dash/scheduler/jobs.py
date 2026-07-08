@@ -358,6 +358,7 @@ _INGEST_JOB_SOURCE: dict[str, str] = {
     "finmind_fundamentals_monthly": "finmind",
     "sentiment_daily": "yfinance",
     "index_quotes_daily": "yfinance",
+    "consensus_daily": "yfinance",
 }
 
 
@@ -456,6 +457,19 @@ def index_quotes_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Trading-day: TAIEX/SPX/KLCI index closes (yfinance)."""
     return _run_ingest(
         conn, "index_quotes_daily", lambda: ingest.ingest_index(conn, now=now), now=now
+    )
+
+
+def consensus_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily: analyst target-price + rating-distribution snapshots for all instruments.
+
+    Slot: 09:10 Asia/Taipei — analyst consensus is a slow-moving, timezone-agnostic
+    signal (not a market close), so it runs once in the morning, staggered just after
+    the 08:00 sentiment job and before the intraday quote crons, on all days (yfinance
+    serves whatever the latest consensus is regardless of any single market's session).
+    """
+    return _run_ingest(
+        conn, "consensus_daily", lambda: ingest.ingest_consensus(conn, now=now), now=now
     )
 
 
@@ -647,6 +661,10 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "index_quotes_daily", index_quotes_daily, "50 14 * * mon-fri", "Asia/Taipei", True,
         "TAIEX/SPX/KLCI index closes",
+    ),
+    JobSpec(
+        "consensus_daily", consensus_daily, "10 9 * * *", "Asia/Taipei", True,
+        "Analyst target price + rating distribution (all instruments)",
     ),
     # on_alert scan (spec 04.9 R7): post-close, after quotes refresh, before insight cron.
     JobSpec(
