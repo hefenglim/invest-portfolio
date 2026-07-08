@@ -177,6 +177,18 @@ def test_volume_signal_none_gap_in_window_degrades() -> None:
     assert sig == {"ratio_to_avg": None, "surge": None}
 
 
+def test_volume_signal_trims_trailing_none() -> None:
+    # The newest row is systematically volume-less when the latest-quote provider
+    # carries no volume (TW: twse) — trailing Nones are trimmed so the signal
+    # computes from the most recent sessions WITH volume instead of degrading daily.
+    vols: list[Decimal | None] = [*([Decimal("100")] * 20), Decimal("250"), None]
+    sig = T.volume_signal(vols)
+    assert sig["ratio_to_avg"] == Decimal("250") / Decimal("100")
+    assert sig["surge"] is True
+    # All-None (nothing trimmable left) -> insufficient-data result.
+    assert T.volume_signal([None] * 25) == {"ratio_to_avg": None, "surge": None}
+
+
 def test_technical_signals_accepts_none_padded_volumes() -> None:
     # The aligned-with-closes series is None-padded for gap sessions; a gap OUTSIDE
     # the recent window must not block the computed signal.

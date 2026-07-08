@@ -222,12 +222,19 @@ def volume_signal(
 
     Probe-gated at the call site: only invoked when the provider actually backfilled
     volume (P1-①②). Needs ``window + 1`` bars. ``None`` entries mark sessions whose
-    stored row carried no volume; a ``None`` inside the needed recent window degrades
-    to the insufficient-data result instead of raising.
+    stored row carried no volume. TRAILING ``None``s are trimmed first: the newest
+    row is systematically volume-less when the market's latest-quote provider carries
+    no volume (TW: twse) until the next history refresh heals it — the signal then
+    honestly reflects the most recent sessions WITH volume instead of degrading
+    every day. A ``None`` strictly inside the needed window still degrades to the
+    insufficient-data result instead of raising.
     """
-    if len(volumes) < window + 1:
+    trimmed = list(volumes)
+    while trimmed and trimmed[-1] is None:
+        trimmed.pop()
+    if len(trimmed) < window + 1:
         return {"ratio_to_avg": None, "surge": None}
-    recent = [v for v in volumes[-(window + 1):] if v is not None]
+    recent = [v for v in trimmed[-(window + 1):] if v is not None]
     if len(recent) < window + 1:
         return {"ratio_to_avg": None, "surge": None}
     avg = sum(recent[:-1], _ZERO) / Decimal(window)
