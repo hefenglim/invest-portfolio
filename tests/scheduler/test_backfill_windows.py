@@ -1,12 +1,15 @@
 """Unit: smart backfill windows (2026-07-03, R4 item 2, human decision).
 
-Prices: default 12 months; a symbol whose position began earlier backfills from
-its first acquisition date; watch-only symbols use the default. FX: from the
-earliest ledger flow date when older than 12 months.
+Prices: default floor is config-driven (``history_backfill_days``); a symbol whose
+position began earlier backfills from its first acquisition date; watch-only symbols
+use the default. FX: from the earliest ledger flow date when older than the floor.
+The tests pin the floor via a monkeypatched ``get_settings`` so they are independent
+of the shipped default (5y since owner 2026-07-08).
 """
 
 import sqlite3
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,7 +21,13 @@ from portfolio_dash.scheduler.jobs import (
 )
 
 _NOW = datetime(2026, 7, 3, tzinfo=UTC)
-_DEFAULT_START = date(2025, 7, 3)  # now - 365d
+_DEFAULT_START = date(2025, 7, 3)  # now - 365d (test pins the floor to 365 below)
+
+
+def _pin_floor(monkeypatch: pytest.MonkeyPatch, days: int) -> None:
+    """Pin the config-driven backfill floor so the window math is deterministic."""
+    monkeypatch.setattr(jobs_mod, "get_settings",
+                        lambda: SimpleNamespace(history_backfill_days=days))
 
 
 def _inst(conn: sqlite3.Connection, symbol: str, market: str) -> None:
@@ -65,9 +74,10 @@ def test_earliest_ledger_flow_spans_all_ledgers(conn: sqlite3.Connection) -> Non
 def test_smart_backfill_windows(
     monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
 ) -> None:
+    _pin_floor(monkeypatch, 365)  # pin the floor to 365d for deterministic date math
     _inst(conn, "OLD", "TW")    # position since 2024-01-10 -> backfill from there
-    _inst(conn, "NEW", "TW")    # position since 2026-06-01 -> default 12mo window
-    _inst(conn, "WATCH", "US")  # no position ever -> default 12mo window
+    _inst(conn, "NEW", "TW")    # position since 2026-06-01 -> default window
+    _inst(conn, "WATCH", "US")  # no position ever -> default window
     _buy(conn, "OLD", "2024-01-10")
     _buy(conn, "NEW", "2026-06-01")
     conn.commit()
@@ -118,3 +128,25 @@ def test_explicit_days_keeps_uniform_window(
     monkeypatch.setattr(jobs_mod, "refresh_fx_history", fake_history)
     backfill_history_all(conn, now=_NOW, days=30)
     assert all(s == date(2026, 6, 3) for s in starts)  # uniform, ignores acquisitions
+
+
+def test_default_window_reads_history_backfill_days(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    """The default (days=None) floor derives from the config field, not a literal."""
+    _pin_floor(monkeypatch, 1825)  # 5y floor (owner 2026-07-08)
+    _inst(conn, "WATCH", "US")     # no position -> uses the config floor verbatim
+    conn.commit()
+    starts: list[date] = []
+
+    def fake_history(c, registry, instruments, start, *, now):  # type: ignore[no-untyped-def]
+        starts.append(start)
+        from portfolio_dash.pricing.results import RefreshSummary
+        return RefreshSummary(ok={}, failed=[], fetched_at=now)
+
+    monkeypatch.setattr(jobs_mod, "default_registry", lambda conn=None: "REG")
+    monkeypatch.setattr(jobs_mod, "refresh_history", fake_history)
+    monkeypatch.setattr(jobs_mod, "refresh_fx_history", fake_history)
+    backfill_history_all(conn, now=_NOW)  # days=None -> smart windows off the config floor
+    expected = (_NOW - timedelta(days=1825)).date()  # floor came from config (1825), not 365
+    assert starts and all(s == expected for s in starts)
