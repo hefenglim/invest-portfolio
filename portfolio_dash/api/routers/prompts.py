@@ -371,6 +371,27 @@ def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
     return ES.build_index_quotes(quotes, as_of=snap.as_of.isoformat())
 
 
+# Honest degrade reason for a symbol yfinance carries no analyst data for (P1 batch 2).
+_CONSENSUS_NO_COVERAGE = "無分析師覆蓋（yfinance 無此標的的分析師目標價／評級資料）"
+
+
+def _consensus_var(conn: sqlite3.Connection, symbol: str) -> dict[str, Any]:
+    """Assemble consensus_json from the latest yfinance consensus snapshot (P1 batch 2).
+
+    The snapshot payload is already the final LLM-facing shape (target prices as Decimal
+    strings, rating distribution + local rating score + upside, all computed at the
+    ``pricing.consensus_source`` fetch seam — llm_insight computes nothing). An absent
+    snapshot degrades to the unavailable shape; the router feeds the "no coverage" reason
+    via ``_external_reasons``.
+    """
+    snap = snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="consensus", symbol=symbol
+    )
+    if snap is None:
+        return {"unavailable": True, "last_as_of": None}
+    return dict(snap.payload)
+
+
 def _external_vars(
     conn: sqlite3.Connection, symbol: str | None, *, now: datetime | None = None
 ) -> dict[str, Any]:
@@ -402,26 +423,33 @@ def _external_vars(
         out["financials_json"] = _finmind_var(
             conn, symbol, dataset="financials", build=ES.build_financials
         )
+        out["consensus_json"] = _consensus_var(conn, symbol)
         out["symbol_news_json"] = _news_var(symbol, now=now or datetime.now(_TAIPEI))
     return out
 
 
 def _external_reasons(conn: sqlite3.Connection, external_vars: dict[str, Any]) -> dict[str, str]:
-    """Degrade reasons per external var, fed from ``data_source_health`` (spec 20.15.4).
+    """Degrade reasons per external var (fed via ``VarContext.external_reasons``).
 
-    For each FinMind chips var that came back ``unavailable`` (no usable snapshot), if
-    the finmind source's health is ``error`` its detail is surfaced as the reason (e.g.
-    "需要 Backer 方案" / "額度已滿"). ``llm_insight`` never reads health — the router does
-    and feeds the reason in via ``VarContext.external_reasons``.
+    Two honest-degrade sources, both resolved by the router (``llm_insight`` never reads
+    health/snapshots itself):
+
+    * FinMind chips — when a chips var is ``unavailable`` AND the finmind source's health
+      is ``error`` (spec 20.15.4), its detail is surfaced (e.g. "需要 Backer 方案" /
+      "額度已滿").
+    * Consensus — when ``consensus_json`` is ``unavailable`` (no snapshot), a static
+      "no analyst coverage" reason (yfinance carries no analyst data for the symbol).
     """
-    state = datasources_store.get_state(conn, "finmind")
-    if state is None or state.status != "error" or not state.detail:
-        return {}
     reasons: dict[str, str] = {}
-    for token in _FINMIND_VAR_DATASET:
-        value = external_vars.get(token)
-        if not isinstance(value, dict) or value.get("unavailable") is True:
-            reasons[token] = state.detail
+    state = datasources_store.get_state(conn, "finmind")
+    if state is not None and state.status == "error" and state.detail:
+        for token in _FINMIND_VAR_DATASET:
+            value = external_vars.get(token)
+            if not isinstance(value, dict) or value.get("unavailable") is True:
+                reasons[token] = state.detail
+    consensus = external_vars.get("consensus_json")
+    if isinstance(consensus, dict) and consensus.get("unavailable") is True:
+        reasons["consensus_json"] = _CONSENSUS_NO_COVERAGE
     return reasons
 
 

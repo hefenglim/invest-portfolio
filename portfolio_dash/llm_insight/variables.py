@@ -62,7 +62,8 @@ class VarSpec:
 
     token: str
     name: str
-    category: str  # vars.js category id: position|price|dividend|fx|chips|sentiment|ai|system
+    category: str  # vars.js category id:
+    # position|price|dividend|fx|chips|consensus|news|sentiment|ai|system
     scope: Scope
     available: bool
     desc: str
@@ -202,6 +203,18 @@ REGISTRY: tuple[VarSpec, ...] = (
         "近 4 季營收/毛利率/EPS（台股；美股 v2）",
         '{"quarters":[{"q":"2026Q1","revenue_yoy":"+0.28","gross_margin":"0.532",'
         '"eps":"14.2"}, …]}',
+    ),
+    # --- consensus (分析師共識) — live from external_snapshots (yfinance; P1 batch 2) ---
+    VarSpec(
+        "consensus_json", "分析師共識", "consensus", "per_symbol", True,
+        "分析師目標價區間（現價/均值/中位/高/低）、本月與上月評級分布、加權評級分數、"
+        "與均值目標價的上檔空間；無分析師覆蓋時誠實降級",
+        '{"as_of":"2026-07-09","price_targets":{"current":"2465.0","mean":"2819.8484",'
+        '"median":"2780.0","high":"3800.0","low":"2051.0"},'
+        '"ratings":{"strong_buy":9,"buy":23,"hold":1,"sell":0,"strong_sell":0,"total":33},'
+        '"ratings_prev_month":{"strong_buy":8,"buy":22,"hold":2,"sell":0,"strong_sell":0,'
+        '"total":32},"rating_score":"1.76","upside_vs_mean_pct":"0.1440",'
+        '"source":"yfinance"}',
     ),
     # --- sentiment (市場情緒) — live from external_snapshots (spec 20.2) ---
     VarSpec(
@@ -414,7 +427,7 @@ _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
 _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
     "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
-    "symbol_news_json",
+    "symbol_news_json", "consensus_json",
 })
 
 
