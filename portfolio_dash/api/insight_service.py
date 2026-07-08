@@ -149,6 +149,10 @@ def _per_symbol_ctx(
         conn, symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
     )
     ctx.closes = [p.value for p in long_hist]
+    # Volumes aligned 1:1 with closes; fed only when at least one session has volume
+    # (probe gate), so the technical volume signal stays honestly absent pre-backfill.
+    vols = [p.volume for p in long_hist]
+    ctx.volumes = vols if any(v is not None for v in vols) else None
     recent = [p for p in long_hist if p.as_of >= as_of - timedelta(days=_HISTORY_DAYS)]
     ctx.price_points = [
         {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in recent

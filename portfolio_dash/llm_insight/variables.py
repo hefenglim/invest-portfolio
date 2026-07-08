@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.portfolio import market_view, technicals
@@ -387,9 +387,10 @@ class VarContext:
     # market so the card cannot misquote another market's numbers (2026-07-05 spec).
     market: str | None = None
     closes: list[Decimal] | None = None  # chronological closes (pricing.store.get_price_history)
-    # chronological volumes aligned to ``closes`` — fed ONLY when a provider backfilled
-    # volume (none does yet); drives the probe-gated technical volume signal (batch ③).
-    volumes: list[Decimal] | None = None
+    # chronological volumes aligned 1:1 with ``closes`` (None-padded for gap sessions) —
+    # fed ONLY when a provider backfilled volume (yfinance/FinMind since P1-①②); drives the
+    # probe-gated technical volume signal. ``None`` when no volume is stored at all.
+    volumes: list[Decimal | None] | None = None
     price_points: list[dict[str, Any]] = field(default_factory=list)  # [{date, close}]
     # Date/time context (spec 04.10), fed by the generation/eval seam. ``now`` is fed on
     # every real render; ``card_created_at``/``eval_date`` only in the 04c eval context.
@@ -512,12 +513,15 @@ def _volatility(ctx: VarContext) -> dict[str, Any]:
 def _technical_signals(ctx: VarContext) -> dict[str, Any]:
     """Integrated technical signals from the fed daily closes (batch ③).
 
-    Volume is probe-gated: ``ctx.volumes`` is fed only when a provider backfilled it
-    (none does yet), so the volume section is honestly absent by default.
+    Volume is probe-gated: ``ctx.volumes`` is fed only when a provider backfilled it,
+    so the volume section is honestly absent otherwise. The cast bridges the frozen
+    ``technicals`` API (``list[Decimal] | None``) to the None-padded field: the volume
+    signal only reads the recent window, which is fully covered in real backfilled data.
     """
     if not ctx.closes:
         return {"unavailable": True}
-    return technicals.technical_signals(ctx.closes, ctx.volumes)
+    volumes = cast("list[Decimal] | None", ctx.volumes)
+    return technicals.technical_signals(ctx.closes, volumes)
 
 
 def _price_vs_cost(ctx: VarContext) -> dict[str, Any]:

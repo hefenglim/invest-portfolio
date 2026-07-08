@@ -42,6 +42,10 @@ class PriceRead(BaseModel):
     as_of: date
     source: str
     stale: bool
+    # Trading volume for the session, when stored (integer-valued Decimal; NOT money).
+    # Additive/optional so existing consumers (spark_30d, dashboard price reads) are
+    # unaffected; populated by ``get_price_history`` and fed to the technical volume signal.
+    volume: Money | None = None
 
 
 class FxRead(BaseModel):

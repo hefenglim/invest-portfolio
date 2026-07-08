@@ -338,6 +338,23 @@ def test_technical_signals_var_from_closes(golden_db: sqlite3.Connection) -> Non
     assert empty == {"unavailable": True}
 
 
+def test_technical_signals_volume_probe_gate(golden_db: sqlite3.Connection) -> None:
+    """ctx.volumes drives the volume section, and is gated on ≥1 non-None value (P1-④)."""
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    closes = [Decimal(str(100 + i)) for i in range(1, 80)]
+    # all-None volumes (only older gap sessions) -> volume section stays absent
+    none_vols: list[Decimal | None] = [None for _ in closes]
+    ctx_none = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes,
+                            volumes=none_vols)
+    assert "volume" not in V.value_for("technical_signals_json", ctx_none)
+    # real backfilled volumes aligned 1:1 with closes -> the volume section appears
+    vols: list[Decimal | None] = [Decimal("1000000") for _ in closes]
+    ctx_vol = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes, volumes=vols)
+    val = V.value_for("technical_signals_json", ctx_vol)
+    assert isinstance(val, dict) and "volume" in val
+    assert set(val["volume"]) == {"ratio_to_avg", "surge"}
+
+
 def test_fear_greed_var_is_external_fed(golden_db: sqlite3.Connection) -> None:
     data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
     ctx = V.VarContext(

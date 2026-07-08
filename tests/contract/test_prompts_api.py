@@ -334,3 +334,36 @@ def test_preview_context_uses_technical_window_for_closes(
     dates = {p["date"] for p in ctx.price_points}
     assert old.isoformat() not in dates            # …but not the rendered history
     assert recent.isoformat() in dates
+
+
+def test_preview_context_feeds_aligned_volumes(golden_db: sqlite3.Connection) -> None:
+    # P1-④: stored volumes flow into ctx.volumes, aligned 1:1 with closes (None-padded),
+    # probe-gated (fed because ≥1 session has volume). Preview and run share this wiring.
+    from datetime import timedelta
+
+    from portfolio_dash.api.routers.prompts import PromptBody, _build_context
+    from portfolio_dash.pricing.results import PriceRow
+    from portfolio_dash.pricing.store import upsert_prices
+    from portfolio_dash.shared.enums import Currency as C
+    from portfolio_dash.shared.enums import Market as M
+    from tests.conftest import GOLDEN_NOW
+
+    as_of = GOLDEN_NOW.date()
+    upsert_prices(golden_db, [
+        PriceRow(instrument="2330", market=M.TW, as_of=as_of - timedelta(days=20),
+                 close=Decimal("600"), volume=Decimal("1000000"), source="test"),
+        PriceRow(instrument="2330", market=M.TW, as_of=as_of - timedelta(days=10),
+                 close=Decimal("610"), source="test"),  # no volume -> None-padded
+        PriceRow(instrument="2330", market=M.TW, as_of=as_of - timedelta(days=5),
+                 close=Decimal("620"), volume=Decimal("0"), source="test"),  # real 0 kept
+    ], fetched_at=GOLDEN_NOW)
+
+    ctx = _build_context(
+        golden_db, PromptBody(body="x", scope="per_symbol", symbol="2330"),
+        GOLDEN_NOW, C.TWD,
+    )
+    assert ctx.closes is not None and ctx.volumes is not None
+    assert len(ctx.volumes) == len(ctx.closes)  # 1:1 alignment (None-padded per row)
+    assert Decimal("1000000") in ctx.volumes    # a stored volume flowed through
+    assert Decimal("0") in ctx.volumes          # a genuine no-trade session stays 0
+    assert None in ctx.volumes                  # the volume-less session is None-padded

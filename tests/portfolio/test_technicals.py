@@ -143,6 +143,14 @@ def test_week52_position_pct_from_high_low() -> None:
     assert pos["window_days"] == 4  # honest actual window, not padded to 252
 
 
+def test_week52_window_caps_at_252_with_multi_year_history() -> None:
+    # P1 acceptance: once 5y (>252 sessions) exists, the 52-week window fills to 252.
+    closes = _dec_series([100.0 + (i % 37) for i in range(400)])  # > 252 sessions
+    assert T.week52_position(closes)["window_days"] == 252
+    w52 = T.technical_signals(closes)["week52"]
+    assert isinstance(w52, dict) and w52["window_days"] == 252
+
+
 def test_trend_structure_uptrend_downtrend_range() -> None:
     up = _dec_series([float(i) for i in range(1, 21)])
     down = _dec_series([float(i) for i in range(20, 0, -1)])
