@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.portfolio import market_view, technicals
@@ -514,14 +514,13 @@ def _technical_signals(ctx: VarContext) -> dict[str, Any]:
     """Integrated technical signals from the fed daily closes (batch ③).
 
     Volume is probe-gated: ``ctx.volumes`` is fed only when a provider backfilled it,
-    so the volume section is honestly absent otherwise. The cast bridges the frozen
-    ``technicals`` API (``list[Decimal] | None``) to the None-padded field: the volume
-    signal only reads the recent window, which is fully covered in real backfilled data.
+    so the volume section is honestly absent otherwise. ``technicals`` accepts the
+    None-padded series directly and degrades the volume signal when a gap session
+    falls inside its recent window.
     """
     if not ctx.closes:
         return {"unavailable": True}
-    volumes = cast("list[Decimal] | None", ctx.volumes)
-    return technicals.technical_signals(ctx.closes, volumes)
+    return technicals.technical_signals(ctx.closes, ctx.volumes)
 
 
 def _price_vs_cost(ctx: VarContext) -> dict[str, Any]:

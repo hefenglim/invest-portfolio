@@ -15,6 +15,7 @@ Discipline (``rules/data-and-pricing.md``):
   compute honestly — the caller renders that as missing/unavailable.
 """
 
+from collections.abc import Sequence
 from decimal import ROUND_HALF_UP, Decimal
 
 _ZERO = Decimal("0")
@@ -214,16 +215,23 @@ def trend_structure(closes: list[Decimal], window: int = 60) -> dict[str, object
     return {"structure": structure, "window_days": len(series)}
 
 
-def volume_signal(volumes: list[Decimal], window: int = 20) -> dict[str, object | None]:
+def volume_signal(
+    volumes: Sequence[Decimal | None], window: int = 20
+) -> dict[str, object | None]:
     """Latest volume vs its ``window``-bar average + a surge flag (≥ 2× average).
 
     Probe-gated at the call site: only invoked when the provider actually backfilled
-    volume (no source does yet — a clean deferred seam). Needs ``window + 1`` bars.
+    volume (P1-①②). Needs ``window + 1`` bars. ``None`` entries mark sessions whose
+    stored row carried no volume; a ``None`` inside the needed recent window degrades
+    to the insufficient-data result instead of raising.
     """
     if len(volumes) < window + 1:
         return {"ratio_to_avg": None, "surge": None}
-    avg = sum(volumes[-(window + 1):-1], _ZERO) / Decimal(window)
-    latest = volumes[-1]
+    recent = [v for v in volumes[-(window + 1):] if v is not None]
+    if len(recent) < window + 1:
+        return {"ratio_to_avg": None, "surge": None}
+    avg = sum(recent[:-1], _ZERO) / Decimal(window)
+    latest = recent[-1]
     if avg == _ZERO:
         return {"ratio_to_avg": None, "surge": None}
     ratio = latest / avg
@@ -231,7 +239,7 @@ def volume_signal(volumes: list[Decimal], window: int = 20) -> dict[str, object 
 
 
 def technical_signals(
-    closes: list[Decimal], volumes: list[Decimal] | None = None
+    closes: list[Decimal], volumes: Sequence[Decimal | None] | None = None
 ) -> dict[str, object]:
     """The one integrated technical-signal variable (mini-spec: one block, not five vars).
 
