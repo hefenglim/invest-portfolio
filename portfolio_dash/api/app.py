@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from portfolio_dash.api import action_log
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
@@ -23,6 +24,7 @@ from portfolio_dash.api.insight_service import (
     generate_calibrations_for_all as insight_generate_calibrations,
 )
 from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
+from portfolio_dash.api.news_service import run_news_daily
 from portfolio_dash.api.routers import (
     accounts,
     actions,
@@ -30,6 +32,7 @@ from portfolio_dash.api.routers import (
     cash,
     dashboard,
     datasources,
+    db_stats,
     dividend_inbox,
     export,
     health,
@@ -38,12 +41,14 @@ from portfolio_dash.api.routers import (
     instruments,
     ledgers,
     llm_settings,
+    news,
     prompts,
     scheduler,
     snapshots_router,
     strategy,
     symbol,
     system_log,
+    ui_prefs,
     users,
 )
 from portfolio_dash.api.snapshots import snapshot_job
@@ -54,6 +59,7 @@ from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_co
 from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure_evaluations_tables
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
+from portfolio_dash.news.organizer_prompt import ensure_news_prompt_seeded
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
@@ -62,6 +68,7 @@ from portfolio_dash.scheduler.jobs import (
     register_dividend_scan_runner,
     register_evaluation_runner,
     register_insight_runner,
+    register_news_runner,
     register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
@@ -70,6 +77,31 @@ from portfolio_dash.shared.logging_config import configure_logging
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that adds ``Cache-Control: no-cache`` to every response (2026-07-07).
+
+    Bare StaticFiles sends only ETag/Last-Modified — NO Cache-Control — so browsers fall
+    back to HEURISTIC freshness (~10% of the asset's age since Last-Modified) and can keep
+    serving a cached ``web/*.js`` for days without ever revalidating. After a deploy that
+    ships an HTML page together with a new helper it calls (e.g. insights.html →
+    ``fmt.aiAttrib``), a returning browser then mixes the fresh HTML with a STALE cached
+    script and the page dies client-side (live incident 2026-07-07: insights/news/index
+    lost every AI card to a swallowed ``f.aiAttrib is not a function``).
+
+    ``no-cache`` keeps caching but forces conditional revalidation on every use: an ETag
+    304 while unchanged, the new body immediately after every future deploy. This is the
+    class fix that fits the no-build-step rule (there is no bundler to fingerprint
+    filenames); the ``?v=<version>`` query on the HTML tags (see web/*.html + the
+    ``test_static_cache_discipline`` contract tests) additionally flushes clients that
+    cached assets BEFORE this header existed.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 @asynccontextmanager
@@ -96,6 +128,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_alert_rules_seeded(conn)
         ensure_auth_seeded(conn)
         ensure_system_prompt_seeded(conn)
+        ensure_news_prompt_seeded(conn)  # editable news-organizer prompt (batch ④)
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
         ensure_insights_tables(conn)  # insights cards table (spec 04b)
         ensure_alert_events_tables(conn)  # alert_events + dispatch log (spec 04b R7)
@@ -110,6 +143,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_dividend_scan_runner(dividend_scan_job)
     # 月度快照 (R6 item 8): nightly current-month KPI upsert via the api seam.
     register_snapshot_runner(snapshot_job)
+    # News pipeline (batch ④): nightly fetch + AI-organize into the separate news DB.
+    register_news_runner(run_news_daily)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
@@ -182,9 +217,12 @@ def create_app() -> FastAPI:
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")
+    app.include_router(db_stats.router, prefix="/api")
+    app.include_router(ui_prefs.router, prefix="/api")
     app.include_router(snapshots_router.router, prefix="/api")
     app.include_router(prompts.router, prefix="/api")
+    app.include_router(news.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
     if _WEB_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
+        app.mount("/", _NoCacheStaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app

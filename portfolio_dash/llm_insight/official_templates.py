@@ -13,7 +13,30 @@ master-role and AI-parse prompts are code-owned (``master.py`` / ``agents.py``) 
 NOT user-editable, so they live outside this library.
 """
 
-LIBRARY_VERSION = "official-v2 (2026-07-05)"
+from typing import TypedDict
+
+LIBRARY_VERSION = "official-v3 (2026-07-06)"
+
+# The news-organizer system prompt (batch ④): the default LLM turns a fetched article's
+# text into a structured, faithful summary. Editable by the user (news settings), with a
+# reset-to-official path — same first-touch-optimum + customization model as the others.
+NEWS_ORGANIZER_PROMPT_VERSION = "v2"
+NEWS_ORGANIZER_PROMPT = (
+    "你是財經新聞整理員。輸入是一篇新聞文章的正文（可能夾雜網頁雜訊）。\n"
+    "請忠實整理成結構化資訊，只根據原文，不得杜撰或加入原文沒有的內容或數字。\n"
+    "<rules>\n"
+    "1. 一律使用繁體中文（台灣用語）。\n"
+    "2. body_summary：2–4 句重點摘要，忠於原文、不評論、不加料；原文若含數字照原文引用，"
+    "不得自行計算或推估。\n"
+    "3. news_date：文章日期，格式 YYYY-MM-DD；原文無明確日期時，留給呼叫端提供的預設。\n"
+    "4. related_stocks：文章提及的個股，回傳其代號（台股用數字代號如 2330、美股用英文代號"
+    "如 AAPL）；沒有明確提及個股時回空陣列。\n"
+    "5. title：若原文標題可辨識則沿用，否則以一句話擬定精簡標題。\n"
+    "6. 若正文並非實質新聞內容（如程式碼、樣式表、導覽選單雜訊），body_summary 一律留空"
+    "字串，不得描述或摘要這些雜訊。\n"
+    "</rules>\n"
+    "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
+)
 
 SYSTEM_PROMPT_VERSION = "v2"
 SYSTEM_PROMPT_BODY = """你是資深投資組合分析師，服務一位同時持有台股、美股、馬股的個人長期投資者。
@@ -72,9 +95,11 @@ _CHECKUP_BODY = (
 同一標的可能分佈於多個帳戶：請分帳戶列示或明確標注「合計」，不得把單一帳戶數字當成總計。
 {{price_vs_cost_json}}
 
-二、技術面 — 均線位置與乖離、30 日波動與回撤；價格序列為「近 30 個交易日逐日＋其餘每 5 日
-取樣」：以近 30 日為主要判讀窗口，較早的取樣點僅作趨勢脈絡。
+二、技術面 — 均線位置與乖離、30 日波動與回撤；並解讀整合技術訊號：RSI(14) 的超買/超賣、
+20/60 均線的黃金/死亡交叉與距今天數、52 週位階、趨勢結構（上升/下降/區間）。價格序列為
+「近 30 個交易日逐日＋其餘每 5 日取樣」：以近 30 日為主要判讀窗口，較早的取樣點僅作趨勢脈絡。
 {{ma_signals_json}}
+{{technical_signals_json}}
 {{volatility_json}}
 {{price_history_json}}
 
@@ -88,13 +113,20 @@ _CHECKUP_BODY = (
 {{financials_json}}
 （非台股標的：改以技術面、價格 vs 成本、環境對照為判讀支柱，並如實說明籌碼資料不適用。）
 
-四、環境對照 — 相對所屬大盤的強弱與當前市場情緒，標注指標時點。
+四、新聞事件 — 近期經整理的個股新聞（標題／日期／摘要）：解讀近期催化劑或風險事件，
+與前述技術/基本面是否相互印證。新聞僅供背景判讀，不得從新聞取價格或報酬等數字；
+無新聞時如實說明「近期無新聞」。
+{{symbol_news_json}}
+
+五、環境對照 — 相對所屬大盤的強弱與當前市場情緒，標注指標時點。
 {{index_quotes_json}}
 {{market_sentiment_json}}
 
-五、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
-1) 條件式情境：明確的觸發條件與對應的重新評估方向，作為長期持倉加碼/減碼評估的參考框架
-（不是買賣指令）；
+六、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
+1) 加碼／減碼參考框架（作為長期持倉評估依據，不是買賣指令）：以技術訊號描述條件式情境，
+例「黃金交叉成立且 RSI 未過熱（<70）、趨勢結構為上升 → 屬偏多的加碼評估情境」、
+「跌破 60 日均線且趨勢結構轉為下降、RSI 走弱 → 屬減碼重新評估情境」；明確寫出觸發條件
+與對應方向，只到條件與方向，不給部位大小或買賣指令；
 2) prediction：metric 一律用 price_change；direction 用 up/down/flat（預期兩週內漲跌幅在
 ±0.5% 以內才用 flat）；target_pct 僅在有明確依據時提供（小數比率，如 0.03＝+3%）；
 3) confidence＝此預測命中的真實機率估計（0-100，寧可保守）。
@@ -103,16 +135,108 @@ _CHECKUP_BODY = (
 標記新鮮度；缺漏資料如實說明；愈近期的資料權重愈高。"""
 )
 
+_MARKET_BODY = (
+    "讀者是長期投資人。以下輸入已由系統切成「單一市場」的資料切片"
+    "（只含這個市場的持倉），\n"
+    + """請產出這個市場的部位週報卡（title 含市場名稱與本週重點）：
+
+〇、本市場一句話 — 指出這個市場部位本週最值得注意的一件事及其數據依據（放在最前面）。
+
+一、部位與配置 — 這個市場的持倉明細與市場內產業配置：點出最大部位、集中度與風險意涵，
+引用具體數字與資料基準日。
+{{holdings_json}}
+{{allocation_json}}
+
+二、報酬 — 這個市場（原幣別）的已實現/未實現與報酬率；只談本市場，不與其他市場比較加總。
+{{returns_by_ccy_json}}
+
+三、股利現金流 — 本市場未來除息事件與年度已宣告股利：下一筆現金流的時點、金額、距今天數。
+{{ex_dividend_calendar_json}}
+{{dividend_projection_json}}
+
+四、市場環境 — 以本市場大盤指數與全球情緒指標定調環境，標注資料時點。
+{{index_quotes_json}}
+{{market_sentiment_json}}
+
+守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
+檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；愈近期的資料權重愈高。
+金額一律照輸入數字的原始數值與單位逐字引用，不得自行換算成「萬／百萬」等單位
+（例：輸入 4290.80 就寫 4,290.80，不得寫成 429 萬）。
+匯率換算與換匯損益屬全組合層次，請見全組合週報，本卡不評匯率歸因。
+本卡為純敘事回顧，不附預測（prediction 留空）；tags 請包含市場名稱（台股／美股／馬股）。"""
+)
+
 # Strategy templates: (name, version, scope hint, body). ``scope`` is advisory — the
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.1", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "個股健檢策略", "version": "v2.3", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
+]
+
+
+class TaskPreset(TypedDict):
+    """One official-pack insight-task preset (a complete, schedulable task)."""
+
+    preset_key: str  # stable provenance key stamped on created tasks (M3 fix)
+    name: str
+    version: str
+    scope: str
+    strategy: str  # references a STRATEGY_TEMPLATES entry by name
+    use_system_prompt: bool
+    self_correct: bool
+    horizon_days: int
+    suggested_cron: str  # Asia/Taipei; the pack mounts this on creation
+    description: str
+
+
+# The official pack (usability decision ①, 2026-07-05): one click creates these tasks
+# complete with strategy, knobs, and a mounted weekly schedule — prod ignition becomes
+# key → roles → top-up → one click. Crons: weekly report Saturday morning (after the US
+# Friday close); per-symbol checkup Monday morning (TW chips from Friday are in).
+TASK_PRESETS: list[TaskPreset] = [
+    {
+        "preset_key": "weekly",
+        "name": "持倉週報",
+        "version": "v1",
+        "scope": "portfolio",
+        "strategy": "持倉週報策略",
+        "use_system_prompt": True,
+        "self_correct": False,
+        "horizon_days": 14,
+        "suggested_cron": "0 9 * * sat",
+        "description": "全組合敘事週報（純敘事，不附預測）",
+    },
+    {
+        "preset_key": "checkup",
+        "name": "個股健檢",
+        "version": "v1",
+        "scope": "per_symbol",
+        "strategy": "個股健檢策略",
+        "use_system_prompt": True,
+        "self_correct": True,
+        "horizon_days": 14,
+        "suggested_cron": "0 9 * * mon",
+        "description": "逐持股健檢（帶方向預測＋信心值，宇宙跟隨持倉）",
+    },
+    {
+        "preset_key": "market",
+        "name": "市場週報",
+        "version": "v1",
+        "scope": "per_market",
+        "strategy": "市場週報策略",
+        "use_system_prompt": True,
+        "self_correct": False,
+        "horizon_days": 14,
+        "suggested_cron": "30 9 * * sat",
+        "description": "台股／美股／馬股各一張市場部位週報（純敘事，資料自動市場切片）",
+    },
 ]
 
 
 def library_wire() -> dict[str, object]:
-    """The ``GET /api/prompt-templates`` payload: version + system prompt + strategies."""
+    """The ``GET /api/prompt-templates`` payload: version + system prompt + strategies
+    + task presets (the one-click official pack)."""
     return {
         "library_version": LIBRARY_VERSION,
         "system_prompt": {
@@ -120,4 +244,5 @@ def library_wire() -> dict[str, object]:
             "body": SYSTEM_PROMPT_BODY,
         },
         "strategies": [dict(t) for t in STRATEGY_TEMPLATES],
+        "task_presets": [dict(p) for p in TASK_PRESETS],
     }

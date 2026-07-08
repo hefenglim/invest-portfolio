@@ -1,0 +1,178 @@
+<title>市場週報 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #0f766e; --accent-soft: #e6f2ef;
+    --tw: #c4453c; --us: #3b6ea5; --my: #a97f2f;
+    --ok: #2f7a4f; --chip-ink: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #14181d; --card: #1c2229; --ink: #e8edf2; --ink-2: #9aa8b5;
+      --line: #313b45; --accent: #34b39a; --accent-soft: #17332d;
+      --tw: #e06158; --us: #6b9bd2; --my: #d4a94e; --ok: #58b380;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #14181d; --card: #1c2229; --ink: #e8edf2; --ink-2: #9aa8b5;
+    --line: #313b45; --accent: #34b39a; --accent-soft: #17332d;
+    --tw: #e06158; --us: #6b9bd2; --my: #d4a94e; --ok: #58b380;
+  }
+  :root[data-theme="light"] {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #0f766e; --accent-soft: #e6f2ef;
+    --tw: #c4453c; --us: #3b6ea5; --my: #a97f2f; --ok: #2f7a4f;
+  }
+  html { background: var(--paper); }
+  body {
+    margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+    font-size: 17px; line-height: 1.75;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 26px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px;
+  }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n {
+    background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center;
+  }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  /* --- 圖:現在 vs 之後 --- */
+  .flow { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .lane { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .lane .lbl { flex: none; width: 44px; font-size: 13px; color: var(--ink-2); font-weight: 700; }
+  .cardlet {
+    border: 1.5px solid var(--line); border-radius: 8px; padding: 6px 10px;
+    font-size: 14px; background: var(--paper); line-height: 1.4;
+  }
+  .cardlet.new { border-color: var(--accent); background: var(--accent-soft); font-weight: 700; }
+  .mk { display: inline-block; border-radius: 5px; padding: 1px 7px; font-size: 12.5px;
+        color: var(--chip-ink); font-weight: 700; margin-right: 6px; }
+  .mk.tw { background: var(--tw); } .mk.us { background: var(--us); } .mk.my { background: var(--my); }
+  .arrow { text-align: center; color: var(--accent); font-size: 18px; line-height: 1; }
+  /* --- 圖:資料分流 --- */
+  .split { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .pool { border: 1.5px dashed var(--line); border-radius: 8px; padding: 8px 12px;
+          text-align: center; font-size: 14px; background: var(--paper); }
+  .branches { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .branch { border-radius: 8px; padding: 8px 6px 10px; font-size: 13px; text-align: center;
+            border: 1.5px solid var(--line); background: var(--card); line-height: 1.5; }
+  .branch b { display: block; font-size: 14px; margin-bottom: 2px; }
+  .branch.tw b { color: var(--tw); } .branch.us b { color: var(--us); } .branch.my b { color: var(--my); }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 6px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  /* --- 卡片示意 --- */
+  .mock { border: 1.5px solid var(--line); border-radius: 10px; padding: 12px 14px;
+          background: var(--paper); margin-top: 10px; }
+  .mock .t { font-weight: 800; font-size: 15.5px; }
+  .mock .s { font-size: 14px; color: var(--ink-2); margin-top: 4px; }
+  .tagrow { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .tag { font-size: 12px; border: 1px solid var(--line); border-radius: 999px;
+         padding: 1px 9px; color: var(--ink-2); }
+  .defaults li { margin: 8px 0; }
+  details { margin-top: 4px; }
+  summary { cursor: pointer; color: var(--accent); font-weight: 700; font-size: 14.5px; }
+  details .dim { margin-top: 6px; }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+         border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+         background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版</div>
+    <h1>市場週報：台股、美股、馬股，各自一張獨立分析卡</h1>
+    <p class="lede">30 秒讀完重點，最後只要回「確認」或指出要改的地方。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>現在 vs 之後</h2>
+    <div class="flow">
+      <div class="lane"><span class="lbl">現在</span>
+        <span class="cardlet">全組合週報 ×1</span>
+        <span class="cardlet">個股健檢 ×每檔</span>
+      </div>
+      <div class="arrow">↓ 新增一個任務「市場週報」</div>
+      <div class="lane"><span class="lbl">之後</span>
+        <span class="cardlet new"><span class="mk tw">台</span>台股市場卡</span>
+        <span class="cardlet new"><span class="mk us">美</span>美股市場卡</span>
+        <span class="cardlet new"><span class="mk my">馬</span>馬股市場卡</span>
+      </div>
+    </div>
+    <p class="dim">一個任務，系統自動看你持有哪些市場，每個市場產一張。之後若清空某市場持倉，該市場就自動不產卡。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>最重要的一件事：資料自動分流</h2>
+    <div class="split">
+      <div class="pool">你的全部持倉資料（持倉、損益、配置、除息…）</div>
+      <div class="arrow">↓ 系統先按市場切好，再交給 AI</div>
+      <div class="branches">
+        <div class="branch tw"><b>台股卡</b>只看得到台股資料<br>＋加權指數、法人籌碼</div>
+        <div class="branch us"><b>美股卡</b>只看得到美股資料<br>＋S&amp;P 500、VIX、恐懼貪婪</div>
+        <div class="branch my"><b>馬股卡</b>只看得到馬股資料<br>＋KLCI 指數</div>
+      </div>
+    </div>
+    <ul class="tight">
+      <li><b>不會張冠李戴</b>：AI 根本看不到別的市場的數字（先前 A/B 測試抓到的「拿錯數字」問題，從源頭堵死）。</li>
+      <li><b>更省錢</b>：每張卡只餵該市場的資料，輸入量更小。</li>
+      <li><b>環境對應</b>：每張卡配上「自己市場」的大盤與情緒指標，判讀更貼身。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>卡片長這樣（示意）</h2>
+    <div class="mock">
+      <div class="t"><span class="mk tw">台</span>台股部位週報｜台積電佔比 75%，集中度是本週焦點</div>
+      <div class="s">台股部位市值 XXX 萬 TWD（基準日 7/4）…（2-3 句重點，往下展開細節）</div>
+      <div class="tagrow"><span class="tag">配置</span><span class="tag">風險</span><span class="tag">台股</span></div>
+    </div>
+    <ul class="tight">
+      <li>純敘事回顧，<b>不帶預測</b>（性質跟全組合週報一樣）。</li>
+      <li>洞察頁可以按市場篩選，只看某個市場的卡。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>不會變的事</h2>
+    <ul class="tight keep">
+      <li>所有數字仍由系統計算，AI 只負責解讀（老規矩）。</li>
+      <li>現有的全組合週報、個股健檢完全不受影響。</li>
+      <li>額度管控、同日快取（重跑不重複扣費）、事後評分迴路，全部直接沿用。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span>官方套組升級＋成本</h2>
+    <p>「啟用官方套組」多一個成員：<b>市場週報</b>，排程建議<b>每週六 09:30</b>（排在全組合週報之後，先總覽、再分市場）。</p>
+    <p class="dim">成本：每週多 2–3 張卡，約 <b>每月多 US$0.1–0.2</b>，可忽略。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">6</span>我會照這 3 個預設做（不同意再說）</h2>
+    <ul class="tight defaults">
+      <li><b>市場卡不引用全組合總數</b>（例如全組合 XIRR）— 只講自己市場的事，避免跟全組合週報打架。</li>
+      <li><b>市場身分用標籤與標題呈現</b>，洞察頁靠它篩選。</li>
+      <li><b>預設涵蓋全部持有市場</b>，之後想只開某一市場再加選項。</li>
+    </ul>
+    <details>
+      <summary>工程附錄（可略過）</summary>
+      <p class="dim">任務範圍新增 <code>per_market</code>（比照 per_symbol 的「一目標一卡」機制）；市場過濾在計算核心完成後才組裝進提示詞；新增官方策略模板「市場週報策略 v1」；測試包含「台股卡輸入絕不含美股數字」的守衛；快取、閘門（R1–R8）、評分迴路零改動沿用。與批次①（官方套組）捆綁為同一版釋出。</p>
+    </details>
+  </section>
+
+  <div class="cta">
+    看完沒問題就回一句「<b>確認</b>」我就開工；想調整就直接講哪一條（例如「排程改週日」「馬股不用出卡」）。
+  </div>
+
+</div>

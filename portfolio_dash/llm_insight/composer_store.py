@@ -103,6 +103,11 @@ class InsightType(BaseModel):
     active_calibration_version: int | None
     horizon_days: int  # task-default prediction horizon (spec 04.10); cards may override
     eval_prompt: str | None  # optional custom self-evaluation prompt (spec 04.10)
+    # Official-pack provenance (M3 fix, decision Q3a 2026-07-07): the TASK_PRESETS key
+    # ('weekly'/'checkup'/'market') stamped when the pack creates the task; survives a
+    # rename so the pack's idempotency never re-creates a renamed official task. NULL
+    # for user-created tasks and pre-column installs.
+    preset_key: str | None
     created_at: str
     updated_at: str
 
@@ -143,6 +148,7 @@ CREATE TABLE IF NOT EXISTS insight_types (
     active_calibration_version INTEGER,
     horizon_days INTEGER NOT NULL DEFAULT 5,
     eval_prompt TEXT,
+    preset_key TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -207,6 +213,10 @@ def _create(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(
         conn, "evolution_config", "shadow_on_alert", "INTEGER NOT NULL DEFAULT 0"
     )
+    # Official-pack provenance key (M3 fix, 2026-07-07): additive migration so existing
+    # installs gain the column; their pre-existing official tasks stay NULL (the pack's
+    # idempotency falls back to the name match for those).
+    _add_column_if_missing(conn, "insight_types", "preset_key", "TEXT")
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -361,6 +371,7 @@ def _insight_type_from_row(row: sqlite3.Row) -> InsightType:
         active_calibration_version=row["active_calibration_version"],
         horizon_days=row["horizon_days"],
         eval_prompt=row["eval_prompt"],
+        preset_key=row["preset_key"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -378,6 +389,7 @@ def create_insight_type(
     enabled: bool = True,
     horizon_days: int = 5,
     eval_prompt: str | None = None,
+    preset_key: str | None = None,
     now: datetime,
 ) -> InsightType:
     """Insert a new insight_type (the composition); return the stored row.
@@ -386,13 +398,14 @@ def create_insight_type(
     rule (R7) is the API's concern; this is the raw write (the caller passes ``enabled``).
     ``horizon_days`` is the task-default prediction horizon (spec 04.10), ``eval_prompt``
     an optional custom self-evaluation prompt (NULL → standard master-scoring template).
+    ``preset_key`` is the official-pack provenance stamp (M3 fix; NULL for user tasks).
     """
     ts = now.isoformat()
     cur = conn.execute(
         "INSERT INTO insight_types (name, scope, use_system_prompt, self_correct, "
         "universe, alert_rules, enabled, archived, job_id, active_calibration_version, "
-        "horizon_days, eval_prompt, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?, ?, ?)",
+        "horizon_days, eval_prompt, preset_key, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?, ?, ?, ?)",
         (
             name,
             scope,
@@ -403,6 +416,7 @@ def create_insight_type(
             1 if enabled else 0,
             horizon_days,
             eval_prompt,
+            preset_key,
             ts,
             ts,
         ),

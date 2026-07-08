@@ -226,3 +226,38 @@ def test_build_index_quotes() -> None:
 
 def test_build_index_quotes_empty_unavailable() -> None:
     assert ES.build_index_quotes({}, as_of=None) == {"unavailable": True, "last_as_of": None}
+
+
+# --- batch ③ Fear & Greed local zones + 7-day trend (2026-07-05) ---------------
+
+
+def test_fear_greed_zone_five_bands() -> None:
+    assert ES.fear_greed_zone(Decimal("10")) == "extreme_fear"
+    assert ES.fear_greed_zone(Decimal("24")) == "extreme_fear"
+    assert ES.fear_greed_zone(Decimal("25")) == "fear"
+    assert ES.fear_greed_zone(Decimal("50")) == "neutral"
+    assert ES.fear_greed_zone(Decimal("62")) == "greed"
+    assert ES.fear_greed_zone(Decimal("76")) == "extreme_greed"
+    assert ES.fear_greed_zone(Decimal("100")) == "extreme_greed"
+
+
+def test_fear_greed_trend_direction_and_change() -> None:
+    # newest-first: 62 today ... 45 a week ago -> rising +17
+    rising = [Decimal(s) for s in ("62", "58", "55", "50", "48", "46", "45")]
+    t = ES.fear_greed_trend(rising)
+    assert t["direction"] == "rising" and t["change"] == "17" and t["window_days"] == 7
+    falling = [Decimal("30"), Decimal("55")]
+    assert ES.fear_greed_trend(falling)["direction"] == "falling"
+    assert ES.fear_greed_trend([Decimal("50")])["direction"] == "flat"
+    assert ES.fear_greed_trend([])["window_days"] == 0
+
+
+def test_market_sentiment_carries_fng_zone_and_trend() -> None:
+    out = ES.build_market_sentiment(
+        vix_close=Decimal("14.2"), as_of_vix="2026-07-04",
+        fng={"score": 62, "rating": "Greed"}, as_of_fng="2026-07-04",
+        fng_scores_newest_first=[Decimal("62"), Decimal("54"), Decimal("45")],
+    )
+    assert out["fear_greed_zone"] == "greed"
+    assert out["fear_greed_trend"]["direction"] == "rising"
+    assert out["fear_greed_trend"]["change"] == "17"

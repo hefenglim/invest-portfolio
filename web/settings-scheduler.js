@@ -34,7 +34,15 @@
   let jobs = [];
   let runs = [];
   let sysRows = [];
-  let jobFilter = 'all';
+
+  /* WPD (2026-07-07): the 200-dump + client-side job filter is replaced by SERVER
+     job_id filter + limit/offset with the shared pdPager. Page size = the user's
+     每頁筆數 clamped to the endpoint max (500). */
+  const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
+  const runState = { job: 'all', offset: 0, limit: PAGE };
+  const sysState = { offset: 0, limit: PAGE };
+  let runsPager = null;
+  let sysPager = null;
 
   /* zh labels for the registered jobs (item 8: the run history must read like
      "what the system did", not internal ids). Unmapped ids fall back to desc/id. */
@@ -178,19 +186,30 @@
     });
   }
 
-  /* ---- Section B run history ---- */
+  /* ---- Section B run history (server-filtered + paged, WPD) ---- */
   function renderHistory() {
     const tbody = $('#hist-body');
     if (!tbody) return;
     tbody.replaceChildren();
     runs
-      .filter((h) => jobFilter === 'all' || h.job_id === jobFilter)
       .forEach((h) => {
         const tr = el('tr');
         tr.appendChild(el('td', 'num', f.datetime(h.started_at)));
         const tdJob = el('td', 'col-text');
         tdJob.appendChild(el('div', null, jobLabel(h.job_id, '')));
         tdJob.appendChild(el('div', 'sym-name cron-code', h.job_id));
+        /* WPB cross-link: an LLM-kind run (insight:* / news_daily) deep-links the
+           Request 明細 pre-filtered to this run's started_at→finished_at window. */
+        if ((h.job_id.indexOf('insight:') === 0 || h.job_id === 'news_daily') && h.started_at) {
+          const qs = ['req_since=' + encodeURIComponent(h.started_at)];
+          if (h.finished_at) qs.push('req_until=' + encodeURIComponent(h.finished_at));
+          const link = el('a', 'runs-ai-link', '查看 AI 請求 ↗');
+          link.href = 'settings.html?' + qs.join('&') + '#llm';
+          link.title = '在 Request 明細以此執行的時間窗篩選 AI 請求';
+          const wrap = el('div');
+          wrap.appendChild(link);
+          tdJob.appendChild(wrap);
+        }
         tr.appendChild(tdJob);
         const tdSt = el('td');
         const pill = el('span', 'pill ' + (h.status === 'ok' ? 'pill-ok' : 'pill-fail'));
@@ -219,13 +238,14 @@
     if (!bar) return;
     bar.replaceChildren();
     const mk = (val, label) => {
-      const c = el('button', 'chip' + (val === jobFilter ? ' active' : ''), label);
+      const c = el('button', 'chip' + (val === runState.job ? ' active' : ''), label);
       c.type = 'button';
       c.addEventListener('click', () => {
-        jobFilter = val;
+        runState.job = val;
+        runState.offset = 0;
         bar.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
         c.classList.add('active');
-        renderHistory();
+        refreshRuns(); // server-side filter (WPD) — not a client slice
       });
       return c;
     };
@@ -235,12 +255,21 @@
   }
 
   async function refreshRuns() {
+    const params = { limit: runState.limit, offset: runState.offset };
+    if (runState.job !== 'all') params.job_id = runState.job;
     try {
-      const resp = await api.get('/api/scheduler/runs', { limit: 200 });
+      const resp = await api.get('/api/scheduler/runs', params);
       runs = (resp && resp.rows) || [];
+      if (runsPager) {
+        runsPager.update({
+          offset: runState.offset,
+          totalCount: (resp && resp.total_count) || 0,
+        });
+      }
     } catch (err) {
       _toast('執行紀錄載入失敗', 'fail', (err && err.message) || undefined);
       runs = [];
+      if (runsPager) runsPager.update({});
     }
     renderHistory();
   }
@@ -276,35 +305,55 @@
     });
   }
   async function refreshSyslog() {
+    if (!$('#syslog-body')) return; /* surface without the panel — skip */
     try {
-      const resp = await api.get('/api/system-log', { limit: 100 });
+      const resp = await api.get('/api/system-log',
+        { limit: sysState.limit, offset: sysState.offset });
       sysRows = (resp && resp.rows) || [];
+      if (sysPager) {
+        sysPager.update({
+          offset: sysState.offset,
+          totalCount: (resp && resp.total_count) || 0,
+        });
+      }
     } catch (err) {
       sysRows = [];
+      if (sysPager) sysPager.update({});
       _toast('系統操作記錄載入失敗', 'fail', (err && err.message) || undefined);
     }
     renderSyslog();
   }
 
-  /* ===== boot: GET jobs + runs in PARALLEL, then render. Graceful: on failure leave the
-     page empty + surface ONE toast (never an unhandled rejection — the e2e smoke asserts
-     ZERO console errors). 401 is handled inside api.js. ===== */
+  /* pagers (shared pdPager; hosts may be absent on a surface — guarded) */
+  if (window.pdPager) {
+    if (document.getElementById('hist-pager')) {
+      runsPager = window.pdPager.create({
+        host: document.getElementById('hist-pager'),
+        limit: runState.limit, offset: 0, totalCount: 0,
+        onPage: (offset) => { runState.offset = offset; refreshRuns(); },
+      });
+    }
+    if (document.getElementById('syslog-pager')) {
+      sysPager = window.pdPager.create({
+        host: document.getElementById('syslog-pager'),
+        limit: sysState.limit, offset: 0, totalCount: 0,
+        onPage: (offset) => { sysState.offset = offset; refreshSyslog(); },
+      });
+    }
+  }
+
+  /* ===== boot: GET jobs + the first runs page in PARALLEL, then render. Graceful: on
+     failure leave the page empty + surface ONE toast (never an unhandled rejection —
+     the e2e smoke asserts ZERO console errors). 401 is handled inside api.js. ===== */
   async function boot() {
-    const [jobsResp, runsResp] = await Promise.all([
-      api.get('/api/scheduler/jobs').catch((err) => {
-        _toast('排程載入失敗', 'fail', (err && err.message) || undefined);
-        return null;
-      }),
-      api.get('/api/scheduler/runs', { limit: 200 }).catch((err) => {
-        _toast('執行紀錄載入失敗', 'fail', (err && err.message) || undefined);
-        return null;
-      }),
-    ]);
+    const jobsResp = await api.get('/api/scheduler/jobs').catch((err) => {
+      _toast('排程載入失敗', 'fail', (err && err.message) || undefined);
+      return null;
+    });
     jobs = (jobsResp && jobsResp.jobs) || [];
-    runs = (runsResp && runsResp.rows) || [];
     renderJobs();
     initHistFilter();
-    renderHistory();
+    await refreshRuns();
     refreshSyslog();  // section C, independent fetch (graceful on failure)
   }
 

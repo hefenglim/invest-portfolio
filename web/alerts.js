@@ -98,9 +98,36 @@
   bell.title = '風險預警（規則引擎，每次資料更新時重算）';
   bell.appendChild(el('span', 'bell-ico', '⚠'));
   bellWrap.appendChild(bell);
+  /* The panel is PORTALED to <body>, NOT nested in the topbar (2026-07-07 iPhone fix):
+     .topbar carries backdrop-filter, and per the CSS spec (enforced by Safari/iOS) a
+     backdrop-filter ancestor becomes the CONTAINING BLOCK for position:fixed
+     descendants — a fixed panel inside the topbar mispositions/clips on real iOS
+     Safari even though desktop Chromium renders it fine. With <body> as the parent no
+     ancestor filter/transform can hijack its coordinates. Geometry (top/left/right)
+     is set from the bell's rect on open + on resize; skin/sizing stay in styles.css. */
   const panel = el('div', 'bell-panel');
   panel.hidden = true;
-  bellWrap.appendChild(panel);
+  document.body.appendChild(panel);
+
+  function positionPanel() {
+    const r = bell.getBoundingClientRect();
+    panel.style.top = Math.round(r.bottom + 8) + 'px';
+    if (window.matchMedia('(max-width: 640px)').matches) {
+      /* mobile: pin to the viewport edges so the whole list is on screen */
+      panel.style.left = '8px';
+      panel.style.right = '8px';
+    } else {
+      /* Anchor by LEFT — the only offset that shares the bell rect's client
+         coordinate space. A `right` offset resolves against the fixed-position
+         viewport, whose width differs from clientWidth/innerWidth when the root's
+         scrollbar-gutter reserves space (measured live: ICB 1425 vs both 1440),
+         which skewed the panel by the gutter width. Called with the panel already
+         unhidden so its CSS width (380px) is measurable. */
+      panel.style.right = 'auto';
+      const w = panel.getBoundingClientRect().width || 380;
+      panel.style.left = Math.max(8, Math.round(r.right - w)) + 'px';
+    }
+  }
 
   function renderCount() {
     const old = bell.querySelector('.bell-count');
@@ -147,10 +174,28 @@
 
   bell.addEventListener('click', (e) => {
     e.stopPropagation();
+    const opening = panel.hidden;
     panel.hidden = !panel.hidden;
+    /* position AFTER unhiding (layout exists → width measurable); JS runs to
+       completion before the browser paints, so no mispositioned frame shows. */
+    if (opening) positionPanel();
   });
+  window.addEventListener('resize', () => {
+    if (!panel.hidden) positionPanel();
+  });
+  if (document.fonts && document.fonts.addEventListener) {
+    /* The FIRST open can lazily load the mono font face the panel items use, which
+       re-metrics the topbar (its clock/chips share that face) and shifts the bell
+       ~15px after the panel was anchored. Re-anchor when a font load settles. */
+    document.fonts.addEventListener('loadingdone', () => {
+      if (!panel.hidden) positionPanel();
+    });
+  }
   document.addEventListener('click', (e) => {
-    if (!panel.hidden && !bellWrap.contains(e.target)) panel.hidden = true;
+    /* panel lives on <body> now — clicks inside it must not count as "outside" */
+    if (!panel.hidden && !bellWrap.contains(e.target) && !panel.contains(e.target)) {
+      panel.hidden = true;
+    }
   });
 
   /* 跨分頁同步：dashboard 重新整理時寫入 pd_alerts_cache；其他已開啟的非 dashboard

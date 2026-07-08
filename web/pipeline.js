@@ -46,11 +46,11 @@
     create_schedule: { label: '啟動排程', run: function (t) { window.ppScheduleModal(t); } },
     enable_schedule: { label: '啟動排程', run: function (t) { window.ppScheduleModal(t); } },
     edit_universe: { label: '編輯標的', run: function (t) { openDrawer(t, 'input'); } },
-    enable_template: { label: '啟用模板', run: function () { go('settings-prompts.html'); } },
+    enable_template: { label: '啟用模板', run: function () { go('settings.html#prompts'); } },
     edit_templates: { label: '增減模板', run: function (t) { openDrawer(t, 'assemble'); } },
     set_active_calibration: { label: '前往校正版本鏈', run: function (t) { openDrawer(t, 'calib'); } },
-    fund_quota: { label: '前往額度設定', run: function () { go('settings-llm.html'); } },
-    activate_role: { label: '前往 AI 大師設定', run: function () { go('settings-llm.html'); } }
+    fund_quota: { label: '前往額度設定', run: function () { go('settings.html#llm'); } },
+    activate_role: { label: '前往 AI 大師設定', run: function () { go('settings.html#llm'); } }
   };
   window.ppFixKinds = FIX_KINDS;
 
@@ -126,6 +126,7 @@
 
   var SCOPE_META = {
     per_symbol: { cls: 's-sym', label: '單一標的・每檔一張' },
+    per_market: { cls: 's-pf', label: '單一市場・每市場一張' },
     portfolio: { cls: 's-pf', label: '全組合' },
     on_alert: { cls: 's-alert', label: '預警觸發' }
   };
@@ -430,7 +431,7 @@
     var asmActs = el('div', 'pp-d-actions');
     asmActs.style.marginTop = '8px';
     var bLib = el('a', 'btn btn-sm', '前往分析模板庫 →');
-    bLib.href = 'settings-prompts.html';
+    bLib.href = 'settings.html#prompts';
     asmActs.appendChild(bLib);
     sAsm.appendChild(asmActs);
 
@@ -448,7 +449,7 @@
     sRun.appendChild(runBox);
     loadRuns(t, runBox);
     var allRuns = el('a', 'btn btn-sm', '完整運行中心（全部任務）→');
-    allRuns.href = 'settings-scheduler.html';
+    allRuns.href = 'settings.html#scheduler';
     allRuns.style.marginTop = '9px';
     allRuns.style.display = 'inline-flex';
     sRun.appendChild(allRuns);

@@ -12,10 +12,7 @@
 .pp-banner .btn-link { font-size: 11px; }
 
 /* ===== 命名對照（摺疊） ===== */
-.pp-naming table { margin: 4px 0 2px; border-collapse: collapse; font-size: 11px; }
-.pp-naming td { padding: 3px 16px 3px 0; color: var(--text-2); }
-.pp-naming td:first-child { color: var(--text-3); }
-.pp-naming td b { color: var(--text); font-weight: 500; }
+/* .pp-naming (提案時代命名對照表) removed 2026-07-07 (FM4) — git history preserves it. */
 
 /* ===== 全局健康列 ===== */
 .pp-health {
@@ -59,7 +56,12 @@
 .pp-card.lv-idle { opacity: 0.72; }
 
 .pp-card-head { display: flex; align-items: center; gap: 10px; }
-.pp-card-name { font-size: 14px; font-weight: 700; color: var(--text); }
+/* FM1 fix: a squeezed flex child wraps CJK one char per line（「持/倉/週/報」）—
+   the name ellipsizes instead of collapsing. */
+.pp-card-name {
+  font-size: 14px; font-weight: 700; color: var(--text);
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .pp-scope {
   font-size: 10px; padding: 1px 8px; border-radius: 999px;
   border: 1px solid var(--border); color: var(--text-2); white-space: nowrap;

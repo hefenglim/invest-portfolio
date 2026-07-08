@@ -3,191 +3,20 @@
 <head>
 <meta charset="UTF-8"></meta>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
-<title>portfolio-dash — 帳戶與費率</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"></link>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
-<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css"></link>
-<link rel="stylesheet" href="settings.css"></link>
-<link rel="stylesheet" href="input.css"></link>
-<style>
-  .acct-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px var(--pad) 14px; }
-  .acct-card {
-    background: var(--panel-2); border: 1px solid var(--border-soft);
-    border-radius: var(--radius); padding: 13px 15px;
-    display: flex; flex-direction: column; gap: 8px;
-  }
-  .acct-name { font-weight: 700; font-size: 13px; }
-  .acct-kv { display: flex; justify-content: space-between; font-size: 11px; border-bottom: 1px dashed var(--border-soft); padding: 4px 0; }
-  .acct-kv:last-of-type { border-bottom: none; }
-  .acct-kv .k { color: var(--text-3); white-space: nowrap; }
-  .acct-kv .v { font-family: var(--font-num); }
-  .div-mode {
-    align-self: flex-start; font-size: 10px; padding: 0 8px; line-height: 18px;
-    border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui);
-    white-space: nowrap;
-  }
-  .dm-tw { color: var(--accent); border-color: rgba(88, 166, 221, 0.4); background: var(--accent-soft); }
-  .dm-drip { color: var(--series-usd); border-color: rgba(155, 134, 216, 0.4); background: rgba(155, 134, 216, 0.12); }
-  .dm-net { color: var(--text-2); }
-  .ver-banner {
-    margin: 12px var(--pad) 0; font-size: 11px; color: var(--text-2);
-    background: var(--panel-2); border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm); padding: 8px 12px;
-  }
-  details.fee-detail { border-top: 1px solid var(--border-soft); }
-  details.fee-detail > summary {
-    list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px;
-    padding: 11px var(--pad); font-size: 12.5px; font-weight: 700;
-  }
-  details.fee-detail > summary::-webkit-details-marker { display: none; }
-  details.fee-detail > summary .caret { font-size: 10px; color: var(--text-3); transition: transform 0.15s ease; }
-  details.fee-detail[open] > summary .caret { transform: rotate(90deg); }
-  .fee-rows { padding: 0 var(--pad) 14px; display: flex; flex-direction: column; gap: 4px; }
-  .fee-row { display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; padding: 5px 0; border-bottom: 1px dashed var(--border-soft); }
-  .fee-row:last-child { border-bottom: none; }
-  .fee-row .k { color: var(--text-3); }
-  .fee-row .v { font-family: var(--font-num); }
-  .fee-row .v.placeholder { color: var(--amber); font-family: var(--font-ui); font-size: 10.5px; }
-  .gen-rows { padding: 12px var(--pad) 14px; display: flex; flex-direction: column; }
-  .gen-row { display: grid; grid-template-columns: 180px 1fr; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border-soft); font-size: 12px; align-items: center; }
-  .gen-row:last-child { border-bottom: none; }
-  .gen-row .k { color: var(--text-3); font-size: 11px; }
-  .provider-chips { display: flex; gap: 6px; align-items: center; }
-  .provider-chips .arrow { color: var(--text-3); font-size: 10px; }
-  @media (max-width: 1200px) { .acct-grid { grid-template-columns: repeat(2, 1fr); } }
-</style>
+<!-- WPF (2026-07-08): the standalone settings pages are retired duplicates of the
+     canonical TABBED settings.html. The file stays so old bookmarks land on the
+     right tab; the query string forwards (deep-link params like req_since keep
+     working) and the hash is forced to this page's tab. -->
+<meta http-equiv="refresh" content="0; url=settings.html#accounts"></meta>
+<title>portfolio-dash — 帳戶與費率（已合併至系統設定）</title>
+<script>
+  window.location.replace('settings.html' + window.location.search + '#accounts');
+</script>
 </head>
-<body data-page="settings-accounts" data-title="帳戶與費率">
-<div class="shell">
-<aside id="sidebar"></aside>
-<div class="shell-main">
-<header id="topbar" class="topbar"></header>
-<div class="page">
-
-  <!-- 授權用戶 -->
-  <section class="panel" data-screen-label="授權用戶">
-    <div class="panel-head">
-      <h2 class="panel-title">授權用戶</h2>
-      <span class="panel-sub">可登入本系統的帳號；投資人稱號會用於儀表板問候</span>
-    </div>
-    <div id="users-wrap"></div>
-    <div class="user-add">
-      <div class="field"><label for="nu-name">投資人稱號</label><input class="input" id="nu-name" placeholder="例如：家明、媽媽的帳戶"></input></div>
-      <div class="field"><label for="nu-user">帳號</label><input class="input" id="nu-user" autocomplete="off" spellcheck="false" placeholder="登入用帳號"></input></div>
-      <div class="field"><label for="nu-pass">密碼</label><input class="input" id="nu-pass" type="password" autocomplete="new-password" placeholder="登入用密碼"></input></div>
-      <button class="btn btn-primary" id="nu-add" type="button">新增用戶</button>
-    </div>
-    <div class="user-note">帳號密碼由後端帶雜湊儲存（/api/users）。新增第一個用戶即啟用帳密保護，下次進入需登入。</div>
-  </section>
-
-  <!-- A 帳戶卡 -->
-  <section class="panel" data-screen-label="帳戶">
-    <div class="panel-head">
-      <h2 class="panel-title">帳戶</h2>
-      <span class="panel-sub">v1 唯讀 — 帳戶由設定檔定義</span>
-    </div>
-    <div class="acct-grid">
-      <div class="acct-card">
-        <span class="acct-name">台灣券商</span>
-        <span class="div-mode dm-tw">股利：成本沖減</span>
-        <div class="acct-kv"><span class="k">結算幣別</span><span class="v">TWD</span></div>
-        <div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div>
-        <div class="acct-kv"><span class="k">費率規則</span><span class="v">tw_default</span></div>
-      </div>
-      <div class="acct-card">
-        <span class="acct-name">嘉信 Schwab</span>
-        <span class="div-mode dm-drip">股利：DRIP 預扣 30%</span>
-        <div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div>
-        <div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div>
-        <div class="acct-kv"><span class="k">費率規則</span><span class="v">schwab_zero</span></div>
-      </div>
-      <div class="acct-card">
-        <span class="acct-name">Moomoo 美股</span>
-        <span class="div-mode dm-drip">股利：DRIP 預扣 30%</span>
-        <div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div>
-        <div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div>
-        <div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_us</span></div>
-      </div>
-      <div class="acct-card">
-        <span class="acct-name">Moomoo 馬股</span>
-        <span class="div-mode dm-net">股利：淨額</span>
-        <div class="acct-kv"><span class="k">結算幣別</span><span class="v">MYR</span></div>
-        <div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div>
-        <div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_my</span></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- B 費率明細 -->
-  <section class="panel" data-screen-label="費率明細">
-    <div class="panel-head">
-      <h2 class="panel-title">費率明細</h2>
-    </div>
-    <div class="ver-banner">費率為版本化設定 — 修改需經設定檔變更紀錄（v1 唯讀）。</div>
-    <div style="height: 8px;"></div>
-
-    <details class="fee-detail" open="open">
-      <summary><span class="caret">▶</span>台灣券商 <span class="panel-sub num">tw_default</span></summary>
-      <div class="fee-rows">
-        <div class="fee-row"><span class="k">券商費率</span><span class="v">0.1425%</span></div>
-        <div class="fee-row"><span class="k">折扣</span><span class="v">1.0</span></div>
-        <div class="fee-row"><span class="k">最低手續費</span><span class="v">NT$20</span></div>
-        <div class="fee-row"><span class="k">證交稅（現股）</span><span class="v">0.3%</span></div>
-        <div class="fee-row"><span class="k">證交稅（ETF）</span><span class="v">0.1%</span></div>
-        <div class="fee-row"><span class="k">證交稅（當沖）</span><span class="v">0.15%</span></div>
-        <div class="fee-row"><span class="k">進位規則</span><span class="v">費稅四捨五入至整數 NT$</span></div>
-      </div>
-    </details>
-
-    <details class="fee-detail">
-      <summary><span class="caret">▶</span>嘉信 Schwab <span class="panel-sub num">schwab_zero</span></summary>
-      <div class="fee-rows">
-        <div class="fee-row"><span class="k">佣金</span><span class="v">$0</span></div>
-        <div class="fee-row"><span class="k">SEC fee（賣出）</span><span class="v placeholder">依設定檔</span></div>
-        <div class="fee-row"><span class="k">股利預扣</span><span class="v">30%</span></div>
-      </div>
-    </details>
-
-    <details class="fee-detail">
-      <summary><span class="caret">▶</span>Moomoo 美股 <span class="panel-sub num">moomoo_us</span></summary>
-      <div class="fee-rows">
-        <div class="fee-row"><span class="k">佣金</span><span class="v">$0</span></div>
-        <div class="fee-row"><span class="k">平台費</span><span class="v">USD 0.99 / 筆</span></div>
-        <div class="fee-row"><span class="k">股利預扣</span><span class="v">30%</span></div>
-      </div>
-    </details>
-
-    <details class="fee-detail">
-      <summary><span class="caret">▶</span>Moomoo 馬股 <span class="panel-sub num">moomoo_my</span></summary>
-      <div class="fee-rows">
-        <div class="fee-row"><span class="k">Clearing fee</span><span class="v">0.03%（cap RM1,000）</span></div>
-        <div class="fee-row"><span class="k">Stamp duty</span><span class="v placeholder">依設定檔</span></div>
-        <div class="fee-row"><span class="k">SST</span><span class="v placeholder">依設定檔</span></div>
-      </div>
-    </details>
-  </section>
-
-  <!-- C 一般 -->
-  <section class="panel" data-screen-label="一般">
-    <div class="panel-head">
-      <h2 class="panel-title">一般</h2>
-      <span class="panel-sub">唯讀</span>
-    </div>
-    <div class="gen-rows">
-      <div class="gen-row"><span class="k">報告幣別</span><span class="v num">TWD</span></div>
-      <div class="gen-row"><span class="k">顯示時區</span><span class="v num">Asia/Taipei</span></div>
-    </div>
-  </section>
-
-</div>
-</div>
-</div>
-
-<script src="api.js"></script>
-<script src="shell.js"></script>
-<script src="alerts.js"></script>
-<script src="settings-users.js"></script>
+<body>
+<p style="font-family: sans-serif; padding: 24px;">
+  本頁已合併至「系統設定 › 帳戶與費率」。若未自動跳轉，請點
+  <a href="settings.html#accounts">settings.html#accounts</a>。
+</p>
 </body>
 </html>

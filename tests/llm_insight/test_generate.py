@@ -429,7 +429,7 @@ def test_budget_exception_mid_run_keeps_budget_reason(
     def raise_budget(*a: object, **kw: object) -> object:
         raise LLMBudgetExceeded("token budget exhausted")
 
-    monkeypatch.setattr(generate.llm, "complete_structured_meta", raise_budget)
+    monkeypatch.setattr(llm_mod, "complete_structured_meta", raise_budget)
     it_id = _portfolio_combo(conn)
     result = generate.run_insight_type(
         conn, it_id, var_contexts={None: _ctx(conn)},
@@ -547,3 +547,192 @@ def test_same_day_anomaly_rerun_does_not_duplicate(
             now=t,
         )
     assert len(istore.list_cards(conn, insight_type_id=it.id)) == 1
+
+
+# --- per_market scope (2026-07-05 spec): one card per held market ----------------
+
+
+def _market_combo(conn: sqlite3.Connection) -> int:
+    sp = cs.create_strategy(
+        conn, name="S-market", body="市場部位：{{holdings_json}} 配置：{{allocation_json}}",
+        now=NOW,
+    )
+    it = cs.create_insight_type(conn, name="MarketWeekly", scope="per_market", now=NOW)
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    return it.id
+
+
+def _market_ctxs(conn: sqlite3.Connection) -> tuple[dict[str | None, V.VarContext], list[str]]:
+    data = build_dashboard(conn, now=NOW, reporting=Currency.TWD)
+    markets = sorted({h.market.value for h in data.holdings})
+    ctxs: dict[str | None, V.VarContext] = {}
+    for mk in markets:
+        ctxs[mk] = V.VarContext(data=data, now=NOW, market=mk)
+    return ctxs, markets
+
+
+def test_per_market_run_one_card_per_held_market(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_llm(monkeypatch)
+    it_id = _market_combo(conn)
+    ctxs, markets = _market_ctxs(conn)
+    assert len(markets) >= 2  # the golden book spans TW + US at least
+    result = generate.run_insight_type(
+        conn, it_id, var_contexts=ctxs,
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=markets),
+        now=NOW,
+    )
+    assert result.status == "ok"
+    cards = istore.list_cards(conn, insight_type_id=it_id)
+    assert len(cards) == len(markets)
+    # the market code rides the symbol column (spec: API/前端以此篩選).
+    assert sorted(c.symbol or "" for c in cards) == markets
+
+
+def test_per_market_prompt_never_leaks_other_market(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # THE guard of the spec: a TW card's assembled input must not contain any
+    # US-held symbol (cross-market misquotes die at the source).
+    prompts: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        msgs = kw["messages"]
+        assert isinstance(msgs, list)
+        prompts.append(str(msgs[0]["content"]))
+        return _Resp(_CARD_JSON)
+
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    it_id = _market_combo(conn)
+    ctxs, markets = _market_ctxs(conn)
+    generate.run_insight_type(
+        conn, it_id, var_contexts=ctxs,
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=markets),
+        now=NOW,
+    )
+    data = build_dashboard(conn, now=NOW, reporting=Currency.TWD)
+    by_market: dict[str, set[str]] = {}
+    for h in data.holdings:
+        by_market.setdefault(h.market.value, set()).add(h.symbol)
+    assert len(prompts) == len(markets)
+    for mk, prompt in zip(markets, prompts, strict=True):
+        for other_mk, symbols in by_market.items():
+            if other_mk == mk:
+                continue
+            for sym in symbols:
+                assert sym not in prompt, f"{mk} card leaked {other_mk} symbol {sym}"
+
+
+def test_per_market_empty_universe_blocks_r2(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_llm(monkeypatch)
+    it_id = _market_combo(conn)
+    result = generate.run_insight_type(
+        conn, it_id, var_contexts={},
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=[]),
+        now=NOW,
+    )
+    assert result.status == "skipped"
+    assert result.reason == "R2_universe_empty"
+
+
+# --- Q5 fix (2026-07-07): per_market cards never store a prediction --------------
+
+
+def test_per_market_prediction_stripped_at_store(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The _CARD_JSON reply CARRIES a prediction; a per_market card must store it as
+    # None (otherwise Loop 2 looks up a price for "TW" → endless defer→undetermined).
+    _patch_llm(monkeypatch)
+    it_id = _market_combo(conn)
+    ctxs, markets = _market_ctxs(conn)
+    generate.run_insight_type(
+        conn, it_id, var_contexts=ctxs,
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=markets),
+        now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it_id)
+    assert len(cards) == len(markets)
+    for card in cards:
+        assert card.card.prediction is None
+        assert card.due_at is None  # never enters the Loop-2 due set
+
+
+# --- M4 fix (decision Q1c): the seen price is snapshotted at card-store time ------
+
+
+def test_per_symbol_card_stores_seen_price(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_llm(monkeypatch)
+    sp = cs.create_strategy(conn, name="S", body="{{symbol_detail_json}}", now=NOW)
+    it = cs.create_insight_type(
+        conn, name="Watch", scope="per_symbol",
+        universe={"mode": "custom", "symbols": ["2330"]}, now=NOW,
+    )
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    ctx = _ctx(conn, "2330")
+    ctx.closes = [Decimal("580"), Decimal("600")]  # the close series the model saw
+    generate.run_insight_type(
+        conn, it.id, var_contexts={"2330": ctx},
+        inputs=RunInputs(budget_remaining=Decimal("100"), universe_symbols=["2330"]),
+        now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it.id)
+    assert len(cards) == 1
+    assert cards[0].price_at_create == "600"  # the LAST close fed in, Decimal string
+
+
+def test_portfolio_card_has_no_seen_price(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_llm(monkeypatch)
+    it_id = _portfolio_combo(conn)
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: _ctx(conn)},
+        inputs=RunInputs(budget_remaining=Decimal("100")), now=NOW,
+    )
+    cards = istore.list_cards(conn, insight_type_id=it_id)
+    assert cards[0].price_at_create is None  # no close series fed → no baseline
+
+
+# --- L4 fix: shadow and active lanes never cache-hit each other -------------------
+
+
+def test_shadow_and_active_fingerprints_are_separate_lanes(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {"n": 0}
+
+    def completion(**kw: object) -> _Resp:
+        calls["n"] += 1
+        return _Resp(_CARD_JSON)
+
+    monkeypatch.setattr(llm_mod.litellm, "supports_response_schema", lambda **kw: False)
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    it_id = _portfolio_combo(conn)
+    ctx = _ctx(conn)
+    # active run stores the active-lane card…
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: ctx},
+        inputs=RunInputs(budget_remaining=Decimal("100")), now=NOW,
+    )
+    assert calls["n"] == 1
+    # …a SHADOW run with identical inputs must NOT cache-hit the active card.
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: ctx},
+        inputs=RunInputs(budget_remaining=Decimal("100"), is_shadow=True), now=NOW,
+    )
+    assert calls["n"] == 2  # generated its own shadow card
+    cards = istore.list_cards(conn, insight_type_id=it_id)
+    assert sorted(c.is_shadow for c in cards) == [False, True]
+    # and a REPEAT of each lane is a cache hit within that lane (no third call).
+    generate.run_insight_type(
+        conn, it_id, var_contexts={None: ctx},
+        inputs=RunInputs(budget_remaining=Decimal("100"), is_shadow=True), now=NOW,
+    )
+    assert calls["n"] == 2

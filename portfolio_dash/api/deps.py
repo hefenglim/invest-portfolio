@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency
@@ -19,8 +20,12 @@ def get_conn() -> Iterator[sqlite3.Connection]:
 
 
 def get_now() -> datetime:
-    """Current time in the application timezone (overridden in tests via freezegun)."""
-    return datetime.now(APP_TZ)
+    """Current time in the application timezone (overridden in tests via freezegun).
+
+    Delegates to :func:`shared.clock.app_now` — the SINGLE day-anchor clock shared
+    with the scheduler's cron path (decision Q6, 2026-07-07).
+    """
+    return app_now()
 
 
 def get_reporting() -> Currency:

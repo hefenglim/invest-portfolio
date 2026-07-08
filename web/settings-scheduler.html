@@ -3,127 +3,20 @@
 <head>
 <meta charset="UTF-8"></meta>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
-<title>portfolio-dash — 排程</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"></link>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
-<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css"></link>
-<link rel="stylesheet" href="settings.css"></link>
-<link rel="stylesheet" href="trades.css"></link>
-<link rel="stylesheet" href="input.css"></link>
-<style>
-  .last-run { display: inline-flex; align-items: center; gap: 7px; cursor: default; }
-  .run-dot { width: 7px; height: 7px; border-radius: 50%; }
-  .dot-ok { background: var(--ok); }
-  .dot-err { background: var(--up); }
-  .err-inline { font-size: 10px; color: var(--up); margin-top: 2px; }
-  .run-result { margin-top: 5px; }
-  .pill-warn { color: var(--amber); border-color: rgba(217, 161, 63, 0.4); background: var(--amber-soft); }
-  #jobs-table td { vertical-align: top; padding-top: 9px; padding-bottom: 9px; }
-  .cron-friendly { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .cron-sel { width: 80px; font-size: 11px; padding: 4px 6px; }
-  .cron-time { width: 80px; font-size: 11px; padding: 4px 6px; font-family: var(--font-num); }
-  .cron-adv { font-size: 10px; padding: 2px 8px; color: var(--text-3); }
-  .cron-human { margin-top: 3px; font-size: 10px; }
-</style>
-</head>
-<body data-page="settings-scheduler" data-title="排程">
-<div class="shell">
-<aside id="sidebar"></aside>
-<div class="shell-main">
-<header id="topbar" class="topbar"></header>
-<div class="page">
-
-  <!-- A 排程工作表 -->
-  <section class="panel" data-screen-label="排程工作表">
-    <div class="panel-head">
-      <h2 class="panel-title">排程工作表</h2>
-      <span class="panel-sub">cron 可直接編輯，下方為人話翻譯；各工作依其市場時區執行</span>
-    </div>
-    <div class="table-wrap">
-      <table class="data" id="jobs-table">
-        <thead>
-          <tr>
-            <th class="col-text">工作</th>
-            <th>啟用</th>
-            <th class="col-text">排程 (cron)</th>
-            <th class="col-text">時區</th>
-            <th class="col-text">上次執行</th>
-            <th>下次執行</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="jobs-body"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- B 執行歷史 -->
-  <section class="panel" data-screen-label="執行歷史">
-    <div class="panel-head">
-      <h2 class="panel-title">排程執行歷史</h2>
-      <span class="panel-sub">每次執行記錄「哪個資料源、查了哪些標的、失敗哪些」；滑鼠停留摘要可看完整內容</span>
-    </div>
-    <div class="filter-bar" id="hist-filter"></div>
-    <div class="table-wrap">
-      <table class="data">
-        <thead>
-          <tr>
-            <th>時間</th>
-            <th class="col-text">工作</th>
-            <th>狀態</th>
-            <th class="col-text">摘要（來源與對象）</th>
-            <th>耗時</th>
-            <th>費用</th>
-          </tr>
-        </thead>
-        <tbody id="hist-body"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- C 系統操作記錄 (2026-07-03, item 8) -->
-  <section class="panel" data-screen-label="系統操作記錄">
-    <div class="panel-head">
-      <h2 class="panel-title">系統操作記錄</h2>
-      <span class="panel-sub">網頁上每一筆「會改變資料」的動作（寫入、更正、更新報價、設定變更…）；試算與預覽不記錄</span>
-    </div>
-    <div class="table-wrap">
-      <table class="data">
-        <thead>
-          <tr>
-            <th>時間</th>
-            <th class="col-text">動作</th>
-            <th class="col-text">使用者</th>
-            <th class="col-text">端點</th>
-            <th>結果</th>
-            <th>耗時</th>
-          </tr>
-        </thead>
-        <tbody id="syslog-body"></tbody>
-      </table>
-    </div>
-  </section>
-
-</div>
-</div>
-</div>
-
-<script src="api.js"></script>
-<script src="shell.js"></script>
-<script src="format.js"></script>
-<script src="export.js"></script>
-<script src="alerts.js"></script>
-<script src="settings-scheduler.js"></script>
+<!-- WPF (2026-07-08): the standalone settings pages are retired duplicates of the
+     canonical TABBED settings.html. The file stays so old bookmarks land on the
+     right tab; the query string forwards (deep-link params like req_since keep
+     working) and the hash is forced to this page's tab. -->
+<meta http-equiv="refresh" content="0; url=settings.html#scheduler"></meta>
+<title>portfolio-dash — 排程（已合併至系統設定）</title>
 <script>
-/* glue: job_runs CSV export（依目前篩選） */
-(function () {
-  var hist = document.getElementById('hist-body');
-  if (!hist || !window.pdExport) return;
-  var head = hist.closest('.panel').querySelector('.panel-head');
-  head.appendChild(window.pdExport.tableButton(hist.closest('table'), 'job_runs.csv'));
-})();
+  window.location.replace('settings.html' + window.location.search + '#scheduler');
 </script>
+</head>
+<body>
+<p style="font-family: sans-serif; padding: 24px;">
+  本頁已合併至「系統設定 › 排程」。若未自動跳轉，請點
+  <a href="settings.html#scheduler">settings.html#scheduler</a>。
+</p>
 </body>
 </html>

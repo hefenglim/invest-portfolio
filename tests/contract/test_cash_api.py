@@ -111,3 +111,21 @@ def test_actions_logged(api_client: TestClient) -> None:
         "ccy": "TWD", "amount": "100"})
     log = api_client.get("/api/system-log", params={"limit": 20}).json()["rows"]
     assert any(x["action"] == "入金／出金" for x in log)
+
+
+def test_movements_pagination(api_client: TestClient) -> None:
+    """WPE: /api/cash movements page via limit/offset; total_count is the whole ledger."""
+    for i in range(1, 6):
+        r = api_client.post("/api/cash/movements", json={
+            "account_id": "tw_broker", "date": f"2026-01-0{i}", "kind": "deposit",
+            "ccy": "TWD", "amount": str(1000 * i)})
+        assert r.status_code == 201
+    p1 = api_client.get("/api/cash", params={"limit": 2, "offset": 0}).json()["movements"]
+    p2 = api_client.get("/api/cash", params={"limit": 2, "offset": 2}).json()["movements"]
+    assert p1["total_count"] == 5 and p2["total_count"] == 5
+    assert len(p1["rows"]) == 2 and len(p2["rows"]) == 2
+    assert {r["id"] for r in p1["rows"]}.isdisjoint({r["id"] for r in p2["rows"]})
+    # balances are NOT affected by the movements page window
+    full = api_client.get("/api/cash", params={"limit": 2, "offset": 4}).json()
+    assert len(full["movements"]["rows"]) == 1
+    assert full["balances"]  # balance cards intact on any page

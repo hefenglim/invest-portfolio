@@ -326,3 +326,87 @@ def test_put_quota_threshold(client: TestClient) -> None:
 def _conn_of(client: TestClient) -> sqlite3.Connection:
     """Recover the overridden connection so a test can seed extra rows."""
     return client.app.dependency_overrides[get_conn]()  # type: ignore[attr-defined,no-any-return]
+
+
+# --- GET /api/llm/requests (2026-07-07 request ledger) ---------------------------
+
+
+def test_llm_requests_ledger_lists_and_filters(api_client: TestClient) -> None:
+    from decimal import Decimal as D
+
+    from portfolio_dash.api.deps import get_conn as _dep
+    from portfolio_dash.shared.llm import log_usage
+
+    conn = api_client.app.dependency_overrides[_dep]()  # type: ignore[attr-defined]
+    log_usage(conn, model="gemini-2.5-flash-lite", agent="insight_generate",
+              input_tokens=6257, output_tokens=1357, cost=D("0.0011685"),
+              cache_tokens=1024)
+    log_usage(conn, model="haiku-4.5", agent="news_organize",
+              input_tokens=500, output_tokens=60, cost=D("0.0006"))
+    r = api_client.get("/api/llm/requests").json()
+    assert r["totals"]["count"] >= 2
+    newest = r["rows"][0]
+    assert set(newest) == {"ts", "model", "agent", "tokens_in", "tokens_out",
+                           "cache_tokens", "cost_usd"}
+    assert newest["model"] == "haiku-4.5" and newest["cache_tokens"] == 0
+    second = r["rows"][1]
+    assert second["cache_tokens"] == 1024 and second["cost_usd"] == "0.0011685"
+    # ts is Taipei-normalized "YYYY-MM-DD HH:MM:SS"
+    assert len(newest["ts"]) == 19 and newest["ts"][10] == " "
+    # agent filter narrows + totals follow the filter
+    news = api_client.get("/api/llm/requests?agent=news_organize").json()
+    assert news["totals"]["count"] == 1 and news["rows"][0]["agent"] == "news_organize"
+    assert "insight_generate" in news["agents"]  # option list stays global
+
+
+def test_llm_requests_since_until_mixed_ts_formats(api_client: TestClient) -> None:
+    """WPB: the ts range filter compares in UTC across BOTH stored ts generations.
+
+    One legacy naive-UTC row (02:00 UTC == 10:00 Taipei) and one current +08:00 row
+    (12:00 Taipei). A Taipei-expressed window 09:00–11:00 must catch ONLY the legacy
+    row; a wide window catches both; totals follow the filtered set.
+    """
+    from decimal import Decimal as D
+
+    from portfolio_dash.api.deps import get_conn as _dep
+
+    conn = api_client.app.dependency_overrides[_dep]()  # type: ignore[attr-defined]
+    conn.execute(
+        "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost) "
+        "VALUES (?,?,?,?,?,?)",
+        ("2026-07-06T02:00:00", "legacy-model", "win_test", 10, 5, str(D("0.001"))),
+    )
+    conn.execute(
+        "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost) "
+        "VALUES (?,?,?,?,?,?)",
+        ("2026-07-06T12:00:00+08:00", "new-model", "win_test", 20, 8, str(D("0.002"))),
+    )
+    conn.commit()
+
+    narrow = api_client.get("/api/llm/requests", params={
+        "agent": "win_test",
+        "since": "2026-07-06T09:00:00+08:00",
+        "until": "2026-07-06T11:00:00+08:00",
+    }).json()
+    assert narrow["totals"]["count"] == 1
+    assert narrow["rows"][0]["model"] == "legacy-model"
+    assert narrow["totals"]["total_cost_usd"] == "0.001"
+    # display ts is Taipei-normalized for the aware row; legacy naive stays as stored
+    wide = api_client.get("/api/llm/requests", params={
+        "agent": "win_test",
+        "since": "2026-07-06T00:00:00+08:00",
+        "until": "2026-07-06T23:59:59+08:00",
+    }).json()
+    assert wide["totals"]["count"] == 2
+    assert {r["model"] for r in wide["rows"]} == {"legacy-model", "new-model"}
+    # an open-ended window (since only) works too
+    tail = api_client.get("/api/llm/requests", params={
+        "agent": "win_test", "since": "2026-07-06T11:00:00+08:00",
+    }).json()
+    assert tail["totals"]["count"] == 1 and tail["rows"][0]["model"] == "new-model"
+
+
+def test_llm_requests_invalid_since_400(api_client: TestClient) -> None:
+    r = api_client.get("/api/llm/requests", params={"since": "not-a-time"})
+    assert r.status_code == 400
+    assert r.json()["error"]["field"] == "since"

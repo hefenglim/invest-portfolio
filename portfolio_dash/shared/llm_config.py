@@ -83,8 +83,12 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 
 
 def create_llm_tables(conn: sqlite3.Connection) -> None:
-    """Create all four LLM tables idempotently."""
+    """Create all four LLM tables idempotently (+ additive column migrations)."""
     conn.executescript(_DDL)
+    # Request-detail ledger (2026-07-07): provider-reported cached prompt tokens per call.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_usage)")}
+    if "cache_tokens" not in cols:
+        conn.execute("ALTER TABLE llm_usage ADD COLUMN cache_tokens INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 

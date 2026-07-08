@@ -4,12 +4,12 @@ import base64
 import json
 import logging
 import sqlite3
-from datetime import UTC, datetime
 from decimal import Decimal
 
 import litellm as litellm  # re-exported so tests can monkeypatch llm_mod.litellm
 from pydantic import BaseModel, ValidationError
 
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.llm_config import (
     AINotActivated,
     LLMBudgetExceeded,
@@ -81,6 +81,23 @@ def cost_of(pricing: ModelPricing, input_tokens: int, output_tokens: int) -> Dec
     ) / Decimal("1000000")
 
 
+def cached_tokens_of(usage: object) -> int:
+    """Provider-reported cached prompt tokens from a LiteLLM usage object (0 when absent).
+
+    LiteLLM normalizes OpenAI-style ``prompt_tokens_details.cached_tokens``; some
+    providers expose ``cache_read_input_tokens`` instead. Both read defensively — a
+    missing field is 0, never an error (the ledger must not break a call).
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    value = getattr(details, "cached_tokens", None) if details is not None else None
+    if value is None:
+        value = getattr(usage, "cache_read_input_tokens", None)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def log_usage(
     conn: sqlite3.Connection,
     *,
@@ -89,12 +106,14 @@ def log_usage(
     input_tokens: int,
     output_tokens: int,
     cost: Decimal,
+    cache_tokens: int = 0,
 ) -> None:
     """Append one row to the ``llm_usage`` table and commit."""
     conn.execute(
-        "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost) "
-        "VALUES (?,?,?,?,?,?)",
-        (datetime.now(UTC).isoformat(), model, agent, input_tokens, output_tokens, str(cost)),
+        "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost, "
+        "cache_tokens) VALUES (?,?,?,?,?,?,?)",
+        (app_now().isoformat(), model, agent, input_tokens, output_tokens, str(cost),
+         cache_tokens),
     )
     conn.commit()
     # Structured log of the LLM call (spec 19.4): one point covers both call paths
@@ -205,6 +224,8 @@ class StructuredCompletion[T: BaseModel](BaseModel):
     value: T
     model: str
     cost: Decimal
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 def _complete_with_meta[T: BaseModel](
@@ -258,6 +279,7 @@ def _complete_with_meta[T: BaseModel](
             input_tokens=usage.prompt_tokens,
             output_tokens=usage.completion_tokens,
             cost=cost,
+            cache_tokens=cached_tokens_of(usage),
         )
         try:
             parsed = schema.model_validate_json(content)
@@ -266,7 +288,10 @@ def _complete_with_meta[T: BaseModel](
                 parsed = schema.model_validate_json(_extract_json(content))
             except (ValidationError, json.JSONDecodeError, ValueError):
                 continue
-        return StructuredCompletion(value=parsed, model=model.model_alias, cost=cost)
+        return StructuredCompletion(
+            value=parsed, model=model.model_alias, cost=cost,
+            tokens_in=usage.prompt_tokens, tokens_out=usage.completion_tokens,
+        )
     raise LLMUnavailable(f"invalid structured output from {model.id}")
 
 
@@ -391,6 +416,7 @@ def _text_with(
         input_tokens=usage.prompt_tokens,
         output_tokens=usage.completion_tokens,
         cost=cost,
+        cache_tokens=cached_tokens_of(usage),
     )
     return TextCompletion(
         reply=content,

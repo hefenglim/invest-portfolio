@@ -19,6 +19,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -30,6 +31,8 @@ from portfolio_dash.data_ingestion.store import list_dividends
 from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
+from portfolio_dash.news import organizer_prompt as news_organizer_prompt
+from portfolio_dash.news import store as news_store
 from portfolio_dash.portfolio import external_signals as ES
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
@@ -41,7 +44,15 @@ from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
+_TAIPEI = ZoneInfo("Asia/Taipei")  # default clock for the news window when now is absent
+
+# The recent window rendered into price_history_json / price_points (token-bounded).
 _HISTORY_DAYS = 180
+# Longer close series fed to the technical signals so 52-week position / MA120 are honest
+# (52w ≈ 252 sessions ≈ 365 calendar days). SINGLE definition (L3 fix, 2026-07-07):
+# the run path (api/insight_service) imports THIS constant, so preview and execution
+# always see the same technical-signal window.
+_TECHNICAL_HISTORY_DAYS = 400
 
 # FinMind chips variable token -> (source id, FinMind logical dataset) (spec 20.15).
 # The required tier is read live from ``finmind_datasets.DATASET_TIER[dataset]`` and the
@@ -80,8 +91,9 @@ class SystemPromptIn(BaseModel):
 
 class PromptBody(BaseModel):
     body: str
-    scope: str  # "portfolio" | "per_symbol"
+    scope: str  # "portfolio" | "per_symbol" | "per_market"
     symbol: str | None = None
+    market: str | None = None  # per_market preview target ("TW"/"US"/"MY")
 
 
 # --- 6.1 variable registry ----------------------------------------------------
@@ -89,7 +101,8 @@ class PromptBody(BaseModel):
 
 @router.get("/prompt-vars")
 def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
-    """The 29-variable registry (mirrors web/vars.js). ``available`` drives the UI's
+    """The 32-variable registry (vars.js mirror + backend signal/news vars). ``available``
+    drives the UI's
     "需後端新增" markers; chips/sentiment went live (spec 20.2), ai stays False (spec 04).
 
     Each var also carries tier metadata (spec 20.15.3): ``required_tier`` (from the live
@@ -154,6 +167,34 @@ def reset_system_prompt(
 ) -> dict[str, str]:
     """Restore the global system prompt to the official library version."""
     return set_system_prompt(conn, official_templates.SYSTEM_PROMPT_BODY, now=now)
+
+
+# --- news-organizer prompt (batch ④; user-viewable + editable, with reset) -----
+
+
+@router.get("/news-prompt")
+def read_news_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, str]:
+    """The editable news-organizer system prompt (default-seeded from the official library)."""
+    return news_organizer_prompt.get_news_prompt(conn)
+
+
+@router.put("/news-prompt")
+def write_news_prompt(
+    payload: SystemPromptIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, str]:
+    """Overwrite the news-organizer prompt (applies to the next nightly news run)."""
+    return news_organizer_prompt.set_news_prompt(conn, payload.body, now=now)
+
+
+@router.post("/news-prompt/reset")
+def reset_news_prompt(
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, str]:
+    """Restore the news-organizer prompt to the official library version."""
+    return news_organizer_prompt.reset_news_prompt(conn, now=now)
 
 
 # --- shared assembly ----------------------------------------------------------
@@ -227,8 +268,25 @@ def _finmind_var(
     return result
 
 
+_FNG_TREND_DAYS = 7
+
+
+def _fng_scores_newest_first(conn: sqlite3.Connection) -> list[Decimal]:
+    """The last ≤7 daily Fear & Greed scores, newest first (for the local trend)."""
+    series = snapshots_store.latest_series(
+        conn, source="sentiment", dataset="fng", symbol=None, n=_FNG_TREND_DAYS
+    )
+    scores: list[Decimal] = []
+    for snap in series:  # latest_series is already newest-first
+        score = ES.to_decimal(snap.payload.get("score"))
+        if score is not None:
+            scores.append(score)
+    return scores
+
+
 def _sentiment_var(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Assemble market_sentiment_json from the latest VIX + Fear & Greed snapshots."""
+    """Assemble market_sentiment_json from the latest VIX + Fear & Greed snapshots
+    (VIX zone + F&G local five-zone + 7-day F&G trend — batch ③)."""
     vix_snap = snapshots_store.latest_snapshot(
         conn, source="sentiment", dataset="vix", symbol=None
     )
@@ -244,7 +302,61 @@ def _sentiment_var(conn: sqlite3.Connection) -> dict[str, Any]:
         as_of_vix=vix_snap.as_of.isoformat() if vix_snap is not None else None,
         fng=fng,
         as_of_fng=fng_snap.as_of.isoformat() if fng_snap is not None else None,
+        fng_scores_newest_first=_fng_scores_newest_first(conn),
     )
+
+
+def _fear_greed_var(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Assemble the standalone fear_greed_json (score + local zone + 7-day trend).
+
+    A dedicated variable so custom prompts can reference F&G independently of VIX
+    (2026-07-05 user request); derived from the same snapshots as market_sentiment_json.
+    """
+    fng_snap = snapshots_store.latest_snapshot(
+        conn, source="sentiment", dataset="fng", symbol=None
+    )
+    if fng_snap is None:
+        return {"unavailable": True, "last_as_of": None}
+    score = ES.to_decimal(fng_snap.payload.get("score"))
+    scores = _fng_scores_newest_first(conn)
+    return {
+        "score": fng_snap.payload.get("score"),
+        "zone": ES.fear_greed_zone(score) if score is not None else None,
+        "trend": ES.fear_greed_trend(scores) if scores else None,
+        "last_as_of": fng_snap.as_of.isoformat(),
+    }
+
+
+_NEWS_WINDOW_DAYS = 7
+_NEWS_MAX_ITEMS = 10
+
+
+def _news_var(symbol: str, *, now: datetime) -> dict[str, Any]:
+    """Assemble symbol_news_json from the separate news DB (batch ④).
+
+    Reads AI-organized news mentioning *symbol* within the last ``_NEWS_WINDOW_DAYS``
+    days from ``news.db``. Degrades to an honest empty payload when the news DB is absent
+    or has nothing (the nightly pipeline may not have run). Only the summary + metadata are
+    exposed — never full article bodies.
+    """
+    since = (now.date() - timedelta(days=_NEWS_WINDOW_DAYS)).isoformat()
+    try:
+        with news_store.news_session() as nconn:
+            rows = news_store.query_by_symbol(
+                nconn, symbol, since_date=since, limit=_NEWS_MAX_ITEMS
+            )
+    except Exception:  # noqa: BLE001 — a news-DB hiccup must never break card rendering
+        rows = []
+    if not rows:
+        return {"symbol": symbol, "since": since, "items": [], "count": 0}
+    items = [
+        {
+            "date": r.news_date, "title": r.title, "summary": r.body_summary,
+            "source": r.source, "lang": r.lang, "link": r.link,
+        }
+        for r in rows
+    ]
+    return {"symbol": symbol, "since": since, "items": items, "count": len(items)}
 
 
 def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -259,8 +371,10 @@ def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
     return ES.build_index_quotes(quotes, as_of=snap.as_of.isoformat())
 
 
-def _external_vars(conn: sqlite3.Connection, symbol: str | None) -> dict[str, Any]:
-    """Assemble the chips/sentiment/index variable values from external snapshots.
+def _external_vars(
+    conn: sqlite3.Connection, symbol: str | None, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Assemble the chips/sentiment/index/news variable values from external snapshots.
 
     Conn-bearing reads + pure derivation (``portfolio.external_signals``) happen HERE,
     not in ``llm_insight`` (layering, spec 20.3). Portfolio-scope sentiment/index are
@@ -269,6 +383,7 @@ def _external_vars(conn: sqlite3.Connection, symbol: str | None) -> dict[str, An
     """
     out: dict[str, Any] = {
         "market_sentiment_json": _sentiment_var(conn),
+        "fear_greed_json": _fear_greed_var(conn),
         "index_quotes_json": _index_var(conn),
     }
     if symbol:
@@ -287,6 +402,7 @@ def _external_vars(conn: sqlite3.Connection, symbol: str | None) -> dict[str, An
         out["financials_json"] = _finmind_var(
             conn, symbol, dataset="financials", build=ES.build_financials
         )
+        out["symbol_news_json"] = _news_var(symbol, now=now or datetime.now(_TAIPEI))
     return out
 
 
@@ -320,7 +436,7 @@ def _build_context(
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
     symbol = payload.symbol if payload.scope == "per_symbol" else None
-    external_vars = _external_vars(conn, symbol)
+    external_vars = _external_vars(conn, symbol, now=now)  # SR: thread now → news window
     ctx = V.VarContext(
         data=data,
         now=now,  # spec 04.10 {{now}} renders ISO-8601 +08:00 in preview/test
@@ -329,14 +445,21 @@ def _build_context(
         external_vars=external_vars,
         external_reasons=_external_reasons(conn, external_vars),
     )
+    if payload.scope == "per_market" and payload.market:
+        ctx.market = payload.market  # market-sliced preview (2026-07-05 spec)
     if payload.scope == "per_symbol" and payload.symbol:
         as_of = now.date()
-        start = as_of - timedelta(days=_HISTORY_DAYS)
-        history = get_price_history(conn, payload.symbol, start, as_of)
+        # L3 fix: same split as the run path (insight_service._per_symbol_ctx) —
+        # ctx.closes gets the LONG series (honest 52w/MA120 technical signals);
+        # price_points keeps only the recent window (token-bounded).
+        long_hist = get_price_history(
+            conn, payload.symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+        )
         ctx.symbol = payload.symbol
-        ctx.closes = [p.value for p in history]
+        ctx.closes = [p.value for p in long_hist]
+        recent = [p for p in long_hist if p.as_of >= as_of - timedelta(days=_HISTORY_DAYS)]
         ctx.price_points = [
-            {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in history
+            {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in recent
         ]
     return ctx
 

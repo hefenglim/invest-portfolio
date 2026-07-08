@@ -3,151 +3,19 @@
 <head>
 <meta charset="UTF-8"></meta>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
-<title>portfolio-dash — 交易帳本</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"></link>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
-<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css"></link>
-<link rel="stylesheet" href="settings.css"></link>
-<link rel="stylesheet" href="trades.css"></link>
-<link rel="stylesheet" href="input.css"></link>
-<style>
-  tr.expandable { cursor: pointer; }
-  .caret-cell { color: var(--text-3); width: 26px; }
-  tr.detail-row td { background: var(--panel-2); padding: 0; }
-  .snapshot-box {
-    display: flex; flex-direction: column; gap: 6px;
-    padding: 10px 16px 12px 44px;
-    font-size: 11px;
-  }
-  .snap-title { color: var(--text-3); font-size: 10px; letter-spacing: 0.05em; }
-  .snap-kv { display: flex; gap: 16px; flex-wrap: wrap; }
-  .snap-kv span {
-    background: var(--panel-3); border-radius: 3px;
-    padding: 2px 8px; color: var(--series-usd); font-size: 10.5px;
-  }
-  .snap-note { color: var(--text-2); }
-  .type-chip {
-    font-size: 10px; padding: 0 8px; line-height: 17px;
-    border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui);
-  }
-  .chip-cash { color: var(--accent); border-color: rgba(88, 166, 221, 0.4); background: var(--accent-soft); }
-  .chip-stock { color: var(--series-myr); border-color: rgba(217, 161, 63, 0.4); background: var(--amber-soft); }
-  .chip-drip { color: var(--series-usd); border-color: rgba(155, 134, 216, 0.4); background: rgba(155, 134, 216, 0.12); }
-  .chip-net { color: var(--text-2); }
-  .append-note {
-    padding: 10px var(--pad) 14px;
-    font-size: 10.5px; color: var(--text-3);
-  }
-  .date-range { display: flex; gap: 6px; align-items: center; }
-  .date-range .input { width: 130px; }
-</style>
+<!-- FM6 (2026-07-07): ledger.html is a retired duplicate of trades.html (its stale
+     default date filter hid recent trades). The file stays so old bookmarks land on
+     the live page; query/hash forward so deep links keep working. -->
+<meta http-equiv="refresh" content="0; url=trades.html"></meta>
+<title>portfolio-dash — 交易帳本（已合併至 trades）</title>
+<script>
+  window.location.replace('trades.html' + window.location.search + window.location.hash);
+</script>
 </head>
-<body data-page="ledger" data-title="交易帳本">
-<div class="shell">
-<aside id="sidebar"></aside>
-<div class="shell-main">
-<header id="topbar" class="topbar"></header>
-<div class="page">
-
-  <section class="panel" data-screen-label="帳本檢視">
-    <div class="panel-head">
-      <h2 class="panel-title">帳本檢視</h2>
-      <span class="panel-sub">四本帳唯讀瀏覽・金額為原幣</span>
-      <span class="spacer"></span>
-      <div class="segmented">
-        <button type="button" id="tab-tx">交易</button>
-        <button type="button" id="tab-div">股利</button>
-        <button type="button" id="tab-fx">換匯</button>
-        <button type="button" id="tab-open">期初庫存</button>
-      </div>
-    </div>
-
-    <div class="filter-bar" id="ledger-filters"></div>
-    <div class="filter-bar" style="padding-top: 6px;">
-      <span class="group-label">代號</span>
-      <input class="input" id="ledger-sym-search" type="search" placeholder="搜尋…" style="max-width: 150px;"></input>
-      <span class="divider"></span>
-      <span class="group-label">日期區間</span>
-      <span class="date-range">
-        <input class="input" id="ledger-date-from" type="date" value="2026-01-01"></input>
-        <span class="hint">至</span>
-        <input class="input" id="ledger-date-to" type="date" value="2026-06-11"></input>
-      </span>
-    </div>
-
-    <!-- 交易 -->
-    <div class="mode-pane" id="pane-tx" data-screen-label="交易帳">
-      <div class="table-wrap">
-        <table class="data">
-          <thead>
-            <tr>
-              <th></th><th>日期</th><th class="col-text">帳戶</th><th class="col-text">代號</th>
-              <th class="col-text">買賣</th><th>股數</th><th>價格</th><th>手續費</th><th>稅</th><th>總額</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="tx-body"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- 股利 -->
-    <div class="mode-pane" id="pane-div" data-screen-label="股利帳">
-      <div class="table-wrap">
-        <table class="data">
-          <thead>
-            <tr>
-              <th>日期</th><th class="col-text">帳戶</th><th class="col-text">代號</th><th class="col-text">類型</th>
-              <th>Gross</th><th>預扣</th><th>Net</th><th>再投資</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="div-body"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- 換匯 -->
-    <div class="mode-pane" id="pane-fx" data-screen-label="換匯帳">
-      <div class="table-wrap">
-        <table class="data">
-          <thead>
-            <tr>
-              <th>日期</th><th class="col-text">帳戶</th><th>賣出</th><th>買入</th><th>隱含匯率</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="fx-body"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- 期初 -->
-    <div class="mode-pane" id="pane-open" data-screen-label="期初帳">
-      <div class="table-wrap">
-        <table class="data">
-          <thead>
-            <tr>
-              <th class="col-text">帳戶</th><th class="col-text">代號</th><th>股數</th>
-              <th>原始均價</th><th>原始總成本</th><th>建檔日</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="open-body"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="append-note">帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。點擊交易列可展開費率規則快照。</div>
-  </section>
-
-</div>
-</div>
-</div>
-
-<script src="api.js"></script>
-<script src="shell.js"></script>
-<script src="format.js"></script>
-<script src="export.js"></script>
-<script src="alerts.js"></script>
-<script src="ledger.js"></script>
+<body>
+<p style="font-family: sans-serif; padding: 24px;">
+  本頁已合併至「交易帳本」。若未自動跳轉，請點
+  <a href="trades.html">trades.html</a>。
+</p>
 </body>
 </html>

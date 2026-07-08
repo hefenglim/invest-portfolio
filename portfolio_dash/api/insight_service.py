@@ -29,6 +29,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from portfolio_dash.api.routers.prompts import (
+    _HISTORY_DAYS,
+    _TECHNICAL_HISTORY_DAYS,
     _dividend_rows,
     _external_reasons,
     _external_vars,
@@ -68,7 +70,8 @@ from portfolio_dash.shared.wire import decimal_str
 
 logger = logging.getLogger(__name__)
 
-_HISTORY_DAYS = 180
+# _HISTORY_DAYS / _TECHNICAL_HISTORY_DAYS are imported from the prompts router (L3 fix):
+# ONE definition, so the 06 preview and the 04 run path can never drift apart again.
 
 # A pure-narrative card (or a quant card whose narrative is the deciding signal) is a "miss"
 # when the master narrative score is below this threshold (spec 4.4 / decide_miss).
@@ -95,6 +98,15 @@ def calibration_gap(conn: sqlite3.Connection) -> Decimal | None:
     return scoring.calibration_error(rows)
 
 
+def _resolve_markets(data: DashboardData) -> list[str]:
+    """The per_market universe: the sorted market codes among current holdings.
+
+    Holdings carry their market directly (HoldingRow.market); an emptied market simply
+    stops appearing — its card is not produced (spec: 自動跟隨持有市場).
+    """
+    return sorted({h.market.value for h in data.holdings})
+
+
 def _resolve_universe(it: cs.InsightType, data: DashboardData) -> list[str]:
     """The per_symbol universe: custom list, or all current holdings for ``mode:all``."""
     held = sorted({h.symbol for h in data.holdings})
@@ -118,7 +130,7 @@ def _per_symbol_ctx(
     reporting: Currency,
 ) -> V.VarContext:
     """Build a per-symbol VarContext (dashboard + history + external snapshots + fx)."""
-    external_vars = _external_vars(conn, symbol)
+    external_vars = _external_vars(conn, symbol, now=now)
     ctx = V.VarContext(
         data=data,
         symbol=symbol,
@@ -129,10 +141,17 @@ def _per_symbol_ctx(
         external_reasons=_external_reasons(conn, external_vars),
     )
     as_of = now.date()
-    history = get_price_history(conn, symbol, as_of - timedelta(days=_HISTORY_DAYS), as_of)
-    ctx.closes = [p.value for p in history]
+    # SR fix (2026-07-06): the technical signals (52-week position, MA120) need up to ~252
+    # trading sessions, but 180 CALENDAR days ≈ 123 sessions — so fetch a longer close
+    # series (the backfill already stores 365d) for ctx.closes, while price_history_json
+    # keeps only the recent 180d window (then downsampled) to stay token-bounded.
+    long_hist = get_price_history(
+        conn, symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+    )
+    ctx.closes = [p.value for p in long_hist]
+    recent = [p for p in long_hist if p.as_of >= as_of - timedelta(days=_HISTORY_DAYS)]
     ctx.price_points = [
-        {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in history
+        {"date": p.as_of.isoformat(), "close": decimal_str(p.value)} for p in recent
     ]
     return ctx
 
@@ -169,6 +188,12 @@ def run_for_id(
     ``generate.run_insight_type``. ``fired_rule``/``fired_symbol`` are set for an on_alert
     dispatch (R7). ``run_id`` finalizes a pre-inserted running row (async manual run).
     Returns the run result.
+
+    H2 fix (decision Q2a): a DISABLED or ARCHIVED task is enforced HERE, at the execution
+    seam every trigger path (cron dispatch, manual run, on_alert) flows through — the run
+    is skipped and recorded as a ``job_runs`` skip (reason ``task_disabled`` /
+    ``task_archived``), never generated or billed. Preflight G0's "won't execute" promise
+    and the runtime now agree.
     """
     it = cs.get_insight_type(conn, insight_type_id)
     if it is None:
@@ -176,6 +201,16 @@ def run_for_id(
             conn, insight_type_id, var_contexts={}, inputs=RunInputs(
                 budget_remaining=budget_remaining(conn)
             ), now=now, run_id=run_id,
+        )
+    if it.archived or not it.enabled:
+        reason = "task_archived" if it.archived else "task_disabled"
+        detail = "任務已刪除，未執行" if it.archived else "任務已停用，未執行"
+        generate._write_job_run(
+            conn, insight_type_id, status="skipped", reason=reason, detail=detail,
+            cost=Decimal("0"), now=now, run_id=run_id, is_shadow=is_shadow,
+        )
+        return RunResult(
+            status="skipped", reason=reason, cards_created=0, cost_usd=Decimal("0")
         )
 
     data = build_dashboard(conn, now=now, reporting=reporting)
@@ -194,6 +229,15 @@ def run_for_id(
             # not in the holdings/prices) is a missing-price anomaly → zero-LLM card.
             if not ctx.closes and sym not in missing_prices:
                 missing_prices.append(sym)
+    elif it.scope == "per_market":
+        # One card per HELD market (2026-07-05 spec): the market code is the R8 target
+        # key AND the card's symbol column; the VarContext.market filter guarantees the
+        # card's inputs contain only that market's slice.
+        universe_symbols = _resolve_markets(data)
+        for mk in universe_symbols:
+            ctx = _portfolio_ctx(conn, data, now=now, reporting=reporting)
+            ctx.market = mk
+            var_contexts[mk] = ctx
     elif it.scope == "on_alert":
         target = fired_symbol
         if target is not None:
@@ -301,8 +345,14 @@ def _measure_actual(
 
     A None return (or all-None measurement fields) signals the actual value is unavailable
     (missing/halted price) → the caller defers as pending_data (anti-poison). Only
-    ``price_change`` is fully measured in v1 (the close at create vs the close at due);
-    ``volatility``/``relative`` degrade to None when their inputs are absent.
+    ``price_change`` is fully measured in v1; ``volatility``/``relative`` degrade to None
+    when their inputs are absent.
+
+    Baseline (M4 fix, decision Q1c): the card's stored ``price_at_create`` — the last
+    close the model actually saw — is the preferred start price, so the score measures
+    the move from the model's own reference point. LEGACY cards without it fall back to
+    the old basis (the first stored close ON/AFTER the create date), so old cards keep
+    scoring on the basis they were created under.
     """
     symbol = due.symbol
     if symbol is None:
@@ -311,7 +361,11 @@ def _measure_actual(
     due_date = datetime.fromisoformat(due.due_at).date() if due.due_at is not None else None
     if due_date is None:
         return None
-    start_px = _price_on_or_after(conn, symbol, created)
+    start_px = (
+        Decimal(due.price_at_create)
+        if due.price_at_create
+        else _price_on_or_after(conn, symbol, created)
+    )
     end_px = _price_on_or_before(conn, symbol, due_date)
     if start_px is None or end_px is None or start_px == Decimal("0"):
         return None  # price unavailable/halted → pending_data
@@ -343,7 +397,7 @@ def _score_one(
         actual = _measure_actual(conn, due, prediction)
         quant_hit = scoring.score_quant(prediction, actual)
         if quant_hit is None:
-            _defer_or_undetermined(conn, due)
+            _defer_or_undetermined(conn, due, now=now)
             return
 
     narrative_score: int | None = None
@@ -363,7 +417,7 @@ def _score_one(
 
     if prediction is None and narrative_score is None:
         # Pure-narrative card with no master signal → cannot judge yet → defer.
-        _defer_or_undetermined(conn, due)
+        _defer_or_undetermined(conn, due, now=now)
         return
 
     miss = scoring.decide_miss(
@@ -378,19 +432,24 @@ def _score_one(
     )
 
 
-def _defer_or_undetermined(conn: sqlite3.Connection, due: es.DueInsight) -> None:
-    """Bump the defer counter; past ``defer_limit_days`` → terminal undetermined (never miss)."""
+def _defer_or_undetermined(
+    conn: sqlite3.Connection, due: es.DueInsight, *, now: datetime
+) -> None:
+    """Bump the defer counter; past ``defer_limit_days`` → terminal undetermined (never miss).
+
+    ``now`` is the evaluate pass's injected clock (L7 fix — no wall-clock reads here).
+    """
     cfg = cs.get_evolution_config(conn)
     limit = int(cfg["defer_limit_days"])
     latest = es.latest_for_insight(conn, due.insight_id)
     prior = latest.defer_count if latest is not None else 0
     if prior + 1 > limit:
         es.mark_undetermined(
-            conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id
+            conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id, now=now
         )
     else:
         es.bump_defer(
-            conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id
+            conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id, now=now
         )
 
 
@@ -438,12 +497,15 @@ def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
     The registered Loop-2 runner. Reads prices to build each actual measurement, feeds it
     into the pure quant scorer, runs master narrative scoring (skipped/degraded when the
     master role is unset or over budget), and writes ``insight_evaluations`` rows. One bad
-    insight never aborts the rest (degrade, never crash the daily job).
+    insight never aborts the rest (degrade, never crash the daily job). Archived tasks'
+    cards are excluded (L2 fix) — their matured predictions must not keep consuming
+    scoring (incl. master narrative cost) after the task was deleted.
     """
     es.ensure_tables(conn)
+    istore.ensure_tables(conn)  # runs the price_at_create migration for legacy DBs (M4)
     master_configured = get_role_model_id(conn, LLMRole.MASTER) is not None
     processed = 0
-    for due in es.due_insights(conn, now=now):
+    for due in es.due_insights(conn, now=now, exclude_type_ids=cs.archived_type_ids(conn)):
         try:
             _score_one(conn, due, master_configured=master_configured, now=now)
             processed += 1
@@ -688,7 +750,11 @@ def _gather_facts(
     master_configured: bool,
 ) -> ps.PipelineFacts:
     """Assemble the fed :class:`PipelineFacts` for one task (no derivation here)."""
-    universe = _resolve_universe(it, data) if it.scope == "per_symbol" else []
+    universe = (
+        _resolve_universe(it, data) if it.scope == "per_symbol"
+        else _resolve_markets(data) if it.scope == "per_market"
+        else []
+    )
     affected_scope = universe if it.scope == "per_symbol" else [h.symbol for h in data.holdings]
     live, total = _template_counts(conn, it.id)
     last_run = _last_run_for(conn, it.id)
@@ -1134,7 +1200,11 @@ def _preflight_saved(
     include_preview: bool,
 ) -> dict[str, Any]:
     """Preflight a SAVED task: share ``generate._gate_context`` + ``gating.evaluate_gates``."""
-    universe = _resolve_universe(it, data) if it.scope == "per_symbol" else []
+    universe = (
+        _resolve_universe(it, data) if it.scope == "per_symbol"
+        else _resolve_markets(data) if it.scope == "per_market"
+        else []
+    )
     missing = _missing_prices_for(data, it.scope, universe, conn)
     inputs = RunInputs(
         budget_remaining=quota,
@@ -1176,7 +1246,9 @@ def _preflight_draft(
 ) -> dict[str, Any]:
     """Preflight an UNSAVED draft: same shared gate, transient context, nothing persisted."""
     universe = (
-        _resolve_universe_raw(draft.universe, data) if draft.scope == "per_symbol" else []
+        _resolve_universe_raw(draft.universe, data) if draft.scope == "per_symbol"
+        else _resolve_markets(data) if draft.scope == "per_market"
+        else []
     )
     missing = _missing_prices_for(data, draft.scope, universe, conn)
     inputs = RunInputs(

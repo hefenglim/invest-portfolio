@@ -1,0 +1,119 @@
+<title>技術訊號＋恐懼貪婪 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #7c5cbf; --accent-soft: #efeaf8;
+    --ok: #2f7a4f; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #15131a; --card: #1e1b26; --ink: #eae6f2; --ink-2: #a49dbb;
+            --line: #37324a; --accent: #a98ae8; --accent-soft: #2a2438;
+            --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #15131a; --card: #1e1b26; --ink: #eae6f2;
+    --ink-2: #a49dbb; --line: #37324a; --accent: #a98ae8; --accent-soft: #2a2438;
+    --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #7c5cbf; --accent-soft: #efeaf8;
+    --ok: #2f7a4f; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  .sig { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px; }
+  .sigrow { border: 1.5px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    background: var(--paper); font-size: 14.5px; line-height: 1.55; }
+  .sigrow b { color: var(--accent); }
+  .zones { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-top: 10px;
+    font-size: 12px; text-align: center; font-weight: 700; }
+  .zones span { border-radius: 6px; padding: 6px 2px; color: #fff; }
+  .z1 { background: #b3402f; } .z2 { background: #c67f36; } .z3 { background: #7b8794; }
+  .z4 { background: #4f9e6b; } .z5 { background: #2f7a4f; }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・批次③</div>
+    <h1>技術訊號＋恐懼貪婪指數：給健檢卡真正的「進出場參考依據」</h1>
+    <p class="lede">30 秒讀完。看完回「確認」即開工，要改哪條直接講。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>為什麼做</h2>
+    <p>你要求：用市場標準的技術判讀，輔助長期持倉的<b>加碼／減碼</b>評估；另外恐懼貪婪指數目前只是把 CNN 的分數原樣塞給 AI，<b>沒有任何信號分析</b>。</p>
+    <p class="dim">兩者都是「缺料」問題：先由系統算出訊號，AI 才有東西可判讀（AI 永遠不自己算數字，老規矩）。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>新增的技術訊號（每檔股票，系統計算）</h2>
+    <div class="sig">
+      <div class="sigrow"><b>均線交叉</b>：20 日 vs 60 日的黃金交叉／死亡交叉＋發生在幾個交易日前（趨勢轉折錨點）</div>
+      <div class="sigrow"><b>RSI（14 日）</b>：超買（&gt;70）／超賣（&lt;30）區間位置</div>
+      <div class="sigrow"><b>52 週位階</b>：現價距 52 週高點／低點各多少 %（位置感）</div>
+      <div class="sigrow"><b>趨勢結構</b>：近 60 日高低點是墊高（HH-HL）還是下移（LH-LL）</div>
+      <div class="sigrow"><b>量能</b>：20 日均量比＋放量事件 —— <span class="dim">前提是資料源有回填成交量；沒有就誠實跳過，不猜</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>恐懼貪婪指數升級</h2>
+    <div class="zones">
+      <span class="z1">極度恐懼<br>0-24</span><span class="z2">恐懼<br>25-44</span>
+      <span class="z3">中性<br>45-55</span><span class="z4">貪婪<br>56-75</span>
+      <span class="z5">極度貪婪<br>76-100</span>
+    </div>
+    <ul class="tight">
+      <li><b>本地五區分類</b>（照 CNN 標準區間，不再依賴對方的文字標籤）。</li>
+      <li><b>7 日變化趨勢</b>：從恐懼轉向貪婪的「過程」比絕對值更有信號 — 歷史快照已在資料庫，直接推導。</li>
+      <li>提示詞使用指引：極端區間當作<b>環境語境</b>（歷史上極恐偏機會、極貪偏風險），不得直接轉譯成買賣訊號 — 守方向性判讀邊界。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>健檢卡怎麼變</h2>
+    <p>健檢模板升到 <b>v2.2</b>：技術面一節引用新訊號；第五節「方向性判讀」增加<b>加碼／減碼參考框架</b>措辭 — 例：「若黃金交叉成立且 RSI 未過熱，屬偏多的加碼評估情境；跌破 60 日線且趨勢結構轉 LH-LL，屬減碼重新評估情境」。仍然只到方向與條件，不給指令。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span>不會變的事＋成本</h2>
+    <ul class="tight keep">
+      <li>所有訊號由系統計算（純函數＋固定夾具測試），AI 只判讀。</li>
+      <li>快取、額度、評分迴路照舊；市場卡與週報不受影響。</li>
+      <li>成本：每檔健檢多約 200 tokens，<b>每月增加不到 US$0.05</b>。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">6</span>我會照這 4 個預設做（不同意再說）</h2>
+    <ul class="tight">
+      <li>RSI 用 <b>14 日</b>（市場慣例）；交叉事件回看 <b>90 日</b>。</li>
+      <li>資料不足時誠實縮窗並標注（如上市未滿一年，52 週位階以現有窗口計算）。</li>
+      <li>量能訊號先做「資料探測」：provider 有回填量才啟用，否則該小節缺席。</li>
+      <li>新訊號整合成<b>一個變數</b> <code>technical_signals_json</code>（不做五個散變數，模型讀一塊完整的技術面）。</li>
+    </ul>
+  </section>
+
+  <div class="cta">
+    沒問題回「<b>確認</b>」即開工；要調整直接講哪一條（例：「RSI 改 9 日」「量能先不用做」）。
+  </div>
+
+</div>

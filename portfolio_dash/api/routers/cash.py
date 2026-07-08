@@ -13,7 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -79,6 +79,8 @@ def _negative_response(hit: tuple[str, Currency, Decimal]) -> JSONResponse:
 
 @router.get("/cash")
 def cash_overview(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
@@ -114,7 +116,10 @@ def cash_overview(
             total += amount / inv.rate
         else:
             total += amount * read.rate
+    # WPE (2026-07-07): the movements ledger pages via limit/offset (additive —
+    # same shape, total_count still counts the WHOLE ledger; balances untouched).
     movements = list(reversed(list_cash_movements(conn)))
+    page = movements[offset:offset + limit]
     return {
         "balances": rows,
         "reporting_total": decimal_str(total) if total_ok else None,
@@ -129,7 +134,7 @@ def cash_overview(
                     "kind": m.kind.lower(), "ccy": m.ccy.value,
                     "amount": decimal_str(m.amount), "note": m.note,
                 }
-                for m in movements
+                for m in page
             ],
             "total_count": len(movements),
         },

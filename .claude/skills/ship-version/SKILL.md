@@ -17,12 +17,16 @@ Do not declare a version done until every item passes. Stop and fix on any failu
    `grep -c "^## \[v" CHANGELOG.md` must equal the number of released version
    headings. Prefer a bounded-section rewrite over surgical edits. The version date
    is the **real delivery date**.
-5. **Lessons** — update `LESSONS_LEARNED.md` if anything was learned the hard way.
-6. **Self-review pass** — review the diff for: correctness; boundary adherence
+5. **Asset-version stamp** — after bumping `portfolio_dash/__init__.py.__version__`,
+   run `.venv/Scripts/python scripts/stamp_asset_version.py` so every `web/*.html`
+   local script/css tag carries `?v=<new version>` (stale-cache flush; the contract
+   test `tests/contract/test_static_cache_discipline.py` fails if skipped).
+6. **Lessons** — update `LESSONS_LEARNED.md` if anything was learned the hard way.
+7. **Self-review pass** — review the diff for: correctness; boundary adherence
    (`architecture.md` — calc stays in `portfolio/`/`forex/`, web layer thin);
    money discipline (`data-and-pricing.md` — Decimal, no float, correct precision);
    no double-counting of dividends or FX (`domain-ledger.md`).
-7. **Bilingual protocol** — code/docs/commits/CHANGELOG in English; the summary to the
+8. **Bilingual protocol** — code/docs/commits/CHANGELOG in English; the summary to the
    human is in Traditional Chinese.
 
 Report a concise pass/fail summary per item, then the version tag and one-line

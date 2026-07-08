@@ -278,3 +278,30 @@ def test_add_card_records_is_shadow_flag(conn: sqlite3.Connection) -> None:
     row = conn.execute("SELECT is_shadow, calibration_version FROM insights").fetchone()
     assert row["is_shadow"] == 1
     assert row["calibration_version"] == 2
+
+
+def test_add_card_stores_token_usage() -> None:
+    # AI attribution (2026-07-07): one call = one card, tokens map 1:1; legacy rows -> 0.
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    store.ensure_tables(conn)
+    rec = store.add_card(
+        conn, insight_type_id=1,
+        card=InsightCard(title="t", summary="s", body_md="b", tags=[]),
+        fingerprint="fp-tok", calibration_version=None, horizon_days=14,
+        input_snapshot="snap", model="haiku-4.5", cost_usd=Decimal("0.0123"),
+        now=datetime(2026, 7, 7, 9, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+        tokens_in=1200, tokens_out=340,
+    )
+    assert rec.tokens_in == 1200 and rec.tokens_out == 340 and rec.model == "haiku-4.5"
+    # default (legacy path) stays 0
+    rec2 = store.add_card(
+        conn, insight_type_id=1,
+        card=InsightCard(title="t2", summary="s", body_md="b", tags=[]),
+        fingerprint="fp-tok2", calibration_version=None, horizon_days=14,
+        input_snapshot="snap", model="m", cost_usd=Decimal("0"),
+        now=datetime(2026, 7, 7, 9, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+    )
+    assert rec2.tokens_in == 0 and rec2.tokens_out == 0
+    conn.close()

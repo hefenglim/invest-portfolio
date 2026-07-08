@@ -75,6 +75,59 @@ def test_backup_database_same_day_overwrites(tmp_path: Path) -> None:
     assert len(list(backup_dir.glob("portfolio_*.db.gz"))) == 1
 
 
+def test_backup_includes_news_db_when_present(tmp_path: Path) -> None:
+    # L1 fix (decision Q4a): news.db beside the ledger DB rides along in the daily
+    # backup under its own prefix; the ledger backup path is still the return value.
+    db = tmp_path / "portfolio.db"
+    _make_db(db)
+    news = tmp_path / "news.db"
+    conn = sqlite3.connect(news)
+    try:
+        conn.execute("CREATE TABLE organized_news (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.execute("INSERT INTO organized_news (title) VALUES ('n1')")
+        conn.commit()
+    finally:
+        conn.close()
+    backup_dir = tmp_path / "backups"
+
+    gz = backup_ops.backup_database(db_path=db, backup_dir=backup_dir, now=_NOW)
+
+    assert gz.name == "portfolio_2026-06-16.db.gz"
+    news_gz = backup_dir / "news_2026-06-16.db.gz"
+    assert news_gz.exists()
+    restored = _read_gz_db(news_gz, tmp_path)
+    try:
+        titles = {r["title"] for r in restored.execute("SELECT title FROM organized_news")}
+    finally:
+        restored.close()
+    assert titles == {"n1"}
+
+
+def test_backup_skips_news_db_when_absent(tmp_path: Path) -> None:
+    db = tmp_path / "portfolio.db"
+    _make_db(db)
+    backup_dir = tmp_path / "backups"
+    backup_ops.backup_database(db_path=db, backup_dir=backup_dir, now=_NOW)
+    assert list(backup_dir.glob("news_*.db.gz")) == []  # silently skipped
+    assert len(list(backup_dir.glob("portfolio_*.db.gz"))) == 1
+
+
+def test_news_backup_rotates_independently(tmp_path: Path) -> None:
+    # The news backups rotate on their own prefix without eating ledger backups.
+    from datetime import timedelta
+
+    db = tmp_path / "portfolio.db"
+    _make_db(db)
+    _make_db(tmp_path / "news.db")
+    backup_dir = tmp_path / "backups"
+    for i in range(4):
+        backup_ops.backup_database(
+            db_path=db, backup_dir=backup_dir, now=_NOW + timedelta(days=i), keep=2
+        )
+    assert len(list(backup_dir.glob("portfolio_*.db.gz"))) == 2
+    assert len(list(backup_dir.glob("news_*.db.gz"))) == 2
+
+
 def test_backup_database_default_dir_is_db_parent_backups(tmp_path: Path) -> None:
     db = tmp_path / "portfolio.db"
     _make_db(db)

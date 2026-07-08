@@ -351,3 +351,126 @@ def test_scenario_3_missing_price_holding_warns_input(
         if t["id"] == tid
     )
     assert task["nodes"]["input"]["lv"] == "warn"  # missing price, not empty
+
+
+# --- one-click official pack (usability decision ①, 2026-07-05) ----------------
+
+
+def test_official_pack_creates_tasks_with_schedules(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    r = api_client.post("/api/insight-tasks/official-pack")
+    assert r.status_code == 200
+    body = r.json()
+    assert [c["name"] for c in body["created"]] == ["持倉週報", "個股健檢", "市場週報"]
+    assert body["skipped"] == []
+    # tasks exist with the preset knobs + a mounted schedule.
+    types = {t["name"]: t for t in api_client.get("/api/insight-types").json()}
+    weekly, checkup, market = types["持倉週報"], types["個股健檢"], types["市場週報"]
+    assert weekly["scope"] == "portfolio" and weekly["self_correct"] is False
+    assert checkup["scope"] == "per_symbol" and checkup["self_correct"] is True
+    assert market["scope"] == "per_market" and market["self_correct"] is False
+    assert checkup["horizon_days"] == 14
+    assert weekly["schedule"] and checkup["schedule"] and market["schedule"]
+    assert [s["name"] for s in weekly["strategies"]] == ["持倉週報策略"]
+    assert [s["name"] for s in market["strategies"]] == ["市場週報策略"]
+    # strategies were created from the library.
+    names = {s["name"] for s in api_client.get("/api/strategy-prompts").json()}
+    assert {"持倉週報策略", "個股健檢策略", "市場週報策略"} <= names
+
+
+def test_official_pack_is_idempotent_and_reuses_strategies(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # A pre-existing customized strategy with the official name is REUSED, not
+    # duplicated; a second click skips both tasks.
+    api_client.post("/api/strategy-prompts",
+                    json={"name": "持倉週報策略", "body": "我的自訂版 {{kpis_json}}"})
+    first = api_client.post("/api/insight-tasks/official-pack").json()
+    weekly_created = next(c for c in first["created"] if c["name"] == "持倉週報")
+    assert weekly_created["strategy_reused"] is True
+    weeklies = [s for s in api_client.get("/api/strategy-prompts").json()
+                if s["name"] == "持倉週報策略"]
+    assert len(weeklies) == 1 and "我的自訂版" in weeklies[0]["body"]
+    second = api_client.post("/api/insight-tasks/official-pack").json()
+    assert second["created"] == []
+    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+
+
+def test_official_pack_rename_then_repack_no_duplicate(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # M3 fix (decision Q3a): the pack's idempotency keys on preset_key provenance, so a
+    # RENAMED official task is never re-created (no double cron, no double cost).
+    first = api_client.post("/api/insight-tasks/official-pack").json()
+    assert len(first["created"]) == 3
+    weekly = next(c for c in first["created"] if c["name"] == "持倉週報")
+    # user renames the official weekly task (PUT keeps preset_key untouched).
+    detail = api_client.get("/api/insight-types").json()
+    weekly_full = next(t for t in detail if t["id"] == weekly["id"])
+    r = api_client.put(f"/api/insight-types/{weekly['id']}", json={
+        "name": "我的週報", "scope": weekly_full["scope"],
+        "strategy_ids": [s["id"] for s in weekly_full["strategies"]],
+    })
+    assert r.status_code == 200
+
+    second = api_client.post("/api/insight-tasks/official-pack").json()
+
+    assert second["created"] == []  # nothing re-created despite the rename
+    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+    names = [t["name"] for t in api_client.get("/api/insight-types").json()]
+    assert names.count("持倉週報") == 0 and names.count("我的週報") == 1
+    # exactly one schedule binding for the renamed task (no double cron).
+    n = golden_db.execute(
+        "SELECT COUNT(*) AS n FROM schedule_config WHERE job_id LIKE 'insight:%'"
+    ).fetchone()["n"]
+    assert n == 3
+
+
+def test_official_pack_name_fallback_for_precolumn_installs(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # An install created BEFORE the preset_key column has official tasks with NULL
+    # provenance — the pack must still skip them by exact name (no duplicate).
+    api_client.post("/api/insight-tasks/official-pack")
+    golden_db.execute("UPDATE insight_types SET preset_key = NULL")
+    golden_db.commit()
+    second = api_client.post("/api/insight-tasks/official-pack").json()
+    assert second["created"] == []
+    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+
+
+# --- per_market tasks over the API (2026-07-05 spec) ----------------------------
+
+
+def test_per_market_task_create_preflight_run(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    from decimal import Decimal as _D
+
+    from portfolio_dash.shared.llm_config import add_topup
+
+    add_topup(golden_db, _D("5"))
+    sp = api_client.post(
+        "/api/strategy-prompts", json={"name": "M", "body": "{{holdings_json}}"}
+    ).json()
+    it = api_client.post(
+        "/api/insight-types",
+        json={"name": "市場卡", "scope": "per_market", "strategy_ids": [sp["id"]]},
+    ).json()
+    assert it["scope"] == "per_market"
+    # preflight: the shared gate accepts the scope; R1/R2 pass on the golden book.
+    pf = api_client.post(f"/api/insight-tasks/{it['id']}/preflight").json()
+    gates = {g["id"]: g["lv"] for g in pf["gates"]}
+    assert gates["R1"] == "ok" and gates["R2"] == "ok"
+    # a per_symbol variable in the template is an R1 block for per_market.
+    sp2 = api_client.post(
+        "/api/strategy-prompts", json={"name": "M2", "body": "{{symbol_detail_json}}"}
+    ).json()
+    r = api_client.post(
+        "/api/insight-types",
+        json={"name": "市場卡2", "scope": "per_market", "strategy_ids": [sp2["id"]]},
+    )
+    assert r.status_code == 422  # R1 rejected at create, same as portfolio scope
+    # manual run dispatches (bg thread is hermetic here; 202 + running row is the contract).
+    assert api_client.post(f"/api/insight-types/{it['id']}/run").status_code == 202

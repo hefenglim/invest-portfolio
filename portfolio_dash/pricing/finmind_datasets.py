@@ -132,6 +132,31 @@ def fetch_dataset(
     return data if isinstance(data, list) else []
 
 
+def fetch_taiwan_stock_news(
+    conn: sqlite3.Connection, *, data_id: str, start_date: str
+) -> list[dict[str, Any]]:
+    """Fetch FinMind ``TaiwanStockNews`` rows for a symbol (batch ④ news pipeline).
+
+    TaiwanStockNews is Free-tier and works token-less (verified 2026-07-06); a configured
+    token is used when present for a higher rate limit but is NOT required. "Single day per
+    request" — the caller queries several days. Returns raw rows (date/stock_id/link/
+    source/title); any error yields ``[]`` (a nightly job must not crash on the news feed).
+    """
+    token = datasources_store.get_api_key(conn, "finmind")
+    headers = _bearer(token) if token else {}
+    try:
+        resp = requests.get(
+            _URL,
+            params={"dataset": "TaiwanStockNews", "data_id": data_id, "start_date": start_date},
+            headers=headers, timeout=_TIMEOUT_S,
+        )
+        payload = resp.json()
+        data = payload.get("data")
+        return data if isinstance(data, list) else []
+    except Exception:  # noqa: BLE001 — degrade to no news, never raise into the job
+        return []
+
+
 def fetch_quota(conn: sqlite3.Connection) -> dict[str, int]:
     """Fetch the token's usage / limit from FinMind ``user_info`` (spec 20.15.5).
 

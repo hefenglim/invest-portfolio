@@ -58,8 +58,17 @@ def reschedule_job(
     if scheduler is None:
         return
     if not enabled:
-        if scheduler.get_job(job_id) is not None:
-            scheduler.remove_job(job_id)
+        remove_job(scheduler, job_id)
         return
     trigger = CronTrigger.from_crontab(cron, timezone=tz)
     scheduler.add_job(trigger_job, trigger, args=[job_id], id=job_id, replace_existing=True)
+
+
+def remove_job(scheduler: BaseScheduler | None, job_id: str) -> None:
+    """Remove a job's live trigger immediately (H1 fix: unbind/delete must not leave a
+    stale trigger firing until restart). No-op when ``scheduler`` is None or the job is
+    not mounted."""
+    if scheduler is None:
+        return
+    if scheduler.get_job(job_id) is not None:
+        scheduler.remove_job(job_id)

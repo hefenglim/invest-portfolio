@@ -50,6 +50,89 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.11] - 2026-07-08
+
+The AI-input optimization program release: four feature batches + a full-system
+deep-review remediation, bundled per the 2026-07-05 decision.
+
+### Added
+- **Official task pack** (`POST /api/insight-tasks/official-pack`): one-click creation of
+  the three official insight tasks (持倉週報 Sat 09:00 · 個股健檢 Mon 09:00 · 市場週報
+  Sat 09:30) with strategies + weekly crons; idempotent via a `preset_key` provenance
+  column (rename-safe). Official template library v2/v3 (`official_templates.py`) with
+  reset/from-template endpoints; system prompt v2; templates 持倉週報 v2.1 / 個股健檢
+  v2.3 / 市場週報 v1.1.
+- **per_market scope**: one insight card per held market (TW/US/MY) with a codified
+  zero-leak guarantee — portfolio variables slice to the market
+  (`portfolio/market_view.py`, `VarContext.market`); whole-portfolio vars carry honest
+  scope notes; market cards strip model-emitted predictions at store time.
+- **Technical signals** (`portfolio/technicals.py`, pure Decimal): Wilder RSI(14),
+  MA20/60 golden/death cross + days-ago, 52-week position (honest window), swing trend
+  structure, probe-gated volume; bundled as `technical_signals_json`. CNN Fear & Greed
+  local five-zone classification + 7-day trend (`fear_greed_json`, standalone variable).
+- **News content pipeline** (`portfolio_dash/news/`, new module): FinMind (中文) +
+  yfinance (英文, incl. .TW/.TWO) + Yahoo-TW discovery → general HTML fetcher
+  (http(s)-only, bounded, non-prose guard) → default-LLM organizer (editable official
+  news prompt v2, `GET/PUT/POST /api/news-prompt(/reset)`) → **separate SQLite news DB**
+  (`news.db` beside the ledger DB — decision 2026-07-06: larger text volume off the
+  transactional DB, multi-account-share-ready; included in the daily backup) → precise
+  per-symbol mentions index (held-universe allowlist) → `symbol_news_json` variable +
+  個股健檢 news section. Nightly `news_daily` job (06:00). News library page
+  (`news.html`): filters (stock/source/date/server keyword), row → full-summary modal.
+- **Unified AI attribution** on every LLM surface (`fmt.aiAttrib`): model · token N ·
+  $cost on insight cards, dashboard AI panel, and the news modal; `insights` gains
+  `tokens_in/tokens_out`, `organized_news` gains `model`.
+- **LLM request ledger**: `llm_usage` gains `cache_tokens` (provider-reported cached
+  prompt tokens, captured defensively); `GET /api/llm/requests` (paged, agent/model/
+  time-window filters, Taipei-normalized timestamps); Request 明細 panel on the AI 與額度
+  tab; 執行歷史 LLM-kind rows deep-link 「查看 AI 請求」 to the run's request window.
+- **Database statistics panel** (`GET /api/db-stats`): row counts for every table across
+  BOTH SQLite files, grouped by category, with oldest-record dates and file sizes —
+  the owner observes before deciding retention (no pruning built).
+- **Site-wide pagination**: shared `web/pager.js` (windowed pages + jump); real paging on
+  Request 明細, 執行歷史 (server job filter), 系統操作記錄, news, insight cards, AI 戰績,
+  持倉健診 (server-side symbol grouping), trades ledgers ×4 (server account/date
+  filters), cash movements. `/api/insights` now bounded ({rows,total_count}, default
+  100/max 500); `/api/ai-score` rows paged; `/api/cash` gains limit/offset.
+- **每頁筆數 setting**: backend-persisted `ui_prefs` (`GET/PUT /api/ui-prefs`,
+  page_size ∈ {20,50,100,200}, default 50) editable in settings 一般; `window.pdPrefs`.
+- Loop-2 scoring rubric v2 (direction 40 / citation 30 / scenario 20 / timeliness 10)
+  and `price_at_create` baseline snapshot (decision Q1c): cards score against the close
+  the model actually saw.
+
+### Fixed
+- **Deep-review remediation** (three parallel xHigh reviews, 2026-07-06/07): insight
+  schedule bind/unbind now syncs the live APScheduler (new crons fire without restart;
+  deleted tasks stop firing; invalid cron → 400); disabled/archived tasks are enforced
+  at execution (cron skips with reason; manual run → 409); single Asia/Taipei day-anchor
+  clock (`shared/clock.app_now`) across cron/API/backup/news (fixes the UTC/Taipei split
+  that re-broke the day-anchored cache on the scheduler path); news mentions merge
+  instead of being wiped on headline→organized upgrade; archived tasks excluded from
+  Loop-2 scoring; cron overlap guard; preview/run technical close-window unified (400d).
+- **Frontend attention surfaces**: news modal opaque (undefined CSS tokens); alert bell
+  copy humanized (display-quantized %, account display names, zh); 產生洞察 button wired
+  (run/menu/redirect); mobile CJK vertical collapse; CLS min-height reservations;
+  pipeline-hub copy productized with live counts; legacy `ledger.html`/`input.html` and
+  all standalone `settings-*.html` converted to redirect stubs (single canonical tabbed
+  settings surface — ends the dual-surface drift class); stale localStorage auth copy
+  replaced; scraper-garbage summaries prevented (fetcher non-prose guard + organizer
+  prompt rule).
+- **Stale-asset cache class bug**: static files now send `Cache-Control: no-cache`
+  (ETag revalidation) and every local asset tag carries `?v=<version>` (rerunnable
+  `scripts/stamp_asset_version.py`; guarded by `test_static_cache_discipline.py`) —
+  a cached old `format.js` had blanked the insights page after deploy.
+- **iOS Safari alert panel**: the bell panel is portaled to `document.body` (a
+  `backdrop-filter` ancestor hijacks fixed-position containing blocks on Safari),
+  anchored from the bell rect, `100dvh`-aware; mobile panel fully on-screen.
+- LLM error taxonomy honesty (F2), day-anchored cache fingerprint (F5), accounts
+  catalog for the parser (F7), and the first-run 4-call/zero-card failure (F1:
+  in-prompt JSON schema contract + tolerant parse) — the ignition-round fixes.
+
+### Changed
+- `log_usage` timestamps now use the Asia/Taipei app clock (single-clock discipline).
+- 用量與趨勢 chart regression on the tabbed settings path fixed (guarded wiring).
+- mypy strict now also covers previously-untyped test files touched this cycle.
+
 ## [v0.1.10] - 2026-07-05
 
 LLM pillar IGNITED: the first live batch runs on the test instance exposed seven

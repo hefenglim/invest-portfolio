@@ -42,7 +42,10 @@
      `state.account` holds an account_id ('all' = no filter), NOT the display name —
      the backend rows carry both a stable `account_id` (e.g. "tw_broker") and an English
      `account` display name; filtering/chips key on the stable id and show the zh-TW label
-     via ACCOUNT_ZH (the same map app.js uses). */
+     via ACCOUNT_ZH (the same map app.js uses).
+     WPE (2026-07-07): account + date range moved SERVER-side (the /api/ledgers/*
+     endpoints take account_id + from/to) so the pagers stay honest; only the keyword
+     search remains a client filter over the CURRENT page (labelled 篩選本頁). */
   const ACCOUNT_ZH = {
     tw_broker: '台灣券商',
     schwab: '嘉信 Schwab',
@@ -50,15 +53,18 @@
     moomoo_my_my: 'Moomoo 馬股',
   };
   const state = { account: 'all', q: '', from: '', to: '' };
+  const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
+  const pageState = {
+    tx: { offset: 0, total: 0 },
+    div: { offset: 0, total: 0 },
+    fx: { offset: 0, total: 0 },
+    open: { offset: 0, total: 0 },
+  };
+  const pagers = {};
+  let accountList = []; /* [{id, name}] from GET /api/accounts (chip registry) */
+
   function initFilters() {
     const bar = $('#ledger-filters');
-    /* Derive the chip set from the distinct account_ids present across all four fetched
-       ledgers, so empty accounts are not shown. Pre-boot (D empty) this renders just the
-       全部 chip; boot() re-invokes initFilters() once the ledgers resolve. */
-    const ids = [];
-    [D.transactions, D.dividends, D.fx, D.openings].forEach((rows) => {
-      rows.forEach((r) => { if (r.account_id && !ids.includes(r.account_id)) ids.push(r.account_id); });
-    });
     const mk = (val, label) => {
       const c = el('button', 'chip' + (state.account === val ? ' active' : ''), label);
       c.type = 'button';
@@ -67,37 +73,50 @@
         state.account = val;
         bar.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
         c.classList.add('active');
-        renderAll();
+        resetOffsets();
+        loadAll(); /* server-side account filter (WPE) */
       });
       return c;
     };
     bar.replaceChildren();
     bar.appendChild(el('span', 'group-label', '帳戶'));
     bar.appendChild(mk('all', '全部'));
-    ids.forEach((id) => bar.appendChild(mk(id, ACCOUNT_ZH[id] || id)));
+    accountList.forEach((a) => bar.appendChild(mk(a.id, ACCOUNT_ZH[a.id] || a.name || a.id)));
   }
-  const byAccount = (rows) => rows.filter((r) => {
-    if (state.account !== 'all' && r.account_id !== state.account) return false;
-    if (state.q) {
-      /* 代號優先、名稱其次(2026-07-03 user decision):符合任一即命中 */
-      const sym = (r.symbol || '').toLowerCase();
-      const name = (r.name || '').toLowerCase();
-      if (!sym.includes(state.q) && !name.includes(state.q)) return false;
-    }
-    const d = r.date || '';
-    if (state.from && d && d < state.from) return false;
-    if (state.to && d && d > state.to) return false;
-    return true;
+
+  /* keyword narrows the CURRENT page only (代號優先、名稱其次 — 2026-07-03 decision) */
+  const byKeyword = (rows) => rows.filter((r) => {
+    if (!state.q) return true;
+    const sym = (r.symbol || '').toLowerCase();
+    const name = (r.name || '').toLowerCase();
+    return sym.includes(state.q) || name.includes(state.q);
   });
 
-  /* 代號搜尋與日期區間（僅 ledger.html 有這些欄位；trades.html 無則略過） */
+  function resetOffsets() {
+    pageState.tx.offset = 0;
+    pageState.div.offset = 0;
+    pageState.fx.offset = 0;
+    pageState.open.offset = 0;
+  }
+
+  /* 代號搜尋與日期區間 — keyword filters the page client-side; dates hit the server */
   (function initExtraFilters() {
     const qIn = document.getElementById('ledger-sym-search');
     const fromIn = document.getElementById('ledger-date-from');
     const toIn = document.getElementById('ledger-date-to');
     if (qIn) qIn.addEventListener('input', () => { state.q = qIn.value.trim().toLowerCase(); renderAll(); });
-    if (fromIn) { state.from = fromIn.value; fromIn.addEventListener('input', () => { state.from = fromIn.value; renderAll(); }); }
-    if (toIn) { state.to = toIn.value; toIn.addEventListener('input', () => { state.to = toIn.value; renderAll(); }); }
+    let dateTimer = null;
+    const onDate = () => {
+      if (dateTimer) clearTimeout(dateTimer);
+      dateTimer = setTimeout(() => {
+        state.from = fromIn ? fromIn.value : '';
+        state.to = toIn ? toIn.value : '';
+        resetOffsets();
+        loadAll();
+      }, 250);
+    };
+    if (fromIn) { state.from = fromIn.value; fromIn.addEventListener('input', onDate); }
+    if (toIn) { state.to = toIn.value; toIn.addEventListener('input', onDate); }
   })();
 
   function dirChip(side) {
@@ -225,10 +244,7 @@
     return s;
   };
   const accountSel = (current) => {
-    const ids = [];
-    [D.transactions, D.dividends, D.fx, D.openings].forEach((rows) => {
-      rows.forEach((r) => { if (r.account_id && !ids.includes(r.account_id)) ids.push(r.account_id); });
-    });
+    const ids = accountList.map((a) => a.id);
     if (current && !ids.includes(current)) ids.push(current);
     return sel(ids.map((id) => [id, ACCOUNT_ZH[id] || id]), current);
   };
@@ -346,7 +362,7 @@
   function renderTx() {
     const tbody = $('#tx-body');
     tbody.replaceChildren();
-    byAccount(D.transactions).forEach((t) => {
+    byKeyword(D.transactions).forEach((t) => {
       const tr = el('tr', 'expandable');
       const tdCaret = el('td', 'num caret-cell', '▸');
       tr.appendChild(tdCaret);
@@ -407,7 +423,7 @@
   function renderDiv() {
     const tbody = $('#div-body');
     tbody.replaceChildren();
-    byAccount(D.dividends).forEach((d) => {
+    byKeyword(D.dividends).forEach((d) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(d.date)));
       tr.appendChild(el('td', 'col-text', d.account));
@@ -440,7 +456,7 @@
   function renderFx() {
     const tbody = $('#fx-body');
     tbody.replaceChildren();
-    byAccount(D.fx).forEach((x) => {
+    byKeyword(D.fx).forEach((x) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(x.date)));
       tr.appendChild(el('td', 'col-text', x.account));
@@ -460,7 +476,7 @@
   function renderOpen() {
     const tbody = $('#open-body');
     tbody.replaceChildren();
-    byAccount(D.openings).forEach((o) => {
+    byKeyword(D.openings).forEach((o) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'col-text', o.account));
       tr.appendChild(symCell(o.symbol));
@@ -479,41 +495,104 @@
 
   function renderAll() { renderTx(); renderDiv(); renderFx(); renderOpen(); }
 
-  /* Graceful degradation: leave the four tables empty and surface ONE toast. Never let
-     a failed fetch become an unhandled rejection (the e2e smoke asserts zero console
-     errors). 401 is already handled by api.js (login redirect). */
-  function bootError(err) {
-    renderAll();  // render the empty default D -> four blank tables, not a half-state
-    if (window.toast) {
+  /* ===== WPE (2026-07-07): per-ledger server pagination =====
+     Each of the four tables fetches its OWN page (limit/offset + total_count from
+     the endpoint) with the account/date filters passed server-side; each pane gets
+     a shared pdPager. One failure toast per load pass (not four). */
+  let loadFailToasted = false;
+  function loadFail(err) {
+    renderAll();
+    if (!loadFailToasted && window.toast) {
+      loadFailToasted = true;
       window.toast('帳本資料載入失敗', 'fail', err && err.message ? err.message : undefined);
     }
   }
 
-  /* Fetch the four append-only ledgers in parallel through the single pdApi layer, then
-     render. A generous `limit` is passed so the whole (small) ledger shows on one page;
-     the backend caps it at 500. */
-  async function boot() {
-    const P = { limit: 500 };
-    let tx, dv, fx, op;
+  function ledgerParams(kind) {
+    const p = { limit: PAGE, offset: pageState[kind].offset };
+    if (state.account !== 'all') p.account_id = state.account;
+    if (kind !== 'open') { /* openings has no date filter server-side */
+      if (state.from) p.from = state.from;
+      if (state.to) p.to = state.to;
+    }
+    return p;
+  }
+
+  function updatePager(kind) {
+    if (pagers[kind]) {
+      pagers[kind].update({
+        offset: pageState[kind].offset,
+        totalCount: pageState[kind].total,
+      });
+    }
+  }
+
+  async function loadOne(kind, path, assign, render) {
     try {
-      [tx, dv, fx, op] = await Promise.all([
-        window.pdApi.get('/api/ledgers/transactions', P),
-        window.pdApi.get('/api/ledgers/dividends', P),
-        window.pdApi.get('/api/ledgers/fx', P),
-        window.pdApi.get('/api/ledgers/openings', P),
-      ]);
+      const resp = await window.pdApi.get(path, ledgerParams(kind));
+      assign((resp && resp.rows) || []);
+      pageState[kind].total = (resp && resp.total_count) || 0;
     } catch (err) {
-      bootError(err);
+      assign([]);
+      pageState[kind].total = 0;
+      loadFail(err);
+      updatePager(kind);
       return;
     }
-    D = {
-      transactions: (tx && tx.rows) || [],
-      dividends: (dv && dv.rows) || [],
-      fx: (fx && fx.rows) || [],
-      openings: (op && op.rows) || [],
-    };
-    initFilters();      // rebuild account chips from the account_ids now present in D
-    renderAll();
+    render();
+    updatePager(kind);
+  }
+
+  const loadTx = () => loadOne('tx', '/api/ledgers/transactions',
+    (rows) => { D.transactions = rows; }, renderTx);
+  const loadDiv = () => loadOne('div', '/api/ledgers/dividends',
+    (rows) => { D.dividends = rows; }, renderDiv);
+  const loadFx = () => loadOne('fx', '/api/ledgers/fx',
+    (rows) => { D.fx = rows; }, renderFx);
+  const loadOpen = () => loadOne('open', '/api/ledgers/openings',
+    (rows) => { D.openings = rows; }, renderOpen);
+
+  async function loadAll() {
+    loadFailToasted = false;
+    await Promise.all([loadTx(), loadDiv(), loadFx(), loadOpen()]);
+  }
+
+  /* pagers: pane hosts exist on trades.html only — guarded per the 略過 convention */
+  if (window.pdPager) {
+    const HOSTS = [
+      ['tx', 'tx-pager', loadTx],
+      ['div', 'ldiv-pager', loadDiv],
+      ['fx', 'lfx-pager', loadFx],
+      ['open', 'lopen-pager', loadOpen],
+    ];
+    HOSTS.forEach(([kind, hostId, loader]) => {
+      const host = document.getElementById(hostId);
+      if (!host) return;
+      pagers[kind] = window.pdPager.create({
+        host: host,
+        limit: PAGE, offset: 0, totalCount: 0,
+        onPage: (offset) => { pageState[kind].offset = offset; loader(); },
+      });
+    });
+  }
+
+  /* account chips come from the accounts registry (server-filterable even when a
+     page shows no rows for that account); degrades to the 全部-only bar. */
+  async function loadAccounts() {
+    try {
+      const resp = await window.pdApi.get('/api/accounts');
+      accountList = ((resp && resp.accounts) || []).map((a) => ({
+        id: a.account_id, name: a.name,
+      }));
+    } catch (err) {
+      accountList = [];
+    }
+  }
+
+  async function boot() {
+    await loadAccounts();
+    initFilters();
+    await loadAll();
   }
 
   initFilters();        // account chip bar (DOM only, no data) — safe before boot

@@ -115,6 +115,35 @@ def test_due_insights_pending_still_due(conn: sqlite3.Connection) -> None:
     assert 100 in {d.insight_id for d in due}
 
 
+def test_due_insights_excludes_archived_type_ids(conn: sqlite3.Connection) -> None:
+    # L2 fix: an archived task's matured cards must not surface as due (they were
+    # being scored — incl. master narrative cost — after the task was deleted).
+    _seed_insights(conn)
+    assert {d.insight_id for d in es.due_insights(conn, now=NOW)} == {100}
+    assert es.due_insights(conn, now=NOW, exclude_type_ids={10}) == []
+    # an unrelated exclusion changes nothing
+    assert {d.insight_id
+            for d in es.due_insights(conn, now=NOW, exclude_type_ids={99})} == {100}
+
+
+def test_bump_defer_and_mark_undetermined_use_injected_clock(
+    conn: sqlite3.Connection,
+) -> None:
+    # L7 fix: the evaluate pass threads its own now; no wall-clock in the stamps.
+    frozen = datetime(2026, 6, 20, 18, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    es.add_evaluation(
+        conn, insight_id=9, insight_type_id=10, calibration_version=None,
+        is_shadow=False, status="pending_data", quant_hit=None, narrative_score=None,
+        miss=False, actual_value=None, confidence=None, now=NOW,
+    )
+    es.bump_defer(conn, insight_id=9, insight_type_id=10, now=frozen)
+    latest = es.latest_for_insight(conn, insight_id=9)
+    assert latest is not None and latest.evaluated_at == frozen.isoformat()
+    es.mark_undetermined(conn, insight_id=9, insight_type_id=10, now=frozen)
+    latest = es.latest_for_insight(conn, insight_id=9)
+    assert latest is not None and latest.evaluated_at == frozen.isoformat()
+
+
 # --- combo_score rollup -------------------------------------------------------
 
 

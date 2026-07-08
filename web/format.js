@@ -90,5 +90,18 @@ window.fmt = (function () {
     return 'sign-flat';
   }
 
-  return { num, money, price, signed, signedNum, pct, signedPct, rate, date, datetime, signClass, NULL_GLYPH };
+  /** Unified AI attribution line for every LLM-generated surface (2026-07-07):
+      "haiku-4.5 · token 1,234 · $0.1234". Segments degrade independently —
+      legacy rows without token counts omit the token segment; cost "0" still shows. */
+  function aiAttrib(model, tokensIn, tokensOut, costUsd) {
+    const parts = [];
+    if (model) parts.push(String(model));
+    const tokens = (Number(tokensIn) || 0) + (Number(tokensOut) || 0);
+    if (tokens > 0) parts.push('token ' + num(tokens, 0));
+    if (!isNil(costUsd)) parts.push('$' + num(costUsd, 4));
+    return parts.join(' · ');
+  }
+
+  return { num, money, price, signed, signedNum, pct, signedPct, rate, date, datetime,
+           signClass, aiAttrib, NULL_GLYPH };
 })();

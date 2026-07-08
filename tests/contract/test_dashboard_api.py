@@ -106,7 +106,9 @@ def test_dashboard_embeds_real_cards_newest_first(
 
     newer = insights[0]
     assert set(newer.keys()) == {
-        "id", "title", "summary", "body_md", "symbol", "created_at", "cost_usd"
+        "id", "title", "summary", "body_md", "symbol", "created_at", "cost_usd",
+        # AI attribution (2026-07-07): every LLM output carries model + token usage.
+        "model", "tokens_in", "tokens_out",
     }
     assert newer["summary"] == "newer summary"
     assert newer["body_md"] == "# newer"

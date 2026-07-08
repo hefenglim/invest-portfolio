@@ -84,20 +84,57 @@ def test_index_page_smoke(live_server: str, browser_page: Page) -> None:
     assert_page_ok(browser_page, live_server, "/index.html", root_selector=".kpi-card")
 
 
+def _assert_settings_redirect(
+    page: Page,
+    live_server: str,
+    old_path: str,
+    tab: str,
+) -> tuple[list[str], list[str]]:
+    """WPF (2026-07-08): a retired standalone settings page must redirect to the
+    canonical settings.html with ITS tab active. Navigates `old_path`, waits for the
+    redirect + the active tab view, and returns the (console_errors, page_errors)
+    sinks — the CALLER keeps waiting for its tab-specific boot signal, then asserts
+    both sinks empty (same pattern as the ledger.html/input.html stubs).
+    """
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + old_path, wait_until="load")
+        page.wait_for_url("**/settings.html*")
+        page.wait_for_selector(f"#view-{tab}.active", state="attached")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+    return console_errors, page_errors
+
+
 @pytest.mark.e2e
-def test_settings_accounts_shell_smoke(
+def test_settings_accounts_redirects_to_tab(
     live_server: str, browser_page: Page
 ) -> None:
-    """/settings-accounts.html (shell-bearing) boots clean (spec 19, Task 2.1 fix).
+    """/settings-accounts.html is a WPF redirect stub -> settings.html#accounts.
 
-    This page loads shell.js + settings-users.js; the latter aliases
-    `const A = window.pdAuth` at module scope and depends on `pdAuth.setSession`
-    existing. After Task 2.1 made the session backend-sourced, setSession was removed
-    from pdAuth; this asserts the transitional no-op shim is in place so the settings
-    shell loads with ZERO console/page errors. (User add/remove is still the localStorage
-    mock flow, rewired to the backend in Task 2.7 — NOT driven here.)
+    Golden DB has ZERO users -> the users panel on the canonical accounts tab renders
+    its empty-state affordance after GET /api/users resolves. ZERO console/page errors.
     """
-    assert_page_ok(browser_page, live_server, "/settings-accounts.html")
+    page = browser_page
+    console_errors, page_errors = _assert_settings_redirect(
+        page, live_server, "/settings-accounts.html", "accounts")
+    page.wait_for_selector("#users-wrap .users-empty", state="attached")
+    assert not console_errors and not page_errors, (
+        f"settings-accounts redirect: console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
 
 
 @pytest.mark.e2e
@@ -583,136 +620,63 @@ def test_ledger_page_smoke(live_server: str, browser_page: Page) -> None:
 
 
 @pytest.mark.e2e
-def test_settings_llm_page_smoke(live_server: str, browser_page: Page) -> None:
-    """/settings-llm.html boots from the REAL /api/llm/config (spec 19, Task 2.7a).
+def test_settings_llm_redirects_to_tab(live_server: str, browser_page: Page) -> None:
+    """/settings-llm.html is a WPF redirect stub -> settings.html#llm.
 
-    settings-llm.js drops its inline window.LLM_DATA mock and boots off GET
-    /api/llm/config -> { models, roles, quota, usage }. The golden DB seeds the LLM
-    tables to the AI-off state (NO models, all roles NULL, quota remaining "0"), so this
-    exercises the empty/graceful path: the model table stays empty, the role selects show
-    "（空 = 關閉）", and the quota chip + value render from the Decimal-STRING quota.
-
-    Waits for #quota-value to carry text (rendered only after the config fetch resolves —
-    the quota object is always present), proving the full async boot landed, then asserts
-    ZERO console + ZERO page errors. This catches the C2 fix: the former bare
-    `remaining.toFixed(2)` / `m.price_in.toFixed(2)` would TypeError on a Decimal STRING;
-    routed through window.fmt they do not.
+    After the redirect the LLM tab is active and its async boot lands: #quota-value gets
+    text only after GET /api/llm/config resolves (renderQuota; golden DB = AI-off state).
+    ZERO console + ZERO page errors — still catching the C2 Decimal-string class.
     """
     page = browser_page
-    assert isinstance(page, Page)
-
-    console_errors: list[str] = []
-    page_errors: list[str] = []
-
-    def _on_console(msg: object) -> None:
-        if getattr(msg, "type", None) == "error":
-            console_errors.append(getattr(msg, "text", repr(msg)))
-
-    def _on_pageerror(exc: object) -> None:
-        page_errors.append(str(exc))
-
-    page.on("console", _on_console)
-    page.on("pageerror", _on_pageerror)
-    try:
-        page.goto(live_server + "/settings-llm.html", wait_until="load")
-        # #quota-value gets text only after GET /api/llm/config resolves (renderQuota).
-        page.wait_for_function(
-            "() => { const v = document.querySelector('#quota-value');"
-            " return v && v.textContent && v.textContent.trim().length > 0; }"
-        )
-    finally:
-        page.remove_listener("console", _on_console)
-        page.remove_listener("pageerror", _on_pageerror)
-
+    console_errors, page_errors = _assert_settings_redirect(
+        page, live_server, "/settings-llm.html", "llm")
+    page.wait_for_function(
+        "() => { const v = document.querySelector('#quota-value');"
+        " return v && v.textContent && v.textContent.trim().length > 0; }"
+    )
     assert not console_errors and not page_errors, (
-        f"/settings-llm.html (llm config wired): console errors={console_errors!r}; "
+        f"settings-llm redirect: console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
 
 @pytest.mark.e2e
-def test_settings_scheduler_page_smoke(live_server: str, browser_page: Page) -> None:
-    """/settings-scheduler.html boots from the REAL /api/scheduler/* (spec 19, Task 2.7a).
-
-    settings-scheduler.js drops window.SCHED_DATA and boots off GET /api/scheduler/jobs +
-    GET /api/scheduler/runs (parallel). The golden DB seeds the registry jobs (so the jobs
-    table renders rows) and an EMPTY run log (so the history table renders empty cleanly).
-
-    Waits for a populated #jobs-body tr (rendered only after the jobs fetch resolves), then
-    asserts ZERO console + ZERO page errors. This catches war-game Finding 8: a run's
-    Decimal-STRING cost_usd "0"/"0.00" is truthy, so the nil-check is `== null` and the
-    value is shown via f.num — never `bareString.toFixed`.
-    """
-    page = browser_page
-    assert isinstance(page, Page)
-
-    console_errors: list[str] = []
-    page_errors: list[str] = []
-
-    def _on_console(msg: object) -> None:
-        if getattr(msg, "type", None) == "error":
-            console_errors.append(getattr(msg, "text", repr(msg)))
-
-    def _on_pageerror(exc: object) -> None:
-        page_errors.append(str(exc))
-
-    page.on("console", _on_console)
-    page.on("pageerror", _on_pageerror)
-    try:
-        page.goto(live_server + "/settings-scheduler.html", wait_until="load")
-        # One job row lands once GET /api/scheduler/jobs resolves (registry-seeded jobs).
-        page.wait_for_selector("#jobs-body tr")
-    finally:
-        page.remove_listener("console", _on_console)
-        page.remove_listener("pageerror", _on_pageerror)
-
-    assert not console_errors and not page_errors, (
-        f"/settings-scheduler.html (scheduler wired): console errors={console_errors!r}; "
-        f"page errors={page_errors!r}"
-    )
-
-
-@pytest.mark.e2e
-def test_settings_datasources_page_smoke(
+def test_settings_scheduler_redirects_to_tab(
     live_server: str, browser_page: Page
 ) -> None:
-    """/settings-datasources.html boots from the REAL /api/datasources (Task 2.7a).
+    """/settings-scheduler.html is a WPF redirect stub -> settings.html#scheduler.
 
-    settings-datasources.js drops window.DATASOURCES_DATA and boots off GET
-    /api/datasources -> { sources, account_fallbacks, account_names }. The golden DB seeds
-    the data_sources catalog (so source groups render) and the four accounts (so the
-    per-account fallback cards render). The render is robust to all real type/status/auth
-    values (stock/dividend/sentiment/fx/macro/trends/news; ok/error/off/unknown/pending/
-    blocked; none/apikey/oauth).
-
-    Waits for a rendered source section (#sources-wrap .ds-section, produced only after the
-    fetch resolves), then asserts ZERO console + ZERO page errors.
+    After the redirect the scheduler tab is active and the jobs table renders from
+    GET /api/scheduler/jobs (registry-seeded); the run history + 系統操作記錄 panels
+    boot paged (golden DB: empty logs render clean). ZERO console + ZERO page errors.
     """
     page = browser_page
-    assert isinstance(page, Page)
-
-    console_errors: list[str] = []
-    page_errors: list[str] = []
-
-    def _on_console(msg: object) -> None:
-        if getattr(msg, "type", None) == "error":
-            console_errors.append(getattr(msg, "text", repr(msg)))
-
-    def _on_pageerror(exc: object) -> None:
-        page_errors.append(str(exc))
-
-    page.on("console", _on_console)
-    page.on("pageerror", _on_pageerror)
-    try:
-        page.goto(live_server + "/settings-datasources.html", wait_until="load")
-        # A source section lands once GET /api/datasources resolves (seeded catalog).
-        page.wait_for_selector("#sources-wrap .ds-section")
-    finally:
-        page.remove_listener("console", _on_console)
-        page.remove_listener("pageerror", _on_pageerror)
-
+    console_errors, page_errors = _assert_settings_redirect(
+        page, live_server, "/settings-scheduler.html", "scheduler")
+    page.wait_for_selector("#jobs-body tr", state="attached")
     assert not console_errors and not page_errors, (
-        f"/settings-datasources.html (datasources wired): console errors={console_errors!r}; "
+        f"settings-scheduler redirect: console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_datasources_redirects_to_tab(
+    live_server: str, browser_page: Page
+) -> None:
+    """/settings-datasources.html is a WPF redirect stub -> settings.html#datasources.
+
+    After the redirect the datasources tab is active and a source section renders once
+    GET /api/datasources resolves; the 市場報價抓取順位 cards (folded in from the retired
+    standalone page) mount too. ZERO console + ZERO page errors.
+    """
+    page = browser_page
+    console_errors, page_errors = _assert_settings_redirect(
+        page, live_server, "/settings-datasources.html", "datasources")
+    page.wait_for_selector("#sources-wrap .ds-section", state="attached")
+    page.wait_for_selector("#market-order-wrap .fallback-card", state="attached")
+    assert not console_errors and not page_errors, (
+        f"settings-datasources redirect: console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
@@ -766,6 +730,29 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: Page) -> N
             "() => { const v = document.querySelector('#sys-prompt');"
             " return v && v.value && v.value.trim().length > 0; }"
         )
+        # 資料庫統計 (WPA, 2026-07-07): the read-only stats panel boots off
+        # GET /api/db-stats — wait for its boot signal (the note text renders on
+        # BOTH success and failure paths; file-size rows land with it).
+        page.wait_for_function(
+            "() => { const n = document.querySelector('#dbstats-note');"
+            " return n && n.textContent && n.textContent.indexOf('唯讀統計') !== -1; }"
+        )
+        page.wait_for_selector("#dbstats-body tr", state="attached")
+        # Q1 fix (2026-07-07): the Request 明細 panel must exist on the CANONICAL tabbed
+        # surface (previously only on standalone settings-llm.html), and clicking the
+        # AI 與額度 tab must still render the daily chart (an unguarded ledger wiring
+        # used to throw here and kill the tab listener → chart never rendered).
+        # The hermetic golden DB has no llm_usage rows — wait for the ledger BOOT signal
+        # (#req-note gets text either way: row counts, or 「尚無請求記錄」 on empty).
+        page.wait_for_function(
+            "() => { const n = document.querySelector('#req-note');"
+            " return n && n.textContent && n.textContent.trim().length > 0; }"
+        )
+        page.click(".set-tab[data-tab='llm']")
+        page.wait_for_function(
+            "() => { const c = document.querySelector('#llm-daily-chart');"
+            " return c && c.querySelector('canvas') !== null; }"
+        )
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
@@ -777,54 +764,29 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: Page) -> N
 
 
 @pytest.mark.e2e
-def test_settings_prompts_page_smoke(live_server: str, browser_page: Page) -> None:
-    """/settings-prompts.html boots from /api/prompt-vars + /api/system-prompt (Task 2.7b).
+def test_settings_prompts_redirects_to_tab(
+    live_server: str, browser_page: Page
+) -> None:
+    """/settings-prompts.html is a WPF redirect stub -> settings.html#prompts.
 
-    settings-prompts.js drops its inline window.PROMPTS_DATA + (vars.js) PD_VARS mocks and
-    boots async: V.load() fetches GET /api/prompt-vars (the 29-var registry with per-var
-    tier metadata) and GET /api/system-prompt fills the editor. The golden DB seeds the
-    default system prompt and the finmind source at its default tier, so the variable-total
-    panel renders rows and tier-locked FinMind chips (if any) are greyed out (option.disabled
-    in the insert-variable selects + .tier-locked rows in the total table).
-
-    Waits for the system-prompt textarea to carry text (proving GET /api/system-prompt
-    resolved) AND the #vars-panel variable-total to mount with rendered rows (proving GET
-    /api/prompt-vars resolved + the registry rendered), then asserts ZERO console + ZERO
-    page errors — catching a botched async boot, a missing tier field, or an unhandled
-    fetch rejection.
+    After the redirect the prompts tab is active and its async boots land: the
+    system-prompt editor fills from GET /api/system-prompt and the #vars-panel
+    variable-total mounts rows from GET /api/prompt-vars. The folded-in standalone
+    controls (#sys-reset / #tpl-from-lib) are present on the canonical tab. ZERO
+    console + ZERO page errors.
     """
     page = browser_page
-    assert isinstance(page, Page)
-
-    console_errors: list[str] = []
-    page_errors: list[str] = []
-
-    def _on_console(msg: object) -> None:
-        if getattr(msg, "type", None) == "error":
-            console_errors.append(getattr(msg, "text", repr(msg)))
-
-    def _on_pageerror(exc: object) -> None:
-        page_errors.append(str(exc))
-
-    page.on("console", _on_console)
-    page.on("pageerror", _on_pageerror)
-    try:
-        page.goto(live_server + "/settings-prompts.html", wait_until="load")
-        # system-prompt editor filled only after GET /api/system-prompt resolves.
-        page.wait_for_function(
-            "() => { const v = document.querySelector('#sys-prompt');"
-            " return v && v.value && v.value.trim().length > 0; }"
-        )
-        # The variable-total panel (and its rows) mount only after GET /api/prompt-vars
-        # resolves and V.CATEGORIES is populated — proving the registry render + tier pills.
-        # #vars-panel is a collapsed <details>, so its rows are ATTACHED but not visible.
-        page.wait_for_selector("#vars-panel .vars-table tbody tr", state="attached")
-    finally:
-        page.remove_listener("console", _on_console)
-        page.remove_listener("pageerror", _on_pageerror)
-
+    console_errors, page_errors = _assert_settings_redirect(
+        page, live_server, "/settings-prompts.html", "prompts")
+    page.wait_for_function(
+        "() => { const v = document.querySelector('#sys-prompt');"
+        " return v && v.value && v.value.trim().length > 0; }"
+    )
+    page.wait_for_selector("#vars-panel .vars-table tbody tr", state="attached")
+    page.wait_for_selector("#sys-reset", state="attached")
+    page.wait_for_selector("#tpl-from-lib", state="attached")
     assert not console_errors and not page_errors, (
-        f"/settings-prompts.html (prompts/vars wired): console errors={console_errors!r}; "
+        f"settings-prompts redirect: console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
@@ -841,11 +803,11 @@ def test_evolution_config_panel_roundtrip(
     shadow_on_alert — and sends gap_alert_pp as a Decimal STRING). The golden DB seeds the
     evolution_config defaults (min_samples=8) via ensure_composer_seeded.
 
-    This proves a REAL backend round-trip (not localStorage): navigate /settings-prompts.html
-    (no tabs -> the panel mounts directly), assert (1) the min_samples input reflects the
-    backend GET (default 8); (2) change it to 12 and click 儲存; (3) the PUT fired + returned
-    200; (4) reload and assert the value PERSISTED to 12 (a fresh GET returns it). Asserts
-    ZERO console + ZERO page errors throughout.
+    This proves a REAL backend round-trip (not localStorage): navigate the CANONICAL
+    /settings.html#prompts (WPF — the standalone page is a redirect stub now), assert
+    (1) the min_samples input reflects the backend GET (default 8); (2) change it to 12
+    and click 儲存; (3) the PUT fired + returned 200; (4) reload and assert the value
+    PERSISTED to 12 (a fresh GET returns it). Asserts ZERO console + ZERO page errors.
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -863,12 +825,11 @@ def test_evolution_config_panel_roundtrip(
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
     try:
-        page.goto(live_server + "/settings-prompts.html", wait_until="load")
+        page.goto(live_server + "/settings.html#prompts", wait_until="load")
         # Panel mounts (with its fields populated from GET /api/evolution-config) before
-        # the page dispatches pd-prompts-mounted, since the IIFE is awaited in boot(). The
-        # standalone prompts page has no shell CSS, so the panel's fields are ATTACHED but
-        # not "visible" to Playwright — drive them via state="attached" + evaluate (the
-        # established pattern in this file for tabbed/hidden nodes).
+        # the page dispatches pd-prompts-mounted, since the IIFE is awaited in boot().
+        # Tabbed settings nodes are ATTACHED but may not be "visible" to Playwright —
+        # drive them via state="attached" + evaluate (the established pattern here).
         min_sel = '[data-evo-field="min_samples"]'
         page.wait_for_selector(min_sel, state="attached")
         # (1) The field reflects the backend GET (golden default min_samples=8).
@@ -895,7 +856,7 @@ def test_evolution_config_panel_roundtrip(
 
         # (4) reload -> a fresh GET must return the changed value (proves the backend
         # round-trip, NOT localStorage which has been removed).
-        page.goto(live_server + "/settings-prompts.html", wait_until="load")
+        page.goto(live_server + "/settings.html#prompts", wait_until="load")
         page.wait_for_selector(min_sel, state="attached")
         assert page.input_value(min_sel) == "12", (
             "min_samples did not PERSIST across reload — round-trip to the backend failed "
@@ -915,17 +876,13 @@ def test_evolution_config_panel_roundtrip(
 def test_settings_accounts_users_wired_smoke(
     live_server: str, browser_page: Page
 ) -> None:
-    """/settings-accounts.html users list wired to GET /api/users (spec 19, Task 2.7b).
+    """Users list on the canonical settings accounts tab wired to GET /api/users.
 
-    settings-users.js drops the localStorage pdAuth CRUD and boots off GET /api/users; the
-    page now loads api.js BEFORE shell.js. The golden DB seeds EMPTY auth tables (guest
-    mode = ZERO users), so the users panel must render the empty-state affordance ("尚無
-    授權用戶 … 新增第一個用戶後即啟用帳密保護") rather than a table — and do so with ZERO
-    console + ZERO page errors. This supersedes the Task-2.1 shell-only smoke: the page no
-    longer depends on the (now-removed) pdAuth.setSession shim.
-
-    Waits for #users-wrap to carry the empty-state text (rendered only after GET /api/users
-    resolves to []), then asserts ZERO console + ZERO page errors.
+    (WPF: retargeted from the retired standalone /settings-accounts.html.) The golden DB
+    seeds EMPTY auth tables (guest mode = ZERO users), so the users panel must render the
+    empty-state affordance ("尚無授權用戶 …") rather than a table — with ZERO console +
+    ZERO page errors. Waits for #users-wrap to carry the empty state (rendered only after
+    GET /api/users resolves to []).
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -943,7 +900,7 @@ def test_settings_accounts_users_wired_smoke(
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
     try:
-        page.goto(live_server + "/settings-accounts.html", wait_until="load")
+        page.goto(live_server + "/settings.html#accounts", wait_until="load")
         # Golden DB has ZERO users -> GET /api/users returns [] -> the empty-state div
         # renders inside #users-wrap (proves the async boot landed, not the empty shell).
         page.wait_for_selector("#users-wrap .users-empty")
@@ -952,7 +909,7 @@ def test_settings_accounts_users_wired_smoke(
         page.remove_listener("pageerror", _on_pageerror)
 
     assert not console_errors and not page_errors, (
-        f"/settings-accounts.html (users wired): console errors={console_errors!r}; "
+        f"/settings.html#accounts (users wired): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
@@ -1365,3 +1322,10 @@ def test_favicon_present_no_ico_404(live_server: str, browser_page: Page) -> Non
     # (c) The asset is actually served (200), so the browser uses it instead of /favicon.ico.
     resp = page.request.get(live_server + "/favicon.svg")
     assert resp.status == 200, f"GET /favicon.svg returned {resp.status}, expected 200"
+
+
+@pytest.mark.e2e
+def test_news_page_smoke(live_server: str, browser_page: Page) -> None:
+    """/news.html boots from GET /api/news + /api/news/filters, renders zero-error even
+    with an empty news DB (the batch-④ news library page)."""
+    assert_page_ok(browser_page, live_server, "/news.html", root_selector="#nw-list")

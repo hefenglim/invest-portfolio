@@ -57,6 +57,33 @@ def test_run_already_running_409(
     assert r.json()["error"]["code"] == "already_running"
 
 
+def test_run_disabled_task_409(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # H2 fix (decision Q2a): a disabled task must not run (previously the flag was
+    # display-only and the run generated + billed anyway).
+    it_id = _make_combo(api_client)
+    golden_db.execute("UPDATE insight_types SET enabled = 0 WHERE id = ?", (it_id,))
+    golden_db.commit()
+    r = api_client.post(f"/api/insight-types/{it_id}/run")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "task_disabled"
+    assert "任務已停用" in r.json()["error"]["message"]
+
+
+def test_run_archived_task_409(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # H2 fix: get_insight_type returns archived rows — that's how an archived re-run
+    # used to slip through the 404 check.
+    it_id = _make_combo(api_client)
+    assert api_client.delete(f"/api/insight-types/{it_id}").status_code == 200  # archive
+    r = api_client.post(f"/api/insight-types/{it_id}/run")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "task_archived"
+    assert "任務已刪除" in r.json()["error"]["message"]
+
+
 def test_runs_list_returns_rows_with_reason(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
@@ -82,7 +109,8 @@ def test_runs_list_limit_over_max_400(api_client: TestClient) -> None:
 
 
 def test_insights_list_empty_returns_empty(api_client: TestClient) -> None:
-    assert api_client.get("/api/insights").json() == []
+    body = api_client.get("/api/insights").json()
+    assert body["rows"] == [] and body["total_count"] == 0
 
 
 def test_insights_list_returns_stored_card(
@@ -110,16 +138,27 @@ def test_insights_list_returns_stored_card(
         fingerprint=istore.fingerprint(it_id, "p", "d", "v1"), calibration_version=None,
         horizon_days=5, input_snapshot="{}", model="m", cost_usd=Decimal("0.001"), now=now,
     )
-    rows = api_client.get("/api/insights").json()
-    assert len(rows) == 1
+    body = api_client.get("/api/insights").json()
+    rows = body["rows"]
+    assert len(rows) == 1 and body["total_count"] == 1
     assert rows[0]["title"] == "洞察"
     assert rows[0]["prediction"]["target_pct"] == "0.05"  # Decimal STRING
     assert rows[0]["due_at"] is not None
     # filter by symbol
-    assert len(api_client.get("/api/insights?symbol=2330").json()) == 1
-    assert api_client.get("/api/insights?symbol=NOPE").json() == []
+    assert len(api_client.get("/api/insights?symbol=2330").json()["rows"]) == 1
+    assert api_client.get("/api/insights?symbol=NOPE").json()["rows"] == []
     # filter by insight_type
-    assert len(api_client.get(f"/api/insights?insight_type={it_id}").json()) == 1
+    assert len(api_client.get(f"/api/insights?insight_type={it_id}").json()["rows"]) == 1
+    # scope filter (WPE): a 2330 card is per-symbol scope, not portfolio scope
+    assert api_client.get("/api/insights?scope=symbol").json()["total_count"] == 1
+    assert api_client.get("/api/insights?scope=portfolio").json()["total_count"] == 0
+    assert api_client.get("/api/insights?scope=bogus").status_code == 400
+    # symbol-grouped shape (WPE, 持倉健診): one group for 2330 with its card
+    grouped = api_client.get("/api/insights?group=symbol&history_limit=5").json()
+    assert grouped["total_count"] == 1
+    assert grouped["groups"][0]["symbol"] == "2330"
+    assert grouped["groups"][0]["total"] == 1
+    assert len(grouped["groups"][0]["cards"]) == 1
 
 
 def test_deleted_task_history_hidden_but_preserved(
@@ -150,12 +189,12 @@ def test_deleted_task_history_hidden_but_preserved(
         is_shadow=False, status="scored", quant_hit=True, narrative_score=80,
         miss=False, actual_value=Decimal("0.01"), confidence=70, now=now,
     )
-    assert len(api_client.get("/api/insights").json()) == 1
+    assert len(api_client.get("/api/insights").json()["rows"]) == 1
     assert len(api_client.get("/api/ai-score").json()["rows"]) == 1
 
     assert api_client.delete(f"/api/insight-types/{it_id}").status_code == 200
 
-    assert api_client.get("/api/insights").json() == []
+    assert api_client.get("/api/insights").json()["rows"] == []
     score = api_client.get("/api/ai-score").json()
     assert score["rows"] == [] and score["totals"]["n"] == 0
     dash = api_client.get("/api/dashboard").json()

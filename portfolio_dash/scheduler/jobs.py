@@ -25,6 +25,7 @@ from portfolio_dash.pricing.refresh import (
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.strategy.alerts import Alert, compute_alerts
@@ -51,6 +52,20 @@ def register_insight_runner(fn: InsightRunner | None) -> None:
 def get_insight_runner() -> InsightRunner | None:
     """The currently-registered insight runner, or None (not wired / scheduler-only)."""
     return _INSIGHT_RUNNER
+
+
+# --- News runner registration (batch ④) ---------------------------------------
+# Same seam as the insight runner: the app registers the news-pipeline runner at startup
+# so ``scheduler/`` never imports ``api``/``news``. The runner (api/news_service.py) reads
+# holdings + fetches + organizes into the separate news DB.
+NewsRunner = Callable[..., object]
+_NEWS_RUNNER: NewsRunner | None = None
+
+
+def register_news_runner(fn: NewsRunner | None) -> None:
+    """Register (or clear with None) the news_daily pipeline runner (app wiring seam)."""
+    global _NEWS_RUNNER
+    _NEWS_RUNNER = fn
 
 
 # The Loop-2/3/4 runners (price-bearing evaluate + master-bearing calibrate) live in
@@ -534,6 +549,21 @@ def generate_calibrations(conn: sqlite3.Connection, *, now: datetime) -> str:
     return "calibration pass complete"
 
 
+def news_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Batch ④ nightly: run the news pipeline (discover→fetch→organize→store) via the
+    registered runner (``news_service.run_news_daily``). No runner wired → safe no-op."""
+    runner = _NEWS_RUNNER
+    if runner is None:
+        return "no news runner registered"
+    result = runner(conn, now=now)
+    if isinstance(result, dict):
+        return (f"news: organized {result.get('organized', 0)}, "
+                f"headline {result.get('headline_only', 0)}, "
+                f"skipped {result.get('skipped_existing', 0)}"
+                + (" (budget stop)" if result.get("stopped_budget") else ""))
+    return "news pass complete"
+
+
 # --- Ops 保全: daily SQLite backup + integrity check (spec 19.3) --------------
 # Downward call (scheduler → ops, fine per architecture.md). The job runs the integrity
 # pragma FIRST; a failed check RAISES so run_job records an error run (the v1 "warn" is the
@@ -636,6 +666,12 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "backup_daily", backup_daily, "30 1 * * *", "Asia/Taipei", True,
         "Daily SQLite backup + integrity check",
+    ),
+    # News pipeline (batch ④): nightly, before the morning insight crons so cards read
+    # fresh organized news. Runs after quotes/chips ingest settle.
+    JobSpec(
+        "news_daily", news_daily, "0 6 * * *", "Asia/Taipei", True,
+        "Nightly news fetch + AI-organize into the news DB",
     ),
 ]
 
@@ -796,9 +832,11 @@ def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
         status = "ok"
     except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
         detail, status = str(exc), "error"
+    # finished_at shares *now*'s timezone (M1 fix): a UTC finish next to a +08:00 start
+    # reads as a negative-duration run in any naive display.
     conn.execute(
         "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
-        (datetime.now(UTC).isoformat(), status, detail, run_id),
+        (datetime.now(tz=now.tzinfo or UTC).isoformat(), status, detail, run_id),
     )
     conn.commit()
     return run_id
@@ -925,13 +963,38 @@ def _insight_payload(conn: sqlite3.Connection, job_id: str) -> int | None:
         return None
 
 
+def _record_skipped_overlap(
+    conn: sqlite3.Connection, job_id: str, payload: int, *, now: datetime
+) -> None:
+    """Insert a completed ``skipped`` job_runs row for a cron/manual overlap (M5).
+
+    Mirrors the shape ``llm_insight.generate._write_job_run`` uses (raw SQL — sharing a
+    table is not importing a module) so the run shows in the task's history/diagnose.
+    """
+    conn.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
+        "reason, cost_usd, is_shadow) VALUES (?, ?, ?, 'skipped', ?, ?, "
+        "'already_running', '0', 0)",
+        (
+            job_id, now.isoformat(), now.isoformat(),
+            "already_running: 前一次執行尚未完成，本次排程觸發已略過", str(payload),
+        ),
+    )
+    conn.commit()
+
+
 def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int | None:
     """Run one scheduled job, dispatching by ``kind`` (spec 04.2).
 
     A ``kind=insight`` row is dispatched to the REGISTERED insight runner against its
     payload (the insight_type_id); the runner owns its own ``job_runs`` record. Any other
     job runs through the static JOBS registry via :func:`run_job` (returning its run id).
-    A kind=insight row with no registered runner is a safe no-op (returns None).
+    A kind=insight row with no registered runner is a safe no-op (returns None), as is an
+    UNKNOWN job_id (no schedule row + not a static job — e.g. a stale live trigger firing
+    after its task was deleted; H1 fix — logged, never a KeyError). A kind=insight fire
+    while the task's latest run is still unfinished (a manual run in flight) SKIPS with a
+    ``job_runs`` row (reason ``already_running``) — the cron overlap guard (M5), mirroring
+    the manual endpoint's 409 guard.
     """
     payload = _insight_payload(conn, job_id)
     if payload is not None:
@@ -939,10 +1002,23 @@ def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int
         if runner is None:
             logger.info("kind=insight job %s fired but no runner is registered; skipping", job_id)
             return None
+        if latest_run_unfinished(conn, job_id):
+            logger.info(
+                "kind=insight job %s fired while a run is in flight; skipping (overlap guard)",
+                job_id,
+            )
+            _record_skipped_overlap(conn, job_id, payload, now=now)
+            return None
         try:
             runner(conn, payload, now=now)
         except Exception:  # noqa: BLE001 — a runner failure must never crash the scheduler
             logger.exception("insight runner failed for %s", job_id)
+        return None
+    if job_id not in _jobs_by_id():
+        logger.warning(
+            "dispatch_job: unknown job id %s (no schedule row, not a static job); skipping",
+            job_id,
+        )
         return None
     return run_job(conn, job_id, now=now)
 
@@ -952,6 +1028,9 @@ def trigger_job(job_id: str) -> None:
 
     Opens its own session and dispatches by kind (kind=insight → registered runner;
     otherwise the static job). Fire-and-forget: any failure is swallowed by ``dispatch_job``.
+    The clock is :func:`shared.clock.app_now` (Asia/Taipei) — the SAME day anchor as the
+    API's ``get_now`` (M1 fix): a cron run and a manual run of the same Taipei trading day
+    must produce the same day-anchored cache fingerprint.
     """
     with session() as conn:
-        dispatch_job(conn, job_id, now=datetime.now(UTC))
+        dispatch_job(conn, job_id, now=app_now())

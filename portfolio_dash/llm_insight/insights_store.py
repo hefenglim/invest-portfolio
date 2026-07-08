@@ -44,6 +44,14 @@ class InsightRecord(BaseModel):
     model: str
     cost_usd: str
     created_at: str
+    # The last close the model actually saw at generation time (M4 fix, decision Q1c):
+    # Loop-2 scores from THIS baseline instead of the first close AFTER create (a number
+    # the model never reasoned about). Decimal STRING; None for legacy/portfolio cards.
+    price_at_create: str | None = None
+    # Per-card token usage (AI attribution, 2026-07-07): one LLM call = one card, so the
+    # call's usage maps 1:1. Zero for legacy cards (the UI omits the token segment then).
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 _DDL = """
@@ -65,16 +73,35 @@ CREATE TABLE IF NOT EXISTS insights (
     input_snapshot TEXT NOT NULL,
     model TEXT NOT NULL,
     cost_usd TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    price_at_create TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_insights_fingerprint ON insights (fingerprint);
 CREATE INDEX IF NOT EXISTS idx_insights_type_symbol ON insights (insight_type_id, symbol);
 """
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    """Add ``column`` to ``table`` if absent (additive, idempotent migration).
+
+    A LOCAL copy of the composer_store PRAGMA pattern (``llm_insight`` layering keeps
+    these stores import-light). ``PRAGMA table_info`` row index 1 is the column name.
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
     """Create the ``insights`` table + indexes idempotently (create-always, no seed)."""
     conn.executescript(_DDL)
+    # M4 fix (decision Q1c, 2026-07-07): additive migration — the seen-at-create price.
+    _add_column_if_missing(conn, "insights", "price_at_create", "TEXT")
+    # AI attribution (2026-07-07): per-card token usage for the unified model/token/cost line.
+    _add_column_if_missing(conn, "insights", "tokens_in", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "insights", "tokens_out", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -157,12 +184,17 @@ def add_card(
     now: datetime,
     is_shadow: bool = False,
     horizon_basis: HorizonBasis = "trading_days",
+    price_at_create: Decimal | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
 ) -> InsightRecord:
     """Append one generated card; compute ``due_at``; return the stored record.
 
     Append-only (spec 04 invariant): every run inserts a new row, never mutating history.
     ``cost_usd`` is stored as a canonical Decimal string. ``due_at`` is the prediction's
     maturity date (trading- or calendar-day horizon) or NULL for a narrative card.
+    ``price_at_create`` (M4 fix) is the last close the model saw in its inputs — the
+    Loop-2 scoring baseline; None when no close series was fed (portfolio/market card).
     """
     due_at = _compute_due_at(
         card, horizon_days=horizon_days, now=now, horizon_basis=horizon_basis
@@ -170,8 +202,9 @@ def add_card(
     cur = conn.execute(
         "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
-        "horizon_days, due_at, input_snapshot, model, cost_usd, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
+        "price_at_create, tokens_in, tokens_out) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -190,6 +223,9 @@ def add_card(
             model,
             str(cost_usd),
             now.isoformat(),
+            None if price_at_create is None else str(price_at_create),
+            tokens_in,
+            tokens_out,
         ),
     )
     conn.commit()
@@ -230,6 +266,13 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         model=row["model"],
         cost_usd=row["cost_usd"],
         created_at=row["created_at"],
+        # Tolerate a pre-migration row shape (a reader hitting an old DB before
+        # ensure_tables ran its ALTER).
+        price_at_create=(
+            row["price_at_create"] if "price_at_create" in row.keys() else None
+        ),
+        tokens_in=(row["tokens_in"] or 0) if "tokens_in" in row.keys() else 0,
+        tokens_out=(row["tokens_out"] or 0) if "tokens_out" in row.keys() else 0,
     )
 
 
@@ -238,16 +281,22 @@ def _get(conn: sqlite3.Connection, insight_id: int) -> InsightRecord | None:
     return _record_from_row(row) if row is not None else None
 
 
-def find_by_fingerprint(conn: sqlite3.Connection, fingerprint: str) -> InsightRecord | None:
-    """Return the most-recent card stored under *fingerprint*, or None (cache miss).
+def find_by_fingerprint(
+    conn: sqlite3.Connection, fingerprint: str, *, is_shadow: bool = False
+) -> InsightRecord | None:
+    """Return the most-recent card stored under *fingerprint* IN THE GIVEN LANE, or None.
 
     A hit means identical inputs were already generated (same trading day) → reuse it,
     no LLM call (spec 04.10). Append-only history may hold several rows with the same
-    fingerprint across days; the latest is returned.
+    fingerprint across days; the latest is returned. ``is_shadow`` scopes the lookup
+    (L4 fix): the shadow lane (Loop 4) and the active lane must never cache-hit each
+    other — a shadow card is a hidden calibration trial, not a substitute for the
+    user-facing card (and vice versa).
     """
     row = conn.execute(
-        "SELECT * FROM insights WHERE fingerprint = ? ORDER BY id DESC LIMIT 1",
-        (fingerprint,),
+        "SELECT * FROM insights WHERE fingerprint = ? AND is_shadow = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (fingerprint, 1 if is_shadow else 0),
     ).fetchone()
     return _record_from_row(row) if row is not None else None
 
@@ -262,19 +311,31 @@ def _exclusion_clause(
     return f"insight_type_id NOT IN ({placeholders})", list(exclude_type_ids)
 
 
-def list_cards(
-    conn: sqlite3.Connection,
-    *,
-    insight_type_id: int | None = None,
-    symbol: str | None = None,
-    exclude_type_ids: set[int] | None = None,
-) -> list[InsightRecord]:
-    """List stored cards (newest first), optionally filtered by type and/or symbol.
+# Wire convention (2026-07-05 per_market spec): a per_market card stores the MARKET
+# CODE in its symbol column, so "portfolio-style" cards = symbol NULL or a market code
+# and "per-symbol" cards = any other non-null symbol. The scope filter below encodes
+# that convention ONCE so paginated reads stay honest (WPE, 2026-07-07).
+_MARKET_CODES = ("TW", "US", "MY")
 
-    ``exclude_type_ids`` hides archived tasks' history from read surfaces (the api
-    layer feeds ``composer_store.archived_type_ids``); the rows stay in the table
-    (spec 4.1 archive semantics — never physically removed).
-    """
+
+def _scope_clause(scope: str | None) -> str | None:
+    """SQL fragment for the ``scope`` filter ('portfolio' | 'symbol' | None)."""
+    codes = ", ".join(f"'{c}'" for c in _MARKET_CODES)
+    if scope == "portfolio":
+        return f"(symbol IS NULL OR symbol IN ({codes}))"
+    if scope == "symbol":
+        return f"(symbol IS NOT NULL AND symbol NOT IN ({codes}))"
+    return None
+
+
+def _filters(
+    *,
+    insight_type_id: int | None,
+    symbol: str | None,
+    exclude_type_ids: set[int] | None,
+    scope: str | None = None,
+) -> tuple[str, list[Any]]:
+    """Shared WHERE builder for the list/count reads (one filter definition)."""
     clauses: list[str] = []
     params: list[Any] = []
     if insight_type_id is not None:
@@ -283,15 +344,104 @@ def list_cards(
     if symbol is not None:
         clauses.append("symbol = ?")
         params.append(symbol)
+    scope_sql = _scope_clause(scope)
+    if scope_sql:
+        clauses.append(scope_sql)
     excl_sql, excl_params = _exclusion_clause(exclude_type_ids)
     if excl_sql:
         clauses.append(excl_sql)
         params.extend(excl_params)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def list_cards(
+    conn: sqlite3.Connection,
+    *,
+    insight_type_id: int | None = None,
+    symbol: str | None = None,
+    exclude_type_ids: set[int] | None = None,
+    scope: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[InsightRecord]:
+    """List stored cards (newest first), optionally filtered by type and/or symbol.
+
+    ``exclude_type_ids`` hides archived tasks' history from read surfaces (the api
+    layer feeds ``composer_store.archived_type_ids``); the rows stay in the table
+    (spec 4.1 archive semantics — never physically removed). ``scope``/``limit``/
+    ``offset`` (WPE): 'portfolio' keeps portfolio + per-market cards, 'symbol' keeps
+    per-symbol health cards; ``limit=None`` returns everything (legacy callers).
+    """
+    where, params = _filters(
+        insight_type_id=insight_type_id, symbol=symbol,
+        exclude_type_ids=exclude_type_ids, scope=scope,
+    )
+    page = ""
+    if limit is not None:
+        page = " LIMIT ? OFFSET ?"
+        params = [*params, limit, offset]
     rows = conn.execute(
-        f"SELECT * FROM insights{where} ORDER BY id DESC", tuple(params)
+        f"SELECT * FROM insights{where} ORDER BY id DESC{page}", tuple(params)
     ).fetchall()
     return [_record_from_row(r) for r in rows]
+
+
+def count_cards(
+    conn: sqlite3.Connection,
+    *,
+    insight_type_id: int | None = None,
+    symbol: str | None = None,
+    exclude_type_ids: set[int] | None = None,
+    scope: str | None = None,
+) -> int:
+    """COUNT over the same filter set as :func:`list_cards` (honest pager totals)."""
+    where, params = _filters(
+        insight_type_id=insight_type_id, symbol=symbol,
+        exclude_type_ids=exclude_type_ids, scope=scope,
+    )
+    row = conn.execute(
+        f"SELECT COUNT(*) AS n FROM insights{where}", tuple(params)
+    ).fetchone()
+    return int(row["n"])
+
+
+def list_symbol_groups(
+    conn: sqlite3.Connection,
+    *,
+    history_limit: int,
+    limit: int,
+    offset: int,
+    exclude_type_ids: set[int] | None = None,
+) -> tuple[list[tuple[str, int, list[InsightRecord]]], int]:
+    """持倉健診 grouping (WPE): per-symbol latest + capped history, paged over SYMBOLS.
+
+    Returns ``([(symbol, symbol_total, cards<=history_limit newest-first)], total_symbols)``.
+    Symbols are ordered by their LATEST card (id desc) so the most recently diagnosed
+    holding leads. Grouping lives server-side because pagination is over symbols —
+    a client slice of a flat card feed cannot know symbol boundaries honestly.
+    """
+    where, params = _filters(
+        insight_type_id=None, symbol=None,
+        exclude_type_ids=exclude_type_ids, scope="symbol",
+    )
+    total_row = conn.execute(
+        f"SELECT COUNT(DISTINCT symbol) AS n FROM insights{where}", tuple(params)
+    ).fetchone()
+    total_symbols = int(total_row["n"])
+    sym_rows = conn.execute(
+        f"SELECT symbol, MAX(id) AS latest_id, COUNT(*) AS total FROM insights{where} "
+        "GROUP BY symbol ORDER BY latest_id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    groups: list[tuple[str, int, list[InsightRecord]]] = []
+    for sr in sym_rows:
+        cards = list_cards(
+            conn, symbol=str(sr["symbol"]), exclude_type_ids=exclude_type_ids,
+            scope="symbol", limit=history_limit, offset=0,
+        )
+        groups.append((str(sr["symbol"]), int(sr["total"]), cards))
+    return groups, total_symbols
 
 
 def latest_cards(

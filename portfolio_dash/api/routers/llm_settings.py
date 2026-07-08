@@ -8,10 +8,12 @@ Decimal strings. Errors use the common ``error_body`` envelope.
 
 import sqlite3
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -136,6 +138,119 @@ def get_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         "roles": _roles_wire(conn),
         "quota": _quota_wire(conn),
         "usage": _usage_wire(conn),
+    }
+
+
+# --- LLM request ledger (2026-07-07): per-request detail below 用量與趨勢 -------
+
+_REQ_MAX_LIMIT = 200
+
+
+def _req_ts_display(raw: str) -> str:
+    """Normalize a stored ts (UTC legacy rows or Asia/Taipei rows) to Taipei display."""
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw[:19]
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(ZoneInfo("Asia/Taipei"))
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _ts_utc(raw: str) -> datetime | None:
+    """Parse a ts to an aware-UTC datetime for COMPARISON, store-format-agnostic.
+
+    llm_usage carries two generations of rows: legacy naive-UTC strings and current
+    Asia/Taipei ``+08:00`` strings (``app_now().isoformat()``). Comparing raw strings
+    would order them wrongly, so every side of a range check is normalized to UTC:
+    aware -> astimezone(UTC); naive -> assumed UTC (the legacy convention).
+    Unparseable -> None (caller decides; range filters exclude such rows).
+    """
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+@router.get("/llm/requests")
+def list_llm_requests(
+    agent: str | None = None,
+    model: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = Query(50, ge=1, le=_REQ_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Per-request LiteLLM ledger, newest first: date/time, model, agent, in/out/cache
+    tokens, cost. ``totals`` covers the WHOLE filtered set (count + Decimal-string cost)
+    so the page can show an honest aggregate above the pager.
+
+    Filters: ``agent``, ``model`` (exact, SQL) and ``since``/``until`` (inclusive ISO
+    timestamps, WPB 2026-07-07 — the 執行歷史 cross-link passes a run's
+    started_at→finished_at window). The ts range compares in UTC via :func:`_ts_utc`
+    because stored ts mixes legacy naive-UTC and current ``+08:00`` rows; rows whose ts
+    cannot be parsed are excluded from a windowed view (never silently mis-bucketed).
+    """
+    since_dt = _ts_utc(since) if since else None
+    if since and since_dt is None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"since 非有效時間：{since}", field="since"))
+    until_dt = _ts_utc(until) if until else None
+    if until and until_dt is None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"until 非有效時間：{until}", field="until"))
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    if agent:
+        clauses.append("agent = ?")
+        params.append(agent)
+    if model:
+        clauses.append("model = ?")
+        params.append(model)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    all_rows = conn.execute(
+        f"SELECT * FROM llm_usage{where} ORDER BY id DESC", tuple(params)
+    ).fetchall()
+    if since_dt is not None or until_dt is not None:
+        filtered = []
+        for r in all_rows:
+            ts = _ts_utc(r["ts"])
+            if ts is None:
+                continue
+            if since_dt is not None and ts < since_dt:
+                continue
+            if until_dt is not None and ts > until_dt:
+                continue
+            filtered.append(r)
+        all_rows = filtered
+    total_cost = sum((Decimal(r["cost"] or "0") for r in all_rows), Decimal("0"))
+    rows = all_rows[offset:offset + limit]
+    keys_probe = rows[0].keys() if rows else []
+    items = [
+        {
+            "ts": _req_ts_display(r["ts"]),
+            "model": r["model"],
+            "agent": r["agent"],
+            "tokens_in": r["input_tokens"],
+            "tokens_out": r["output_tokens"],
+            "cache_tokens": (r["cache_tokens"] or 0) if "cache_tokens" in keys_probe else 0,
+            "cost_usd": decimal_str(Decimal(r["cost"] or "0")),
+        }
+        for r in rows
+    ]
+    agents = [r["agent"] for r in conn.execute(
+        "SELECT DISTINCT agent FROM llm_usage ORDER BY agent")]
+    return {
+        "rows": items,
+        "totals": {"count": len(all_rows), "total_cost_usd": decimal_str(total_cost)},
+        "agents": agents,
+        "limit": limit,
+        "offset": offset,
     }
 
 

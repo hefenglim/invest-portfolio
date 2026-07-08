@@ -1,8 +1,9 @@
 """Unit tests for llm_insight.variables — registry, token validation, value assembly.
 
 The registry mirrors web/vars.js (26 vars / 8 categories) PLUS three backend-only
-date/time system tokens added for spec 04.10 (now / card_created_at / eval_date) — 29
-total. validate_tokens is the single reusable core (spec 04 R1 + spec 07 preflight):
+date/time system tokens (spec 04.10: now / card_created_at / eval_date) PLUS two
+batch-③ signal vars (technical_signals_json / fear_greed_json) — 31 total.
+validate_tokens is the single reusable core (spec 04 R1 + spec 07 preflight):
 preview lists diagnostics, the execution path turns them into 422s. Value assembly reads
 only already-computed DashboardData / per-symbol detail / technicals / fed date context —
 it computes no numbers of record.
@@ -20,12 +21,12 @@ from portfolio_dash.shared.enums import Currency
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_registry_has_29_and_categories() -> None:
-    # 26 vars.js mirror + 3 backend-only date/time system tokens (spec 04.10).
-    assert len(V.REGISTRY) == 29
-    assert len({v.category for v in V.REGISTRY}) == 8
+def test_registry_has_32_and_categories() -> None:
+    # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news = 32.
+    assert len(V.REGISTRY) == 32
+    assert len({v.category for v in V.REGISTRY}) == 9  # + the 'news' category
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 29
+    assert len({v.token for v in V.REGISTRY}) == 32
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
@@ -35,17 +36,19 @@ def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
     for v in V.REGISTRY:
         counts[v.category] = counts.get(v.category, 0) + 1
     assert counts == {
-        "position": 6, "price": 4, "dividend": 3, "fx": 2,
+        # price gained technical_signals_json (4 → 5); sentiment gained
+        # fear_greed_json (2 → 3) — batch ③; news gained symbol_news_json — batch ④.
+        "position": 6, "price": 5, "dividend": 3, "fx": 2,
         # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
-        "chips": 5, "sentiment": 2, "ai": 2, "system": 5,
+        "chips": 5, "news": 1, "sentiment": 3, "ai": 2, "system": 5,
     }
 
 
-def test_available_split_27_now_2_later() -> None:
+def test_available_split_30_now_2_later() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    # chips(5) + sentiment(2) live (spec 20.2) + 3 date vars (spec 04.10): 24 + 3 = 27.
-    assert len(available) == 27
+    # 29 previously live + 1 batch-④ news = 30; only the 2 'ai' vars stay deferred.
+    assert len(available) == 30
     assert len(unavailable) == 2
     # only the 2 'ai' vars remain deferred (spec 04).
     assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)
@@ -258,3 +261,118 @@ def test_downsample_keeps_daily_tail_and_sparse_head() -> None:
     dates = [p["date"] for p in out]
     assert dates == sorted(dates, key=lambda d: int(d[1:]))  # chronological order kept
     assert out[-31] == pts[149]  # sparse walk starts at the last head point (149,144,...)
+
+
+# --- per_market slicing (2026-07-05 spec) ---------------------------------------
+
+
+def _mctx(conn: sqlite3.Connection, market: str) -> V.VarContext:
+    data = build_dashboard(conn, now=_NOW, reporting=Currency.TWD)
+    return V.VarContext(data=data, now=_NOW, market=market)
+
+
+def test_market_holdings_slice_only_own_market(golden_db: sqlite3.Connection) -> None:
+    out, _ = V.render_prompt("{{holdings_json}}", _mctx(golden_db, "TW"))
+    assert "2330" in out
+    assert "AAPL" not in out  # the US holding never reaches a TW card
+
+
+def test_market_allocation_reweights_within_market(golden_db: sqlite3.Connection) -> None:
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    tw = V.value_for("allocation_json", V.VarContext(data=data, now=_NOW, market="TW"))
+    assert isinstance(tw, dict) and "unavailable" not in tw
+    total = sum(Decimal(str(w)) for w in tw.values())
+    assert Decimal("0.999") < total < Decimal("1.001")  # weights re-normalized in-market
+
+
+def test_market_returns_only_own_currency(golden_db: sqlite3.Connection) -> None:
+    out, _ = V.render_prompt("{{returns_by_ccy_json}}", _mctx(golden_db, "US"))
+    assert "USD" in out and "TWD" not in out
+
+
+def test_market_index_filtered_to_own_benchmark(golden_db: sqlite3.Connection) -> None:
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    ctx = V.VarContext(
+        data=data, now=_NOW, market="TW",
+        external_vars={"index_quotes_json": {
+            "TAIEX": {"chg_20d": "+0.042"}, "SPX": {"chg_20d": "+0.031"},
+            "KLCI": {"chg_20d": "+0.008"}, "last_as_of": "2026-06-11",
+        }},
+    )
+    value = V.value_for("index_quotes_json", ctx)
+    assert set(value) == {"TAIEX", "last_as_of"}
+
+
+def test_per_market_scope_rejects_per_symbol_vars() -> None:
+    v = V.validate_tokens("{{symbol_detail_json}} {{holdings_json}}", "per_market")
+    assert v.scope_violations == ["symbol_detail_json"]
+    assert v.unknown_tokens == []
+
+
+def test_market_freshness_filters_to_own_symbols(golden_db: sqlite3.Connection) -> None:
+    # SR gap-fill: the freshness slice was implemented but untested.
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    full = V.value_for("freshness_json", V.VarContext(data=data, now=_NOW))
+    tw = V.value_for("freshness_json", V.VarContext(data=data, now=_NOW, market="TW"))
+    tw_symbols = {h.symbol for h in data.holdings if h.market.value == "TW"}
+    assert all(
+        p.get("symbol") in tw_symbols for p in tw.get("prices", []) if isinstance(p, dict)
+    )
+    assert all(s in tw_symbols for s in tw.get("missing_prices", []))
+    # the unfiltered dump is a superset
+    assert len(full.get("prices", [])) >= len(tw.get("prices", []))
+
+
+# --- batch ③ technical signals + fear_greed variable (2026-07-05) --------------
+
+
+def test_technical_signals_var_from_closes(golden_db: sqlite3.Connection) -> None:
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    closes = [Decimal(str(100 + i)) for i in range(1, 80)]
+    ctx = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes)
+    val = V.value_for("technical_signals_json", ctx)
+    assert isinstance(val, dict) and "rsi14" in val and "ma_cross" in val
+    assert "volume" not in val  # probe-gated: no volumes fed
+    # empty closes -> honest unavailable
+    empty = V.value_for("technical_signals_json", V.VarContext(data=data, now=_NOW, symbol="X"))
+    assert empty == {"unavailable": True}
+
+
+def test_fear_greed_var_is_external_fed(golden_db: sqlite3.Connection) -> None:
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    ctx = V.VarContext(
+        data=data, now=_NOW,
+        external_vars={"fear_greed_json": {
+            "score": 62, "zone": "greed",
+            "trend": {"direction": "rising", "change": "+8", "window_days": 7},
+            "last_as_of": "2026-07-04",
+        }},
+    )
+    val = V.value_for("fear_greed_json", ctx)
+    assert val["zone"] == "greed" and val["trend"]["direction"] == "rising"
+    # missing snapshot -> degrade shape
+    missing = V.value_for("fear_greed_json", V.VarContext(data=data, now=_NOW))
+    assert missing == {"unavailable": True}
+
+
+def test_new_signal_vars_registered_scopes() -> None:
+    assert V.BY_TOKEN["technical_signals_json"].scope == "per_symbol"
+    assert V.BY_TOKEN["technical_signals_json"].category == "price"
+    assert V.BY_TOKEN["fear_greed_json"].scope == "portfolio"
+    assert V.BY_TOKEN["fear_greed_json"].category == "sentiment"
+
+
+def test_per_market_kpis_and_fx_carry_scope_note(golden_db: sqlite3.Connection) -> None:
+    # SR fix: whole-portfolio vars used in a per_market card are labelled, not fabricated.
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    ctx = V.VarContext(data=data, now=_NOW, market="TW",
+                       fx_rates={"USD_TWD": {"rate": "32.9"}})
+    kpis = V.value_for("kpis_json", ctx)
+    assert "scope_note" in kpis and "全組合" in kpis["scope_note"]
+    fx = V.value_for("fx_json", ctx)
+    assert isinstance(fx, dict) and ("scope_note" in fx or fx.get("unavailable"))
+    rates = V.value_for("fx_rates_json", ctx)
+    assert "scope_note" in rates
+    # without a market, no scope_note (portfolio card unchanged)
+    p = V.value_for("kpis_json", V.VarContext(data=data, now=_NOW))
+    assert "scope_note" not in p

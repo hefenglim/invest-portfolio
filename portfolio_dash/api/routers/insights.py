@@ -14,13 +14,15 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, TypeVar
 
-from fastapi import APIRouter, Depends
+from apscheduler.triggers.cron import CronTrigger
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from portfolio_dash.api import insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.api.routers.scheduler import get_scheduler
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
 from portfolio_dash.llm_insight import insights_store as istore
@@ -34,8 +36,13 @@ from portfolio_dash.scheduler.jobs import (
     start_insight_run,
     unbind_insight_schedule,
 )
+from portfolio_dash.scheduler.runtime import remove_job, reschedule_job
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.wire import decimal_str
+
+# Insight-type schedule bindings are Asia/Taipei by definition (spec 4.2 —
+# ``bind_insight_schedule``'s default); the live-trigger mount uses the same tz.
+_INSIGHT_TZ = "Asia/Taipei"
 
 router = APIRouter()
 
@@ -354,6 +361,7 @@ def update_insight_type(
 @_dual("DELETE", "/{insight_type_id}")
 def delete_insight_type(
     insight_type_id: int,
+    request: Request,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
@@ -366,7 +374,69 @@ def delete_insight_type(
             content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
         )
     unbind_insight_schedule(conn, insight_type_id)  # remove the schedule_config row (4.1)
+    # H1 fix: also drop the LIVE trigger — a deleted task's cron must stop firing now,
+    # not at the next restart (no-op when the scheduler is absent, e.g. tests).
+    remove_job(get_scheduler(request), insight_job_id(insight_type_id))
     return _insight_type_wire(conn, it)
+
+
+# --- one-click official pack (usability decision ①, 2026-07-05) ----------------
+
+
+@_dual("POST", "/official-pack")
+def enable_official_pack(
+    request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, Any]:
+    """Create every official task preset in one click (strategy + knobs + schedule).
+
+    Idempotent: a non-archived insight task carrying a preset's ``preset_key`` (the
+    provenance stamp, M3 fix) — or, for installs that predate the column, its exact
+    name — is skipped (a second click reports it under ``skipped``), so a RENAMED
+    official task is never re-created (no double cron, no double cost). A same-name
+    strategy is REUSED — the user's customized copy wins over the library body; only
+    a missing strategy is created from the template.
+    """
+    cs.ensure_seeded(conn)
+    live_types = cs.list_insight_types(conn)  # non-archived only
+    existing_names = {t.name for t in live_types}
+    existing_keys = {t.preset_key for t in live_types if t.preset_key}
+    strategies_by_name = {s.name: s for s in cs.list_strategies(conn) if not s.archived}
+    created: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    templates_by_name = {t["name"]: t for t in official_templates.STRATEGY_TEMPLATES}
+    scheduler = get_scheduler(request)
+    for preset in official_templates.TASK_PRESETS:
+        if preset["preset_key"] in existing_keys or preset["name"] in existing_names:
+            skipped.append(preset["name"])
+            continue
+        tpl = templates_by_name[preset["strategy"]]
+        sp = strategies_by_name.get(tpl["name"])
+        strategy_reused = sp is not None
+        if sp is None:
+            sp = cs.create_strategy(conn, name=tpl["name"], body=tpl["body"], now=now)
+            strategies_by_name[sp.name] = sp
+        it = cs.create_insight_type(
+            conn, name=preset["name"], scope=preset["scope"],
+            use_system_prompt=preset["use_system_prompt"],
+            self_correct=preset["self_correct"],
+            universe=None, alert_rules=None, enabled=True,
+            horizon_days=preset["horizon_days"], eval_prompt=None,
+            preset_key=preset["preset_key"], now=now,
+        )
+        cs.set_strategies(conn, it.id, [(sp.id, 0)])
+        job_id = bind_insight_schedule(conn, it.id, cron=preset["suggested_cron"])
+        cs.set_job_id(conn, it.id, job_id)
+        # H1 fix: mount the live trigger now (was: only loaded at restart).
+        reschedule_job(
+            scheduler, job_id, cron=preset["suggested_cron"], tz=_INSIGHT_TZ, enabled=True
+        )
+        created.append({
+            "id": it.id, "name": it.name, "cron": preset["suggested_cron"],
+            "strategy": sp.name, "strategy_reused": strategy_reused,
+        })
+    return {"created": created, "skipped": skipped}
 
 
 # --- schedule mount (spec 4.2) ------------------------------------------------
@@ -376,13 +446,16 @@ def delete_insight_type(
 def mount_schedule(
     insight_type_id: int,
     payload: ScheduleIn,
+    request: Request,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
     """Bind/update the insight_type's schedule (kind=insight). on_alert combos reject (400).
 
-    on_alert insight_types are event-triggered (spec 03), not scheduled. The runtime
-    dispatch of the kind=insight row is 04b; here we only persist the binding + return
-    its job_id.
+    on_alert insight_types are event-triggered (spec 03), not scheduled. Persists the
+    binding AND mounts/updates the LIVE APScheduler trigger immediately (H1 fix — the
+    old behavior loaded new bindings only at restart, so a fresh schedule never fired).
+    The cron is validated BEFORE any write (an invalid stored cron would crash the
+    scheduler build at the next startup).
     """
     cs.ensure_seeded(conn)
     it = cs.get_insight_type(conn, insight_type_id)
@@ -399,14 +472,25 @@ def mount_schedule(
                 field="cron",
             ),
         )
+    try:
+        CronTrigger.from_crontab(payload.cron, timezone=_INSIGHT_TZ)
+    except Exception as exc:  # noqa: BLE001 — surface any builder failure as 400
+        return JSONResponse(
+            status_code=400,
+            content=error_body("invalid_cron", f"cron 表達式無效：{exc}", field="cron"),
+        )
     job_id = bind_insight_schedule(conn, insight_type_id, cron=payload.cron)
     cs.set_job_id(conn, insight_type_id, job_id)  # mirror onto the insight_type row
+    reschedule_job(
+        get_scheduler(request), job_id, cron=payload.cron, tz=_INSIGHT_TZ, enabled=True
+    )
     return {"job_id": job_id}
 
 
 @_dual("DELETE", "/{insight_type_id}/schedule")
 def unmount_schedule(
     insight_type_id: int,
+    request: Request,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
     cs.ensure_seeded(conn)
@@ -417,6 +501,8 @@ def unmount_schedule(
         )
     unbind_insight_schedule(conn, insight_type_id)
     cs.set_job_id(conn, insight_type_id, None)
+    # H1 fix: drop the live trigger too (no-op when the scheduler is absent).
+    remove_job(get_scheduler(request), insight_job_id(insight_type_id))
     return {"job_id": None}
 
 
@@ -511,16 +597,24 @@ def calibration_samples(
 
 
 @router.get("/ai-score")
-def get_ai_score(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def get_ai_score(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
     """The AI battle-record table: ``{totals, by_combo[], calibration_bins[], rows[]}``.
 
     Active (non-shadow) scored rows drive the displayed totals/by_combo; shadow rows are
     kept in ``rows`` for the promotion view. Empty DB → zeroed/[] (CSV export is a frontend
-    concern over this payload).
+    concern over this payload). WPE (2026-07-07): the previously-unbounded ``rows`` pages
+    via ``limit``/``offset`` (+ ``rows_total_count``); the aggregates stay whole-set.
     """
     es.ensure_tables(conn)
     cs.ensure_seeded(conn)
-    return es.ai_score(conn, exclude_type_ids=cs.archived_type_ids(conn))
+    return es.ai_score(
+        conn, exclude_type_ids=cs.archived_type_ids(conn),
+        rows_limit=limit, rows_offset=offset,
+    )
 
 
 # --- evolution-config (spec 4.6) ----------------------------------------------
@@ -589,12 +683,25 @@ def run_insight_now(
     Inserts a 'running' ``job_runs`` row synchronously (returning its id for polling), then
     dispatches the registered insight runner in a daemon thread. Mirrors spec-15 ``/run``:
     progress is polled via ``GET /api/insight-types/{id}/runs`` (running/ok/error/skipped).
+    A disabled or archived task rejects with 409 (H2 fix, decision Q2a — ``get_insight_type``
+    returns archived rows, which is how an archived re-run used to slip through).
     """
     cs.ensure_seeded(conn)
-    if cs.get_insight_type(conn, insight_type_id) is None:
+    it = cs.get_insight_type(conn, insight_type_id)
+    if it is None:
         return JSONResponse(
             status_code=404,
             content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
+        )
+    if it.archived:
+        return JSONResponse(
+            status_code=409,
+            content=error_body("task_archived", "任務已刪除，無法執行"),
+        )
+    if not it.enabled:
+        return JSONResponse(
+            status_code=409,
+            content=error_body("task_disabled", "任務已停用，請先啟用再執行"),
         )
     if latest_run_unfinished(conn, insight_job_id(insight_type_id)):
         return JSONResponse(
@@ -767,6 +874,8 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
         "due_at": rec.due_at,
         "model": rec.model,
         "cost_usd": rec.cost_usd,
+        "tokens_in": rec.tokens_in,
+        "tokens_out": rec.tokens_out,
         "created_at": rec.created_at,
     }
 
@@ -775,20 +884,61 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
 def list_insights(
     insight_type: int | None = None,
     symbol: str | None = None,
+    scope: str | None = None,
+    group: str | None = None,
+    history_limit: int = Query(5, ge=1, le=20),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
-) -> list[dict[str, Any]]:
-    """List stored insight cards (newest first), optionally filtered by type and/or symbol.
+) -> Any:
+    """List stored insight cards (newest first) — paginated (WPE, 2026-07-07).
+
+    Flat shape: ``{rows, total_count, limit, offset}`` filtered by ``insight_type`` /
+    ``symbol`` / ``scope`` ('portfolio' = portfolio + per-market cards; 'symbol' =
+    per-symbol health cards — the market-code-in-symbol wire convention is encoded once
+    in the store). Grouped shape (``group=symbol``, the 持倉健診 treatment): pagination
+    runs over SYMBOLS — ``{groups: [{symbol, total, cards<=history_limit}], total_count,
+    limit, offset, history_limit}``. Grouping is server-side because a client slice of a
+    flat feed cannot know symbol boundaries; the cards keep coming from the same
+    ``_card_wire`` serializer (no client-computed numbers either way).
 
     Archived (deleted) tasks' cards are hidden — history stays in the table (spec 4.1)
-    but stops surfacing. Empty DB → ``[]``. Money/target_pct is a Decimal STRING (the
-    frontend never computes).
+    but stops surfacing. Empty DB → empty rows/groups. Money/target_pct is a Decimal
+    STRING (the frontend never computes).
     """
     istore.ensure_tables(conn)
     cs.ensure_seeded(conn)
-    return [
+    if scope not in (None, "portfolio", "symbol"):
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"scope 非有效值：{scope}", field="scope"))
+    if group not in (None, "symbol"):
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"group 非有效值：{group}", field="group"))
+    excluded = cs.archived_type_ids(conn)
+    if group == "symbol":
+        groups, total_symbols = istore.list_symbol_groups(
+            conn, history_limit=history_limit, limit=limit, offset=offset,
+            exclude_type_ids=excluded,
+        )
+        return {
+            "groups": [
+                {"symbol": sym, "total": total, "cards": [_card_wire(c) for c in cards]}
+                for sym, total, cards in groups
+            ],
+            "total_count": total_symbols,
+            "limit": limit,
+            "offset": offset,
+            "history_limit": history_limit,
+        }
+    rows = [
         _card_wire(rec)
         for rec in istore.list_cards(
             conn, insight_type_id=insight_type, symbol=symbol,
-            exclude_type_ids=cs.archived_type_ids(conn),
+            exclude_type_ids=excluded, scope=scope, limit=limit, offset=offset,
         )
     ]
+    total = istore.count_cards(
+        conn, insight_type_id=insight_type, symbol=symbol,
+        exclude_type_ids=excluded, scope=scope,
+    )
+    return {"rows": rows, "total_count": total, "limit": limit, "offset": offset}

@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css"></link>
-<link rel="stylesheet" href="settings.css"></link>
-<link rel="stylesheet" href="input.css"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.11"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.11"></link>
+<link rel="stylesheet" href="input.css?v=0.1.11"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   /* settings tab bar */
@@ -214,19 +214,64 @@
       <div class="table-wrap"><table class="data"><thead><tr><th class="col-text">模型</th><th>呼叫數</th><th>輸入 tokens</th><th>輸出 tokens</th><th>累計成本</th></tr></thead><tbody id="usage-body"></tbody></table></div>
       <div class="set-body"><div id="llm-daily-chart" style="height:180px;"></div></div>
     </section>
+    <!-- Request 明細 (2026-07-07): per-request LiteLLM ledger — canonical tabbed surface -->
+    <section class="panel" data-screen-label="Request 明細">
+      <div class="panel-head">
+        <h2 class="panel-title">Request 明細</h2>
+        <span class="panel-sub">每一次 LiteLLM 底層請求的完整記錄</span>
+        <span class="spacer"></span>
+        <span class="pill" id="req-window" hidden="hidden"></span>
+        <select class="select" id="req-agent" style="min-height:30px; font-size:11.5px;">
+          <option value="">全部用途</option>
+        </select>
+        <span class="panel-sub num" id="req-totals"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th class="col-text">日期時間</th><th class="col-text">模型</th>
+              <th class="col-text">用途</th><th>輸入</th><th>輸出</th>
+              <th>快取</th><th>金額</th>
+            </tr>
+          </thead>
+          <tbody id="req-body"></tbody>
+        </table>
+      </div>
+      <div id="req-pager" hidden="hidden"></div>
+      <div class="set-body" style="padding-top:6px;">
+        <span class="panel-sub" id="req-note"></span>
+      </div>
+    </section>
   </div>
 
-  <!-- ===== AI 提示詞 ===== -->
+  <!-- ===== AI 提示詞 (WPF: canonical — mirrors the retired standalone page incl.
+       sys-reset / tpl-from-lib / the FM8 in-panel save bar) ===== -->
   <div class="set-view" id="view-prompts" data-screen-label="AI 提示詞">
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">系統提示詞</h2><span class="panel-sub" id="sys-prompt-meta"></span></div>
-      <div class="sys-prompt-card"><textarea class="input" id="sys-prompt" spellcheck="false"></textarea><span class="hint">定義角色、語言與全域規則；所有 AI 呼叫皆先套用此提示詞。</span></div>
+      <div class="panel-head">
+        <h2 class="panel-title">系統提示詞</h2>
+        <span class="panel-sub" id="sys-prompt-meta"></span>
+        <span class="spacer"></span>
+        <button class="btn" id="sys-reset" type="button" title="以官方模板庫最新版覆蓋目前內容">重置回官方版</button>
+      </div>
+      <div class="sys-prompt-card"><textarea class="input" id="sys-prompt" spellcheck="false"></textarea><span class="hint">定義角色、語言與全域規則；所有 AI 呼叫（輸入解析、洞察批次）皆先套用此提示詞。</span></div>
+      <!-- FM8: the save bar belongs to THIS panel (it writes the system prompt). -->
+      <div class="save-bar" data-screen-label="儲存列" style="border-top: 1px solid var(--border-soft);">
+        <span class="note">「儲存設定」寫入系統提示詞；策略卡各自的「儲存」即時寫入資料庫</span>
+        <button class="btn btn-primary" id="prompts-save" type="button">儲存設定</button>
+      </div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">策略提示詞</h2><span class="panel-sub">純設計物件 — 搭配數據變數組裝，由洞察類型引用後執行</span><span class="spacer"></span><button class="btn btn-primary" id="tpl-add" type="button">＋ 新增策略</button></div>
+      <div class="panel-head">
+        <h2 class="panel-title">策略提示詞</h2>
+        <span class="panel-sub">啟用中的策略會在洞察批次依序執行，各產生一張洞察卡片</span>
+        <span class="spacer"></span>
+        <button class="btn" id="tpl-from-lib" type="button" title="從官方模板庫複製一份可自訂的副本">從官方模板庫新增</button>
+        <button class="btn btn-primary" id="tpl-add" type="button">＋ 新增策略</button>
+      </div>
       <div class="set-body"><div class="tpl-list" id="tpl-list"></div></div>
     </section>
-    <div class="save-bar"><span class="note">提示詞寫入本機 config — 此頁為設計稿，不會真的儲存</span><button class="btn" type="button">還原變更</button><button class="btn btn-primary" id="prompts-save" type="button">儲存設定</button></div>
   </div>
 
   <!-- ===== 排程 ===== -->
@@ -239,11 +284,24 @@
       </tr></thead><tbody id="jobs-body"></tbody></table></div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">最近 10 筆</span></div>
+      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">新→舊・可依工作篩選・LLM 類執行可跳查 AI 請求</span></div>
       <div class="filter-bar" id="hist-filter"></div>
       <div class="table-wrap"><table class="data"><thead><tr>
         <th>時間</th><th class="col-text">工作</th><th>狀態</th><th class="col-text">摘要</th><th>耗時</th><th>費用</th>
       </tr></thead><tbody id="hist-body"></tbody></table></div>
+      <div id="hist-pager" hidden="hidden"></div>
+    </section>
+    <!-- 系統操作記錄 (WPD 2026-07-07): folded in from the standalone scheduler page —
+         the canonical tabbed surface now carries every scheduler-area panel. -->
+    <section class="panel" data-screen-label="系統操作記錄">
+      <div class="panel-head">
+        <h2 class="panel-title">系統操作記錄</h2>
+        <span class="panel-sub">網頁上每一筆「會改變資料」的動作（寫入、更正、更新報價、設定變更…）；試算與預覽不記錄</span>
+      </div>
+      <div class="table-wrap"><table class="data"><thead><tr>
+        <th>時間</th><th class="col-text">動作</th><th class="col-text">使用者</th><th class="col-text">端點</th><th>結果</th><th>耗時</th>
+      </tr></thead><tbody id="syslog-body"></tbody></table></div>
+      <div id="syslog-pager" hidden="hidden"></div>
     </section>
   </div>
 
@@ -258,7 +316,7 @@
         <div class="field"><label for="nu-pass">密碼</label><input class="input" id="nu-pass" type="password" autocomplete="new-password" placeholder="登入用密碼"></input></div>
         <button class="btn btn-primary" id="nu-add" type="button">新增用戶</button>
       </div>
-      <div class="user-note">設計稿：帳號密碼存於本機瀏覽器（localStorage）。後端接線後改為伺服器端帶雜湊儲存，並支援角色權限。</div>
+      <div class="user-note">後端 session 認證：密碼以加鹽 scrypt 雜湊儲存於伺服器資料庫，瀏覽器僅保存登入 session cookie。</div>
     </section>
     <section class="panel">
       <div class="panel-head"><h2 class="panel-title">帳戶</h2><span class="panel-sub">v1 唯讀</span></div>
@@ -279,24 +337,52 @@
       <details class="fee-detail"><summary><span class="caret">▶</span>Moomoo 馬股 <span class="panel-sub num">moomoo_my</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">Clearing fee</span><span class="v">0.03%</span></div><div class="fee-row"><span class="k">Stamp duty</span><span class="v placeholder">依設定檔</span></div></div></details>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">一般</h2><span class="panel-sub">唯讀</span></div>
+      <div class="panel-head"><h2 class="panel-title">一般</h2><span class="panel-sub">系統資訊與介面偏好</span></div>
       <div class="gen-rows">
         <div class="gen-row"><span class="k">系統版本</span><span class="v num" id="gen-version">—</span></div>
         <div class="gen-row"><span class="k">報告幣別</span><span class="v num">TWD</span></div>
         <div class="gen-row"><span class="k">顯示時區</span><span class="v num">Asia/Taipei</span></div>
+        <!-- 每頁筆數 (WPC): backend-persisted global page size for every pager -->
+        <div class="gen-row"><span class="k">每頁筆數</span><span class="v">
+          <select class="select" id="pref-page-size" style="width:90px;min-height:28px;">
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+          </select>
+        </span></div>
       </div>
+    </section>
+    <!-- 資料庫統計 (2026-07-07 owner decision): read-only observation panel — canonical
+         tabbed surface ONLY (the standalone settings pages are redirect stubs). -->
+    <section class="panel" data-screen-label="資料庫統計">
+      <div class="panel-head">
+        <h2 class="panel-title">資料庫統計</h2>
+        <span class="panel-sub">唯讀 — 各資料表筆數與最早記錄，供保留期限評估；目前不做任何自動清理</span>
+        <span class="spacer"></span>
+        <button class="btn" id="dbstats-refresh" type="button">⟳ 重新整理</button>
+      </div>
+      <div class="gen-rows" id="dbstats-files" style="padding-bottom:0;"></div>
+      <div class="table-wrap"><table class="data"><thead><tr>
+        <th class="col-text">類別</th><th class="col-text">資料表</th><th>筆數</th><th>最早記錄</th>
+      </tr></thead><tbody id="dbstats-body"></tbody></table></div>
+      <div class="set-body" style="padding-top:6px;"><span class="panel-sub" id="dbstats-note"></span></div>
     </section>
   </div>
 
-  <!-- ===== 資料來源 ===== -->
+  <!-- ===== 資料來源 (WPF: canonical — the dead 帳戶抓取順序 mock panel is replaced
+       by the REAL 市場報價抓取順位 panel from the retired standalone page) ===== -->
   <div class="set-view" id="view-datasources" data-screen-label="資料來源">
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">帳戶抓取順序</h2><span class="panel-sub">系統依序嘗試各來源，拖曳調整優先順序</span></div>
-      <div class="fallback-grid" id="fallback-wrap"></div>
-    </section>
-        <section class="panel">
       <div class="panel-head"><h2 class="panel-title">資料來源清單</h2><span class="panel-sub">報價・股利・匯率・新聞 · 需金鑰的來源在此設定 token／API key 並測試連線</span></div>
       <div id="sources-wrap"></div>
+    </section>
+    <section class="panel" data-screen-label="市場報價抓取順位">
+      <div class="panel-head">
+        <h2 class="panel-title">市場報價抓取順位</h2>
+        <span class="panel-sub">抓報價時依此順序詢問來源，第一個成功即採用；順位改了就是真的改（排程與手動更新都走這條鏈）。來源的健康狀態與金鑰見上方清單</span>
+      </div>
+      <div class="fallback-grid" id="market-order-wrap" style="grid-template-columns: repeat(3, 1fr);"></div>
     </section>
   </div>
 
@@ -352,18 +438,21 @@
   </div>
 </div>
 
-<script src="api.js"></script>
-<script src="shell.js"></script>
-<script src="format.js"></script>
-<script src="export.js"></script>
-<script src="alerts.js"></script>
-<script src="vars.js"></script>
-<script src="settings-llm.js"></script>
-<script src="settings-prompts.js"></script>
-<script src="settings-scheduler.js"></script>
-<script src="settings-datasources.js"></script>
-<script src="settings-alerts.js"></script>
-<script src="settings-users.js"></script>
+<script src="api.js?v=0.1.11"></script>
+<script src="shell.js?v=0.1.11"></script>
+<script src="format.js?v=0.1.11"></script>
+<script src="pager.js?v=0.1.11"></script>
+<script src="export.js?v=0.1.11"></script>
+<script src="alerts.js?v=0.1.11"></script>
+<script src="vars.js?v=0.1.11"></script>
+<script src="settings-llm.js?v=0.1.11"></script>
+<script src="settings-prompts.js?v=0.1.11"></script>
+<script src="settings-scheduler.js?v=0.1.11"></script>
+<script src="settings-datasources.js?v=0.1.11"></script>
+<script src="settings-alerts.js?v=0.1.11"></script>
+<script src="settings-users.js?v=0.1.11"></script>
+<script src="settings-dbstats.js?v=0.1.11"></script>
+<script src="settings-prefs.js?v=0.1.11"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs） */
 (function () {

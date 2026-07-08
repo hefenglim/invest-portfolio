@@ -69,6 +69,9 @@ class DueInsight(BaseModel):
     prediction: str | None  # the raw prediction JSON (parsed by the scorer)
     due_at: str | None
     created_at: str
+    # The close the model saw at create time (M4 fix) — the preferred Loop-2 baseline;
+    # None for legacy cards (they score on the old on-or-after-create basis).
+    price_at_create: str | None = None
 
 
 _DDL = """
@@ -195,11 +198,15 @@ def latest_for_insight(conn: sqlite3.Connection, insight_id: int) -> Evaluation 
 # --- pending_data lifecycle (anti-poison) -------------------------------------
 
 
-def bump_defer(conn: sqlite3.Connection, *, insight_id: int, insight_type_id: int) -> int:
+def bump_defer(
+    conn: sqlite3.Connection, *, insight_id: int, insight_type_id: int,
+    now: datetime | None = None,
+) -> int:
     """Record another deferral for a still-unscoreable insight; return the new defer_count.
 
     Appends a fresh ``pending_data`` row carrying ``prior_max_defer + 1`` so the retry
-    history is preserved (append-only). Returns the new defer_count.
+    history is preserved (append-only). ``now`` is the injected clock (L7 fix — the
+    evaluate pass threads its own ``now``); ``None`` falls back to wall-clock UTC.
     """
     row = conn.execute(
         "SELECT MAX(defer_count) AS m FROM insight_evaluations WHERE insight_id = ?",
@@ -207,32 +214,38 @@ def bump_defer(conn: sqlite3.Connection, *, insight_id: int, insight_type_id: in
     ).fetchone()
     prior = int(row["m"]) if row is not None and row["m"] is not None else 0
     new_count = prior + 1
+    stamp = (now if now is not None else datetime.now(UTC)).isoformat()
     conn.execute(
         "INSERT INTO insight_evaluations (insight_id, insight_type_id, calibration_version, "
         "is_shadow, status, quant_hit, narrative_score, miss, actual_value, confidence, "
         "defer_count, notes, evaluated_at) "
         "VALUES (?, ?, NULL, 0, 'pending_data', NULL, NULL, 0, NULL, NULL, ?, NULL, ?)",
-        (insight_id, insight_type_id, new_count, datetime.now(UTC).isoformat()),
+        (insight_id, insight_type_id, new_count, stamp),
     )
     conn.commit()
     return new_count
 
 
 def mark_undetermined(
-    conn: sqlite3.Connection, *, insight_id: int, insight_type_id: int
+    conn: sqlite3.Connection, *, insight_id: int, insight_type_id: int,
+    now: datetime | None = None,
 ) -> None:
-    """Append an ``undetermined`` terminal row (defer cap exceeded; excluded, never miss)."""
+    """Append an ``undetermined`` terminal row (defer cap exceeded; excluded, never miss).
+
+    ``now`` is the injected clock (L7 fix); ``None`` falls back to wall-clock UTC.
+    """
     row = conn.execute(
         "SELECT MAX(defer_count) AS m FROM insight_evaluations WHERE insight_id = ?",
         (insight_id,),
     ).fetchone()
     prior = int(row["m"]) if row is not None and row["m"] is not None else 0
+    stamp = (now if now is not None else datetime.now(UTC)).isoformat()
     conn.execute(
         "INSERT INTO insight_evaluations (insight_id, insight_type_id, calibration_version, "
         "is_shadow, status, quant_hit, narrative_score, miss, actual_value, confidence, "
         "defer_count, notes, evaluated_at) "
         "VALUES (?, ?, NULL, 0, 'undetermined', NULL, NULL, 0, NULL, NULL, ?, NULL, ?)",
-        (insight_id, insight_type_id, prior, datetime.now(UTC).isoformat()),
+        (insight_id, insight_type_id, prior, stamp),
     )
     conn.commit()
 
@@ -240,23 +253,37 @@ def mark_undetermined(
 # --- due insights -------------------------------------------------------------
 
 
-def due_insights(conn: sqlite3.Connection, *, now: datetime) -> list[DueInsight]:
+def due_insights(
+    conn: sqlite3.Connection, *, now: datetime,
+    exclude_type_ids: set[int] | None = None,
+) -> list[DueInsight]:
     """Insights whose prediction has matured and which have NO terminal evaluation yet.
 
     A card is due when ``due_at`` is non-NULL and ``<= now`` and it has no ``scored`` or
     ``undetermined`` evaluation row (a ``pending_data`` row leaves it due — it must be
-    retried). Reads the ``insights`` table read-only; tolerates its absence (returns []).
+    retried). ``exclude_type_ids`` hides archived tasks' cards (L2 fix — the api layer
+    feeds ``composer_store.archived_type_ids``, same pattern as :func:`ai_score`), so an
+    archived task's matured cards stop consuming scoring (incl. master narrative cost).
+    Reads the ``insights`` table read-only; tolerates its absence (returns []).
     """
+    excl_sql = ""
+    excl_params: list[Any] = []
+    if exclude_type_ids:
+        placeholders = ",".join("?" * len(exclude_type_ids))
+        excl_sql = f"AND i.insight_type_id NOT IN ({placeholders}) "
+        excl_params = list(exclude_type_ids)
     try:
         rows = conn.execute(
             "SELECT i.id AS id, i.insight_type_id AS insight_type_id, i.symbol AS symbol, "
             "i.calibration_version AS calibration_version, i.is_shadow AS is_shadow, "
             "i.confidence AS confidence, i.prediction AS prediction, i.due_at AS due_at, "
-            "i.created_at AS created_at FROM insights i "
+            "i.created_at AS created_at, i.price_at_create AS price_at_create "
+            "FROM insights i "
             "WHERE i.due_at IS NOT NULL AND i.due_at <= ? "
+            f"{excl_sql}"
             "AND NOT EXISTS (SELECT 1 FROM insight_evaluations e WHERE e.insight_id = i.id "
             "AND e.status IN ('scored', 'undetermined')) ORDER BY i.id",
-            (now.isoformat(),),
+            (now.isoformat(), *excl_params),
         ).fetchall()
     except sqlite3.OperationalError:
         return []
@@ -271,6 +298,7 @@ def due_insights(conn: sqlite3.Connection, *, now: datetime) -> list[DueInsight]
             prediction=r["prediction"],
             due_at=r["due_at"],
             created_at=r["created_at"],
+            price_at_create=r["price_at_create"],
         )
         for r in rows
     ]
@@ -481,7 +509,11 @@ def _row_wire(r: sqlite3.Row) -> dict[str, Any]:
 
 
 def ai_score(
-    conn: sqlite3.Connection, *, exclude_type_ids: set[int] | None = None
+    conn: sqlite3.Connection,
+    *,
+    exclude_type_ids: set[int] | None = None,
+    rows_limit: int | None = None,
+    rows_offset: int = 0,
 ) -> dict[str, Any]:
     """The battle-record table (spec 4.7): ``{totals, by_combo[], calibration_bins[], rows[]}``.
 
@@ -491,6 +523,11 @@ def ai_score(
     tasks' history from the displayed record (spec 4.1 archive: rows stay in the table);
     ``calibration_bins`` stays global — it is a calibration diagnostic, not a scoreboard.
     Empty DB → zeroed/[] (the contract shape the frontend consumes).
+
+    WPE (2026-07-07): ``rows`` pages via ``rows_limit``/``rows_offset`` (applied AFTER
+    the archived-task exclusion so page boundaries are honest); the AGGREGATES always
+    cover the whole set. ``rows_total_count`` reports the filtered total.
+    ``rows_limit=None`` keeps the legacy everything-in-one shape for internal callers.
     """
     excluded = exclude_type_ids or set()
     combo_ids = [
@@ -522,16 +559,18 @@ def ai_score(
         "quant_hit_rate": _ratio_str(total_quant_hit, total_quant_n),
         "avg_narrative": _avg_str(total_narr_sum, total_narr_n),
     }
-    rows = [
+    all_rows = [
         _row_wire(r)
         for r in conn.execute(
             "SELECT * FROM insight_evaluations ORDER BY id DESC"
         )
         if int(r["insight_type_id"]) not in excluded
     ]
+    rows = all_rows if rows_limit is None else all_rows[rows_offset:rows_offset + rows_limit]
     return {
         "totals": totals,
         "by_combo": by_combo,
         "calibration_bins": calibration_bins(conn),
         "rows": rows,
+        "rows_total_count": len(all_rows),
     }

@@ -2,13 +2,15 @@
 
 The single source of truth for the prompt "Lego blocks". Three pieces:
 
-1. **REGISTRY** — the 26 data variables across 8 categories, mirroring ``web/vars.js``
-   exactly (token ids, categories, scope, description, sample). 24 are available now;
-   the chips/sentiment 7 went live from ``external_snapshots`` (spec 20.2). The 2
-   AI-self variables (ai → spec 04) remain ``available=False`` and render
-   ``{"unavailable": true}``. External values are derived in the calc core
-   (``portfolio/external_signals.py``) and FED IN via ``VarContext.external_vars`` —
-   this layer never reads a connection or recomputes a number.
+1. **REGISTRY** — the data variables across 8 categories, mirroring ``web/vars.js``
+   (token ids, categories, scope, description, sample), plus 3 backend date/time tokens
+   (spec 04.10) and 2 batch-③ signal vars (``technical_signals_json`` calc-core derived;
+   ``fear_greed_json`` external-fed). The chips/sentiment external vars went live from
+   ``external_snapshots`` (spec 20.2). The 2 AI-self variables (ai → spec 04) remain
+   ``available=False`` and render ``{"unavailable": true}``. External values are derived
+   in the calc core (``portfolio/external_signals.py``) and FED IN via
+   ``VarContext.external_vars`` — this layer never reads a connection or recomputes a
+   number.
 
 2. **validate_tokens** — THE single validation core, reused by the preview endpoint
    (diagnostic, always 200), ``/prompts/test`` (execution path, 422), spec 04 R1
@@ -30,11 +32,16 @@ from decimal import Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from portfolio_dash.portfolio import technicals
+from portfolio_dash.portfolio import market_view, technicals
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.shared.wire import to_wire
 
 Scope = Literal["portfolio", "per_symbol"]
+
+# per_market rendering (2026-07-05 spec): each market card sees ONLY its own market's
+# slice of the portfolio-scope variables, plus its own benchmark index. Sentiment
+# (VIX / Fear & Greed) stays global — it is a world-risk mood, not a market slice.
+_MARKET_INDEX: dict[str, str] = {"TW": "TAIEX", "US": "SPX", "MY": "KLCI"}
 
 # Project display timezone for the date/time vars (spec 04.10): all rendered ISO-8601
 # +08:00. A naive datetime is assumed to already be Asia/Taipei; an aware one is
@@ -131,6 +138,13 @@ REGISTRY: tuple[VarSpec, ...] = (
         "現價相對原始/調整均價的距離（決策核心比值）",
         '{"price_vs_original":"+0.2250","price_vs_adjusted":"+0.2374"}',
     ),
+    VarSpec(
+        "technical_signals_json", "技術訊號", "price", "per_symbol", True,
+        "整合技術訊號：RSI(14)、20/60 均線交叉＋距今天數、52 週位階、趨勢結構（量能有料才附）",
+        '{"rsi14":"58.3","ma_cross":{"cross":"golden","days_ago":4},'
+        '"week52":{"pct_from_high":"-0.061","pct_from_low":"+0.452","window_days":180},'
+        '"trend":{"structure":"uptrend","window_days":60}}',
+    ),
     # --- dividend (股利) — all available ---
     VarSpec(
         "dividends_json", "配息史", "dividend", "portfolio", True,
@@ -192,14 +206,28 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- sentiment (市場情緒) — live from external_snapshots (spec 20.2) ---
     VarSpec(
         "market_sentiment_json", "情緒指標", "sentiment", "portfolio", True,
-        "VIX、Fear & Greed 指數與所處區間",
+        "VIX、Fear & Greed 指數與所處區間（綜合視圖）",
         '{"vix":"14.2","vix_zone":"low","fear_greed":62,"fear_greed_zone":"greed"}',
+    ),
+    VarSpec(
+        "fear_greed_json", "恐懼貪婪指數", "sentiment", "portfolio", True,
+        "CNN 恐懼貪婪指數：分數、本地五區分類、近 7 日趨勢（可獨立用於自訂提示詞）",
+        '{"score":62,"zone":"greed","trend":{"direction":"rising","change":"+8",'
+        '"window_days":7},"last_as_of":"2026-07-04"}',
     ),
     VarSpec(
         "index_quotes_json", "大盤指數", "sentiment", "portfolio", True,
         "加權指數/S&P 500/KLCI 近 20 日漲跌",
         '{"TAIEX":{"chg_20d":"+0.042"},"SPX":{"chg_20d":"+0.031"},'
         '"KLCI":{"chg_20d":"+0.008"}}',
+    ),
+    # --- news (個股新聞) — live from the separate news DB (batch ④, 2026-07-06) ---
+    VarSpec(
+        "symbol_news_json", "個股新聞", "news", "per_symbol", True,
+        "該標的近 7 日經 AI 整理的新聞（標題／日期／摘要／來源／連結；提及此股的皆納入）",
+        '{"symbol":"2330","since":"2026-06-29","items":[{"date":"2026-07-05",'
+        '"title":"台積電法說 7/16 登場","summary":"聚焦全年成長…","source":"中央社",'
+        '"lang":"zh","link":"https://…"}],"count":1}',
     ),
     # --- ai (AI 自身 / 校正用) — available=False until spec 04 ---
     VarSpec(
@@ -324,11 +352,13 @@ def validate_tokens(body: str, scope: str) -> TokenValidation:
 
     * a token absent from the registry → ``unknown_tokens``;
     * a registry variable whose ``scope == 'per_symbol'`` used when the body's *scope*
-      is ``'portfolio'`` → ``scope_violations`` (= spec 04 R1).
+      is ``'portfolio'`` or ``'per_market'`` → ``scope_violations`` (= spec 04 R1;
+      a market card has no single symbol to bind them to).
 
-    ``per_symbol`` bodies may use ``portfolio`` variables freely (no violation). The
-    preview path lists these as diagnostics (always 200); the execution path turns any
-    non-empty list into a 422.
+    ``per_symbol`` bodies may use ``portfolio`` variables freely (no violation), and so
+    may ``per_market`` bodies (they render the market's slice). The preview path lists
+    these as diagnostics (always 200); the execution path turns any non-empty list
+    into a 422.
     """
     used = tokens_in(body)
     unknown: list[str] = []
@@ -338,7 +368,7 @@ def validate_tokens(body: str, scope: str) -> TokenValidation:
         if spec is None:
             unknown.append(token)
             continue
-        if scope == "portfolio" and spec.scope == "per_symbol":
+        if scope in ("portfolio", "per_market") and spec.scope == "per_symbol":
             violations.append(token)
     return TokenValidation(tokens_used=used, unknown_tokens=unknown, scope_violations=violations)
 
@@ -353,7 +383,13 @@ class VarContext:
 
     data: DashboardData
     symbol: str | None = None
+    # per_market render target ("TW"/"US"/"MY"): portfolio-scope variables slice to this
+    # market so the card cannot misquote another market's numbers (2026-07-05 spec).
+    market: str | None = None
     closes: list[Decimal] | None = None  # chronological closes (pricing.store.get_price_history)
+    # chronological volumes aligned to ``closes`` — fed ONLY when a provider backfilled
+    # volume (none does yet); drives the probe-gated technical volume signal (batch ③).
+    volumes: list[Decimal] | None = None
     price_points: list[dict[str, Any]] = field(default_factory=list)  # [{date, close}]
     # Date/time context (spec 04.10), fed by the generation/eval seam. ``now`` is fed on
     # every real render; ``card_created_at``/``eval_date`` only in the 04c eval context.
@@ -376,7 +412,8 @@ _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
 # Chips/sentiment tokens whose value is fed via VarContext.external_vars (spec 20.2).
 _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
-    "financials_json", "market_sentiment_json", "index_quotes_json",
+    "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
+    "symbol_news_json",
 })
 
 
@@ -472,6 +509,17 @@ def _volatility(ctx: VarContext) -> dict[str, Any]:
     }
 
 
+def _technical_signals(ctx: VarContext) -> dict[str, Any]:
+    """Integrated technical signals from the fed daily closes (batch ③).
+
+    Volume is probe-gated: ``ctx.volumes`` is fed only when a provider backfilled it
+    (none does yet), so the volume section is honestly absent by default.
+    """
+    if not ctx.closes:
+        return {"unavailable": True}
+    return technicals.technical_signals(ctx.closes, ctx.volumes)
+
+
 def _price_vs_cost(ctx: VarContext) -> dict[str, Any]:
     if ctx.symbol is None:
         return {"unavailable": True}
@@ -494,10 +542,11 @@ def _allocation(data: DashboardData) -> dict[str, Any]:
     return dict(data.allocation.weights)
 
 
-def _returns_by_ccy(data: DashboardData) -> dict[str, Any]:
+def _returns_by_ccy(data: DashboardData, *, market: str | None = None) -> dict[str, Any]:
     if data.returns is None:
         return {"unavailable": True}
-    return {
+    only_ccy = market_view.MARKET_QUOTE_CCY.get(market or "")
+    out = {
         ccy.value: {
             "realized": cr.realized,
             "unrealized": cr.unrealized,
@@ -506,7 +555,9 @@ def _returns_by_ccy(data: DashboardData) -> dict[str, Any]:
             "rate": cr.rate,
         }
         for ccy, cr in data.returns.by_currency.items()
+        if only_ccy is None or ccy.value == only_ccy
     }
+    return out or {"unavailable": True}
 
 
 def _fx(data: DashboardData) -> dict[str, Any]:
@@ -539,19 +590,46 @@ def _fx_rates(ctx: VarContext) -> dict[str, Any]:
 
 def _dividends(ctx: VarContext) -> Any:
     """Per-event dividend ledger rows (symbol/date/type/gross/net/ccy), fed by the router.
-    Falls back to the computed yearly summary when no rows are supplied (conn-less callers)."""
+    A market card sees only its market-currency events. Falls back to the computed yearly
+    summary when no rows are supplied (conn-less callers; unfiltered — documented)."""
     if ctx.dividend_rows is not None:
+        ccy = market_view.MARKET_QUOTE_CCY.get(ctx.market or "")
+        if ccy is not None:
+            return [r for r in ctx.dividend_rows if r.get("ccy") == ccy]
         return ctx.dividend_rows
     return ctx.data.dividends.model_dump()
 
 
-def _dividend_projection(data: DashboardData) -> dict[str, Any]:
+def _dividend_projection(data: DashboardData, *, market: str | None = None) -> dict[str, Any]:
     if data.dividend_projection is None:
         return {"unavailable": True}
-    return {
+    only_ccy = market_view.MARKET_QUOTE_CCY.get(market or "")
+    out: dict[str, Any] = {
         ccy.value: dpc.model_dump()
         for ccy, dpc in data.dividend_projection.by_currency.items()
+        if only_ccy is None or ccy.value == only_ccy
     }
+    return out or {"unavailable": True}
+
+
+def _freshness(ctx: VarContext) -> dict[str, Any]:
+    """The freshness report; a market card sees only its own market's symbols."""
+    dump = ctx.data.freshness.model_dump()
+    if ctx.market is None:
+        return dump
+    market_symbols = {
+        h.symbol for h in market_view.market_holdings(ctx.data.holdings, ctx.market)
+    }
+    if isinstance(dump.get("missing_prices"), list):
+        dump["missing_prices"] = [
+            s for s in dump["missing_prices"] if s in market_symbols
+        ]
+    if isinstance(dump.get("prices"), list):
+        dump["prices"] = [
+            p for p in dump["prices"]
+            if not isinstance(p, dict) or p.get("symbol") in market_symbols
+        ]
+    return dump
 
 
 def _iso_taipei(value: datetime | None) -> str | None:
@@ -597,18 +675,43 @@ def value_for(token: str, ctx: VarContext) -> Any:
         if not isinstance(value, dict) or value.get("unavailable") is True:
             reason = ctx.external_reasons.get(token)
             return {"unavailable": True, "reason": reason} if reason else _UNAVAILABLE
+        if token == "index_quotes_json" and ctx.market in _MARKET_INDEX:
+            # A market card sees only its OWN benchmark (TW→TAIEX, US→SPX, MY→KLCI).
+            label = _MARKET_INDEX[ctx.market]
+            return {
+                k: v for k, v in value.items() if k == label or k == "last_as_of"
+            } or _UNAVAILABLE
         return value
     data = ctx.data
     if token == "holdings_json":
+        if ctx.market is not None:
+            return [
+                h.model_dump()
+                for h in market_view.market_holdings(data.holdings, ctx.market)
+            ]
         return [h.model_dump() for h in data.holdings]
     if token == "allocation_json":
+        if ctx.market is not None:
+            return market_view.market_allocation(data.holdings, ctx.market) or _UNAVAILABLE
         return _allocation(data)
     if token == "kpis_json":
-        return data.kpis.model_dump()
+        kpis = data.kpis.model_dump()
+        if ctx.market is not None:
+            # SR fix: KPIs (total market value / total return / XIRR) are whole-portfolio;
+            # a per_market card must not read them as this market's numbers. XIRR is not
+            # computed per market, so label rather than fabricate. Market-level figures
+            # come from holdings_json / returns_by_ccy_json (both sliced).
+            return {"scope_note": "以下為全組合彙總，非本市場切片；"
+                                  "本市場數字見 holdings_json 與 returns_by_ccy_json", **kpis}
+        return kpis
     if token == "returns_by_ccy_json":
-        return _returns_by_ccy(data)
+        return _returns_by_ccy(data, market=ctx.market)
     if token == "realized_json":
-        return [r.model_dump() for r in data.realized.rows]
+        rows = data.realized.rows
+        ccy = market_view.MARKET_QUOTE_CCY.get(ctx.market or "")
+        if ccy is not None:
+            rows = [r for r in rows if r.quote_ccy.value == ccy]
+        return [r.model_dump() for r in rows]
     if token == "symbol_detail_json":
         return _symbol_detail(ctx)
     if token == "price_history_json":
@@ -617,20 +720,35 @@ def value_for(token: str, ctx: VarContext) -> Any:
         return _ma_signals(ctx)
     if token == "volatility_json":
         return _volatility(ctx)
+    if token == "technical_signals_json":
+        return _technical_signals(ctx)
     if token == "price_vs_cost_json":
         return _price_vs_cost(ctx)
     if token == "dividends_json":
         return _dividends(ctx)
     if token == "ex_dividend_calendar_json":
-        return [e.model_dump() for e in data.ex_dividend_calendar]
+        events = data.ex_dividend_calendar
+        ccy = market_view.MARKET_QUOTE_CCY.get(ctx.market or "")
+        if ccy is not None:
+            events = [
+                e for e in events
+                if e.currency is not None and e.currency.value == ccy
+            ]
+        return [e.model_dump() for e in events]
     if token == "dividend_projection_json":
-        return _dividend_projection(data)
+        return _dividend_projection(data, market=ctx.market)
     if token == "fx_json":
-        return _fx(data)
+        fx = _fx(data)
+        if ctx.market is not None and "unavailable" not in fx:
+            fx = {"scope_note": "匯率與換匯損益為全組合層級（非本市場切片）", **fx}
+        return fx
     if token == "fx_rates_json":
-        return _fx_rates(ctx)
+        rates = _fx_rates(ctx)
+        if ctx.market is not None and "unavailable" not in rates:
+            rates = {"scope_note": "即期匯率為全組合層級（非本市場切片）", **rates}
+        return rates
     if token == "freshness_json":
-        return data.freshness.model_dump()
+        return _freshness(ctx)
     if token == "as_of":
         return data.as_of
     # Defensive: a registered-available token with no mapping (should not happen).

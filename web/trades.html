@@ -8,10 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css"></link>
-<link rel="stylesheet" href="settings.css"></link>
-<link rel="stylesheet" href="trades.css"></link>
-<link rel="stylesheet" href="input.css"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.11"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.11"></link>
+<link rel="stylesheet" href="trades.css?v=0.1.11"></link>
+<link rel="stylesheet" href="input.css?v=0.1.11"></link>
 <style>
   .trades-page { display: flex; flex-direction: column; gap: var(--gap); }
   .ledger-section { display: flex; flex-direction: column; gap: 0; }
@@ -255,8 +255,8 @@
     <div class="filter-bar" id="ledger-filters"></div>
     <div class="filter-bar" style="gap: 8px;">
       <span class="group-label">篩選</span>
-      <input class="input" id="ledger-sym-search" type="search" placeholder="代號或名稱…"
-             style="width: 180px;" spellcheck="false"></input>
+      <input class="input" id="ledger-sym-search" type="search" placeholder="代號或名稱（篩選本頁）…"
+             style="width: 190px;" spellcheck="false" title="關鍵字僅過濾目前頁面；帳戶與日期為全帳本篩選"></input>
       <input class="input" id="ledger-date-from" type="date" style="width: 150px;"
              title="起日（含）"></input>
       <span class="group-label">→</span>
@@ -269,24 +269,28 @@
         <thead><tr><th></th><th>日期</th><th class="col-text">帳戶</th><th class="col-text">代號</th><th class="col-text">買賣</th><th>股數</th><th>價格</th><th>手續費</th><th>稅</th><th>總額</th><th></th></tr></thead>
         <tbody id="tx-body"></tbody>
       </table></div>
+      <div id="tx-pager" hidden="hidden"></div>
     </div>
     <div class="mode-pane" id="pane-ldiv">
       <div class="table-wrap"><table class="data">
         <thead><tr><th>日期</th><th class="col-text">帳戶</th><th class="col-text">代號</th><th class="col-text">類型</th><th>Gross</th><th>預扣</th><th>Net</th><th>再投資</th><th></th></tr></thead>
         <tbody id="div-body"></tbody>
       </table></div>
+      <div id="ldiv-pager" hidden="hidden"></div>
     </div>
     <div class="mode-pane" id="pane-lfx">
       <div class="table-wrap"><table class="data">
         <thead><tr><th>日期</th><th class="col-text">帳戶</th><th>賣出</th><th>買入</th><th>隱含匯率</th><th></th></tr></thead>
         <tbody id="fx-body"></tbody>
       </table></div>
+      <div id="lfx-pager" hidden="hidden"></div>
     </div>
     <div class="mode-pane" id="pane-lopen">
       <div class="table-wrap"><table class="data">
         <thead><tr><th class="col-text">帳戶</th><th class="col-text">代號</th><th>股數</th><th>原始均價</th><th>原始總成本</th><th>建檔日</th><th></th></tr></thead>
         <tbody id="open-body"></tbody>
       </table></div>
+      <div id="lopen-pager" hidden="hidden"></div>
     </div>
     <div class="append-note">帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。點擊交易列展開費率規則快照。</div>
   </section>
@@ -295,14 +299,15 @@
 </div>
 </div>
 
-<script src="api.js"></script>
-<script src="shell.js"></script>
-<script src="format.js"></script>
-<script src="export.js"></script>
-<script src="alerts.js"></script>
-<script src="input.js"></script>
-<script src="ledger.js"></script>
-<script src="inbox.js"></script>
+<script src="api.js?v=0.1.11"></script>
+<script src="shell.js?v=0.1.11"></script>
+<script src="format.js?v=0.1.11"></script>
+<script src="pager.js?v=0.1.11"></script>
+<script src="export.js?v=0.1.11"></script>
+<script src="alerts.js?v=0.1.11"></script>
+<script src="input.js?v=0.1.11"></script>
+<script src="ledger.js?v=0.1.11"></script>
+<script src="inbox.js?v=0.1.11"></script>
 <script>
 /* glue: collapse toggle */
 document.getElementById('input-toggle').addEventListener('click', function (e) {

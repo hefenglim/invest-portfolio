@@ -53,10 +53,13 @@ def _seed_llm(conn: sqlite3.Connection, *, topup: str = "10.00") -> None:
 
 def test_prompt_vars_shape(api_client: TestClient) -> None:
     rows = api_client.get("/api/prompt-vars").json()
-    # 26 vars.js mirror + 3 backend-only date/time system tokens (spec 04.10).
-    assert len(rows) == 29
+    # + 1 batch-④ news var (symbol_news_json) = 32.
+    assert len(rows) == 32
     date_tokens = {r["token"] for r in rows} & {"now", "card_created_at", "eval_date"}
     assert date_tokens == {"now", "card_created_at", "eval_date"}
+    # the batch-③ signal vars surface in the variable area for custom prompts.
+    tokens = {r["token"] for r in rows}
+    assert {"technical_signals_json", "fear_greed_json", "symbol_news_json"} <= tokens
     h = next(r for r in rows if r["token"] == "holdings_json")
     assert h["scope"] == "portfolio" and h["available"] is True
     assert set(h) == {"token", "name", "category", "scope", "desc", "available", "sample",
@@ -66,8 +69,8 @@ def test_prompt_vars_shape(api_client: TestClient) -> None:
     assert inst["available"] is True
     ai = next(r for r in rows if r["token"] == "backtest_json")
     assert ai["available"] is False
-    # 8 categories present
-    assert len({r["category"] for r in rows}) == 8
+    # 9 categories present (+ the batch-④ 'news' category)
+    assert len({r["category"] for r in rows}) == 9
 
 
 # --- 6.2 GET/PUT /api/system-prompt -------------------------------------------
@@ -272,3 +275,62 @@ def test_system_prompt_reset_restores_official(api_client: TestClient) -> None:
     b = api_client.post("/api/system-prompt/reset").json()
     assert "時效第一" in b["body"]
     assert api_client.get("/api/system-prompt").json()["body"] == b["body"]
+
+
+def test_preview_per_market_slices_values(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # SR gap-fill: PromptBody gained scope=per_market + market; the preview must
+    # render the market slice (TW body contains no US holding) with clean tokens.
+    r = api_client.post(
+        "/api/prompts/preview",
+        json={"body": "{{holdings_json}}", "scope": "per_market", "market": "TW"},
+    )
+    assert r.status_code == 200
+    b = r.json()
+    assert b["unknown_tokens"] == [] and b["scope_violations"] == []
+    assert "2330" in b["rendered"] and "AAPL" not in b["rendered"]
+
+
+# --- L3 fix (2026-07-07): preview and run share ONE close-window ---------------
+
+
+def test_preview_context_uses_technical_window_for_closes(
+    golden_db: sqlite3.Connection,
+) -> None:
+    # ctx.closes spans the 400d technical window (honest 52w/MA120 signals in preview,
+    # same as the run path); price_points stays bounded to the recent 180d.
+    from datetime import timedelta
+
+    from portfolio_dash.api.routers.prompts import (
+        _HISTORY_DAYS,
+        _TECHNICAL_HISTORY_DAYS,
+        PromptBody,
+        _build_context,
+    )
+    from portfolio_dash.pricing.results import PriceRow
+    from portfolio_dash.pricing.store import upsert_prices
+    from portfolio_dash.shared.enums import Currency as C
+    from portfolio_dash.shared.enums import Market as M
+    from tests.conftest import GOLDEN_NOW
+
+    assert _TECHNICAL_HISTORY_DAYS == 400 and _HISTORY_DAYS == 180
+    as_of = GOLDEN_NOW.date()
+    old = as_of - timedelta(days=300)   # inside 400d, outside 180d
+    recent = as_of - timedelta(days=10)
+    upsert_prices(golden_db, [
+        PriceRow(instrument="2330", market=M.TW, as_of=old,
+                 close=Decimal("450"), source="test"),
+        PriceRow(instrument="2330", market=M.TW, as_of=recent,
+                 close=Decimal("610"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+
+    ctx = _build_context(
+        golden_db, PromptBody(body="x", scope="per_symbol", symbol="2330"),
+        GOLDEN_NOW, C.TWD,
+    )
+    assert ctx.closes is not None
+    assert Decimal("450") in ctx.closes    # long window feeds the signals
+    dates = {p["date"] for p in ctx.price_points}
+    assert old.isoformat() not in dates            # …but not the rendered history
+    assert recent.isoformat() in dates

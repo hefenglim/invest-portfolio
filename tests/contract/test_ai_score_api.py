@@ -80,3 +80,24 @@ def test_calibration_samples_empty_for_unknown(api_client: TestClient) -> None:
     r = api_client.get("/api/calibrations/9999/samples")
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_ai_score_rows_pagination(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """WPE: rows page via limit/offset; aggregates stay whole-set."""
+    now = datetime(2026, 6, 11, 14, 30)
+    es.ensure_tables(golden_db)
+    for i in range(5):
+        es.add_evaluation(
+            golden_db, insight_id=100 + i, insight_type_id=10, calibration_version=1,
+            is_shadow=False, status="scored", quant_hit=True, narrative_score=80,
+            miss=False, actual_value=Decimal("0.05"), confidence=70, now=now)
+    p1 = api_client.get("/api/ai-score", params={"limit": 2, "offset": 0}).json()
+    p2 = api_client.get("/api/ai-score", params={"limit": 2, "offset": 2}).json()
+    assert p1["rows_total_count"] == 5 and p2["rows_total_count"] == 5
+    assert len(p1["rows"]) == 2 and len(p2["rows"]) == 2
+    assert {r["id"] for r in p1["rows"]}.isdisjoint({r["id"] for r in p2["rows"]})
+    # aggregates are NOT affected by the rows page
+    assert p1["totals"]["n"] == 5 and p2["totals"]["n"] == 5
+    assert len(p1["by_combo"]) == 1
