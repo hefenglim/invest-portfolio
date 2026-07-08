@@ -58,10 +58,10 @@ def backfill_history(
 ) -> Any:
     """Backfill price + FX history for ALL instruments (manual, idempotent).
 
-    Default (days omitted, 2026-07-03 decision): SMART windows — 12 months back,
-    extended per symbol to its first acquisition date when older, and FX pairs
-    from the earliest ledger flow date. Explicit ``days`` = uniform window,
-    clamped to [1, 3650].
+    Default (days omitted): SMART windows — the config-driven floor
+    (``history_backfill_days``, 5y default since owner 2026-07-08), extended per
+    symbol to its first acquisition date when older, and FX pairs from the earliest
+    ledger flow date. Explicit ``days`` = uniform window, clamped to [1, 3650].
     """
     days = max(1, min(body.days, 3650)) if body.days is not None else None
     detail = backfill_history_all(conn, days=days, now=now)
