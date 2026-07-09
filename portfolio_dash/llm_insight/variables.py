@@ -62,7 +62,8 @@ class VarSpec:
 
     token: str
     name: str
-    category: str  # vars.js category id: position|price|dividend|fx|chips|sentiment|ai|system
+    category: str  # vars.js category id:
+    # position|price|dividend|fx|chips|consensus|news|sentiment|ai|system
     scope: Scope
     available: bool
     desc: str
@@ -202,6 +203,18 @@ REGISTRY: tuple[VarSpec, ...] = (
         "近 4 季營收/毛利率/EPS（台股；美股 v2）",
         '{"quarters":[{"q":"2026Q1","revenue_yoy":"+0.28","gross_margin":"0.532",'
         '"eps":"14.2"}, …]}',
+    ),
+    # --- consensus (分析師共識) — live from external_snapshots (yfinance; P1 batch 2) ---
+    VarSpec(
+        "consensus_json", "分析師共識", "consensus", "per_symbol", True,
+        "分析師目標價區間（現價/均值/中位/高/低）、本月與上月評級分布、加權評級分數、"
+        "與均值目標價的上檔空間；無分析師覆蓋時誠實降級",
+        '{"as_of":"2026-07-09","price_targets":{"current":"2465.0","mean":"2819.8484",'
+        '"median":"2780.0","high":"3800.0","low":"2051.0"},'
+        '"ratings":{"strong_buy":9,"buy":23,"hold":1,"sell":0,"strong_sell":0,"total":33},'
+        '"ratings_prev_month":{"strong_buy":8,"buy":22,"hold":2,"sell":0,"strong_sell":0,'
+        '"total":32},"rating_score":"1.76","upside_vs_mean_pct":"0.1440",'
+        '"source":"yfinance"}',
     ),
     # --- sentiment (市場情緒) — live from external_snapshots (spec 20.2) ---
     VarSpec(
@@ -387,9 +400,10 @@ class VarContext:
     # market so the card cannot misquote another market's numbers (2026-07-05 spec).
     market: str | None = None
     closes: list[Decimal] | None = None  # chronological closes (pricing.store.get_price_history)
-    # chronological volumes aligned to ``closes`` — fed ONLY when a provider backfilled
-    # volume (none does yet); drives the probe-gated technical volume signal (batch ③).
-    volumes: list[Decimal] | None = None
+    # chronological volumes aligned 1:1 with ``closes`` (None-padded for gap sessions) —
+    # fed ONLY when a provider backfilled volume (yfinance/FinMind since P1-①②); drives the
+    # probe-gated technical volume signal. ``None`` when no volume is stored at all.
+    volumes: list[Decimal | None] | None = None
     price_points: list[dict[str, Any]] = field(default_factory=list)  # [{date, close}]
     # Date/time context (spec 04.10), fed by the generation/eval seam. ``now`` is fed on
     # every real render; ``card_created_at``/``eval_date`` only in the 04c eval context.
@@ -413,7 +427,7 @@ _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
 _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
     "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
-    "symbol_news_json",
+    "symbol_news_json", "consensus_json",
 })
 
 
@@ -512,8 +526,10 @@ def _volatility(ctx: VarContext) -> dict[str, Any]:
 def _technical_signals(ctx: VarContext) -> dict[str, Any]:
     """Integrated technical signals from the fed daily closes (batch ③).
 
-    Volume is probe-gated: ``ctx.volumes`` is fed only when a provider backfilled it
-    (none does yet), so the volume section is honestly absent by default.
+    Volume is probe-gated: ``ctx.volumes`` is fed only when a provider backfilled it,
+    so the volume section is honestly absent otherwise. ``technicals`` accepts the
+    None-padded series directly and degrades the volume signal when a gap session
+    falls inside its recent window.
     """
     if not ctx.closes:
         return {"unavailable": True}

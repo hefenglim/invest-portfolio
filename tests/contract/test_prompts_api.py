@@ -53,13 +53,14 @@ def _seed_llm(conn: sqlite3.Connection, *, topup: str = "10.00") -> None:
 
 def test_prompt_vars_shape(api_client: TestClient) -> None:
     rows = api_client.get("/api/prompt-vars").json()
-    # + 1 batch-④ news var (symbol_news_json) = 32.
-    assert len(rows) == 32
+    # + 1 batch-④ news (symbol_news_json) + 1 P1-batch-2 consensus (consensus_json) = 33.
+    assert len(rows) == 33
     date_tokens = {r["token"] for r in rows} & {"now", "card_created_at", "eval_date"}
     assert date_tokens == {"now", "card_created_at", "eval_date"}
-    # the batch-③ signal vars surface in the variable area for custom prompts.
+    # the batch-③/④ + consensus signal vars surface in the variable area for custom prompts.
     tokens = {r["token"] for r in rows}
-    assert {"technical_signals_json", "fear_greed_json", "symbol_news_json"} <= tokens
+    assert {"technical_signals_json", "fear_greed_json", "symbol_news_json",
+            "consensus_json"} <= tokens
     h = next(r for r in rows if r["token"] == "holdings_json")
     assert h["scope"] == "portfolio" and h["available"] is True
     assert set(h) == {"token", "name", "category", "scope", "desc", "available", "sample",
@@ -69,8 +70,11 @@ def test_prompt_vars_shape(api_client: TestClient) -> None:
     assert inst["available"] is True
     ai = next(r for r in rows if r["token"] == "backtest_json")
     assert ai["available"] is False
-    # 9 categories present (+ the batch-④ 'news' category)
-    assert len({r["category"] for r in rows}) == 9
+    # consensus went live (P1 batch 2); available and per_symbol.
+    cons = next(r for r in rows if r["token"] == "consensus_json")
+    assert cons["available"] is True and cons["scope"] == "per_symbol"
+    # 10 categories present (+ the P1-batch-2 'consensus' category)
+    assert len({r["category"] for r in rows}) == 10
 
 
 # --- 6.2 GET/PUT /api/system-prompt -------------------------------------------
@@ -334,3 +338,36 @@ def test_preview_context_uses_technical_window_for_closes(
     dates = {p["date"] for p in ctx.price_points}
     assert old.isoformat() not in dates            # …but not the rendered history
     assert recent.isoformat() in dates
+
+
+def test_preview_context_feeds_aligned_volumes(golden_db: sqlite3.Connection) -> None:
+    # P1-④: stored volumes flow into ctx.volumes, aligned 1:1 with closes (None-padded),
+    # probe-gated (fed because ≥1 session has volume). Preview and run share this wiring.
+    from datetime import timedelta
+
+    from portfolio_dash.api.routers.prompts import PromptBody, _build_context
+    from portfolio_dash.pricing.results import PriceRow
+    from portfolio_dash.pricing.store import upsert_prices
+    from portfolio_dash.shared.enums import Currency as C
+    from portfolio_dash.shared.enums import Market as M
+    from tests.conftest import GOLDEN_NOW
+
+    as_of = GOLDEN_NOW.date()
+    upsert_prices(golden_db, [
+        PriceRow(instrument="2330", market=M.TW, as_of=as_of - timedelta(days=20),
+                 close=Decimal("600"), volume=Decimal("1000000"), source="test"),
+        PriceRow(instrument="2330", market=M.TW, as_of=as_of - timedelta(days=10),
+                 close=Decimal("610"), source="test"),  # no volume -> None-padded
+        PriceRow(instrument="2330", market=M.TW, as_of=as_of - timedelta(days=5),
+                 close=Decimal("620"), volume=Decimal("0"), source="test"),  # real 0 kept
+    ], fetched_at=GOLDEN_NOW)
+
+    ctx = _build_context(
+        golden_db, PromptBody(body="x", scope="per_symbol", symbol="2330"),
+        GOLDEN_NOW, C.TWD,
+    )
+    assert ctx.closes is not None and ctx.volumes is not None
+    assert len(ctx.volumes) == len(ctx.closes)  # 1:1 alignment (None-padded per row)
+    assert Decimal("1000000") in ctx.volumes    # a stored volume flowed through
+    assert Decimal("0") in ctx.volumes          # a genuine no-trade session stays 0
+    assert None in ctx.volumes                  # the volume-less session is None-padded

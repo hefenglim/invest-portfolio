@@ -23,6 +23,18 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **Cross-provider seam gaps only surface on live data — live-verify every data-pipeline
+  batch before ship (2026-07-09):** the volume wiring was fully green on unit + contract
+  tests, yet on the demo site every TW/MY volume signal degraded: the newest TW row is
+  written by the twse latest-quote provider (no volume) while history rows come from
+  yfinance (with volume) — a chain interaction no single-provider fixture models. Without
+  the live pass, TW volume confirmation would have shipped permanently dead (or raising
+  on interior gaps). Rule: when a batch touches the provider chain or data shape, the
+  demo-site behavioral pass must assert on REAL fetched rows (coverage %, per-symbol
+  signal output), not just health/e2e smoke; and multi-provider columns must be modeled
+  as per-row-nullable from day one (`Sequence[Decimal | None]`, trim/degrade policy
+  decided explicitly).
+
 - **A no-build-step frontend still needs explicit cache control (2026-07-07):**
   Starlette StaticFiles sends ETag/Last-Modified but NO `Cache-Control`, so browsers
   apply HEURISTIC freshness (~10% of asset age) and serve cached `web/*.js` for days

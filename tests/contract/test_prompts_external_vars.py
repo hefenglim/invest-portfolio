@@ -41,11 +41,12 @@ def test_prompt_vars_external_now_available(api_client: TestClient) -> None:
         "financials_json", "market_sentiment_json", "index_quotes_json",
     ):
         assert by_token[token]["available"] is True, token
-    # 29 previously live + 1 batch-④ news (symbol_news_json) = 30.
-    assert sum(1 for r in rows if r["available"]) == 30
+    # 30 previously live + 1 P1-batch-2 consensus (consensus_json) = 31.
+    assert sum(1 for r in rows if r["available"]) == 31
     assert by_token["technical_signals_json"]["available"] is True
     assert by_token["fear_greed_json"]["available"] is True
     assert by_token["symbol_news_json"]["available"] is True
+    assert by_token["consensus_json"]["available"] is True
     # The spec-04 'ai' vars stay unavailable this round.
     assert by_token["backtest_json"]["available"] is False
     assert by_token["calibration_gap_json"]["available"] is False
@@ -197,3 +198,39 @@ def test_index_quotes_renders_from_snapshot(api_client: TestClient) -> None:
     assert value["TAIEX"] == "22150.5"
     assert value["SPX"] == "5980.12"
     assert value["KLCI"] == "1612.0"
+
+
+# --- (e) consensus var: snapshot renders; absence degrades with reason (P1 batch 2) ---
+
+
+def test_consensus_renders_from_snapshot(api_client: TestClient) -> None:
+    conn = _conn_of(api_client)
+    snapshots_store.add_snapshot(
+        conn, source="yfinance", dataset="consensus", symbol="2330",
+        as_of=date(2026, 7, 9),
+        payload={
+            "as_of": "2026-07-09",
+            "price_targets": {"current": "2465.0", "mean": "2819.8484",
+                              "high": "3800.0", "low": "2051.0"},
+            "ratings": {"strong_buy": 9, "buy": 23, "hold": 1, "sell": 0,
+                        "strong_sell": 0, "total": 33},
+            "rating_score": "1.76", "upside_vs_mean_pct": "0.1440",
+            "source": "yfinance",
+        },
+        fetched_at=datetime(2026, 7, 9, 9, 10),
+    )
+    out = _preview(api_client, "{{consensus_json}}", scope="per_symbol", symbol="2330")
+    value = json.loads(out["rendered"])
+    assert value.get("unavailable") is not True
+    assert value["as_of"] == "2026-07-09"
+    assert value["price_targets"]["mean"] == "2819.8484"
+    assert value["ratings"]["total"] == 33
+    assert value["rating_score"] == "1.76"
+
+
+def test_consensus_degrades_with_no_coverage_reason(api_client: TestClient) -> None:
+    # No snapshot for an uncovered symbol -> unavailable + honest "no coverage" reason.
+    out = _preview(api_client, "{{consensus_json}}", scope="per_symbol", symbol="ZZZ")
+    value = json.loads(out["rendered"])
+    assert value["unavailable"] is True
+    assert "無分析師覆蓋" in value["reason"]

@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     tz_display: str = "Asia/Taipei"  # display tz; storage is always UTC
     reporting_currency: Currency = Currency.TWD
 
+    # Default daily-history backfill window (owner decision 2026-07-08): 5 years
+    # (1825 days), superseding the blueprint's 3-year draft — env-overridable via
+    # HISTORY_BACKFILL_DAYS. The SINGLE source for the two former 365-day literals
+    # (api.instrument_service quick-register + scheduler.jobs.backfill_history_all).
+    # The smart-window logic still extends further back per symbol to its first
+    # acquisition date (and FX to the earliest ledger flow); this only sets the floor.
+    history_backfill_days: int = 1825
+
 
 @lru_cache
 def get_settings() -> Settings:

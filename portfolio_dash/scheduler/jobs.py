@@ -26,6 +26,7 @@ from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.clock import app_now
+from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.strategy.alerts import Alert, compute_alerts
@@ -357,6 +358,7 @@ _INGEST_JOB_SOURCE: dict[str, str] = {
     "finmind_fundamentals_monthly": "finmind",
     "sentiment_daily": "yfinance",
     "index_quotes_daily": "yfinance",
+    "consensus_daily": "yfinance",
 }
 
 
@@ -455,6 +457,19 @@ def index_quotes_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Trading-day: TAIEX/SPX/KLCI index closes (yfinance)."""
     return _run_ingest(
         conn, "index_quotes_daily", lambda: ingest.ingest_index(conn, now=now), now=now
+    )
+
+
+def consensus_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily: analyst target-price + rating-distribution snapshots for all instruments.
+
+    Slot: 09:10 Asia/Taipei — analyst consensus is a slow-moving, timezone-agnostic
+    signal (not a market close), so it runs once in the morning, staggered just after
+    the 08:00 sentiment job and before the intraday quote crons, on all days (yfinance
+    serves whatever the latest consensus is regardless of any single market's session).
+    """
+    return _run_ingest(
+        conn, "consensus_daily", lambda: ingest.ingest_consensus(conn, now=now), now=now
     )
 
 
@@ -647,6 +662,10 @@ JOBS: list[JobSpec] = [
         "index_quotes_daily", index_quotes_daily, "50 14 * * mon-fri", "Asia/Taipei", True,
         "TAIEX/SPX/KLCI index closes",
     ),
+    JobSpec(
+        "consensus_daily", consensus_daily, "10 9 * * *", "Asia/Taipei", True,
+        "Analyst target price + rating distribution (all instruments)",
+    ),
     # on_alert scan (spec 04.9 R7): post-close, after quotes refresh, before insight cron.
     JobSpec(
         "alert_scan", alert_scan, "0 15 * * mon-fri", "Asia/Taipei", True,
@@ -726,11 +745,11 @@ def refresh_instrument_quote(
     return _summarize(summary)
 
 
-# Smart backfill windows (2026-07-03, R4 item 2, human decision): default 12
-# months; a symbol whose position began EARLIER backfills from its first
-# acquisition date; the FX pairs backfill from the earliest ledger flow date —
-# so the trend replay / XIRR have a rate on-or-before every flow.
-_BACKFILL_DEFAULT_DAYS = 365
+# Smart backfill windows: the default floor is config-driven
+# (``history_backfill_days``, 5y since owner 2026-07-08 — env-overridable); a symbol
+# whose position began EARLIER backfills from its first acquisition date; the FX
+# pairs backfill from the earliest ledger flow date — so the trend replay / XIRR
+# have a rate on-or-before every flow.
 
 
 def earliest_acquisitions(conn: sqlite3.Connection) -> dict[str, date]:
@@ -770,15 +789,16 @@ def backfill_history_all(
 ) -> str:
     """Backfill daily close history for ALL instruments + the reporting FX pairs.
 
-    ``days=None`` (the default, 2026-07-03 decision) uses the SMART windows:
-    12 months back, extended per symbol to its first acquisition date when that
-    is older, and for FX to the earliest ledger flow date. An explicit ``days``
-    keeps the old uniform-window behavior. Idempotent upserts; per-key failures
-    degrade into the summary, never raise.
+    ``days=None`` (the default) uses the SMART windows: the config-driven floor
+    (``history_backfill_days``, 5y default), extended per symbol to its first
+    acquisition date when that is older, and for FX to the earliest ledger flow
+    date. An explicit ``days`` keeps the old uniform-window behavior. Idempotent
+    upserts; per-key failures degrade into the summary, never raise.
     """
     instruments, fx_pairs = build_worklist(conn, None)
     registry = default_registry(conn)
-    default_start = (now - timedelta(days=days or _BACKFILL_DEFAULT_DAYS)).date()
+    default_days = days or get_settings().history_backfill_days
+    default_start = (now - timedelta(days=default_days)).date()
 
     if days is not None:
         p_summary = refresh_history(conn, registry, instruments, default_start, now=now)

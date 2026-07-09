@@ -143,6 +143,14 @@ def test_week52_position_pct_from_high_low() -> None:
     assert pos["window_days"] == 4  # honest actual window, not padded to 252
 
 
+def test_week52_window_caps_at_252_with_multi_year_history() -> None:
+    # P1 acceptance: once 5y (>252 sessions) exists, the 52-week window fills to 252.
+    closes = _dec_series([100.0 + (i % 37) for i in range(400)])  # > 252 sessions
+    assert T.week52_position(closes)["window_days"] == 252
+    w52 = T.technical_signals(closes)["week52"]
+    assert isinstance(w52, dict) and w52["window_days"] == 252
+
+
 def test_trend_structure_uptrend_downtrend_range() -> None:
     up = _dec_series([float(i) for i in range(1, 21)])
     down = _dec_series([float(i) for i in range(20, 0, -1)])
@@ -159,6 +167,38 @@ def test_volume_signal_surge_and_gate() -> None:
     assert sig["surge"] is True
     assert sig["ratio_to_avg"] == Decimal("250") / Decimal("100")
     assert T.volume_signal(_dec_series([1.0, 2.0]))["surge"] is None  # too short
+
+
+def test_volume_signal_none_gap_in_window_degrades() -> None:
+    # A gap session (None volume) inside the needed window+1 recent bars must degrade
+    # to the insufficient-data result — never raise (never-500 discipline).
+    vols: list[Decimal | None] = [*([Decimal("100")] * 20), None, Decimal("250")]
+    sig = T.volume_signal(vols)
+    assert sig == {"ratio_to_avg": None, "surge": None}
+
+
+def test_volume_signal_trims_trailing_none() -> None:
+    # The newest row is systematically volume-less when the latest-quote provider
+    # carries no volume (TW: twse) — trailing Nones are trimmed so the signal
+    # computes from the most recent sessions WITH volume instead of degrading daily.
+    vols: list[Decimal | None] = [*([Decimal("100")] * 20), Decimal("250"), None]
+    sig = T.volume_signal(vols)
+    assert sig["ratio_to_avg"] == Decimal("250") / Decimal("100")
+    assert sig["surge"] is True
+    # All-None (nothing trimmable left) -> insufficient-data result.
+    assert T.volume_signal([None] * 25) == {"ratio_to_avg": None, "surge": None}
+
+
+def test_technical_signals_accepts_none_padded_volumes() -> None:
+    # The aligned-with-closes series is None-padded for gap sessions; a gap OUTSIDE
+    # the recent window must not block the computed signal.
+    closes = _dec_series([100.0 + i for i in range(1, 80)])
+    vols: list[Decimal | None] = [None, *_dec_series([100.0] * 78)]
+    out = T.technical_signals(closes, vols)
+    vol = out["volume"]
+    assert isinstance(vol, dict)
+    assert vol["ratio_to_avg"] == Decimal("1.00")
+    assert vol["surge"] is False
 
 
 def test_technical_signals_bundles_and_omits_volume_by_default() -> None:

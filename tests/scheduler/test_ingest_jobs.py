@@ -10,7 +10,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from portfolio_dash.pricing import datasources_store, sentiment_source, snapshots_store
+from portfolio_dash.pricing import (
+    consensus_source,
+    datasources_store,
+    sentiment_source,
+    snapshots_store,
+)
 from portfolio_dash.scheduler import jobs as jobs_mod
 from portfolio_dash.scheduler.jobs import JOBS, run_job
 
@@ -49,7 +54,31 @@ def test_ingest_jobs_registered() -> None:
         "finmind_fundamentals_monthly",
         "sentiment_daily",
         "index_quotes_daily",
+        "consensus_daily",
     } <= ids
+
+
+def test_consensus_job_writes_snapshot(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    from datetime import date
+
+    _add_tw(conn, "2330")
+
+    def fake_fetch(yf_sym: str, *, as_of: date) -> dict[str, object]:
+        assert yf_sym == "2330.TW"  # yf mapping reused
+        return {"as_of": as_of.isoformat(), "ratings": {"total": 33},
+                "rating_score": "1.76", "source": "yfinance"}
+
+    monkeypatch.setattr(consensus_source, "fetch_consensus", fake_fetch)
+    rid = run_job(conn, "consensus_daily", now=_NOW)
+    assert rid > 0
+    row = conn.execute("SELECT status FROM job_runs WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "ok"
+    snap = snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="consensus", symbol="2330"
+    )
+    assert snap is not None and snap.payload["rating_score"] == "1.76"
 
 
 def test_scheduler_jobs_no_data_ingestion_import() -> None:

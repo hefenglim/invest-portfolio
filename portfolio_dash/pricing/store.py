@@ -100,13 +100,14 @@ def get_price_history(
     ``False`` — staleness is a latest-quote concern).
     """
     rows = conn.execute(
-        "SELECT close, as_of_date, source FROM prices WHERE instrument=? "
+        "SELECT close, as_of_date, source, volume FROM prices WHERE instrument=? "
         "AND as_of_date BETWEEN ? AND ? ORDER BY as_of_date ASC",
         (instrument, start.isoformat(), end.isoformat()),
     ).fetchall()
     return [
         PriceRead(value=from_db(r["close"]), as_of=date.fromisoformat(r["as_of_date"]),
-                  source=r["source"], stale=False)
+                  source=r["source"], stale=False,
+                  volume=from_db(r["volume"]) if r["volume"] is not None else None)
         for r in rows
     ]
 

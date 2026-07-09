@@ -9,6 +9,7 @@ from portfolio_dash.pricing.store import (
     get_fx_history,
     get_fx_on,
     get_latest_price,
+    get_price_history,
     upsert_dividend_events,
     upsert_fx,
     upsert_prices,
@@ -120,3 +121,33 @@ def test_fx_rate_capped_at_6dp(conn: sqlite3.Connection) -> None:
               fetched_at=_NOW)
     r = get_fx(conn, Currency.USD, Currency.TWD, now=_NOW)
     assert r is not None and r.rate == Decimal("32.555000")
+
+
+def _price_v(close: str, d: date, volume: Decimal | None) -> PriceRow:
+    return PriceRow(instrument="AAPL", market=Market.US, as_of=d,
+                    close=Decimal(close), volume=volume, source="yfinance")
+
+
+def test_get_price_history_roundtrips_volume(conn: sqlite3.Connection) -> None:
+    """Volume persists as a canonical integer string and reads back through
+    ``get_price_history`` (integer Decimal, None passthrough)."""
+    upsert_prices(conn, [
+        _price_v("100", date(2026, 6, 4), Decimal("27997826")),  # integer volume
+        _price_v("101", date(2026, 6, 5), Decimal("0")),         # a real no-trade session
+        _price_v("102", date(2026, 6, 6), None),                 # gap: no volume stored
+    ], fetched_at=_NOW)
+    out = get_price_history(conn, "AAPL", date(2026, 6, 4), date(2026, 6, 6))
+    assert [r.volume for r in out] == [Decimal("27997826"), Decimal("0"), None]
+    # stored canonically as an integer TEXT string (not "0E-4" etc.)
+    stored = {row["as_of_date"]: row["volume"] for row in
+              conn.execute("SELECT as_of_date, volume FROM prices WHERE instrument='AAPL'")}
+    assert stored["2026-06-04"] == "27997826" and stored["2026-06-05"] == "0"
+    assert stored["2026-06-06"] is None
+
+
+def test_upsert_volume_idempotent_and_updates(conn: sqlite3.Connection) -> None:
+    """Re-upsert never duplicates and overwrites a previously-empty volume (deep backfill)."""
+    upsert_prices(conn, [_price_v("100", date(2026, 6, 4), None)], fetched_at=_NOW)
+    upsert_prices(conn, [_price_v("100", date(2026, 6, 4), Decimal("500"))], fetched_at=_NOW)
+    rows = list(conn.execute("SELECT volume FROM prices WHERE instrument='AAPL'"))
+    assert len(rows) == 1 and rows[0]["volume"] == "500"  # backfilled onto the existing row

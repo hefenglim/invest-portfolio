@@ -1,8 +1,9 @@
 """Unit tests for llm_insight.variables — registry, token validation, value assembly.
 
-The registry mirrors web/vars.js (26 vars / 8 categories) PLUS three backend-only
-date/time system tokens (spec 04.10: now / card_created_at / eval_date) PLUS two
-batch-③ signal vars (technical_signals_json / fear_greed_json) — 31 total.
+The registry mirrors web/vars.js PLUS three backend-only date/time system tokens
+(spec 04.10: now / card_created_at / eval_date), two batch-③ signal vars
+(technical_signals_json / fear_greed_json), one batch-④ news var (symbol_news_json),
+and one P1-batch-2 consensus var (consensus_json) — 33 total across 10 categories.
 validate_tokens is the single reusable core (spec 04 R1 + spec 07 preflight):
 preview lists diagnostics, the execution path turns them into 422s. Value assembly reads
 only already-computed DashboardData / per-symbol detail / technicals / fed date context —
@@ -21,12 +22,13 @@ from portfolio_dash.shared.enums import Currency
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_registry_has_32_and_categories() -> None:
-    # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news = 32.
-    assert len(V.REGISTRY) == 32
-    assert len({v.category for v in V.REGISTRY}) == 9  # + the 'news' category
+def test_registry_has_33_and_categories() -> None:
+    # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news
+    # + 1 P1-batch-2 consensus (consensus_json) = 33.
+    assert len(V.REGISTRY) == 33
+    assert len({v.category for v in V.REGISTRY}) == 10  # + the 'consensus' category
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 32
+    assert len({v.token for v in V.REGISTRY}) == 33
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
@@ -37,18 +39,19 @@ def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
         counts[v.category] = counts.get(v.category, 0) + 1
     assert counts == {
         # price gained technical_signals_json (4 → 5); sentiment gained
-        # fear_greed_json (2 → 3) — batch ③; news gained symbol_news_json — batch ④.
+        # fear_greed_json (2 → 3) — batch ③; news gained symbol_news_json — batch ④;
+        # consensus is the new P1-batch-2 category (consensus_json).
         "position": 6, "price": 5, "dividend": 3, "fx": 2,
         # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
-        "chips": 5, "news": 1, "sentiment": 3, "ai": 2, "system": 5,
+        "chips": 5, "consensus": 1, "news": 1, "sentiment": 3, "ai": 2, "system": 5,
     }
 
 
-def test_available_split_30_now_2_later() -> None:
+def test_available_split_31_now_2_later() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    # 29 previously live + 1 batch-④ news = 30; only the 2 'ai' vars stay deferred.
-    assert len(available) == 30
+    # 30 previously live + 1 P1-batch-2 consensus = 31; only the 2 'ai' vars stay deferred.
+    assert len(available) == 31
     assert len(unavailable) == 2
     # only the 2 'ai' vars remain deferred (spec 04).
     assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)
@@ -163,6 +166,58 @@ def test_external_var_degrade_carries_reason(golden_db: sqlite3.Connection) -> N
     value = _json.loads(out)
     assert value["unavailable"] is True
     assert value["reason"] == "需要 Backer 方案"
+
+
+def test_consensus_var_registered_per_symbol_available() -> None:
+    spec = V.BY_TOKEN["consensus_json"]
+    assert spec.category == "consensus"
+    assert spec.scope == "per_symbol"
+    assert spec.available is True
+    assert "consensus_json" in V._EXTERNAL_TOKENS
+
+
+def test_consensus_var_renders_fed_payload(golden_db: sqlite3.Connection) -> None:
+    # The fed snapshot payload (as_of + targets + ratings) renders verbatim.
+    import json as _json
+
+    data = _data(golden_db)
+    payload = {
+        "as_of": "2026-07-09",
+        "price_targets": {"current": "2465.0", "mean": "2819.8484"},
+        "ratings": {"strong_buy": 9, "buy": 23, "hold": 1, "sell": 0,
+                    "strong_sell": 0, "total": 33},
+        "rating_score": "1.76",
+        "upside_vs_mean_pct": "0.1440",
+        "source": "yfinance",
+    }
+    ctx = V.VarContext(
+        data=data,  # type: ignore[arg-type]
+        symbol="2330",
+        external_vars={"consensus_json": payload},
+    )
+    out, used = V.render_prompt("{{consensus_json}}", ctx)
+    value = _json.loads(out)
+    assert value["as_of"] == "2026-07-09"  # data age visible to the LLM
+    assert value["rating_score"] == "1.76"
+    assert value["upside_vs_mean_pct"] == "0.1440"
+    assert "consensus_json" in used
+
+
+def test_consensus_var_degrades_with_reason(golden_db: sqlite3.Connection) -> None:
+    # No snapshot fed -> the var degrades, carrying the "no coverage" reason.
+    import json as _json
+
+    data = _data(golden_db)
+    ctx = V.VarContext(
+        data=data,  # type: ignore[arg-type]
+        symbol="ZZZ",
+        external_vars={"consensus_json": {"unavailable": True, "last_as_of": None}},
+        external_reasons={"consensus_json": "無分析師覆蓋"},
+    )
+    out, _ = V.render_prompt("{{consensus_json}}", ctx)
+    value = _json.loads(out)
+    assert value["unavailable"] is True
+    assert value["reason"] == "無分析師覆蓋"
 
 
 def test_value_for_decimals_are_strings(golden_db: sqlite3.Connection) -> None:
@@ -336,6 +391,23 @@ def test_technical_signals_var_from_closes(golden_db: sqlite3.Connection) -> Non
     # empty closes -> honest unavailable
     empty = V.value_for("technical_signals_json", V.VarContext(data=data, now=_NOW, symbol="X"))
     assert empty == {"unavailable": True}
+
+
+def test_technical_signals_volume_probe_gate(golden_db: sqlite3.Connection) -> None:
+    """ctx.volumes drives the volume section, and is gated on ≥1 non-None value (P1-④)."""
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    closes = [Decimal(str(100 + i)) for i in range(1, 80)]
+    # all-None volumes (only older gap sessions) -> volume section stays absent
+    none_vols: list[Decimal | None] = [None for _ in closes]
+    ctx_none = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes,
+                            volumes=none_vols)
+    assert "volume" not in V.value_for("technical_signals_json", ctx_none)
+    # real backfilled volumes aligned 1:1 with closes -> the volume section appears
+    vols: list[Decimal | None] = [Decimal("1000000") for _ in closes]
+    ctx_vol = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes, volumes=vols)
+    val = V.value_for("technical_signals_json", ctx_vol)
+    assert isinstance(val, dict) and "volume" in val
+    assert set(val["volume"]) == {"ratio_to_avg", "surge"}
 
 
 def test_fear_greed_var_is_external_fed(golden_db: sqlite3.Connection) -> None:

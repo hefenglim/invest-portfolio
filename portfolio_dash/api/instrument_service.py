@@ -29,18 +29,13 @@ from portfolio_dash.pricing.refresh import refresh_history, refresh_quotes
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.store import get_latest_price
 from portfolio_dash.scheduler.jobs import DEFAULT_BOARD, REPORTING_FX_PAIRS
+from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CCY = {Market.TW: Currency.TWD, Market.US: Currency.USD, Market.MY: Currency.MYR}
-
-# Initial history window (2026-07-03, user decision — supersedes the 92-day round-2
-# value): 12 months of daily closes. A freshly added symbol has no position yet, so
-# the default window applies; positions predating 12 months get their fuller window
-# through the smart backfill action (scheduler.jobs.backfill_history_all).
-HISTORY_BACKFILL_DAYS = 365
 
 
 class QuickRegisterError(Exception):
@@ -132,10 +127,11 @@ def quick_register(
     )
     register_instrument(conn, inst, prober=None, confirm=True)
 
-    # 5. Initial 3-month history window — best-effort, never blocks registration.
+    # 5. Initial history window (config-driven, 5y default; owner 2026-07-08) —
+    #    best-effort, never blocks registration.
     history_points = False
     try:
-        start = (now - timedelta(days=HISTORY_BACKFILL_DAYS)).date()
+        start = (now - timedelta(days=get_settings().history_backfill_days)).date()
         hist_summary = refresh_history(conn, registry, [ref], start, now=now)
         history_points = sym in hist_summary.ok
     except Exception:  # noqa: BLE001 — presentation backfill must not fail the write

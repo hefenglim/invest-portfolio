@@ -1,0 +1,113 @@
+<title>P1 資料地基・批次1 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #2b6cb0; --accent-soft: #e8f0f9;
+    --ok: #2f7a4f; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #131519; --card: #1b1f26; --ink: #e8ecf2; --ink-2: #9aa6b5;
+            --line: #323a46; --accent: #6ea8dc; --accent-soft: #22303f;
+            --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #131519; --card: #1b1f26; --ink: #e8ecf2;
+    --ink-2: #9aa6b5; --line: #323a46; --accent: #6ea8dc; --accent-soft: #22303f;
+    --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #2b6cb0; --accent-soft: #e8f0f9;
+    --ok: #2f7a4f; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  .skip li::marker { content: "✕ "; color: var(--warn); }
+  .sig { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px; }
+  .sigrow { border: 1.5px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    background: var(--paper); font-size: 14.5px; line-height: 1.55; }
+  .sigrow b { color: var(--accent); }
+  .probe { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13.5px; }
+  .probe th, .probe td { border: 1px solid var(--line); padding: 6px 8px; text-align: center;
+    font-variant-numeric: tabular-nums; }
+  .probe th { background: var(--accent-soft); font-weight: 700; }
+  .probe td.ok { color: var(--ok); font-weight: 700; }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・P1 批次1（1A＋1B）</div>
+    <h1>資料地基：量能回填＋5 年價格歷史</h1>
+    <p class="lede">30 秒讀完。看完回「確認」即開工，要改哪條直接講。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>為什麼做</h2>
+    <p><code>prices.volume</code> 欄位存在但<b>全庫 0 筆有資料</b>——黃金交叉的量能確認（實證勝率：高量 72% vs 低量 54%）完全不可用；歷史只有 365 天，MA200／52 週視窗／未來回測的樣本都不誠實。</p>
+    <p class="dim">這是 P2 技術法則引擎與 P4 回測的共同地基。缺料先補料，AI 永遠不自己算數字（老規矩）。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>資料源探測已通過（2026-07-08 實測）</h2>
+    <table class="probe">
+      <tr><th>代表標的</th><th>5 年筆數</th><th>量能覆蓋</th></tr>
+      <tr><td>AAPL（US）</td><td>1,254</td><td class="ok">100%</td></tr>
+      <tr><td>2330.TW（TW）</td><td>1,214</td><td class="ok">99.9%</td></tr>
+      <tr><td>1155.KL（MY）</td><td>1,225</td><td class="ok">99.6%</td></tr>
+    </table>
+    <p class="dim">yfinance 一家就三市場全通；FinMind <code>TaiwanStockPrice</code> 也實測含量價（<code>Trading_Volume</code>），可當台股備援。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>做四件事</h2>
+    <div class="sig">
+      <div class="sigrow"><b>① 量能接線（純接線）</b>：yfinance provider 的 history／latest 補讀 <code>Volume</code> 欄 → <code>PriceRow.volume</code>。儲存欄位與 upsert 早已預留，整數字串入庫（量不是錢，不受 2dp 規則）。</div>
+      <div class="sigrow"><b>② 台股歷史備援</b>：FinMind provider 擴充 <code>QUOTE_HISTORY</code>（收盤＋量能），排在 yfinance 之後的 fallback 鏈——順帶解掉「歷史只有 yfinance 單點」的風險項。維持現有 token 門控。</div>
+      <div class="sigrow"><b>③ 歷史深度 5 年（你的定案，取代藍圖 3 年建議）</b>：單一 config 設定 <code>history_backfill_days=1825</code>（env 可覆寫），統一取代散落的兩處 365；智慧視窗「延伸到首次買入日」的邏輯不變。儲存量約 1,250 列/標的，微不足道。</div>
+      <div class="sigrow"><b>④ 讀取路徑＋深回填</b>：<code>get_price_history</code> 回傳補上 volume；洞察生成餵入 <code>ctx.volumes</code>（與收盤對齊，探測門控不變）；沿用既有回填 action 一次深回填——冪等 upsert 會把舊列的空 volume 一併補上。</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>驗收（退出條件）</h2>
+    <ul class="tight keep">
+      <li>持有標的近 90 個交易日 volume 覆蓋率 &gt; 90%</li>
+      <li><code>technical_signals_json</code> 出現量能節（volume_signal 活了）</li>
+      <li>52 週位置的視窗達滿額 252 個交易日</li>
+      <li>重跑回填不重複、不毀史（冪等不變）；TW fallback 有契約測試</li>
+      <li>全閘門綠（pytest／mypy --strict／ruff）→ demo 站實測量能節出現</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span>不做什麼（本批次外）</h2>
+    <ul class="tight skip">
+      <li>分析師共識變數 → <b>批次 2</b>（探測已通過：三市場都有目標價＋評級分布，屆時出獨立 mini-spec 給你確認欄位）</li>
+      <li>預覽路徑技術指標讀窗對齊 → 已在 2026-07-07 的 L3 修復完成，不重做</li>
+      <li>資料保留／清理 → 等你觀察「資料庫統計」後再定</li>
+      <li>P2 法則引擎（MA200 濾網、50/200 交叉…）→ 地基完成後開 P2</li>
+    </ul>
+  </section>
+
+  <section class="cta">
+    <b>回「確認」即開工</b>：分支開發 → 閘門 → demo 驗證 → SR 報告。決策記錄：歷史深度採 <b>5 年</b>（owner 2026-07-08 定案，CHANGELOG 隨批次記錄）。
+  </section>
+
+</div>

@@ -45,3 +45,42 @@ def test_parse_history_json_skips_nan_close() -> None:
     payload = {"Close": {"1700000000000": None, "1700086400000": 2.5}}
     rows = YFinanceProvider()._parse_history_json(payload, instrument="X", market=Market.MY)
     assert len(rows) == 1 and rows[0].close == Decimal("2.5")
+
+
+def test_volume_helper_integer_and_gaps() -> None:
+    from portfolio_dash.pricing.providers.yfinance_provider import _volume
+
+    assert _volume(3323800) == Decimal("3323800")
+    assert _volume(3323800.0) == Decimal("3323800")   # yfinance emits float64 volume
+    assert _volume(0) == Decimal("0")                 # a real no-trade session stays 0
+    assert _volume(None) is None
+    assert _volume(float("nan")) is None
+    assert _volume(float("inf")) is None
+
+
+def test_parse_history_json_reads_volume() -> None:
+    # The KL fixture carries a Volume column (first bar = 0, a genuine no-trade session).
+    raw = Path("tests/pricing/fixtures/yfinance/3182.KL.json").read_text("utf-8")
+    rows = YFinanceProvider()._parse_history_json(json.loads(raw), instrument="3182",
+                                                  market=Market.MY)
+    assert [r.volume for r in rows] == [
+        Decimal("0"), Decimal("3323800"), Decimal("2853800"),
+        Decimal("2838500"), Decimal("4933700"),
+    ]
+    # volume is an integer Decimal (not money) — no spurious decimal places
+    assert all(v is not None and v == v.to_integral_value() for v in
+               (r.volume for r in rows))
+
+
+def test_parse_history_json_missing_volume_column_is_none() -> None:
+    # A payload without a Volume key -> every row's volume degrades to None (not a crash).
+    payload = {"Close": {"1700000000000": 2.5, "1700086400000": 2.6}}
+    rows = YFinanceProvider()._parse_history_json(payload, instrument="X", market=Market.MY)
+    assert [r.volume for r in rows] == [None, None]
+
+
+def test_parse_history_json_nan_volume_is_none_close_kept() -> None:
+    # A finite close with a NaN/None volume keeps the close, drops only the volume.
+    payload = {"Close": {"1700000000000": 2.5}, "Volume": {"1700000000000": None}}
+    rows = YFinanceProvider()._parse_history_json(payload, instrument="X", market=Market.MY)
+    assert len(rows) == 1 and rows[0].close == Decimal("2.5") and rows[0].volume is None

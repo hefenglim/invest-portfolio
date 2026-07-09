@@ -14,6 +14,14 @@ def test_defaults() -> None:
     assert s.tz_display == "Asia/Taipei"
     assert s.reporting_currency == Currency.TWD
     assert isinstance(s.db_path, Path)
+    # owner decision 2026-07-08: 5-year history backfill floor
+    assert s.history_backfill_days == 1825
+
+
+def test_history_backfill_days_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HISTORY_BACKFILL_DAYS", "1095")  # e.g. narrow to 3y
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.history_backfill_days == 1095
 
 
 def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

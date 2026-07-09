@@ -15,7 +15,7 @@ NOT user-editable, so they live outside this library.
 
 from typing import TypedDict
 
-LIBRARY_VERSION = "official-v3 (2026-07-06)"
+LIBRARY_VERSION = "official-v4 (2026-07-09)"
 
 # The news-organizer system prompt (batch ④): the default LLM turns a fetched article's
 # text into a structured, faithful summary. Editable by the user (news settings), with a
@@ -113,16 +113,23 @@ _CHECKUP_BODY = (
 {{financials_json}}
 （非台股標的：改以技術面、價格 vs 成本、環境對照為判讀支柱，並如實說明籌碼資料不適用。）
 
-四、新聞事件 — 近期經整理的個股新聞（標題／日期／摘要）：解讀近期催化劑或風險事件，
+四、分析師共識 — 引用分析師目標價區間：現價相對均值／中位／最高／最低目標價的位置，
+以及與均值目標價的上檔空間（upside_vs_mean_pct）；本月評級分布（強力買進…強力賣出）與
+加權評級分數，並對照上月分布點出月度變化（趨勢轉強或轉弱）。評估市場對此標的的集體看法
+是否與前述技術／基本面相互印證；共識僅供估值脈絡，不取代自身判讀。若 consensus_json 為
+unavailable（無分析師覆蓋），必須明講「無分析師覆蓋」，不得虛構任何目標價或評級。
+{{consensus_json}}
+
+五、新聞事件 — 近期經整理的個股新聞（標題／日期／摘要）：解讀近期催化劑或風險事件，
 與前述技術/基本面是否相互印證。新聞僅供背景判讀，不得從新聞取價格或報酬等數字；
 無新聞時如實說明「近期無新聞」。
 {{symbol_news_json}}
 
-五、環境對照 — 相對所屬大盤的強弱與當前市場情緒，標注指標時點。
+六、環境對照 — 相對所屬大盤的強弱與當前市場情緒，標注指標時點。
 {{index_quotes_json}}
 {{market_sentiment_json}}
 
-六、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
+七、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
 1) 加碼／減碼參考框架（作為長期持倉評估依據，不是買賣指令）：以技術訊號描述條件式情境，
 例「黃金交叉成立且 RSI 未過熱（<70）、趨勢結構為上升 → 屬偏多的加碼評估情境」、
 「跌破 60 日均線且趨勢結構轉為下降、RSI 走弱 → 屬減碼重新評估情境」；明確寫出觸發條件
@@ -170,7 +177,7 @@ _MARKET_BODY = (
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.3", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "個股健檢策略", "version": "v2.4", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
 ]
 
