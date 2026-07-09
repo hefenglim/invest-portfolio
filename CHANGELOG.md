@@ -50,6 +50,59 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.12] - 2026-07-09
+
+Blueprint P1 "data foundation" release: trading volume across all three markets,
+5-year price history, and the analyst-consensus variable — the data bedrock for the
+upcoming rules engine (P2) and backtest/decision-quality loop (P4).
+
+### Added
+- **Trading volume end to end** (P1-1A): the yfinance provider now reads the `Volume`
+  column in history/latest fetches into the long-reserved `prices.volume` column
+  (canonical integer strings — volume is not money, the 2dp rule never applied);
+  `get_price_history`/`PriceRead` gain an additive `volume` field; the insight
+  generation AND preview paths feed `VarContext.volumes` (aligned 1:1 with closes,
+  probe-gated) so `technical_signals_json` now emits its volume section
+  (`ratio_to_avg` + `surge`). Live-verified on the test site: 13 instruments at
+  98.9–100% recent-window volume coverage after the deep backfill.
+- **FinMind TW quote-history fallback** (P1-1A): `FinMindProvider` gains
+  `QUOTE_HISTORY` support (`TaiwanStockPrice`: OHLC + `Trading_Volume`), appended
+  after yfinance in the TW chain — removing the yfinance single point for price
+  history. Token-gated exactly as the dividend path.
+- **5-year price history** (P1-1B; owner decision 2026-07-08 supersedes the
+  blueprint's 3-year recommendation, recorded here): new `history_backfill_days`
+  setting (default 1825, env-overridable) replaces the two scattered 365-day
+  literals (quick-register backfill + smart backfill windows; the
+  extend-to-first-acquisition logic is unchanged). The 52-week position now reaches
+  its full 252-session window.
+- **Analyst-consensus variable `consensus_json`** (P1-1C): new
+  `pricing/consensus_source.py` fetches yfinance's two light endpoints
+  (`analyst_price_targets` + `recommendations_summary`; never the heavy
+  `Ticker.info`) into idempotent per-symbol snapshots — target prices (Decimal
+  strings under the 4dp float-noise cap), this/last-month rating distributions,
+  and locally computed weighted `rating_score` (1–5) + `upside_vs_mean_pct`.
+  Convention (invariant #1): consensus numbers are fetched from the finance API and
+  computed locally — the LLM only interprets them. New `consensus_daily` job
+  (09:10 Asia/Taipei; manual trigger via the existing
+  `POST /api/scheduler/jobs/{id}/run`). Variable registry grows 32→33 across
+  9→10 categories (new 分析師共識 category, mirrored in `web/vars.js`); symbols
+  without coverage degrade honestly with an explicit no-coverage reason.
+- **Health-check strategy v2.4** (template library `official-v4`): adds a consensus
+  section — target range/mean vs current + upside, rating distribution and its
+  month-over-month shift — and must state 無分析師覆蓋 explicitly when the variable
+  is unavailable. Official byte-freeze / reset-to-official conventions unchanged;
+  the task-preset pack references the strategy by name and needed no change.
+
+### Fixed
+- **`volume_signal` None-safety + trailing-gap trim** (caught by live verification,
+  not by the green unit gates): the newest TW price row is written by the twse
+  latest-quote provider, which carries no volume, so the volume signal would have
+  degraded — or raised on an interior gap — on every TW/MY symbol daily. It now
+  accepts None-padded series (`Sequence[Decimal | None]`), trims trailing
+  volume-less sessions (the next history refresh heals them a day later), and
+  degrades honestly on an interior-window gap; the type bridge cast in
+  `llm_insight.variables` is gone.
+
 ## [v0.1.11] - 2026-07-08
 
 The AI-input optimization program release: four feature batches + a full-system
