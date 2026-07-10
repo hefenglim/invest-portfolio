@@ -22,7 +22,9 @@ def test_default_params_values() -> None:
     assert dp.trend == P.TrendFilterParams(ma=200, band=Decimal("0.02"), confirm_days=2)
     assert dp.cross.fast == 50 and dp.cross.slow == 200
     assert dp.cross.volume_confirm is True and dp.cross.volume_window == 20
-    assert dp.cross.cross_lookback == dp.cross.decay_sessions == 120
+    # 60 = deep-review calibration 2026-07-10 (death cross ~random after ~30d:
+    # half-weight at day 30, handed back to the relationship read by ~3 months).
+    assert dp.cross.cross_lookback == dp.cross.decay_sessions == 60
     assert dp.momentum.lookback_sessions == 252 and dp.momentum.skip_sessions == 21
     assert dp.rsi.period == 14
     assert dp.rsi.overbought == Decimal("70") and dp.rsi.oversold == Decimal("30")

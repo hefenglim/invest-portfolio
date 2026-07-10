@@ -117,6 +117,40 @@ def test_stale_cross_beyond_lookback_falls_to_relationship() -> None:
     assert rs.evidence["cross"] is None
 
 
+def test_most_recent_of_two_crosses_wins() -> None:
+    # Golden at t=7 (days_ago 6) THEN death at t=11 (days_ago 2) — the newer cross
+    # must win (deep review 2026-07-10: single-cross fixtures could not catch an
+    # oldest-first scan mutation).
+    closes = _s([20, 18, 16, 14, 12, 10, 14, 18, 22, 26, 20, 14, 8, 2])
+    rs = MC.evaluate(closes, None, _P)
+    assert rs is not None
+    assert rs.state == "death"
+    assert rs.evidence["days_ago"] == 2
+
+
+def test_volumes_shorter_than_closes_degrade_to_unknown() -> None:
+    # Cross at absolute index 7 but only 6 volume entries: must NOT raise; the
+    # confirmation is honestly unknown (deep review 2026-07-10 MEDIUM fix).
+    vols = _s([100, 100, 100, 100, 100, 100])
+    rs = MC.evaluate(_CLOSES, vols, _P)
+    assert rs is not None
+    assert rs.state == "golden"
+    assert rs.evidence["volume_confirmed"] is None
+    assert rs.evidence["confidence_modifier"] == Decimal("0.85")
+
+
+def test_fully_decayed_boundary_is_not_detected_as_cross() -> None:
+    # days_ago == decay_sessions would decay to score 0 — a contradictory
+    # "detected golden, score 0" state. The detection window excludes the boundary,
+    # so it falls through to the standing relationship (deep review 2026-07-10).
+    params = MaCrossParams(fast=2, slow=4, cross_lookback=2, decay_sessions=2)
+    rs = MC.evaluate(_CLOSES, None, params)  # golden is exactly 2 sessions ago
+    assert rs is not None
+    assert rs.state == "fast_above"
+    assert rs.score == Decimal("0.4")
+    assert rs.evidence["cross"] is None
+
+
 def test_aligned_flat_series_is_neutral() -> None:
     # Flat series: fast MA == slow MA exactly -> aligned, score 0 (not fast_above).
     rs = MC.evaluate(_s([50] * 12), None, _P)

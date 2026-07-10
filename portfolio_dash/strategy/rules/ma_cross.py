@@ -5,19 +5,24 @@ bounded lookback, then scores it by:
 
 * **base** — golden ``+1`` / death ``-1``;
 * **confidence modifier** — the empirical volume-confirmation edge (high-volume
-  confirmed ~72% vs unconfirmed ~54%) encoded directly:
+  confirmed ~72% vs unconfirmed ~54%; ``0.75 = 54/72``) encoded directly:
   ``×1.00`` confirmed · ``×0.75`` unconfirmed · ``×0.85`` unknown (volume absent / gap
   at the cross — never faked). If volume confirmation is disabled the modifier is
-  ``1.00``;
+  ``1.00``. Caveat: the 72/54 figure is INDEX-level evidence (S&P, 33 signals over
+  66y); applied per-symbol it mildly overstates confidence — individual stocks are
+  noisier than indices (blueprint §1.2);
 * **age decay** — a cross fades: a documented LINEAR decay to 0 over
-  ``decay_sessions`` (default 120) sessions (death-cross evidence: short-term
-  effective, ~random after ~30d — the linear-to-120 decay keeps it simple and honest).
+  ``decay_sessions`` sessions (default 60 — calibrated to the death-cross evidence
+  that the signal is ~random after ~30 days: half-weight at day 30, fully handed back
+  to the standing relationship by ~3 months).
 
 When no cross is found within the lookback the state reports the *standing* fast-vs-slow
 relationship at a reduced magnitude (``fast_above`` ``+0.4`` / ``fast_below`` ``-0.4`` /
-``aligned`` ``0``). ``cross_lookback`` equals ``decay_sessions`` by default so a detected
-cross always carries a non-zero contribution and stale crosses fall through to the
-relationship read. Pure Decimal; fewer than ``slow`` closes → ``None``.
+``aligned`` ``0``). ``cross_lookback`` equals ``decay_sessions`` by default, and the
+detection window EXCLUDES the fully-decayed boundary (``days_ago < decay_sessions``),
+so a detected cross always carries a strictly non-zero contribution and anything older
+falls through to the relationship read — no "detected but score 0" state, no score jump
+at the boundary. Pure Decimal; fewer than ``slow`` closes → ``None``.
 """
 
 from collections.abc import Sequence
@@ -63,7 +68,7 @@ def _volume_confirmed(
     ``None`` when it cannot be judged (no volumes, not enough pre-cross bars, or a
     ``None`` gap in the cross day or the window) — unknown is never faked as confirmed.
     """
-    if volumes is None or cross_t - window < 0:
+    if volumes is None or cross_t - window < 0 or cross_t >= len(volumes):
         return None
     cross_vol = volumes[cross_t]
     before = volumes[cross_t - window:cross_t]
@@ -104,9 +109,11 @@ def evaluate(
     else:
         rel_state, rel_score = "aligned", _ZERO
 
-    # Scan newest→oldest for the most recent sign flip within cross_lookback.
+    # Scan newest→oldest for the most recent sign flip within cross_lookback. The
+    # fully-decayed boundary (days_ago == decay_sessions) is EXCLUDED so a detected
+    # cross is always strictly non-zero (deep review 2026-07-10).
     latest = len(signs) - 1  # days_ago == latest - j
-    lo = max(1, latest - params.cross_lookback)
+    lo = max(1, latest - params.cross_lookback + 1)
     cross: str | None = None
     days_ago: int | None = None
     cross_j: int | None = None

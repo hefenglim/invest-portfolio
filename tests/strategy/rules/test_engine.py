@@ -58,6 +58,21 @@ def test_whipsaw_stays_range_bound() -> None:
     assert ss.composite.evaluation_context == "range_bound"
 
 
+def test_confirmed_uptrend_with_unknown_momentum_says_so() -> None:
+    # 220 sessions: momentum (needs 253) is missing. The label must NOT claim a
+    # momentum direction it never measured — the pre-fix behavior labelled this
+    # "uptrend_pullback / 動能轉弱", a fabricated claim (deep review 2026-07-10).
+    ss = evaluate_symbol(_s([100.0 + i for i in range(220)]))
+    assert ss is not None
+    trend = ss.rules["trend_filter"]
+    assert trend is not None and trend.state == "above_confirmed"
+    assert ss.rules["momentum_12_1"] is None
+    assert ss.composite is not None
+    assert ss.composite.evaluation_context == "uptrend"
+    assert "動能樣本不足" in ss.composite.context_note
+    assert "轉弱" not in ss.composite.context_note
+
+
 def test_insufficient_data_family() -> None:
     # 220 sessions: trend/cross/rsi evaluable, momentum (needs 253) missing.
     ss = evaluate_symbol(_s([100.0 + (i % 13) for i in range(220)]))

@@ -41,7 +41,8 @@ class Composite:
       ``[0, 100]`` (all-bullish → 100, neutral → 50, all-bearish → 0).
     * ``contributions`` — per-rule signed contribution actually applied (post
       renormalization) — the audit trail that sums to ``tech_score - 50``.
-    * ``weights_applied`` — the renormalized weight each rule received (sums to 100).
+    * ``weights_applied`` — the renormalized weight each rule received (sums to 100
+      to Decimal precision; a non-dividing weight subset can be an ulp short).
     * ``coverage`` — ``"3/4"`` = evaluable / total rules.
     * ``missing`` — names of rules excluded for insufficient data.
     * ``evaluation_context`` / ``context_note`` — a deterministic label + one-line

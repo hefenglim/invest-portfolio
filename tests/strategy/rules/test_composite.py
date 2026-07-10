@@ -106,6 +106,23 @@ def test_evaluation_context_table() -> None:
     assert ev("above_unconfirmed", "flat", mid)[0] == "range_bound"
 
 
+def test_unknown_momentum_never_claims_a_direction() -> None:
+    # Deep review 2026-07-10 (MEDIUM): a MISSING momentum rule must not be read as
+    # "flat" — "動能轉弱" for unmeasured momentum is a fabricated claim.
+    ev = C.evaluation_context
+    mid = Decimal("50")
+    label_up, note_up = ev("above_confirmed", None, mid)
+    assert label_up == "uptrend"
+    assert "動能樣本不足" in note_up
+    assert "轉弱" not in note_up
+    label_down, note_down = ev("below_confirmed", None, mid)
+    assert label_down == "downtrend"
+    assert "動能樣本不足" in note_down
+    assert "反彈" not in note_down
+    # Neutral trend + unknown momentum stays range_bound.
+    assert ev("in_band", None, mid)[0] == "range_bound"
+
+
 def test_evaluation_context_falls_back_to_score_band_when_trend_missing() -> None:
     ev = C.evaluation_context
     assert ev(None, "positive", Decimal("80"))[0] == "strong_uptrend"
@@ -115,8 +132,8 @@ def test_evaluation_context_falls_back_to_score_band_when_trend_missing() -> Non
 
 
 def test_context_notes_cover_every_label_in_zh_tw() -> None:
-    labels = {"strong_uptrend", "uptrend_pullback", "range_bound",
-              "downtrend_rally", "strong_downtrend", C.INSUFFICIENT_DATA}
+    labels = {"strong_uptrend", "uptrend_pullback", "uptrend", "range_bound",
+              "downtrend_rally", "downtrend", "strong_downtrend", C.INSUFFICIENT_DATA}
     assert set(C.CONTEXT_NOTES) == labels
     for note in C.CONTEXT_NOTES.values():
         assert note and isinstance(note, str)

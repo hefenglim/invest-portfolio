@@ -31,6 +31,17 @@ def test_above_confirmed_known_answer() -> None:
     assert rs.window_days == 3
 
 
+def test_price_exactly_at_band_edge_is_in_band() -> None:
+    # Zone boundaries are STRICT (> / <): a close exactly equal to ma*(1±band) stays
+    # in-band. With band=0 a flat series has close == ma exactly -> in_band, which a
+    # >= mutation would misread as above (deep review 2026-07-10 adequacy gap).
+    rs = TF.evaluate(_s([100.0] * 5), TrendFilterParams(ma=3, band=Decimal("0"),
+                                                        confirm_days=2))
+    assert rs is not None
+    assert rs.state == "in_band"
+    assert rs.score == Decimal("0")
+
+
 def test_above_unconfirmed_scores_zero() -> None:
     # Only the last session is above (days_in_zone = 1 < 2) -> neutral score.
     rs = TF.evaluate(_s([100, 100, 100, 100, 110]), _P3)

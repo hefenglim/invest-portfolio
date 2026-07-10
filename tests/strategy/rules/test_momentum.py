@@ -47,11 +47,12 @@ def test_full_scale_caps_at_one() -> None:
 
 
 def test_flat_within_epsilon() -> None:
-    # r=0.003 (< 0.5% epsilon) -> flat label; score is the tiny uniform value 0.01.
+    # r=0.003 (< 0.5% epsilon) -> flat label; flat forces score to EXACTLY 0
+    # (state/score consistency — deep review 2026-07-10).
     rs = M.evaluate(_s([50, 100, 50, 50, 100.3, 50]), _P)
     assert rs is not None
     assert rs.state == "flat"
-    assert rs.score == Decimal("0.01")
+    assert rs.score == Decimal("0")
 
 
 def test_exactly_flat_zero_return() -> None:

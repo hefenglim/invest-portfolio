@@ -46,6 +46,20 @@ def test_neutral_midrange() -> None:
     assert Decimal("30") < rs.evidence["rsi14"] < Decimal("70")  # type: ignore[operator]
 
 
+def test_thresholds_are_inclusive_at_exact_boundary() -> None:
+    # RSI exactly == threshold must classify (>= / <= inclusive); a mutation to
+    # strict >/< would silently pass the extremes-only fixtures above
+    # (deep review 2026-07-10 adequacy gap).
+    up = _s([float(i) for i in range(1, 30)])  # RSI exactly 100
+    rs = R.evaluate(up, RsiRegimeParams(overbought=Decimal("100")))
+    assert rs is not None
+    assert rs.state == "overbought"
+    down = _s([float(i) for i in range(30, 1, -1)])  # RSI exactly 0
+    rs2 = R.evaluate(down, RsiRegimeParams(oversold=Decimal("0")))
+    assert rs2 is not None
+    assert rs2.state == "oversold"
+
+
 def test_insufficient_data_returns_none() -> None:
     assert R.evaluate(_s([1, 2, 3]), _P) is None  # < period+1
     assert R.evaluate([], _P) is None

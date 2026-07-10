@@ -39,17 +39,23 @@ class MaCrossParams:
     ``volume_confirm`` gates the confidence modifier (empirical base: high-volume
     confirmation ~72% vs low-volume ~54% — encoded as a score multiplier, see
     ``ma_cross.py``). ``cross_lookback`` bounds how far back a cross is detected; it
-    equals ``decay_sessions`` by default so a *detected* cross always still carries a
-    non-zero (un-decayed) contribution, and anything older reverts to the standing
-    fast-vs-slow relationship instead of a stale cross.
+    equals ``decay_sessions`` by default and detection excludes the fully-decayed
+    boundary, so a *detected* cross always carries a strictly non-zero contribution
+    and anything older reverts to the standing fast-vs-slow relationship.
+
+    ``decay_sessions=60`` (deep-review calibration 2026-07-10, owner-flagged): the
+    cited death-cross evidence says the signal is ~random after ~30 days; a linear
+    decay over 60 sessions leaves half-weight at day 30 and hands fully back to the
+    relationship read by ~3 months. (The earlier 120 kept 0.75 weight at day 30 —
+    over-crediting a signal the evidence calls noise.)
     """
 
     fast: int = 50
     slow: int = 200
     volume_confirm: bool = True
     volume_window: int = 20
-    cross_lookback: int = 120
-    decay_sessions: int = 120
+    cross_lookback: int = 60
+    decay_sessions: int = 60
 
 
 @dataclass(frozen=True)

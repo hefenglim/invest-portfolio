@@ -6,9 +6,10 @@ Formula (trivially auditable):
 
 With every rule scoring ``+1`` and weights summing to 100 the score is 100; all ``-1``
 → 0; all neutral → 50. Rules with insufficient data (``None``) are excluded and the
-REMAINING weights are renormalized back to 100, so an under-covered symbol is scored
-honestly on what is available. Fewer than 2 evaluable rules → no composite (``None``):
-too thin to score.
+REMAINING weights are renormalized back to 100 (to Decimal precision — a non-dividing
+weight subset sums to 100 minus an ulp, never materially off), so an under-covered
+symbol is scored honestly on what is available. Fewer than 2 evaluable rules → no
+composite (``None``): too thin to score.
 
 ``evaluation_context`` is a deterministic label (health-check add/trim vocabulary) with
 a one-line zh-TW condition sentence, derived only from the trend + momentum states and
@@ -32,12 +33,17 @@ _BAND_LOW = Decimal("35")
 RULE_ORDER: tuple[str, ...] = ("trend_filter", "ma_cross", "momentum_12_1", "rsi_regime")
 
 # Health-check add/trim framework vocabulary + one-line zh-TW condition sentences.
+# ``uptrend``/``downtrend`` are the momentum-UNKNOWN variants (deep review 2026-07-10):
+# when the momentum rule has too little history to evaluate, the label must not claim
+# a momentum direction it never measured — "動能轉弱" for unmeasured momentum is false.
 INSUFFICIENT_DATA = "insufficient_data"
 CONTEXT_NOTES: dict[str, str] = {
     "strong_uptrend": "強勢上升趨勢——價格站穩 MA200 且動能為正，回測不破帶前可續抱觀察。",
     "uptrend_pullback": "上升趨勢但動能轉弱——回檔或整理，留意 MA200 帶是否守住。",
+    "uptrend": "上升趨勢確立——動能樣本不足暫不判讀；回測不破 MA200 帶前可續抱觀察。",
     "range_bound": "區間震盪——趨勢未定，等待方向突破，避免追高殺低。",
     "downtrend_rally": "下降趨勢中的反彈——尚未轉勢，反彈至均線帶宜保守。",
+    "downtrend": "下降趨勢確立——動能樣本不足暫不判讀；價格位於 MA200 帶下，控制風險優先。",
     "strong_downtrend": "強勢下降趨勢——跌破 MA200 且動能為負，控制風險優先。",
     INSUFFICIENT_DATA: "資料不足——歷史長度不夠，無法形成可信的技術判斷。",
 }
@@ -72,7 +78,10 @@ def _trend_direction(trend_state: str | None, tech_score: Decimal) -> str:
 
 
 def _momentum_direction(momentum_state: str | None) -> str:
-    """pos / neg / flat (a missing momentum rule reads as flat)."""
+    """pos / neg / flat / unknown (a MISSING momentum rule is unknown, never "flat" —
+    labelling unmeasured momentum as weakening would be fabrication)."""
+    if momentum_state is None:
+        return "unknown"
     if momentum_state == "positive":
         return "pos"
     if momentum_state == "negative":
@@ -87,9 +96,19 @@ def evaluation_context(
     tdir = _trend_direction(trend_state, tech_score)
     mdir = _momentum_direction(momentum_state)
     if tdir == "up":
-        label = "strong_uptrend" if mdir == "pos" else "uptrend_pullback"
+        if mdir == "pos":
+            label = "strong_uptrend"
+        elif mdir == "unknown":
+            label = "uptrend"
+        else:
+            label = "uptrend_pullback"
     elif tdir == "down":
-        label = "strong_downtrend" if mdir == "neg" else "downtrend_rally"
+        if mdir == "neg":
+            label = "strong_downtrend"
+        elif mdir == "unknown":
+            label = "downtrend"
+        else:
+            label = "downtrend_rally"
     else:
         label = "range_bound"
     return label, CONTEXT_NOTES[label]
