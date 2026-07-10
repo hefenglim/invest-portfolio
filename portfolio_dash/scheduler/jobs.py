@@ -336,6 +336,34 @@ def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> str:
     return str(runner(conn, now=now))
 
 
+# signal_scan runner seam (P2 batch 2): the scan reads pricing/portfolio + the rule engine
+# and writes signal_states/alert_events; that orchestration lives in the api seam
+# (api/signals_service.scan_signals), registered at app startup — so scheduler/ never
+# imports api (architecture.md). A scheduler-only process without the runner is a safe
+# no-op (state resumes seeding once the app wires it on the next scan).
+SignalScanRunner = Callable[..., str]
+_SIGNAL_SCAN_RUNNER: SignalScanRunner | None = None
+
+
+def register_signal_scan_runner(fn: SignalScanRunner | None) -> None:
+    """Register (or clear with None) the signal-scan runner (app wiring seam)."""
+    global _SIGNAL_SCAN_RUNNER
+    _SIGNAL_SCAN_RUNNER = fn
+
+
+def signal_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Post-close: evaluate held-symbol rule signals → detect transitions → events.
+
+    A separate static job (jobs here are one-purpose; the blueprint allows this or an
+    alert_scan pre-step — the runner-seam job is the lowest-coupling option and is
+    independently triggerable via ``POST /api/scheduler/jobs/signal_scan/run``). No runner
+    wired → safe no-op summary."""
+    runner = _SIGNAL_SCAN_RUNNER
+    if runner is None:
+        return "no signal scan runner registered"
+    return str(runner(conn, now=now))
+
+
 def dividend_inbox_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Daily: refresh dividend events for acquired symbols + report pending count."""
     runner = _DIVIDEND_SCAN_RUNNER
@@ -665,6 +693,12 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "consensus_daily", consensus_daily, "10 9 * * *", "Asia/Taipei", True,
         "Analyst target price + rating distribution (all instruments)",
+    ),
+    # Rule-signal scan (P2 batch 2): post-close, after quotes refresh, before the alert
+    # scan so any signal transition is recorded ahead of the on_alert dispatch pass.
+    JobSpec(
+        "signal_scan", signal_scan, "55 14 * * mon-fri", "Asia/Taipei", True,
+        "Technical rule-signal scan + state-transition events",
     ),
     # on_alert scan (spec 04.9 R7): post-close, after quotes refresh, before insight cron.
     JobSpec(
