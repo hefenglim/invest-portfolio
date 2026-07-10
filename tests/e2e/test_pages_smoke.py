@@ -187,6 +187,53 @@ def test_symbol_detail_drawer_held_smoke(
 
 
 @pytest.mark.e2e
+def test_symbol_drawer_signal_chips_smoke(
+    live_server: str, browser_page: Page
+) -> None:
+    """技術訊號 section in the held drawer, fetched from GET /api/signals/{symbol} (P2 b2).
+
+    Opens the 2330 drawer via the REAL nav path (dashboard → pdOpenSymbol). The golden DB
+    stores ONE price row for 2330, so the rule engine degrades honestly (every rule + the
+    composite None) and the section renders its 資料不足 empty state — the honest-empty path
+    the batch must show, not a fabricated score. Asserts (a) the section self-fetch
+    /api/signals/2330 returns 200, (b) the .sd-signals box renders the .sd-sig-empty honest
+    state, and (c) ZERO console + page errors (an unhandled signals-fetch rejection fails it).
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")  # dashboard async render landed
+        with page.expect_response("**/api/signals/2330") as resp_info:
+            page.evaluate("() => window.pdOpenSymbol('2330')")
+        assert resp_info.value.status == 200, f"/api/signals status {resp_info.value.status}"
+        page.wait_for_selector(".sd-drawer .sd-signals")  # section mounted
+        # One stored price → honest 資料不足 empty state (never a fabricated TechScore).
+        page.wait_for_selector(".sd-signals .sd-sig-empty")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"symbol drawer signal chips (2330): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_symbol_detail_drawer_watchlist_smoke(
     live_server: str, browser_page: Page
 ) -> None:

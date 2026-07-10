@@ -78,6 +78,30 @@
 .sd-section table.data td { height: 28px; padding: 4px 8px; }
 .sd-section table.data th { padding: 5px 8px; }
 
+/* technical rule signals (P2 batch 2) — TechScore is NOT P&L: NEUTRAL accent, never the
+   red-up/green-down sign classes. */
+.sd-signals { display: flex; flex-direction: column; gap: 9px; }
+.sd-sig-loading { font-size: 11px; color: var(--text-3); }
+.sd-sig-score { display: flex; align-items: center; gap: 12px; }
+.sd-sig-scorenum { display: flex; flex-direction: column; gap: 1px; min-width: 78px; }
+.sd-sig-scorenum .v { font-family: var(--font-num); font-size: 20px; font-weight: 700; color: var(--text); }
+.sd-sig-scorenum .k { font-size: 9.5px; color: var(--text-3); white-space: nowrap; }
+.sd-sig-meter { flex: 1; height: 8px; border-radius: 999px; background: var(--panel-3); overflow: hidden; }
+.sd-sig-meter span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.sd-sig-note { font-size: 11px; color: var(--text-2); line-height: 1.5; }
+.sd-sig-chips { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.sd-chip {
+  display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; min-width: 0;
+  background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+}
+.sd-chip.is-empty { opacity: 0.55; }
+.sd-chip-label { font-size: 9.5px; color: var(--text-3); white-space: nowrap; }
+.sd-chip-state { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.sd-chip-sub {
+  font-size: 10px; font-family: var(--font-num); color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* what-if simulator */
 .sd-sim {
   background: var(--panel-2); border: 1px solid var(--border-soft);
@@ -118,4 +142,5 @@
 @media (max-width: 720px) {
   .sd-stats { grid-template-columns: repeat(2, 1fr); }
   .sd-sim-result { grid-template-columns: 1fr; }
+  .sd-sig-chips { grid-template-columns: 1fr; }
 }
