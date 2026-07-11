@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
+from portfolio_dash.api import signals_service
 from portfolio_dash.api.signals_service import required_calendar_days, required_sessions
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
@@ -36,15 +37,21 @@ def _assert_wire_discipline(node: object) -> None:
         assert not isinstance(node, Decimal), f"raw Decimal leaked to the wire: {node!r}"
 
 
-def _seed_long_series(conn: sqlite3.Connection, symbol: str, n: int = 320) -> None:
-    """Seed ``n`` consecutive daily ascending closes ending at the golden clock date."""
+def _seed_long_series(
+    conn: sqlite3.Connection, symbol: str, n: int = 320, *, with_volume: bool = True
+) -> None:
+    """Seed ``n`` consecutive daily ascending closes ending at the golden clock date.
+
+    ``with_volume=False`` seeds prices-but-no-volume so the volume-confirmation signal
+    stays honestly UNKNOWN (the pre-backfill / provider-without-volume path).
+    """
     end = GOLDEN_NOW.date()
     rows = [
         PriceRow(
             instrument=symbol, market=Market.TW,
             as_of=end - timedelta(days=n - 1 - i),
             close=Decimal(100) + Decimal(i) * Decimal("2"),
-            volume=Decimal(1000) + Decimal(i), source="test",
+            volume=(Decimal(1000) + Decimal(i)) if with_volume else None, source="test",
         )
         for i in range(n)
     ]
@@ -144,3 +151,63 @@ def test_full_held_view_full_path(
     entry = next(s for s in body["signals"] if s["symbol"] == "2330")
     assert entry["composite"] is not None
     assert entry["composite"]["coverage"] == "4/4"
+
+
+# --- quantization discipline (deep review 2026-07-10) --------------------------
+
+
+def test_non_ratio_evidence_decimal_stays_full_precision() -> None:
+    # A non-ratio evidence Decimal (ma200 / fast_ma) is an ABSOLUTE price level, not a ratio
+    # → it must NOT be clamped to 4 dp; only ratio-like keys quantize to 4 dp on the wire.
+    wire = signals_service._evidence_wire({
+        "ma200": Decimal("305.364990234375"),   # not a ratio key → full precision
+        "fast_ma": Decimal("42.123456789"),      # not a ratio key → full precision
+        "price_vs_ma": Decimal("0.123456789"),   # ratio key → 4 dp
+    })
+    assert wire["ma200"] == "305.364990234375"
+    assert wire["fast_ma"] == "42.123456789"
+    assert wire["price_vs_ma"] == "0.1235"
+
+
+def test_ratio_key_set_includes_decay_and_confidence() -> None:
+    # cheap guard: the ma_cross decay/confidence multipliers are ratio-like → 4 dp on the wire.
+    assert {"decay_factor", "confidence_modifier"} <= signals_service._RATIO_EVIDENCE_KEYS
+
+
+def test_composite_contributions_and_weights_are_2dp(
+    golden_db: sqlite3.Connection, api_client: TestClient
+) -> None:
+    _seed_long_series(golden_db, "2330")
+    comp = api_client.get("/api/signals/2330").json()["composite"]
+    assert comp is not None
+    for section in ("contributions", "weights_applied"):
+        for value in comp[section].values():
+            assert isinstance(value, str)
+            assert len(value.split(".")[1]) == 2, f"{section} not 2 dp: {value!r}"
+
+
+# --- honest degradation edges (deep review 2026-07-10) -------------------------
+
+
+def test_single_symbol_prices_no_volume_is_honest_200(
+    golden_db: sqlite3.Connection, api_client: TestClient
+) -> None:
+    # Prices present but NO volume → ma_cross evaluates, but volume confirmation is honestly
+    # UNKNOWN (never faked as confirmed). The endpoint stays 200.
+    _seed_long_series(golden_db, "2330", with_volume=False)
+    resp = api_client.get("/api/signals/2330")
+    assert resp.status_code == 200
+    cross = resp.json()["rules"]["ma_cross"]
+    assert cross is not None
+    assert cross["evidence"]["volume_confirmed"] is None       # unknown, not fabricated
+    assert cross["evidence"]["volume_confirm_enabled"] is True
+
+
+def test_signals_zero_holdings_returns_empty_list(
+    dashboard_client_factory: object,
+) -> None:
+    # An empty ledger (no holdings) → /api/signals is a 200 with an empty signals list.
+    client = dashboard_client_factory(lambda conn: None)  # type: ignore[operator]
+    body = client.get("/api/signals").json()
+    assert body["signals"] == []
+    assert set(body) == {"as_of", "evaluated_at", "signals"}

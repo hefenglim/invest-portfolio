@@ -167,6 +167,25 @@ def test_r7_alert_rules_all_matches_any_rule() -> None:
     assert "R7_rule_not_matched" not in _reasons(evaluate_gates(ctx))
 
 
+def test_r7_all_wildcard_excludes_signal_rules() -> None:
+    # deep review 2026-07-10 F4: 'all' means "all RISK alerts" — a signal_* transition rule
+    # is NOT matched by the wildcard (it would fire an unsubscribed narrative card storm).
+    blocked = GateContext(
+        scope="on_alert", live_strategy_count=1, budget_remaining=Decimal("5"),
+        alert_rules="all", fired_rule="signal_trend", fired_symbol="2330",
+    )
+    assert "R7_rule_not_matched" in _reasons(evaluate_gates(blocked))
+
+
+def test_r7_explicit_signal_rule_still_subscribes() -> None:
+    # ...but explicitly listing signal_trend DOES subscribe (opt-in).
+    listed = GateContext(
+        scope="on_alert", live_strategy_count=1, budget_remaining=Decimal("5"),
+        alert_rules=["signal_trend"], fired_rule="signal_trend", fired_symbol="2330",
+    )
+    assert "R7_rule_not_matched" not in _reasons(evaluate_gates(listed))
+
+
 def test_r7_debounce_key_is_task_rule_symbol() -> None:
     ctx = GateContext(
         scope="on_alert", live_strategy_count=1, budget_remaining=Decimal("5"),

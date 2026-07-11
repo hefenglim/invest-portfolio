@@ -215,13 +215,19 @@ def scan_signals(
     """Evaluate every held symbol, compare with the stored ``signal_states`` cache, record
     transition events, and refresh the cache. Returns a short ``job_runs.detail`` summary.
 
-    Discipline (per the mini-spec):
+    Discipline (per the mini-spec + deep review 2026-07-10):
     * **first run seeds silently** — a symbol with no stored row is written with ZERO
-      events (no event storm on first deploy);
+      events, and its hold columns are seeded from the current evaluation (no event storm
+      on first deploy);
     * **params_version change reseeds silently** — a recalibration is not a market event;
-    * **idempotent per scan/day** — a transition fires once because the cache is updated to
-      the new state in the same pass (a same-day re-scan sees no change); ``record_event``
-      additionally dedups per (rule, symbol) per day as a safety net.
+      the hold columns are reset from the new evaluation (full silent reseed);
+    * **hold semantics** — the trend/momentum detectors compare against the last non-neutral
+      direction/sign (``signal_states.detect_transitions``), which the scan carries forward
+      every pass, so a reversal through a dead-band dwell fires exactly once;
+    * **coalesced per (rule, symbol, day)** — an intra-day repeated flip records ≤1 event
+      per (rule, symbol) per day (``record_event_ex`` dedups). The cron runs once daily; a
+      manual same-day re-run is deliberately conservative (no double-count). The detail's
+      transition count therefore counts only INSERTED events, not merely DETECTED ones.
     """
     signal_states.ensure_table(conn)
     alerts_bridge.ensure_tables(conn)
@@ -231,7 +237,7 @@ def scan_signals(
 
     symbols = _held_symbols(conn, now=now, reporting=reporting)
     seeded = 0
-    transitions = 0
+    recorded = 0
     for symbol in symbols:
         closes, volumes = _read_series(conn, symbol, now=now, params=params)
         signals = engine.evaluate_symbol(closes, volumes, params)
@@ -241,18 +247,22 @@ def scan_signals(
         if stored is None or stored.params_version != PARAMS_VERSION:
             # First run for this symbol, or a params recalibration → reseed silently.
             signal_states.upsert_state(
-                conn, symbol, new_state, params_version=PARAMS_VERSION,
-                as_of=as_of, updated_at=stamped,
+                conn, symbol, new_state, hold=signal_states.seed_hold(new_state),
+                params_version=PARAMS_VERSION, as_of=as_of, updated_at=stamped,
             )
             seeded += 1
             continue
 
-        for rule_id in signal_states.detect_transitions(stored.derived, new_state):
-            alerts_bridge.record_event(conn, rule_id=rule_id, symbol=symbol, now=now)
-            transitions += 1
+        result = signal_states.detect_transitions(stored.derived, new_state, stored.hold)
+        for rule_id in result.events:
+            _, inserted = alerts_bridge.record_event_ex(
+                conn, rule_id=rule_id, symbol=symbol, now=now
+            )
+            if inserted:  # coalesced same-day repeats do not inflate the count (F2)
+                recorded += 1
         signal_states.upsert_state(
-            conn, symbol, new_state, params_version=PARAMS_VERSION,
-            as_of=as_of, updated_at=stamped,
+            conn, symbol, new_state, hold=result.hold,
+            params_version=PARAMS_VERSION, as_of=as_of, updated_at=stamped,
         )
 
-    return f"{len(symbols)} symbol(s), {seeded} seeded, {transitions} transition event(s)"
+    return f"{len(symbols)} symbol(s), {seeded} seeded, {recorded} transition event(s)"

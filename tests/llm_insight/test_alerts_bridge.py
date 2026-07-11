@@ -80,6 +80,23 @@ def test_subscribers_match_rule_list_and_all(conn: sqlite3.Connection) -> None:
     assert ids == {sub_all.id, sub_fx.id}
 
 
+def test_all_wildcard_excludes_signal_rules(conn: sqlite3.Connection) -> None:
+    # deep review 2026-07-10 F4: 'all' means "all RISK alerts" — it must NOT implicitly
+    # subscribe to signal_* transition rules; an explicit list still does.
+    sub_all = cs.create_insight_type(
+        conn, name="All", scope="on_alert", alert_rules="all", enabled=True, now=NOW
+    )
+    sub_signal = cs.create_insight_type(
+        conn, name="Sig", scope="on_alert", alert_rules=["signal_trend"], enabled=True,
+        now=NOW,
+    )
+    # 'all' does NOT pull in signal_trend; only the explicit combo does.
+    sig_ids = {it.id for it in ab.on_alert_subscribers(conn, "signal_trend")}
+    assert sig_ids == {sub_signal.id}
+    # 'all' still subscribes to a genuine RISK rule.
+    assert sub_all.id in {it.id for it in ab.on_alert_subscribers(conn, "fx_drift")}
+
+
 def test_subscribers_exclude_disabled_and_non_on_alert(conn: sqlite3.Connection) -> None:
     cs.create_insight_type(
         conn, name="Disabled", scope="on_alert", alert_rules="all", enabled=False, now=NOW

@@ -75,11 +75,26 @@ def _today(now: datetime) -> str:
 def record_event(
     conn: sqlite3.Connection, *, rule_id: str, symbol: str | None, now: datetime
 ) -> int:
-    """Append a fired alert event; idempotent per (rule, symbol) PER DAY.
+    """Append a fired alert event; idempotent per (rule, symbol) PER DAY. Returns the id.
 
     A re-scan the same day for the same (rule, symbol) does not duplicate an UNCONSUMED
     event — the 24h dispatch debounce is the dispatcher's concern, but this avoids a pile
-    of identical rows when the scan runs repeatedly intraday. Returns the event id.
+    of identical rows when the scan runs repeatedly intraday.
+    """
+    event_id, _ = record_event_ex(conn, rule_id=rule_id, symbol=symbol, now=now)
+    return event_id
+
+
+def record_event_ex(
+    conn: sqlite3.Connection, *, rule_id: str, symbol: str | None, now: datetime
+) -> tuple[int, bool]:
+    """Like :func:`record_event`, but also reports whether a NEW row was written.
+
+    Returns ``(event_id, inserted)`` — ``inserted`` is ``False`` when an existing same-day
+    UNCONSUMED event for this (rule, symbol) was reused (coalesced) instead of a new row
+    being written. Intra-day repeated flips therefore coalesce to ≤1 event per
+    (rule, symbol, day) by design. The signal-scan uses ``inserted`` to count only
+    genuinely-recorded events in its ``job_runs.detail`` (deep review 2026-07-10 F2).
     """
     existing = conn.execute(
         "SELECT id FROM alert_events WHERE rule_id = ? AND IFNULL(symbol, '') = IFNULL(?, '') "
@@ -87,13 +102,13 @@ def record_event(
         (rule_id, symbol, _today(now)),
     ).fetchone()
     if existing is not None:
-        return int(existing["id"])
+        return int(existing["id"]), False
     cur = conn.execute(
         "INSERT INTO alert_events (rule_id, symbol, fired_at, consumed) VALUES (?, ?, ?, 0)",
         (rule_id, symbol, now.isoformat()),
     )
     conn.commit()
-    return int(cur.lastrowid or 0)
+    return int(cur.lastrowid or 0), True
 
 
 def unconsumed_events(conn: sqlite3.Connection) -> list[AlertEvent]:
@@ -120,11 +135,24 @@ def mark_consumed(conn: sqlite3.Connection, event_id: int) -> None:
 # --- subscribers (R7 filter) --------------------------------------------------
 
 
+# Signal-transition rule ids (strategy.signal_states EVENT_*) are a technical
+# state-transition, NOT a spec-03 RISK alert. The 'all' wildcard means "all RISK alerts",
+# so it must NOT pull these in implicitly — a combo subscribes to them ONLY by listing them
+# explicitly (deep review 2026-07-10 F4). Mirrors gating._SIGNAL_RULE_PREFIX.
+_SIGNAL_RULE_PREFIX = "signal_"
+
+
 def _subscribes(alert_rules: object, rule_id: str) -> bool:
-    if alert_rules == "all":
-        return True
+    """True when a combo's ``alert_rules`` subscribes to *rule_id*.
+
+    An explicit list subscribes to exactly its members (including ``signal_*``). The 'all'
+    wildcard subscribes to every RISK alert but EXCLUDES ``signal_*`` transition rules —
+    those are opt-in only (deep review 2026-07-10 F4).
+    """
     if isinstance(alert_rules, list):
         return rule_id in alert_rules
+    if alert_rules == "all":
+        return not rule_id.startswith(_SIGNAL_RULE_PREFIX)
     return False
 
 
