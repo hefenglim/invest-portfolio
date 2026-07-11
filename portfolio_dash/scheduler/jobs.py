@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from portfolio_dash.llm_insight import alerts_bridge
 from portfolio_dash.ops import backup as backup_ops
+from portfolio_dash.ops import notify_dispatch
 from portfolio_dash.pricing import datasources_store, ingest
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
@@ -554,7 +555,18 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
         # pile up; cards are produced once the app wires the runner on the next scan.
         for event in alerts_bridge.unconsumed_events(conn):
             alerts_bridge.mark_consumed(conn, event.id)
-    return f"{len(alerts)} alert(s) [{', '.join(rules_seen)}], {dispatched} dispatched"
+    # WP 3B: push unnotified events (this scan's + signal_scan's 14:55 events) to the
+    # enabled channels. Uses the SEPARATE notified_at marker (independent of `consumed`
+    # above). Wrapped so a push-path failure can never fail the alert scan itself.
+    try:
+        notify_detail = notify_dispatch.dispatch_notifications(conn, now=now)
+    except Exception as exc:  # noqa: BLE001 - the push path must never break the scan
+        logger.warning("notify dispatch failed in alert_scan: %s", exc)
+        notify_detail = "notify: error"
+    return (
+        f"{len(alerts)} alert(s) [{', '.join(rules_seen)}], {dispatched} dispatched; "
+        f"{notify_detail}"
+    )
 
 
 # --- Loop-2 evaluate + Loop-3 calibrate jobs (spec 04.4 / 4.5) ----------------
