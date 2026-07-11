@@ -53,14 +53,14 @@ def _seed_llm(conn: sqlite3.Connection, *, topup: str = "10.00") -> None:
 
 def test_prompt_vars_shape(api_client: TestClient) -> None:
     rows = api_client.get("/api/prompt-vars").json()
-    # + 1 batch-④ news (symbol_news_json) + 1 P1-batch-2 consensus (consensus_json) = 33.
-    assert len(rows) == 33
+    # + 1 batch-④ news + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals = 34.
+    assert len(rows) == 34
     date_tokens = {r["token"] for r in rows} & {"now", "card_created_at", "eval_date"}
     assert date_tokens == {"now", "card_created_at", "eval_date"}
-    # the batch-③/④ + consensus signal vars surface in the variable area for custom prompts.
+    # the batch-③/④ + consensus + rule-signals vars surface in the variable area.
     tokens = {r["token"] for r in rows}
     assert {"technical_signals_json", "fear_greed_json", "symbol_news_json",
-            "consensus_json"} <= tokens
+            "consensus_json", "rule_signals_json"} <= tokens
     h = next(r for r in rows if r["token"] == "holdings_json")
     assert h["scope"] == "portfolio" and h["available"] is True
     assert set(h) == {"token", "name", "category", "scope", "desc", "available", "sample",
@@ -73,6 +73,10 @@ def test_prompt_vars_shape(api_client: TestClient) -> None:
     # consensus went live (P1 batch 2); available and per_symbol.
     cons = next(r for r in rows if r["token"] == "consensus_json")
     assert cons["available"] is True and cons["scope"] == "per_symbol"
+    # rule signals went live (P2 batch 3); available, per_symbol, in the 'price' category.
+    rs = next(r for r in rows if r["token"] == "rule_signals_json")
+    assert rs["available"] is True and rs["scope"] == "per_symbol"
+    assert rs["category"] == "price"
     # 10 categories present (+ the P1-batch-2 'consensus' category)
     assert len({r["category"] for r in rows}) == 10
 

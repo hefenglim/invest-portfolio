@@ -1,0 +1,99 @@
+<title>P2 技術法則引擎・批次3 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #9a6b2f; --accent-soft: #f6efe3;
+    --ok: #2f7a4f; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #16140f; --card: #201c15; --ink: #efe9dd; --ink-2: #b3a88f;
+            --line: #453c2c; --accent: #d2a35c; --accent-soft: #2e2718;
+            --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #16140f; --card: #201c15; --ink: #efe9dd;
+    --ink-2: #b3a88f; --line: #453c2c; --accent: #d2a35c; --accent-soft: #2e2718;
+    --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #9a6b2f; --accent-soft: #f6efe3;
+    --ok: #2f7a4f; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  .skip li::marker { content: "✕ "; color: var(--warn); }
+  .sig { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px; }
+  .sigrow { border: 1.5px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    background: var(--paper); font-size: 14.5px; line-height: 1.55; }
+  .sigrow b { color: var(--accent); }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・P2 批次3（WP 2C＋觀察標的擴充）</div>
+    <h1>訊號進 AI 變數＋健檢 v2.5＋觀察中標的全覆蓋</h1>
+    <p class="lede">已按指令開工（Opus 4.8 xHigh，完工後 ★ 獨立深審）。30 秒讀完。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>觀察標的全覆蓋（你的補充，回頭擴充批次 2）</h2>
+    <p>「觀察中 = 一直在找買點」——訊號對未持倉標的同樣關鍵（觀察股出現黃金交叉正是建倉時機）。</p>
+    <ul class="tight keep">
+      <li><code>signal_scan</code> 掃描範圍：持倉 → <b>全部已註冊標的</b>（觀察股靜默播種、轉換事件照發）</li>
+      <li><code>GET /api/signals</code> 全清單含觀察股,每檔標記 <code>held</code> 旗標</li>
+      <li>個股抽屜的技術訊號節:<b>觀察股也顯示</b>(拿掉「僅持倉」的門)</li>
+      <li>AI 變數與健檢:任何已註冊代號都可分析(建倉評估視角)</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>WP 2C 本體</h2>
+    <div class="sig">
+      <div class="sigrow"><b>① <code>rule_signals_json</code> 變數</b>(33→34,price 類):per_symbol,經 api 層評估後由 <code>external_vars</code> 餵入(層向不變,LLM 永不自算)。內容 = TechScore＋貢獻分解＋四法則狀態與證據＋條件語＋<code>params_version</code>——與 /api/signals 同形狀(單一事實來源)。</div>
+      <div class="sigrow"><b>② 健檢模板 v2.4→v2.5</b>(模板庫 → official-v5):新節引用 TechScore/法則狀態/條件語,明令「僅詮釋、不重算」;未持倉標的以<b>建倉評估</b>視角敘述;資料不足如實說。官方位元組凍結慣例照舊。</div>
+      <div class="sigrow"><b>③ 任務展開選項</b>:健檢任務的多目標展開若現有機制可小改,加「含觀察標的」選項(預設仍僅持倉——觀察股每檔都是 LLM 花費,要明確 opt-in);機制若不適合小改則回報後另議。</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>驗收（退出條件）</h2>
+    <ul class="tight keep">
+      <li>demo:觀察股抽屜看到 TechScore＋四法則;/api/signals 13 檔全出現(9 持倉+4 觀察)</li>
+      <li>變數清單 34 個;預覽 <code>{{rule_signals_json}}</code> 帶持倉股與觀察股都出真值</li>
+      <li>健檢 v2.5 產卡引用 TechScore 與條件語(LLM 只詮釋);官方模板凍結/重設回歸測試綠</li>
+      <li>var-count/契約/e2e 同步;全閘門綠 → <b>★ 獨立深審</b></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>不做什麼</h2>
+    <ul class="tight skip">
+      <li>推播通道、警示分類法 v2 → Phase 3</li>
+      <li>回測數據進變數(<code>backtest_json</code>)→ Phase 4</li>
+      <li>官方健檢套組預設自動含觀察股 → 不做(成本要明確 opt-in)</li>
+    </ul>
+  </section>
+
+  <section class="cta">
+    <b>執行中</b>:同分支累積。本批完成＝<b>P2 整段收工</b> → 深審 → demo 驗證 → v0.1.13 出版決策。
+  </section>
+
+</div>

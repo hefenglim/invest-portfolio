@@ -44,6 +44,7 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
+from portfolio_dash.strategy.signal_states import ensure_table as ensure_signal_states_table
 
 GOLDEN_NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
@@ -114,6 +115,7 @@ def init_golden_base(conn: sqlite3.Connection) -> None:
     ensure_insights_tables(conn)  # insights cards table: created EMPTY (spec 04b)
     ensure_alert_events_tables(conn)  # alert_events + dispatch log: created EMPTY (spec 04b)
     ensure_evaluations_tables(conn)  # insight_evaluations: created EMPTY (spec 04c)
+    ensure_signal_states_table(conn)  # signal_states derived cache: created EMPTY (P2 batch 2)
 
 
 @pytest.fixture

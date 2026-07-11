@@ -33,6 +33,29 @@
   const MARKET_ZH = { TW: '台股', US: '美股', MY: '馬股' };
   /* dividend wire type (lowercase, from /detail) -> display chip label */
   const DIV_TYPE_ZH = { cash: '現金', drip: 'DRIP', stock: '配股', net: '淨額' };
+
+  /* ---- 技術訊號 (rule engine, GET /api/signals/{symbol}) ----
+     zh-TW labels for the four v1 rules + their per-rule state vocabulary. Numbers arrive
+     as Decimal STRINGS from the API; every DISPLAY routes through f.* (which coerce for
+     presentation). TechScore is NOT P&L → neutral styling, never the red/green sign class. */
+  const RULE_KEYS = ['trend_filter', 'ma_cross', 'momentum_12_1', 'rsi_regime'];
+  const RULE_LABEL = {
+    trend_filter: '趨勢濾網', ma_cross: '均線交叉',
+    momentum_12_1: '12-1 動能', rsi_regime: 'RSI 情境'
+  };
+  const RULE_STATE_ZH = {
+    trend_filter: {
+      above_confirmed: '站上 MA200', below_confirmed: '跌破 MA200',
+      above_unconfirmed: '站上（待確認）', below_unconfirmed: '跌破（待確認）',
+      in_band: '均線帶內'
+    },
+    ma_cross: {
+      golden: '黃金交叉', death: '死亡交叉',
+      fast_above: '短均在上', fast_below: '短均在下', aligned: '均線糾結'
+    },
+    momentum_12_1: { positive: '正動能', negative: '負動能', flat: '動能持平' },
+    rsi_regime: { overbought: '超買', oversold: '超賣', neutral: '中性' }
+  };
   /* 試算-only approximate spot rates to the reporting ccy (TWD), used SOLELY inside the
      local what-if weight estimate (documented spec-03 exception). NOT a display path for
      backend money — every backend Decimal is rendered via f.* untouched. The dashboard
@@ -210,12 +233,17 @@
     body.appendChild(chartSection(detail, h));
     if (h) {
       body.appendChild(statsSection(h));
+      body.appendChild(signalsSection(symbol));
       body.appendChild(splitSection(h));
       body.appendChild(simSection(h));
       body.appendChild(dividendSection(symbol, detail));
       body.appendChild(realizedSection(symbol, detail));
     } else {
-      body.appendChild(el('div', 'sd-empty', '此標的不在持倉中 — 僅顯示價格走勢（觀察清單標的）。'));
+      /* Watchlist (unheld) symbol: no position/P&L, but 技術訊號 still matter — a watched
+         name is an entry candidate (P2 batch 3). Render the signals section (honest-empty
+         when data is thin) alongside the price chart; skip the holding-only sections. */
+      body.appendChild(signalsSection(symbol));
+      body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
     }
     renderChart(detail, h);
   }
@@ -345,6 +373,97 @@
     grid.appendChild(stat('回本進度', f.pct(h.payback_ratio), '配息 / 原始成本'));
     sec.appendChild(grid);
     return sec;
+  }
+
+  /* ---------- 技術訊號 (rule engine signals) ---------- */
+  function signalsSection(symbol) {
+    const sec = el('div', 'sd-section');
+    sec.appendChild(secHead('技術訊號', '法則引擎・掃描產生（非即時）'));
+    const box = el('div', 'sd-signals');
+    box.appendChild(el('div', 'sd-sig-loading', '載入技術訊號…'));
+    sec.appendChild(box);
+    /* Self-fetch through the single fetch layer; a failure degrades to an honest note (the
+       e2e smoke asserts ZERO console errors — never an unhandled rejection). Guard on the
+       still-current symbol so a superseding open does not populate a stale box. */
+    window.pdApi.get('/api/signals/' + encodeURIComponent(symbol))
+      .then((data) => { if (currentSymbol === symbol) renderSignals(box, data); })
+      .catch(() => {
+        if (currentSymbol !== symbol) return;
+        box.replaceChildren(el('div', 'sd-empty sd-sig-empty', '技術訊號暫時無法取得'));
+      });
+    return sec;
+  }
+
+  function renderSignals(box, data) {
+    if (!box) return;
+    box.replaceChildren();
+    const rules = (data && data.rules) || {};
+    const comp = data && data.composite;
+    const anyRule = RULE_KEYS.some((k) => rules[k]);
+    if (!comp && !anyRule) {
+      box.appendChild(el('div', 'sd-empty sd-sig-empty', '資料不足 — 歷史長度不夠，尚無法形成技術判斷。'));
+      return;
+    }
+    if (comp) {
+      const head = el('div', 'sd-sig-score');
+      const num = el('div', 'sd-sig-scorenum');
+      num.appendChild(el('span', 'v', comp.tech_score));
+      num.appendChild(el('span', 'k', 'TechScore・涵蓋 ' + comp.coverage));
+      head.appendChild(num);
+      const meter = el('div', 'sd-sig-meter');
+      const fill = el('span');
+      /* tech_score is a Decimal STRING (0-100); Number() it ONLY for the meter-fill width
+         geometry (presentation) — never a P&L computation, never a sign class. */
+      fill.style.width = Math.max(0, Math.min(100, Number(comp.tech_score))) + '%';
+      meter.appendChild(fill);
+      head.appendChild(meter);
+      box.appendChild(head);
+      if (comp.context_note) box.appendChild(el('div', 'sd-sig-note', comp.context_note));
+    }
+    const chips = el('div', 'sd-sig-chips');
+    RULE_KEYS.forEach((k) => chips.appendChild(ruleChip(k, rules[k])));
+    box.appendChild(chips);
+  }
+
+  function ruleChip(key, rule) {
+    const chip = el('div', 'sd-chip');
+    chip.appendChild(el('span', 'sd-chip-label', RULE_LABEL[key]));
+    if (!rule) {
+      chip.classList.add('is-empty');
+      chip.appendChild(el('span', 'sd-chip-state', '資料不足'));
+      return chip;
+    }
+    const stateMap = RULE_STATE_ZH[key] || {};
+    const stateZh = stateMap[rule.state] || rule.state;
+    chip.appendChild(el('span', 'sd-chip-state', stateZh));
+    const sub = ruleEvidence(key, rule);
+    if (sub) {
+      chip.appendChild(el('span', 'sd-chip-sub', sub));
+      chip.title = RULE_LABEL[key] + '：' + stateZh + '（' + sub + '）';
+    }
+    return chip;
+  }
+
+  /* Compact key-evidence subline per rule. Evidence values are Decimal STRINGS; f.* coerce
+     for display (the sanctioned presentation path — the drawer never computes money). */
+  function ruleEvidence(key, rule) {
+    const ev = rule.evidence || {};
+    if (key === 'trend_filter') {
+      return ev.price_vs_ma != null ? '偏離 MA200 ' + f.signedPct(ev.price_vs_ma) : null;
+    }
+    if (key === 'ma_cross') {
+      /* fresh cross -> its age; otherwise the state chip already shows the relationship,
+         so the subline stays empty (no redundant echo). */
+      if (ev.cross && ev.days_ago != null) return ev.days_ago + ' 天前' + (ev.cross === 'golden' ? '黃金交叉' : '死亡交叉');
+      return null;
+    }
+    if (key === 'momentum_12_1') {
+      return ev.return_12_1 != null ? '12-1 報酬 ' + f.signedPct(ev.return_12_1) : null;
+    }
+    if (key === 'rsi_regime') {
+      return ev.rsi14 != null ? 'RSI ' + f.num(ev.rsi14, 0) : null;
+    }
+    return null;
   }
 
   function splitSection(h) {

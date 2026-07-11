@@ -23,6 +23,20 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **Transition detection over a dead-banded state needs HOLD memory, or the event is
+  unreachable (2026-07-10):** the momentum reversal event compared consecutive raw
+  states, but a 12-1 return on 252 sessions moves in small daily steps, so every real
+  positive↔negative reversal dwells in the `flat` dead-band for ≥1 scan — and the
+  intervening `flat` reset the stored sign, masking the flip. Every unit test was
+  green (each pairwise hop is individually "correct"); only an adversarial
+  SEQUENCE probe (pos→flat→neg across three scans) exposed that the feature was
+  dead on arrival. Same class hit the trend detector as band-edge whipsaw
+  (confirmed→neutral→confirmed emitted two events for noise the hysteresis rule
+  exists to suppress). Rule: when detecting transitions over any state machine with
+  a neutral/dead zone, store the last DIRECTIONAL state and treat neutral as a hold,
+  never a reset — and always test transition detectors with multi-step sequences,
+  not just adjacent pairs.
+
 - **Cross-provider seam gaps only surface on live data — live-verify every data-pipeline
   batch before ship (2026-07-09):** the volume wiring was fully green on unit + contract
   tests, yet on the demo site every TW/MY volume signal degraded: the newest TW row is

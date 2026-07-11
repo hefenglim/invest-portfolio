@@ -15,7 +15,7 @@ NOT user-editable, so they live outside this library.
 
 from typing import TypedDict
 
-LIBRARY_VERSION = "official-v4 (2026-07-09)"
+LIBRARY_VERSION = "official-v5 (2026-07-11)"
 
 # The news-organizer system prompt (batch ④): the default LLM turns a fetched article's
 # text into a structured, faithful summary. Editable by the user (news settings), with a
@@ -103,7 +103,18 @@ _CHECKUP_BODY = (
 {{volatility_json}}
 {{price_history_json}}
 
-三、籌碼與基本面（僅台股有值；變數為空時整節跳過，不得虛構）— 法人買賣超與連買賣天數、
+三、法則訊號（TechScore 與四法則綜合）— 引用法則引擎的輸出，只詮釋、不重算、不虛構：
+1) TechScore（0-100）與涵蓋度 coverage：一句話定調綜合技術強弱，並說明有幾條法則可評估；
+2) 逐一點名四法則的狀態與其關鍵證據數字：趨勢濾網（相對 MA200 的偏離 price_vs_ma）、
+均線交叉（黃金／死亡與距今天數 days_ago）、12-1 動能（return_12_1）、RSI 情境（rsi14）；
+3) 條件語：照實引述引擎給的情境註記（evaluation_context／context_note），不得改寫其結論；
+4) 法則訊號須與第二節的逐項技術指標相互印證；若 rule_signals_json 為 unavailable，直說
+「法則訊號資料不足」，不得自行計算 TechScore 或杜撰任何法則狀態。
+本標的若未持倉（held=false 或 symbol_detail_json 無部位），本節與第八節一律改以「建倉評估」
+視角敘述（此刻是否為進場／觀望時機），而非加碼／減碼。
+{{rule_signals_json}}
+
+四、籌碼與基本面（僅台股有值；變數為空時整節跳過，不得虛構）— 法人買賣超與連買賣天數、
 融資融券變化、月營收動能、估值位階（PER/PBR 歷史百分位）、近四季財報摘要；點出籌碼大戶
 動向與基本面是否相互印證，並注意各資料的日期新舊。
 {{institutional_json}}
@@ -113,26 +124,27 @@ _CHECKUP_BODY = (
 {{financials_json}}
 （非台股標的：改以技術面、價格 vs 成本、環境對照為判讀支柱，並如實說明籌碼資料不適用。）
 
-四、分析師共識 — 引用分析師目標價區間：現價相對均值／中位／最高／最低目標價的位置，
+五、分析師共識 — 引用分析師目標價區間：現價相對均值／中位／最高／最低目標價的位置，
 以及與均值目標價的上檔空間（upside_vs_mean_pct）；本月評級分布（強力買進…強力賣出）與
 加權評級分數，並對照上月分布點出月度變化（趨勢轉強或轉弱）。評估市場對此標的的集體看法
 是否與前述技術／基本面相互印證；共識僅供估值脈絡，不取代自身判讀。若 consensus_json 為
 unavailable（無分析師覆蓋），必須明講「無分析師覆蓋」，不得虛構任何目標價或評級。
 {{consensus_json}}
 
-五、新聞事件 — 近期經整理的個股新聞（標題／日期／摘要）：解讀近期催化劑或風險事件，
+六、新聞事件 — 近期經整理的個股新聞（標題／日期／摘要）：解讀近期催化劑或風險事件，
 與前述技術/基本面是否相互印證。新聞僅供背景判讀，不得從新聞取價格或報酬等數字；
 無新聞時如實說明「近期無新聞」。
 {{symbol_news_json}}
 
-六、環境對照 — 相對所屬大盤的強弱與當前市場情緒，標注指標時點。
+七、環境對照 — 相對所屬大盤的強弱與當前市場情緒，標注指標時點。
 {{index_quotes_json}}
 {{market_sentiment_json}}
 
-七、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
-1) 加碼／減碼參考框架（作為長期持倉評估依據，不是買賣指令）：以技術訊號描述條件式情境，
-例「黃金交叉成立且 RSI 未過熱（<70）、趨勢結構為上升 → 屬偏多的加碼評估情境」、
-「跌破 60 日均線且趨勢結構轉為下降、RSI 走弱 → 屬減碼重新評估情境」；明確寫出觸發條件
+八、方向性判讀與預測 — 綜合以上給出偏多／偏空／觀望之一，並附：
+1) 加碼／減碼參考框架（作為長期持倉評估依據，不是買賣指令；未持倉標的改以建倉／觀望情境
+描述，取代加碼／減碼）：以技術與法則訊號描述條件式情境，例「黃金交叉成立且 RSI 未過熱
+（<70）、趨勢結構為上升、TechScore 偏強 → 屬偏多的加碼（或建倉）評估情境」、「跌破 60 日
+均線且趨勢結構轉為下降、RSI 走弱 → 屬減碼（或觀望）重新評估情境」；明確寫出觸發條件
 與對應方向，只到條件與方向，不給部位大小或買賣指令；
 2) prediction：metric 一律用 price_change；direction 用 up/down/flat（預期兩週內漲跌幅在
 ±0.5% 以內才用 flat）；target_pct 僅在有明確依據時提供（小數比率，如 0.03＝+3%）；
@@ -177,7 +189,7 @@ _MARKET_BODY = (
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.4", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "個股健檢策略", "version": "v2.5", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
 ]
 

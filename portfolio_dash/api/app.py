@@ -44,6 +44,7 @@ from portfolio_dash.api.routers import (
     news,
     prompts,
     scheduler,
+    signals,
     snapshots_router,
     strategy,
     symbol,
@@ -51,6 +52,7 @@ from portfolio_dash.api.routers import (
     ui_prefs,
     users,
 )
+from portfolio_dash.api.signals_service import scan_signals as signal_scan_runner
 from portfolio_dash.api.snapshots import snapshot_job
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
@@ -69,12 +71,14 @@ from portfolio_dash.scheduler.jobs import (
     register_evaluation_runner,
     register_insight_runner,
     register_news_runner,
+    register_signal_scan_runner,
     register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.logging_config import configure_logging
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
+from portfolio_dash.strategy.signal_states import ensure_table as ensure_signal_states_table
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
@@ -133,6 +137,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_insights_tables(conn)  # insights cards table (spec 04b)
         ensure_alert_events_tables(conn)  # alert_events + dispatch log (spec 04b R7)
         ensure_evaluations_tables(conn)  # insight_evaluations table (spec 04c)
+        ensure_signal_states_table(conn)  # signal_states derived cache (P2 batch 2)
     # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
     # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
     register_insight_runner(insight_run_for_id)
@@ -145,6 +150,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_snapshot_runner(snapshot_job)
     # News pipeline (batch ④): nightly fetch + AI-organize into the separate news DB.
     register_news_runner(run_news_daily)
+    # Rule-signal scan (P2 batch 2): held-symbol signal evaluation + transition events.
+    register_signal_scan_runner(signal_scan_runner)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
@@ -216,6 +223,7 @@ def create_app() -> FastAPI:
     app.include_router(symbol.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
+    app.include_router(signals.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")
     app.include_router(db_stats.router, prefix="/api")
     app.include_router(ui_prefs.router, prefix="/api")

@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from portfolio_dash.api import signals_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.store import list_dividends
@@ -101,7 +102,7 @@ class PromptBody(BaseModel):
 
 @router.get("/prompt-vars")
 def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
-    """The 32-variable registry (vars.js mirror + backend signal/news vars). ``available``
+    """The 34-variable registry (vars.js mirror + backend signal/news vars). ``available``
     drives the UI's
     "需後端新增" markers; chips/sentiment went live (spec 20.2), ai stays False (spec 04).
 
@@ -392,6 +393,30 @@ def _consensus_var(conn: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     return dict(snap.payload)
 
 
+# Honest degrade reason when a symbol's price history is too thin for the rule engine.
+_RULE_SIGNALS_THIN = "價格歷史不足，法則引擎無法評估"
+
+
+def _rule_signals_var(
+    conn: sqlite3.Connection, symbol: str, *, now: datetime
+) -> dict[str, Any]:
+    """Assemble rule_signals_json via the SAME path as GET /api/signals/{symbol} (P2 batch
+    3): identical evaluation + display quantization = one source of truth, one wire shape.
+    Computed on read (no snapshot table, like technicals). A too-thin / absent series
+    degrades to the unavailable shape (every rule None AND no composite → cannot judge),
+    which the var renders as ``{"unavailable": true, "reason": …}`` via _external_reasons.
+    """
+    signals = signals_service.evaluate_symbol(conn, symbol, now=now)
+    wire = signals_service.to_wire(
+        symbol, signals, now=now, held=signals_service.is_held(conn, symbol)
+    )
+    rules = wire.get("rules")
+    rules_all_none = isinstance(rules, dict) and all(v is None for v in rules.values())
+    if wire.get("composite") is None and rules_all_none:
+        return {"unavailable": True, "last_as_of": wire.get("as_of")}
+    return wire
+
+
 def _external_vars(
     conn: sqlite3.Connection, symbol: str | None, *, now: datetime | None = None
 ) -> dict[str, Any]:
@@ -425,6 +450,9 @@ def _external_vars(
         )
         out["consensus_json"] = _consensus_var(conn, symbol)
         out["symbol_news_json"] = _news_var(symbol, now=now or datetime.now(_TAIPEI))
+        out["rule_signals_json"] = _rule_signals_var(
+            conn, symbol, now=now or datetime.now(_TAIPEI)
+        )
     return out
 
 
@@ -439,6 +467,8 @@ def _external_reasons(conn: sqlite3.Connection, external_vars: dict[str, Any]) -
       "額度已滿").
     * Consensus — when ``consensus_json`` is ``unavailable`` (no snapshot), a static
       "no analyst coverage" reason (yfinance carries no analyst data for the symbol).
+    * Rule signals — when ``rule_signals_json`` is ``unavailable`` (too-thin price
+      history), a static "price history insufficient" reason.
     """
     reasons: dict[str, str] = {}
     state = datasources_store.get_state(conn, "finmind")
@@ -450,6 +480,9 @@ def _external_reasons(conn: sqlite3.Connection, external_vars: dict[str, Any]) -
     consensus = external_vars.get("consensus_json")
     if isinstance(consensus, dict) and consensus.get("unavailable") is True:
         reasons["consensus_json"] = _CONSENSUS_NO_COVERAGE
+    rule_signals = external_vars.get("rule_signals_json")
+    if isinstance(rule_signals, dict) and rule_signals.get("unavailable") is True:
+        reasons["rule_signals_json"] = _RULE_SIGNALS_THIN
     return reasons
 
 

@@ -83,14 +83,21 @@ def _r1_violations(scope: str, bodies: list[str]) -> list[str]:
     return seen
 
 
+# 'all' means "all RISK alerts"; signal_* transition rules (strategy.signal_states EVENT_*)
+# are opt-in ONLY by explicit listing, never via the wildcard (deep review 2026-07-10 F4).
+# Mirrors alerts_bridge._SIGNAL_RULE_PREFIX.
+_SIGNAL_RULE_PREFIX = "signal_"
+
+
 def _alert_matches(alert_rules: str | list[str] | None, fired_rule: str | None) -> bool:
-    """R7 filter: 'all' matches any rule; a list matches when it contains the fired rule."""
+    """R7 filter: an explicit list matches its members (incl. ``signal_*``); the 'all'
+    wildcard matches any RISK alert but EXCLUDES ``signal_*`` transitions (F4)."""
     if fired_rule is None:
         return False
-    if alert_rules == "all":
-        return True
     if isinstance(alert_rules, list):
         return fired_rule in alert_rules
+    if alert_rules == "all":
+        return not fired_rule.startswith(_SIGNAL_RULE_PREFIX)
     return False
 
 

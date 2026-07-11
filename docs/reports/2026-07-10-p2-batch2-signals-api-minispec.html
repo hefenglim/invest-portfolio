@@ -1,0 +1,99 @@
+<title>P2 技術法則引擎・批次2 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #9a6b2f; --accent-soft: #f6efe3;
+    --ok: #2f7a4f; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #16140f; --card: #201c15; --ink: #efe9dd; --ink-2: #b3a88f;
+            --line: #453c2c; --accent: #d2a35c; --accent-soft: #2e2718;
+            --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #16140f; --card: #201c15; --ink: #efe9dd;
+    --ink-2: #b3a88f; --line: #453c2c; --accent: #d2a35c; --accent-soft: #2e2718;
+    --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #9a6b2f; --accent-soft: #f6efe3;
+    --ok: #2f7a4f; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  .skip li::marker { content: "✕ "; color: var(--warn); }
+  .sig { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px; }
+  .sigrow { border: 1.5px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    background: var(--paper); font-size: 14.5px; line-height: 1.55; }
+  .sigrow b { color: var(--accent); }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・P2 批次2（WP 2B）</div>
+    <h1>Signals API＋轉換事件：把法則引擎接到真實世界</h1>
+    <p class="lede">已按指令開工（Opus 4.8 xHigh，完工後 ★ 獨立深審）。30 秒讀完。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>做四件事</h2>
+    <div class="sig">
+      <div class="sigrow"><b>① GET /api/signals</b>：全持股 SymbolSignals（TechScore、四法則狀態＋證據、evaluation_context、params_version）。路由零業務邏輯：讀價（收盤＋量能對齊）→ 呼叫引擎 → 序列化。金額/比率一律 Decimal 字串，顯示量化只在 wire 層（引擎保持全精度）。</div>
+      <div class="sigrow"><b>② signal_states 衍生快取表</b>：每檔記上次法則狀態（可重建，真相仍是 prices——既定 computed-on-read 快取豁免寫法）。掃描時比對新舊 → <b>狀態轉換</b>（趨勢確認態改變／新交叉／動能翻向）寫入 <code>alert_events</code> 警示流水（每日每規則每標的冪等）。<b>首次掃描只播種、不發事件</b>——不得警示風暴。</div>
+      <div class="sigrow"><b>③ 掃描排程</b>：併入既有 alert_scan 前段或獨立 job（依現有程式碼取最小風險方案）；demo 排程停用 → 沿用既有手動觸發端點驗證。</div>
+      <div class="sigrow"><b>④ 個股抽屜訊號晶片</b>：TechScore＋四法則狀態晶片＋條件語句（zh-TW），資料不足誠實顯示。vanilla JS、無框架、走 <code>web/api.js</code>；儀表板監控面板留給後續批次。</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>已預先抓到的坑（寫進派工單）</h2>
+    <ul class="tight keep">
+      <li><b>讀取視窗不能沿用 400 日曆天</b>：動能要 253 個交易日（≈380+ 日曆天）、交叉偵測要 260 個交易日——視窗改由參數推導（約 600 日曆天），否則動能永遠 None</li>
+      <li>首次掃描 = 播種 signal_states,零事件;重跑掃描冪等不重複</li>
+      <li>新表走 ALTER-if-missing 慣例＋golden_db 建空表,套件維持綠</li>
+      <li>TechScore 非損益——晶片用中性色,不用紅漲綠跌語意</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>驗收（退出條件）</h2>
+    <ul class="tight keep">
+      <li>demo 站:持股抽屜看到 TechScore＋法則晶片(五年資料下四法則全亮)</li>
+      <li>手動觸發掃描 → signal_states 播種;製造狀態變化 → alert_events 出現轉換事件;重掃不重複</li>
+      <li>/api/signals 契約測試(形狀、Decimal 字串、誠實 None);e2e 走真實導航路徑</li>
+      <li>全閘門綠 → <b>★ 獨立深審</b>(整合正確性:視窗換算、事件邏輯、冪等、法則調用)</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>不做什麼（後續）</h2>
+    <ul class="tight skip">
+      <li><code>rule_signals_json</code> 變數＋健檢 v2.5 → <b>批次 3（WP 2C）</b></li>
+      <li>儀表板監控面板、推播通道 → Phase 3（警示分類法 v2＋notify）</li>
+      <li>警示新分類（高點回撤/波動突升/再平衡帶）→ Phase 3</li>
+    </ul>
+  </section>
+
+  <section class="cta">
+    <b>執行中</b>：同分支 <code>feat/p2-rules-engine</code> 累積。完工 → 深審 → demo 部署驗證 → 給你批次 2 SR 報告。
+  </section>
+
+</div>

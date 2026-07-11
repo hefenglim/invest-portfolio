@@ -1,0 +1,124 @@
+<title>P2 技術法則引擎・批次1 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #9a6b2f; --accent-soft: #f6efe3;
+    --ok: #2f7a4f; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #16140f; --card: #201c15; --ink: #efe9dd; --ink-2: #b3a88f;
+            --line: #453c2c; --accent: #d2a35c; --accent-soft: #2e2718;
+            --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #16140f; --card: #201c15; --ink: #efe9dd;
+    --ink-2: #b3a88f; --line: #453c2c; --accent: #d2a35c; --accent-soft: #2e2718;
+    --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #9a6b2f; --accent-soft: #f6efe3;
+    --ok: #2f7a4f; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  .skip li::marker { content: "✕ "; color: var(--warn); }
+  .sig { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px; }
+  .sigrow { border: 1.5px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    background: var(--paper); font-size: 14.5px; line-height: 1.55; }
+  .sigrow b { color: var(--accent); }
+  pre { background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; font-size: 12.5px; line-height: 1.5; overflow-x: auto; margin: 10px 0 0;
+    font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・P2 批次1（WP 2A）</div>
+    <h1>技術法則引擎核心：signals of record，不再只是 LLM 變數</h1>
+    <p class="lede">已按指令開工（Opus 4.8 xHigh）。30 秒讀完，要改哪條直接講。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>為什麼做</h2>
+    <p>現有 technicals 只是餵給 AI 的變數——<b>沒有狀態、沒有分數、不可回測</b>。P2 建立 <code>strategy/rules/</code>：參數化純函數法則引擎，本地算出每檔持股的法則狀態＋TechScore，AI 之後只詮釋（invariant #1）。這也是 P4 回測引擎的直接輸入。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>法則集 v1 =「實證核心四件」（藍圖 D3 建議案，隨你的 OK 定案）</h2>
+    <div class="sig">
+      <div class="sigrow"><b>① MA200 趨勢濾網</b>：現價 vs 200 日均線＋<b>遲滯帶 ±2%／2 日確認</b>抑制 whipsaw（Faber／Zakamulin：價值在風險控制）</div>
+      <div class="sigrow"><b>② 50/200 均線交叉</b>：黃金/死亡交叉＋距今天數＋<b>量能確認</b>（高量確認勝率 72% vs 低量 54% → 直接編碼為信心修飾；P1 的量能資料在此接上）。既有 20/60 保留為短窗參考變數</div>
+      <div class="sigrow"><b>③ 12-1 月動能</b>：跳過最近一個月的 12 個月報酬（Moskowitz TSMOM／Antonacci——長期實證最強因子），作續抱/減碼傾向分量（P1 的 5 年歷史在此接上）</div>
+      <div class="sigrow"><b>④ RSI 區間＋52 週位置</b>：超買超賣與高低點接近度，<b>情境上下文</b>而非獨立進出訊號（權重最小）</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>輸出形狀與誠實政策</h2>
+    <pre>evaluate_symbol(closes, volumes, params) → SymbolSignals
+{
+ "rules": {
+   "trend_filter":  {state, score, evidence{ma200, price_vs_ma, days_in_state…}, window_days},
+   "ma_cross":      {state, score, evidence{cross, days_ago, volume_confirmed…}, …},
+   "momentum_12_1": {state, score, evidence{return_12_1…}, …},
+   "rsi_regime":    {state, score, evidence{rsi14, pct_from_52w_high/low…}, …}
+ },
+ "composite": {
+   "tech_score": 0-100,          ← 加權合成，凍結權重
+   "contributions": {…},         ← 每法則貢獻分解（可審計）
+   "coverage": "4/4",            ← 資料不足的法則誠實排除＋權重重正規化
+   "evaluation_context": "…"     ← 對映健檢「加碼/減碼框架」的條件語彙
+ },
+ "params_version": "rules-v1",   ← 參數版本戳記隨結果攜帶（重算可還原，費稅快照精神）
+ …
+}</pre>
+    <ul class="tight keep">
+      <li>純函數、全 Decimal、資料不足回 <code>None</code> 不編造（沿用 technicals 紀律）</li>
+      <li>量能缺席 → 交叉確認標 <code>unknown</code>（不是假裝已確認）</li>
+      <li>參數 v1 <b>凍結在程式碼</b>（`params.py`），日後要 UI 可調再開接縫——不預建</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>驗收（退出條件）</h2>
+    <ul class="tight keep">
+      <li>四族合成序列 fixtures 全綠：單調升／whipsaw 鋸齒／資料不足／量能有無</li>
+      <li>已知答案測試：黃金交叉位置、12-1 動能值可手算核對</li>
+      <li>property 式邊界：空序列、單點、全等值不炸</li>
+      <li>全閘門綠 → <b>★ 獨立深審 subagent</b>（法則正確性，藍圖高風險包要求）</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span>不做什麼（後續批次）</h2>
+    <ul class="tight skip">
+      <li>GET /api/signals＋UI 晶片＋<code>signal_states</code> 轉換事件 → <b>批次 2（WP 2B）</b></li>
+      <li><code>rule_signals_json</code> 變數＋健檢 v2.5 → <b>批次 3（WP 2C）</b></li>
+      <li>MACD／布林等指標動物園 → 不做（D3a：等 P4 回測數據說話）</li>
+      <li>參數 UI 編輯／回測 → 留接縫，P4 範圍</li>
+    </ul>
+  </section>
+
+  <section class="cta">
+    <b>執行中</b>：新分支 <code>feat/p2-rules-engine</code>（main 已是 v0.1.12）。核心引擎完工＋深審綠後，接著出批次 2 規劃。
+  </section>
+
+</div>
