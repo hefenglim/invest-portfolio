@@ -239,7 +239,11 @@
       body.appendChild(dividendSection(symbol, detail));
       body.appendChild(realizedSection(symbol, detail));
     } else {
-      body.appendChild(el('div', 'sd-empty', '此標的不在持倉中 — 僅顯示價格走勢（觀察清單標的）。'));
+      /* Watchlist (unheld) symbol: no position/P&L, but 技術訊號 still matter — a watched
+         name is an entry candidate (P2 batch 3). Render the signals section (honest-empty
+         when data is thin) alongside the price chart; skip the holding-only sections. */
+      body.appendChild(signalsSection(symbol));
+      body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
     }
     renderChart(detail, h);
   }

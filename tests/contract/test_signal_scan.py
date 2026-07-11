@@ -12,13 +12,23 @@ from datetime import timedelta
 from decimal import Decimal
 
 from portfolio_dash.api.signals_service import scan_signals
+from portfolio_dash.data_ingestion.store import upsert_instrument
 from portfolio_dash.llm_insight import alerts_bridge as ab
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.strategy import signal_states as ss
 from portfolio_dash.strategy.rules.params import PARAMS_VERSION
 from tests.conftest import GOLDEN_NOW
+
+
+def _register_watch(conn: sqlite3.Connection, symbol: str) -> None:
+    """Register an unheld (watchlist) US instrument — no position, just registered."""
+    upsert_instrument(conn, Instrument(
+        symbol=symbol, market=Market.US, quote_ccy=Currency.USD,
+        sector="Tech", name=symbol,
+    ))
 
 # The golden DB holds two positions (2330, AAPL), each with a single stored price → the
 # live derived state is all-None for both. Seeding a long monotonic series gives a symbol a
@@ -155,6 +165,27 @@ def test_rebuildability_wipe_rescan_equivalent(golden_db: sqlite3.Connection) ->
     after = {s.symbol: (s.derived, s.hold) for s in ss.all_states(golden_db)}
     assert before == after  # derived state AND hold columns reproduced exactly
     assert _events(golden_db) == []  # a rebuild seeds silently, never fires
+
+
+def test_scan_seeds_watchlist_symbol_silently(golden_db: sqlite3.Connection) -> None:
+    # P2 batch 3: the scan universe is EVERY registered instrument (held + watchlist). An
+    # unheld watch symbol seeds silently on first scan exactly like a held one — ZERO events.
+    _register_watch(golden_db, "MSFT")
+    detail = scan_signals(golden_db, now=GOLDEN_NOW)
+    assert {s.symbol for s in ss.all_states(golden_db)} == {"2330", "AAPL", "MSFT"}
+    assert "3 seeded" in detail                 # the watch symbol is scanned + seeded
+    assert _events(golden_db) == []             # silent seed, no event storm
+
+
+def test_scan_watchlist_symbol_transition_emits_event(golden_db: sqlite3.Connection) -> None:
+    # A genuine reversal on a WATCHLIST (unheld) symbol fires a transition event — a golden
+    # cross on a watched name is a build-a-position signal worth surfacing (P2 batch 3).
+    _register_watch(golden_db, "MSFT")
+    _seed_series(golden_db, "MSFT", Market.US, ascending=True)  # confirmed up + positive
+    _manufacture(golden_db, "MSFT", ss.HoldState("down", "positive"))  # stored down → reversal
+    scan_signals(golden_db, now=GOLDEN_NOW)
+    rows = _events(golden_db)
+    assert any(r["rule_id"] == ss.EVENT_TREND and r["symbol"] == "MSFT" for r in rows)
 
 
 def test_scan_records_event_in_alert_events_feed(golden_db: sqlite3.Connection) -> None:

@@ -19,10 +19,10 @@ import sqlite3
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
+from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
 from portfolio_dash.llm_insight import alerts_bridge
-from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing.store import get_price_history
-from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import signal_states
 from portfolio_dash.strategy.rules import engine
@@ -112,25 +112,43 @@ def evaluate_symbol(
     return engine.evaluate_symbol(closes, volumes, resolved)
 
 
-def _held_symbols(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
-) -> list[str]:
-    """Distinct current holding symbols (dedup across accounts) — the ``/api/signals``
-    universe. Mirrors ``insight_service._resolve_universe`` (``mode:all``) so the two agree
-    on what "held" means. Technical signals are symbol-level, so accounts collapse."""
-    data = build_dashboard(conn, now=now, reporting=reporting)
-    return sorted({h.symbol for h in data.holdings})
+def _registered_symbols(conn: sqlite3.Connection) -> list[str]:
+    """Every REGISTERED instrument symbol (held + watchlist) — the ``/api/signals`` and
+    ``signal_scan`` universe (P2 batch 3). A watched symbol is an entry candidate: its
+    signals / TechScore / transition events matter exactly as a held one's do (a golden
+    cross on a watchlist name IS the build-a-position moment). Technical signals are
+    symbol-level, so this enumerates instruments directly (no ``build_dashboard``)."""
+    return sorted({i.symbol for i in list_instruments(conn)})
 
 
-def evaluate_held(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
-) -> list[tuple[str, SymbolSignals | None]]:
-    """Evaluate every held symbol; returns ``(symbol, signals-or-None)`` pairs, sorted."""
+def _account_ids(conn: sqlite3.Connection) -> list[str]:
+    return [a.account_id for a in list_accounts(conn)]
+
+
+def _is_held(conn: sqlite3.Connection, symbol: str, *, account_ids: list[str]) -> bool:
+    """Whether *symbol* carries a live position in any account (cheap holdings check —
+    same precedent as ``instruments._held``: net current_shares > 0, no dashboard build)."""
+    return any(current_shares(conn, aid, symbol) > 0 for aid in account_ids)
+
+
+def is_held(conn: sqlite3.Connection, symbol: str) -> bool:
+    """Public single-symbol ``held`` check (drawer + rule_signals_json variable feed)."""
+    return _is_held(conn, symbol, account_ids=_account_ids(conn))
+
+
+def evaluate_all(
+    conn: sqlite3.Connection, *, now: datetime
+) -> list[tuple[str, SymbolSignals | None, bool]]:
+    """Evaluate every REGISTERED symbol (held + watchlist); returns
+    ``(symbol, signals-or-None, held)`` triples, sorted. Watch symbols get the same honest
+    evaluation as held ones — the API tags each with its ``held`` flag (P2 batch 3)."""
     params = default_params()
-    out: list[tuple[str, SymbolSignals | None]] = []
-    for symbol in _held_symbols(conn, now=now, reporting=reporting):
+    account_ids = _account_ids(conn)
+    out: list[tuple[str, SymbolSignals | None, bool]] = []
+    for symbol in _registered_symbols(conn):
         closes, volumes = _read_series(conn, symbol, now=now, params=params)
-        out.append((symbol, engine.evaluate_symbol(closes, volumes, params)))
+        signals = engine.evaluate_symbol(closes, volumes, params)
+        out.append((symbol, signals, _is_held(conn, symbol, account_ids=account_ids)))
     return out
 
 
@@ -182,10 +200,11 @@ def _composite_wire(composite: Composite) -> dict[str, object]:
 
 
 def to_wire(
-    symbol: str, signals: SymbolSignals | None, *, now: datetime
+    symbol: str, signals: SymbolSignals | None, *, now: datetime, held: bool = False
 ) -> dict[str, object]:
     """The per-symbol ``/api/signals`` wire payload (honest nulls when a rule/composite is
-    too thin to judge)."""
+    too thin to judge). ``held`` tags whether the symbol carries a live position (P2 batch
+    3): a watchlist entry serializes identically but with ``held=false``."""
     if signals is None:
         rules_wire: dict[str, object | None] = dict.fromkeys(RULE_ORDER, None)
         composite_wire: dict[str, object] | None = None
@@ -198,6 +217,7 @@ def to_wire(
         params_version = signals.params_version
     return {
         "symbol": symbol,
+        "held": held,
         "evaluated_at": now.isoformat(),
         "as_of": now.date().isoformat(),
         "params_version": params_version,
@@ -209,11 +229,12 @@ def to_wire(
 # --- transition scan (registered as the signal_scan scheduler runner) -------------------
 
 
-def scan_signals(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
-) -> str:
-    """Evaluate every held symbol, compare with the stored ``signal_states`` cache, record
-    transition events, and refresh the cache. Returns a short ``job_runs.detail`` summary.
+def scan_signals(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Evaluate every REGISTERED symbol (held + watchlist), compare with the stored
+    ``signal_states`` cache, record transition events, and refresh the cache. Returns a
+    short ``job_runs.detail`` summary. Watch symbols seed silently and fire transitions
+    exactly like held ones (P2 batch 3 — a watchlist golden cross is a build-a-position
+    signal worth an event).
 
     Discipline (per the mini-spec + deep review 2026-07-10):
     * **first run seeds silently** — a symbol with no stored row is written with ZERO
@@ -235,7 +256,7 @@ def scan_signals(
     as_of = now.date().isoformat()
     stamped = now.isoformat()
 
-    symbols = _held_symbols(conn, now=now, reporting=reporting)
+    symbols = _registered_symbols(conn)
     seeded = 0
     recorded = 0
     for symbol in symbols:

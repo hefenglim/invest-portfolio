@@ -15,9 +15,11 @@ from fastapi.testclient import TestClient
 
 from portfolio_dash.api import signals_service
 from portfolio_dash.api.signals_service import required_calendar_days, required_sessions
+from portfolio_dash.data_ingestion.store import upsert_instrument
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.strategy.rules.params import default_params
 from tests.conftest import GOLDEN_NOW
 
@@ -206,8 +208,35 @@ def test_single_symbol_prices_no_volume_is_honest_200(
 def test_signals_zero_holdings_returns_empty_list(
     dashboard_client_factory: object,
 ) -> None:
-    # An empty ledger (no holdings) → /api/signals is a 200 with an empty signals list.
+    # An empty ledger (no instruments) → /api/signals is a 200 with an empty signals list.
     client = dashboard_client_factory(lambda conn: None)  # type: ignore[operator]
     body = client.get("/api/signals").json()
     assert body["signals"] == []
     assert set(body) == {"as_of", "evaluated_at", "signals"}
+
+
+# --- watchlist coverage: registered-but-unheld symbols surface with held=false (P2 b3) ---
+
+
+def test_signals_includes_watchlist_symbol_with_held_flag(
+    golden_db: sqlite3.Connection, api_client: TestClient
+) -> None:
+    # Register MSFT as an instrument with NO position (a watchlist symbol). /api/signals
+    # now enumerates ALL registered instruments (held + watchlist), each tagged ``held``.
+    upsert_instrument(golden_db, Instrument(
+        symbol="MSFT", market=Market.US, quote_ccy=Currency.USD,
+        sector="Tech", name="Microsoft",
+    ))
+    body = api_client.get("/api/signals").json()
+    by = {s["symbol"]: s for s in body["signals"]}
+    assert set(by) == {"2330", "AAPL", "MSFT"}       # the watch symbol appears
+    assert by["2330"]["held"] is True and by["AAPL"]["held"] is True
+    assert by["MSFT"]["held"] is False               # honest watchlist tag
+    _assert_wire_discipline(body)
+
+
+def test_single_symbol_carries_held_flag(api_client: TestClient) -> None:
+    held = api_client.get("/api/signals/2330").json()
+    assert held["held"] is True                       # 2330 is a position in the golden DB
+    unheld = api_client.get("/api/signals/NOPE").json()
+    assert unheld["held"] is False                    # an ad-hoc / unheld symbol

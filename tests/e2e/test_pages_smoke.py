@@ -237,13 +237,15 @@ def test_symbol_drawer_signal_chips_smoke(
 def test_symbol_detail_drawer_watchlist_smoke(
     live_server: str, browser_page: Page
 ) -> None:
-    """Drawer watchlist (unheld) variant (spec 19, Task 2.3).
+    """Drawer watchlist (unheld) variant (spec 19, Task 2.3; signals P2 batch 3).
 
     MSFT is not an instrument in the golden DB, so /api/symbol/MSFT/detail returns
     cost_basis=null + price_history.available=false and it is absent from /api/dashboard
     holdings -> the rich holding `h` is null. The drawer must NOT crash: it renders the
     '非持倉標的' head + a chart-only / empty-price variant, skipping the holding sections.
-    Asserts ZERO console + ZERO page errors over that null-holding path.
+    P2 batch 3: the 技術訊號 section now ALSO renders for the unheld symbol (a watch symbol
+    is an entry candidate) — it self-fetches /api/signals/MSFT (200, honest-empty here) and
+    mounts the .sd-signals box. Asserts ZERO console + ZERO page errors over that path.
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -263,10 +265,14 @@ def test_symbol_detail_drawer_watchlist_smoke(
     try:
         page.goto(live_server + "/index.html", wait_until="load")
         page.wait_for_selector(".kpi-card")
-        page.evaluate("() => window.pdOpenSymbol('MSFT')")
+        with page.expect_response("**/api/signals/MSFT") as resp_info:
+            page.evaluate("() => window.pdOpenSymbol('MSFT')")
+        assert resp_info.value.status == 200, f"/api/signals status {resp_info.value.status}"
         page.wait_for_selector(".sd-drawer")
         # Unheld -> '非持倉標的' badge in the head + chart-only body (no holding sections).
         page.wait_for_selector(".sd-drawer .sd-empty")
+        # P2 batch 3: 技術訊號 renders for the watchlist symbol too (honest-empty here).
+        page.wait_for_selector(".sd-drawer .sd-signals")
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
