@@ -146,6 +146,25 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"week52":{"pct_from_high":"-0.061","pct_from_low":"+0.452","window_days":180},'
         '"trend":{"structure":"uptrend","window_days":60}}',
     ),
+    VarSpec(
+        "rule_signals_json", "法則訊號", "price", "per_symbol", True,
+        "四法則引擎訊號（與 /api/signals 同形狀，單一事實來源）：TechScore(0-100)＋各法則貢獻"
+        "分解、趨勢濾網／均線交叉／12-1 動能／RSI 情境四法則各自狀態與關鍵證據數字、涵蓋度、"
+        "條件語（evaluation_context）、params_version、held 旗標（未持倉＝建倉評估視角）。"
+        "數字由 api 層評估後餵入，LLM 僅詮釋不重算；價格歷史不足時如實降級。",
+        '{"symbol":"2330","held":true,"as_of":"2026-06-11","params_version":"rules-v1",'
+        '"composite":{"tech_score":"82.5","coverage":"4/4","evaluation_context":"trend_up",'
+        '"context_note":"…","missing":[],"contributions":{"trend_filter":"25.00"},'
+        '"weights_applied":{"trend_filter":"0.30"}},'
+        '"rules":{"trend_filter":{"state":"above_confirmed","score":"1.00",'
+        '"window_days":200,"evidence":{"price_vs_ma":"0.0863"}},'
+        '"ma_cross":{"state":"golden","score":"1.00","window_days":260,'
+        '"evidence":{"cross":"golden","days_ago":4}},'
+        '"momentum_12_1":{"state":"positive","score":"1.00","window_days":253,'
+        '"evidence":{"return_12_1":"0.2140"}},'
+        '"rsi_regime":{"state":"neutral","score":"0.00","window_days":253,'
+        '"evidence":{"rsi14":"58.3"}}}}',
+    ),
     # --- dividend (股利) — all available ---
     VarSpec(
         "dividends_json", "配息史", "dividend", "portfolio", True,
@@ -423,11 +442,14 @@ class VarContext:
 
 _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
 
-# Chips/sentiment tokens whose value is fed via VarContext.external_vars (spec 20.2).
+# Chips/sentiment/consensus/signal tokens whose value is fed via VarContext.external_vars.
+# ``rule_signals_json`` is external-fed like chips/consensus: the api seam evaluates it via
+# the SAME path as GET /api/signals/{symbol} (single source of truth) and passes the wire
+# in — llm_insight reads no DB and calls no rule engine (spec 20.2 / P2 batch 3).
 _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
     "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
-    "symbol_news_json", "consensus_json",
+    "symbol_news_json", "consensus_json", "rule_signals_json",
 })
 
 

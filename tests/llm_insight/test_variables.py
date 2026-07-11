@@ -3,7 +3,8 @@
 The registry mirrors web/vars.js PLUS three backend-only date/time system tokens
 (spec 04.10: now / card_created_at / eval_date), two batch-③ signal vars
 (technical_signals_json / fear_greed_json), one batch-④ news var (symbol_news_json),
-and one P1-batch-2 consensus var (consensus_json) — 33 total across 10 categories.
+one P1-batch-2 consensus var (consensus_json), and one P2-batch-3 rule-signals var
+(rule_signals_json) — 34 total across 10 categories.
 validate_tokens is the single reusable core (spec 04 R1 + spec 07 preflight):
 preview lists diagnostics, the execution path turns them into 422s. Value assembly reads
 only already-computed DashboardData / per-symbol detail / technicals / fed date context —
@@ -22,13 +23,13 @@ from portfolio_dash.shared.enums import Currency
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_registry_has_33_and_categories() -> None:
+def test_registry_has_34_and_categories() -> None:
     # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news
-    # + 1 P1-batch-2 consensus (consensus_json) = 33.
-    assert len(V.REGISTRY) == 33
-    assert len({v.category for v in V.REGISTRY}) == 10  # + the 'consensus' category
+    # + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals (rule_signals_json) = 34.
+    assert len(V.REGISTRY) == 34
+    assert len({v.category for v in V.REGISTRY}) == 10  # rule_signals joins existing 'price'
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 33
+    assert len({v.token for v in V.REGISTRY}) == 34
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
@@ -38,20 +39,20 @@ def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
     for v in V.REGISTRY:
         counts[v.category] = counts.get(v.category, 0) + 1
     assert counts == {
-        # price gained technical_signals_json (4 → 5); sentiment gained
-        # fear_greed_json (2 → 3) — batch ③; news gained symbol_news_json — batch ④;
-        # consensus is the new P1-batch-2 category (consensus_json).
-        "position": 6, "price": 5, "dividend": 3, "fx": 2,
+        # price gained technical_signals_json (4 → 5, batch ③) then rule_signals_json
+        # (5 → 6, P2 batch 3); sentiment gained fear_greed_json (2 → 3) — batch ③; news
+        # gained symbol_news_json — batch ④; consensus is the P1-batch-2 category.
+        "position": 6, "price": 6, "dividend": 3, "fx": 2,
         # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
         "chips": 5, "consensus": 1, "news": 1, "sentiment": 3, "ai": 2, "system": 5,
     }
 
 
-def test_available_split_31_now_2_later() -> None:
+def test_available_split_32_now_2_later() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    # 30 previously live + 1 P1-batch-2 consensus = 31; only the 2 'ai' vars stay deferred.
-    assert len(available) == 31
+    # 31 previously live + 1 P2-batch-3 rule_signals = 32; only the 2 'ai' vars stay deferred.
+    assert len(available) == 32
     assert len(unavailable) == 2
     # only the 2 'ai' vars remain deferred (spec 04).
     assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)
@@ -218,6 +219,61 @@ def test_consensus_var_degrades_with_reason(golden_db: sqlite3.Connection) -> No
     value = _json.loads(out)
     assert value["unavailable"] is True
     assert value["reason"] == "無分析師覆蓋"
+
+
+def test_rule_signals_var_registered_per_symbol_available() -> None:
+    spec = V.BY_TOKEN["rule_signals_json"]
+    assert spec.category == "price"
+    assert spec.scope == "per_symbol"
+    assert spec.available is True
+    assert "rule_signals_json" in V._EXTERNAL_TOKENS
+
+
+def test_rule_signals_var_renders_fed_payload(golden_db: sqlite3.Connection) -> None:
+    # The api seam feeds the /api/signals wire (incl. the held flag + composite); it renders
+    # verbatim — llm_insight never re-evaluates the rule engine.
+    import json as _json
+
+    data = _data(golden_db)
+    wire = {
+        "symbol": "2330", "held": False, "as_of": "2026-06-11",
+        "params_version": "rules-v1",
+        "composite": {"tech_score": "82.5", "coverage": "4/4",
+                      "evaluation_context": "trend_up", "context_note": "…",
+                      "missing": [], "contributions": {"trend_filter": "25.00"},
+                      "weights_applied": {"trend_filter": "0.30"}},
+        "rules": {"trend_filter": {"state": "above_confirmed", "score": "1.00",
+                                   "window_days": 200,
+                                   "evidence": {"price_vs_ma": "0.0863"}}},
+    }
+    ctx = V.VarContext(
+        data=data,  # type: ignore[arg-type]
+        symbol="2330",
+        external_vars={"rule_signals_json": wire},
+    )
+    out, used = V.render_prompt("{{rule_signals_json}}", ctx)
+    value = _json.loads(out)
+    assert value["composite"]["tech_score"] == "82.5"     # TechScore passes through
+    assert value["held"] is False                          # watchlist framing signal
+    assert value["rules"]["trend_filter"]["state"] == "above_confirmed"
+    assert "rule_signals_json" in used
+
+
+def test_rule_signals_var_degrades_with_reason(golden_db: sqlite3.Connection) -> None:
+    # A too-thin series → unavailable + the honest "price history insufficient" reason.
+    import json as _json
+
+    data = _data(golden_db)
+    ctx = V.VarContext(
+        data=data,  # type: ignore[arg-type]
+        symbol="2330",
+        external_vars={"rule_signals_json": {"unavailable": True, "last_as_of": None}},
+        external_reasons={"rule_signals_json": "價格歷史不足，法則引擎無法評估"},
+    )
+    out, _ = V.render_prompt("{{rule_signals_json}}", ctx)
+    value = _json.loads(out)
+    assert value["unavailable"] is True
+    assert "價格歷史不足" in value["reason"]
 
 
 def test_value_for_decimals_are_strings(golden_db: sqlite3.Connection) -> None:
