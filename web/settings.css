@@ -535,3 +535,39 @@ table.data td.log-msg {
   .field.span-2 { grid-column: auto; }
   .usage-top { grid-template-columns: 1fr; }
 }
+
+/* ===== 通知通道 (WP 3B) ===== */
+.nt-cards {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+  padding: 14px var(--pad);
+}
+.nt-card {
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  background: var(--panel-2); padding: 12px 14px 14px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.nt-card-head { display: flex; align-items: center; justify-content: space-between; }
+.nt-card-title { font-weight: 700; font-size: 13px; }
+.nt-card .form-grid { padding: 0; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.nt-card-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: auto; }
+.nt-quiet {
+  display: flex; align-items: flex-end; gap: 18px; flex-wrap: wrap;
+  padding: 12px var(--pad) 0;
+}
+.nt-subs {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 6px 14px; padding: 12px var(--pad) 4px;
+}
+.nt-sub { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.nt-sub input { flex: none; }
+.nt-sub .nt-sub-sev {
+  width: 8px; height: 8px; border-radius: 999px; flex: none; display: inline-block;
+}
+.nt-sub-sev.sev-risk { background: var(--danger, #d9534f); }
+.nt-sub-sev.sev-warn { background: var(--warn, #d1a54a); }
+.nt-sub-sev.sev-info { background: var(--accent); }
+
+@media (max-width: 1000px) {
+  .nt-cards { grid-template-columns: 1fr; }
+  .nt-card .form-grid { grid-template-columns: 1fr; }
+}
