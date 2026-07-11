@@ -304,3 +304,56 @@ def test_rule_signals_feeds_preview_and_generation(api_client: TestClient) -> No
     ctx = _per_symbol_ctx(conn, data, "2330", now=GOLDEN_NOW, reporting=Currency.TWD)
     assert "rule_signals_json" in ctx.external_vars
     assert ctx.external_vars["rule_signals_json"]["composite"] is not None
+
+
+def test_rule_signals_partial_coverage_not_degraded(api_client: TestClient) -> None:
+    # Deep review 2026-07-11 (batch-3 adequacy gap): a series with ≥1 evaluable rule but too
+    # few for a composite must NOT degrade to unavailable — it carries the partial coverage
+    # honestly. Kills a degrade `AND`→`OR` mutation in prompts._rule_signals_var, which only
+    # returns {"unavailable": true} when composite is None AND EVERY rule is None; with `OR`
+    # this partial case (composite None, one rule non-null) would be wrongly hidden.
+    #
+    # Session-count math (verified vs strategy/rules/params.py): trend_filter needs ma=200
+    # closes, ma_cross needs slow=200, momentum_12_1 needs lookback_sessions+1=253 — all None
+    # at 20 closes; rsi_regime needs only period+1=15 (technicals.rsi) and week52 works on any
+    # window → the ONLY evaluable rule at 20 closes ⇒ 1 rule < 2 ⇒ composite None, rules
+    # partially non-null.
+    from portfolio_dash.api.routers.prompts import (
+        _external_reasons,
+        _external_vars,
+        _rule_signals_var,
+    )
+
+    conn = _conn_of(api_client)
+    _seed_long_series(conn, "2330", n=20)
+    var = _rule_signals_var(conn, "2330", now=GOLDEN_NOW)
+    # NOT degraded: the full wire, never the {"unavailable": true} shape.
+    assert var.get("unavailable") is not True
+    # composite is too thin (1 evaluable rule < 2) → honest None, NOT unavailable.
+    assert var["composite"] is None
+    # the one evaluable rule is carried; the three too-short rules are honest nulls.
+    assert var["rules"]["rsi_regime"] is not None
+    assert var["rules"]["trend_filter"] is None
+    assert var["rules"]["ma_cross"] is None
+    assert var["rules"]["momentum_12_1"] is None
+    # and NO degrade reason attaches (the var is available, so _external_reasons stays silent).
+    ext = _external_vars(conn, "2330", now=GOLDEN_NOW)
+    assert ext["rule_signals_json"].get("unavailable") is not True
+    assert "rule_signals_json" not in _external_reasons(conn, ext)
+
+
+def test_rule_signals_var_equals_full_api_signals_dict(api_client: TestClient) -> None:
+    # Deep review 2026-07-11 (batch-3 adequacy gap): the rule_signals_json var MUST equal the
+    # FULL GET /api/signals/{sym} dict byte-for-byte — pinning `held` AND every display
+    # quantization (score 2dp, tech_score 1dp, ratio evidence 4dp) against drift, since both
+    # are the ONE source of truth (signals_service.to_wire). The existing
+    # test_rule_signals_renders_from_series only pins tech_score; this pins the whole wire.
+    from portfolio_dash.api.routers.prompts import _rule_signals_var
+
+    conn = _conn_of(api_client)
+    _seed_long_series(conn, "2330")  # 320 rows → full coverage, non-degraded wire
+    var = _rule_signals_var(conn, "2330", now=GOLDEN_NOW)
+    api_wire = api_client.get("/api/signals/2330").json()
+    # Both go through signals_service.to_wire with the SAME injected clock (GOLDEN_NOW) and
+    # the SAME held check → identical evaluated_at/as_of/held/scores/composite.
+    assert var == api_wire
