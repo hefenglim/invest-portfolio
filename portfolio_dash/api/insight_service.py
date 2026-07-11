@@ -36,6 +36,7 @@ from portfolio_dash.api.routers.prompts import (
     _external_vars,
     _resolve_fx_rates,
 )
+from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.llm_insight import (
     alerts_bridge,
     assemble,
@@ -107,8 +108,18 @@ def _resolve_markets(data: DashboardData) -> list[str]:
     return sorted({h.market.value for h in data.holdings})
 
 
-def _resolve_universe(it: cs.InsightType, data: DashboardData) -> list[str]:
-    """The per_symbol universe: custom list, or all current holdings for ``mode:all``."""
+def _all_registered_symbols(conn: sqlite3.Connection) -> list[str]:
+    """Every registered instrument symbol (held + watchlist) — the opt-in ``all_registered``
+    universe (P2 batch 3). Watch symbols are entry candidates, so a checkup task MAY analyse
+    them — but only when the user explicitly opts in (each is LLM cost; default stays holds)."""
+    return sorted({i.symbol for i in list_instruments(conn)})
+
+
+def _resolve_universe(
+    conn: sqlite3.Connection, it: cs.InsightType, data: DashboardData
+) -> list[str]:
+    """The per_symbol universe: custom list, all current holdings (``mode:all``, the
+    default), or holdings + watchlist (``mode:all_registered`` — explicit opt-in)."""
     held = sorted({h.symbol for h in data.holdings})
     universe = it.universe
     if isinstance(universe, dict):
@@ -116,6 +127,8 @@ def _resolve_universe(it: cs.InsightType, data: DashboardData) -> list[str]:
         if mode == "custom":
             syms = universe.get("symbols")
             return list(syms) if isinstance(syms, list) else []
+        if mode == "all_registered":
+            return _all_registered_symbols(conn)
         if mode == "all":
             return held
     return held  # default: follow holdings
@@ -225,7 +238,7 @@ def run_for_id(
     universe_symbols: list[str] = []
 
     if it.scope == "per_symbol":
-        universe_symbols = _resolve_universe(it, data)
+        universe_symbols = _resolve_universe(conn, it, data)
         for sym in universe_symbols:
             ctx = _per_symbol_ctx(conn, data, sym, now=now, reporting=reporting)
             var_contexts[sym] = ctx
@@ -755,7 +768,7 @@ def _gather_facts(
 ) -> ps.PipelineFacts:
     """Assemble the fed :class:`PipelineFacts` for one task (no derivation here)."""
     universe = (
-        _resolve_universe(it, data) if it.scope == "per_symbol"
+        _resolve_universe(conn, it, data) if it.scope == "per_symbol"
         else _resolve_markets(data) if it.scope == "per_market"
         else []
     )
@@ -874,15 +887,21 @@ class PreflightDraft(BaseModel):
 
 
 def _resolve_universe_raw(
-    universe: dict[str, Any] | list[Any] | str | None, data: DashboardData
+    conn: sqlite3.Connection,
+    universe: dict[str, Any] | list[Any] | str | None,
+    data: DashboardData,
 ) -> list[str]:
-    """Resolve a per_symbol universe value (mode:all → holdings, mode:custom → listed)."""
+    """Resolve a per_symbol universe value (mode:all → holdings, mode:custom → listed,
+    mode:all_registered → holdings + watchlist). The draft-preflight twin of
+    ``_resolve_universe`` (spec 07 §7.2 dry run)."""
     held = sorted({h.symbol for h in data.holdings})
     if isinstance(universe, dict):
         mode = universe.get("mode")
         if mode == "custom":
             syms = universe.get("symbols")
             return list(syms) if isinstance(syms, list) else []
+        if mode == "all_registered":
+            return _all_registered_symbols(conn)
         if mode == "all":
             return held
     return held
@@ -1205,7 +1224,7 @@ def _preflight_saved(
 ) -> dict[str, Any]:
     """Preflight a SAVED task: share ``generate._gate_context`` + ``gating.evaluate_gates``."""
     universe = (
-        _resolve_universe(it, data) if it.scope == "per_symbol"
+        _resolve_universe(conn, it, data) if it.scope == "per_symbol"
         else _resolve_markets(data) if it.scope == "per_market"
         else []
     )
@@ -1250,7 +1269,7 @@ def _preflight_draft(
 ) -> dict[str, Any]:
     """Preflight an UNSAVED draft: same shared gate, transient context, nothing persisted."""
     universe = (
-        _resolve_universe_raw(draft.universe, data) if draft.scope == "per_symbol"
+        _resolve_universe_raw(conn, draft.universe, data) if draft.scope == "per_symbol"
         else _resolve_markets(data) if draft.scope == "per_market"
         else []
     )

@@ -29,7 +29,7 @@
 
   window.ppWizard = function () {
     /* fetched reference data (filled before the wizard renders). */
-    var REF = { templates: [], rules: [], held: [], quota: null };
+    var REF = { templates: [], rules: [], held: [], registered: [], quota: null };
     var tplOf = function (id) {
       return REF.templates.find(function (x) { return x.id === id; }) || null;
     };
@@ -47,13 +47,16 @@
       pdApi.get('/api/strategy-prompts').catch(function () { return []; }),
       pdApi.get('/api/alert-rules').catch(function () { return { rules: [] }; }),
       pdApi.get('/api/dashboard').catch(function () { return { holdings: [] }; }),
-      pdApi.get('/api/insight-tasks/status').catch(function () { return { health: {} }; })
-    ]) : Promise.resolve([[], { rules: [] }, { holdings: [] }, { health: {} }]);
+      pdApi.get('/api/insight-tasks/status').catch(function () { return { health: {} }; }),
+      pdApi.get('/api/instruments').catch(function () { return { list: [] }; })
+    ]) : Promise.resolve([[], { rules: [] }, { holdings: [] }, { health: {} }, { list: [] }]);
 
     loads.then(function (res) {
       REF.templates = (Array.isArray(res[0]) ? res[0] : []).filter(function (x) { return !x.archived; });
       REF.rules = (res[1] && res[1].rules) || [];
       REF.held = ((res[2] && res[2].holdings) || []).map(function (h) { return h.symbol; });
+      /* every registered instrument (held + watchlist) — drives the opt-in「含觀察標的」宇宙 */
+      REF.registered = ((res[4] && res[4].list) || []).map(function (i) { return i.symbol; });
       REF.quota = res[3] && res[3].health ? res[3].health.quota_remaining : null;
       openWizard();
     });
@@ -71,7 +74,9 @@
       /* ---- 右側即時管線預覽 ---- */
       function symCount() {
         if (d.scope !== 'per_symbol') return 1;
-        return d.universe.mode === 'all' ? REF.held.length : (d.universe.symbols || []).length;
+        if (d.universe.mode === 'all') return REF.held.length;
+        if (d.universe.mode === 'all_registered') return REF.registered.length;
+        return (d.universe.symbols || []).length;
       }
       function renderRail() {
         rail.replaceChildren();
@@ -88,7 +93,9 @@
           : '手動（暫不排程）'));
         stack.appendChild(layer('輸入', d.scope === 'portfolio' ? '全組合・1 卡'
           : d.scope === 'on_alert' ? '事件標的'
-          : (d.universe.mode === 'all' ? '全部持倉 ' + REF.held.length : '自選 ' + (d.universe.symbols || []).length) + ' 檔・每檔 1 卡'));
+          : (d.universe.mode === 'all' ? '全部持倉 ' + REF.held.length
+            : d.universe.mode === 'all_registered' ? '持倉＋觀察 ' + REF.registered.length
+            : '自選 ' + (d.universe.symbols || []).length) + ' 檔・每檔 1 卡'));
         stack.appendChild(layer('守則', '全域守則（共用）'));
         if (!d.templates.length) stack.appendChild(layer('模板', '－ 尚未選擇 －', 'l-off'));
         d.templates.forEach(function (tid, i) {
@@ -207,8 +214,9 @@
               n2.textContent = '標的宇宙（出清/移出觀察清單會自動移除；清單空會自動停用＋預警）：';
               stage.appendChild(n2);
               var grid4 = el('div', 'wz-opts');
-              grid4.style.gridTemplateColumns = 'repeat(2, 1fr)';
+              grid4.style.gridTemplateColumns = 'repeat(3, 1fr)';
               grid4.appendChild(opt('全部持倉', REF.held.length + ' 檔・自動跟隨持倉變動', d.universe.mode === 'all', function () { d.universe = { mode: 'all' }; renderStage(); }));
+              grid4.appendChild(opt('含觀察標的', REF.registered.length + ' 檔・持倉＋觀察清單（每檔皆計費）', d.universe.mode === 'all_registered', function () { d.universe = { mode: 'all_registered' }; renderStage(); }));
               grid4.appendChild(opt('自選標的', '持倉勾選', d.universe.mode === 'custom', function () { d.universe = { mode: 'custom', symbols: d.universe.symbols || [] }; renderStage(); }));
               stage.appendChild(grid4);
               if (d.universe.mode === 'custom') {

@@ -86,6 +86,33 @@ def test_per_symbol_run_for_id_uses_holdings_for_mode_all(conn: sqlite3.Connecti
     assert symbols == {"2330", "AAPL"}
 
 
+def test_all_registered_universe_is_opt_in_expansion(conn: sqlite3.Connection) -> None:
+    # P2 batch 3 item ④: the default per_symbol universe (mode:all) stays HOLDINGS ONLY;
+    # the opt-in mode:all_registered expands to holdings + watchlist (each watch symbol is
+    # explicit LLM cost). Unit-level: resolve the two modes over the same registry.
+    from portfolio_dash.data_ingestion.store import upsert_instrument
+    from portfolio_dash.portfolio.dashboard import build_dashboard
+    from portfolio_dash.shared.enums import Market
+    from portfolio_dash.shared.models.assets import Instrument
+
+    upsert_instrument(conn, Instrument(
+        symbol="MSFT", market=Market.US, quote_ccy=Currency.USD,
+        sector="Tech", name="Microsoft",
+    ))  # a registered, UNHELD watchlist symbol
+    data = build_dashboard(conn, now=NOW, reporting=Currency.TWD)
+    it_all = cs.create_insight_type(
+        conn, name="Holds", scope="per_symbol", universe={"mode": "all"}, now=NOW
+    )
+    it_reg = cs.create_insight_type(
+        conn, name="HoldsWatch", scope="per_symbol",
+        universe={"mode": "all_registered"}, now=NOW,
+    )
+    # default: holdings only — the watch symbol is NOT swept in.
+    assert insight_service._resolve_universe(conn, it_all, data) == ["2330", "AAPL"]
+    # opt-in: holdings + watchlist.
+    assert insight_service._resolve_universe(conn, it_reg, data) == ["2330", "AAPL", "MSFT"]
+
+
 def test_custom_universe_with_missing_symbol_gets_anomaly_card(conn: sqlite3.Connection) -> None:
     sp = cs.create_strategy(conn, name="S", body="{{symbol_detail_json}}", now=NOW)
     it = cs.create_insight_type(
