@@ -48,20 +48,35 @@ CREATE TABLE IF NOT EXISTS alert_events (
     rule_id TEXT NOT NULL,
     symbol TEXT,
     fired_at TEXT NOT NULL,
-    consumed INTEGER NOT NULL DEFAULT 0
+    consumed INTEGER NOT NULL DEFAULT 0,
+    notified_at TEXT
 );
 CREATE TABLE IF NOT EXISTS alert_dispatch_log (
     debounce_key TEXT NOT NULL,
     dispatched_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_alert_events_consumed ON alert_events (consumed);
+CREATE INDEX IF NOT EXISTS idx_alert_events_notified ON alert_events (notified_at);
 CREATE INDEX IF NOT EXISTS idx_alert_dispatch_key ON alert_dispatch_log (debounce_key);
 """
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, column: str, decl: str) -> None:
+    """Additively add ``alert_events.column`` on legacy DBs (idempotent PRAGMA guard)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(alert_events)")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE alert_events ADD COLUMN {column} {decl}")
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
-    """Create the alert_events + dispatch-log tables idempotently."""
+    """Create the alert_events + dispatch-log tables idempotently.
+
+    ``notified_at`` (WP 3B push dispatch) is a SEPARATE marker from ``consumed`` (the
+    on_alert AI-card dispatch): the two dispatch paths track the same events independently.
+    Added additively for legacy DBs that predate the column.
+    """
     conn.executescript(_DDL)
+    _add_column_if_missing(conn, "notified_at", "TEXT")
     conn.commit()
 
 
