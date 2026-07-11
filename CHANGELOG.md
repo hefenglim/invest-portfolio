@@ -50,6 +50,67 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.13] - 2026-07-11
+
+Blueprint P2 "technical-rules engine" release: local, stateful, auditable rule
+signals for every held AND watched symbol — TechScore, transition events into the
+alert stream, drawer signal chips, an LLM variable, and health-check v2.5 that
+interprets (never computes) them. Three batches, each gated by an independent
+deep-review audit.
+
+### Added
+- **Rules engine core `strategy/rules/`** (P2-2A): frozen `rules-v1` params; four
+  evidence-based rules — MA200 trend filter (±2% hysteresis band + 2-day confirm),
+  SMA50/200 golden/death cross with volume confirmation (×1.00 confirmed / ×0.75
+  unconfirmed = 54/72 / ×0.85 unknown — never faked) and linear age decay,
+  12-1 momentum (skip-month convention; flat dead-band forces score 0), RSI(14) +
+  52-week context (halved magnitude by design); composite TechScore 0–100 with
+  per-rule contribution audit trail, coverage renormalization over evaluable rules,
+  and a deterministic zh-TW evaluation-context sentence. Pure Decimal, honest
+  `None` on thin data, `params_version` stamped on every result (replay discipline).
+  **Deep-review calibration (2026-07-10, recorded here): cross decay = 60 sessions**
+  (cited death-cross evidence: ~random after ~30 days — half-weight at day 30),
+  superseding the initial 120; unmeasured momentum is labelled honestly (dedicated
+  uptrend/downtrend context labels — never called "weakening").
+- **Signals API + transition events** (P2-2B): `GET /api/signals` (+ single-symbol
+  variant) serving every registered instrument with a `held` flag; history window
+  derived from params (260 sessions → 583 calendar days). `signal_states` derived
+  cache (rebuildable; truth stays `prices`) detects regime transitions with HOLD
+  semantics — trend fires only on confirmed up↔down, momentum only on
+  positive↔negative, both holding their last direction through neutral/flat noise
+  (without this the momentum event was unreachable); fresh golden/death crosses
+  fire with a both-days_ago-present guard. Events land in `alert_events`
+  (`signal_trend`/`signal_cross`/`signal_momentum`), first scan seeds silently
+  (no event storm), same-day re-scans coalesce, `params_version` changes reseed
+  silently. New `signal_scan` job (weekdays 14:55 Asia/Taipei, before alert_scan);
+  the `'all'` alert-subscription wildcard deliberately EXCLUDES `signal_*`
+  (explicit listing subscribes — AI-card cost stays opt-in).
+- **Watchlist coverage** (owner decision 2026-07-11, recorded here): watched
+  (registered but unheld) symbols get the full signal treatment — scan seeding,
+  transition events, API rows (`held:false`), and drawer chips — a watched symbol
+  is an entry candidate (a golden cross there is exactly the wanted alert). A
+  sold-but-registered symbol stays tracked as a re-entry candidate.
+- **Drawer 技術訊號 chips** (P2-2B/2C): TechScore + coverage, four rule chips with
+  key evidence, and the engine's condition sentence, for held and watched symbols;
+  neutral accent styling (signals are not P&L); honest 資料不足 empty state.
+- **`rule_signals_json` variable** (P2-2C): registry grows 33→34 (price category);
+  fed via `external_vars` from the SAME evaluation/serialization seam as
+  `/api/signals` (byte-identical, test-pinned); honest partial pass-through
+  (per-rule nulls) and thin-data degrade with an explicit reason.
+- **Health-check strategy v2.5** (library `official-v5`): cites TechScore/coverage,
+  each rule's state with its key evidence number, and the condition sentence
+  verbatim — interpret only, never recompute; unheld symbols are framed as entry
+  assessment (建倉評估) instead of add/trim; unavailable data is stated honestly.
+  Task presets reference strategies by name — no preset change.
+- **Opt-in task universe "holdings + watchlist"** (`mode:"all_registered"`):
+  explicit wizard option with a per-symbol cost hint; default stays holdings-only.
+  A registered symbol without prices takes the zero-LLM anomaly-card path.
+
+### Fixed
+- `volume_signal`'s trailing-gap trim (v0.1.12) is consumed by the cross rule's
+  volume confirmation — an unknown-volume cross day degrades the confidence
+  modifier to ×0.85 instead of raising or fabricating.
+
 ## [v0.1.12] - 2026-07-09
 
 Blueprint P1 "data foundation" release: trading volume across all three markets,
