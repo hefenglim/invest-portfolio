@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.15"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.15"></link>
-<link rel="stylesheet" href="input.css?v=0.1.15"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.16"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.16"></link>
+<link rel="stylesheet" href="input.css?v=0.1.16"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   /* settings tab bar */
@@ -401,7 +401,7 @@
     <section class="panel">
       <div class="panel-head">
         <h2 class="panel-title">通知通道</h2>
-        <span class="panel-sub">警示事件掃描後自動推播到所有啟用通道・單一通道故障不影響其他通道・金鑰遮罩儲存，不進 git／日誌</span>
+        <span class="panel-sub">警示事件掃描後自動推播到所有啟用通道（平日收盤掃描約 15:00 台北）・單一通道故障不影響其他通道・金鑰遮罩儲存，不進 git／日誌</span>
       </div>
       <div class="nt-cards">
         <div class="nt-card">
@@ -411,6 +411,15 @@
             <div class="field span-2"><label for="nt-ntfy-topic">主題（＝密碼）</label><div class="input-row"><input class="input" id="nt-ntfy-topic" spellcheck="false" readonly="readonly"></input><button class="btn" id="nt-ntfy-topic-copy" type="button">複製</button></div><span class="hint">主題名即密碼，請勿外流；手機 ntfy app 訂閱此主題即可收到推播。</span></div>
             <div class="field span-2"><label for="nt-ntfy-token">存取權杖（選填）</label><input class="input" id="nt-ntfy-token" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">僅受保護主題需要；以遮罩顯示。</span></div>
           </div>
+          <details class="nt-sop"><summary>📖 設定步驟（約 1 分鐘）</summary>
+            <ol>
+              <li>手機安裝 <b>ntfy</b> app（App Store／Google Play，免費、無需註冊）。</li>
+              <li>在本卡按「啟用」，然後按「複製」取得主題名（主題名＝密碼，勿外流）。</li>
+              <li>手機 ntfy app → <b>＋ Subscribe to topic</b> → 貼上主題名 → 訂閱。</li>
+              <li>回本頁按「傳送測試訊息」→ 手機應立即收到。</li>
+            </ol>
+            <p class="nt-sop-note">沒收到？「測試成功」代表已送達伺服器——請確認手機訂閱的主題名<b>完全相同</b>、且已允許 ntfy 的通知權限。伺服器預設 ntfy.sh（免費）；自架 ntfy 者改填自己的網址。</p>
+          </details>
           <div class="nt-card-foot"><button class="btn" id="nt-ntfy-test" type="button">傳送測試訊息</button><button class="btn btn-primary" id="nt-ntfy-save" type="button">儲存</button></div>
         </div>
 
@@ -420,6 +429,15 @@
             <div class="field span-2"><label for="nt-tg-token">Bot Token</label><input class="input" id="nt-tg-token" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">向 @BotFather 建立 bot 取得；以遮罩顯示。</span></div>
             <div class="field span-2"><label for="nt-tg-chat">Chat ID</label><input class="input" id="nt-tg-chat" spellcheck="false" placeholder="例如 123456789"></input><span class="hint">需先在 Telegram 對你的 bot 傳送 /start（bot 不能主動發起對話）；chat_id 為數字，私訊 @userinfobot 可查，群組 id 為負數。「chat not found」= 尚未 /start 或 chat_id 錯誤。</span></div>
           </div>
+          <details class="nt-sop"><summary>📖 設定步驟（約 3 分鐘）</summary>
+            <ol>
+              <li>Telegram 搜尋 <b>@BotFather</b> → 傳送 <code>/newbot</code> → 依指示命名 → 取得 <b>Bot Token</b> 貼入上方欄位。</li>
+              <li>私訊 <b>@userinfobot</b>，它會回覆你的<b>數字 Chat ID</b>，貼入上方欄位。</li>
+              <li><b>對你的新 bot 傳送一次 /start</b>（必要！bot 不能主動發起對話，漏了這步會出現「chat not found」）。</li>
+              <li>按「啟用」→「儲存」→「傳送測試訊息」→ Telegram 應收到訊息。</li>
+            </ol>
+            <p class="nt-sop-note">要發到群組：把 bot 加入群組，Chat ID 用群組的（負數）。</p>
+          </details>
           <div class="nt-card-foot"><button class="btn" id="nt-tg-test" type="button">傳送測試訊息</button><button class="btn btn-primary" id="nt-tg-save" type="button">儲存</button></div>
         </div>
 
@@ -434,6 +452,15 @@
             <div class="field"><label for="nt-em-from">寄件者</label><input class="input" id="nt-em-from" spellcheck="false" placeholder="alerts@example.com"></input></div>
             <div class="field"><label for="nt-em-to">收件者</label><input class="input" id="nt-em-to" spellcheck="false" placeholder="me@example.com"></input></div>
           </div>
+          <details class="nt-sop"><summary>📖 設定步驟（以 Gmail 為例）</summary>
+            <ol>
+              <li>SMTP 主機 <code>smtp.gmail.com</code>、連接埠 <b>587</b>、加密 <b>STARTTLS</b>（若用 465 則選 SSL——<b>埠與加密必須成對</b>，配錯會逾時）。</li>
+              <li>Gmail 必須用「<b>應用程式密碼</b>」：Google 帳戶 → 安全性 → 開啟兩步驟驗證 → 應用程式密碼 → 產生 16 碼貼入「密碼」。一般登入密碼會被拒（錯誤 535）。</li>
+              <li>帳號＝完整信箱；寄件者通常需與帳號相同；收件者填要接收警示的信箱。</li>
+              <li>按「啟用」→「儲存」→「傳送測試訊息」→ 收件匣（含垃圾郵件夾）確認。</li>
+            </ol>
+            <p class="nt-sop-note">其他信箱服務：向提供者查 SMTP 主機／埠；多數同樣要求應用程式專用密碼。</p>
+          </details>
           <div class="nt-card-foot"><button class="btn" id="nt-em-test" type="button">傳送測試訊息</button><button class="btn btn-primary" id="nt-em-save" type="button">儲存</button></div>
         </div>
       </div>
@@ -495,22 +522,22 @@
   </div>
 </div>
 
-<script src="api.js?v=0.1.15"></script>
-<script src="shell.js?v=0.1.15"></script>
-<script src="format.js?v=0.1.15"></script>
-<script src="pager.js?v=0.1.15"></script>
-<script src="export.js?v=0.1.15"></script>
-<script src="alerts.js?v=0.1.15"></script>
-<script src="vars.js?v=0.1.15"></script>
-<script src="settings-llm.js?v=0.1.15"></script>
-<script src="settings-prompts.js?v=0.1.15"></script>
-<script src="settings-scheduler.js?v=0.1.15"></script>
-<script src="settings-datasources.js?v=0.1.15"></script>
-<script src="settings-alerts.js?v=0.1.15"></script>
-<script src="settings-notify.js?v=0.1.15"></script>
-<script src="settings-users.js?v=0.1.15"></script>
-<script src="settings-dbstats.js?v=0.1.15"></script>
-<script src="settings-prefs.js?v=0.1.15"></script>
+<script src="api.js?v=0.1.16"></script>
+<script src="shell.js?v=0.1.16"></script>
+<script src="format.js?v=0.1.16"></script>
+<script src="pager.js?v=0.1.16"></script>
+<script src="export.js?v=0.1.16"></script>
+<script src="alerts.js?v=0.1.16"></script>
+<script src="vars.js?v=0.1.16"></script>
+<script src="settings-llm.js?v=0.1.16"></script>
+<script src="settings-prompts.js?v=0.1.16"></script>
+<script src="settings-scheduler.js?v=0.1.16"></script>
+<script src="settings-datasources.js?v=0.1.16"></script>
+<script src="settings-alerts.js?v=0.1.16"></script>
+<script src="settings-notify.js?v=0.1.16"></script>
+<script src="settings-users.js?v=0.1.16"></script>
+<script src="settings-dbstats.js?v=0.1.16"></script>
+<script src="settings-prefs.js?v=0.1.16"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs） */
 (function () {
