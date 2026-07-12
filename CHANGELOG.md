@@ -50,6 +50,21 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.16] - 2026-07-12
+
+Notification-channel setup guides (owner request: lower the setup barrier).
+
+### Added
+- **Per-channel 設定步驟 SOP** — each channel card gains a collapsible, numbered
+  zh-TW guide: ntfy (install app → enable → copy topic → subscribe → test; explains
+  that a successful test with a silent phone means the subscription/permission is
+  missing, not the server), Telegram (@BotFather → @userinfobot numeric chat_id →
+  the mandatory /start step → test; group = negative id), Email (Gmail example:
+  smtp.gmail.com/587/STARTTLS, the app-password requirement — a normal password is
+  rejected with 535 — and the port↔encryption pairing that otherwise times out).
+  Panel subtitle now states when real alerts dispatch (weekday post-close scan,
+  ~15:00 Taipei).
+
 ## [v0.1.15] - 2026-07-12
 
 Hotfix for the v0.1.14 notification channels (owner field report, same day).

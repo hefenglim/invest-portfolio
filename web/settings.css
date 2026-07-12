@@ -550,6 +550,14 @@ table.data td.log-msg {
 .nt-card-title { font-weight: 700; font-size: 13px; }
 .nt-card .form-grid { padding: 0; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
 .nt-card-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: auto; }
+/* Per-channel setup SOP (2026-07-12 owner request: lower the setup barrier). */
+.nt-sop { margin: 4px 0 10px; border: 1px dashed var(--border-soft); border-radius: var(--radius-sm); background: var(--panel-2); }
+.nt-sop > summary { list-style: none; cursor: pointer; padding: 8px 12px; font-size: 11.5px; font-weight: 700; color: var(--accent); }
+.nt-sop > summary::-webkit-details-marker { display: none; }
+.nt-sop[open] > summary { border-bottom: 1px dashed var(--border-soft); }
+.nt-sop ol { margin: 8px 0 4px; padding: 0 14px 0 30px; display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; line-height: 1.65; color: var(--text-2); }
+.nt-sop code { font-family: var(--font-num); font-size: 10.5px; background: var(--panel-3); border-radius: 3px; padding: 0 4px; }
+.nt-sop-note { margin: 6px 12px 10px; font-size: 10.5px; color: var(--text-3); line-height: 1.6; }
 .nt-quiet {
   display: flex; align-items: flex-end; gap: 18px; flex-wrap: wrap;
   padding: 12px var(--pad) 0;
