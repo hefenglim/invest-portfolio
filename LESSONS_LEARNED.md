@@ -23,6 +23,14 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A switch-shaped control must persist on interaction (2026-07-12):** the notify
+  enable toggles flipped a CSS class and relied on a separate save button — the owner
+  read it as "cannot be turned off" (toggled off, reloaded, it was back on). Anything
+  that LOOKS like a switch must either write immediately (optimistic + revert on
+  failure) or visibly mark unsaved state. Related: never swallow a provider's error
+  body — Telegram's "chat not found" was the actionable reason, and only the bare
+  status line was shown.
+
 - **An index on a migrated column must be created AFTER the migration — and schema
   changes need a legacy-shape test, not just fresh-DB fixtures (2026-07-12):** adding
   `notified_at` to `alert_events` put the CREATE INDEX inside the initial DDL script,
