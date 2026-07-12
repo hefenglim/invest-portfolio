@@ -1,0 +1,105 @@
+<title>Phase 3 智能監控・批次2 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #1f7a6d; --accent-soft: #e4f2ef;
+    --ok: #2f7a4f; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #101514; --card: #18201e; --ink: #e4efec; --ink-2: #93aca6;
+            --line: #2e423d; --accent: #52b3a4; --accent-soft: #1c2f2b;
+            --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #101514; --card: #18201e; --ink: #e4efec;
+    --ink-2: #93aca6; --line: #2e423d; --accent: #52b3a4; --accent-soft: #1c2f2b;
+    --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #1f7a6d; --accent-soft: #e4f2ef;
+    --ok: #2f7a4f; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  .skip li::marker { content: "✕ "; color: var(--warn); }
+  .sig { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px; }
+  .sigrow { border: 1.5px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    background: var(--paper); font-size: 14.5px; line-height: 1.55; }
+  .sigrow b { color: var(--accent); }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・Phase 3 批次2（WP 3A）</div>
+    <h1>警示分類法 v2：四種新警示＋目標權重設定</h1>
+    <p class="lede">已按指令開工（Opus 4.8 xHigh，完工後 ★ 獨立深審）。30 秒讀完。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>為什麼做</h2>
+    <p>現有 8 條警示偏「帳務健康」（權重上限/資料新鮮度/FX/除息/額度）。缺的是<b>市場風險的主動預警</b>：跌了多少、波動起來沒、配置漂了沒、分析師轉向沒——全部走你剛設好的手機推播。D8 已定案（2026-07-12）：加目標權重設定。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>四種新警示（本地計算，門檻可調）</h2>
+    <div class="sig">
+      <div class="sigrow"><b>① 個股高點回撤</b>：持股現價自 52 週高點回撤超過門檻（預設 −20%，risk；−10% 先給 warn）。觀察股也納入（進場機會的另一面）。</div>
+      <div class="sigrow"><b>② 波動突升</b>：30 日年化波動 ≥ 90 日基準的倍數門檻（預設 1.8×，warn）——「這檔最近不對勁」的早期訊號。</div>
+      <div class="sigrow"><b>③ 再平衡帶漂移（Swedroe 5/25）</b>：|現權重 − 目標權重| 超過 <b>5 個絕對百分點</b> 或 <b>目標的 25% 相對值</b>（兩者取先觸發，risk）。只對有設目標的標的檢查；沒設＝該規則誠實不啟用。</div>
+      <div class="sigrow"><b>④ 分析師共識變化</b>：評級分數惡化超過門檻（預設 0.5，1→5 制）或均值目標價下修超過 10%（對比 7 日前快照，info）——持股與觀察股都看。</div>
+    </div>
+    <p class="dim">全部進既有警示引擎（儀表板嵌入＋警示鈴＋<code>alert_events</code>）→ 自動走推播（規則訂閱會出現四個新項目，預設開啟）。門檻在預警規則編輯器可調。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>目標權重設定（D8）</h2>
+    <ul class="tight keep">
+      <li>設定 → 預警規則分頁新增「<b>目標配置</b>」節：已註冊標的清單各一個目標權重欄（%），留空＝不設；總和檢查（≤100%，超出 400）</li>
+      <li>存 config（伺服器端），同時供 ③ 帶漂移警示與既有再平衡預覽（試算帶入目標值）使用——單一事實來源</li>
+      <li>權重是比率不是金額：Decimal 字串、4dp，不受 2dp 規則</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>驗收（退出條件）</h2>
+    <ul class="tight keep">
+      <li>demo：四種新警示各能以合成資料觸發；儀表板嵌入與 GET /api/alerts 單源相等測試</li>
+      <li>設目標權重 → 製造漂移 → 警示出現且推播（沿用 24h 去抖與訂閱過濾）</li>
+      <li>沒設目標／歷史不足 → 對應規則誠實靜默（不誤報、不編造）</li>
+      <li>四個新規則有中文推播標籤（RULE_CATALOG 防漂移測試會強制）＋門檻可在編輯器調整</li>
+      <li>全閘門綠 → <b>★ 獨立深審</b>（規則正確性：5/25 語意、回撤/波動視窗、共識比較基準）</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span>不做什麼（後續）</h2>
+    <ul class="tight skip">
+      <li>每日收盤摘要＋週行動清單 → 批次 3（3C）</li>
+      <li>產業層級目標權重 → 先做標的層級，有需求再加</li>
+      <li>警示前置量回顧分析（M3）→ Phase 4 回測範圍</li>
+    </ul>
+  </section>
+
+  <section class="cta">
+    <b>執行中</b>：新分支 <code>feat/p3-alerts-v2</code>（main 已是 v0.1.16）。門檻預設值若想調（−20%／1.8×／5-25／0.5 與 −10%），直接講。
+  </section>
+
+</div>
