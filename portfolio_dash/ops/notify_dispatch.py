@@ -7,20 +7,31 @@ stays out of ``scheduler/`` (which holds no business logic) and out of ``ops/not
 ``api``/``strategy`` — and reaches the ``alert_events`` table by RAW SQL on the passed
 connection, which is the established cross-module convention here ("sharing a table is not
 importing a module"; cf. ``scheduler.jobs`` writing ``job_runs`` and
-``llm_insight.generate`` writing the same). The ``notified_at`` column it reads/writes is
-OWNED and created by ``llm_insight.alerts_bridge.ensure_tables`` (the alert-scan job runs
-that first) — this module only sets its value.
+``llm_insight.generate`` writing the same). The ``notified_at`` + ``notify_attempts``
+columns it reads/writes are OWNED and created by ``llm_insight.alerts_bridge
+.ensure_tables`` (the alert-scan job runs that first) — this module only sets values.
 
-Dispatch semantics (idempotent, flood-safe):
+Dispatch semantics (idempotent, flood-safe, starvation-free — security review F2):
 
-- Select up to :data:`_CAP` (10) OLDEST events with ``notified_at IS NULL`` — a backlog
-  after an outage drips out, never floods the phone.
 - Skip when no channel is enabled, or when *now* is inside quiet hours (Asia/Taipei) — the
-  events stay unmarked and send on the next scan outside the window.
-- Unsubscribed rules are marked handled immediately (they never send, never linger).
-- A subscribed event is formatted (zh-TW, from the rule id + symbol only) and fanned out to
-  every enabled channel; ``notified_at`` is set ONLY when at least one channel returned ok
-  (all-fail → left unmarked to retry next scan; partial success → marked, failure logged).
+  events stay unmarked (and un-attempted) and send on the next scan outside the window.
+- Select up to :data:`_CAP` (10) OLDEST events with ``notified_at IS NULL AND
+  notify_attempts < 3`` — a backlog after an outage drips out, never floods the phone, and
+  a permanently-failing head-of-queue drops out of the candidate set after 3 attempts so
+  it can never starve newer events.
+- Per-event state machine (``notified_at`` × ``notify_attempts``):
+
+  1. **Claim (atomic, BEFORE sending):** ``UPDATE ... SET notified_at = ? WHERE id = ?
+     AND notified_at IS NULL``. Rowcount 0 → another runner (cron vs manual run_job)
+     claimed it between our SELECT and UPDATE → skip, no double-send.
+  2. **Unsubscribed rule:** stays claimed (marked handled) — never sends, never lingers.
+  3. **Send** to every enabled channel. ≥1 channel ok → the claim stands (partial
+     failure is logged in the summary but the event is done).
+  4. **All channels failed:** release the claim and bump the counter
+     (``SET notified_at = NULL, notify_attempts = notify_attempts + 1``) → retried next
+     scan. The bump that reaches 3 leaves the event permanently unclaimed-but-excluded
+     by the ``notify_attempts < 3`` filter (give-up) — observable via the run detail
+     (``gave up on N event(s)``) and a warning log.
 """
 
 import logging
@@ -34,6 +45,9 @@ logger = logging.getLogger(__name__)
 # At most this many events per dispatch run (oldest first); the rest go next run.
 _CAP = 10
 
+# All-channels-failed retries per event; the attempt that reaches this gives up.
+_MAX_ATTEMPTS = 3
+
 
 def dispatch_notifications(
     conn: sqlite3.Connection,
@@ -44,8 +58,9 @@ def dispatch_notifications(
     """Deliver unnotified alert events to the enabled channels; return a short summary.
 
     ``sender`` is injectable (defaults to :func:`notify.dispatch`) so tests exercise the
-    marker/quiet-hours/subscription/cap logic without any network. Never raises for a
-    channel failure (the sender isolates those); a summary string is always returned.
+    claim/attempts/quiet-hours/subscription/cap logic without any network. Never raises
+    for a channel failure (the sender isolates those); a summary string is always
+    returned. See the module docstring for the per-event state machine.
     """
     cfg = notify.load_config(conn)
     channels = notify.build_enabled_channels(cfg)
@@ -55,25 +70,33 @@ def dispatch_notifications(
         return "notify: 靜音時段"
 
     rows = conn.execute(
-        "SELECT id, rule_id, symbol FROM alert_events WHERE notified_at IS NULL "
-        "ORDER BY id LIMIT ?",
-        (_CAP,),
+        "SELECT id, rule_id, symbol FROM alert_events "
+        "WHERE notified_at IS NULL AND notify_attempts < ? ORDER BY id LIMIT ?",
+        (_MAX_ATTEMPTS, _CAP),
     ).fetchall()
 
     sent = 0
+    gave_up = 0
     failed_channels: set[str] = set()
     for row in rows:
         event_id = int(row["id"])
+        if not _claim(conn, event_id, now=now):
+            continue  # another runner claimed it between SELECT and UPDATE — skip
         rule_id = str(row["rule_id"])
-        symbol = row["symbol"]
         if not cfg.subscriptions.get(rule_id, True):
-            _mark_notified(conn, event_id, now=now)  # unsubscribed → handled, don't linger
-            continue
-        title, body, severity = notify.format_event(rule_id, symbol)
+            continue  # unsubscribed → stays claimed (handled), never sends
+        title, body, severity = notify.format_event(rule_id, row["symbol"])
         outcome = sender(channels, title, body, severity, None)
         if any(result == "ok" for result in outcome.values()):
-            _mark_notified(conn, event_id, now=now)
-            sent += 1
+            sent += 1  # ≥1 ok → claim stands (partial failure logged below)
+        else:
+            attempts = _release_and_bump(conn, event_id)
+            if attempts >= _MAX_ATTEMPTS:
+                gave_up += 1
+                logger.warning(
+                    "notify dispatch gave up on alert event %d after %d failed attempts",
+                    event_id, attempts,
+                )
         for name, result in outcome.items():
             if result != "ok":
                 failed_channels.add(name)
@@ -81,15 +104,38 @@ def dispatch_notifications(
     detail = f"notify: {sent} 送出 / {len(rows)} 待送"
     if failed_channels:
         detail += f" (通道異常: {', '.join(sorted(failed_channels))})"
+    if gave_up:
+        detail += f"; gave up on {gave_up} event(s)"
     return detail
 
 
-def _mark_notified(conn: sqlite3.Connection, event_id: int, *, now: datetime) -> None:
-    """Stamp ``alert_events.notified_at`` so this event never dispatches again (idempotent)."""
-    conn.execute(
-        "UPDATE alert_events SET notified_at = ? WHERE id = ?", (now.isoformat(), event_id)
+def _claim(conn: sqlite3.Connection, event_id: int, *, now: datetime) -> bool:
+    """Atomically claim an event for THIS runner (False = someone else already did).
+
+    The ``notified_at IS NULL`` predicate makes the claim a compare-and-set: of two
+    concurrent dispatch runs (cron firing while a manual ``run_job`` is in flight) exactly
+    one sees rowcount 1 and sends; the other skips — no double push.
+    """
+    cur = conn.execute(
+        "UPDATE alert_events SET notified_at = ? WHERE id = ? AND notified_at IS NULL",
+        (now.isoformat(), event_id),
     )
     conn.commit()
+    return cur.rowcount > 0
+
+
+def _release_and_bump(conn: sqlite3.Connection, event_id: int) -> int:
+    """All channels failed: release the claim + count the attempt; return the new count."""
+    conn.execute(
+        "UPDATE alert_events SET notified_at = NULL, "
+        "notify_attempts = notify_attempts + 1 WHERE id = ?",
+        (event_id,),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT notify_attempts FROM alert_events WHERE id = ?", (event_id,)
+    ).fetchone()
+    return int(row["notify_attempts"]) if row is not None else _MAX_ATTEMPTS
 
 
 __all__ = ["dispatch_notifications"]

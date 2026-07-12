@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS alert_events (
     symbol TEXT,
     fired_at TEXT NOT NULL,
     consumed INTEGER NOT NULL DEFAULT 0,
-    notified_at TEXT
+    notified_at TEXT,
+    notify_attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS alert_dispatch_log (
     debounce_key TEXT NOT NULL,
@@ -73,10 +74,13 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
 
     ``notified_at`` (WP 3B push dispatch) is a SEPARATE marker from ``consumed`` (the
     on_alert AI-card dispatch): the two dispatch paths track the same events independently.
-    Added additively for legacy DBs that predate the column.
+    ``notify_attempts`` (security review F2) counts failed push-dispatch attempts so a
+    permanently-failing head-of-queue can never starve newer events (the dispatcher gives
+    up at 3). Both added additively for legacy DBs that predate the columns.
     """
     conn.executescript(_DDL)
     _add_column_if_missing(conn, "notified_at", "TEXT")
+    _add_column_if_missing(conn, "notify_attempts", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
