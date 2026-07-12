@@ -89,6 +89,30 @@ def _redact(text: str, *secret_values: str) -> str:
     return out
 
 
+def _response_hint(resp: Any) -> str:
+    """A short, safe reason extracted from an error-response body.
+
+    Telegram/ntfy return an actionable ``description``/``error`` field (e.g.
+    "Bad Request: chat not found"); surfacing it lets the owner self-diagnose
+    instead of staring at a bare status line. Bounded length; callers still run
+    the final message through ``_redact``. Never raises.
+    """
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            for key in ("description", "error", "message"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return f" — {value.strip()[:160]}"
+    except Exception:  # noqa: BLE001 - body may be empty/non-JSON
+        pass
+    try:
+        text = str(getattr(resp, "text", "") or "").strip()
+        return f" — {text[:120]}" if text else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 # --- channel protocol + implementations ---------------------------------------
 
 
@@ -143,6 +167,10 @@ class NtfyChannel:
             )
             if 300 <= int(resp.status_code) < 400:
                 raise NotifyError(f"unexpected redirect (HTTP {resp.status_code})")
+            if int(resp.status_code) >= 400:
+                # Surface the server's own reason (owner-diagnosable), never just the
+                # bare status line (2026-07-12 field report: opaque errors).
+                raise NotifyError(f"HTTP {resp.status_code}{_response_hint(resp)}")
             resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001 - normalize to a redacted NotifyError
             raise NotifyError(_redact(str(exc), self.token, self.topic)) from None
@@ -173,8 +201,14 @@ class TelegramChannel:
             text = f"{text}\n{link}"
         try:
             resp = self._transport.post(
-                url, json={"chat_id": self.chat_id, "text": text}, timeout=self.timeout
+                url, json={"chat_id": self.chat_id.strip(), "text": text},
+                timeout=self.timeout,
             )
+            if int(resp.status_code) >= 400:
+                # Telegram's body carries the actionable reason ("chat not found" =
+                # the bot was never /start-ed or the chat_id is wrong) — the bare
+                # status line hid it (2026-07-12 field report). Redacted below.
+                raise NotifyError(f"HTTP {resp.status_code}{_response_hint(resp)}")
             resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001 - redact the token out of the URL/message
             raise NotifyError(_redact(str(exc), self.bot_token)) from None

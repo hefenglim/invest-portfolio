@@ -50,6 +50,24 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.15] - 2026-07-12
+
+Hotfix for the v0.1.14 notification channels (owner field report, same day).
+
+### Fixed
+- **Enable toggles now persist on click.** The channel/quiet-hours toggles only
+  flipped a CSS class until the separate 儲存 button was pressed, which read as
+  "enabled but cannot be turned off". A click now sends a minimal
+  `PUT {channel:{enabled}}` immediately (optimistic flip, revert + toast on
+  failure); the save buttons still persist field edits.
+- **Provider error reasons are surfaced.** A failing test-send showed only the
+  bare HTTP status line; Telegram's response body carries the actionable reason
+  (e.g. "Bad Request: chat not found" = the bot was never /start-ed or the
+  chat_id is wrong). ntfy and Telegram errors now include the response-body
+  description (bounded, still secret-redacted); `chat_id` is trimmed before
+  sending; the Telegram card documents the /start requirement and where to find
+  a numeric chat_id.
+
 ## [v0.1.14] - 2026-07-12
 
 Blueprint Phase 3 batch 1: multi-channel push notifications — alerts and rule-signal

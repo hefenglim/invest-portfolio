@@ -23,8 +23,15 @@ TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 class _Resp:
-    def __init__(self, status: int = 200) -> None:
+    def __init__(self, status: int = 200, body: Any = None, text: str = "") -> None:
         self.status_code = status
+        self._body = body
+        self.text = text
+
+    def json(self) -> Any:
+        if self._body is None:
+            raise ValueError("no body")
+        return self._body
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -139,6 +146,34 @@ def test_telegram_payload_plain_text_no_parse_mode() -> None:
     assert call["url"] == "https://api.telegram.org/bot11:AAA/sendMessage"
     assert call["json"] == {"chat_id": "9988", "text": "title\nbody ＞ 30%"}
     assert "parse_mode" not in call["json"]  # never Markdown -> no injection / break
+
+
+def test_telegram_http_error_surfaces_description_and_stays_secret_free() -> None:
+    # Field report 2026-07-12: a bare "400 Bad Request" hid Telegram's actionable
+    # reason ("chat not found" = bot never /start-ed or wrong chat_id). The response
+    # body's description must surface; the token must stay redacted. chat_id is
+    # trimmed before sending.
+    token = "123456:SECRETTOKENVALUE"
+    t = _Transport(resp=_Resp(400, body={
+        "ok": False, "error_code": 400, "description": "Bad Request: chat not found",
+    }))
+    ch = notify.TelegramChannel(token, " 9988 ", transport=t)
+    with pytest.raises(notify.NotifyError) as ei:
+        ch.send("t", "b", "info", None)
+    msg = str(ei.value)
+    assert "chat not found" in msg
+    assert token not in msg
+    assert t.calls[0]["json"]["chat_id"] == "9988"  # trimmed
+
+
+def test_ntfy_http_error_surfaces_body_reason() -> None:
+    t = _Transport(resp=_Resp(403, body={"error": "forbidden"}))
+    ch = notify.NtfyChannel("https://ntfy.sh", "pd-x", "tok-secret", transport=t)
+    with pytest.raises(notify.NotifyError) as ei:
+        ch.send("t", "b", "info", None)
+    msg = str(ei.value)
+    assert "forbidden" in msg
+    assert "tok-secret" not in msg
 
 
 def test_telegram_error_is_secret_free() -> None:
