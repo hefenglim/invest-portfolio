@@ -33,7 +33,15 @@
     quota_low: { name: 'AI 額度偏低', sev: 'warn',
       desc: '剩餘額度低於閾值時警示（閾值在 AI 額度設定調整，此處僅可停用）。' },
     calib_gap: { name: 'AI 校準誤差', sev: 'warn', step: 1,
-      desc: 'AI 預測信心與實際命中率偏差超過此值時警示（資料來源：AI 戰績自我回測）。' }
+      desc: 'AI 預測信心與實際命中率偏差超過此值時警示（資料來源：AI 戰績自我回測）。' },
+    drawdown_from_peak: { name: '高點回撤', sev: 'risk', step: 1,
+      desc: '持股／觀察股現價自 52 週高點回撤達此幅度時警示（risk）；達一半幅度先給 warn。' },
+    vol_spike: { name: '波動突升', sev: 'warn', step: 0.1,
+      desc: '持股 30 日年化波動達 90 日基準的此倍數時警示（「最近不對勁」的早期訊號）。' },
+    rebalance_drift: { name: '配置漂移', sev: 'risk', step: 1,
+      desc: '有設目標的持股，現權重偏離目標超過此絕對帶寬或目標的 25%（Swedroe 5/25）時警示。' },
+    consensus_change: { name: '分析師共識轉弱', sev: 'info', step: 0.1,
+      desc: '評級分數惡化達此值（1→5 制）或均值目標價下修逾 10%（對比 7 日前）時提示。' }
   };
 
   /* Unit conversion between the WIRE (backend native units) and the EDITOR input.
@@ -59,6 +67,8 @@
     if (unit === 'ratio') return '%';
     if (unit === 'pp') return 'pp';
     if (unit === 'days') return '天';
+    if (unit === 'x') return '倍';    /* vol_spike multiple */
+    if (unit === 'score') return '分'; /* consensus rating-score points (1..5) */
     return '';
   }
 
@@ -186,7 +196,11 @@
     { id: 'fx_drift', enabled: true, value: '0.03' },
     { id: 'exdiv_upcoming', enabled: true, value: '14' },
     { id: 'quota_low', enabled: true, value: null },
-    { id: 'calib_gap', enabled: true, value: '15' }
+    { id: 'calib_gap', enabled: true, value: '15' },
+    { id: 'drawdown_from_peak', enabled: true, value: '0.20' },
+    { id: 'vol_spike', enabled: true, value: '1.8' },
+    { id: 'rebalance_drift', enabled: true, value: '0.05' },
+    { id: 'consensus_change', enabled: true, value: '0.5' }
   ];
 
   async function resetRules() {
@@ -206,6 +220,107 @@
   const resetBtn = $('#alert-rules-reset');
   if (resetBtn) resetBtn.addEventListener('click', resetRules);
   loadRules();
+
+  /* ============ 目標配置 (D8) — per-symbol target weights ============ */
+  /* Server state: GET /api/target-weights lists every REGISTERED symbol (name + held/watch
+     badge + stored target). Weights are RATIOS on the wire (Decimal strings, 4dp) and edited
+     as a percent number here (display-only % <-> ratio; the frontend never computes money).
+     Σ ≤ 100% enforced server-side; the live sum indicator is a UI hint only. */
+  const TW_SYMBOLS = [];  /* the last GET rows, for the PUT body */
+
+  function fmtPct(ratioStr) {
+    if (ratioStr === null || ratioStr === undefined) return '';
+    const pct = Number(ratioStr) * 100;
+    return Math.round(pct * 1e6) / 1e6;  /* strip float dust (0.25 -> 25) */
+  }
+
+  function updateTwSum() {
+    const sumEl = $('#tw-sum');
+    if (!sumEl) return;
+    let sum = 0;
+    document.querySelectorAll('#target-weights-wrap .tw-input').forEach((inp) => {
+      const v = Number(inp.value);
+      if (inp.value !== '' && !Number.isNaN(v)) sum += v;
+    });
+    sumEl.textContent = (Math.round(sum * 100) / 100) + '%';
+    sumEl.classList.toggle('sign-up', sum > 100.0001);
+  }
+
+  function renderTargetsFrom(view) {
+    const wrap = $('#target-weights-wrap');
+    if (!wrap) return;
+    TW_SYMBOLS.length = 0;
+    (view && view.symbols || []).forEach((s) => TW_SYMBOLS.push(s));
+    wrap.replaceChildren();
+    if (!TW_SYMBOLS.length) {
+      wrap.appendChild(el('div', 'tw-empty', '尚無已註冊標的 — 先於「輸入中心」新增標的後即可設定目標配置。'));
+      updateTwSum();
+      return;
+    }
+    const list = el('div', 'tw-list');
+    TW_SYMBOLS.forEach((s) => {
+      const row = el('div', 'tw-row');
+      const main = el('div', 'tw-main');
+      const head = el('div', 'tw-head');
+      head.appendChild(el('span', 'tw-code', s.symbol));
+      head.appendChild(el('span', 'tw-badge ' + (s.held ? 'tw-held' : 'tw-watch'),
+        s.held ? '持有' : '觀察'));
+      main.appendChild(head);
+      main.appendChild(el('div', 'tw-name', s.name || ''));
+      row.appendChild(main);
+      const ctrl = el('div', 'tw-ctrl');
+      const inp = el('input', 'input tw-input');
+      inp.type = 'number'; inp.min = '0'; inp.max = '100'; inp.step = '0.5';
+      inp.placeholder = '不設';
+      const iv = fmtPct(s.weight);
+      inp.value = iv === '' ? '' : iv;
+      inp.dataset.sym = s.symbol;
+      inp.addEventListener('input', updateTwSum);
+      ctrl.appendChild(inp);
+      ctrl.appendChild(el('span', 'tw-unit', '%'));
+      row.appendChild(ctrl);
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+    updateTwSum();
+  }
+
+  async function loadTargets() {
+    if (!window.pdApi) return;
+    try {
+      const res = await window.pdApi.get('/api/target-weights');
+      renderTargetsFrom(res);
+    } catch (err) {
+      if (window.toast) window.toast(err.message, 'fail', err.code);
+    }
+  }
+
+  function collectTargets() {
+    /* Build the PUT body: only non-empty inputs become targets (empty = unset). % -> ratio. */
+    const weights = {};
+    document.querySelectorAll('#target-weights-wrap .tw-input').forEach((inp) => {
+      if (inp.value === '' || inp.value === null) return;
+      const v = Number(inp.value);
+      if (Number.isNaN(v) || v <= 0) return;
+      weights[inp.dataset.sym] = (v / 100).toFixed(4);  /* ratio string, 4dp */
+    });
+    return weights;
+  }
+
+  async function saveTargets() {
+    if (!window.pdApi) return;
+    try {
+      const res = await window.pdApi.put('/api/target-weights', { weights: collectTargets() });
+      renderTargetsFrom(res);
+      if (window.toast) window.toast('目標配置已儲存', 'ok', '再平衡帶漂移警示與再平衡試算即以此為準');
+    } catch (err) {
+      if (window.toast) window.toast(err.message, 'fail', err.code);
+    }
+  }
+
+  const twSaveBtn = $('#target-weights-save');
+  if (twSaveBtn) twSaveBtn.addEventListener('click', saveTargets);
+  loadTargets();
 
   /* ============ E7: 匯出中心 ============ */
   const EXPORTS = [

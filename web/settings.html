@@ -129,6 +129,25 @@
   .ar-input { width:76px;text-align:right;font-family:var(--font-num); }
   .ar-unit { font-size:10.5px;color:var(--text-3);width:30px; }
 
+  /* D8: target weights */
+  .tw-list { display:flex;flex-direction:column;padding:6px var(--pad) 8px; }
+  .tw-row { display:flex;align-items:center;gap:14px;padding:9px 0;border-bottom:1px solid var(--border-soft); }
+  .tw-row:last-child { border-bottom:none; }
+  .tw-main { flex:1;min-width:0; }
+  .tw-head { display:flex;align-items:center;gap:8px; }
+  .tw-code { font-size:12.5px;font-weight:700;font-family:var(--font-num); }
+  .tw-badge { font-size:10px;padding:1px 6px;border-radius:10px;font-weight:700; }
+  .tw-badge.tw-held { background:var(--accent-soft,rgba(31,122,109,.14));color:var(--accent); }
+  .tw-badge.tw-watch { background:var(--panel-2);color:var(--text-3);border:1px solid var(--border-soft); }
+  .tw-name { font-size:11px;color:var(--text-3);margin-top:1px; }
+  .tw-ctrl { display:flex;align-items:center;gap:6px;flex:none; }
+  .tw-input { width:76px;text-align:right;font-family:var(--font-num); }
+  .tw-unit { font-size:10.5px;color:var(--text-3);width:14px; }
+  .tw-empty { padding:12px var(--pad);font-size:12px;color:var(--text-3); }
+  .tw-sumbar { padding:8px var(--pad) 12px;font-size:12px;color:var(--text-2); }
+  .tw-sumbar .num { font-family:var(--font-num);font-weight:700;margin-left:4px; }
+  .tw-sumbar .sign-up { color:var(--up); }
+
   /* E7: export center */
   .ec-group { padding:10px var(--pad) 4px; }
   .ec-group-title { margin:0 0 8px;font-size:12px;font-weight:700;color:var(--text-2);letter-spacing:.04em; }
@@ -395,7 +414,18 @@
       </div>
       <div id="alert-rules-wrap"></div>
     </section>
-    <div class="save-bar"><span class="note">規則門檻儲存於本機，後端 strategy/ 模組接線後改存伺服器設定</span><button class="btn" id="alert-rules-reset" type="button">還原預設值</button><button class="btn btn-primary" id="alert-rules-save" type="button">儲存規則</button></div>
+    <div class="save-bar"><span class="note">規則門檻儲存於伺服器設定・頂欄鈴鐺與儀表板於下次載入時生效</span><button class="btn" id="alert-rules-reset" type="button">還原預設值</button><button class="btn btn-primary" id="alert-rules-save" type="button">儲存規則</button></div>
+
+    <!-- ===== 目標配置 (D8) ===== -->
+    <section class="panel" id="target-weights-panel">
+      <div class="panel-head">
+        <h2 class="panel-title">目標配置</h2>
+        <span class="panel-sub">為已註冊標的設定目標權重（%）・供「再平衡帶漂移」警示與再平衡試算使用（單一事實來源）・留空＝不設・合計 ≤ 100%</span>
+      </div>
+      <div id="target-weights-wrap"></div>
+      <div class="tw-sumbar">目標合計：<span id="tw-sum" class="num">—</span></div>
+    </section>
+    <div class="save-bar"><span class="note">權重為比率（非金額），以 Decimal 4dp 儲存於伺服器；再平衡試算抽屜開啟時自動帶入</span><button class="btn btn-primary" id="target-weights-save" type="button">儲存目標配置</button></div>
 
     <!-- ===== 通知通道 (WP 3B) ===== -->
     <section class="panel">
