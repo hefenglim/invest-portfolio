@@ -418,7 +418,7 @@
           <div class="nt-card-head"><span class="nt-card-title">Telegram</span><button class="toggle" id="nt-tg-enabled" type="button" role="switch" title="啟用 / 停用 Telegram"></button></div>
           <div class="form-grid">
             <div class="field span-2"><label for="nt-tg-token">Bot Token</label><input class="input" id="nt-tg-token" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">向 @BotFather 建立 bot 取得；以遮罩顯示。</span></div>
-            <div class="field span-2"><label for="nt-tg-chat">Chat ID</label><input class="input" id="nt-tg-chat" spellcheck="false" placeholder="例如 123456789"></input></div>
+            <div class="field span-2"><label for="nt-tg-chat">Chat ID</label><input class="input" id="nt-tg-chat" spellcheck="false" placeholder="例如 123456789"></input><span class="hint">需先在 Telegram 對你的 bot 傳送 /start（bot 不能主動發起對話）；chat_id 為數字，私訊 @userinfobot 可查，群組 id 為負數。「chat not found」= 尚未 /start 或 chat_id 錯誤。</span></div>
           </div>
           <div class="nt-card-foot"><button class="btn" id="nt-tg-test" type="button">傳送測試訊息</button><button class="btn btn-primary" id="nt-tg-save" type="button">儲存</button></div>
         </div>

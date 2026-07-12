@@ -217,10 +217,30 @@
     }
   }
 
-  /* toggles flip their own 'on' class (same convention as settings-alerts.js). */
-  ['nt-ntfy-enabled', 'nt-tg-enabled', 'nt-em-enabled', 'nt-qh-enabled'].forEach((id) => {
+  /* Toggles AUTO-SAVE on click (2026-07-12 field report: a class-flip-only toggle
+     looked enabled/disabled but never persisted until 儲存 — "can't turn it off").
+     Optimistic flip → minimal PUT {channel:{enabled}} → revert + toast on failure. */
+  const TOGGLE_KEY = {
+    'nt-ntfy-enabled': 'ntfy',
+    'nt-tg-enabled': 'telegram',
+    'nt-em-enabled': 'email',
+    'nt-qh-enabled': 'quiet_hours',
+  };
+  Object.keys(TOGGLE_KEY).forEach((id) => {
     const n = $(id);
-    if (n) n.addEventListener('click', () => n.classList.toggle('on'));
+    if (!n) return;
+    n.addEventListener('click', async () => {
+      if (GUEST) return;
+      const next = !n.classList.contains('on');
+      n.classList.toggle('on', next); // optimistic; fill() from the PUT echo confirms
+      try {
+        await put({ [TOGGLE_KEY[id]]: { enabled: next } });
+        _toast(next ? '已啟用' : '已停用', 'ok');
+      } catch (err) {
+        n.classList.toggle('on', !next); // revert — the server state did not change
+        _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
+      }
+    });
   });
 
   const wire = (id, fn) => { const n = $(id); if (n) n.addEventListener('click', fn); };
