@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.13"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.13"></link>
-<link rel="stylesheet" href="input.css?v=0.1.13"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.14"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.14"></link>
+<link rel="stylesheet" href="input.css?v=0.1.14"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   /* settings tab bar */
@@ -396,6 +396,63 @@
       <div id="alert-rules-wrap"></div>
     </section>
     <div class="save-bar"><span class="note">規則門檻儲存於本機，後端 strategy/ 模組接線後改存伺服器設定</span><button class="btn" id="alert-rules-reset" type="button">還原預設值</button><button class="btn btn-primary" id="alert-rules-save" type="button">儲存規則</button></div>
+
+    <!-- ===== 通知通道 (WP 3B) ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">通知通道</h2>
+        <span class="panel-sub">警示事件掃描後自動推播到所有啟用通道・單一通道故障不影響其他通道・金鑰遮罩儲存，不進 git／日誌</span>
+      </div>
+      <div class="nt-cards">
+        <div class="nt-card">
+          <div class="nt-card-head"><span class="nt-card-title">ntfy</span><button class="toggle" id="nt-ntfy-enabled" type="button" role="switch" title="啟用 / 停用 ntfy"></button></div>
+          <div class="form-grid">
+            <div class="field span-2"><label for="nt-ntfy-server">伺服器</label><input class="input" id="nt-ntfy-server" spellcheck="false" placeholder="https://ntfy.sh"></input></div>
+            <div class="field span-2"><label for="nt-ntfy-topic">主題（＝密碼）</label><div class="input-row"><input class="input" id="nt-ntfy-topic" spellcheck="false" readonly="readonly"></input><button class="btn" id="nt-ntfy-topic-copy" type="button">複製</button></div><span class="hint">主題名即密碼，請勿外流；手機 ntfy app 訂閱此主題即可收到推播。</span></div>
+            <div class="field span-2"><label for="nt-ntfy-token">存取權杖（選填）</label><input class="input" id="nt-ntfy-token" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">僅受保護主題需要；以遮罩顯示。</span></div>
+          </div>
+          <div class="nt-card-foot"><button class="btn" id="nt-ntfy-test" type="button">傳送測試訊息</button><button class="btn btn-primary" id="nt-ntfy-save" type="button">儲存</button></div>
+        </div>
+
+        <div class="nt-card">
+          <div class="nt-card-head"><span class="nt-card-title">Telegram</span><button class="toggle" id="nt-tg-enabled" type="button" role="switch" title="啟用 / 停用 Telegram"></button></div>
+          <div class="form-grid">
+            <div class="field span-2"><label for="nt-tg-token">Bot Token</label><input class="input" id="nt-tg-token" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">向 @BotFather 建立 bot 取得；以遮罩顯示。</span></div>
+            <div class="field span-2"><label for="nt-tg-chat">Chat ID</label><input class="input" id="nt-tg-chat" spellcheck="false" placeholder="例如 123456789"></input></div>
+          </div>
+          <div class="nt-card-foot"><button class="btn" id="nt-tg-test" type="button">傳送測試訊息</button><button class="btn btn-primary" id="nt-tg-save" type="button">儲存</button></div>
+        </div>
+
+        <div class="nt-card">
+          <div class="nt-card-head"><span class="nt-card-title">Email</span><button class="toggle" id="nt-em-enabled" type="button" role="switch" title="啟用 / 停用 Email"></button></div>
+          <div class="form-grid">
+            <div class="field"><label for="nt-em-host">SMTP 主機</label><input class="input" id="nt-em-host" spellcheck="false" placeholder="smtp.example.com"></input></div>
+            <div class="field"><label for="nt-em-port">連接埠</label><input class="input" id="nt-em-port" type="number" min="1" max="65535" placeholder="587"></input></div>
+            <div class="field"><label for="nt-em-tls">加密</label><select class="select" id="nt-em-tls"><option value="starttls">STARTTLS</option><option value="ssl">SSL</option><option value="none">無</option></select></div>
+            <div class="field"><label for="nt-em-user">帳號</label><input class="input" id="nt-em-user" spellcheck="false" autocomplete="off"></input></div>
+            <div class="field span-2"><label for="nt-em-pass">密碼</label><input class="input" id="nt-em-pass" type="password" autocomplete="new-password" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">以遮罩顯示；建議使用應用程式密碼。</span></div>
+            <div class="field"><label for="nt-em-from">寄件者</label><input class="input" id="nt-em-from" spellcheck="false" placeholder="alerts@example.com"></input></div>
+            <div class="field"><label for="nt-em-to">收件者</label><input class="input" id="nt-em-to" spellcheck="false" placeholder="me@example.com"></input></div>
+          </div>
+          <div class="nt-card-foot"><button class="btn" id="nt-em-test" type="button">傳送測試訊息</button><button class="btn btn-primary" id="nt-em-save" type="button">儲存</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 靜音時段 + 規則訂閱 (WP 3B) ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">靜音時段與規則訂閱</h2>
+        <span class="panel-sub">靜音時段內暫存、時段外下次掃描補發（台北時間）・訂閱決定哪些警示要推播（含訊號類）</span>
+      </div>
+      <div class="nt-quiet">
+        <div class="field"><label for="nt-qh-enabled">啟用靜音時段</label><button class="toggle" id="nt-qh-enabled" type="button" role="switch"></button></div>
+        <div class="field"><label for="nt-qh-start">起</label><input class="input" id="nt-qh-start" type="time" value="22:00"></input></div>
+        <div class="field"><label for="nt-qh-end">迄</label><input class="input" id="nt-qh-end" type="time" value="08:00"></input></div>
+      </div>
+      <div class="nt-subs" id="nt-subs"></div>
+      <div class="save-bar"><span class="note">變更於下次警示掃描生效</span><button class="btn btn-primary" id="nt-prefs-save" type="button">儲存靜音與訂閱</button></div>
+    </section>
   </div>
 
   <!-- ===== 匯出中心 (E7) ===== -->
@@ -438,21 +495,22 @@
   </div>
 </div>
 
-<script src="api.js?v=0.1.13"></script>
-<script src="shell.js?v=0.1.13"></script>
-<script src="format.js?v=0.1.13"></script>
-<script src="pager.js?v=0.1.13"></script>
-<script src="export.js?v=0.1.13"></script>
-<script src="alerts.js?v=0.1.13"></script>
-<script src="vars.js?v=0.1.13"></script>
-<script src="settings-llm.js?v=0.1.13"></script>
-<script src="settings-prompts.js?v=0.1.13"></script>
-<script src="settings-scheduler.js?v=0.1.13"></script>
-<script src="settings-datasources.js?v=0.1.13"></script>
-<script src="settings-alerts.js?v=0.1.13"></script>
-<script src="settings-users.js?v=0.1.13"></script>
-<script src="settings-dbstats.js?v=0.1.13"></script>
-<script src="settings-prefs.js?v=0.1.13"></script>
+<script src="api.js?v=0.1.14"></script>
+<script src="shell.js?v=0.1.14"></script>
+<script src="format.js?v=0.1.14"></script>
+<script src="pager.js?v=0.1.14"></script>
+<script src="export.js?v=0.1.14"></script>
+<script src="alerts.js?v=0.1.14"></script>
+<script src="vars.js?v=0.1.14"></script>
+<script src="settings-llm.js?v=0.1.14"></script>
+<script src="settings-prompts.js?v=0.1.14"></script>
+<script src="settings-scheduler.js?v=0.1.14"></script>
+<script src="settings-datasources.js?v=0.1.14"></script>
+<script src="settings-alerts.js?v=0.1.14"></script>
+<script src="settings-notify.js?v=0.1.14"></script>
+<script src="settings-users.js?v=0.1.14"></script>
+<script src="settings-dbstats.js?v=0.1.14"></script>
+<script src="settings-prefs.js?v=0.1.14"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs） */
 (function () {

@@ -50,6 +50,51 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.14] - 2026-07-12
+
+Blueprint Phase 3 batch 1: multi-channel push notifications — alerts and rule-signal
+transition events finally reach the owner's phone. Security-audited (independent ★
+deep review: secret handling probed clean across every exception path).
+
+### Added
+- **`ops/notify.py` leaf module** with three channels (owner decision D1, 2026-07-12
+  — all verified free): **ntfy** (JSON publish endpoint, default https://ntfy.sh,
+  auto-generated long random topic — the topic IS the read secret; `allow_redirects`
+  disabled, 3xx = failure), **Telegram** (bot sendMessage, PLAIN text — no
+  parse_mode, no Markdown-injection surface), **Email** (stdlib smtplib, zero new
+  dependencies; STARTTLS/SSL/none). **Multi-channel fan-out:** every enabled channel
+  receives each message; a failing channel is isolated (logged, never blocks the
+  others or the scheduler). Timeouts on every call; every channel wraps errors
+  through a redactor so tokens/passwords can never reach logs, run details, or API
+  responses (probe-verified incl. requests exceptions that embed the token URL).
+- **Dispatch pipeline:** `alert_events` gains `notified_at` + `notify_attempts`
+  (additive migration; independent of the on_alert `consumed` path). The alert_scan
+  tail pushes undispatched events (covers signal_scan's 14:55 events): subscription
+  filter → quiet hours (Asia/Taipei, midnight-wrap aware; hold-then-release;
+  malformed config fails OPEN — an alert system must not silently suppress) →
+  zh-TW message (rule label + symbol, no amounts) → **atomic claim** per event
+  (closes the cron-vs-manual double-send race) → fan-out → all-channels-fail
+  releases the claim and bumps `notify_attempts`, giving up at 3 so a permanently
+  broken channel can never starve newer alerts; cap 10 events/run (no
+  post-outage flood). Idempotent: claimed events never resend.
+- **Settings UI (canonical settings → 預警規則 tab):** 通知通道 section — three
+  channel cards (enable / fields / save / 傳送測試訊息), quiet hours, per-rule
+  subscriptions incl. the `signal_*` events (default all on). Secrets masked on
+  read, placeholder-preserving on write (LLM-key convention); ntfy topic shown
+  with a copy affordance and a "topic = password" hint.
+- **API:** `GET/PUT /api/notify/config`, `POST /api/notify/test` (per-channel test
+  send). **Guest-mode lockdown (security review):** on a guest instance (public
+  demo) PUT/test return 403 and GET masks the ntfy topic — notification channels
+  are configured on the protected production site only. PUT validates: no userinfo
+  in the ntfy server URL, http(s) scheme only, strict SMTP host shape, 400 on junk.
+
+### Fixed
+- **Legacy-DB boot crash caught by the deploy gate:** the `notified_at` index lived
+  inside the initial DDL script and ran before the column migration on live DBs
+  whose `alert_events` predates the column — the demo instance crash-looped at
+  startup. The index is now created after `_add_column_if_missing`, with a
+  legacy-schema regression test (a fresh-DB suite cannot see this ordering class).
+
 ## [v0.1.13] - 2026-07-11
 
 Blueprint P2 "technical-rules engine" release: local, stateful, auditable rule

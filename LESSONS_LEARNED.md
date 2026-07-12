@@ -23,6 +23,17 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **An index on a migrated column must be created AFTER the migration — and schema
+  changes need a legacy-shape test, not just fresh-DB fixtures (2026-07-12):** adding
+  `notified_at` to `alert_events` put the CREATE INDEX inside the initial DDL script,
+  which runs before `_add_column_if_missing`. Every fresh-DB test passed (table
+  created WITH the column → index fine), but the live demo DB had the pre-notify
+  table shape → `no such column` → the app crash-looped at boot. The deploy gate
+  (install + boot + /api/health) caught it — exactly its job. Rule: any DDL that
+  references a column added by an additive migration must be ordered after that
+  migration, and every schema change gets a regression test that seeds the LEGACY
+  table shape first, then calls ensure_tables.
+
 - **Transition detection over a dead-banded state needs HOLD memory, or the event is
   unreachable (2026-07-10):** the momentum reversal event compared consecutive raw
   states, but a 12-1 return on 252 sessions moves in small daily steps, so every real

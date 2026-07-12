@@ -42,6 +42,7 @@ from portfolio_dash.api.routers import (
     ledgers,
     llm_settings,
     news,
+    notify,
     prompts,
     scheduler,
     signals,
@@ -62,6 +63,7 @@ from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.news.organizer_prompt import ensure_news_prompt_seeded
+from portfolio_dash.ops import notify as notify_ops
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
@@ -138,6 +140,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_alert_events_tables(conn)  # alert_events + dispatch log (spec 04b R7)
         ensure_evaluations_tables(conn)  # insight_evaluations table (spec 04c)
         ensure_signal_states_table(conn)  # signal_states derived cache (P2 batch 2)
+        notify_ops.ensure_seeded(conn)  # notify_config single-row + one-time topic (WP 3B)
     # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
     # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
     register_insight_runner(insight_run_for_id)
@@ -231,6 +234,7 @@ def create_app() -> FastAPI:
     app.include_router(prompts.router, prefix="/api")
     app.include_router(news.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
+    app.include_router(notify.router, prefix="/api")
     if _WEB_DIR.is_dir():
         app.mount("/", _NoCacheStaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app

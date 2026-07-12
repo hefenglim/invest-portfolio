@@ -1,0 +1,95 @@
+<title>Phase 3 智能監控・批次1 mini-spec（30 秒版）</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #1f7a6d; --accent-soft: #e4f2ef;
+    --ok: #2f7a4f; --warn: #b0812f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #101514; --card: #18201e; --ink: #e4efec; --ink-2: #93aca6;
+            --line: #2e423d; --accent: #52b3a4; --accent-soft: #1c2f2b;
+            --ok: #58b380; --warn: #d4a94e; }
+  }
+  :root[data-theme="dark"] { --paper: #101514; --card: #18201e; --ink: #e4efec;
+    --ink-2: #93aca6; --line: #2e423d; --accent: #52b3a4; --accent-soft: #1c2f2b;
+    --ok: #58b380; --warn: #d4a94e; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #1f7a6d; --accent-soft: #e4f2ef;
+    --ok: #2f7a4f; --warn: #b0812f; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 20px 16px 56px; color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    font-size: 17px; line-height: 1.75; }
+  .wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .18em; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 25px; line-height: 1.35; margin: 4px 0 0; text-wrap: balance; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 16px 18px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 999px; flex: none;
+    width: 22px; height: 22px; font-size: 13px; display: inline-flex;
+    align-items: center; justify-content: center; }
+  p { margin: 8px 0; }
+  .dim { color: var(--ink-2); font-size: 14.5px; }
+  ul.tight { margin: 8px 0 0; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .keep li::marker { content: "✓ "; color: var(--ok); }
+  .skip li::marker { content: "✕ "; color: var(--warn); }
+  .sig { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px; }
+  .sigrow { border: 1.5px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    background: var(--paper); font-size: 14.5px; line-height: 1.55; }
+  .sigrow b { color: var(--accent); }
+  .cta { border-left: 4px solid var(--accent); padding: 10px 14px; background: var(--accent-soft);
+    border-radius: 6px; font-size: 15.5px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">MINI-SPEC・審查版・Phase 3 批次1（WP 3B）</div>
+    <h1>推播通知：三通道同步發送,警示真正到手機</h1>
+    <p class="lede">已按指令開工（Opus 4.8 xHigh，完工後 ★ 安全深審）。30 秒讀完。</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span>為什麼做＋費用定案</h2>
+    <p>目前警示是<b>純拉式</b>——不開網頁就看不到。「適時主動提示」是願景 P1 支柱的核心缺口。費用查證(owner 2026-07-12 定案):<b>ntfy.sh 免費層完全免費</b>(我們的量遠低於上限)、Telegram bot 免費、Email 用現有信箱免費 → <b>三通道全做</b>,多通道啟用時同步發送。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>做四件事</h2>
+    <div class="sig">
+      <div class="sigrow"><b>① <code>ops/notify.py</code> 葉子模組</b>:通道協定＋三實作——<b>ntfy</b>(HTTP POST 到伺服器/主題,預設 ntfy.sh,主題預設<b>長隨機字串</b>=密碼)、<b>Telegram</b>(bot token+chat_id)、<b>Email</b>(stdlib smtplib,零新依賴)。<code>send()</code> 對<b>所有啟用通道</b>扇出;單一通道失敗只記錄、不影響其他通道、永不炸排程。</div>
+      <div class="sigrow"><b>② 設定 UI(canonical settings 分頁的警示區)</b>:「通知通道」節——三張通道卡,各自 啟用開關＋欄位＋儲存＋<b>傳送測試訊息</b>按鈕;金鑰入庫遮罩顯示(比照 LLM key);另有 靜音時段(起迄時分,靜音中暫存、時段外下次掃描補發)與 規則訂閱(哪些警示類型要推,含 signal_* 訊號事件,預設風險類全開、訊號類全開)。</div>
+      <div class="sigrow"><b>③ 派送接線</b>:alert_scan 之後跑派送步——收集<b>未派送</b>事件(新欄位標記,與 on_alert 卡片的 consumed 互不干擾)→ 訂閱過濾 → 靜音檢查 → zh-TW 訊息格式化(規則中文名+標的+一句摘要,不含帳戶金額明細)→ 扇出 → 標記已派送。每事件每通道最多發一次(冪等)。</div>
+      <div class="sigrow"><b>④ 測試端點</b>:<code>POST /api/notify/test</code>(指定通道發測試訊息,需登入);demo 驗證用 ntfy 隨機測試主題,我會用 curl 訂閱串流確認端到端真的送達。</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>驗收（退出條件）</h2>
+    <ul class="tight keep">
+      <li>demo:設定頁三通道卡可存可測;ntfy 測試訊息<b>實際送達</b>(curl 訂閱驗證)</li>
+      <li>警示事件掃描後自動推播到所有啟用通道;重掃不重發(冪等)</li>
+      <li>靜音時段內不發、時段結束後補發;退訂(停用)即停</li>
+      <li>金鑰遮罩、不進 git、不進日誌;單通道故障不影響其他通道與排程</li>
+      <li>全閘門綠 → <b>★ 安全深審</b>(秘密處理/出站請求/注入面)</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>不做什麼（後續批次）</h2>
+    <ul class="tight skip">
+      <li>警示分類法 v2(高點回撤/波動突升/再平衡帶)→ 批次 2(再平衡帶需要你裁 D8 目標權重)</li>
+      <li>每日收盤摘要＋週行動清單 → 批次 3</li>
+      <li>LINE/Discord 等更多通道 → 通道協定已留接縫,有需求再加</li>
+    </ul>
+  </section>
+
+  <section class="cta">
+    <b>執行中</b>:新分支 <code>feat/p3-monitoring</code>(main 已是 v0.1.13)。Telegram/Email 的 token 由你日後在站上自行輸入(永不進 git/對話)。
+  </section>
+
+</div>

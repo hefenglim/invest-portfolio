@@ -48,7 +48,9 @@ CREATE TABLE IF NOT EXISTS alert_events (
     rule_id TEXT NOT NULL,
     symbol TEXT,
     fired_at TEXT NOT NULL,
-    consumed INTEGER NOT NULL DEFAULT 0
+    consumed INTEGER NOT NULL DEFAULT 0,
+    notified_at TEXT,
+    notify_attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS alert_dispatch_log (
     debounce_key TEXT NOT NULL,
@@ -59,9 +61,32 @@ CREATE INDEX IF NOT EXISTS idx_alert_dispatch_key ON alert_dispatch_log (debounc
 """
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, column: str, decl: str) -> None:
+    """Additively add ``alert_events.column`` on legacy DBs (idempotent PRAGMA guard)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(alert_events)")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE alert_events ADD COLUMN {column} {decl}")
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
-    """Create the alert_events + dispatch-log tables idempotently."""
+    """Create the alert_events + dispatch-log tables idempotently.
+
+    ``notified_at`` (WP 3B push dispatch) is a SEPARATE marker from ``consumed`` (the
+    on_alert AI-card dispatch): the two dispatch paths track the same events independently.
+    ``notify_attempts`` (security review F2) counts failed push-dispatch attempts so a
+    permanently-failing head-of-queue can never starve newer events (the dispatcher gives
+    up at 3). Both added additively for legacy DBs that predate the columns.
+    """
     conn.executescript(_DDL)
+    _add_column_if_missing(conn, "notified_at", "TEXT")
+    _add_column_if_missing(conn, "notify_attempts", "INTEGER NOT NULL DEFAULT 0")
+    # The notified_at index MUST come after the column migration: on a legacy DB the
+    # table already exists WITHOUT the column, so an index statement inside _DDL runs
+    # before the ALTER and crashes boot (caught by the deploy gate 2026-07-12 — a
+    # fresh-DB test suite cannot see this ordering class).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alert_events_notified ON alert_events (notified_at)"
+    )
     conn.commit()
 
 

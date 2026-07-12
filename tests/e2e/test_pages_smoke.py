@@ -1074,6 +1074,62 @@ def test_settings_alert_rules_editor_wired(
 
 
 @pytest.mark.e2e
+def test_settings_notify_channels_render(
+    live_server: str, browser_page: Page
+) -> None:
+    """通知通道 section on the alerts tab boots from GET /api/notify/config (WP 3B).
+
+    settings-notify.js fetches GET /api/notify/config and renders the three channel cards,
+    the quiet-hours inputs, and one subscription checkbox per rule (from the wire's
+    rule_catalog). The live_server golden DB is GUEST mode (no auth users — the public
+    demo), so since the F1 lockdown the wire carries topic_masked/topic_set instead of the
+    full topic and the page must render the honest demo state: masked topic in the input,
+    the #nt-demo-note notice, and every control disabled. Navigate /settings.html#alerts,
+    wait for the rendered subscription rows, then assert the guest state + ZERO console +
+    ZERO page errors over the async boot (an unhandled fetch rejection would fail it).
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings.html#alerts", wait_until="load")
+        # Subscription checkboxes mount only after GET /api/notify/config resolves.
+        # Waiting on the RENDERED result (not the response event) avoids racing the late
+        # fetch in the long settings script chain.
+        page.wait_for_selector("#nt-subs .nt-sub", state="attached")
+        rows = page.query_selector_all("#nt-subs .nt-sub")
+        assert len(rows) >= 8, f"expected >=8 subscription rows, got {len(rows)}"
+        # Guest demo state (F1): topic MASKED (never the full read secret), the honest
+        # lockdown notice mounted, and the write controls disabled.
+        topic = page.input_value("#nt-ntfy-topic")
+        assert "•••" in topic, f"guest topic must be masked: {topic!r}"
+        page.wait_for_selector("#nt-demo-note", state="attached")
+        for control in ("#nt-ntfy-save", "#nt-ntfy-test", "#nt-prefs-save"):
+            node = page.query_selector(control)
+            assert node is not None and node.is_disabled(), f"{control} must be disabled"
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings.html#alerts (notify channels): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_insights_page_smoke(live_server: str, browser_page: Page) -> None:
     """/insights.html boots from GET /api/insights + GET /api/ai-score (spec 19, Task 2.8).
 
