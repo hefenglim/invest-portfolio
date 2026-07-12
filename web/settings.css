@@ -566,6 +566,13 @@ table.data td.log-msg {
 .nt-sub-sev.sev-risk { background: var(--danger, #d9534f); }
 .nt-sub-sev.sev-warn { background: var(--warn, #d1a54a); }
 .nt-sub-sev.sev-info { background: var(--accent); }
+/* guest/demo lockdown notice (security review F1): injected by settings-notify.js */
+.nt-demo-note {
+  margin: 10px var(--pad) 0; padding: 8px 12px; font-size: 12.5px;
+  color: var(--warn, #d1a54a); border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--warn, #d1a54a); border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
 
 @media (max-width: 1000px) {
   .nt-cards { grid-template-columns: 1fr; }

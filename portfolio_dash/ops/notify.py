@@ -134,9 +134,15 @@ class NtfyChannel:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         try:
+            # allow_redirects=False (security review F1): the server URL is user config,
+            # so a redirect could re-aim the POST (topic + token) at an arbitrary host.
+            # Never follow; a 3xx is a hard failure (raise_for_status passes 3xx).
             resp = self._transport.post(
-                self.server.rstrip("/"), json=payload, headers=headers, timeout=self.timeout
+                self.server.rstrip("/"), json=payload, headers=headers,
+                timeout=self.timeout, allow_redirects=False,
             )
+            if 300 <= int(resp.status_code) < 400:
+                raise NotifyError(f"unexpected redirect (HTTP {resp.status_code})")
             resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001 - normalize to a redacted NotifyError
             raise NotifyError(_redact(str(exc), self.token, self.topic)) from None

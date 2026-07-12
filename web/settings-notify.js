@@ -5,11 +5,17 @@
    MASKED (token_masked / bot_token_masked / password_masked) with a *_set flag; the
    masked string is pre-filled into the secret input so an unchanged save round-trips the
    mask -> the backend keeps the existing value (placeholder-preserving, mirrors the LLM
-   key convention). The ntfy TOPIC is shown in full (it is the read secret you copy to the
-   phone). All writes go through pdApi; success -> toast + re-fetch; PdApiError ->
-   toast(message,'fail',code); every handler is try/caught so a failure never throws an
-   unhandled rejection. Per-node wiring is guarded (if (node) ...) so a missing element on
-   a partially-rendered page is a no-op, not a crash. */
+   key convention). In PROTECTED mode the ntfy TOPIC is shown in full (it is the read
+   secret you copy to the phone). All writes go through pdApi; success -> toast +
+   re-fetch; PdApiError -> toast(message,'fail',code); every handler is try/caught so a
+   failure never throws an unhandled rejection. Per-node wiring is guarded (if (node) ...)
+   so a missing element on a partially-rendered page is a no-op, not a crash.
+
+   GUEST (demo) mode — security review F1: the backend locks notify writes down
+   (PUT/test -> 403) and the GET wire carries topic_masked/topic_set INSTEAD of the full
+   topic. This page detects that wire shape and renders an honest read-only state: every
+   control disabled, a 示範站不開放通知設定 notice, and the masked topic in the topic
+   field. A 403 from a save/test (defense in depth) toasts the same honest message. */
 (function () {
   'use strict';
   const api = window.pdApi;
@@ -33,13 +39,49 @@
   function setSecret(id, masked, isSet) { setVal(id, isSet ? (masked || '•••') : ''); }
 
   let CATALOG = [];  // [{id,label,severity}] from the backend (subscription checkboxes)
+  let GUEST = false; // demo lockdown: backend sent topic_masked instead of topic (F1)
+
+  const GUEST_MSG = '示範站不開放通知設定，請於正式站（受保護模式）設定';
+
+  /* Every interactive control of the two notify sections — disabled wholesale in the
+     guest demo state so the UI never invites a write the backend will 403. */
+  const CONTROL_IDS = [
+    'nt-ntfy-enabled', 'nt-ntfy-server', 'nt-ntfy-topic', 'nt-ntfy-topic-copy',
+    'nt-ntfy-token', 'nt-ntfy-test', 'nt-ntfy-save',
+    'nt-tg-enabled', 'nt-tg-token', 'nt-tg-chat', 'nt-tg-test', 'nt-tg-save',
+    'nt-em-enabled', 'nt-em-host', 'nt-em-port', 'nt-em-tls', 'nt-em-user',
+    'nt-em-pass', 'nt-em-from', 'nt-em-to', 'nt-em-test', 'nt-em-save',
+    'nt-qh-enabled', 'nt-qh-start', 'nt-qh-end', 'nt-prefs-save',
+  ];
+
+  function applyGuestState() {
+    if (!GUEST) return;
+    CONTROL_IDS.forEach((id) => { const n = $(id); if (n) n.disabled = true; });
+    document.querySelectorAll('#nt-subs input[type="checkbox"]').forEach((cb) => {
+      cb.disabled = true;
+    });
+    if (!$('nt-demo-note')) {
+      const anchor = $('nt-ntfy-server');
+      const section = anchor && anchor.closest('section');
+      if (section) {
+        const note = el('div', 'nt-demo-note', GUEST_MSG + '。');
+        note.id = 'nt-demo-note';
+        const head = section.querySelector('.panel-head');
+        if (head && head.nextSibling) section.insertBefore(note, head.nextSibling);
+        else section.insertBefore(note, section.firstChild);
+      }
+    }
+  }
 
   function fill(cfg) {
     if (!cfg) return;
     const n = cfg.ntfy || {}, t = cfg.telegram || {}, e = cfg.email || {}, q = cfg.quiet_hours || {};
+    /* Guest wire shape: no full topic — only topic_masked/topic_set (read secret). */
+    GUEST = !('topic' in n) && (('topic_set' in n) || ('topic_masked' in n));
     setToggle('nt-ntfy-enabled', n.enabled);
     setVal('nt-ntfy-server', n.server);
-    setVal('nt-ntfy-topic', n.topic);
+    if (GUEST) setVal('nt-ntfy-topic', n.topic_set ? (n.topic_masked || '•••') : '');
+    else setVal('nt-ntfy-topic', n.topic);
     setSecret('nt-ntfy-token', n.token_masked, n.token_set);
 
     setToggle('nt-tg-enabled', t.enabled);
@@ -61,6 +103,7 @@
 
     CATALOG = cfg.rule_catalog || [];
     renderSubs(cfg.subscriptions || {});
+    applyGuestState();
   }
 
   function renderSubs(subs) {
@@ -138,10 +181,16 @@
     });
   }
 
+  /* 403 = the guest-mode lockdown (F1): show the honest demo message, not a raw error. */
+  function _writeErrToast(err) {
+    if (err && err.status === 403) _toast(GUEST_MSG, 'fail', 'forbidden');
+    else _toast(err.message, 'fail', err.code);
+  }
+
   async function doSave(fn, okMsg) {
     if (!api) return;
     try { await fn(); _toast(okMsg, 'ok'); }
-    catch (err) { _toast(err.message, 'fail', err.code); }
+    catch (err) { _writeErrToast(err); }
   }
 
   async function doTest(channel) {
@@ -151,7 +200,7 @@
       if (res && res.ok) _toast('測試訊息已送出', 'ok', res.detail);
       else _toast('測試失敗', 'fail', (res && res.detail) || '');
     } catch (err) {
-      _toast(err.message, 'fail', err.code);
+      _writeErrToast(err);
     }
   }
 

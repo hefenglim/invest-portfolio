@@ -1081,10 +1081,11 @@ def test_settings_notify_channels_render(
 
     settings-notify.js fetches GET /api/notify/config and renders the three channel cards,
     the quiet-hours inputs, and one subscription checkbox per rule (from the wire's
-    rule_catalog). The golden DB lazily seeds notify_config on first read (a one-time random
-    ntfy topic), so the topic input fills and #nt-subs mounts a checkbox per rule. Navigate
-    /settings.html#alerts (the notify section lives under the 預警規則 tab), wait for the
-    /api/notify/config response + the rendered subscription rows, then assert ZERO console +
+    rule_catalog). The live_server golden DB is GUEST mode (no auth users — the public
+    demo), so since the F1 lockdown the wire carries topic_masked/topic_set instead of the
+    full topic and the page must render the honest demo state: masked topic in the input,
+    the #nt-demo-note notice, and every control disabled. Navigate /settings.html#alerts,
+    wait for the rendered subscription rows, then assert the guest state + ZERO console +
     ZERO page errors over the async boot (an unhandled fetch rejection would fail it).
     """
     page = browser_page
@@ -1104,14 +1105,20 @@ def test_settings_notify_channels_render(
     page.on("pageerror", _on_pageerror)
     try:
         page.goto(live_server + "/settings.html#alerts", wait_until="load")
-        # Subscription checkboxes mount only after GET /api/notify/config resolves; the topic
-        # input fills with the seeded pd-... topic. Waiting on the RENDERED result (not the
-        # response event) avoids racing the late fetch in the long settings script chain.
+        # Subscription checkboxes mount only after GET /api/notify/config resolves.
+        # Waiting on the RENDERED result (not the response event) avoids racing the late
+        # fetch in the long settings script chain.
         page.wait_for_selector("#nt-subs .nt-sub", state="attached")
         rows = page.query_selector_all("#nt-subs .nt-sub")
         assert len(rows) >= 8, f"expected >=8 subscription rows, got {len(rows)}"
+        # Guest demo state (F1): topic MASKED (never the full read secret), the honest
+        # lockdown notice mounted, and the write controls disabled.
         topic = page.input_value("#nt-ntfy-topic")
-        assert topic.startswith("pd-"), f"ntfy topic did not fill: {topic!r}"
+        assert "•••" in topic, f"guest topic must be masked: {topic!r}"
+        page.wait_for_selector("#nt-demo-note", state="attached")
+        for control in ("#nt-ntfy-save", "#nt-ntfy-test", "#nt-prefs-save"):
+            node = page.query_selector(control)
+            assert node is not None and node.is_disabled(), f"{control} must be disabled"
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)

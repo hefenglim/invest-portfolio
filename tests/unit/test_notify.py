@@ -7,6 +7,7 @@ quiet-hours (incl. midnight wrap), the config defaults (one-time random topic pe
 once), and a catalog-drift guard against the backend rule ids.
 """
 
+import smtplib
 import sqlite3
 from datetime import datetime
 from typing import Any
@@ -23,11 +24,11 @@ TAIPEI = ZoneInfo("Asia/Taipei")
 
 class _Resp:
     def __init__(self, status: int = 200) -> None:
-        self._status = status
+        self.status_code = status
 
     def raise_for_status(self) -> None:
-        if self._status >= 400:
-            raise RuntimeError(f"HTTP {self._status}")
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 class _Transport:
@@ -39,9 +40,18 @@ class _Transport:
         self._exc = exc
 
     def post(
-        self, url: str, *, json: Any = None, headers: Any = None, timeout: Any = None
+        self,
+        url: str,
+        *,
+        json: Any = None,
+        headers: Any = None,
+        timeout: Any = None,
+        allow_redirects: Any = "unset",
     ) -> _Resp:
-        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        self.calls.append({
+            "url": url, "json": json, "headers": headers, "timeout": timeout,
+            "allow_redirects": allow_redirects,
+        })
         if self._exc is not None:
             raise self._exc
         return self._resp
@@ -76,6 +86,46 @@ def test_ntfy_no_token_no_auth_header() -> None:
     t = _Transport()
     notify.NtfyChannel("https://ntfy.sh", "pd-x", transport=t).send("t", "b", "info", None)
     assert "Authorization" not in t.calls[0]["headers"]
+
+
+def test_ntfy_error_redacts_token_and_topic() -> None:
+    # Mirrors the Telegram redaction test (security review F3.1): BOTH ntfy secrets —
+    # the bearer token AND the topic (the read secret) — must never reach the message.
+    token = "tok-SECRETVALUE-123"
+    topic = "pd-topicsecret456"
+    exc = RuntimeError(f"401 for https://evil/{topic} with Authorization: Bearer {token}")
+    ch = notify.NtfyChannel("https://ntfy.sh", topic, token=token, transport=_Transport(exc=exc))
+    with pytest.raises(notify.NotifyError) as ei:
+        ch.send("t", "b", "info", None)
+    assert token not in str(ei.value)
+    assert topic not in str(ei.value)
+    assert "***" in str(ei.value)
+
+
+def test_ntfy_never_follows_redirects() -> None:
+    # F1.3: the server URL is user config; a redirect could re-aim topic+token.
+    t = _Transport()
+    notify.NtfyChannel("https://ntfy.sh", "pd-x", transport=t).send("t", "b", "info", None)
+    assert t.calls[0]["allow_redirects"] is False
+
+
+def test_ntfy_3xx_is_a_failure() -> None:
+    t = _Transport(resp=_Resp(status=302))
+    ch = notify.NtfyChannel("https://ntfy.sh", "pd-x", transport=t)
+    with pytest.raises(notify.NotifyError) as ei:
+        ch.send("t", "b", "info", None)
+    assert "redirect" in str(ei.value)
+
+
+def test_ntfy_and_telegram_pass_a_timeout() -> None:
+    # F3.3: a hung provider must never hang the scheduler thread — every HTTP send
+    # carries a finite timeout.
+    t1 = _Transport()
+    notify.NtfyChannel("https://ntfy.sh", "pd-x", transport=t1).send("t", "b", "info", None)
+    assert t1.calls[0]["timeout"] is not None
+    t2 = _Transport()
+    notify.TelegramChannel("11:AAA", "9988", transport=t2).send("t", "b", "info", None)
+    assert t2.calls[0]["timeout"] is not None
 
 
 # --- telegram (token redaction) -----------------------------------------------
@@ -147,6 +197,32 @@ def test_email_error_redacts_password() -> None:
     with pytest.raises(notify.NotifyError) as ei:
         ch.send("t", "b", "info", None)
     assert "s3cr3t-pass" not in str(ei.value)
+
+
+@pytest.mark.parametrize("tls", ["none", "ssl"])
+def test_smtp_constructor_receives_timeout(
+    monkeypatch: pytest.MonkeyPatch, tls: str
+) -> None:
+    # F3.3: without an injected factory, the REAL smtplib constructor path must carry a
+    # finite timeout (a hung SMTP server must never hang the scheduler thread). Patching
+    # the stdlib module patches the SAME object ``ops.notify`` imported.
+    captured: dict[str, Any] = {}
+
+    class _CapturingSMTP(_FakeSMTP):
+        def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
+            super().__init__()
+            captured["host"] = host
+            captured["timeout"] = timeout
+
+    monkeypatch.setattr(smtplib, "SMTP", _CapturingSMTP)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", _CapturingSMTP)
+    ch = notify.EmailChannel(
+        host="smtp.x", port=465, tls=tls, username="", password="",
+        from_addr="a@x", to_addr="b@x",
+    )
+    ch.send("t", "b", "info", None)
+    assert captured["host"] == "smtp.x"
+    assert captured["timeout"] is not None
 
 
 # --- dispatch fan-out isolation ----------------------------------------------
