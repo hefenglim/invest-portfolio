@@ -36,6 +36,35 @@ def test_ensure_tables_creates_alert_events(conn: sqlite3.Connection) -> None:
     ab.ensure_tables(conn)  # idempotent
 
 
+def test_ensure_tables_migrates_legacy_schema_without_notify_columns() -> None:
+    # Deploy-gate regression (2026-07-12): a LIVE DB has alert_events created by the
+    # pre-notify schema (no notified_at/notify_attempts). ensure_tables must migrate
+    # it without crashing — the notified_at index must be created AFTER the column
+    # migration, never inside the initial DDL script. Fresh-DB fixtures cannot see
+    # this ordering class, so this test seeds the legacy shape explicitly.
+    c = sqlite3.connect(":memory:")
+    try:
+        c.execute(
+            "CREATE TABLE alert_events ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id TEXT NOT NULL,"
+            " symbol TEXT, fired_at TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)"
+        )
+        c.execute(
+            "INSERT INTO alert_events (rule_id, symbol, fired_at) VALUES ('fx_drift', 's', 'x')"
+        )
+        ab.ensure_tables(c)  # must not raise on the legacy shape
+        cols = {r[1] for r in c.execute("PRAGMA table_info(alert_events)")}
+        assert {"notified_at", "notify_attempts"} <= cols
+        indexes = {r[1] for r in c.execute("PRAGMA index_list(alert_events)")}
+        assert "idx_alert_events_notified" in indexes
+        row = c.execute(
+            "SELECT notified_at, notify_attempts FROM alert_events"
+        ).fetchone()
+        assert row == (None, 0)  # legacy row inherits honest defaults
+    finally:
+        c.close()
+
+
 # --- record + read events -----------------------------------------------------
 
 

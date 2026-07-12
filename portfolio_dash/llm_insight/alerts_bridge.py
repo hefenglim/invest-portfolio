@@ -57,7 +57,6 @@ CREATE TABLE IF NOT EXISTS alert_dispatch_log (
     dispatched_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_alert_events_consumed ON alert_events (consumed);
-CREATE INDEX IF NOT EXISTS idx_alert_events_notified ON alert_events (notified_at);
 CREATE INDEX IF NOT EXISTS idx_alert_dispatch_key ON alert_dispatch_log (debounce_key);
 """
 
@@ -81,6 +80,13 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
     _add_column_if_missing(conn, "notified_at", "TEXT")
     _add_column_if_missing(conn, "notify_attempts", "INTEGER NOT NULL DEFAULT 0")
+    # The notified_at index MUST come after the column migration: on a legacy DB the
+    # table already exists WITHOUT the column, so an index statement inside _DDL runs
+    # before the ALTER and crashes boot (caught by the deploy gate 2026-07-12 — a
+    # fresh-DB test suite cannot see this ordering class).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alert_events_notified ON alert_events (notified_at)"
+    )
     conn.commit()
 
 
