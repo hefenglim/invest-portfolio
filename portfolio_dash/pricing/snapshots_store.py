@@ -108,6 +108,26 @@ def latest_snapshot(
     return _row_to_snapshot(row) if row is not None else None
 
 
+def snapshot_on_or_before(
+    conn: sqlite3.Connection, *, source: str, dataset: str, symbol: str | None, as_of: date
+) -> Snapshot | None:
+    """Newest snapshot whose ``as_of`` is on-or-before *as_of* for the key, or None.
+
+    Ordered by ``as_of`` DESC (then newest ``fetched_at`` to collapse re-fetches), so this
+    answers "the consensus as it stood at-or-before date D". Used by the ``consensus_change``
+    alert to fetch both the LATEST snapshot (``as_of = today``) and the closest baseline
+    ``>= 7 days`` older (``as_of = latest.as_of - 7d``); ISO date strings sort chronologically.
+    """
+    clause, params = _symbol_clause(symbol)
+    row = conn.execute(
+        f"SELECT * FROM external_snapshots "
+        f"WHERE source = ? AND dataset = ? AND {clause} AND as_of <= ? "
+        f"ORDER BY as_of DESC, fetched_at DESC, id DESC LIMIT 1",
+        (source, dataset, *params, as_of.isoformat()),
+    ).fetchone()
+    return _row_to_snapshot(row) if row is not None else None
+
+
 def latest_series(
     conn: sqlite3.Connection, *, source: str, dataset: str, symbol: str | None, n: int
 ) -> list[Snapshot]:

@@ -32,6 +32,13 @@ class AlertRules(BaseModel):
     exdiv_upcoming: Rule
     quota_low: Rule
     calib_gap: Rule
+    # P3 batch 2 (alerts taxonomy v2): market-risk rules. Each threshold is fed to the PURE
+    # engine; the per-symbol market metrics they compare against are assembled at the
+    # api/scheduler seam (api.alert_inputs), never inside strategy/ (which cannot read pricing).
+    drawdown_from_peak: Rule
+    vol_spike: Rule
+    rebalance_drift: Rule
+    consensus_change: Rule
 
 
 # id -> (default_value | None, unit | None, min | None, max | None); all numerics are strings.
@@ -46,6 +53,18 @@ RULE_META: dict[str, tuple[str | None, str | None, str | None, str | None]] = {
     # calib_gap threshold is in PERCENTAGE POINTS (matches scoring.calibration_error's
     # pp output) — NOT a ratio. 15pp default, clamped 5..50pp.
     "calib_gap": ("15", "pp", "5", "50"),
+    # drawdown_from_peak: the RISK drawdown magnitude as a ratio (0.20 = −20% from the 52-week
+    # high). warn fires at HALF this value (−10% at the default) — one editable knob, a
+    # documented two-level severity (mini-spec §2: "−20% risk; −10% 先給 warn").
+    "drawdown_from_peak": ("0.20", "ratio", "0.02", "0.90"),
+    # vol_spike: the multiple (×) of the 90d annualized-vol baseline the 30d vol must reach.
+    "vol_spike": ("1.8", "x", "1", "10"),
+    # rebalance_drift: the ABSOLUTE band (ratio) of the Swedroe 5/25 rule; the RELATIVE leg
+    # (25% of the target, base = target) is a fixed named constant in strategy/alerts.
+    "rebalance_drift": ("0.05", "ratio", "0.01", "0.50"),
+    # consensus_change: the rating-score worsening threshold (1=best..5=worst scale, so
+    # "worse" = increase). The mean-target-price cut leg (−10%) is a fixed named constant.
+    "consensus_change": ("0.5", "score", "0.1", "4"),
 }
 RULE_IDS = list(RULE_META)  # preserves order
 
@@ -82,7 +101,15 @@ def _parse(raw: str) -> AlertRules:
     data = json.loads(raw)
     fields: dict[str, Rule] = {}
     for rid in RULE_IDS:
-        entry = data.get(rid, {})
+        if rid not in data:
+            # A rule added AFTER this config row was last saved (an existing install upgrading
+            # into P3): come online at its RULE_META default rather than value=None (which
+            # would silently disable numeric rules). This is the additive default-on-read
+            # merge — a stored rule keeps its saved enabled/value verbatim (incl. an explicit
+            # None for toggle-only rules); only genuinely-absent keys take the default.
+            fields[rid] = _default_rule(RULE_META[rid][0])
+            continue
+        entry = data[rid]
         raw_value = entry.get("value")
         fields[rid] = Rule(
             enabled=bool(entry.get("enabled", True)),
