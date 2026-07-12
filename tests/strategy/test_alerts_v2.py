@@ -105,6 +105,28 @@ def test_drawdown_silent_when_no_history() -> None:
     assert not any(a.rule == "drawdown_from_peak" for a in _run(_data(), symbol_metrics=m))
 
 
+def test_drawdown_silent_below_minimum_window() -> None:
+    # Deep review 2026-07-13: a 2-point declining series is not a "peak" — a window
+    # under 30 sessions is too thin to judge a 52-week drawdown -> silent, never a
+    # RISK push from a freshly-registered symbol awaiting backfill.
+    thin = {"NEW": SymbolMetric(held=False, pct_from_52w_high=Decimal("-0.20"),
+                                window_days=2)}
+    assert not any(a.rule == "drawdown_from_peak" for a in _run(_data(), symbol_metrics=thin))
+    at_floor = {"NEW": SymbolMetric(held=False, pct_from_52w_high=Decimal("-0.20"),
+                                    window_days=30)}
+    assert any(a.rule == "drawdown_from_peak" for a in _run(_data(), symbol_metrics=at_floor))
+
+
+def test_exact_threshold_boundaries_fire_inclusively() -> None:
+    # dd exactly 20% -> risk (>=); vol ratio exactly 1.8x -> fires (>=).
+    m = {"2330": SymbolMetric(held=True, pct_from_52w_high=Decimal("-0.20"), window_days=252,
+                              vol_30d=Decimal("0.36"), vol_90d=Decimal("0.20"))}
+    fired = _run(_data(), symbol_metrics=m)
+    dd = next(a for a in fired if a.rule == "drawdown_from_peak")
+    assert dd.sev == "risk"
+    assert any(a.rule == "vol_spike" for a in fired)  # 0.36/0.20 == 1.8 exactly
+
+
 def test_drawdown_silent_when_disabled() -> None:
     rules = DEFAULT_RULES.model_copy(deep=True)
     rules.drawdown_from_peak.enabled = False
@@ -151,7 +173,7 @@ def test_vol_spike_silent_when_disabled() -> None:
 
 
 def test_drift_absolute_leg_triggers() -> None:
-    # current 40%, target 30%: drift 10% > max(5%, 0.25*30%=7.5%) -> risk (absolute leg wins).
+    # current 40%, target 30%: drift 10pp > min(5pp, 0.25*30%=7.5pp) = 5pp -> risk.
     data = _data([_holding("2330", Decimal("0.40"))])
     rd = next(a for a in _run(data, target_weights={"2330": Decimal("0.30")})
               if a.id == "rebalance_drift:2330")
@@ -159,25 +181,38 @@ def test_drift_absolute_leg_triggers() -> None:
 
 
 def test_drift_relative_leg_triggers() -> None:
-    # target 10% (small): band = max(5%, 0.25*10%=2.5%) = 5%. current 4% -> drift 6% > 5%.
-    data = _data([_holding("2330", Decimal("0.04"))])
+    # Canonical Swedroe (deep review 2026-07-13): target 10% -> relative band
+    # 0.25*10% = 2.5pp GOVERNS (tighter than the 5pp absolute). current 14% ->
+    # drift 4pp > 2.5pp -> FIRES via the relative leg (the max() bug was silent here).
+    data = _data([_holding("2330", Decimal("0.14"))])
     assert any(a.id == "rebalance_drift:2330"
                for a in _run(data, target_weights={"2330": Decimal("0.10")}))
 
 
-def test_drift_relative_leg_binds_above_absolute() -> None:
-    # target 40%: relative band = 0.25*40% = 10% > absolute 5% -> band 10%. drift 8% -> silent
-    # (proves the relative leg RAISES the band using the TARGET as base).
-    data = _data([_holding("2330", Decimal("0.48"))])
+def test_drift_absolute_leg_governs_large_targets() -> None:
+    # target 50%: relative band = 12.5pp, absolute 5pp is TIGHTER -> band 5pp.
+    # current 42% -> drift 8pp > 5pp -> fires (the max() bug silenced this too).
+    data = _data([_holding("2330", Decimal("0.42"))])
+    assert any(a.id == "rebalance_drift:2330"
+               for a in _run(data, target_weights={"2330": Decimal("0.50")}))
+
+
+def test_drift_small_target_inside_tight_band_is_silent() -> None:
+    # target 10%, current 11.5%: drift 1.5pp <= relative band 2.5pp -> silent; and
+    # exactly AT the band (current 12.5% -> drift == 2.5pp) stays silent (strict >).
+    data = _data([_holding("2330", Decimal("0.115"))])
     assert not any(a.rule == "rebalance_drift"
-                   for a in _run(data, target_weights={"2330": Decimal("0.40")}))
+                   for a in _run(data, target_weights={"2330": Decimal("0.10")}))
+    at_band = _data([_holding("2330", Decimal("0.125"))])
+    assert not any(a.rule == "rebalance_drift"
+                   for a in _run(at_band, target_weights={"2330": Decimal("0.10")}))
 
 
 def test_drift_neither_leg_triggers() -> None:
-    # current 32%, target 30%: drift 2% <= max(5%, 7.5%) -> silent.
-    data = _data([_holding("2330", Decimal("0.32"))])
+    # current 53%, target 50%: drift 3pp <= min(5pp, 12.5pp) = 5pp -> silent.
+    data = _data([_holding("2330", Decimal("0.53"))])
     assert not any(a.rule == "rebalance_drift"
-                   for a in _run(data, target_weights={"2330": Decimal("0.30")}))
+                   for a in _run(data, target_weights={"2330": Decimal("0.50")}))
 
 
 def test_drift_silent_when_no_target() -> None:
@@ -227,6 +262,13 @@ def test_consensus_price_cut_triggers() -> None:
                                 days_apart=8)}
     cc = next(a for a in _run(_data(), consensus_deltas=d) if a.id == "consensus_change:AAPL")
     assert "目標均價下修" in cc.detail and "11.0%" in cc.detail
+
+
+def test_consensus_exact_threshold_fires_inclusively() -> None:
+    # +0.5 rating worsening exactly at the default threshold -> fires (>= semantics).
+    d = {"AAPL": ConsensusDelta(score_now=Decimal("3.5"), score_then=Decimal("3.0"),
+                                days_apart=7)}
+    assert any(a.rule == "consensus_change" for a in _run(_data(), consensus_deltas=d))
 
 
 def test_consensus_improvement_silent() -> None:

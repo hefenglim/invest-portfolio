@@ -61,6 +61,7 @@ RULE_META: dict[str, tuple[str | None, str | None, str | None, str | None]] = {
     "vol_spike": ("1.8", "x", "1", "10"),
     # rebalance_drift: the ABSOLUTE band (ratio) of the Swedroe 5/25 rule; the RELATIVE leg
     # (25% of the target, base = target) is a fixed named constant in strategy/alerts.
+    # The TIGHTER of the two bands governs (min) — whichever leg is crossed first fires.
     "rebalance_drift": ("0.05", "ratio", "0.01", "0.50"),
     # consensus_change: the rating-score worsening threshold (1=best..5=worst scale, so
     # "worse" = increase). The mean-target-price cut leg (−10%) is a fixed named constant.

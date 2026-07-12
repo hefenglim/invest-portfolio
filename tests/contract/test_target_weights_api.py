@@ -49,6 +49,15 @@ def test_put_weight_out_of_range_400(api_client: TestClient) -> None:
         assert r.status_code == 400, bad
 
 
+def test_put_sum_exactly_one_accepted(api_client: TestClient) -> None:
+    # Σ == 1.0 is a legal full allocation (the guard is strictly > 1).
+    syms = [s["symbol"] for s in _registered(api_client)]
+    assert len(syms) >= 2
+    r = api_client.put("/api/target-weights",
+                       json={"weights": {syms[0]: "0.6", syms[1]: "0.4"}})
+    assert r.status_code == 200
+
+
 def test_put_sum_over_one_400(api_client: TestClient) -> None:
     syms = [s["symbol"] for s in _registered(api_client)]
     assert len(syms) >= 2

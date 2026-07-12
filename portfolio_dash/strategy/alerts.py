@@ -29,12 +29,16 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _HALF = Decimal("0.5")
 
-# Swedroe 5/25 relative leg: the drift band is max(absolute_band, 0.25 × target); the
-# relative leg's BASE is the TARGET weight (a named constant, not editable — the "25" in 5/25).
+# Swedroe 5/25 relative leg: the drift band is min(absolute_band, 0.25 × target) — the
+# TIGHTER band governs (whichever leg is crossed first); the relative leg's BASE is the
+# TARGET weight (a named constant, not editable — the "25" in 5/25).
 _REBALANCE_REL = Decimal("0.25")
 # consensus_change price leg: a mean-target-price CUT of ≥ 10% (base = the older mean) — the
 # fixed second leg alongside the editable rating-score worsening threshold.
 _CONSENSUS_PRICE_CUT = Decimal("0.10")
+# drawdown_from_peak minimum honest window: below ~30 sessions a "52-week high" is just the
+# highest of a handful of points — too thin to call a peak (deep review 2026-07-13).
+_DRAWDOWN_MIN_WINDOW = 30
 
 
 class Alert(BaseModel):
@@ -227,13 +231,15 @@ def compute_alerts_from(
     # ① drawdown_from_peak (held AND watch): current price vs the trailing 52-week high.
     # value = the RISK drawdown magnitude (0.20); warn fires at HALF that (−10% at default) —
     # one editable knob, documented two-level severity. pct_from_52w_high is a ratio <= 0.
+    # A window below _DRAWDOWN_MIN_WINDOW sessions is too thin to call a "peak" (deep review
+    # 2026-07-13: a 2-point declining series fired a RISK alert) → silent, never fabricated.
     if (rules.drawdown_from_peak.enabled
             and rules.drawdown_from_peak.value is not None and metrics):
         risk_thr = rules.drawdown_from_peak.value
         warn_thr = risk_thr * _HALF
         for sym, m in metrics.items():
-            if m.pct_from_52w_high is None:
-                continue  # no price history → silent (never fabricated)
+            if m.pct_from_52w_high is None or m.window_days < _DRAWDOWN_MIN_WINDOW:
+                continue  # no/too-thin price history → silent (never fabricated)
             dd = -m.pct_from_52w_high if m.pct_from_52w_high < _ZERO else _ZERO
             if dd >= risk_thr:
                 sev_dd: Severity = "risk"
@@ -265,9 +271,13 @@ def compute_alerts_from(
                             f"{_pct(m.vol_90d)} 的 {_mult(ratio)}＞門檻 {_mult(mult)}"),
                     href=f"/symbol/{sym}"))
 
-    # ③ rebalance_drift (HELD with a target): Swedroe 5/25. |current − target| exceeds
-    # max(absolute_band, 0.25 × target); the relative leg's base is the TARGET. No target →
-    # silent. current weight is aggregated per symbol across accounts (holdings are per-row).
+    # ③ rebalance_drift (HELD with a target): Swedroe 5/25 — rebalance when the drift
+    # crosses EITHER the absolute band OR 25% of the target, whichever comes FIRST, i.e.
+    # the TIGHTER band: min(absolute_band, 0.25 × target). The relative leg exists to
+    # tighten the band for small allocations (target 10% → 2.5pp governs, not 5pp).
+    # (Deep review 2026-07-13: max() inverted the rule — relative leg was dead code for
+    # small targets and RAISED the band for large ones.) No target → silent. current
+    # weight is aggregated per symbol across accounts (holdings are per-row).
     if (rules.rebalance_drift.enabled
             and rules.rebalance_drift.value is not None and targets):
         abs_band = rules.rebalance_drift.value
@@ -280,7 +290,7 @@ def compute_alerts_from(
             if cur is None:
                 continue  # not held (or unpriced) → the drift rule is silent for it
             drift = abs(cur - target)
-            band = max(abs_band, _REBALANCE_REL * target)
+            band = min(abs_band, _REBALANCE_REL * target)
             if drift > band:
                 alerts.append(Alert(
                     id=f"rebalance_drift:{sym}", sev="risk", rule="rebalance_drift",
