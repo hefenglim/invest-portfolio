@@ -169,6 +169,9 @@
     }
     return _wnPromise;
   }
+  /* small hook so other pages (e.g. settings.html's 版本發佈資訊 button) can lazy-ensure
+     whatsnew.js through the same version-stamped loader before calling window.pdWhatsNew. */
+  window.pdEnsureWhatsNew = pdEnsureWhatsNew;
   let pdDrawerPromise = null;
   function pdEnsureDrawer() {
     if (window.openSymbolDrawer) return Promise.resolve();
@@ -338,7 +341,11 @@
     wnBtn.id = 'wn-btn';
     wnBtn.type = 'button';
     wnBtn.title = '新功能';
-    wnBtn.textContent = '✦';
+    /* crisp four-pointed sparkle (the ✦ text glyph rendered blurry at this size). Inline
+       SVG, currentColor, aria-hidden; the absolutely-positioned .wn-dot overlays it. */
+    wnBtn.innerHTML = '<svg class="wn-ico" viewBox="0 0 24 24" width="15" height="15" '
+      + 'fill="currentColor" aria-hidden="true">'
+      + '<path d="M12 2 L14.1 9.9 L22 12 L14.1 14.1 L12 22 L9.9 14.1 L2 12 L9.9 9.9 Z"/></svg>';
     wnBtn.addEventListener('click', () => {
       pdEnsureWhatsNew().then((ok) => { if (ok && window.pdWhatsNew) window.pdWhatsNew.open(); });
     });

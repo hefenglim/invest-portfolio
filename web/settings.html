@@ -358,7 +358,7 @@
     <section class="panel">
       <div class="panel-head"><h2 class="panel-title">一般</h2><span class="panel-sub">系統資訊與介面偏好</span></div>
       <div class="gen-rows">
-        <div class="gen-row"><span class="k">系統版本</span><span class="v num" id="gen-version">—</span></div>
+        <div class="gen-row"><span class="k">系統版本</span><span style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;"><span class="v num" id="gen-version">—</span><button class="btn" id="gen-whatsnew" type="button">版本發佈資訊</button></span></div>
         <div class="gen-row"><span class="k">報告幣別</span><span class="v num">TWD</span></div>
         <div class="gen-row"><span class="k">顯示時區</span><span class="v num">Asia/Taipei</span></div>
         <!-- 每頁筆數 (WPC): backend-persisted global page size for every pager -->
@@ -608,6 +608,19 @@
     var h = location.hash.slice(1);
     if (valid.includes(h)) showSettingsTab(h);
   });
+  /* 版本發佈資訊 (一般 tab): lazy-ensure whatsnew.js through shell's version-stamped loader,
+     then open the full version-history browser. Guest mode fine (GET only). */
+  var vhBtn = document.getElementById('gen-whatsnew');
+  if (vhBtn) {
+    vhBtn.addEventListener('click', function () {
+      if (!window.pdEnsureWhatsNew) return;
+      window.pdEnsureWhatsNew().then(function (ok) {
+        if (ok && window.pdWhatsNew && window.pdWhatsNew.openHistory) {
+          window.pdWhatsNew.openHistory();
+        }
+      });
+    });
+  }
 })();
 </script>
 </body>
