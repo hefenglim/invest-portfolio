@@ -59,3 +59,43 @@ def test_whatsnew_badge_panel_and_persist(
     assert page.locator("#wn-btn .wn-dot").count() == 0
 
     assert not page_errors, page_errors
+
+
+@pytest.mark.e2e
+def test_whatsnew_callout_arrival_and_cancel_on_switch(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """前往 -> in-page callout + 10s flash on the target; a tab switch cancels both and
+    they do not resurface on switch-back (only a fresh 前往 re-arms)."""
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    page_errors: list[str] = []
+    page.on("pageerror", lambda e: page_errors.append(str(e)))
+
+    # Open the panel and click the first 前往 (market-risk-alerts -> settings.html#alerts).
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector("#wn-btn")
+    page.click("#wn-btn")
+    page.wait_for_selector(".wn-backdrop .wn-go")
+    page.locator(".wn-backdrop .wn-go").first.click()
+
+    # Arrives on the alerts tab: the callout is visible with the feature title, and the
+    # flash wraps the rules block (the panel enclosing #alert-rules-wrap).
+    page.wait_for_url("**/settings.html#alerts")
+    callout = page.locator(".wn-callout")
+    callout.wait_for(state="visible")
+    assert callout.locator(".wn-callout-title").inner_text() == "市場風險預警"
+    page.wait_for_selector(".wn-flash #alert-rules-wrap")
+
+    # Switch tab (hashchange): callout + flash vanish immediately.
+    page.evaluate("window.location.hash = 'accounts'")
+    page.wait_for_selector(".wn-callout", state="detached")
+    page.wait_for_selector(".wn-flash", state="detached")
+
+    # Switch back to #alerts: they do NOT resurface.
+    page.evaluate("window.location.hash = 'alerts'")
+    page.wait_for_load_state("networkidle")
+    assert page.locator(".wn-callout").count() == 0
+    assert page.locator(".wn-flash").count() == 0
+
+    assert not page_errors, page_errors

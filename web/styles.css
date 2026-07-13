@@ -1782,13 +1782,44 @@ button[disabled], .btn[disabled] {
 }
 .wn-go:hover { background: var(--accent); color: #fff; }
 
-/* arrival flash: a brief highlight on the section a 前往 link jumped to. */
-.wn-flash { animation: wn-flash-pulse 1.6s ease-out 1; }
+/* arrival flash: a 10s highlight on the section a 前往 link jumped to — holds clearly
+   visible for ~8.5s, then fades over the last ~1.5s (single iteration). */
+.wn-flash { animation: wn-flash-pulse 10s ease-out 1; }
 @keyframes wn-flash-pulse {
   0%   { box-shadow: 0 0 0 2px var(--accent), 0 0 0 6px var(--accent-soft); background: var(--accent-soft); }
-  70%  { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 6px transparent; }
+  85%  { box-shadow: 0 0 0 2px var(--accent), 0 0 0 6px var(--accent-soft); background: var(--accent-soft); }
   100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
 }
 @media (prefers-reduced-motion: reduce) {
   .wn-flash { animation: none; }
 }
+
+/* in-page 新功能 callout: a dismissible card inserted BEFORE the flashed anchor, in
+   normal flow (never overlays controls). Theme-aware via the shared tokens. */
+.wn-callout {
+  position: relative;
+  margin: 0 0 12px;
+  padding: 12px 40px 12px 14px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+.wn-callout-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wn-callout-tag {
+  flex: none; font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  color: var(--accent); text-transform: uppercase;
+}
+.wn-callout-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.wn-callout-desc { font-size: 12px; color: var(--text-2); line-height: 1.5; margin-top: 5px; }
+.wn-callout-area {
+  font-size: 10px; color: var(--text-3); font-family: var(--font-num); margin-top: 4px;
+}
+.wn-callout-x {
+  position: absolute; top: 8px; right: 8px;
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 0; cursor: pointer;
+  color: var(--text-3); font-size: 13px; line-height: 1; border-radius: var(--radius-sm);
+}
+.wn-callout-x:hover { background: var(--panel-2); color: var(--text); }
