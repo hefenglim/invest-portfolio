@@ -569,18 +569,38 @@
 <script src="settings-dbstats.js?v=0.1.17"></script>
 <script src="settings-prefs.js?v=0.1.17"></script>
 <script>
-/* glue: CSV exports for audit tables（llm_usage / job_runs） */
+/* glue: CSV exports for audit tables（llm_usage / job_runs）→ reconciliation channel
+   (POST /api/export/llm-usage / /api/export/job-runs; empty body -> full history).
+   Owner directive 2026-07-14: no more DOM/display-value dumps; numbers come straight
+   from the backend audit tables. Filename comes from the backend Content-Disposition. */
 (function () {
-  if (!window.pdExport) return;
+  if (!window.pdApi) return;
+  function mkBtn(path) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn-export';
+    b.title = '匯出對帳級 CSV（由後端稽核紀錄產生）';
+    b.appendChild(Object.assign(document.createElement('span'), { textContent: '⬇' }));
+    b.appendChild(Object.assign(document.createElement('span'), { textContent: '匯出 CSV' }));
+    b.addEventListener('click', async function () {
+      var restore = window.pdBusy ? window.pdBusy(b, '匯出中…') : function () {};
+      try {
+        await window.pdApi.download(path, {});
+      } catch (err) {
+        if (window.toast) window.toast(err && err.message ? err.message : '匯出失敗', 'fail', err && err.code);
+      } finally {
+        restore();
+      }
+    });
+    return b;
+  }
   var usage = document.getElementById('usage-body');
   if (usage) {
-    usage.closest('.panel').querySelector('.panel-head')
-      .appendChild(window.pdExport.tableButton(usage.closest('table'), 'llm_usage.csv'));
+    usage.closest('.panel').querySelector('.panel-head').appendChild(mkBtn('/api/export/llm-usage'));
   }
   var hist = document.getElementById('hist-body');
   if (hist) {
-    hist.closest('.panel').querySelector('.panel-head')
-      .appendChild(window.pdExport.tableButton(hist.closest('table'), 'job_runs.csv'));
+    hist.closest('.panel').querySelector('.panel-head').appendChild(mkBtn('/api/export/job-runs'));
   }
 })();
 </script>

@@ -314,6 +314,33 @@ def test_holdings_export_report_download(
 
 
 @pytest.mark.e2e
+def test_ledger_export_csv_download(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """交易帳本 匯出 CSV: the active-tab 匯出 CSV button downloads the reconciliation CSV via
+    the backend channel (POST /api/export/ledger). Default tab = 交易 -> transactions ->
+    `ledger_transactions_all_all.csv`. ZERO console + page errors (owner directive
+    2026-07-14: the export no longer scrapes the rendered table)."""
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/trades.html", wait_until="load")
+    page.wait_for_selector("#ledger-export-slot .btn-export")
+
+    with page.expect_download() as dl_info:
+        page.click("#ledger-export-slot .btn-export")
+    download = dl_info.value
+    assert download.suggested_filename == "ledger_transactions_all_all.csv", (
+        f"unexpected export filename: {download.suggested_filename!r}"
+    )
+
+    assert not console_errors and not page_errors, (
+        f"ledger export: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_target_weights_section_renders_sum_and_saves(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:

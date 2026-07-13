@@ -121,6 +121,15 @@ CATALOG: list[Feature] = [
         target='section[data-screen-label="帳本記錄"]',
     ),
     Feature(
+        version="0.1.18",
+        id="reconciliation-csv",
+        title="CSV 匯出全面對帳級",
+        desc="所有匯出 CSV 改由後端計算核心直接產生，數字為對帳級全精度，不再取自畫面顯示值",
+        href="index.html",
+        area="儀表板 → 持倉明細",
+        target='section[data-screen-label="持倉明細"]',
+    ),
+    Feature(
         version="0.1.17",
         id="market-risk-alerts",
         title="市場風險預警",

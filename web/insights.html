@@ -542,10 +542,27 @@
     });
   }
 
-  /* CSV export over the live table (built lazily once score rows render). */
+  /* 預測明細 → POST /api/export/ai-predictions (reconciliation channel over the
+     evaluations store; the whole archived-excluded set, not just the current page).
+     Owner directive 2026-07-14: no more DOM/display-value dumps. */
   var slot = document.getElementById('score-export-slot');
-  if (slot && window.pdExport) {
-    slot.appendChild(window.pdExport.tableButton(document.getElementById('score-table'), 'ai_predictions.csv'));
+  if (slot) {
+    var scoreBtn = el('button', 'btn-export');
+    scoreBtn.type = 'button';
+    scoreBtn.title = '匯出對帳級 CSV（AI 預測明細，由後端評估紀錄產生）';
+    scoreBtn.appendChild(el('span', null, '⬇'));
+    scoreBtn.appendChild(el('span', null, '匯出 CSV'));
+    scoreBtn.addEventListener('click', async function () {
+      var restore = window.pdBusy ? window.pdBusy(scoreBtn, '匯出中…') : function () {};
+      try {
+        await window.pdApi.download('/api/export/ai-predictions', {});
+      } catch (err) {
+        if (window.toast) window.toast(err && err.message ? err.message : '匯出失敗', 'fail', err && err.code);
+      } finally {
+        restore();
+      }
+    });
+    slot.appendChild(scoreBtn);
   }
 
   /* ---- async boot / refresh (graceful: degrade to empty states, never crash) ----

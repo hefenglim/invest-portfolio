@@ -1061,24 +1061,36 @@
     }
   });
 
-  /* ============ 匯出按鈕（依目前篩選/排序結果） ============ */
+  /* ============ 匯出按鈕（對帳級 CSV，直接由後端計算核心產生） ============ */
+  /* Owner directive 2026-07-14: every 匯出 CSV goes through the backend reconciliation
+     channel (pdApi.download → /api/export/*); the frontend no longer dumps rendered/
+     display values. House style: silent on success, fail toast, pdBusy guards double
+     clicks; the filename comes from the backend Content-Disposition. */
+  function csvExportButton(label, path, bodyFn) {
+    const b = el('button', 'btn-export');
+    b.type = 'button';
+    b.title = '匯出對帳級 CSV（由後端計算核心產生）';
+    b.appendChild(el('span', null, '⬇'));
+    b.appendChild(el('span', null, label));
+    b.addEventListener('click', async () => {
+      const restore = window.pdBusy ? window.pdBusy(b, '匯出中…') : function () {};
+      try {
+        await window.pdApi.download(path, bodyFn ? bodyFn() : {});
+      } catch (err) {
+        if (window.toast) window.toast(err && err.message ? err.message : '匯出失敗', 'fail', err && err.code);
+      } finally {
+        restore();
+      }
+    });
+    return b;
+  }
+
   function wireExports() {
-    if (!window.pdExport) return;
-    /* 持倉明細 */
+    /* 持倉明細 → POST /api/export/holdings (existing reconciliation endpoint) */
     const holdingsHead = document.querySelector('#holdings-table');
     if (holdingsHead) {
       const panelHead = holdingsHead.closest('.panel').querySelector('.panel-head');
-      panelHead.appendChild(window.pdExport.button(() => ({
-        filename: 'holdings_' + f.date(D.as_of) + '.csv',
-        headers: ['代號', '名稱', '市場', '帳戶', '幣別', '股數', '原始均價', '調整均價',
-          '現價', '價格日期', '市值', '未實現損益', '資本利得', '累計配息', '股利回收率', '權重'],
-        rows: sortedFilteredHoldings().map((h) => [
-          h.symbol, h.name, MARKET_ZH[h.market] || h.market, ACCOUNT_ZH[h.account_id] || h.account_name,
-          h.quote_ccy, h.shares, h.original_avg, h.adjusted_avg,
-          h.market_price, h.price_as_of, h.market_value, h.unrealized_pnl,
-          h.capital_gain, h.dividend_portion, h.payback_ratio, h.weight
-        ])
-      })));
+      panelHead.appendChild(csvExportButton('匯出 CSV', '/api/export/holdings', () => ({})));
       /* 匯出報告: print-optimized 持倉報告 (self-contained HTML from the backend). Server
          recomputes everything (no client math). House style: silent on success, fail toast,
          busy state guards double-clicks. */
@@ -1099,18 +1111,11 @@
       });
       panelHead.appendChild(reportBtn);
     }
-    /* 已實現損益 */
+    /* 已實現損益 → POST /api/export/realized (new reconciliation endpoint) */
     const realizedBody = document.getElementById('realized-body');
     if (realizedBody) {
       const panelHead = realizedBody.closest('.panel').querySelector('.panel-head');
-      panelHead.appendChild(window.pdExport.button(() => ({
-        filename: 'realized_' + f.date(D.as_of) + '.csv',
-        headers: ['代號', '帳戶', '幣別', '賣出股數', '淨收款', '原始成本移除', '調整成本移除', '已實現損益'],
-        rows: D.realized.rows.map((r) => [
-          r.symbol, ACCOUNT_ZH[r.account_id] || r.account_id, r.quote_ccy,
-          r.shares_sold, r.proceeds_net, r.original_cost_removed, r.adjusted_cost_removed, r.realized
-        ])
-      })));
+      panelHead.appendChild(csvExportButton('匯出 CSV', '/api/export/realized', () => ({})));
     }
   }
 
