@@ -1079,6 +1079,25 @@
           h.capital_gain, h.dividend_portion, h.payback_ratio, h.weight
         ])
       })));
+      /* 匯出報告: print-optimized 持倉報告 (self-contained HTML from the backend). Server
+         recomputes everything (no client math). House style: silent on success, fail toast,
+         busy state guards double-clicks. */
+      const reportBtn = el('button', 'btn pd-holdings-report-btn', '匯出報告');
+      reportBtn.type = 'button';
+      reportBtn.title = '下載持倉報告（可列印 HTML，含 KPI、持倉明細與配置）';
+      reportBtn.addEventListener('click', async () => {
+        const restore = window.pdBusy(reportBtn, '產出中…');
+        try {
+          await window.pdApi.download('/api/export/holdings-report', {});
+        } catch (err) {
+          if (window.toast) {
+            window.toast(err && err.message ? err.message : '匯出報告失敗', 'fail', err && err.code);
+          }
+        } finally {
+          restore();
+        }
+      });
+      panelHead.appendChild(reportBtn);
     }
     /* 已實現損益 */
     const realizedBody = document.getElementById('realized-body');

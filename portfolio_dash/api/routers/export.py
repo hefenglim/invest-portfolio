@@ -22,7 +22,9 @@ from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.export.artifact import ExportArtifact
 from portfolio_dash.export.holdings import build_holdings_csv
+from portfolio_dash.export.holdings_report import build_holdings_report_html
 from portfolio_dash.export.ledgers import build_ledgers_zip
+from portfolio_dash.export.ledgers_report import build_ledgers_report_html
 from portfolio_dash.export.rebalance_report import build_rebalance_report_html
 from portfolio_dash.export.tax import build_tax_package_zip
 from portfolio_dash.export.usage import build_job_runs_csv, build_llm_usage_csv
@@ -73,6 +75,30 @@ def export_ledgers(
     now: datetime = Depends(get_now),
 ) -> Response:
     return _respond(build_ledgers_zip(conn, now=now))
+
+
+@router.post("/export/holdings-report")
+def export_holdings_report(
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+) -> Response:
+    # Print-optimized 持倉報告 (self-contained HTML). Empty JSON body {} — no parameters.
+    return _respond(build_holdings_report_html(conn, now=now, reporting=reporting))
+
+
+@router.post("/export/ledgers-report")
+def export_ledgers_report(
+    body: RangeBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Response:
+    # Print-optimized 帳本報告 over [from, to]. SAME RangeBody + 400 validation as the other
+    # range exports (from > to -> validation_error / field=from).
+    bad = _bad_range(body)
+    if bad is not None:
+        return bad
+    return _respond(build_ledgers_report_html(conn, now=now, frm=body.frm, to=body.to))
 
 
 @router.post("/export/llm-usage")

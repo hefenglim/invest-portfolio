@@ -347,6 +347,36 @@ document.getElementById('tab-tx').click();
     };
   }));
 })();
+/* glue: 匯出報告 — print-optimized 帳本報告 (all four ledgers) over the page's current
+   date-range filter (empty range -> 全部期間). Server builds the HTML; no client math.
+   House style: silent on success, fail toast, busy state guards double-clicks. */
+(function () {
+  var slot = document.getElementById('ledger-export-slot');
+  if (!slot || !window.pdApi) return;
+  var reportBtn = document.createElement('button');
+  reportBtn.type = 'button';
+  reportBtn.className = 'btn';
+  reportBtn.textContent = '匯出報告';
+  reportBtn.title = '下載帳本報告（可列印 HTML，四帳本＋期初庫存，依目前日期區間）';
+  reportBtn.addEventListener('click', async function () {
+    var restore = window.pdBusy ? window.pdBusy(reportBtn, '產出中…') : function () {};
+    try {
+      var body = {};
+      var fromEl = document.getElementById('ledger-date-from');
+      var toEl = document.getElementById('ledger-date-to');
+      if (fromEl && fromEl.value) body.from = fromEl.value;
+      if (toEl && toEl.value) body.to = toEl.value;
+      await window.pdApi.download('/api/export/ledgers-report', body);
+    } catch (err) {
+      if (window.toast) {
+        window.toast(err && err.message ? err.message : '匯出報告失敗', 'fail', err && err.code);
+      }
+    } finally {
+      restore();
+    }
+  });
+  slot.appendChild(reportBtn);
+})();
 /* 待確認匯入收件匣：真實接線在 inbox.js（2026-07-03, R4）。 */
 /* glue: on confirm write — flash new row in ledger */
 var origConfirm = document.getElementById('m-confirm');

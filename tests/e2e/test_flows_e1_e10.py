@@ -288,6 +288,32 @@ def test_rebalance_export_report_download(
 
 
 @pytest.mark.e2e
+def test_holdings_export_report_download(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """匯出報告 (持倉報告): the holdings panel's report button triggers a browser download of
+    `holdings-report-YYYYMMDD-HHMM.html`. ZERO console + page errors."""
+    base = flow_server(_seed_dual_account)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    page.wait_for_selector(".pd-holdings-report-btn")
+
+    with page.expect_download() as dl_info:
+        page.click(".pd-holdings-report-btn")
+    download = dl_info.value
+    assert re.match(r"holdings-report-\d{8}-\d{4}\.html$", download.suggested_filename), (
+        f"unexpected export filename: {download.suggested_filename!r}"
+    )
+
+    assert not console_errors and not page_errors, (
+        f"holdings export: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_target_weights_section_renders_sum_and_saves(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
