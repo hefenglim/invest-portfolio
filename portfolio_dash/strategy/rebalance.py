@@ -84,7 +84,9 @@ def _priced_constituents(holdings: list[HoldingRow], symbol: str) -> list[Holdin
 
     Tie-break by account_id (ascending) so the buy target and the sell greedy order are
     deterministic. Constituents share one quote currency and one market price (the price
-    is keyed by symbol), so aggregation is exact.
+    is keyed by symbol), so aggregation is exact. A non-positive price is treated as NO
+    usable price (a degenerate/halted quote): such a symbol yields no constituents and is
+    EXCLUDED — never fabricated, and never a divide-by-zero when sizing raw shares.
     """
     cons = [
         h
@@ -92,6 +94,7 @@ def _priced_constituents(holdings: list[HoldingRow], symbol: str) -> list[Holdin
         if h.symbol == symbol
         and h.shares > _ZERO
         and h.market_price is not None
+        and h.market_price > _ZERO
         and h.market_value is not None
     ]
     cons.sort(key=lambda h: (-h.shares, h.account_id))
@@ -145,7 +148,9 @@ def _excluded_with_target(
     priced_syms = {
         h.symbol
         for h in data.holdings
-        if h.market_price is not None and h.symbol not in missing
+        if h.market_price is not None
+        and h.market_price > _ZERO
+        and h.symbol not in missing
     }
     return sorted(sym for sym in stored if sym not in priced_syms)
 

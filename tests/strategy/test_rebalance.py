@@ -124,6 +124,30 @@ def test_missing_price_symbol_is_excluded() -> None:
     conn.close()
 
 
+def test_zero_price_symbol_excluded_not_crash() -> None:
+    """A held+targeted symbol with a degenerate 0 price is EXCLUDED, never a divide-by-zero.
+
+    Regression: sizing raw shares as ``delta / price`` raised decimal.DivisionByZero (a 500
+    on the preview / report route) when a quote came back as 0. A non-positive price is now
+    treated as no usable price -> the symbol is excluded, honoring the degradation invariant.
+    """
+    conn = _golden()
+    # AAPL is held; overwrite its current quote with 0 (halted / degenerate feed).
+    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
+                                  as_of=date(2026, 6, 9), close=Decimal("0"),
+                                  source="test")], fetched_at=_NOW)
+    conn.commit()
+    result = compute_rebalance(conn, now=_NOW, reporting=Currency.TWD,
+                               targets={"AAPL": Decimal("0.5"), "2330": Decimal("0.5")})
+    by_sym = _rows_by_symbol(result)
+    assert "AAPL" not in by_sym  # zero-priced -> no row
+    excluded = _summary(result)["excluded"]
+    assert isinstance(excluded, list)
+    assert "AAPL" in excluded
+    assert "2330" in by_sym  # the other (priced) symbol still computes
+    conn.close()
+
+
 def test_my_market_rounds_to_100_lot() -> None:
     """An MY-market holding's traded shares snap to a 100-unit board lot."""
     conn = _golden()
