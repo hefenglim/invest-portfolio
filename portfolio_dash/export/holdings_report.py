@@ -19,13 +19,13 @@ from decimal import Decimal
 
 from portfolio_dash.export.artifact import ExportArtifact
 from portfolio_dash.export.report_html import (
+    _NULL,
     _amount_ccy,
     _document,
     _esc,
     _fmt_amount,
     _fmt_pct,
     _fmt_shares,
-    _NULL,
     _page_footer,
     _page_header,
     _version_line,
@@ -219,7 +219,8 @@ def _allocation_html(data: DashboardData, reporting_ccy: str) -> str:
         )
 
     if not blocks:
-        return '<section><h2>配置</h2><p class="note">目前無可用的配置資料（缺匯率）。</p></section>'
+        return ('<section><h2>配置</h2>'
+                '<p class="note">目前無可用的配置資料（缺匯率）。</p></section>')
     return f"<section><h2>配置</h2>{''.join(blocks)}</section>"
 
 

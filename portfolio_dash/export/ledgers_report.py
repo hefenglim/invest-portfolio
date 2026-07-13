@@ -32,12 +32,12 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.export.artifact import ExportArtifact
 from portfolio_dash.export.report_html import (
+    _NULL,
     _amount_ccy,
     _document,
     _esc,
     _fmt_amount,
     _fmt_shares,
-    _NULL,
     _page_footer,
     _page_header,
     _version_line,
@@ -222,7 +222,8 @@ def _fx_section(
         count += 1
         _add(out_totals, c.from_ccy.value, c.from_amount)
         _add(in_totals, c.to_ccy.value, c.to_amount)
-        rate = f"1 {_esc(c.to_ccy.value)} = {_fmt_amount(c.implied_rate, c.from_ccy.value)} {_esc(c.from_ccy.value)}"
+        rate = (f"1 {_esc(c.to_ccy.value)} = "
+                f"{_fmt_amount(c.implied_rate, c.from_ccy.value)} {_esc(c.from_ccy.value)}")
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(c.date.isoformat())}</td>'
