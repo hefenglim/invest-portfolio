@@ -3,6 +3,12 @@
    POST /api/rebalance/preview 算出需買/賣股數、費稅、試算後權重。
    體驗債修復：列建立一次、輸入時僅更新計算欄（250ms debounce），輸入框不重繪不失焦。
 
+   COMBINED CROSS-ACCOUNT (owner ruling 2026-07-13): a symbol held in >1 account is ONE row
+   whose target drives the COMBINED position (account chips show the constituents). The
+   backend routes the executed trade to concrete accounts and returns per-account `legs`
+   (rendered in the action cell) plus the combined `current_weight` / `new_weight`. Targets
+   stay SYMBOL-level; the drawer groups the priced holdings by symbol before building rows.
+
    DATA SOURCE (spec 19, Task 3.1 + defer ③): holdings come from the SHARED
    window.pdDashboard promise (GET /api/dashboard, reused from app.js / charts.js /
    alerts.js / detail.js — one fetch per page). The retired window.DASHBOARD_DATA mock
@@ -118,33 +124,72 @@
     body.appendChild(el('div', 'sd-mock-note',
       '費稅與股數由後端 /api/rebalance/preview 依各帳戶費率規則與現匯計算（買賣皆計，整數股／馬股 100 股一手；缺價標的排除）。試算不寫入帳本（spec 03）。'));
 
-    /* state — the what-if target weight RATIO per symbol, seeded from the backend weight.
-       h.weight is a Decimal STRING; Number() makes the seed into a numeric UI ratio. This
+    /* GROUP the priced holdings by SYMBOL. The (account × symbol) identity is preserved as
+       the symbol's constituents, but the drawer shows ONE row per symbol (the rebalance
+       engine is combined-aware; owner ruling 2026-07-13). A symbol held in >1 account (e.g.
+       AAPL in Schwab + Moomoo US) collapses into a single row whose target drives the
+       COMBINED position — the old per-holding keying orphaned the first duplicate's cells. */
+    const order = [];
+    const groups = {};
+    priced.forEach((h) => {
+      let g = groups[h.symbol];
+      if (!g) { g = groups[h.symbol] = { symbol: h.symbol, name: h.name, holdings: [] }; order.push(h.symbol); }
+      g.holdings.push(h);
+    });
+    /* Per group: sort constituents most-shares-first (the chip order + the buy/sell routing
+       order the backend uses), and sum the per-holding weight RATIOS into the combined
+       current weight. Number() on shares/weight here is display / UI-state math on RATIOS (a
+       documented exception), never money — every money/share number of record is backend-fed. */
+    Object.keys(groups).forEach((sym) => {
+      const g = groups[sym];
+      g.holdings.sort((a, b) =>
+        (Number(b.shares) - Number(a.shares)) ||
+        String(a.account_id).localeCompare(String(b.account_id)));
+      g.weightSum = g.holdings.reduce((s, h) => s + (Number(h.weight) || 0), 0);
+      g.multi = g.holdings.length > 1;
+    });
+
+    /* state — the what-if target weight RATIO per SYMBOL. Seed: a stored 目標配置 target
+       wins; else the COMBINED current weight (sum of the constituents' weight ratios). This
        is a target PERCENTAGE (a UI weight), NOT money — the only money/share numbers come
        back from the backend preview below and render through f.*. */
     const state = {};
-    priced.forEach((h) => {
-      state[h.symbol] = (storedTargets[h.symbol] !== undefined)
-        ? storedTargets[h.symbol] : Number(h.weight);  /* D8 target prefill, else current */
+    order.forEach((sym) => {
+      const g = groups[sym];
+      state[sym] = (storedTargets[sym] !== undefined) ? storedTargets[sym] : g.weightSum;
     });
 
-    /* build rows ONCE; keep refs to computed cells, keyed by symbol for backend matching */
+    /* build rows ONCE (one per SYMBOL); keep refs to computed cells, keyed by symbol for
+       backend matching. One row per symbol removes the duplicate-object orphan bug structurally. */
     const rowsBySym = {};
-    priced.forEach((h) => {
+    order.forEach((sym) => {
+      const g = groups[sym];
       const tr = el('tr');
       const tdSym = el('td', 'col-text');
       const cell = el('div', 'sym-cell');
-      cell.appendChild(el('span', 'sym-code', h.symbol));
-      cell.appendChild(el('span', 'sym-name', h.name));
+      const idBox = el('div', 'rb-sym-id');
+      idBox.appendChild(el('span', 'sym-code', g.symbol));
+      idBox.appendChild(el('span', 'sym-name', g.name));
+      cell.appendChild(idBox);
+      /* account chips: only when the symbol spans >1 account (single-account rows stay
+         clean). Built from the dashboard rows' raw data (account_name + shares). */
+      if (g.multi) {
+        const chips = el('div', 'rb-acct-chips');
+        g.holdings.forEach((h) => {
+          chips.appendChild(el('span', 'rb-acct-chip',
+            h.account_name + ' ' + f.num(h.shares) + '股'));
+        });
+        cell.appendChild(chips);
+      }
       tdSym.appendChild(cell);
       tr.appendChild(tdSym);
-      const tdCur = el('td', 'num', f.pct(h.weight));  /* backend weight via f.* */
-      if (state[h.symbol] > CAP) tdCur.classList.add('sign-up');  /* numeric what-if seed */
+      const tdCur = el('td', 'num', f.pct(g.weightSum));  /* COMBINED current weight */
+      if (g.weightSum > CAP) tdCur.classList.add('sign-up');
       tr.appendChild(tdCur);
       const tdT = el('td', 'num');
       const inp = el('input', 'rb-input');
       inp.type = 'number'; inp.min = '0'; inp.max = '100'; inp.step = '0.5';
-      inp.value = (state[h.symbol] * 100).toFixed(1);  /* seed control from numeric what-if state */
+      inp.value = (state[sym] * 100).toFixed(1);  /* seed control from numeric what-if state */
       tdT.appendChild(inp);
       tr.appendChild(tdT);
       const tdAct = el('td', 'col-text');
@@ -157,12 +202,12 @@
       tr.appendChild(tdNew);
       tbody.appendChild(tr);
       inp.addEventListener('input', () => {
-        state[h.symbol] = Math.max(0, Number(inp.value) / 100 || 0);
+        state[sym] = Math.max(0, Number(inp.value) / 100 || 0);
         schedule();
       });
-      rowsBySym[h.symbol] = { h, inp, tdAct, tdAmt, tdFee, tdNew };
+      rowsBySym[sym] = { symbol: sym, group: g, inp, tdCur, tdAct, tdAmt, tdFee, tdNew };
     });
-    const rows = priced.map((h) => rowsBySym[h.symbol]);
+    const rows = order.map((sym) => rowsBySym[sym]);
 
     /* clear all computed cells to the null glyph (used while a preview is in flight / on error) */
     function clearComputed() {
@@ -176,13 +221,30 @@
       });
     }
 
-    /* render ONE backend row (a Decimal-STRING trade) into its table row via f.* */
+    /* render ONE backend row (a Decimal-STRING trade) into its table row via f.*. The action
+       cell renders the executing LEGS (one line per account leg, most-shares first): a single
+       leg reads `買 35 股 @ 嘉信 Schwab`; a multi-leg sell shows one line per account, with
+       （零股）appended on a TW odd lot. The combined current weight is refreshed from the
+       backend once it lands. */
     function renderRow(r, br) {
       r.tdAct.replaceChildren();
-      const side = br.side;
-      r.tdAct.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
-        side === 'buy' ? '買' : '賣'));
-      r.tdAct.appendChild(document.createTextNode(' ' + f.num(br.shares) + ' 股'));
+      const legs = Array.isArray(br.legs) ? br.legs : [];
+      if (legs.length) {
+        legs.forEach((lg) => {
+          const line = el('div', 'rb-leg');
+          line.appendChild(el('span', 'dir-chip ' + (lg.side === 'buy' ? 'dir-buy' : 'dir-sell'),
+            lg.side === 'buy' ? '買' : '賣'));
+          line.appendChild(document.createTextNode(
+            ' ' + f.num(lg.shares) + ' 股 @ ' + lg.account_name));
+          if (lg.odd_lot) line.appendChild(el('span', 'rb-oddlot', '（零股）'));
+          r.tdAct.appendChild(line);
+        });
+      } else {
+        /* aggregate fallback (no per-leg detail returned): show side + total shares */
+        r.tdAct.appendChild(el('span', 'dir-chip ' + (br.side === 'buy' ? 'dir-buy' : 'dir-sell'),
+          br.side === 'buy' ? '買' : '賣'));
+        r.tdAct.appendChild(document.createTextNode(' ' + f.num(br.shares) + ' 股'));
+      }
       const ccy = br.ccy;
       r.tdAmt.textContent = f.money(br.amount, ccy) + ' ' + ccy;
       /* fee + tax are separate Decimal strings; show their combined cost (display only,
@@ -191,26 +253,51 @@
       r.tdFee.textContent = f.money(feeTax, ccy);
       r.tdNew.textContent = f.pct(br.new_weight);
       r.tdNew.classList.toggle('sign-up', Number(br.new_weight) > CAP);
+      /* prefer the backend's COMBINED current weight once the preview resolves */
+      if (br.current_weight !== undefined && br.current_weight !== null) {
+        r.tdCur.textContent = f.pct(br.current_weight);
+        r.tdCur.classList.toggle('sign-up', Number(br.current_weight) > CAP);
+      }
+    }
+
+    /* reset one symbol's computed cells to the null glyph (no trade / on target / excluded) */
+    function clearRow(r) {
+      r.tdAct.replaceChildren();
+      r.tdAct.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
+      r.tdAmt.textContent = f.NULL_GLYPH;
+      r.tdFee.textContent = f.NULL_GLYPH;
+      r.tdNew.textContent = f.NULL_GLYPH;
+      r.tdNew.classList.remove('sign-up');
     }
 
     function renderFoot(summary, sumTarget) {
       foot.replaceChildren();
       const cash = 1 - sumTarget;
+      /* the backend flag is authoritative for Σ>100%; keep the client check as a fallback
+         so the warning still shows before the first preview resolves. */
+      const over = (summary && summary.over_allocated === true) || sumTarget > 1.0001;
       const kv = (k, v, cls) => {
         const s = el('span', 'rb-kv');
         s.appendChild(el('span', 'k', k));
         s.appendChild(el('span', 'v num' + (cls ? ' ' + cls : ''), v));
         return s;
       };
-      foot.appendChild(kv('目標合計', f.pct(sumTarget), sumTarget > 1.0001 ? 'sign-up' : ''));
+      foot.appendChild(kv('目標合計', f.pct(sumTarget), over ? 'sign-up' : ''));
       foot.appendChild(kv('現金水位', f.pct(Math.max(0, cash))));
       const turnover = summary ? summary.turnover_reporting : null;
       const fees = summary ? summary.total_fees_reporting : null;
       foot.appendChild(kv('預估周轉額', f.money(turnover, REPORTING) + ' ' + REPORTING));
       foot.appendChild(kv('預估總費稅', f.money(fees, REPORTING) + ' ' + REPORTING,
         fees != null && Number(fees) > 0 ? 'sign-up' : ''));
-      if (sumTarget > 1.0001) {
+      if (over) {
         foot.appendChild(el('span', 'rb-warn', '⚠ 目標合計超過 100% — 請下調部分標的'));
+      }
+      /* stored 目標配置 symbols not in the preview (not held / unpriced) — surface, don't drop */
+      const ewt = summary && Array.isArray(summary.excluded_with_target)
+        ? summary.excluded_with_target : [];
+      if (ewt.length) {
+        foot.appendChild(el('div', 'sd-chart-note',
+          '已設目標但不在試算內：' + ewt.join('、') + '（未持有或缺價）'));
       }
     }
 
@@ -218,14 +305,15 @@
     function schedule() { clearTimeout(timer); timer = setTimeout(update, 250); }
 
     async function update() {
-      /* sumTarget is a pure UI percentage (NOT money) — drives the 目標合計 / 現金水位 hints. */
+      /* sumTarget is a pure UI percentage (NOT money) — drives the 目標合計 / 現金水位 hints.
+         One row per SYMBOL, so each symbol's target is counted exactly once. */
       let sumTarget = 0;
       const targets = {};
       rows.forEach((r) => {
-        const ratio = state[r.h.symbol];
+        const ratio = state[r.symbol];
         sumTarget += ratio;
         /* send ratios as STRINGS so Pydantic parses EXACT Decimals (avoids JS-float drift). */
-        targets[r.h.symbol] = String(ratio);
+        targets[r.symbol] = String(ratio);
       });
 
       /* cancel any prior in-flight preview so a newer edit wins (typeahead-style). */
@@ -247,33 +335,24 @@
       const byRow = {};
       backendRows.forEach((br) => { byRow[br.symbol] = br; });
       rows.forEach((r) => {
-        const br = byRow[r.h.symbol];
-        if (br) {
-          renderRow(r, br);
-        } else {
-          /* no trade for this symbol (on target, rounds to nothing, or excluded) */
-          r.tdAct.replaceChildren();
-          r.tdAct.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
-          r.tdAmt.textContent = f.NULL_GLYPH;
-          r.tdFee.textContent = f.NULL_GLYPH;
-          r.tdNew.textContent = f.NULL_GLYPH;
-          r.tdNew.classList.remove('sign-up');
-        }
+        const br = byRow[r.symbol];
+        if (br) renderRow(r, br);
+        else clearRow(r);  /* no trade for this symbol (on target, rounds to nothing, excluded) */
       });
       renderFoot(result && result.summary, sumTarget);
     }
 
     capBtn.addEventListener('click', () => {
       rows.forEach((r) => {
-        state[r.h.symbol] = Math.min(Number(r.h.weight), CAP);  /* numeric what-if seed */
-        r.inp.value = (state[r.h.symbol] * 100).toFixed(1);
+        state[r.symbol] = Math.min(r.group.weightSum, CAP);  /* combined current weight vs cap */
+        r.inp.value = (state[r.symbol] * 100).toFixed(1);
       });
       update();
     });
     resetBtn.addEventListener('click', () => {
       rows.forEach((r) => {
-        state[r.h.symbol] = Number(r.h.weight);  /* reset to backend weight (numeric) */
-        r.inp.value = (state[r.h.symbol] * 100).toFixed(1);
+        state[r.symbol] = r.group.weightSum;  /* reset to combined current weight */
+        r.inp.value = (state[r.symbol] * 100).toFixed(1);
       });
       update();
     });

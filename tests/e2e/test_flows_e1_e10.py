@@ -25,7 +25,7 @@ import pytest
 from playwright.sync_api import Page
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
-from tests.conftest import _seed_golden
+from tests.conftest import _seed_dual_account, _seed_golden
 from tests.contract.test_oversell_graceful import _seed_oversold
 from tests.contract.test_spec17_financials import seed_full
 from tests.e2e.conftest import FlowServerFactory
@@ -217,6 +217,45 @@ def test_e6_login_loop_protected_mode(
     assert ok.value.status == 200
     page.wait_for_url("**/index.html")
     page.wait_for_selector(".kpi-card")  # the session cookie carried -> dashboard renders
+
+
+@pytest.mark.e2e
+def test_rebalance_dual_account_single_row_with_chips(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """Combined cross-account rebalance: a symbol held in TWO accounts (AAPL: schwab +
+    moomoo_my_us) renders as EXACTLY ONE drawer row with account chips; editing its target
+    fires the preview and populates its OWN action cell (the pre-fix orphan bug is gone) —
+    and one row means the footer counts the symbol once. ZERO console + page errors."""
+    base = flow_server(_seed_dual_account)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    page.wait_for_selector(".rb-open-btn")
+    page.click(".rb-open-btn")
+    page.wait_for_selector(".rb-drawer .rb-table tbody tr")
+
+    aapl_rows = page.locator(
+        ".rb-drawer .rb-table tbody tr",
+        has=page.locator(".sym-code", has_text="AAPL"),
+    )
+    assert aapl_rows.count() == 1  # ONE row for the dual-account symbol (no duplicate)
+    # the account chips list BOTH constituents (schwab 30 + moomoo_my_us 10)
+    assert aapl_rows.locator(".rb-acct-chip").count() == 2
+
+    # editing AAPL's target fires the debounced preview; its OWN action cell then computes
+    inp = aapl_rows.locator(".rb-input")
+    inp.wait_for(state="attached")
+    with page.expect_response("**/api/rebalance/preview") as resp_info:
+        inp.fill("40")
+    assert resp_info.value.status == 200
+    aapl_rows.locator(".rb-leg").first.wait_for(state="attached")  # its cells populated
+
+    assert not console_errors and not page_errors, (
+        f"dual-account rebalance: console={console_errors!r} page={page_errors!r}"
+    )
 
 
 @pytest.mark.e2e

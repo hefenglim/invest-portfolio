@@ -1507,6 +1507,18 @@ table.data tbody tr.kb-focus td {
 .rb-warn { font-size: 11px; color: var(--amber); }
 .rb-open-btn { margin-left: 8px; font-size: 11px; padding: 2px 10px; }
 .panel-head .rb-open-btn + .btn-export { margin-left: 8px; }
+/* combined cross-account row: symbol id stacked over account chips (2026-07-13) */
+.rb-sym-id { display: flex; align-items: baseline; gap: 8px; }
+.rb-acct-chips { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 3px; }
+.rb-acct-chip {
+  font-size: 10px; color: var(--text-3); font-family: var(--font-num);
+  padding: 0 6px; line-height: 15px; border: 1px solid var(--border);
+  border-radius: 3px; white-space: nowrap;
+}
+/* per-account executing legs in the action cell (one line per leg) */
+.rb-leg { display: flex; align-items: center; gap: 4px; font-size: 11px; white-space: nowrap; }
+.rb-leg + .rb-leg { margin-top: 2px; }
+.rb-oddlot { color: var(--amber); font-size: 10px; }
 
 /* ex-div 入帳預覽 (A3) */
 .exdiv-preview {
