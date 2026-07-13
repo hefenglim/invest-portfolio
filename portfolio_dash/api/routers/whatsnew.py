@@ -42,6 +42,7 @@ def _feature_json(feature: Feature) -> dict[str, Any]:
         "desc": feature.desc,
         "href": feature.href,
         "area": feature.area,
+        "target": feature.target,
     }
 
 

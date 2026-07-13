@@ -20,8 +20,15 @@ def _assert_shape(body: dict[str, object]) -> None:
         assert grp["date"] is None or isinstance(grp["date"], str)
         assert isinstance(grp["unseen"], bool)
         for feat in grp["features"]:
-            assert set(feat.keys()) == {"id", "title", "desc", "href", "area"}
+            assert set(feat.keys()) == {"id", "title", "desc", "href", "area", "target"}
             assert feat["href"] is None or isinstance(feat["href"], str)
+            # target: optional CSS selector (string-or-null); when set it is non-empty and
+            # only ever accompanies an href (presentation metadata, not standalone).
+            assert feat["target"] is None or (
+                isinstance(feat["target"], str) and bool(feat["target"])
+            )
+            if feat["target"] is not None:
+                assert feat["href"] is not None
 
 
 def test_get_shape_and_default_unseen_math(api_client: TestClient) -> None:
@@ -41,6 +48,20 @@ def test_get_shape_and_default_unseen_math(api_client: TestClient) -> None:
     expected = sum(len(g["features"]) for g in body["versions"] if g["unseen"])
     assert body["unseen_count"] == expected
     assert body["unseen_count"] > 0
+
+
+def test_settings_features_carry_seeded_targets(api_client: TestClient) -> None:
+    # The in-page callout/flash points at a precise element per feature; the settings-page
+    # features carry the seeded selectors, and non-settings features stay target-null.
+    body = api_client.get("/api/whats-new").json()
+    feats = {f["id"]: f for g in body["versions"] for f in g["features"]}
+    assert feats["market-risk-alerts"]["target"] == "#alert-rules-wrap"
+    assert feats["target-weights"]["target"] == "#target-weights-panel"
+    assert feats["push-channels"]["target"] == ".nt-cards"
+    assert feats["quiet-hours"]["target"] == "#nt-qh-enabled"
+    assert feats["per-rule-subscriptions"]["target"] == "#nt-subs"
+    # a non-settings feature (instruments page) has no precise anchor yet.
+    assert feats["rules-engine"]["target"] is None
 
 
 def test_post_seen_round_trip_clears_unseen(api_client: TestClient) -> None:

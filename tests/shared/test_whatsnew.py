@@ -127,6 +127,16 @@ def test_catalog_ids_unique_within_version() -> None:
         assert not dupes, f"duplicate ids in v{version}: {dupes}"
 
 
+def test_catalog_targets_nonempty_and_require_href() -> None:
+    # target is an optional CSS selector for the in-page callout/flash anchor. When set it
+    # must be a non-empty string, and it only ever accompanies an href (it points WHERE a
+    # feature lives on its page — meaningless without a page to arrive on).
+    for feature in CATALOG:
+        if feature.target is not None:
+            assert isinstance(feature.target, str) and feature.target.strip(), feature.id
+            assert feature.href is not None, feature.id
+
+
 def test_catalog_version_dates_present_for_shipped_versions() -> None:
     current_key = _version_key(portfolio_dash.__version__)
     for feature in CATALOG:

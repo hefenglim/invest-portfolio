@@ -38,6 +38,10 @@ class Feature(BaseModel):
     desc: str  # zh-TW one-liner
     href: str | None  # e.g. "settings.html#alerts"; None -> no 前往 button
     area: str  # zh-TW breadcrumb, e.g. "系統設定 → 預警規則"
+    # Optional CSS selector for the precise in-page element the feature lives at, used by
+    # the arrival callout/flash to point exactly WHERE it changed. Presentation metadata
+    # only (no logic here). Only meaningful when ``href`` is set; None -> no precise anchor.
+    target: str | None = None
 
 
 # Hand-maintained, newest version first. 2-4 features per version, phrased for the end
@@ -60,6 +64,7 @@ CATALOG: list[Feature] = [
         desc="新增回檔、波動、再平衡漂移與分析師共識四項自動預警，可推播到手機",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target="#alert-rules-wrap",
     ),
     Feature(
         version="0.1.17",
@@ -68,6 +73,7 @@ CATALOG: list[Feature] = [
         desc="為每檔持股設定目標權重，驅動再平衡漂移預警與再平衡試算",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target="#target-weights-panel",
     ),
     Feature(
         version="0.1.16",
@@ -76,6 +82,7 @@ CATALOG: list[Feature] = [
         desc="ntfy／Telegram／Email 各通道新增逐步設定說明，降低設定門檻",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target=".nt-cards",
     ),
     Feature(
         version="0.1.16",
@@ -84,6 +91,7 @@ CATALOG: list[Feature] = [
         desc="面板標示實際預警發送時段（工作日收盤後約 15:00 台北）",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target=".nt-cards",
     ),
     Feature(
         version="0.1.15",
@@ -92,6 +100,7 @@ CATALOG: list[Feature] = [
         desc="通知通道與勿擾時段的開關改為點擊即存，不需再另按儲存",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target=".nt-cards",
     ),
     Feature(
         version="0.1.15",
@@ -100,6 +109,7 @@ CATALOG: list[Feature] = [
         desc="測試發送失敗時顯示供應商回報的具體原因，便於排除設定問題",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target=".nt-cards",
     ),
     Feature(
         version="0.1.14",
@@ -108,6 +118,7 @@ CATALOG: list[Feature] = [
         desc="預警與訊號事件可推播到 ntfy／Telegram／Email，任一通道獨立運作",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target=".nt-cards",
     ),
     Feature(
         version="0.1.14",
@@ -116,6 +127,7 @@ CATALOG: list[Feature] = [
         desc="設定勿擾時段，期間內的通知會延後送出",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target="#nt-qh-enabled",
     ),
     Feature(
         version="0.1.14",
@@ -124,6 +136,7 @@ CATALOG: list[Feature] = [
         desc="可分別選擇要接收哪些預警與訊號事件的推播",
         href="settings.html#alerts",
         area="系統設定 → 預警規則",
+        target="#nt-subs",
     ),
     Feature(
         version="0.1.13",
