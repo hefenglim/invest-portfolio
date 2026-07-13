@@ -154,7 +154,9 @@
     <p>Three owner-requested UX upgrades to the 前往 arrival experience. Backend adds only
       presentation metadata; all behaviour is front-end.</p>
     <ul>
-      <li><b>A · 10s flash, cancel-on-switch, fire only via 前往.</b> The
+      <li><b>A · 10s flash, cancel-on-switch, fire only via 前往.</b>
+        <em>(The 10s hold-then-fade timing is superseded by the Round 3 blink; the
+        cancel-on-switch / fire-only-via-前往 behaviour below is unchanged.)</em> The
         <code>wn-flash-pulse</code> keyframes now hold the ring + tint clearly visible to
         ~8.5s then fade over the last ~1.5s (single 10s iteration; JS safety-net ~11s;
         reduced-motion fallback kept). While a flash/callout is active a
@@ -188,6 +190,71 @@
       <li><b>C · "missing NEW pill" report — no code change.</b> Root-caused to the demo DB's
         <code>seen_version</code> already acknowledged by earlier verification runs; badge
         logic is correct and left intact.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Round 3 (owner UX round) — 2026-07-13</h2>
+    <p>Four owner-requested changes. Per-feature read semantics replace the version-level
+      ack; a full version-history browser is added; the arrival flash becomes a blink; the
+      ✦ glyph becomes a crisp SVG.</p>
+    <ul>
+      <li><b>1 · Per-FEATURE seen semantics (supersedes the version-level ack above).</b> A
+        feature's <span class="tag">NEW</span> clears ONLY when the user acts on it — 前往
+        (navigate), 知道了 (dismiss, for href-less features), or 全部標示已讀 (whole visible
+        window). Opening the panel no longer acknowledges anything. New table
+        <code>whatsnew_seen(feature_key PRIMARY KEY, seen_at)</code>, keyed
+        <code>"&lt;version&gt;:&lt;id&gt;"</code>, created alongside the legacy
+        <code>whatsnew_config</code> by the same <code>config_store</code> create-always
+        pattern. A <b>one-time, idempotent migration</b> folds a legacy
+        <code>seen_version &gt; "0"</code> into per-feature rows (INSERT OR IGNORE for every
+        catalog feature at/below it); the legacy table is <b>kept in place, never dropped</b>
+        (a legacy-schema boot crash is a known repo lesson) and simply stops being written.
+        Shared API: <code>get_seen_keys</code>, <code>mark_seen(keys)</code> (idempotent,
+        returns the full set), <code>known_feature_keys(current)</code> (visible-window keys,
+        used to validate POSTs). <code>get/set_seen_version</code> were removed.
+        <br><b>Router.</b> GET each feature gains <code>key</code> + <code>seen</code>; the
+        group <code>unseen</code> is any-unseen; <code>unseen_count</code> counts unseen
+        features across visible groups; <code>seen_version</code> is dropped. POST
+        <code>/seen</code> body is now <code>{features:[key,…]}</code> OR <code>{all:true}</code>
+        (all = every key in the visible window); an unknown/out-of-window key → 400
+        <code>validation_error</code> (<code>field=features</code>), nothing written;
+        idempotent; returns the GET payload.
+        <br><b>Front-end.</b> Ambient badge shows iff <code>unseen_count &gt; 0</code>. Panel
+        rows carry a per-feature NEW mini-pill; the group-head pill shows iff any row is
+        unseen. 前往 marks that feature seen optimistically (remove the row pill, recompute
+        group pill + badge from the cached payload) then POSTs; <b>same-page</b> 前往 and 知道了
+        are fire-and-forget, but <b>cross-page</b> 前往 awaits the POST (≤1.5 s cap) before
+        navigating so the seen-state reliably survives the page unload. 全部標示已讀 clears
+        every pill + the badge. Server truth reconciles on reload.</li>
+      <li><b>2 · Blink pattern (replaces the 10s hold-then-fade).</b> The
+        <code>wn-flash-pulse</code> keyframes are now 0%/100% fully transparent, 50% full
+        highlight (ring + soft tint), driven by
+        <code>animation: wn-flash-pulse 2s ease-in-out 10</code> — 1s in / 1s out, ten times
+        (~20 s). JS safety-net <code>FLASH_MS</code> bumped to ~21 s;
+        <code>prefers-reduced-motion → none</code> and cancel-on-switch are unchanged.</li>
+      <li><b>3 · 版本發佈資訊 — full version-history browser (settings 一般).</b> The whatsnew
+        CATALOG is now the single user-facing history source: entries were backfilled for
+        every shipped version <code>v0.1.0 → v0.1.11</code> from CHANGELOG (1–4 zh-TW
+        user-facing features each; <code>href=None</code>, since the ✦ panel caps at the
+        newest 6 versions and these surface only here). New
+        <code>GET /api/whats-new/history?offset&amp;limit</code> pages the FULL catalog
+        (<code>version ≤ current</code>, newest first): <code>{total, offset, versions:[{version,
+        date, features:[{title, desc, area}]}]}</code>, <code>offset ≥ 0</code>,
+        <code>1 ≤ limit ≤ 20</code> (else 400), no seen-state. A settings-page button lazy-
+        ensures <code>whatsnew.js</code> (new <code>window.pdEnsureWhatsNew</code> hook) and
+        calls <code>window.pdWhatsNew.openHistory()</code>; the modal (own
+        <code>.wnh-*</code> namespace) appends each loaded page, with 「載入更早版本」 hiding
+        when <code>offset+len ≥ total</code>. <b>Scalability:</b> the browser only renders the
+        pages it loaded, so an ever-growing catalog can never degrade page performance
+        (noted in the router + shared module docstrings). A full-coverage drift unit test now
+        also asserts every CHANGELOG <code>## [v…]</code> version (≥ 0.1.0, ≤ current) has a
+        catalog entry.</li>
+      <li><b>4 · Crisp ✦ icon.</b> The blurry ✦ text glyph in <code>#wn-btn</code> is
+        replaced by an inline four-pointed sparkle SVG (<code>viewBox 0 0 24 24</code>,
+        <code>fill=currentColor</code>, 15×15, <code>aria-hidden</code>,
+        <code>display:block</code> to centre it against the neighbouring topbar glyph
+        buttons); the absolutely-positioned <code>.wn-dot</code> overlay is unaffected.</li>
     </ul>
   </section>
 </div>
