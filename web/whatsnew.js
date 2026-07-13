@@ -147,11 +147,22 @@
 
     /* scroll after the tab switch settles (next frame). The callout leads straight into
        the anchor, so bringing it to the top keeps both the explanation and the flashed
-       block in view. */
-    window.requestAnimationFrame(function () {
+       block in view. Async-rendered content ABOVE the anchor (fetched lists, e.g. the
+       alert-rules editor) can grow the layout after this first scroll and push the
+       target back below the fold — re-assert briefly until it settles. */
+    var scrollTo = function () {
       var into = a.callout || anchor;
       try { into.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
       catch (e) { try { into.scrollIntoView(); } catch (e2) { /* noop */ } }
+    };
+    window.requestAnimationFrame(scrollTo);
+    [800, 1600].forEach(function (delay) {
+      window.setTimeout(function () {
+        if (_arrival !== a) return;  // arrival ended -> never fight the user's scroll
+        var into = a.callout || anchor;
+        var r = into.getBoundingClientRect();
+        if (r.top < 0 || r.top > window.innerHeight * 0.5) scrollTo();
+      }, delay);
     });
   }
 
