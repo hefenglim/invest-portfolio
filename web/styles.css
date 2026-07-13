@@ -1796,6 +1796,9 @@ button[disabled], .btn[disabled] {
 
 /* in-page 新功能 callout: a dismissible card inserted BEFORE the flashed anchor, in
    normal flow (never overlays controls). Theme-aware via the shared tokens. */
+/* sticky-topbar clearance: the arrival scrollIntoView(block:'start') must not tuck the
+   callout (or the flashed block on the no-callout fallback) under the sticky .topbar. */
+.wn-callout, .wn-flash { scroll-margin-top: 68px; }
 .wn-callout {
   position: relative;
   margin: 0 0 12px;
