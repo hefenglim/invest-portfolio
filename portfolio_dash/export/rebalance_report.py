@@ -257,7 +257,7 @@ def _execution_html(rows: list[_RowView]) -> str:
         subtotal: dict[str, Decimal] = {}
         for lg in legs:
             subtotal[lg.ccy] = subtotal.get(lg.ccy, _ZERO) + lg.amount
-            odd = "＋（零股）" if lg.odd_lot else ""
+            odd = "（零股）" if lg.odd_lot else ""
             chip = f'<span class="chip {_side_class(lg.side)}">{_side_glyph(lg.side)}</span>'
             leg_rows.append(
                 "<tr>"
