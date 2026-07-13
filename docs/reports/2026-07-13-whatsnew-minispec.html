@@ -1,0 +1,151 @@
+<title>What's-New feature-announcement system — mini-spec (WP-WN)</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #2b76b9; --accent-soft: #e7f0fa; --mono-bg: #eef2f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #10151c; --card: #18202b; --ink: #e6ebf2; --ink-2: #9aa6b5;
+            --line: #232e3c; --accent: #58a6dd; --accent-soft: #16283a; --mono-bg: #0e141c; }
+  }
+  :root[data-theme="dark"] { --paper: #10151c; --card: #18202b; --ink: #e6ebf2;
+    --ink-2: #9aa6b5; --line: #232e3c; --accent: #58a6dd; --accent-soft: #16283a; --mono-bg: #0e141c; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #2b76b9; --accent-soft: #e7f0fa; --mono-bg: #eef2f6; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 22px 16px 56px; color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "Noto Sans", sans-serif;
+    font-size: 15px; line-height: 1.65; }
+  .wrap { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .eyebrow { font-size: 12px; letter-spacing: .16em; color: var(--accent); font-weight: 700; text-transform: uppercase; }
+  h1 { font-size: 24px; line-height: 1.3; margin: 4px 0 0; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 9px;
+    padding: 14px 18px 16px; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: var(--accent); }
+  p { margin: 7px 0; }
+  ul { margin: 7px 0; padding-left: 20px; }
+  li { margin: 5px 0; }
+  code { background: var(--mono-bg); border-radius: 4px; padding: 1px 5px;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px; }
+  pre { background: var(--mono-bg); border: 1px solid var(--line); border-radius: 7px;
+    padding: 12px 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.5;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: 6px; }
+  th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); font-weight: 700; }
+  .tag { display: inline-block; background: var(--accent-soft); color: var(--accent);
+    border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 700; }
+</style>
+<div class="wrap">
+  <div>
+    <div class="eyebrow">Mini-spec · archived</div>
+    <h1>「有什麼新功能」 — feature-announcement system</h1>
+    <p class="lede">WP-WN · v0.1.18 candidate · 2026-07-13. A dismissible new-feature
+      badge plus a per-version panel whose entries deep-link (「前往」) to where each
+      feature lives. Front-end only for the badge/panel; a tiny single-row table persists
+      the acknowledged version server-side.</p>
+  </div>
+
+  <section>
+    <h2>Goal</h2>
+    <ul>
+      <li>Tell a returning user, at a glance, that new features shipped — a small accent
+        <b>dot</b> on the topbar ✦ button and a <span class="tag">NEW</span> pill by the
+        sidebar version tag when there are unseen features.</li>
+      <li>A ✦ panel lists each visible version's features (title · one-line desc · area
+        breadcrumb) with a 「前往 →」 button that jumps to the page/tab the feature lives on.</li>
+      <li>Opening the panel <b>acknowledges</b> everything up to the current version; the
+        badge disappears and the acknowledgement persists across reloads and devices
+        (server-side, not localStorage).</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>API contract — <code>/api/whats-new</code></h2>
+    <p>Global session gate covers it (guest open, protected 401). Counts + strings only;
+      no money. The router is thin — ordering/visibility live in <code>shared/whatsnew.py</code>.</p>
+    <table>
+      <tr><th>Route</th><th>Behaviour</th></tr>
+      <tr><td><code>GET /api/whats-new</code></td>
+        <td>Returns <code>current_version</code>, <code>seen_version</code>,
+          <code>unseen_count</code>, and <code>versions[]</code> (newest first). Each group:
+          <code>version</code>, <code>date</code> (nullable), <code>unseen</code>,
+          <code>features[]</code> (<code>id/title/desc/href/area</code>).</td></tr>
+      <tr><td><code>POST /api/whats-new/seen</code></td>
+        <td>Body <code>{version}</code>. Bad format → <code>400</code>
+          (<code>error.field == "version"</code>). Else acknowledges (monotonic) and returns
+          the <b>same payload shape as GET</b>, so the client re-renders from one response.
+          Idempotent.</td></tr>
+    </table>
+    <pre>{
+  "current_version": "0.1.17",
+  "seen_version": "0",
+  "unseen_count": 15,
+  "versions": [
+    { "version": "0.1.17", "date": "2026-07-13", "unseen": true,
+      "features": [ { "id": "market-risk-alerts", "title": "市場風險預警",
+        "desc": "…", "href": "settings.html#alerts", "area": "系統設定 → 預警規則" } ] }
+  ]
+}</pre>
+  </section>
+
+  <section>
+    <h2>Seen-state semantics (version-level, monotonic)</h2>
+    <ul>
+      <li>Single-row table <code>whatsnew_config(id=1, seen_version, updated_at)</code> via
+        the same <code>config_store</code> create-always / seed-once pattern as
+        <code>ui_prefs</code>. Default <code>seen_version = "0"</code> (below every real
+        version, so a fresh install sees everything as new).</li>
+      <li><b>Acknowledgement is version-level</b>, not per-feature: opening the panel marks
+        everything up to <code>current_version</code> as seen. A group is
+        <code>unseen</code> iff <code>version_key(version) &gt; version_key(seen_version)</code>;
+        <code>unseen_count</code> sums the features in unseen groups.</li>
+      <li><b>Monotonic:</b> <code>set_seen_version</code> keeps the max of stored vs supplied
+        (by numeric version key), so a replayed or out-of-order lower version can never
+        un-acknowledge newer features.</li>
+      <li><code>version_key</code> parses to a numeric tuple so <code>0.1.9 &lt; 0.1.10</code>
+        orders correctly (the lexical trap). Versions validate against
+        <code>^\d+(\.\d+)*$</code>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Catalog maintenance rule</h2>
+    <ul>
+      <li><code>CATALOG</code> in <code>shared/whatsnew.py</code> is static and
+        hand-maintained, newest version first, 2–4 user-facing features per version
+        (what the user can now do, not implementation detail). <code>VERSION_DATES</code>
+        maps version → CHANGELOG date.</li>
+      <li><code>visible_versions(current)</code> filters to versions
+        <code>&le; current</code>, newest first, capped at <code>_MAX_VERSIONS = 6</code>.
+        The v0.1.18 catalog entry therefore stays hidden until <code>__version__</code> is
+        bumped at ship time — intentional and test-pinned.</li>
+      <li><b>Ship-step durability:</b> the ship-version checklist (item 5b) requires adding
+        the new version's CATALOG + VERSION_DATES entry. Unit tests enforce: ids unique per
+        version, valid version format, every <code>href</code> page exists under
+        <code>web/</code> (and a <code>settings.html#tab</code> hash is a real tab id), and
+        every catalog version <code>&le; __version__</code> has a
+        <code>## [v…]</code> CHANGELOG heading.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Front-end decisions</h2>
+    <ul>
+      <li><b>Dynamic load, no HTML tag.</b> <code>whatsnew.js</code> is lazy-loaded by
+        <code>shell.js</code> after the <code>/api/health</code> version resolves, and
+        stamped <code>?v=&lt;version&gt;</code> by shell (the asset stamper only sees HTML
+        tags). This avoids touching every <code>web/*.html</code>.</li>
+      <li><b>Silent degradation everywhere.</b> Every network path (badge fetch, ack POST)
+        tolerates failure without breaking the page — the badge is a hint, not a gate.</li>
+      <li><b>Optimistic ack.</b> Opening the panel removes the dot/pill immediately and fires
+        one <code>POST seen</code> per open; a failed POST does not re-show the badge.</li>
+      <li><b>前往 navigation.</b> Same page → set <code>location.hash</code> (the settings
+        page's own hashchange handler switches tabs) and flash the target in place; other
+        page → <code>location.href</code>, with a <code>sessionStorage</code> flash marker
+        consumed on arrival. The arrival flash respects
+        <code>prefers-reduced-motion</code>.</li>
+    </ul>
+  </section>
+</div>

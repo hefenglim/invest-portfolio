@@ -21,6 +21,11 @@ Do not declare a version done until every item passes. Stop and fix on any failu
    run `.venv/Scripts/python scripts/stamp_asset_version.py` so every `web/*.html`
    local script/css tag carries `?v=<new version>` (stale-cache flush; the contract
    test `tests/contract/test_static_cache_discipline.py` fails if skipped).
+   **5b. What's-new catalog** — add/update this version's `shared/whatsnew.py` `CATALOG`
+   entry (2-4 user-facing features, zh-TW, each with an accurate `href`/`area`) and its
+   `VERSION_DATES` date so the ✦ 新功能 panel stays current. The catalog-integrity +
+   CHANGELOG-drift unit tests (`tests/shared/test_whatsnew.py`) fail if a shipped version
+   is missing or an `href` points at a non-existent page.
 6. **Lessons** — update `LESSONS_LEARNED.md` if anything was learned the hard way.
 7. **Self-review pass** — review the diff for: correctness; boundary adherence
    (`architecture.md` — calc stays in `portfolio/`/`forex/`, web layer thin);
