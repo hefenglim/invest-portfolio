@@ -30,16 +30,19 @@
       btn.classList.add('wn-has-dot');
       btn.appendChild(_el('span', 'wn-dot'));
     }
+    /* pill INSIDE .brand-ver so it sits inline next to the version tag (a sidebar-level
+       sibling becomes its own stretched flex row) and hides with the collapsed rail. */
     document.querySelectorAll('.brand-ver').forEach(function (ver) {
-      var parent = ver.parentNode;
-      if (!parent || parent.querySelector('.wn-pill')) return;
-      var pill = _el('span', 'wn-pill', 'NEW');
-      parent.insertBefore(pill, ver.nextSibling);
+      if (ver.querySelector('.wn-pill')) return;
+      ver.appendChild(_el('span', 'wn-pill', 'NEW'));
     });
   }
 
   function _clearBadge() {
-    document.querySelectorAll('.wn-dot, .wn-pill').forEach(function (n) { n.remove(); });
+    /* scoped to the two ambient badges — the panel's own group NEW pills must survive
+       the open-ack (they tell the user WHICH versions are new on this very open). */
+    document.querySelectorAll('#wn-btn .wn-dot, .brand-ver .wn-pill')
+      .forEach(function (n) { n.remove(); });
     var btn = _btn();
     if (btn) btn.classList.remove('wn-has-dot');
   }
