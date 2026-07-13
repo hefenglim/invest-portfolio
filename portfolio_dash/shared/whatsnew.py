@@ -1,16 +1,27 @@
-"""What's-new feature catalog + per-install acknowledged-version state (WP-WN, 2026-07-13).
+"""What's-new feature catalog + per-FEATURE seen-state (WP-WN; round 3, 2026-07-13).
 
-A small, hand-maintained changelog of *user-facing* features surfaced by the ✦ 新功能
-panel, plus a single-row table tracking the highest version the user has acknowledged
-(so the "NEW" badge disappears once the panel is opened).
+A small, hand-maintained changelog of *user-facing* features surfaced by two surfaces:
 
-Follows the ``config_store`` create-always/seed-once pattern (same shape as
-``ui_prefs``: one row, id=1). Lives in ``shared/`` and imports nothing internal beyond
-``config_store`` so any layer may read it; only the api router writes it. Strings and
-counts only — no money anywhere here.
+* the ✦ 新功能 panel — the most recent ``_MAX_VERSIONS`` versions, with a per-feature
+  "NEW" badge that clears only when the user actually acts on a feature (前往 / 知道了 /
+  全部標示已讀), and
+* the 版本發佈資訊 history browser (settings 一般) — the FULL catalog, paged newest-first
+  via ``all_visible_versions`` + the router's ``offset/limit`` slice. Paging is the
+  scalability answer: the browser only renders the pages it has loaded, so an
+  ever-growing catalog can never degrade page performance.
+
+Seen-state is per feature (round 3, replacing the old version-level ack): a
+``whatsnew_seen`` table of ``"<version>:<id>"`` keys. A one-time migration folds any
+legacy ``whatsnew_config.seen_version`` acknowledgement into per-feature rows; the
+legacy table is kept in place (never dropped — a legacy-schema boot crash is a known
+lesson in this repo) but is no longer written.
+
+Follows the ``config_store`` create-always/seed-once pattern. Lives in ``shared/`` and
+imports nothing internal beyond ``config_store`` so any layer may read it; only the api
+router writes it. Strings and counts only — no money anywhere here.
 
 CATALOG maintenance rule: when a version ships, add/update its entry here (+
-``VERSION_DATES``) so the panel stays current. See the ship-version checklist.
+``VERSION_DATES``) so both surfaces stay current. See the ship-version checklist.
 """
 
 import re
@@ -24,9 +35,11 @@ from portfolio_dash.shared import config_store
 _CATEGORY = "whatsnew"
 _MAX_VERSIONS = 6
 _VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
-# Default acknowledged version: lower than every real version, so a fresh install sees
-# every visible group as unseen. "0" -> key (0,) sorts below any (0, 1, N).
+# Default legacy acknowledged version: lower than every real version. "0" -> key (0,)
+# sorts below any (0, 1, N). Only used by the migration source + the legacy seed row.
 _SEED_SEEN_VERSION = "0"
+# Fixed seen_at stamp for migrated rows (config_store-style constant; not user-facing).
+_MIGRATION_AT = datetime(2026, 7, 13).isoformat()
 
 
 class Feature(BaseModel):
@@ -36,7 +49,7 @@ class Feature(BaseModel):
     id: str  # kebab-case, unique within its version
     title: str  # zh-TW
     desc: str  # zh-TW one-liner
-    href: str | None  # e.g. "settings.html#alerts"; None -> no 前往 button
+    href: str | None  # e.g. "settings.html#alerts"; None -> no 前往 button (知道了 instead)
     area: str  # zh-TW breadcrumb, e.g. "系統設定 → 預警規則"
     # Optional CSS selector for the precise in-page element the feature lives at, used by
     # the arrival callout/flash to point exactly WHERE it changed. Presentation metadata
@@ -48,6 +61,10 @@ class Feature(BaseModel):
 # user (what they can now do), not implementation detail. The v0.1.18 entry is the
 # what's-new system itself; it stays hidden until __version__ is bumped at ship time
 # (visible_versions filters it out while current == 0.1.17 — this is intentional).
+#
+# v0.1.0 -> v0.1.11 were backfilled from CHANGELOG.md (round 3) so the history browser has
+# the full release story; those older entries carry href=None (the ✦ panel caps at the
+# newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
     Feature(
         version="0.1.18",
@@ -186,6 +203,263 @@ CATALOG: list[Feature] = [
         href="insights.html",
         area="AI 洞察",
     ),
+    # --- backfill: v0.1.11 -> v0.1.0 (history browser only; href=None) ---------------
+    Feature(
+        version="0.1.11",
+        id="official-task-pack",
+        title="官方洞察任務包",
+        desc="一鍵建立持倉週報、個股健檢與市場週報三項官方排程任務",
+        href=None,
+        area="系統設定 → 排程",
+    ),
+    Feature(
+        version="0.1.11",
+        id="news-pipeline",
+        title="新聞內容管線",
+        desc="自動擷取中英文新聞、以 AI 整理並建立個股新聞索引，新增新聞庫頁面",
+        href=None,
+        area="新聞庫",
+    ),
+    Feature(
+        version="0.1.11",
+        id="db-stats-panel",
+        title="資料庫統計面板",
+        desc="設定頁可檢視各資料表列數、最舊紀錄日期與檔案大小",
+        href=None,
+        area="系統設定 → 一般",
+    ),
+    Feature(
+        version="0.1.11",
+        id="site-pagination",
+        title="全站分頁與每頁筆數",
+        desc="各清單與帳本支援分頁，並可自訂每頁顯示筆數",
+        href=None,
+        area="全站",
+    ),
+    Feature(
+        version="0.1.10",
+        id="llm-insights-live",
+        title="AI 洞察正式啟用",
+        desc="AI 洞察在正式模型供應商上穩定運作，產出結構化洞察卡",
+        href=None,
+        area="AI 洞察",
+    ),
+    Feature(
+        version="0.1.10",
+        id="official-templates",
+        title="官方提示詞範本庫",
+        desc="系統提示詞與策略卡官方範本，可一鍵重置回官方版或複製自訂",
+        href=None,
+        area="系統設定 → 提示詞",
+    ),
+    Feature(
+        version="0.1.10",
+        id="scoring-rubric",
+        title="洞察評分準則",
+        desc="AI 洞察以方向、引用、情境與時效四面向評分，作為學習依據",
+        href=None,
+        area="AI 洞察",
+    ),
+    Feature(
+        version="0.1.9",
+        id="mobile-layout",
+        title="手機版介面",
+        desc="全站支援手機（iPhone）版面：側欄改為抽屜、表格獨立捲動、觸控更順手",
+        href=None,
+        area="全站",
+    ),
+    Feature(
+        version="0.1.8",
+        id="cash-management",
+        title="資金管理頁",
+        desc="各帳戶現金池集中管理：入金、出金、換匯與現金異動帳本",
+        href=None,
+        area="資金管理",
+    ),
+    Feature(
+        version="0.1.8",
+        id="monthly-snapshot",
+        title="月度成績快照",
+        desc="每月自動記錄總值、報酬率與 XIRR，儀表板新增月度成績面板",
+        href=None,
+        area="儀表板",
+    ),
+    Feature(
+        version="0.1.8",
+        id="inbox-badge",
+        title="待確認股利提醒",
+        desc="側欄交易帳本顯示待確認股利筆數徽章",
+        href=None,
+        area="側欄 → 交易帳本",
+    ),
+    Feature(
+        version="0.1.7",
+        id="all-market-dividend",
+        title="全市場配息偵測",
+        desc="股利待確認依帳戶模型支援台股現金、美股 DRIP、馬股淨額與台股配股",
+        href=None,
+        area="交易帳本 → 股利待確認",
+    ),
+    Feature(
+        version="0.1.7",
+        id="dividend-daily-scan",
+        title="配息每日自動掃描",
+        desc="每日收盤後自動掃描新配息事件並回報待確認筆數",
+        href=None,
+        area="交易帳本 → 股利待確認",
+    ),
+    Feature(
+        version="0.1.6",
+        id="tw-dividend-inbox",
+        title="台股配息待確認匯入",
+        desc="自動偵測台股現金配息並列入待確認清單，確認後才入帳，絕不自動入帳",
+        href=None,
+        area="交易帳本 → 股利待確認",
+    ),
+    Feature(
+        version="0.1.6",
+        id="smart-backfill",
+        title="智慧歷史回補",
+        desc="價格與匯率歷史自動回補至最早持有日，走勢圖與 XIRR 更完整",
+        href=None,
+        area="觀察清單",
+    ),
+    Feature(
+        version="0.1.5",
+        id="single-entry-forms",
+        title="股利／換匯／期初單筆輸入",
+        desc="股利、換匯與期初庫存提供專屬輸入表單，並支援 CSV 拖放匯入",
+        href=None,
+        area="交易輸入",
+    ),
+    Feature(
+        version="0.1.5",
+        id="system-action-log",
+        title="系統操作記錄",
+        desc="每筆異動操作自動記錄，可追溯時間、對象與結果",
+        href=None,
+        area="系統設定 → 排程",
+    ),
+    Feature(
+        version="0.1.5",
+        id="per-market-quote-order",
+        title="各市場報價來源順序",
+        desc="可分別設定台、美、馬三市場的報價來源優先順序",
+        href=None,
+        area="系統設定 → 資料來源",
+    ),
+    Feature(
+        version="0.1.5",
+        id="instruments-full-edit",
+        title="標的完整欄位編輯",
+        desc="名稱、產業、板別、ETF 與目標價皆可編輯（含美股）",
+        href=None,
+        area="觀察清單",
+    ),
+    Feature(
+        version="0.1.4",
+        id="one-step-add",
+        title="一步新增標的",
+        desc="輸入代號與市場即可完成註冊，自動帶入名稱並回補歷史走勢",
+        href=None,
+        area="觀察清單",
+    ),
+    Feature(
+        version="0.1.4",
+        id="ledger-row-edit",
+        title="帳本逐筆修改",
+        desc="交易、股利、換匯與期初資料皆可逐筆編輯或刪除，並自動重播檢查賣超",
+        href=None,
+        area="交易帳本",
+    ),
+    Feature(
+        version="0.1.4",
+        id="progress-visibility",
+        title="全站進度提示",
+        desc="更新報價、重算、歷史回補等長操作顯示進度條與提示，不再像卡住",
+        href=None,
+        area="全站",
+    ),
+    Feature(
+        version="0.1.4",
+        id="build-identity",
+        title="版本與建置資訊",
+        desc="側欄顯示版本與建置編號，未發行版另有標示",
+        href=None,
+        area="側欄",
+    ),
+    Feature(
+        version="0.1.3",
+        id="refresh-recompute-buttons",
+        title="更新報價與重算按鈕",
+        desc="頂列「更新報價」「重算」按鈕實際連動後端，隨時取得最新價格與重新計算",
+        href=None,
+        area="頂列",
+    ),
+    Feature(
+        version="0.1.3",
+        id="instant-first-quote",
+        title="註冊即抓報價",
+        desc="新增標的後立即抓取最新報價，不必等待收盤排程",
+        href=None,
+        area="觀察清單",
+    ),
+    Feature(
+        version="0.1.3",
+        id="symbol-search",
+        title="標的快速搜尋",
+        desc="以 Cmd／Ctrl＋K 搜尋已註冊標的並快速跳轉",
+        href=None,
+        area="全站",
+    ),
+    Feature(
+        version="0.1.2",
+        id="datasource-conn-test",
+        title="資料來源連線測試",
+        desc="設定頁可實際測試 yfinance／TWSE／TPEx／FinMind 是否連線正常",
+        href=None,
+        area="系統設定 → 資料來源",
+    ),
+    Feature(
+        version="0.1.2",
+        id="version-display",
+        title="系統版本顯示",
+        desc="側欄與設定頁顯示目前系統版本，方便確認更新狀態",
+        href=None,
+        area="側欄",
+    ),
+    Feature(
+        version="0.1.1",
+        id="first-run-bootstrap",
+        title="全新安裝開箱即用",
+        desc="首次啟動自動建立資料表與券商帳戶，全新安裝即可直接輸入交易",
+        href=None,
+        area="系統",
+    ),
+    Feature(
+        version="0.1.0",
+        id="dashboard-launch",
+        title="投資組合儀表板上線",
+        desc="持股、已實現／未實現損益、報酬率、產業配置與 XIRR 集中一頁檢視",
+        href=None,
+        area="儀表板",
+    ),
+    Feature(
+        version="0.1.0",
+        id="daily-backup",
+        title="每日自動備份",
+        desc="每日自動備份資料庫並檢查完整性，資料更有保障",
+        href=None,
+        area="系統",
+    ),
+    Feature(
+        version="0.1.0",
+        id="multi-account-login",
+        title="多帳戶與登入保護",
+        desc="支援多券商帳戶與多幣別，並以登入保護個人財務資料",
+        href=None,
+        area="全站",
+    ),
 ]
 
 # version -> ISO delivery date (from the CHANGELOG headings). v0.1.18 is intentionally
@@ -197,6 +471,18 @@ VERSION_DATES: dict[str, str] = {
     "0.1.14": "2026-07-12",
     "0.1.13": "2026-07-11",
     "0.1.12": "2026-07-09",
+    "0.1.11": "2026-07-08",
+    "0.1.10": "2026-07-05",
+    "0.1.9": "2026-07-03",
+    "0.1.8": "2026-07-03",
+    "0.1.7": "2026-07-03",
+    "0.1.6": "2026-07-03",
+    "0.1.5": "2026-07-03",
+    "0.1.4": "2026-07-02",
+    "0.1.3": "2026-07-02",
+    "0.1.2": "2026-07-02",
+    "0.1.1": "2026-06-19",
+    "0.1.0": "2026-06-19",
 }
 
 
@@ -219,68 +505,118 @@ def _version_key(version: str) -> tuple[int, ...]:
 def visible_versions(current: str) -> list[str]:
     """Catalog versions with ``key <= key(current)``, newest first, capped at 6.
 
-    A catalog version newer than *current* stays hidden (e.g. the v0.1.18 entry while
-    ``__version__`` is still 0.1.17). Deduplicated across the multi-feature catalog.
+    Feeds the ✦ panel only. A catalog version newer than *current* stays hidden (e.g. the
+    v0.1.18 entry while ``__version__`` is still 0.1.17). Deduplicated across the
+    multi-feature catalog.
     """
     current_key = _version_key(current)
     versions = {f.version for f in CATALOG if _version_key(f.version) <= current_key}
     return sorted(versions, key=_version_key, reverse=True)[:_MAX_VERSIONS]
 
 
-# --- acknowledged-version persistence (single-row config_store table) -------
+def all_visible_versions(current: str) -> list[str]:
+    """Every catalog version with ``key <= key(current)``, newest first, UNCAPPED.
 
+    Feeds the 版本發佈資訊 history browser (the 6-version cap applies only to the ✦ panel);
+    the router pages through this list via ``offset/limit``.
+    """
+    current_key = _version_key(current)
+    versions = {f.version for f in CATALOG if _version_key(f.version) <= current_key}
+    return sorted(versions, key=_version_key, reverse=True)
+
+
+def known_feature_keys(current: str) -> set[str]:
+    """Per-feature keys (``"<version>:<id>"``) for features in the ✦ panel window.
+
+    The router validates POSTed seen keys against this set: a key outside the visible
+    window (never rendered in the panel) can never be marked seen.
+    """
+    visible = set(visible_versions(current))
+    return {f"{f.version}:{f.id}" for f in CATALOG if f.version in visible}
+
+
+# --- per-feature seen-state (config_store create-always / seed-once) --------
+
+# Legacy single-row table (round 1/2): kept in place for the migration source + so a boot
+# on an old checkout never crashes on a missing table. No longer written after round 3.
 _DDL = (
     "CREATE TABLE IF NOT EXISTS whatsnew_config "
     "(id INTEGER PRIMARY KEY CHECK (id = 1), seen_version TEXT NOT NULL, "
     "updated_at TEXT NOT NULL)"
 )
+# Round-3 per-feature seen table: one row per acknowledged "<version>:<id>" key.
+_SEEN_DDL = (
+    "CREATE TABLE IF NOT EXISTS whatsnew_seen "
+    "(feature_key TEXT PRIMARY KEY, seen_at TEXT NOT NULL)"
+)
 
 
 def _create(conn: sqlite3.Connection) -> None:
+    # Both tables, every boot (config_store's create runs on every startup, so existing
+    # installs pick up whatsnew_seen safely without a bespoke migration path).
     conn.execute(_DDL)
+    conn.execute(_SEEN_DDL)
 
 
 def _seed(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT INTO whatsnew_config (id, seen_version, updated_at) VALUES (1, ?, ?) "
         "ON CONFLICT(id) DO NOTHING",
-        (_SEED_SEEN_VERSION, datetime(2026, 7, 13).isoformat()),
+        (_SEED_SEEN_VERSION, _MIGRATION_AT),
     )
+
+
+def _migrate_legacy_seen(conn: sqlite3.Connection) -> None:
+    """Fold a legacy version-level ack into per-feature seen rows (idempotent).
+
+    If the legacy ``whatsnew_config.seen_version`` is a valid version > "0", mark every
+    catalog feature at or below it as seen (INSERT OR IGNORE). Effectively one-time: seen
+    rows only ever grow, so re-running is a no-op. A fresh install (seen_version "0") and
+    a hand-corrupted non-version row both short-circuit here.
+    """
+    row = conn.execute(
+        "SELECT seen_version FROM whatsnew_config WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return
+    raw = str(row["seen_version"])
+    if not is_valid_version(raw) or _version_key(raw) <= _version_key(_SEED_SEEN_VERSION):
+        return
+    legacy_key = _version_key(raw)
+    keys = [f"{f.version}:{f.id}" for f in CATALOG if _version_key(f.version) <= legacy_key]
+    if not keys:
+        return
+    conn.executemany(
+        "INSERT OR IGNORE INTO whatsnew_seen (feature_key, seen_at) VALUES (?, ?)",
+        [(k, _MIGRATION_AT) for k in keys],
+    )
+    conn.commit()
 
 
 def ensure_whatsnew_seeded(conn: sqlite3.Connection) -> None:
-    """Create the single-row table (always) and seed the default seen_version (once)."""
+    """Create both tables (always), seed the legacy row (once), then migrate legacy acks."""
     config_store.ensure_seeded(conn, _CATEGORY, create=_create, seed=_seed)
+    _migrate_legacy_seen(conn)
 
 
-def get_seen_version(conn: sqlite3.Connection) -> str:
-    """Return the highest acknowledged version; falls back to the seed when absent.
+def get_seen_keys(conn: sqlite3.Connection) -> set[str]:
+    """Return the set of acknowledged ``"<version>:<id>"`` feature keys."""
+    ensure_whatsnew_seeded(conn)
+    rows = conn.execute("SELECT feature_key FROM whatsnew_seen").fetchall()
+    return {str(r["feature_key"]) for r in rows}
 
-    Defensive (same stance as ui_prefs): a legacy/hand-edited row holding a non-version
-    string would make every ``_version_key`` comparison raise — treat it as never-seen
-    instead of 500ing the panel.
+
+def mark_seen(conn: sqlite3.Connection, keys: list[str], *, now: datetime) -> set[str]:
+    """Mark each key in *keys* as seen (INSERT OR IGNORE); return the full seen set.
+
+    Idempotent — an already-seen key is left untouched (its original ``seen_at`` stands).
+    Caller validates the keys against :func:`known_feature_keys`.
     """
     ensure_whatsnew_seeded(conn)
-    row = conn.execute("SELECT seen_version FROM whatsnew_config WHERE id = 1").fetchone()
-    raw = str(row["seen_version"]) if row is not None else _SEED_SEEN_VERSION
-    return raw if is_valid_version(raw) else _SEED_SEEN_VERSION
-
-
-def set_seen_version(conn: sqlite3.Connection, version: str, *, now: datetime) -> str:
-    """Persist the acknowledged *version*, MONOTONIC — never regress.
-
-    Keeps the max of the stored value and *version* (by version_key), so an out-of-order
-    or replayed lower version cannot un-acknowledge newer features. Caller validates the
-    format (:func:`is_valid_version`). Returns the value actually stored.
-    """
-    ensure_whatsnew_seeded(conn)
-    current = get_seen_version(conn)
-    winner = version if _version_key(version) > _version_key(current) else current
-    conn.execute(
-        "INSERT INTO whatsnew_config (id, seen_version, updated_at) VALUES (1, ?, ?) "
-        "ON CONFLICT(id) DO UPDATE SET seen_version = excluded.seen_version, "
-        "updated_at = excluded.updated_at",
-        (winner, now.isoformat()),
-    )
-    conn.commit()
-    return winner
+    if keys:
+        conn.executemany(
+            "INSERT OR IGNORE INTO whatsnew_seen (feature_key, seen_at) VALUES (?, ?)",
+            [(k, now.isoformat()) for k in keys],
+        )
+        conn.commit()
+    return get_seen_keys(conn)

@@ -1,17 +1,19 @@
-"""Contract: GET/POST /api/whats-new — the feature-announcement panel + seen-state (WP-WN)."""
+"""Contract: GET/POST /api/whats-new (per-feature seen) + GET /api/whats-new/history (WP-WN)."""
+
+from typing import Any
 
 from fastapi.testclient import TestClient
 
 import portfolio_dash
 from portfolio_dash.shared.whatsnew import _version_key
 
-_KEYS = {"current_version", "seen_version", "unseen_count", "versions"}
+_KEYS = {"current_version", "unseen_count", "versions"}
+_FEAT_KEYS = {"key", "id", "title", "desc", "href", "area", "target", "seen"}
 
 
 def _assert_shape(body: dict[str, object]) -> None:
     assert set(body.keys()) == _KEYS
     assert isinstance(body["current_version"], str)
-    assert isinstance(body["seen_version"], str)
     assert isinstance(body["unseen_count"], int)
     assert isinstance(body["versions"], list)
     for grp in body["versions"]:
@@ -20,7 +22,9 @@ def _assert_shape(body: dict[str, object]) -> None:
         assert grp["date"] is None or isinstance(grp["date"], str)
         assert isinstance(grp["unseen"], bool)
         for feat in grp["features"]:
-            assert set(feat.keys()) == {"id", "title", "desc", "href", "area", "target"}
+            assert set(feat.keys()) == _FEAT_KEYS
+            assert feat["key"] == f"{grp['version']}:{feat['id']}"
+            assert isinstance(feat["seen"], bool)
             assert feat["href"] is None or isinstance(feat["href"], str)
             # target: optional CSS selector (string-or-null); when set it is non-empty and
             # only ever accompanies an href (presentation metadata, not standalone).
@@ -31,23 +35,26 @@ def _assert_shape(body: dict[str, object]) -> None:
                 assert feat["href"] is not None
 
 
+def _all_feature_keys(body: dict[str, Any]) -> list[str]:
+    return [f["key"] for g in body["versions"] for f in g["features"]]
+
+
 def test_get_shape_and_default_unseen_math(api_client: TestClient) -> None:
     r = api_client.get("/api/whats-new")
     assert r.status_code == 200
     body = r.json()
     _assert_shape(body)
     assert body["current_version"] == portfolio_dash.__version__
-    assert body["seen_version"] == "0"  # fresh install
+    assert "seen_version" not in body  # dropped in round 3
     # v0.1.18 (the unshipped what's-new entry) stays hidden while current == 0.1.17.
     versions = [g["version"] for g in body["versions"]]
     assert "0.1.18" not in versions
-    # newest first.
-    assert versions == sorted(versions, key=_version_key, reverse=True)
-    # with seen "0", every visible group is unseen and the count is their total features.
+    assert versions == sorted(versions, key=_version_key, reverse=True)  # newest first
+    # fresh install: every feature unseen; count == total visible features.
     assert all(g["unseen"] for g in body["versions"])
-    expected = sum(len(g["features"]) for g in body["versions"] if g["unseen"])
-    assert body["unseen_count"] == expected
-    assert body["unseen_count"] > 0
+    assert all(not f["seen"] for g in body["versions"] for f in g["features"])
+    total = sum(len(g["features"]) for g in body["versions"])
+    assert body["unseen_count"] == total > 0
 
 
 def test_settings_features_carry_seeded_targets(api_client: TestClient) -> None:
@@ -64,49 +71,121 @@ def test_settings_features_carry_seeded_targets(api_client: TestClient) -> None:
     assert feats["rules-engine"]["target"] is None
 
 
-def test_post_seen_round_trip_clears_unseen(api_client: TestClient) -> None:
-    current = portfolio_dash.__version__
-    r = api_client.post("/api/whats-new/seen", json={"version": current})
+def test_post_all_marks_every_feature_seen(api_client: TestClient) -> None:
+    r = api_client.post("/api/whats-new/seen", json={"all": True})
     assert r.status_code == 200
     body = r.json()
     _assert_shape(body)  # POST returns the same shape as GET
-    assert body["seen_version"] == current
     assert body["unseen_count"] == 0
     assert all(not g["unseen"] for g in body["versions"])
-    # a fresh GET reflects the persisted acknowledgement.
+    assert all(f["seen"] for g in body["versions"] for f in g["features"])
+    # persisted: a fresh GET reflects it.
     after = api_client.get("/api/whats-new").json()
-    assert after["seen_version"] == current
     assert after["unseen_count"] == 0
 
 
-def test_post_lower_version_does_not_regress(api_client: TestClient) -> None:
-    current = portfolio_dash.__version__
-    api_client.post("/api/whats-new/seen", json={"version": current})
-    # A lower version must not un-acknowledge newer features (monotonic).
-    r = api_client.post("/api/whats-new/seen", json={"version": "0.1.13"})
+def test_post_features_marks_only_those(api_client: TestClient) -> None:
+    before = api_client.get("/api/whats-new").json()
+    keys = _all_feature_keys(before)
+    target = keys[0]  # the newest group's first feature
+    r = api_client.post("/api/whats-new/seen", json={"features": [target]})
     assert r.status_code == 200
     body = r.json()
-    assert body["seen_version"] == current
-    assert body["unseen_count"] == 0
+    _assert_shape(body)
+    # exactly one feature flipped to seen; the count dropped by exactly one.
+    assert body["unseen_count"] == before["unseen_count"] - 1
+    seen_map = {f["key"]: f["seen"] for g in body["versions"] for f in g["features"]}
+    assert seen_map[target] is True
+    assert sum(1 for v in seen_map.values() if v) == 1
+    # its group is still unseen (sibling features remain unread).
+    grp0 = body["versions"][0]
+    assert grp0["unseen"] is True
+    # persisted across a fresh GET.
+    after = api_client.get("/api/whats-new").json()
+    after_seen = {f["key"]: f["seen"] for g in after["versions"] for f in g["features"]}
+    assert after_seen[target] is True
 
 
-def test_post_above_current_is_clamped(api_client: TestClient) -> None:
-    # Acknowledging "beyond" the running version would permanently suppress the badge
-    # for every FUTURE release; the router clamps the advance to current_version.
-    current = portfolio_dash.__version__
-    r = api_client.post("/api/whats-new/seen", json={"version": "999.0"})
+def test_post_features_is_idempotent(api_client: TestClient) -> None:
+    keys = _all_feature_keys(api_client.get("/api/whats-new").json())
+    target = keys[0]
+    first = api_client.post("/api/whats-new/seen", json={"features": [target]}).json()
+    second = api_client.post("/api/whats-new/seen", json={"features": [target]}).json()
+    assert first["unseen_count"] == second["unseen_count"]
+
+
+def test_post_unknown_key_400_writes_nothing(api_client: TestClient) -> None:
+    before = api_client.get("/api/whats-new").json()
+    # an unknown key and an out-of-window (backfilled) key both fail; nothing is written.
+    for bad in (["9.9.9:nope"], ["0.1.0:dashboard-launch"], [_all_feature_keys(before)[0], "x:y"]):
+        r = api_client.post("/api/whats-new/seen", json={"features": bad})
+        assert r.status_code == 400, bad
+        err = r.json()["error"]
+        assert err["code"] == "validation_error"
+        assert err["field"] == "features"
+    # nothing written on any refusal — the count is unchanged.
+    after = api_client.get("/api/whats-new").json()
+    assert after["unseen_count"] == before["unseen_count"]
+
+
+# --- history browser --------------------------------------------------------
+
+
+def _assert_history_shape(body: dict[str, object]) -> None:
+    assert set(body.keys()) == {"total", "offset", "versions"}
+    assert isinstance(body["total"], int)
+    assert isinstance(body["offset"], int)
+    assert isinstance(body["versions"], list)
+    for grp in body["versions"]:
+        assert set(grp.keys()) == {"version", "date", "features"}
+        assert grp["date"] is None or isinstance(grp["date"], str)
+        for feat in grp["features"]:
+            # history features carry NO seen-state, key, or href — just the user copy.
+            assert set(feat.keys()) == {"title", "desc", "area"}
+
+
+def test_history_shape_and_full_coverage(api_client: TestClient) -> None:
+    r = api_client.get("/api/whats-new/history", params={"offset": 0, "limit": 5})
     assert r.status_code == 200
     body = r.json()
-    assert body["seen_version"] == current
-    assert body["unseen_count"] == 0
-    assert api_client.get("/api/whats-new").json()["seen_version"] == current
+    _assert_history_shape(body)
+    assert body["offset"] == 0
+    # history pages the FULL catalog (uncapped) — strictly more than the ✦ panel's 6.
+    assert body["total"] > 6
+    versions = [g["version"] for g in body["versions"]]
+    assert versions == sorted(versions, key=_version_key, reverse=True)
+    assert "0.1.18" not in versions  # unshipped stays hidden here too
 
 
-def test_post_bad_format_is_rejected(api_client: TestClient) -> None:
-    r = api_client.post("/api/whats-new/seen", json={"version": "not-a-version"})
-    assert r.status_code == 400
-    err = r.json()["error"]
-    assert err["code"] == "validation_error"
-    assert err["field"] == "version"
-    # nothing written on refusal.
-    assert api_client.get("/api/whats-new").json()["seen_version"] == "0"
+def test_history_paging_stitches_without_overlap_or_gap(api_client: TestClient) -> None:
+    limit = 5
+    p1 = api_client.get("/api/whats-new/history", params={"offset": 0, "limit": limit}).json()
+    p2 = api_client.get("/api/whats-new/history", params={"offset": limit, "limit": limit}).json()
+    assert p1["total"] == p2["total"]  # total is constant across pages
+    v1 = [g["version"] for g in p1["versions"]]
+    v2 = [g["version"] for g in p2["versions"]]
+    assert len(v1) == limit  # a full first page
+    stitched = v1 + v2
+    assert len(set(stitched)) == len(stitched)  # no overlap, no dup
+    # contiguous + strictly newest-first across the seam (no gap).
+    assert stitched == sorted(stitched, key=_version_key, reverse=True)
+
+
+def test_history_offset_past_end_is_empty_not_error(api_client: TestClient) -> None:
+    total = api_client.get("/api/whats-new/history").json()["total"]
+    body = api_client.get("/api/whats-new/history", params={"offset": total, "limit": 5}).json()
+    assert body["versions"] == []
+    assert body["total"] == total
+
+
+def test_history_validation_400s(api_client: TestClient) -> None:
+    for params, field in (
+        ({"offset": -1, "limit": 5}, "offset"),
+        ({"offset": 0, "limit": 0}, "limit"),
+        ({"offset": 0, "limit": 21}, "limit"),
+    ):
+        r = api_client.get("/api/whats-new/history", params=params)
+        assert r.status_code == 400, params
+        err = r.json()["error"]
+        assert err["code"] == "validation_error"
+        assert err["field"] == field
