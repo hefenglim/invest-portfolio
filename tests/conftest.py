@@ -98,6 +98,46 @@ def _seed_golden(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _seed_dual_account(conn: sqlite3.Connection) -> None:
+    """A portfolio where ONE symbol (AAPL) is genuinely held in TWO accounts.
+
+    AAPL: schwab 30 sh @100 + moomoo_my_us 10 sh @110 (both US, USD) — the cross-account
+    duplicate the combined-aware rebalance engine must treat as a single position. 2330 in
+    tw_broker (1000 sh) gives a TW single-account symbol alongside it. Current: AAPL 120 USD,
+    2330 600 TWD; USD/TWD 33. Used by the dual-account rebalance flow/contract tests — kept
+    OUT of the golden oracle (`_seed_golden`) so its byte-exact regression values are stable.
+    """
+    seed_accounts(conn)
+    upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=Currency.TWD,
+                                       sector="Semiconductors", name="TSMC", board="TWSE"))
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=Currency.USD,
+                                       sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("30"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    insert_transaction(conn, account_id="moomoo_my_us", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("110"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 12))
+    upsert_prices(conn, [
+        PriceRow(instrument="2330", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("600"), source="test"),
+        PriceRow(instrument="AAPL", market=Market.US, as_of=date(2026, 6, 9),
+                 close=Decimal("120"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    upsert_fx(conn, [
+        FxRow(base=Currency.USD, quote=Currency.TWD, as_of=date(2026, 6, 9),
+              rate=Decimal("33"), source="test"),
+        FxRow(base=Currency.USD, quote=Currency.MYR, as_of=date(2026, 6, 9),
+              rate=Decimal("4.4"), source="test"),
+        FxRow(base=Currency.MYR, quote=Currency.TWD, as_of=date(2026, 6, 9),
+              rate=Decimal("7"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    conn.commit()
+
+
 def init_golden_base(conn: sqlite3.Connection) -> None:
     """Create the full empty schema (the same ordered table setup golden_db uses) on
     *conn*, WITHOUT any ledger rows. Callers seed their own scenario afterwards. Reused
