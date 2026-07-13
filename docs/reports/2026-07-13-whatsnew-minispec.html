@@ -257,4 +257,26 @@
         buttons); the absolutely-positioned <code>.wn-dot</code> overlay is unaffected.</li>
     </ul>
   </section>
+
+  <section>
+    <h2>Round 4 — flash retiming + arrival unification (2026-07-14)</h2>
+    <ul>
+      <li><b>Blink retimed.</b> The arrival pulse is now <code>animation: wn-flash-pulse 1s
+        ease-in-out 20</code> — 0.5 s fade-in / 0.5 s fade-out per 1 s cycle, twenty cycles
+        (~20 s total). Keyframes are unchanged (0%/100% transparent, 50% full highlight); the
+        JS safety-net <code>FLASH_MS</code> stays ~21 s. Replaces round-2's
+        <code>2s … 10</code> (1 s in / 1 s out) — same duration, gentler per-cycle motion.</li>
+      <li><b>Every 前往 now flashes.</b> <code>_resolveAnchor</code> gained a final generic
+        fallback: after the precise <code>target</code> selector and the settings-tab / hash
+        lookup miss, it returns <code>document.querySelector('.page section.panel')</code>,
+        else <code>document.querySelector('.page')</code>. So a catalog feature whose page has
+        no hash section (instruments / insights / index) still gets the callout + a page-level
+        highlight instead of silently showing nothing.</li>
+      <li><b>Targets filled + enforced.</b> Every CATALOG feature that carries an
+        <code>href</code> now also carries a stable <code>target</code> (attribute selectors
+        like <code>section[data-screen-label="持倉明細"]</code>). A new unit test asserts
+        <code>href ⇒ non-empty target</code> forever, and the <code>ship-version</code>
+        checklist (item 5b) now requires both for every shipped user-facing feature.</li>
+    </ul>
+  </section>
 </div>

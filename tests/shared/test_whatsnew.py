@@ -201,6 +201,39 @@ def test_catalog_targets_nonempty_and_require_href() -> None:
             assert feature.href is not None, feature.id
 
 
+def test_catalog_href_requires_target() -> None:
+    # The guarantee (round 4): every feature with an href MUST also carry a non-empty
+    # target, so the 前往 jump lands a precise in-page callout + flash on its own page.
+    # (href=None backfilled features are exempt — they only surface in 版本發佈資訊.)
+    for feature in CATALOG:
+        if feature.href is not None:
+            assert feature.target is not None and feature.target.strip(), feature.id
+
+
+def test_v0_1_18_entries_valid_and_hidden_at_current_version() -> None:
+    # This release's own catalog entries: each is well-formed (href + target) and stays
+    # HIDDEN from the ✦ panel while __version__ is still 0.1.17 (visible_versions filters
+    # a version newer than current). They surface only once the ship bump lands.
+    entries = [f for f in CATALOG if f.version == "0.1.18"]
+    assert len(entries) >= 5  # what's-new panel + history browser + 3 report exports (+rebalance)
+    ids = {f.id for f in entries}
+    for expected in (
+        "version-history-browser",
+        "rebalance-combined",
+        "rebalance-report-export",
+        "holdings-report-export",
+        "ledger-report-export",
+    ):
+        assert expected in ids
+    # Every entry with an href carries a non-empty target (the round-4 guarantee).
+    for f in entries:
+        if f.href is not None:
+            assert f.target and f.target.strip(), f.id
+    # Hidden at the current shipped version.
+    assert "0.1.18" not in visible_versions("0.1.17")
+    assert "0.1.18" not in all_visible_versions("0.1.17")
+
+
 def test_catalog_version_dates_present_for_shipped_versions() -> None:
     current_key = _version_key(portfolio_dash.__version__)
     for feature in CATALOG:

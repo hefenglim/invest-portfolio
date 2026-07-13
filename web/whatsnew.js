@@ -62,12 +62,13 @@
   }
 
   /* ---- arrival highlight + in-page callout (via 前往) ------------------------------
-     Arriving from a 前往 click blinks the exact section that changed (1s in / 1s out ×10,
-     ~20s) AND drops a dismissible callout card right before it (WHAT changed, WHERE). A tab
-     switch (hashchange OR the settings replaceState-based pd-settings-tab event) or leaving
-     the page cancels the whole thing immediately, and — since teardown removes the callout
-     from the DOM — it never resurfaces on switch-back; only a fresh 前往 re-arms it. */
-  var FLASH_MS = 21000;         // safety net: a hair past the 20s CSS blink (2s × 10)
+     Arriving from a 前往 click blinks the exact section that changed (0.5s in / 0.5s out ×20,
+     1s cycle, ~20s) AND drops a dismissible callout card right before it (WHAT changed,
+     WHERE). A tab switch (hashchange OR the settings replaceState-based pd-settings-tab
+     event) or leaving the page cancels the whole thing immediately, and — since teardown
+     removes the callout from the DOM — it never resurfaces on switch-back; only a fresh 前往
+     re-arms it. */
+  var FLASH_MS = 21000;         // safety net: a hair past the 20s CSS blink (1s × 20)
   var MARKER_FRESH_MS = 30000;  // a marker older than this is stale -> discard unconsumed
   var _arrival = null;          // the single active arrival, or null
 
@@ -79,8 +80,9 @@
 
   /* Resolve the element to flash / anchor the callout to. A precise `target` selector
      wins (resolved up to its enclosing panel so a small/inline match still wraps a
-     meaningful block); else fall back to the settings tab section (existing behaviour).
-     Null -> nothing precise to point at (degrade silently: no flash, no callout). */
+     meaningful block); else the settings tab section or the hash element; else a generic
+     page-level fallback so EVERY 前往 gets at least a callout + page highlight (a catalog
+     feature with an href but no in-page anchor never silently shows nothing). */
   function _resolveAnchor(feat) {
     if (feat && feat.target) {
       var el = null;
@@ -89,11 +91,16 @@
     }
     var hash = _hashOf(feat && feat.href);
     if (_currentPage() === 'settings.html') {
-      return document.getElementById('view-' + hash)
+      var view = document.getElementById('view-' + hash)
         || document.querySelector('.set-view.active')
         || (hash ? document.getElementById(hash) : null);
+      if (view) return view;
+    } else if (hash) {
+      var byId = document.getElementById(hash);
+      if (byId) return byId;
     }
-    return hash ? document.getElementById(hash) : null;
+    /* generic fallback: main panel, else the page container (page-level highlight at worst). */
+    return document.querySelector('.page section.panel') || document.querySelector('.page');
   }
 
   function _buildCallout(feat) {
@@ -151,9 +158,9 @@
     window.addEventListener('hashchange', a.onCancel);
     window.addEventListener('pd-settings-tab', a.onCancel);
 
-    /* ~20s blink (1s in / 1s out × 10). Reduced-motion suppresses the animation (no
-       animationend), so a timer clears the class too. Neither clears the callout — the
-       callout persists until ✕ or a cancel. */
+    /* ~20s blink (0.5s in / 0.5s out × 20, 1s cycle). Reduced-motion suppresses the
+       animation (no animationend), so a timer clears the class too. Neither clears the
+       callout — the callout persists until ✕ or a cancel. */
     anchor.classList.add('wn-flash');
     a.onAnimEnd = function () { if (a.flashEl) a.flashEl.classList.remove('wn-flash'); };
     anchor.addEventListener('animationend', a.onAnimEnd);

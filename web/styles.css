@@ -1808,10 +1808,10 @@ button[disabled], .btn[disabled] {
 }
 .wn-go:hover { background: var(--accent); color: #fff; }
 
-/* arrival blink: the section a 前往 link jumped to pulses 1s in / 1s out, 10 times
-   (~20s total). Endpoints are fully transparent so it starts and ends with no jump; the
-   midpoint is the full highlight (ring + soft tint). */
-.wn-flash { animation: wn-flash-pulse 2s ease-in-out 10; }
+/* arrival blink: the section a 前往 link jumped to pulses 0.5s in / 0.5s out, 20 times
+   (1s cycle, ~20s total). Endpoints are fully transparent so it starts and ends with no
+   jump; the midpoint is the full highlight (ring + soft tint). */
+.wn-flash { animation: wn-flash-pulse 1s ease-in-out 20; }
 @keyframes wn-flash-pulse {
   0%, 100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
   50%      { box-shadow: 0 0 0 2px var(--accent), 0 0 0 6px var(--accent-soft); background: var(--accent-soft); }

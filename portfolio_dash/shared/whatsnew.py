@@ -57,10 +57,11 @@ class Feature(BaseModel):
     target: str | None = None
 
 
-# Hand-maintained, newest version first. 2-4 features per version, phrased for the end
-# user (what they can now do), not implementation detail. The v0.1.18 entry is the
-# what's-new system itself; it stays hidden until __version__ is bumped at ship time
-# (visible_versions filters it out while current == 0.1.17 — this is intentional).
+# Hand-maintained, newest version first. Features are phrased for the end user (what they
+# can now do), not implementation detail. The v0.1.18 entries (what's-new system + version-
+# history browser + the rebalance/holdings/ledger print reports) stay hidden until
+# __version__ is bumped at ship time (visible_versions filters them out while current ==
+# 0.1.17 — this is intentional).
 #
 # v0.1.0 -> v0.1.11 were backfilled from CHANGELOG.md (round 3) so the history browser has
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
@@ -73,6 +74,51 @@ CATALOG: list[Feature] = [
         desc="每次改版的新功能一覽，可一鍵前往對應的設定或頁面",
         href=None,
         area="全站 → 頂列 ✦",
+    ),
+    Feature(
+        version="0.1.18",
+        id="version-history-browser",
+        title="版本發佈資訊瀏覽",
+        desc="系統設定「一般」新增版本發佈資訊按鈕，可翻閱每次改版的完整功能清單",
+        href="settings.html#accounts",
+        area="系統設定 → 一般",
+        target="#gen-whatsnew",
+    ),
+    Feature(
+        version="0.1.18",
+        id="rebalance-combined",
+        title="再平衡跨帳戶合併試算",
+        desc="同一標的跨多帳戶合併為一列試算，並標示各帳戶持股，目標權重驅動合併部位",
+        href="index.html",
+        area="儀表板 → 持倉明細",
+        target='section[data-screen-label="持倉明細"]',
+    ),
+    Feature(
+        version="0.1.18",
+        id="rebalance-report-export",
+        title="再平衡執行報告匯出",
+        desc="再平衡試算可匯出可列印的執行報告，依帳戶列出買賣股數與費稅清單",
+        href="index.html",
+        area="儀表板 → 持倉明細",
+        target='section[data-screen-label="持倉明細"]',
+    ),
+    Feature(
+        version="0.1.18",
+        id="holdings-report-export",
+        title="持倉報告匯出",
+        desc="持倉明細可匯出可列印的持倉報告，含 KPI 摘要、持倉明細與產業／幣別配置",
+        href="index.html",
+        area="儀表板 → 持倉明細",
+        target='section[data-screen-label="持倉明細"]',
+    ),
+    Feature(
+        version="0.1.18",
+        id="ledger-report-export",
+        title="帳本報告匯出",
+        desc="交易帳本可匯出可列印的帳本報告，涵蓋交易、股利、換匯與期初庫存，可依日期區間",
+        href="trades.html",
+        area="交易帳本 → 帳本記錄",
+        target='section[data-screen-label="帳本記錄"]',
     ),
     Feature(
         version="0.1.17",
@@ -162,6 +208,7 @@ CATALOG: list[Feature] = [
         desc="持股與觀察標的計算 TechScore 與趨勢、交叉、動能、RSI 四項技術訊號",
         href="instruments.html",
         area="觀察清單",
+        target='section[data-screen-label="標的清單"]',
     ),
     Feature(
         version="0.1.13",
@@ -170,6 +217,7 @@ CATALOG: list[Feature] = [
         desc="點開任一標的抽屜即可看到 TechScore、各規則證據與判讀說明",
         href="instruments.html",
         area="觀察清單 → 個股抽屜",
+        target='section[data-screen-label="標的清單"]',
     ),
     Feature(
         version="0.1.13",
@@ -177,7 +225,8 @@ CATALOG: list[Feature] = [
         title="訊號轉折事件",
         desc="趨勢、交叉與動能轉折會自動進入預警與推播串流",
         href="index.html",
-        area="儀表板",
+        area="儀表板 → 持倉明細",
+        target='section[data-screen-label="持倉明細"]',
     ),
     Feature(
         version="0.1.12",
@@ -186,6 +235,7 @@ CATALOG: list[Feature] = [
         desc="三大市場的成交量納入資料庫，供技術訊號與 AI 健檢引用",
         href="instruments.html",
         area="觀察清單",
+        target='section[data-screen-label="標的清單"]',
     ),
     Feature(
         version="0.1.12",
@@ -194,6 +244,7 @@ CATALOG: list[Feature] = [
         desc="價格歷史回補延長至五年，52 週位置與長期指標更完整",
         href="instruments.html",
         area="觀察清單",
+        target='section[data-screen-label="標的清單"]',
     ),
     Feature(
         version="0.1.12",
@@ -202,6 +253,7 @@ CATALOG: list[Feature] = [
         desc="新增分析師目標價與評等共識，作為 AI 洞察的判讀依據",
         href="insights.html",
         area="AI 洞察",
+        target='section[data-screen-label="AI 洞察"]',
     ),
     # --- backfill: v0.1.11 -> v0.1.0 (history browser only; href=None) ---------------
     Feature(
