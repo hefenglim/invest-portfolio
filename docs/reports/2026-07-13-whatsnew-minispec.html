@@ -148,4 +148,46 @@
         <code>prefers-reduced-motion</code>.</li>
     </ul>
   </section>
+
+  <section>
+    <h2>Round 2 (field feedback) — 2026-07-13</h2>
+    <p>Three owner-requested UX upgrades to the 前往 arrival experience. Backend adds only
+      presentation metadata; all behaviour is front-end.</p>
+    <ul>
+      <li><b>A · 10s flash, cancel-on-switch, fire only via 前往.</b> The
+        <code>wn-flash-pulse</code> keyframes now hold the ring + tint clearly visible to
+        ~8.5s then fade over the last ~1.5s (single 10s iteration; JS safety-net ~11s;
+        reduced-motion fallback kept). While a flash/callout is active a
+        <code>hashchange</code> (and the settings <code>pd-settings-tab</code> tab-switch
+        event, which uses <code>replaceState</code> and fires no hashchange) tears it down
+        immediately; teardown removes the callout from the DOM so it never resurfaces on
+        switch-back — only a fresh 前往 re-arms it. The <code>sessionStorage</code> marker
+        now carries a <code>ts</code>; a marker older than 30s is discarded unconsumed, and
+        it is always removed once evaluated on the matching page.</li>
+      <li><b>B · In-page detailed feature callout (頁內新功能提醒).</b> Arriving via 前往 now
+        also drops a dismissible <code>.wn-callout</code> card inserted <em>before</em> the
+        anchor (normal flow — pushes content down, never overlays controls): accent
+        left-border, <code>✦ 新功能</code> + title, desc body, <code>area</code> breadcrumb,
+        ✕ close. The marker became a JSON string
+        <code>{href,id,title,desc,area,target,ts}</code> (malformed/legacy markers discarded
+        silently). The anchor resolves from the feature's <code>target</code> selector
+        (small/inline matches resolve to <code>el.closest('section.panel')</code>), falling
+        back to the settings <code>#view-&lt;hash&gt;</code> section. Same-page 前往 runs the
+        SAME routine (callout + scroll + 10s flash), not a bare flash. One callout at a time
+        (re-arrival replaces it).</li>
+      <li><b>Model.</b> <code>Feature</code> gained <code>target: str | None</code> — an
+        optional CSS selector, serialized in the GET/POST feature JSON. Seeded:
+        <code>market-risk-alerts → #alert-rules-wrap</code>,
+        <code>target-weights → #target-weights-panel</code>, the five notification-channel
+        features → <code>.nt-cards</code>, <code>quiet-hours → #nt-qh-enabled</code>,
+        <code>per-rule-subscriptions → #nt-subs</code>; instruments/insights/index features
+        stay <code>null</code>. Presentation metadata only — no logic in
+        <code>shared/whatsnew.py</code>. Contract/unit tests pin the seeded targets and the
+        <code>target ⇒ href</code> invariant; an e2e test covers callout arrival +
+        cancel-on-switch + no-resurface.</li>
+      <li><b>C · "missing NEW pill" report — no code change.</b> Root-caused to the demo DB's
+        <code>seen_version</code> already acknowledged by earlier verification runs; badge
+        logic is correct and left intact.</li>
+    </ul>
+  </section>
 </div>
