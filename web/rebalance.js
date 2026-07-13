@@ -99,8 +99,12 @@
     capBtn.title = '將超過上限的標的設為上限值，其餘維持現權重；釋出部分視為現金';
     const resetBtn = el('button', 'btn', '重設為現權重');
     resetBtn.type = 'button';
+    const exportBtn = el('button', 'btn rb-export-btn', '匯出執行報告');
+    exportBtn.type = 'button';
+    exportBtn.title = '下載目前試算結果為可列印的執行報告（HTML，不寫入帳本）';
     bar.appendChild(capBtn);
     bar.appendChild(resetBtn);
+    bar.appendChild(exportBtn);
     body.appendChild(bar);
 
     /* table */
@@ -304,17 +308,25 @@
     let timer = null;
     function schedule() { clearTimeout(timer); timer = setTimeout(update, 250); }
 
-    async function update() {
-      /* sumTarget is a pure UI percentage (NOT money) — drives the 目標合計 / 現金水位 hints.
-         One row per SYMBOL, so each symbol's target is counted exactly once. */
+    /* Build the target-weight RATIO dict the backend consumes — one entry per SYMBOL, as
+       STRINGS so Pydantic parses EXACT Decimals (avoids JS-float drift). SHARED by the
+       debounced preview (update) and the 匯出執行報告 download so both send the identical
+       plan. sumTarget is a pure UI percentage (NOT money) — drives 目標合計 / 現金水位. */
+    function buildTargets() {
       let sumTarget = 0;
       const targets = {};
       rows.forEach((r) => {
         const ratio = state[r.symbol];
         sumTarget += ratio;
-        /* send ratios as STRINGS so Pydantic parses EXACT Decimals (avoids JS-float drift). */
         targets[r.symbol] = String(ratio);
       });
+      return { targets: targets, sumTarget: sumTarget };
+    }
+
+    async function update() {
+      const built = buildTargets();
+      const sumTarget = built.sumTarget;
+      const targets = built.targets;
 
       /* cancel any prior in-flight preview so a newer edit wins (typeahead-style). */
       const ctrl = window.pdApi.abortable('rebalance-preview');
@@ -355,6 +367,24 @@
         r.inp.value = (state[r.symbol] * 100).toFixed(1);
       });
       update();
+    });
+    /* 匯出執行報告: download the CURRENT plan as a print-optimized, self-contained HTML
+       execution guide. Sends the SAME targets dict as update() (buildTargets); the server
+       recomputes the numbers of record (no client math). House style: silent on success,
+       toast only on failure; the button shows a busy state (guards double-clicks). */
+    exportBtn.addEventListener('click', async () => {
+      const restore = window.pdBusy(exportBtn, '產出中…');
+      try {
+        const built = buildTargets();
+        await window.pdApi.download('/api/export/rebalance-report', { targets: built.targets });
+      } catch (err) {
+        if (window.toast) {
+          window.toast(err && err.message ? err.message : '匯出執行報告失敗',
+            'fail', err && err.code);
+        }
+      } finally {
+        restore();
+      }
     });
 
     clearComputed();

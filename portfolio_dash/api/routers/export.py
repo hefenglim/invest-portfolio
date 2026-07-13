@@ -12,6 +12,7 @@ stays a pure scheduler view.
 
 import sqlite3
 from datetime import datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
@@ -22,6 +23,7 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.export.artifact import ExportArtifact
 from portfolio_dash.export.holdings import build_holdings_csv
 from portfolio_dash.export.ledgers import build_ledgers_zip
+from portfolio_dash.export.rebalance_report import build_rebalance_report_html
 from portfolio_dash.export.tax import build_tax_package_zip
 from portfolio_dash.export.usage import build_job_runs_csv, build_llm_usage_csv
 from portfolio_dash.shared.enums import Currency
@@ -106,4 +108,27 @@ def export_tax_package(
 ) -> Response:
     return _respond(
         build_tax_package_zip(conn, now=now, year=body.year, reporting=reporting)
+    )
+
+
+class RebalanceReportBody(BaseModel):
+    targets: dict[str, Decimal]  # symbol -> reporting-ccy weight RATIO (Decimal string)
+
+
+@router.post("/export/rebalance-report")
+def export_rebalance_report(
+    body: RebalanceReportBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+) -> Response:
+    # Validation PARITY with POST /api/rebalance/preview (api/routers/strategy.py
+    # ::post_rebalance): a non-decimal ratio is a Pydantic 422 in both; reject a negative
+    # ratio with the SAME 400 validation_error / field=targets shape (few lines duplicated).
+    for symbol, ratio in body.targets.items():
+        if ratio < Decimal("0"):
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", f"{symbol} 目標權重不可為負", field="targets"))
+    return _respond(
+        build_rebalance_report_html(conn, now=now, reporting=reporting, targets=body.targets)
     )
