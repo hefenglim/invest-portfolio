@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
-from portfolio_dash.api import insight_service
+from portfolio_dash.api import alert_inputs, insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.llm_insight import composer_store, insights_store
@@ -56,14 +56,21 @@ def dashboard(
 
     # alerts: the SAME rule engine as GET /api/alerts, run over the already-built `data`
     # (no second build_dashboard) so the embedded array can never diverge from the endpoint.
-    # calib_gap is fed in from the single-source helper (None below the min_samples gate).
+    # calib_gap is fed in from the single-source helper (None below the min_samples gate); the
+    # P3 market-risk metrics (drawdown / vol / drift / consensus) are assembled from the SAME
+    # `data` + stored prices/consensus/target-weights via the shared alert_inputs seam, so the
+    # embed and GET /api/alerts feed byte-identical inputs.
     calib = insight_service.calibration_gap(conn)
+    fed = alert_inputs.assemble(conn, data, now=now)
     alerts = compute_alerts_from(
         data, get_alert_rules(conn),
         quota_remaining=budget_remaining(conn),
         quota_threshold=get_alert_threshold(conn),
         calib_gap=calib,
         account_names=account_display_names(conn),  # FH2: same display names as GET /api/alerts
+        symbol_metrics=fed.symbol_metrics,
+        target_weights=fed.target_weights,
+        consensus_deltas=fed.consensus_deltas,
     )
     payload["alerts"] = to_wire([a.model_dump() for a in alerts])
 

@@ -510,12 +510,34 @@ def consensus_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
 # (task, rule, symbol) in ``llm_insight.alerts_bridge``.
 
 
+# alert-compute runner seam (P3 batch 2): the FULL rule set needs per-symbol market metrics
+# read from pricing + consensus snapshots, which lives in the api seam (api/alert_inputs.py).
+# The app registers it at startup so scheduler/ never imports api (architecture.md), exactly
+# like the signal_scan / snapshot / insight runners.
+AlertComputeRunner = Callable[..., list[Alert]]
+_ALERT_COMPUTE_RUNNER: AlertComputeRunner | None = None
+
+
+def register_alert_compute_runner(fn: AlertComputeRunner | None) -> None:
+    """Register (or clear with None) the full-alert-compute runner (app wiring seam)."""
+    global _ALERT_COMPUTE_RUNNER
+    _ALERT_COMPUTE_RUNNER = fn
+
+
 def _compute_alerts_for_scan(conn: sqlite3.Connection, *, now: datetime) -> list[Alert]:
     """Compute the current spec-03 alerts for the scan (reporting ccy = TWD).
 
-    A thin seam over ``strategy.alerts.compute_alerts`` (overridable in tests) so the scan
-    job stays a trigger: it does not reimplement the rule engine.
+    A thin seam (overridable in tests) so the scan job stays a trigger: it does not
+    reimplement the rule engine. When the app has registered the alert-compute runner
+    (``api.alert_inputs.scan_alert_compute``) it runs the FULL P3 rule set (incl. the
+    market-risk rules whose inputs are read from pricing — scheduler/ never imports api).
+    A scheduler-only process without the runner degrades to the base ``strategy.alerts``
+    engine (the 8 pre-P3 rules; the market-risk rules simply do not fire), which mirrors how
+    the scan already omits ``calib_gap``.
     """
+    runner = _ALERT_COMPUTE_RUNNER
+    if runner is not None:
+        return list(runner(conn, now=now))
     return compute_alerts(conn, now=now, reporting=Currency.TWD)
 
 

@@ -54,6 +54,16 @@
       if (window.toast) window.toast('目前沒有可試算的持倉', 'info');
       return;
     }
+    /* D8: prefill target weights from the server-side 目標配置 (single source of truth). A
+       symbol with a stored target seeds its input from that ratio; the rest fall back to the
+       current weight. Non-fatal — a failure just keeps the current-weight seed. */
+    const storedTargets = {};
+    try {
+      const tw = await window.pdApi.get('/api/target-weights');
+      (tw && tw.symbols || []).forEach((s) => {
+        if (s.weight !== null && s.weight !== undefined) storedTargets[s.symbol] = Number(s.weight);
+      });
+    } catch (e) { /* fall back to current weights */ }
     const priced = D.holdings.filter((h) => h.market_price !== null && h.market_price !== undefined && h.weight !== null);
     const unpriced = D.holdings.filter((h) => h.market_price === null || h.market_price === undefined || h.weight === null);
 
@@ -113,7 +123,10 @@
        is a target PERCENTAGE (a UI weight), NOT money — the only money/share numbers come
        back from the backend preview below and render through f.*. */
     const state = {};
-    priced.forEach((h) => { state[h.symbol] = Number(h.weight); });
+    priced.forEach((h) => {
+      state[h.symbol] = (storedTargets[h.symbol] !== undefined)
+        ? storedTargets[h.symbol] : Number(h.weight);  /* D8 target prefill, else current */
+    });
 
     /* build rows ONCE; keep refs to computed cells, keyed by symbol for backend matching */
     const rowsBySym = {};

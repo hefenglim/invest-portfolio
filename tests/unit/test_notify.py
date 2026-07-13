@@ -352,6 +352,23 @@ def test_config_defaults_topic_generated_once(conn: sqlite3.Connection) -> None:
     assert notify.load_config(conn).ntfy.topic == cfg.ntfy.topic
 
 
+def test_load_config_backfills_new_subscription_keys(conn: sqlite3.Connection) -> None:
+    # An EXISTING install whose saved config predates the P3 rules (subscriptions map is
+    # missing the 4 new keys) must gain them defaulted-True on the next load, and persist it.
+    notify.ensure_seeded(conn)
+    stale = notify.load_config(conn)
+    for rid in ("drawdown_from_peak", "vol_spike", "rebalance_drift", "consensus_change"):
+        stale.subscriptions.pop(rid, None)
+    notify.save_config(conn, stale, now=_now(9))
+    healed = notify.load_config(conn)
+    for rid in ("drawdown_from_peak", "vol_spike", "rebalance_drift", "consensus_change"):
+        assert healed.subscriptions[rid] is True
+    # persisted (the self-heal happens exactly once): a raw re-read still has them
+    assert all(notify.load_config(conn).subscriptions[rid]
+               for rid in ("drawdown_from_peak", "vol_spike", "rebalance_drift",
+                           "consensus_change"))
+
+
 def test_save_round_trip(conn: sqlite3.Connection) -> None:
     cfg = notify.load_config(conn)
     cfg.telegram.enabled = True

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
 from portfolio_dash.api import action_log
+from portfolio_dash.api.alert_inputs import scan_alert_compute
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
 from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.dividend_inbox import scan_job as dividend_scan_job
@@ -68,6 +69,7 @@ from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
     ensure_scheduler_seeded,
+    register_alert_compute_runner,
     register_calibration_runner,
     register_dividend_scan_runner,
     register_evaluation_runner,
@@ -81,6 +83,7 @@ from portfolio_dash.shared.db import session
 from portfolio_dash.shared.logging_config import configure_logging
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
 from portfolio_dash.strategy.signal_states import ensure_table as ensure_signal_states_table
+from portfolio_dash.strategy.target_weights import ensure_target_weights_seeded
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
@@ -132,6 +135,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         snapshots_store.ensure_tables(conn)  # external_snapshots (spec 20.4)
         ensure_scheduler_seeded(conn)  # also seeds the 5 ingest jobs' schedule rows
         ensure_alert_rules_seeded(conn)
+        ensure_target_weights_seeded(conn)  # per-symbol target weights (P3 batch 2, D8)
         ensure_auth_seeded(conn)
         ensure_system_prompt_seeded(conn)
         ensure_news_prompt_seeded(conn)  # editable news-organizer prompt (batch ④)
@@ -155,6 +159,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_news_runner(run_news_daily)
     # Rule-signal scan (P2 batch 2): held-symbol signal evaluation + transition events.
     register_signal_scan_runner(signal_scan_runner)
+    # Alert-compute (P3 batch 2): the FULL rule set (market-risk rules need pricing/consensus
+    # reads that live in the api seam) — the scheduler's alert_scan runs through this.
+    register_alert_compute_runner(scan_alert_compute)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()

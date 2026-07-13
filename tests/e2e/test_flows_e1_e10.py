@@ -217,3 +217,32 @@ def test_e6_login_loop_protected_mode(
     assert ok.value.status == 200
     page.wait_for_url("**/index.html")
     page.wait_for_selector(".kpi-card")  # the session cookie carried -> dashboard renders
+
+
+@pytest.mark.e2e
+def test_target_weights_section_renders_sum_and_saves(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """D8: the 目標配置 section renders per-symbol rows via the real settings nav, the live
+    sum indicator reacts to input, and 儲存 PUTs the ratios (guest write path, like the
+    existing alert-rules editor). ZERO console + page errors on the whole flow."""
+    base = flow_server(seed_full)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/settings.html#alerts", wait_until="load")
+    # one row per REGISTERED symbol (rendered after GET /api/target-weights resolves)
+    page.wait_for_selector("#target-weights-wrap .tw-row")
+    # the live sum indicator reacts to a % input
+    page.locator("#target-weights-wrap .tw-input").first.fill("12.5")
+    page.wait_for_function(
+        "() => (document.querySelector('#tw-sum').textContent || '').includes('12.5')"
+    )
+    # 儲存 PUTs the ratio and the backend accepts it (200) — the alerts editor's guest path
+    with page.expect_response("**/api/target-weights") as resp:
+        page.click("#target-weights-save")
+    assert resp.value.status == 200
+
+    assert not console_errors and not page_errors, (
+        f"target-weights: console={console_errors!r} page={page_errors!r}"
+    )

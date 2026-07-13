@@ -69,6 +69,12 @@ RULE_CATALOG: list[tuple[str, str, str]] = [
     ("exdiv_upcoming", "即將除息", "info"),
     ("quota_low", "AI 額度偏低", "warn"),
     ("calib_gap", "AI 校準誤差", "warn"),
+    # P3 batch 2 market-risk rules (mirror strategy.rules_config RULE_META). The push
+    # severity here is the rule's representative level (drawdown can escalate to risk).
+    ("drawdown_from_peak", "高點回撤", "risk"),
+    ("vol_spike", "波動突升", "warn"),
+    ("rebalance_drift", "配置漂移", "risk"),
+    ("consensus_change", "分析師共識轉弱", "info"),
     ("signal_trend", "趨勢反轉", "info"),
     ("signal_cross", "均線交叉", "info"),
     ("signal_momentum", "動能轉向", "info"),
