@@ -85,7 +85,12 @@ def mark_seen(
     if not is_valid_version(body.version):
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "版本格式無效", field="version"))
-    set_seen_version(conn, body.version, now=now)
+    # Clamp to the running version: acknowledging "beyond" current would permanently
+    # suppress the badge for every FUTURE release (irreversible from the UI). The store
+    # stays monotonic; this cap just bounds how far a single POST can advance it.
+    current = portfolio_dash.__version__
+    version = body.version if _version_key(body.version) <= _version_key(current) else current
+    set_seen_version(conn, version, now=now)
     return _payload(conn)
 
 

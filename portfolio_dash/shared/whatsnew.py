@@ -241,10 +241,16 @@ def ensure_whatsnew_seeded(conn: sqlite3.Connection) -> None:
 
 
 def get_seen_version(conn: sqlite3.Connection) -> str:
-    """Return the highest acknowledged version; falls back to the seed when absent."""
+    """Return the highest acknowledged version; falls back to the seed when absent.
+
+    Defensive (same stance as ui_prefs): a legacy/hand-edited row holding a non-version
+    string would make every ``_version_key`` comparison raise — treat it as never-seen
+    instead of 500ing the panel.
+    """
     ensure_whatsnew_seeded(conn)
     row = conn.execute("SELECT seen_version FROM whatsnew_config WHERE id = 1").fetchone()
-    return str(row["seen_version"]) if row is not None else _SEED_SEEN_VERSION
+    raw = str(row["seen_version"]) if row is not None else _SEED_SEEN_VERSION
+    return raw if is_valid_version(raw) else _SEED_SEEN_VERSION
 
 
 def set_seen_version(conn: sqlite3.Connection, version: str, *, now: datetime) -> str:

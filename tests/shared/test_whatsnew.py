@@ -98,6 +98,18 @@ def test_set_seen_version_is_monotonic() -> None:
     assert get_seen_version(conn) == "0.1.18"
 
 
+def test_corrupt_stored_seen_version_degrades_to_seed() -> None:
+    # A legacy/hand-edited row holding a non-version string must not 500 the panel:
+    # read degrades to the never-seen seed, and a subsequent write recovers cleanly.
+    conn = _mem_conn()
+    set_seen_version(conn, "0.1.17", now=_NOW)  # creates + seeds the table
+    conn.execute("UPDATE whatsnew_config SET seen_version = 'not-a-version' WHERE id = 1")
+    conn.commit()
+    assert get_seen_version(conn) == "0"
+    assert set_seen_version(conn, "0.1.17", now=_NOW) == "0.1.17"
+    assert get_seen_version(conn) == "0.1.17"
+
+
 # --- catalog integrity ------------------------------------------------------
 
 

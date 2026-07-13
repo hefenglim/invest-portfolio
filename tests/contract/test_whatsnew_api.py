@@ -69,6 +69,18 @@ def test_post_lower_version_does_not_regress(api_client: TestClient) -> None:
     assert body["unseen_count"] == 0
 
 
+def test_post_above_current_is_clamped(api_client: TestClient) -> None:
+    # Acknowledging "beyond" the running version would permanently suppress the badge
+    # for every FUTURE release; the router clamps the advance to current_version.
+    current = portfolio_dash.__version__
+    r = api_client.post("/api/whats-new/seen", json={"version": "999.0"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["seen_version"] == current
+    assert body["unseen_count"] == 0
+    assert api_client.get("/api/whats-new").json()["seen_version"] == current
+
+
 def test_post_bad_format_is_rejected(api_client: TestClient) -> None:
     r = api_client.post("/api/whats-new/seen", json={"version": "not-a-version"})
     assert r.status_code == 400
