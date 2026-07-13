@@ -83,10 +83,11 @@ def test_all_visible_versions_uncapped_and_newest_first() -> None:
     # list is strictly longer than the panel cap.
     assert len(out) > _MAX_VERSIONS
     assert out == sorted(out, key=_version_key, reverse=True)
-    # v0.1.18 (unshipped) stays hidden; the oldest backfilled version is present.
-    assert "0.1.18" not in out
+    # Version-agnostic (survives every release bump): nothing ABOVE the running version
+    # is ever visible, and the oldest backfilled version is present.
+    current_key = _version_key(current)
+    assert all(_version_key(v) <= current_key for v in out)
     assert "0.1.0" in out
-    assert out[0] == "0.1.17"
 
 
 # --- per-feature seen-state -------------------------------------------------

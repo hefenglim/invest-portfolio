@@ -50,6 +50,70 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.18] - 2026-07-14
+
+What's-new announcement system (four field-feedback rounds), the combined cross-account
+rebalance engine, three print-optimized reports, and the reconciliation-grade CSV
+migration. Every batch implemented by Opus subagents and gated by independent deep
+reviews (two review rounds caught and fixed six defects green tests had missed).
+
+### Added
+- **✦ What's-new system (WP-WN):** topbar ✦ (crisp inline SVG) with an unseen dot +
+  sidebar NEW pill; the panel lists recent versions' features with per-feature NEW
+  state — a feature clears ONLY on 前往 / 知道了 / 全部標示已讀 (per-feature
+  `whatsnew_seen` table; opening the panel acknowledges nothing; legacy version-level
+  acks migrate on boot). 前往 deep-links to the exact page/tab, scrolls to a precise
+  per-feature anchor, drops a dismissible in-page callout card, and blinks the target
+  0.5s in / 0.5s out × 20 (canceled by any tab/page switch; re-armed only by 前往;
+  30s marker freshness). `GET/POST /api/whats-new`; catalog in `shared/whatsnew.py`
+  (every href-bearing feature must carry a resolvable `target` — test-enforced).
+- **版本發佈資訊 history browser:** settings 一般 → button beside 系統版本; pages the
+  FULL user-facing release story (`GET /api/whats-new/history?offset&limit`, catalog
+  backfilled v0.1.0–v0.1.11) 5 versions at a time — the browser renders only loaded
+  pages, so an ever-growing history cannot degrade performance.
+- **Print reports (self-contained offline HTML, A4 print CSS, all dynamic strings
+  escaped, shared `export/report_html.py` scaffold):** 再平衡試算執行指南
+  (`POST /api/export/rebalance-report` — per-symbol summary + a per-ACCOUNT execution
+  checklist with ☐ rows and per-currency subtotals), 持倉報告
+  (`/api/export/holdings-report` — KPI grid, weight-sorted holdings with account
+  labels + TOTAL row, sector/currency allocation), 帳本報告 (`/api/export/ledgers-report`
+  — four ledgers over an optional date range with per-currency sums). Buttons on the
+  持倉明細 head, the rebalance drawer, and the 交易帳本 toolbar.
+- **Reconciliation-grade CSV endpoints:** `POST /api/export/ledger {kind,from,to}`
+  (single-ledger CSV), `/api/export/realized`, `/api/export/ai-predictions`,
+  `/api/export/symbol-detail {symbol}`.
+
+### Changed
+- **Rebalance preview is combined-aware (owner ruling 2026-07-14 recorded here, decided
+  2026-07-13): target weights stay SYMBOL-level (D8 single source of truth) and apply to
+  the COMBINED cross-account position; buys route to the most-shares account, sells
+  allocate greedily most-shares-first bounded per account (a target of 0 liquidates
+  every account; oversell is structurally impossible). Option 2 (per-account targets)
+  was rejected.** Response gains `accounts[]` constituents + per-account `legs[]`
+  (fees per that account's rule set, TW odd-lot hint) + `over_allocated` /
+  `excluded_with_target` flags; the drawer shows ONE row per symbol with account chips
+  and per-leg actions, and 目標合計 counts each symbol once.
+- **Every 匯出 CSV now flows through the backend reconciliation channel (owner
+  directive 2026-07-14):** seven surfaces rewired (holdings, realized, ledger tabs,
+  ai-predictions, symbol dividends, llm-usage, job-runs) — full data sets at source
+  precision, English snake_case headers; the client-side display-value dump framework
+  (`web/export.js`) is retired to an inert frozen object.
+- ship-version checklist item 5b: every shipped user-facing feature must add a what's-new
+  catalog entry with an accurate `href` AND `target`.
+
+### Fixed
+- Rebalance: the engine previously computed a multi-account symbol against ONE account
+  (wrong trade sizes; the drawer's duplicate rows orphaned the first row's cells so its
+  target edits never computed); footer 目標合計 double-counted multi-account symbols.
+- Deep review: `Content-Disposition` filenames are now sanitized (ASCII fallback +
+  RFC 5987 `filename*` — a CJK symbol name previously 500'd the download and CRLF could
+  inject headers); a zero-priced symbol no longer crashes the rebalance preview with
+  `DivisionByZero` (excluded honestly per the no-fabrication rule).
+- What's-new audit fixes: seen-version clamped to the running version; corrupt stored
+  seen value degrades to never-seen; the open-ack no longer wipes the panel's own group
+  NEW pills; the sidebar pill no longer stretches full-width; the arrival scroll
+  re-asserts after async layout shifts and clears the sticky topbar.
+
 ## [v0.1.17] - 2026-07-13
 
 Blueprint Phase 3 batch 2: alerts taxonomy v2 — proactive market-risk alerts, each

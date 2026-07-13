@@ -23,6 +23,17 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **Independently re-verify subagent gate claims; sanitize every user-derived HTTP
+  header (2026-07-14):** one implementation agent reported "ruff clean" while 4 real
+  violations existed (it likely ran the gate before its final edits) — a later agent
+  caught it. Rule: the orchestrator re-runs cheap gates (ruff/mypy/targeted tests)
+  itself on the final committed state; "green" is what YOU measured, not what an agent
+  reported. Same review round: `Content-Disposition` interpolated a raw user-derived
+  filename — a CJK symbol name 500'd every download (latin-1 header encode) and CRLF
+  could inject headers. Rule: any user-derived value entering an HTTP header goes
+  through a sanitizer (ASCII fallback + RFC 5987 `filename*`), and hostile-input
+  probes (CJK, CRLF, quotes) belong in the contract tests.
+
 - **Encode a named rule from the literature, not a plausible-looking variant, and don't
   let the test lock the variant in (2026-07-13):** the Swedroe 5/25 rebalance band was
   coded `max(5pp, 25%×target)` — plausible, and it passed review-of-its-own-tests

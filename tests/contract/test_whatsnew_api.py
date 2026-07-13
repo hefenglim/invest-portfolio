@@ -46,9 +46,11 @@ def test_get_shape_and_default_unseen_math(api_client: TestClient) -> None:
     _assert_shape(body)
     assert body["current_version"] == portfolio_dash.__version__
     assert "seen_version" not in body  # dropped in round 3
-    # v0.1.18 (the unshipped what's-new entry) stays hidden while current == 0.1.17.
+    # Version-agnostic: nothing ABOVE the running version is ever visible (an unshipped
+    # catalog entry stays hidden until the release bump makes it current).
     versions = [g["version"] for g in body["versions"]]
-    assert "0.1.18" not in versions
+    current_key = _version_key(portfolio_dash.__version__)
+    assert all(_version_key(v) <= current_key for v in versions)
     assert versions == sorted(versions, key=_version_key, reverse=True)  # newest first
     # fresh install: every feature unseen; count == total visible features.
     assert all(g["unseen"] for g in body["versions"])
@@ -159,7 +161,9 @@ def test_history_shape_and_full_coverage(api_client: TestClient) -> None:
     assert body["total"] > 6
     versions = [g["version"] for g in body["versions"]]
     assert versions == sorted(versions, key=_version_key, reverse=True)
-    assert "0.1.18" not in versions  # unshipped stays hidden here too
+    # nothing above the running version appears here either (version-agnostic).
+    current_key = _version_key(portfolio_dash.__version__)
+    assert all(_version_key(v) <= current_key for v in versions)
 
 
 def test_history_paging_stitches_without_overlap_or_gap(api_client: TestClient) -> None:

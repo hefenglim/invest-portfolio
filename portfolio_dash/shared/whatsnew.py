@@ -526,6 +526,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). v0.1.18 is intentionally
 # absent until it ships (GET serializes a missing entry as date: null).
 VERSION_DATES: dict[str, str] = {
+    "0.1.18": "2026-07-14",
     "0.1.17": "2026-07-13",
     "0.1.16": "2026-07-12",
     "0.1.15": "2026-07-12",

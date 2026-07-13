@@ -48,10 +48,13 @@ def test_whatsnew_per_feature_seen_and_persist(
     assert page.locator(".wn-backdrop .wn-new-pill").count() > 0
     assert page.locator("#wn-btn .wn-dot").count() == 1
 
-    # Click the first 前往 (market-risk-alerts -> settings.html#alerts): marks THAT feature.
-    first_key = page.locator(".wn-backdrop .wn-feat").first.get_attribute("data-wn-key")
+    # Click a SPECIFIC 前往 (market-risk-alerts -> settings.html#alerts): marks THAT
+    # feature. Targeted by key, NOT `.first` — a release bump prepends a new version
+    # group whose first feature may be href-less (知道了), which broke the old locator.
+    row = page.locator('.wn-backdrop .wn-feat[data-wn-key="0.1.17:market-risk-alerts"]')
+    first_key = row.get_attribute("data-wn-key")
     assert first_key
-    page.locator(".wn-backdrop .wn-go").first.click()
+    row.locator(".wn-go").click()
     page.wait_for_url("**/settings.html#alerts")
 
     # The dot persists (other features are still unread). Reopen the panel: the clicked
@@ -94,7 +97,9 @@ def test_whatsnew_callout_arrival_and_cancel_on_switch(
     page.wait_for_selector("#wn-btn")
     page.click("#wn-btn")
     page.wait_for_selector(".wn-backdrop .wn-go")
-    page.locator(".wn-backdrop .wn-go").first.click()
+    # Targeted by key (version-proof), not `.first` — see the note in the test above.
+    page.locator('.wn-backdrop .wn-feat[data-wn-key="0.1.17:market-risk-alerts"]') \
+        .locator(".wn-go").click()
 
     # Arrives on the alerts tab: the callout is visible with the feature title, and the
     # blink wraps the rules block (the panel enclosing #alert-rules-wrap).
