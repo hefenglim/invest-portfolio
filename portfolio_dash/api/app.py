@@ -53,6 +53,7 @@ from portfolio_dash.api.routers import (
     system_log,
     ui_prefs,
     users,
+    whatsnew,
 )
 from portfolio_dash.api.signals_service import scan_signals as signal_scan_runner
 from portfolio_dash.api.snapshots import snapshot_job
@@ -242,6 +243,7 @@ def create_app() -> FastAPI:
     app.include_router(news.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
     app.include_router(notify.router, prefix="/api")
+    app.include_router(whatsnew.router, prefix="/api")
     if _WEB_DIR.is_dir():
         app.mount("/", _NoCacheStaticFiles(directory=_WEB_DIR, html=True), name="web")
     return app

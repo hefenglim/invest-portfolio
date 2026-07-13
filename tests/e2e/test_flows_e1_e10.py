@@ -25,7 +25,7 @@ import pytest
 from playwright.sync_api import Page
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
-from tests.conftest import _seed_golden
+from tests.conftest import _seed_dual_account, _seed_golden
 from tests.contract.test_oversell_graceful import _seed_oversold
 from tests.contract.test_spec17_financials import seed_full
 from tests.e2e.conftest import FlowServerFactory
@@ -217,6 +217,127 @@ def test_e6_login_loop_protected_mode(
     assert ok.value.status == 200
     page.wait_for_url("**/index.html")
     page.wait_for_selector(".kpi-card")  # the session cookie carried -> dashboard renders
+
+
+@pytest.mark.e2e
+def test_rebalance_dual_account_single_row_with_chips(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """Combined cross-account rebalance: a symbol held in TWO accounts (AAPL: schwab +
+    moomoo_my_us) renders as EXACTLY ONE drawer row with account chips; editing its target
+    fires the preview and populates its OWN action cell (the pre-fix orphan bug is gone) —
+    and one row means the footer counts the symbol once. ZERO console + page errors."""
+    base = flow_server(_seed_dual_account)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    page.wait_for_selector(".rb-open-btn")
+    page.click(".rb-open-btn")
+    page.wait_for_selector(".rb-drawer .rb-table tbody tr")
+
+    aapl_rows = page.locator(
+        ".rb-drawer .rb-table tbody tr",
+        has=page.locator(".sym-code", has_text="AAPL"),
+    )
+    assert aapl_rows.count() == 1  # ONE row for the dual-account symbol (no duplicate)
+    # the account chips list BOTH constituents (schwab 30 + moomoo_my_us 10)
+    assert aapl_rows.locator(".rb-acct-chip").count() == 2
+
+    # editing AAPL's target fires the debounced preview; its OWN action cell then computes
+    inp = aapl_rows.locator(".rb-input")
+    inp.wait_for(state="attached")
+    with page.expect_response("**/api/rebalance/preview") as resp_info:
+        inp.fill("40")
+    assert resp_info.value.status == 200
+    aapl_rows.locator(".rb-leg").first.wait_for(state="attached")  # its cells populated
+
+    assert not console_errors and not page_errors, (
+        f"dual-account rebalance: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_rebalance_export_report_download(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """匯出執行報告: the drawer's export button triggers a browser download of the current
+    plan as `rebalance-plan-YYYYMMDD-HHMM.html`. ZERO console + page errors."""
+    base = flow_server(_seed_dual_account)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    page.wait_for_selector(".rb-open-btn")
+    page.click(".rb-open-btn")
+    page.wait_for_selector(".rb-drawer .rb-table tbody tr")
+    page.wait_for_selector(".rb-export-btn")
+
+    with page.expect_download() as dl_info:
+        page.click(".rb-export-btn")
+    download = dl_info.value
+    assert re.match(r"rebalance-plan-\d{8}-\d{4}\.html$", download.suggested_filename), (
+        f"unexpected export filename: {download.suggested_filename!r}"
+    )
+
+    assert not console_errors and not page_errors, (
+        f"rebalance export: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_holdings_export_report_download(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """匯出報告 (持倉報告): the holdings panel's report button triggers a browser download of
+    `holdings-report-YYYYMMDD-HHMM.html`. ZERO console + page errors."""
+    base = flow_server(_seed_dual_account)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    page.wait_for_selector(".pd-holdings-report-btn")
+
+    with page.expect_download() as dl_info:
+        page.click(".pd-holdings-report-btn")
+    download = dl_info.value
+    assert re.match(r"holdings-report-\d{8}-\d{4}\.html$", download.suggested_filename), (
+        f"unexpected export filename: {download.suggested_filename!r}"
+    )
+
+    assert not console_errors and not page_errors, (
+        f"holdings export: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_ledger_export_csv_download(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """交易帳本 匯出 CSV: the active-tab 匯出 CSV button downloads the reconciliation CSV via
+    the backend channel (POST /api/export/ledger). Default tab = 交易 -> transactions ->
+    `ledger_transactions_all_all.csv`. ZERO console + page errors (owner directive
+    2026-07-14: the export no longer scrapes the rendered table)."""
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/trades.html", wait_until="load")
+    page.wait_for_selector("#ledger-export-slot .btn-export")
+
+    with page.expect_download() as dl_info:
+        page.click("#ledger-export-slot .btn-export")
+    download = dl_info.value
+    assert download.suggested_filename == "ledger_transactions_all_all.csv", (
+        f"unexpected export filename: {download.suggested_filename!r}"
+    )
+
+    assert not console_errors and not page_errors, (
+        f"ledger export: console={console_errors!r} page={page_errors!r}"
+    )
 
 
 @pytest.mark.e2e

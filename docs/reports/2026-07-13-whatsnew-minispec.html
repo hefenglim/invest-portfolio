@@ -1,0 +1,282 @@
+<title>What's-New feature-announcement system — mini-spec (WP-WN)</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933; --ink-2: #52606d;
+    --line: #d9e0e6; --accent: #2b76b9; --accent-soft: #e7f0fa; --mono-bg: #eef2f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #10151c; --card: #18202b; --ink: #e6ebf2; --ink-2: #9aa6b5;
+            --line: #232e3c; --accent: #58a6dd; --accent-soft: #16283a; --mono-bg: #0e141c; }
+  }
+  :root[data-theme="dark"] { --paper: #10151c; --card: #18202b; --ink: #e6ebf2;
+    --ink-2: #9aa6b5; --line: #232e3c; --accent: #58a6dd; --accent-soft: #16283a; --mono-bg: #0e141c; }
+  :root[data-theme="light"] { --paper: #f4f6f8; --card: #ffffff; --ink: #1f2933;
+    --ink-2: #52606d; --line: #d9e0e6; --accent: #2b76b9; --accent-soft: #e7f0fa; --mono-bg: #eef2f6; }
+  html { background: var(--paper); }
+  body { margin: 0; padding: 22px 16px 56px; color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "Noto Sans", sans-serif;
+    font-size: 15px; line-height: 1.65; }
+  .wrap { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .eyebrow { font-size: 12px; letter-spacing: .16em; color: var(--accent); font-weight: 700; text-transform: uppercase; }
+  h1 { font-size: 24px; line-height: 1.3; margin: 4px 0 0; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 9px;
+    padding: 14px 18px 16px; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: var(--accent); }
+  p { margin: 7px 0; }
+  ul { margin: 7px 0; padding-left: 20px; }
+  li { margin: 5px 0; }
+  code { background: var(--mono-bg); border-radius: 4px; padding: 1px 5px;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px; }
+  pre { background: var(--mono-bg); border: 1px solid var(--line); border-radius: 7px;
+    padding: 12px 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.5;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: 6px; }
+  th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); font-weight: 700; }
+  .tag { display: inline-block; background: var(--accent-soft); color: var(--accent);
+    border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 700; }
+</style>
+<div class="wrap">
+  <div>
+    <div class="eyebrow">Mini-spec · archived</div>
+    <h1>「有什麼新功能」 — feature-announcement system</h1>
+    <p class="lede">WP-WN · v0.1.18 candidate · 2026-07-13. A dismissible new-feature
+      badge plus a per-version panel whose entries deep-link (「前往」) to where each
+      feature lives. Front-end only for the badge/panel; a tiny single-row table persists
+      the acknowledged version server-side.</p>
+  </div>
+
+  <section>
+    <h2>Goal</h2>
+    <ul>
+      <li>Tell a returning user, at a glance, that new features shipped — a small accent
+        <b>dot</b> on the topbar ✦ button and a <span class="tag">NEW</span> pill by the
+        sidebar version tag when there are unseen features.</li>
+      <li>A ✦ panel lists each visible version's features (title · one-line desc · area
+        breadcrumb) with a 「前往 →」 button that jumps to the page/tab the feature lives on.</li>
+      <li>Opening the panel <b>acknowledges</b> everything up to the current version; the
+        badge disappears and the acknowledgement persists across reloads and devices
+        (server-side, not localStorage).</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>API contract — <code>/api/whats-new</code></h2>
+    <p>Global session gate covers it (guest open, protected 401). Counts + strings only;
+      no money. The router is thin — ordering/visibility live in <code>shared/whatsnew.py</code>.</p>
+    <table>
+      <tr><th>Route</th><th>Behaviour</th></tr>
+      <tr><td><code>GET /api/whats-new</code></td>
+        <td>Returns <code>current_version</code>, <code>seen_version</code>,
+          <code>unseen_count</code>, and <code>versions[]</code> (newest first). Each group:
+          <code>version</code>, <code>date</code> (nullable), <code>unseen</code>,
+          <code>features[]</code> (<code>id/title/desc/href/area</code>).</td></tr>
+      <tr><td><code>POST /api/whats-new/seen</code></td>
+        <td>Body <code>{version}</code>. Bad format → <code>400</code>
+          (<code>error.field == "version"</code>). Else acknowledges (monotonic) and returns
+          the <b>same payload shape as GET</b>, so the client re-renders from one response.
+          Idempotent.</td></tr>
+    </table>
+    <pre>{
+  "current_version": "0.1.17",
+  "seen_version": "0",
+  "unseen_count": 15,
+  "versions": [
+    { "version": "0.1.17", "date": "2026-07-13", "unseen": true,
+      "features": [ { "id": "market-risk-alerts", "title": "市場風險預警",
+        "desc": "…", "href": "settings.html#alerts", "area": "系統設定 → 預警規則" } ] }
+  ]
+}</pre>
+  </section>
+
+  <section>
+    <h2>Seen-state semantics (version-level, monotonic)</h2>
+    <ul>
+      <li>Single-row table <code>whatsnew_config(id=1, seen_version, updated_at)</code> via
+        the same <code>config_store</code> create-always / seed-once pattern as
+        <code>ui_prefs</code>. Default <code>seen_version = "0"</code> (below every real
+        version, so a fresh install sees everything as new).</li>
+      <li><b>Acknowledgement is version-level</b>, not per-feature: opening the panel marks
+        everything up to <code>current_version</code> as seen. A group is
+        <code>unseen</code> iff <code>version_key(version) &gt; version_key(seen_version)</code>;
+        <code>unseen_count</code> sums the features in unseen groups.</li>
+      <li><b>Monotonic:</b> <code>set_seen_version</code> keeps the max of stored vs supplied
+        (by numeric version key), so a replayed or out-of-order lower version can never
+        un-acknowledge newer features.</li>
+      <li><code>version_key</code> parses to a numeric tuple so <code>0.1.9 &lt; 0.1.10</code>
+        orders correctly (the lexical trap). Versions validate against
+        <code>^\d+(\.\d+)*$</code>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Catalog maintenance rule</h2>
+    <ul>
+      <li><code>CATALOG</code> in <code>shared/whatsnew.py</code> is static and
+        hand-maintained, newest version first, 2–4 user-facing features per version
+        (what the user can now do, not implementation detail). <code>VERSION_DATES</code>
+        maps version → CHANGELOG date.</li>
+      <li><code>visible_versions(current)</code> filters to versions
+        <code>&le; current</code>, newest first, capped at <code>_MAX_VERSIONS = 6</code>.
+        The v0.1.18 catalog entry therefore stays hidden until <code>__version__</code> is
+        bumped at ship time — intentional and test-pinned.</li>
+      <li><b>Ship-step durability:</b> the ship-version checklist (item 5b) requires adding
+        the new version's CATALOG + VERSION_DATES entry. Unit tests enforce: ids unique per
+        version, valid version format, every <code>href</code> page exists under
+        <code>web/</code> (and a <code>settings.html#tab</code> hash is a real tab id), and
+        every catalog version <code>&le; __version__</code> has a
+        <code>## [v…]</code> CHANGELOG heading.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Front-end decisions</h2>
+    <ul>
+      <li><b>Dynamic load, no HTML tag.</b> <code>whatsnew.js</code> is lazy-loaded by
+        <code>shell.js</code> after the <code>/api/health</code> version resolves, and
+        stamped <code>?v=&lt;version&gt;</code> by shell (the asset stamper only sees HTML
+        tags). This avoids touching every <code>web/*.html</code>.</li>
+      <li><b>Silent degradation everywhere.</b> Every network path (badge fetch, ack POST)
+        tolerates failure without breaking the page — the badge is a hint, not a gate.</li>
+      <li><b>Optimistic ack.</b> Opening the panel removes the dot/pill immediately and fires
+        one <code>POST seen</code> per open; a failed POST does not re-show the badge.</li>
+      <li><b>前往 navigation.</b> Same page → set <code>location.hash</code> (the settings
+        page's own hashchange handler switches tabs) and flash the target in place; other
+        page → <code>location.href</code>, with a <code>sessionStorage</code> flash marker
+        consumed on arrival. The arrival flash respects
+        <code>prefers-reduced-motion</code>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Round 2 (field feedback) — 2026-07-13</h2>
+    <p>Three owner-requested UX upgrades to the 前往 arrival experience. Backend adds only
+      presentation metadata; all behaviour is front-end.</p>
+    <ul>
+      <li><b>A · 10s flash, cancel-on-switch, fire only via 前往.</b>
+        <em>(The 10s hold-then-fade timing is superseded by the Round 3 blink; the
+        cancel-on-switch / fire-only-via-前往 behaviour below is unchanged.)</em> The
+        <code>wn-flash-pulse</code> keyframes now hold the ring + tint clearly visible to
+        ~8.5s then fade over the last ~1.5s (single 10s iteration; JS safety-net ~11s;
+        reduced-motion fallback kept). While a flash/callout is active a
+        <code>hashchange</code> (and the settings <code>pd-settings-tab</code> tab-switch
+        event, which uses <code>replaceState</code> and fires no hashchange) tears it down
+        immediately; teardown removes the callout from the DOM so it never resurfaces on
+        switch-back — only a fresh 前往 re-arms it. The <code>sessionStorage</code> marker
+        now carries a <code>ts</code>; a marker older than 30s is discarded unconsumed, and
+        it is always removed once evaluated on the matching page.</li>
+      <li><b>B · In-page detailed feature callout (頁內新功能提醒).</b> Arriving via 前往 now
+        also drops a dismissible <code>.wn-callout</code> card inserted <em>before</em> the
+        anchor (normal flow — pushes content down, never overlays controls): accent
+        left-border, <code>✦ 新功能</code> + title, desc body, <code>area</code> breadcrumb,
+        ✕ close. The marker became a JSON string
+        <code>{href,id,title,desc,area,target,ts}</code> (malformed/legacy markers discarded
+        silently). The anchor resolves from the feature's <code>target</code> selector
+        (small/inline matches resolve to <code>el.closest('section.panel')</code>), falling
+        back to the settings <code>#view-&lt;hash&gt;</code> section. Same-page 前往 runs the
+        SAME routine (callout + scroll + 10s flash), not a bare flash. One callout at a time
+        (re-arrival replaces it).</li>
+      <li><b>Model.</b> <code>Feature</code> gained <code>target: str | None</code> — an
+        optional CSS selector, serialized in the GET/POST feature JSON. Seeded:
+        <code>market-risk-alerts → #alert-rules-wrap</code>,
+        <code>target-weights → #target-weights-panel</code>, the five notification-channel
+        features → <code>.nt-cards</code>, <code>quiet-hours → #nt-qh-enabled</code>,
+        <code>per-rule-subscriptions → #nt-subs</code>; instruments/insights/index features
+        stay <code>null</code>. Presentation metadata only — no logic in
+        <code>shared/whatsnew.py</code>. Contract/unit tests pin the seeded targets and the
+        <code>target ⇒ href</code> invariant; an e2e test covers callout arrival +
+        cancel-on-switch + no-resurface.</li>
+      <li><b>C · "missing NEW pill" report — no code change.</b> Root-caused to the demo DB's
+        <code>seen_version</code> already acknowledged by earlier verification runs; badge
+        logic is correct and left intact.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Round 3 (owner UX round) — 2026-07-13</h2>
+    <p>Four owner-requested changes. Per-feature read semantics replace the version-level
+      ack; a full version-history browser is added; the arrival flash becomes a blink; the
+      ✦ glyph becomes a crisp SVG.</p>
+    <ul>
+      <li><b>1 · Per-FEATURE seen semantics (supersedes the version-level ack above).</b> A
+        feature's <span class="tag">NEW</span> clears ONLY when the user acts on it — 前往
+        (navigate), 知道了 (dismiss, for href-less features), or 全部標示已讀 (whole visible
+        window). Opening the panel no longer acknowledges anything. New table
+        <code>whatsnew_seen(feature_key PRIMARY KEY, seen_at)</code>, keyed
+        <code>"&lt;version&gt;:&lt;id&gt;"</code>, created alongside the legacy
+        <code>whatsnew_config</code> by the same <code>config_store</code> create-always
+        pattern. A <b>one-time, idempotent migration</b> folds a legacy
+        <code>seen_version &gt; "0"</code> into per-feature rows (INSERT OR IGNORE for every
+        catalog feature at/below it); the legacy table is <b>kept in place, never dropped</b>
+        (a legacy-schema boot crash is a known repo lesson) and simply stops being written.
+        Shared API: <code>get_seen_keys</code>, <code>mark_seen(keys)</code> (idempotent,
+        returns the full set), <code>known_feature_keys(current)</code> (visible-window keys,
+        used to validate POSTs). <code>get/set_seen_version</code> were removed.
+        <br><b>Router.</b> GET each feature gains <code>key</code> + <code>seen</code>; the
+        group <code>unseen</code> is any-unseen; <code>unseen_count</code> counts unseen
+        features across visible groups; <code>seen_version</code> is dropped. POST
+        <code>/seen</code> body is now <code>{features:[key,…]}</code> OR <code>{all:true}</code>
+        (all = every key in the visible window); an unknown/out-of-window key → 400
+        <code>validation_error</code> (<code>field=features</code>), nothing written;
+        idempotent; returns the GET payload.
+        <br><b>Front-end.</b> Ambient badge shows iff <code>unseen_count &gt; 0</code>. Panel
+        rows carry a per-feature NEW mini-pill; the group-head pill shows iff any row is
+        unseen. 前往 marks that feature seen optimistically (remove the row pill, recompute
+        group pill + badge from the cached payload) then POSTs; <b>same-page</b> 前往 and 知道了
+        are fire-and-forget, but <b>cross-page</b> 前往 awaits the POST (≤1.5 s cap) before
+        navigating so the seen-state reliably survives the page unload. 全部標示已讀 clears
+        every pill + the badge. Server truth reconciles on reload.</li>
+      <li><b>2 · Blink pattern (replaces the 10s hold-then-fade).</b> The
+        <code>wn-flash-pulse</code> keyframes are now 0%/100% fully transparent, 50% full
+        highlight (ring + soft tint), driven by
+        <code>animation: wn-flash-pulse 2s ease-in-out 10</code> — 1s in / 1s out, ten times
+        (~20 s). JS safety-net <code>FLASH_MS</code> bumped to ~21 s;
+        <code>prefers-reduced-motion → none</code> and cancel-on-switch are unchanged.</li>
+      <li><b>3 · 版本發佈資訊 — full version-history browser (settings 一般).</b> The whatsnew
+        CATALOG is now the single user-facing history source: entries were backfilled for
+        every shipped version <code>v0.1.0 → v0.1.11</code> from CHANGELOG (1–4 zh-TW
+        user-facing features each; <code>href=None</code>, since the ✦ panel caps at the
+        newest 6 versions and these surface only here). New
+        <code>GET /api/whats-new/history?offset&amp;limit</code> pages the FULL catalog
+        (<code>version ≤ current</code>, newest first): <code>{total, offset, versions:[{version,
+        date, features:[{title, desc, area}]}]}</code>, <code>offset ≥ 0</code>,
+        <code>1 ≤ limit ≤ 20</code> (else 400), no seen-state. A settings-page button lazy-
+        ensures <code>whatsnew.js</code> (new <code>window.pdEnsureWhatsNew</code> hook) and
+        calls <code>window.pdWhatsNew.openHistory()</code>; the modal (own
+        <code>.wnh-*</code> namespace) appends each loaded page, with 「載入更早版本」 hiding
+        when <code>offset+len ≥ total</code>. <b>Scalability:</b> the browser only renders the
+        pages it loaded, so an ever-growing catalog can never degrade page performance
+        (noted in the router + shared module docstrings). A full-coverage drift unit test now
+        also asserts every CHANGELOG <code>## [v…]</code> version (≥ 0.1.0, ≤ current) has a
+        catalog entry.</li>
+      <li><b>4 · Crisp ✦ icon.</b> The blurry ✦ text glyph in <code>#wn-btn</code> is
+        replaced by an inline four-pointed sparkle SVG (<code>viewBox 0 0 24 24</code>,
+        <code>fill=currentColor</code>, 15×15, <code>aria-hidden</code>,
+        <code>display:block</code> to centre it against the neighbouring topbar glyph
+        buttons); the absolutely-positioned <code>.wn-dot</code> overlay is unaffected.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Round 4 — flash retiming + arrival unification (2026-07-14)</h2>
+    <ul>
+      <li><b>Blink retimed.</b> The arrival pulse is now <code>animation: wn-flash-pulse 1s
+        ease-in-out 20</code> — 0.5 s fade-in / 0.5 s fade-out per 1 s cycle, twenty cycles
+        (~20 s total). Keyframes are unchanged (0%/100% transparent, 50% full highlight); the
+        JS safety-net <code>FLASH_MS</code> stays ~21 s. Replaces round-2's
+        <code>2s … 10</code> (1 s in / 1 s out) — same duration, gentler per-cycle motion.</li>
+      <li><b>Every 前往 now flashes.</b> <code>_resolveAnchor</code> gained a final generic
+        fallback: after the precise <code>target</code> selector and the settings-tab / hash
+        lookup miss, it returns <code>document.querySelector('.page section.panel')</code>,
+        else <code>document.querySelector('.page')</code>. So a catalog feature whose page has
+        no hash section (instruments / insights / index) still gets the callout + a page-level
+        highlight instead of silently showing nothing.</li>
+      <li><b>Targets filled + enforced.</b> Every CATALOG feature that carries an
+        <code>href</code> now also carries a stable <code>target</code> (attribute selectors
+        like <code>section[data-screen-label="持倉明細"]</code>). A new unit test asserts
+        <code>href ⇒ non-empty target</code> forever, and the <code>ship-version</code>
+        checklist (item 5b) now requires both for every shipped user-facing feature.</li>
+    </ul>
+  </section>
+</div>

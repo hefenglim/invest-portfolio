@@ -154,6 +154,24 @@
     l.rel = 'stylesheet'; l.href = href;
     document.head.appendChild(l);
   }
+  /* 「新功能」panel (WP-WN): whatsnew.js has no HTML <script> tag, so the ?v= stamper
+     never sees it — stamp it here with the backend version (set by pdInitVersion) so a
+     deploy flushes its cache. Loaded on first ✦ click OR by pdInitVersion at boot. */
+  let _appVersion = '';
+  let _wnPromise = null;
+  function pdEnsureWhatsNew() {
+    if (window.pdWhatsNew) return Promise.resolve(true);
+    if (!_wnPromise) {
+      const q = _appVersion ? ('?v=' + _appVersion) : '';
+      _wnPromise = pdLoadScript('whatsnew.js' + q)
+        .then(() => !!window.pdWhatsNew)
+        .catch(() => false);
+    }
+    return _wnPromise;
+  }
+  /* small hook so other pages (e.g. settings.html's 版本發佈資訊 button) can lazy-ensure
+     whatsnew.js through the same version-stamped loader before calling window.pdWhatsNew. */
+  window.pdEnsureWhatsNew = pdEnsureWhatsNew;
   let pdDrawerPromise = null;
   function pdEnsureDrawer() {
     if (window.openSymbolDrawer) return Promise.resolve();
@@ -318,6 +336,20 @@
     searchBtn.appendChild(el('kbd', null, '⌘K'));
     searchBtn.addEventListener('click', openSearch);
     tb.appendChild(searchBtn);
+    /* ✦ 新功能 panel trigger (WP-WN): lazy-loads whatsnew.js on first click, then opens. */
+    const wnBtn = el('button', 'btn-refresh');
+    wnBtn.id = 'wn-btn';
+    wnBtn.type = 'button';
+    wnBtn.title = '新功能';
+    /* crisp four-pointed sparkle (the ✦ text glyph rendered blurry at this size). Inline
+       SVG, currentColor, aria-hidden; the absolutely-positioned .wn-dot overlays it. */
+    wnBtn.innerHTML = '<svg class="wn-ico" viewBox="0 0 24 24" width="15" height="15" '
+      + 'fill="currentColor" aria-hidden="true">'
+      + '<path d="M12 2 L14.1 9.9 L22 12 L14.1 14.1 L12 22 L9.9 14.1 L2 12 L9.9 9.9 Z"/></svg>';
+    wnBtn.addEventListener('click', () => {
+      pdEnsureWhatsNew().then((ok) => { if (ok && window.pdWhatsNew) window.pdWhatsNew.open(); });
+    });
+    tb.appendChild(wnBtn);
     /* theme toggle */
     const themeBtn = el('button', 'btn-refresh');
     themeBtn.type = 'button';
@@ -667,6 +699,14 @@
           n.title = full;
         });
         document.querySelectorAll('#gen-version').forEach((n) => { n.textContent = full; });
+        /* 「新功能」badge/panel (WP-WN): stamp whatsnew.js with this version, then init
+           (badge dot + arrival flash). Skip on login; non-critical, silent on failure. */
+        _appVersion = h.version;
+        if (page !== 'login') {
+          pdEnsureWhatsNew().then((ok) => {
+            if (ok && window.pdWhatsNew) window.pdWhatsNew.init();
+          });
+        }
       })
       .catch(() => { /* silent: version tag is non-critical */ });
   }

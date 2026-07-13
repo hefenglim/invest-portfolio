@@ -8,10 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.17"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.17"></link>
-<link rel="stylesheet" href="trades.css?v=0.1.17"></link>
-<link rel="stylesheet" href="input.css?v=0.1.17"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.18"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.18"></link>
+<link rel="stylesheet" href="trades.css?v=0.1.18"></link>
+<link rel="stylesheet" href="input.css?v=0.1.18"></link>
 <style>
   .trades-page { display: flex; flex-direction: column; gap: var(--gap); }
   .ledger-section { display: flex; flex-direction: column; gap: 0; }
@@ -299,15 +299,15 @@
 </div>
 </div>
 
-<script src="api.js?v=0.1.17"></script>
-<script src="shell.js?v=0.1.17"></script>
-<script src="format.js?v=0.1.17"></script>
-<script src="pager.js?v=0.1.17"></script>
-<script src="export.js?v=0.1.17"></script>
-<script src="alerts.js?v=0.1.17"></script>
-<script src="input.js?v=0.1.17"></script>
-<script src="ledger.js?v=0.1.17"></script>
-<script src="inbox.js?v=0.1.17"></script>
+<script src="api.js?v=0.1.18"></script>
+<script src="shell.js?v=0.1.18"></script>
+<script src="format.js?v=0.1.18"></script>
+<script src="pager.js?v=0.1.18"></script>
+<script src="export.js?v=0.1.18"></script>
+<script src="alerts.js?v=0.1.18"></script>
+<script src="input.js?v=0.1.18"></script>
+<script src="ledger.js?v=0.1.18"></script>
+<script src="inbox.js?v=0.1.18"></script>
 <script>
 /* glue: collapse toggle */
 document.getElementById('input-toggle').addEventListener('click', function (e) {
@@ -329,23 +329,70 @@ LEDGER_TABS.forEach(function(t) {
   });
 });
 document.getElementById('tab-tx').click();
-/* glue: ledger CSV export — exports the active pane's table with current filters */
+/* glue: ledger CSV export — reconciliation channel (POST /api/export/ledger) over the
+   ACTIVE tab's ledger table + the page's date-range inputs. Owner directive 2026-07-14:
+   no more DOM/display-value dumps; numbers come straight from the ledger table at source
+   precision. Filename comes from the backend Content-Disposition. */
 (function () {
   var slot = document.getElementById('ledger-export-slot');
-  if (!slot || !window.pdExport) return;
-  var NAMES = { tx: 'transactions', ldiv: 'dividends', lfx: 'fx_conversions', lopen: 'opening_positions' };
-  slot.appendChild(window.pdExport.button(function () {
-    var active = LEDGER_TABS.find(function (t) {
-      var p = document.getElementById('pane-' + t);
-      return p && p.classList.contains('active');
-    }) || 'tx';
-    var table = document.querySelector('#pane-' + active + ' table.data');
-    return {
-      filename: 'ledger_' + (NAMES[active] || active) + '.csv',
-      headers: window.pdExport.headersFromTable(table),
-      rows: window.pdExport.rowsFromTable(table)
-    };
-  }));
+  if (!slot || !window.pdApi) return;
+  var KIND = { tx: 'transactions', ldiv: 'dividends', lfx: 'fx', lopen: 'opening' };
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-export';
+  btn.title = '匯出對帳級 CSV（目前分頁的帳本，依日期區間）';
+  btn.appendChild(Object.assign(document.createElement('span'), { textContent: '⬇' }));
+  btn.appendChild(Object.assign(document.createElement('span'), { textContent: '匯出 CSV' }));
+  btn.addEventListener('click', async function () {
+    var restore = window.pdBusy ? window.pdBusy(btn, '匯出中…') : function () {};
+    try {
+      var active = LEDGER_TABS.find(function (t) {
+        var p = document.getElementById('pane-' + t);
+        return p && p.classList.contains('active');
+      }) || 'tx';
+      var body = { kind: KIND[active] || 'transactions' };
+      var fromEl = document.getElementById('ledger-date-from');
+      var toEl = document.getElementById('ledger-date-to');
+      if (fromEl && fromEl.value) body.from = fromEl.value;
+      if (toEl && toEl.value) body.to = toEl.value;
+      await window.pdApi.download('/api/export/ledger', body);
+    } catch (err) {
+      if (window.toast) window.toast(err && err.message ? err.message : '匯出失敗', 'fail', err && err.code);
+    } finally {
+      restore();
+    }
+  });
+  slot.appendChild(btn);
+})();
+/* glue: 匯出報告 — print-optimized 帳本報告 (all four ledgers) over the page's current
+   date-range filter (empty range -> 全部期間). Server builds the HTML; no client math.
+   House style: silent on success, fail toast, busy state guards double-clicks. */
+(function () {
+  var slot = document.getElementById('ledger-export-slot');
+  if (!slot || !window.pdApi) return;
+  var reportBtn = document.createElement('button');
+  reportBtn.type = 'button';
+  reportBtn.className = 'btn';
+  reportBtn.textContent = '匯出報告';
+  reportBtn.title = '下載帳本報告（可列印 HTML，四帳本＋期初庫存，依目前日期區間）';
+  reportBtn.addEventListener('click', async function () {
+    var restore = window.pdBusy ? window.pdBusy(reportBtn, '產出中…') : function () {};
+    try {
+      var body = {};
+      var fromEl = document.getElementById('ledger-date-from');
+      var toEl = document.getElementById('ledger-date-to');
+      if (fromEl && fromEl.value) body.from = fromEl.value;
+      if (toEl && toEl.value) body.to = toEl.value;
+      await window.pdApi.download('/api/export/ledgers-report', body);
+    } catch (err) {
+      if (window.toast) {
+        window.toast(err && err.message ? err.message : '匯出報告失敗', 'fail', err && err.code);
+      }
+    } finally {
+      restore();
+    }
+  });
+  slot.appendChild(reportBtn);
 })();
 /* 待確認匯入收件匣：真實接線在 inbox.js（2026-07-03, R4）。 */
 /* glue: on confirm write — flash new row in ledger */

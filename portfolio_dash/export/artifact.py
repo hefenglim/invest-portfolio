@@ -7,11 +7,34 @@ strings). Display-value export is the frontend's job; this module is the audit f
 
 import csv
 import io
+import re
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from urllib.parse import quote
 
 _BOM = "\ufeff"
+# Characters kept verbatim in the ASCII `filename=` fallback; everything else (quotes,
+# CR/LF, ';', spaces, non-ASCII) is replaced with '_' so a user-derived name (symbol /
+# date range) can never inject a header or crash latin-1 header encoding.
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def content_disposition(filename: str) -> str:
+    """A safe ``attachment`` Content-Disposition value for *filename*.
+
+    Filename components can be user-derived (a symbol, a date range) and must never break
+    the response header. Emit an ASCII-only ``filename=`` fallback (unsafe bytes stripped)
+    PLUS an RFC 5987 ``filename*=UTF-8''`` copy carrying the full Unicode name. This blocks
+    CRLF header injection and the latin-1 encode crash Starlette raises on a non-ASCII
+    header value, while a compliant client (incl. ``web/api.js``) still recovers the exact
+    name from ``filename*``.
+    """
+    ascii_fallback = _SAFE_FILENAME_RE.sub("_", filename.encode("ascii", "ignore").decode())
+    if not ascii_fallback.strip("_"):
+        ascii_fallback = "download"
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 @dataclass(frozen=True)

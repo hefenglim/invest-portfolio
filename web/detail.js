@@ -520,15 +520,25 @@
     const sec = el('div', 'sd-section');
     const rows = detail.dividend_events || [];
     const typeZh = (d) => DIV_TYPE_ZH[d.type] || d.type;
+    /* 配息史 → POST /api/export/symbol-detail (reconciliation channel over the dividend
+       ledger). Owner directive 2026-07-14: no more DOM/display-value dumps. */
     let exportBtn = null;
-    if (window.pdExport && rows.length) {
-      exportBtn = window.pdExport.button(() => ({
-        filename: symbol + '_dividends.csv',
-        headers: ['日期', '類型', 'Gross', 'Net', '再投資股數', '再投資價格', '幣別'],
-        rows: rows.map((d) => [d.date, typeZh(d),
-          d.gross == null ? '' : d.gross, d.net == null ? '' : d.net,
-          d.reinvest_shares || '', d.reinvest_price || '', d.ccy || ''])
-      }));
+    if (rows.length) {
+      exportBtn = el('button', 'btn-export');
+      exportBtn.type = 'button';
+      exportBtn.title = '匯出對帳級 CSV（配息史，由後端股利帳本產生）';
+      exportBtn.appendChild(el('span', null, '⬇'));
+      exportBtn.appendChild(el('span', null, '匯出 CSV'));
+      exportBtn.addEventListener('click', async () => {
+        const restore = window.pdBusy ? window.pdBusy(exportBtn, '匯出中…') : function () {};
+        try {
+          await window.pdApi.download('/api/export/symbol-detail', { symbol: symbol });
+        } catch (err) {
+          if (window.toast) window.toast(err && err.message ? err.message : '匯出失敗', 'fail', err && err.code);
+        } finally {
+          restore();
+        }
+      });
     }
     sec.appendChild(secHead('配息史', '帳本 dividends・' + rows.length + ' 筆', exportBtn));
     if (!rows.length) {

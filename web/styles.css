@@ -1507,6 +1507,18 @@ table.data tbody tr.kb-focus td {
 .rb-warn { font-size: 11px; color: var(--amber); }
 .rb-open-btn { margin-left: 8px; font-size: 11px; padding: 2px 10px; }
 .panel-head .rb-open-btn + .btn-export { margin-left: 8px; }
+/* combined cross-account row: symbol id stacked over account chips (2026-07-13) */
+.rb-sym-id { display: flex; align-items: baseline; gap: 8px; }
+.rb-acct-chips { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 3px; }
+.rb-acct-chip {
+  font-size: 10px; color: var(--text-3); font-family: var(--font-num);
+  padding: 0 6px; line-height: 15px; border: 1px solid var(--border);
+  border-radius: 3px; white-space: nowrap;
+}
+/* per-account executing legs in the action cell (one line per leg) */
+.rb-leg { display: flex; align-items: center; gap: 4px; font-size: 11px; white-space: nowrap; }
+.rb-leg + .rb-leg { margin-top: 2px; }
+.rb-oddlot { color: var(--amber); font-size: 10px; }
 
 /* ex-div 入帳預覽 (A3) */
 .exdiv-preview {
@@ -1725,3 +1737,143 @@ button[disabled], .btn[disabled] {
 /* 執行歷史 -> Request 明細 cross-link (WPB): LLM-kind runs deep-link the AI ledger. */
 .runs-ai-link { font-size: 10px; color: var(--accent); text-decoration: none; }
 .runs-ai-link:hover { text-decoration: underline; }
+
+/* ---------- 「新功能」announcement panel (WP-WN) ---------- */
+
+/* topbar ✦ button: small accent dot in the corner when there are unseen features. */
+#wn-btn { position: relative; }
+/* crisp inline sparkle SVG — block removes the inline-svg baseline gap so it centers
+   against the neighbouring topbar glyph buttons (⌕ / ☾ / ⟳). */
+.wn-ico { display: block; }
+.wn-dot {
+  position: absolute; top: 3px; right: 3px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--panel);
+}
+/* "NEW" pill — reused next to the sidebar version tag AND on unseen panel groups. */
+.wn-pill {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 9px; font-weight: 700; line-height: 15px;
+  letter-spacing: .04em; text-transform: uppercase;
+  color: #fff; background: var(--accent);
+  vertical-align: middle;
+}
+.sidebar .brand-ver .wn-pill, .sidebar .wn-pill { margin-left: 8px; }
+.sidebar.collapsed .wn-pill { display: none; }
+
+/* panel body: version groups + feature rows (namespaced .wn-*) */
+.wn-modal { width: 460px; }
+.wn-body { max-height: min(70vh, 560px); overflow-y: auto; gap: 16px; }
+.wn-empty { color: var(--text-3); font-size: 12px; padding: 8px 0; }
+.wn-group { display: flex; flex-direction: column; gap: 8px; }
+.wn-group + .wn-group { border-top: 1px solid var(--border-soft); padding-top: 14px; }
+.wn-group-head { display: flex; align-items: center; gap: 2px; }
+.wn-ver {
+  font-family: var(--font-num); font-size: 11px; font-weight: 700;
+  color: var(--text-2); letter-spacing: .02em;
+}
+.wn-feat {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.wn-feat-main { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.wn-feat-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12.5px; font-weight: 700; color: var(--text);
+}
+/* per-feature NEW badge — clears when the user acts on that feature (前往 / 知道了). */
+.wn-new-pill {
+  flex: none;
+  padding: 0 5px; border-radius: 999px;
+  font-size: 8.5px; font-weight: 700; line-height: 14px;
+  letter-spacing: .04em; text-transform: uppercase;
+  color: #fff; background: var(--accent);
+}
+.wn-feat-desc { font-size: 11.5px; color: var(--text-2); line-height: 1.45; }
+.wn-feat-area { font-size: 10px; color: var(--text-3); font-family: var(--font-num); }
+.wn-go {
+  flex: none; align-self: center;
+  background: var(--accent-soft); color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui); font-size: 11px; font-weight: 700;
+  padding: 4px 10px; cursor: pointer; white-space: nowrap;
+}
+.wn-go:hover { background: var(--accent); color: #fff; }
+
+/* arrival blink: the section a 前往 link jumped to pulses 0.5s in / 0.5s out, 20 times
+   (1s cycle, ~20s total). Endpoints are fully transparent so it starts and ends with no
+   jump; the midpoint is the full highlight (ring + soft tint). */
+.wn-flash { animation: wn-flash-pulse 1s ease-in-out 20; }
+@keyframes wn-flash-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
+  50%      { box-shadow: 0 0 0 2px var(--accent), 0 0 0 6px var(--accent-soft); background: var(--accent-soft); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wn-flash { animation: none; }
+}
+
+/* in-page 新功能 callout: a dismissible card inserted BEFORE the flashed anchor, in
+   normal flow (never overlays controls). Theme-aware via the shared tokens. */
+/* sticky-topbar clearance: the arrival scrollIntoView(block:'start') must not tuck the
+   callout (or the flashed block on the no-callout fallback) under the sticky .topbar. */
+.wn-callout, .wn-flash { scroll-margin-top: 68px; }
+.wn-callout {
+  position: relative;
+  margin: 0 0 12px;
+  padding: 12px 40px 12px 14px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+.wn-callout-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wn-callout-tag {
+  flex: none; font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  color: var(--accent); text-transform: uppercase;
+}
+.wn-callout-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.wn-callout-desc { font-size: 12px; color: var(--text-2); line-height: 1.5; margin-top: 5px; }
+.wn-callout-area {
+  font-size: 10px; color: var(--text-3); font-family: var(--font-num); margin-top: 4px;
+}
+.wn-callout-x {
+  position: absolute; top: 8px; right: 8px;
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 0; cursor: pointer;
+  color: var(--text-3); font-size: 13px; line-height: 1; border-radius: var(--radius-sm);
+}
+.wn-callout-x:hover { background: var(--panel-2); color: var(--text); }
+
+/* footer bar shared by the ✦ panel (全部標示已讀) and the history modal (載入更早版本). */
+.wn-foot, .wnh-foot { justify-content: space-between; }
+
+/* 版本發佈資訊 — full paged version-history browser (own .wnh-* namespace; no seen logic) */
+.wnh-modal { width: 500px; }
+.wnh-body { max-height: min(70vh, 560px); overflow-y: auto; gap: 18px; }
+.wnh-empty { color: var(--text-3); font-size: 12px; padding: 8px 0; }
+.wnh-group { display: flex; flex-direction: column; gap: 8px; }
+.wnh-group + .wnh-group { border-top: 1px solid var(--border-soft); padding-top: 14px; }
+.wnh-head { display: flex; align-items: center; gap: 8px; }
+.wnh-ver {
+  font-family: var(--font-num); font-size: 11.5px; font-weight: 700;
+  color: var(--text-2); letter-spacing: .02em;
+}
+.wnh-feat {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.wnh-title { font-size: 12.5px; font-weight: 700; color: var(--text); }
+.wnh-desc { font-size: 11.5px; color: var(--text-2); line-height: 1.45; }
+.wnh-area { font-size: 10px; color: var(--text-3); font-family: var(--font-num); }
