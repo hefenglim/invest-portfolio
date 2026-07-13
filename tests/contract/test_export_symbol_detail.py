@@ -1,6 +1,12 @@
 """Contract tests for POST /api/export/symbol-detail (dividend-history reconciliation CSV)."""
 
+import sqlite3
+
 from fastapi.testclient import TestClient
+
+from portfolio_dash.data_ingestion.store import upsert_instrument
+from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.models.assets import Instrument
 
 _HEADER = "date,type,gross,withholding,net,reinvest_shares,reinvest_price,ccy"
 
@@ -15,6 +21,22 @@ def test_export_symbol_detail_known_symbol(api_client: TestClient) -> None:
     assert text.split("\r\n", 1)[0] == _HEADER
     # golden 2330 cash dividend at source precision.
     assert "2026-03-01,cash,5000,0,5000,,,TWD" in text
+
+
+def test_export_symbol_detail_non_ascii_symbol_never_500(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A registered non-ASCII symbol must not crash header encoding (never a 500). The
+    Content-Disposition stays latin-1 safe and carries the full name via filename*."""
+    upsert_instrument(golden_db, Instrument(symbol="台積電", market=Market.TW,
+                                            quote_ccy=Currency.TWD, sector="Semi",
+                                            name="TSMC", board="TWSE"))
+    golden_db.commit()
+    r = api_client.post("/api/export/symbol-detail", json={"symbol": "台積電"})
+    assert r.status_code == 200
+    cd = r.headers["content-disposition"]
+    cd.encode("latin-1")  # header value must be pure latin-1 (no crash)
+    assert "filename*=UTF-8''" in cd
 
 
 def test_export_symbol_detail_unknown_symbol_400(api_client: TestClient) -> None:

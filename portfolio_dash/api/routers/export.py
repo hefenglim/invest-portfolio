@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.export.ai_predictions import build_ai_predictions_csv
-from portfolio_dash.export.artifact import ExportArtifact
+from portfolio_dash.export.artifact import ExportArtifact, content_disposition
 from portfolio_dash.export.holdings import build_holdings_csv
 from portfolio_dash.export.holdings_report import build_holdings_report_html
 from portfolio_dash.export.ledgers import LEDGER_KINDS, build_ledger_csv, build_ledgers_zip
@@ -37,10 +37,12 @@ router = APIRouter()
 
 
 def _respond(art: ExportArtifact) -> Response:
+    # Content-Disposition is built via content_disposition() so a user-derived filename
+    # component (symbol / date range) can never inject a header or crash header encoding.
     return Response(
         content=art.content,
         media_type=art.media_type,
-        headers={"Content-Disposition": f'attachment; filename="{art.filename}"'},
+        headers={"Content-Disposition": content_disposition(art.filename)},
     )
 
 
