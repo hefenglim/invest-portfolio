@@ -23,6 +23,17 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **Encode a named rule from the literature, not a plausible-looking variant, and don't
+  let the test lock the variant in (2026-07-13):** the Swedroe 5/25 rebalance band was
+  coded `max(5pp, 25%×target)` — plausible, and it passed review-of-its-own-tests
+  because the tests asserted that behavior. But the canonical rule fires on whichever
+  threshold is crossed FIRST = the tighter band = `min`; `max` made the relative leg
+  dead code for small allocations and *loosened* the band for large ones. A rule with a
+  named provenance (Swedroe/Faber/Moskowitz…) must be checked against the source's
+  worked examples, and its tests must include a case where the candidate formulas
+  DIVERGE (here: target 50%, 8pp drift — `min` fires, `max` is silent). An independent
+  reviewer with the literature caught what the implementer + its own green tests did not.
+
 - **A switch-shaped control must persist on interaction (2026-07-12):** the notify
   enable toggles flipped a CSS class and relied on a separate save button — the owner
   read it as "cannot be turned off" (toggled off, reloaded, it was back on). Anything

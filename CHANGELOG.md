@@ -50,6 +50,48 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.17] - 2026-07-13
+
+Blueprint Phase 3 batch 2: alerts taxonomy v2 — proactive market-risk alerts, each
+pushed to the phone via the v0.1.14 channels. Rule correctness gated by an independent
+deep review.
+
+### Added
+- **Four new alert rules** (`strategy/alerts.py`, pure + fed; thresholds editable in
+  the 預警規則 editor, all default-on for existing installs):
+  - `drawdown_from_peak` (held **and** watched) — price vs the trailing 52-week high;
+    risk at −20%, warn at half that (−10%), one editable knob. A minimum 30-session
+    window guard prevents a freshly-registered symbol's thin series from firing a
+    spurious peak drawdown.
+  - `vol_spike` (held) — 30-day annualized volatility ≥ 1.8× the 90-day baseline.
+  - `rebalance_drift` (held with a target) — Swedroe **5/25**: fires when the weight
+    drift crosses the **tighter** of a 5-percentage-point absolute band or 25% of the
+    target (whichever is hit first), so a small allocation gets a proportionally tight
+    band. No target set → silent.
+  - `consensus_change` (held **and** watched) — analyst rating worsened by ≥ 0.5
+    (1=best…5=worst) or mean target price cut by ≥ 10%, latest snapshot vs the closest
+    one ≥ 7 days older.
+  Every rule flows through the existing engine → dashboard embed + `GET /api/alerts` +
+  `alert_scan` → `alert_events` → push (24h-debounced, subscription-filtered); messages
+  carry percentages/symbols only, never account amounts (push-boundary discipline).
+- **Target-weights config (owner ruling D8):** `strategy/target_weights.py` store +
+  `GET/PUT /api/target-weights` (each weight ∈ (0,1], Σ ≤ 1, registered symbols only,
+  Decimal-string ratios) + a 目標配置 section in the 預警規則 tab (per-symbol % with a
+  live sum indicator). The stored targets drive `rebalance_drift` AND prefill the
+  existing rebalance preview — single source of truth.
+- **Feeding seam** `api/alert_inputs.py` — one conn-bearing assembler computes the fed
+  inputs (52-week position, 30/90-day vol, target weights, consensus deltas) for all
+  three alert surfaces, preserving the single-source equality invariant (strategy/
+  stays pure; the api layer feeds it, mirroring the calib_gap precedent). New
+  `snapshots_store.snapshot_on_or_before` as-of reader for the consensus baseline.
+
+### Fixed
+- **Swedroe 5/25 band operator (deep review 2026-07-13):** `rebalance_drift` computed
+  `max(absolute, 25%×target)`, which inverted the rule — the relative leg was dead code
+  for small targets and *raised* the band above 5pp for large ones (an 8pp drift on a
+  50% target was silent). Corrected to `min` (the tighter leg governs); the tests that
+  had locked the wrong behavior were rewritten to the canonical cases.
+
 ## [v0.1.16] - 2026-07-12
 
 Notification-channel setup guides (owner request: lower the setup barrier).
