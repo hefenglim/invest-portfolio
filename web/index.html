@@ -22,6 +22,28 @@
   <!-- B. KPI band -->
   <section class="kpi-band" id="kpi-band" data-screen-label="KPI"></section>
 
+  <!-- B1. 今日摘要 + 週行動清單 (P3 batch 3) -->
+  <div class="row-2 align-start" data-screen-label="摘要與週報">
+    <section class="panel" id="digest-daily-panel" data-screen-label="今日摘要">
+      <div class="panel-head">
+        <h2 class="panel-title">今日摘要</h2>
+        <span class="panel-sub">收盤後自動彙整・純計算</span>
+        <span class="spacer"></span>
+        <button class="btn" id="digest-daily-history" type="button">歷史</button>
+      </div>
+      <div id="digest-daily-body" class="digest-body"></div>
+    </section>
+    <section class="panel" id="digest-weekly-panel" data-screen-label="週行動清單">
+      <div class="panel-head">
+        <h2 class="panel-title">週行動清單</h2>
+        <span class="panel-sub">每週日彙整</span>
+        <span class="spacer"></span>
+        <button class="btn" id="digest-weekly-history" type="button">歷史</button>
+      </div>
+      <div id="digest-weekly-body" class="digest-body"></div>
+    </section>
+  </div>
+
   <!-- B2. 各幣別報酬拆分（可折疊） -->
   <details class="panel freshness" id="ccyret" data-screen-label="各幣別報酬">
     <summary>
@@ -224,5 +246,6 @@
 <script src="charts.js?v=0.1.18"></script>
 <script src="detail.js?v=0.1.18"></script>
 <script src="rebalance.js?v=0.1.18"></script>
+<script src="digest.js?v=0.1.18"></script>
 </body>
 </html>

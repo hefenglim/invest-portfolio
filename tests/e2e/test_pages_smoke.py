@@ -1438,3 +1438,84 @@ def test_news_page_smoke(live_server: str, browser_page: Page) -> None:
     """/news.html boots from GET /api/news + /api/news/filters, renders zero-error even
     with an empty news DB (the batch-④ news library page)."""
     assert_page_ok(browser_page, live_server, "/news.html", root_selector="#nw-list")
+
+
+@pytest.mark.e2e
+def test_dashboard_digest_cards_smoke(live_server: str, browser_page: Page) -> None:
+    """今日摘要 + 週行動清單 cards on /index.html render clean from /api/digest/latest.
+
+    The golden DB has ZERO stored digests, so both cards render their honest empty state
+    (.digest-empty) after the two GET /api/digest/latest?kind= reads resolve (reads are open
+    even in guest mode). Asserts ZERO console + ZERO page errors over the async boot — an
+    unhandled digest.js rejection or a Decimal-string TypeError would fail it.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")  # dashboard async render landed
+        # Both digest cards resolved their latest read -> empty-state div (no stored digest).
+        page.wait_for_selector("#digest-daily-body .digest-empty", state="attached")
+        page.wait_for_selector("#digest-weekly-body .digest-empty", state="attached")
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/index.html (digest cards): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_digest_card_smoke(live_server: str, browser_page: Page) -> None:
+    """摘要與週報 card on /settings.html#alerts renders daily + weekly rows clean.
+
+    settings-digest.js boots off GET /api/scheduler/jobs (the digest_daily/digest_weekly
+    rows are seeded by the lifespan) + GET /api/digest/config, then renders the two edition
+    rows with a friendly time picker (the default crons are simple, so a #digest-config-wrap
+    .digest-cfg-hhmm time input mounts). Asserts ZERO console + ZERO page errors.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings.html#alerts", wait_until="load")
+        # Rows mount only after GET /api/scheduler/jobs resolves; the alerts tab is not the
+        # active tab, so wait for ATTACHED. The default simple crons render a time input.
+        page.wait_for_selector("#digest-config-wrap .digest-cfg-hhmm", state="attached")
+        rows = page.query_selector_all("#digest-config-wrap .digest-cfg-row")
+        assert len(rows) >= 3, f"expected daily+weekly+LLM rows, got {len(rows)}"
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings.html#alerts (digest card): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )

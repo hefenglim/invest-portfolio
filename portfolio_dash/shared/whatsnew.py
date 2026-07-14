@@ -67,6 +67,34 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.19 (P3 batch 3 · Wave 1 digests) — HIDDEN until __version__ is bumped ------
+    Feature(
+        version="0.1.19",
+        id="daily-digest",
+        title="每日收盤摘要",
+        desc="收盤後自動彙整當日漲跌、警示與訊號，儀表板新增「今日摘要」卡",
+        href="index.html",
+        area="儀表板 → 今日摘要",
+        target="#digest-daily-panel",
+    ),
+    Feature(
+        version="0.1.19",
+        id="weekly-action-list",
+        title="每週行動清單",
+        desc="每週日彙整再平衡漂移、警示回顧與即將除息等待辦，儀表板新增「週行動清單」",
+        href="index.html",
+        area="儀表板 → 週行動清單",
+        target="#digest-weekly-panel",
+    ),
+    Feature(
+        version="0.1.19",
+        id="digest-settings",
+        title="摘要與週報設定",
+        desc="可開關每日／每週摘要、調整發送時間，並選用 AI 一句話總結",
+        href="settings.html#alerts",
+        area="系統設定 → 預警規則 → 摘要與週報",
+        target="#digest-settings-card",
+    ),
     Feature(
         version="0.1.18",
         id="whats-new-panel",

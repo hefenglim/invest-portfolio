@@ -59,10 +59,15 @@
     finmind_fundamentals_monthly: '台股月營收＋財報（每月）',
     sentiment_daily: '市場情緒（VIX＋恐懼貪婪）',
     index_quotes_daily: '大盤指數收盤（台／美／馬）',
+    consensus_daily: '分析師共識',
+    signal_scan: '技術訊號掃描',
+    news_daily: '新聞摘要',
     alert_scan: '風險警示掃描＋AI 派發',
     evaluate_insights: 'AI 洞察每日評分（Loop 2）',
     generate_calibrations: 'AI 校準版本週產生（Loop 3）',
     backup_daily: '資料庫備份＋完整性檢查',
+    digest_daily: '每日收盤摘要',
+    digest_weekly: '每週行動清單',
   };
   const jobLabel = (id, desc) => JOB_ZH[id] || desc || id;
 
