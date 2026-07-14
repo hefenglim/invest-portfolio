@@ -396,7 +396,9 @@
   const table = document.getElementById('holdings-table');
   if (table) {
     const headBar = table.closest('.panel').querySelector('.panel-head');
-    const btn = el('button', 'btn rb-open-btn', '⚖ 再平衡試算');
+    const btn = el('button', 'btn btn-sm rb-open-btn');
+    btn.appendChild(el('span', 'ico', '⚖'));
+    btn.appendChild(el('span', null, '再平衡試算'));
     btn.type = 'button';
     btn.title = '設定目標權重，試算需買賣的股數與費稅（不寫入）';
     btn.addEventListener('click', open);

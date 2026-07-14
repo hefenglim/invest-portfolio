@@ -330,9 +330,9 @@ document.getElementById('tab-tx').click();
   var KIND = { tx: 'transactions', ldiv: 'dividends', lfx: 'fx', lopen: 'opening' };
   var btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'btn-export';
+  btn.className = 'btn btn-sm btn-export';
   btn.title = '匯出對帳級 CSV（目前分頁的帳本，依日期區間）';
-  btn.appendChild(Object.assign(document.createElement('span'), { textContent: '⬇' }));
+  btn.appendChild(Object.assign(document.createElement('span'), { className: 'ico', textContent: '⬇' }));
   btn.appendChild(Object.assign(document.createElement('span'), { textContent: '匯出 CSV' }));
   btn.addEventListener('click', async function () {
     var restore = window.pdBusy ? window.pdBusy(btn, '匯出中…') : function () {};
@@ -363,10 +363,10 @@ document.getElementById('tab-tx').click();
   if (!slot || !window.pdApi) return;
   var reportBtn = document.createElement('button');
   reportBtn.type = 'button';
-  /* 3D: same compact tier as the sibling 匯出 CSV button (both .btn-sm height, both with an
-     icon glyph + one shared gap) so the export slot row is one consistent height. */
+  /* same compact tier + leading `.ico` as the sibling 匯出 CSV button, so the export slot
+     row is one coherent set (both filled .btn-sm, both icon + label). */
   reportBtn.className = 'btn btn-sm';
-  reportBtn.appendChild(Object.assign(document.createElement('span'), { textContent: '⎙' }));
+  reportBtn.appendChild(Object.assign(document.createElement('span'), { className: 'ico', textContent: '⎙' }));
   reportBtn.appendChild(Object.assign(document.createElement('span'), { textContent: '匯出報告' }));
   reportBtn.title = '下載帳本報告（可列印 HTML，四帳本＋期初庫存，依目前日期區間）';
   reportBtn.addEventListener('click', async function () {

@@ -1128,29 +1128,12 @@ table.ccyret td:first-child { text-align: left; font-weight: 600; }
 table.ccyret tr:last-child td { border-bottom: none; }
 .ccyret-note { padding: 0 var(--pad) 10px; font-size: 10px; color: var(--text-3); }
 
-/* ---------- export button ---------- */
-
-.btn-export {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  padding: 4px 10px;      /* 3D: matches the .btn / .btn-sm vertical metrics (one row height) */
-  font-size: 11px;        /* compact tier */
-  line-height: 18px;      /* shared height anchor */
-  font-family: var(--font-ui);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-2);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.btn-export:hover { color: var(--text); border-color: var(--text-3); }
-/* align-self:center overrides .panel-head's align-items:baseline so the export button (and
-   its ledger-slot siblings) centre vertically against the title row. Retained because
-   .btn-export keeps margin-left:auto (its right-push mechanism). */
-.panel-head .btn-export { align-self: center; }
+/* ---------- export / download buttons ----------
+   `.btn-export` is no longer a distinct style: every export button is a plain
+   `.btn .btn-sm` (leading ⬇ `.ico`, filled like every other button). The class is
+   retained ONLY as a semantic + e2e hook (`#ledger-export-slot .btn-export` in
+   test_flows_e1_e10) and carries no box style of its own. Right-alignment comes
+   from the host panel-head's `.spacer`, not a baked margin-left:auto. */
 
 /* ---------- stale row desaturation ---------- */
 
@@ -1426,12 +1409,42 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   background: var(--amber); color: #0c1015; font-weight: 700;
 }
 
-/* ---------- button system (3D): TWO size tiers + one shared height ----------
-   `.btn` (12px) is the base tier; `.btn-sm` (11px) the compact tier. Both share the SAME
-   vertical metrics — an explicit line-height + equal vertical padding — so every button in
-   a `.panel-head` / `.toolbar` renders at ONE height regardless of tier (the same-row rule;
-   the e2e helper asserts per-row heights match within 1px). Only font-size + horizontal
-   density distinguish the tiers. `.btn-export` (below) shares these metrics too. */
+/* =========================================================================
+   ACTIONABLE CONTROLS — one design language (site-wide)  [3F, 2026-07-15]
+   -------------------------------------------------------------------------
+   Every button-like actionable control on the site is a `.btn`. There is ONE
+   base, TWO size tiers, and a small fixed set of emphasis variants. Nothing
+   else — a "hollow" export button, an inline glyph baked into the label, or
+   per-page ad-hoc padding/colour — is allowed. The owner's "same row, three
+   different looks" complaint (⚖ 再平衡試算 / ⬇ 匯出 CSV / 匯出報告) was exactly
+   that drift; this block is the single source of truth that ends it.
+
+   Toggle / segmented controls (`.segmented`, `.chip`, `.range-btn`) and the
+   topbar icon cluster (`.btn-refresh`, `.search-btn`, `.bell-btn`) are SEPARATE,
+   self-consistent sub-systems — they are stateful toggles / a distinct zone,
+   not page action buttons, and are intentionally NOT `.btn`.
+
+     BASE        .btn         filled (panel-2), 1px border, radius-sm, text-2.
+     TIERS       .btn         base tier    — font 12px, pad 4px 13px.
+                 .btn-sm      compact tier — font 11px, pad 4px 10px.
+                 Both pin line-height:18px + 4px vertical pad, so EVERY tier
+                 renders at ONE height (the same-row invariant; the toolbar-
+                 height e2e asserts per-row heights match within 1px). Only
+                 font-size + horizontal density differ between the tiers.
+     VARIANTS    (default)    neutral (text-2).
+                 .btn-primary single accent, weight 700 — the row's main act.
+                 .btn-danger  destructive (red), weight 700.
+                 .btn-warn    caution (amber).
+     ICON RULE   An icon is ALWAYS a leading `<span class="ico">`, sharing the
+                 base's 6px gap — never baked into the label text (ONE mechanism,
+                 site-wide). A homogeneous action cluster (the holdings / trades
+                 export row: ⚖ 再平衡試算 · ⬇ 匯出 CSV · ⎙ 匯出報告) is all-icon;
+                 a primary create / refresh affordance (＋ / ⟳) may stand beside
+                 a neutral secondary button.
+     TOOLBAR     A multi-button row is a `.toolbar` (or a `.panel-head`, which
+                 behaves as one). Right-alignment comes from a `.spacer`; a
+                 component class NEVER carries its own margin-left:auto.
+   ========================================================================= */
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 13px;
@@ -1447,6 +1460,9 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
 }
 .btn:hover { border-color: var(--text-3); color: var(--text); }
 .btn-sm { padding: 4px 10px; font-size: 11px; }
+/* leading icon: sized to the label (1em), never shrinks, never wraps. Scoped to `.btn`
+   so the sidebar's own `.sb-item .ico` (fixed 18px column) is left untouched. */
+.btn .ico { flex: none; font-size: 1em; line-height: 1; }
 .btn-primary {
   color: var(--accent);
   border-color: rgba(88, 166, 221, 0.45);
@@ -1461,15 +1477,19 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   font-weight: 700;
 }
 .btn-danger:hover { border-color: var(--up); }
-/* shared amber-outline variant (folded out of settings.html's local <style>, 3D) */
-.btn-outline-warn { color: var(--amber); border-color: rgba(217, 161, 63, 0.45); background: var(--amber-soft); }
-.btn-outline-warn:hover { border-color: var(--amber); }
+/* caution variant (renamed from `.btn-outline-warn` to the tier-consistent `.btn-warn`). */
+.btn-warn { color: var(--amber); border-color: rgba(217, 161, 63, 0.45); background: var(--amber-soft); }
+.btn-warn:hover { border-color: var(--amber); }
 
-/* .toolbar (3D): a named action row. `.spacer` right-pushes trailing items (replaces
-   ad-hoc per-button margin-left:auto in new markup). align-items:center so mixed tiers
-   sit on one baseline-free centre line. */
+/* `.toolbar`: a named action row. `.spacer` right-pushes trailing items (replaces
+   ad-hoc per-button margin-left:auto). align-items:center so mixed tiers share one
+   centre line. `.panel-head` is the other action-row host; its buttons centre too. */
 .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .toolbar .spacer { margin-left: auto; }
+/* every button placed in a panel-head centres against its (baseline-aligned) title row. */
+.panel-head .btn { align-self: center; }
+/* the trades ledger export slot holds two `.btn`s (匯出 CSV + 匯出報告) side by side. */
+#ledger-export-slot { display: inline-flex; align-items: center; gap: 8px; }
 
 /* ---------- E2: sparkline ---------- */
 .spark-cell { text-align: center; }
@@ -1525,10 +1545,10 @@ table.data tbody tr.kb-focus td {
 .rb-kv .k { color: var(--text-3); }
 .rb-kv .v { font-family: var(--font-num); font-weight: 600; }
 .rb-warn { font-size: 11px; color: var(--amber); }
-/* 3D: the rebalance trigger uses the compact tier's metrics (font 11px + shared 4px/18px
-   vertical height) so it matches the sibling export button in the holdings panel head. */
-.rb-open-btn { margin-left: 8px; font-size: 11px; padding: 4px 10px; align-self: center; }
-.panel-head .rb-open-btn + .btn-export { margin-left: 8px; }
+/* the rebalance trigger is a plain `.btn .btn-sm` (leading ⚖ `.ico`). `.rb-open-btn`
+   is kept ONLY as a deep-link / e2e hook (digest_service.py weekly item target;
+   test_flows / test_pages) — it carries no box style of its own; the tier supplies it,
+   the panel-head's gap + `.spacer` handle spacing + right-alignment. */
 /* combined cross-account row: symbol id stacked over account chips (2026-07-13) */
 .rb-sym-id { display: flex; align-items: baseline; gap: 8px; }
 .rb-acct-chips { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 3px; }
@@ -1561,7 +1581,6 @@ details.freshness > summary > span,
 .topbar .badge,
 .topbar button,
 .btn,
-.btn-export,
 .sum-chips .ccy-chip,
 .exdiv-sym .sym-name,
 .trend-note {
@@ -1650,7 +1669,7 @@ details.freshness > summary > span:not(.sum-chips) {
   input.input, select.select, textarea.input { font-size: 16px; min-height: 40px; }
   /* 3D: the compact tiers + the topbar refresh buttons get the same ≥38px touch target as
      .btn so no action button is finger-hostile on mobile. */
-  .btn, .btn-sm, .btn-export, .btn-refresh { min-height: 38px; }
+  .btn, .btn-sm, .btn-refresh { min-height: 38px; }
   .segmented button { min-height: 36px; }
   .chip { min-height: 30px; }
   .pencil { min-width: 38px; min-height: 38px; }
