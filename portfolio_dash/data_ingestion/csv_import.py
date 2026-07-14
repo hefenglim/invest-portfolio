@@ -73,13 +73,17 @@ def txn_preview_row(
         (inp.account_id,),
     ).fetchone()
     if acc is not None and (fee is None or tax is None):
+        # Registry-authoritative ETF flag (same rule as manual.py — stress-audit
+        # finding 2026-07-15): a registered instrument's is_etf wins; the input
+        # flag only covers unregistered symbols (e.g. an AI draft pre-registration).
+        is_etf = res.instrument.is_etf if res.instrument is not None else inp.is_etf
         try:
             fr = compute_fees(
                 get_fee_rule_set(acc["fee_rule_set"]),
                 inp.side,
                 inp.quantity,
                 inp.price,
-                is_etf=inp.is_etf,
+                is_etf=is_etf,
                 daytrade=inp.daytrade,
             )
         except FeeComputationError as exc:
@@ -126,7 +130,8 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
         conn:     Active SQLite connection (schema in place, accounts seeded).
         csv_text: Full CSV text including a header row.  Required columns:
                   ``account``, ``symbol``, ``side``, ``date``, ``shares``,
-                  ``price``.  Optional: ``fee``, ``tax``, ``note``.
+                  ``price``.  Optional: ``fee``, ``tax``, ``note``, ``daytrade``
+                  (``1``/``true`` marks a TW same-day round trip → 0.15% sell tax).
 
     Returns:
         :class:`ImportPreview` containing one :class:`PreviewRow` per data row.
@@ -148,6 +153,7 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
                 trade_date=date.fromisoformat(raw["date"]),
                 fee=Decimal(raw["fee"]) if raw.get("fee") else None,
                 tax=Decimal(raw["tax"]) if raw.get("tax") else None,
+                daytrade=raw.get("daytrade", "").lower() in ("1", "true", "y", "yes"),
                 note=raw.get("note") or None,
             )
         except (KeyError, ValueError, InvalidOperation) as exc:

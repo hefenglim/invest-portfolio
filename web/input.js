@@ -113,6 +113,8 @@
     ['m-account', 'm-symbol', 'm-shares', 'm-price', 'm-date'].forEach((id) => {
       $('#' + id).addEventListener('input', schedulePreview);
     });
+    const mdt = $('#m-daytrade');
+    if (mdt) mdt.addEventListener('change', schedulePreview);
     $('#m-fee-pencil').addEventListener('click', () => {
       m.feeOverride = true;
       $('#m-fee').readOnly = false;
@@ -154,6 +156,8 @@
       shares: sharesRaw === '' ? '0' : sharesRaw,
       price: priceRaw === '' ? '0' : priceRaw,
     };
+    const dt = $('#m-daytrade');
+    if (dt && dt.checked) body.daytrade = true;
     if (m.feeOverride) {
       const fv = $('#m-fee').value.trim();
       if (fv !== '') body.fee_override = fv;

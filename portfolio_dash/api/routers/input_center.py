@@ -112,15 +112,19 @@ class ManualBody(BaseModel):
     price: Decimal = Field(le=Decimal("1e12"))
     fee_override: Decimal | None = Field(default=None, ge=0)
     tax_override: Decimal | None = Field(default=None, ge=0)
+    daytrade: bool = False  # TW same-day round trip → 0.15% sell tax (persisted, MED-1)
     note: str | None = None
     ack_oversell: bool = False  # used by commit (Task 3)
 
 
 def _txn_input(body: ManualBody) -> TxnInput:
+    # is_etf is NOT taken from the body: the instrument registry is authoritative
+    # (resolved at the fee-computation seam in manual.py / csv_import.py).
     return TxnInput(
         account_id=body.account_id, symbol=body.symbol, side=parse_side(body.side),
         quantity=body.shares, price=body.price, trade_date=body.date,
-        fee=body.fee_override, tax=body.tax_override, note=body.note,
+        fee=body.fee_override, tax=body.tax_override, daytrade=body.daytrade,
+        note=body.note,
     )
 
 

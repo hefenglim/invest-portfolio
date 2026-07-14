@@ -99,13 +99,18 @@ def enter_transaction(
         (inp.account_id,),
     ).fetchone()
     if acc is not None and (fee is None or tax is None):
+        # The instrument REGISTRY is authoritative for the ETF flag (it drives the TW
+        # sell-tax rate); the input flag is only a fallback for unregistered symbols.
+        # Stress-audit finding 2026-07-15: entry paths defaulted is_etf=False, taxing
+        # ETF sells at the 現股 0.3% rate instead of 0.1%.
+        is_etf = instrument.is_etf if instrument is not None else inp.is_etf
         try:
             fr = compute_fees(
                 get_fee_rule_set(acc["fee_rule_set"]),
                 inp.side,
                 inp.quantity,
                 inp.price,
-                is_etf=inp.is_etf,
+                is_etf=is_etf,
                 daytrade=inp.daytrade,
             )
         except FeeComputationError as exc:

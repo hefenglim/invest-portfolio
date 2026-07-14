@@ -391,14 +391,17 @@
       }
     });
 
-    const updImplied = () => {
+    /* Hoisted function declaration: syncFxCcy() above runs during initForms() BEFORE
+       this point — a `const` arrow here is in its temporal dead zone at that call and
+       aborts the whole init (no click handlers attached). */
+    function updImplied() {
       const fromA = parseFloat($('#cfx-from-amt').value) || 0;
       const toA = parseFloat($('#cfx-to-amt').value) || 0;
       /* implied-rate what-if on the USER's own entry (input-side calc exception) */
       $('#cfx-implied').textContent = (fromA > 0 && toA > 0)
         ? '1 ' + $('#cfx-to-ccy').value + ' = ' + (fromA / toA).toFixed(4) + ' ' + $('#cfx-from-ccy').value
         : f.NULL_GLYPH;
-    };
+    }
     ['cfx-from-amt', 'cfx-to-amt', 'cfx-from-ccy', 'cfx-to-ccy'].forEach((id) =>
       $('#' + id).addEventListener('input', updImplied));
     updImplied();

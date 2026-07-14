@@ -1535,3 +1535,16 @@ def test_settings_digest_card_smoke(live_server: str, browser_page: Page) -> Non
         f"/settings.html#alerts (digest card): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_cash_page_smoke(live_server: str, browser_page: Page) -> None:
+    """/cash.html loads clean and its input forms actually initialize.
+
+    Regression guard for the stress-audit finding (2026-07-15): a TDZ ReferenceError
+    in cash.js initForms() aborted BEFORE the deposit/FX click handlers were attached,
+    so the buttons silently did nothing — and no smoke covered this page. Waits for a
+    post-render selector so the async boot (balances + forms) is observed, then asserts
+    zero console/page errors.
+    """
+    assert_page_ok(browser_page, live_server, "/cash.html", root_selector="#cm-confirm")

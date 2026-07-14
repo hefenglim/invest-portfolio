@@ -1,3 +1,4 @@
+import sqlite3
 from typing import Any
 
 import pytest
@@ -5,6 +6,8 @@ from fastapi.testclient import TestClient
 
 from portfolio_dash.api.instrument_service import QuickRegisterError, QuickRegisterOutcome
 from portfolio_dash.api.routers import input_center
+from portfolio_dash.data_ingestion.store import upsert_instrument
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 
 
@@ -180,3 +183,30 @@ def test_manual_commit_registered_symbol_skips_auto_register(
         "date": "2026-06-11", "shares": "100", "price": "600"})
     assert r.status_code == 201
     assert r.json()["auto_registered"] is None
+
+
+def test_manual_preview_etf_sell_uses_etf_tax_rate(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Stress-audit finding (2026-07-15): the registry's is_etf flag must reach the
+    fee engine on the manual path — an ETF sell is taxed 0.1%, never the 現股 0.3%."""
+    upsert_instrument(
+        golden_db,
+        Instrument(symbol="0050", market=Market.TW, quote_ccy=Currency.TWD,
+                   sector="ETF", name="元大台灣50", is_etf=True),
+    )
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "0050", "side": "sell",
+        "date": "2026-06-11", "shares": "50", "price": "140"})
+    assert r.status_code == 200
+    # notional 7,000 -> tax 7 (0.1%); the pre-fix bug returned 21 (0.3%).
+    assert r.json()["tax"] == "7"
+
+
+def test_manual_preview_daytrade_uses_daytrade_tax_rate(api_client: TestClient) -> None:
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-11", "shares": "100", "price": "600", "daytrade": True})
+    assert r.status_code == 200
+    # notional 60,000 -> tax 90 (0.15%); 現股 would be 180.
+    assert r.json()["tax"] == "90"
