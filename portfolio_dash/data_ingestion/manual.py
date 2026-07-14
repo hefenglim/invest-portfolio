@@ -1,12 +1,13 @@
 """Manual transaction entry: resolve → fee/tax → validate → confirm → persist."""
 
 import sqlite3
+from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
-from portfolio_dash.data_ingestion.fees import compute_fees
+from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
@@ -36,6 +37,7 @@ def enter_transaction(
     inp: TxnInput,
     *,
     confirm: bool = False,
+    today: date | None = None,
 ) -> TxnDraft:
     """Run the full manual-entry pipeline for a single transaction.
 
@@ -59,7 +61,7 @@ def enter_transaction(
         fee/tax, all issues found, and the write outcome.
     """
     # --- 1. Validate ---
-    issues: list[Issue] = list(validate_transaction(conn, inp))
+    issues: list[Issue] = list(validate_transaction(conn, inp, today=today))
 
     # --- 2. Resolve symbol ---
     res = resolve(conn, inp.symbol)
@@ -97,19 +99,26 @@ def enter_transaction(
         (inp.account_id,),
     ).fetchone()
     if acc is not None and (fee is None or tax is None):
-        fr = compute_fees(
-            get_fee_rule_set(acc["fee_rule_set"]),
-            inp.side,
-            inp.quantity,
-            inp.price,
-            is_etf=inp.is_etf,
-            daytrade=inp.daytrade,
-        )
-        if fee is None:
-            fee = fr.fee
-        if tax is None:
-            tax = fr.tax
-        snapshot = fr.snapshot
+        try:
+            fr = compute_fees(
+                get_fee_rule_set(acc["fee_rule_set"]),
+                inp.side,
+                inp.quantity,
+                inp.price,
+                is_etf=inp.is_etf,
+                daytrade=inp.daytrade,
+            )
+        except FeeComputationError as exc:
+            # Overflow-sized input (M4): surface as a HARD issue, never a 500. The
+            # magnitude guard in validate normally catches this first; this is the seam
+            # for any path that reaches the quantize with a pathological value.
+            issues.append(Issue(kind="fee_overflow", message=str(exc)))
+        else:
+            if fee is None:
+                fee = fr.fee
+            if tax is None:
+                tax = fr.tax
+            snapshot = fr.snapshot
 
     # Guarantee non-None for the draft (fallback to zero if account unknown)
     resolved_fee: Decimal = fee if fee is not None else Decimal("0")

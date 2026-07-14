@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS cash_movements (
     ccy TEXT NOT NULL, amount TEXT NOT NULL,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS ledger_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('update','delete')),
+    before_json TEXT NOT NULL,
+    at TEXT NOT NULL
+);
 """
 
 

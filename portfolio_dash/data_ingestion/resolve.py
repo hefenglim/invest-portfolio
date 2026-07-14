@@ -33,7 +33,7 @@ def resolve(
     raw: str,
     *,
     market_hint: Market | None = None,
-    threshold: float = 0.6,
+    threshold: float = 0.75,
     llm_resolver: Callable[[str], Instrument | None] | None = None,
 ) -> Resolution:
     """Resolve a raw user string to an Instrument.
@@ -45,7 +45,9 @@ def resolve(
         conn:          Active SQLite connection.
         raw:           Raw user-supplied symbol or name string.
         market_hint:   Optional market filter applied to the fuzzy-match pool.
-        threshold:     Minimum fuzzy-match ratio to accept a candidate (0–1).
+        threshold:     Minimum fuzzy-match ratio to accept a candidate (0–1). Raised to
+                       0.75 (audit L12) so a weak cross-market near-miss no longer
+                       silently resolves — below it the caller must register/confirm.
         llm_resolver:  Optional callable ``(raw_symbol) -> Instrument | None``
                        invoked only when exact and fuzzy both fail.  When it
                        returns an instrument, the resolution status is FUZZY

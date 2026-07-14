@@ -7,7 +7,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
-from portfolio_dash.data_ingestion.fees import compute_fees
+from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import insert_transaction
@@ -73,19 +73,24 @@ def txn_preview_row(
         (inp.account_id,),
     ).fetchone()
     if acc is not None and (fee is None or tax is None):
-        fr = compute_fees(
-            get_fee_rule_set(acc["fee_rule_set"]),
-            inp.side,
-            inp.quantity,
-            inp.price,
-            is_etf=inp.is_etf,
-            daytrade=inp.daytrade,
-        )
-        if fee is None:
-            fee = fr.fee
-        if tax is None:
-            tax = fr.tax
-        snap = fr.snapshot
+        try:
+            fr = compute_fees(
+                get_fee_rule_set(acc["fee_rule_set"]),
+                inp.side,
+                inp.quantity,
+                inp.price,
+                is_etf=inp.is_etf,
+                daytrade=inp.daytrade,
+            )
+        except FeeComputationError as exc:
+            # Overflow-sized input (M4): a hard row issue, never a 500.
+            issues.append(Issue(kind="fee_overflow", message=str(exc)))
+        else:
+            if fee is None:
+                fee = fr.fee
+            if tax is None:
+                tax = fr.tax
+            snap = fr.snapshot
 
     # Build payload for the writer (string dict + prefixed snapshot entries)
     payload: dict[str, str] = {

@@ -1,12 +1,20 @@
 """Per-account fee and tax computation with rule snapshot."""
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.enums import Side
+
+
+class FeeComputationError(ValueError):
+    """Fee/tax could not be computed (e.g. an overflow-sized notional).
+
+    Raised at the quantize seam so a pathological input surfaces as a validation
+    issue at the callers (manual entry, CSV import) rather than a 500 (audit M4).
+    """
 
 
 class FeeResult(BaseModel):
@@ -18,11 +26,19 @@ class FeeResult(BaseModel):
 
 
 def _round(value: Decimal, *, integer: bool) -> Decimal:
-    """Quantize to integer (TW NT$) or 2 dp (USD/MYR), using ROUND_HALF_UP."""
-    return value.quantize(
-        Decimal("1") if integer else Decimal("0.01"),
-        rounding=ROUND_HALF_UP,
-    )
+    """Quantize to integer (TW NT$) or 2 dp (USD/MYR), using ROUND_HALF_UP.
+
+    An overflow-sized value exceeds the Decimal context precision and raises
+    ``InvalidOperation``; re-raise it as :class:`FeeComputationError` so callers can
+    degrade it to a validation issue instead of a 500 (audit M4).
+    """
+    try:
+        return value.quantize(
+            Decimal("1") if integer else Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+    except InvalidOperation as exc:
+        raise FeeComputationError("數值過大,無法計算費用/稅") from exc
 
 
 def compute_fees(

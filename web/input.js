@@ -95,6 +95,7 @@
       dl.appendChild(o);
     });
     $('#m-date').value = TODAY;
+    $('#m-date').max = TODAY;  // audit M5: discourage a future trade date (server soft-warns too)
     $('#m-symbol').value = '';
     $('#m-shares').value = '';
     $('#m-price').value = '';

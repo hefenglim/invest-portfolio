@@ -13,6 +13,11 @@ _ISSUE_FIELD = {
     "non_positive_quantity": "shares",
     "non_positive_price": "price",
     "unknown_account": "account_id",
+    "market_mismatch": "symbol",
+    "amount_too_large": "shares",
+    "negative_fee": "fee",
+    "negative_tax": "tax",
+    "fee_overflow": "shares",
 }
 
 _DIV_MODEL = {"cash_cost_reduction": "tw", "drip_us": "drip", "cash": "net"}

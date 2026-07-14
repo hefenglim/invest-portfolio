@@ -242,7 +242,7 @@
   <section class="panel ledger-section" data-screen-label="帳本記錄">
     <div class="panel-head">
       <h2 class="panel-title">帳本記錄</h2>
-      <span class="panel-sub">所有交易・四帳唯讀・append-only</span>
+      <span class="panel-sub">所有交易・四帳本・更正以全帳重播檢核，原值留存稽核軌跡</span>
       <span class="spacer"></span>
       <span id="ledger-export-slot"></span>
       <div class="segmented">
@@ -292,7 +292,7 @@
       </table></div>
       <div id="lopen-pager" hidden="hidden"></div>
     </div>
-    <div class="append-note">帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。點擊交易列展開費率規則快照。</div>
+    <div class="append-note">帳本更正為顯式操作：編輯／刪除前會以全帳本重播檢核（賣超與孤兒紀錄防呆），更正前的原值會寫入稽核軌跡留存。點擊交易列展開費率規則快照。</div>
   </section>
 
 </div>

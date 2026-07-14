@@ -18,11 +18,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.wire import parse_side
+from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
+from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
+from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
 from portfolio_dash.data_ingestion.store import (
     StoredDividend,
     StoredOpening,
@@ -47,8 +50,9 @@ from portfolio_dash.data_ingestion.store import (
     update_transaction,
     upsert_opening,
 )
-from portfolio_dash.portfolio.cost_basis import OversellError, build_book
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import (
     Dividend,
@@ -204,18 +208,27 @@ def openings(
 # ---------------------------------------------------------------------------
 
 
-def _replay_error(
+_Models = tuple[list[Transaction], list[Dividend], list[OpeningInventory]]
+
+
+class _ReplayBlock(BaseModel):
+    """A reason a correction is refused: an ``oversell`` (ack-bypassable) or an
+    ``orphan`` (a dividend/opening record stranded by the mutation — hard)."""
+
+    code: str  # "oversell" | "orphan"
+    message: str
+
+
+def _to_models(
     conn: sqlite3.Connection,
-    *,
     txs: list[StoredTransaction] | None = None,
     divs: list[StoredDividend] | None = None,
     opening: list[StoredOpening] | None = None,
-) -> str | None:
-    """Replay the WOULD-BE ledger through build_book; the oversell message or None.
+) -> _Models:
+    """Build ledger models from the mutated list(s); unspecified ledgers load from store.
 
-    Callers pass the mutated list(s); unspecified ledgers load from the store.
-    Rows whose symbol is unregistered are excluded (same degradation as the
-    dashboard) so one legacy bad row cannot block corrections to healthy rows.
+    Rows whose symbol is unregistered are excluded (same degradation as the dashboard)
+    so one legacy bad row cannot block corrections to healthy rows.
     """
     s_txs = txs if txs is not None else list_transactions(conn)
     s_divs = divs if divs is not None else list_dividends(conn)
@@ -241,10 +254,90 @@ def _replay_error(
                          build_date=s.build_date)
         for s in s_open if s.symbol in instruments
     ]
+    return t_models, d_models, o_models
+
+
+def _orphan_keys(models: _Models) -> set[tuple[str, str]]:
+    """(account, symbol) dividend keys with NO buy/sell/opening on-or-before the div date.
+
+    These are exactly the rows on which ``build_book`` raises ``ValueError`` ('dividend
+    for unknown position') — computing the set directly (rather than catching) lets the
+    caller scope the block to orphans the mutation INTRODUCES (audit H3)."""
+    t_models, d_models, o_models = models
+    orphans: set[tuple[str, str]] = set()
+    for dv in d_models:
+        covered = any(
+            o.account_id == dv.account_id and o.symbol == dv.symbol
+            and o.build_date <= dv.date for o in o_models
+        ) or any(
+            t.account_id == dv.account_id and t.symbol == dv.symbol
+            and t.trade_date <= dv.date for t in t_models
+        )
+        if not covered:
+            orphans.add((dv.account_id, dv.symbol))
+    return orphans
+
+
+def _oversold_shares(
+    models: _Models, instruments: dict[str, Instrument]
+) -> dict[tuple[str, str], Decimal] | None:
+    """Map of (account, symbol) → negative shares for oversold positions.
+
+    ``None`` when the ledger is un-bookable (e.g. a pre-existing orphan) — the caller
+    then declines to scope the oversell rather than block an unrelated correction."""
+    t_models, d_models, o_models = models
     try:
-        build_book(t_models, d_models, o_models, instruments)
-    except OversellError as exc:
-        return str(exc)
+        book = build_book(t_models, d_models, o_models, instruments, allow_oversell=True)
+    except (ValueError, KeyError):
+        return None
+    return {(h.account_id, h.symbol): h.shares for h in book.holdings if h.oversold}
+
+
+def _replay_block(
+    conn: sqlite3.Connection,
+    *,
+    txs: list[StoredTransaction] | None = None,
+    divs: list[StoredDividend] | None = None,
+    opening: list[StoredOpening] | None = None,
+) -> _ReplayBlock | None:
+    """Compare the CURRENT ledger to the WOULD-BE ledger; block only what this mutation
+    introduces — a newly stranded dividend/opening (orphan, hard) or a new/worsened
+    oversell (soft). A pre-existing, unrelated oversell/orphan never poisons the
+    correction (audit H3 + H8)."""
+    instruments = {i.symbol: i for i in list_instruments(conn)}
+    pre = _to_models(conn)
+    post = _to_models(conn, txs, divs, opening)
+
+    introduced_orphans = _orphan_keys(post) - _orphan_keys(pre)
+    if introduced_orphans:
+        sym = sorted(introduced_orphans)[0][1]
+        return _ReplayBlock(
+            code="orphan",
+            message=(
+                f"此更正會使 {sym} 的股利/期初紀錄失去對應持倉,請先處理該紀錄"
+            ),
+        )
+
+    post_over = _oversold_shares(post, instruments)
+    pre_over_raw = _oversold_shares(pre, instruments)
+    if post_over is None:
+        # The would-be ledger cannot be replayed (beyond the orphan-dividend case above,
+        # e.g. a DRIP dividend stripped of its reinvest shares). Block hard when THIS
+        # mutation introduced it; a pre-existing un-bookable ledger must not poison an
+        # unrelated correction (mirrors the oversell scoping).
+        if pre_over_raw is not None:
+            return _ReplayBlock(
+                code="orphan",
+                message="此更正會使帳本無法重建，請檢查相關股利/期初紀錄")
+        return None
+    pre_over = pre_over_raw or {}
+    for key, shares in post_over.items():
+        prev = pre_over.get(key)
+        if prev is None or shares < prev:  # newly oversold OR gone more negative
+            return _ReplayBlock(
+                code="oversell",
+                message=f"{key[1]} 部位將為 {decimal_str(shares)} 股",
+            )
     return None
 
 
@@ -257,15 +350,32 @@ def _account_exists(conn: sqlite3.Connection, account_id: str) -> bool:
 def _mutation_guard(
     conn: sqlite3.Connection, *, account_id: str, symbol: str | None
 ) -> JSONResponse | None:
-    """Shared field checks for row corrections: account known, symbol registered."""
+    """Shared field checks for row corrections: account known, symbol registered, and
+    account↔instrument market coherence (audit H1)."""
     if not _account_exists(conn, account_id):
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"帳戶 {account_id} 不存在", field="account_id"))
-    if symbol is not None and get_instrument(conn, symbol) is None:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error",
-            f"未註冊標的 {symbol} — 請先至「標的管理」註冊", field="symbol"))
+    if symbol is not None:
+        inst = get_instrument(conn, symbol)
+        if inst is None:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error",
+                f"未註冊標的 {symbol} — 請先至「標的管理」註冊", field="symbol"))
+        acct_mkt = _account_market_of(conn, account_id)
+        if acct_mkt is not None and inst.market is not acct_mkt:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error",
+                f"{symbol} 屬 {inst.market.value} 市場,"
+                f"不可登錄於 {MARKET_ZH.get(acct_mkt, acct_mkt.value)}帳戶",
+                field="symbol"))
     return None
+
+
+def _account_market_of(conn: sqlite3.Connection, account_id: str) -> Market | None:
+    row = conn.execute(
+        "SELECT settlement_ccy FROM accounts WHERE account_id=?", (account_id,)
+    ).fetchone()
+    return CCY_MARKET.get(row["settlement_ccy"]) if row is not None else None
 
 
 def _oversell_response(msg: str) -> JSONResponse:
@@ -274,17 +384,92 @@ def _oversell_response(msg: str) -> JSONResponse:
         f"此更正將造成賣超（{msg}）— 確認後可強制寫入（儀表板將標示賣超待釐清）"))
 
 
+def _replay_guard(
+    conn: sqlite3.Connection,
+    *,
+    ack_oversell: bool,
+    txs: list[StoredTransaction] | None = None,
+    divs: list[StoredDividend] | None = None,
+    opening: list[StoredOpening] | None = None,
+) -> JSONResponse | None:
+    """Replay the would-be ledger; 422 the caller when THIS mutation strands a record
+    (orphan — hard) or introduces/worsens an oversell (soft, ack-bypassable)."""
+    block = _replay_block(conn, txs=txs, divs=divs, opening=opening)
+    if block is None:
+        return None
+    if block.code == "orphan":
+        return JSONResponse(status_code=422, content=error_body(
+            "orphan_correction", block.message))
+    if not ack_oversell:
+        return _oversell_response(block.message)
+    return None
+
+
 class TxEditBody(BaseModel):
     account_id: str
     symbol: str
     side: str
     date: date
-    shares: Decimal
-    price: Decimal
-    fee: Decimal
-    tax: Decimal
+    # shares/price bounded (audit M4) so an overflow-sized edit 400s before the fee
+    # quantize can 500. fee/tax constrained >= 0 (audit H2).
+    shares: Decimal = Field(le=Decimal("1e12"))
+    price: Decimal = Field(le=Decimal("1e12"))
+    fee: Decimal = Field(ge=0)
+    tax: Decimal = Field(ge=0)
     note: str | None = None
     ack_oversell: bool = False
+    # audit M6: whether the user explicitly edited fee/tax in the modal. When a core
+    # field (account/side/qty/price/date) changes and these are False, the backend
+    # recomputes fee/tax from the NEW account's rule set + regenerates the snapshot.
+    fee_overridden: bool = False
+    tax_overridden: bool = False
+
+
+def _recompute_edit_fees(
+    conn: sqlite3.Connection, body: TxEditBody, existing: StoredTransaction
+) -> tuple[Decimal, Decimal, dict[str, str] | None] | JSONResponse:
+    """Resolve the fee/tax + snapshot to persist for a transaction edit (audit M6).
+
+    Recomputes from the new account's rule set when a core field changed and the user
+    did not explicitly edit fee/tax; explicit edits are honored as overrides (snapshot
+    tagged ``override: true``). Returns a 400 JSONResponse on an overflow-sized notional.
+    """
+    side = parse_side(body.side)
+    core_changed = (
+        existing.account_id != body.account_id
+        or existing.symbol != body.symbol
+        or existing.side is not side
+        or existing.quantity != body.shares
+        or existing.price != body.price
+        or existing.trade_date != body.date
+    )
+    fee, tax = body.fee, body.tax
+    snapshot: dict[str, str] | None = None
+    recompute = core_changed and not (body.fee_overridden and body.tax_overridden)
+    if recompute:
+        row = conn.execute(
+            "SELECT fee_rule_set FROM accounts WHERE account_id=?", (body.account_id,)
+        ).fetchone()
+        inst = get_instrument(conn, body.symbol)
+        if row is not None:
+            try:
+                fr = compute_fees(
+                    get_fee_rule_set(row["fee_rule_set"]), side, body.shares, body.price,
+                    is_etf=inst.is_etf if inst is not None else False,
+                )
+            except FeeComputationError as exc:
+                return JSONResponse(status_code=400, content=error_body(
+                    "validation_error", str(exc), field="shares"))
+            snapshot = dict(fr.snapshot)
+            if not body.fee_overridden:
+                fee = fr.fee
+            if not body.tax_overridden:
+                tax = fr.tax
+    if body.fee_overridden or body.tax_overridden:
+        base = snapshot if snapshot is not None else dict(existing.fee_rule_snapshot or {})
+        base["override"] = "true"
+        snapshot = base
+    return fee, tax, snapshot
 
 
 @router.put("/ledgers/transactions/{txn_id}")
@@ -303,24 +488,26 @@ def edit_transaction(
     if body.shares <= 0 or body.price <= 0:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "股數與價格必須大於 0", field="shares"))
-    if body.fee < 0 or body.tax < 0:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "費用與稅不可為負", field="fee"))
+    resolved = _recompute_edit_fees(conn, body, existing)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    fee, tax, snapshot = resolved
     edited = existing.model_copy(update={
         "account_id": body.account_id, "symbol": body.symbol,
         "side": parse_side(body.side), "quantity": body.shares, "price": body.price,
-        "fees": body.fee, "tax": body.tax, "trade_date": body.date, "note": body.note,
+        "fees": fee, "tax": tax, "trade_date": body.date, "note": body.note,
     })
     would_be = [edited if t.id == txn_id else t for t in list_transactions(conn)]
-    msg = _replay_error(conn, txs=would_be)
-    if msg is not None and not body.ack_oversell:
-        return _oversell_response(msg)
+    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, txs=would_be)
+    if blocked is not None:
+        return blocked
     update_transaction(
         conn, txn_id, account_id=body.account_id, symbol=body.symbol,
         side=parse_side(body.side), quantity=body.shares, price=body.price,
-        fees=body.fee, tax=body.tax, trade_date=body.date, note=body.note,
+        fees=fee, tax=tax, trade_date=body.date, note=body.note,
+        fee_rule_snapshot=snapshot,
     )
-    return {"ok": True, "id": txn_id}
+    return {"ok": True, "id": txn_id, "fee": decimal_str(fee), "tax": decimal_str(tax)}
 
 
 @router.delete("/ledgers/transactions/{txn_id}")
@@ -333,9 +520,9 @@ def remove_transaction(
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"交易 #{txn_id} 不存在"))
     would_be = [t for t in list_transactions(conn) if t.id != txn_id]
-    msg = _replay_error(conn, txs=would_be)
-    if msg is not None and not ack_oversell:
-        return _oversell_response(msg)
+    blocked = _replay_guard(conn, ack_oversell=ack_oversell, txs=would_be)
+    if blocked is not None:
+        return blocked
     delete_transaction(conn, txn_id)
     return {"ok": True, "id": txn_id}
 
@@ -383,9 +570,9 @@ def edit_dividend(
         "reinvest_price": body.reinvest_price,
     })
     would_be = [edited if d.id == div_id else d for d in list_dividends(conn)]
-    msg = _replay_error(conn, divs=would_be)
-    if msg is not None and not body.ack_oversell:
-        return _oversell_response(msg)
+    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, divs=would_be)
+    if blocked is not None:
+        return blocked
     update_dividend(
         conn, div_id, account_id=body.account_id, symbol=body.symbol,
         div_date=body.date, div_type=div_type, gross=body.gross,
@@ -405,9 +592,9 @@ def remove_dividend(
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"股利 #{div_id} 不存在"))
     would_be = [d for d in list_dividends(conn) if d.id != div_id]
-    msg = _replay_error(conn, divs=would_be)
-    if msg is not None and not ack_oversell:
-        return _oversell_response(msg)
+    blocked = _replay_guard(conn, ack_oversell=ack_oversell, divs=would_be)
+    if blocked is not None:
+        return blocked
     delete_dividend(conn, div_id)
     return {"ok": True, "id": div_id}
 
@@ -487,9 +674,9 @@ def edit_opening(
     })
     would_be = [edited if (o.account_id == account_id and o.symbol == symbol) else o
                 for o in list_opening(conn)]
-    msg = _replay_error(conn, opening=would_be)
-    if msg is not None and not body.ack_oversell:
-        return _oversell_response(msg)
+    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, opening=would_be)
+    if blocked is not None:
+        return blocked
     upsert_opening(
         conn, account_id=account_id, symbol=symbol, shares=body.shares,
         original_avg_cost=body.avg, original_cost_total=total, build_date=body.date,
@@ -509,8 +696,8 @@ def remove_opening(
             "not_found", f"期初 {account_id}/{symbol} 不存在"))
     would_be = [o for o in list_opening(conn)
                 if not (o.account_id == account_id and o.symbol == symbol)]
-    msg = _replay_error(conn, opening=would_be)
-    if msg is not None and not ack_oversell:
-        return _oversell_response(msg)
+    blocked = _replay_guard(conn, ack_oversell=ack_oversell, opening=would_be)
+    if blocked is not None:
+        return blocked
     delete_opening(conn, account_id, symbol)
     return {"ok": True}
