@@ -62,6 +62,7 @@ from portfolio_dash.api.snapshots import snapshot_job
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
+from portfolio_dash.llm_insight.alerts_bridge import suppress_stale_quota_low
 from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
 from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure_evaluations_tables
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
@@ -84,6 +85,7 @@ from portfolio_dash.scheduler.jobs import (
     register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.logging_config import configure_logging
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
@@ -147,6 +149,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
         ensure_insights_tables(conn)  # insights cards table (spec 04b)
         ensure_alert_events_tables(conn)  # alert_events + dispatch log (spec 04b R7)
+        # 3B one-time cleanup: quota_low is now gated on ai_active — neutralize any
+        # pre-gate pending quota_low event so no stale AI card / push fires retroactively.
+        suppress_stale_quota_low(conn, now=app_now())
         ensure_evaluations_tables(conn)  # insight_evaluations table (spec 04c)
         ensure_signal_states_table(conn)  # signal_states derived cache (P2 batch 2)
         notify_ops.ensure_seeded(conn)  # notify_config single-row + one-time topic (WP 3B)

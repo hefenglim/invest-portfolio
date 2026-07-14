@@ -36,6 +36,32 @@ def test_ensure_tables_creates_alert_events(conn: sqlite3.Connection) -> None:
     ab.ensure_tables(conn)  # idempotent
 
 
+def test_suppress_stale_quota_low_neutralizes_only_quota_low_and_is_idempotent(
+    conn: sqlite3.Connection,
+) -> None:
+    """3B one-time cleanup: pending quota_low events are marked consumed + notified so no
+    stale AI card / push fires retroactively once the ai_active gate lands; other rules and
+    already-neutral rows are untouched, and re-running is a no-op."""
+    ab.record_event(conn, rule_id="quota_low", symbol=None, now=NOW)
+    ab.record_event(conn, rule_id="single_weight", symbol="2330", now=NOW)
+
+    affected = ab.suppress_stale_quota_low(conn, now=NOW)
+    assert affected == 1
+
+    q = conn.execute(
+        "SELECT consumed, notified_at FROM alert_events WHERE rule_id='quota_low'"
+    ).fetchone()
+    assert q["consumed"] == 1 and q["notified_at"] is not None
+
+    other = conn.execute(
+        "SELECT consumed, notified_at FROM alert_events WHERE rule_id='single_weight'"
+    ).fetchone()
+    assert other["consumed"] == 0 and other["notified_at"] is None
+
+    # idempotent: nothing pending remains for quota_low.
+    assert ab.suppress_stale_quota_low(conn, now=NOW) == 0
+
+
 def test_ensure_tables_migrates_legacy_schema_without_notify_columns() -> None:
     # Deploy-gate regression (2026-07-12): a LIVE DB has alert_events created by the
     # pre-notify schema (no notified_at/notify_attempts). ensure_tables must migrate

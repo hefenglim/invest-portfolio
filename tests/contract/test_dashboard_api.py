@@ -31,6 +31,15 @@ def test_dashboard_holdings_enriched_and_llm_quota_present(api_client: TestClien
     assert "llm_quota" in body
 
 
+def test_dashboard_llm_quota_carries_ai_active_false_on_golden(
+    api_client: TestClient,
+) -> None:
+    """3B: llm_quota exposes ai_active (smallest honest surface for the quota chip). The
+    golden DB is AI-off (no model bound to any role) -> ai_active is False."""
+    body = api_client.get("/api/dashboard").json()
+    assert body["llm_quota"]["ai_active"] is False
+
+
 def test_dashboard_freshness_and_currency_kept_uppercase(api_client: TestClient) -> None:
     body = api_client.get("/api/dashboard").json()
     assert body["currency_view"]["by_currency_value"]["USD"] == "1200"   # Currency stays UPPER

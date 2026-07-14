@@ -30,7 +30,7 @@ from portfolio_dash.portfolio.technicals import annualized_volatility, week52_po
 from portfolio_dash.pricing import consensus_source, snapshots_store
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.llm_config import budget_remaining, get_alert_threshold
+from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.strategy import target_weights as tw
 from portfolio_dash.strategy.alerts import (
     Alert,
@@ -160,6 +160,7 @@ def compute_alerts_full(
         data, get_alert_rules(conn),
         quota_remaining=budget_remaining(conn),
         quota_threshold=get_alert_threshold(conn),
+        ai_active=ai_active(conn),
         calib_gap=calib_gap,
         account_names=account_display_names(conn),
         symbol_metrics=inputs.symbol_metrics,

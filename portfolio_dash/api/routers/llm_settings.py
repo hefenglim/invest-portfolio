@@ -24,6 +24,7 @@ from portfolio_dash.shared.llm_config import (
     LLMRole,
     ModelConfig,
     add_topup,
+    ai_active,
     all_role_bindings,
     delete_model,
     get_alert_threshold,
@@ -99,6 +100,9 @@ def _quota_wire(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
         "remaining_usd": decimal_str(quota_remaining(conn)),
         "alert_threshold_usd": decimal_str(get_alert_threshold(conn)),
+        # ai_active (P3 batch 3 · 3B): lets the off-dashboard quota chip render the neutral
+        # 「AI 未啟用」 state instead of 「AI 額度 $0」+warning when no model is configured.
+        "ai_active": ai_active(conn),
         "topups": list_topups(conn),
     }
 

@@ -20,7 +20,14 @@ from portfolio_dash.portfolio.dashboard_models import (
 )
 from portfolio_dash.portfolio.results import RealizedPnL
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.llm_config import set_alert_threshold
+from portfolio_dash.shared.llm_config import (
+    LLMRole,
+    ModelConfig,
+    ensure_llm_seeded,
+    set_alert_threshold,
+    set_role,
+    upsert_model,
+)
 from portfolio_dash.strategy.alerts import compute_alerts, compute_alerts_from
 from portfolio_dash.strategy.rules_config import DEFAULT_RULES
 
@@ -59,6 +66,37 @@ def test_quota_low_below_threshold_is_warn(golden_db: sqlite3.Connection) -> Non
     assert q.sev == "warn"
 
 
+def test_quota_low_gated_off_when_ai_inactive(golden_db: sqlite3.Connection) -> None:
+    """3B: a low budget is NOT worth alerting on when AI is off (no enabled model)."""
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    alerts = compute_alerts_from(
+        data, DEFAULT_RULES, quota_remaining=Decimal("0"), quota_threshold=Decimal("1"),
+        ai_active=False,
+    )
+    assert not any(a.id == "quota_low" for a in alerts)
+
+
+def test_quota_low_fires_when_ai_active_and_below(golden_db: sqlite3.Connection) -> None:
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    alerts = compute_alerts_from(
+        data, DEFAULT_RULES, quota_remaining=Decimal("0.5"), quota_threshold=Decimal("1"),
+        ai_active=True,
+    )
+    assert any(a.id == "quota_low" for a in alerts)
+
+
+def test_quota_low_silent_above_threshold_regardless_of_ai(
+    golden_db: sqlite3.Connection,
+) -> None:
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    for ai in (True, False):
+        alerts = compute_alerts_from(
+            data, DEFAULT_RULES, quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
+            ai_active=ai,
+        )
+        assert not any(a.id == "quota_low" for a in alerts)
+
+
 def test_disabled_rule_silent(golden_db: sqlite3.Connection) -> None:
     data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
     rules = DEFAULT_RULES.model_copy(deep=True)
@@ -71,12 +109,29 @@ def test_disabled_rule_silent(golden_db: sqlite3.Connection) -> None:
 def test_compute_alerts_wrapper_uses_db(golden_db: sqlite3.Connection) -> None:
     # golden DB has no topups -> budget_remaining 0; set $1 threshold explicitly (the
     # default is now 1.00) so 0 < 1 fires quota_low. single_weight fires regardless.
+    # 3B: quota_low is now gated on ai_active, so activate AI (bind an enabled model to a
+    # role) — this also proves the wrapper reads ai_active from the SAME conn.
+    ensure_llm_seeded(golden_db)
+    upsert_model(golden_db, ModelConfig(
+        id="m", model_alias="M", provider="anthropic", model_name="claude-x"))
+    set_role(golden_db, LLMRole.DEFAULT, "m")
     set_alert_threshold(golden_db, Decimal("1"))
     alerts = compute_alerts(golden_db, now=_NOW, reporting=Currency.TWD)
     ids = {a.id for a in alerts}
     assert "single_weight:2330" in ids and "quota_low" in ids
     q = next(a for a in alerts if a.id == "quota_low")
     assert q.sev == "risk"  # remaining == 0 -> risk
+
+
+def test_compute_alerts_wrapper_gates_quota_low_when_ai_off(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """3B: with the golden DB AI-off (no model bound), the conn-bearing wrapper feeds
+    ai_active=False, so quota_low does NOT fire even at $0 remaining."""
+    set_alert_threshold(golden_db, Decimal("1"))
+    alerts = compute_alerts(golden_db, now=_NOW, reporting=Currency.TWD)
+    ids = {a.id for a in alerts}
+    assert "single_weight:2330" in ids and "quota_low" not in ids
 
 
 def _minimal_data(*, fx: FXSummary | None,

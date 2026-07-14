@@ -252,6 +252,28 @@ def select_models(conn: sqlite3.Connection, *, vision: bool) -> list[ModelConfig
     return select_role_models(conn, primary, fallback)
 
 
+def ai_active(conn: sqlite3.Connection) -> bool:
+    """True iff AI is usable: at least one role binding resolves to an ENABLED model.
+
+    The pure predicate behind the P3-batch-3 quota_low gate + the "AI 未啟用" chip state.
+    Semantically equivalent to ``select_role_models`` NOT raising :exc:`AINotActivated`
+    for some role pair — but as a boolean, never raising. A missing ``llm_defaults`` /
+    ``llm_models`` table degrades to ``False`` (AI off): the gate runs on every dashboard/
+    alert build, and a legacy-schema boot must degrade, not 500.
+    """
+    try:
+        for role in LLMRole:
+            model_id = get_role_model_id(conn, role)
+            if model_id is None:
+                continue
+            model = get_model(conn, model_id)
+            if model is not None and model.enabled:
+                return True
+        return False
+    except sqlite3.OperationalError:
+        return False
+
+
 def budget_remaining(conn: sqlite3.Connection) -> Decimal:
     """Remaining USD = Σ(all top-up amounts) − Σ(all usage cost). The single source
     of truth for the gate, the settings page, and the dashboard chip.

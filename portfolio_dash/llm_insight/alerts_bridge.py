@@ -157,6 +157,25 @@ def mark_consumed(conn: sqlite3.Connection, event_id: int) -> None:
     conn.commit()
 
 
+def suppress_stale_quota_low(conn: sqlite3.Connection, *, now: datetime) -> int:
+    """One-time (idempotent) 3B cleanup: neutralize still-pending ``quota_low`` events.
+
+    P3 batch 3 gates ``quota_low`` on ``ai_active``; without this, a ``quota_low`` event
+    recorded BEFORE the gate (e.g. $0 budget while no model is configured) could still spawn
+    a retroactive AI card (``consumed = 0``) or push (``notified_at IS NULL``) on the next
+    scan/dispatch. Mark every such pending ``quota_low`` row consumed AND notified so neither
+    path fires for the pre-gate condition. Idempotent — after the first run no pending
+    ``quota_low`` rows remain, so re-runs update 0 rows. Returns the affected row count.
+    """
+    cur = conn.execute(
+        "UPDATE alert_events SET consumed = 1, notified_at = COALESCE(notified_at, ?) "
+        "WHERE rule_id = 'quota_low' AND (consumed = 0 OR notified_at IS NULL)",
+        (now.isoformat(),),
+    )
+    conn.commit()
+    return int(cur.rowcount)
+
+
 # --- subscribers (R7 filter) --------------------------------------------------
 
 

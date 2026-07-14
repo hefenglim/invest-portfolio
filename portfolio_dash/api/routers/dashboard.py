@@ -19,7 +19,7 @@ from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.llm_config import budget_remaining, get_alert_threshold
+from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy.alerts import account_display_names, compute_alerts_from
 from portfolio_dash.strategy.rules_config import get_alert_rules
@@ -48,7 +48,14 @@ def dashboard(
         row["spark_30d"] = [decimal_str(p.value) for p in history]
 
     # Single source of truth (Σ top-ups − Σ usage); never None, $0 when nothing funded.
-    payload["llm_quota"] = {"remaining_usd": decimal_str(budget_remaining(conn))}
+    # ``ai_active`` (P3 batch 3 · 3B): the smallest honest surface for the quota chip — when
+    # false the chip shows a neutral 「AI 未啟用」 instead of 「AI 額度 $0」+warning, matching
+    # the quota_low alert now being gated off while no model is configured.
+    ai_on = ai_active(conn)
+    payload["llm_quota"] = {
+        "remaining_usd": decimal_str(budget_remaining(conn)),
+        "ai_active": ai_on,
+    }
 
     # Backup freshness: ops/file state, not pure calc — build_dashboard leaves it None,
     # the router fills it. ISO-8601 UTC string of the newest backup, or None if none yet.
@@ -66,6 +73,7 @@ def dashboard(
         data, get_alert_rules(conn),
         quota_remaining=budget_remaining(conn),
         quota_threshold=get_alert_threshold(conn),
+        ai_active=ai_on,
         calib_gap=calib,
         account_names=account_display_names(conn),  # FH2: same display names as GET /api/alerts
         symbol_metrics=fed.symbol_metrics,
