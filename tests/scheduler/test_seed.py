@@ -31,6 +31,14 @@ def test_seed_is_idempotent_and_preserves_edits(conn: sqlite3.Connection) -> Non
     assert row["cron"] == "9 9 * * *" and row["enabled"] == 0
 
 
+def test_seed_includes_digest_jobs(conn: sqlite3.Connection) -> None:
+    # P3 batch 3: the two digest editions must seed a schedule_config row (they surface on
+    # the settings scheduler tab + are driven by the 摘要與週報 card via the same rows).
+    ensure_scheduler_seeded(conn)
+    ids = {r["job_id"] for r in conn.execute("SELECT job_id FROM schedule_config")}
+    assert {"digest_daily", "digest_weekly"} <= ids
+
+
 def test_newly_registered_job_gets_default_row(conn: sqlite3.Connection) -> None:
     ensure_scheduler_seeded(conn)
     extra = JobSpec(

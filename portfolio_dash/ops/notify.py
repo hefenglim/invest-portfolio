@@ -78,6 +78,12 @@ RULE_CATALOG: list[tuple[str, str, str]] = [
     ("signal_trend", "趨勢反轉", "info"),
     ("signal_cross", "均線交叉", "info"),
     ("signal_momentum", "動能轉向", "info"),
+    # P3 batch 3 digests: the daily close summary + weekly action list push under their own
+    # subscription toggles (counts/percentages only — B3-D4). These are NOT strategy rules,
+    # so the RULE_IDS drift guard (subset check) is unaffected; load_config self-heals both
+    # to subscribed=True on an existing install.
+    ("digest_daily", "每日收盤摘要", "info"),
+    ("digest_weekly", "每週行動清單", "info"),
 ]
 _RULE_LABEL: dict[str, tuple[str, str]] = {rid: (label, sev) for rid, label, sev in RULE_CATALOG}
 

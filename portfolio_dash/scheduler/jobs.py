@@ -70,6 +70,40 @@ def register_news_runner(fn: NewsRunner | None) -> None:
     _NEWS_RUNNER = fn
 
 
+# --- Digest runner registration (P3 batch 3 · Wave 1) -------------------------
+# Same seam as the news/insight runners: the app registers the digest assembler at startup
+# so ``scheduler/`` never imports ``api``/``digest_service``. The runner (api/digest_service
+# .run_digest) reads the computed dashboard + stored prices, stores the digest, and pushes
+# (counts/percentages only — B3-D4). Signature: ``fn(conn, kind, now) -> str``.
+DigestRunner = Callable[..., str]
+_DIGEST_RUNNER: DigestRunner | None = None
+
+
+def register_digest_runner(fn: DigestRunner | None) -> None:
+    """Register (or clear with None) the daily/weekly digest runner (app wiring seam)."""
+    global _DIGEST_RUNNER
+    _DIGEST_RUNNER = fn
+
+
+def digest_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily close digest: assemble + store + push via the registered runner (kind=daily).
+
+    No runner wired (scheduler-only process) → safe no-op summary; the digest resumes once
+    the app registers the runner on the next fire."""
+    runner = _DIGEST_RUNNER
+    if runner is None:
+        return "no digest runner registered"
+    return str(runner(conn, "daily", now=now))
+
+
+def digest_weekly(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Weekly action list: assemble + store + push via the registered runner (kind=weekly)."""
+    runner = _DIGEST_RUNNER
+    if runner is None:
+        return "no digest runner registered"
+    return str(runner(conn, "weekly", now=now))
+
+
 # The Loop-2/3/4 runners (price-bearing evaluate + master-bearing calibrate) live in
 # ``api/insight_service.py`` and are registered at startup, so ``scheduler/`` never imports
 # ``api`` (architecture.md). The static evaluate/calibrate JOBS dispatch through these.
@@ -759,6 +793,16 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "news_daily", news_daily, "0 6 * * *", "Asia/Taipei", True,
         "Nightly news fetch + AI-organize into the news DB",
+    ),
+    # Digests (P3 batch 3): the daily close summary fires just after the alert scan (15:00)
+    # so it reflects that day's alerts/signals; the weekly action list fires Sunday evening.
+    JobSpec(
+        "digest_daily", digest_daily, "10 15 * * mon-fri", "Asia/Taipei", True,
+        "Daily close digest (assemble + push)",
+    ),
+    JobSpec(
+        "digest_weekly", digest_weekly, "0 17 * * sun", "Asia/Taipei", True,
+        "Weekly action list (assemble + push)",
     ),
 ]
 
