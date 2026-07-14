@@ -228,16 +228,8 @@
   </section>
 
   <!-- ===== 下半：帳本記錄 ===== -->
-  <!-- ===== 中段：待確認匯入收件匣 ===== -->
-  <section class="panel" id="inbox-section" data-screen-label="待確認匯入">
-    <div class="panel-head">
-      <h2 class="panel-title">待確認匯入</h2>
-      <span class="inbox-count-badge" id="inbox-count">0</span>
-      <span class="panel-sub">配息／配股偵測，台美馬全市場（自每檔持倉最早取得日起）— 需你確認後才寫入帳本，絕不自動入帳</span>
-    </div>
-    <div class="inbox-list" id="inbox-list"></div>
-    <div class="inbox-note">確認後寫入股利帳本並依帳戶股利模式沖減調整成本；略過的項目不會再次提示。金額由後端依「除息日前持有股數 × 每股配息」重新計算，帳本列可再編輯。</div>
-  </section>
+  <!-- 待確認匯入收件匣已移至獨立頁面（3E, 2026-07-14） -->
+  <div class="append-note" style="padding: 6px var(--pad);">配息／配股偵測已移至 <a href="dividend-inbox.html" style="color: var(--accent);">股利收件匣</a>。</div>
 
   <section class="panel ledger-section" data-screen-label="帳本記錄">
     <div class="panel-head">
@@ -307,7 +299,6 @@
 <script src="alerts.js?v=0.1.18"></script>
 <script src="input.js?v=0.1.18"></script>
 <script src="ledger.js?v=0.1.18"></script>
-<script src="inbox.js?v=0.1.18"></script>
 <script>
 /* glue: collapse toggle */
 document.getElementById('input-toggle').addEventListener('click', function (e) {
@@ -372,8 +363,11 @@ document.getElementById('tab-tx').click();
   if (!slot || !window.pdApi) return;
   var reportBtn = document.createElement('button');
   reportBtn.type = 'button';
-  reportBtn.className = 'btn';
-  reportBtn.textContent = '匯出報告';
+  /* 3D: same compact tier as the sibling 匯出 CSV button (both .btn-sm height, both with an
+     icon glyph + one shared gap) so the export slot row is one consistent height. */
+  reportBtn.className = 'btn btn-sm';
+  reportBtn.appendChild(Object.assign(document.createElement('span'), { textContent: '⎙' }));
+  reportBtn.appendChild(Object.assign(document.createElement('span'), { textContent: '匯出報告' }));
   reportBtn.title = '下載帳本報告（可列印 HTML，四帳本＋期初庫存，依目前日期區間）';
   reportBtn.addEventListener('click', async function () {
     var restore = window.pdBusy ? window.pdBusy(reportBtn, '產出中…') : function () {};

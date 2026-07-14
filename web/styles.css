@@ -1133,10 +1133,11 @@ table.ccyret tr:last-child td { border-bottom: none; }
 .btn-export {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   margin-left: auto;
-  padding: 2px 10px;
-  font-size: 11px;
+  padding: 4px 10px;      /* 3D: matches the .btn / .btn-sm vertical metrics (one row height) */
+  font-size: 11px;        /* compact tier */
+  line-height: 18px;      /* shared height anchor */
   font-family: var(--font-ui);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
@@ -1146,6 +1147,9 @@ table.ccyret tr:last-child td { border-bottom: none; }
   white-space: nowrap;
 }
 .btn-export:hover { color: var(--text); border-color: var(--text-3); }
+/* align-self:center overrides .panel-head's align-items:baseline so the export button (and
+   its ledger-slot siblings) centre vertically against the title row. Retained because
+   .btn-export keeps margin-left:auto (its right-push mechanism). */
 .panel-head .btn-export { align-self: center; }
 
 /* ---------- stale row desaturation ---------- */
@@ -1388,7 +1392,7 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
 .inbox-group-head::-webkit-details-marker { display: none; }
 .inbox-group-head::before { content: "▸"; color: var(--text-3); font-size: 10px; }
 .inbox-group[open] > .inbox-group-head::before { content: "▾"; }
-.inbox-group-head .btn { margin-left: auto; font-size: 10px; padding: 2px 10px; }
+.inbox-group-head .btn { margin-left: auto; padding: 4px 10px; }  /* 3D: use .btn-sm tier (set in JS); keep the right-push */
 .inbox-group .inbox-item { margin: 4px 0; }
 .inbox-item {
   display: flex; align-items: center; gap: 14px;
@@ -1422,7 +1426,12 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   background: var(--amber); color: #0c1015; font-weight: 700;
 }
 
-/* generic small buttons reused by inbox */
+/* ---------- button system (3D): TWO size tiers + one shared height ----------
+   `.btn` (12px) is the base tier; `.btn-sm` (11px) the compact tier. Both share the SAME
+   vertical metrics — an explicit line-height + equal vertical padding — so every button in
+   a `.panel-head` / `.toolbar` renders at ONE height regardless of tier (the same-row rule;
+   the e2e helper asserts per-row heights match within 1px). Only font-size + horizontal
+   density distinguish the tiers. `.btn-export` (below) shares these metrics too. */
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 13px;
@@ -1432,10 +1441,12 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   color: var(--text-2);
   font-family: var(--font-ui);
   font-size: 12px;
+  line-height: 18px;
   cursor: pointer;
   text-decoration: none;
 }
 .btn:hover { border-color: var(--text-3); color: var(--text); }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
 .btn-primary {
   color: var(--accent);
   border-color: rgba(88, 166, 221, 0.45);
@@ -1450,6 +1461,15 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   font-weight: 700;
 }
 .btn-danger:hover { border-color: var(--up); }
+/* shared amber-outline variant (folded out of settings.html's local <style>, 3D) */
+.btn-outline-warn { color: var(--amber); border-color: rgba(217, 161, 63, 0.45); background: var(--amber-soft); }
+.btn-outline-warn:hover { border-color: var(--amber); }
+
+/* .toolbar (3D): a named action row. `.spacer` right-pushes trailing items (replaces
+   ad-hoc per-button margin-left:auto in new markup). align-items:center so mixed tiers
+   sit on one baseline-free centre line. */
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toolbar .spacer { margin-left: auto; }
 
 /* ---------- E2: sparkline ---------- */
 .spark-cell { text-align: center; }
@@ -1505,7 +1525,9 @@ table.data tbody tr.kb-focus td {
 .rb-kv .k { color: var(--text-3); }
 .rb-kv .v { font-family: var(--font-num); font-weight: 600; }
 .rb-warn { font-size: 11px; color: var(--amber); }
-.rb-open-btn { margin-left: 8px; font-size: 11px; padding: 2px 10px; }
+/* 3D: the rebalance trigger uses the compact tier's metrics (font 11px + shared 4px/18px
+   vertical height) so it matches the sibling export button in the holdings panel head. */
+.rb-open-btn { margin-left: 8px; font-size: 11px; padding: 4px 10px; align-self: center; }
 .panel-head .rb-open-btn + .btn-export { margin-left: 8px; }
 /* combined cross-account row: symbol id stacked over account chips (2026-07-13) */
 .rb-sym-id { display: flex; align-items: baseline; gap: 8px; }
@@ -1626,7 +1648,9 @@ details.freshness > summary > span:not(.sum-chips) {
 
   /* --- iOS input + touch ergonomics --- */
   input.input, select.select, textarea.input { font-size: 16px; min-height: 40px; }
-  .btn { min-height: 38px; }
+  /* 3D: the compact tiers + the topbar refresh buttons get the same ≥38px touch target as
+     .btn so no action button is finger-hostile on mobile. */
+  .btn, .btn-sm, .btn-export, .btn-refresh { min-height: 38px; }
   .segmented button { min-height: 36px; }
   .chip { min-height: 30px; }
   .pencil { min-width: 38px; min-height: 38px; }

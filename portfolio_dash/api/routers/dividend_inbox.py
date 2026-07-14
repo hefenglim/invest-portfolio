@@ -67,3 +67,28 @@ def skip(
     for fp in body.fingerprints:
         inbox.mark_skipped(conn, fp, now=now)
     return {"skipped": len(body.fingerprints)}
+
+
+@router.get("/dividend-inbox/skipped")
+def list_skipped(
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, Any]:
+    """The 「已忽略」 list (3E): skipped fingerprints + reconstructable detail (or fp+date)."""
+    rows = inbox.list_skipped(conn, now=now)
+    return {
+        "rows": [to_wire(r.model_dump()) for r in rows],
+        "total_count": len(rows),
+    }
+
+
+@router.post("/dividend-inbox/unskip")
+def unskip(
+    body: FingerprintsBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Un-skip fingerprints so they re-surface in the inbox (3E). Mirrors skip/confirm —
+    no guest is_protected gate (the dividend inbox is a core ledger surface, open in guest
+    mode exactly like its confirm/skip siblings)."""
+    removed = inbox.unskip(conn, body.fingerprints)
+    return {"unskipped": removed}

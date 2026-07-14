@@ -119,6 +119,22 @@ def _assert_settings_redirect(
 
 
 @pytest.mark.e2e
+def test_dividend_inbox_page_smoke(live_server: str, browser_page: Page) -> None:
+    """/dividend-inbox.html (3E standalone page) boots inbox.js off /api/dividend-inbox.
+
+    The golden DB seeds a 2330 CASH dividend LEDGER row but ZERO dividend EVENTS, so the
+    inbox detection returns [] and the list renders its empty-state note (proving the async
+    boot landed). The 已忽略 list + undo strip stay hidden (both empty). ZERO console + page
+    errors over the boot (an unhandled fetch rejection or a Decimal-string TypeError fails
+    it).
+    """
+    assert_page_ok(
+        browser_page, live_server, "/dividend-inbox.html",
+        root_selector="#inbox-list .inbox-note",
+    )
+
+
+@pytest.mark.e2e
 def test_settings_accounts_redirects_to_tab(
     live_server: str, browser_page: Page
 ) -> None:

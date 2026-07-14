@@ -8,6 +8,7 @@
   const NAV = [
     { id: 'dashboard',   href: 'index.html',       label: '儀表板',   ico: '◫' },
     { id: 'ledger',      href: 'trades.html',       label: '交易帳本', ico: '≣' },
+    { id: 'divinbox',    href: 'dividend-inbox.html', label: '股利收件匣', ico: '⇩' },
     { id: 'cash',        href: 'cash.html',          label: '資金管理', ico: '＄' },
     { id: 'instruments', href: 'instruments.html',  label: '觀察清單', ico: '◎' },
     { id: 'insights',    href: 'insights.html',     label: 'AI 洞察',  ico: '◈' },
@@ -739,8 +740,9 @@
   }
   pdInitPrefs();
 
-  /* 待確認匯入 sidebar badge (R6 item 4): pending-count on the 交易帳本 nav item
-     so detections are visible from ANY page. Non-critical: silent on failure. */
+  /* 待確認匯入 sidebar badge (R6 item 4): pending-count on the 股利收件匣 nav item
+     so detections are visible from ANY page (re-pointed off 交易帳本 to the standalone
+     股利收件匣 page in 3E). Non-critical: silent on failure. */
   function pdInitInboxBadge() {
     if (page === 'login') return;
     pdEnsureApi()
@@ -750,7 +752,7 @@
         if (!n) return;
         const items = document.querySelectorAll('#sidebar .sb-item');
         for (const a of items) {
-          if (a.getAttribute('href') === 'trades.html') {
+          if (a.getAttribute('href') === 'dividend-inbox.html') {
             const b = el('span', 'sb-badge sb-badge-alert', String(n));
             b.title = n + ' 筆偵測到的配息待確認';
             a.appendChild(b);
