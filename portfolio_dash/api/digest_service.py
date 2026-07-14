@@ -35,6 +35,7 @@ from portfolio_dash.portfolio.dashboard_models import (
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.llm_config import ai_active
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy.alerts import Alert
 
@@ -175,10 +176,18 @@ def _per_symbol_day_change(
 
 
 def _alerts_today(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
-    """Today's alert events (excluding signal_*), grouped by rule with count + symbols."""
+    """Today's alert events (excluding signal_*), grouped by rule with count + symbols.
+
+    When AI is inactive, a ``quota_low`` event is suppressed (LOW-2): the same gate the
+    live-alert engine applies (a low LLM budget is only worth surfacing when AI is usable),
+    so a first digest can't resurface a quota_low the running system would never show. A
+    legitimately-fired quota_low (AI on) is still included even after it is consumed/notified.
+    """
+    extra = "" if ai_active(conn) else " AND rule_id != 'quota_low'"
     rows = conn.execute(
         "SELECT rule_id, symbol FROM alert_events "
-        "WHERE substr(fired_at,1,10) = ? AND rule_id NOT LIKE 'signal_%' ORDER BY id",
+        "WHERE substr(fired_at,1,10) = ? AND rule_id NOT LIKE 'signal_%'"
+        + extra + " ORDER BY id",
         (_today(now),),
     ).fetchall()
     grouped: dict[str, dict[str, Any]] = {}
@@ -426,12 +435,15 @@ def _drift_symbols(alerts: list[Alert]) -> list[str]:
 
 
 def _alert_review_week(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, Any]]:
-    """Last-7-day alert events (excluding signal_*), grouped by rule with count + severity."""
+    """Last-7-day alert events (excluding signal_*), grouped by rule with count + severity.
+
+    Suppresses ``quota_low`` when AI is inactive (LOW-2), mirroring ``_alerts_today``."""
     since = (now.date() - timedelta(days=_WEEK_DAYS)).isoformat()
+    extra = "" if ai_active(conn) else " AND rule_id != 'quota_low'"
     rows = conn.execute(
         "SELECT rule_id, COUNT(*) AS n FROM alert_events "
-        "WHERE substr(fired_at,1,10) >= ? AND rule_id NOT LIKE 'signal_%' "
-        "GROUP BY rule_id ORDER BY n DESC, rule_id",
+        "WHERE substr(fired_at,1,10) >= ? AND rule_id NOT LIKE 'signal_%'"
+        + extra + " GROUP BY rule_id ORDER BY n DESC, rule_id",
         (since,),
     ).fetchall()
     out: list[dict[str, Any]] = []

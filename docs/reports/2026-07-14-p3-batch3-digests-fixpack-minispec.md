@@ -322,3 +322,30 @@ Standing directives that apply to every wave:
 - True append-only correction rows (trades #9 option (a)) — the audit trail + honest copy
   (option (b)) is this wave's fix; a full correction-row redesign needs its own spec.
 - Tick advisory (trades L10) unless trivial.
+
+---
+
+## Post-review adjudications (2026-07-14)
+
+Deep-review verdict: **SOUND-WITH-FIXES**. The following were adjudicated and actioned in
+the post-review fix pass:
+
+- **MED-1** (`daytrade` not persisted → edit-recompute silently reverted a TW day-trade
+  sell to the 現股 0.3% rate): **FIXED**. The flag is now a stored `transactions` column
+  (migrated for legacy DBs), threaded through insert / list / update and the M6
+  edit-recompute path; preserved across edits via a `None`-means-preserve wire contract
+  (no new API/frontend surface this round).
+- **LOW-2** (first digest could resurface a suppressed `quota_low`): **FIXED**. The digest
+  `_alerts_today` / `_alert_review_week` now exclude `quota_low` whenever
+  `shared.llm_config.ai_active(conn)` is False — the same gate the live-alert engine
+  applies — without filtering on consumed/notified.
+- **LOW-3** (H1 coherence guard could strand a legacy incoherent row on a same-key edit):
+  **FIXED**. `_mutation_guard` applies the market-coherence branch only when the edit
+  changes `account_id` or `symbol` vs the stored row; account-exists + symbol-registered
+  checks stay unconditional.
+- **W3's partial `.btn-export` / `.toolbar` migration**: **ACCEPTED** — same-row control
+  heights are unified and e2e-enforced; a full `.toolbar` migration is deferred.
+- **Unskip endpoint left ungated (no auth)**: **ACCEPTED** — it matches the sibling inbox
+  endpoints and the demo/test data is synthetic.
+- **C8 (cash in dashboard net worth)** and **true append-only correction rows**: remain
+  **deferred to owner** (unchanged from the Out-of-scope list above).

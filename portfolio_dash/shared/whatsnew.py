@@ -58,10 +58,9 @@ class Feature(BaseModel):
 
 
 # Hand-maintained, newest version first. Features are phrased for the end user (what they
-# can now do), not implementation detail. The v0.1.18 entries (what's-new system + version-
-# history browser + the rebalance/holdings/ledger print reports) stay hidden until
-# __version__ is bumped at ship time (visible_versions filters them out while current ==
-# 0.1.17 — this is intentional).
+# can now do), not implementation detail. Entries for a version that has not shipped yet
+# stay hidden until __version__ is bumped to that version at ship time (visible_versions
+# filters out any version newer than the running __version__ — this is intentional).
 #
 # v0.1.0 -> v0.1.11 were backfilled from CHANGELOG.md (round 3) so the history browser has
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
@@ -614,8 +613,8 @@ CATALOG: list[Feature] = [
     ),
 ]
 
-# version -> ISO delivery date (from the CHANGELOG headings). v0.1.18 is intentionally
-# absent until it ships (GET serializes a missing entry as date: null).
+# version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
+# date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
     "0.1.18": "2026-07-14",
     "0.1.17": "2026-07-13",

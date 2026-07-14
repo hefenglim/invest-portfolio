@@ -100,6 +100,7 @@ def txn_preview_row(
         "quantity": str(inp.quantity),
         "price": str(inp.price),
         "trade_date": inp.trade_date.isoformat(),
+        "daytrade": "1" if inp.daytrade else "0",  # persisted through the writer (MED-1)
         "note": inp.note or "",
         **{f"snap.{k}": v for k, v in snap.items()},
     }
@@ -192,5 +193,6 @@ def write_transaction_row(
         trade_date=date.fromisoformat(p["trade_date"]),
         fee_rule_snapshot=snapshot,
         note=p["note"] or None,
+        daytrade=p.get("daytrade") == "1",
         commit=commit,
     )

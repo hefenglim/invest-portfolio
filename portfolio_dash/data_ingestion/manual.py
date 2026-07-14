@@ -148,6 +148,7 @@ def enter_transaction(
             trade_date=inp.trade_date,
             fee_rule_snapshot=snapshot,
             note=inp.note,
+            daytrade=inp.daytrade,
         )
         draft.written = True
     return draft

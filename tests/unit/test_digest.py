@@ -14,6 +14,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.api import digest_service as ds
+from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
 from portfolio_dash.ops import digest as digest_store
 from portfolio_dash.ops import notify
@@ -22,6 +23,7 @@ from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
 from portfolio_dash.scheduler.jobs import create_scheduler_tables
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.llm_config import LLMRole, ModelConfig, set_role, upsert_model
 from portfolio_dash.strategy.alerts import Alert
 from tests.conftest import GOLDEN_NOW
 
@@ -206,6 +208,53 @@ def test_alert_review_and_signal_week() -> None:
     assert review[0]["label"] == "單一標的集中度"
     sig = ds._signal_week(c, now=now)
     assert sig == ["AAPL"]
+
+
+# --- LOW-2: quota_low gated on ai_active in the digest -------------------------
+
+
+def _insert_quota_low(conn: sqlite3.Connection, now: datetime) -> None:
+    # a consumed+notified quota_low (the normal dispatch flow) — the gate is ai_active,
+    # NOT consumed/notified: a legitimately-fired one (AI on) must still appear.
+    conn.execute(
+        "INSERT INTO alert_events (rule_id, symbol, fired_at, consumed) VALUES (?,?,?,1)",
+        ("quota_low", None, now.date().isoformat() + "T09:00:00"),
+    )
+    conn.commit()
+
+
+def _bind_enabled_model(conn: sqlite3.Connection) -> None:
+    upsert_model(conn, ModelConfig(
+        id="m1", model_alias="m1", provider="anthropic", model_name="claude-sonnet-4-5",
+        api_key="sk-abcdef1234567890a2f", vision=True,
+        input_price_per_mtok=Decimal("3.00"), output_price_per_mtok=Decimal("15.00"),
+        context_window=200000, max_output_tokens=8192, timeout_seconds=60, max_retries=2,
+        enabled=True))
+    set_role(conn, LLMRole.DEFAULT, "m1")
+
+
+def test_quota_low_absent_from_digest_when_ai_inactive() -> None:
+    c = _mem()
+    ensure_alert_events_tables(c)  # no llm tables -> ai_active degrades to False
+    _insert_quota_low(c, NOW)
+    # a normal alert proves ONLY quota_low is filtered
+    c.execute("INSERT INTO alert_events (rule_id, symbol, fired_at, consumed) VALUES (?,?,?,0)",
+              ("single_weight", "2330", NOW.date().isoformat() + "T09:00:00"))
+    c.commit()
+    today_rids = {g["rule_id"] for g in ds._alerts_today(c, NOW)}
+    assert "quota_low" not in today_rids and "single_weight" in today_rids
+    review_rids = {g["rule_id"] for g in ds._alert_review_week(c, now=NOW)}
+    assert "quota_low" not in review_rids and "single_weight" in review_rids
+
+
+def test_quota_low_present_in_digest_when_ai_active() -> None:
+    c = _mem()
+    bootstrap_db(c)                # llm_models / llm_defaults tables
+    ensure_alert_events_tables(c)
+    _bind_enabled_model(c)         # AI now usable -> quota_low is legitimate
+    _insert_quota_low(c, NOW)
+    assert "quota_low" in {g["rule_id"] for g in ds._alerts_today(c, NOW)}
+    assert "quota_low" in {g["rule_id"] for g in ds._alert_review_week(c, now=NOW)}
 
 
 def test_upcoming_exdiv_window() -> None:

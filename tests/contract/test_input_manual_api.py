@@ -74,6 +74,34 @@ def test_manual_commit_hard_error_400(api_client: TestClient) -> None:
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
 
 
+# --- C1b: overdraft soft issue only once the account tracks cash --------------
+
+
+def test_manual_preview_overdraft_issue_when_tracked(api_client: TestClient) -> None:
+    """LOW-4c: with ≥1 cash movement on the account, a BUY beyond the pool surfaces the
+    soft cash_overdraft issue (the golden tw_broker TWD pool is already negative from its
+    500k trade settlement, so any tracked buy overdraws)."""
+    dep = api_client.post("/api/cash/movements", json={
+        "account_id": "tw_broker", "date": "2026-01-01", "kind": "deposit",
+        "ccy": "TWD", "amount": "1000"})
+    assert dep.status_code == 201, dep.text
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "1000", "price": "600"})
+    codes = {i["code"] for i in r.json()["issues"]}
+    assert "cash_overdraft" in codes
+
+
+def test_manual_preview_no_overdraft_when_untracked(api_client: TestClient) -> None:
+    """No cash movement on the account -> the overdraft check never fires (even on a big
+    buy) — users who do not track cash are never warned."""
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "1000", "price": "600"})
+    codes = {i["code"] for i in r.json()["issues"]}
+    assert "cash_overdraft" not in codes
+
+
 # --- unknown symbol: auto-register on commit (2026-07-02, round 2) ------------
 # The data_ingestion hard block stands (a ledger row must always resolve to an
 # Instrument), but the manual COMMIT path now resolves it ITSELF: it infers the

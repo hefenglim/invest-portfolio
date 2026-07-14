@@ -25,7 +25,7 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.wire import parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
-from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
+from portfolio_dash.data_ingestion.markets import MARKET_ZH, account_market
 from portfolio_dash.data_ingestion.store import (
     StoredDividend,
     StoredOpening,
@@ -51,7 +51,7 @@ from portfolio_dash.data_ingestion.store import (
     upsert_opening,
 )
 from portfolio_dash.portfolio.cost_basis import build_book
-from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import (
@@ -348,10 +348,24 @@ def _account_exists(conn: sqlite3.Connection, account_id: str) -> bool:
 
 
 def _mutation_guard(
-    conn: sqlite3.Connection, *, account_id: str, symbol: str | None
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    symbol: str | None,
+    prev_account_id: str | None = None,
+    prev_symbol: str | None = None,
 ) -> JSONResponse | None:
     """Shared field checks for row corrections: account known, symbol registered, and
-    account↔instrument market coherence (audit H1)."""
+    account↔instrument market coherence (audit H1).
+
+    The coherence branch is applied ONLY when the edit re-keys the row — i.e. changes
+    ``account_id`` or ``symbol`` vs the stored ``prev_*`` (audit LOW-3). A legacy
+    incoherent row (e.g. a US stock booked in a TWD account before H1 existed) stays
+    editable in place — fixing its amount/shares must not be blocked by a coherence
+    check on a key the user is not changing; moving/re-keying still enforces coherence.
+    When ``prev_*`` are omitted (a fresh mutation, or the FX path with ``symbol=None``),
+    coherence is enforced as before. The account-exists + symbol-registered checks are
+    always unconditional."""
     if not _account_exists(conn, account_id):
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"帳戶 {account_id} 不存在", field="account_id"))
@@ -361,21 +375,16 @@ def _mutation_guard(
             return JSONResponse(status_code=400, content=error_body(
                 "validation_error",
                 f"未註冊標的 {symbol} — 請先至「標的管理」註冊", field="symbol"))
-        acct_mkt = _account_market_of(conn, account_id)
-        if acct_mkt is not None and inst.market is not acct_mkt:
-            return JSONResponse(status_code=400, content=error_body(
-                "validation_error",
-                f"{symbol} 屬 {inst.market.value} 市場,"
-                f"不可登錄於 {MARKET_ZH.get(acct_mkt, acct_mkt.value)}帳戶",
-                field="symbol"))
+        rekeyed = account_id != prev_account_id or symbol != prev_symbol
+        if rekeyed:
+            acct_mkt = account_market(conn, account_id)
+            if acct_mkt is not None and inst.market is not acct_mkt:
+                return JSONResponse(status_code=400, content=error_body(
+                    "validation_error",
+                    f"{symbol} 屬 {inst.market.value} 市場,"
+                    f"不可登錄於 {MARKET_ZH.get(acct_mkt, acct_mkt.value)}帳戶",
+                    field="symbol"))
     return None
-
-
-def _account_market_of(conn: sqlite3.Connection, account_id: str) -> Market | None:
-    row = conn.execute(
-        "SELECT settlement_ccy FROM accounts WHERE account_id=?", (account_id,)
-    ).fetchone()
-    return CCY_MARKET.get(row["settlement_ccy"]) if row is not None else None
 
 
 def _oversell_response(msg: str) -> JSONResponse:
@@ -423,16 +432,27 @@ class TxEditBody(BaseModel):
     # recomputes fee/tax from the NEW account's rule set + regenerates the snapshot.
     fee_overridden: bool = False
     tax_overridden: bool = False
+    # audit MED-1: same-day round-trip flag, persisted on the row so an edit-recompute
+    # reproduces the TW sell-side day-trade tax rate. None = preserve the stored value
+    # (the wire never carries daytrade this round; preservation via None is the contract).
+    daytrade: bool | None = None
 
 
 def _recompute_edit_fees(
-    conn: sqlite3.Connection, body: TxEditBody, existing: StoredTransaction
+    conn: sqlite3.Connection,
+    body: TxEditBody,
+    existing: StoredTransaction,
+    daytrade: bool,
 ) -> tuple[Decimal, Decimal, dict[str, str] | None] | JSONResponse:
     """Resolve the fee/tax + snapshot to persist for a transaction edit (audit M6).
 
     Recomputes from the new account's rule set when a core field changed and the user
     did not explicitly edit fee/tax; explicit edits are honored as overrides (snapshot
     tagged ``override: true``). Returns a 400 JSONResponse on an overflow-sized notional.
+
+    ``daytrade`` is the effective flag (preserved-or-changed); a change to it is a core
+    change (it governs the TW sell-side tax rate) and it is fed into ``compute_fees`` so a
+    recompute reproduces the day-trade rate instead of silently reverting to 現股 (MED-1).
     """
     side = parse_side(body.side)
     core_changed = (
@@ -442,6 +462,7 @@ def _recompute_edit_fees(
         or existing.quantity != body.shares
         or existing.price != body.price
         or existing.trade_date != body.date
+        or existing.daytrade != daytrade
     )
     fee, tax = body.fee, body.tax
     snapshot: dict[str, str] | None = None
@@ -456,6 +477,7 @@ def _recompute_edit_fees(
                 fr = compute_fees(
                     get_fee_rule_set(row["fee_rule_set"]), side, body.shares, body.price,
                     is_etf=inst.is_etf if inst is not None else False,
+                    daytrade=daytrade,
                 )
             except FeeComputationError as exc:
                 return JSONResponse(status_code=400, content=error_body(
@@ -482,13 +504,17 @@ def edit_transaction(
     if existing is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"交易 #{txn_id} 不存在"))
-    guard = _mutation_guard(conn, account_id=body.account_id, symbol=body.symbol)
+    guard = _mutation_guard(
+        conn, account_id=body.account_id, symbol=body.symbol,
+        prev_account_id=existing.account_id, prev_symbol=existing.symbol)
     if guard is not None:
         return guard
     if body.shares <= 0 or body.price <= 0:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "股數與價格必須大於 0", field="shares"))
-    resolved = _recompute_edit_fees(conn, body, existing)
+    # None on the wire = preserve the stored daytrade flag (MED-1: the wire never carries it).
+    effective_daytrade = body.daytrade if body.daytrade is not None else existing.daytrade
+    resolved = _recompute_edit_fees(conn, body, existing, effective_daytrade)
     if isinstance(resolved, JSONResponse):
         return resolved
     fee, tax, snapshot = resolved
@@ -496,6 +522,7 @@ def edit_transaction(
         "account_id": body.account_id, "symbol": body.symbol,
         "side": parse_side(body.side), "quantity": body.shares, "price": body.price,
         "fees": fee, "tax": tax, "trade_date": body.date, "note": body.note,
+        "daytrade": effective_daytrade,
     })
     would_be = [edited if t.id == txn_id else t for t in list_transactions(conn)]
     blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, txs=would_be)
@@ -504,8 +531,8 @@ def edit_transaction(
     update_transaction(
         conn, txn_id, account_id=body.account_id, symbol=body.symbol,
         side=parse_side(body.side), quantity=body.shares, price=body.price,
-        fees=fee, tax=tax, trade_date=body.date, note=body.note,
-        fee_rule_snapshot=snapshot,
+        fees=fee, tax=tax, trade_date=body.date, daytrade=effective_daytrade,
+        note=body.note, fee_rule_snapshot=snapshot,
     )
     return {"ok": True, "id": txn_id, "fee": decimal_str(fee), "tax": decimal_str(tax)}
 
@@ -553,7 +580,9 @@ def edit_dividend(
     if existing is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"股利 #{div_id} 不存在"))
-    guard = _mutation_guard(conn, account_id=body.account_id, symbol=body.symbol)
+    guard = _mutation_guard(
+        conn, account_id=body.account_id, symbol=body.symbol,
+        prev_account_id=existing.account_id, prev_symbol=existing.symbol)
     if guard is not None:
         return guard
     div_type = body.type.strip().upper()

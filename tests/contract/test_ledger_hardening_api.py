@@ -5,13 +5,31 @@ dividend; schwab holds AAPL (US, buy 10 @100). Every finding's confirmed probe i
 named test here.
 """
 
+import sqlite3
+from datetime import date
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
+
+from portfolio_dash.data_ingestion.store import (
+    insert_transaction,
+    list_transactions,
+    upsert_instrument,
+)
+from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.models.enums import Side
 
 
 def _tx_id(api_client: TestClient, symbol: str, account_id: str = "tw_broker") -> int:
     rows = api_client.get("/api/ledgers/transactions", params={"limit": 500}).json()["rows"]
     hit = next(r for r in rows if r["symbol"] == symbol and r["account_id"] == account_id)
     return int(hit["id"])
+
+
+def _tx_id_side(api_client: TestClient, symbol: str, side: str) -> int:
+    rows = api_client.get("/api/ledgers/transactions", params={"limit": 500}).json()["rows"]
+    return int(next(r for r in rows if r["symbol"] == symbol and r["side"] == side)["id"])
 
 
 def _tx_row(api_client: TestClient, txn_id: int) -> dict:
@@ -131,3 +149,90 @@ def test_oversell_scoping_unrelated_delete_allowed(api_client: TestClient) -> No
     r = api_client.delete(f"/api/ledgers/transactions/{aapl_id}")
     assert r.status_code == 200, r.text
     assert api_client.get("/api/dashboard").status_code == 200  # never-500 invariant
+
+
+# --- H2 (edit path): negative fee is a Pydantic 422, row unchanged ----------
+
+
+def test_edit_negative_fee_rejected_4xx(api_client: TestClient) -> None:
+    """LOW-4b: PUT with fee=-1 trips the `fee: ge=0` model constraint. The app's error
+    handler normalizes the Pydantic request-validation 422 to a 400 validation_error, so
+    assert a client error (4xx) and that the row is unchanged."""
+    txn_id = _tx_id(api_client, "2330")
+    before = _tx_row(api_client, txn_id)["fee"]
+    r = api_client.put(f"/api/ledgers/transactions/{txn_id}", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-01-05", "shares": "1000", "price": "500", "fee": "-1", "tax": "0"})
+    assert 400 <= r.status_code < 500
+    assert _tx_row(api_client, txn_id)["fee"] == before  # untouched
+
+
+# --- MED-1: daytrade flag persists + governs the recompute tax rate ---------
+
+
+def test_edit_recompute_preserves_daytrade_tax_rate(
+    golden_db: sqlite3.Connection, api_client: TestClient
+) -> None:
+    """A stored TW day-trade SELL, edited (shares) WITHOUT a fee/tax override, recomputes
+    tax at the day-trade rate (0.15%) — not the 現股 0.3% — and the flag survives."""
+    insert_transaction(
+        golden_db, account_id="tw_broker", symbol="2330", side=Side.SELL,
+        quantity=Decimal("100"), price=Decimal("600"), fees=Decimal("85"),
+        tax=Decimal("90"), trade_date=date(2026, 6, 10), daytrade=True,
+        fee_rule_snapshot={"brokerage": "0.001425", "min_fee": "20", "tax_rate": "0.0015"})
+    txn_id = _tx_id_side(api_client, "2330", "sell")
+    r = api_client.put(f"/api/ledgers/transactions/{txn_id}", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-10", "shares": "200", "price": "600", "fee": "0", "tax": "0"})
+    assert r.status_code == 200, r.text
+    assert r.json()["tax"] == "180"  # 0.0015 * (200*600); NOT 0.003 * 120000 = 360
+    assert (_tx_row(api_client, txn_id)["fee_snapshot"] or {}).get("tax_rate") == "0.0015"
+    stored = {t.id: t for t in list_transactions(golden_db)}[txn_id]
+    assert stored.daytrade is True  # flag survived the recompute (not on the wire)
+
+
+def test_edit_recompute_normal_sell_uses_normal_tax(
+    golden_db: sqlite3.Connection, api_client: TestClient
+) -> None:
+    """A normal (non-daytrade) SELL edit recomputes at the 現股 0.3% rate."""
+    insert_transaction(
+        golden_db, account_id="tw_broker", symbol="2330", side=Side.SELL,
+        quantity=Decimal("100"), price=Decimal("600"), fees=Decimal("85"),
+        tax=Decimal("180"), trade_date=date(2026, 6, 11), daytrade=False)
+    txn_id = _tx_id_side(api_client, "2330", "sell")
+    r = api_client.put(f"/api/ledgers/transactions/{txn_id}", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-11", "shares": "200", "price": "600", "fee": "0", "tax": "0"})
+    assert r.status_code == 200, r.text
+    assert r.json()["tax"] == "360"  # 0.003 * (200*600)
+    assert (_tx_row(api_client, txn_id)["fee_snapshot"] or {}).get("tax_rate") == "0.003"
+
+
+# --- LOW-3: H1 coherence guard scoped to re-keys (legacy row editable in place) ---
+
+
+def test_legacy_incoherent_row_editable_in_place(
+    golden_db: sqlite3.Connection, api_client: TestClient
+) -> None:
+    """A legacy incoherent row (US AAPL booked in the TWD tw_broker account, written
+    directly via the store) stays editable IN PLACE — a shares/amount fix must not be
+    blocked by H1 — while changing its symbol to another incoherent combo still 400s."""
+    insert_transaction(
+        golden_db, account_id="tw_broker", symbol="AAPL", side=Side.BUY,
+        quantity=Decimal("10"), price=Decimal("100"), fees=Decimal("0"),
+        tax=Decimal("0"), trade_date=date(2026, 1, 15))
+    upsert_instrument(golden_db, Instrument(
+        symbol="MSFT", market=Market.US, quote_ccy=Currency.USD,
+        sector="Tech", name="Microsoft"))
+    txn_id = _tx_id(api_client, "AAPL", account_id="tw_broker")
+    # in-place edit (same account+symbol): coherence skipped -> succeeds
+    ok = api_client.put(f"/api/ledgers/transactions/{txn_id}", json={
+        "account_id": "tw_broker", "symbol": "AAPL", "side": "buy",
+        "date": "2026-01-15", "shares": "20", "price": "100", "fee": "0", "tax": "0"})
+    assert ok.status_code == 200, ok.text
+    assert _tx_row(api_client, txn_id)["shares"] == "20"
+    # re-keying the symbol to another US instrument in the TW account still 400s (H1)
+    rekey = api_client.put(f"/api/ledgers/transactions/{txn_id}", json={
+        "account_id": "tw_broker", "symbol": "MSFT", "side": "buy",
+        "date": "2026-01-15", "shares": "20", "price": "100", "fee": "0", "tax": "0"})
+    assert rekey.status_code == 400 and "US" in rekey.json()["error"]["message"]
