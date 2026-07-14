@@ -95,6 +95,25 @@ CATALOG: list[Feature] = [
         area="系統設定 → 預警規則 → 摘要與週報",
         target="#digest-settings-card",
     ),
+    # --- v0.1.19 (P3 batch 3 · Wave 2 ledger + cash hardening) --------------------------
+    Feature(
+        version="0.1.19",
+        id="cash-statement",
+        title="現金收支明細",
+        desc="點各帳戶現金池即可展開該幣別的收支明細，含每筆異動與伺服器計算的滾動餘額",
+        href="cash.html",
+        area="資金管理 → 現金收支明細",
+        target="#cash-statement",
+    ),
+    Feature(
+        version="0.1.19",
+        id="ledger-input-hardening",
+        title="交易輸入更嚴謹",
+        desc="市場與帳戶不符、負費用、未來日期、重複與超大數值等會即時提示，並保留更正稽核",
+        href="trades.html",
+        area="交易帳本 → 交易輸入",
+        target="#input-section",
+    ),
     Feature(
         version="0.1.18",
         id="whats-new-panel",
