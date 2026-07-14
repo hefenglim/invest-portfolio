@@ -135,6 +135,14 @@
       rows.forEach((i) => {
         if (i && i.symbol && i.name) instrumentNames[i.symbol] = i.name;
       });
+      /* 抓取範圍 select (3C): EVERY registered instrument (held + watchlist), reusing the
+         already-fetched instruments list — the scope the manual /api/news/run resolves. */
+      const scopeSel = $('#nw-scope');
+      if (scopeSel) rows.forEach((i) => {
+        if (!i || !i.symbol) return;
+        const label = i.name ? i.symbol + ' ' + i.name : i.symbol;
+        const o = el('option', null, label); o.value = i.symbol; scopeSel.appendChild(o);
+      });
       if (!f2) return;
       const stockSel = $('#nw-stock'), srcSel = $('#nw-source');
       (f2.stocks || []).forEach((s) => {
@@ -144,6 +152,44 @@
       (f2.sources || []).forEach((s) => { const o = el('option', null, s); o.value = s; srcSel.appendChild(o); });
     }).catch(() => {});
   }
+
+  /* 抓取新聞 (3C): POST /api/news/run {scope} -> 202 + background pipeline. Poll the run
+     history for completion, then reload the list. NEVER runs the LLM on page load — only on
+     this explicit click. Guest/demo → 403, surfaced as a friendly fail toast. */
+  function pollNewsRun(prog, attempt) {
+    if (attempt > 60) { if (prog) prog.done('抓取已在背景進行', '稍後重新整理即可看到新整理的新聞'); return; }
+    api.get('/api/scheduler/runs', { job_id: 'news_daily', limit: 1 }).then((resp) => {
+      const run = resp && resp.rows && resp.rows[0];
+      if (run && run.finished_at) {
+        if (prog) {
+          if (run.status === 'error') prog.fail('抓取失敗', run.detail || '請稍後再試');
+          else prog.done('抓取完成', run.detail || '已更新新聞庫');
+        }
+        state.offset = 0; load();
+        return;
+      }
+      setTimeout(() => pollNewsRun(prog, attempt + 1), 2500);
+    }).catch(() => { if (prog) prog.done('抓取已在背景進行', '稍後重新整理即可看到新整理的新聞'); });
+  }
+
+  const runBtn = $('#nw-run');
+  if (runBtn) runBtn.addEventListener('click', () => {
+    const scope = ($('#nw-scope') && $('#nw-scope').value) || 'all';
+    const restore = window.pdBusy ? window.pdBusy(runBtn, '抓取中…') : () => {};
+    const prog = window.toastProgress
+      ? window.toastProgress('新聞抓取中…', '正在向資料源抓取並以 AI 整理(數十秒~數分鐘)')
+      : null;
+    api.post('/api/news/run', { scope: scope }).then(() => {
+      restore();
+      pollNewsRun(prog, 0);
+    }).catch((err) => {
+      restore();
+      const msg = (err && err.status === 409) ? '已有抓取正在進行,請稍候'
+        : (err && err.message) || '抓取失敗';
+      if (prog) prog.fail('無法開始抓取', msg);
+      else if (window.toast) window.toast(msg, 'fail', err && err.code);
+    });
+  });
 
   $('#nw-stock').addEventListener('change', (e) => { state.stock = e.target.value; state.offset = 0; load(); });
   $('#nw-source').addEventListener('change', (e) => { state.source = e.target.value; state.offset = 0; load(); });

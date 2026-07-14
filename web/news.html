@@ -13,6 +13,11 @@
   .nw-field { display: flex; flex-direction: column; gap: 4px; }
   .nw-field label { font-size: 11px; color: var(--text-3); letter-spacing: .04em; }
   .nw-field select, .nw-field input { min-height: 34px; }
+  #nw-toolbar { padding: 10px var(--pad) 0; }
+  #nw-toolbar .nw-run-label { font-size: 11px; color: var(--text-3); letter-spacing: .04em; }
+  #nw-toolbar #nw-scope { min-height: 30px; max-width: 260px; }
+  .nw-sched-hint { font-size: 11px; color: var(--text-3); }
+  .nw-sched-hint a { color: var(--accent); }
   .nw-totals { margin-left: auto; text-align: right; font-size: 12.5px; color: var(--text-2); }
   .nw-totals b { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
   .nw-list { padding: 0 var(--pad) 20px; display: flex; flex-direction: column; gap: 8px; }
@@ -61,6 +66,14 @@
     <div class="panel-head">
       <h2 class="panel-title">個股新聞庫</h2>
       <span class="panel-sub">每晚整理入庫 · 點列開全文摘要 · 逐則 token/成本追蹤,協助評估用量</span>
+    </div>
+
+    <div class="toolbar" id="nw-toolbar">
+      <label class="nw-run-label" for="nw-scope">抓取範圍</label>
+      <select class="select" id="nw-scope"><option value="all">全部(持倉＋觀察清單)</option></select>
+      <button class="btn btn-sm btn-primary" id="nw-run" type="button">抓取新聞</button>
+      <span class="spacer"></span>
+      <span class="nw-sched-hint">排程:每日 06:00(<a href="settings.html#scheduler">設定→排程</a> 可調)</span>
     </div>
 
     <div class="nw-filters">

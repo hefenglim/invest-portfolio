@@ -12,6 +12,7 @@ import logging
 import sqlite3
 from datetime import date, datetime, timedelta
 
+from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.news import fetcher, organizer, pipeline
 from portfolio_dash.news import sources as news_sources
 from portfolio_dash.news import store as news_store
@@ -58,17 +59,23 @@ def _yf_client() -> news_sources.YfClient:
     return client
 
 
-def run_news_daily(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
+def run_news_for(
+    conn: sqlite3.Connection,
+    symbols_with_market: list[tuple[str, str]],
+    *,
+    now: datetime,
 ) -> dict[str, int | bool]:
-    """Run the nightly news pipeline for every held symbol. Returns the run summary.
+    """Run the news pipeline over an EXPLICIT ``(symbol, market)`` universe. Run summary.
 
-    Reads holdings from the dashboard, wires the real clients, and runs the pure pipeline
-    against the separate news DB. The organizer records ``llm_usage`` on *conn* (the ledger
-    DB) and is budget-governed; an exhausted budget ends the run (partial).
+    The shared core of BOTH the nightly held-universe job (:func:`run_news_daily`) and the
+    manual scoped run (``POST /api/news/run`` — held ∪ watchlist for ``all``, or a single
+    symbol). Wires the real FinMind / yfinance / Yahoo-TW clients + the HTML fetcher + the
+    LLM organizer, and runs the pure pipeline against the separate news DB. The organizer
+    records ``llm_usage`` on *conn* (the ledger DB) and is budget-governed; an exhausted
+    budget ends the run (partial). Everything network/LLM lives behind the injected seams,
+    so the pipeline itself stays unit-tested and pure.
     """
-    data = build_dashboard(conn, now=now, reporting=reporting)
-    holdings = sorted({(h.symbol, h.market.value) for h in data.holdings})
+    holdings = sorted(set(symbols_with_market))
     prompt = get_news_prompt(conn)["body"]
     finmind = _finmind_client(conn, now)
     yfc = _yf_client()
@@ -91,5 +98,37 @@ def run_news_daily(
             nconn, holdings, discover=discover, fetch=do_fetch, organize=do_organize,
             now=now, per_symbol_cap=_PER_SYMBOL_CAP,
         )
-    logger.info("news_daily complete: %s", result)
+    logger.info("news run complete over %d symbol(s): %s", len(holdings), result)
     return result
+
+
+def run_news_daily(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
+) -> dict[str, int | bool]:
+    """Run the nightly news pipeline for every HELD symbol. Returns the run summary.
+
+    The nightly job stays held-only (holdings from the dashboard) → :func:`run_news_for`.
+    The manual endpoint is the one that widens the universe to the watchlist.
+    """
+    data = build_dashboard(conn, now=now, reporting=reporting)
+    holdings = sorted({(h.symbol, h.market.value) for h in data.holdings})
+    return run_news_for(conn, holdings, now=now)
+
+
+def resolve_news_scope(
+    conn: sqlite3.Connection, scope: str
+) -> list[tuple[str, str]] | None:
+    """Resolve a manual-run ``scope`` to a ``(symbol, market)`` universe (registry read).
+
+    ``"all"`` → EVERY registered instrument (held ∪ watchlist — the manual run widens past
+    the nightly held-only job). A bare symbol → ``[(symbol, market)]`` with the market taken
+    from the registry. An unknown symbol (or an otherwise invalid scope) → ``None`` so the
+    caller returns a 400. Deterministic ordering for reproducible runs.
+    """
+    instruments = list_instruments(conn)
+    if scope == "all":
+        return sorted({(i.symbol, i.market.value) for i in instruments})
+    for i in instruments:
+        if i.symbol == scope:
+            return [(i.symbol, i.market.value)]
+    return None
