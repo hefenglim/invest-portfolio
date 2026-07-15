@@ -7,15 +7,31 @@ rebate, and 確認入帳 → editable-amount prompt → POST /api/rebates/confir
 self-heals out of the inbox. ZERO console + ZERO page errors throughout.
 """
 
+from collections.abc import Iterator
 from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 from playwright.sync_api import Page
+from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.shared.models.enums import Side
 from tests.conftest import _seed_golden
+
+
+@pytest.fixture(autouse=True)
+def _loopback_sockets() -> Iterator[None]:
+    """Re-enable loopback sockets per test (pytest-socket re-bans before each test).
+
+    Required by every flow-server e2e file (mirrors test_whatsnew_flow.py /
+    test_flows_e1_e10.py); without it the file passes in isolation but fails under
+    the full-suite ordering with SocketBlockedError at _free_port().
+    """
+    enable_socket()
+    socket_allow_hosts(["127.0.0.1", "localhost"], allow_unix_socket=True)
+    yield
+    disable_socket(allow_unix_socket=True)
 
 
 def _seed_rebate(conn: object) -> None:
