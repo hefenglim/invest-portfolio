@@ -37,6 +37,13 @@ Do not declare a version done until every item passes. Stop and fix on any failu
    no double-counting of dividends or FX (`domain-ledger.md`).
 8. **Bilingual protocol** — code/docs/commits/CHANGELOG in English; the summary to the
    human is in Traditional Chinese.
+9. **Money-of-record stress audit** — if this version changes ANY money-of-record
+   calculation (cost basis, realized/unrealized P&L, fee/tax, dividends, FX pool,
+   returns/XIRR): extend `scripts/stress_audit` (the independent oracle in `oracle.py`
+   **and** a `run_phase1.py` scenario op exercising the change), re-run phase 1 green
+   (`.venv/Scripts/python scripts/stress_audit/run_all.py --phase 1` → `fail=0`), and
+   update `docs/accounting-formula-manual.md` (the formula + a verification anchor). See
+   the `/stress-audit` skill.
 
 Report a concise pass/fail summary per item, then the version tag and one-line
 description.
