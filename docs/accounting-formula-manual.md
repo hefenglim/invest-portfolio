@@ -1,6 +1,6 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.0-draft`（2026-07-15）
+> **版本**：`v1.1-draft`（2026-07-15）
 > **程式碼基線**：`v0.1.18 + feat/p3-batch3`
 > **仲裁狀態**：**待 owner 確認**（pending owner confirmation）。經 owner 正式簽署後，本文件即成為
 > 站上任何「金額爭議」的**唯一仲裁標準**（arbitration standard）。
@@ -401,6 +401,34 @@ $$\text{payback\_ratio} = \frac{\text{cumulative cash dividends}}{\text{original
 
   （`cost_basis.py`：`dividend_portion = original_total − adjusted_total`。此為顯示指標，不進報酬分子。）
 
+### 6.5 配息偵測與待確認匯入（inbox 估算）
+
+實作：`api/dividend_inbox.py::detect`（**純讀、自癒**，不寫任何 pending 列）+ `confirm`（確認時**server 端重算**後才寫入帳本，client 數字僅供顯示）。偵測視窗 = 每 symbol 之最早取得日 → 今日；**除息權利判定**採「**除息日前持有**」：
+
+$$\text{shares\_held} = \text{shares\_on}(account, symbol, \text{before}=ex\_date)\quad(\text{事件日期嚴格早於除息日者才計入})$$
+
+（`data_ingestion/holdings.py::shares_on`：期初 + 買 − 賣 + 非現金 `reinvest_shares`，同 §4.1 重播規則。買在除息日當日**不**具權利。）每筆估算毛額：
+
+$$\text{est\_gross} = \text{cash\_amount（每股）}\times \text{shares\_held}$$
+
+依帳戶 `dividend_model` 分三式（確認後成為 §6 對應之帳本列）：
+
+- **DRIP（`drip_us`）**：`est_withhold = est_gross × 0.30`、`est_net = est_gross − est_withhold`（同 §6.2）。**再投資價為估計值**：取**發放／除息日當日或之前最後一筆庫存收盤價**（`_price_on_or_before`，回看窗 14 日），`est_reinvest_shares = est_net / est_reinvest_price`。**無庫存收盤價 → 該筆不可確認（`缺再投資價`）**，須先回補歷史報價；確認後仍可於帳本編輯實際再投資價。
+- **MY 現金（`cash` → `NET`）**：`est_net = est_gross`（單層淨額，無預扣，同 §6.3）。
+- **TW 現金（`cash_cost_reduction` → `CASH`）**：`est_net = est_gross`（同 §6.1，降成本於重算時套用）。
+
+**TW 配股（stock distribution，面額制）**：另立一筆 share-only 項（family = `stock`）：
+
+$$\text{added\_shares} = \frac{\text{shares\_held}\times \text{stock\_amount（元，面額計）}}{\text{TW\_STOCK\_PAR}=10}$$
+
+即每股配 `stock_amount / 10` 股、**$0 成本**入帳（`STOCK`，見 §6.4；`withholding = net = 0`）。此**面額 10 元換股公式**為 §6.4 配股語意之具體化，裁定 TW 配股股數時以此為準。
+
+**抑制（去重）**：同一 (account, symbol, family) 於除息日 **±45 日**內已有同族帳本股利列，或使用者已略過（skip 指紋持久化）→ 不再出現於 inbox。
+
+> **驗證錨點**：966 項壓測未涵蓋 inbox 估算純量（`detect` 為純讀投影，不寫帳本）；本節公式以 `apply_dividend_model`（DRIP 30% 已由 §6.2 之 `ledger.div.gross/net` 錨定）與 `shares_on` 為準。**配股面額換股與 DRIP 再投資價估計之驗證錨點：無（建議納入下次壓測）**。
+> **實作位置**：`api/dividend_inbox.py`（`detect`、`confirm`、`_price_on_or_before`、`_TW_STOCK_PAR=10`、`_US_WITHHOLDING=0.30`、`_MATCH_WINDOW_DAYS=45`）、`data_ingestion/holdings.py::shares_on`。
+> **依據**：`.claude/rules/domain-ledger.md`（Dividend models；除息權利）、`.claude/rules/markets-and-fees.md`。
+
 > **實作位置**：`data_ingestion/dividend_model.py`、`portfolio/cost_basis.py`（股利分支、`CASH_DIVIDEND_TYPES`、
 > DRIP 需 `reinvest_shares` 否則 fail-loud）。
 > **依據**：`.claude/rules/domain-ledger.md`（Dividend models；P&L and returns）、`.claude/rules/markets-and-fees.md`（30% 預扣）。
@@ -432,6 +460,16 @@ $$\text{rate}_{ccy} = \frac{\text{total\_return}_{ccy}}{\text{gross\_invested}_{
 | `total_market_value` | 3,887,889.28 | `kpi.total_market_value TWD` |
 
 （交叉核對：168,757.84 + 345,995.01 = 514,752.85 ✓。）
+
+**混合報告幣別報酬率（blended reporting rate，儀表板 KPI `total_return_rate`）**（`portfolio/dashboard.py` step 10）：
+
+$$\text{realized\_total} = \sum_{ccy}\operatorname{convert}(\text{realized}_{ccy},\ \text{spot}),\qquad \text{unrealized\_total} = \sum_{ccy}\operatorname{convert}(\text{unrealized}_{ccy},\ \text{spot})$$
+
+$$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displaystyle\sum_{ccy}\operatorname{convert}(\text{gross\_invested}_{ccy},\ \text{spot})}\quad(\text{混合分母；為 0 → None})$$
+
+其中 `gross_invested`（`cost_basis.build_book` 之 `gross_invested`）= 各幣別**累計買入 all-in 原始成本**。上表 `realized_total` / `unrealized_total` 即此混合值（錨點 `kpi.realized_total` / `kpi.unrealized_total`）。
+
+**月度快照（月度快照）**：`api/snapshots.py::write_snapshot` 每晚以**同一 combiner** 將當月 `total_market_value / total_return / total_return_rate / xirr / by_currency`（by_currency 見 §7.3 幣別視圖）**存為月末記錄**（月結時最後上升值即月末值，upsert-by-month）。快照僅**持久化**本節與 §7.3 之 KPI，**不引入新公式**；缺價／缺匯之選填 KPI 存 NULL（誠實退化）。裁定月末歷史金額時，以快照列所存值 = 當時 combiner 依本手冊公式之輸出為準。
 
 ### 7.2 XIRR（年化、資金加權、FX-aware — 決策主指標）
 
@@ -468,6 +506,74 @@ XIRR 即對上述 `(dates, amounts)` 序列求使 NPV=0 之年化率 r。
 > **實作位置**：`portfolio/returns.py`（`total_return`、`xirr_reporting`）、`portfolio/results.py`
 > （`ReturnSummary`、`CurrencyReturn`）。
 > **依據**：`.claude/rules/domain-ledger.md`（Total return；XIRR cashflow signs）、`.claude/rules/data-and-pricing.md`（Returns & FX P&L）。
+
+### 7.3 配置權重、產業配置、幣別視圖與報告幣估值
+
+**報告幣估值通則**：任一報價幣部位換入報告幣一律走
+
+$$\operatorname{convert}(\text{market\_value}_{quote},\ \text{spot}(quote\to reporting))$$
+
+（`market_value = price × shares`，見 §5.2；`spot` 為當前即期，經 `RateResolver`：identity → 直接對 → 反轉對 → KeyError）。缺價 → 該列 `market_value is None` 排除；缺匯 → `weight = None`，**永不臆造**。
+
+**單一持股權重（holding weight）**（`portfolio/dashboard.py` step 8）：
+
+$$\text{weight}_h = \frac{\operatorname{convert}(\text{market\_value}_h,\ \text{spot})}{\text{total\_market\_value}}\quad(\text{total 為 §7.1 報告幣總市值；total}=0\text{ 或缺 → None})$$
+
+此權重驅動 `single_weight` 警示與再平衡 §11。
+
+**產業配置（sector allocation）**（`portfolio/allocation.py::sector_allocation`；市場別配置 `market_view.py::market_allocation` 同式）：
+
+$$\text{sector\_value}_s = \sum_{h\in s}\operatorname{convert}(\text{market\_value}_h,\ \text{spot}),\qquad \text{sector\_weight}_s = \frac{\text{sector\_value}_s}{\sum_s \text{sector\_value}_s}$$
+
+產業別由 registry `instruments.sector` 決定；stale（缺價）持倉略過。
+
+**幣別視圖（combined view）**（`portfolio/allocation.py::combined_view`）：
+
+$$\text{by\_currency\_value}[ccy] = \sum_{h:\ quote=ccy}\text{market\_value}_h\ (\text{原幣，不換算}),\qquad \text{reporting\_total\_value} = \sum_h \operatorname{convert}(\text{market\_value}_h,\ \text{spot})$$
+
+`reporting_total_value` 即 §7.1 之 `total_market_value`；`by_currency_value` 為**各報價幣原生市值**（月度快照之 `by_currency` 即存此，見 §7.1）。
+
+**匯出層之報告幣值與合計列**：匯出報表（`export/holdings*.py`、`ledgers_report.py`、`tax.py`、`rebalance_report.py`）之「報告幣值」欄同走上式 `convert(...)`；其 **TOTAL／小計列**為對應欄之**逐幣別加總**（如 `Σ 淨額`、`Σ original_cost_total`、`Σ 市值`、`Σ dividends.net`、`Σ fx from/to`），**不引入新公式**（逐項見 §12.5）。**唯一例外**——**稅務報表之已實現以「賣出日匯率」換算**（`export/tax.py`）：
+
+$$\text{reporting\_realized} = \text{realized}\times\text{rate}(quote\to reporting\ \text{於賣出日})$$
+
+（**非**當前 spot；供落地稅務用，與 §7.1 以 spot 換算之總報酬視角**不同**，裁定稅務金額時務必分辨。）
+
+> **驗證錨點**：權重／產業／幣別視圖**無壓測純量錨點**（`weight`/`alloc`/`sector`/`by_currency` 斷言計數 = 0，**建議納入下次壓測**）；`convert` 通則已於 §7.1 與 §8 之 rollup 間接驗證；匯出 `original_cost_total` / `adjusted_cost_total` / `shares` 之合計以 `export.holdings.*`（各 20 項）驗證。
+> **仲裁邊界註記**：權重／配置為「金額之比值」；本手冊沿用 §11.2 之既例將其**納入仲裁範圍**（附公式），惟其本質介於 class A（金額）與 class B（指標）之間——見 §12.5 之邊界說明。
+> **實作位置**：`portfolio/allocation.py`（`sector_allocation`、`combined_view`）、`portfolio/market_view.py::market_allocation`、`portfolio/dashboard.py`（holding `weight`、step 10 blends）、`export/holdings.py`、`export/holdings_report.py`、`export/ledgers_report.py`、`export/tax.py`。
+> **依據**：`.claude/rules/domain-ledger.md`、`CLAUDE.md`（module map：portfolio 算配置，web 不算）。
+
+### 7.4 股利收入彙總與年度預估
+
+**股利收入彙總（display-only）**（`portfolio/dashboard.py` step 6）：**逐幣別、逐年**加總已入帳股利淨額，**排除配股 `STOCK`**、**含 DRIP 淨額**：
+
+$$\text{dividend\_total}[ccy] = \sum_{d:\ type\ne STOCK}\text{net}_d,\qquad \text{by\_year}[y][ccy] = \sum_{\substack{d:\ year=y\\ type\ne STOCK}}\text{net}_d$$
+
+**幣別永不跨幣相加**。此為**顯示用股利統計**（含 DRIP 再投資淨額作為「已宣告收入」），**與總報酬分離**：股利已於 §5／§6 折入成本（TW/MY）或化為 $0 成本股（US DRIP）各計一次（invariant I4），此統計**不得**再加入總報酬（否則重複計算）；亦與 §6.4 之 `payback_ratio`（僅**現金**股利、單一部位）定義不同。
+
+**年度股利預估（declared-only projection）**（`portfolio/dividends.py::project_dividends`）：對當年度、持有中 symbol 之除息事件（`ex_date.year == year` 且有現金金額）：
+
+$$\text{declared\_gross}[ccy] = \sum \text{shares}_h \times \text{cash\_amount}_{ev},\qquad \text{declared\_net}[ccy] = \sum \text{apply\_dividend\_model}(model_h,\ gross).\text{net}$$
+
+淨額**僅套用預扣**（DRIP 30%；Moomoo-US 每筆平台費屬 probe-pending，暫不計）；幣別由事件幣（fallback 報價幣）鍵定，**永不跨幣相加**；未知 `account_id` → fail-loud（`KeyError`）。
+
+> **驗證錨點：無**（`dividend_summary` / `projection` 無壓測斷言，**建議納入下次壓測**）；其成分 `dividends.net`（`ledger.div.net`，15 項）與 §6 之 DRIP 30% 已驗證。
+> **實作位置**：`portfolio/dashboard.py`（step 6 股利彙總）、`portfolio/dividends.py::project_dividends`、`data_ingestion/dividend_model.py::apply_dividend_model`。
+> **依據**：`.claude/rules/domain-ledger.md`（Dividend models；no double counting）。
+
+### 7.5 淨值與累計投入趨勢（daily replay）
+
+實作：`portfolio/timeseries.py::daily_value_series`（純函式，combiner 預載價／匯歷史）。自首筆帳本事件日至 `as_of` **逐日重播**，每日兩序列（報告幣）：
+
+- **市值 `total_value`**：$\displaystyle\sum_{h:\ shares>0}\operatorname{convert}(\text{price}_{\le day}\times \text{shares}_h,\ \text{fx}_{\le day})$，價與匯採**當日或之前最後值（carry-forward）**。任一持倉當日**全無報價**或**賣超（負股）**→ 該日標 `incomplete`（**不臆造**、不貢獻市值）。
+- **累計淨投入 `net_invested`**：截至當日之流量累加，**流量符號與 XIRR 相反（§7.2 之負號）**：期初 `+original_cost_total`、買入 `+(qty×price+fees+tax)`、賣出 `−(qty×price−fees−tax)`、現金股利（CASH/NET）`−net`；DRIP/STOCK 中性。每筆流量以**其日期之 carry-forward 匯率**換算。
+
+任一流量日期無「當日或之前」匯率 → 整條序列 `available = False`（與 §7.2 XIRR 之 all-or-nothing 一致）。
+
+> **驗證錨點：無**（`trend` / `net_invested` 無壓測斷言，**建議納入下次壓測**）；其成分（`price × shares`、all-in 買入成本、賣出淨額、股利淨額、`convert`）已於 §4／§5／§7 驗證。
+> **實作位置**：`portfolio/timeseries.py`（`daily_value_series`、`_at_or_before`、`_fx_at`）、`portfolio/dashboard.py`（step 9 預載歷史）。
+> **依據**：`.claude/rules/domain-ledger.md`（XIRR 流量符號；carry-forward valuation）、`.claude/rules/data-and-pricing.md`。
 
 ---
 
@@ -705,6 +811,34 @@ $$\text{new\_weight} = \frac{\operatorname{convert}(\text{new\_combined\_shares}
 > **驗證錨點**：壓測 phase1 未涵蓋再平衡試算純量（該引擎為 compute-only，不寫帳本）；本節公式以程式碼為準，
 > 其 leg 費用經 §3 之 `fee_engine.*` 錨點間接驗證。
 
+### 11.4 再平衡彙總與 leg 金額
+
+每 leg：`amount = shares × price`；每列（symbol）之 `shares / amount / fee / tax` = 該列各 leg 加總。整體彙總（報告幣）：
+
+$$\text{turnover\_reporting} = \sum_{rows}\operatorname{convert}(\text{total\_amount},\ \text{rate})$$
+
+$$\text{total\_fees\_reporting} = \sum_{rows}\operatorname{convert}(\text{total\_fee}+\text{total\_tax},\ \text{rate})$$
+
+$$\text{cash\_after} = \sum_{rows}\begin{cases}+\operatorname{convert}(\text{total\_amount}-\text{fee}-\text{tax},\ \text{rate}) & \text{SELL（淨流入）}\\[2pt] -\operatorname{convert}(\text{total\_amount}+\text{fee}+\text{tax},\ \text{rate}) & \text{BUY（成本流出）}\end{cases}$$
+
+皆為 compute-only 投影，不寫帳本；`rate` 與估值同儀表板 spot（§7.3）。
+
+### 11.5 試算交易（What-if）投影
+
+實作：`strategy/whatif.py::compute_whatif`。**純投影**，複用**真實費引擎**（§3 `compute_fees`）與**真實帳本重播**（§4 `build_book`），永不寫帳本。帳戶綁定（Q1）：顯式 `account_id` 優先，否則**持股最多**之帳戶；未持且未指定 → `WhatIfError` → 400。`amount = shares × price`。
+
+- **買入**：`total_cost = amount + fee + tax`；`new_shares = held_shares + shares`；
+
+$$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost}}{\text{new\_shares}},\qquad \text{new\_adjusted\_avg} = \frac{\text{held\_adj\_total} + \text{total\_cost}}{\text{new\_shares}}$$
+
+  （同 §4 加權平均。）
+- **賣出**：`proceeds_net = amount − fee − tax`（§5.1）；`adjusted_cost_removed = held_adj_avg × shares`（**等同** §4.1 之比例移除 `frac × adjusted_total`，因 `held_adj_avg = held_adj_total / held_shares`）；`realized = proceeds_net − adjusted_cost_removed`（§5.1）；`oversell = shares > held_shares`（**僅旗標**，試算不阻擋）。
+- `new_weight = new_position_reporting / new_total`，其中 `new_total = current_total − old_position_reporting + new_position_reporting`（誠實退化：缺價／缺匯 → None）。
+
+> **驗證錨點**：§11.4／§11.5 均為 compute-only，無壓測純量錨點；其 fee/tax 經 §3 `fee_engine.*`、成本／已實現經 §4／§5.1 之公式與錨點間接驗證。**建議納入下次壓測**。
+> **實作位置**：`strategy/rebalance.py`（`compute_rebalance` 彙總段、`_Leg.amount`）、`strategy/whatif.py`（`compute_whatif`、`_new_weight`）。
+> **依據**：`CLAUDE.md`（rebalance ruling）、`.claude/rules/domain-ledger.md`（費綁帳戶 I6；weighted-average；realized）。
+
 ---
 
 ## 12. 附錄
@@ -753,19 +887,36 @@ $$\text{new\_weight} = \frac{\operatorname{convert}(\text{new\_combined\_shares}
 | 稽核前值 | `ledger_audit.before_json` | §10.3 |
 | 期初庫存 | `opening_inventory` | §2／§9.1 |
 | 期初資金（現金移動） | cash movement `opening` | §9.1 |
+| 單一持股權重 | `weight` | §7.3 |
+| 產業／市場配置權重 | `sector_weight` / `weights` | §7.3 |
+| 幣別視圖原幣市值 | `by_currency_value` | §7.3 |
+| 報告幣總市值 | `reporting_total_value` / `total_market_value` | §7.1／§7.3 |
+| 稅務已實現（賣出日匯率換算） | `reporting_realized` | §7.3 |
+| 混合報告幣報酬率 | `total_return_rate`（blended） | §7.1 |
+| 股利收入彙總 | `dividend_total` / `total_by_currency` | §7.4 |
+| 年度股利預估 | `declared_gross` / `declared_net` | §7.4 |
+| 淨值趨勢市值／累計淨投入 | `total_value` / `net_invested`（`TrendPoint`） | §7.5 |
+| 配息偵測估算 | `est_gross` / `est_net` / `est_reinvest_shares` | §6.5 |
+| 配股面額換股常數 | `TW_STOCK_PAR = 10` | §6.5 |
+| 再平衡週轉／費用／預估餘額 | `turnover_reporting` / `total_fees_reporting` / `cash_after` | §11.4 |
+| 試算後新均價 | `new_original_avg` / `new_adjusted_avg` | §11.5 |
 
 ### 12.3 版本歷史
 
 | 版本 | 日期 | 說明 |
 | --- | --- | --- |
 | `v1.0-draft` | 2026-07-15 | 首版草稿。基線 `v0.1.18 + feat/p3-batch3`。經 966 項對抗性對帳（966/966 通過）核對。**待 owner 確認為仲裁標準**。 |
+| `v1.1-draft` | 2026-07-15 | **對抗性完整性稽核**：全庫清點所有金額／比值／指標計算後補齊缺漏之 class A 公式——新增 §6.5（配息偵測 inbox 估算：除息前持股權利、DRIP 再投資價估計、TW 配股面額 10 元換股）、§7.1 混合報告幣報酬率 + 月度快照、§7.3（單一持股／產業／市場配置權重、幣別視圖、報告幣估值通則、匯出合計列、稅務已實現以賣出日匯率換算）、§7.4（股利收入彙總 + 年度預估）、§7.5（淨值與累計投入趨勢）、§11.4（再平衡週轉／費用／預估餘額 + leg 金額）、§11.5（What-if 試算）。新增 §12.5「仲裁範圍外之數值公式一覽」逐項列舉全部 class B（技術指標／警示門檻／匯出比值）與 class C（LLM 額度／花費），達成「完全列舉」。基線不變；**仍待 owner 確認**。 |
 
 ### 12.4 如何仲裁一個爭議金額
 
 給定一個「站上顯示為 X，但認為應為 Y」的金額：
 
 1. **定位金額類型** → 對應章節：費／稅 §3；持倉成本／均價 §4；已實現 §5.1；未實現／資本利得 §5.2；
-   股利 §6；總報酬／報酬率 §7.1；XIRR §7.2；換匯損益 §8；現金餘額 §9；再平衡 §11。
+   股利 §6；**配息偵測估算 §6.5**；總報酬／報酬率（含混合率）§7.1；XIRR §7.2；**配置權重／產業／幣別視圖／
+   報告幣估值／稅務已實現 §7.3**；**股利收入彙總／年度預估 §7.4**；**淨值與投入趨勢 §7.5**；換匯損益 §8；
+   現金餘額 §9；再平衡 §11（**彙總 §11.4；試算 What-if §11.5**）。若該數字非以上任一 → 查 §12.5 是否屬
+   仲裁範圍外之 class B／C（技術指標、警示門檻、LLM 額度）。
 2. **取出相關帳本列**（四本永久帳本）：
    - 費／稅、成本、已實現、未實現 → `transactions`（該 account×symbol，**依 `trade_date` 排序**）+
      `dividends` + `opening_inventory`。
@@ -778,6 +929,62 @@ $$\text{new\_weight} = \frac{\operatorname{convert}(\text{new\_combined\_shares}
 5. **稽核佐證**：若該列曾被更正，查 `ledger_audit`（§10.3）取變更前值還原歷史。
 6. **換匯爭議專屬檢查**：確認爭議者**未把換匯損益加疊於總報酬之上**（§8.4，invariant I5 — 最常見的重複
    計算來源）。
+
+### 12.5 仲裁範圍外之數值公式一覽（完整列舉）
+
+**完全列舉原則**：站上顯示／推播／匯出之**每一個數字**，若非**在仲裁範圍內附有公式**（§3–§11，class A 金額），
+即**明列於下之範圍外**。範圍外分兩類：**class B 資訊型指標**（技術指標／警示門檻／分數／百分比——非「金額之
+記錄」）與 **class C 營運成本會計**（LLM 額度／花費之美元計量）。範圍外項目**不作為金額爭議之仲裁對象**；其
+正確性由各自單元測試守護，非本仲裁文件所裁。
+
+**邊界說明（A/B 之界）**：配置權重（holding／sector／market weight，§7.3）與報酬率（§7.1）為「金額之比值」，
+本手冊**破例納入 class A**（附公式），因其直接由市值金額導出、且驅動 §11／警示決策；其餘純比值／分數／門檻一律
+class B。此界線係經標示之刻意選擇（見 §7.3 仲裁邊界註記），如 owner 認為權重應改列範圍外，於簽署時記明即可。
+
+**Class B — 資訊型指標（informational；非金額之記錄）**
+
+| 指標 | 公式（一行） | 實作位置 | 何以在範圍外 |
+| --- | --- | --- | --- |
+| day-change % | `(last − prev)/prev`（純價，刻意排除 FX） | `api/digest_service.py::_pct_from_last_two` | 百分比；推播硬規定僅帶百分比與計數 |
+| 組合當日漲跌 | `Σ(wᵢ·pctᵢ)/Σwᵢ`（值權重） | `api/digest_service.py::_weighted_pct` | 百分比 |
+| movers 排名 | 依 day-change % 排序取 top-N | `api/digest_service.py::_movers` | 排名 |
+| SMA／均線 | `Σ(最後 N 收盤)/N` | `portfolio/technicals.py::moving_average` | 指標（幣值參考位，非記錄） |
+| price_vs_maN | `(price − maN)/maN`（N=20/60/120） | `portfolio/technicals.py::ma_signals` | 比值 |
+| 年化波動率 | `stdev_sample(日報酬) × √252` | `portfolio/technicals.py::annualized_volatility` | 波動度 |
+| 最大回撤 | `min((close − running_peak)/running_peak)` | `portfolio/technicals.py::max_drawdown` | 比值 |
+| RSI(14) | `100 − 100/(1+RS)`，`RS=avg_gain/avg_loss`（Wilder 平滑） | `portfolio/technicals.py::rsi` | 指標 |
+| 均線交叉 | `sign(SMA_fast − SMA_slow)` 之翻轉 + `days_ago` | `portfolio/technicals.py::ma_cross` | 分類 |
+| 52 週位置 | `pct_from_high=(price−hi)/hi`、`pct_from_low=(price−lo)/lo` | `portfolio/technicals.py::week52_position` | 比值（hi/lo 為幣值參考） |
+| 趨勢結構／量能 | 半窗高低比較；`ratio_to_avg=latest/avg`，`surge=ratio≥2` | `portfolio/technicals.py::trend_structure`／`volume_signal` | 分類／比值 |
+| price_vs_cost | `(price − original_avg)/original_avg`、`…/adjusted_avg` | `portfolio/technicals.py::price_vs_cost` | 比值（輸入為成本金額，輸出比值） |
+| 法人連買／連賣、net_buy_sum | 連續天數；`Σ 近 N 日 daily_net` | `portfolio/external_signals.py` | 計數／外部籌碼（非記錄） |
+| chg_pct／yoy／mom／percentile | `(curr−prev)/prev`；`count(h≤v)/len` | `portfolio/external_signals.py` | 比值／排名 |
+| VIX／Fear&Greed 分區 | 門檻分類；`change = newest − oldest` | `portfolio/external_signals.py` | 分類 |
+| PER／PBR／殖利率、融資融券、月營收 yoy/mom、指數收盤 | 直通或 `chg_pct/yoy/mom` | `portfolio/external_signals.py` | 外部脈絡（幣值參考，非記錄） |
+| 市場別配置權重 | `sector_value / market_total`（同 §7.3） | `portfolio/market_view.py::market_allocation` | 比值 |
+| 分析師共識 delta | `score_now − score_then`；目標均價下修 `(then−now)/then` | `api/alert_inputs.py`／`strategy/alerts.py` | 分數／比值 |
+| SymbolMetric | `pct_from_52w_high`、`vol_30d`、`vol_90d`（√252 年化） | `api/alert_inputs.py::assemble` | 指標 |
+| TechScore（複合） | `clamp(50 + Σ(score·applied_w·0.5), 0, 100)` | `strategy/rules/composite.py::compose` | 分數（0–100） |
+| 12-1 動能／MA-cross／RSI-regime／trend-filter 分數 | 各 rule 之 [−1,1] 分數（params 常數見 `strategy/rules/params.py`） | `strategy/rules/*.py` | 分數 |
+| 警示門檻比較 | `single_weight`／`sector_weight`／`fx_drift=\|spot/avg−1\|`／`drawdown=−pct_from_52w_high`（warn=0.5×risk）／`vol_spike=vol_30d/vol_90d`／`rebalance_drift band=min(abs, 0.25×target)`（Swedroe 5/25）／`calib_gap`（pp） | `strategy/alerts.py::compute_alerts_from` | 觸發布林（是否示警，非金額） |
+| 匯出資訊欄 | `_return_ratio=unrealized_pnl/adjusted_cost_total`；TOTAL 權重 `Σ weight`；`sum_target=Σ targets`；`cash_level=max(0, 1−Σtargets)`；tax `rate_used` | `export/holdings_report.py`／`export/rebalance_report.py`／`export/tax.py` | 比值／百分比 |
+| 讀取視窗推導 | `required_sessions`；`required_calendar_days=ceil(sessions×1.4×1.6)` | `api/signals_service.py` | 整數視窗 |
+
+**Class C — 營運成本會計（operational cost；美元計量，非投組金額之記錄）**
+
+| 項目 | 公式（一行） | 實作位置 | 何以在範圍外 |
+| --- | --- | --- | --- |
+| 單次呼叫成本 | `cost = (in_tok × in_price_per_mtok + out_tok × out_price_per_mtok) / 1,000,000`（USD） | `shared/llm.py::cost_of` | LLM 營運花費，非投組金額 |
+| 剩餘額度 | `budget_remaining = Σ topups − Σ usage.cost`（累計，無 reset） | `shared/llm_config.py::budget_remaining` | 額度會計 |
+| 額度閘門 | `remaining ≤ 0 → LLMBudgetExceeded` | `shared/llm_config.py::check_budget` | 閘門 |
+| 額度警戒門檻 | 預設 `1.00`（USD）；`quota_low` 於 `remaining < threshold` 觸發 | `shared/llm_config.py::get_alert_threshold`、`strategy/alerts.py` | 門檻／營運 |
+| 用量匯出 | `llm_usage` / `job_runs` 直通匯出（token、cost 直讀，無新計算） | `export/usage.py` | 直通營運紀錄 |
+
+> **完整性宣稱（complete-by-enumeration）**：截至基線 `v0.1.18 + feat/p3-batch3`，站上產生之數字經本次對抗性
+> 清點後，**非落於 §3–§11（class A，附仲裁公式），即落於本 §12.5（class B／C，明列範圍外）**。日後新增任何
+> 顯示／推播／匯出之數字，須同步歸類並補入本手冊（class A 補公式；class B／C 補本表），否則即為手冊缺陷
+> （見 §12.4 步驟 4）。**尚未納入壓測錨點之 class A 公式**（§6.5、§7.3–§7.5、§11.4–§11.5）已於各節標注
+> 「驗證錨點：無（建議納入下次壓測）」，供下一輪對抗性對帳補齊。
 
 ---
 
