@@ -42,7 +42,8 @@ Do not declare a version done until every item passes. Stop and fix on any failu
    returns/XIRR): extend `scripts/stress_audit` (the independent oracle in `oracle.py`
    **and** a `run_phase1.py` scenario op exercising the change), re-run phase 1 green
    (`.venv/Scripts/python scripts/stress_audit/run_all.py --phase 1` → `fail=0`), and
-   update `docs/accounting-formula-manual.md` (the formula + a verification anchor). See
+   update `docs/accounting-formula-manual.md` (the formula + a verification anchor) and
+   regenerate `docs/accounting-formula-manual.en.md` in the same change. See
    the `/stress-audit` skill.
 
 Report a concise pass/fail summary per item, then the version tag and one-line
