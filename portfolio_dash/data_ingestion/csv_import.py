@@ -15,6 +15,16 @@ from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
 from portfolio_dash.shared.models.enums import Side
 
+# Canonical CSV column order for the transactions import — the SINGLE SOURCE the downloadable
+# template header is built from (see data_ingestion.import_templates). These names MUST match
+# the keys the DictReader in build_transaction_preview reads below (required: account, symbol,
+# side, date, shares, price; optional: fee, tax, daytrade, note). The round-trip guard test
+# re-parses the generated template to prove header ↔ parser stay in lockstep.
+TRANSACTION_COLUMNS: list[str] = [
+    "account", "symbol", "side", "date", "shares", "price",
+    "fee", "tax", "daytrade", "note",
+]
+
 
 def txn_preview_row(
     conn: sqlite3.Connection,
@@ -147,7 +157,9 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
     Returns:
         :class:`ImportPreview` containing one :class:`PreviewRow` per data row.
     """
-    reader = csv.DictReader(io.StringIO(csv_text))
+    # lstrip a leading UTF-8 BOM: the downloadable template ships WITH a BOM (Excel), so a
+    # download->re-upload (or paste) round-trip must not turn the first header into a BOM+account.
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
     rows: list[PreviewRow] = []
 
     for idx, raw_row in enumerate(reader):

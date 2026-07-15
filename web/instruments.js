@@ -12,6 +12,8 @@
   /* D.list is mutable: starts empty (any pre-fetch render shows a blank table)
      and is replaced by the fetched rows once GET /api/instruments resolves. */
   let D = { list: [] };
+  /* FU-D13: archived (停止追蹤) rows are hidden by default behind the toolbar toggle. */
+  let showArchived = false;
   const f = window.fmt;
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
@@ -111,10 +113,19 @@
     const tbody = $('#inst-body');
     tbody.replaceChildren();
     const q = (filter || '').trim().toLowerCase();
+    /* Toolbar toggle reflects how many archived rows exist; hidden entirely when none. */
+    const archivedCount = D.list.filter((i) => i.archived).length;
+    const toggle = $('#toggle-archived');
+    if (toggle) {
+      toggle.style.display = archivedCount ? '' : 'none';
+      toggle.textContent = showArchived ? '隱藏已封存' : ('顯示已封存 (' + archivedCount + ')');
+    }
     D.list
+      .filter((i) => showArchived || !i.archived)
       .filter((i) => !q || i.symbol.toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q))
       .forEach((i) => {
         const tr = el('tr');
+        if (i.archived) tr.classList.add('inst-archived');
         const tdSym = el('td', 'col-text');
         const cell = el('div', 'sym-cell sym-link');
         cell.title = '點擊查看個股詳情（價格與成本、配息史、試算）';
@@ -171,16 +182,29 @@
         tr.appendChild(tdTgt);
 
         const tdHeld = el('td', 'col-text');
-        tdHeld.appendChild(el('span', 'status-tag ' + (i.held ? 'hold' : 'watch'), i.held ? '持有' : '觀察'));
+        if (i.archived) {
+          const tag = el('span', 'status-tag archived', '已封存');
+          tag.title = '已停止追蹤：不抓報價/訊號/新聞，但仍保留於帳本統計';
+          tdHeld.appendChild(tag);
+        } else {
+          tdHeld.appendChild(el('span', 'status-tag ' + (i.held ? 'hold' : 'watch'), i.held ? '持有' : '觀察'));
+        }
         tr.appendChild(tdHeld);
 
         const tdAct = el('td');
         const acts = el('div', 'wl-actions');
-        const edit = el('button', 'btn', '編輯'); edit.type = 'button';
-        edit.title = '編輯產業與目標價提醒';
-        edit.addEventListener('click', () => openEdit(i));
-        acts.appendChild(edit);
-        if (i.market === 'TW') {
+        if (i.archived) {
+          const restore = el('button', 'btn', '還原'); restore.type = 'button';
+          restore.title = '還原（恢復追蹤：重新納入報價、訊號與新聞範圍）';
+          restore.addEventListener('click', () => archiveInstrument(i, false));
+          acts.appendChild(restore);
+        } else {
+          const edit = el('button', 'btn', '編輯'); edit.type = 'button';
+          edit.title = '編輯產業與目標價提醒';
+          edit.addEventListener('click', () => openEdit(i));
+          acts.appendChild(edit);
+        }
+        if (!i.archived && i.market === 'TW') {
           const rp = el('button', 'btn', '重新探測'); rp.type = 'button';
           rp.title = '重新探測 TWSE / TPEx 板別並儲存結果';
           rp.addEventListener('click', async () => {
@@ -217,6 +241,10 @@
           });
           acts.appendChild(rp);
         }
+        const del = el('button', 'btn btn-danger', '刪除'); del.type = 'button';
+        del.title = '刪除此標的（持倉中或有交易紀錄者不可刪除，可改為封存）';
+        del.addEventListener('click', () => delInstrument(i));
+        acts.appendChild(del);
         tdAct.appendChild(acts);
         tr.appendChild(tdAct);
         tbody.appendChild(tr);
@@ -305,6 +333,62 @@
     setTimeout(() => nameIn.focus(), 50);
   }
 
+  /* ---- delete / archive (FU-D13, three tiers) ----
+     刪除 → confirm → DELETE. The backend decides the tier and answers with a 422 the UI
+     maps to a helpful dialog:
+       • held        → 持倉中不可刪除或封存 (info; the only fix is to close the position),
+       • has_history → 不可刪除（帳本完整/重算）→ offer 封存 (stop tracking) instead.
+     archiveInstrument PUTs the archive flag (封存 / 還原); archiving a held symbol 422s too. */
+  function delInstrument(i) {
+    window.confirmDialog({
+      title: '刪除 ' + i.symbol,
+      body: '確定刪除 ' + i.symbol + (i.name ? ' ' + i.name : '') +
+        '？將一併刪除其報價、訊號與事件記錄。',
+      confirmLabel: '刪除', danger: true,
+      onConfirm: async () => {
+        try {
+          await window.pdApi.del('/api/instruments/' + encodeURIComponent(i.symbol));
+        } catch (err) {
+          if (err && err.status === 422 && err.code === 'held') {
+            window.confirmDialog({ title: '無法刪除', body: err.message, confirmLabel: '我知道了' });
+            return;
+          }
+          if (err && err.status === 422 && err.code === 'has_history') {
+            window.confirmDialog({
+              title: '不可刪除，改為封存？', body: err.message,
+              confirmLabel: '封存（停止追蹤）', danger: true,
+              onConfirm: () => archiveInstrument(i, true)
+            });
+            return;
+          }
+          if (window.toast) window.toast(err && err.message ? err.message : '刪除失敗', 'fail', err && err.code);
+          return;
+        }
+        if (window.toast) window.toast('已刪除 ' + i.symbol, 'ok');
+        await refresh();
+      }
+    });
+  }
+
+  async function archiveInstrument(i, archived) {
+    try {
+      await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol) + '/archive',
+        { archived: archived });
+    } catch (err) {
+      if (err && err.status === 422 && err.code === 'held') {
+        window.confirmDialog({ title: '無法封存', body: err.message, confirmLabel: '我知道了' });
+        return;
+      }
+      if (window.toast) {
+        window.toast(err && err.message ? err.message : (archived ? '封存失敗' : '還原失敗'),
+          'fail', err && err.code);
+      }
+      return;
+    }
+    if (window.toast) window.toast(archived ? '已封存 ' + i.symbol : '已還原 ' + i.symbol, 'ok');
+    await refresh();
+  }
+
   /* Fetch the instrument list and (re)render. Graceful degradation: on failure leave
      the table empty and surface ONE toast — never an unhandled rejection (the e2e smoke
      asserts zero console errors). 401 is handled inside api.js. */
@@ -324,5 +408,9 @@
 
   render();  // empty table before the fetch resolves
   $('#inst-search').addEventListener('input', (e) => render(e.target.value));
+  $('#toggle-archived').addEventListener('click', () => {
+    showArchived = !showArchived;
+    render($('#inst-search').value);
+  });
   refresh();
 })();

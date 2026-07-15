@@ -826,12 +826,13 @@ def build_worklist(
 
     Board comes from the stored ``instruments.board`` column when set, else the
     deterministic market default (US ``""`` / MY ``".KL"`` / TW ``"TWSE"``). FX pairs
-    are the fixed reporting-currency set.
+    are the fixed reporting-currency set. Archived symbols (FU-D13) are excluded — a
+    stopped-tracking symbol should not consume quote/history/dividend fetch budget.
     """
-    sql = "SELECT symbol, market, board FROM instruments"
+    sql = "SELECT symbol, market, board FROM instruments WHERE COALESCE(archived,0)=0"
     params: tuple[str, ...] = ()
     if market is not None:
-        sql += " WHERE market = ?"
+        sql += " AND market = ?"
         params = (market.value,)
     refs: list[InstrumentRef] = []
     for row in conn.execute(sql, params):

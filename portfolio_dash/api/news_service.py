@@ -120,14 +120,16 @@ def resolve_news_scope(
 ) -> list[tuple[str, str]] | None:
     """Resolve a manual-run ``scope`` to a ``(symbol, market)`` universe (registry read).
 
-    ``"all"`` → EVERY registered instrument (held ∪ watchlist — the manual run widens past
-    the nightly held-only job). A bare symbol → ``[(symbol, market)]`` with the market taken
-    from the registry. An unknown symbol (or an otherwise invalid scope) → ``None`` so the
-    caller returns a 400. Deterministic ordering for reproducible runs.
+    ``"all"`` → EVERY registered, NON-archived instrument (held ∪ active watchlist — the
+    manual run widens past the nightly held-only job; archived/stopped-tracking symbols
+    (FU-D13) drop out of the broad scope). A bare symbol → ``[(symbol, market)]`` with the
+    market taken from the registry — an EXPLICIT single-symbol scope is still honoured even
+    when archived (the user asked for that name by name). An unknown symbol (or an otherwise
+    invalid scope) → ``None`` so the caller returns a 400. Deterministic ordering.
     """
     instruments = list_instruments(conn)
     if scope == "all":
-        return sorted({(i.symbol, i.market.value) for i in instruments})
+        return sorted({(i.symbol, i.market.value) for i in instruments if not i.archived})
     for i in instruments:
         if i.symbol == scope:
             return [(i.symbol, i.market.value)]

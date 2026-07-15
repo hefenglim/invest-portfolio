@@ -17,9 +17,12 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.store import (
+    delete_instrument,
     get_instrument,
+    has_ledger_history,
     list_accounts,
     list_instruments,
+    set_instrument_archived,
     upsert_instrument,
 )
 from portfolio_dash.pricing.board import probe_tw_board
@@ -61,6 +64,7 @@ def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
         "last": last, "chg_pct": chg_pct,
         "target_low": decimal_str(inst.target_low) if inst.target_low is not None else None,
         "is_etf": inst.is_etf,
+        "archived": inst.archived,
     }
 
 
@@ -216,3 +220,58 @@ def update(
     assert saved is not None
     account_ids = [a.account_id for a in list_accounts(conn)]
     return _element(conn, saved, account_ids, now)
+
+
+class ArchiveBody(BaseModel):
+    archived: bool
+
+
+@router.put("/instruments/{symbol}/archive")
+def archive(
+    symbol: str,
+    body: ArchiveBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Set / clear a symbol's 封存 (stop-tracking) flag (FU-D13).
+
+    Archiving a HELD symbol is refused (422 ``held``) — the invariant is held ⇒ not
+    archived. Un-archiving (``archived: false``) is always allowed (the 還原 path). The flag
+    only scopes quote/signal/news fetches; the symbol stays registered, so no money figure
+    moves (the archived-symbol dashboard-invariant test proves this).
+    """
+    if get_instrument(conn, symbol) is None:
+        return JSONResponse(status_code=404,
+                            content=error_body("not_found", f"{symbol} 不存在"))
+    account_ids = [a.account_id for a in list_accounts(conn)]
+    if body.archived and _held(conn, account_ids, symbol):
+        return JSONResponse(status_code=422, content=error_body(
+            "held", "持倉中的標的不可刪除或封存", field="symbol"))
+    set_instrument_archived(conn, symbol, body.archived)
+    return {"ok": True, "archived": body.archived}
+
+
+@router.delete("/instruments/{symbol}")
+def remove(
+    symbol: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Hard-delete a NEVER-TRADED watch-only symbol (FU-D13, three tiers, no bypass).
+
+    404 unknown → 422 ``held`` (a held symbol is never removable) → 422 ``has_history``
+    (a closed-with-history symbol would corrupt 重算 if hard-deleted; the UI offers 封存
+    instead) → else a true delete that also cleans the symbol's derived / cache rows.
+    """
+    if get_instrument(conn, symbol) is None:
+        return JSONResponse(status_code=404,
+                            content=error_body("not_found", f"{symbol} 不存在"))
+    account_ids = [a.account_id for a in list_accounts(conn)]
+    if _held(conn, account_ids, symbol):
+        return JSONResponse(status_code=422, content=error_body(
+            "held", "持倉中的標的不可刪除或封存", field="symbol"))
+    if has_ledger_history(conn, symbol):
+        return JSONResponse(status_code=422, content=error_body(
+            "has_history",
+            "該標的有交易/配息/期初記錄，為保帳本完整與重算正確不可刪除；可改為封存（停止追蹤）",
+            field="symbol"))
+    delete_instrument(conn, symbol)
+    return {"ok": True, "symbol": symbol}

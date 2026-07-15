@@ -137,11 +137,27 @@
 
       <!-- Tab: CSV -->
       <div class="mode-pane" id="pane-csv">
-        <div class="sub-chips"><span class="group-label">資料類型</span><span id="csv-kinds" style="display:flex;gap:6px;"></span><span class="hint" id="csv-kind-note"></span></div>
-        <div class="dc-grid" style="padding-bottom:0;">
-          <div class="dropzone"><span class="glyph">⇪</span><span class="big">拖放 CSV 檔案，或點擊選取</span></div>
-          <div class="field"><label>或貼上 CSV 文字</label><textarea class="input" style="min-height:96px;" placeholder="date,side,symbol,shares,price" spellcheck="false"></textarea></div>
+        <div class="sub-chips">
+          <span class="group-label">資料類型</span>
+          <span id="csv-kinds" style="display:flex;gap:6px;"></span>
+          <span class="hint" id="csv-kind-note"></span>
+          <span style="flex:1;"></span>
+          <button class="btn btn-sm" id="csv-template" type="button" title="下載目前資料類型的匯入範本 CSV（含欄位標題與範例列）">
+            <span class="ico">⬇</span><span>下載範本</span>
+          </button>
         </div>
+        <div class="dc-grid" style="padding-bottom:0;">
+          <div class="dropzone" id="csv-dropzone">
+            <span class="glyph">⇪</span>
+            <span class="big">拖放 CSV 檔案，或點擊選取</span>
+            <span class="hint" id="csv-dz-hint"></span>
+          </div>
+          <div class="field">
+            <label for="csv-paste">或貼上 CSV 文字</label>
+            <textarea class="input" id="csv-paste" style="min-height:96px;" placeholder="account,symbol,side,date,shares,price,fee,tax,daytrade,note" spellcheck="false"></textarea>
+          </div>
+        </div>
+        <input type="file" id="csv-file-input" accept=".csv,text/csv" hidden="hidden"></input>
         <div class="ai-result-head"><span>解析預覽：<b class="num" id="csv-file"></b></span><span class="num" id="csv-counts"></span></div>
         <div class="table-wrap">
           <table class="data"><thead><tr><th></th><th>#</th><th>日期</th><th class="col-text">帳戶</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th class="col-text">狀態</th><th class="col-text">原因</th></tr></thead><tbody id="csv-body"></tbody></table>

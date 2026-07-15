@@ -411,12 +411,14 @@
   const CSV_KINDS = [['交易', 'transactions'], ['股利', 'dividends'], ['換匯', 'fx'], ['期初', 'openings']];
   let csvKind = 'transactions';
 
-  /* per-kind CSV header hints shown in the dropzone */
+  /* per-kind CSV header hints shown in the dropzone — the FULL canonical header (leads with
+     the REQUIRED `account` column; matches the *_COLUMNS constants in the backend parsers +
+     the downloadable 範本). */
   const CSV_HINTS = {
-    transactions: '交易欄位：date・side・symbol・shares・price・fee（選）・tax（選）',
-    dividends: '股利欄位：account・symbol・date・type(CASH/STOCK/DRIP/NET)・gross・net（選）・reinvest_shares（選）・reinvest_price（選）',
-    fx: '換匯欄位：account・date・from_ccy・from_amount・to_ccy・to_amount',
-    openings: '期初欄位：account・symbol・shares・original_avg_cost・build_date・original_cost_total（選）',
+    transactions: '欄位：account・symbol・side・date・shares・price・fee（選）・tax（選）・daytrade（選）・note（選）',
+    dividends: '欄位：account・symbol・date・type(CASH/STOCK/DRIP/NET)・gross・withholding（選）・net（選）・reinvest_shares（選）・reinvest_price（選）',
+    fx: '欄位：account・date・from_ccy・from_amount・to_ccy・to_amount',
+    openings: '欄位：account・symbol・shares・original_avg_cost・build_date・original_cost_total（選）',
   };
 
   function initCsv() {
@@ -435,6 +437,27 @@
       });
       bar.appendChild(c);
     });
+    /* seed the dropzone hint for the default (transactions) kind — the chip handler
+       above only refreshes it on a switch. */
+    const dzHint0 = $('#csv-dz-hint');
+    if (dzHint0) dzHint0.textContent = CSV_HINTS[csvKind] || '';
+
+    /* 下載範本：GET /api/import/template?kind=… (BOM+CRLF text/csv) for the ACTIVE kind.
+       pdApi.download issues a GET when no body is passed; the filename rides the endpoint's
+       Content-Disposition. The template is a single-source of the parser column order. */
+    const tplBtn = $('#csv-template');
+    if (tplBtn) {
+      tplBtn.addEventListener('click', async () => {
+        const restore = window.pdBusy ? window.pdBusy(tplBtn, '下載中…') : () => {};
+        try {
+          await api.download('/api/import/template?kind=' + encodeURIComponent(csvKind));
+        } catch (err) {
+          if (window.toast) window.toast((err && err.message) || '範本下載失敗', 'fail', err && err.code);
+        } finally {
+          restore();
+        }
+      });
+    }
 
     const paste = $('#csv-paste');
     if (paste) paste.addEventListener('input', scheduleCsvPreview);

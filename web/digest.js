@@ -87,13 +87,21 @@
     renderFn(host, null);   // re-render the empty state (restores a fresh 立即產生 button)
   }
 
-  /* movers tooltip: 名稱（代號）・收盤 YYYY-MM-DD・更新 YYYY-MM-DD HH:MM.
-     Older stored digests lack quote_date / fetched_at → those parts are omitted. */
+  /* movers tooltip (FU-D14): 名稱（代號）・股價 {close}・更新 {YYYY-MM-DD HH:MM}.
+     `close` is a Decimal STRING off the wire — rendered verbatim (no JS math, no coercion).
+     更新 = fetched_at, falling back to quote_date. Older stored digests without `close`
+     keep the round-1 format (名稱（代號）・收盤 {date}・更新 {datetime}). */
   function _moverTitle(m) {
     var parts = [];
     parts.push(m.name ? (m.name + '（' + m.symbol + '）') : m.symbol);
-    if (m.quote_date) parts.push('收盤 ' + f.date(m.quote_date));
-    if (m.fetched_at) parts.push('更新 ' + f.datetime(m.fetched_at));
+    if (m.close != null) {
+      parts.push('股價 ' + m.close);
+      if (m.fetched_at) parts.push('更新 ' + f.datetime(m.fetched_at));
+      else if (m.quote_date) parts.push('更新 ' + f.date(m.quote_date));
+    } else {
+      if (m.quote_date) parts.push('收盤 ' + f.date(m.quote_date));
+      if (m.fetched_at) parts.push('更新 ' + f.datetime(m.fetched_at));
+    }
     return parts.join('・');
   }
 

@@ -122,12 +122,6 @@
   .provider-chips { display:flex;gap:6px;align-items:center; }
   .provider-chips .arrow { color:var(--text-3);font-size:10px; }
 
-  /* 資料庫統計 (FU-D8): the table keeps growing, so give it a bounded scroll area with a
-     sticky header (table.data th is already position:sticky — it pins to this container). */
-  .table-wrap.dbstats-scroll { max-height:60vh; overflow-y:auto; }
-  .table-wrap.dbstats-scroll table.data th { top:-1px; }
-  #dbstats-updated { font-size:10.5px;color:var(--text-3); }
-
   /* datasources */
   .ds-section { margin-bottom:var(--gap); }
   .ds-sec-head { display:flex;align-items:center;gap:10px;padding:10px var(--pad) 6px; }
@@ -410,23 +404,9 @@
             <option value="200">200</option>
           </select>
         </span></div>
+        <!-- 資料庫統計 moved to its own 資料中心 page (FU-D15); this is a pointer only. -->
+        <div class="gen-row"><span class="k">資料庫統計</span><span class="v"><a href="data-center.html">前往「資料中心」 →</a></span></div>
       </div>
-    </section>
-    <!-- 資料庫統計 (2026-07-07 owner decision): read-only observation panel — canonical
-         tabbed surface ONLY (the standalone settings pages are redirect stubs). -->
-    <section class="panel" data-screen-label="資料庫統計">
-      <div class="panel-head">
-        <h2 class="panel-title">資料庫統計</h2>
-        <span class="panel-sub">唯讀 — 各資料表筆數與最早記錄，供保留期限評估；目前不做任何自動清理</span>
-        <span class="spacer"></span>
-        <span class="panel-sub num" id="dbstats-updated"></span>
-        <button class="btn" id="dbstats-refresh" type="button"><span class="ico">⟳</span>重新整理</button>
-      </div>
-      <div class="gen-rows" id="dbstats-files" style="padding-bottom:0;"></div>
-      <div class="table-wrap dbstats-scroll"><table class="data"><thead><tr>
-        <th class="col-text">類別</th><th class="col-text">資料表</th><th>筆數</th><th>最早記錄</th>
-      </tr></thead><tbody id="dbstats-body"></tbody></table></div>
-      <div class="set-body" style="padding-top:6px;"><span class="panel-sub" id="dbstats-note"></span></div>
     </section>
   </div>
 
@@ -614,7 +594,6 @@
 <script src="settings-digest.js?v=0.1.19"></script>
 <script src="settings-users.js?v=0.1.19"></script>
 <script src="settings-fees.js?v=0.1.19"></script>
-<script src="settings-dbstats.js?v=0.1.19"></script>
 <script src="settings-prefs.js?v=0.1.19"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs）→ reconciliation channel

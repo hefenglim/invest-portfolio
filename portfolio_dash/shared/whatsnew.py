@@ -396,9 +396,10 @@ CATALOG: list[Feature] = [
         version="0.1.11",
         id="db-stats-panel",
         title="資料庫統計面板",
-        desc="設定頁可檢視各資料表列數、最舊紀錄日期與檔案大小",
-        href=None,
-        area="系統設定 → 一般",
+        desc="「資料中心」頁可檢視各資料表列數、最舊紀錄日期、每類小計與檔案大小",
+        href="data-center.html",
+        area="資料中心 → 資料庫統計",
+        target="#dbstats-body",
     ),
     Feature(
         version="0.1.11",

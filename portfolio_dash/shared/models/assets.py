@@ -29,3 +29,4 @@ class Instrument(BaseModel):
     board: str = ""  # "TWSE" | "TPEx" | ".KL" | "" (US / unresolved)
     target_low: Decimal | None = None  # price-alert floor (spec 10)
     is_etf: bool = False  # single source of truth for ETF (never derive from sector)
+    archived: bool = False  # FU-D13: stop-tracking flag; stays registered, off fetch scopes

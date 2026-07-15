@@ -106,13 +106,14 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         board=row["board"] or "",
         target_low=from_db(row["target_low"]) if row["target_low"] else None,
         is_etf=bool(row["is_etf"]),
+        archived=bool(row["archived"]),
     )
 
 
 def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
-        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf "
+        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf, archived "
         "FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
@@ -120,12 +121,122 @@ def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
 
 
 def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
-    """Return all instruments in the database."""
+    """Return all instruments in the database (archived included; callers that must
+    exclude archived symbols — quote/signal/news fetch scopes — filter on ``.archived``,
+    never here: the dashboard / portfolio / exports keep seeing EVERY registered symbol
+    so no money figure is affected by archiving)."""
     rows = conn.execute(
-        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf "
+        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf, archived "
         "FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Watchlist deletion / archive (FU-D13)
+# ---------------------------------------------------------------------------
+# The instruments registry IS the watchlist. Ledger tables reference ``symbol`` with no
+# foreign keys, and the dashboard silently DROPS any ledger row whose symbol lacks an
+# instruments row from ALL computation — so a HARD delete of a symbol with history would
+# corrupt realized P&L / XIRR. Hence three tiers (enforced in the API router):
+#   * never-traded watch-only symbol -> true DELETE (+ clean its derived/cache rows),
+#   * currently held                 -> DELETE and archive both refused (422),
+#   * closed-with-history            -> DELETE refused; ARCHIVE (stop-tracking) instead.
+# Invariant "held => not archived" is enforced at the single booking seam below
+# (``insert_transaction`` / ``upsert_opening`` un-archive on any new booking).
+
+
+def has_ledger_history(conn: sqlite3.Connection, symbol: str) -> bool:
+    """Whether *symbol* appears in ANY permanent ledger (transactions / dividends /
+    opening_inventory) — the guard that forbids a hard delete (ledger integrity / 重算)."""
+    for sql in (
+        "SELECT 1 FROM transactions WHERE symbol=? LIMIT 1",
+        "SELECT 1 FROM dividends WHERE symbol=? LIMIT 1",
+        "SELECT 1 FROM opening_inventory WHERE symbol=? LIMIT 1",
+    ):
+        if conn.execute(sql, (symbol,)).fetchone() is not None:
+            return True
+    return False
+
+
+def set_instrument_archived(
+    conn: sqlite3.Connection, symbol: str, archived: bool
+) -> bool:
+    """Set (or clear) the archived flag on one instrument. Returns False if unknown."""
+    cur = conn.execute(
+        "UPDATE instruments SET archived=? WHERE symbol=?",
+        (1 if archived else 0, symbol),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """Whether a table exists — cleanup guards spare a fresh/partial DB (some derived
+    tables are created lazily by their own module's bootstrap)."""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+def _like_escape(value: str) -> str:
+    r"""Escape LIKE metacharacters (``\`` ``%`` ``_``) for use with ``ESCAPE '\'``."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def delete_instrument(conn: sqlite3.Connection, symbol: str) -> bool:
+    """Hard-delete a NEVER-TRADED watch-only symbol and its derived / cache rows, in ONE
+    transaction; audit the instruments row first (mirrors ``delete_opening``). The caller
+    (API router) has already verified the symbol is neither held nor has ledger history.
+
+    Cleaned in addition to the instruments row: ``prices``, ``dividend_events`` (both keyed
+    ``instrument``), ``signal_states`` / ``alert_events`` (keyed ``symbol``), any
+    ``pending_dividend_skips`` fingerprint for the symbol, and the symbol's entry in the
+    single-row ``target_weights_config`` JSON map. Raw SQL by table name keeps the cleanup
+    atomic without importing upward (data_ingestion imports no higher layer)."""
+    _write_audit(
+        conn, "instruments", symbol, "delete",
+        _capture(conn, "SELECT * FROM instruments WHERE symbol=?", (symbol,)),
+    )
+    for table, col in (
+        ("prices", "instrument"),
+        ("dividend_events", "instrument"),
+        ("signal_states", "symbol"),
+        ("alert_events", "symbol"),
+    ):
+        if _table_exists(conn, table):
+            conn.execute(f"DELETE FROM {table} WHERE {col}=?", (symbol,))  # noqa: S608 (fixed table/col literals)
+    if _table_exists(conn, "pending_dividend_skips"):
+        # fingerprint form: ``div:{account}:{symbol}:{ex_date}[:stock]`` (symbol = 3rd part).
+        conn.execute(
+            r"DELETE FROM pending_dividend_skips WHERE fingerprint LIKE ? ESCAPE '\'",
+            (f"div:%:{_like_escape(symbol)}:%",),
+        )
+    if _table_exists(conn, "target_weights_config"):
+        row = conn.execute(
+            "SELECT weights_json FROM target_weights_config WHERE id=1"
+        ).fetchone()
+        if row is not None and row[0]:
+            weights = json.loads(row[0])
+            if symbol in weights:
+                del weights[symbol]
+                conn.execute(
+                    "UPDATE target_weights_config SET weights_json=? WHERE id=1",
+                    (json.dumps(weights),),
+                )
+    cur = conn.execute("DELETE FROM instruments WHERE symbol=?", (symbol,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def _unarchive_on_booking(conn: sqlite3.Connection, symbol: str) -> None:
+    """Un-archive *symbol* on ANY new booking — the single write seam upholding the
+    "held => not archived" invariant across the manual, CSV, and opening-edit paths (they
+    all funnel through ``insert_transaction`` / ``upsert_opening``). No commit here: it
+    joins the caller's transaction (batch-import atomicity is preserved)."""
+    conn.execute(
+        "UPDATE instruments SET archived=0 WHERE symbol=? AND archived=1", (symbol,)
+    )
 
 
 def list_accounts(conn: sqlite3.Connection) -> list[Account]:
@@ -207,6 +318,7 @@ def insert_transaction(
             1 if daytrade else 0,
         ),
     )
+    _unarchive_on_booking(conn, symbol)  # held => not archived (FU-D13)
     if commit:
         conn.commit()
     return int(cur.lastrowid or 0)
@@ -274,6 +386,7 @@ def upsert_opening(
             build_date.isoformat(),
         ),
     )
+    _unarchive_on_booking(conn, symbol)  # held => not archived (FU-D13)
     if commit:
         conn.commit()
 

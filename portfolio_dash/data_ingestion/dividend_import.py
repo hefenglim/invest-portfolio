@@ -12,6 +12,15 @@ from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import insert_dividend
 from portfolio_dash.data_ingestion.validate import Issue
 
+# Canonical CSV column order for the dividends import — SINGLE SOURCE for the downloadable
+# template header (see data_ingestion.import_templates). Required: account, symbol, date, type,
+# gross; optional overrides: withholding, net, reinvest_shares, reinvest_price. Kept in lockstep
+# with the DictReader keys below by the round-trip guard test.
+DIVIDEND_COLUMNS: list[str] = [
+    "account", "symbol", "date", "type", "gross",
+    "withholding", "net", "reinvest_shares", "reinvest_price",
+]
+
 
 def _opt_decimal(row: dict[str, str], key: str) -> Decimal | None:
     """Return a Decimal parsed from *row[key]*, or None when missing/empty/invalid."""
@@ -34,7 +43,7 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
     (``DRIP`` / ``STOCK`` / ``cash``); ``apply_dividend_model`` fills in computed
     amounts which are stored in ``payload`` for later commit.
     """
-    reader = csv.DictReader(io.StringIO(csv_text))
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))  # tolerate a leading BOM
     rows: list[PreviewRow] = []
     for idx, raw0 in enumerate(reader):
         raw: dict[str, str] = {k.strip(): (v or "").strip() for k, v in raw0.items()}

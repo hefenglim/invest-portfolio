@@ -799,14 +799,8 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: Page) -> N
             "() => { const v = document.querySelector('#sys-prompt');"
             " return v && v.value && v.value.trim().length > 0; }"
         )
-        # 資料庫統計 (WPA, 2026-07-07): the read-only stats panel boots off
-        # GET /api/db-stats — wait for its boot signal (the note text renders on
-        # BOTH success and failure paths; file-size rows land with it).
-        page.wait_for_function(
-            "() => { const n = document.querySelector('#dbstats-note');"
-            " return n && n.textContent && n.textContent.indexOf('唯讀統計') !== -1; }"
-        )
-        page.wait_for_selector("#dbstats-body tr", state="attached")
+        # 資料庫統計 moved off settings to its own 資料中心 page (FU-D15, 2026-07-16);
+        # its smoke lives in test_data_center_page_smoke. Nothing to wait for here now.
         # Q1 fix (2026-07-07): the Request 明細 panel must exist on the CANONICAL tabbed
         # surface (previously only on standalone settings-llm.html), and clicking the
         # AI 與額度 tab must still render the daily chart (an unguarded ledger wiring
@@ -1645,3 +1639,24 @@ def test_cash_page_smoke(live_server: str, browser_page: Page) -> None:
     assert not console_errors and not page_errors, (
         f"/cash.html: console errors={console_errors!r}; page errors={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_data_center_page_smoke(live_server: str, browser_page: Page) -> None:
+    """/data-center.html (FU-D15) renders the db-stats table + 概況 summary strip off
+    GET /api/db-stats with ZERO console/page errors, and the sidebar exposes the new
+    資料中心 nav item.
+
+    The db-stats section moved verbatim off 系統設定 (same #dbstats-* ids); this page
+    adds a summary strip (#dc-summary) and per-category 小計 subtotal rows. Waiting on
+    a #dbstats-body row proves the async boot landed; the summary strip renders in the
+    same pass, so it is present once the table is.
+    """
+    page = browser_page
+    assert_page_ok(page, live_server, "/data-center.html", root_selector="#dbstats-body tr")
+    # summary strip populated + at least one per-category subtotal row rendered.
+    page.wait_for_selector("#dc-summary .dc-stat", state="attached")
+    page.wait_for_selector("#dbstats-body tr.dc-subtotal", state="attached")
+    # the new nav item is present and points at this page.
+    nav = page.query_selector("#sidebar a[href='data-center.html']")
+    assert nav is not None, "資料中心 nav item missing from the sidebar"

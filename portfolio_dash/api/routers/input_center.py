@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from portfolio_dash.api.deps import get_conn, get_now
@@ -26,6 +26,11 @@ from portfolio_dash.data_ingestion.dividend_import import (
 from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
 from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.import_templates import (
+    TEMPLATE_KINDS,
+    render_import_template,
+    template_filename,
+)
 from portfolio_dash.data_ingestion.manual import enter_transaction
 from portfolio_dash.data_ingestion.markets import account_market as _account_market
 from portfolio_dash.data_ingestion.opening_import import (
@@ -42,6 +47,7 @@ from portfolio_dash.data_ingestion.store import (
     list_transactions,
 )
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
+from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
@@ -49,6 +55,7 @@ from portfolio_dash.shared.wire import decimal_str
 router = APIRouter()
 
 _ZERO = Decimal("0")
+_BOM = "\ufeff"
 
 
 @router.get("/input/context")
@@ -356,6 +363,26 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
     accept = {r.index for r in preview.rows if not r.has_hard_issue}
     summary = commit_preview(conn, preview, accept=accept, writer=writer)
     return {"written": len(summary.written), "skipped": len(summary.skipped)}
+
+
+@router.get("/import/template")
+def import_template(kind: str = "transactions") -> Response:
+    """Download a CSV import template (canonical header + worked example rows) for *kind*.
+
+    UTF-8 **with BOM** (so Excel opens the Chinese ``note`` column cleanly) + CRLF, mirroring
+    the export download shape. The header is the parser's own column constant
+    (:mod:`data_ingestion.import_templates`) — a single source guarded by the round-trip test.
+    Unknown ``kind`` -> 400 (same envelope as the preview/commit routes).
+    """
+    if kind not in TEMPLATE_KINDS:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"未知 kind: {kind}", field="kind"))
+    body = (_BOM + render_import_template(kind)).encode("utf-8")
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": content_disposition(template_filename(kind))},
+    )
 
 
 # --- AI agents input: NL text -> preview + meta + commit CSV (12.4) ---

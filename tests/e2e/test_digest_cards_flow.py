@@ -111,7 +111,8 @@ def test_digest_cards_empty_then_generate_inplace(
         "the card update must not reload the page"
     )
 
-    # Movers render the instrument NAME with a native tooltip carrying 收盤 / 更新 parts.
+    # Movers render the instrument NAME with a native tooltip carrying 股價 / 更新 parts
+    # (FU-D14: freshly-stored digests carry `close`, so the tooltip shows 股價, not 收盤).
     page.wait_for_selector("#digest-daily-body .digest-mover")
     chips = page.query_selector_all("#digest-daily-body .digest-mover")
     assert chips, "expected mover chips after generation"
@@ -124,8 +125,8 @@ def test_digest_cards_empty_then_generate_inplace(
         f"movers should display instrument names, got {names!r}"
     )
     titles = [chip.get_attribute("title") or "" for chip in chips]
-    assert any("更新" in t and "收盤" in t and "・" in t for t in titles), (
-        f"a mover tooltip must carry 收盤 + 更新, got {titles!r}"
+    assert any("更新" in t and "股價" in t and "・" in t for t in titles), (
+        f"a mover tooltip must carry 股價 + 更新, got {titles!r}"
     )
 
     page.remove_listener("console", _on_console)

@@ -93,25 +93,27 @@ def test_movers_ranks_up_and_down() -> None:
     assert [m["symbol"] for m in out["down"]] == ["B"]     # most negative first
     assert out["up"][0]["name"] == "Gamma"
     assert out["up"][0]["pct"] == "0.10"  # Decimal string, not computed
-    # no meta supplied → quote_date / fetched_at keys are simply absent (old-payload shape)
+    # no meta supplied → quote_date / fetched_at / close keys are simply absent (old shape)
     assert "quote_date" not in out["up"][0] and "fetched_at" not in out["up"][0]
+    assert "close" not in out["up"][0]
 
 
-def test_movers_carries_quote_date_and_fetched_at_from_meta() -> None:
+def test_movers_carries_quote_date_fetched_at_and_close_from_meta() -> None:
     pcts: dict[str, Decimal | None] = {"A": Decimal("0.05"), "B": Decimal("-0.03")}
     names = {"A": "Alpha", "B": "Beta"}
-    meta: dict[str, tuple[str | None, str | None]] = {
-        "A": ("2026-07-14", "2026-07-14T15:00:00+08:00"),
-        "B": ("2026-07-14", None),  # fetched_at missing → that key omitted, quote_date kept
+    meta: dict[str, tuple[str | None, str | None, str | None]] = {
+        "A": ("2026-07-14", "2026-07-14T15:00:00+08:00", "185.50"),
+        "B": ("2026-07-14", None, None),  # fetched_at + close missing → those keys omitted
     }
     out = ds._movers(pcts, names, meta=meta, n=3)
     up = out["up"][0]
     assert up["symbol"] == "A"
     assert up["quote_date"] == "2026-07-14"
     assert up["fetched_at"] == "2026-07-14T15:00:00+08:00"
+    assert up["close"] == "185.50"  # FU-D14: later close as a Decimal string
     down = out["down"][0]
     assert down["symbol"] == "B" and down["quote_date"] == "2026-07-14"
-    assert "fetched_at" not in down  # None meta value → key omitted gracefully
+    assert "fetched_at" not in down and "close" not in down  # None meta values → keys omitted
 
 
 # --- push body: NO currency amounts (B3-D4 hard rule) -------------------------
@@ -314,9 +316,10 @@ def test_run_digest_daily_assembles_and_stores(golden_db: sqlite3.Connection) ->
     up_by_sym = {m["symbol"]: m for m in p["movers"]["up"]}
     assert {"2330", "AAPL"} <= set(up_by_sym)
     # movers carry the later-close provenance from the same price read (quote_date +
-    # fetched_at), threaded from get_price_history — the tooltip source (item 5).
+    # fetched_at + close), threaded from get_price_history — the tooltip source (FU-D14).
     assert up_by_sym["2330"]["quote_date"] == "2026-06-10"  # the second close added above
     assert up_by_sym["2330"]["fetched_at"] == GOLDEN_NOW.isoformat()
+    assert up_by_sym["2330"]["close"] == "606"  # the later close as a Decimal string
     assert p["llm_note"] is None  # default OFF
 
 

@@ -41,6 +41,12 @@
   .detail-form .form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .detail-form h3 { margin: 0 0 10px; font-size: 12px; color: var(--text-2); font-weight: 500; }
   .wl-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  tr.inst-archived { opacity: 0.5; }
+  tr.inst-archived .sym-name { font-style: italic; }
+  .status-tag.archived {
+    color: var(--text-3, var(--text-2)); border-color: var(--border);
+    background: var(--panel-2);
+  }
 </style>
 </head>
 <body data-page="instruments" data-title="觀察清單">
@@ -81,6 +87,7 @@
     </div>
     <div class="inst-toolbar">
       <input class="input" id="inst-search" type="search" placeholder="搜尋代號或名稱…"></input>
+      <button class="btn" id="toggle-archived" type="button" style="display: none;" title="顯示或隱藏已封存（停止追蹤）的標的"></button>
       <span class="spacer"></span>
       <button class="btn" id="backfill-btn" type="button" title="個股：12 個月（持倉自最早買入日起）＋匯率：自帳本最早一筆流量日起">回補歷史報價</button>
     </div>

@@ -119,15 +119,16 @@ def _movers(
     per_symbol_pct: dict[str, Decimal | None],
     names: dict[str, str],
     *,
-    meta: dict[str, tuple[str | None, str | None]] | None = None,
+    meta: dict[str, tuple[str | None, str | None, str | None]] | None = None,
     n: int = _MOVERS_N,
 ) -> dict[str, list[dict[str, str]]]:
     """Top-*n* up + top-*n* down symbols by day-change %.
 
     Each entry is ``{symbol, name, pct}`` plus, when the per-symbol *meta* map supplies
-    them, ``quote_date`` (the later close's ``as_of_date``) and ``fetched_at`` (that price
-    row's fetch timestamp) — both ISO strings the movers tooltip renders. Absent meta keys
-    are simply omitted (older stored digests never carried them; the renderer tolerates it).
+    them, ``quote_date`` (the later close's ``as_of_date``), ``fetched_at`` (that price row's
+    fetch timestamp) and ``close`` (that later close as a Decimal string, FU-D14) — all wire
+    strings the movers tooltip renders. Absent meta keys are simply omitted (older stored
+    digests never carried them; the renderer tolerates it and keeps its round-1 format).
     """
     meta = meta or {}
     ranked: list[tuple[str, Decimal]] = sorted(
@@ -138,11 +139,13 @@ def _movers(
 
     def _entry(sym: str, pct: Decimal) -> dict[str, str]:
         entry = {"symbol": sym, "name": names.get(sym, sym), "pct": decimal_str(pct)}
-        quote_date, fetched_at = meta.get(sym, (None, None))
+        quote_date, fetched_at, close = meta.get(sym, (None, None, None))
         if quote_date is not None:
             entry["quote_date"] = quote_date
         if fetched_at is not None:
             entry["fetched_at"] = fetched_at
+        if close is not None:
+            entry["close"] = close
         return entry
 
     ups = [_entry(s, p) for s, p in ranked if p > 0][:n]
@@ -176,18 +179,22 @@ def _holding_weights(rows: list[HoldingRow]) -> list[tuple[str, Decimal]]:
 
 def _per_symbol_day_change(
     conn: sqlite3.Connection, symbols: list[str], *, now: datetime
-) -> tuple[dict[str, Decimal | None], str | None, dict[str, tuple[str | None, str | None]]]:
+) -> tuple[
+    dict[str, Decimal | None], str | None, dict[str, tuple[str | None, str | None, str | None]]
+]:
     """Per-symbol day-change ratio (last two stored closes) + the latest close date used +
-    per-symbol ``(quote_date, fetched_at)`` metadata for the later close feeding each pct.
+    per-symbol ``(quote_date, fetched_at, close)`` metadata for the later close feeding each
+    pct.
 
     The metadata reuses the SAME ``get_price_history`` read (no extra query): the later close
-    is ``hist[-1]``, whose ``as_of`` is the quote date and whose ``fetched_at`` is the fetch
-    timestamp. Only symbols with a computable pct get a metadata entry.
+    is ``hist[-1]``, whose ``as_of`` is the quote date, ``fetched_at`` the fetch timestamp,
+    and ``value`` the close price (FU-D14 tooltip source). Only symbols with a computable pct
+    get a metadata entry.
     """
     start = now.date() - timedelta(days=_DAY_CHANGE_LOOKBACK_DAYS)
     end = now.date()
     out: dict[str, Decimal | None] = {}
-    meta: dict[str, tuple[str | None, str | None]] = {}
+    meta: dict[str, tuple[str | None, str | None, str | None]] = {}
     latest_as_of: date | None = None
     for sym in symbols:
         hist = get_price_history(conn, sym, start, end)
@@ -196,7 +203,7 @@ def _per_symbol_day_change(
         if pct is not None and hist:
             later = hist[-1]
             fetched = later.fetched_at.isoformat() if later.fetched_at is not None else None
-            meta[sym] = (later.as_of.isoformat(), fetched)
+            meta[sym] = (later.as_of.isoformat(), fetched, decimal_str(later.value))
             if latest_as_of is None or later.as_of > latest_as_of:
                 latest_as_of = later.as_of
     return out, (latest_as_of.isoformat() if latest_as_of is not None else None), meta
@@ -407,7 +414,8 @@ def run_digest_daily(
     # tuple defaults are typed constants — an inline ``({}, None)`` would infer too narrow
     # for the invariant dict inside the tuple.
     empty_day_change: tuple[
-        dict[str, Decimal | None], str | None, dict[str, tuple[str | None, str | None]]
+        dict[str, Decimal | None], str | None,
+        dict[str, tuple[str | None, str | None, str | None]],
     ] = ({}, None, {})
     per_symbol_pct, as_of, mover_meta = _try(
         lambda: _per_symbol_day_change(conn, held, now=now), empty_day_change
