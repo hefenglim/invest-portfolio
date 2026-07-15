@@ -246,6 +246,21 @@
     $('#m-fee-ovr').hidden = !m.feeOverride;
     $('#m-tax-ovr').hidden = !m.taxOverride;
 
+    /* FE-D1 forecast HINT (informational, 不計入成本): the server returns rebate_estimate
+       (TW charge-first next-month refund) as a Decimal STRING, or null when the account
+       never rebates. Show it under the fee field only where it applies + is positive. */
+    const rebateHint = $('#m-rebate-hint');
+    if (rebateHint) {
+      const est = (serverOk && preview) ? preview.rebate_estimate : null;
+      if (est != null && Number(est) > 0) {
+        rebateHint.textContent = '預估次月折讓 +' + f.money(est, ccy) + '（不計入成本）';
+        rebateHint.hidden = false;
+      } else {
+        rebateHint.hidden = true;
+        rebateHint.textContent = '';
+      }
+    }
+
     /* split server issues: hard (error) gates the confirm; soft (warn, e.g. oversell)
        needs an ack; info (e.g. 未註冊將自動註冊) is a notice only — never gates. */
     const hard = issues.filter((i) => i.sev === 'error');

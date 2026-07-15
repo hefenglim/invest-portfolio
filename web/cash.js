@@ -27,7 +27,7 @@
   })();
 
   const KIND_LABEL = {
-    deposit: '入金', withdraw: '出金', opening: '期初資金',
+    deposit: '入金', withdraw: '出金', opening: '期初資金', rebate: '折讓款',
     fx_in: '換入', fx_out: '換出', buy: '買入', sell: '賣出', dividend: '股利',
   };
   const settlementCcy = (a) => (a && (a.settlement_ccy || a.ccy)) || '';

@@ -113,6 +113,27 @@ CATALOG: list[Feature] = [
         area="交易帳本 → 交易輸入",
         target="#input-section",
     ),
+    # --- v0.1.19 (fee-engine v2 + 折讓款 inbox) -----------------------------------------
+    Feature(
+        version="0.1.19",
+        id="fee-engine-v2",
+        title="費用引擎升級 v2",
+        desc="改依各券商真實費率表計算手續費與稅：台股無條件捨去至整數、馬股印花稅與 SST、"
+             "美股 SEC／TAF，交易預覽即時反映",
+        href="trades.html",
+        area="交易帳本 → 交易輸入",
+        target="#input-section",
+    ),
+    Feature(
+        version="0.1.19",
+        id="rebate-inbox",
+        title="折讓款預告與確認",
+        desc="台股先收後退的次月手續費折讓自動預估並列入收件匣，實際入帳時一鍵確認記入現金池"
+             "（僅供參考，不計入成本／損益）",
+        href="dividend-inbox.html",
+        area="收件匣 → 待確認退款（折讓款）",
+        target="#rebate-section",
+    ),
     # --- v0.1.19 (P3 batch 3 · Wave 3 fix pack + UX) ------------------------------------
     Feature(
         version="0.1.19",

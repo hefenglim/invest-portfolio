@@ -296,6 +296,14 @@
       if (over) {
         foot.appendChild(el('span', 'rb-warn', '⚠ 目標合計超過 100% — 請下調部分標的'));
       }
+      /* FE-D1 forecast footnote (不計入成本): TW legs' expected next-month rebate, summed
+         server-side (reporting ccy). Only shown when a TW leg actually rebates. */
+      const rebateTotal = summary ? summary.rebate_estimate_total : null;
+      if (rebateTotal != null && Number(rebateTotal) > 0) {
+        foot.appendChild(el('div', 'sd-chart-note',
+          '預估次月折讓合計 ' + f.money(rebateTotal, REPORTING) + ' ' + REPORTING +
+          '（台股先收後退,不計入成本）'));
+      }
       /* stored 目標配置 symbols not in the preview (not held / unpriced) — surface, don't drop */
       const ewt = summary && Array.isArray(summary.excluded_with_target)
         ? summary.excluded_with_target : [];

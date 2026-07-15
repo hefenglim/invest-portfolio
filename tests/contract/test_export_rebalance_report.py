@@ -27,6 +27,16 @@ def test_export_rebalance_report_ok(api_client: TestClient) -> None:
     assert "再平衡試算執行指南" in doc
 
 
+def test_export_rebalance_report_rebate_footnote(api_client: TestClient) -> None:
+    """FE-D1: a TW sell leg surfaces the 預估次月折讓 footnote, clearly 不計入成本."""
+    r = api_client.post(
+        "/api/export/rebalance-report", json={"targets": {"2330": "0.30", "AAPL": "0.70"}}
+    )
+    assert r.status_code == 200
+    doc = r.content.decode("utf-8")
+    assert "預估次月折讓合計" in doc and "不計入成本" in doc
+
+
 def test_export_rebalance_report_negative_ratio_400(api_client: TestClient) -> None:
     """Mirrors the preview route: a negative ratio is a 400 validation_error / field=targets."""
     r = api_client.post("/api/export/rebalance-report", json={"targets": {"2330": "-0.1"}})

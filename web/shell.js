@@ -8,7 +8,7 @@
   const NAV = [
     { id: 'dashboard',   href: 'index.html',       label: '儀表板',   ico: '◫' },
     { id: 'ledger',      href: 'trades.html',       label: '交易帳本', ico: '≣' },
-    { id: 'divinbox',    href: 'dividend-inbox.html', label: '股利收件匣', ico: '⇩' },
+    { id: 'divinbox',    href: 'dividend-inbox.html', label: '收件匣', ico: '⇩' },
     { id: 'cash',        href: 'cash.html',          label: '資金管理', ico: '＄' },
     { id: 'instruments', href: 'instruments.html',  label: '觀察清單', ico: '◎' },
     { id: 'insights',    href: 'insights.html',     label: 'AI 洞察',  ico: '◈' },
@@ -740,21 +740,27 @@
   }
   pdInitPrefs();
 
-  /* 待確認匯入 sidebar badge (R6 item 4): pending-count on the 股利收件匣 nav item
-     so detections are visible from ANY page (re-pointed off 交易帳本 to the standalone
-     股利收件匣 page in 3E). Non-critical: silent on failure. */
+  /* 收件匣 sidebar badge (R6 item 4; Wave B): ONE pending-count on the 收件匣 nav item =
+     配息偵測 + 待確認折讓款, so both surfaces are visible from ANY page. Two lightweight
+     count fetches summed into a single badge number. Non-critical: silent on failure. */
   function pdInitInboxBadge() {
     if (page === 'login') return;
     pdEnsureApi()
-      .then((ok) => (ok ? window.pdApi.get('/api/dividend-inbox/count') : null))
-      .then((resp) => {
-        const n = resp && resp.count;
+      .then((ok) => (ok ? Promise.all([
+        window.pdApi.get('/api/dividend-inbox/count').catch(() => null),
+        window.pdApi.get('/api/rebates/count').catch(() => null),
+      ]) : null))
+      .then((results) => {
+        if (!results) return;
+        const dv = (results[0] && results[0].count) || 0;
+        const rb = (results[1] && results[1].count) || 0;
+        const n = dv + rb;
         if (!n) return;
         const items = document.querySelectorAll('#sidebar .sb-item');
         for (const a of items) {
           if (a.getAttribute('href') === 'dividend-inbox.html') {
             const b = el('span', 'sb-badge sb-badge-alert', String(n));
-            b.title = n + ' 筆偵測到的配息待確認';
+            b.title = n + ' 筆待確認（配息 ' + dv + '・折讓款 ' + rb + '）';
             a.appendChild(b);
             break;
           }
