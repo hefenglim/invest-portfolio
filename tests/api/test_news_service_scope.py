@@ -7,6 +7,7 @@ unknown = None -> the router 400s). These assert the universe resolution WITHOUT
 the network (run_news_for is monkeypatched to capture its argument)."""
 
 import sqlite3
+from collections.abc import Iterable
 
 import pytest
 
@@ -45,16 +46,16 @@ def test_scope_all_includes_watchlist_but_daily_stays_held_only(
     all_universe = news_service.resolve_news_scope(golden_db, "all")
     assert all_universe is not None and ("MSFT", "US") in all_universe
 
-    captured: dict[str, object] = {}
+    captured: dict[str, list[tuple[str, str]]] = {}
 
     def _fake_run_news_for(
-        conn: sqlite3.Connection, symbols: object, *, now: object
+        conn: sqlite3.Connection, symbols: Iterable[tuple[str, str]], *, now: object
     ) -> dict[str, int]:
-        captured["symbols"] = list(symbols)  # type: ignore[arg-type]
+        captured["symbols"] = list(symbols)
         return {"organized": 0}
 
     monkeypatch.setattr(news_service, "run_news_for", _fake_run_news_for)
     news_service.run_news_daily(golden_db, now=GOLDEN_NOW)
     # golden holds 2330 (tw_broker) + AAPL (schwab); MSFT is watchlist-only.
-    assert set(captured["symbols"]) == {("2330", "TW"), ("AAPL", "US")}  # type: ignore[arg-type]
-    assert ("MSFT", "US") not in captured["symbols"]  # type: ignore[operator]
+    assert set(captured["symbols"]) == {("2330", "TW"), ("AAPL", "US")}
+    assert ("MSFT", "US") not in captured["symbols"]

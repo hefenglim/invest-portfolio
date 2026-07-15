@@ -30,6 +30,13 @@
     if (window.toast) window.toast(msg, kind, code);
   }
 
+  /* Desync fix (FU-D3): after ANY schedule-row write, broadcast so the digest card
+     (settings-digest.js, now on this same tab) and this jobs table both re-fetch from
+     fresh data. The listeners GET + re-render only (never re-PUT), so there is no loop. */
+  function dispatchJobsChanged() {
+    document.dispatchEvent(new CustomEvent('pd-jobs-changed'));
+  }
+
   /* Structural data from the GETs. Starts empty so a pre-fetch render is blank. */
   let jobs = [];
   let runs = [];
@@ -94,7 +101,7 @@
         try {
           await api.put('/api/scheduler/jobs/' + encodeURIComponent(j.id), { enabled: next });
           _toast('已更新', 'ok', j.id + (next ? ' 已啟用' : ' 已停用'));
-          await boot();
+          dispatchJobsChanged();
         } catch (err) {
           _toast((err && err.message) || '更新失敗', 'fail', err && err.code);
           t.disabled = false;
@@ -118,7 +125,7 @@
         try {
           await api.put('/api/scheduler/jobs/' + encodeURIComponent(j.id), { cron: cron });
           _toast('排程已更新', 'ok', j.id + ' · ' + cron);
-          await boot();
+          dispatchJobsChanged();
         } catch (err) {
           cronInput.classList.add('field-error');
           _toast((err && err.message) || 'cron 更新失敗', 'fail', err && err.code);
@@ -361,6 +368,24 @@
     await refreshRuns();
     refreshSyslog();  // section C, independent fetch (graceful on failure)
   }
+
+  /* Lightweight refresh of JUST the jobs table (cron / enabled / next-fire) — run when a
+     schedule row changes anywhere (pd-jobs-changed, incl. an edit on the digest card) or
+     when the 排程中心 tab is (re)activated. Re-fetch + re-render only; never re-PUT, so a
+     self-echo from this script's own dispatch is an idempotent no-op (no loop). */
+  async function refreshJobs() {
+    const jobsResp = await api.get('/api/scheduler/jobs').catch(() => null);
+    if (jobsResp && jobsResp.jobs) {
+      jobs = jobsResp.jobs;
+      renderJobs();
+      initHistFilter();  // job list unchanged in practice; preserves the active filter chip
+    }
+  }
+
+  document.addEventListener('pd-jobs-changed', refreshJobs);
+  window.addEventListener('pd-settings-tab', (e) => {
+    if (e && e.detail === 'scheduler') refreshJobs();
+  });
 
   boot();
 })();

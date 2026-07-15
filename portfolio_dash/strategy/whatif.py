@@ -143,7 +143,7 @@ def compute_whatif(
     rule_name = _fee_rule_set_name(conn, resolved)
     if rule_name is None:
         raise WhatIfError(f"未知帳戶 {resolved}")
-    rules = get_fee_rule_set(rule_name)
+    rules = get_fee_rule_set(rule_name, conn)
 
     held = _holding_for(book.holdings, resolved, symbol)
     held_shares = held.shares if held is not None else _ZERO

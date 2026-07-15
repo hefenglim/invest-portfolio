@@ -59,10 +59,14 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     # 系統記錄 — operational history
     _TableSpec("job_runs", "排程執行紀錄", "系統記錄", "started_at"),
     _TableSpec("action_log", "系統操作記錄", "系統記錄", "ts"),
+    _TableSpec("ledger_audit", "帳本操作稽核", "系統記錄", "at"),
     _TableSpec("alert_events", "預警事件", "系統記錄", "fired_at"),
     _TableSpec("alert_dispatch_log", "預警派發紀錄", "系統記錄", "dispatched_at"),
     _TableSpec("signal_states", "技術訊號狀態", "系統記錄", "updated_at"),
     _TableSpec("pending_dividend_skips", "配息略過記錄", "系統記錄", "skipped_at"),
+    _TableSpec("rebate_skips", "折讓款略過記錄", "系統記錄", "skipped_at"),
+    _TableSpec("digests", "摘要卡", "系統記錄", "digest_date"),
+    _TableSpec("whatsnew_seen", "新功能已讀記錄", "系統記錄", "seen_at"),
     _TableSpec("auth_users", "授權用戶", "系統記錄", None),
     _TableSpec("auth_sessions", "登入工作階段", "系統記錄", None),
     # 設定 — small config stores (registered so they don't read as "unknown")
@@ -78,6 +82,11 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("evolution_config", "AI 進化設定", "設定", None),
     _TableSpec("system_prompt_config", "系統提示詞", "設定", None),
     _TableSpec("news_prompt_config", "新聞整理提示詞", "設定", None),
+    _TableSpec("target_weights_config", "目標配置", "設定", None),
+    _TableSpec("notify_config", "通知設定", "設定", None),
+    _TableSpec("digest_config", "摘要設定", "設定", None),
+    _TableSpec("whatsnew_config", "新功能面板設定", "設定", None),
+    _TableSpec("fee_rule_overrides", "費率調整", "設定", "updated_at"),
     _TableSpec("ui_prefs_config", "介面偏好", "設定", None),
     _TableSpec("settings_meta", "設定種子記錄", "設定", None),
 )

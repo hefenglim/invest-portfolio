@@ -294,6 +294,15 @@ assumption).
 - **Manual override**: on input / edit the user may explicitly overwrite `fee` / `tax`;
   the system then uses the override value and marks `override: true` in `snapshot`
   (see §10's `_recompute_edit_fees`).
+- **User-adjustable rates (FU-D1, overlay)**: each rule set's rates / tax rates / rounding mode
+  can be adjusted under Settings → Accounts & Fees, backed by a DB overlay
+  (`data_ingestion/fee_overrides.py`, table `fee_rule_overrides`) layered over the v2 seed
+  defaults: **effective rule set = v2 defaults ⊕ overlay**, resolved conn-aware at EVERY money
+  call site (`get_fee_rule_set(name, conn)`; `conn=None` always returns the seed defaults, for
+  the oracle / unit tests). Edits affect **FUTURE trades only** — historical rows are still
+  arbitrated by their own `fee_rule_snapshot` (§3, §10.2) and are never recomputed. Reset
+  semantics: clearing a field (null = revert one field) or deleting the whole overlay row
+  (per-set / reset-all) returns it to the seed defaults.
 - **fee-engine v2 is implemented from the owner's complete schedules (2026-07-15)**:
   `config_seed.py::FEE_RULES` now carries the complete schedules from
   `docs/reference/broker-fee-schedules-2026-07.md`; §3.1–§3.4 document what the v2 engine

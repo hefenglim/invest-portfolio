@@ -20,6 +20,9 @@
     display: flex; flex-direction: column; gap: 6px;
   }
   .cash-card .acct { font-weight: 700; font-size: 12px; }
+  .cash-card .acct.clickable { cursor: pointer; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; }
+  .cash-card .acct.clickable:hover { background: var(--panel-3); }
+  .cash-card .acct.active { background: var(--accent-soft); }
   .cash-line { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; gap: 8px; }
   .cash-line.clickable { cursor: pointer; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; }
   .cash-line.clickable:hover { background: var(--panel-3); }
@@ -64,12 +67,14 @@
   <section class="panel" id="cash-statement" data-screen-label="現金收支明細">
     <div class="panel-head">
       <h2 class="panel-title">現金收支明細</h2>
-      <span class="panel-sub" id="cash-stmt-sub">點上方任一帳戶幣別，查看該資金池的收支明細與滾動餘額</span>
+      <span class="panel-sub" id="cash-stmt-sub">點帳戶名稱看全部幣別，或點某個幣別看單一資金池的收支明細與滾動餘額</span>
+      <span class="spacer"></span>
+      <div class="toolbar" id="cash-stmt-export"></div>
     </div>
     <div class="table-wrap">
       <table class="data">
         <thead>
-          <tr><th>日期</th><th class="col-text">類型</th><th class="col-text">說明</th><th>金額</th><th>餘額</th></tr>
+          <tr><th>日期</th><th class="col-text">類型</th><th class="col-ccy" id="cash-stmt-ccy-th" hidden="hidden">幣別</th><th class="col-text">說明</th><th>金額</th><th>餘額</th></tr>
         </thead>
         <tbody id="cash-stmt-body"></tbody>
       </table>

@@ -14,6 +14,14 @@
   const files = document.getElementById('dbstats-files');
   const note = document.getElementById('dbstats-note');
   const refreshBtn = document.getElementById('dbstats-refresh');
+  const updated = document.getElementById('dbstats-updated');
+
+  function stampUpdated() {
+    if (!updated) return;
+    const d = new Date();
+    const p = (n) => (n < 10 ? '0' : '') + n;
+    updated.textContent = '更新於 ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
 
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -71,6 +79,7 @@
     renderGroups(p.groups || []);
     if (n.present) renderGroups(n.groups || []);
     if (note) note.textContent = '唯讀統計 — 供保留期限評估；目前不做任何自動清理。';
+    stampUpdated();
   }
 
   function load() {

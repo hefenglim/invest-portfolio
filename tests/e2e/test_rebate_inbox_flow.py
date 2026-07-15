@@ -81,6 +81,14 @@ def test_rebate_inbox_two_panel_and_confirm(
         # sidebar badge counts the pending rebate (1 rebate + 0 dividends) on every page.
         page.wait_for_selector(".sb-badge-alert")
 
+        # 明細 (FU-D6): expand the collapsed per-trade breakdown. The sole prior-month trade
+        # renders (2330 buy, fee 142 -> 預估 109). The 明細 toggle is the item's only .btn-sm,
+        # so 確認入帳 stays the only .btn-primary (the confirm selector below is unaffected).
+        page.click("#rebate-list .inbox-item .btn-sm")
+        page.wait_for_selector("#rebate-list .rbt-detail:not([hidden]) .rbt-table tbody tr")
+        detail_text = page.inner_text("#rebate-list .rbt-detail")
+        assert "142" in detail_text and "109" in detail_text and "2330" in detail_text
+
         # 確認入帳 -> a small prompt with the estimate PREFILLED into an editable amount input.
         page.click("#rebate-list .inbox-item .btn-primary")
         page.wait_for_selector(".modal-backdrop .modal input")

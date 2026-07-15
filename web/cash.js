@@ -70,7 +70,13 @@
     });
     accounts.forEach((a) => {
       const card = el('div', 'cash-card');
-      card.appendChild(el('div', 'acct', a.name));
+      /* Account name = clickable header -> the ACCOUNT-LEVEL all-currency statement
+         (openStatement with ccy=null); active when that combined view is open. */
+      const acctDiv = el('div', 'acct clickable', a.name);
+      if (stmt.account === a.id && stmt.ccy == null) acctDiv.classList.add('active');
+      acctDiv.title = '點擊查看全部幣別收支明細';
+      acctDiv.addEventListener('click', () => openStatement(a.id, null));
+      card.appendChild(acctDiv);
       const entry = byAcct.get(a.id);
       if (!entry || !entry.lines.length) {
         card.appendChild(el('div', 'hint', '尚無現金紀錄'));
@@ -144,27 +150,65 @@
     if (stmtPager) stmtPager.update({ offset: stmt.offset, totalCount: stmt.total });
   }
 
+  /* Compose the 說明 line from a row's structured detail (display-only formatting via the
+     f.* helpers). Falls back to the note/ref for movements; empty note -> 「（無備註）」. */
+  function describe(r) {
+    const ccy = r.ccy;
+    if (r.kind === 'buy' || r.kind === 'sell') {
+      const verb = r.kind === 'buy' ? '買入' : '賣出';
+      const nm = r.name ? r.name + '（' + r.symbol + '）' : (r.symbol || '');
+      return verb + ' ' + nm + ' ' + f.num(r.qty, 0) + ' 股 @ ' + f.price(r.price, ccy) +
+        '（費 ' + f.money(r.fee, ccy) + '・稅 ' + f.money(r.tax, ccy) + '）';
+    }
+    if (r.kind === 'dividend') {
+      const nm = r.name ? r.name + '（' + r.symbol + '）' : (r.symbol || '');
+      return '配息 ' + nm;
+    }
+    if (r.kind === 'fx_in' || r.kind === 'fx_out') {
+      let s = '換匯 ' + (r.ref || '');
+      if (r.fx_rate != null) s += ' @ ' + f.rate(r.fx_rate);
+      if (r.counter_amount != null && r.counter_ccy) {
+        s += '（對應 ' + f.signed(r.counter_amount, r.counter_ccy) + ' ' + r.counter_ccy + '）';
+      }
+      return s;
+    }
+    const note = (r.ref || '').trim();
+    return note || '（無備註）';
+  }
+
   function renderStatement(resp) {
+    const combined = resp.ccy == null;  // account-level all-currency view
     const sub = $('#cash-stmt-sub');
     if (sub) {
-      sub.textContent = (resp.account || stmt.account) + '・' + resp.ccy +
-        '　目前餘額 ' + f.money(resp.current_balance, resp.ccy) + ' ' + resp.ccy;
+      if (combined) {
+        const bals = (resp.balances || [])
+          .map((b) => b.ccy + ' ' + f.money(b.balance, b.ccy)).join('　·　');
+        sub.textContent = (resp.account || stmt.account) + '・全部幣別' +
+          (bals ? '　目前餘額 ' + bals : '');
+      } else {
+        sub.textContent = (resp.account || stmt.account) + '・' + resp.ccy +
+          '　目前餘額 ' + f.money(resp.current_balance, resp.ccy) + ' ' + resp.ccy;
+      }
     }
+    const ccyTh = $('#cash-stmt-ccy-th');
+    if (ccyTh) ccyTh.hidden = !combined;
     const tbody = $('#cash-stmt-body');
     tbody.replaceChildren();
     (resp.rows || []).forEach((r) => {
+      const rowCcy = r.ccy || resp.ccy;
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(r.date)));
       const tdKind = el('td', 'col-text');
       tdKind.appendChild(el('span', 'stmt-chip', KIND_LABEL[r.kind] || r.kind));
       tr.appendChild(tdKind);
-      tr.appendChild(el('td', 'col-text', r.ref || ''));
+      if (combined) tr.appendChild(el('td', 'num col-ccy', rowCcy));
+      tr.appendChild(el('td', 'col-text', describe(r)));
       const tdDelta = el('td', 'num');
-      tdDelta.textContent = f.signed(r.delta, resp.ccy);
+      tdDelta.textContent = f.signed(r.delta, rowCcy);
       if (String(r.delta).indexOf('-') === 0) tdDelta.classList.add('sign-down');
       tr.appendChild(tdDelta);
       const tdBal = el('td', 'num');
-      tdBal.textContent = f.money(r.balance, resp.ccy);
+      tdBal.textContent = f.money(r.balance, rowCcy);
       if (String(r.balance).indexOf('-') === 0) { tdBal.style.color = 'var(--amber)'; }
       tr.appendChild(tdBal);
       tbody.appendChild(tr);
@@ -172,10 +216,40 @@
     if (!(resp.rows || []).length) {
       const tr = el('tr');
       const td = el('td', 'hint', '此資金池尚無收支紀錄');
-      td.colSpan = 5;
+      td.colSpan = combined ? 6 : 5;
       tr.appendChild(td);
       tbody.appendChild(tr);
     }
+  }
+
+  /* ---- statement exports: server-side reconciliation channel (匯出 CSV / 匯出報告) ----
+     Both post the CURRENT statement scope {account, ccy} (ccy null = all-currency view).
+     House style: pdBusy guards double-clicks, fail toast, filename from Content-Disposition. */
+  function makeStmtExportButton(label, icon, path) {
+    const b = el('button', 'btn btn-sm');
+    b.type = 'button';
+    b.appendChild(el('span', 'ico', icon));
+    b.appendChild(el('span', null, label));
+    b.addEventListener('click', async () => {
+      if (!stmt.account) { if (window.toast) window.toast('請先選擇資金池', 'fail'); return; }
+      const restore = window.pdBusy ? window.pdBusy(b, '匯出中…') : () => {};
+      try {
+        await api.download(path, { account: stmt.account, ccy: stmt.ccy });
+      } catch (err) {
+        if (window.toast) window.toast((err && err.message) || '匯出失敗', 'fail', err && err.code);
+      } finally {
+        restore();
+      }
+    });
+    return b;
+  }
+
+  function initStmtExports() {
+    const host = $('#cash-stmt-export');
+    if (!host) return;
+    host.replaceChildren();
+    host.appendChild(makeStmtExportButton('匯出 CSV', '⬇', '/api/export/cash-statement'));
+    host.appendChild(makeStmtExportButton('匯出報告', '⎙', '/api/export/cash-statement-report'));
   }
 
   /* ---- C. movements ledger ---- */
@@ -473,6 +547,7 @@
       accounts = [];
     }
     initForms();
+    initStmtExports();
     await boot();
   })();
 })();

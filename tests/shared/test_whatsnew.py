@@ -26,7 +26,9 @@ _NOW = datetime(2026, 7, 13, 12, 0, 0)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WEB_DIR = _REPO_ROOT / "web"
 # The settings page's own tab ids (mirrors the valid list in web/settings.html).
-_SETTINGS_TABS = {"llm", "prompts", "scheduler", "accounts", "datasources", "alerts", "exports"}
+_SETTINGS_TABS = {
+    "llm", "prompts", "scheduler", "accounts", "datasources", "alerts", "notify", "exports",
+}
 
 
 def _mem_conn() -> sqlite3.Connection:

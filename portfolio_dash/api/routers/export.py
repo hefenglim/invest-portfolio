@@ -22,6 +22,10 @@ from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.export.ai_predictions import build_ai_predictions_csv
 from portfolio_dash.export.artifact import ExportArtifact, content_disposition
+from portfolio_dash.export.cash_statement import (
+    build_cash_statement_csv,
+    build_cash_statement_report_html,
+)
 from portfolio_dash.export.holdings import build_holdings_csv
 from portfolio_dash.export.holdings_report import build_holdings_report_html
 from portfolio_dash.export.ledgers import LEDGER_KINDS, build_ledger_csv, build_ledgers_zip
@@ -203,6 +207,44 @@ def export_tax_package(
     return _respond(
         build_tax_package_zip(conn, now=now, year=body.year, reporting=reporting)
     )
+
+
+class CashStatementBody(BaseModel):
+    account: str
+    ccy: Currency | None = None  # None = the account's all-currency statement (FU-D5)
+
+
+@router.post("/export/cash-statement")
+def export_cash_statement(
+    body: CashStatementBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Response:
+    # 現金收支明細 CSV for one account (all pools when ccy is null), from the SAME
+    # pool_lines/running_statement seam the statement view uses. Unknown account -> 400.
+    art = build_cash_statement_csv(conn, account=body.account, ccy=body.ccy, now=now)
+    if art is None:
+        return JSONResponse(
+            status_code=400,
+            content=error_body("validation_error", f"未知帳戶：{body.account}", field="account"),
+        )
+    return _respond(art)
+
+
+@router.post("/export/cash-statement-report")
+def export_cash_statement_report(
+    body: CashStatementBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Response:
+    # Print-optimized 現金收支明細 report (one section per pool). Unknown account -> 400.
+    art = build_cash_statement_report_html(conn, account=body.account, ccy=body.ccy, now=now)
+    if art is None:
+        return JSONResponse(
+            status_code=400,
+            content=error_body("validation_error", f"未知帳戶：{body.account}", field="account"),
+        )
+    return _respond(art)
 
 
 class RebalanceReportBody(BaseModel):

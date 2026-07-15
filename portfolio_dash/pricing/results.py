@@ -46,6 +46,10 @@ class PriceRead(BaseModel):
     # Additive/optional so existing consumers (spark_30d, dashboard price reads) are
     # unaffected; populated by ``get_price_history`` and fed to the technical volume signal.
     volume: Money | None = None
+    # When this price row was fetched (provenance timestamp; NOT a market date). Additive/
+    # optional so existing consumers are unaffected; populated by ``get_price_history`` and
+    # surfaced by the digest movers tooltip (更新 <fetched_at>).
+    fetched_at: datetime | None = None
 
 
 class FxRead(BaseModel):

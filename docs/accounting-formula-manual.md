@@ -249,6 +249,12 @@ $$\boxed{\text{fee} = \text{comm} + \text{platform} + \text{clearing} + \text{ss
 
 - **手動覆寫**：使用者於輸入／編輯時可顯式改寫 `fee` / `tax`；此時系統以覆寫值為準，並在 `snapshot`
   標記 `override: true`（見 §10 之 `_recompute_edit_fees`）。
+- **費率可調整（FU-D1，overlay）**：各規則集的費率／稅率／捨入方式可於「設定→帳戶與費率」調整，
+  由一層 DB overlay（`data_ingestion/fee_overrides.py`，表 `fee_rule_overrides`）疊加於 v2 種子預設之上；
+  **有效規則集＝v2 預設 ⊕ overlay**，於每個金額計算點 conn-aware 解析（`get_fee_rule_set(name, conn)`；
+  `conn=None` 恆回種子預設，供 oracle／單元測試）。調整**僅影響未來交易**——歷史列仍以其
+  `fee_rule_snapshot`（本節 §3、§10.2）為最終裁定，永不重算。重設語意：清空該欄位（null＝還原單一欄位）
+  或刪除整列 overlay（每規則集／全部重設）即回種子預設。
 - **fee-engine v2 已依 owner 完整費表實作（2026-07-15）**：`config_seed.py::FEE_RULES` 已載入
   `docs/reference/broker-fee-schedules-2026-07.md` 之完整費表；§3.1–§3.4 記述的即為 v2 引擎實際計算。先前 v1
   與費表之「已知分歧」（US `sec_fee` 0.0000278→0.0000206、TAF/CAT/平台/交收費、MY 結構、TW 捨入）**已於 v2

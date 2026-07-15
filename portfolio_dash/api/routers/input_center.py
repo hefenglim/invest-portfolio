@@ -72,7 +72,8 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         for a in accts
     ]
     fee_rules = {
-        aid: fee_rules_wire(get_fee_rule_set(m["fee_rule_set"])) for aid, m in meta.items()
+        aid: fee_rules_wire(get_fee_rule_set(m["fee_rule_set"], conn))
+        for aid, m in meta.items()
     }
     insts = list_instruments(conn)
     instruments = [
@@ -133,7 +134,7 @@ def _rule_for(conn: sqlite3.Connection, account_id: str) -> FeeRuleSet | None:
     row = conn.execute(
         "SELECT fee_rule_set FROM accounts WHERE account_id=?", (account_id,)
     ).fetchone()
-    return get_fee_rule_set(row["fee_rule_set"]) if row is not None else None
+    return get_fee_rule_set(row["fee_rule_set"], conn) if row is not None else None
 
 
 def _issue_wire_manual(issue: Issue, symbol: str) -> dict[str, Any]:

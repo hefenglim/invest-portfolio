@@ -115,18 +115,8 @@
     });
     const mdt = $('#m-daytrade');
     if (mdt) mdt.addEventListener('change', schedulePreview);
-    $('#m-fee-pencil').addEventListener('click', () => {
-      m.feeOverride = true;
-      $('#m-fee').readOnly = false;
-      $('#m-fee').focus();
-      schedulePreview();
-    });
-    $('#m-tax-pencil').addEventListener('click', () => {
-      m.taxOverride = true;
-      $('#m-tax').readOnly = false;
-      $('#m-tax').focus();
-      schedulePreview();
-    });
+    $('#m-fee-pencil').addEventListener('click', () => toggleOverride('fee'));
+    $('#m-tax-pencil').addEventListener('click', () => toggleOverride('tax'));
     $('#m-fee').addEventListener('input', schedulePreview);
     $('#m-tax').addEventListener('input', schedulePreview);
     $('#m-confirm').addEventListener('click', commitManual);
@@ -139,6 +129,27 @@
     $('#m-side-sell').classList.toggle('active', s === 'sell');
     $('#m-side-sell').classList.toggle('sell-on', s === 'sell');
     schedulePreview();
+  }
+
+  /* fee/tax override is a TRUE toggle (FU-D7). ON: flag true, field editable, pencil
+     pressed. OFF: flag false, field read-only, pencil released — schedulePreview() then
+     repopulates the auto-computed value (runManualPreview only writes fee/tax back when
+     the flag is false) and the commit body drops fee_override/tax_override. Visual state
+     rides on the pencil's aria-pressed (styled in input.css) + a swapped title. */
+  function applyOverrideState(kind, on) {
+    const isFee = kind === 'fee';
+    if (isFee) m.feeOverride = on; else m.taxOverride = on;
+    const field = $(isFee ? '#m-fee' : '#m-tax');
+    const pencil = $(isFee ? '#m-fee-pencil' : '#m-tax-pencil');
+    field.readOnly = !on;
+    pencil.setAttribute('aria-pressed', on ? 'true' : 'false');
+    pencil.title = on ? '取消覆寫（回自動計算）' : '覆寫';
+  }
+  function toggleOverride(kind) {
+    const on = !(kind === 'fee' ? m.feeOverride : m.taxOverride);
+    applyOverrideState(kind, on);
+    if (on) $(kind === 'fee' ? '#m-fee' : '#m-tax').focus();
+    schedulePreview();  // OFF -> auto value returns; ON -> re-preview with the override
   }
 
   /* Build the ManualBody for /input/manual/preview & /commit. fee/tax overrides ride
@@ -388,9 +399,8 @@
         : '';
       window.toast('寫入成功', 'ok', '交易已寫入帳本 ' + id + arTxt);
     }
-    /* reset draft state and re-preview a clean form */
-    m.feeOverride = false; m.taxOverride = false; m.acked = false;
-    $('#m-fee').readOnly = true; $('#m-tax').readOnly = true;
+    /* reset draft state and re-preview a clean form (clears the override toggles too) */
+    applyOverrideState('fee', false); applyOverrideState('tax', false); m.acked = false;
     $('#m-shares').value = '';
     $('#m-price').value = '';
     schedulePreview();

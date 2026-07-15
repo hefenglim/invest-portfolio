@@ -82,7 +82,7 @@ def confirm(
         "SELECT fee_rule_set FROM accounts WHERE account_id=?", (body.account_id,)
     ).fetchone()
     rebate_rate = (
-        get_fee_rule_set(rule_row["fee_rule_set"]).rebate_rate if rule_row is not None
+        get_fee_rule_set(rule_row["fee_rule_set"], conn).rebate_rate if rule_row is not None
         else _ZERO
     )
     if acct is None or rebate_rate <= _ZERO:

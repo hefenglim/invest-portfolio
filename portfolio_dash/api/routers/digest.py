@@ -1,9 +1,11 @@
 """Digest API (P3 batch 3 · Wave 1): latest / history / manual run / config.
 
 Thin router over ``ops.digest`` (storage + config) and the scheduler run seam. READS
-(latest / history / config GET) are open; WRITES (manual run / config PUT) return **403**
-in guest/demo mode — mirroring ``api/routers/notify.py`` (``auth_store.is_protected``, an
-app-level check independent of the global session gate). The manual run mirrors the
+(latest / history / config GET) are open. The manual run (``POST /digest/run``) is ALSO open
+in guest/demo mode (FU-D4 — a compute+cache action; the outbound push is separately
+suppressed in ``digest_service._push`` when guest), while ``PUT /digest/config`` keeps its
+**403** in guest/demo mode — mirroring ``api/routers/notify.py`` (``auth_store.is_protected``,
+an app-level check independent of the global session gate). The manual run mirrors the
 scheduler router's ``/run`` (async 202 + background thread + a ``job_runs`` row; 409 when a
 run is already in flight).
 
@@ -95,9 +97,12 @@ def run_now(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    """Manually regenerate a digest (async 202). Guest → 403; already-running → 409."""
-    if not auth_store.is_protected(conn):
-        return _guest_forbidden()
+    """Manually regenerate a digest (async 202); already-running → 409.
+
+    Open in guest/demo mode (FU-D4): generation + caching is a compute action, so it is NOT
+    gated — but ``digest_service._push`` suppresses the outbound push when the app is in guest
+    mode, so no notification leaves the demo. ``PUT /digest/config`` keeps its 403.
+    """
     if body.kind not in digest_store.VALID_KINDS:
         return _bad_kind()
     job_id = _JOB_ID[body.kind]

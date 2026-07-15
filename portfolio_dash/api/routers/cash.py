@@ -39,7 +39,13 @@ from portfolio_dash.data_ingestion.store import (
     list_transactions,
     update_cash_movement,
 )
-from portfolio_dash.portfolio.cash import cash_balances, pool_lines, running_min, running_statement
+from portfolio_dash.portfolio.cash import (
+    CashLine,
+    account_statement,
+    cash_balances,
+    pool_lines,
+    running_min,
+)
 from portfolio_dash.pricing.store import get_fx
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Account
@@ -183,43 +189,81 @@ def cash_overview(
     }
 
 
+def _stmt_row_wire(ccy: Currency, ln: CashLine, bal: Decimal) -> dict[str, Any]:
+    """One statement row: the existing keys (date/kind/ref/delta/balance) + the per-row
+    ``ccy`` (needed by the combined view) + the OPTIONAL structured detail keys (null when
+    the field does not apply to the kind). Every Decimal is a wire STRING."""
+    def _d(value: Decimal | None) -> str | None:
+        return decimal_str(value) if value is not None else None
+
+    return {
+        "date": ln.date.isoformat(),
+        "ccy": ccy.value,
+        "kind": ln.kind,
+        "ref": ln.ref,
+        "delta": decimal_str(ln.delta),
+        "balance": decimal_str(bal),
+        "symbol": ln.symbol,
+        "name": ln.name,
+        "qty": _d(ln.qty),
+        "price": _d(ln.price),
+        "fee": _d(ln.fee),
+        "tax": _d(ln.tax),
+        "fx_rate": _d(ln.fx_rate),
+        "counter_ccy": ln.counter_ccy,
+        "counter_amount": _d(ln.counter_amount),
+    }
+
+
 @router.get("/cash/statement")
 def cash_statement(
     account: str = Query(...),
-    ccy: Currency = Query(...),
+    ccy: Currency | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
-    """Merged, date-ordered flow timeline for one (account, ccy) pool with a
-    server-computed running balance (audit C5). Newest-first, paged; Decimal strings."""
+    """Merged, date-ordered flow timeline with a server-computed running balance (audit C5).
+
+    ``ccy`` given → one (account, ccy) pool (``ccy`` echoed; ``current_balance`` set).
+    ``ccy`` absent → the ACCOUNT-LEVEL all-currency view: every pool's rows merged
+    newest-first, each row carrying its own ``ccy`` and its per-(account, ccy) running
+    balance (balances are NEVER blended across currencies); envelope ``ccy`` is null and a
+    per-ccy ``balances`` list is returned. Newest-first, paged; Decimal strings."""
     accounts = _accounts(conn)
     acct = accounts.get(account)
     if acct is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"帳戶 {account} 不存在", field="account"))
-    lines = pool_lines(
-        account, ccy, list_cash_movements(conn), list_fx_conversions(conn),
+    statements = account_statement(
+        account, list_cash_movements(conn), list_fx_conversions(conn),
         list_transactions(conn), list_dividends(conn),
-        {i.symbol: i for i in list_instruments(conn)},
+        {i.symbol: i for i in list_instruments(conn)}, ccy=ccy,
     )
-    stmt = running_statement(lines)
-    current_balance = stmt[-1][1] if stmt else _ZERO
-    rows_all = [
-        {
-            "date": ln.date.isoformat(), "kind": ln.kind, "ref": ln.ref,
-            "delta": decimal_str(ln.delta), "balance": decimal_str(bal),
-        }
-        for ln, bal in stmt
+    # Per-ccy current balances (last running balance in each pool; 0 for an empty pool).
+    balances = [
+        {"ccy": pool_ccy.value, "balance": decimal_str(stmt[-1][1] if stmt else _ZERO)}
+        for pool_ccy, stmt in statements
     ]
-    rows_desc = list(reversed(rows_all))
+    # Flatten every pool's rows, then sort newest-first for display. The key is the REVERSE
+    # of the chronological order (running_statement's `_ordered` = date asc, credits-before-
+    # debits), so same-day rows show end-of-day balance on top; each row keeps its OWN pool
+    # balance and currencies are never interleaved into one running total.
+    flat: list[tuple[Currency, CashLine, Decimal]] = [
+        (pool_ccy, ln, bal) for pool_ccy, stmt in statements for ln, bal in stmt
+    ]
+    flat.sort(key=lambda item: (item[1].date, item[1].delta < _ZERO), reverse=True)
+    page = flat[offset:offset + limit]
+    single = ccy is not None
+    current_balance = statements[0][1][-1][1] if single and statements[0][1] else _ZERO
     return {
         "account_id": account,
         "account": acct.name,
-        "ccy": ccy.value,
-        "current_balance": decimal_str(current_balance),
-        "rows": rows_desc[offset:offset + limit],
-        "total_count": len(rows_all),
+        "ccy": ccy.value if ccy is not None else None,
+        "current_balance": decimal_str(current_balance) if single else None,
+        "balances": balances,
+        "rows": [_stmt_row_wire(c, ln, bal) for c, ln, bal in page],
+        "total_count": len(flat),
     }
 
 

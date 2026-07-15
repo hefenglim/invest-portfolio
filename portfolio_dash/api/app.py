@@ -38,6 +38,7 @@ from portfolio_dash.api.routers import (
     digest,
     dividend_inbox,
     export,
+    fee_rules,
     health,
     input_center,
     insights,
@@ -242,6 +243,7 @@ def create_app() -> FastAPI:
     app.include_router(rebates.router, prefix="/api")
     app.include_router(actions.router, prefix="/api")
     app.include_router(accounts.router, prefix="/api")
+    app.include_router(fee_rules.router, prefix="/api")
     app.include_router(datasources.router, prefix="/api")
     app.include_router(llm_settings.router, prefix="/api")
     app.include_router(strategy.router, prefix="/api")

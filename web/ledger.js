@@ -281,6 +281,22 @@
     }
     [fShares, fPrice].forEach((n) => n.addEventListener('input', recompute));
     [fAcc, fSym, fSide, fDate].forEach((n) => n.addEventListener('change', recompute));
+    /* FU-D7: a per-field 還原自動 (↺) affordance beside fee/tax. Once you type in the
+       dialog the field is dirty and there is otherwise no way back within it; this clears
+       the dirty flag and re-runs recompute() so the account's computed value returns and
+       fee_overridden/tax_overridden save as false. */
+    const revertCell = (field, clearDirty) => {
+      const wrap = el('div', 'edit-revert-line');
+      wrap.appendChild(field);
+      const btn = el('button', 'btn btn-sm edit-revert', '↺ 還原自動');
+      btn.type = 'button';
+      btn.title = '清除手動費用／稅，改回依帳戶規則自動計算';
+      btn.addEventListener('click', () => { clearDirty(); recompute(); });
+      wrap.appendChild(btn);
+      return wrap;
+    };
+    const feeCell = revertCell(fFee, () => { feeDirty = false; });
+    const taxCell = revertCell(fTax, () => { taxDirty = false; });
     /* 改「代號 / 帳戶」= 把這筆帳移到另一個持倉：兩邊的成本與損益都會由帳本重建。
        合法（改正輸錯的代號），但要讓使用者知道影響範圍（2026-07-03, item 12）。 */
     const warn = el('div', 'hint',
@@ -288,7 +304,7 @@
       '新代號必須與帳戶市場相符且已註冊，會先做賣超與孤兒紀錄檢核；未手動改費用／稅時會依新帳戶規則重算。');
     editModal('編輯交易 #' + t.id + ' — ' + t.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['方向', fSide],
-      ['股數', fShares], ['價格', fPrice], ['手續費', fFee], ['交易稅', fTax], ['備註', fNote],
+      ['股數', fShares], ['價格', fPrice], ['手續費', feeCell], ['交易稅', taxCell], ['備註', fNote],
       ['', warn],
     ], async (dismiss) => {
       dismiss();

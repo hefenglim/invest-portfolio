@@ -8,6 +8,7 @@ named test here.
 import sqlite3
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -32,7 +33,7 @@ def _tx_id_side(api_client: TestClient, symbol: str, side: str) -> int:
     return int(next(r for r in rows if r["symbol"] == symbol and r["side"] == side)["id"])
 
 
-def _tx_row(api_client: TestClient, txn_id: int) -> dict:
+def _tx_row(api_client: TestClient, txn_id: int) -> dict[str, Any]:
     rows = api_client.get("/api/ledgers/transactions", params={"limit": 500}).json()["rows"]
     return next(r for r in rows if r["id"] == txn_id)
 

@@ -5,6 +5,10 @@ schwab BUY AAPL 10×100 (−1,000 USD), schwab FX 32,000 TWD → 1,000 USD, tw_b
 CASH dividend net 5,000 TWD. Stored FX rates: USD/TWD 33 (latest), MYR/TWD 7.
 """
 
+import csv
+import io
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
 
 
@@ -138,6 +142,99 @@ def test_actions_logged(api_client: TestClient) -> None:
         "ccy": "TWD", "amount": "100"})
     log = api_client.get("/api/system-log", params={"limit": 20}).json()["rows"]
     assert any(x["action"] == "入金／出金" for x in log)
+
+
+# --- FU-D5: statement line detail + account-level view + exports ------------
+
+
+def test_statement_single_ccy_carries_trade_detail(api_client: TestClient) -> None:
+    """A trade row carries structured detail (symbol/name/qty/price/fee/tax) + per-row ccy;
+    a dividend row carries symbol/name only (trade-only detail stays null)."""
+    body = api_client.get("/api/cash/statement",
+                          params={"account": "tw_broker", "ccy": "TWD"}).json()
+    assert body["ccy"] == "TWD"
+    buy = next(r for r in body["rows"] if r["kind"] == "buy" and r["symbol"] == "2330")
+    assert buy["name"] == "TSMC" and buy["ccy"] == "TWD"
+    assert Decimal(buy["qty"]) == Decimal("1000") and Decimal(buy["price"]) == Decimal("500")
+    assert Decimal(buy["fee"]) == Decimal("0") and Decimal(buy["tax"]) == Decimal("0")
+    div = next(r for r in body["rows"] if r["kind"] == "dividend")
+    assert div["symbol"] == "2330" and div["name"] == "TSMC"
+    assert div["qty"] is None and div["fee"] is None  # trade-only detail null for a dividend
+
+
+def test_statement_all_ccy_view_merges_pools(api_client: TestClient) -> None:
+    """ccy absent → the account-level view: ccy null, a per-ccy balances list, and every
+    row carrying its own ccy + its per-(account, ccy) running balance (never blended)."""
+    body = api_client.get("/api/cash/statement", params={"account": "schwab"}).json()
+    assert body["ccy"] is None and body["current_balance"] is None
+    bal = {b["ccy"]: b["balance"] for b in body["balances"]}
+    assert bal["USD"] == "0"        # +1000 fx_in − 1000 AAPL buy
+    assert bal["TWD"] == "-32000"   # −32000 fx_out
+    assert all(r["ccy"] in ("USD", "TWD") for r in body["rows"])
+    # an fx leg carries the implied rate + counter amount
+    fx_in = next(r for r in body["rows"] if r["kind"] == "fx_in")
+    assert fx_in["ccy"] == "USD" and fx_in["counter_ccy"] == "TWD"
+    assert Decimal(fx_in["counter_amount"]) == Decimal("-32000")
+    assert Decimal(fx_in["fx_rate"]) == Decimal("32")
+
+
+def test_statement_same_day_newest_first_balance_on_top(api_client: TestClient) -> None:
+    """Same-day rows are ordered newest-first (reverse of the credit-before-debit
+    chronological order), so the end-of-day balance sits on top."""
+    api_client.post("/api/cash/movements", json={
+        "account_id": "moomoo_my_us", "date": "2026-05-01", "kind": "deposit",
+        "ccy": "USD", "amount": "1000"})
+    api_client.post("/api/cash/movements", json={
+        "account_id": "moomoo_my_us", "date": "2026-05-01", "kind": "withdraw",
+        "ccy": "USD", "amount": "300"})
+    body = api_client.get("/api/cash/statement",
+                          params={"account": "moomoo_my_us", "ccy": "USD"}).json()
+    assert [r["kind"] for r in body["rows"]] == ["withdraw", "deposit"]
+    assert body["rows"][0]["balance"] == "700" and body["rows"][1]["balance"] == "1000"
+
+
+def test_export_cash_statement_csv(api_client: TestClient) -> None:
+    r = api_client.post("/api/export/cash-statement",
+                        json={"account": "tw_broker", "ccy": "TWD"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert "cash_statement_tw_broker_TWD" in r.headers["content-disposition"]
+    reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    assert reader[0] == [
+        "date", "ccy", "kind", "symbol", "name", "qty", "price", "fee", "tax",
+        "note_ref", "delta", "balance",
+    ]
+    data = [row for row in reader[1:] if row and not row[0].startswith("#")]
+    buy = next(row for row in data if row[2] == "buy" and row[3] == "2330")
+    assert buy[1] == "TWD" and buy[4] == "TSMC"
+    assert Decimal(buy[5]) == Decimal("1000") and Decimal(buy[6]) == Decimal("500")
+    assert Decimal(buy[7]) == Decimal("0") and Decimal(buy[8]) == Decimal("0")
+    assert Decimal(buy[10]) == Decimal("-500000")  # delta = -(1000*500)
+
+
+def test_export_cash_statement_all_ccy_csv(api_client: TestClient) -> None:
+    """ccy null exports every pool; the filename marks the 'all' scope."""
+    r = api_client.post("/api/export/cash-statement", json={"account": "schwab"})
+    assert r.status_code == 200
+    assert "cash_statement_schwab_all" in r.headers["content-disposition"]
+    reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    data = [row for row in reader[1:] if row and not row[0].startswith("#")]
+    assert {row[1] for row in data} == {"USD", "TWD"}  # both pools present
+
+
+def test_export_cash_statement_report_html(api_client: TestClient) -> None:
+    r = api_client.post("/api/export/cash-statement-report", json={"account": "tw_broker"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert ".html" in r.headers["content-disposition"]
+    assert "現金收支明細" in r.content.decode("utf-8")
+
+
+def test_export_cash_statement_unknown_account_400(api_client: TestClient) -> None:
+    r = api_client.post("/api/export/cash-statement", json={"account": "ghost"})
+    assert r.status_code == 400 and r.json()["error"]["field"] == "account"
+    r2 = api_client.post("/api/export/cash-statement-report", json={"account": "ghost"})
+    assert r2.status_code == 400 and r2.json()["error"]["field"] == "account"
 
 
 def test_movements_pagination(api_client: TestClient) -> None:

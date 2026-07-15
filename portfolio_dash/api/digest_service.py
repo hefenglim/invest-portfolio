@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from portfolio_dash.api import auth_store
 from portfolio_dash.ops import digest as digest_store
 from portfolio_dash.ops import notify
 from portfolio_dash.portfolio.dashboard import build_dashboard
@@ -115,9 +116,20 @@ def _weighted_pct(
 
 
 def _movers(
-    per_symbol_pct: dict[str, Decimal | None], names: dict[str, str], *, n: int = _MOVERS_N
+    per_symbol_pct: dict[str, Decimal | None],
+    names: dict[str, str],
+    *,
+    meta: dict[str, tuple[str | None, str | None]] | None = None,
+    n: int = _MOVERS_N,
 ) -> dict[str, list[dict[str, str]]]:
-    """Top-*n* up + top-*n* down symbols by day-change %, each ``{symbol, name, pct}``."""
+    """Top-*n* up + top-*n* down symbols by day-change %.
+
+    Each entry is ``{symbol, name, pct}`` plus, when the per-symbol *meta* map supplies
+    them, ``quote_date`` (the later close's ``as_of_date``) and ``fetched_at`` (that price
+    row's fetch timestamp) — both ISO strings the movers tooltip renders. Absent meta keys
+    are simply omitted (older stored digests never carried them; the renderer tolerates it).
+    """
+    meta = meta or {}
     ranked: list[tuple[str, Decimal]] = sorted(
         ((sym, pct) for sym, pct in per_symbol_pct.items() if pct is not None),
         key=lambda kv: kv[1],
@@ -125,7 +137,13 @@ def _movers(
     )
 
     def _entry(sym: str, pct: Decimal) -> dict[str, str]:
-        return {"symbol": sym, "name": names.get(sym, sym), "pct": decimal_str(pct)}
+        entry = {"symbol": sym, "name": names.get(sym, sym), "pct": decimal_str(pct)}
+        quote_date, fetched_at = meta.get(sym, (None, None))
+        if quote_date is not None:
+            entry["quote_date"] = quote_date
+        if fetched_at is not None:
+            entry["fetched_at"] = fetched_at
+        return entry
 
     ups = [_entry(s, p) for s, p in ranked if p > 0][:n]
     downs = [_entry(s, p) for s, p in reversed(ranked) if p < 0][:n]
@@ -158,21 +176,30 @@ def _holding_weights(rows: list[HoldingRow]) -> list[tuple[str, Decimal]]:
 
 def _per_symbol_day_change(
     conn: sqlite3.Connection, symbols: list[str], *, now: datetime
-) -> tuple[dict[str, Decimal | None], str | None]:
-    """Per-symbol day-change ratio (last two stored closes) + the latest close date used."""
+) -> tuple[dict[str, Decimal | None], str | None, dict[str, tuple[str | None, str | None]]]:
+    """Per-symbol day-change ratio (last two stored closes) + the latest close date used +
+    per-symbol ``(quote_date, fetched_at)`` metadata for the later close feeding each pct.
+
+    The metadata reuses the SAME ``get_price_history`` read (no extra query): the later close
+    is ``hist[-1]``, whose ``as_of`` is the quote date and whose ``fetched_at`` is the fetch
+    timestamp. Only symbols with a computable pct get a metadata entry.
+    """
     start = now.date() - timedelta(days=_DAY_CHANGE_LOOKBACK_DAYS)
     end = now.date()
     out: dict[str, Decimal | None] = {}
+    meta: dict[str, tuple[str | None, str | None]] = {}
     latest_as_of: date | None = None
     for sym in symbols:
         hist = get_price_history(conn, sym, start, end)
         pct = _pct_from_last_two([p.value for p in hist])
         out[sym] = pct
         if pct is not None and hist:
-            d = hist[-1].as_of
-            if latest_as_of is None or d > latest_as_of:
-                latest_as_of = d
-    return out, (latest_as_of.isoformat() if latest_as_of is not None else None)
+            later = hist[-1]
+            fetched = later.fetched_at.isoformat() if later.fetched_at is not None else None
+            meta[sym] = (later.as_of.isoformat(), fetched)
+            if latest_as_of is None or later.as_of > latest_as_of:
+                latest_as_of = later.as_of
+    return out, (latest_as_of.isoformat() if latest_as_of is not None else None), meta
 
 
 def _alerts_today(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
@@ -330,10 +357,17 @@ def _push(
 ) -> str:
     """Dispatch the digest to the enabled channels (gated). Returns a short push note.
 
-    Gates (in order): no enabled channel → skip; rule unsubscribed → skip; quiet hours →
-    skip (the stored digest is unaffected). Never raises (``sender`` isolates channel
-    failures). The push text carries counts + percentages only (B3-D4).
+    Gates (in order): guest/demo mode → suppress outbound dispatch entirely (FU-D4 — the
+    digest run is open in guest mode so the demo can be exercised, but outbound push stays
+    locked; the stored digest is unaffected); no enabled channel → skip; rule unsubscribed →
+    skip; quiet hours → skip. Never raises (``sender`` isolates channel failures). The push
+    text carries counts + percentages only (B3-D4).
     """
+    if not auth_store.is_protected(conn):
+        logger.info(
+            "digest push suppressed in guest/demo mode (kind=%s): outbound stays locked", kind
+        )
+        return "示範模式略過推播"
     cfg = notify.load_config(conn)
     rule_id = f"digest_{kind}"
     channels = notify.build_enabled_channels(cfg)
@@ -372,8 +406,10 @@ def run_digest_daily(
     # (the payload is opaque ``dict[str, Any]``, so the annotations must live here). The
     # tuple defaults are typed constants — an inline ``({}, None)`` would infer too narrow
     # for the invariant dict inside the tuple.
-    empty_day_change: tuple[dict[str, Decimal | None], str | None] = ({}, None)
-    per_symbol_pct, as_of = _try(
+    empty_day_change: tuple[
+        dict[str, Decimal | None], str | None, dict[str, tuple[str | None, str | None]]
+    ] = ({}, None, {})
+    per_symbol_pct, as_of, mover_meta = _try(
         lambda: _per_symbol_day_change(conn, held, now=now), empty_day_change
     )
     empty_pf: tuple[Decimal | None, int] = (None, 0)
@@ -381,7 +417,7 @@ def run_digest_daily(
         lambda: _weighted_pct(_holding_weights(data.holdings), per_symbol_pct), empty_pf
     )
     movers: dict[str, list[dict[str, str]]] = _try(
-        lambda: _movers(per_symbol_pct, names), {"up": [], "down": []}
+        lambda: _movers(per_symbol_pct, names, meta=mover_meta), {"up": [], "down": []}
     )
     alerts_today: list[dict[str, Any]] = _try(lambda: _alerts_today(conn, now), [])
     signals_today: list[dict[str, Any]] = _try(lambda: _signals_today(conn, now), [])

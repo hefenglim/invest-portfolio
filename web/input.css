@@ -78,10 +78,23 @@
 .fee-line { display: flex; align-items: center; gap: 8px; }
 .fee-line .input { max-width: 130px; text-align: right; }
 .pencil {
-  background: none; border: none; cursor: pointer;
-  color: var(--text-3); font-size: 12px; padding: 2px;
+  background: none; border: 1px solid transparent; cursor: pointer;
+  color: var(--text-3); font-size: 12px; padding: 2px 5px; border-radius: var(--radius-sm);
 }
 .pencil:hover { color: var(--accent); }
+/* FU-D7: a pressed pencil = override ON (field editable). aria-pressed is the single
+   state source (input.js toggles it); the active look makes the toggle obvious. */
+.pencil[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: rgba(88, 166, 221, 0.4);
+}
+
+/* FU-D7: edit-dialog 還原自動 affordance — clears the fee/tax dirty flag + re-fetches the
+   computed value so an accidental override can be undone within the dialog. */
+.edit-revert-line { display: flex; align-items: center; gap: 8px; }
+.edit-revert-line .input { flex: 1 1 auto; min-width: 0; }
+.edit-revert { flex: 0 0 auto; white-space: nowrap; }
 .hint-link { color: var(--accent); text-decoration: none; font-size: 10px; }
 .hint-link:hover { text-decoration: underline; }
 

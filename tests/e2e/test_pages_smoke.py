@@ -1100,7 +1100,8 @@ def test_settings_notify_channels_render(
     rule_catalog). The live_server golden DB is GUEST mode (no auth users — the public
     demo), so since the F1 lockdown the wire carries topic_masked/topic_set instead of the
     full topic and the page must render the honest demo state: masked topic in the input,
-    the #nt-demo-note notice, and every control disabled. Navigate /settings.html#alerts,
+    the #nt-demo-note notice, and every control disabled. Navigate /settings.html#notify
+    (FU-D3: the notify channels + quiet hours + subscriptions moved to the 通知中心 tab),
     wait for the rendered subscription rows, then assert the guest state + ZERO console +
     ZERO page errors over the async boot (an unhandled fetch rejection would fail it).
     """
@@ -1120,7 +1121,7 @@ def test_settings_notify_channels_render(
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
     try:
-        page.goto(live_server + "/settings.html#alerts", wait_until="load")
+        page.goto(live_server + "/settings.html#notify", wait_until="load")
         # Subscription checkboxes mount only after GET /api/notify/config resolves.
         # Waiting on the RENDERED result (not the response event) avoids racing the late
         # fetch in the long settings script chain.
@@ -1140,7 +1141,7 @@ def test_settings_notify_channels_render(
         page.remove_listener("pageerror", _on_pageerror)
 
     assert not console_errors and not page_errors, (
-        f"/settings.html#alerts (notify channels): console errors={console_errors!r}; "
+        f"/settings.html#notify (notify channels): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
@@ -1498,8 +1499,9 @@ def test_dashboard_digest_cards_smoke(live_server: str, browser_page: Page) -> N
 
 @pytest.mark.e2e
 def test_settings_digest_card_smoke(live_server: str, browser_page: Page) -> None:
-    """摘要與週報 card on /settings.html#alerts renders daily + weekly rows clean.
+    """摘要與週報 card on /settings.html#scheduler renders daily + weekly rows clean.
 
+    FU-D3 moved the digest card into the 排程中心 tab (above the jobs table it drives).
     settings-digest.js boots off GET /api/scheduler/jobs (the digest_daily/digest_weekly
     rows are seeded by the lifespan) + GET /api/digest/config, then renders the two edition
     rows with a friendly time picker (the default crons are simple, so a #digest-config-wrap
@@ -1521,9 +1523,9 @@ def test_settings_digest_card_smoke(live_server: str, browser_page: Page) -> Non
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
     try:
-        page.goto(live_server + "/settings.html#alerts", wait_until="load")
-        # Rows mount only after GET /api/scheduler/jobs resolves; the alerts tab is not the
-        # active tab, so wait for ATTACHED. The default simple crons render a time input.
+        page.goto(live_server + "/settings.html#scheduler", wait_until="load")
+        # Rows mount only after GET /api/scheduler/jobs resolves. The default simple crons
+        # render a time input; wait for ATTACHED (robust regardless of active-tab timing).
         page.wait_for_selector("#digest-config-wrap .digest-cfg-hhmm", state="attached")
         rows = page.query_selector_all("#digest-config-wrap .digest-cfg-row")
         assert len(rows) >= 3, f"expected daily+weekly+LLM rows, got {len(rows)}"
@@ -1532,19 +1534,114 @@ def test_settings_digest_card_smoke(live_server: str, browser_page: Page) -> Non
         page.remove_listener("pageerror", _on_pageerror)
 
     assert not console_errors and not page_errors, (
-        f"/settings.html#alerts (digest card): console errors={console_errors!r}; "
+        f"/settings.html#scheduler (digest card): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_digest_edit_updates_jobs_row_without_reload(
+    live_server: str, browser_page: Page
+) -> None:
+    """FU-D3 desync fix: editing the digest send-time updates the matching 排程工作表 row LIVE.
+
+    The digest card + jobs table now share the 排程中心 tab. settings-digest.js PUTs the new
+    cron then broadcasts ``pd-jobs-changed``; settings-scheduler.js listens and re-fetches, so
+    the ``digest_daily`` row's raw-cron input reflects the new schedule WITHOUT a page reload
+    (the stale-frontend-cache bug this fix targets). Guest mode is fine — the scheduler PUT is
+    config-class (no owner gate). Asserts the live propagation + ZERO console/page errors.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings.html#scheduler", wait_until="load")
+        # Both surfaces mount after GET /api/scheduler/jobs resolves.
+        page.wait_for_selector("#digest-config-wrap .digest-cfg-hhmm")
+        page.wait_for_selector("#jobs-body tr")
+
+        daily_time = page.locator("#digest-config-wrap .digest-cfg-hhmm").first
+        cur = daily_time.input_value()
+        new_time = "06:17" if cur != "06:17" else "07:23"
+        hh, mm = new_time.split(":")
+        expected_cron = f"{int(mm)} {int(hh)} * * mon-fri"
+
+        # Edit the daily send-time -> PUT /api/scheduler/jobs/digest_daily (change-event persist).
+        with page.expect_response("**/api/scheduler/jobs/digest_daily") as resp_info:
+            daily_time.fill(new_time)
+            daily_time.dispatch_event("change")
+        assert resp_info.value.request.method == "PUT", "expected a PUT to the digest_daily job"
+
+        # WITHOUT a reload, the digest_daily jobs-table row's cron input reflects the new cron.
+        page.wait_for_function(
+            """(cron) => {
+                for (const tr of document.querySelectorAll('#jobs-body tr')) {
+                    const code = tr.querySelector('.cron-code');
+                    if (code && code.textContent.trim() === 'digest_daily') {
+                        const inp = tr.querySelector('.cron-friendly input');
+                        return !!inp && inp.value === cron;
+                    }
+                }
+                return false;
+            }""",
+            arg=expected_cron,
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings.html#scheduler (digest→jobs desync): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
 
 @pytest.mark.e2e
 def test_cash_page_smoke(live_server: str, browser_page: Page) -> None:
-    """/cash.html loads clean and its input forms actually initialize.
+    """/cash.html loads clean, its forms initialize, AND clicking a pool renders the
+    statement (FU-D5 detail 說明 + per-row balance) with ZERO console/page errors.
 
     Regression guard for the stress-audit finding (2026-07-15): a TDZ ReferenceError
     in cash.js initForms() aborted BEFORE the deposit/FX click handlers were attached,
-    so the buttons silently did nothing — and no smoke covered this page. Waits for a
-    post-render selector so the async boot (balances + forms) is observed, then asserts
-    zero console/page errors.
+    so the buttons silently did nothing — and no smoke covered this page. Extended for
+    FU-D5: after the async boot, click one per-ccy cash line and assert the statement
+    table renders server rows (the describe()/detail path must not throw).
     """
-    assert_page_ok(browser_page, live_server, "/cash.html", root_selector="#cm-confirm")
+    page = browser_page
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/cash.html", wait_until="load")
+        page.wait_for_selector("#cm-confirm")          # forms initialized
+        page.wait_for_selector(".cash-line.clickable")  # balance cards rendered
+        page.click(".cash-line.clickable")              # open one pool's statement
+        page.wait_for_selector("#cash-stmt-body tr")    # server rows rendered
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/cash.html: console errors={console_errors!r}; page errors={page_errors!r}"
+    )

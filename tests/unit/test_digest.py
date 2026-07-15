@@ -14,6 +14,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.api import digest_service as ds
+from portfolio_dash.api.auth_store import create_auth_tables, create_user
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
 from portfolio_dash.ops import digest as digest_store
@@ -92,6 +93,25 @@ def test_movers_ranks_up_and_down() -> None:
     assert [m["symbol"] for m in out["down"]] == ["B"]     # most negative first
     assert out["up"][0]["name"] == "Gamma"
     assert out["up"][0]["pct"] == "0.10"  # Decimal string, not computed
+    # no meta supplied → quote_date / fetched_at keys are simply absent (old-payload shape)
+    assert "quote_date" not in out["up"][0] and "fetched_at" not in out["up"][0]
+
+
+def test_movers_carries_quote_date_and_fetched_at_from_meta() -> None:
+    pcts: dict[str, Decimal | None] = {"A": Decimal("0.05"), "B": Decimal("-0.03")}
+    names = {"A": "Alpha", "B": "Beta"}
+    meta: dict[str, tuple[str | None, str | None]] = {
+        "A": ("2026-07-14", "2026-07-14T15:00:00+08:00"),
+        "B": ("2026-07-14", None),  # fetched_at missing → that key omitted, quote_date kept
+    }
+    out = ds._movers(pcts, names, meta=meta, n=3)
+    up = out["up"][0]
+    assert up["symbol"] == "A"
+    assert up["quote_date"] == "2026-07-14"
+    assert up["fetched_at"] == "2026-07-14T15:00:00+08:00"
+    down = out["down"][0]
+    assert down["symbol"] == "B" and down["quote_date"] == "2026-07-14"
+    assert "fetched_at" not in down  # None meta value → key omitted gracefully
 
 
 # --- push body: NO currency amounts (B3-D4 hard rule) -------------------------
@@ -291,8 +311,12 @@ def test_run_digest_daily_assembles_and_stores(golden_db: sqlite3.Connection) ->
     # day-change computed (both held symbols moved up), nothing excluded
     assert p["day_change"]["portfolio_pct"] is not None
     assert p["day_change"]["excluded_count"] == 0
-    ups = {m["symbol"] for m in p["movers"]["up"]}
-    assert {"2330", "AAPL"} <= ups
+    up_by_sym = {m["symbol"]: m for m in p["movers"]["up"]}
+    assert {"2330", "AAPL"} <= set(up_by_sym)
+    # movers carry the later-close provenance from the same price read (quote_date +
+    # fetched_at), threaded from get_price_history — the tooltip source (item 5).
+    assert up_by_sym["2330"]["quote_date"] == "2026-06-10"  # the second close added above
+    assert up_by_sym["2330"]["fetched_at"] == GOLDEN_NOW.isoformat()
     assert p["llm_note"] is None  # default OFF
 
 
@@ -337,7 +361,19 @@ def _enable_ntfy(conn: sqlite3.Connection) -> None:
     notify.save_config(conn, cfg, now=GOLDEN_NOW)
 
 
+def _protect(conn: sqlite3.Connection) -> None:
+    """Add an auth user so ``is_protected(conn)`` → True.
+
+    The golden DB is guest by default (empty auth tables); the FU-D4 guest gate suppresses
+    the digest push in guest mode, so the dispatch-path tests must run PROTECTED to exercise
+    the enabled/subscribed/quiet-hours gates.
+    """
+    create_auth_tables(conn)  # idempotent — golden_db already created these
+    create_user(conn, name="Owner", username="owner", password="password123", now=GOLDEN_NOW)
+
+
 def test_push_dispatches_when_subscribed(golden_db: sqlite3.Connection) -> None:
+    _protect(golden_db)
     _enable_ntfy(golden_db)
     calls: list[tuple[str, str]] = []
 
@@ -351,7 +387,24 @@ def test_push_dispatches_when_subscribed(golden_db: sqlite3.Connection) -> None:
     assert not _AMOUNT_RE.search(calls[0][1])  # dispatched body carries no amount
 
 
+def test_push_suppressed_in_guest_mode(golden_db: sqlite3.Connection) -> None:
+    # FU-D4: golden_db is guest (no auth users). Generation is open, but the outbound push
+    # is suppressed — the injected sender must NOT be called, yet the digest is still stored.
+    _enable_ntfy(golden_db)  # channel enabled + subscribed — only guest mode blocks dispatch
+    calls: list[str] = []
+
+    def fake_sender(channels, title, body, severity, link):  # type: ignore[no-untyped-def]
+        calls.append(title)
+        return {ch.name: "ok" for ch in channels}
+
+    summary = ds.run_digest_daily(golden_db, now=GOLDEN_NOW, sender=fake_sender)
+    assert not calls, "guest-mode digest must NOT dispatch outbound push"
+    assert "示範模式略過推播" in summary
+    assert digest_store.get_latest(golden_db, "daily") is not None  # generation + cache open
+
+
 def test_push_skips_in_quiet_hours(golden_db: sqlite3.Connection) -> None:
+    _protect(golden_db)
     _enable_ntfy(golden_db)
     cfg = notify.load_config(golden_db)
     # GOLDEN_NOW is 14:30 Taipei → put a window around it.
@@ -371,6 +424,7 @@ def test_push_skips_in_quiet_hours(golden_db: sqlite3.Connection) -> None:
 
 
 def test_push_skips_when_unsubscribed(golden_db: sqlite3.Connection) -> None:
+    _protect(golden_db)
     _enable_ntfy(golden_db)
     cfg = notify.load_config(golden_db)
     cfg.subscriptions["digest_daily"] = False

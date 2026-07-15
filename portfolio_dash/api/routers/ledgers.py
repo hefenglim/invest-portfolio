@@ -474,7 +474,7 @@ def _recompute_edit_fees(
         ).fetchone()
         inst = get_instrument(conn, body.symbol)
         if row is not None:
-            rules = get_fee_rule_set(row["fee_rule_set"])
+            rules = get_fee_rule_set(row["fee_rule_set"], conn)
             # FE-D2: resolve the trade-date USD/MYR rate for the Moomoo US MY stamp. No rate
             # -> stamp 0 (recorded in the snapshot); the edit path has no soft-issue surface.
             stamp_fx = resolve_stamp_fx(conn, body.date) if rules.has_us_stamp else None

@@ -105,7 +105,7 @@ def enter_transaction(
         # Stress-audit finding 2026-07-15: entry paths defaulted is_etf=False, taxing
         # ETF sells at the 現股 0.3% rate instead of 0.1%.
         is_etf = instrument.is_etf if instrument is not None else inp.is_etf
-        rules = get_fee_rule_set(acc["fee_rule_set"])
+        rules = get_fee_rule_set(acc["fee_rule_set"], conn)
         # FE-D2: the Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure,
         # so the seam resolves it here, like is_etf). No rate -> stamp 0 + a soft issue.
         stamp_fx: Decimal | None = None

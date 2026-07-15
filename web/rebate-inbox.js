@@ -26,6 +26,65 @@
     if (countBadge) countBadge.textContent = String(n);
   }
 
+  /* 買/賣 label from the Side wire value ("BUY"/"SELL"). */
+  function sideLabel(side) {
+    return side === 'SELL' ? '賣' : '買';
+  }
+
+  /* 標的 label — 名稱（代號）, or just the symbol when the name fell back to the symbol. */
+  function targetLabel(t) {
+    return (t.name && t.name !== t.symbol) ? (t.name + '（' + t.symbol + '）') : t.symbol;
+  }
+
+  /* A collapsed-by-default per-trade breakdown (§3.6). `d` is any object carrying
+     { trades, fee_total, expected, ccy } — a pending month row OR a skipped row's detail.
+     The 合計 footer mirrors the header numbers (Σ trade == month, enforced server-side).
+     All money is a Decimal STRING rendered via window.fmt — the frontend never computes. */
+  function buildDetail(d) {
+    const wrap = el('div', 'rbt-detail');
+    wrap.hidden = true;  /* collapsed by default; the [hidden] UA rule hides it */
+    const table = el('table', 'rbt-table');
+    const thead = el('thead');
+    const htr = el('tr');
+    [['日期', ''], ['標的', ''], ['買/賣', 'rbt-c'],
+      ['手續費', 'rbt-num'], ['預估退款', 'rbt-num']].forEach((h) => {
+      htr.appendChild(el('th', h[1] || null, h[0]));
+    });
+    thead.appendChild(htr);
+    table.appendChild(thead);
+    const tbody = el('tbody');
+    (d.trades || []).forEach((t) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', null, f.date(t.trade_date)));
+      tr.appendChild(el('td', null, targetLabel(t)));
+      tr.appendChild(el('td', 'rbt-c', sideLabel(t.side)));
+      tr.appendChild(el('td', 'rbt-num', f.money(t.fee, d.ccy)));
+      tr.appendChild(el('td', 'rbt-num', f.money(t.expected, d.ccy)));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    wrap.appendChild(el('div', 'rbt-foot',
+      '合計 手續費 ' + f.money(d.fee_total, d.ccy) + ' ' + d.ccy +
+      '・預估退款 ' + f.money(d.expected, d.ccy) + ' ' + d.ccy));
+    return wrap;
+  }
+
+  /* A `.btn-sm` toggle (deliberately NOT `.btn-primary`, so the e2e's single-primary =
+     確認入帳 invariant holds) that shows/hides a `buildDetail` block. */
+  function makeToggle(detailEl) {
+    const btn = el('button', 'btn btn-sm', '明細 ▸');
+    btn.type = 'button';
+    btn.setAttribute('aria-expanded', 'false');
+    btn.addEventListener('click', () => {
+      const show = detailEl.hidden;
+      detailEl.hidden = !show;
+      btn.textContent = show ? '明細 ▾' : '明細 ▸';
+      btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+    });
+    return btn;
+  }
+
   /* skip / unskip — both recomputed server-side; refresh the panel after. */
   async function act(kind, r) {
     try {
@@ -118,7 +177,7 @@
       return;
     }
     items.forEach((r) => {
-      const item = el('div', 'inbox-item');
+      const item = el('div', 'inbox-item rbt-item');
       const main = el('div', 'inbox-main');
       main.appendChild(el('span', 'inbox-title',
         r.month + ' 折讓款（' + r.account_name + '）'));
@@ -133,12 +192,19 @@
       const ok = el('button', 'btn btn-primary', '確認入帳');
       ok.type = 'button';
       ok.addEventListener('click', () => openConfirm(r));
+      acts.appendChild(ok);
+      /* 明細 toggle (per-trade §3.6 breakdown), collapsed by default. */
+      let detail = null;
+      if (r.trades && r.trades.length) {
+        detail = buildDetail(r);
+        acts.appendChild(makeToggle(detail));
+      }
       const sk = el('button', 'btn', '略過');
       sk.type = 'button';
       sk.addEventListener('click', () => act('skip', r));
-      acts.appendChild(ok);
       acts.appendChild(sk);
       item.appendChild(acts);
+      if (detail) item.appendChild(detail);
       list.appendChild(item);
     });
   }
@@ -162,10 +228,17 @@
       }
       main.appendChild(el('span', 'sk-sub', sub));
       row.appendChild(main);
+      /* 明細 toggle mirrors the pending rows when the skipped month is still detectable. */
+      let detail = null;
+      if (s.detail && s.detail.trades && s.detail.trades.length) {
+        detail = buildDetail(s.detail);
+        row.appendChild(makeToggle(detail));
+      }
       const un = el('button', 'btn btn-sm', '取消略過');
       un.type = 'button';
       un.addEventListener('click', () => act('unskip', s));
       row.appendChild(un);
+      if (detail) row.appendChild(detail);
       listEl.appendChild(row);
     });
   }

@@ -78,7 +78,7 @@ def txn_preview_row(
         # finding 2026-07-15): a registered instrument's is_etf wins; the input
         # flag only covers unregistered symbols (e.g. an AI draft pre-registration).
         is_etf = res.instrument.is_etf if res.instrument is not None else inp.is_etf
-        rules = get_fee_rule_set(acc["fee_rule_set"])
+        rules = get_fee_rule_set(acc["fee_rule_set"], conn)
         # FE-D2: Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure).
         stamp_fx: Decimal | None = None
         if rules.has_us_stamp:

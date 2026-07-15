@@ -118,8 +118,15 @@ def test_cash_statement_unknown_account_404(api_client: TestClient) -> None:
     assert r.status_code == 404
 
 
-def test_cash_statement_missing_params_400(api_client: TestClient) -> None:
-    assert api_client.get("/api/cash/statement", params={"account": "schwab"}).status_code == 400
+def test_cash_statement_account_only_is_combined_view(api_client: TestClient) -> None:
+    """FU-D5: ccy is now OPTIONAL. Account-only returns the all-currency view (ccy null +
+    a per-ccy balances list); the account param itself is still required (400 when absent)."""
+    r = api_client.get("/api/cash/statement", params={"account": "schwab"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ccy"] is None and body["current_balance"] is None
+    assert any(b["ccy"] == "USD" for b in body["balances"])
+    # account is still mandatory
     assert api_client.get("/api/cash/statement", params={"ccy": "USD"}).status_code == 400
 
 

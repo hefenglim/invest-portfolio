@@ -1401,6 +1401,46 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
 .inbox-rule { font-size: 10px; color: var(--text-3); }
 .inbox-actions { display: flex; gap: 6px; flex: none; }
 .inbox-note { padding: 0 var(--pad) 12px; font-size: 10.5px; color: var(--text-3); }
+
+/* 折讓款 per-trade breakdown (FU-D6): a collapsed-by-default 明細 table under each month row.
+   `.rbt-item` lets the full-width detail wrap onto its own line below the row's main+actions;
+   the detail block itself stays hidden via the [hidden] attribute until the 明細 toggle. */
+.inbox-item.rbt-item { flex-wrap: wrap; }
+.inbox-item.rbt-item > .rbt-detail { flex: 0 0 100%; }
+.rbt-detail {
+  margin-top: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--panel);
+  overflow-x: auto;
+}
+.rbt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.rbt-table th, .rbt-table td {
+  padding: 4px 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-soft);
+}
+.rbt-table thead th {
+  font-size: 10px; font-weight: 600; color: var(--text-3);
+  text-transform: none;
+}
+.rbt-table tbody tr:last-child td { border-bottom: none; }
+.rbt-table .rbt-num { text-align: right; font-family: var(--font-num); }
+.rbt-table .rbt-c { text-align: center; }
+.rbt-foot {
+  padding: 5px 10px;
+  font-size: 10.5px;
+  color: var(--text-2);
+  font-family: var(--font-num);
+  border-top: 1px solid var(--border);
+  background: var(--panel-2);
+}
 .inbox-count-badge {
   font-family: var(--font-num);
   font-size: 10px;
@@ -1932,8 +1972,11 @@ button[disabled], .btn[disabled] {
   display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px;
   border: 1px solid var(--border-soft); border-radius: 999px; font-size: 11px;
 }
-.digest-mover-sym { font-weight: 600; color: var(--text); }
-.digest-mover-pct { font-family: var(--font-num); }
+.digest-mover-sym {
+  font-weight: 600; color: var(--text);
+  max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.digest-mover-pct { font-family: var(--font-num); flex: none; }
 .digest-counts { display: flex; flex-wrap: wrap; gap: 8px; }
 .digest-count {
   font-size: 11.5px; color: var(--text-2); text-decoration: none;
@@ -1952,7 +1995,14 @@ button[disabled], .btn[disabled] {
   border-radius: 3px; padding: 0 4px; flex: none;
 }
 .digest-stamp { font-size: 10px; color: var(--text-3); font-family: var(--font-num); }
-.digest-empty { padding: 8px 0; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.digest-empty {
+  padding: 8px 0; font-size: 12px; color: var(--text-2); line-height: 1.5;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+}
+.digest-empty-msg { color: var(--text-2); }
+.digest-empty-link { color: var(--accent); text-decoration: none; }
+.digest-empty-link:hover { text-decoration: underline; }
+.digest-gen-btn { flex: none; }
 .digest-checklist { display: flex; flex-direction: column; gap: 8px; }
 .digest-item {
   display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px;

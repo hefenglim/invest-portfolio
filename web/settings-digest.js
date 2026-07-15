@@ -65,7 +65,13 @@
   var llmEnabled = false;
 
   async function putJob(jobId, body) {
-    return api.put('/api/scheduler/jobs/' + encodeURIComponent(jobId), body);
+    var res = await api.put('/api/scheduler/jobs/' + encodeURIComponent(jobId), body);
+    /* Desync fix (FU-D3): a schedule-row write here must visibly refresh the 排程工作表 row
+       (cron / enabled / next-fire) that settings-scheduler.js owns — and this card itself —
+       without a page reload. Broadcast so BOTH scripts re-fetch from fresh data. The
+       listeners only GET + re-render (never re-PUT), so there is no echo loop. */
+    document.dispatchEvent(new CustomEvent('pd-jobs-changed'));
+    return res;
   }
 
   /* Build one edition row (daily/weekly). */
@@ -191,6 +197,20 @@
     host.appendChild(llmRow());
   }
 
+  /* Re-fetch the schedule rows and re-render THIS card. Called on ANY pd-jobs-changed
+     (from here or from settings-scheduler.js) and when the 排程中心 tab is (re)activated —
+     a cheap GET that kills any residual staleness between the two surfaces that now share a
+     tab. GET-only + idempotent render, so a self-echo is a no-op, never a re-PUT loop. */
+  async function refetchJobs() {
+    if (!$('digest-config-wrap') || !api) return;
+    try {
+      var jobsResp = await api.get('/api/scheduler/jobs');
+      jobsById = {};
+      (jobsResp && jobsResp.jobs || []).forEach(function (j) { jobsById[j.id] = j; });
+    } catch (err) { /* keep last-known rows on a failed refresh (no toast spam) */ }
+    render();
+  }
+
   async function boot() {
     if (!$('digest-config-wrap') || !api) return;
     try {
@@ -205,6 +225,11 @@
     } catch (err) { /* config GET is open; ignore on failure (default off) */ }
     render();
   }
+
+  document.addEventListener('pd-jobs-changed', refetchJobs);
+  window.addEventListener('pd-settings-tab', function (e) {
+    if (e && e.detail === 'scheduler') refetchJobs();
+  });
 
   boot();
 })();
