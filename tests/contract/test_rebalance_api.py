@@ -9,9 +9,27 @@ ONE row over the combined position; the response adds per-row `accounts` (consti
 The wire REQUEST is unchanged: still `{"targets": {symbol: ratio_string}}`.
 """
 
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
 
 from tests.conftest import DashboardClientFactory, _seed_dual_account
+
+
+def test_rebalance_rebate_estimate_total_present_for_tw_leg(api_client: TestClient) -> None:
+    """FE-D1 forecast hint: a TW sell leg contributes Σ floor(fee × 0.77) to the summary
+    (reporting-ccy Decimal string, 不計入成本)."""
+    body = api_client.post("/api/rebalance/preview",
+                           json={"targets": {"2330": "0.30", "AAPL": "0.70"}}).json()
+    ret = body["summary"]["rebate_estimate_total"]
+    assert ret is not None and Decimal(ret) > 0
+
+
+def test_rebalance_rebate_estimate_total_null_without_tw_leg(api_client: TestClient) -> None:
+    """A US-only rebalance produces no TW leg -> rebate_estimate_total is null (N/A)."""
+    body = api_client.post("/api/rebalance/preview",
+                           json={"targets": {"AAPL": "0.70"}}).json()
+    assert body["summary"]["rebate_estimate_total"] is None
 
 
 def test_rebalance_two_symbol_target(api_client: TestClient) -> None:

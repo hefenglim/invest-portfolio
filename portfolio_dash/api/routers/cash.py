@@ -48,7 +48,9 @@ from portfolio_dash.shared.wire import decimal_str
 router = APIRouter()
 
 _ZERO = Decimal("0")
-_KINDS = {"DEPOSIT", "WITHDRAW", "OPENING"}
+# REBATE (退款／折讓): a deposit-like CREDIT booked by the rebate inbox confirm (FE-D1). It is
+# an actual cash refund of record — NOT the forecast estimate — and never touches cost/P&L.
+_KINDS = {"DEPOSIT", "WITHDRAW", "OPENING", "REBATE"}
 
 
 def _accounts(conn: sqlite3.Connection) -> dict[str, Account]:
@@ -236,7 +238,7 @@ def _movement_guard(
 ) -> JSONResponse | None:
     if body.kind.strip().upper() not in _KINDS:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"未知類型 {body.kind}（deposit / withdraw / opening）",
+            "validation_error", f"未知類型 {body.kind}（deposit / withdraw / opening / rebate）",
             field="kind"))
     if body.amount <= _ZERO:
         return JSONResponse(status_code=400, content=error_body(

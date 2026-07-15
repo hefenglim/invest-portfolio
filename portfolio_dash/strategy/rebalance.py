@@ -167,7 +167,10 @@ def compute_rebalance(
     Returns a dict ``{"rows": [...], "summary": {...}}`` with all money values as
     ``Decimal`` (the router converts to wire strings). Compute-only — no writes.
     """
-    from portfolio_dash.data_ingestion.fees import compute_fees  # local: avoid cycle risk
+    from portfolio_dash.data_ingestion.fees import (  # local: avoid cycle risk
+        compute_fees,
+        forecast_tw_rebate,
+    )
     from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 
     data = build_dashboard(conn, now=now, reporting=reporting)
@@ -204,6 +207,7 @@ def compute_rebalance(
                 "excluded": excluded,
                 "over_allocated": over_allocated,
                 "excluded_with_target": excluded_with_target,
+                "rebate_estimate_total": None,
                 "note": "total market value unavailable; nothing to rebalance",
             },
         }
@@ -211,6 +215,9 @@ def compute_rebalance(
     turnover_reporting = _ZERO
     total_fees_reporting = _ZERO
     cash_after = _ZERO
+    # FE-D1 forecast HINT (不計入成本): Σ per-TW-leg floor(fee × rebate_rate). None when no leg
+    # rebates (every non-TW account) so the drawer/report footnote only shows where it applies.
+    rebate_estimate_total = _ZERO
 
     for symbol, target_ratio in targets.items():
         cons = _priced_constituents(data.holdings, symbol)
@@ -338,6 +345,11 @@ def compute_rebalance(
             "legs": [lg.wire() for lg in legs],
         })
 
+        for lg in legs:
+            leg_rate = rules_by_acct[lg.account_id].rebate_rate
+            if leg_rate > _ZERO:  # convert to reporting ccy (leg fee is in the row's quote ccy)
+                rebate_estimate_total += convert(forecast_tw_rebate(lg.fee, leg_rate), rate)
+
         turnover_reporting += convert(total_amount, rate)
         total_fees_reporting += convert(total_fee + total_tax, rate)
         if side is Side.SELL:
@@ -354,5 +366,8 @@ def compute_rebalance(
             "excluded": excluded,
             "over_allocated": over_allocated,
             "excluded_with_target": excluded_with_target,
+            "rebate_estimate_total": (
+                rebate_estimate_total if rebate_estimate_total > _ZERO else None
+            ),
         },
     }

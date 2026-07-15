@@ -47,6 +47,7 @@ from portfolio_dash.api.routers import (
     news,
     notify,
     prompts,
+    rebates,
     scheduler,
     signals,
     snapshots_router,
@@ -238,6 +239,7 @@ def create_app() -> FastAPI:
     app.include_router(input_center.router, prefix="/api")
     app.include_router(dividend_inbox.router, prefix="/api")
     app.include_router(cash.router, prefix="/api")
+    app.include_router(rebates.router, prefix="/api")
     app.include_router(actions.router, prefix="/api")
     app.include_router(accounts.router, prefix="/api")
     app.include_router(datasources.router, prefix="/api")

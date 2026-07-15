@@ -24,6 +24,17 @@ def test_manual_preview_buy_computes_fee_and_total(api_client: TestClient) -> No
     # normalize() dropped it). The frontend quantizes for display.
     assert b["gross"] == "612500.0" and b["total"] == "-613372.0"
     assert b["fee_overridden"] is False and b["issues"] == []
+    # FE-D1 forecast hint (不計入成本): TW rebate = floor(fee × 0.77) = floor(872×0.77)=671.
+    assert b["rebate_estimate"] == "671"
+
+
+def test_manual_preview_rebate_estimate_null_for_non_tw(api_client: TestClient) -> None:
+    """A US account (schwab, rebate_rate 0) returns rebate_estimate null (never applies)."""
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "schwab", "symbol": "AAPL", "side": "buy",
+        "date": "2026-06-11", "shares": "10", "price": "100"})
+    assert r.status_code == 200
+    assert r.json()["rebate_estimate"] is None
 
 
 def test_manual_preview_oversell_soft_issue(api_client: TestClient) -> None:

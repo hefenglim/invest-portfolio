@@ -23,6 +23,7 @@ from portfolio_dash.data_ingestion.dividend_import import (
     build_dividend_preview,
     write_dividend_row,
 )
+from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.manual import enter_transaction
@@ -204,12 +205,21 @@ def manual_preview(
     overdraft = _cash_overdraft_issue(conn, body, draft.fee, draft.tax)
     if overdraft is not None:
         issues.append(overdraft)
+    # FE-D1 forecast HINT (informational, 不計入成本): the TW charge-first rebate on next
+    # month's refund = floor(resolved fee × rebate_rate). Null when the account never rebates
+    # (rebate_rate 0 — every non-TW rule) so the UI only shows the line where it applies.
+    rebate_estimate = (
+        decimal_str(forecast_tw_rebate(draft.fee, rule.rebate_rate))
+        if rule is not None and rule.rebate_rate > _ZERO
+        else None
+    )
     return {
         "fee": decimal_str(draft.fee), "tax": decimal_str(draft.tax),
         "gross": decimal_str(gross), "total": decimal_str(total),
         "fee_rule_label": fee_rules_wire(rule)["label"] if rule is not None else None,
         "fee_overridden": body.fee_override is not None,
         "tax_overridden": body.tax_override is not None,
+        "rebate_estimate": rebate_estimate,
         "issues": [_issue_wire_manual(i, body.symbol) for i in issues],
     }
 
