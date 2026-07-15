@@ -499,9 +499,11 @@ $$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displayst
 
 XIRR 即對上述 `(dates, amounts)` 序列求使 NPV=0 之年化率 r。
 
-> **仲裁註記（誠實揭露）**：966 項壓測**未涵蓋 XIRR 純量**（無 `xirr.*` 斷言）。XIRR 之**現金流建構規則**
-> 以 `returns.py::xirr_reporting` 為裁定準據（上表逐項可由已驗證的 `ledger.tx.total` 與 `holding.market_value`
-> 重建）；其**數值收斂結果**由 `pyxirr` 決定。若日後需為 XIRR 純量提供錨點，應新增對應斷言。
+> **驗證錨點（2026-07-15 常駐 harness 補上）**：XIRR **純量**已由 `scripts/stress_audit/` 之
+> **獨立求解器**（Newton+bisection，不使用 `pyxirr`）錨定 — 對同一現金流序列與應用值比對，
+> 全套件唯一之「文件化容差」比較 `|Δ| ≤ 1e-6`，實測 `checkpoint1` 差 1.0e-12、`final` 差 2.8e-12
+> （1,006/1,006 斷言全過之 phase 1 實跑）。現金流建構規則仍以 `returns.py::xirr_reporting` 為
+> 裁定準據（上表逐項可由已驗證的 `ledger.tx.total` 與 `holding.market_value` 重建）。
 
 > **實作位置**：`portfolio/returns.py`（`total_return`、`xirr_reporting`）、`portfolio/results.py`
 > （`ReturnSummary`、`CurrencyReturn`）。
