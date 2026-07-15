@@ -89,6 +89,21 @@ class PendingDividend(BaseModel):
     note: str | None = None
 
 
+class SkippedDividend(BaseModel):
+    """A previously-skipped detection (3E), for the 「已忽略」 un-skip list.
+
+    ``detail`` carries the full re-detected item when it is STILL detectable (the event +
+    holding still exist and it is not otherwise recorded); when it is no longer detectable
+    only ``fingerprint`` + the ``symbol``/``ex_date`` parsed from the fingerprint are known.
+    """
+
+    fingerprint: str
+    skipped_at: str
+    symbol: str | None = None
+    ex_date: date | None = None
+    detail: PendingDividend | None = None
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_SKIP_DDL)
     conn.commit()
@@ -104,10 +119,71 @@ def mark_skipped(conn: sqlite3.Connection, fingerprint: str, *, now: datetime) -
     conn.commit()
 
 
+def unskip(conn: sqlite3.Connection, fingerprints: list[str]) -> int:
+    """Remove skip marks so the items re-surface in the inbox (3E). Returns rows deleted."""
+    ensure_tables(conn)
+    removed = 0
+    for fp in fingerprints:
+        cur = conn.execute(
+            "DELETE FROM pending_dividend_skips WHERE fingerprint = ?", (fp,)
+        )
+        removed += cur.rowcount
+    conn.commit()
+    return removed
+
+
 def _skipped(conn: sqlite3.Connection) -> set[str]:
     ensure_tables(conn)
     return {r["fingerprint"] for r in conn.execute(
         "SELECT fingerprint FROM pending_dividend_skips")}
+
+
+def _skipped_at(conn: sqlite3.Connection) -> dict[str, str]:
+    """fingerprint -> skipped_at, newest first (drives the 「已忽略」 list ordering)."""
+    ensure_tables(conn)
+    return {
+        r["fingerprint"]: r["skipped_at"]
+        for r in conn.execute(
+            "SELECT fingerprint, skipped_at FROM pending_dividend_skips "
+            "ORDER BY skipped_at DESC, fingerprint"
+        )
+    }
+
+
+def _fp_parts(fingerprint: str) -> tuple[str | None, date | None]:
+    """Best-effort (symbol, ex_date) parse of a ``div:acct:symbol:YYYY-MM-DD[:stock]`` fp."""
+    parts = fingerprint.split(":")
+    if len(parts) < 4 or parts[0] != "div":
+        return None, None
+    symbol = parts[2] or None
+    try:
+        ex = date.fromisoformat(parts[3])
+    except ValueError:
+        ex = None
+    return symbol, ex
+
+
+def list_skipped(conn: sqlite3.Connection, *, now: datetime) -> list[SkippedDividend]:
+    """The skipped-fingerprint list with as much reconstructable detail as detection allows.
+
+    Runs detection with the skip filter OFF to recover the full item for each skipped
+    fingerprint that is still detectable; fingerprints no longer detectable degrade to
+    symbol/ex_date parsed from the fingerprint (or bare fingerprint if unparseable).
+    """
+    skipped = _skipped_at(conn)
+    if not skipped:
+        return []
+    by_fp = {p.fingerprint: p for p in detect(conn, now=now, include_skipped=True)}
+    out: list[SkippedDividend] = []
+    for fp, at in skipped.items():
+        p = by_fp.get(fp)
+        if p is not None:
+            out.append(SkippedDividend(
+                fingerprint=fp, skipped_at=at, symbol=p.symbol, ex_date=p.ex_date, detail=p))
+        else:
+            sym, ex = _fp_parts(fp)
+            out.append(SkippedDividend(fingerprint=fp, skipped_at=at, symbol=sym, ex_date=ex))
+    return out
 
 
 def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> str:
@@ -138,12 +214,18 @@ def _price_on_or_before(
     return hist[-1].value if hist else None
 
 
-def detect(conn: sqlite3.Connection, *, now: datetime) -> list[PendingDividend]:
-    """Compute the current inbox — pure read, self-healing (no pending rows stored)."""
+def detect(
+    conn: sqlite3.Connection, *, now: datetime, include_skipped: bool = False
+) -> list[PendingDividend]:
+    """Compute the current inbox — pure read, self-healing (no pending rows stored).
+
+    ``include_skipped=True`` ignores the skip filter so :func:`list_skipped` (3E) can
+    reconstruct the detail of previously-skipped fingerprints; the default excludes them.
+    """
     instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
     acq = earliest_acquisitions(conn)
-    skips = _skipped(conn)
+    skips: set[str] = set() if include_skipped else _skipped(conn)
     today = now.date()
 
     # Ledger dividend dates per (account, symbol, family) — the recorded guard.

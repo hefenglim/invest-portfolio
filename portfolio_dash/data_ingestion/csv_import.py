@@ -7,7 +7,8 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
-from portfolio_dash.data_ingestion.fees import compute_fees
+from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
+from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import insert_transaction
@@ -73,19 +74,38 @@ def txn_preview_row(
         (inp.account_id,),
     ).fetchone()
     if acc is not None and (fee is None or tax is None):
-        fr = compute_fees(
-            get_fee_rule_set(acc["fee_rule_set"]),
-            inp.side,
-            inp.quantity,
-            inp.price,
-            is_etf=inp.is_etf,
-            daytrade=inp.daytrade,
-        )
-        if fee is None:
-            fee = fr.fee
-        if tax is None:
-            tax = fr.tax
-        snap = fr.snapshot
+        # Registry-authoritative ETF flag (same rule as manual.py — stress-audit
+        # finding 2026-07-15): a registered instrument's is_etf wins; the input
+        # flag only covers unregistered symbols (e.g. an AI draft pre-registration).
+        is_etf = res.instrument.is_etf if res.instrument is not None else inp.is_etf
+        rules = get_fee_rule_set(acc["fee_rule_set"])
+        # FE-D2: Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure).
+        stamp_fx: Decimal | None = None
+        if rules.has_us_stamp:
+            stamp_fx = resolve_stamp_fx(conn, inp.trade_date)
+            if stamp_fx is None:
+                issues.append(Issue(
+                    kind="stamp_fx_missing", needs_confirm=True,
+                    message="無 USD/MYR 匯率,印花稅未計"))
+        try:
+            fr = compute_fees(
+                rules,
+                inp.side,
+                inp.quantity,
+                inp.price,
+                is_etf=is_etf,
+                daytrade=inp.daytrade,
+                stamp_fx=stamp_fx,
+            )
+        except FeeComputationError as exc:
+            # Overflow-sized input (M4): a hard row issue, never a 500.
+            issues.append(Issue(kind="fee_overflow", message=str(exc)))
+        else:
+            if fee is None:
+                fee = fr.fee
+            if tax is None:
+                tax = fr.tax
+            snap = fr.snapshot
 
     # Build payload for the writer (string dict + prefixed snapshot entries)
     payload: dict[str, str] = {
@@ -95,6 +115,7 @@ def txn_preview_row(
         "quantity": str(inp.quantity),
         "price": str(inp.price),
         "trade_date": inp.trade_date.isoformat(),
+        "daytrade": "1" if inp.daytrade else "0",  # persisted through the writer (MED-1)
         "note": inp.note or "",
         **{f"snap.{k}": v for k, v in snap.items()},
     }
@@ -120,7 +141,8 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
         conn:     Active SQLite connection (schema in place, accounts seeded).
         csv_text: Full CSV text including a header row.  Required columns:
                   ``account``, ``symbol``, ``side``, ``date``, ``shares``,
-                  ``price``.  Optional: ``fee``, ``tax``, ``note``.
+                  ``price``.  Optional: ``fee``, ``tax``, ``note``, ``daytrade``
+                  (``1``/``true`` marks a TW same-day round trip → 0.15% sell tax).
 
     Returns:
         :class:`ImportPreview` containing one :class:`PreviewRow` per data row.
@@ -142,6 +164,7 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
                 trade_date=date.fromisoformat(raw["date"]),
                 fee=Decimal(raw["fee"]) if raw.get("fee") else None,
                 tax=Decimal(raw["tax"]) if raw.get("tax") else None,
+                daytrade=raw.get("daytrade", "").lower() in ("1", "true", "y", "yes"),
                 note=raw.get("note") or None,
             )
         except (KeyError, ValueError, InvalidOperation) as exc:
@@ -187,5 +210,6 @@ def write_transaction_row(
         trade_date=date.fromisoformat(p["trade_date"]),
         fee_rule_snapshot=snapshot,
         note=p["note"] or None,
+        daytrade=p.get("daytrade") == "1",
         commit=commit,
     )

@@ -310,10 +310,11 @@ def test_dual_target_zero_liquidates_all_accounts_greedy() -> None:
     assert [Decimal(str(lg["shares"])) for lg in legs] == [Decimal("30"), Decimal("10")]
     assert Decimal(str(row["shares"])) == Decimal("40")  # aggregate = all shares
     assert row["new_weight"] == Decimal("0")  # combined position fully closed
-    # per-account fee rule sets: schwab sell = sec_fee*3600 = 0.10; moomoo_us = 0.99 flat +
-    # sec_fee*1200 = 1.02 — DIFFERENT structures, proving fees bind to the account not market.
-    assert Decimal(str(legs[0]["fee"])) == Decimal("0.10")
-    assert Decimal(str(legs[1]["fee"])) == Decimal("1.02")
+    # per-account fee rule sets (fee-engine v2): schwab sell 30@120 = sec 0.07 + taf 0.01 =
+    # 0.08; moomoo_us sell 10@120 = comm 0.36 + platform 0.99 + settle 0.03 + cat 0.00 +
+    # sec 0.02 + taf 0.01 = 1.41 — DIFFERENT structures, proving fees bind to account not market.
+    assert Decimal(str(legs[0]["fee"])) == Decimal("0.08")
+    assert Decimal(str(legs[1]["fee"])) == Decimal("1.41")
     conn.close()
 
 

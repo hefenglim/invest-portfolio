@@ -59,9 +59,12 @@ def test_fx_entry_negative_guard(api_client: TestClient) -> None:
         "account_id": "schwab", "date": "2026-06-01", "from_ccy": "TWD",
         "from_amt": "10000", "to_ccy": "USD", "to_amt": "300"})
     assert r.status_code == 422 and r.json()["error"]["code"] == "negative_cash"
-    # deposit first -> conversion passes and lands in the SAME fx ledger
+    # deposit FIRST (dated before the golden 2026-01-08 fx-out) -> the running balance
+    # never dips below zero, so the conversion passes and lands in the SAME fx ledger.
+    # (Under the date-aware guard, audit C3, a deposit dated AFTER the drain would still
+    # warn — the pool was negative in between.)
     api_client.post("/api/cash/movements", json={
-        "account_id": "schwab", "date": "2026-05-01", "kind": "deposit",
+        "account_id": "schwab", "date": "2026-01-05", "kind": "deposit",
         "ccy": "TWD", "amount": "50000"})
     r2 = api_client.post("/api/cash/fx", json={
         "account_id": "schwab", "date": "2026-06-01", "from_ccy": "TWD",
@@ -91,6 +94,30 @@ def test_movement_edit_delta_guard_and_delete(api_client: TestClient) -> None:
     assert r2.status_code == 422
     r3 = api_client.delete(f"/api/cash/movements/{dep['id']}?ack_negative=true")
     assert r3.status_code == 200
+
+
+def test_rebate_movement_credits_pool_and_statement(api_client: TestClient) -> None:
+    """A rebate movement (退款／折讓, FE-D1) is a deposit-like CREDIT in the account's
+    settlement ccy, surfacing in the statement with kind 'rebate' (the frontend maps → 折讓款)."""
+    r = api_client.post("/api/cash/movements", json={
+        "account_id": "tw_broker", "date": "2026-06-01", "kind": "rebate",
+        "ccy": "TWD", "amount": "109", "note": "2026-05 折讓款"})
+    assert r.status_code == 201
+    # golden tw_broker TWD is −495,000; a +109 rebate credit lifts it to −494,891.
+    assert _balance(api_client, "tw_broker", "TWD") == "-494891"
+    rows = api_client.get("/api/cash").json()["movements"]["rows"]
+    assert rows[0]["kind"] == "rebate" and rows[0]["amount"] == "109"
+    stmt = api_client.get("/api/cash/statement",
+                          params={"account": "tw_broker", "ccy": "TWD"}).json()
+    assert any(x["kind"] == "rebate" and x["delta"] == "109" for x in stmt["rows"])
+
+
+def test_rebate_movement_ccy_guard(api_client: TestClient) -> None:
+    """A rebate movement obeys the same currency↔account coherence guard as deposits."""
+    r = api_client.post("/api/cash/movements", json={
+        "account_id": "tw_broker", "date": "2026-06-01", "kind": "rebate",
+        "ccy": "USD", "amount": "10"})
+    assert r.status_code == 400 and r.json()["error"]["field"] == "ccy"
 
 
 def test_bad_inputs_400(api_client: TestClient) -> None:

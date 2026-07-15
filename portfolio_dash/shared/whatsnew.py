@@ -58,15 +58,126 @@ class Feature(BaseModel):
 
 
 # Hand-maintained, newest version first. Features are phrased for the end user (what they
-# can now do), not implementation detail. The v0.1.18 entries (what's-new system + version-
-# history browser + the rebalance/holdings/ledger print reports) stay hidden until
-# __version__ is bumped at ship time (visible_versions filters them out while current ==
-# 0.1.17 — this is intentional).
+# can now do), not implementation detail. Entries for a version that has not shipped yet
+# stay hidden until __version__ is bumped to that version at ship time (visible_versions
+# filters out any version newer than the running __version__ — this is intentional).
 #
 # v0.1.0 -> v0.1.11 were backfilled from CHANGELOG.md (round 3) so the history browser has
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.19 (P3 batch 3 · Wave 1 digests) — HIDDEN until __version__ is bumped ------
+    Feature(
+        version="0.1.19",
+        id="daily-digest",
+        title="每日收盤摘要",
+        desc="收盤後自動彙整當日漲跌、警示與訊號，儀表板新增「今日摘要」卡",
+        href="index.html",
+        area="儀表板 → 今日摘要",
+        target="#digest-daily-panel",
+    ),
+    Feature(
+        version="0.1.19",
+        id="weekly-action-list",
+        title="每週行動清單",
+        desc="每週日彙整再平衡漂移、警示回顧與即將除息等待辦，儀表板新增「週行動清單」",
+        href="index.html",
+        area="儀表板 → 週行動清單",
+        target="#digest-weekly-panel",
+    ),
+    Feature(
+        version="0.1.19",
+        id="digest-settings",
+        title="摘要與週報設定",
+        desc="可開關每日／每週摘要、調整發送時間，並選用 AI 一句話總結",
+        href="settings.html#alerts",
+        area="系統設定 → 預警規則 → 摘要與週報",
+        target="#digest-settings-card",
+    ),
+    # --- v0.1.19 (P3 batch 3 · Wave 2 ledger + cash hardening) --------------------------
+    Feature(
+        version="0.1.19",
+        id="cash-statement",
+        title="現金收支明細",
+        desc="點各帳戶現金池即可展開該幣別的收支明細，含每筆異動與伺服器計算的滾動餘額",
+        href="cash.html",
+        area="資金管理 → 現金收支明細",
+        target="#cash-statement",
+    ),
+    Feature(
+        version="0.1.19",
+        id="ledger-input-hardening",
+        title="交易輸入更嚴謹",
+        desc="市場與帳戶不符、負費用、未來日期、重複與超大數值等會即時提示，並保留更正稽核",
+        href="trades.html",
+        area="交易帳本 → 交易輸入",
+        target="#input-section",
+    ),
+    # --- v0.1.19 (fee-engine v2 + 折讓款 inbox) -----------------------------------------
+    Feature(
+        version="0.1.19",
+        id="fee-engine-v2",
+        title="費用引擎升級 v2",
+        desc="改依各券商真實費率表計算手續費與稅：台股無條件捨去至整數、馬股印花稅與 SST、"
+             "美股 SEC／TAF，交易預覽即時反映",
+        href="trades.html",
+        area="交易帳本 → 交易輸入",
+        target="#input-section",
+    ),
+    Feature(
+        version="0.1.19",
+        id="rebate-inbox",
+        title="折讓款預告與確認",
+        desc="台股先收後退的次月手續費折讓自動預估並列入收件匣，實際入帳時一鍵確認記入現金池"
+             "（僅供參考，不計入成本／損益）",
+        href="dividend-inbox.html",
+        area="收件匣 → 待確認退款（折讓款）",
+        target="#rebate-section",
+    ),
+    # --- v0.1.19 (P3 batch 3 · Wave 3 fix pack + UX) ------------------------------------
+    Feature(
+        version="0.1.19",
+        id="news-manual-fetch",
+        title="手動抓取新聞",
+        desc="新聞庫可選定範圍（全部或單一標的）立即抓取並以 AI 整理，不必等每日排程",
+        href="news.html",
+        area="新聞庫",
+        target="#nw-toolbar",
+    ),
+    Feature(
+        version="0.1.19",
+        id="ui-toolbar-polish",
+        title="操作列樣式統一",
+        desc="全站面板的操作按鈕統一尺寸與對齊，同一列的按鈕高度一致，視覺更整齊",
+        href="index.html",
+        area="全站 → 面板操作列",
+        target=".panel-head",
+    ),
+    Feature(
+        version="0.1.19",
+        id="dividend-inbox-page",
+        title="股利收件匣獨立頁",
+        desc="配息／配股偵測移至獨立的「股利收件匣」頁，可取消忽略、確認後一鍵復原",
+        href="dividend-inbox.html",
+        area="股利收件匣",
+        target="#inbox-section",
+    ),
+    Feature(
+        version="0.1.19",
+        id="alert-bell-readstate",
+        title="預警鈴已讀狀態",
+        desc="開啟預警面板後鈴鐺紅點清除，僅在有新的預警時再次亮起（跨分頁同步）",
+        href=None,
+        area="全站 → 頂列預警鈴",
+    ),
+    Feature(
+        version="0.1.19",
+        id="quota-gate-when-ai-off",
+        title="未啟用 AI 不再誤報額度",
+        desc="尚未設定任何 AI 模型時，額度標籤顯示「AI 未啟用」，不再誤報 LLM 額度偏低預警",
+        href=None,
+        area="全站 → AI 額度標籤",
+    ),
     Feature(
         version="0.1.18",
         id="whats-new-panel",
@@ -523,9 +634,10 @@ CATALOG: list[Feature] = [
     ),
 ]
 
-# version -> ISO delivery date (from the CHANGELOG headings). v0.1.18 is intentionally
-# absent until it ships (GET serializes a missing entry as date: null).
+# version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
+# date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.19": "2026-07-15",
     "0.1.18": "2026-07-14",
     "0.1.17": "2026-07-13",
     "0.1.16": "2026-07-12",

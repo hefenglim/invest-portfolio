@@ -1,6 +1,24 @@
 """Per-account FX pool: weighted-avg acquisition rate and foreign cash reconstruction.
 
 Inputs are already scoped to a single account (the caller filters by account_id).
+
+Two distinct "cash" definitions live in this codebase — do not conflate them (audit C9):
+
+* **FX-exposure view** (this module, :func:`foreign_cash_balance`): the foreign-currency
+  balance whose home-currency cost basis drives 換匯損益 (realized/unrealized FX P&L). It
+  reconstructs the FOREIGN pool from conversions + foreign trades + foreign cash dividends.
+  Its purpose is attribution of currency gain/loss against the weighted-avg acquisition
+  rate — NOT operational cash tracking.
+
+* **Funds view** (``portfolio/cash.py`` :func:`cash_balances`): the operational cash pool
+  per (account, currency) that the 資金管理 page shows — deposits/withdrawals/openings +
+  fx legs + trade settlements + cash dividends. It answers "how much cash is in this
+  account right now" and drives the overdraft guard; it feeds NO return metric.
+
+They diverge whenever cash enters/leaves a pool WITHOUT an FX conversion — e.g. a plain
+deposit, a same-currency trade, or a cash dividend. The funds view moves; the FX-exposure
+view (which only tracks foreign amounts acquired via conversion) may not. Keep them
+separate: one is for FX P&L attribution, the other for cash operations.
 """
 
 from decimal import Decimal

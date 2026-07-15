@@ -95,6 +95,7 @@
       dl.appendChild(o);
     });
     $('#m-date').value = TODAY;
+    $('#m-date').max = TODAY;  // audit M5: discourage a future trade date (server soft-warns too)
     $('#m-symbol').value = '';
     $('#m-shares').value = '';
     $('#m-price').value = '';
@@ -112,6 +113,8 @@
     ['m-account', 'm-symbol', 'm-shares', 'm-price', 'm-date'].forEach((id) => {
       $('#' + id).addEventListener('input', schedulePreview);
     });
+    const mdt = $('#m-daytrade');
+    if (mdt) mdt.addEventListener('change', schedulePreview);
     $('#m-fee-pencil').addEventListener('click', () => {
       m.feeOverride = true;
       $('#m-fee').readOnly = false;
@@ -153,6 +156,8 @@
       shares: sharesRaw === '' ? '0' : sharesRaw,
       price: priceRaw === '' ? '0' : priceRaw,
     };
+    const dt = $('#m-daytrade');
+    if (dt && dt.checked) body.daytrade = true;
     if (m.feeOverride) {
       const fv = $('#m-fee').value.trim();
       if (fv !== '') body.fee_override = fv;
@@ -240,6 +245,21 @@
     const ccy = a ? a.ccy : '';
     $('#m-fee-ovr').hidden = !m.feeOverride;
     $('#m-tax-ovr').hidden = !m.taxOverride;
+
+    /* FE-D1 forecast HINT (informational, 不計入成本): the server returns rebate_estimate
+       (TW charge-first next-month refund) as a Decimal STRING, or null when the account
+       never rebates. Show it under the fee field only where it applies + is positive. */
+    const rebateHint = $('#m-rebate-hint');
+    if (rebateHint) {
+      const est = (serverOk && preview) ? preview.rebate_estimate : null;
+      if (est != null && Number(est) > 0) {
+        rebateHint.textContent = '預估次月折讓 +' + f.money(est, ccy) + '（不計入成本）';
+        rebateHint.hidden = false;
+      } else {
+        rebateHint.hidden = true;
+        rebateHint.textContent = '';
+      }
+    }
 
     /* split server issues: hard (error) gates the confirm; soft (warn, e.g. oversell)
        needs an ack; info (e.g. 未註冊將自動註冊) is a notice only — never gates. */

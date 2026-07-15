@@ -2,8 +2,8 @@
 
 import json
 import sqlite3
-from datetime import date
-from decimal import Decimal
+from datetime import UTC, date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +11,71 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import from_db, to_db
+
+# Transaction price precision cap (audit L11): cap to 4 dp on the way in — same
+# convention as pricing/store (ROUND_HALF_UP, CAP-not-pad; clean values are unchanged).
+# 4 dp covers every market tick (US/TW 2 dp, MY 3 dp).
+_PRICE_DP = 4
+
+
+def _cap_price(v: Decimal) -> Decimal:
+    """Round *v* to at most 4 decimals; values already within the cap are returned as-is."""
+    exp = v.as_tuple().exponent
+    if isinstance(exp, int) and exp < -_PRICE_DP:
+        return v.quantize(Decimal(1).scaleb(-_PRICE_DP), rounding=ROUND_HALF_UP)
+    return v
+
+
+# ---------------------------------------------------------------------------
+# Ledger correction audit trail (audit M9)
+# ---------------------------------------------------------------------------
+# Every row correction (edit / delete) on the four ledgers captures the BEFORE state
+# here, so an explicit correction is auditable even though the ledger is not literally
+# append-only. No UI viewer this wave — db-stats visibility is enough.
+
+
+def _write_audit(
+    conn: sqlite3.Connection,
+    table_name: str,
+    row_id: str,
+    action: str,
+    before: dict[str, object] | None,
+) -> None:
+    """Record the pre-mutation snapshot of one ledger row (idempotent-agnostic append)."""
+    if before is None:
+        return
+    conn.execute(
+        "INSERT INTO ledger_audit (table_name, row_id, action, before_json, at) "
+        "VALUES (?,?,?,?,?)",
+        (
+            table_name,
+            row_id,
+            action,
+            json.dumps(before, ensure_ascii=False, default=str),
+            datetime.now(UTC).isoformat(),
+        ),
+    )
+
+
+def _capture(
+    conn: sqlite3.Connection, sql: str, params: tuple[object, ...]
+) -> dict[str, object] | None:
+    row = conn.execute(sql, params).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_ledger_audit(
+    conn: sqlite3.Connection, *, table_name: str | None = None
+) -> list[dict[str, object]]:
+    """Return ledger_audit rows (newest first); optionally filter by table_name."""
+    where = " WHERE table_name=?" if table_name is not None else ""
+    params: tuple[object, ...] = (table_name,) if table_name is not None else ()
+    rows = conn.execute(
+        f"SELECT id, table_name, row_id, action, before_json, at "
+        f"FROM ledger_audit{where} ORDER BY id DESC",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def upsert_instrument(conn: sqlite3.Connection, inst: Instrument) -> None:
@@ -99,6 +164,7 @@ class StoredTransaction(BaseModel):
     trade_date: date
     fee_rule_snapshot: dict[str, str] = Field(default_factory=dict)
     note: str | None = None
+    daytrade: bool = False
 
 
 def insert_transaction(
@@ -114,6 +180,7 @@ def insert_transaction(
     trade_date: date,
     fee_rule_snapshot: dict[str, str] | None = None,
     note: str | None = None,
+    daytrade: bool = False,
     commit: bool = True,
 ) -> int:
     """Insert a transaction row and return its new primary-key id.
@@ -124,19 +191,20 @@ def insert_transaction(
     """
     cur = conn.execute(
         """INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax,
-               trade_date, fee_rule_snapshot, note)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               trade_date, fee_rule_snapshot, note, daytrade)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (
             account_id,
             symbol,
             side.value,
             to_db(quantity),
-            to_db(price),
+            to_db(_cap_price(price)),
             to_db(fees),
             to_db(tax),
             trade_date.isoformat(),
             json.dumps(fee_rule_snapshot or {}),
             note,
+            1 if daytrade else 0,
         ),
     )
     if commit:
@@ -175,7 +243,19 @@ def upsert_opening(
 
     Pass ``commit=False`` to defer the commit to the caller (batch-import atomicity, #1).
     Single-row and manual callers keep the default ``commit=True`` and are unchanged.
+
+    When a row for (account_id, symbol) already exists, the pre-mutation state is
+    captured to ``ledger_audit`` as an ``update`` (audit M9); a first insert audits
+    nothing (there is no prior row to preserve).
     """
+    _write_audit(
+        conn, "opening_inventory", f"{account_id}/{symbol}", "update",
+        _capture(
+            conn,
+            "SELECT * FROM opening_inventory WHERE account_id=? AND symbol=?",
+            (account_id, symbol),
+        ),
+    )
     conn.execute(
         """INSERT INTO opening_inventory
                (account_id, symbol, shares, original_avg_cost, original_cost_total, build_date)
@@ -448,7 +528,8 @@ def list_transactions(
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         f"SELECT id, account_id, symbol, side, quantity, price, fees, tax, trade_date, "
-        f"fee_rule_snapshot, note FROM transactions{where} ORDER BY trade_date ASC, id ASC",
+        f"fee_rule_snapshot, note, daytrade FROM transactions{where} "
+        f"ORDER BY trade_date ASC, id ASC",
         params,
     ).fetchall()
     return [
@@ -464,6 +545,7 @@ def list_transactions(
             trade_date=date.fromisoformat(r["trade_date"]),
             fee_rule_snapshot=json.loads(r["fee_rule_snapshot"] or "{}"),
             note=r["note"],
+            daytrade=bool(r["daytrade"]),
         )
         for r in rows
     ]
@@ -498,26 +580,51 @@ def update_transaction(
     fees: Decimal,
     tax: Decimal,
     trade_date: date,
+    daytrade: bool,
     note: str | None = None,
+    fee_rule_snapshot: dict[str, str] | None = None,
 ) -> bool:
     """Full-row transaction correction; returns False when the id does not exist.
 
-    ``fee_rule_snapshot`` is intentionally NOT touched: it records the rule set in
-    force when the row was first written (audit trail), even across corrections.
+    ``daytrade`` is persisted (audit MED-1) so a recompute reproduces the sell-side TW tax
+    rate; the caller supplies the effective value explicitly (no default — the single
+    caller resolves preserve-vs-change against the stored row).
+
+    ``fee_rule_snapshot`` is regenerated by the caller ONLY when the fee/tax are
+    recomputed from the new account's rule set (audit M6); pass ``None`` to leave the
+    stored snapshot untouched (records the rule set in force when first written). The
+    pre-mutation row is captured to ``ledger_audit`` first (M9).
     """
-    cur = conn.execute(
-        """UPDATE transactions SET account_id=?, symbol=?, side=?, quantity=?, price=?,
-               fees=?, tax=?, trade_date=?, note=? WHERE id=?""",
-        (
-            account_id, symbol, side.value, to_db(quantity), to_db(price),
-            to_db(fees), to_db(tax), trade_date.isoformat(), note, txn_id,
-        ),
-    )
+    _write_audit(conn, "transactions", str(txn_id), "update",
+                 _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,)))
+    dt = 1 if daytrade else 0
+    if fee_rule_snapshot is None:
+        cur = conn.execute(
+            """UPDATE transactions SET account_id=?, symbol=?, side=?, quantity=?, price=?,
+                   fees=?, tax=?, trade_date=?, note=?, daytrade=? WHERE id=?""",
+            (
+                account_id, symbol, side.value, to_db(quantity), to_db(_cap_price(price)),
+                to_db(fees), to_db(tax), trade_date.isoformat(), note, dt, txn_id,
+            ),
+        )
+    else:
+        cur = conn.execute(
+            """UPDATE transactions SET account_id=?, symbol=?, side=?, quantity=?, price=?,
+                   fees=?, tax=?, trade_date=?, note=?, daytrade=?, fee_rule_snapshot=?
+                   WHERE id=?""",
+            (
+                account_id, symbol, side.value, to_db(quantity), to_db(_cap_price(price)),
+                to_db(fees), to_db(tax), trade_date.isoformat(), note, dt,
+                json.dumps(fee_rule_snapshot), txn_id,
+            ),
+        )
     conn.commit()
     return cur.rowcount > 0
 
 
 def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> bool:
+    _write_audit(conn, "transactions", str(txn_id), "delete",
+                 _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,)))
     cur = conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
     conn.commit()
     return cur.rowcount > 0
@@ -546,6 +653,8 @@ def update_dividend(
     reinvest_price: Decimal | None = None,
 ) -> bool:
     """Full-row dividend correction; returns False when the id does not exist."""
+    _write_audit(conn, "dividends", str(div_id), "update",
+                 _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,)))
     cur = conn.execute(
         """UPDATE dividends SET account_id=?, symbol=?, date=?, type=?, gross=?,
                withholding=?, net=?, reinvest_shares=?, reinvest_price=? WHERE id=?""",
@@ -562,6 +671,8 @@ def update_dividend(
 
 
 def delete_dividend(conn: sqlite3.Connection, div_id: int) -> bool:
+    _write_audit(conn, "dividends", str(div_id), "delete",
+                 _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,)))
     cur = conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))
     conn.commit()
     return cur.rowcount > 0
@@ -587,6 +698,8 @@ def update_fx_conversion(
     to_amount: Decimal,
 ) -> bool:
     """Full-row FX-conversion correction; returns False when the id does not exist."""
+    _write_audit(conn, "fx_conversions", str(fx_id), "update",
+                 _capture(conn, "SELECT * FROM fx_conversions WHERE id=?", (fx_id,)))
     cur = conn.execute(
         """UPDATE fx_conversions SET account_id=?, date=?, from_ccy=?, from_amount=?,
                to_ccy=?, to_amount=? WHERE id=?""",
@@ -600,6 +713,8 @@ def update_fx_conversion(
 
 
 def delete_fx_conversion(conn: sqlite3.Connection, fx_id: int) -> bool:
+    _write_audit(conn, "fx_conversions", str(fx_id), "delete",
+                 _capture(conn, "SELECT * FROM fx_conversions WHERE id=?", (fx_id,)))
     cur = conn.execute("DELETE FROM fx_conversions WHERE id=?", (fx_id,))
     conn.commit()
     return cur.rowcount > 0
@@ -616,6 +731,14 @@ def get_opening(
 
 
 def delete_opening(conn: sqlite3.Connection, account_id: str, symbol: str) -> bool:
+    _write_audit(
+        conn, "opening_inventory", f"{account_id}/{symbol}", "delete",
+        _capture(
+            conn,
+            "SELECT * FROM opening_inventory WHERE account_id=? AND symbol=?",
+            (account_id, symbol),
+        ),
+    )
     cur = conn.execute(
         "DELETE FROM opening_inventory WHERE account_id=? AND symbol=?",
         (account_id, symbol),

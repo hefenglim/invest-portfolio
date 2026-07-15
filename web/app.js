@@ -1067,10 +1067,10 @@
      display values. House style: silent on success, fail toast, pdBusy guards double
      clicks; the filename comes from the backend Content-Disposition. */
   function csvExportButton(label, path, bodyFn) {
-    const b = el('button', 'btn-export');
+    const b = el('button', 'btn btn-sm btn-export');
     b.type = 'button';
     b.title = '匯出對帳級 CSV（由後端計算核心產生）';
-    b.appendChild(el('span', null, '⬇'));
+    b.appendChild(el('span', 'ico', '⬇'));
     b.appendChild(el('span', null, label));
     b.addEventListener('click', async () => {
       const restore = window.pdBusy ? window.pdBusy(b, '匯出中…') : function () {};
@@ -1093,8 +1093,11 @@
       panelHead.appendChild(csvExportButton('匯出 CSV', '/api/export/holdings', () => ({})));
       /* 匯出報告: print-optimized 持倉報告 (self-contained HTML from the backend). Server
          recomputes everything (no client math). House style: silent on success, fail toast,
-         busy state guards double-clicks. */
-      const reportBtn = el('button', 'btn pd-holdings-report-btn', '匯出報告');
+         busy state guards double-clicks. Compact tier + leading ⎙ icon so the whole holdings
+         action row (再平衡試算 / 匯出 CSV / 匯出報告) reads as one coherent set. */
+      const reportBtn = el('button', 'btn btn-sm pd-holdings-report-btn');
+      reportBtn.appendChild(el('span', 'ico', '⎙'));
+      reportBtn.appendChild(el('span', null, '匯出報告'));
       reportBtn.type = 'button';
       reportBtn.title = '下載持倉報告（可列印 HTML，含 KPI、持倉明細與配置）';
       reportBtn.addEventListener('click', async () => {

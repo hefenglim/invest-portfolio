@@ -60,30 +60,35 @@ def _fee_rule_set_name(conn: sqlite3.Connection, account_id: str) -> str | None:
 
 
 def _fee_rule_desc(snapshot: dict[str, str], side: Side) -> str:
-    """A short human-readable fee summary, best-effort from the snapshot.
+    """A short human-readable fee summary, best-effort from the fee-engine v2 snapshot.
 
-    e.g. TW buy -> "0.1425%・最低 20"; TW sell adds "・證交稅 0.3%".
+    e.g. TW buy -> "0.1425%・最低 20"; TW sell adds "・證交稅 0.3%"; US/MY compose from the
+    commission / platform / SEC-TAF / stamp components recorded in the snapshot.
     """
     def _pct(value: str) -> str:  # rate -> trimmed percentage, e.g. "0.001425" -> "0.1425"
         return f"{(Decimal(value) * 100).normalize():f}"
 
     parts: list[str] = []
-    brokerage = snapshot.get("brokerage")
+    brokerage = snapshot.get("brokerage")  # TW commission rate
     if brokerage is not None and Decimal(brokerage) > _ZERO:
         parts.append(f"{_pct(brokerage)}%")
-    flat_fee = snapshot.get("flat_fee")
-    if flat_fee is not None and Decimal(flat_fee) > _ZERO:
-        parts.append(f"固定 {flat_fee}")
+    commission_rate = snapshot.get("commission_rate")  # US/MY commission rate
+    if commission_rate is not None and Decimal(commission_rate) > _ZERO:
+        parts.append(f"佣金 {_pct(commission_rate)}%")
+    platform = snapshot.get("platform")
+    if platform is not None and Decimal(platform) > _ZERO:
+        parts.append(f"平台費 {platform}")
     min_fee = snapshot.get("min_fee")
     if min_fee is not None and Decimal(min_fee) > _ZERO:
         parts.append(f"最低 {min_fee}")
     if side is Side.SELL:
-        tax_rate = snapshot.get("tax_rate")
+        tax_rate = snapshot.get("tax_rate")  # TW securities-transaction tax
         if tax_rate is not None and Decimal(tax_rate) > _ZERO:
             parts.append(f"證交稅 {_pct(tax_rate)}%")
-        stamp = snapshot.get("stamp_duty_rate")
-        if stamp is not None and Decimal(stamp) > _ZERO:
-            parts.append(f"印花稅 {_pct(stamp)}%")
+        if "sec" in snapshot or "taf" in snapshot:
+            parts.append("SEC/TAF")
+    if "stamp" in snapshot or "stamp_usd" in snapshot:
+        parts.append("印花稅")
     return "・".join(parts) if parts else "無手續費/稅"
 
 
@@ -104,6 +109,7 @@ def compute_whatif(
         WhatIfError: symbol is unheld and no *account_id* was given (cannot infer account).
     """
     from portfolio_dash.data_ingestion.fees import compute_fees  # local: avoid cycle risk
+    from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 
     # 1. Ledgers (Stored* rows -> ledger models) — same mapping as build_dashboard step 1.
     txs = [
@@ -148,8 +154,10 @@ def compute_whatif(
     inst = instruments.get(symbol)
     is_etf = inst.is_etf if inst is not None else False
 
-    # 3. Fee/tax via the REAL engine — never re-implement the math.
-    fr = compute_fees(rules, side, shares, price, is_etf=is_etf)
+    # 3. Fee/tax via the REAL engine — never re-implement the math. FE-D2 estimate path:
+    # resolve the current USD/MYR rate for a Moomoo US MY stamp (silent omit if unavailable).
+    stamp_fx = resolve_stamp_fx(conn, now.date()) if rules.has_us_stamp else None
+    fr = compute_fees(rules, side, shares, price, is_etf=is_etf, stamp_fx=stamp_fx)
     fee = fr.fee
     tax = fr.tax
     amount = shares * price

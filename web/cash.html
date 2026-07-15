@@ -8,10 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.18"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.18"></link>
-<link rel="stylesheet" href="trades.css?v=0.1.18"></link>
-<link rel="stylesheet" href="input.css?v=0.1.18"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.19"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.19"></link>
+<link rel="stylesheet" href="trades.css?v=0.1.19"></link>
+<link rel="stylesheet" href="input.css?v=0.1.19"></link>
 <style>
   .cash-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px var(--pad) 14px; }
   .cash-card {
@@ -20,12 +20,24 @@
     display: flex; flex-direction: column; gap: 6px;
   }
   .cash-card .acct { font-weight: 700; font-size: 12px; }
-  .cash-line { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; }
+  .cash-line { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; gap: 8px; }
+  .cash-line.clickable { cursor: pointer; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; }
+  .cash-line.clickable:hover { background: var(--panel-3); }
+  .cash-line.active { background: var(--accent-soft); }
   .cash-line .ccy { color: var(--text-3); font-family: var(--font-num); font-size: 10px; }
   .cash-line .amt { font-family: var(--font-num); }
-  .cash-line .amt.neg { color: var(--up); font-weight: 700; }
+  /* audit C7: negative cash is a WARNING (漏記入金), not a gain — amber, never --up. */
+  .cash-line .amt.neg { color: var(--amber); font-weight: 700; }
   .cash-total { padding: 4px var(--pad) 0; font-size: 12px; color: var(--text-2); }
+  .cash-total .excl { color: var(--amber); }
+  .cash-banner {
+    margin: 0 var(--pad) 4px; padding: 8px 12px; font-size: 11.5px;
+    border-radius: var(--radius); color: var(--amber);
+    background: var(--amber-soft); border: 1px solid rgba(217, 161, 63, 0.35);
+  }
+  .cash-help { padding: 0 var(--pad) 12px; font-size: 10.5px; color: var(--text-3); }
   .cash-forms { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); padding: 0 var(--pad) 14px; }
+  .stmt-chip { font-size: 10px; padding: 0 8px; line-height: 17px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui); color: var(--text-2); }
   @media (max-width: 1100px) { .cash-cards { grid-template-columns: repeat(2, 1fr); } .cash-forms { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -42,8 +54,27 @@
       <h2 class="panel-title">各帳戶現金池</h2>
       <span class="panel-sub">入金 − 出金 ± 換匯 ± 買賣收付 ＋ 現金股利；期初庫存不動現金（需要的話補一筆初始入金）</span>
     </div>
+    <div class="cash-banner" id="cash-neg-banner" hidden="hidden"></div>
     <div class="cash-total" id="cash-total"></div>
     <div class="cash-cards" id="cash-cards"></div>
+    <div class="cash-help">期初庫存的賣出需要對應的現金：若某帳戶以「期初庫存」建檔持股，記得補一筆「期初資金」入金，資金池才不會因賣出而顯示透支。</div>
+  </section>
+
+  <!-- A2. 現金收支明細（點上方現金池載入） -->
+  <section class="panel" id="cash-statement" data-screen-label="現金收支明細">
+    <div class="panel-head">
+      <h2 class="panel-title">現金收支明細</h2>
+      <span class="panel-sub" id="cash-stmt-sub">點上方任一帳戶幣別，查看該資金池的收支明細與滾動餘額</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr><th>日期</th><th class="col-text">類型</th><th class="col-text">說明</th><th>金額</th><th>餘額</th></tr>
+        </thead>
+        <tbody id="cash-stmt-body"></tbody>
+      </table>
+    </div>
+    <div id="cash-stmt-pager" hidden="hidden"></div>
   </section>
 
   <!-- B. 入金/出金 + 換匯 -->
@@ -69,6 +100,7 @@
             <div class="segmented">
               <button type="button" id="cm-kind-in" class="active">入金</button>
               <button type="button" id="cm-kind-out">出金</button>
+              <button type="button" id="cm-kind-open">期初資金</button>
             </div>
           </div>
           <div class="field">
@@ -166,11 +198,11 @@
 </div>
 </div>
 
-<script src="api.js?v=0.1.18"></script>
-<script src="shell.js?v=0.1.18"></script>
-<script src="format.js?v=0.1.18"></script>
-<script src="pager.js?v=0.1.18"></script>
-<script src="alerts.js?v=0.1.18"></script>
-<script src="cash.js?v=0.1.18"></script>
+<script src="api.js?v=0.1.19"></script>
+<script src="shell.js?v=0.1.19"></script>
+<script src="format.js?v=0.1.19"></script>
+<script src="pager.js?v=0.1.19"></script>
+<script src="alerts.js?v=0.1.19"></script>
+<script src="cash.js?v=0.1.19"></script>
 </body>
 </html>

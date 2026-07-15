@@ -5,14 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
 <title>portfolio-dash — 新聞庫</title>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.18"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.18"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.19"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.19"></link>
 <style>
   .nw-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
     padding: 12px var(--pad); }
   .nw-field { display: flex; flex-direction: column; gap: 4px; }
   .nw-field label { font-size: 11px; color: var(--text-3); letter-spacing: .04em; }
   .nw-field select, .nw-field input { min-height: 34px; }
+  #nw-toolbar { padding: 10px var(--pad) 0; }
+  #nw-toolbar .nw-run-label { font-size: 11px; color: var(--text-3); letter-spacing: .04em; }
+  #nw-toolbar #nw-scope { min-height: 30px; max-width: 260px; }
+  .nw-sched-hint { font-size: 11px; color: var(--text-3); }
+  .nw-sched-hint a { color: var(--accent); }
   .nw-totals { margin-left: auto; text-align: right; font-size: 12.5px; color: var(--text-2); }
   .nw-totals b { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
   .nw-list { padding: 0 var(--pad) 20px; display: flex; flex-direction: column; gap: 8px; }
@@ -63,6 +68,14 @@
       <span class="panel-sub">每晚整理入庫 · 點列開全文摘要 · 逐則 token/成本追蹤,協助評估用量</span>
     </div>
 
+    <div class="toolbar" id="nw-toolbar">
+      <label class="nw-run-label" for="nw-scope">抓取範圍</label>
+      <select class="select" id="nw-scope"><option value="all">全部(持倉＋觀察清單)</option></select>
+      <button class="btn btn-sm btn-primary" id="nw-run" type="button">抓取新聞</button>
+      <span class="spacer"></span>
+      <span class="nw-sched-hint">排程:每日 06:00(<a href="settings.html#scheduler">設定→排程</a> 可調)</span>
+    </div>
+
     <div class="nw-filters">
       <div class="nw-field">
         <label>相關股票</label>
@@ -100,10 +113,10 @@
   <div class="nw-modal" id="nw-modal"></div>
 </div>
 
-<script src="api.js?v=0.1.18"></script>
-<script src="shell.js?v=0.1.18"></script>
-<script src="format.js?v=0.1.18"></script>
-<script src="pager.js?v=0.1.18"></script>
-<script src="news.js?v=0.1.18"></script>
+<script src="api.js?v=0.1.19"></script>
+<script src="shell.js?v=0.1.19"></script>
+<script src="format.js?v=0.1.19"></script>
+<script src="pager.js?v=0.1.19"></script>
+<script src="news.js?v=0.1.19"></script>
 </body>
 </html>

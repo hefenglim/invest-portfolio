@@ -60,19 +60,26 @@ def test_get_shape_and_default_unseen_math(api_client: TestClient) -> None:
 
 
 def test_settings_features_carry_seeded_targets(api_client: TestClient) -> None:
-    # The in-page callout/flash points at a precise element per feature; the settings-page
-    # features carry the seeded selectors, and (round 4) EVERY feature with an href now
-    # carries a non-empty target — including the non-settings pages.
+    # The in-page callout/flash points at a precise element per feature. The SPECIFIC
+    # seeded selectors are asserted against the CATALOG (version-independent — wire
+    # assertions on named features age out as the 6-version panel window slides past
+    # their release; that broke this test at the 0.1.19 bump). The wire keeps the
+    # generic round-4 guarantee: every href feature in the payload has a target.
+    from portfolio_dash.shared.whatsnew import CATALOG
+
+    cat = {f.id: f for f in CATALOG}
+    assert cat["market-risk-alerts"].target == "#alert-rules-wrap"
+    assert cat["target-weights"].target == "#target-weights-panel"
+    assert cat["push-channels"].target == ".nt-cards"
+    assert cat["quiet-hours"].target == "#nt-qh-enabled"
+    assert cat["per-rule-subscriptions"].target == "#nt-subs"
+    # a non-settings feature (instruments page) carries its own stable panel selector.
+    assert cat["rules-engine"].target == 'section[data-screen-label="標的清單"]'
+    # the round-4 guarantee, enforced end-to-end on the live wire: every href feature
+    # currently in the panel window has a non-empty target.
     body = api_client.get("/api/whats-new").json()
     feats = {f["id"]: f for g in body["versions"] for f in g["features"]}
-    assert feats["market-risk-alerts"]["target"] == "#alert-rules-wrap"
-    assert feats["target-weights"]["target"] == "#target-weights-panel"
-    assert feats["push-channels"]["target"] == ".nt-cards"
-    assert feats["quiet-hours"]["target"] == "#nt-qh-enabled"
-    assert feats["per-rule-subscriptions"]["target"] == "#nt-subs"
-    # a non-settings feature (instruments page) now carries its own stable panel selector.
-    assert feats["rules-engine"]["target"] == 'section[data-screen-label="標的清單"]'
-    # the round-4 guarantee, enforced end-to-end: every href feature has a non-empty target.
+    assert feats, "panel window unexpectedly empty"
     for f in feats.values():
         if f["href"] is not None:
             assert f["target"] and f["target"].strip(), f["id"]

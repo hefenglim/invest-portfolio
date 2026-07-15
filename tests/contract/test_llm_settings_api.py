@@ -114,6 +114,9 @@ def test_get_config_masks_key_and_shows_roles_quota_usage(client: TestClient) ->
     assert quota["remaining_usd"] == "8.08"  # 10.00 - 1.92
     assert "alert_threshold_usd" in quota
     assert len(quota["topups"]) == 1 and quota["topups"][0]["amount_usd"] == "10.00"
+    # 3B: ai_active for the off-dashboard quota chip; the fixture binds an enabled model
+    # to the DEFAULT role -> AI is active.
+    assert quota["ai_active"] is True
 
     # usage: by_model / by_agent / daily series shape
     usage = b["usage"]

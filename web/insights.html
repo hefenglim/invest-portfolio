@@ -8,8 +8,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.18"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.18"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.19"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.19"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   .mode-pane { display: none; }
@@ -216,12 +216,12 @@
 </div>
 </div>
 
-<script src="api.js?v=0.1.18"></script>
-<script src="shell.js?v=0.1.18"></script>
-<script src="format.js?v=0.1.18"></script>
-<script src="pager.js?v=0.1.18"></script>
-<script src="export.js?v=0.1.18"></script>
-<script src="alerts.js?v=0.1.18"></script>
+<script src="api.js?v=0.1.19"></script>
+<script src="shell.js?v=0.1.19"></script>
+<script src="format.js?v=0.1.19"></script>
+<script src="pager.js?v=0.1.19"></script>
+<script src="export.js?v=0.1.19"></script>
+<script src="alerts.js?v=0.1.19"></script>
 <script>
 /* AI 洞察 — async-booted from the REAL API (decision B, spec 19/04).
    洞察卡 + 持倉健診 ← GET /api/insights (stored cards; cost_usd is a Decimal STRING).
@@ -547,10 +547,10 @@
      Owner directive 2026-07-14: no more DOM/display-value dumps. */
   var slot = document.getElementById('score-export-slot');
   if (slot) {
-    var scoreBtn = el('button', 'btn-export');
+    var scoreBtn = el('button', 'btn btn-sm btn-export');
     scoreBtn.type = 'button';
     scoreBtn.title = '匯出對帳級 CSV（AI 預測明細，由後端評估紀錄產生）';
-    scoreBtn.appendChild(el('span', null, '⬇'));
+    scoreBtn.appendChild(el('span', 'ico', '⬇'));
     scoreBtn.appendChild(el('span', null, '匯出 CSV'));
     scoreBtn.addEventListener('click', async function () {
       var restore = window.pdBusy ? window.pdBusy(scoreBtn, '匯出中…') : function () {};

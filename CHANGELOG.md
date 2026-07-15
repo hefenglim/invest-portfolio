@@ -50,6 +50,78 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.19] - 2026-07-15
+
+### Added
+- **Daily close digest + weekly action list** (P3 batch 3C; rulings B3-D1..D4): deterministic
+  assembly (day-change from last two closes, movers, alerts/signals of the day, data health;
+  weekly action items with jump links), `digest_daily`/`digest_weekly` scheduler jobs —
+  user-toggleable with adjustable times through the SAME `schedule_config` rows (settings
+  「摘要與週報」 card, friendly pickers; raw cron stays in the scheduler tab), push via the
+  notify fan-out carrying **counts/percentages only (never amounts)**, dashboard cards +
+  paged history modal, optional LLM one-liner (default OFF, never blocks generation).
+- **收件匣 standalone page** (dividend detection moved out of the trades page): nav count
+  badge, skip AND un-skip, post-confirm 「已入帳」 undo strip; continuous re-detection
+  semantics documented in-page.
+- **Rebate (折讓款) forecast + pending-refund inbox** (FE-D1 — forecast-only, never in
+  cost/P&L/XIRR): expected = floor(fee × rebate_rate) grouped per month, pending from the
+  following month, confirm books an editable-amount cash movement (`kind='rebate'`); hints
+  in the manual-trade preview and rebalance drawer/execution report.
+- **Fee engine v2** from the owner-provided complete schedules
+  (`docs/reference/broker-fee-schedules-2026-07.md`): TW **floor rounding** for fee AND tax
+  (財政部 rule — supersedes the previous 四捨五入; owner sign-off 2026-07-15); Moomoo MY
+  commission 0.03% min RM0.01 + platform RM3 + clearing + SST 8% of fees + step stamp duty
+  `ceil(amt/1000)×RM1` with per-type caps and **ETF exemption**; Moomoo US per-component
+  fees (commission/platform/settlement/CAT + SELL-only SEC 0.0000206 min $0.01 / TAF
+  $0.000195/sh min $0.01 cap $9.79) + **FE-D2** MY stamp on US trades booked in USD with
+  fx + MYR recorded in the snapshot; Schwab SELL-only regulatory fees; per-row snapshot
+  regime (`engine:"v2"`) — historical rows keep their booked regime.
+- **Cash management hardening** (audit C1-C7): per-(account,ccy) **statement with server
+  running balance**, `opening` (期初資金) movement kind, negative-pool banner, currency↔
+  account validation, date-aware running-min guard, reporting total skip-not-abort.
+- **News manual fetch** (`POST /api/news/run`, all registered instruments or one symbol,
+  409 in-flight guard, guest 403) + schedule hint linking the scheduler tab.
+- **Accounting formula manual v1.3** (`docs/accounting-formula-manual.md`): **activated as
+  the arbitration standard** (owner sign-off 2026-07-15, effective this version); adversarial
+  completeness sweep filled 11 class-A formula gaps + §12.5 out-of-scope enumeration;
+  English mirror `docs/accounting-formula-manual.en.md` (zh version is the authority);
+  XIRR scalar anchored by the stress solver.
+- **Permanent stress-audit harness** `scripts/stress_audit/` + `/stress-audit` skill:
+  independent Decimal oracle (incl. its own XIRR solver, tolerance |Δ|≤1e-6), phase-1
+  clean-room (1,063/1,063 on this release) + phase-2 live-site delta mode, accumulation
+  rules (every found bug → pytest regression + permanent scenario op), ship checklist item 9.
+- **`ledger_audit`** before-value capture on every ledger update/delete (audit M9) +
+  honest correction copy; `daytrade` persisted on transactions (new column, migrated).
+
+### Changed
+- Alert bell gains per-alert **read state** (dot lights only for unseen ids; opening the
+  panel marks current alerts read); `quota_low` gated on `ai_active` (no 額度偏低 when AI
+  is off; stale events suppressed once; chip shows 「AI 未啟用」).
+- Site-wide actionable-button **design language**: `.btn`/`.btn-sm` tiers, leading
+  `.ico` icon convention (per-row all-or-none), `.toolbar`/`.spacer` rows; the drifted
+  duplicate `.btn` in settings.css removed.
+- **Trades ledger hardening** (deep audits, all findings CONFIRMED by probes):
+  account↔market coherence (create + re-key edits; legacy rows stay editable in place),
+  negative fee/tax rejected on all paths, orphan-dividend corrections 422 (was 500),
+  overflow-sized input 400 (was 500), future-date soft confirm, edits recompute fee/tax +
+  regenerate the snapshot unless explicitly overridden, duplicate-trade soft confirm,
+  oversell replay scoped to introduced/worsened only, 4-dp price cap at the write seam,
+  fuzzy-resolve threshold 0.75.
+- **ETF sell tax now uses the instrument registry on every entry path** — manual/CSV
+  entries were taxing ETF sells at 0.3% instead of 0.1% (stress-audit CONFIRMED finding);
+  CSV gains a `daytrade` column; the manual form gains a 當沖 checkbox.
+- Rebalance ruling date canonicalized **2026-07-13**; weights/return-rates ruled IN
+  arbitration scope (owner, 2026-07-15).
+
+### Fixed
+- `cash.html` TDZ ReferenceError aborted form init (deposit/withdraw/FX buttons dead) —
+  branch regression caught by the live-demo stress phase; cash page added to the e2e
+  page smokes.
+- Digest no longer resurfaces suppressed `quota_low` events while AI is inactive.
+- Flow-server e2e files require the `_loopback_sockets` fixture — added to the rebate
+  flow file (passed in isolation, failed only under full-suite ordering).
+
+
 ## [v0.1.18] - 2026-07-14
 
 What's-new announcement system (four field-feedback rounds), the combined cross-account

@@ -94,6 +94,56 @@ def test_skip_persists(api_client: TestClient, golden_db: sqlite3.Connection) ->
     assert all(x["fingerprint"] != fp for x in _rows(api_client))
 
 
+def test_skipped_list_and_unskip_resurfaces(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """3E: skip → the item leaves the inbox but shows in 已忽略 with reconstructable
+    detail; unskip → it re-surfaces in the inbox. Guest-open (no is_protected gate),
+    consistent with its skip/confirm siblings."""
+    _seed_events(golden_db, _event("2026-05-20", "2.75"))
+    fp = _rows(api_client)[0]["fingerprint"]
+
+    api_client.post("/api/dividend-inbox/skip", json={"fingerprints": [fp]})
+    assert all(x["fingerprint"] != fp for x in _rows(api_client))  # left the inbox
+
+    sk = api_client.get("/api/dividend-inbox/skipped")
+    assert sk.status_code == 200
+    body = sk.json()
+    assert body["total_count"] == 1
+    row = body["rows"][0]
+    assert row["fingerprint"] == fp and row["symbol"] == "2330"
+    assert row["ex_date"] == "2026-05-20"
+    assert row["detail"] is not None and row["detail"]["est_gross"] == "2750.00"
+
+    un = api_client.post("/api/dividend-inbox/unskip", json={"fingerprints": [fp]})
+    assert un.status_code == 200 and un.json()["unskipped"] == 1
+    assert any(x["fingerprint"] == fp for x in _rows(api_client))  # re-surfaced
+    assert api_client.get("/api/dividend-inbox/skipped").json()["total_count"] == 0
+
+
+def test_skipped_empty_shape(api_client: TestClient) -> None:
+    assert api_client.get("/api/dividend-inbox/skipped").json() == {
+        "rows": [], "total_count": 0}
+
+
+def test_unskip_unknown_is_noop(api_client: TestClient) -> None:
+    r = api_client.post("/api/dividend-inbox/unskip", json={"fingerprints": ["nope"]})
+    assert r.status_code == 200 and r.json()["unskipped"] == 0
+
+
+def test_skipped_undetectable_shows_fp_and_date_only(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A skipped fingerprint with no backing detectable item degrades to fp + parsed
+    symbol/ex_date (detail=None)."""
+    fp = "div:tw_broker:9999:2026-05-20"  # parseable date, no backing event/holding
+    api_client.post("/api/dividend-inbox/skip", json={"fingerprints": [fp]})
+    rows = api_client.get("/api/dividend-inbox/skipped").json()["rows"]
+    row = next(r for r in rows if r["fingerprint"] == fp)
+    assert row["detail"] is None
+    assert row["symbol"] == "9999" and row["ex_date"] == "2026-05-20"
+
+
 def test_bulk_confirm_multiple_events(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:

@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.18"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.18"></link>
-<link rel="stylesheet" href="pipeline.css?v=0.1.18"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.19"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.19"></link>
+<link rel="stylesheet" href="pipeline.css?v=0.1.19"></link>
 </head>
 <body data-page="pipeline" data-title="洞察管線中心">
 <div class="shell">
@@ -33,7 +33,7 @@
       <span class="spacer"></span>
       <button class="btn" id="pp-official-pack" type="button"
         title="一鍵建立官方洞察套組：持倉週報＋個股健檢（含策略與週排程；已存在的任務會跳過）">啟用官方套組</button>
-      <button class="btn btn-primary" id="pp-add" type="button">＋ 新增洞察任務</button>
+      <button class="btn btn-primary" id="pp-add" type="button"><span class="ico">＋</span>新增洞察任務</button>
     </div>
     <div class="pp-filter" id="pp-filter"></div>
     <div class="pp-list" id="pp-list"></div>
@@ -51,13 +51,13 @@
 </div>
 </div>
 
-<script src="api.js?v=0.1.18"></script>
-<script src="shell.js?v=0.1.18"></script>
-<script src="format.js?v=0.1.18"></script>
-<script src="alerts.js?v=0.1.18"></script>
-<script src="pipeline.js?v=0.1.18"></script>
-<script src="pipeline-preflight.js?v=0.1.18"></script>
-<script src="pipeline-wizard.js?v=0.1.18"></script>
+<script src="api.js?v=0.1.19"></script>
+<script src="shell.js?v=0.1.19"></script>
+<script src="format.js?v=0.1.19"></script>
+<script src="alerts.js?v=0.1.19"></script>
+<script src="pipeline.js?v=0.1.19"></script>
+<script src="pipeline-preflight.js?v=0.1.19"></script>
+<script src="pipeline-wizard.js?v=0.1.19"></script>
 <script>
   document.getElementById('pp-add').addEventListener('click', function () { window.ppWizard(); });
   document.getElementById('pp-official-pack').addEventListener('click', function () {

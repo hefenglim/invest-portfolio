@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL,
     quantity TEXT NOT NULL, price TEXT NOT NULL, fees TEXT NOT NULL, tax TEXT NOT NULL,
-    trade_date TEXT NOT NULL, fee_rule_snapshot TEXT, note TEXT
+    trade_date TEXT NOT NULL, fee_rule_snapshot TEXT, note TEXT,
+    daytrade INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS dividends (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +43,14 @@ CREATE TABLE IF NOT EXISTS cash_movements (
     ccy TEXT NOT NULL, amount TEXT NOT NULL,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS ledger_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('update','delete')),
+    before_json TEXT NOT NULL,
+    at TEXT NOT NULL
+);
 """
 
 
@@ -59,4 +68,5 @@ def create_tables(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "instruments", "target_low", "TEXT")
     _add_column_if_missing(conn, "instruments", "board_status", "TEXT NOT NULL DEFAULT 'resolved'")
     _add_column_if_missing(conn, "instruments", "is_etf", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "transactions", "daytrade", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()

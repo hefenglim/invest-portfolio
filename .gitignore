@@ -35,6 +35,9 @@ docs/human_noted/
 data/
 *.csv.backup
 
+# --- Stress-audit evidence: regenerated every run, never committed or trusted stale ---
+scripts/stress_audit/evidence/
+
 # --- Logs ---
 *.log
 

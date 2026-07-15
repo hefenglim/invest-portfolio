@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.18"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.18"></link>
-<link rel="stylesheet" href="input.css?v=0.1.18"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.19"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.19"></link>
+<link rel="stylesheet" href="input.css?v=0.1.19"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   /* settings tab bar */
@@ -44,8 +44,7 @@
   .roles-help { padding: 0 var(--pad) 8px; font-size: 10.5px; color: var(--text-3); }
   .roles-close-bar { display: flex; align-items: center; gap: 14px; padding: 10px var(--pad) 14px; border-top: 1px solid var(--border-soft); }
   .roles-close-hint { flex: 1; font-size: 11px; color: var(--text-3); }
-  .btn-outline-warn { color: var(--amber); border-color: rgba(217,161,63,0.45); background: var(--amber-soft); }
-  .btn-outline-warn:hover { border-color: var(--amber); }
+  /* caution buttons use the shared `.btn-warn` variant in styles.css. */
   .billing-grid { display: grid; grid-template-columns: minmax(260px,340px) 1fr; gap: var(--gap); align-items: start; }
   .drawer-backdrop { position:fixed;inset:0;z-index:60;background:rgba(4,7,11,.55); }
   .drawer { position:absolute;top:0;right:0;bottom:0;width:420px;max-width:calc(100vw - 40px);background:var(--panel);border-left:1px solid var(--border);box-shadow:-16px 0 50px rgba(0,0,0,.5);display:flex;flex-direction:column;animation:drawer-in .18s ease; }
@@ -186,7 +185,7 @@
   <div class="set-view" id="view-llm" data-screen-label="AI 與額度">
     <div class="view-head"><span class="pill" id="ai-status"></span><span class="view-desc">角色預設四者皆空時，所有 AI 功能停用</span></div>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">模型註冊表</h2><span class="spacer"></span><button class="btn btn-primary" id="model-add" type="button">＋ 新增模型</button></div>
+      <div class="panel-head"><h2 class="panel-title">模型註冊表</h2><span class="spacer"></span><button class="btn btn-primary" id="model-add" type="button"><span class="ico">＋</span>新增模型</button></div>
       <div class="table-wrap"><table class="data"><thead><tr>
         <th class="col-text">別名 / 狀態</th><th class="col-text">供應商</th><th class="col-text">模型名</th>
         <th class="col-text">Vision</th><th>輸入價 $/Mtok</th><th>輸出價 $/Mtok</th>
@@ -206,7 +205,7 @@
       <div class="roles-help">角色皆空時，所有 AI 功能停用，輸入頁將顯示「AI 未啟用」。<br>AI 大師模型負責最關鍵的工作：洞察回測評分與校正提示詞產生 — 建議選用前沿高階模型（呼叫頻率低、單次價值高）；未設定時自我校正管線暫停，洞察照常產生。</div>
       <div class="roles-close-bar">
         <span class="roles-close-hint">關閉全部角色將停用所有 AI 功能，已註冊的模型設定不受影響。</span>
-        <button class="btn btn-outline-warn" id="llm-restore" type="button">關閉全部角色</button>
+        <button class="btn btn-warn" id="llm-restore" type="button">關閉全部角色</button>
       </div>
     </section>
     <section class="panel" id="quota">
@@ -220,7 +219,7 @@
             <input class="input" id="quota-threshold" type="number" min="0.01" step="0.01" style="width:80px;font-family:var(--font-num);text-align:right;"></input>
             <span class="hint">USD 時顯示警示</span>
           </div>
-          <div><button class="btn btn-primary" id="quota-topup" type="button">＋ 添加額度</button></div>
+          <div><button class="btn btn-primary" id="quota-topup" type="button"><span class="ico">＋</span>添加額度</button></div>
         </div>
         <div style="padding:14px var(--pad);">
           <h3 class="panel-title" style="margin:0 0 8px;font-size:12px;">加值歷史</h3>
@@ -287,7 +286,7 @@
         <span class="panel-sub">啟用中的策略會在洞察批次依序執行，各產生一張洞察卡片</span>
         <span class="spacer"></span>
         <button class="btn" id="tpl-from-lib" type="button" title="從官方模板庫複製一份可自訂的副本">從官方模板庫新增</button>
-        <button class="btn btn-primary" id="tpl-add" type="button">＋ 新增策略</button>
+        <button class="btn btn-primary" id="tpl-add" type="button"><span class="ico">＋</span>新增策略</button>
       </div>
       <div class="set-body"><div class="tpl-list" id="tpl-list"></div></div>
     </section>
@@ -303,7 +302,7 @@
       </tr></thead><tbody id="jobs-body"></tbody></table></div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">新→舊・可依工作篩選・LLM 類執行可跳查 AI 請求</span></div>
+      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">新→舊・可依工作篩選・LLM 類執行可跳查 AI 請求</span><span class="spacer"></span></div>
       <div class="filter-bar" id="hist-filter"></div>
       <div class="table-wrap"><table class="data"><thead><tr>
         <th>時間</th><th class="col-text">工作</th><th>狀態</th><th class="col-text">摘要</th><th>耗時</th><th>費用</th>
@@ -379,7 +378,7 @@
         <h2 class="panel-title">資料庫統計</h2>
         <span class="panel-sub">唯讀 — 各資料表筆數與最早記錄，供保留期限評估；目前不做任何自動清理</span>
         <span class="spacer"></span>
-        <button class="btn" id="dbstats-refresh" type="button">⟳ 重新整理</button>
+        <button class="btn" id="dbstats-refresh" type="button"><span class="ico">⟳</span>重新整理</button>
       </div>
       <div class="gen-rows" id="dbstats-files" style="padding-bottom:0;"></div>
       <div class="table-wrap"><table class="data"><thead><tr>
@@ -496,6 +495,15 @@
       </div>
     </section>
 
+    <!-- ===== 摘要與週報 (P3 batch 3) ===== -->
+    <section class="panel" id="digest-settings-card">
+      <div class="panel-head">
+        <h2 class="panel-title">摘要與週報</h2>
+        <span class="panel-sub">每日收盤摘要與每週行動清單・發送時間與「排程」分頁為同一設定（單一事實來源）・純計算，AI 一句話為選用（預設關閉）</span>
+      </div>
+      <div id="digest-config-wrap" class="digest-config"></div>
+    </section>
+
     <!-- ===== 靜音時段 + 規則訂閱 (WP 3B) ===== -->
     <section class="panel">
       <div class="panel-head">
@@ -552,22 +560,23 @@
   </div>
 </div>
 
-<script src="api.js?v=0.1.18"></script>
-<script src="shell.js?v=0.1.18"></script>
-<script src="format.js?v=0.1.18"></script>
-<script src="pager.js?v=0.1.18"></script>
-<script src="export.js?v=0.1.18"></script>
-<script src="alerts.js?v=0.1.18"></script>
-<script src="vars.js?v=0.1.18"></script>
-<script src="settings-llm.js?v=0.1.18"></script>
-<script src="settings-prompts.js?v=0.1.18"></script>
-<script src="settings-scheduler.js?v=0.1.18"></script>
-<script src="settings-datasources.js?v=0.1.18"></script>
-<script src="settings-alerts.js?v=0.1.18"></script>
-<script src="settings-notify.js?v=0.1.18"></script>
-<script src="settings-users.js?v=0.1.18"></script>
-<script src="settings-dbstats.js?v=0.1.18"></script>
-<script src="settings-prefs.js?v=0.1.18"></script>
+<script src="api.js?v=0.1.19"></script>
+<script src="shell.js?v=0.1.19"></script>
+<script src="format.js?v=0.1.19"></script>
+<script src="pager.js?v=0.1.19"></script>
+<script src="export.js?v=0.1.19"></script>
+<script src="alerts.js?v=0.1.19"></script>
+<script src="vars.js?v=0.1.19"></script>
+<script src="settings-llm.js?v=0.1.19"></script>
+<script src="settings-prompts.js?v=0.1.19"></script>
+<script src="settings-scheduler.js?v=0.1.19"></script>
+<script src="settings-datasources.js?v=0.1.19"></script>
+<script src="settings-alerts.js?v=0.1.19"></script>
+<script src="settings-notify.js?v=0.1.19"></script>
+<script src="settings-digest.js?v=0.1.19"></script>
+<script src="settings-users.js?v=0.1.19"></script>
+<script src="settings-dbstats.js?v=0.1.19"></script>
+<script src="settings-prefs.js?v=0.1.19"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs）→ reconciliation channel
    (POST /api/export/llm-usage / /api/export/job-runs; empty body -> full history).
@@ -578,9 +587,9 @@
   function mkBtn(path) {
     var b = document.createElement('button');
     b.type = 'button';
-    b.className = 'btn-export';
+    b.className = 'btn btn-sm btn-export';
     b.title = '匯出對帳級 CSV（由後端稽核紀錄產生）';
-    b.appendChild(Object.assign(document.createElement('span'), { textContent: '⬇' }));
+    b.appendChild(Object.assign(document.createElement('span'), { className: 'ico', textContent: '⬇' }));
     b.appendChild(Object.assign(document.createElement('span'), { textContent: '匯出 CSV' }));
     b.addEventListener('click', async function () {
       var restore = window.pdBusy ? window.pdBusy(b, '匯出中…') : function () {};

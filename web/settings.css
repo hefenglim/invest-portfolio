@@ -76,20 +76,10 @@ textarea.input { font-family: var(--font-num); line-height: 1.6; resize: vertica
 .input-row { display: flex; gap: 8px; align-items: center; }
 .input-row .input { flex: 1; }
 
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text-2);
-  font-family: var(--font-ui);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
+/* .btn is defined ONCE in styles.css (3D single-tier system) — the duplicate that used
+   to live here (padding 6px 14px, no line-height) drifted taller than the canonical tier
+   and broke same-row height consistency on every page that loads settings.css. Removed so
+   the shared .btn / .btn-sm tiers govern site-wide. */
 .btn:hover { border-color: var(--text-3); color: var(--text); }
 .btn-primary {
   background: var(--accent-soft);
@@ -247,7 +237,7 @@ textarea.input { font-family: var(--font-num); line-height: 1.6; resize: vertica
   list-style: none;
 }
 .cal-ver-body summary::-webkit-details-marker { display: none; }
-.btn-sm { padding: 2px 9px; font-size: 11px; }
+/* .btn-sm consolidated into styles.css (3D) — one canonical compact tier, site-wide. */
 .btn-link {
   background: none; border: none; color: var(--accent);
   font-size: 11px; cursor: pointer; padding: 0; font-family: var(--font-ui);

@@ -259,11 +259,33 @@
     const fFee = inp(t.fee, 'number', 'any');
     const fTax = inp(t.tax, 'number', 'any');
     const fNote = inp(t.note || '');
+    /* audit M6: track whether the user explicitly edited fee/tax. When a core field
+       (帳戶/代號/方向/股數/價格/日期) changes and fee/tax are NOT dirty, the modal
+       re-fetches the computed fee/tax from the entry preview seam and the backend
+       recomputes them from the new account's rule set + regenerates the snapshot. An
+       explicit fee/tax edit is honored as an override (snapshot tagged override:true). */
+    let feeDirty = false;
+    let taxDirty = false;
+    fFee.addEventListener('input', () => { feeDirty = true; });
+    fTax.addEventListener('input', () => { taxDirty = true; });
+    async function recompute() {
+      if (!window.pdApi) return;
+      try {
+        const resp = await window.pdApi.post('/api/input/manual/preview', {
+          account_id: fAcc.value, symbol: fSym.value.trim(), side: fSide.value,
+          date: fDate.value, shares: fShares.value || '0', price: fPrice.value || '0',
+        });
+        if (resp && !feeDirty && resp.fee !== undefined) fFee.value = resp.fee;
+        if (resp && !taxDirty && resp.tax !== undefined) fTax.value = resp.tax;
+      } catch (e) { /* best-effort; the save-time recompute is the source of truth */ }
+    }
+    [fShares, fPrice].forEach((n) => n.addEventListener('input', recompute));
+    [fAcc, fSym, fSide, fDate].forEach((n) => n.addEventListener('change', recompute));
     /* 改「代號 / 帳戶」= 把這筆帳移到另一個持倉：兩邊的成本與損益都會由帳本重建。
        合法（改正輸錯的代號），但要讓使用者知道影響範圍（2026-07-03, item 12）。 */
     const warn = el('div', 'hint',
       '⚠ 更改「代號」或「帳戶」會把這筆交易移到另一個持倉，兩邊的成本、損益與報酬將自動重建；' +
-      '新代號必須已註冊，且會先做賣超檢核。');
+      '新代號必須與帳戶市場相符且已註冊，會先做賣超與孤兒紀錄檢核；未手動改費用／稅時會依新帳戶規則重算。');
     editModal('編輯交易 #' + t.id + ' — ' + t.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['方向', fSide],
       ['股數', fShares], ['價格', fPrice], ['手續費', fFee], ['交易稅', fTax], ['備註', fNote],
@@ -275,6 +297,7 @@
         account_id: fAcc.value, symbol: fSym.value.trim(), side: fSide.value,
         date: fDate.value, shares: fShares.value, price: fPrice.value,
         fee: fFee.value, tax: fTax.value, note: fNote.value.trim() || null,
+        fee_overridden: feeDirty, tax_overridden: taxDirty,
         ack_oversell: ack,
       }), '編輯');
     });

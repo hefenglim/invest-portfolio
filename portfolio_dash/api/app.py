@@ -16,6 +16,7 @@ from portfolio_dash.api import action_log
 from portfolio_dash.api.alert_inputs import scan_alert_compute
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
 from portfolio_dash.api.deps import get_conn
+from portfolio_dash.api.digest_service import run_digest
 from portfolio_dash.api.dividend_inbox import scan_job as dividend_scan_job
 from portfolio_dash.api.errors import register_error_handlers
 from portfolio_dash.api.insight_service import (
@@ -34,6 +35,7 @@ from portfolio_dash.api.routers import (
     dashboard,
     datasources,
     db_stats,
+    digest,
     dividend_inbox,
     export,
     health,
@@ -45,6 +47,7 @@ from portfolio_dash.api.routers import (
     news,
     notify,
     prompts,
+    rebates,
     scheduler,
     signals,
     snapshots_router,
@@ -60,11 +63,13 @@ from portfolio_dash.api.snapshots import snapshot_job
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
+from portfolio_dash.llm_insight.alerts_bridge import suppress_stale_quota_low
 from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
 from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure_evaluations_tables
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.news.organizer_prompt import ensure_news_prompt_seeded
+from portfolio_dash.ops import digest as digest_ops
 from portfolio_dash.ops import notify as notify_ops
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
@@ -72,6 +77,7 @@ from portfolio_dash.scheduler.jobs import (
     ensure_scheduler_seeded,
     register_alert_compute_runner,
     register_calibration_runner,
+    register_digest_runner,
     register_dividend_scan_runner,
     register_evaluation_runner,
     register_insight_runner,
@@ -80,6 +86,7 @@ from portfolio_dash.scheduler.jobs import (
     register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.logging_config import configure_logging
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
@@ -143,9 +150,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
         ensure_insights_tables(conn)  # insights cards table (spec 04b)
         ensure_alert_events_tables(conn)  # alert_events + dispatch log (spec 04b R7)
+        # 3B one-time cleanup: quota_low is now gated on ai_active — neutralize any
+        # pre-gate pending quota_low event so no stale AI card / push fires retroactively.
+        suppress_stale_quota_low(conn, now=app_now())
         ensure_evaluations_tables(conn)  # insight_evaluations table (spec 04c)
         ensure_signal_states_table(conn)  # signal_states derived cache (P2 batch 2)
         notify_ops.ensure_seeded(conn)  # notify_config single-row + one-time topic (WP 3B)
+        digest_ops.ensure_seeded(conn)  # digests + digest_config single-row (P3 batch 3)
     # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
     # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
     register_insight_runner(insight_run_for_id)
@@ -158,6 +169,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_snapshot_runner(snapshot_job)
     # News pipeline (batch ④): nightly fetch + AI-organize into the separate news DB.
     register_news_runner(run_news_daily)
+    # Digests (P3 batch 3): daily close summary + weekly action list (assemble + store + push).
+    register_digest_runner(run_digest)
     # Rule-signal scan (P2 batch 2): held-symbol signal evaluation + transition events.
     register_signal_scan_runner(signal_scan_runner)
     # Alert-compute (P3 batch 2): the FULL rule set (market-risk rules need pricing/consensus
@@ -226,6 +239,7 @@ def create_app() -> FastAPI:
     app.include_router(input_center.router, prefix="/api")
     app.include_router(dividend_inbox.router, prefix="/api")
     app.include_router(cash.router, prefix="/api")
+    app.include_router(rebates.router, prefix="/api")
     app.include_router(actions.router, prefix="/api")
     app.include_router(accounts.router, prefix="/api")
     app.include_router(datasources.router, prefix="/api")
@@ -243,6 +257,7 @@ def create_app() -> FastAPI:
     app.include_router(news.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
     app.include_router(notify.router, prefix="/api")
+    app.include_router(digest.router, prefix="/api")
     app.include_router(whatsnew.router, prefix="/api")
     if _WEB_DIR.is_dir():
         app.mount("/", _NoCacheStaticFiles(directory=_WEB_DIR, html=True), name="web")

@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.llm_config import budget_remaining, get_alert_threshold
+from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.strategy.rules_config import AlertRules, get_alert_rules
 
 Severity = Literal["risk", "warn", "info"]
@@ -130,6 +130,7 @@ def _exdiv_phrase(delta: int) -> str:
 def compute_alerts_from(
     data: DashboardData, rules: AlertRules, *,
     quota_remaining: Decimal, quota_threshold: Decimal,
+    ai_active: bool = True,
     calib_gap: Decimal | None = None,
     account_names: dict[str, str] | None = None,
     symbol_metrics: dict[str, SymbolMetric] | None = None,
@@ -137,6 +138,12 @@ def compute_alerts_from(
     consensus_deltas: dict[str, ConsensusDelta] | None = None,
 ) -> list[Alert]:
     """Run the rule engine over the fed inputs; returns display-ready alerts.
+
+    ``ai_active`` (P3 batch 3 · 3B) gates ``quota_low``: a low LLM budget is only worth
+    alerting on when AI is actually usable (≥1 role → an enabled model). It is FED IN as a
+    plain bool by the conn-bearing seams (``shared.llm_config.ai_active``) — strategy/ stays
+    pure and never imports the model registry itself. Defaults to ``True`` so callers that
+    predate the gate keep firing quota_low.
 
     ``account_names`` maps account_id → the accounts table's display name (fed by the
     conn-bearing wrapper); an unknown/absent id falls back to the raw id.
@@ -209,7 +216,7 @@ def compute_alerts_from(
                     title=f"{item.symbol} 即將除息", detail=_exdiv_phrase(delta),
                     href=f"/symbol/{item.symbol}"))
 
-    if rules.quota_low.enabled and quota_remaining < quota_threshold:
+    if rules.quota_low.enabled and ai_active and quota_remaining < quota_threshold:
         sev: Severity = "risk" if quota_remaining == _ZERO else "warn"
         alerts.append(Alert(
             id="quota_low", sev=sev, rule="quota_low", title="LLM 額度偏低",
@@ -353,6 +360,7 @@ def compute_alerts(
         data, get_alert_rules(conn),
         quota_remaining=budget_remaining(conn),
         quota_threshold=get_alert_threshold(conn),
+        ai_active=ai_active(conn),
         calib_gap=calib_gap,
         account_names=account_display_names(conn),
     )

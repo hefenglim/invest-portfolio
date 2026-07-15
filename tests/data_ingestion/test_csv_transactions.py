@@ -61,3 +61,33 @@ def test_blank_fee_autofilled_provided_fee_kept(conn: sqlite3.Connection) -> Non
     )
     p = build_transaction_preview(conn, csv)
     assert p.rows[0].fee == Decimal("10")  # provided fee preserved
+
+
+def test_etf_sell_tax_comes_from_registry_not_input(conn: sqlite3.Connection) -> None:
+    """Stress-audit finding (2026-07-15): the registered instrument's is_etf flag must
+    reach the fee engine on the CSV path — an ETF sell is taxed 0.1%, not 現股 0.3%."""
+    _setup(conn)
+    upsert_instrument(
+        conn,
+        Instrument(symbol="0050", market=Market.TW, quote_ccy=Currency.TWD,
+                   sector="ETF", name="元大台灣50", is_etf=True),
+    )
+    csv = (
+        "account,symbol,side,date,shares,price\n"
+        "tw_broker,0050,SELL,2026-06-02,50,140\n"
+    )
+    p = build_transaction_preview(conn, csv)
+    # notional 7,000 -> tax 0.001 * 7000 = 7 (the pre-fix bug charged 21 = 0.3%)
+    assert p.rows[0].tax == Decimal("7")
+
+
+def test_daytrade_csv_column_uses_daytrade_tax_rate(conn: sqlite3.Connection) -> None:
+    _setup(conn)
+    csv = (
+        "account,symbol,side,date,shares,price,daytrade\n"
+        "tw_broker,2330,SELL,2026-06-02,100,600,1\n"
+    )
+    p = build_transaction_preview(conn, csv)
+    # notional 60,000 -> tax 0.0015 * 60000 = 90 (現股 would be 180)
+    assert p.rows[0].tax == Decimal("90")
+    assert p.rows[0].payload["daytrade"] == "1"  # persisted through the writer (MED-1)

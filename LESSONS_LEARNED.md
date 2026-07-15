@@ -246,3 +246,22 @@ prevents recurrence.
   is guarded on element existence; e2e walks the REAL nav path (tab click), not the
   convenient standalone URL. Lesson: when two pages share JS, either they share ONE
   markup source or one of them redirects — never hand-sync.
+
+- **2026-07-15 — A fee/flag feature the engine supports but no entry path passes is a
+  silent money bug the engine's own unit tests cannot see.** `compute_fees` supported
+  `is_etf`/`daytrade` (unit-tested green) but manual + CSV entry never threaded the
+  instrument's ETF flag in, so every real ETF sell was taxed 0.3% instead of 0.1% —
+  found only by the adversarial stress oracle recomputing fees per trade. Lessons:
+  (a) flags that alter money must be REGISTRY-authoritative and resolved at the entry
+  seam, never trusted to input defaults; (b) coverage must include one end-to-end
+  assertion PER ENTRY PATH (manual API, CSV, AI), not just the pure engine; (c) the
+  independent-oracle stress audit (`/stress-audit`) is the class of test that catches
+  "engine right, wiring wrong" — run it whenever money-of-record code changes.
+
+- **2026-07-15 — Flow-server e2e files MUST carry the `_loopback_sockets` autouse
+  fixture; in-isolation green is not proof.** pytest-socket re-bans sockets before each
+  test, so a new e2e file that spawns the flow server passes when run alone (a prior
+  fixture left sockets enabled) but fails with `SocketBlockedError` under full-suite
+  ordering. Copy the fixture from `test_whatsnew_flow.py` into every new flow-server
+  e2e file, and treat "passes alone, fails in suite" as an ordering/isolation smell,
+  not flakiness to retry.

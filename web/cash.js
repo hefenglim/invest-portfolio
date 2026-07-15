@@ -1,10 +1,14 @@
 /* portfolio-dash — 資金管理 (wired to /api/cash, 2026-07-03 R6 item 7).
 
-   One page manages the four accounts' cash pools: balances per (account, ccy),
-   deposit/withdraw entry, FX conversion entry, and the movements ledger with
-   edit/delete. All amounts are Decimal STRINGS via window.fmt — the frontend
-   never computes money; the negative-pool 422 (item 2) surfaces as a danger
-   confirm before re-sending with ack_negative. */
+   One page manages the accounts' cash pools: balances per (account, ccy) with a
+   clickable收支明細 (statement) surface, deposit/withdraw/opening entry, FX conversion
+   entry, and the movements ledger with edit/delete. All amounts are Decimal STRINGS via
+   window.fmt — the frontend never computes money; the running balance in the statement
+   comes from the server. Wave 2B additions: currency dropdowns constrained to the
+   account's {交割幣, 資金幣} (audit C2), an 期初資金 movement kind (C4), a transfer/pool
+   statement (C5), a negative-pool banner (C1a), and a missing-rate annotation (C6).
+   The negative-pool 422 (audit C3) surfaces as a danger confirm before re-sending with
+   ack_negative. */
 (function () {
   'use strict';
   const f = window.fmt;
@@ -22,16 +26,19 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   })();
 
-  let D = { balances: [], movements: [] };
-  let accounts = [];  // from /api/input/context (id, name, ccy)
+  const KIND_LABEL = {
+    deposit: '入金', withdraw: '出金', opening: '期初資金', rebate: '折讓款',
+    fx_in: '換入', fx_out: '換出', buy: '買入', sell: '賣出', dividend: '股利',
+  };
+  const settlementCcy = (a) => (a && (a.settlement_ccy || a.ccy)) || '';
+
+  let D = { balances: [], movements: [], negative_pools: [] };
+  let accounts = [];  // from /api/input/context (id, name, ccy, settlement_ccy, funding_ccy)
   let cmKind = 'deposit';
 
   /* WPE (2026-07-07): movements ledger pages via the endpoint's limit/offset */
-  const cmState = {
-    offset: 0,
-    limit: Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500),
-    total: 0,
-  };
+  const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
+  const cmState = { offset: 0, limit: PAGE, total: 0 };
   let cmPager = null;
   if (window.pdPager) {
     cmPager = window.pdPager.create({
@@ -41,7 +48,18 @@
     });
   }
 
-  /* ---- A. balance cards ---- */
+  /* ---- C5: cash statement (per account+ccy pool) ---- */
+  const stmt = { account: null, ccy: null, offset: 0, limit: PAGE, total: 0 };
+  let stmtPager = null;
+  if (window.pdPager) {
+    stmtPager = window.pdPager.create({
+      host: document.getElementById('cash-stmt-pager'),
+      limit: stmt.limit, offset: 0, totalCount: 0,
+      onPage: (offset) => { stmt.offset = offset; loadStatement(); },
+    });
+  }
+
+  /* ---- A. balance cards (clickable -> statement) ---- */
   function renderCards() {
     const wrap = $('#cash-cards');
     wrap.replaceChildren();
@@ -58,7 +76,8 @@
         card.appendChild(el('div', 'hint', '尚無現金紀錄'));
       } else {
         entry.lines.forEach((b) => {
-          const line = el('div', 'cash-line');
+          const line = el('div', 'cash-line clickable');
+          if (stmt.account === b.account_id && stmt.ccy === b.ccy) line.classList.add('active');
           line.appendChild(el('span', 'ccy', b.ccy));
           const amt = el('span', 'amt', f.money(b.amount, b.ccy));
           if (String(b.amount).indexOf('-') === 0) {
@@ -66,17 +85,96 @@
             amt.title = '負現金 — 通常代表漏記入金或換匯';
           }
           line.appendChild(amt);
+          line.title = '點擊查看收支明細';
+          line.addEventListener('click', () => openStatement(b.account_id, b.ccy));
           card.appendChild(line);
         });
       }
       wrap.appendChild(card);
     });
+    renderTotal();
+    renderBanner();
+  }
+
+  function renderTotal() {
     const totalEl = $('#cash-total');
+    totalEl.replaceChildren();
     if (D.reporting_total != null) {
-      totalEl.textContent = '合併現金（' + D.reporting_currency + '，依最新匯率換算）: ' +
-        f.money(D.reporting_total, D.reporting_currency) + ' ' + D.reporting_currency;
+      totalEl.appendChild(document.createTextNode(
+        '合併現金（' + D.reporting_currency + '，依最新匯率換算）: ' +
+        f.money(D.reporting_total, D.reporting_currency) + ' ' + D.reporting_currency));
+      if (D.reporting_total_unavailable_reason) {
+        totalEl.appendChild(el('span', 'excl', '　（' + D.reporting_total_unavailable_reason + '）'));
+      }
     } else {
       totalEl.textContent = '合併現金暫無法換算：' + (D.reporting_total_unavailable_reason || '');
+    }
+  }
+
+  /* ---- C1a: negative-pool banner ---- */
+  function renderBanner() {
+    const banner = $('#cash-neg-banner');
+    const negs = D.negative_pools || [];
+    if (!negs.length) { banner.hidden = true; return; }
+    banner.hidden = false;
+    banner.textContent = '⚠ 資金池透支 — 可能漏登入金或換匯：' + negs.map((p) =>
+      (p.account + ' ' + f.money(p.amount, p.ccy) + ' ' + p.ccy)).join('；');
+  }
+
+  /* ---- C5: statement table ---- */
+  async function openStatement(account, ccy) {
+    stmt.account = account; stmt.ccy = ccy; stmt.offset = 0;
+    renderCards();  // refresh active highlight
+    await loadStatement();
+  }
+
+  async function loadStatement() {
+    if (!stmt.account) return;
+    let resp;
+    try {
+      resp = await api.get('/api/cash/statement', {
+        account: stmt.account, ccy: stmt.ccy, limit: stmt.limit, offset: stmt.offset,
+      });
+    } catch (err) {
+      if (window.toast) window.toast('明細載入失敗', 'fail', (err && err.message) || undefined);
+      return;
+    }
+    stmt.total = (resp && resp.total_count) || 0;
+    renderStatement(resp);
+    if (stmtPager) stmtPager.update({ offset: stmt.offset, totalCount: stmt.total });
+  }
+
+  function renderStatement(resp) {
+    const sub = $('#cash-stmt-sub');
+    if (sub) {
+      sub.textContent = (resp.account || stmt.account) + '・' + resp.ccy +
+        '　目前餘額 ' + f.money(resp.current_balance, resp.ccy) + ' ' + resp.ccy;
+    }
+    const tbody = $('#cash-stmt-body');
+    tbody.replaceChildren();
+    (resp.rows || []).forEach((r) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'num', f.date(r.date)));
+      const tdKind = el('td', 'col-text');
+      tdKind.appendChild(el('span', 'stmt-chip', KIND_LABEL[r.kind] || r.kind));
+      tr.appendChild(tdKind);
+      tr.appendChild(el('td', 'col-text', r.ref || ''));
+      const tdDelta = el('td', 'num');
+      tdDelta.textContent = f.signed(r.delta, resp.ccy);
+      if (String(r.delta).indexOf('-') === 0) tdDelta.classList.add('sign-down');
+      tr.appendChild(tdDelta);
+      const tdBal = el('td', 'num');
+      tdBal.textContent = f.money(r.balance, resp.ccy);
+      if (String(r.balance).indexOf('-') === 0) { tdBal.style.color = 'var(--amber)'; }
+      tr.appendChild(tdBal);
+      tbody.appendChild(tr);
+    });
+    if (!(resp.rows || []).length) {
+      const tr = el('tr');
+      const td = el('td', 'hint', '此資金池尚無收支紀錄');
+      td.colSpan = 5;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
     }
   }
 
@@ -89,8 +187,8 @@
       tr.appendChild(el('td', 'num', f.date(m.date)));
       tr.appendChild(el('td', 'col-text', m.account));
       const tdKind = el('td', 'col-text');
-      tdKind.appendChild(el('span', 'dir-chip ' + (m.kind === 'deposit' ? 'dir-buy' : 'dir-sell'),
-        m.kind === 'deposit' ? '入金' : '出金'));
+      const chipCls = m.kind === 'withdraw' ? 'dir-sell' : 'dir-buy';
+      tdKind.appendChild(el('span', 'dir-chip ' + chipCls, KIND_LABEL[m.kind] || m.kind));
       tr.appendChild(tdKind);
       tr.appendChild(el('td', 'num', f.money(m.amount, m.ccy) + ' ' + m.ccy));
       tr.appendChild(el('td', 'col-text', m.note || ''));
@@ -118,10 +216,33 @@
     return false;
   }
 
+  /* ---- C2: constrain a ccy <select> to the account's {交割幣, 資金幣} ---- */
+  function ccyOptions(accountId) {
+    const a = accounts.find((x) => x.id === accountId);
+    if (!a) return [];
+    const out = [];
+    const seen = new Set();
+    const add = (ccy, role) => { if (ccy && !seen.has(ccy)) { seen.add(ccy); out.push([ccy, role]); } };
+    add(settlementCcy(a), '交割幣');
+    add(a.funding_ccy, '資金幣');
+    return out;
+  }
+  function fillCcySelect(sel, accountId, preferred) {
+    if (!sel) return;
+    const opts = ccyOptions(accountId);
+    sel.replaceChildren();
+    opts.forEach(([ccy, role]) => {
+      const o = el('option', null, ccy + '（' + role + '）');
+      o.value = ccy;
+      sel.appendChild(o);
+    });
+    if (preferred && opts.some(([c]) => c === preferred)) sel.value = preferred;
+  }
+
   function openEdit(m) {
     const fDate = el('input', 'input'); fDate.type = 'date'; fDate.value = m.date;
     const fKind = el('select', 'select');
-    [['deposit', '入金'], ['withdraw', '出金']].forEach(([v, label]) => {
+    [['deposit', '入金'], ['withdraw', '出金'], ['opening', '期初資金']].forEach(([v, label]) => {
       const o = el('option', null, label); o.value = v;
       if (m.kind === v) o.selected = true;
       fKind.appendChild(o);
@@ -180,7 +301,7 @@
   function removeMovement(m) {
     window.confirmDialog({
       title: '刪除資金紀錄',
-      body: f.date(m.date) + '・' + (m.kind === 'deposit' ? '入金' : '出金') + ' ' +
+      body: f.date(m.date) + '・' + (KIND_LABEL[m.kind] || m.kind) + ' ' +
         f.money(m.amount, m.ccy) + ' ' + m.ccy + '（' + m.account + '）',
       confirmLabel: '刪除', danger: true,
       onConfirm: async () => {
@@ -206,7 +327,7 @@
     const accSelects = [$('#cm-account'), $('#cfx-account')];
     accSelects.forEach((sel) => {
       accounts.forEach((a) => {
-        const o = el('option', null, a.name + '（' + a.ccy + '）');
+        const o = el('option', null, a.name + '（' + settlementCcy(a) + '）');
         o.value = a.id;
         sel.appendChild(o);
       });
@@ -214,12 +335,30 @@
     $('#cm-date').value = TODAY;
     $('#cfx-date').value = TODAY;
 
+    /* C2: movement ccy dropdown tracks the selected account */
+    const syncMovementCcy = () => fillCcySelect($('#cm-ccy'), $('#cm-account').value);
+    $('#cm-account').addEventListener('change', syncMovementCcy);
+    syncMovementCcy();
+
+    /* C2: fx ccy dropdowns track the account; default funding -> settlement */
+    const syncFxCcy = () => {
+      const a = accounts.find((x) => x.id === $('#cfx-account').value);
+      fillCcySelect($('#cfx-from-ccy'), $('#cfx-account').value, a && a.funding_ccy);
+      fillCcySelect($('#cfx-to-ccy'), $('#cfx-account').value, a && settlementCcy(a));
+      updImplied();
+    };
+    $('#cfx-account').addEventListener('change', syncFxCcy);
+    syncFxCcy();
+
     $('#cm-kind-in').addEventListener('click', () => setKind('deposit'));
     $('#cm-kind-out').addEventListener('click', () => setKind('withdraw'));
+    const openBtn = $('#cm-kind-open');
+    if (openBtn) openBtn.addEventListener('click', () => setKind('opening'));
     function setKind(k) {
       cmKind = k;
       $('#cm-kind-in').classList.toggle('active', k === 'deposit');
       $('#cm-kind-out').classList.toggle('active', k === 'withdraw');
+      if (openBtn) openBtn.classList.toggle('active', k === 'opening');
     }
 
     $('#cm-confirm').addEventListener('click', async () => {
@@ -234,7 +373,7 @@
       try {
         await send(false);
         restore();
-        if (window.toast) window.toast('寫入成功', 'ok', (cmKind === 'deposit' ? '入金 ' : '出金 ') + amount);
+        if (window.toast) window.toast('寫入成功', 'ok', (KIND_LABEL[cmKind] || '') + ' ' + amount);
         $('#cm-amount').value = ''; $('#cm-note').value = '';
         await boot();
       } catch (err) {
@@ -252,17 +391,20 @@
       }
     });
 
-    const upd = () => {
+    /* Hoisted function declaration: syncFxCcy() above runs during initForms() BEFORE
+       this point — a `const` arrow here is in its temporal dead zone at that call and
+       aborts the whole init (no click handlers attached). */
+    function updImplied() {
       const fromA = parseFloat($('#cfx-from-amt').value) || 0;
       const toA = parseFloat($('#cfx-to-amt').value) || 0;
       /* implied-rate what-if on the USER's own entry (input-side calc exception) */
       $('#cfx-implied').textContent = (fromA > 0 && toA > 0)
         ? '1 ' + $('#cfx-to-ccy').value + ' = ' + (fromA / toA).toFixed(4) + ' ' + $('#cfx-from-ccy').value
         : f.NULL_GLYPH;
-    };
+    }
     ['cfx-from-amt', 'cfx-to-amt', 'cfx-from-ccy', 'cfx-to-ccy'].forEach((id) =>
-      $('#' + id).addEventListener('input', upd));
-    upd();
+      $('#' + id).addEventListener('input', updImplied));
+    updImplied();
 
     $('#cfx-confirm').addEventListener('click', async () => {
       const fromA = $('#cfx-from-amt').value.trim();
@@ -278,7 +420,7 @@
         await send(false);
         restore();
         if (window.toast) window.toast('換匯已寫入', 'ok', fromA + ' ' + $('#cfx-from-ccy').value + ' → ' + toA + ' ' + $('#cfx-to-ccy').value);
-        $('#cfx-from-amt').value = ''; $('#cfx-to-amt').value = ''; upd();
+        $('#cfx-from-amt').value = ''; $('#cfx-to-amt').value = ''; updImplied();
         await boot();
       } catch (err) {
         restore();
@@ -286,7 +428,7 @@
           try {
             await send(true);
             if (window.toast) window.toast('換匯已寫入', 'ok');
-            $('#cfx-from-amt').value = ''; $('#cfx-to-amt').value = ''; upd();
+            $('#cfx-from-amt').value = ''; $('#cfx-to-amt').value = ''; updImplied();
             await boot();
           } catch (e2) { if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail'); }
         })) {
@@ -301,7 +443,7 @@
     try {
       resp = await api.get('/api/cash', { limit: cmState.limit, offset: cmState.offset });
     } catch (err) {
-      D = { balances: [], movements: [] };
+      D = { balances: [], movements: [], negative_pools: [] };
       cmState.total = 0;
       renderCards(); renderMovements();
       if (cmPager) cmPager.update({});
@@ -311,6 +453,7 @@
     D = {
       balances: (resp && resp.balances) || [],
       movements: (resp && resp.movements && resp.movements.rows) || [],
+      negative_pools: (resp && resp.negative_pools) || [],
       reporting_total: resp && resp.reporting_total,
       reporting_currency: (resp && resp.reporting_currency) || 'TWD',
       reporting_total_unavailable_reason: resp && resp.reporting_total_unavailable_reason,
@@ -319,6 +462,7 @@
     renderCards();
     renderMovements();
     if (cmPager) cmPager.update({ offset: cmState.offset, totalCount: cmState.total });
+    if (stmt.account) await loadStatement();  // keep the open statement fresh
   }
 
   (async function init() {

@@ -39,3 +39,17 @@ def test_resolve_needs_ai_when_unknown(conn: sqlite3.Connection) -> None:
     upsert_instrument(conn, _TSMC)
     r = resolve(conn, "ZZ Unknown Corp")
     assert r.status is ResolutionStatus.NEEDS_AI and r.instrument is None
+
+
+def test_weak_fuzzy_below_075_needs_ai(conn: sqlite3.Connection) -> None:
+    """Audit L12: a 0.60-ratio near-miss used to resolve FUZZY; the 0.75 floor now
+    sends it to NEEDS_AI (register/confirm) rather than silently accepting it.
+
+    SequenceMatcher('abcde','abcxy').ratio() == 0.6 (matches 'abc'); the name 'Zzzzz'
+    scores ~0 so the symbol ratio governs.
+    """
+    upsert_instrument(conn, Instrument(symbol="ABCDE", market=Market.US,
+                                       quote_ccy=Currency.USD, sector="X", name="Zzzzz"))
+    assert resolve(conn, "ABCXY").status is ResolutionStatus.NEEDS_AI
+    # a strong (>=0.75) match still resolves
+    assert resolve(conn, "ABCDX").status is ResolutionStatus.FUZZY

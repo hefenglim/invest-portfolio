@@ -524,10 +524,10 @@
        ledger). Owner directive 2026-07-14: no more DOM/display-value dumps. */
     let exportBtn = null;
     if (rows.length) {
-      exportBtn = el('button', 'btn-export');
+      exportBtn = el('button', 'btn btn-sm btn-export');
       exportBtn.type = 'button';
       exportBtn.title = '匯出對帳級 CSV（配息史，由後端股利帳本產生）';
-      exportBtn.appendChild(el('span', null, '⬇'));
+      exportBtn.appendChild(el('span', 'ico', '⬇'));
       exportBtn.appendChild(el('span', null, '匯出 CSV'));
       exportBtn.addEventListener('click', async () => {
         const restore = window.pdBusy ? window.pdBusy(exportBtn, '匯出中…') : function () {};

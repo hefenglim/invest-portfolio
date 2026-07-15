@@ -48,6 +48,32 @@
   let alerts = [];
   window.PD_ALERTS = alerts;
 
+  /* ---- bell read-state (3A): a client-side seen-set of alert ids ----
+     The bell dot lights ONLY for UNSEEN alert ids (deterministic ids like
+     "single_weight:2330" / "quota_low"). Opening the panel marks all CURRENT ids seen;
+     a NEW alert id re-lights the dot. Persisted in localStorage (capped) and synced across
+     tabs via the storage listener. This is a pure READ-state overlay — it never touches
+     alert_events.consumed/notified_at (those drive AI cards + push, a different concern). */
+  const SEEN_KEY = 'pd_alerts_seen';
+  const SEEN_CAP = 200;
+  function loadSeen() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]');
+      return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : [];
+    } catch (e) { return []; }
+  }
+  let seenIds = loadSeen();  // insertion-ordered array, capped at SEEN_CAP
+  function markCurrentSeen() {
+    const set = new Set(seenIds);
+    let changed = false;
+    alerts.forEach((a) => {
+      if (a && a.id && !set.has(a.id)) { set.add(a.id); seenIds.push(a.id); changed = true; }
+    });
+    if (!changed) return;
+    if (seenIds.length > SEEN_CAP) seenIds = seenIds.slice(seenIds.length - SEEN_CAP);
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(seenIds)); } catch (e) { /* noop */ }
+  }
+
   /* ---- topbar UI: quota chip + bell ---- */
   const tb = document.getElementById('topbar');
   if (!tb) return;
@@ -65,9 +91,18 @@
     if (window.fmt) return window.fmt.num(v, 2);
     return Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
-  function renderQuotaChip(remaining, threshold) {
+  function renderQuotaChip(remaining, threshold, aiActive) {
     chip.className = 'badge quota-chip';
     chip.replaceChildren();
+    /* 3B: when the wire says AI is inactive (no role bound to an enabled model), show a
+       neutral 「AI 未啟用」 state — NOT 「AI 額度 $0」+warning dot. quota_low is likewise
+       gated off in this state, so the chip and the bell agree. Treat only an explicit
+       false as inactive; undefined (a thin page / older payload) keeps the amount view. */
+    if (aiActive === false) {
+      chip.textContent = 'AI 未啟用';
+      chip.title = 'AI 尚未啟用（點擊前往 AI 與額度設定）';
+      return;
+    }
     if (remaining === null || remaining === undefined) {
       chip.classList.add('badge-fresh-ok');
       chip.textContent = 'AI 額度 無上限';
@@ -132,10 +167,16 @@
   function renderCount() {
     const old = bell.querySelector('.bell-count');
     if (old) old.remove();
+    if (!alerts.length) return;
+    /* 3A: the badge (dot) shows ONLY while at least one current alert id is UNSEEN.
+       The numeric badge keeps the TOTAL count + the existing risk coloring; it simply
+       hides once every current id has been seen (panel opened), and reappears when a new
+       alert id arrives. */
+    const seen = new Set(seenIds);
+    const hasUnseen = alerts.some((a) => !a || !a.id || !seen.has(a.id));
+    if (!hasUnseen) return;
     const riskCount = alerts.filter((a) => a.sev === 'risk').length;
-    if (alerts.length) {
-      bell.appendChild(el('span', 'bell-count' + (riskCount ? ' risk' : ''), String(alerts.length)));
-    }
+    bell.appendChild(el('span', 'bell-count' + (riskCount ? ' risk' : ''), String(alerts.length)));
   }
 
   function fillPanel() {
@@ -178,7 +219,12 @@
     panel.hidden = !panel.hidden;
     /* position AFTER unhiding (layout exists → width measurable); JS runs to
        completion before the browser paints, so no mispositioned frame shows. */
-    if (opening) positionPanel();
+    if (opening) {
+      positionPanel();
+      /* opening the panel = the user has SEEN the current alerts → clear the dot (3A). */
+      markCurrentSeen();
+      renderCount();
+    }
   });
   window.addEventListener('resize', () => {
     if (!panel.hidden) positionPanel();
@@ -201,6 +247,13 @@
   /* 跨分頁同步：dashboard 重新整理時寫入 pd_alerts_cache；其他已開啟的非 dashboard
      分頁透過 storage 事件即時跟上（無需重新整理）。dashboard 以後端 D.alerts 為準。 */
   window.addEventListener('storage', (e) => {
+    /* 3A: a seen-set change in another tab (panel opened there) clears/relights the dot
+       here — on EVERY page, dashboard included. */
+    if (e.key === SEEN_KEY) {
+      seenIds = loadSeen();
+      renderCount();
+      return;
+    }
     if (isDashboard || e.key !== 'pd_alerts_cache') return;
     try { alerts = JSON.parse(e.newValue || '[]'); } catch (err) { alerts = []; }
     if (!Array.isArray(alerts)) alerts = [];
@@ -235,7 +288,7 @@
       window.PD_ALERTS = alerts;
       try { localStorage.setItem('pd_alerts_cache', JSON.stringify(alerts)); } catch (e) { /* noop */ }
       const quota = D.llm_quota || {};
-      renderQuotaChip(quota.remaining_usd, null);
+      renderQuotaChip(quota.remaining_usd, null, quota.ai_active);
       renderCount();
       fillPanel();
     })();
@@ -261,7 +314,7 @@
       try {
         const cfg = await window.pdApi.get('/api/llm/config');
         const quota = (cfg && cfg.quota) || {};
-        renderQuotaChip(quota.remaining_usd, quota.alert_threshold_usd);
+        renderQuotaChip(quota.remaining_usd, quota.alert_threshold_usd, quota.ai_active);
       } catch (e) { /* degrade: keep the placeholder chip */ }
     })();
   }

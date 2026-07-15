@@ -12,6 +12,7 @@ from portfolio_dash.shared.llm_config import (
     LLMRole,
     ModelConfig,
     add_topup,
+    ai_active,
     budget_remaining,
     check_budget,
     create_llm_tables,
@@ -124,6 +125,45 @@ def test_select_text_uses_default_then_fallback(conn: sqlite3.Connection) -> Non
     set_role(conn, LLMRole.DEFAULT_FALLBACK, "b")
     chain = select_models(conn, vision=False)
     assert [m.id for m in chain] == ["a", "b"]
+
+
+# --- ai_active predicate (P3 batch 3 · 3B) -----------------------------------
+
+
+def test_ai_active_false_on_fresh_ai_off(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)  # four roles seeded to NULL, no models
+    assert ai_active(conn) is False
+
+
+def test_ai_active_true_when_role_bound_to_enabled_model(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model())  # enabled by default
+    set_role(conn, LLMRole.DEFAULT, "opus")
+    assert ai_active(conn) is True
+
+
+def test_ai_active_false_when_only_bound_model_is_disabled(conn: sqlite3.Connection) -> None:
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model(enabled=False))
+    set_role(conn, LLMRole.DEFAULT, "opus")
+    assert ai_active(conn) is False
+
+
+def test_ai_active_true_for_any_role_binding(conn: sqlite3.Connection) -> None:
+    # A non-default role (vision) alone still means AI is usable.
+    ensure_llm_seeded(conn)
+    upsert_model(conn, _model(id="v"))
+    set_role(conn, LLMRole.VISION, "v")
+    assert ai_active(conn) is True
+
+
+def test_ai_active_false_when_tables_missing() -> None:
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    try:
+        assert ai_active(c) is False  # no llm_defaults table -> defensive False (AI off)
+    finally:
+        c.close()
 
 
 def test_select_skips_disabled_and_missing(conn: sqlite3.Connection) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
@@ -23,32 +23,32 @@ from portfolio_dash.data_ingestion.dividend_import import (
     build_dividend_preview,
     write_dividend_row,
 )
+from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.manual import enter_transaction
+from portfolio_dash.data_ingestion.markets import account_market as _account_market
 from portfolio_dash.data_ingestion.opening_import import (
     build_opening_preview,
     write_opening_row,
 )
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, commit_preview
-from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.data_ingestion.store import (
+    list_accounts,
+    list_cash_movements,
+    list_dividends,
+    list_fx_conversions,
+    list_instruments,
+    list_transactions,
+)
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.portfolio.cash import cash_balances
+from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
-# The account's settlement currency determines the market a bare symbol entered
-# under it belongs to (TW broker→TWD/TW, Schwab & Moomoo-US→USD/US, Moomoo-MY→
-# MYR/MY) — the basis for auto-registering unknown symbols from trade input.
-_CCY_MARKET = {"TWD": Market.TW, "USD": Market.US, "MYR": Market.MY}
-
-
-def _account_market(conn: sqlite3.Connection, account_id: str) -> Market | None:
-    row = conn.execute(
-        "SELECT settlement_ccy FROM accounts WHERE account_id=?", (account_id,)
-    ).fetchone()
-    return _CCY_MARKET.get(row["settlement_ccy"]) if row is not None else None
+_ZERO = Decimal("0")
 
 
 @router.get("/input/context")
@@ -58,11 +58,15 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     ).fetchall()
     meta = {r["account_id"]: r for r in rows}
     accts = list_accounts(conn)
+    # `ccy` stays the settlement currency (back-compat); `funding_ccy` is added so the
+    # cash page can constrain its currency dropdowns to {settlement, funding} (audit C2).
     accounts_out = [
         {
             "id": a.account_id,
             "name": a.name,
             "ccy": a.settlement_ccy.value,
+            "settlement_ccy": a.settlement_ccy.value,
+            "funding_ccy": a.funding_ccy.value,
             "div_model": div_model_wire(meta[a.account_id]["dividend_model"]),
         }
         for a in accts
@@ -103,19 +107,25 @@ class ManualBody(BaseModel):
     symbol: str
     side: str
     date: date
-    shares: Decimal
-    price: Decimal
-    fee_override: Decimal | None = None
-    tax_override: Decimal | None = None
+    # shares/price bounded (audit M4) so an overflow-sized value 400s here rather than
+    # reaching the fee quantize as a 500. fee/tax overrides constrained >= 0 (audit H2).
+    shares: Decimal = Field(le=Decimal("1e12"))
+    price: Decimal = Field(le=Decimal("1e12"))
+    fee_override: Decimal | None = Field(default=None, ge=0)
+    tax_override: Decimal | None = Field(default=None, ge=0)
+    daytrade: bool = False  # TW same-day round trip → 0.15% sell tax (persisted, MED-1)
     note: str | None = None
     ack_oversell: bool = False  # used by commit (Task 3)
 
 
 def _txn_input(body: ManualBody) -> TxnInput:
+    # is_etf is NOT taken from the body: the instrument registry is authoritative
+    # (resolved at the fee-computation seam in manual.py / csv_import.py).
     return TxnInput(
         account_id=body.account_id, symbol=body.symbol, side=parse_side(body.side),
         quantity=body.shares, price=body.price, trade_date=body.date,
-        fee=body.fee_override, tax=body.tax_override, note=body.note,
+        fee=body.fee_override, tax=body.tax_override, daytrade=body.daytrade,
+        note=body.note,
     )
 
 
@@ -144,11 +154,46 @@ def _issue_wire_manual(issue: Issue, symbol: str) -> dict[str, Any]:
     return wired
 
 
+def _cash_overdraft_issue(
+    conn: sqlite3.Connection, body: ManualBody, draft_fee: Decimal, draft_tax: Decimal
+) -> Issue | None:
+    """Soft overdraft warning (audit C1b): only when the account opted into cash tracking
+    (>=1 cash movement) AND this BUY would push the instrument's cash pool below zero.
+
+    Never a hard block — users may not track cash at all (only fires once they do).
+    """
+    if parse_side(body.side) is not Side.BUY:
+        return None
+    inst = next((i for i in list_instruments(conn) if i.symbol == body.symbol), None)
+    if inst is None:  # unregistered symbol: pool ccy unknown until auto-register — skip
+        return None
+    tracked = conn.execute(
+        "SELECT 1 FROM cash_movements WHERE account_id=? LIMIT 1", (body.account_id,)
+    ).fetchone()
+    if tracked is None:
+        return None
+    bal = cash_balances(
+        list_cash_movements(conn), list_fx_conversions(conn), list_transactions(conn),
+        list_dividends(conn), {i.symbol: i for i in list_instruments(conn)},
+    )
+    current = bal.get((body.account_id, inst.quote_ccy), _ZERO)
+    cost = body.shares * body.price + draft_fee + draft_tax
+    if current - cost < _ZERO:
+        return Issue(
+            kind="cash_overdraft",
+            needs_confirm=True,
+            message=f"此帳戶 {inst.quote_ccy.value} 現金將不足(可能漏登入金或換匯),確認要寫入?",
+        )
+    return None
+
+
 @router.post("/input/manual/preview")
 def manual_preview(
-    body: ManualBody, conn: sqlite3.Connection = Depends(get_conn)
+    body: ManualBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
-    draft = enter_transaction(conn, _txn_input(body), confirm=False)
+    draft = enter_transaction(conn, _txn_input(body), confirm=False, today=now.date())
     gross = body.shares * body.price
     total = (
         -(gross + draft.fee + draft.tax)
@@ -156,13 +201,26 @@ def manual_preview(
         else (gross - draft.fee - draft.tax)
     )
     rule = _rule_for(conn, body.account_id)
+    issues = list(draft.issues)
+    overdraft = _cash_overdraft_issue(conn, body, draft.fee, draft.tax)
+    if overdraft is not None:
+        issues.append(overdraft)
+    # FE-D1 forecast HINT (informational, 不計入成本): the TW charge-first rebate on next
+    # month's refund = floor(resolved fee × rebate_rate). Null when the account never rebates
+    # (rebate_rate 0 — every non-TW rule) so the UI only shows the line where it applies.
+    rebate_estimate = (
+        decimal_str(forecast_tw_rebate(draft.fee, rule.rebate_rate))
+        if rule is not None and rule.rebate_rate > _ZERO
+        else None
+    )
     return {
         "fee": decimal_str(draft.fee), "tax": decimal_str(draft.tax),
         "gross": decimal_str(gross), "total": decimal_str(total),
         "fee_rule_label": fee_rules_wire(rule)["label"] if rule is not None else None,
         "fee_overridden": body.fee_override is not None,
         "tax_overridden": body.tax_override is not None,
-        "issues": [_issue_wire_manual(i, body.symbol) for i in draft.issues],
+        "rebate_estimate": rebate_estimate,
+        "issues": [_issue_wire_manual(i, body.symbol) for i in issues],
     }
 
 
@@ -172,8 +230,9 @@ def manual_commit(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
+    today = now.date()
     inp = _txn_input(body)
-    draft = enter_transaction(conn, inp, confirm=False)  # inspect, no write
+    draft = enter_transaction(conn, inp, confirm=False, today=today)  # inspect, no write
 
     # Auto-register an unknown symbol (2026-07-02): infer the market from the
     # account's settlement currency and run the one-step registration (which
@@ -202,7 +261,7 @@ def manual_commit(
             }
             body = body.model_copy(update={"symbol": outcome.instrument.symbol})
         inp = _txn_input(body)
-        draft = enter_transaction(conn, inp, confirm=False)  # re-validate, resolved now
+        draft = enter_transaction(conn, inp, confirm=False, today=today)  # re-validate now
 
     hard = [i for i in draft.issues if not i.needs_confirm]
     if hard:
@@ -214,7 +273,7 @@ def manual_commit(
         return JSONResponse(status_code=422, content=error_body(
             "oversell_unacknowledged", "需確認賣超",
             issues=[issue_wire(i) for i in draft.issues]))
-    written = enter_transaction(conn, inp, confirm=True)
+    written = enter_transaction(conn, inp, confirm=True, today=today)
     gross = body.shares * body.price
     total = (-(gross + written.fee + written.tax) if inp.side.value == "BUY"
              else (gross - written.fee - written.tax))

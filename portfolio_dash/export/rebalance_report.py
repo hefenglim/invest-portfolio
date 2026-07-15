@@ -263,6 +263,7 @@ def _totals_html(
     over_allocated: bool,
     excluded: list[str],
     excluded_with_target: list[str],
+    rebate_estimate_total: Decimal | None,
 ) -> str:
     """彙總 — target sum / cash level / turnover / fees, plus over-alloc + excluded notes."""
     kv = [
@@ -277,6 +278,14 @@ def _totals_html(
         for k, v in kv
     )
     notes: list[str] = []
+    # FE-D1 forecast HINT (informational, 不計入成本): TW charge-first rebate on next month's
+    # refund. Reporting-ccy amount; only rendered when a TW leg actually rebates.
+    if rebate_estimate_total is not None and rebate_estimate_total > _ZERO:
+        notes.append(
+            '<p class="note">預估次月折讓合計 '
+            f"{_amount_ccy(rebate_estimate_total, reporting_ccy)}"
+            "（台股先收後退，<b>不計入成本</b>，僅供參考）。</p>"
+        )
     if over_allocated:
         notes.append('<p class="warn">⚠ 目標合計超過 100% — 請下調部分標的。</p>')
     if excluded:
@@ -337,6 +346,8 @@ def build_rebalance_report_html(
                 over_allocated=cast(bool, summary["over_allocated"]),
                 excluded=cast(list[str], summary["excluded"]),
                 excluded_with_target=cast(list[str], summary["excluded_with_target"]),
+                rebate_estimate_total=cast(
+                    "Decimal | None", summary.get("rebate_estimate_total")),
             ),
             _footer_html(),
         ]

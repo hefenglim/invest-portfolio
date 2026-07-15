@@ -1,3 +1,4 @@
+import sqlite3
 from typing import Any
 
 import pytest
@@ -5,6 +6,8 @@ from fastapi.testclient import TestClient
 
 from portfolio_dash.api.instrument_service import QuickRegisterError, QuickRegisterOutcome
 from portfolio_dash.api.routers import input_center
+from portfolio_dash.data_ingestion.store import upsert_instrument
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 
 
@@ -14,12 +17,24 @@ def test_manual_preview_buy_computes_fee_and_total(api_client: TestClient) -> No
         "date": "2026-06-11", "shares": "1000", "price": "612.5"})
     assert r.status_code == 200
     b = r.json()
-    assert b["fee"] == "873" and b["tax"] == "0"
+    # fee-engine v2 (FE-D3): 612,500 × 0.1425% = 872.8125 -> floor 872 (was 873 under HALF_UP).
+    assert b["fee"] == "872" and b["tax"] == "0"
     # Full source precision stays on the wire (canonical decimal_str, #2c/M1): 1000 * 612.5
     # is Decimal("612500.0") -- the trailing zero is preserved (the old _money_str
     # normalize() dropped it). The frontend quantizes for display.
-    assert b["gross"] == "612500.0" and b["total"] == "-613373.0"
+    assert b["gross"] == "612500.0" and b["total"] == "-613372.0"
     assert b["fee_overridden"] is False and b["issues"] == []
+    # FE-D1 forecast hint (不計入成本): TW rebate = floor(fee × 0.77) = floor(872×0.77)=671.
+    assert b["rebate_estimate"] == "671"
+
+
+def test_manual_preview_rebate_estimate_null_for_non_tw(api_client: TestClient) -> None:
+    """A US account (schwab, rebate_rate 0) returns rebate_estimate null (never applies)."""
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "schwab", "symbol": "AAPL", "side": "buy",
+        "date": "2026-06-11", "shares": "10", "price": "100"})
+    assert r.status_code == 200
+    assert r.json()["rebate_estimate"] is None
 
 
 def test_manual_preview_oversell_soft_issue(api_client: TestClient) -> None:
@@ -72,6 +87,34 @@ def test_manual_commit_hard_error_400(api_client: TestClient) -> None:
         "account_id": "tw_broker", "symbol": "2330", "side": "buy",
         "date": "2026-06-11", "shares": "0", "price": "600"})
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
+
+
+# --- C1b: overdraft soft issue only once the account tracks cash --------------
+
+
+def test_manual_preview_overdraft_issue_when_tracked(api_client: TestClient) -> None:
+    """LOW-4c: with ≥1 cash movement on the account, a BUY beyond the pool surfaces the
+    soft cash_overdraft issue (the golden tw_broker TWD pool is already negative from its
+    500k trade settlement, so any tracked buy overdraws)."""
+    dep = api_client.post("/api/cash/movements", json={
+        "account_id": "tw_broker", "date": "2026-01-01", "kind": "deposit",
+        "ccy": "TWD", "amount": "1000"})
+    assert dep.status_code == 201, dep.text
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "1000", "price": "600"})
+    codes = {i["code"] for i in r.json()["issues"]}
+    assert "cash_overdraft" in codes
+
+
+def test_manual_preview_no_overdraft_when_untracked(api_client: TestClient) -> None:
+    """No cash movement on the account -> the overdraft check never fires (even on a big
+    buy) — users who do not track cash are never warned."""
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "1000", "price": "600"})
+    codes = {i["code"] for i in r.json()["issues"]}
+    assert "cash_overdraft" not in codes
 
 
 # --- unknown symbol: auto-register on commit (2026-07-02, round 2) ------------
@@ -152,3 +195,30 @@ def test_manual_commit_registered_symbol_skips_auto_register(
         "date": "2026-06-11", "shares": "100", "price": "600"})
     assert r.status_code == 201
     assert r.json()["auto_registered"] is None
+
+
+def test_manual_preview_etf_sell_uses_etf_tax_rate(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Stress-audit finding (2026-07-15): the registry's is_etf flag must reach the
+    fee engine on the manual path — an ETF sell is taxed 0.1%, never the 現股 0.3%."""
+    upsert_instrument(
+        golden_db,
+        Instrument(symbol="0050", market=Market.TW, quote_ccy=Currency.TWD,
+                   sector="ETF", name="元大台灣50", is_etf=True),
+    )
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "0050", "side": "sell",
+        "date": "2026-06-11", "shares": "50", "price": "140"})
+    assert r.status_code == 200
+    # notional 7,000 -> tax 7 (0.1%); the pre-fix bug returned 21 (0.3%).
+    assert r.json()["tax"] == "7"
+
+
+def test_manual_preview_daytrade_uses_daytrade_tax_rate(api_client: TestClient) -> None:
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-11", "shares": "100", "price": "600", "daytrade": True})
+    assert r.status_code == 200
+    # notional 60,000 -> tax 90 (0.15%); 現股 would be 180.
+    assert r.json()["tax"] == "90"

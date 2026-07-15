@@ -1391,7 +1391,8 @@
     "basis": "declared_only"
   },
   "llm_quota": {
-    "remaining_usd": "0"
+    "remaining_usd": "0",
+    "ai_active": false
   },
   "alerts": [
     {
@@ -1441,14 +1442,6 @@
       "title": "Charles Schwab 匯率偏離成本",
       "detail": "即期匯率偏離成本匯率 3.2%＞門檻 3.0%",
       "href": null
-    },
-    {
-      "id": "quota_low",
-      "sev": "risk",
-      "rule": "quota_low",
-      "title": "LLM 額度偏低",
-      "detail": "剩餘額度 $0.00＜警戒值 $1.00",
-      "href": "/settings"
     }
   ]
 }

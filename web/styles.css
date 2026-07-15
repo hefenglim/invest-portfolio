@@ -1128,25 +1128,12 @@ table.ccyret td:first-child { text-align: left; font-weight: 600; }
 table.ccyret tr:last-child td { border-bottom: none; }
 .ccyret-note { padding: 0 var(--pad) 10px; font-size: 10px; color: var(--text-3); }
 
-/* ---------- export button ---------- */
-
-.btn-export {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
-  padding: 2px 10px;
-  font-size: 11px;
-  font-family: var(--font-ui);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-2);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.btn-export:hover { color: var(--text); border-color: var(--text-3); }
-.panel-head .btn-export { align-self: center; }
+/* ---------- export / download buttons ----------
+   `.btn-export` is no longer a distinct style: every export button is a plain
+   `.btn .btn-sm` (leading ⬇ `.ico`, filled like every other button). The class is
+   retained ONLY as a semantic + e2e hook (`#ledger-export-slot .btn-export` in
+   test_flows_e1_e10) and carries no box style of its own. Right-alignment comes
+   from the host panel-head's `.spacer`, not a baked margin-left:auto. */
 
 /* ---------- stale row desaturation ---------- */
 
@@ -1388,7 +1375,7 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
 .inbox-group-head::-webkit-details-marker { display: none; }
 .inbox-group-head::before { content: "▸"; color: var(--text-3); font-size: 10px; }
 .inbox-group[open] > .inbox-group-head::before { content: "▾"; }
-.inbox-group-head .btn { margin-left: auto; font-size: 10px; padding: 2px 10px; }
+.inbox-group-head .btn { margin-left: auto; padding: 4px 10px; }  /* 3D: use .btn-sm tier (set in JS); keep the right-push */
 .inbox-group .inbox-item { margin: 4px 0; }
 .inbox-item {
   display: flex; align-items: center; gap: 14px;
@@ -1422,7 +1409,42 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   background: var(--amber); color: #0c1015; font-weight: 700;
 }
 
-/* generic small buttons reused by inbox */
+/* =========================================================================
+   ACTIONABLE CONTROLS — one design language (site-wide)  [3F, 2026-07-15]
+   -------------------------------------------------------------------------
+   Every button-like actionable control on the site is a `.btn`. There is ONE
+   base, TWO size tiers, and a small fixed set of emphasis variants. Nothing
+   else — a "hollow" export button, an inline glyph baked into the label, or
+   per-page ad-hoc padding/colour — is allowed. The owner's "same row, three
+   different looks" complaint (⚖ 再平衡試算 / ⬇ 匯出 CSV / 匯出報告) was exactly
+   that drift; this block is the single source of truth that ends it.
+
+   Toggle / segmented controls (`.segmented`, `.chip`, `.range-btn`) and the
+   topbar icon cluster (`.btn-refresh`, `.search-btn`, `.bell-btn`) are SEPARATE,
+   self-consistent sub-systems — they are stateful toggles / a distinct zone,
+   not page action buttons, and are intentionally NOT `.btn`.
+
+     BASE        .btn         filled (panel-2), 1px border, radius-sm, text-2.
+     TIERS       .btn         base tier    — font 12px, pad 4px 13px.
+                 .btn-sm      compact tier — font 11px, pad 4px 10px.
+                 Both pin line-height:18px + 4px vertical pad, so EVERY tier
+                 renders at ONE height (the same-row invariant; the toolbar-
+                 height e2e asserts per-row heights match within 1px). Only
+                 font-size + horizontal density differ between the tiers.
+     VARIANTS    (default)    neutral (text-2).
+                 .btn-primary single accent, weight 700 — the row's main act.
+                 .btn-danger  destructive (red), weight 700.
+                 .btn-warn    caution (amber).
+     ICON RULE   An icon is ALWAYS a leading `<span class="ico">`, sharing the
+                 base's 6px gap — never baked into the label text (ONE mechanism,
+                 site-wide). A homogeneous action cluster (the holdings / trades
+                 export row: ⚖ 再平衡試算 · ⬇ 匯出 CSV · ⎙ 匯出報告) is all-icon;
+                 a primary create / refresh affordance (＋ / ⟳) may stand beside
+                 a neutral secondary button.
+     TOOLBAR     A multi-button row is a `.toolbar` (or a `.panel-head`, which
+                 behaves as one). Right-alignment comes from a `.spacer`; a
+                 component class NEVER carries its own margin-left:auto.
+   ========================================================================= */
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 13px;
@@ -1432,10 +1454,15 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   color: var(--text-2);
   font-family: var(--font-ui);
   font-size: 12px;
+  line-height: 18px;
   cursor: pointer;
   text-decoration: none;
 }
 .btn:hover { border-color: var(--text-3); color: var(--text); }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+/* leading icon: sized to the label (1em), never shrinks, never wraps. Scoped to `.btn`
+   so the sidebar's own `.sb-item .ico` (fixed 18px column) is left untouched. */
+.btn .ico { flex: none; font-size: 1em; line-height: 1; }
 .btn-primary {
   color: var(--accent);
   border-color: rgba(88, 166, 221, 0.45);
@@ -1450,6 +1477,19 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
   font-weight: 700;
 }
 .btn-danger:hover { border-color: var(--up); }
+/* caution variant (renamed from `.btn-outline-warn` to the tier-consistent `.btn-warn`). */
+.btn-warn { color: var(--amber); border-color: rgba(217, 161, 63, 0.45); background: var(--amber-soft); }
+.btn-warn:hover { border-color: var(--amber); }
+
+/* `.toolbar`: a named action row. `.spacer` right-pushes trailing items (replaces
+   ad-hoc per-button margin-left:auto). align-items:center so mixed tiers share one
+   centre line. `.panel-head` is the other action-row host; its buttons centre too. */
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toolbar .spacer { margin-left: auto; }
+/* every button placed in a panel-head centres against its (baseline-aligned) title row. */
+.panel-head .btn { align-self: center; }
+/* the trades ledger export slot holds two `.btn`s (匯出 CSV + 匯出報告) side by side. */
+#ledger-export-slot { display: inline-flex; align-items: center; gap: 8px; }
 
 /* ---------- E2: sparkline ---------- */
 .spark-cell { text-align: center; }
@@ -1505,8 +1545,10 @@ table.data tbody tr.kb-focus td {
 .rb-kv .k { color: var(--text-3); }
 .rb-kv .v { font-family: var(--font-num); font-weight: 600; }
 .rb-warn { font-size: 11px; color: var(--amber); }
-.rb-open-btn { margin-left: 8px; font-size: 11px; padding: 2px 10px; }
-.panel-head .rb-open-btn + .btn-export { margin-left: 8px; }
+/* the rebalance trigger is a plain `.btn .btn-sm` (leading ⚖ `.ico`). `.rb-open-btn`
+   is kept ONLY as a deep-link / e2e hook (digest_service.py weekly item target;
+   test_flows / test_pages) — it carries no box style of its own; the tier supplies it,
+   the panel-head's gap + `.spacer` handle spacing + right-alignment. */
 /* combined cross-account row: symbol id stacked over account chips (2026-07-13) */
 .rb-sym-id { display: flex; align-items: baseline; gap: 8px; }
 .rb-acct-chips { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 3px; }
@@ -1539,7 +1581,6 @@ details.freshness > summary > span,
 .topbar .badge,
 .topbar button,
 .btn,
-.btn-export,
 .sum-chips .ccy-chip,
 .exdiv-sym .sym-name,
 .trend-note {
@@ -1626,7 +1667,9 @@ details.freshness > summary > span:not(.sum-chips) {
 
   /* --- iOS input + touch ergonomics --- */
   input.input, select.select, textarea.input { font-size: 16px; min-height: 40px; }
-  .btn { min-height: 38px; }
+  /* 3D: the compact tiers + the topbar refresh buttons get the same ≥38px touch target as
+     .btn so no action button is finger-hostile on mobile. */
+  .btn, .btn-sm, .btn-refresh { min-height: 38px; }
   .segmented button { min-height: 36px; }
   .chip { min-height: 30px; }
   .pencil { min-width: 38px; min-height: 38px; }
@@ -1877,3 +1920,53 @@ button[disabled], .btn[disabled] {
 .wnh-title { font-size: 12.5px; font-weight: 700; color: var(--text); }
 .wnh-desc { font-size: 11.5px; color: var(--text-2); line-height: 1.45; }
 .wnh-area { font-size: 10px; color: var(--text-3); font-family: var(--font-num); }
+
+/* ===== 摘要與週報 (P3 batch 3 · Wave 1) ===== */
+.digest-body { padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 10px; }
+.digest-headline { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.digest-head-label { font-size: 12px; color: var(--text-2); }
+.digest-pct { font-family: var(--font-num); font-size: 22px; font-weight: 700; }
+.digest-sub { font-size: 11px; color: var(--text-3); }
+.digest-movers { display: flex; flex-wrap: wrap; gap: 6px; }
+.digest-mover {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px;
+  border: 1px solid var(--border-soft); border-radius: 999px; font-size: 11px;
+}
+.digest-mover-sym { font-weight: 600; color: var(--text); }
+.digest-mover-pct { font-family: var(--font-num); }
+.digest-counts { display: flex; flex-wrap: wrap; gap: 8px; }
+.digest-count {
+  font-size: 11.5px; color: var(--text-2); text-decoration: none;
+  padding: 3px 10px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+}
+.digest-count:hover { color: var(--text); border-color: var(--accent); }
+.digest-health { font-size: 11.5px; color: var(--text-2); }
+.digest-health.warn { color: #d9a13f; }
+.digest-ai {
+  display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--text);
+  padding: 8px 10px; background: var(--panel-2); border-radius: var(--radius-sm);
+  line-height: 1.5;
+}
+.digest-ai-tag {
+  font-size: 9.5px; font-weight: 700; color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 3px; padding: 0 4px; flex: none;
+}
+.digest-stamp { font-size: 10px; color: var(--text-3); font-family: var(--font-num); }
+.digest-empty { padding: 8px 0; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.digest-checklist { display: flex; flex-direction: column; gap: 8px; }
+.digest-item {
+  display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+}
+.digest-item-ico { font-size: 15px; flex: none; line-height: 1.3; }
+.digest-item-main { flex: 1 1 auto; min-width: 0; }
+.digest-item-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.digest-item-desc { font-size: 11.5px; color: var(--text-2); line-height: 1.45; margin-top: 2px; }
+/* settings 摘要與週報 card */
+.digest-config { padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 10px; }
+.digest-cfg-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.digest-cfg-title { font-size: 12.5px; font-weight: 600; color: var(--text); min-width: 120px; }
+.digest-cfg-time { display: flex; align-items: center; gap: 6px; }
+.digest-cfg-hhmm { width: 120px; }
+.digest-cfg-custom { font-size: 11px; color: var(--text-3); }
+.digest-cfg-hint { font-size: 11px; color: var(--text-3); flex: 1 1 220px; }
