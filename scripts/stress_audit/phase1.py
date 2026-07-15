@@ -36,11 +36,12 @@ INSTRUMENTS = [
     ("1155", "MY", "MYR", "Maybank", "Banking", False),
     ("TSLA", "US", "USD", "Tesla", "Auto", False),      # watchlist -> later bought
     ("5225", "MY", "MYR", "IHH Healthcare", "Healthcare", False),  # watchlist, stays
+    ("0800EA", "MY", "MYR", "TradePlus MY ETF", "ETF", True),  # MY ETF -> stamp EXEMPT (v2)
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
     "2330": D("700"), "0050": D("145"), "AAPL": D("205"), "MSFT": D("420"),
-    "NVDA": D("610"), "1155": D("11.20"), "TSLA": D("250"),
+    "NVDA": D("610"), "1155": D("11.20"), "TSLA": D("250"), "0800EA": D("1.20"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 FX_RATES = {("USD", "TWD"): D("32.5"), ("USD", "MYR"): D("4.5"), ("MYR", "TWD"): D("7.2")}
@@ -117,12 +118,20 @@ class Ops:
         finally:
             conn.close()
 
-    def _fee_check(self, txn_id, account_id, side, qty, price, symbol, daytrade=False):
+    def _fee_check(self, txn_id, account_id, side, qty, price, symbol, d, daytrade=False):
         # is_etf comes from the instrument REGISTRY (found-bug: entry paths must honour it,
         # not default False); daytrade is the per-transaction TW same-day flag (0.15%).
         is_etf = dict((i[0], i[5]) for i in INSTRUMENTS).get(symbol, False)
+        # FE-D2: the Moomoo US MY stamp needs the trade-date USD/MYR rate. Resolve it from the
+        # harness-owned seeded schedule (on-or-before), mirroring the app's caller seam.
+        stamp_fx = None
+        if O.ACCOUNTS[account_id][0] == "moomoo_us":
+            try:
+                stamp_fx = fx_on_resolver()(date.fromisoformat(d), "USD", "MYR")
+            except KeyError:
+                stamp_fx = None
         fee, tax, notes = O.fee_tax(account_id, side.upper(), dec(qty), dec(price),
-                                    is_etf, daytrade)
+                                    is_etf, daytrade, stamp_fx)
         got_fee, got_tax = C.read_fee_tax_from_db(self.db, txn_id)
         tag = "daytrade" if daytrade else ("etf" if is_etf else "normal")
         self.ev.check("fee_engine.fee",
@@ -155,7 +164,8 @@ class Ops:
             return resp
         txn_id = resp["json"].get("txn_id") if isinstance(resp.get("json"), dict) else None
         if txn_id and fee_check:
-            self._fee_check(txn_id, account_id, side, shares, price, symbol, daytrade=daytrade)
+            self._fee_check(txn_id, account_id, side, shares, price, symbol, d,
+                            daytrade=daytrade)
         return resp
 
     def daytrade_csv(self, account_id, symbol, d, shares, buy_price, sell_price):
@@ -177,7 +187,7 @@ class Ops:
         if resp["status"] in (200, 201):
             sid = self._latest_tx_id(account_id, symbol, "sell")
             if sid:
-                self._fee_check(sid, account_id, "sell", shares, sell_price, symbol,
+                self._fee_check(sid, account_id, "sell", shares, sell_price, symbol, d,
                                 daytrade=True)
         return resp
 

@@ -36,11 +36,12 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 D = Decimal
 ZERO = D("0")
 ONE = D("1")
+CENT = D("0.01")
 
 # --- per-currency minor units (data-and-pricing.md) --------------------------------
 MINOR_UNITS = {"TWD": 0, "USD": 2, "MYR": 2}
@@ -53,15 +54,26 @@ ACCOUNTS = {
     "moomoo_my_my": ("moomoo_my", "MYR", "MYR"),
 }
 
-# --- fee-rule parameters (transcribed from config_seed.FEE_RULES) ------------------
+# --- fee-rule parameters (fee-engine v2, transcribed from config_seed.FEE_RULES) ---
+# Parameters-from-config is allowed (independence rule); the LOGIC in fee_tax is re-derived
+# from the mini-spec + reference doc, so a bug in fees.py cannot hide behind a shared path.
 FEE_RULES = {
     "tw": dict(brokerage=D("0.001425"), discount=D("1"), min_fee=D("20"),
                tax_normal=D("0.003"), tax_etf=D("0.001"), tax_daytrade=D("0.0015"),
-               round_integer=True, ccy="TWD"),
-    "schwab": dict(sec_fee=D("0.0000278"), ccy="USD"),
-    "moomoo_us": dict(flat_fee=D("0.99"), sec_fee=D("0.0000278"), ccy="USD"),
-    "moomoo_my": dict(brokerage=D("0.0008"), min_fee=D("3"), clearing=D("0.0003"),
-                      clearing_cap=D("1000"), stamp_duty_rate=D("0.001"), ccy="MYR"),
+               rounding="floor", ccy="TWD"),
+    "schwab": dict(sec_rate=D("0.0000206"), sec_min=D("0.01"), taf_per_share=D("0.000195"),
+                   taf_min=D("0.01"), taf_cap=D("9.79"), ccy="USD"),
+    "moomoo_us": dict(commission_rate=D("0.0003"), commission_min=D("0.01"),
+                      platform=D("0.99"), settlement_per_share=D("0.003"),
+                      settlement_cap_rate=D("0.01"), cat_per_share=D("0.000003"),
+                      sec_rate=D("0.0000206"), sec_min=D("0.01"), taf_per_share=D("0.000195"),
+                      taf_min=D("0.01"), taf_cap=D("9.79"), stamp_unit=D("1000"),
+                      stamp_per_unit=D("1"), stamp_cap_stock=D("1000"), stamp_cap_etf=D("200"),
+                      ccy="USD"),
+    "moomoo_my": dict(commission_rate=D("0.0003"), commission_min=D("0.01"),
+                      platform=D("3.00"), clearing_rate=D("0.0003"), clearing_cap=D("1000"),
+                      sst_rate=D("0.08"), stamp_unit=D("1000"), stamp_per_unit=D("1"),
+                      stamp_cap_stock=D("1000"), stamp_cap_etf=D("0"), ccy="MYR"),
 }
 
 CASH_DIVIDEND_TYPES = {"CASH", "NET"}  # domain-ledger.md: TW cash + MY single-tier net
@@ -72,22 +84,37 @@ def _round(value: Decimal, places: int) -> Decimal:
     return value.quantize(q, rounding=ROUND_HALF_UP)
 
 
+def _cent(value: Decimal) -> Decimal:
+    """US/MY per-component minor unit, ROUND_HALF_UP."""
+    return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def _floor_int(value: Decimal) -> Decimal:
+    """TW integer NT$, ROUND_DOWN (FE-D3, 角以下免收)."""
+    return value.quantize(ONE, rounding=ROUND_DOWN)
+
+
+def _ceil_int(value: Decimal) -> Decimal:
+    """Stamp-duty lot count, ceil to integer."""
+    return value.quantize(ONE, rounding=ROUND_CEILING)
+
+
 # ===================================================================================
 # LAYER 1 — FEE ENGINE ORACLE (rule-derived; compared vs app-stored fee/tax)
 # ===================================================================================
 def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
-            is_etf: bool, daytrade: bool = False) -> tuple[Decimal, Decimal, list[str]]:
-    """Return (fee, tax, assumptions[]) expected from markets-and-fees.md.
+            is_etf: bool, daytrade: bool = False,
+            stamp_fx: Decimal | None = None) -> tuple[Decimal, Decimal, list[str]]:
+    """Return (fee, tax, notes[]) expected from the fee-engine v2 spec (independent derive).
 
-    ``side`` in {"BUY","SELL"}. ``assumptions`` records rule-silent mechanical choices
-    so a mismatch on one of them can be classified as an oracle assumption rather than
-    an app bug.
+    ``side`` in {"BUY","SELL"}. Logic is re-derived from the mini-spec + reference doc
+    (NOT imported from fees.py); parameters are transcribed above. ``notes`` records the
+    rule-silent mechanical choices so a mismatch can be triaged.
 
-    TW sell-side tax rate precedence (mirrors fees.compute_fees): daytrade (0.15%) wins,
-    else ETF (0.1%), else 現股 normal (0.3%). ``is_etf`` is the instrument-REGISTRY flag,
-    NOT a per-input flag (found-bug 2026-07-15: entry paths defaulted is_etf=False and
-    taxed ETF sells at 0.3%). ``daytrade`` is the per-transaction flag (manual body or
-    CSV ``daytrade`` column) persisted so a recompute reproduces the sell tax (MED-1).
+    Rounding: TW floors to integer NT$ (FE-D3); US/MY quantize each component to the cent
+    (ROUND_HALF_UP) then sum. ``is_etf`` is the instrument-REGISTRY flag (TW sell tax rate;
+    MY/US stamp cap). ``daytrade`` is the per-transaction TW flag. ``stamp_fx`` is the
+    trade-date USD/MYR rate for the Moomoo US MY stamp (FE-D2); None -> stamp 0.
     """
     rule_name = ACCOUNTS[account_id][0]
     r = FEE_RULES[rule_name]
@@ -95,12 +122,13 @@ def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
     fee = ZERO
     tax = ZERO
     notes: list[str] = []
+    if notional <= ZERO:
+        return fee, tax, ["zero/negative notional -> no fee/tax"]
 
     if rule_name == "tw":
-        raw = notional * r["brokerage"] * r["discount"]
-        brok = _round(raw, 0)                       # integer NT$ (四捨五入)
-        fee = max(brok, r["min_fee"])               # min NT$20
-        notes.append("tw: fee=max(round_int(notional*0.001425*1), 20)")
+        floored = _floor_int(notional * r["brokerage"] * r["discount"])
+        fee = max(floored, r["min_fee"])            # min applies AFTER the floor (FE-D3)
+        notes.append("tw v2: fee=max(floor(notional*0.001425*1), 20) [FE-D3 floor]")
         if side == "SELL":
             if daytrade:
                 rate = r["tax_daytrade"]
@@ -108,37 +136,52 @@ def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
                 rate = r["tax_etf"]
             else:
                 rate = r["tax_normal"]
-            tax = _round(notional * rate, 0)
-            notes.append(f"tw: sell tax=round_int(notional*{rate}) "
-                         f"is_etf={is_etf} daytrade={daytrade}")
-    elif rule_name == "schwab":
+            tax = _floor_int(notional * rate)
+            notes.append(f"tw v2: tax=floor(notional*{rate}) is_etf={is_etf} daytrade={daytrade}")
+    elif rule_name in ("schwab", "moomoo_us"):
+        if "commission_rate" in r:
+            fee += _cent(max(notional * r["commission_rate"], r["commission_min"]))
+        if "platform" in r:
+            fee += _cent(r["platform"])
+        if "settlement_per_share" in r:
+            cap = r["settlement_cap_rate"] * notional
+            fee += _cent(min(r["settlement_per_share"] * qty, cap))
+        if "cat_per_share" in r:
+            fee += _cent(r["cat_per_share"] * qty)
         if side == "SELL":
-            fee = _round(notional * r["sec_fee"], 2)  # SEC reg fee, sell-side, 2dp
-            notes.append("schwab: sell fee=round2(notional*sec_fee); buy fee=0; ROUND_HALF_UP")
-        else:
-            notes.append("schwab: buy fee=0")
-    elif rule_name == "moomoo_us":
-        base = r["flat_fee"]                          # ASSUMPTION: flat fee both sides
-        if side == "SELL":
-            fee = _round(base + notional * r["sec_fee"], 2)
-        else:
-            fee = _round(base, 2)
-        notes.append("moomoo_us: flat_fee $0.99 assumed BOTH sides; sell adds sec_fee; round2")
+            fee += _cent(max(notional * r["sec_rate"], r["sec_min"]))
+            taf = max(qty * r["taf_per_share"], r["taf_min"])
+            if taf > r["taf_cap"]:
+                taf = r["taf_cap"]
+            fee += _cent(taf)
+        notes.append(f"{rule_name} v2: Σ per-component cent-quantized; SELL adds SEC+TAF")
+        if "stamp_unit" in r:                        # moomoo_us MY stamp (FE-D2)
+            if stamp_fx is None or stamp_fx <= ZERO:
+                notes.append("moomoo_us v2: no USD/MYR rate -> stamp 0")
+            else:
+                amt_myr = notional * stamp_fx
+                stamp_myr = _ceil_int(amt_myr / r["stamp_unit"]) * r["stamp_per_unit"]
+                cap = r["stamp_cap_etf"] if is_etf else r["stamp_cap_stock"]
+                if stamp_myr > cap:
+                    stamp_myr = cap
+                tax = _cent(stamp_myr / stamp_fx)
+                notes.append("moomoo_us v2: MY stamp computed in MYR, booked USD (FE-D2)")
     elif rule_name == "moomoo_my":
-        brok = notional * r["brokerage"]
-        if brok < r["min_fee"]:
-            brok = r["min_fee"]
-        clr = notional * r["clearing"]
+        commission = _cent(max(notional * r["commission_rate"], r["commission_min"]))
+        platform = _cent(r["platform"])
+        clr = notional * r["clearing_rate"]
         if clr > r["clearing_cap"]:
             clr = r["clearing_cap"]
-        # App models stamp duty in the TAX field (a tax-like contract-note charge),
-        # keeping fee = brokerage + clearing. The rule lists stamp duty separately from
-        # brokerage/clearing, so this split is a defensible modeling choice; the ALL-IN
-        # cost (fee+tax) is identical either way. (Confirmed against app fees engine.)
-        fee = _round(brok + clr, 2)
-        tax = _round(notional * r["stamp_duty_rate"], 2)
-        notes.append("moomoo_my: fee=round2(max(notional*0.0008,3)+min(notional*0.0003,1000)); "
-                     "tax=round2(notional*0.001 stamp); SST=0; both sides")
+        clearing = _cent(clr)
+        sst = _cent(r["sst_rate"] * (commission + platform + clearing))
+        fee = commission + platform + clearing + sst
+        stamp_myr = _ceil_int(notional / r["stamp_unit"]) * r["stamp_per_unit"]
+        cap = r["stamp_cap_etf"] if is_etf else r["stamp_cap_stock"]
+        if stamp_myr > cap:
+            stamp_myr = cap
+        tax = _cent(stamp_myr)
+        notes.append("moomoo_my v2: comm+platform+clearing+SST(8%); stamp step ceil(n/1000)"
+                     "×RM1; ETF cap 0 => exempt")
     return fee, tax, notes
 
 

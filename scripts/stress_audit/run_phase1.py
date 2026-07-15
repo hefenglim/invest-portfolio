@@ -57,6 +57,8 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("B12", "moomoo_my_my", "1155", "2026-01-30", 1000, "9.50")
     buy("B13", "moomoo_my_my", "1155", "2026-02-25", 500, "10.20")
     buy("B18", "moomoo_my_my", "1155", "2026-03-15", 200, "10.50")
+    # MY ETF buy -> fee-engine v2 stamp EXEMPTION: tax must be RM0 despite the step formula.
+    buy("BME", "moomoo_my_my", "0800EA", "2026-02-08", 1000, "1.15")
 
     reconcile(ev, api, db_path, "checkpoint1", valuation=True)
 
