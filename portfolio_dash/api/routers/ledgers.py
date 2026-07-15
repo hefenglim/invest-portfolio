@@ -25,6 +25,7 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.wire import parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
+from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.markets import MARKET_ZH, account_market
 from portfolio_dash.data_ingestion.store import (
     StoredDividend,
@@ -473,11 +474,15 @@ def _recompute_edit_fees(
         ).fetchone()
         inst = get_instrument(conn, body.symbol)
         if row is not None:
+            rules = get_fee_rule_set(row["fee_rule_set"])
+            # FE-D2: resolve the trade-date USD/MYR rate for the Moomoo US MY stamp. No rate
+            # -> stamp 0 (recorded in the snapshot); the edit path has no soft-issue surface.
+            stamp_fx = resolve_stamp_fx(conn, body.date) if rules.has_us_stamp else None
             try:
                 fr = compute_fees(
-                    get_fee_rule_set(row["fee_rule_set"]), side, body.shares, body.price,
+                    rules, side, body.shares, body.price,
                     is_etf=inst.is_etf if inst is not None else False,
-                    daytrade=daytrade,
+                    daytrade=daytrade, stamp_fx=stamp_fx,
                 )
             except FeeComputationError as exc:
                 return JSONResponse(status_code=400, content=error_body(

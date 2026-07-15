@@ -50,26 +50,42 @@ def _tw_label(r: FeeRuleSet) -> str:
     )
 
 
+def _us_label(r: FeeRuleSet) -> str:
+    # fee-engine v2: Moomoo US = commission + platform + settlement/CAT (+ SELL SEC/TAF);
+    # Schwab = $0 online commission (+ SELL SEC/TAF).
+    if r.platform_fee > 0:
+        return (
+            f"佣金 {r.commission_rate * 100}%・平台費 USD {r.platform_fee}/筆・"
+            f"賣出 SEC/TAF"
+        )
+    return "$0 佣金・賣出 SEC/TAF"
+
+
+def _my_label(r: FeeRuleSet) -> str:
+    return (
+        f"佣金 {r.commission_rate * 100}%・平台費 RM{r.platform_fee}・"
+        f"清算 {r.clearing_rate * 100}%・SST {r.sst_rate * 100}%・"
+        f"印花 ceil(金額/{r.stamp_unit})×RM{r.stamp_per_unit}"
+    )
+
+
 def fee_rules_wire(r: FeeRuleSet) -> dict[str, Any]:
-    """Serialize a FeeRuleSet to the frontend fee-rule shape (shared with spec 13)."""
+    """Serialize a FeeRuleSet to the frontend fee-rule shape (shared with spec 13).
+
+    The frontend consumes only ``label``; the remaining keys are the stable contract shape.
+    ``round_int`` is True when the rule floors to integer NT$ (TW, fee-engine v2 FE-D3).
+    """
     if r.market is Market.TW:
         label = _tw_label(r)
     elif r.market is Market.US:
-        label = (
-            f"平台費 USD {r.flat_fee}/筆"
-            if r.flat_fee > 0
-            else f"$0 佣金 + SEC fee {r.sec_fee}"
-        )
+        label = _us_label(r)
     else:
-        label = (
-            f"佣金 {r.brokerage * 100}%・清算 {r.clearing * 100}%・"
-            f"印花稅 {r.stamp_duty_rate * 100}%"
-        )
+        label = _my_label(r)
     return {
         "rate": decimal_str(r.brokerage),
         "discount": decimal_str(r.discount),
         "min_fee": decimal_str(r.min_fee),
-        "round_int": r.round_integer,
+        "round_int": r.rounding == "floor",
         "tax_sell": decimal_str(r.tax_normal),
         "tax_sell_etf": decimal_str(r.tax_etf),
         "label": label,

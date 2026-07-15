@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
+from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
@@ -104,14 +105,25 @@ def enter_transaction(
         # Stress-audit finding 2026-07-15: entry paths defaulted is_etf=False, taxing
         # ETF sells at the 現股 0.3% rate instead of 0.1%.
         is_etf = instrument.is_etf if instrument is not None else inp.is_etf
+        rules = get_fee_rule_set(acc["fee_rule_set"])
+        # FE-D2: the Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure,
+        # so the seam resolves it here, like is_etf). No rate -> stamp 0 + a soft issue.
+        stamp_fx: Decimal | None = None
+        if rules.has_us_stamp:
+            stamp_fx = resolve_stamp_fx(conn, inp.trade_date)
+            if stamp_fx is None:
+                issues.append(Issue(
+                    kind="stamp_fx_missing", needs_confirm=True,
+                    message="無 USD/MYR 匯率,印花稅未計"))
         try:
             fr = compute_fees(
-                get_fee_rule_set(acc["fee_rule_set"]),
+                rules,
                 inp.side,
                 inp.quantity,
                 inp.price,
                 is_etf=is_etf,
                 daytrade=inp.daytrade,
+                stamp_fx=stamp_fx,
             )
         except FeeComputationError as exc:
             # Overflow-sized input (M4): surface as a HARD issue, never a 500. The

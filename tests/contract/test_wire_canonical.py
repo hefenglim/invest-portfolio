@@ -69,7 +69,7 @@ def test_input_manual_preview_preserves_full_precision_total(api_client: TestCli
         "date": "2026-06-11", "shares": "1000", "price": "612.5"})
     b = r.json()
     assert b["gross"] == "612500.0"
-    assert b["total"] == "-613373.0"
+    assert b["total"] == "-613372.0"  # fee-engine v2 floor: fee 872 (was 873)
     assert _no_sci(b["gross"]) and _no_sci(b["total"])
 
 

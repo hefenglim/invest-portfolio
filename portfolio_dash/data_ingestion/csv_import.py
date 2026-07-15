@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
+from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import insert_transaction
@@ -77,14 +78,24 @@ def txn_preview_row(
         # finding 2026-07-15): a registered instrument's is_etf wins; the input
         # flag only covers unregistered symbols (e.g. an AI draft pre-registration).
         is_etf = res.instrument.is_etf if res.instrument is not None else inp.is_etf
+        rules = get_fee_rule_set(acc["fee_rule_set"])
+        # FE-D2: Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure).
+        stamp_fx: Decimal | None = None
+        if rules.has_us_stamp:
+            stamp_fx = resolve_stamp_fx(conn, inp.trade_date)
+            if stamp_fx is None:
+                issues.append(Issue(
+                    kind="stamp_fx_missing", needs_confirm=True,
+                    message="無 USD/MYR 匯率,印花稅未計"))
         try:
             fr = compute_fees(
-                get_fee_rule_set(acc["fee_rule_set"]),
+                rules,
                 inp.side,
                 inp.quantity,
                 inp.price,
                 is_etf=is_etf,
                 daytrade=inp.daytrade,
+                stamp_fx=stamp_fx,
             )
         except FeeComputationError as exc:
             # Overflow-sized input (M4): a hard row issue, never a 500.

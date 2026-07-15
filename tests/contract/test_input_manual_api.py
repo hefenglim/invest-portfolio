@@ -17,11 +17,12 @@ def test_manual_preview_buy_computes_fee_and_total(api_client: TestClient) -> No
         "date": "2026-06-11", "shares": "1000", "price": "612.5"})
     assert r.status_code == 200
     b = r.json()
-    assert b["fee"] == "873" and b["tax"] == "0"
+    # fee-engine v2 (FE-D3): 612,500 × 0.1425% = 872.8125 -> floor 872 (was 873 under HALF_UP).
+    assert b["fee"] == "872" and b["tax"] == "0"
     # Full source precision stays on the wire (canonical decimal_str, #2c/M1): 1000 * 612.5
     # is Decimal("612500.0") -- the trailing zero is preserved (the old _money_str
     # normalize() dropped it). The frontend quantizes for display.
-    assert b["gross"] == "612500.0" and b["total"] == "-613373.0"
+    assert b["gross"] == "612500.0" and b["total"] == "-613372.0"
     assert b["fee_overridden"] is False and b["issues"] == []
 
 

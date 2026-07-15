@@ -1,7 +1,15 @@
-"""Account + fee-rule + LLM-model config seed (config-as-code defaults)."""
+"""Account + fee-rule + LLM-model config seed (config-as-code defaults).
+
+Fee-engine **v2** (2026-07-15): the FeeRuleSet carries the full per-broker schedule
+from ``docs/reference/broker-fee-schedules-2026-07.md`` (owner-provided). Rates that
+adjust over time (SEC / TAF / commission / stamp) live here as ``Decimal`` config, never
+hard-coded in ``fees.py`` (developer note §1 of the reference doc). The TW rebate
+(``rebate_rate``) is FORECAST-ONLY and is NEVER read by ``compute_fees`` (FE-D1).
+"""
 
 import sqlite3
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -9,23 +17,60 @@ from portfolio_dash.shared.enums import Currency, Market
 
 
 class FeeRuleSet(BaseModel):
-    """Fee and tax parameters for a single account rule set."""
+    """Fee and tax parameters for a single account rule set (fee-engine v2).
+
+    All monetary parameters are ``Decimal``. A field left at its default is simply not
+    charged, so each rule set enables only the components its broker levies (config over
+    hard-coding). ``rounding`` picks the quantization mode: ``"floor"`` (TW, ROUND_DOWN to
+    integer NT$ per 財政部 FE-D3) or ``"half_up"`` (US/MY, ROUND_HALF_UP to the 2-dp minor
+    unit, applied per component).
+    """
 
     market: Market
-    brokerage: Decimal = Decimal("0")  # rate of notional
-    discount: Decimal = Decimal("1")
-    min_fee: Decimal = Decimal("0")
-    tax_normal: Decimal = Decimal("0")  # sell-side
-    tax_etf: Decimal = Decimal("0")
-    tax_daytrade: Decimal = Decimal("0")
-    sec_fee: Decimal = Decimal("0")  # US sell-side regulatory fee rate
-    flat_fee: Decimal = Decimal("0")  # per-trade fixed fee (e.g. Moomoo US platform fee)
-    clearing: Decimal = Decimal("0")  # MY
-    clearing_cap: Decimal | None = None
-    stamp_duty_rate: Decimal = Decimal("0")  # MY: rate of notional (was a flat constant)
-    stamp_duty_cap: Decimal | None = None
-    sst: Decimal = Decimal("0")
-    round_integer: bool = False  # TW rounds fee/tax to integer NT$
+    rounding: Literal["floor", "half_up"] = "half_up"
+
+    # --- TW commission + securities-transaction-tax ---
+    brokerage: Decimal = Decimal("0")  # commission rate of notional (TW)
+    discount: Decimal = Decimal("1")  # charge-first: 1 = full price; rebate applied off-ledger
+    min_fee: Decimal = Decimal("0")  # TW min NT$20 (floor applies before this compare)
+    tax_normal: Decimal = Decimal("0")  # sell-side 現股
+    tax_etf: Decimal = Decimal("0")  # sell-side ETF
+    tax_daytrade: Decimal = Decimal("0")  # sell-side 當沖
+    rebate_rate: Decimal = Decimal("0")  # TW monthly 折讓款 (FORECAST-ONLY; never in compute_fees)
+
+    # --- US regulatory components (Schwab + Moomoo US share these formulas) ---
+    commission_rate: Decimal = Decimal("0")  # US commission rate of notional
+    commission_min: Decimal = Decimal("0")  # US commission floor (e.g. $0.01)
+    platform_fee: Decimal = Decimal("0")  # per-order fixed platform fee (Moomoo US $0.99)
+    settlement_per_share: Decimal = Decimal("0")  # $0.003 / share
+    settlement_cap_rate: Decimal = Decimal("0")  # cap = rate × notional (1% => 0.01)
+    cat_per_share: Decimal = Decimal("0")  # Consolidated Audit Trail, both sides
+    sec_rate: Decimal = Decimal("0")  # SEC reg fee rate, SELL-only
+    sec_min: Decimal = Decimal("0")  # SEC min ($0.01)
+    taf_per_share: Decimal = Decimal("0")  # FINRA TAF per share, SELL-only
+    taf_min: Decimal = Decimal("0")  # TAF min ($0.01)
+    taf_cap: Decimal | None = None  # TAF cap ($9.79)
+    broker_assisted_surcharge: Decimal = Decimal("0")  # Schwab $25 (config; not applied)
+
+    # --- MY commission / clearing / SST (Moomoo MY market) ---
+    clearing_rate: Decimal = Decimal("0")  # MY clearing fee rate of notional
+    clearing_cap: Decimal | None = None  # MY clearing cap (RM1,000)
+    sst_rate: Decimal = Decimal("0")  # SST on (commission + platform + clearing)
+
+    # --- Stamp duty: MY market native (MYR); US->MY cross-currency per FE-D2 ---
+    stamp_unit: Decimal = Decimal("0")  # RM step granularity (per this notional); 0 => no stamp
+    stamp_per_unit: Decimal = Decimal("0")  # RM charged per (ceil) unit (RM1)
+    stamp_cap_stock: Decimal | None = None  # stamp cap for ordinary stock
+    stamp_cap_etf: Decimal | None = None  # ETF cap: MY = 0 (exempt); US = RM200
+
+    @property
+    def has_us_stamp(self) -> bool:
+        """True when this US rule levies the MY cross-currency stamp (Moomoo US, FE-D2).
+
+        The caller seam resolves the trade-date USD/MYR rate only when this is True, so
+        Schwab (no stamp configured) never triggers an FX lookup.
+        """
+        return self.market is Market.US and self.stamp_unit > 0
 
 
 class AccountConfig(BaseModel):
@@ -40,30 +85,75 @@ class AccountConfig(BaseModel):
     dividend_model: str
 
 
+# Annually-adjusted US regulatory rates (reference doc §肆.1 — configurable, not hard-coded).
+_US_SEC_RATE = Decimal("0.0000206")
+_US_TAF_PER_SHARE = Decimal("0.000195")
+_US_TAF_MIN = Decimal("0.01")
+_US_TAF_CAP = Decimal("9.79")
+_US_REG_MIN = Decimal("0.01")
+
 FEE_RULES: dict[str, FeeRuleSet] = {
+    # TW — 群益 charge-first (先收後退) 2.3折: full 0.1425% at settlement, 77% rebate next
+    # month (rebate_rate is FORECAST-ONLY, never charged here). Floor to integer NT$ (FE-D3).
     "tw": FeeRuleSet(
         market=Market.TW,
+        rounding="floor",
         brokerage=Decimal("0.001425"),
         discount=Decimal("1"),
         min_fee=Decimal("20"),
         tax_normal=Decimal("0.003"),
         tax_etf=Decimal("0.001"),
         tax_daytrade=Decimal("0.0015"),
-        round_integer=True,
+        rebate_rate=Decimal("0.77"),
     ),
-    # Rates per spec 18.0 truth table; pending real-statement confirmation
-    # (SEC fee, MY stamp-duty cap, Moomoo platform fee buy/sell).
-    "schwab": FeeRuleSet(market=Market.US, sec_fee=Decimal("0.0000278")),
+    # Schwab US — $0 online commission; SELL-only SEC + TAF. Broker-assisted $25 is config
+    # only (default off — the app has no channel flag, so it is never applied).
+    "schwab": FeeRuleSet(
+        market=Market.US,
+        rounding="half_up",
+        sec_rate=_US_SEC_RATE,
+        sec_min=_US_REG_MIN,
+        taf_per_share=_US_TAF_PER_SHARE,
+        taf_min=_US_TAF_MIN,
+        taf_cap=_US_TAF_CAP,
+        broker_assisted_surcharge=Decimal("25.00"),
+    ),
+    # Moomoo MY (US) — commission + platform + settlement + CAT (+ SELL: SEC + TAF), plus
+    # the MY stamp on US trades (FE-D2): computed in MYR, booked in USD.
     "moomoo_us": FeeRuleSet(
-        market=Market.US, flat_fee=Decimal("0.99"), sec_fee=Decimal("0.0000278")
+        market=Market.US,
+        rounding="half_up",
+        commission_rate=Decimal("0.0003"),
+        commission_min=Decimal("0.01"),
+        platform_fee=Decimal("0.99"),
+        settlement_per_share=Decimal("0.003"),
+        settlement_cap_rate=Decimal("0.01"),
+        cat_per_share=Decimal("0.000003"),
+        sec_rate=_US_SEC_RATE,
+        sec_min=_US_REG_MIN,
+        taf_per_share=_US_TAF_PER_SHARE,
+        taf_min=_US_TAF_MIN,
+        taf_cap=_US_TAF_CAP,
+        stamp_unit=Decimal("1000"),
+        stamp_per_unit=Decimal("1"),
+        stamp_cap_stock=Decimal("1000"),
+        stamp_cap_etf=Decimal("200"),
     ),
+    # Moomoo MY (MY) — commission + platform + clearing + SST (both sides); stamp step
+    # function ceil(amount/1000)×RM1 capped RM1,000, ETF exempt (cap 0).
     "moomoo_my": FeeRuleSet(
         market=Market.MY,
-        brokerage=Decimal("0.0008"),
-        min_fee=Decimal("3"),
-        clearing=Decimal("0.0003"),
+        rounding="half_up",
+        commission_rate=Decimal("0.0003"),
+        commission_min=Decimal("0.01"),
+        platform_fee=Decimal("3.00"),
+        clearing_rate=Decimal("0.0003"),
         clearing_cap=Decimal("1000"),
-        stamp_duty_rate=Decimal("0.001"),
+        sst_rate=Decimal("0.08"),
+        stamp_unit=Decimal("1000"),
+        stamp_per_unit=Decimal("1"),
+        stamp_cap_stock=Decimal("1000"),
+        stamp_cap_etf=Decimal("0"),
     ),
 }
 

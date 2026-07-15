@@ -168,8 +168,12 @@ def compute_rebalance(
     ``Decimal`` (the router converts to wire strings). Compute-only — no writes.
     """
     from portfolio_dash.data_ingestion.fees import compute_fees  # local: avoid cycle risk
+    from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 
     data = build_dashboard(conn, now=now, reporting=reporting)
+    # FE-D2 estimate path: resolve the current USD/MYR rate once for any Moomoo US leg's MY
+    # stamp (silent omit + snapshot note if unavailable). Ignored by non-US-stamp rules.
+    stamp_fx = resolve_stamp_fx(conn, now.date())
     resolver = RateResolver(conn, now=now)
     total = data.kpis.total_market_value
 
@@ -273,7 +277,7 @@ def compute_rebalance(
             leg_shares = _round_shares(raw_shares, target_h.market)
             if leg_shares > _ZERO:
                 fr = compute_fees(rules_by_acct[target_h.account_id], side, leg_shares,
-                                  price, is_etf=is_etf)
+                                  price, is_etf=is_etf, stamp_fx=stamp_fx)
                 legs.append(_Leg(account_id=target_h.account_id,
                                  account_name=target_h.account_name, side=side,
                                  shares=leg_shares, price=price, fee=fr.fee, tax=fr.tax,
@@ -296,7 +300,7 @@ def compute_rebalance(
                 if leg_shares <= _ZERO:
                     continue
                 fr = compute_fees(rules_by_acct[h.account_id], side, leg_shares, price,
-                                  is_etf=is_etf)
+                                  is_etf=is_etf, stamp_fx=stamp_fx)
                 legs.append(_Leg(account_id=h.account_id, account_name=h.account_name,
                                  side=side, shares=leg_shares, price=price, fee=fr.fee,
                                  tax=fr.tax, market=h.market))
