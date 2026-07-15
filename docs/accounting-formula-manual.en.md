@@ -11,8 +11,8 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.2` (2026-07-15)
-> **Code baseline**: `v0.1.18 + feat/p3-batch3`
+> **Version**: `v1.3` (2026-07-15)
+> **Code baseline**: `v0.1.18 + feat/fee-engine-v2`
 > **Arbitration status**: **Formally signed off by the owner (2026-07-15)**; effective
 > as the site's single **arbitration standard** for any money dispute **from version
 > v0.1.19 onward**.
@@ -158,154 +158,188 @@ Key points:
 
 ---
 
-## 3. Fee & Transaction-Tax Formulas
+## 3. Fee & Transaction-Tax Formulas (fee-engine **v2**, 2026-07-15)
 
-**Single implementation**: `data_ingestion/fees.py::compute_fees(rules, side, quantity, price, *, is_etf, daytrade)`.
+**Single implementation**: `data_ingestion/fees.py::compute_fees(rules, side, quantity, price, *, is_etf, daytrade, stamp_fx)`.
 `notional = quantity × price`. Returns `FeeResult{fee, tax, snapshot}`, where **`snapshot`
-is the rate snapshot used for that row**, persisted per row in
-`transactions.fee_rule_snapshot`, so a later rule change can still reproduce history (an
-extension of invariant I2).
+is the rate + per-component snapshot used for that row** (incl. `engine="v2"`), persisted per
+row in `transactions.fee_rule_snapshot`, so a later rule change can still reproduce history
+(an extension of invariant I2).
 
-Seed rates are in `config_seed.py::FEE_RULES`; the owner's complete schedules are now on
-file (→ §3.5, `docs/reference/broker-fee-schedules-2026-07.md`); the fee-engine-v2 upgrade
-will supersede the seed rates, and **until then the current engine's computed numbers
-govern arbitration**.
+**Rate source**: the owner's complete schedules `docs/reference/broker-fee-schedules-2026-07.md`
+(authoritative), carried in `config_seed.py::FEE_RULES` as **config**; **rates that adjust over
+time (US SEC/TAF, commission, stamp) live in config, never hard-coded** (reference §肆.1).
 
-### 3.1 TW (`tw_broker` → rule set `tw`, `market = TW`, `round_integer = True`)
+**Rounding (per rule set)**:
+- **TW (`rounding="floor"`)**: both fee and tax are **floored (ROUND_DOWN) to integer NT$**
+  (財政部 FE-D3); the min-NT$20 floor is compared **after** the floor.
+- **US / MY (`rounding="half_up"`)**: **each fee component** is quantized to 2 dp
+  (ROUND_HALF_UP) then summed (per-component rounding is a documented assumption, pending
+  statement verification).
 
-$$\text{fee} = \operatorname{round}_{\mathbb{Z}}\Big(\max\big(\text{brokerage}\times\text{discount}\times\text{notional},\ \text{min\_fee}\big)\Big),\quad \text{買賣皆有}$$
+**Per-row regime clause**: fee-engine-v2 is a **per-row regime** — old rows keep their v1
+snapshot and are arbitrated under the old regime; new rows carry the v2 snapshot and are
+arbitrated under v2. Historical rows are **never recomputed** (see the fee-dispute note in
+§12.4). `stamp_fx` (FE-D2) is resolved by the caller and passed into the pure `compute_fees`
+(`fees.py` stays pure and never touches `conn`).
 
-$$\text{tax} = \operatorname{round}_{\mathbb{Z}}\big(\text{rate}\times\text{notional}\big),\quad \text{僅賣方}$$
+### 3.1 TW (`tw_broker` → rule set `tw`, `market = TW`, `rounding = "floor"`)
+
+$$\text{fee} = \max\Big(\big\lfloor\text{brokerage}\times\text{discount}\times\text{notional}\big\rfloor,\ \text{min\_fee}\Big),\quad \text{買賣皆有}$$
+
+$$\text{tax} = \big\lfloor\text{rate}\times\text{notional}\big\rfloor,\quad \text{僅賣方}$$
 
 The sell-side tax rate is determined in order:
 
 $$\text{rate} = \begin{cases} \text{tax\_daytrade} = 0.0015 & \text{當沖 } daytrade=\text{True}\\ \text{tax\_etf} = 0.001 & is\_etf=\text{True}\\ \text{tax\_normal} = 0.003 & \text{現股（預設）}\end{cases}$$
 
-Seed values: `brokerage = 0.001425`, `discount = 1`, `min_fee = 20` (NT$).
-`round_integer=True` → both fee and tax are `ROUND_HALF_UP` to **integer NT$**. Buy-side
-`tax = 0`.
+Seed values: `brokerage = 0.001425`, `discount = 1` (charge-first: full price at settlement,
+77% refunded next month, see §3.6), `min_fee = 20` (NT$), `rebate_rate = 0.77` (FORECAST-ONLY,
+never used by `compute_fees`). `rounding="floor"` → both fee and tax are **floored (ROUND_DOWN)
+to integer NT$** (FE-D3); the **min NT$20 is compared after the floor** (群益 142.5→floor 142;
+5.5→floor 5→min 20). Buy-side `tax = 0`.
 
 - **`is_etf` source**: the instrument **registry** (`instruments.is_etf`, the sole source
   of truth, **never derived from sector**).
 - **`daytrade`**: a **per-row flag**, written and **persisted in `transactions.daytrade`**,
   so a rebuild reproduces the day-trade tax rate (see §10).
 
-**Verified examples**
+**Verified examples** (anchor: fee-engine v2 stress phase1, 2026-07-15, `fee_engine.*` 80/80 pass)
 
 | Scenario | notional | fee | tax | Verification anchor (`scope`) |
 | --- | ---: | ---: | ---: | --- |
-| 2330 buy 1,000@600 | 600,000 | `max(855, 20)=` **855** | 0 | `fee_engine.fee/tax tw_broker/2330 buy 1000@600 id=1` |
-| 2330 sell 300@700 (cash equity) | 210,000 | round(299.25)=**299** | round(0.003×210,000)=**630** | `fee_engine.fee/tax tw_broker/2330 sell 300@700 id=18` |
-| 0050 sell 50@140 (**ETF**) | 7,000 | max(9.975,20)=**20** | round(0.001×7,000)=**7** | `fee_engine.fee/tax tw_broker/0050 sell 50@140 id=21` |
-| 0050 buy 10@130 (**min applies**) | 1,300 | max(1.8525,20)=**20** | 0 | — |
+| 2330 buy 1,000@600 | 600,000 | `max(⌊855.0⌋, 20)=` **855** | 0 | `fee_engine.fee/tax tw_broker/2330 buy 1000@600` |
+| 2330 sell 300@700 (cash equity) | 210,000 | ⌊299.25⌋=**299** | ⌊0.003×210,000⌋=**630** | `fee_engine.fee/tax tw_broker/2330 sell 300@700` |
+| 0050 buy 1,000@1.15 (**min applies**) | 1,150 | ⌊1.6…⌋=1→**20** | 0 | cf. 群益 min case |
+| 2330 sell 100@725 (**day-trade**) | 72,500 | ⌊103.3…⌋=**103** | ⌊0.0015×72,500⌋=**108** | `fee_engine.fee/tax tw_broker/2330 sell 100@725 [daytrade]` |
 
-> Day-trade comparison: the same 0050 sell 50@140 with `daytrade=True` gives
-> tax = round(0.0015×7,000) = **11** (reproduced here via the `compute_fees` pure
-> function; the stress suite did not exercise day-trade).
+> Rounding-direction comparison (**v2 vs v1**): 0050 sell 50@140 with `daytrade=True` gives
+> tax = ⌊0.0015×7,000⌋ = ⌊10.5⌋ = **10** (v1's ROUND_HALF_UP gave 11) — this is the effect of
+> FE-D3 switching from round-half-up to unconditional floor.
 
 ### 3.2 US — Schwab (rule set `schwab`, `market = US`)
 
-$$\text{fee} = \underbrace{\text{flat\_fee}}_{=0} + \underbrace{\text{brokerage}}_{=0}\times\text{notional} + \big[\,\text{side}=\text{SELL}\,\big]\cdot \text{sec\_fee}\times\text{notional}$$
+Listed-stock online orders are **$0 commission**; **sell-only** adds SEC + TAF regulatory
+fees (adjusted annually, kept in config):
+
+$$\text{fee} = \big[\,\text{SELL}\,\big]\cdot\Big(\underbrace{\max(\text{sec\_rate}\times\text{notional},\ 0.01)}_{\text{SEC}} + \underbrace{\min\big(\max(\text{taf\_per\_share}\times\text{shares},\ 0.01),\ 9.79\big)}_{\text{TAF}}\Big)$$
 
 $$\text{tax} = 0.00 \quad(\text{美股無交易稅})$$
 
-Seed value: `sec_fee = 0.0000278` (sell-side SEC/TAF regulatory rate). `fee` is quantized
-to **2 dp** (`ROUND_HALF_UP`).
+Seed values: `sec_rate = 0.0000206` (min $0.01), `taf_per_share = 0.000195` (min $0.01, cap
+**$9.79**). `broker_assisted_surcharge = 25.00` is config (**default off**, no channel flag, so
+never applied). Each component is quantized to the **cent (2 dp, ROUND_HALF_UP)** then summed.
 
 **Verified examples**
 
 | Scenario | fee | tax | Verification anchor |
 | --- | ---: | ---: | --- |
-| AAPL buy 100@180 | **0.00** | 0.00 | `fee_engine.fee/tax schwab/AAPL buy 100@180 id=7` |
-| TSLA sell 20@260 (sec fee) | 0.0000278×5,200 = 0.14456 → **0.14** | 0.00 | `fee_engine.fee/tax schwab/TSLA sell 20@260 id=23` |
+| AAPL buy 100@180 | **0.00** (no buy-side fee) | 0.00 | unit `test_schwab_buy_zero` |
+| sell 100@300 (notional 30,000) | SEC ⌈0.618⌉→0.62 + TAF 0.02 = **0.64** | 0.00 | unit `test_schwab_sell_sec_taf` |
+| sell 100,000@10 (**TAF cap**) | SEC 20.60 + TAF **9.79** = **30.39** | 0.00 | unit `test_schwab_sell_taf_cap` |
 
 ### 3.3 US — Moomoo (rule set `moomoo_us`, `market = US`)
 
-Same as §3.2, plus a **per-order fixed platform fee** `flat_fee = 0.99` (USD):
+$$\text{fee} = \underbrace{\max(\text{comm\_rate}\times n,\ 0.01)}_{\text{commission}} + \underbrace{0.99}_{\text{platform}} + \underbrace{\min(0.003\times\text{shares},\ 0.01\times n)}_{\text{settlement}} + \underbrace{0.000003\times\text{shares}}_{\text{CAT}} + \big[\text{SELL}\big]\cdot(\text{SEC}+\text{TAF})$$
 
-$$\text{fee} = 0.99 + \big[\,\text{SELL}\,\big]\cdot 0.0000278\times\text{notional}$$
+where SEC / TAF are as in §3.2; $n=\text{notional}$ (USD). Each component is cent-quantized
+then summed.
 
-**Verified examples**
+**MY stamp duty (tax, FE-D2)**: the stamp on a US trade is computed in MYR and booked in USD:
 
-| Scenario | fee | Verification anchor |
-| --- | ---: | --- |
-| NVDA buy 30@500 | 0.99 → **0.99** | (oplog `op20` total = −15,000.99) |
-| NVDA sell 25@600 | 0.99 + 0.0000278×15,000 = 0.99+0.417 → **1.41** | `fee_engine.fee moomoo_my_us/NVDA sell 25@600 id=27` |
+$$\text{stamp\_myr} = \min\!\Big(\big\lceil (n\times\text{fx}) / 1000\big\rceil\times 1,\ \text{cap}\Big),\quad \text{cap}=\begin{cases}200 & \text{ETF}\\ 1000 & \text{stock}\end{cases}$$
 
-### 3.4 MY (`moomoo_my_my` → rule set `moomoo_my`, `market = MY`)
+$$\text{tax} = \text{round}_{2}\big(\text{stamp\_myr} / \text{fx}\big),\quad \text{fx}=\text{trade-date USD/MYR (on-or-before)}$$
 
-$$\text{brokerage} = \max\big(\text{brokerage\_rate}\times\text{notional},\ \text{min\_fee}\big)$$
+`fx` is resolved by the caller (manual/CSV/edit/rebalance/whatif) and passed in; **no rate →
+stamp 0** + a soft issue 「無 USD/MYR 匯率,印花稅未計」. The snapshot records `stamp_fx_rate`
+and `stamp_myr`. Seed values: `commission_rate = 0.0003` (min 0.01), `platform_fee = 0.99`,
+`settlement_per_share = 0.003` (cap 1%×n), `cat_per_share = 0.000003`.
 
-$$\text{clearing} = \min\big(\text{clearing\_rate}\times\text{notional},\ \text{clearing\_cap}\big)$$
+**Verified examples (fx = 4.3; the stress phase1 on-or-before USD/MYR)**
 
-$$\boxed{\text{fee} = \text{brokerage} + \text{clearing} + \text{sst}}\qquad \boxed{\text{tax} = \text{stamp\_duty\_rate}\times\text{notional}\ (\le \text{stamp\_duty\_cap})}$$
+| Scenario | fee breakdown | fee | tax (stamp, in USD) | Verification anchor |
+| --- | --- | ---: | ---: | --- |
+| NVDA buy 30@500 | 4.50+0.99+0.09+0.00 | **5.58** | ⌈64,500/1000⌉=65 → 65/4.3=**15.12** | `fee_engine.fee/tax moomoo_my_us/NVDA buy 30@500` |
+| NVDA sell 25@600 | 4.50+0.99+0.08+0.00+SEC0.31+TAF0.01 | **5.89** | 65/4.3=**15.12** | `fee_engine.fee/tax moomoo_my_us/NVDA sell 25@600` |
+| buy 1,000@0.10 (**settlement cap**) | 0.03+0.99+min(3.00,1.00)+0.00 | **2.02** | — | unit `test_moomoo_us_settlement_cap` |
 
-Seed values: `brokerage_rate = 0.0008`, `min_fee = 3`, `clearing_rate = 0.0003`,
-`clearing_cap = 1,000` (RM), `stamp_duty_rate = 0.001`, `stamp_duty_cap = None`
-(**currently no cap**, see §3.5), `sst = 0`. Both `fee` and `tax` are quantized to
-**2 dp**.
+### 3.4 MY (`moomoo_my_my` → rule set `moomoo_my`, `market = MY`, native MYR)
+
+$$\text{comm} = \max(0.0003\times n,\ 0.01),\quad \text{clearing} = \min(0.0003\times n,\ 1000)$$
+
+$$\text{sst} = 0.08\times(\text{comm}+\text{platform}+\text{clearing}),\quad \text{platform}=3.00$$
+
+$$\boxed{\text{fee} = \text{comm} + \text{platform} + \text{clearing} + \text{sst}}\qquad \boxed{\text{tax} = \min\!\big(\lceil n/1000\rceil\times 1,\ \text{cap}\big)}$$
+
+Stamp cap: **ordinary stock RM1,000**; **ETF exempt (cap = 0 → tax 0)**; REITs/warrants RM200
+(**no REIT flag modeled** — the ETF flag governs; limitation noted). Each component is quantized
+to the **cent (2 dp)**; SST is computed on the quantized comm/platform/clearing (a documented
+assumption).
 
 > **Important booking convention**: this app records **stamp duty in the `tax` column**
-> and **brokerage + clearing + SST in the `fee` column**. This is an MY-specific column
+> and **comm + platform + clearing + SST in the `fee` column**. This is an MY-specific column
 > mapping; be sure to distinguish it when arbitrating MY trade costs.
 
 **Verified examples**
 
-| Scenario | brokerage | clearing | fee | tax (stamp) | Verification anchor |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 1155 buy 1,000@9.50 | max(7.60,3)=7.60 | 0.0003×9,500=2.85 | **10.45** | 0.001×9,500=**9.50** | `fee_engine.fee/tax moomoo_my_my/1155 buy 1000@9.50 id=15` |
-| 1155 sell 400@11.00 | max(3.52,3)=3.52 | 0.0003×4,400=1.32 | **4.84** | 0.001×4,400=**4.40** | `fee_engine.fee/tax moomoo_my_my/1155 sell 400@11.00 id=26` |
+| Scenario | fee breakdown | fee | tax (stamp) | Verification anchor |
+| --- | --- | ---: | ---: | --- |
+| 1155 buy 1,000@9.50 | 2.85+3.00+2.85+0.70 | **9.40** | ⌈9,500/1000⌉=10 → **10.00** | `fee_engine.fee/tax moomoo_my_my/1155 buy 1000@9.50` |
+| 1155 sell 400@11.00 | 1.32+3.00+1.32+0.45 | **6.09** | ⌈4,400/1000⌉=5 → **5.00** | `fee_engine.fee/tax moomoo_my_my/1155 sell 400@11.00` |
+| **0800EA buy 1,000@1.15 (ETF)** | 0.35+3.00+0.35+0.30 | **4.00** | **0.00 (ETF exempt)** | `fee_engine.fee/tax moomoo_my_my/0800EA buy 1000@1.15 [etf]` |
 
-### 3.5 Overrides & Rate Governance (owner's complete schedules are on file)
+### 3.5 Overrides, Coexisting Regimes & Rate Governance (fee-engine v2 is live)
 
 - **Manual override**: on input / edit the user may explicitly overwrite `fee` / `tax`;
   the system then uses the override value and marks `override: true` in `snapshot`
   (see §10's `_recompute_edit_fees`).
-- **The owner's complete schedules are on file and supersede the current seed rates at
-  the fee-engine-v2 upgrade (honest statement)**: on 2026-07-15 the owner supplied the
-  **complete real fee schedules** for the three brokerages
-  (→ `docs/reference/broker-fee-schedules-2026-07.md`). That document is the source spec
-  for the separate "fee engine v2" work package and, **once shipped, will supersede** the
-  current seed rates in `config_seed.py::FEE_RULES`. Until fee-engine-v2 ships, **this §3
-  documents what the *current engine actually computes*** — which is exactly what
-  arbitration of "the site's current amounts" requires (the object of arbitration is
-  always the number the app produces now, not a future schedule not yet implemented).
-- **Known divergences (current engine vs the owner's complete schedules; until the
-  upgrade, the current engine always governs arbitration)**:
-  - **US `sec_fee`**: current `0.0000278` (applied the same way on buy and sell); the
-    schedule is **`0.0000206`, sell-only, minimum `$0.01`**.
-  - **Other US regulatory fees not yet modeled**: **TAF** (`$0.000195/share`, sell-side,
-    min $0.01, max $9.79), **CAT**, **platform fee** (Moomoo whole-share `$0.99` / Schwab
-    `$0`), and **settlement fee** (`$0.003/share`, capped at notional×1%) are not yet in
-    the current engine.
-  - **MY schedule shape differs**: the schedule is **commission `0.03%` (min RM0.01) +
-    platform fee RM3 + SST (= 8% of commission + platform + clearing) + stamp
-    `ceil(amount/1000)×RM1` (per-security-type caps, ETF exempt)**; the current engine is
-    commission `0.08%` (min RM3) + clearing `0.03%` (cap RM1,000) + SST 0, stamp `0.1%`
-    with no cap (see §3.4) — **rates, minimums, cap structure, and presence of SST all
-    differ**.
-  - **TW Capital Securities (群益) "23% of list, charge-first-refund-later" model**: at
-    settlement (T+2) the full `0.1425%` list fee is charged, then 77% is refunded the
-    next month (net = 23% of list). The current engine charges `0.1425%×discount` once
-    only and **does not model the charge-first-refund-later rebate entries** — the rebate
-    ledger treatment is **pending an owner design ruling**.
-  - **TW fee-rounding divergence**: the Capital Securities (群益) examples **floor**
-    (round down, 無條件捨去) the fee (`142.5→142`); the current engine uses
-    `ROUND_HALF_UP` (`round_integer=True`, see §3.1, `142.5→143`) — the **rounding
-    direction is pending an owner ruling**.
-- **Rate-change process**: after the upgrade, rate changes are config changes and must be
-  recorded in `CHANGELOG.md`; each transaction's `fee_rule_snapshot` preserves the rates
-  used per row, so during any period where the old and new regimes coexist, **each row is
-  arbitrated under the regime recorded in its snapshot** (see the fee-dispute note in
-  §12.4).
+- **fee-engine v2 is implemented from the owner's complete schedules (2026-07-15)**:
+  `config_seed.py::FEE_RULES` now carries the complete schedules from
+  `docs/reference/broker-fee-schedules-2026-07.md`; §3.1–§3.4 document what the v2 engine
+  actually computes. The earlier v1-vs-schedule "known divergences" (US `sec_fee`
+  0.0000278→0.0000206, TAF/CAT/platform/settlement, MY shape, TW rounding) have **all been
+  reconciled in v2**.
+- **Per-row regime**: v2 is a **per-row regime**. Old rows are arbitrated under the v1 rates
+  and rounding in their `fee_rule_snapshot`; new rows carry an `engine="v2"` snapshot and are
+  arbitrated under v2. Historical rows are **never recomputed** — the `fee_rule_snapshot`
+  (§3, §10.2) is the final arbiter.
+- **Config over hard-coding**: rates that change over time (SEC/TAF, commission, stamp) live
+  in `FEE_RULES` (config); a rate change is a config change and must be recorded in
+  `CHANGELOG.md`.
+- **Limitations (documented)**: REIT-specific stamp caps are not modeled (no REIT flag; the
+  ETF flag governs); the per-component rounding of MY/US fees is an assumption pending real
+  statement verification; options/bonds/futures/fractional shares are out of scope (the app
+  trades whole-share stocks/ETF only).
 
-> **Implementation**: `data_ingestion/fees.py`, `data_ingestion/config_seed.py::FEE_RULES`;
-> complete schedules `docs/reference/broker-fee-schedules-2026-07.md` (fee-engine-v2 source
-> spec).
+> **Implementation**: `data_ingestion/fees.py`, `data_ingestion/config_seed.py::FEE_RULES`,
+> `data_ingestion/fx_lookup.py` (stamp FX resolution); complete schedules
+> `docs/reference/broker-fee-schedules-2026-07.md`.
 > **Basis**: `.claude/rules/markets-and-fees.md`.
-> **Verification anchor**: the `fee_engine.*` entries above (stress phase1,
-> `fee_engine.fee` / `fee_engine.tax` 36 each, all passing) — these anchor the **current
-> engine's** output (not the owner schedules above).
+> **Verification anchor**: the `fee_engine.*` entries in §3.1–§3.4 (stress phase1 2026-07-15,
+> `fee_engine.fee` / `fee_engine.tax` **80/80 passing**); edge cases (TAF/settlement caps,
+> missing-FX degrade) are guarded by unit tests.
+
+### 3.6 TW Rebate Forecast (群益 charge-first-refund-later; FORECAST-ONLY, not a number of record)
+
+The 群益 2.3折 (23%-of-list) model charges the full `0.1425%` list fee at settlement and
+refunds 77% of it next month. The refund **never enters cost basis, P&L, or `compute_fees`**
+(FE-D1): `compute_fees` always books the full list price (§3.1, `discount=1`). The system only
+**forecasts** the refund for information:
+
+$$\text{expected\_rebate}_{\text{per trade}} = \big\lfloor \text{fee} \times \text{rebate\_rate} \big\rfloor,\quad \text{rebate\_rate}=0.77\ (\text{floor on any fraction})$$
+
+Implementation: `fees.py::forecast_tw_rebate(fee, rebate_rate)` (pure). **Full 群益 walk**: buy
+142 → ⌊142×0.77⌋=**109**; sell 156 → ⌊156×0.77⌋=**120**; monthly total 229. When the actual
+refund arrives (next month) the owner **confirms** it in the inbox, booking a cash movement
+`kind='rebate'` (折讓款) with an editable amount (prefilled with the estimate; **the actual
+wins — the estimate is never a number of record**). This forecast / confirmation flow (inbox,
+hint, cash movement) is **Wave B**; this §3.6 defines only the pure formula. Classified in
+§12.5 (class B).
+
+> **Verification anchor**: the 109/120 of `forecast_tw_rebate` are guarded by unit
+> `test_gunyi_rebate_forecast_floor` (and `test_fees`); being a FORECAST value, **not a number
+> of record**, it is not part of the stress scalar reconciliation.
 
 ---
 
@@ -1192,6 +1226,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.0-draft` | 2026-07-15 | First draft. Baseline `v0.1.18 + feat/p3-batch3`. Reconciled against 966 adversarial assertions (966/966 passing). **Pending owner confirmation as the arbitration standard.** |
 | `v1.1-draft` | 2026-07-15 | **Adversarial completeness audit**: after a repo-wide census of every amount / ratio / metric calculation, filled in the missing class-A formulas — added §6.5 (dividend-detection inbox estimation: pre-ex-date entitlement, DRIP reinvest-price estimate, TW stock-dividend par-value-10 conversion), §7.1 blended reporting-currency return rate + monthly snapshot, §7.3 (single-holding / sector / market allocation weight, currency view, reporting-currency valuation rule, export TOTAL rows, tax realized converted at sell-date FX), §7.4 (dividend-income summary + annual projection), §7.5 (net-value and cumulative-invested trend), §11.4 (rebalance turnover / fees / projected balance + leg amounts), §11.5 (What-if simulation). Added §12.5 "Inventory of numeric formulas outside arbitration scope", itemizing all class B (technical indicators / alert thresholds / export ratios) and class C (LLM budget / spend), achieving "complete enumeration". Baseline unchanged; **still pending owner confirmation.** |
 | `v1.2` | 2026-07-15 | **Formally signed off by the owner as the arbitration standard, effective from v0.1.19** (removed the "pending owner confirmation" draft status; version leaves -draft). Folds in the owner's four rulings: ① added the English mirror `docs/accounting-formula-manual.en.md` (a working copy for AI/agent reading; the zh manual is the arbitration authority, and each zh change must regenerate the mirror in the same change set); ② this activation (this row); ③ the §11.1 rebalance ruling's canonical date is set to **2026-07-13** (the ship record's 07-14 was only the ship date); ④ §3 rate honest statement: the owner's complete schedules are on file (→ `docs/reference/broker-fee-schedules-2026-07.md`), superseding the seed rates at the fee-engine-v2 upgrade; until then §3 documents what the current engine computes and lists the known divergences (sec_fee 0.0000278→0.0000206, TAF/CAT/platform/settlement not modeled, MY schedule shape differs, TW Capital Securities (群益) 23%-of-list charge-first-refund-later + rounding divergence), and a fee-dispute note was added to §12.4; ⑤ the §7.3 / §12.5 boundary ruling is settled (weights / return rates remain within arbitration scope). Baseline unchanged. |
+| `v1.3` | 2026-07-15 | **fee-engine v2 shipped** (owner sign-off; §3 fully rewritten). ① **TW rounding FE-D3**: fee/tax switch from round-half-up to **unconditional floor (ROUND_DOWN) to integer NT$**, with the min-NT$20 compared after the floor (群益 142.5→142; day-trade tax example 11→10); ② **US regulatory v2**: Schwab / Moomoo US commission $0 / platform $0.99, SELL adds SEC `0.0000206` + TAF `0.000195` (cap $9.79), settlement `0.003/share` (cap 1%), CAT `0.000003/share` — each component rounded then summed; ③ **MY v2**: commission `0.03%` (min RM0.01) + platform RM3 + clearing (cap RM1,000) + **SST 8%**; stamp becomes `ceil(amount/1000)×RM1` (stock cap RM1,000, **ETF exempt**); ④ **FE-D2 US stamp**: the MY stamp on US trades is computed in MYR, booked in USD (`stamp_fx` resolved by the caller; no rate → 0 + soft issue); ⑤ **FE-D1 rebate**: new §3.6 forecast `⌊fee×0.77⌋` (**not a number of record**, never in `compute_fees`; inbox/confirm is Wave B); ⑥ the snapshot carries `engine="v2"`, a **per-row regime** (old rows arbitrated under their old snapshot, never recomputed). All rates live in config. §3 example anchors updated to fee-engine v2 stress phase1 (`fee_engine.*` 80/80). Mirror regenerated in the same change set. Baseline unchanged. |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 
@@ -1223,14 +1258,15 @@ Given an amount "displayed as X on the site but believed to be Y":
 6. **FX-dispute-specific check**: confirm the disputer **did not add FX P&L on top of total
    return** (§8.4, invariant I5 — the most common source of double counting).
 
-> **Fee-dispute-specific note (current engine vs the owner's complete schedules)**: when
-> arbitrating any fee/tax amount, check **both** §3 (what the current engine computes) and
-> `docs/reference/broker-fee-schedules-2026-07.md` (the owner's complete schedules /
-> fee-engine-v2 source spec), and confirm **which regime the disputed row was booked
-> under** — the **per-row `fee_rule_snapshot` (§3, §10.2) is the final arbitration basis**:
-> the snapshot records the rates actually applied to that row, so after fee-engine-v2
-> ships, old rows are still arbitrated under their snapshot's old regime and new rows under
-> the new regime, the two coexisting without conflict.
+> **Fee-dispute-specific note (fee-engine v2 is live, per-row regime)**: when arbitrating any
+> fee/tax amount, first read the disputed row's **`fee_rule_snapshot` (§3, §10.2) — the final
+> arbitration basis**: rows carrying `engine="v2"` are arbitrated by the v2 formulas of
+> §3.1–§3.4; rows without an `engine` marker are arbitrated under the v1 rates / rounding
+> recorded in their snapshot (**never recomputed**). The authoritative schedules are
+> `docs/reference/broker-fee-schedules-2026-07.md`. For a US stamp dispute, also read the
+> snapshot's `stamp_fx_rate` / `stamp_myr` (the FE-D2 conversion trail). The TW rebate
+> (`⌊fee×0.77⌋`, §3.6) is a **forecast, not a number of record**, and is not an object of
+> fee/tax arbitration (classified in §12.5 class B).
 
 ### 12.5 Inventory of Numeric Formulas Outside Arbitration Scope (complete enumeration)
 
@@ -1279,6 +1315,7 @@ this point is closed.
 | alert threshold comparisons | `single_weight` / `sector_weight` / `fx_drift=\|spot/avg−1\|` / `drawdown=−pct_from_52w_high` (warn=0.5×risk) / `vol_spike=vol_30d/vol_90d` / `rebalance_drift band=min(abs, 0.25×target)` (Swedroe 5/25) / `calib_gap` (pp) | `strategy/alerts.py::compute_alerts_from` | trigger boolean (whether to alert, not an amount) |
 | export info columns | `_return_ratio=unrealized_pnl/adjusted_cost_total`; TOTAL weight `Σ weight`; `sum_target=Σ targets`; `cash_level=max(0, 1−Σtargets)`; tax `rate_used` | `export/holdings_report.py` / `export/rebalance_report.py` / `export/tax.py` | ratio / percentage |
 | read-window derivation | `required_sessions`; `required_calendar_days=ceil(sessions×1.4×1.6)` | `api/signals_service.py` | integer window |
+| TW rebate forecast (§3.6, FE-D1) | `⌊fee × rebate_rate⌋` (rebate_rate=0.77) | `data_ingestion/fees.py::forecast_tw_rebate` (inbox/confirm is Wave B) | **FORECAST**; the charge-first-refund-later estimate, not a number of record — booked to cash only after the actual refund is confirmed (`kind='rebate'`) |
 
 **Class C — Operational-Cost Accounting (operational cost; USD measurement, not a record of portfolio amounts)**
 

@@ -25,8 +25,12 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
   (see `domain-ledger.md`).
 
 **Amount precision (per-currency minor unit, applied at settlement):**
-- USD = 2 dp (cent) · TWD = 0 dp (whole NT$, fees/tax 四捨五入 to integer) ·
+- USD = 2 dp (cent) · TWD = 0 dp (whole NT$; **fee/tax 無條件捨去 — floor, ROUND_DOWN — to
+  integer** per 財政部 FE-D3, owner sign-off 2026-07-15; supersedes the earlier 四捨五入) ·
   MYR = 2 dp (sen).
+  - Note: `quantize_amount` (general amounts, e.g. proceeds) still uses ROUND_HALF_UP; the
+    floor is specific to the TW **fee/tax** engine (`fees.py`, `rounding="floor"`). US/MY fee
+    components quantize per-component ROUND_HALF_UP to the 2-dp minor unit.
 
 **Mechanics:**
 - Persist Decimals as **TEXT** (canonical string) or **scaled integers**; one
