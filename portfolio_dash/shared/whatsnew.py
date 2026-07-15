@@ -637,6 +637,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.19": "2026-07-15",
     "0.1.18": "2026-07-14",
     "0.1.17": "2026-07-13",
     "0.1.16": "2026-07-12",
