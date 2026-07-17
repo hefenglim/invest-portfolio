@@ -83,16 +83,18 @@ def upsert_instrument(conn: sqlite3.Connection, inst: Instrument) -> None:
     register_instrument and intentionally not written here (preserved on conflict)."""
     conn.execute(
         """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board,
-               target_low, is_etf)
-           VALUES (?,?,?,?,?,?,?,?)
+               target_low, target_high, is_etf)
+           VALUES (?,?,?,?,?,?,?,?,?)
            ON CONFLICT(symbol) DO UPDATE SET
                market=excluded.market, quote_ccy=excluded.quote_ccy,
                sector=excluded.sector, name=excluded.name, board=excluded.board,
-               target_low=excluded.target_low, is_etf=excluded.is_etf""",
+               target_low=excluded.target_low, target_high=excluded.target_high,
+               is_etf=excluded.is_etf""",
         (
             inst.symbol, inst.market.value, inst.quote_ccy.value,
             inst.sector, inst.name, inst.board,
             to_db(inst.target_low) if inst.target_low is not None else None,
+            to_db(inst.target_high) if inst.target_high is not None else None,
             1 if inst.is_etf else 0,
         ),
     )
@@ -105,6 +107,7 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         quote_ccy=Currency(row["quote_ccy"]), sector=row["sector"], name=row["name"],
         board=row["board"] or "",
         target_low=from_db(row["target_low"]) if row["target_low"] else None,
+        target_high=from_db(row["target_high"]) if row["target_high"] else None,
         is_etf=bool(row["is_etf"]),
         archived=bool(row["archived"]),
     )
@@ -113,8 +116,8 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
 def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
-        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf, archived "
-        "FROM instruments WHERE symbol=?",
+        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
+        "is_etf, archived FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
     return _row_to_instrument(row) if row is not None else None
@@ -126,22 +129,27 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
     never here: the dashboard / portfolio / exports keep seeing EVERY registered symbol
     so no money figure is affected by archiving)."""
     rows = conn.execute(
-        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf, archived "
-        "FROM instruments"
+        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
+        "is_etf, archived FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
-# Watchlist deletion / archive (FU-D13)
+# Watchlist deletion / archive (FU-D13; API path superseded by FU-D18)
 # ---------------------------------------------------------------------------
 # The instruments registry IS the watchlist. Ledger tables reference ``symbol`` with no
 # foreign keys, and the dashboard silently DROPS any ledger row whose symbol lacks an
 # instruments row from ALL computation — so a HARD delete of a symbol with history would
-# corrupt realized P&L / XIRR. Hence three tiers (enforced in the API router):
-#   * never-traded watch-only symbol -> true DELETE (+ clean its derived/cache rows),
-#   * currently held                 -> DELETE and archive both refused (422),
-#   * closed-with-history            -> DELETE refused; ARCHIVE (stop-tracking) instead.
+# corrupt realized P&L / XIRR.
+#
+# FU-D18 (2026-07-17) makes watchlist deletion ACCUMULATIVE: the API DELETE now SOFT-deletes
+# EVERY non-held symbol (never-traded included) by setting ``archived=1`` — no data is ever
+# removed, and re-adding a symbol restores it and gap-backfills the missing price window. The
+# hard-delete ``delete_instrument`` below is RETAINED for internal / test use but is NO LONGER
+# routed (see its docstring). Only two API tiers remain:
+#   * currently held -> DELETE refused (422 ``held``); a held symbol is never archived,
+#   * everything else -> SOFT delete (archived=1), fully reversible.
 # Invariant "held => not archived" is enforced at the single booking seam below
 # (``insert_transaction`` / ``upsert_opening`` un-archive on any new booking).
 
@@ -186,8 +194,12 @@ def _like_escape(value: str) -> str:
 
 def delete_instrument(conn: sqlite3.Connection, symbol: str) -> bool:
     """Hard-delete a NEVER-TRADED watch-only symbol and its derived / cache rows, in ONE
-    transaction; audit the instruments row first (mirrors ``delete_opening``). The caller
-    (API router) has already verified the symbol is neither held nor has ledger history.
+    transaction; audit the instruments row first (mirrors ``delete_opening``).
+
+    NOTE (FU-D18, 2026-07-17): the API delete path is now SOFT-delete-only
+    (``set_instrument_archived(True)``); this hard delete is NO LONGER routed. It is
+    retained for internal / test use only (rebuild tooling, fixtures) — callers must
+    still guarantee the symbol is neither held nor has ledger history before invoking it.
 
     Cleaned in addition to the instruments row: ``prices``, ``dividend_events`` (both keyed
     ``instrument``), ``signal_states`` / ``alert_events`` (keyed ``symbol``), any

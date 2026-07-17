@@ -171,6 +171,11 @@ def symbol_detail(
     return {
         "symbol": symbol,
         "as_of": as_of.isoformat(),
+        # Registry enrichment (FU-D24): name/market from the instruments registry so the
+        # drawer can title itself even for a non-held / watchlist symbol. None when the
+        # symbol is unregistered.
+        "name": inst.name if inst is not None else None,
+        "market": inst.market.value if inst is not None else None,
         "price_history": price_history,
         "cost_basis": cost_basis,
         "dividend_events": dividend_events,

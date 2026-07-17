@@ -8,18 +8,23 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
+from portfolio_dash.api.instrument_service import (
+    QuickRegisterError,
+    gap_backfill,
+    last_price_date,
+    lookup_instrument,
+    quick_register,
+    restore_archived,
+)
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.store import (
-    delete_instrument,
     get_instrument,
-    has_ledger_history,
     list_accounts,
     list_instruments,
     set_instrument_archived,
@@ -63,6 +68,7 @@ def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
         "ccy": inst.quote_ccy.value, "held": _held(conn, account_ids, inst.symbol),
         "last": last, "chg_pct": chg_pct,
         "target_low": decimal_str(inst.target_low) if inst.target_low is not None else None,
+        "target_high": decimal_str(inst.target_high) if inst.target_high is not None else None,
         "is_etf": inst.is_etf,
         "archived": inst.archived,
     }
@@ -96,6 +102,20 @@ def probe(body: ProbeBody) -> dict[str, Any]:
             "board_label": _BOARD_LABEL.get(board or "", "未解析")}
 
 
+@router.get("/instruments/lookup")
+def lookup(
+    symbol: str = Query(...),
+    market: Market = Query(...),
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> dict[str, Any]:
+    """FU-D23 fast identification for the quick-add dialog — name + suggested sector +
+    board/is_etf, no history fetch. ``found=false`` is the typo guard (the dialog blocks the
+    confirm). A KNOWN symbol resolves from stored metadata with no provider call
+    (``registered`` when active, ``archived`` when soft-deleted → confirming restores it)."""
+    return lookup_instrument(conn, symbol=symbol, market=market, now=now).model_dump()
+
+
 _TW_BOARDS = {"TWSE", "TPEx"}
 
 
@@ -107,6 +127,7 @@ class RegisterBody(BaseModel):
     board: str | None = None
     quote_ccy: Currency | None = None
     target_low: Decimal | None = None
+    target_high: Decimal | None = None
     is_etf: bool = False
 
 
@@ -115,36 +136,86 @@ class UpdateBody(BaseModel):
     sector: str | None = None
     board: str | None = None
     target_low: Decimal | None = None
+    target_high: Decimal | None = None
     is_etf: bool | None = None
+
+
+def _apply_target_high(
+    conn: sqlite3.Connection, inst: Instrument, target_high: Decimal | None
+) -> Instrument:
+    """Persist an explicit ``target_high`` supplied at REGISTRATION time (FU-D28).
+
+    The shared onboarding service (``quick_register`` / ``restore_archived``) predates
+    ``target_high`` and does not carry it, so — parallel to how ``target_low`` rides through
+    that service — the router applies ``target_high`` here via a direct upsert once the row
+    exists. ``None`` (the usual case; the quick-add dialog never sends it) is a no-op, so a
+    registration that omits it is byte-identical to before.
+    """
+    if target_high is None:
+        return inst
+    upsert_instrument(conn, inst.model_copy(update={"target_high": target_high}))
+    saved = get_instrument(conn, inst.symbol)
+    assert saved is not None
+    return saved
 
 
 @router.post("/instruments", status_code=201)
 def register(
     body: RegisterBody,
+    background_tasks: BackgroundTasks,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Classic (detail-form) registration: registers even when no quote is found.
 
     Delegates to the shared quick_register service (probe + instant quote + name
-    fill-in + 3-month history backfill) with ``force=True`` so its behavior stays
-    backward compatible: a provider outage never blocks an explicit registration.
+    fill-in) with ``force=True`` so its behavior stays backward compatible: a provider
+    outage never blocks an explicit registration. The heavy history backfill is offloaded
+    to a background gap_backfill (FU-D23) so the quick-add dialog's confirm returns fast.
+
+    FU-D18 door (b): when *symbol* already exists but is ARCHIVED, this RESTORES it
+    (un-archive + apply provided metadata) and schedules a background gap backfill, so the
+    response stays fast; it returns ``restored: true`` + ``last_price_date`` (the last data
+    on file, pre-backfill).
     """
     if body.market in (Market.US, Market.MY) and (body.board or "") in _TW_BOARDS:
         return JSONResponse(status_code=400,
                             content=error_body("validation_error", "US/MY 不可帶台股板別",
                                                field="board"))
+    sym = body.symbol.strip().upper()
+    existing = get_instrument(conn, sym)
+    if existing is not None and existing.archived:
+        saved = restore_archived(
+            conn, existing, name=body.name, sector=body.sector,
+            board=body.board or None, quote_ccy=body.quote_ccy,
+            target_low=body.target_low, is_etf=body.is_etf,
+        )
+        saved = _apply_target_high(conn, saved, body.target_high)  # FU-D28 (service is low-only)
+        last_date = last_price_date(conn, sym)  # read BEFORE the backfill runs
+        background_tasks.add_task(gap_backfill, sym, now=now)
+        account_ids = [a.account_id for a in list_accounts(conn)]
+        elem = _element(conn, saved, account_ids, now)
+        elem["restored"] = True
+        elem["last_price_date"] = last_date
+        return elem
     try:
         outcome = quick_register(
             conn, symbol=body.symbol, market=body.market, now=now, name=body.name,
             sector=body.sector, board=body.board or None, quote_ccy=body.quote_ccy,
             target_low=body.target_low, is_etf=body.is_etf, force=True,
+            backfill_history=False,
         )
     except QuickRegisterError as exc:
         return JSONResponse(status_code=exc.status,
                             content=error_body(exc.code, exc.message))
+    # FU-D23: the instant quote is fetched synchronously (so ``last`` is immediate), but the
+    # heavy history/dividend backfill runs in the BACKGROUND — the same gap_backfill primitive
+    # the FU-D18 restore path schedules, now consistently wired for a brand-new registration
+    # too, so the quick-add dialog's confirm returns fast (「背景抓取報價中」).
+    background_tasks.add_task(gap_backfill, sym, now=now)
+    saved = _apply_target_high(conn, outcome.instrument, body.target_high)  # FU-D28
     account_ids = [a.account_id for a in list_accounts(conn)]
-    return _element(conn, outcome.instrument, account_ids, now)
+    return _element(conn, saved, account_ids, now)
 
 
 class QuickBody(BaseModel):
@@ -185,6 +256,8 @@ def quick(
     )
     elem["name_source"] = outcome.name_source
     elem["history_backfilled"] = outcome.history_points
+    # FU-D18 door (c): a re-add of an archived symbol RESTORES it inline (never 409).
+    elem["restored"] = outcome.restored
     return elem
 
 
@@ -230,14 +303,18 @@ class ArchiveBody(BaseModel):
 def archive(
     symbol: str,
     body: ArchiveBody,
+    background_tasks: BackgroundTasks,
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
-    """Set / clear a symbol's 封存 (stop-tracking) flag (FU-D13).
+    """Set / clear a symbol's 封存 (stop-tracking) flag (FU-D13; restore backfill FU-D18).
 
     Archiving a HELD symbol is refused (422 ``held``) — the invariant is held ⇒ not
-    archived. Un-archiving (``archived: false``) is always allowed (the 還原 path). The flag
-    only scopes quote/signal/news fetches; the symbol stays registered, so no money figure
-    moves (the archived-symbol dashboard-invariant test proves this).
+    archived. Un-archiving (``archived: false``, the 還原 path) is always allowed and
+    schedules a background gap backfill (FU-D18); the response returns ``last_price_date``
+    (the last data on file, pre-backfill). The flag only scopes quote/signal/news fetches;
+    the symbol stays registered, so no money figure moves (the archived-symbol
+    dashboard-invariant test proves this).
     """
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
@@ -245,9 +322,13 @@ def archive(
     account_ids = [a.account_id for a in list_accounts(conn)]
     if body.archived and _held(conn, account_ids, symbol):
         return JSONResponse(status_code=422, content=error_body(
-            "held", "持倉中的標的不可刪除或封存", field="symbol"))
+            "held", "持倉中的標的不可移除或封存", field="symbol"))
     set_instrument_archived(conn, symbol, body.archived)
-    return {"ok": True, "archived": body.archived}
+    if not body.archived:  # FU-D18: restoring triggers a background gap backfill
+        last_date = last_price_date(conn, symbol)  # read BEFORE the backfill runs
+        background_tasks.add_task(gap_backfill, symbol, now=now)
+        return {"ok": True, "archived": False, "last_price_date": last_date}
+    return {"ok": True, "archived": True}
 
 
 @router.delete("/instruments/{symbol}")
@@ -255,11 +336,14 @@ def remove(
     symbol: str,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
-    """Hard-delete a NEVER-TRADED watch-only symbol (FU-D13, three tiers, no bypass).
+    """SOFT-delete (archive) any non-held symbol — accumulative watchlist (FU-D18).
 
-    404 unknown → 422 ``held`` (a held symbol is never removable) → 422 ``has_history``
-    (a closed-with-history symbol would corrupt 重算 if hard-deleted; the UI offers 封存
-    instead) → else a true delete that also cleans the symbol's derived / cache rows.
+    404 unknown → 422 ``held`` (a held symbol is never removable) → else SOFT delete via
+    ``set_instrument_archived(True)``: the symbol is hidden from the watchlist front-end but
+    NO data is removed (prices, dividend_events, signals, alerts, news all stay), so re-adding
+    it restores everything and gap-backfills the missing window. The former ``has_history``
+    422 tier is gone (a closed-with-history symbol soft-deletes like any other); the hard
+    delete (``store.delete_instrument``) is retained internally but no longer routed.
     """
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
@@ -267,11 +351,6 @@ def remove(
     account_ids = [a.account_id for a in list_accounts(conn)]
     if _held(conn, account_ids, symbol):
         return JSONResponse(status_code=422, content=error_body(
-            "held", "持倉中的標的不可刪除或封存", field="symbol"))
-    if has_ledger_history(conn, symbol):
-        return JSONResponse(status_code=422, content=error_body(
-            "has_history",
-            "該標的有交易/配息/期初記錄，為保帳本完整與重算正確不可刪除；可改為封存（停止追蹤）",
-            field="symbol"))
-    delete_instrument(conn, symbol)
-    return {"ok": True, "symbol": symbol}
+            "held", "持倉中的標的不可移除或封存", field="symbol"))
+    set_instrument_archived(conn, symbol, True)
+    return {"ok": True, "removed": True}

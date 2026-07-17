@@ -219,6 +219,10 @@
       }
       head.appendChild(price);
     } else {
+      /* Non-held / watchlist: no rich holding summary, but the /detail payload now
+         carries the registry name (FU-D24). Fallback order: holding.name → detail.name. */
+      const nm = (h && h.name) || (detail && detail.name);
+      if (nm) head.appendChild(el('span', 'sym-name', nm));
       head.appendChild(el('span', 'badge', '非持倉標的'));
       head.appendChild(el('span', 'header-spacer'));
     }

@@ -60,6 +60,9 @@ class KpiSummary(BaseModel):
     realized_total: Decimal | None = None
     unrealized_total: Decimal | None = None
     xirr: Decimal | None = None
+    # Observation window (days) the XIRR was measured over; a short window (< 365) is a
+    # low-confidence hint surfaced by the UI. None when there are no flows or no XIRR run.
+    xirr_window_days: int | None = None
     fx_realized: Decimal | None = None
     fx_unrealized: Decimal | None = None
 
@@ -110,6 +113,12 @@ class TrendPoint(BaseModel):
     total_value: Decimal
     net_invested: Decimal
     incomplete: bool = False
+    # Total net worth = total_value + reporting-currency cash that day (FU-D29 / C8).
+    # Additive + display-only: daily_value_series never sets it (stays None); the
+    # dashboard combiner fills it via portfolio.networth.compose_net_worth after the
+    # trend is built. None on a cash-incomplete day (a non-zero pool lacked FX) so the
+    # frontend draws an honest gap. Never a money-of-record input.
+    net_worth: Decimal | None = None
 
 
 class TrendSeries(BaseModel):

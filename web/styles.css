@@ -520,6 +520,14 @@ button.is-busy {
   line-height: 15px;
   padding: 0 5px;
 }
+/* Muted mini badge — e.g. XIRR short-window confidence hint (FU-D26.7). Inherits the
+   base .badge neutral panel/border tokens (theme-aware); text-3 keeps it low-key. */
+.badge-window-mini {
+  color: var(--text-3);
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 5px;
+}
 .badge-ai {
   color: var(--series-usd);
   border-color: rgba(155, 134, 216, 0.4);
@@ -1780,11 +1788,51 @@ button[disabled], .btn[disabled] {
   /* LOW: topbar icon buttons reach a 40px touch target. */
   .topbar button { min-height: 40px; min-width: 40px; }
 
-  /* LOW: horizontally-scrollable tables get a right-edge fade as a scroll affordance. */
+  /* FU-D26.5: horizontally-scrollable tables get a STRONGER right-edge fade as a scroll
+     affordance. The fade (a mask, so no extra element / no layout shift) is REMOVED once
+     app.js marks the wrap `.tw-end` (scrolled to the end) or `.tw-noscroll` (fits without
+     scrolling) — so it disappears when there is nothing more to reveal. Pages without the
+     JS enhancer keep the always-on fade as a graceful fallback. */
   .table-wrap {
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), rgba(0,0,0,0.25));
-    mask-image: linear-gradient(to right, #000 calc(100% - 28px), rgba(0,0,0,0.25));
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 42px), rgba(0,0,0,0.04));
+    mask-image: linear-gradient(to right, #000 calc(100% - 42px), rgba(0,0,0,0.04));
   }
+  .table-wrap.tw-end,
+  .table-wrap.tw-noscroll {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+}
+
+/* FU-D26.5: one-time, session-dismissed horizontal-scroll hint pill (mobile only).
+   Fixed-position so it never reflows content (CLS reservations preserved). */
+.tw-hint-pill {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 15px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 6px 22px -6px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+  animation: tw-hint-in 0.2s ease;
+}
+.tw-hint-pill.show { display: inline-flex; }
+@keyframes tw-hint-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@media (min-width: 641px) {
+  .tw-hint-pill { display: none !important; }
 }
 
 /* Unified AI attribution line (model · token N · $cost) on every LLM-generated card. */

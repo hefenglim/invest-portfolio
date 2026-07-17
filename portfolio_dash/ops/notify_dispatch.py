@@ -68,9 +68,10 @@ def dispatch_notifications(
         return "notify: 無啟用通道"
     if notify.in_quiet_hours(cfg.quiet_hours, now):
         return "notify: 靜音時段"
+    base = cfg.public_base_url  # FU-D17: empty ⇒ frontend_url returns None ⇒ legacy text
 
     rows = conn.execute(
-        "SELECT id, rule_id, symbol FROM alert_events "
+        "SELECT id, rule_id, symbol, href FROM alert_events "
         "WHERE notified_at IS NULL AND notify_attempts < ? ORDER BY id LIMIT ?",
         (_MAX_ATTEMPTS, _CAP),
     ).fetchall()
@@ -85,8 +86,14 @@ def dispatch_notifications(
         rule_id = str(row["rule_id"])
         if not cfg.subscriptions.get(rule_id, True):
             continue  # unsubscribed → stays claimed (handled), never sends
-        title, body, severity = notify.format_event(rule_id, row["symbol"])
-        outcome = sender(channels, title, body, severity, None)
+        # FU-D17: build a clickable deep link from the event's stored href (None ⇒ the
+        # dashboard fallback inside frontend_url). Empty base URL ⇒ link is None ⇒ the
+        # body keeps its legacy 「請至儀表板查看詳情」 tail (byte-identical legacy behaviour).
+        link = notify.frontend_url(base, row["href"])
+        title, body, severity = notify.format_event(
+            rule_id, row["symbol"], linked=link is not None
+        )
+        outcome = sender(channels, title, body, severity, link)
         if any(result == "ok" for result in outcome.values()):
             sent += 1  # ≥1 ok → claim stands (partial failure logged below)
         else:

@@ -13,6 +13,38 @@
 <link rel="stylesheet" href="trades.css?v=0.1.19"></link>
 <link rel="stylesheet" href="input.css?v=0.1.19"></link>
 <style>
+  /* FU-D25: 資金管理 tab bar (own inline block, mirrors settings' .set-tabbar pattern;
+     MUST NOT reuse .set-* — settings.html/css belong to a parallel wave). */
+  .cash-tabbar {
+    display: flex; gap: 2px; padding: 12px 20px 0;
+    border-bottom: 1px solid var(--border-soft);
+    margin-bottom: var(--gap);
+    flex-wrap: wrap;
+  }
+  .cash-tab {
+    padding: 7px 18px; font-size: 12px; font-family: var(--font-ui);
+    border: none; background: transparent; color: var(--text-2);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    cursor: pointer; border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  }
+  .cash-tab:hover { color: var(--text); background: var(--panel-2); }
+  .cash-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
+  .cash-view { display: none; flex-direction: column; gap: var(--gap);
+    width: 100%; min-width: 0; box-sizing: border-box; }
+  .cash-view.active { display: flex; }
+  /* single-form tabs (出金入金 / 換匯中心): the card no longer shares the 2-col grid —
+     keep it at a readable single-column width instead of stretching page-wide. */
+  .cash-view > .stack-card { max-width: 680px; width: 100%; box-sizing: border-box; }
+  .cash-flows-note { font-size: 10.5px; color: var(--text-3); padding: 0 2px; max-width: 680px; }
+  /* statement empty state: emptyState() glyph + msg, plus a pointer-to-pools hint line. */
+  .stmt-empty-hint { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+  /* ≤760px: the 3-tab bar becomes a horizontal scroll strip (settings mobile fallback). */
+  @media (max-width: 760px) {
+    .cash-tabbar { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin; }
+    .cash-tab { flex: 0 0 auto; white-space: nowrap; }
+  }
+
   .cash-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px var(--pad) 14px; }
   .cash-card {
     background: var(--panel-2); border: 1px solid var(--border-soft);
@@ -39,9 +71,8 @@
     background: var(--amber-soft); border: 1px solid rgba(217, 161, 63, 0.35);
   }
   .cash-help { padding: 0 var(--pad) 12px; font-size: 10.5px; color: var(--text-3); }
-  .cash-forms { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); padding: 0 var(--pad) 14px; }
   .stmt-chip { font-size: 10px; padding: 0 8px; line-height: 17px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui); color: var(--text-2); }
-  @media (max-width: 1100px) { .cash-cards { grid-template-columns: repeat(2, 1fr); } .cash-forms { grid-template-columns: 1fr; } }
+  @media (max-width: 1100px) { .cash-cards { grid-template-columns: repeat(2, 1fr); } }
 </style>
 </head>
 <body data-page="cash" data-title="資金管理">
@@ -51,153 +82,168 @@
 <header id="topbar" class="topbar"></header>
 <div class="page">
 
-  <!-- A. 各帳戶現金池 -->
-  <section class="panel" data-screen-label="現金池">
-    <div class="panel-head">
-      <h2 class="panel-title">各帳戶現金池</h2>
-      <span class="panel-sub">入金 − 出金 ± 換匯 ± 買賣收付 ＋ 現金股利；期初庫存不動現金（需要的話補一筆初始入金）</span>
-    </div>
-    <div class="cash-banner" id="cash-neg-banner" hidden="hidden"></div>
-    <div class="cash-total" id="cash-total"></div>
-    <div class="cash-cards" id="cash-cards"></div>
-    <div class="cash-help">期初庫存的賣出需要對應的現金：若某帳戶以「期初庫存」建檔持股，記得補一筆「期初資金」入金，資金池才不會因賣出而顯示透支。</div>
-  </section>
+  <!-- FU-D25: 資金管理 three tabs — 賬戶現金 / 出金入金 / 換匯中心 -->
+  <div class="cash-tabbar" id="cash-tabbar">
+    <button class="cash-tab" data-tab="pools" type="button">賬戶現金</button>
+    <button class="cash-tab" data-tab="flows" type="button">出金入金</button>
+    <button class="cash-tab" data-tab="fx" type="button">換匯中心</button>
+  </div>
 
-  <!-- A2. 現金收支明細（點上方現金池載入） -->
-  <section class="panel" id="cash-statement" data-screen-label="現金收支明細">
-    <div class="panel-head">
-      <h2 class="panel-title">現金收支明細</h2>
-      <span class="panel-sub" id="cash-stmt-sub">點帳戶名稱看全部幣別，或點某個幣別看單一資金池的收支明細與滾動餘額</span>
-      <span class="spacer"></span>
-      <div class="toolbar" id="cash-stmt-export"></div>
-    </div>
-    <div class="table-wrap">
-      <table class="data">
-        <thead>
-          <tr><th>日期</th><th class="col-text">類型</th><th class="col-ccy" id="cash-stmt-ccy-th" hidden="hidden">幣別</th><th class="col-text">說明</th><th>金額</th><th>餘額</th></tr>
-        </thead>
-        <tbody id="cash-stmt-body"></tbody>
-      </table>
-    </div>
-    <div id="cash-stmt-pager" hidden="hidden"></div>
-  </section>
+  <!-- ===== 賬戶現金：現金池 + 收支明細 ===== -->
+  <div class="cash-view" id="cview-pools" data-screen-label="賬戶現金">
 
-  <!-- B. 入金/出金 + 換匯 -->
-  <section class="panel" data-screen-label="資金異動">
-    <div class="panel-head">
-      <h2 class="panel-title">資金異動</h2>
-      <span class="panel-sub">會讓現金變負的寫入將先要求確認（通常代表漏記）</span>
-    </div>
-    <div class="cash-forms">
-      <div class="stack-card" data-screen-label="入金出金">
-        <h3>入金／出金</h3>
-        <div class="form-grid">
-          <div class="field">
-            <label for="cm-account">帳戶</label>
-            <select class="select" id="cm-account"></select>
-          </div>
-          <div class="field">
-            <label for="cm-date">日期</label>
-            <input class="input" id="cm-date" type="date"></input>
-          </div>
-          <div class="field">
-            <label>方向</label>
-            <div class="segmented">
-              <button type="button" id="cm-kind-in" class="active">入金</button>
-              <button type="button" id="cm-kind-out">出金</button>
-              <button type="button" id="cm-kind-open">期初資金</button>
-            </div>
-          </div>
-          <div class="field">
-            <label for="cm-ccy">幣別</label>
-            <select class="select" id="cm-ccy">
-              <option value="TWD">TWD</option>
-              <option value="USD">USD</option>
-              <option value="MYR">MYR</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="cm-amount">金額</label>
-            <input class="input" id="cm-amount" type="number" step="0.01" min="0"></input>
-          </div>
-          <div class="field">
-            <label for="cm-note">備註（選）</label>
-            <input class="input" id="cm-note"></input>
+    <!-- A. 各帳戶現金池 -->
+    <section class="panel" data-screen-label="現金池">
+      <div class="panel-head">
+        <h2 class="panel-title">各帳戶現金池</h2>
+        <span class="panel-sub">入金 − 出金 ± 換匯 ± 買賣收付 ＋ 現金股利；期初庫存不動現金（需要的話補一筆初始入金）</span>
+      </div>
+      <div class="cash-banner" id="cash-neg-banner" hidden="hidden"></div>
+      <div class="cash-total" id="cash-total"></div>
+      <div class="cash-cards" id="cash-cards"></div>
+      <div class="cash-help">期初庫存的賣出需要對應的現金：若某帳戶以「期初庫存」建檔持股，記得補一筆「期初資金」入金，資金池才不會因賣出而顯示透支。</div>
+    </section>
+
+    <!-- A2. 現金收支明細（點上方現金池載入） -->
+    <section class="panel" id="cash-statement" data-screen-label="現金收支明細">
+      <div class="panel-head">
+        <h2 class="panel-title">現金收支明細</h2>
+        <span class="panel-sub" id="cash-stmt-sub">點帳戶名稱看全部幣別，或點某個幣別看單一資金池的收支明細與滾動餘額</span>
+        <span class="spacer"></span>
+        <div class="toolbar" id="cash-stmt-export"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr><th>日期</th><th class="col-text">類型</th><th class="col-ccy" id="cash-stmt-ccy-th" hidden="hidden">幣別</th><th class="col-text">說明</th><th>金額</th><th>餘額</th></tr>
+          </thead>
+          <tbody id="cash-stmt-body"></tbody>
+        </table>
+      </div>
+      <div id="cash-stmt-pager" hidden="hidden"></div>
+    </section>
+
+  </div>
+
+  <!-- ===== 出金入金：入金/出金表單 + 紀錄 ===== -->
+  <div class="cash-view" id="cview-flows" data-screen-label="出金入金">
+
+    <div class="stack-card" data-screen-label="入金出金">
+      <h3>入金／出金</h3>
+      <div class="form-grid">
+        <div class="field">
+          <label for="cm-account">帳戶</label>
+          <select class="select" id="cm-account"></select>
+        </div>
+        <div class="field">
+          <label for="cm-date">日期</label>
+          <input class="input" id="cm-date" type="date"></input>
+        </div>
+        <div class="field">
+          <label>方向</label>
+          <div class="segmented">
+            <button type="button" id="cm-kind-in" class="active">入金</button>
+            <button type="button" id="cm-kind-out">出金</button>
+            <button type="button" id="cm-kind-open">期初資金</button>
           </div>
         </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" id="cm-confirm" type="button">確認寫入</button>
+        <div class="field">
+          <label for="cm-ccy">幣別</label>
+          <select class="select" id="cm-ccy">
+            <option value="TWD">TWD</option>
+            <option value="USD">USD</option>
+            <option value="MYR">MYR</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cm-amount">金額</label>
+          <input class="input" id="cm-amount" type="number" step="0.01" min="0"></input>
+        </div>
+        <div class="field">
+          <label for="cm-note">備註（選）</label>
+          <input class="input" id="cm-note"></input>
         </div>
       </div>
-
-      <div class="stack-card" data-screen-label="換匯">
-        <h3>換匯</h3>
-        <div class="form-grid">
-          <div class="field">
-            <label for="cfx-account">帳戶</label>
-            <select class="select" id="cfx-account"></select>
-          </div>
-          <div class="field">
-            <label for="cfx-date">日期</label>
-            <input class="input" id="cfx-date" type="date"></input>
-          </div>
-          <div class="field"></div>
-          <div class="field">
-            <label for="cfx-from-ccy">賣出幣別</label>
-            <select class="select" id="cfx-from-ccy">
-              <option value="TWD" selected="selected">TWD</option>
-              <option value="USD">USD</option>
-              <option value="MYR">MYR</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="cfx-from-amt">賣出金額</label>
-            <input class="input" id="cfx-from-amt" type="number" step="0.01" min="0"></input>
-          </div>
-          <div class="field"></div>
-          <div class="field">
-            <label for="cfx-to-ccy">買入幣別</label>
-            <select class="select" id="cfx-to-ccy">
-              <option value="TWD">TWD</option>
-              <option value="USD" selected="selected">USD</option>
-              <option value="MYR">MYR</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="cfx-to-amt">買入金額</label>
-            <input class="input" id="cfx-to-amt" type="number" step="0.01" min="0"></input>
-          </div>
-        </div>
-        <div class="fx-implied">
-          <span class="k">隱含匯率</span>
-          <span class="v num" id="cfx-implied"></span>
-        </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" id="cfx-confirm" type="button">確認寫入</button>
-        </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" id="cm-confirm" type="button">確認寫入</button>
       </div>
     </div>
-  </section>
+    <div class="cash-flows-note">會讓現金變負的寫入將先要求確認（通常代表漏記入金或換匯）。</div>
 
-  <!-- C. 入金/出金紀錄 -->
-  <section class="panel" data-screen-label="資金紀錄">
-    <div class="panel-head">
-      <h2 class="panel-title">入金／出金紀錄</h2>
-      <span class="panel-sub">換匯紀錄在「交易帳本 › 換匯」分頁（同一本帳）</span>
+    <!-- C. 入金/出金紀錄 -->
+    <section class="panel" data-screen-label="資金紀錄">
+      <div class="panel-head">
+        <h2 class="panel-title">入金／出金紀錄</h2>
+        <span class="panel-sub">換匯在「換匯中心」分頁登錄；換匯紀錄在「交易帳本 › 換匯」分頁（同一本帳）</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>日期</th><th class="col-text">帳戶</th><th class="col-text">方向</th>
+              <th>金額</th><th class="col-text">備註</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="cm-body"></tbody>
+        </table>
+      </div>
+      <div id="cm-pager" hidden="hidden"></div>
+    </section>
+
+  </div>
+
+  <!-- ===== 換匯中心：換匯表單 ===== -->
+  <div class="cash-view" id="cview-fx" data-screen-label="換匯中心">
+
+    <div class="stack-card" data-screen-label="換匯">
+      <h3>換匯</h3>
+      <div class="form-grid">
+        <div class="field">
+          <label for="cfx-account">帳戶</label>
+          <select class="select" id="cfx-account"></select>
+        </div>
+        <div class="field">
+          <label for="cfx-date">日期</label>
+          <input class="input" id="cfx-date" type="date"></input>
+        </div>
+        <div class="field"></div>
+        <div class="field">
+          <label for="cfx-from-ccy">賣出幣別</label>
+          <select class="select" id="cfx-from-ccy">
+            <option value="TWD" selected="selected">TWD</option>
+            <option value="USD">USD</option>
+            <option value="MYR">MYR</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cfx-from-amt">賣出金額</label>
+          <input class="input" id="cfx-from-amt" type="number" step="0.01" min="0"></input>
+        </div>
+        <div class="field"></div>
+        <div class="field">
+          <label for="cfx-to-ccy">買入幣別</label>
+          <select class="select" id="cfx-to-ccy">
+            <option value="TWD">TWD</option>
+            <option value="USD" selected="selected">USD</option>
+            <option value="MYR">MYR</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cfx-to-amt">買入金額</label>
+          <input class="input" id="cfx-to-amt" type="number" step="0.01" min="0"></input>
+        </div>
+      </div>
+      <div class="fx-implied">
+        <span class="k">隱含匯率</span>
+        <span class="v num" id="cfx-implied"></span>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" id="cfx-confirm" type="button">確認寫入</button>
+      </div>
     </div>
-    <div class="table-wrap">
-      <table class="data">
-        <thead>
-          <tr>
-            <th>日期</th><th class="col-text">帳戶</th><th class="col-text">方向</th>
-            <th>金額</th><th class="col-text">備註</th><th></th>
-          </tr>
-        </thead>
-        <tbody id="cm-body"></tbody>
-      </table>
-    </div>
-    <div id="cm-pager" hidden="hidden"></div>
-  </section>
+    <div class="cash-flows-note">賣出一種幣別、買入另一種；換匯會進入各資金池的收支明細與「交易帳本 › 換匯」（同一本帳）。</div>
+
+  </div>
 
 </div>
 </div>
@@ -209,5 +255,34 @@
 <script src="pager.js?v=0.1.19"></script>
 <script src="alerts.js?v=0.1.19"></script>
 <script src="cash.js?v=0.1.19"></script>
+<script>
+(function () {
+  /* FU-D25 tab switching (mirrors settings' showSettingsTab): active toggling +
+     location.hash sync (#pools / #flows / #fx) + a pd-cash-tab CustomEvent that cash.js
+     listens for to re-render the activated section from cached state. */
+  var TABS = ['pools', 'flows', 'fx'];
+  window.showCashTab = function (id, skipHash) {
+    if (TABS.indexOf(id) < 0) id = 'pools';
+    document.querySelectorAll('.cash-tab').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.tab === id);
+    });
+    document.querySelectorAll('.cash-view').forEach(function (v) {
+      v.classList.toggle('active', v.id === 'cview-' + id);
+    });
+    if (!skipHash) { try { history.replaceState(null, '', '#' + id); } catch (e) { /* noop */ } }
+    window.dispatchEvent(new CustomEvent('pd-cash-tab', { detail: id }));
+  };
+  document.querySelectorAll('.cash-tab').forEach(function (b) {
+    b.addEventListener('click', function () { window.showCashTab(b.dataset.tab); });
+  });
+  /* activate from hash or default (賬戶現金) */
+  var hash = location.hash.slice(1);
+  window.showCashTab(TABS.indexOf(hash) >= 0 ? hash : 'pools', true);
+  window.addEventListener('hashchange', function () {
+    var h = location.hash.slice(1);
+    if (TABS.indexOf(h) >= 0) window.showCashTab(h);
+  });
+})();
+</script>
 </body>
 </html>

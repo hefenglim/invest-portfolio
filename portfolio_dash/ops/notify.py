@@ -31,6 +31,7 @@ they are NEVER logged and NEVER embedded in an exception message.
 
 import contextlib
 import logging
+import re
 import secrets
 import smtplib
 import sqlite3
@@ -38,6 +39,7 @@ from collections.abc import Callable
 from datetime import datetime
 from email.message import EmailMessage
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
@@ -75,6 +77,7 @@ RULE_CATALOG: list[tuple[str, str, str]] = [
     ("vol_spike", "波動突升", "warn"),
     ("rebalance_drift", "配置漂移", "risk"),
     ("consensus_change", "分析師共識轉弱", "info"),
+    ("target_cross", "目標價穿越", "warn"),  # FU-D28
     ("signal_trend", "趨勢反轉", "info"),
     ("signal_cross", "均線交叉", "info"),
     ("signal_momentum", "動能轉向", "info"),
@@ -314,20 +317,92 @@ def dispatch(
 # --- message formatting (pure) ------------------------------------------------
 
 
-def format_event(rule_id: str, symbol: str | None) -> tuple[str, str, str]:
+def format_event(
+    rule_id: str, symbol: str | None, *, linked: bool = False
+) -> tuple[str, str, str]:
     """A fired alert event → ``(title, body, severity)`` in zh-TW (deterministic, pure).
 
     Uses only the rule_id + symbol carried by the ``alert_events`` row — NO account
     balances or amounts. An unknown rule id degrades to ``(rule_id, info)`` (never crashes).
+
+    When ``linked`` is True a clickable deep link WILL be attached by the channel (ntfy
+    ``click`` / Telegram + Email append the URL), so the body drops the now-redundant
+    「請至儀表板查看詳情」 tail and just states the trigger (FU-D17). ``linked=False`` (the
+    default, taken whenever no public base URL is configured) keeps the byte-identical
+    legacy text so the link-free path is unchanged.
     """
     label, severity = _RULE_LABEL.get(rule_id, (rule_id, "info"))
+    tail = "。" if linked else "，請至儀表板查看詳情。"
     if symbol:
         title = f"portfolio-dash · {symbol} {label}"
-        body = f"{symbol}：觸發「{label}」預警，請至儀表板查看詳情。"
+        body = f"{symbol}：觸發「{label}」預警{tail}"
     else:
         title = f"portfolio-dash · {label}"
-        body = f"觸發「{label}」預警，請至儀表板查看詳情。"
+        body = f"觸發「{label}」預警{tail}"
     return title, body, severity
+
+
+# --- deep-link URL mapping (FU-D17) -------------------------------------------
+# ``_frontend_path`` MUST stay in sync with web/alerts.js ``mapAlertHref`` — a unit test
+# (tests/unit/test_notify.py) pins every case. Backend ``Alert.href`` values are
+# server-route shaped (``/symbol/{sym}``, ``/settings`` …) with no matching StaticFiles
+# page, so BOTH the bell renderer (JS) and this push deep-link builder translate them to
+# the real static-page path. Any drift = a push that lands on a 404 the bell routes fine.
+
+
+def _frontend_path(href: str | None) -> str:
+    """Translate a backend ``Alert.href`` into a static-frontend path (no host).
+
+    Mirror of web/alerts.js ``mapAlertHref`` (keep in sync — see the note above). An
+    empty/None href falls back to the dashboard ``index.html``: ``mapAlertHref`` returns
+    ``'#'`` for the bell's non-navigating case, but a PUSH needs a real landing page, so
+    the dashboard is the honest fallback (FU-D17 spec: "fallback href = dashboard").
+    """
+    if not href:
+        return "index.html"
+    m = re.match(r"^/symbol/(.+)$", href)
+    if m:
+        # encodeURIComponent-equivalent: quote's default unreserved set is A-Za-z0-9_.-~;
+        # adding !*'() makes the encoded output byte-identical to JS encodeURIComponent.
+        return "index.html#sym=" + quote(m.group(1), safe="!*'()")
+    if re.search(r"#sym=(.+)$", href):
+        return href  # already carries a drawer anchor → pass through
+    if href == "/settings":
+        return "settings.html"
+    if href == "/settings#llm":
+        return "settings.html#llm"
+    if href == "/insights":
+        return "insights.html"
+    if href == "/pipeline":
+        return "pipeline-hub.html"
+    return href  # already a static page (e.g. settings.html#alerts) → pass through
+
+
+def frontend_url(base: str, href: str | None) -> str | None:
+    """Absolute deep-link URL for a push: ``base`` + the mapped frontend path (FU-D17).
+
+    Returns ``None`` when *base* is empty (no public base URL configured → callers fall
+    back to legacy link-free text). Any trailing slash on *base* is stripped; the path is
+    mapped by :func:`_frontend_path` (mirrors web/alerts.js). Pure; never raises.
+    """
+    if not base:
+        return None
+    return f"{base.rstrip('/')}/{_frontend_path(href).lstrip('/')}"
+
+
+def normalize_base_url(value: str) -> str | None:
+    """Validate + canonicalize the public base URL (FU-D17). Pure; no I/O.
+
+    Returns the trailing-slash-stripped URL, ``""`` for empty (deep links off), or
+    ``None`` when *value* is neither empty nor an ``http(s)://`` URL (the caller rejects
+    with a 400). The base URL is user-supplied config — hosts are NEVER hard-coded.
+    """
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    if not stripped.startswith(("http://", "https://")):
+        return None
+    return stripped.rstrip("/")
 
 
 # --- config model + persistence (single-row JSON in config_store) -------------
@@ -369,6 +444,9 @@ class NotifyConfig(BaseModel):
     email: EmailConfig = Field(default_factory=EmailConfig)
     quiet_hours: QuietHours = Field(default_factory=QuietHours)
     subscriptions: dict[str, bool] = Field(default_factory=dict)
+    # FU-D17: the site's public URL, used to build clickable push deep links. NOT a secret
+    # (returned un-masked on the API read path). Empty ⇒ pushes carry legacy link-free text.
+    public_base_url: str = ""
 
 
 _CATEGORY = "notify"
@@ -549,8 +627,10 @@ __all__ = [
     "dispatch",
     "ensure_seeded",
     "format_event",
+    "frontend_url",
     "generate_topic",
     "in_quiet_hours",
     "load_config",
+    "normalize_base_url",
     "save_config",
 ]

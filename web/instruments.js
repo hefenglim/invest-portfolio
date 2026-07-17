@@ -24,66 +24,41 @@
   };
   const MARKET_ZH = { TW: '台股', US: '美股', MY: '馬股' };
 
-  /* ---- one-step add (2026-07-02, supersedes the probe→confirm→detail flow) ----
-     Symbol + market → POST /api/instruments/quick: the backend probes the board,
-     requires a REAL quote (typo guard), auto-fills the name, and backfills ~3 months
-     of history in one call. 422 quote_not_found → explicit confirm → force re-send.
-     The button carries a pdBusy spinner (real network work, several seconds). */
-  async function quickAdd(force) {
+  /* ---- one-step add via the shared quick-add dialog (FU-D23, supersedes the direct
+     POST /api/instruments/quick flow) ----
+     The 加入 button opens web/inst-quickadd.js: a FAST lookup (GET /api/instruments/lookup)
+     provider-verifies existence (typo guard) and detects an already-registered symbol
+     (「已註冊」) or an archived one to restore — network-free for both. The user confirms the
+     name + picks/enters a sector (datalist of existing sectors), then 確認 registers via POST
+     /api/instruments; the heavy quote/history fetch runs in the BACKGROUND. 記一筆買入 hands
+     off to the manual pane (input.html?symbol=). */
+  function openQuickAdd() {
     const sym = $('#new-symbol').value.trim();
     const market = $('#new-market').value;
     if (!sym) {
       if (window.toast) window.toast('請先輸入代號', 'fail');
       return;
     }
-    const btn = $('#quick-add-btn');
-    const restore = window.pdBusy ? window.pdBusy(btn, '查詢並加入中…') : () => {};
-    $('#quick-add-hint').textContent = '正在查詢報價、名稱與歷史資料（數秒）…';
-    let resp;
-    try {
-      resp = await window.pdApi.post('/api/instruments/quick',
-        { symbol: sym, market: market, force: !!force });
-    } catch (err) {
-      restore();
-      $('#quick-add-hint').textContent = '';
-      if (err && err.status === 422 && err.code === 'quote_not_found') {
-        window.confirmDialog({
-          title: '查無報價',
-          body: (err.message || '查無 ' + sym + ' 的報價') +
-            '。仍要加入嗎？（加入後將顯示「缺價」，直到資料來源提供報價）',
-          confirmLabel: '仍要加入',
-          danger: true,
-          onConfirm: () => quickAdd(true)
-        });
-        return;
-      }
-      // 409 duplicate_symbol / 400 validation_error -> surface the backend message.
-      if (window.toast) window.toast(err && err.message ? err.message : '加入失敗', 'fail', err && err.code);
+    if (!window.pdInstQuickAdd) {
+      if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
       return;
     }
-    restore();
-    $('#quick-add-hint').textContent = '';
-    $('#new-symbol').value = '';
-    const label = [resp.name || null, resp.board_label || null,
-      resp.last != null ? '現價 ' + f.price(resp.last, resp.ccy) + ' ' + resp.ccy : '暫無報價']
-      .filter(Boolean).join('・');
-    if (window.toast) window.toast('已加入 ' + resp.symbol, 'ok', label);
-    await refresh();
-    /* item 6 (2026-07-03): 新增 → 買入 is the most common next step — offer the
-       handoff (input.html prefills via ?symbol=). 稍後 keeps the add-several flow. */
-    if (window.confirmDialog) {
-      window.confirmDialog({
-        title: '已加入 ' + resp.symbol + (resp.name ? ' ' + resp.name : ''),
-        body: '要現在記一筆買入嗎？（交易輸入將自動帶入代號）',
-        confirmLabel: '記一筆買入',
-        onConfirm: () => {
-          window.location.href = 'input.html?symbol=' + encodeURIComponent(resp.symbol);
-        }
-      });
-    }
+    window.pdInstQuickAdd({
+      symbol: sym,
+      market: market,
+      lockSymbol: true,
+      onConfirm: async () => {
+        $('#new-symbol').value = '';
+        await refresh();
+      },
+      onBuy: (resp) => {
+        const s = (resp && resp.symbol) || sym.toUpperCase();
+        window.location.href = 'input.html?symbol=' + encodeURIComponent(s);
+      },
+    });
   }
-  $('#quick-add-btn').addEventListener('click', () => quickAdd(false));
-  $('#new-symbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') quickAdd(false); });
+  $('#quick-add-btn').addEventListener('click', openQuickAdd);
+  $('#new-symbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') openQuickAdd(); });
 
   /* ---- smart history backfill (2026-07-03): prices 12mo (or since a position's
      first acquisition when older) + the reporting FX pairs since the earliest
@@ -118,7 +93,11 @@
     const toggle = $('#toggle-archived');
     if (toggle) {
       toggle.style.display = archivedCount ? '' : 'none';
-      toggle.textContent = showArchived ? '隱藏已封存' : ('顯示已封存 (' + archivedCount + ')');
+      /* FU-D18: 移除 (soft delete) and 封存 (stop-tracking) are the SAME archived state now,
+         so the toggle covers both intents. */
+      toggle.textContent = showArchived
+        ? '隱藏已移除／封存'
+        : ('顯示已移除／封存 (' + archivedCount + ')');
     }
     D.list
       .filter((i) => showArchived || !i.archived)
@@ -163,28 +142,42 @@
         }
         tr.appendChild(tdLast);
 
-        /* 目標價提醒 */
+        /* 目標價提醒（下限 ≤、上限 ≥）。Display-only 觸價 flag: a boolean UI decision, not a
+           money value of record — the two Decimal strings are coerced PURELY to pick the badge
+           (mirrors the backend target_cross rule's ≤ / ≥); nothing money-derived is stored. */
         const tdTgt = el('td', 'num');
-        if (i.target_low === null || i.target_low === undefined) {
+        const hasLow = i.target_low !== null && i.target_low !== undefined;
+        const hasHigh = i.target_high !== null && i.target_high !== undefined;
+        if (!hasLow && !hasHigh) {
           tdTgt.textContent = f.NULL_GLYPH;
           tdTgt.classList.add('sign-nil');
         } else {
-          tdTgt.textContent = '≤ ' + f.price(i.target_low, i.ccy);
-          /* Display-only触價 flag: a boolean UI decision, not a money value of record.
-             Coerce the two Decimal strings purely to pick the badge; nothing computed
-             from money is stored or shown. */
-          if (i.last !== null && i.last !== undefined &&
-              Number(i.last) <= Number(i.target_low)) {
-            tdTgt.appendChild(document.createTextNode(' '));
-            tdTgt.appendChild(el('span', 'badge badge-stale-mini', '已觸價'));
+          const priced = i.last !== null && i.last !== undefined;
+          if (hasLow) {
+            const line = el('div', 'tgt-line');
+            line.appendChild(el('span', null, '≤ ' + f.price(i.target_low, i.ccy)));
+            if (priced && Number(i.last) <= Number(i.target_low)) {
+              line.appendChild(document.createTextNode(' '));
+              line.appendChild(el('span', 'badge badge-stale-mini', '跌破'));
+            }
+            tdTgt.appendChild(line);
+          }
+          if (hasHigh) {
+            const line = el('div', 'tgt-line');
+            line.appendChild(el('span', null, '≥ ' + f.price(i.target_high, i.ccy)));
+            if (priced && Number(i.last) >= Number(i.target_high)) {
+              line.appendChild(document.createTextNode(' '));
+              line.appendChild(el('span', 'badge badge-stale-mini', '突破'));
+            }
+            tdTgt.appendChild(line);
           }
         }
         tr.appendChild(tdTgt);
 
         const tdHeld = el('td', 'col-text');
         if (i.archived) {
-          const tag = el('span', 'status-tag archived', '已封存');
-          tag.title = '已停止追蹤：不抓報價/訊號/新聞，但仍保留於帳本統計';
+          const tag = el('span', 'status-tag archived', '已移除');
+          tag.title = '已移除（停止追蹤）：不抓報價/訊號/新聞；所有資料仍保留，重新加入即可還原並補抓缺口';
           tdHeld.appendChild(tag);
         } else {
           tdHeld.appendChild(el('span', 'status-tag ' + (i.held ? 'hold' : 'watch'), i.held ? '持有' : '觀察'));
@@ -241,8 +234,8 @@
           });
           acts.appendChild(rp);
         }
-        const del = el('button', 'btn btn-danger', '刪除'); del.type = 'button';
-        del.title = '刪除此標的（持倉中或有交易紀錄者不可刪除，可改為封存）';
+        const del = el('button', 'btn btn-danger', '移除'); del.type = 'button';
+        del.title = '移除此標的（自前端隱藏；資料仍保留，重新加入可還原。持倉中不可移除）';
         del.addEventListener('click', () => delInstrument(i));
         acts.appendChild(del);
         tdAct.appendChild(acts);
@@ -250,7 +243,8 @@
         tbody.appendChild(tr);
       });
   }
-  /* ---- edit modal（名稱、產業、板別(TW)、ETF、目標價 — 全市場一致，2026-07-03）---- */
+  /* ---- edit modal（名稱、產業、板別(TW)、ETF、目標價下限/上限 — 全市場一致，
+     2026-07-03；上限 FU-D28）。目標價下限/上限即為 target_cross 預警規則的逐檔門檻。 ---- */
   function openEdit(i) {
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal');
@@ -291,11 +285,19 @@
     etfWrap.appendChild(etfCb);
     etfWrap.appendChild(el('span', null, ' 此標的為 ETF（影響台股賣出稅率 0.1%）'));
     body.appendChild(fld('類別', etfWrap));
+    const tgtStep = i.ccy === 'MYR' ? '0.001' : '0.01';
     const tgtIn = el('input', 'input');
-    tgtIn.type = 'number'; tgtIn.min = '0'; tgtIn.step = i.ccy === 'MYR' ? '0.001' : '0.01';
+    tgtIn.id = 'edit-target-low';
+    tgtIn.type = 'number'; tgtIn.min = '0'; tgtIn.step = tgtStep;
     tgtIn.placeholder = '留空 = 不提醒';
     if (i.target_low !== null && i.target_low !== undefined) tgtIn.value = i.target_low;
-    body.appendChild(fld('目標價提醒（現價 ≤ 此值時提醒，' + i.ccy + '）', tgtIn));
+    body.appendChild(fld('目標價下限（現價 ≤ 此值時提醒，' + i.ccy + '）', tgtIn));
+    const tgtHiIn = el('input', 'input');
+    tgtHiIn.id = 'edit-target-high';
+    tgtHiIn.type = 'number'; tgtHiIn.min = '0'; tgtHiIn.step = tgtStep;
+    tgtHiIn.placeholder = '留空 = 不提醒';
+    if (i.target_high !== null && i.target_high !== undefined) tgtHiIn.value = i.target_high;
+    body.appendChild(fld('目標價上限（現價 ≥ 此值時提醒，' + i.ccy + '）', tgtHiIn));
     body.appendChild(el('div', 'hint', '市場與幣別由註冊流程決定，不可更改。'));
     modal.appendChild(body);
     const foot = el('div', 'modal-foot');
@@ -310,13 +312,16 @@
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
     ok.addEventListener('click', async () => {
       const raw = tgtIn.value.trim();
-      /* target_low rides through as a STRING (never parseFloat'd into money). Empty
-         clears it; otherwise pass the raw string to the backend Decimal column. */
+      const rawHi = tgtHiIn.value.trim();
+      /* target_low / target_high ride through as STRINGS (never parseFloat'd into money).
+         Empty clears the bound (explicit null); otherwise the raw string reaches the backend
+         Decimal column verbatim. */
       const body2 = {
         name: nameIn.value.trim() || i.name,
         sector: secIn.value.trim(),
         is_etf: etfCb.checked,
         target_low: raw === '' ? null : raw,
+        target_high: rawHi === '' ? null : rawHi,
       };
       if (boardSel) body2.board = boardSel.value;
       try {
@@ -333,46 +338,40 @@
     setTimeout(() => nameIn.focus(), 50);
   }
 
-  /* ---- delete / archive (FU-D13, three tiers) ----
-     刪除 → confirm → DELETE. The backend decides the tier and answers with a 422 the UI
-     maps to a helpful dialog:
-       • held        → 持倉中不可刪除或封存 (info; the only fix is to close the position),
-       • has_history → 不可刪除（帳本完整/重算）→ offer 封存 (stop tracking) instead.
-     archiveInstrument PUTs the archive flag (封存 / 還原); archiving a held symbol 422s too. */
+  /* ---- remove / restore (FU-D18, accumulative soft delete) ----
+     移除 → ONE confirm → DELETE, which now SOFT-deletes (archives) ANY non-held symbol: no
+     data is removed, so re-adding restores it and auto-backfills the gap. The backend still
+     refuses a HELD symbol (422 ``held``) — surfaced as an info dialog (the only fix is to
+     close the position). The former has_history → 封存 branch is gone (all non-held symbols
+     soft-delete alike). archiveInstrument PUTs the archive flag (還原 un-archives + triggers
+     the background backfill; archiving a held symbol 422s too). */
   function delInstrument(i) {
     window.confirmDialog({
-      title: '刪除 ' + i.symbol,
-      body: '確定刪除 ' + i.symbol + (i.name ? ' ' + i.name : '') +
-        '？將一併刪除其報價、訊號與事件記錄。',
-      confirmLabel: '刪除', danger: true,
+      title: '移除 ' + i.symbol + (i.name ? ' ' + i.name : ''),
+      body: '移除後將自前端隱藏；所有已抓取的報價與歷史資料仍保留，' +
+        '重新加入即可還原並自動補抓缺口。',
+      confirmLabel: '移除', danger: true,
       onConfirm: async () => {
         try {
           await window.pdApi.del('/api/instruments/' + encodeURIComponent(i.symbol));
         } catch (err) {
           if (err && err.status === 422 && err.code === 'held') {
-            window.confirmDialog({ title: '無法刪除', body: err.message, confirmLabel: '我知道了' });
+            window.confirmDialog({ title: '無法移除', body: err.message, confirmLabel: '我知道了' });
             return;
           }
-          if (err && err.status === 422 && err.code === 'has_history') {
-            window.confirmDialog({
-              title: '不可刪除，改為封存？', body: err.message,
-              confirmLabel: '封存（停止追蹤）', danger: true,
-              onConfirm: () => archiveInstrument(i, true)
-            });
-            return;
-          }
-          if (window.toast) window.toast(err && err.message ? err.message : '刪除失敗', 'fail', err && err.code);
+          if (window.toast) window.toast(err && err.message ? err.message : '移除失敗', 'fail', err && err.code);
           return;
         }
-        if (window.toast) window.toast('已刪除 ' + i.symbol, 'ok');
+        if (window.toast) window.toast('已移除 ' + i.symbol, 'ok', '資料已保留，重新加入可還原');
         await refresh();
       }
     });
   }
 
   async function archiveInstrument(i, archived) {
+    let resp;
     try {
-      await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol) + '/archive',
+      resp = await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol) + '/archive',
         { archived: archived });
     } catch (err) {
       if (err && err.status === 422 && err.code === 'held') {
@@ -385,7 +384,16 @@
       }
       return;
     }
-    if (window.toast) window.toast(archived ? '已封存 ' + i.symbol : '已還原 ' + i.symbol, 'ok');
+    if (window.toast) {
+      if (archived) {
+        window.toast('已封存 ' + i.symbol, 'ok');
+      } else {
+        /* FU-D18: restore kicks off a background gap backfill; report the last data on file. */
+        const lastDate = resp && resp.last_price_date;
+        window.toast('已還原，背景補抓報價中', 'ok',
+          i.symbol + (lastDate ? '（最後資料日 ' + lastDate + '）' : ''));
+      }
+    }
     await refresh();
   }
 

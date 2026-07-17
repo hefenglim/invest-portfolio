@@ -500,13 +500,14 @@ def test_instruments_page_smoke(live_server: str, browser_page: Page) -> None:
 def test_instruments_quick_add_duplicate_surfaces_backend_error(
     live_server: str, browser_page: Page
 ) -> None:
-    """One-step add hits the REAL POST /api/instruments/quick (2026-07-02).
+    """The 加入 button opens the shared quick-add dialog (FU-D23), which runs the fast
+    GET /api/instruments/lookup.
 
-    Deterministic + provider-free path: adding golden-registered 2330 answers 409
-    duplicate_symbol BEFORE any quote fetch, so the e2e never touches the network.
-    Asserts (a) the button POSTs the real endpoint and receives the 409, (b) the
-    backend message surfaces as a fail toast, and (c) ZERO console + page errors
-    over the interaction (an unhandled POST rejection would fail this).
+    Deterministic + provider-free path: looking up golden-registered 2330 resolves
+    ``registered:true`` from stored metadata BEFORE any provider call, so the e2e never
+    touches the network. Asserts (a) the button fires the real lookup endpoint (200),
+    (b) the dialog surfaces the 「已註冊」 duplicate signal in-place and holds the confirm
+    disabled, and (c) ZERO console + page errors over the interaction.
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -527,23 +528,26 @@ def test_instruments_quick_add_duplicate_surfaces_backend_error(
         page.goto(live_server + "/instruments.html", wait_until="load")
         page.wait_for_selector("#inst-body tr")  # list landed (page fully booted)
         page.fill("#new-symbol", "2330")
-        # Market defaults to TW; the one-step add POSTs /api/instruments/quick.
-        with page.expect_response("**/api/instruments/quick") as resp_info:
+        # Market defaults to TW; 加入 opens the dialog which GETs /api/instruments/lookup.
+        with page.expect_response("**/api/instruments/lookup**") as resp_info:
             page.click("#quick-add-btn")
-        assert resp_info.value.status == 409, f"quick status {resp_info.value.status}"
-        # The backend duplicate message surfaces as a fail toast.
-        page.wait_for_selector(".toast-fail")
-        assert "已註冊" in page.inner_text(".toast-fail")
+        assert resp_info.value.status == 200, f"lookup status {resp_info.value.status}"
+        # The dialog surfaces the duplicate in-place and keeps the confirm disabled.
+        page.wait_for_selector(".modal-backdrop")
+        page.wait_for_function(
+            "() => { const m = document.querySelector('.modal-body');"
+            " return m && m.textContent.includes('已註冊'); }"
+        )
+        page.wait_for_function(
+            "() => { const b = [...document.querySelectorAll('.modal-foot .btn-primary')]"
+            ".find(x => x.textContent.trim() === '確認'); return b && b.disabled; }"
+        )
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
 
-    # Chrome logs a console "error" for ANY non-2xx fetch ("Failed to load
-    # resource: ... 409") — that is network logging of the DELIBERATE 409, not an
-    # app error. Filter it; everything else (and all page errors) stays fatal.
-    app_errors = [e for e in console_errors if "Failed to load resource" not in e]
-    assert not app_errors and not page_errors, (
-        f"/instruments.html (quick add): console errors={app_errors!r}; "
+    assert not console_errors and not page_errors, (
+        f"/instruments.html (quick add dialog): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
@@ -1604,14 +1608,15 @@ def test_settings_digest_edit_updates_jobs_row_without_reload(
 
 @pytest.mark.e2e
 def test_cash_page_smoke(live_server: str, browser_page: Page) -> None:
-    """/cash.html loads clean, its forms initialize, AND clicking a pool renders the
-    statement (FU-D5 detail 說明 + per-row balance) with ZERO console/page errors.
+    """/cash.html loads clean across its THREE tabs (FU-D25) with ZERO console/page errors.
 
     Regression guard for the stress-audit finding (2026-07-15): a TDZ ReferenceError
     in cash.js initForms() aborted BEFORE the deposit/FX click handlers were attached,
-    so the buttons silently did nothing — and no smoke covered this page. Extended for
-    FU-D5: after the async boot, click one per-ccy cash line and assert the statement
-    table renders server rows (the describe()/detail path must not throw).
+    so the buttons silently did nothing — and no smoke covered this page. FU-D5: on the
+    default 賬戶現金 tab, click one per-ccy cash line and assert the statement renders
+    real server rows (the describe()/detail path must not throw). FU-D25: the deposit
+    button and the FX button now live under the 出金入金 / 換匯中心 tabs — activate each
+    tab and assert its key control becomes visible (a hidden-tab id-drift regression guard).
     """
     page = browser_page
     console_errors: list[str] = []
@@ -1628,10 +1633,24 @@ def test_cash_page_smoke(live_server: str, browser_page: Page) -> None:
     page.on("pageerror", _on_pageerror)
     try:
         page.goto(live_server + "/cash.html", wait_until="load")
-        page.wait_for_selector("#cm-confirm")          # forms initialized
-        page.wait_for_selector(".cash-line.clickable")  # balance cards rendered
-        page.click(".cash-line.clickable")              # open one pool's statement
-        page.wait_for_selector("#cash-stmt-body tr")    # server rows rendered
+
+        # 賬戶現金 (default tab): pools + statement.
+        page.wait_for_selector(".cash-line.clickable")       # balance cards rendered
+        page.click(".cash-line.clickable")                    # open one pool's statement
+        # td.num rows are REAL server rows (the empty-state row has no .num cell), so this
+        # also proves the click drove the statement rather than matching the pre-select hint.
+        page.wait_for_selector("#cash-stmt-body tr td.num")
+
+        # 出金入金 tab: the deposit form + movements ledger. #cm-confirm is the key
+        # control; the ledger tbody (#cm-body) is empty in the golden seed (an empty
+        # tbody has no box → not a reliable visibility target), so assert it is attached.
+        page.click('.cash-tab[data-tab="flows"]')
+        page.wait_for_selector("#cm-confirm", state="visible")  # deposit button visible
+        page.wait_for_selector("#cm-body", state="attached")    # movements ledger mounted
+
+        # 換匯中心 tab: the FX form.
+        page.click('.cash-tab[data-tab="fx"]')
+        page.wait_for_selector("#cfx-confirm", state="visible")  # FX button visible
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)

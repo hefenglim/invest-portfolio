@@ -35,6 +35,8 @@ def _good_completer(
     *,
     agent: str,
     conn: object = None,
+    images: list[bytes] | None = None,
+    model_override: str | None = None,
 ) -> AiDraftList:
     return AiDraftList(
         drafts=[
@@ -79,7 +81,8 @@ def test_ai_input_degrades_with_kind(
     _setup(conn)
 
     def boom(
-        prompt: str, schema: type, *, agent: str, conn: object = None
+        prompt: str, schema: type, *, agent: str, conn: object = None,
+        images: list[bytes] | None = None, model_override: str | None = None,
     ) -> AiDraftList:
         raise exc
 
@@ -96,7 +99,8 @@ def test_ai_input_prompt_carries_live_account_catalog(conn: sqlite3.Connection) 
     seen: dict[str, str] = {}
 
     def spy_completer(
-        prompt: str, schema: type, *, agent: str, conn: object = None
+        prompt: str, schema: type, *, agent: str, conn: object = None,
+        images: list[bytes] | None = None, model_override: str | None = None,
     ) -> AiDraftList:
         seen["prompt"] = prompt
         return AiDraftList(drafts=[])
@@ -115,7 +119,8 @@ def test_ai_input_prompt_carries_today_anchor(conn: sqlite3.Connection) -> None:
     seen: dict[str, str] = {}
 
     def spy_completer(
-        prompt: str, schema: type, *, agent: str, conn: object = None
+        prompt: str, schema: type, *, agent: str, conn: object = None,
+        images: list[bytes] | None = None, model_override: str | None = None,
     ) -> AiDraftList:
         seen["prompt"] = prompt
         return AiDraftList(drafts=[])
@@ -123,3 +128,35 @@ def test_ai_input_prompt_carries_today_anchor(conn: sqlite3.Connection) -> None:
     ai_agents_input(conn, "7/3 買 2330", completer=spy_completer, today=date(2026, 7, 5))
     assert "<today>2026-07-05</today>" in seen["prompt"]
     assert "recent PAST occurrence" in seen["prompt"]  # rule text wraps across a newline
+
+
+def test_prompt_is_centralized_in_official_templates(conn: sqlite3.Connection) -> None:
+    # FU-D20 drift guard: agents.py no longer owns the prompt body — it imports the
+    # code-owned constant from llm_insight.official_templates.
+    from portfolio_dash.data_ingestion import agents as agents_mod
+    from portfolio_dash.llm_insight.official_templates import AI_INPUT_PROMPT_BODY
+
+    assert agents_mod._PROMPT is AI_INPUT_PROMPT_BODY
+
+
+def test_ai_input_forwards_images_and_model_alias_to_completer(
+    conn: sqlite3.Connection,
+) -> None:
+    # The router-supplied screenshot bytes + per-run model alias must reach the completion
+    # callable (which then routes to the vision role / puts the alias at the chain head).
+    _setup(conn)
+    seen: dict[str, object] = {}
+
+    def spy(
+        prompt: str, schema: type, *, agent: str, conn: object = None,
+        images: list[bytes] | None = None, model_override: str | None = None,
+    ) -> AiDraftList:
+        seen["images"] = images
+        seen["model_override"] = model_override
+        return AiDraftList(drafts=[])
+
+    ai_agents_input(
+        conn, "", completer=spy, images=[b"\x89PNG\r\n\x1a\nDATA"], model_alias="my-vision",
+    )
+    assert seen["images"] == [b"\x89PNG\r\n\x1a\nDATA"]
+    assert seen["model_override"] == "my-vision"

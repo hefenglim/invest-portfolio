@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS alert_events (
     fired_at TEXT NOT NULL,
     consumed INTEGER NOT NULL DEFAULT 0,
     notified_at TEXT,
-    notify_attempts INTEGER NOT NULL DEFAULT 0
+    notify_attempts INTEGER NOT NULL DEFAULT 0,
+    href TEXT
 );
 CREATE TABLE IF NOT EXISTS alert_dispatch_log (
     debounce_key TEXT NOT NULL,
@@ -75,11 +76,13 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     on_alert AI-card dispatch): the two dispatch paths track the same events independently.
     ``notify_attempts`` (security review F2) counts failed push-dispatch attempts so a
     permanently-failing head-of-queue can never starve newer events (the dispatcher gives
-    up at 3). Both added additively for legacy DBs that predate the columns.
+    up at 3). ``href`` (FU-D17) stores the alert's frontend route so a push can carry a
+    clickable deep link. All added additively for legacy DBs that predate the columns.
     """
     conn.executescript(_DDL)
     _add_column_if_missing(conn, "notified_at", "TEXT")
     _add_column_if_missing(conn, "notify_attempts", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "href", "TEXT")
     # The notified_at index MUST come after the column migration: on a legacy DB the
     # table already exists WITHOUT the column, so an index statement inside _DDL runs
     # before the ALTER and crashes boot (caught by the deploy gate 2026-07-12 — a
@@ -98,20 +101,31 @@ def _today(now: datetime) -> str:
 
 
 def record_event(
-    conn: sqlite3.Connection, *, rule_id: str, symbol: str | None, now: datetime
+    conn: sqlite3.Connection,
+    *,
+    rule_id: str,
+    symbol: str | None,
+    now: datetime,
+    href: str | None = None,
 ) -> int:
     """Append a fired alert event; idempotent per (rule, symbol) PER DAY. Returns the id.
 
     A re-scan the same day for the same (rule, symbol) does not duplicate an UNCONSUMED
     event — the 24h dispatch debounce is the dispatcher's concern, but this avoids a pile
-    of identical rows when the scan runs repeatedly intraday.
+    of identical rows when the scan runs repeatedly intraday. ``href`` (FU-D17, optional)
+    is the alert's frontend route, stored so a push can build a clickable deep link.
     """
-    event_id, _ = record_event_ex(conn, rule_id=rule_id, symbol=symbol, now=now)
+    event_id, _ = record_event_ex(conn, rule_id=rule_id, symbol=symbol, now=now, href=href)
     return event_id
 
 
 def record_event_ex(
-    conn: sqlite3.Connection, *, rule_id: str, symbol: str | None, now: datetime
+    conn: sqlite3.Connection,
+    *,
+    rule_id: str,
+    symbol: str | None,
+    now: datetime,
+    href: str | None = None,
 ) -> tuple[int, bool]:
     """Like :func:`record_event`, but also reports whether a NEW row was written.
 
@@ -119,7 +133,9 @@ def record_event_ex(
     UNCONSUMED event for this (rule, symbol) was reused (coalesced) instead of a new row
     being written. Intra-day repeated flips therefore coalesce to ≤1 event per
     (rule, symbol, day) by design. The signal-scan uses ``inserted`` to count only
-    genuinely-recorded events in its ``job_runs.detail`` (deep review 2026-07-10 F2).
+    genuinely-recorded events in its ``job_runs.detail`` (deep review 2026-07-10 F2). A
+    coalesced same-day event keeps the href recorded on its first firing (same (rule,
+    symbol) ⇒ same route), so ``href`` is stored only on the fresh INSERT.
     """
     existing = conn.execute(
         "SELECT id FROM alert_events WHERE rule_id = ? AND IFNULL(symbol, '') = IFNULL(?, '') "
@@ -129,8 +145,9 @@ def record_event_ex(
     if existing is not None:
         return int(existing["id"]), False
     cur = conn.execute(
-        "INSERT INTO alert_events (rule_id, symbol, fired_at, consumed) VALUES (?, ?, ?, 0)",
-        (rule_id, symbol, now.isoformat()),
+        "INSERT INTO alert_events (rule_id, symbol, fired_at, consumed, href) "
+        "VALUES (?, ?, ?, 0, ?)",
+        (rule_id, symbol, now.isoformat(), href),
     )
     conn.commit()
     return int(cur.lastrowid or 0), True

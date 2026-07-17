@@ -62,7 +62,8 @@ class UiDriver:
 
     def cash_move(self, account_id, kind, ccy, d, amount):
         p = self.page
-        p.goto(self.base + "/cash.html", wait_until="load")
+        # FU-D25 split cash.html into tabs; #flows activates 出金入金 where the form lives.
+        p.goto(self.base + "/cash.html#flows", wait_until="load")
         p.wait_for_function(
             "() => document.querySelector('#cm-account') && "
             "document.querySelector('#cm-account').options.length > 0")
@@ -75,7 +76,8 @@ class UiDriver:
 
     def fx(self, account_id, d, from_ccy, from_amt, to_ccy, to_amt):
         p = self.page
-        p.goto(self.base + "/cash.html", wait_until="load")
+        # FU-D25: the FX form lives under the 換匯中心 tab (#fx).
+        p.goto(self.base + "/cash.html#fx", wait_until="load")
         p.wait_for_function(
             "() => document.querySelector('#cfx-account') && "
             "document.querySelector('#cfx-account').options.length > 0")

@@ -79,6 +79,7 @@ def dashboard(
         symbol_metrics=fed.symbol_metrics,
         target_weights=fed.target_weights,
         consensus_deltas=fed.consensus_deltas,
+        target_levels=fed.target_levels,  # FU-D28: keep the embed identical to GET /api/alerts
     )
     payload["alerts"] = to_wire([a.model_dump() for a in alerts])
 

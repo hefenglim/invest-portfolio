@@ -72,6 +72,19 @@ _READINESS_TIMEOUT_S = 60.0
 _READINESS_POLL_S = 0.25
 
 
+def _assert_loopback_window() -> None:
+    """(Re-)open the loopback-only socket window. Idempotent.
+
+    Several flow modules carry a per-test `_loopback_sockets` fixture whose teardown
+    calls ``disable_socket()`` — under random test ordering that clobbers the
+    session-wide window before a later module's session server first spins up. Every
+    socket-needing seam below re-asserts the window at its own setup, so ordering can
+    never break it. External hosts stay banned (loopback allow-list only).
+    """
+    enable_socket()
+    socket_allow_hosts(["127.0.0.1", "localhost"], allow_unix_socket=True)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _e2e_loopback_socket() -> Iterator[None]:
     """Spec-17-sanctioned loopback exception, scoped to tests/e2e ONLY.
@@ -81,12 +94,24 @@ def _e2e_loopback_socket() -> Iterator[None]:
     external network leaks. Autouse keeps the window open for the whole e2e session
     (port probe, readiness poll, and any incidental parent-side loopback I/O).
     """
-    enable_socket()
-    socket_allow_hosts(["127.0.0.1", "localhost"], allow_unix_socket=True)
+    _assert_loopback_window()
     try:
         yield
     finally:
         disable_socket(allow_unix_socket=True)
+
+
+@pytest.fixture(autouse=True)
+def _e2e_loopback_per_test(_e2e_loopback_socket: None) -> Iterator[None]:
+    """Re-assert the loopback window before EVERY e2e test (ordering-proof).
+
+    A previously-run flow module's per-test teardown may have re-banned sockets; this
+    keeps direct parent-side loopback I/O (urllib calls inside tests) working no matter
+    which module ran first. The session fixture above still restores the global ban
+    when tests/e2e ends.
+    """
+    _assert_loopback_window()
+    yield
 
 
 def _build_golden_db(path: Path) -> None:
@@ -157,6 +182,7 @@ def live_server(_e2e_loopback_socket: None) -> Iterator[str]:
     process (outside pytest_socket), so it freely binds the loopback listener; the
     parent only needs the loopback exception for the port probe + readiness poll.
     """
+    _assert_loopback_window()  # session fixtures init lazily — self-heal (see helper)
     tmp_dir = Path(tempfile.mkdtemp(prefix="pd_e2e_"))
     db_path = tmp_dir / "golden.db"
     stderr_path = tmp_dir / "uvicorn.stderr.log"
@@ -206,6 +232,7 @@ def browser_page(_e2e_loopback_socket: None) -> Iterator[Page]:
     """A headless chromium Page for the e2e session. Each test should fully drive a
     navigation; the page is shared but the per-page handlers in `assert_page_ok` are
     detached after each assertion so listeners don't accumulate across tests."""
+    _assert_loopback_window()  # session fixtures init lazily — self-heal (see helper)
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page()
@@ -314,6 +341,7 @@ def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
         *,
         users: list[tuple[str, str]] | None = None,
     ) -> str:
+        _assert_loopback_window()  # ordering-proof: a prior module may have re-banned
         tmp_dir = Path(tempfile.mkdtemp(prefix="pd_flow_"))
         tmp_dirs.append(tmp_dir)
         db_path = tmp_dir / "flow.db"

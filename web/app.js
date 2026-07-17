@@ -131,6 +131,15 @@
       const label = el('div', 'kpi-label', '年化報酬 (XIRR)');
       const xirrNil = nil(k && k.xirr);
       if (xirrNil) nilBadge(label, (D.freshness && D.freshness.xirr_unavailable_reason) || '資料不足');
+      /* Short-window confidence hint: XIRR annualizes, so a sub-year observation window
+         makes the figure volatile. window_days is a plain count (not money) — safe to
+         compare/render directly. Only shown when an XIRR value is present. */
+      const xirrWin = k && k.xirr_window_days;
+      if (!xirrNil && xirrWin !== null && xirrWin !== undefined && xirrWin < 365) {
+        const wb = el('span', 'badge badge-window-mini', '觀察期 ' + xirrWin + ' 天・短窗參考');
+        wb.title = '觀察期不足一年，年化 XIRR 波動較大，僅供參考。';
+        label.appendChild(wb);
+      }
       card.appendChild(label);
       const value = mkValue(k && k.xirr, f.signedPct, true);
       card.appendChild(value);
@@ -491,6 +500,9 @@
     tdRest.colSpan = 2;
     tr.appendChild(tdRest);
     tfoot.appendChild(tr);
+    /* Row count changed the holdings-table width — refresh the scroll fade state
+       (hoisted; safe to call before its declaration further down). */
+    enhanceTableScroll();
   }
 
   /* ============ E2. 幣別組成 ============ */
@@ -1129,6 +1141,56 @@
      On failure (api.js already handles 401 → login redirect) we render a graceful
      empty state instead of letting an unhandled rejection hit the console (the e2e
      smoke asserts ZERO console errors / pageerrors). */
+  /* ============ Mobile wide-table scroll affordance (FU-D26.5) ============
+     Wide data tables scroll horizontally on phones. Two cues, both lightweight and
+     layout-shift-free (the fade is a CSS mask toggled by class; the hint pill is
+     position:fixed, so neither reflows content — the #holdings/#tx CLS reservations
+     survive):
+       1. The right-edge fade (styles.css, ≤640px) is REMOVED via `.tw-end` once the
+          wrap is scrolled to its end, and via `.tw-noscroll` when it does not overflow.
+       2. A one-time, session-dismissed hint pill 「← 左右捲動看更多 →」 appears the first
+          time a scrollable table is seen on a narrow screen. */
+  const TW_HINT_KEY = 'pd_tw_scroll_hint';
+  let twHintDismiss = null;
+  function twUpdate(wrap) {
+    const overflow = wrap.scrollWidth - wrap.clientWidth;
+    if (overflow <= 2) {
+      wrap.classList.add('tw-noscroll');
+      wrap.classList.remove('tw-end');
+      return false;
+    }
+    wrap.classList.remove('tw-noscroll');
+    wrap.classList.toggle('tw-end', wrap.scrollLeft >= overflow - 2);
+    return true;
+  }
+  function twMaybeHint(anyScrollable) {
+    if (!anyScrollable || twHintDismiss) return;
+    if (!window.matchMedia || !window.matchMedia('(max-width: 640px)').matches) return;
+    try { if (sessionStorage.getItem(TW_HINT_KEY)) return; } catch (e) { return; }
+    const pill = el('div', 'tw-hint-pill show', '← 左右捲動看更多 →');
+    twHintDismiss = () => {
+      try { sessionStorage.setItem(TW_HINT_KEY, '1'); } catch (e) { /* noop */ }
+      pill.remove();
+    };
+    pill.addEventListener('click', twHintDismiss);
+    document.body.appendChild(pill);
+    setTimeout(() => { if (twHintDismiss) twHintDismiss(); }, 6000);
+  }
+  function enhanceTableScroll() {
+    let anyScrollable = false;
+    document.querySelectorAll('.table-wrap').forEach((wrap) => {
+      if (!wrap.__twBound) {
+        wrap.__twBound = true;
+        wrap.addEventListener('scroll', () => {
+          twUpdate(wrap);
+          if (twHintDismiss) twHintDismiss();
+        }, { passive: true });
+      }
+      if (twUpdate(wrap)) anyScrollable = true;
+    });
+    twMaybeHint(anyScrollable);
+  }
+
   async function boot() {
     try {
       D = await (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
@@ -1152,6 +1214,9 @@
     renderInsights();
     renderFreshness();
     wireExports();
+    /* Tables are populated above; measure overflow now (and re-measure on resize). */
+    enhanceTableScroll();
+    window.addEventListener('resize', enhanceTableScroll);
   }
 
   /* Graceful degradation when the dashboard payload cannot be loaded (non-401; 401 is

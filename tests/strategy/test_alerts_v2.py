@@ -24,6 +24,7 @@ from portfolio_dash.strategy.alerts import (
     Alert,
     ConsensusDelta,
     SymbolMetric,
+    TargetLevels,
     compute_alerts_from,
 )
 from portfolio_dash.strategy.rules_config import DEFAULT_RULES, AlertRules
@@ -67,12 +68,13 @@ def _run(
     symbol_metrics: dict[str, SymbolMetric] | None = None,
     target_weights: dict[str, Decimal] | None = None,
     consensus_deltas: dict[str, ConsensusDelta] | None = None,
+    target_levels: dict[str, TargetLevels] | None = None,
 ) -> list[Alert]:
     """Run the pure engine with the (inert) quota args filled in — keeps call sites short."""
     return compute_alerts_from(
         data, rules, quota_remaining=_QR, quota_threshold=_QT,
         symbol_metrics=symbol_metrics, target_weights=target_weights,
-        consensus_deltas=consensus_deltas,
+        consensus_deltas=consensus_deltas, target_levels=target_levels,
     )
 
 
@@ -321,3 +323,79 @@ def test_new_rule_messages_are_percentages_only() -> None:
     for a in new:
         # No currency symbols / amounts leak into a push-bound message.
         assert "NT$" not in a.detail and "$" not in a.detail and "USD" not in a.detail
+
+
+# --- ⑤ target_cross (FU-D28) --------------------------------------------------
+
+
+def test_target_cross_low_fires_below_floor() -> None:
+    # price 90 <= target_low 100 -> 跌破 (warn), href to the drawer.
+    lv = {"2330": TargetLevels(price=Decimal("90"), target_low=Decimal("100"))}
+    a = next(x for x in _run(_data(), target_levels=lv) if x.id == "target_cross:2330:low")
+    assert a.sev == "warn" and a.rule == "target_cross" and a.href == "/symbol/2330"
+    assert a.title == "2330 跌破目標價"
+    assert a.detail == "現價 90 ≤ 目標下限 100"
+
+
+def test_target_cross_high_fires_above_ceiling() -> None:
+    # price 220 >= target_high 200 -> 突破 (warn); id suffix :high.
+    lv = {"AAPL": TargetLevels(price=Decimal("220"), target_high=Decimal("200"))}
+    a = next(x for x in _run(_data(), target_levels=lv) if x.id == "target_cross:AAPL:high")
+    assert a.sev == "warn" and a.title == "AAPL 突破目標價"
+    assert a.detail == "現價 220 ≥ 目標上限 200"
+
+
+def test_target_cross_boundary_equality_fires_both_legs_inclusively() -> None:
+    # price exactly AT the floor and AT the ceiling both fire (<= / >= are inclusive).
+    lv_low = {"X": TargetLevels(price=Decimal("100"), target_low=Decimal("100"))}
+    assert any(a.id == "target_cross:X:low" for a in _run(_data(), target_levels=lv_low))
+    lv_high = {"X": TargetLevels(price=Decimal("200"), target_high=Decimal("200"))}
+    assert any(a.id == "target_cross:X:high" for a in _run(_data(), target_levels=lv_high))
+
+
+def test_target_cross_both_legs_fire_for_pathological_band() -> None:
+    # low 150 > high 120 with price 130: price <= 150 AND price >= 120 -> BOTH fire honestly
+    # (the user's own inverted band is reported, never clamped).
+    lv = {"Z": TargetLevels(price=Decimal("130"), target_low=Decimal("150"),
+                            target_high=Decimal("120"))}
+    ids = {a.id for a in _run(_data(), target_levels=lv) if a.rule == "target_cross"}
+    assert ids == {"target_cross:Z:low", "target_cross:Z:high"}
+
+
+def test_target_cross_silent_inside_band() -> None:
+    # 120 is strictly between 100 (low) and 200 (high) -> neither leg fires.
+    lv = {"2330": TargetLevels(price=Decimal("120"), target_low=Decimal("100"),
+                               target_high=Decimal("200"))}
+    assert not any(a.rule == "target_cross" for a in _run(_data(), target_levels=lv))
+
+
+def test_target_cross_silent_without_price() -> None:
+    # A configured band but no stored price -> cannot judge a cross -> silent.
+    lv = {"2330": TargetLevels(price=None, target_low=Decimal("100"),
+                               target_high=Decimal("50"))}
+    assert not any(a.rule == "target_cross" for a in _run(_data(), target_levels=lv))
+
+
+def test_target_cross_silent_without_any_target() -> None:
+    # No levels fed at all (no symbol carries a target) -> silent.
+    assert not any(a.rule == "target_cross" for a in _run(_data(), target_levels={}))
+    # A leg with only the OTHER bound set does not fire the unset leg.
+    lv = {"2330": TargetLevels(price=Decimal("90"), target_high=Decimal("200"))}  # only high
+    assert not any(a.rule == "target_cross" for a in _run(_data(), target_levels=lv))
+
+
+def test_target_cross_uses_decimal_exact_comparison() -> None:
+    # 0.1 + 0.2 == 0.3 only under Decimal; a float compare would misjudge the boundary.
+    # price 0.30, low 0.30 -> equal -> fires; price 0.31, low 0.30 -> above -> no low leg.
+    lv_eq = {"P": TargetLevels(price=Decimal("0.30"), target_low=Decimal("0.30"))}
+    assert any(a.id == "target_cross:P:low" for a in _run(_data(), target_levels=lv_eq))
+    lv_above = {"P": TargetLevels(price=Decimal("0.31"), target_low=Decimal("0.30"))}
+    assert not any(a.rule == "target_cross" for a in _run(_data(), target_levels=lv_above))
+
+
+def test_target_cross_silent_when_disabled() -> None:
+    rules = DEFAULT_RULES.model_copy(deep=True)
+    rules.target_cross.enabled = False
+    lv = {"2330": TargetLevels(price=Decimal("90"), target_low=Decimal("100"))}
+    assert not any(a.rule == "target_cross"
+                   for a in _run(_data(), rules, target_levels=lv))

@@ -194,9 +194,74 @@
     const symHint = $('#m-sym-hint');
     symHint.replaceChildren();
     if (sym && !it) {
-      symHint.textContent = '未註冊 — 寫入時將自動查詢並註冊（依帳戶判定市場）';
+      symHint.appendChild(el('span', null, '未註冊 — 寫入時將自動查詢並註冊（依帳戶判定市場）　'));
+      /* FU-D23: an inline 立即註冊 action opens the shared quick-add dialog with the symbol
+         pre-filled + market inferred from the account. The commit-time auto-register fallback
+         stays, so this is optional convenience, not a gate. */
+      const reg = el('button', null, '立即註冊');
+      reg.type = 'button';
+      reg.style.cssText = 'background:none;border:none;padding:0;color:var(--accent);'
+        + 'cursor:pointer;font-size:inherit;text-decoration:underline;';
+      reg.addEventListener('click', () => openManualQuickAdd(sym));
+      symHint.appendChild(reg);
     } else if (it) {
       symHint.textContent = it.name + '・' + it.ccy + (it.etf ? '・ETF' : '');
+    }
+  }
+
+  /* Market inferred from the selected account's settlement ccy — mirrors the backend
+     auto-register (data_ingestion.markets.account_market): TWD→TW, USD→US, MYR→MY. */
+  const _CCY_MARKET = { TWD: 'TW', USD: 'US', MYR: 'MY' };
+  function accountMarket(accId) {
+    const a = acc(accId);
+    return a ? (_CCY_MARKET[a.settlement_ccy || a.ccy] || 'TW') : 'TW';
+  }
+
+  /* FU-D23: open the shared quick-add dialog for the manual pane's unregistered symbol.
+     After a successful register (or restore), re-fetch /api/input/context so the hint clears
+     and the user continues the SAME entry — the draft form is NOT cleared. */
+  function openManualQuickAdd(sym) {
+    if (!window.pdInstQuickAdd) {
+      if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
+      return;
+    }
+    const cont = async () => {
+      await reloadContext();
+      renderSymbolHint();
+      schedulePreview();
+    };
+    window.pdInstQuickAdd({
+      symbol: sym,
+      market: accountMarket($('#m-account').value),
+      lockSymbol: true,
+      onConfirm: cont,
+      onBuy: cont,
+    });
+  }
+
+  /* Re-fetch structural context (accounts / instruments / holdings) into `ctx` + refresh the
+     manual symbol datalist, so a just-registered symbol resolves immediately (the 未註冊 hint
+     clears). Graceful: a failed refetch keeps the prior ctx. */
+  async function reloadContext() {
+    let resp;
+    try {
+      resp = await api.get('/api/input/context');
+    } catch (e) {
+      return;
+    }
+    ctx = {
+      accounts: (resp && resp.accounts) || ctx.accounts,
+      fee_rules: (resp && resp.fee_rules) || ctx.fee_rules,
+      instruments: (resp && resp.instruments) || ctx.instruments,
+      holdings: (resp && resp.holdings) || ctx.holdings,
+    };
+    const dl = $('#m-symbols');
+    if (dl) {
+      dl.replaceChildren();
+      ctx.instruments.forEach((i) => {
+        const o = el('option'); o.value = i.symbol; o.label = i.name;
+        dl.appendChild(o);
+      });
     }
   }
 
@@ -410,15 +475,23 @@
   /* kind chips map the UI label to the import endpoint `kind`. */
   const CSV_KINDS = [['交易', 'transactions'], ['股利', 'dividends'], ['換匯', 'fx'], ['期初', 'openings']];
   let csvKind = 'transactions';
+  /* FU-D19: the pinned date format (a dateparse format id) once the user resolves an
+     ambiguous date column; null = let the backend infer. Reset whenever the CSV text or
+     the kind changes so a new file re-detects from scratch. */
+  let csvDateFormat = null;
+
+  /* Shown in #csv-kind-note: the expected date shape + the never-guess promise (FU-D19). */
+  const CSV_DATE_NOTE = '日期欄位建議 YYYY-MM-DD；2026/7/10、20260710 等常見格式亦可自動辨識，'
+    + '無法判斷（如 3/4/2026）時會請你選擇格式。';
 
   /* per-kind CSV header hints shown in the dropzone — the FULL canonical header (leads with
      the REQUIRED `account` column; matches the *_COLUMNS constants in the backend parsers +
-     the downloadable 範本). */
+     the downloadable 範本; date carries its YYYY-MM-DD hint, optional columns marked 選填). */
   const CSV_HINTS = {
-    transactions: '欄位：account・symbol・side・date・shares・price・fee（選）・tax（選）・daytrade（選）・note（選）',
-    dividends: '欄位：account・symbol・date・type(CASH/STOCK/DRIP/NET)・gross・withholding（選）・net（選）・reinvest_shares（選）・reinvest_price（選）',
-    fx: '欄位：account・date・from_ccy・from_amount・to_ccy・to_amount',
-    openings: '欄位：account・symbol・shares・original_avg_cost・build_date・original_cost_total（選）',
+    transactions: '欄位：account・symbol・side・date(YYYY-MM-DD)・shares・price・fee（選填）・tax（選填）・daytrade（選填）・note（選填）',
+    dividends: '欄位：account・symbol・date(YYYY-MM-DD)・type(CASH/STOCK/DRIP/NET)・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）',
+    fx: '欄位：account・date(YYYY-MM-DD)・from_ccy・from_amount・to_ccy・to_amount',
+    openings: '欄位：account・symbol・shares・original_avg_cost・build_date(YYYY-MM-DD)・original_cost_total（選填）',
   };
 
   function initCsv() {
@@ -430,17 +503,29 @@
         bar.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
         c.classList.add('active');
         csvKind = kind;
+        csvDateFormat = null;      // FU-D19: a different kind re-detects the date format
+        hideDateFmtChooser();
         const note = $('#csv-kind-note');
-        if (note) note.textContent = kind === 'transactions' ? '' : '（' + label + ' CSV：解析同此模式）';
+        if (note) note.textContent = CSV_DATE_NOTE + (kind === 'transactions' ? '' : '（' + label + ' CSV：解析同此模式）');
         const hint = $('#csv-dz-hint');
         if (hint) hint.textContent = CSV_HINTS[kind] || '';
+        scheduleCsvPreview();      // re-run so any prior ambiguity re-evaluates for this kind
       });
       bar.appendChild(c);
     });
-    /* seed the dropzone hint for the default (transactions) kind — the chip handler
-       above only refreshes it on a switch. */
+    /* seed the dropzone hint + date note for the default (transactions) kind — the chip
+       handler above only refreshes them on a switch. */
     const dzHint0 = $('#csv-dz-hint');
     if (dzHint0) dzHint0.textContent = CSV_HINTS[csvKind] || '';
+    const note0 = $('#csv-kind-note');
+    if (note0) note0.textContent = CSV_DATE_NOTE;
+
+    /* FU-D19: picking a date format pins it and re-previews (which now resolves cleanly). */
+    const fmtSel = $('#csv-datefmt-select');
+    if (fmtSel) fmtSel.addEventListener('change', () => {
+      csvDateFormat = fmtSel.value || null;
+      runCsvPreview();
+    });
 
     /* 下載範本：GET /api/import/template?kind=… (BOM+CRLF text/csv) for the ACTIVE kind.
        pdApi.download issues a GET when no body is passed; the filename rides the endpoint's
@@ -460,7 +545,8 @@
     }
 
     const paste = $('#csv-paste');
-    if (paste) paste.addEventListener('input', scheduleCsvPreview);
+    /* a manual edit invalidates any pinned date format — re-detect from the new text. */
+    if (paste) paste.addEventListener('input', () => { csvDateFormat = null; scheduleCsvPreview(); });
     $('#csv-confirm').addEventListener('click', commitCsv);
     $('#csv-confirm').disabled = true;
 
@@ -474,6 +560,7 @@
       const r = new FileReader();
       r.onload = () => {
         if (paste) paste.value = String(r.result || '').trim();
+        csvDateFormat = null;      // FU-D19: a fresh file re-detects the date format
         $('#csv-file').textContent = f.name;
         if (window.toast) window.toast('已載入 ' + f.name, 'ok', '解析預覽已更新，確認後寫入');
         scheduleCsvPreview();
@@ -501,6 +588,27 @@
     csvTimer = setTimeout(runCsvPreview, 250);
   }
 
+  /* FU-D19 date-format chooser helpers. */
+  function hideDateFmtChooser() {
+    const box = $('#csv-datefmt');
+    if (box) box.hidden = true;
+    const sel = $('#csv-datefmt-select');
+    if (sel) sel.replaceChildren();
+  }
+  function showDateFmtChooser(amb) {
+    const box = $('#csv-datefmt');
+    const sel = $('#csv-datefmt-select');
+    if (!box || !sel) return;
+    sel.replaceChildren();
+    const ph = el('option', null, '請選擇日期格式…'); ph.value = ''; sel.appendChild(ph);
+    (amb.candidates || []).forEach((c) => {
+      const o = el('option', null, c.label + ' — ' + c.example_in + ' → ' + c.example_out);
+      o.value = c.id;
+      sel.appendChild(o);
+    });
+    box.hidden = false;
+  }
+
   async function runCsvPreview() {
     const paste = $('#csv-paste');
     const csvText = paste ? paste.value.trim() : '';
@@ -510,11 +618,15 @@
       $('#csv-counts').textContent = '';
       $('#csv-file').textContent = '';
       $('#csv-confirm').disabled = true;
+      csvDateFormat = null;
+      hideDateFmtChooser();
       return;
     }
+    const reqBody = { kind: csvKind, csv_text: csvText };
+    if (csvDateFormat) reqBody.date_format = csvDateFormat;  // FU-D19: pin once chosen
     let resp;
     try {
-      resp = await api.post('/api/import/preview', { kind: csvKind, csv_text: csvText });
+      resp = await api.post('/api/import/preview', reqBody);
     } catch (err) {
       if (window.toast) window.toast((err && err.message) || '解析失敗', 'fail', err && err.code);
       return;
@@ -562,6 +674,15 @@
     const s = preview.summary || { ok: 0, warn: 0, error: 0 };
     $('#csv-counts').textContent =
       '可寫入 ' + (s.ok || 0) + '・警告 ' + (s.warn || 0) + '・錯誤 ' + (s.error || 0);
+    /* FU-D19: an unresolved ambiguous date column -> show the chooser + hold the confirm
+       disabled until a format is pinned (all date rows are errors until then anyway). */
+    const amb = preview.date_ambiguity;
+    if (amb && !csvDateFormat) {
+      showDateFmtChooser(amb);
+      $('#csv-confirm').disabled = true;
+      return;
+    }
+    hideDateFmtChooser();
     /* confirm enables when there is anything non-error to write */
     $('#csv-confirm').disabled = ((s.ok || 0) + (s.warn || 0)) === 0;
   }
@@ -573,10 +694,20 @@
     const paste = $('#csv-paste');
     const csvText = paste ? paste.value.trim() : '';
     if (!csvText) return;
+    const commitBody = (ack) => {
+      const b = { kind: csvKind, csv_text: csvText, ack_warnings: ack };
+      if (csvDateFormat) b.date_format = csvDateFormat;  // FU-D19: carry the pinned format
+      return b;
+    };
     try {
-      const resp = await api.post('/api/import/commit', { kind: csvKind, csv_text: csvText, ack_warnings: false });
+      const resp = await api.post('/api/import/commit', commitBody(false));
       onCsvWritten(resp);
     } catch (err) {
+      /* FU-D19: server refused because the date column is still ambiguous — never a guess. */
+      if (err && err.status === 422 && err.code === 'date_ambiguity_unresolved') {
+        if (window.toast) window.toast('日期格式不明確', 'fail', '請先於上方選擇日期格式再寫入');
+        return;
+      }
       if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
         window.confirmDialog({
           title: '匯入警告確認',
@@ -584,7 +715,7 @@
           confirmLabel: '確認寫入',
           onConfirm: async () => {
             try {
-              const resp = await api.post('/api/import/commit', { kind: csvKind, csv_text: csvText, ack_warnings: true });
+              const resp = await api.post('/api/import/commit', commitBody(true));
               onCsvWritten(resp);
             } catch (e2) {
               if (window.toast) window.toast((e2 && e2.message) || '匯入失敗', 'fail', e2 && e2.code);
@@ -621,10 +752,125 @@
     $('#ai-parse').addEventListener('click', runAiPreview);
     const writeAll = $('#ai-write-all');
     if (writeAll) writeAll.addEventListener('click', commitAi);
+    initAiImages();   // FU-D20: dropzone click / drag-drop / clipboard-paste screenshot intake
+    loadAiModels();   // FU-D20: per-run model picker (enabled models + 自動; last-used persisted)
   }
 
   /* The CSV text the AI run returns; written via the import/commit path on 寫入全部. */
   let aiCsvText = '';
+  /* FU-D20 attached screenshots for the current run: {name, dataUrl}. The dataUrl is the
+     FileReader readAsDataURL result (a full `data:image/...;base64,` string) sent as-is —
+     the server tolerates + strips the prefix. Money/quantity of record NEVER come from
+     here: the LLM only extracts what the image shows, then preview→confirm→commit computes. */
+  let aiImages = [];
+  const AI_MAX_IMAGES = 4;
+
+  /* Render the thumbnail strip with a per-image ✕ remove control. */
+  function renderAiThumbs() {
+    const strip = $('#ai-images');
+    if (!strip) return;
+    strip.replaceChildren();
+    strip.hidden = aiImages.length === 0;
+    aiImages.forEach((img, i) => {
+      const cell = el('div', 'ai-thumb');
+      cell.style.cssText = 'position:relative;width:64px;height:64px;border:1px solid ' +
+        'var(--border,#2a2f3a);border-radius:6px;overflow:hidden;background:#0d0f14;';
+      const im = el('img');
+      im.src = img.dataUrl; im.alt = img.name || ('image ' + (i + 1));
+      im.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+      const x = el('button', null, '✕'); x.type = 'button'; x.title = '移除';
+      x.style.cssText = 'position:absolute;top:2px;right:2px;width:18px;height:18px;' +
+        'line-height:16px;padding:0;border:none;border-radius:50%;cursor:pointer;' +
+        'background:rgba(0,0,0,0.6);color:#fff;font-size:11px;';
+      x.addEventListener('click', () => { aiImages.splice(i, 1); renderAiThumbs(); });
+      cell.appendChild(im); cell.appendChild(x);
+      strip.appendChild(cell);
+    });
+  }
+
+  /* Read image Files -> base64 data URLs, capping the total at AI_MAX_IMAGES (toast on excess). */
+  function addAiImages(files) {
+    const list = Array.prototype.slice.call(files || [])
+      .filter((fl) => fl && fl.type && fl.type.indexOf('image/') === 0);
+    if (!list.length) return;
+    const room = AI_MAX_IMAGES - aiImages.length;
+    if (room <= 0) {
+      if (window.toast) window.toast('最多 ' + AI_MAX_IMAGES + ' 張圖片', 'fail');
+      return;
+    }
+    if (list.length > room && window.toast) {
+      window.toast('最多 ' + AI_MAX_IMAGES + ' 張圖片', 'fail', '已略過多餘的圖片');
+    }
+    list.slice(0, room).forEach((fl) => {
+      const r = new FileReader();
+      r.onload = () => {
+        if (aiImages.length >= AI_MAX_IMAGES) return;   // guard the async race
+        aiImages.push({ name: fl.name, dataUrl: String(r.result || '') });
+        renderAiThumbs();
+      };
+      r.onerror = () => { if (window.toast) window.toast('圖片讀取失敗', 'fail', fl.name); };
+      r.readAsDataURL(fl);
+    });
+  }
+
+  /* Wire the three intake paths onto the dropzone / hidden file input / pane paste. */
+  function initAiImages() {
+    const dz = $('#ai-dropzone');
+    const fileIn = $('#ai-file-input');
+    if (dz && fileIn) {
+      dz.style.cursor = 'pointer';
+      dz.addEventListener('click', () => fileIn.click());
+      fileIn.addEventListener('change', () => { addAiImages(fileIn.files); fileIn.value = ''; });
+      dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dz-over'); });
+      dz.addEventListener('dragleave', () => dz.classList.remove('dz-over'));
+      dz.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dz.classList.remove('dz-over');
+        addAiImages(e.dataTransfer && e.dataTransfer.files);
+      });
+    }
+    /* clipboard paste of an image while focus is anywhere in the AI pane. */
+    const pane = $('#pane-ai');
+    if (pane) {
+      pane.addEventListener('paste', (e) => {
+        const items = (e.clipboardData && e.clipboardData.items) || [];
+        const imgs = [];
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
+            const fl = items[i].getAsFile();
+            if (fl) imgs.push(fl);
+          }
+        }
+        if (imgs.length) { e.preventDefault(); addAiImages(imgs); }
+      });
+    }
+  }
+
+  /* Populate the model picker from GET /api/llm/config (enabled models only). Persist the
+     choice in localStorage `pd_ai_model`; a stale/disabled persisted alias silently falls
+     back to 自動 (it simply won't match any option). AI-off / guest leaves 自動 only. */
+  async function loadAiModels() {
+    const sel = $('#ai-model-select');
+    if (!sel) return;
+    let cfg;
+    try { cfg = await api.get('/api/llm/config'); } catch (e) { return; }
+    const models = (cfg && cfg.models) || [];
+    models.filter((mo) => mo.enabled).forEach((mo) => {
+      const o = el('option', null, mo.alias + (mo.vision ? '・支援影像' : ''));
+      o.value = mo.alias;
+      o.dataset.vision = mo.vision ? '1' : '';
+      sel.appendChild(o);
+    });
+    try {
+      const saved = localStorage.getItem('pd_ai_model');
+      if (saved && Array.prototype.some.call(sel.options, (o) => o.value === saved)) {
+        sel.value = saved;
+      }
+    } catch (e) { /* noop */ }
+    sel.addEventListener('change', () => {
+      try { localStorage.setItem('pd_ai_model', sel.value); } catch (e) { /* noop */ }
+    });
+  }
 
   /* Map a PdApiError code to the matching degraded panel. */
   function showAiDegrade(code) {
@@ -639,13 +885,31 @@
 
   async function runAiPreview() {
     const text = ($('#ai-text') && $('#ai-text').value || '').trim();
-    if (!text) {
-      if (window.toast) window.toast('請先貼上對帳單文字', 'fail');
+    if (!text && !aiImages.length) {
+      if (window.toast) window.toast('請貼上對帳單文字或上傳截圖', 'fail');
       return;
     }
+    /* Resolve the per-run model. If a non-vision model is chosen WITH images attached,
+       fall back to 自動 (the vision role chain) + show the inline hint — this keeps the
+       frontend consistent with the server rule (which 400s a non-vision alias + images),
+       so we never send that invalid combination. */
+    const sel = $('#ai-model-select');
+    let modelAlias = sel ? sel.value : '';
+    const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
+    const modelIsVision = !!(opt && opt.dataset && opt.dataset.vision);
+    const hint = $('#ai-model-hint');
+    if (modelAlias && aiImages.length && !modelIsVision) {
+      modelAlias = '';
+      if (hint) hint.hidden = false;
+    } else if (hint) {
+      hint.hidden = true;
+    }
+    const payload = { text: text };
+    if (aiImages.length) payload.images = aiImages.map((im) => im.dataUrl);
+    if (modelAlias) payload.model_alias = modelAlias;
     let resp;
     try {
-      resp = await api.post('/api/input/ai/preview', { text: text });
+      resp = await api.post('/api/input/ai/preview', payload);
     } catch (err) {
       /* graceful degradation: 402 額度 / 409 未啟用 / 503 不可用 -> degraded panel + toast */
       if (err && (err.status === 402 || err.status === 409 || err.status === 503)) {
@@ -953,14 +1217,7 @@
   }
 
   boot();
-
-  /* AI 截圖拖放區：Vision 解析尚未開通 — 誠實提示（CSV 拖放區已是真上傳，見 initCsv） */
-  (function () {
-    const dz = document.getElementById('ai-dropzone');
-    if (!dz) return;
-    dz.style.cursor = 'pointer';
-    dz.addEventListener('click', () => {
-      if (window.toast) window.toast('截圖解析尚未開通', 'fail', 'Vision 模型解析將於 AI 功能開通時提供 — 目前請貼上文字解析');
-    });
-  })();
+  /* NOTE (FU-D20, 2026-07-17): the old "截圖解析尚未開通" AI-dropzone stub is retired — the
+     dropzone is now a REAL screenshot intake wired in initAi()/initAiImages() (click /
+     drag-drop / clipboard-paste → vision parse via /api/input/ai/preview). */
 })();

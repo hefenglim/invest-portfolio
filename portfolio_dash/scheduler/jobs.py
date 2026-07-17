@@ -15,6 +15,7 @@ from portfolio_dash.llm_insight import alerts_bridge
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.ops import notify_dispatch
 from portfolio_dash.pricing import datasources_store, ingest
+from portfolio_dash.pricing.benchmarks import benchmark_refs
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
 from portfolio_dash.pricing.refresh import (
@@ -24,6 +25,7 @@ from portfolio_dash.pricing.refresh import (
     refresh_quotes,
 )
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
+from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.clock import app_now
@@ -320,12 +322,34 @@ def quotes_my(conn: sqlite3.Connection, *, now: datetime) -> str:
     return refresh_quotes_for(conn, Market.MY, now=now)
 
 
+def _refresh_benchmark_history(conn: sqlite3.Connection, start: date, *, now: datetime) -> str:
+    """Refresh benchmark index history (FU-D27) — NEVER blocks instrument refresh.
+
+    Benchmarks are fetched via the SAME ``registry.fetch_quote_history`` path as
+    instruments (their refs route correctly through ``yf_symbol``) and stored under their
+    stable ``prices.instrument`` keys (they are not registered instruments). A benchmark
+    fetch failure degrades silently (logged + summarized) so a bad index fetch can never
+    fail the daily instrument history job.
+    """
+    try:
+        summary = refresh_history(conn, default_registry(conn), benchmark_refs(), start, now=now)
+        return _summarize(summary)
+    except Exception as exc:  # noqa: BLE001 - benchmark fetch must never block instrument refresh
+        logger.warning("benchmark history refresh failed: %s", exc)
+        return "error"
+
+
 def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
-    """Backfill a recent history window for all instruments (deep backfill is manual)."""
+    """Backfill a recent history window for all instruments + benchmarks (FU-D27).
+
+    Deep backfill is manual; this is the recent-window sweep. Benchmarks share the same
+    7-day window and degrade silently.
+    """
     instruments, _ = build_worklist(conn, None)
     start = (now - timedelta(days=_HISTORY_LOOKBACK_DAYS)).date()
     summary = refresh_history(conn, default_registry(conn), instruments, start, now=now)
-    return _summarize(summary)
+    bench = _refresh_benchmark_history(conn, start, now=now)
+    return f"{_summarize(summary)} · benchmarks: {bench}"
 
 
 def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
@@ -583,7 +607,13 @@ def _alert_symbol(alert: Alert) -> str | None:
     """
     prefix = f"{alert.rule}:"
     if alert.id.startswith(prefix):
-        return alert.id[len(prefix):]
+        symbol = alert.id[len(prefix):]
+        # target_cross ids are 3-part (``target_cross:{sym}:low|high``) so per-leg events
+        # dedup independently — strip the leg suffix for the human-facing symbol (FU-D28).
+        for leg in (":low", ":high"):
+            if symbol.endswith(leg):
+                return symbol[: -len(leg)]
+        return symbol
     return None
 
 
@@ -598,7 +628,8 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     rules_seen: list[str] = []
     for alert in alerts:
         alerts_bridge.record_event(
-            conn, rule_id=alert.rule, symbol=_alert_symbol(alert), now=now
+            conn, rule_id=alert.rule, symbol=_alert_symbol(alert), now=now,
+            href=alert.href,  # FU-D17: stored so the push can carry a clickable deep link
         )
         if alert.rule not in rules_seen:
             rules_seen.append(alert.rule)
@@ -897,6 +928,23 @@ def earliest_ledger_flow(conn: sqlite3.Connection) -> date | None:
     return date.fromisoformat(min(dates)) if dates else None
 
 
+def _backfill_benchmarks(
+    conn: sqlite3.Connection, registry: Registry, start: date, *, now: datetime
+) -> str:
+    """Backfill benchmark index history from ``start`` (FU-D27) — silent-degrade.
+
+    Uses the shared ``registry`` (no second construction) and the same idempotent history
+    path as instruments. A benchmark failure is logged + summarized, never raised, so a bad
+    index backfill can never fail the whole-portfolio backfill job.
+    """
+    try:
+        summary = refresh_history(conn, registry, benchmark_refs(), start, now=now)
+        return _summarize(summary)
+    except Exception as exc:  # noqa: BLE001 - benchmark backfill must never fail the job
+        logger.warning("benchmark backfill failed: %s", exc)
+        return "error"
+
+
 def backfill_history_all(
     conn: sqlite3.Connection, *, now: datetime, days: int | None = None
 ) -> str:
@@ -916,7 +964,12 @@ def backfill_history_all(
     if days is not None:
         p_summary = refresh_history(conn, registry, instruments, default_start, now=now)
         f_summary = refresh_fx_history(conn, registry, fx_pairs, default_start, now=now)
-        return f"prices: {_summarize(p_summary)} · fx: {_summarize(f_summary)}"
+        # Benchmarks (FU-D27): uniform-window explicit-days runs use the same window.
+        b_summary = _backfill_benchmarks(conn, registry, default_start, now=now)
+        return (
+            f"prices: {_summarize(p_summary)} · fx: {_summarize(f_summary)} · "
+            f"benchmarks: {b_summary}"
+        )
 
     acq = earliest_acquisitions(conn)
     by_start: dict[date, list[InstrumentRef]] = {}
@@ -935,9 +988,13 @@ def backfill_history_all(
     flow = earliest_ledger_flow(conn)
     fx_start = min(default_start, flow) if flow is not None else default_start
     f_summary = refresh_fx_history(conn, registry, fx_pairs, fx_start, now=now)
+    # Benchmarks (FU-D27): no acquisition date — backfill from the earliest ledger flow
+    # (like the FX pairs) so the "all" TWR window has a benchmark on the portfolio's full
+    # span; the floor otherwise. Silent-degrade — a benchmark fetch never fails the job.
+    b_summary = _backfill_benchmarks(conn, registry, fx_start, now=now)
     return (
         f"prices: {_summarize(p_summary)} · fx(from {fx_start.isoformat()}): "
-        f"{_summarize(f_summary)}"
+        f"{_summarize(f_summary)} · benchmarks(from {fx_start.isoformat()}): {b_summary}"
     )
 
 

@@ -1,5 +1,8 @@
 """Input center API (spec 12): read context + manual/CSV/AI write paths (12a: context+manual)."""
 
+import base64
+import binascii
+import re
 import sqlite3
 from datetime import date, datetime
 from decimal import Decimal
@@ -16,9 +19,12 @@ from portfolio_dash.api.wire import div_model_wire, fee_rules_wire, issue_wire, 
 from portfolio_dash.data_ingestion.agents import ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.csv_import import (
+    DateAmbiguity,
     build_transaction_preview,
+    normalize_import_csv,
     write_transaction_row,
 )
+from portfolio_dash.data_ingestion.dateparse import FORMAT_IDS
 from portfolio_dash.data_ingestion.dividend_import import (
     build_dividend_preview,
     write_dividend_row,
@@ -27,6 +33,7 @@ from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.import_templates import (
+    DATE_COLUMN_BY_KIND,
     TEMPLATE_KINDS,
     render_import_template,
     template_filename,
@@ -49,6 +56,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
 from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
+from portfolio_dash.shared.llm_config import get_model
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
 
@@ -328,9 +336,30 @@ def _preview_wire(preview: ImportPreview) -> dict[str, Any]:
     return {"rows": rows, "summary": {"total": len(preview.rows), **counts}}
 
 
+def _date_ambiguity_wire(amb: DateAmbiguity) -> dict[str, Any]:
+    """Wire shape for a column-level date ambiguity (FU-D19) — the frontend chooser reads it."""
+    return {
+        "column": amb.column,
+        "samples": list(amb.samples),
+        "candidates": [
+            {"id": c.id, "label": c.label,
+             "example_in": c.example_in, "example_out": c.example_out}
+            for c in amb.candidates
+        ],
+    }
+
+
+def _bad_date_format(date_format: str | None) -> JSONResponse | None:
+    if date_format is not None and date_format not in FORMAT_IDS:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"未知 date_format: {date_format}", field="date_format"))
+    return None
+
+
 class ImportPreviewBody(BaseModel):
     kind: str
     csv_text: str
+    date_format: str | None = None  # FU-D19: pin the date parse (from the ambiguity chooser)
 
 
 @router.post("/import/preview")
@@ -339,13 +368,22 @@ def import_preview(body: ImportPreviewBody, conn: sqlite3.Connection = Depends(g
     if builder is None:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
-    return _preview_wire(builder(conn, body.csv_text))
+    if (bad := _bad_date_format(body.date_format)) is not None:
+        return bad
+    # FU-D19: canonicalize headers + resolve the date column to ISO before the ISO-only builder.
+    norm = normalize_import_csv(
+        body.csv_text, DATE_COLUMN_BY_KIND[body.kind], date_format=body.date_format)
+    wire = _preview_wire(builder(conn, norm.text))
+    if norm.ambiguity is not None:
+        wire["date_ambiguity"] = _date_ambiguity_wire(norm.ambiguity)
+    return wire
 
 
 class ImportCommitBody(BaseModel):
     kind: str
     csv_text: str
     ack_warnings: bool = False
+    date_format: str | None = None  # FU-D19: the chosen format carried through from preview
 
 
 @router.post("/import/commit")
@@ -355,7 +393,18 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
     if builder is None or writer is None:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
-    preview = builder(conn, body.csv_text)  # re-derive (re-validate vs current ledger)
+    if (bad := _bad_date_format(body.date_format)) is not None:
+        return bad
+    norm = normalize_import_csv(
+        body.csv_text, DATE_COLUMN_BY_KIND[body.kind], date_format=body.date_format)
+    if norm.ambiguity is not None:
+        # Never guess: an unresolved M/D-vs-D/M column cannot be committed. The frontend keeps
+        # the confirm disabled until a format is pinned; this is the defensive server gate.
+        content = error_body(
+            "date_ambiguity_unresolved", "日期格式不明確，請先選擇日期格式再寫入")
+        content["date_ambiguity"] = _date_ambiguity_wire(norm.ambiguity)
+        return JSONResponse(status_code=422, content=content)
+    preview = builder(conn, norm.text)  # re-derive (re-validate vs current ledger)
     has_warn = any((not r.has_hard_issue) and r.issues for r in preview.rows)
     if has_warn and not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
@@ -385,14 +434,63 @@ def import_template(kind: str = "transactions") -> Response:
     )
 
 
-# --- AI agents input: NL text -> preview + meta + commit CSV (12.4) ---
+# --- AI agents input: NL text (+ screenshots) -> preview + meta + commit CSV (12.4) ---
 
 _LLM_HTTP = {"budget_exceeded": 402, "ai_not_activated": 409,
              "llm_unavailable": 503, "llm_error": 503}
 
+# FU-D20 screenshot intake bounds. The server is the authority for these limits — the
+# frontend caps to 4 as a courtesy, but every rule below is re-checked here so a direct
+# API caller cannot bypass them. Magic-byte sniffing rejects a non-image payload before it
+# ever reaches the vision model (never trust the client-declared MIME).
+_AI_MAX_IMAGES = 4
+_AI_MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB decoded, per image
+_DATA_URI_PREFIX = re.compile(r"^data:image/[A-Za-z0-9.+-]+;base64,", re.IGNORECASE)
+
+
+def _sniff_image(data: bytes) -> bool:
+    """True when *data* opens with a PNG, JPEG, or WebP magic-byte signature."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+def _image_error(message: str) -> JSONResponse:
+    return JSONResponse(status_code=400, content=error_body(
+        "validation_error", message, field="images"))
+
+
+def _decode_ai_images(raw: list[str]) -> tuple[list[bytes], JSONResponse | None]:
+    """Decode + validate base64 (data-URI prefix tolerated) images.
+
+    Returns ``(decoded_bytes, None)`` on success or ``([], JSONResponse-400)`` on the first
+    violation: too many images, invalid base64, oversize, or a non-PNG/JPEG/WebP payload.
+    """
+    if len(raw) > _AI_MAX_IMAGES:
+        return [], _image_error(f"最多只能附上 {_AI_MAX_IMAGES} 張圖片")
+    out: list[bytes] = []
+    for item in raw:
+        b64 = re.sub(r"\s+", "", _DATA_URI_PREFIX.sub("", item.strip()))
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            return [], _image_error("圖片編碼無效（需為 base64 圖片）")
+        if len(data) > _AI_MAX_IMAGE_BYTES:
+            return [], _image_error("單張圖片不可超過 5 MB")
+        if not _sniff_image(data):
+            return [], _image_error("僅支援 PNG／JPEG／WebP 圖片")
+        out.append(data)
+    return out, None
+
 
 class AiBody(BaseModel):
-    text: str
+    text: str = ""
+    # base64 (data-URI prefix tolerated); ≤4 images, ≤5 MB decoded each, png/jpeg/webp only.
+    images: list[str] | None = None
+    # explicit per-run model alias; must name an ENABLED model (+ vision when images present).
+    model_alias: str | None = None
 
 
 @router.post("/input/ai/preview")
@@ -401,7 +499,27 @@ def ai_preview(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    result = ai_agents_input(conn, body.text, today=now.date())
+    images, bad = _decode_ai_images(body.images or [])
+    if bad is not None:
+        return bad
+    if not body.text.strip() and not images:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "請提供對帳單文字或至少一張截圖", field="text"))
+    if body.model_alias:
+        model = get_model(conn, body.model_alias)
+        if model is None or not model.enabled:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", f"指定的模型不存在或已停用：{body.model_alias}",
+                field="model_alias"))
+        # Consistent with the frontend rule: a non-vision model cannot read screenshots.
+        if images and not model.vision:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error",
+                "所選模型不支援影像，請改用支援影像的模型或改用「自動」", field="model_alias"))
+    result = ai_agents_input(
+        conn, body.text, today=now.date(),
+        images=images or None, model_alias=body.model_alias or None,
+    )
     for r in result.preview.rows:
         for issue in r.issues:
             if issue.kind in _LLM_HTTP:

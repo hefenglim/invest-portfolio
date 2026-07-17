@@ -47,6 +47,7 @@ from portfolio_dash.api.routers import (
     llm_settings,
     news,
     notify,
+    performance,
     prompts,
     rebates,
     scheduler,
@@ -259,6 +260,7 @@ def create_app() -> FastAPI:
     app.include_router(news.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
     app.include_router(notify.router, prefix="/api")
+    app.include_router(performance.router, prefix="/api")
     app.include_router(digest.router, prefix="/api")
     app.include_router(whatsnew.router, prefix="/api")
     if _WEB_DIR.is_dir():

@@ -146,7 +146,11 @@
     }, 0);
     var sigN = (p.signals_today || []).length;
     var counts = el('div', 'digest-counts');
-    counts.appendChild(_countLink('今日警示', alertN, 'settings.html#alerts'));
+    /* FU-D26: 今日警示 counts TODAY'S scheduled-scan alert events — a different statistic
+       from the top-right bell's live 即時狀態 snapshot. A tooltip states the scope (the
+       least-noisy option; the chip layout is unchanged). */
+    counts.appendChild(_countLink('今日警示', alertN, 'settings.html#alerts',
+      '今日排程掃描記錄的警示事件數（與右上角鈴鐺的即時狀態為不同統計）'));
     counts.appendChild(_countLink('今日訊號', sigN, 'instruments.html'));
     host.appendChild(counts);
 
@@ -171,9 +175,10 @@
     host.appendChild(el('div', 'digest-stamp', '產生於 ' + f.datetime(d.generated_at)));
   }
 
-  function _countLink(label, n, href) {
+  function _countLink(label, n, href, title) {
     var a = el('a', 'digest-count', label + ' ' + n);
     a.href = href;
+    if (title) a.title = title;
     return a;
   }
 

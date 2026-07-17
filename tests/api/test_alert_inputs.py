@@ -100,3 +100,34 @@ def test_full_engine_fires_consensus_change(conn: sqlite3.Connection) -> None:
     alerts = alert_inputs.compute_alerts_full(conn, now=NOW, reporting=Currency.TWD)
     cc = next(a for a in alerts if a.id == "consensus_change:TEST")
     assert cc.sev == "info"
+
+
+# --- FU-D28 target_cross feeding seam ----------------------------------------
+
+
+def test_assemble_feeds_target_levels_only_for_configured_symbols(
+    conn: sqlite3.Connection,
+) -> None:
+    # No target set -> the symbol is omitted from target_levels (the rule reads nothing).
+    from portfolio_dash.portfolio.dashboard import build_dashboard
+    _seed_declining_prices(conn)
+    data = build_dashboard(conn, now=NOW, reporting=Currency.TWD)
+    assert "TEST" not in alert_inputs.assemble(conn, data, now=NOW).target_levels
+    # Configure a floor above the latest declining price -> the level is fed with the price.
+    upsert_instrument(conn, Instrument(
+        symbol="TEST", market=Market.TW, quote_ccy=Currency.TWD, sector="Tech",
+        name="Test Co", board="TWSE", target_low=Decimal("95")))
+    lv = alert_inputs.assemble(conn, data, now=NOW).target_levels["TEST"]
+    assert lv.target_low == Decimal("95") and lv.target_high is None
+    assert lv.price is not None and lv.price < Decimal("95")  # latest close is well below 95
+
+
+def test_full_engine_fires_target_cross_from_real_price(conn: sqlite3.Connection) -> None:
+    _seed_declining_prices(conn)  # latest close ≈ 69 (100 - 259*0.12)
+    upsert_instrument(conn, Instrument(
+        symbol="TEST", market=Market.TW, quote_ccy=Currency.TWD, sector="Tech",
+        name="Test Co", board="TWSE", target_low=Decimal("95"), target_high=Decimal("200")))
+    alerts = alert_inputs.compute_alerts_full(conn, now=NOW, reporting=Currency.TWD)
+    # price far below the 95 floor -> the low leg fires; the 200 ceiling is untouched.
+    assert any(a.id == "target_cross:TEST:low" and a.sev == "warn" for a in alerts)
+    assert not any(a.id == "target_cross:TEST:high" for a in alerts)

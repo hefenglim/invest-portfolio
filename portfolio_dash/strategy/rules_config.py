@@ -39,6 +39,9 @@ class AlertRules(BaseModel):
     vol_spike: Rule
     rebalance_drift: Rule
     consensus_change: Rule
+    # FU-D28: target-price crossing. On/off only — the thresholds are PER-SYMBOL (the
+    # instruments table's target_low / target_high), edited on the 觀察清單 page, NOT here.
+    target_cross: Rule
 
 
 # id -> (default_value | None, unit | None, min | None, max | None); all numerics are strings.
@@ -66,6 +69,9 @@ RULE_META: dict[str, tuple[str | None, str | None, str | None, str | None]] = {
     # consensus_change: the rating-score worsening threshold (1=best..5=worst scale, so
     # "worse" = increase). The mean-target-price cut leg (−10%) is a fixed named constant.
     "consensus_change": ("0.5", "score", "0.1", "4"),
+    # target_cross (FU-D28): toggle-only (no numeric threshold) — the levels are per-symbol
+    # (instruments.target_low / target_high), edited on 觀察清單. Same shape as stale_price.
+    "target_cross": (None, None, None, None),
 }
 RULE_IDS = list(RULE_META)  # preserves order
 

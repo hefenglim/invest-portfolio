@@ -146,6 +146,65 @@ def test_cap_limits_events_per_run(conn: sqlite3.Connection) -> None:
     assert "5 送出" in d2
 
 
+# --- FU-D17: push deep links --------------------------------------------------
+
+
+class _CapturingSender:
+    """Records the (body, link) the dispatcher passes to the channel fan-out."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    def __call__(
+        self, channels: list[Any], title: str, body: str, severity: str, link: str | None
+    ) -> dict[str, str]:
+        self.calls.append((body, link))
+        return {ch.name: "ok" for ch in channels}
+
+
+def _set_base(conn: sqlite3.Connection, base: str) -> None:
+    cfg = notify.load_config(conn)
+    cfg.public_base_url = base
+    notify.save_config(conn, cfg, now=NOON)
+
+
+def test_deep_link_built_and_passed_when_base_configured(conn: sqlite3.Connection) -> None:
+    _enable_ntfy(conn)
+    _set_base(conn, "https://invest.example.com")
+    # record the event WITH its href, exactly as alert_scan now does.
+    alerts_bridge.record_event(
+        conn, rule_id="single_weight", symbol="2330", now=NOON, href="/symbol/2330"
+    )
+    sender = _CapturingSender()
+    notify_dispatch.dispatch_notifications(conn, now=NOON, sender=sender)
+    body, link = sender.calls[0]
+    assert link == "https://invest.example.com/index.html#sym=2330"
+    assert "請至儀表板查看詳情" not in body  # linked body drops the redundant tail
+
+
+def test_no_link_and_legacy_text_when_base_empty(conn: sqlite3.Connection) -> None:
+    _enable_ntfy(conn)  # default config → public_base_url == "" (deep links off)
+    alerts_bridge.record_event(
+        conn, rule_id="single_weight", symbol="2330", now=NOON, href="/symbol/2330"
+    )
+    sender = _CapturingSender()
+    notify_dispatch.dispatch_notifications(conn, now=NOON, sender=sender)
+    body, link = sender.calls[0]
+    assert link is None  # no base URL → no deep link
+    assert "請至儀表板查看詳情" in body  # byte-identical legacy text
+
+
+def test_link_falls_back_to_dashboard_for_hrefless_event(conn: sqlite3.Connection) -> None:
+    # a global/legacy event with no stored href still gets a dashboard deep link.
+    _enable_ntfy(conn)
+    _set_base(conn, "https://invest.example.com")
+    alerts_bridge.record_event(conn, rule_id="quota_low", symbol=None, now=NOON)  # no href
+    sender = _CapturingSender()
+    notify_dispatch.dispatch_notifications(conn, now=NOON, sender=sender)
+    _, link = sender.calls[0]
+    assert link == "https://invest.example.com/index.html"
+
+
 def test_signal_event_included_when_subscribed(conn: sqlite3.Connection) -> None:
     _enable_ntfy(conn)
     ev = _add_event(conn, "signal_trend", "2330")

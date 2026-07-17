@@ -327,19 +327,27 @@ def _signed_pct(pct: str) -> str:
     return f"{sign}{abs(q)}%"
 
 
-def push_text(kind: str, payload: dict[str, Any], *, now: datetime) -> tuple[str, str]:
+def push_text(
+    kind: str, payload: dict[str, Any], *, now: datetime, linked: bool = False
+) -> tuple[str, str]:
     """Compose the push ``(title, body)`` — counts + percentages + a jump hint ONLY.
 
     HARD RULE (B3-D4): the body contains NO currency amount. A unit test asserts this
     (regex guard). Kept module-public so that test can hit it directly.
+
+    When ``linked`` is True a clickable deep link WILL be attached by the channel
+    (FU-D17), so the redundant 「開啟儀表板查看」 hint is dropped. ``linked=False`` (the
+    default, taken whenever no public base URL is configured) keeps the byte-identical
+    legacy text.
     """
     md = now.strftime("%m/%d")
+    hint = "" if linked else "・開啟儀表板查看"
     if kind == "weekly":
         items = payload.get("items", [])
         body = (
-            f"本週待辦 {len(items)} 項・開啟儀表板查看"
+            f"本週待辦 {len(items)} 項{hint}"
             if items
-            else "本週無待辦事項・開啟儀表板查看"
+            else f"本週無待辦事項{hint}"
         )
         return f"週行動清單 {md}", body
     parts: list[str] = []
@@ -350,7 +358,8 @@ def push_text(kind: str, payload: dict[str, Any], *, now: datetime) -> tuple[str
     parts.append(f"上漲 {len(movers.get('up', []))}・下跌 {len(movers.get('down', []))}")
     parts.append(f"警示 {sum(int(a.get('count', 0)) for a in payload.get('alerts_today', []))}")
     parts.append(f"訊號 {len(payload.get('signals_today', []))}")
-    parts.append("開啟儀表板查看")
+    if not linked:
+        parts.append("開啟儀表板查看")
     return f"收盤摘要 {md}", "・".join(parts)
 
 
@@ -384,8 +393,11 @@ def _push(
         return "未訂閱"
     if notify.in_quiet_hours(cfg.quiet_hours, now):
         return "靜音時段略過推播"
-    title, body = push_text(kind, payload, now=now)
-    outcome = sender(channels, title, body, "info", None)
+    # FU-D17: link the digest push to the dashboard when a public base URL is configured
+    # (frontend_url(base, None) → base + "/index.html"; empty base → None ⇒ legacy text).
+    link = notify.frontend_url(cfg.public_base_url, None)
+    title, body = push_text(kind, payload, now=now, linked=link is not None)
+    outcome = sender(channels, title, body, "info", link)
     ok = sum(1 for v in outcome.values() if v == "ok")
     return f"推播 {ok}/{len(channels)} 通道"
 

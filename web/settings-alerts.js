@@ -41,7 +41,9 @@
     rebalance_drift: { name: '配置漂移', sev: 'risk', step: 1,
       desc: '有設目標的持股，現權重偏離目標超過此絕對帶寬或目標的 25%（Swedroe 5/25）時警示。' },
     consensus_change: { name: '分析師共識轉弱', sev: 'info', step: 0.1,
-      desc: '評級分數惡化達此值（1→5 制）或均值目標價下修逾 10%（對比 7 日前）時提示。' }
+      desc: '評級分數惡化達此值（1→5 制）或均值目標價下修逾 10%（對比 7 日前）時提示。' },
+    target_cross: { name: '目標價穿越', sev: 'warn',
+      desc: '個股現價跌破目標下限或突破目標上限時警示。目標價在「觀察清單」逐檔設定，此處僅可停用。' }
   };
 
   /* Unit conversion between the WIRE (backend native units) and the EDITOR input.
@@ -200,7 +202,8 @@
     { id: 'drawdown_from_peak', enabled: true, value: '0.20' },
     { id: 'vol_spike', enabled: true, value: '1.8' },
     { id: 'rebalance_drift', enabled: true, value: '0.05' },
-    { id: 'consensus_change', enabled: true, value: '0.5' }
+    { id: 'consensus_change', enabled: true, value: '0.5' },
+    { id: 'target_cross', enabled: true, value: null }
   ];
 
   async function resetRules() {

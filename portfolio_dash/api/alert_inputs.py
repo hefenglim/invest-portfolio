@@ -28,7 +28,7 @@ from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.portfolio.technicals import annualized_volatility, week52_position
 from portfolio_dash.pricing import consensus_source, snapshots_store
-from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.strategy import target_weights as tw
@@ -36,6 +36,7 @@ from portfolio_dash.strategy.alerts import (
     Alert,
     ConsensusDelta,
     SymbolMetric,
+    TargetLevels,
     account_display_names,
     compute_alerts_from,
 )
@@ -56,6 +57,7 @@ class AlertInputs:
     symbol_metrics: dict[str, SymbolMetric] = field(default_factory=dict)
     target_weights: dict[str, Decimal] = field(default_factory=dict)
     consensus_deltas: dict[str, ConsensusDelta] = field(default_factory=dict)
+    target_levels: dict[str, TargetLevels] = field(default_factory=dict)
 
 
 def _as_decimal(value: object) -> Decimal | None:
@@ -117,15 +119,20 @@ def assemble(
     Reuses the already-built ``data`` for the held set + current weights (no second dashboard
     build). Held = symbols carrying a live position; every REGISTERED symbol (held + watch)
     gets 52-week drawdown + consensus; vol is fed only for held symbols (vol_spike is
-    held-only).
+    held-only). ``target_cross`` (FU-D28) is fed the latest stored price + the instrument's
+    configured target band, but ONLY for symbols that actually carry a target (no target set →
+    the symbol is omitted, so the rule reads nothing to cross).
     """
-    registered = sorted({i.symbol for i in list_instruments(conn)})
+    instruments = sorted(list_instruments(conn), key=lambda i: i.symbol)
+    registered = [i.symbol for i in instruments]
     held = {h.symbol for h in data.holdings if h.shares > 0}
     end = now.date()
     start = end - timedelta(days=_HISTORY_DAYS)
 
     metrics: dict[str, SymbolMetric] = {}
-    for sym in registered:
+    levels: dict[str, TargetLevels] = {}
+    for inst in instruments:
+        sym = inst.symbol
         closes = [p.value for p in get_price_history(conn, sym, start, end)]
         w52 = week52_position(closes)
         is_held = sym in held
@@ -136,11 +143,22 @@ def assemble(
             vol_30d=annualized_volatility(closes, window=_VOL_SHORT) if is_held else None,
             vol_90d=annualized_volatility(closes, window=_VOL_LONG) if is_held else None,
         )
+        # target_cross: only symbols with a configured band are fed. The latest quote is the
+        # "現價" the rule compares (independent of the drawdown window — a stale price still
+        # crosses honestly; None only when NO price exists at all → silent).
+        if inst.target_low is not None or inst.target_high is not None:
+            latest = get_latest_price(conn, sym, now=now)
+            levels[sym] = TargetLevels(
+                price=latest.value if latest is not None else None,
+                target_low=inst.target_low,
+                target_high=inst.target_high,
+            )
 
     return AlertInputs(
         symbol_metrics=metrics,
         target_weights=tw.load_target_weights(conn),
         consensus_deltas=_consensus_deltas(conn, registered, now=now),
+        target_levels=levels,
     )
 
 
@@ -166,6 +184,7 @@ def compute_alerts_full(
         symbol_metrics=inputs.symbol_metrics,
         target_weights=inputs.target_weights,
         consensus_deltas=inputs.consensus_deltas,
+        target_levels=inputs.target_levels,
     )
 
 

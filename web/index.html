@@ -73,18 +73,42 @@
   <div class="row-trend" data-screen-label="趨勢與洞察">
   <section class="panel trend-panel" data-screen-label="趨勢圖">
     <div class="panel-head">
-      <h2 class="panel-title">總市值 vs 累計淨投入</h2>
-      <span class="panel-sub">TWD・日線</span>
+      <h2 class="panel-title" id="trend-title">總市值 vs 累計淨投入</h2>
+      <span class="panel-sub" id="trend-sub">TWD・日線</span>
+      <span class="panel-sub" id="trend-networth" hidden="hidden"></span>
       <span class="trend-note" id="trend-note" hidden="hidden"><span class="dot"></span>○ 標記＝部分標的當日無價格</span>
       <span class="spacer"></span>
-      <div class="range-group">
+      <div class="range-group" id="trend-mode" role="tablist" aria-label="趨勢圖模式">
+        <button class="range-btn active" type="button" data-mode="value">市值</button>
+        <button class="range-btn" type="button" data-mode="twr">績效比較</button>
+      </div>
+      <div class="range-group" id="value-ranges">
         <button class="range-btn" type="button" data-range="1">1M</button>
         <button class="range-btn" type="button" data-range="3">3M</button>
         <button class="range-btn" type="button" data-range="6">6M</button>
         <button class="range-btn active" type="button" data-range="all">全部</button>
       </div>
+      <div id="twr-controls" hidden="hidden"
+           style="display:flex; gap:8px; align-items:center;">
+        <select id="twr-benchmark" aria-label="比較基準"
+                style="font-size:11px; font-family:var(--font-num); padding:2px 6px;
+                       border-radius:var(--radius-sm); border:1px solid var(--border);
+                       background:var(--panel-2); color:var(--text-2); cursor:pointer;">
+          <option value="0050">元大台灣50</option>
+          <option value="sp500">S&amp;P 500</option>
+        </select>
+        <div class="range-group" id="twr-windows">
+          <button class="range-btn" type="button" data-win="1y">1年</button>
+          <button class="range-btn active" type="button" data-win="3y">3年</button>
+          <button class="range-btn" type="button" data-win="all">全部</button>
+        </div>
+      </div>
     </div>
     <div id="trend-chart"></div>
+    <div id="twr-chart" hidden="hidden" style="width:100%; height:360px; max-width:100%;"></div>
+    <div id="twr-caption" hidden="hidden"
+         style="font-size:11px; color:var(--text-3); padding:6px 2px 0;
+                font-family:var(--font-num);"></div>
   </section>
   <section class="panel insights-panel" data-screen-label="AI 洞察">
     <div class="panel-head">

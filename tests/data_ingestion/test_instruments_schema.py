@@ -30,10 +30,24 @@ def test_instrument_new_fields_default(conn: sqlite3.Connection) -> None:
 def test_instrument_fields_round_trip(conn: sqlite3.Connection) -> None:
     inst = Instrument(symbol="0056", market=Market.TW, quote_ccy=Currency.TWD,
                       sector="ETF", name="高股息", board="TWSE",
-                      target_low=Decimal("36.50"), is_etf=True)
+                      target_low=Decimal("36.50"), target_high=Decimal("42.80"), is_etf=True)
     upsert_instrument(conn, inst)
     got = get_instrument(conn, "0056")
     assert got is not None and got.target_low == Decimal("36.50") and got.is_etf is True
+    assert got.target_high == Decimal("42.80")
+
+
+def test_instrument_target_high_defaults_none_and_clears(conn: sqlite3.Connection) -> None:
+    # FU-D28: target_high is optional and independently clearable (upsert writes None).
+    inst = Instrument(symbol="2454", market=Market.TW, quote_ccy=Currency.TWD,
+                      sector="Semis", name="MediaTek", board="TWSE",
+                      target_high=Decimal("1200"))
+    upsert_instrument(conn, inst)
+    got = get_instrument(conn, "2454")
+    assert got is not None and got.target_low is None and got.target_high == Decimal("1200")
+    upsert_instrument(conn, got.model_copy(update={"target_high": None}))
+    cleared = get_instrument(conn, "2454")
+    assert cleared is not None and cleared.target_high is None
 
 
 def test_register_sets_board_status_unresolved_for_tw_without_board(

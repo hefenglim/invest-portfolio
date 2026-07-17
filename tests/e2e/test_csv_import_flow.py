@@ -147,8 +147,67 @@ def test_csv_template_download_serves_csv(
     path = download.path()
     assert path is not None
     text = path.read_text(encoding="utf-8-sig")  # utf-8-sig strips the Excel BOM
-    assert text.split("\r\n")[0].startswith("account,symbol,side,date,shares,price")
+    # FU-D19: the header now annotates the date column with its ISO format.
+    assert text.split("\r\n")[0].startswith("account,symbol,side,date(YYYY-MM-DD),shares,price")
 
     assert not console_errors and not page_errors, (
         f"template download: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_csv_ambiguous_date_shows_chooser_then_commits(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """FU-D19: pasting a CSV whose date column is genuinely ambiguous (M/D vs D/M) must NOT be
+    guessed — the chooser appears with the confirm held disabled; picking a format resolves the
+    preview and the commit then lands."""
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    before = _shares_of(_get_json(base, "/api/dashboard"), "2330")
+    assert before is not None and Decimal(before) == Decimal("1000")
+
+    _open_csv_tab(page, base)
+
+    # 3/4 and 5/6 read differently as M/D vs D/M -> ambiguous, the backend refuses to guess.
+    ambiguous = (
+        "account,symbol,side,date,shares,price\r\n"
+        "tw_broker,2330,buy,3/4/2026,100,600\r\n"
+        "tw_broker,2330,buy,5/6/2026,100,600"
+    )
+    with page.expect_response("**/api/import/preview") as pv:
+        page.fill("#csv-paste", ambiguous)
+    assert pv.value.status == 200
+    # the chooser surfaces and the confirm is held disabled (no guess path).
+    page.wait_for_selector("#csv-datefmt", state="visible")
+    page.wait_for_function(
+        "() => { const b = document.querySelector('#csv-confirm'); return b && b.disabled; }"
+    )
+    # both interpretations are offered.
+    opts = page.eval_on_selector_all(
+        "#csv-datefmt-select option", "els => els.map(o => o.value)"
+    )
+    assert "mdy" in opts and "dmy" in opts
+
+    # pick D/M/YYYY -> re-preview resolves, chooser hides, confirm enables.
+    with page.expect_response("**/api/import/preview") as pv2:
+        page.select_option("#csv-datefmt-select", "dmy")
+    assert pv2.value.status == 200
+    page.wait_for_selector("#csv-datefmt", state="hidden")
+    page.wait_for_function(
+        "() => { const b = document.querySelector('#csv-confirm'); return b && !b.disabled; }"
+    )
+
+    with page.expect_response("**/api/import/commit") as cm:
+        page.click("#csv-confirm")
+    assert cm.value.status == 200
+    page.wait_for_selector("#csv-result", state="visible")
+
+    after = _shares_of(_get_json(base, "/api/dashboard"), "2330")
+    assert after is not None and Decimal(after) == Decimal("1200")  # 1000 + 100 + 100
+
+    assert not console_errors and not page_errors, (
+        f"CSV ambiguous-date flow: console={console_errors!r} page={page_errors!r}"
     )

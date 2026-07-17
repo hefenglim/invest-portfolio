@@ -1,12 +1,22 @@
-"""Transaction CSV importer: parse → validate → fee-compute → preview/commit."""
+"""Transaction CSV importer: parse → validate → fee-compute → preview/commit.
+
+Also hosts the SHARED import-seam helpers (FU-D19) used by every kind's importer via the
+router: :func:`canonical_header` (strip a template annotation from a column name) and
+:func:`normalize_import_csv` (canonicalize headers + resolve the date column to ISO, refusing
+to guess an ambiguous M/D-vs-D/M column).  The per-kind builders stay ISO-only; the router
+normalizes first, so annotated templates and Excel-reformatted dates parse through every kind.
+"""
 
 import csv
 import io
+import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
+from portfolio_dash.data_ingestion.dateparse import DateCandidate, resolve_date_column
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
@@ -24,6 +34,79 @@ TRANSACTION_COLUMNS: list[str] = [
     "account", "symbol", "side", "date", "shares", "price",
     "fee", "tax", "daytrade", "note",
 ]
+
+# A column-name annotation from the downloadable template — half- or full-width parentheses,
+# e.g. ``date(YYYY-MM-DD)`` / ``fee（選填）``. Stripped so annotated templates parse like plain.
+_ANNOTATION_RE = re.compile(r"[(（][^)）]*[)）]")
+
+
+def canonical_header(name: str) -> str:
+    """Canonical column key: drop any parenthetical annotation (half/full-width) + surrounding
+    whitespace, then lowercase.  ``date(YYYY-MM-DD)`` -> ``date``, ``fee（選填）`` -> ``fee``, a
+    leading BOM + ``Account`` -> ``account``; a plain header is returned unchanged (byte-clean
+    templates stay byte-identical).  Applied at the import seam so annotated templates and
+    hand-typed casing both match the parsers' canonical column names."""
+    return _ANNOTATION_RE.sub("", name).lstrip("\ufeff").strip().lower()
+
+
+@dataclass(frozen=True)
+class DateAmbiguity:
+    """A column-level date ambiguity the user must resolve before any write (FU-D19)."""
+
+    column: str
+    samples: list[str]
+    candidates: list[DateCandidate]
+
+
+@dataclass(frozen=True)
+class NormalizedImport:
+    """Result of :func:`normalize_import_csv`: rewritten CSV text + any date ambiguity."""
+
+    text: str
+    ambiguity: DateAmbiguity | None
+
+
+def normalize_import_csv(
+    csv_text: str, date_col: str, *, date_format: str | None = None
+) -> NormalizedImport:
+    """Rewrite *csv_text* to canonical headers + ISO dates for the per-kind builder.
+
+    Headers are canonicalized (annotation + case stripped) so annotated templates parse; the
+    *date_col* is inferred at COLUMN level (:func:`dateparse.resolve_date_column`) and each cell
+    rewritten to ISO.  A genuine M/D-vs-D/M ambiguity is NOT guessed: ``ambiguity`` is returned
+    and the date cells are left as-is so the ISO-only builder errors each row until the caller
+    pins *date_format*.  A cell that does not parse under the resolved format is likewise left
+    as-is, so the builder reports the offending value per row (unchanged behaviour).
+
+    The AI path and the single-row forms already emit ISO -> the fast path leaves them intact.
+    """
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
+    fieldnames = reader.fieldnames
+    if not fieldnames:
+        return NormalizedImport(text=csv_text, ambiguity=None)  # header-only / empty: nothing to do
+    canon = [canonical_header(f) for f in fieldnames]
+    rows: list[dict[str, str]] = [
+        {canonical_header(k): (v or "").strip() for k, v in row.items() if k is not None}
+        for row in reader
+    ]
+
+    ambiguity: DateAmbiguity | None = None
+    if date_col in canon:
+        result = resolve_date_column([r.get(date_col, "") for r in rows], pinned=date_format)
+        if result.ambiguous:
+            ambiguity = DateAmbiguity(
+                column=date_col, samples=result.samples, candidates=result.candidates)
+        else:
+            for r, d in zip(rows, result.dates, strict=True):
+                if d is not None:
+                    r[date_col] = d.isoformat()
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf, fieldnames=canon, lineterminator="\r\n", extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return NormalizedImport(text=buf.getvalue(), ambiguity=ambiguity)
 
 
 def txn_preview_row(

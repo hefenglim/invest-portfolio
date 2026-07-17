@@ -157,6 +157,28 @@ def test_push_text_weekly_counts_only() -> None:
     assert body_empty == "本週無待辦事項・開啟儀表板查看"
 
 
+def test_push_text_daily_linked_drops_jump_hint() -> None:
+    # FU-D17: when a deep link will be attached, the redundant 「開啟儀表板查看」 hint is
+    # dropped; the substance (percentage + counts) stays and no amount ever appears.
+    payload = {
+        "day_change": {"portfolio_pct": "0.0123"},
+        "movers": {"up": [], "down": []},
+        "alerts_today": [{"rule_id": "x", "count": 2}],
+        "signals_today": [],
+    }
+    _, body = ds.push_text("daily", payload, now=NOW, linked=True)
+    assert "開啟儀表板查看" not in body
+    assert "組合 +1.23%" in body and "警示 2" in body
+    assert not _AMOUNT_RE.search(body)
+
+
+def test_push_text_weekly_linked_drops_jump_hint() -> None:
+    _, body_full = ds.push_text("weekly", {"items": [1, 2]}, now=NOW, linked=True)
+    assert body_full == "本週待辦 2 項"
+    _, body_empty = ds.push_text("weekly", {"items": []}, now=NOW, linked=True)
+    assert body_empty == "本週無待辦事項"
+
+
 # --- config seed / backfill + upsert idempotency ------------------------------
 
 
@@ -388,6 +410,26 @@ def test_push_dispatches_when_subscribed(golden_db: sqlite3.Connection) -> None:
     assert calls, "the digest push must fire when a channel is enabled + subscribed"
     assert "推播" in summary
     assert not _AMOUNT_RE.search(calls[0][1])  # dispatched body carries no amount
+
+
+def test_push_links_to_dashboard_when_base_configured(golden_db: sqlite3.Connection) -> None:
+    # FU-D17: a configured public base URL → the daily push links to the dashboard and the
+    # 「開啟儀表板查看」 hint is dropped from the body.
+    _protect(golden_db)
+    _enable_ntfy(golden_db)
+    cfg = notify.load_config(golden_db)
+    cfg.public_base_url = "https://invest.example.com"
+    notify.save_config(golden_db, cfg, now=GOLDEN_NOW)
+    captured: dict[str, str | None] = {}
+
+    def fake_sender(channels, title, body, severity, link):  # type: ignore[no-untyped-def]
+        captured["link"] = link
+        captured["body"] = body
+        return {ch.name: "ok" for ch in channels}
+
+    ds.run_digest_daily(golden_db, now=GOLDEN_NOW, sender=fake_sender)
+    assert captured["link"] == "https://invest.example.com/index.html"
+    assert "開啟儀表板查看" not in (captured["body"] or "")
 
 
 def test_push_suppressed_in_guest_mode(golden_db: sqlite3.Connection) -> None:

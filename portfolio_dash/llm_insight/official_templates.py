@@ -9,13 +9,50 @@ a strategy body the user then owns. Fresh installs seed the system prompt from h
 Content is Traditional Chinese by design (it is LLM- and user-facing); identifiers and
 comments stay English per the bilingual protocol. Every template carries a version tag
 so a future library update can offer "official has a newer version" upgrades. The
-master-role and AI-parse prompts are code-owned (``master.py`` / ``agents.py``) and are
-NOT user-editable, so they live outside this library.
+master-role prompt (``master.py``) and the AI-input parse prompt
+(:data:`AI_INPUT_PROMPT_BODY`, below) are code-owned and NOT user-editable — the
+AI-parse prompt lives here as a versioned constant but is deliberately kept OUT of the
+user-facing :func:`library_wire` payload (``agents.py`` imports it and fills the dynamic
+``{accounts}`` / ``{today}`` / ``{text}`` placeholders).
 """
 
 from typing import TypedDict
 
-LIBRARY_VERSION = "official-v5 (2026-07-11)"
+LIBRARY_VERSION = "official-v6 (2026-07-17)"
+
+# --- AI transaction-input parse prompt (code-owned, FU-D20 2026-07-17) ---------------
+# Moved here from ``data_ingestion/agents.py::_PROMPT`` so all shipped prompt content has
+# a single home; still code-owned (NOT in the user-editable library dict). ``agents.py``
+# calls ``.format(accounts=…, today=…, text=…)`` — the ``{{`` / ``}}`` escape the literal
+# JSON braces so only those three placeholders interpolate. Extended for screenshots: an
+# attached broker-statement image may list MULTIPLE transactions, so the model must emit
+# one draft per visible row under the same JSON-only contract.
+AI_INPUT_PROMPT_VERSION = "v2"
+AI_INPUT_PROMPT_BODY = (
+    "<task>Extract stock transactions from the user's text and any attached statement\n"
+    "screenshot into JSON.</task>\n"
+    '<schema>{{"drafts": [{{"account_id","symbol","side":"BUY|SELL","date":"YYYY-MM-DD",\n'
+    '"shares","price","daytrade":false,"is_etf":false,"note"}}]}}</schema>\n'
+    "<accounts>{accounts}</accounts>\n"
+    "<today>{today}</today>\n"
+    "<example_input>在元大買 10 股 2330 @ 600</example_input>\n"
+    '<example_output>{{"drafts":[{{"account_id":"tw_broker","symbol":"2330","side":"BUY",\n'
+    '"date":"2026-06-01","shares":"10","price":"600"}}]}}</example_output>\n'
+    "<example_input>7/1 嘉信買 AAPL 5股 @210，隔天再買 5 股 @212</example_input>\n"
+    '<example_output>{{"drafts":[{{"account_id":"schwab","symbol":"AAPL","side":"BUY",\n'
+    '"date":"2026-07-01","shares":"5","price":"210"}},{{"account_id":"schwab",\n'
+    '"symbol":"AAPL","side":"BUY","date":"2026-07-02","shares":"5","price":"212"}}]}}\n'
+    "</example_output>\n"
+    "<rules>Return JSON only, no prose. account_id MUST be one of the ids listed in\n"
+    "<accounts> (match the user's broker wording to the account name); never invent\n"
+    "an id. Dates resolve against <today>: a month/day without a year means the most\n"
+    "recent PAST occurrence (a trade date is never in the future); relative words\n"
+    "(今天/昨天/上週五) resolve from <today>. One draft per transaction — text may\n"
+    "contain several. An attached screenshot is a broker statement that may list\n"
+    "MULTIPLE transactions: read every visible row and emit one draft per row; the\n"
+    "same JSON-only contract applies to text and images alike.</rules>\n"
+    "<user_text>{text}</user_text>"
+)
 
 # The news-organizer system prompt (batch ④): the default LLM turns a fetched article's
 # text into a structured, faithful summary. Editable by the user (news settings), with a

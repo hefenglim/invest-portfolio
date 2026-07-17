@@ -15,15 +15,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.data_ingestion.csv_import import (
-    TRANSACTION_COLUMNS,
     build_transaction_preview,
+    normalize_import_csv,
 )
 from portfolio_dash.data_ingestion.dividend_import import build_dividend_preview
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview
 from portfolio_dash.data_ingestion.import_templates import (
+    DATE_COLUMN_BY_KIND,
     TEMPLATE_KINDS,
+    annotated_columns,
     render_import_template,
-    template_columns,
 )
 from portfolio_dash.data_ingestion.opening_import import build_opening_preview
 from portfolio_dash.data_ingestion.preview import ImportPreview
@@ -39,6 +40,13 @@ _BUILDERS = {
     "fx": build_fx_preview,
     "openings": build_opening_preview,
 }
+
+
+def _built(kind: str, conn: sqlite3.Connection, text: str) -> ImportPreview:
+    """Parse *text* the way the runtime does: normalize (canonical headers + ISO dates) at the
+    import seam, then hand the clean CSV to the kind's ISO-only builder."""
+    norm = normalize_import_csv(text, DATE_COLUMN_BY_KIND[kind])
+    return _BUILDERS[kind](conn, norm.text)
 
 
 @pytest.fixture
@@ -68,15 +76,27 @@ def test_template_endpoint_shape(api_client: TestClient, kind: str) -> None:
     assert text.startswith(_BOM)  # Excel-friendly BOM so Chinese `note` opens cleanly
     assert "\r\n" in text  # CRLF line endings (reconciliation-grade, matches export)
     header_line = text[len(_BOM):].split("\r\n")[0]
-    assert header_line == ",".join(template_columns(kind))
+    # FU-D19: the rendered header carries annotations (date format + 選填 markers).
+    assert header_line == ",".join(annotated_columns(kind))
     assert f"import_template_{kind}.csv" in r.headers["content-disposition"]
+
+
+def test_template_header_carries_date_and_optional_annotations() -> None:
+    txn = annotated_columns("transactions")
+    assert "date(YYYY-MM-DD)" in txn
+    assert "fee(選填)" in txn and "note(選填)" in txn
+    # openings annotates the build_date column, not `date`.
+    assert "build_date(YYYY-MM-DD)" in annotated_columns("openings")
+    # fx has no optional columns -> no 選填 markers, but still the date hint.
+    assert "date(YYYY-MM-DD)" in annotated_columns("fx")
+    assert not any("選填" in c for c in annotated_columns("fx"))
 
 
 def test_template_endpoint_default_kind_is_transactions(api_client: TestClient) -> None:
     r = api_client.get("/api/import/template")
     assert r.status_code == 200
     body = r.content.decode("utf-8")[len(_BOM):]
-    assert body.split("\r\n")[0] == ",".join(TRANSACTION_COLUMNS)
+    assert body.split("\r\n")[0] == ",".join(annotated_columns("transactions"))
 
 
 def test_template_endpoint_unknown_kind_400(api_client: TestClient) -> None:
@@ -95,7 +115,8 @@ def _issue_kinds(preview: ImportPreview) -> list[str]:
 def test_template_roundtrips_through_real_builder(
     template_conn: sqlite3.Connection, kind: str
 ) -> None:
-    preview = _BUILDERS[kind](template_conn, render_import_template(kind))
+    # FU-D19: the ANNOTATED template must round-trip through the real seam (normalize -> builder).
+    preview = _built(kind, template_conn, render_import_template(kind))
     assert preview.rows, f"{kind}: template produced no data rows"
     kinds = _issue_kinds(preview)
     # Soft warnings (duplicate / sell-exceeds / fuzzy) would be acceptable; a parse_error or
@@ -106,8 +127,8 @@ def test_template_roundtrips_through_real_builder(
 
 def test_transactions_template_is_fully_clean(template_conn: sqlite3.Connection) -> None:
     """With every referenced symbol registered, the six example rows carry NO hard issue —
-    the template is directly writable, not just parseable."""
-    preview = build_transaction_preview(template_conn, render_import_template("transactions"))
+    the annotated template is directly writable, not just parseable."""
+    preview = _built("transactions", template_conn, render_import_template("transactions"))
     assert len(preview.rows) == 6
     hard = [(r.index, [i.kind for i in r.issues]) for r in preview.rows if r.has_hard_issue]
     assert not hard, f"unexpected hard-issue rows: {hard}"
@@ -115,9 +136,9 @@ def test_transactions_template_is_fully_clean(template_conn: sqlite3.Connection)
 
 def test_template_with_bom_prefix_still_parses(template_conn: sqlite3.Connection) -> None:
     """The served bytes carry a BOM; a download->re-upload/paste round-trip must not break
-    the header (the builders lstrip a leading BOM)."""
-    preview = build_transaction_preview(
-        template_conn, _BOM + render_import_template("transactions")
+    the header (the normalize seam lstrips a leading BOM before canonicalizing)."""
+    preview = _built(
+        "transactions", template_conn, _BOM + render_import_template("transactions")
     )
     assert len(preview.rows) == 6
     assert "parse_error" not in _issue_kinds(preview)

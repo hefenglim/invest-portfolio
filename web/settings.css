@@ -443,7 +443,9 @@ table.vars-table td { height: auto; padding: 6px 8px; }
 .status-tag.hold { color: var(--accent); border-color: rgba(88, 166, 221, 0.4); background: var(--accent-soft); }
 .status-tag.watch { color: var(--text-2); }
 
-/* sticky save bar */
+/* sticky save bar — FULLY OPAQUE (FU-D26.1): the earlier translucent color-mix + blur
+   let underlying scrolled text bleed through. Solid var(--panel) + a top-edge shadow so
+   the bar reads as a distinct layer above the content it floats over. Stays sticky. */
 .save-bar {
   position: sticky;
   bottom: 0;
@@ -452,10 +454,10 @@ table.vars-table td { height: auto; padding: 6px 8px; }
   align-items: center;
   gap: 12px;
   padding: 11px var(--pad);
-  background: color-mix(in srgb, var(--panel) 92%, transparent);
-  backdrop-filter: blur(6px);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  box-shadow: 0 -8px 20px -10px rgba(0, 0, 0, 0.4);
 }
 .save-bar .note { font-size: 11px; color: var(--text-3); flex: 1; }
 

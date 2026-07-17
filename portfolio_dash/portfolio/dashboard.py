@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
+    list_cash_movements,
     list_dividends,
     list_fx_conversions,
     list_instruments,
@@ -24,6 +25,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.forex.fx_pnl import compute_fx_summary
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.allocation import combined_view, sector_allocation
+from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard_models import (
     DashboardData,
@@ -39,6 +41,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     TrendSeries,
 )
 from portfolio_dash.portfolio.dividends import project_dividends
+from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.pnl import value_holdings
 from portfolio_dash.portfolio.results import CombinedView, ReturnSummary, SectorAllocation
 from portfolio_dash.portfolio.returns import total_return, xirr_reporting
@@ -198,14 +201,17 @@ def build_dashboard(
         )
 
     xirr_value: Decimal | None = None
+    xirr_window_days: int | None = None
     xirr_reason: str | None = None
     if has_oversold:
         # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
         xirr_reason = "ledger has an oversold (賣超) position — 待釐清"
     else:
         try:
-            xirr_value = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
-                                        price_map, resolver.rate, as_of, reporting)
+            outcome = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
+                                     price_map, resolver.rate, as_of, reporting)
+            xirr_value = outcome.rate
+            xirr_window_days = outcome.window_days
         except KeyError as exc:
             xirr_reason = str(exc).strip("'\"")
     if xirr_value is None and xirr_reason is None:
@@ -310,6 +316,32 @@ def build_dashboard(
                                    fx_history, reporting, end=as_of)
         if not trend.available:
             trend_reason = "missing FX history for a ledger flow date"
+        else:
+            # 9b. Total net worth (FU-D29 / deferred C8): compose the UNCHANGED trend
+            # with a daily cash series. Cash is read from the SAME Stored rows the 資金管理
+            # /api/cash view uses (unregistered symbols skipped inside cash_balances,
+            # exactly as there), converted at carry-forward FX per day. Display-only
+            # attribution — no money-of-record path is touched.
+            cash_movements = list_cash_movements(conn)
+            cash_txs = list_transactions(conn)
+            cash_divs = list_dividends(conn)
+            cash_convs = list_fx_conversions(conn)
+            cash_ccys = {
+                ccy for _acct, ccy in cash_balances(
+                    cash_movements, cash_convs, cash_txs, cash_divs, instruments)
+            }
+            cash_fx_history: FxHistory = {}
+            for ccy in cash_ccys:
+                if ccy == reporting:
+                    continue
+                for base, quote in ((ccy, reporting), (reporting, ccy)):
+                    rows = get_fx_history(conn, base, quote, _EPOCH, as_of)
+                    if rows:
+                        cash_fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
+            cash_by_date = daily_cash_series(
+                cash_movements, cash_convs, cash_txs, cash_divs, instruments,
+                cash_fx_history, reporting, end=as_of)
+            trend = compose_net_worth(trend, cash_by_date)
     else:
         trend = TrendSeries(points=[], reporting_currency=reporting, available=False)
         trend_reason = "no ledger events"
@@ -341,6 +373,7 @@ def build_dashboard(
         realized_total=realized_total,
         unrealized_total=unrealized_total,
         xirr=xirr_value,
+        xirr_window_days=xirr_window_days,
         fx_realized=fx_summary.reporting_realized_fx if fx_summary is not None else None,
         fx_unrealized=(fx_summary.reporting_unrealized_fx
                        if fx_summary is not None else None),

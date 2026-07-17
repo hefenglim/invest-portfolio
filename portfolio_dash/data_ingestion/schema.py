@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS instruments (
     sector TEXT, name TEXT, board TEXT,
     target_low TEXT, board_status TEXT NOT NULL DEFAULT 'resolved',
     is_etf INTEGER NOT NULL DEFAULT 0,
-    archived INTEGER NOT NULL DEFAULT 0
+    archived INTEGER NOT NULL DEFAULT 0,
+    target_high TEXT
 );
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,5 +73,8 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # archived (FU-D13): a closed-with-history symbol the user stopped tracking. Excluded
     # from quote/signal/news fetch scopes but stays REGISTERED, so no money figure changes.
     _add_column_if_missing(conn, "instruments", "archived", "INTEGER NOT NULL DEFAULT 0")
+    # target_high (FU-D28): the price-alert CEILING, joining target_low (the floor). Both feed
+    # the target_cross rule; additive, so an existing DB migrates in without touching any row.
+    _add_column_if_missing(conn, "instruments", "target_high", "TEXT")
     _add_column_if_missing(conn, "transactions", "daytrade", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()

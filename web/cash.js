@@ -35,6 +35,7 @@
   let D = { balances: [], movements: [], negative_pools: [] };
   let accounts = [];  // from /api/input/context (id, name, ccy, settlement_ccy, funding_ccy)
   let cmKind = 'deposit';
+  let booted = false;  // FU-D25: gate pd-cash-tab re-renders until the first boot() populated D
 
   /* WPE (2026-07-07): movements ledger pages via the endpoint's limit/offset */
   const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
@@ -214,12 +215,43 @@
       tbody.appendChild(tr);
     });
     if (!(resp.rows || []).length) {
-      const tr = el('tr');
-      const td = el('td', 'hint', '此資金池尚無收支紀錄');
-      td.colSpan = combined ? 6 : 5;
-      tr.appendChild(td);
-      tbody.appendChild(tr);
+      tbody.appendChild(stmtEmptyRow('empty', combined));
     }
+  }
+
+  /* FU-D25 statement empty state — window.emptyState() glyph + one-line explanation, plus
+     a hint pointing back at the pools above. Two honest variants:
+       'pre'   — no pool chosen yet (initial / cleared);
+       'empty' — a pool is selected but the ledger has no rows.
+     Rendered inside a full-width <td> so the table structure (ids) is unchanged. */
+  function stmtEmptyRow(kind, combined) {
+    const tr = el('tr');
+    const td = el('td');
+    td.colSpan = combined ? 6 : 5;
+    let main;
+    let hint;
+    if (kind === 'pre') {
+      main = '尚未選擇資金池';
+      hint = '點擊上方任一資金池即可檢視該池收支明細與滾動餘額';
+    } else {
+      main = '此資金池尚無收支紀錄';
+      hint = '入金／出金、換匯或買賣收付都會列在這裡（點上方切換其他資金池）';
+    }
+    const es = window.emptyState ? window.emptyState(main) : el('div', 'empty-state', main);
+    es.appendChild(el('div', 'stmt-empty-hint', hint));
+    td.appendChild(es);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  /* Pre-selection state: no pool chosen yet -> show guidance, not a blank table. */
+  function renderStatementPre() {
+    const sub = $('#cash-stmt-sub');
+    if (sub) sub.textContent = '點帳戶名稱看全部幣別，或點某個幣別看單一資金池的收支明細與滾動餘額';
+    const ccyTh = $('#cash-stmt-ccy-th');
+    if (ccyTh) ccyTh.hidden = true;
+    const tbody = $('#cash-stmt-body');
+    if (tbody) tbody.replaceChildren(stmtEmptyRow('pre', false));
   }
 
   /* ---- statement exports: server-side reconciliation channel (匯出 CSV / 匯出報告) ----
@@ -537,7 +569,26 @@
     renderMovements();
     if (cmPager) cmPager.update({ offset: cmState.offset, totalCount: cmState.total });
     if (stmt.account) await loadStatement();  // keep the open statement fresh
+    else renderStatementPre();  // FU-D25: guidance instead of a blank statement table
+    booted = true;
   }
+
+  /* FU-D25: re-render the activated tab's section from cached state on every tab switch.
+     boot() already refetches + re-renders all sections eagerly (even while a tab is
+     display:none — this ECharts-free page has no measurement path that mis-sizes when
+     hidden), so this is a belt-and-braces re-render, not the source of freshness. */
+  function onCashTab(e) {
+    if (!booted) return;
+    const tab = e && e.detail;
+    if (tab === 'pools') {
+      renderCards();
+      if (!stmt.account) renderStatementPre();
+    } else if (tab === 'flows') {
+      renderMovements();
+    }
+    /* 'fx': the FX card is a pure input form — nothing to re-render. */
+  }
+  window.addEventListener('pd-cash-tab', onCashTab);
 
   (async function init() {
     try {

@@ -80,13 +80,37 @@ def test_ensure_tables_migrates_legacy_schema_without_notify_columns() -> None:
         )
         ab.ensure_tables(c)  # must not raise on the legacy shape
         cols = {r[1] for r in c.execute("PRAGMA table_info(alert_events)")}
-        assert {"notified_at", "notify_attempts"} <= cols
+        assert {"notified_at", "notify_attempts", "href"} <= cols  # href added too (FU-D17)
         indexes = {r[1] for r in c.execute("PRAGMA index_list(alert_events)")}
         assert "idx_alert_events_notified" in indexes
         row = c.execute(
-            "SELECT notified_at, notify_attempts FROM alert_events"
+            "SELECT notified_at, notify_attempts, href FROM alert_events"
         ).fetchone()
-        assert row == (None, 0)  # legacy row inherits honest defaults
+        assert row == (None, 0, None)  # legacy row inherits honest defaults
+    finally:
+        c.close()
+
+
+def test_ensure_tables_adds_href_to_post_3b_schema() -> None:
+    # FU-D17: a DB from the 3B era HAS notified_at/notify_attempts but no href. ensure_tables
+    # must add href additively without disturbing existing rows (fresh-DB fixtures can't see
+    # this migration ordering — seed the post-3B shape explicitly).
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    try:
+        c.execute(
+            "CREATE TABLE alert_events ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id TEXT NOT NULL, symbol TEXT,"
+            " fired_at TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,"
+            " notified_at TEXT, notify_attempts INTEGER NOT NULL DEFAULT 0)"
+        )
+        c.execute(
+            "INSERT INTO alert_events (rule_id, symbol, fired_at) VALUES ('fx_drift', 's', 'x')"
+        )
+        ab.ensure_tables(c)  # must not raise; adds href
+        cols = {r[1] for r in c.execute("PRAGMA table_info(alert_events)")}
+        assert "href" in cols
+        assert c.execute("SELECT href FROM alert_events").fetchone()["href"] is None
     finally:
         c.close()
 
@@ -102,6 +126,23 @@ def test_record_and_list_unconsumed_events(conn: sqlite3.Connection) -> None:
     assert {(e.rule_id, e.symbol) for e in events} == {
         ("fx_drift", "schwab"), ("single_weight", "2330"),
     }
+
+
+def test_record_event_stores_href_when_provided(conn: sqlite3.Connection) -> None:
+    # FU-D17: alert_scan passes each alert's frontend route so the push can deep-link.
+    eid = ab.record_event(
+        conn, rule_id="stale_price", symbol="2330", now=NOW, href="/symbol/2330"
+    )
+    row = conn.execute("SELECT href FROM alert_events WHERE id = ?", (eid,)).fetchone()
+    assert row["href"] == "/symbol/2330"
+
+
+def test_record_event_href_defaults_none(conn: sqlite3.Connection) -> None:
+    # a caller that does not supply an href (e.g. signal_scan, calibration_regression)
+    # records NULL — the push falls back to the dashboard deep link.
+    eid = ab.record_event(conn, rule_id="quota_low", symbol=None, now=NOW)
+    row = conn.execute("SELECT href FROM alert_events WHERE id = ?", (eid,)).fetchone()
+    assert row["href"] is None
 
 
 def test_record_event_is_idempotent_same_day(conn: sqlite3.Connection) -> None:

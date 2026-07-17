@@ -93,6 +93,10 @@ def _masked_wire(cfg: notify.NotifyConfig, *, guest: bool = False) -> dict[str, 
             "end": cfg.quiet_hours.end,
         },
         "subscriptions": dict(cfg.subscriptions),
+        # FU-D17: the public base URL is NOT a secret (it is the site's own address), so it
+        # is returned in full on both protected and guest reads — the frontend needs it to
+        # populate the deep-link field.
+        "public_base_url": cfg.public_base_url,
         "rule_catalog": [
             {"id": rid, "label": label, "severity": sev}
             for rid, label, sev in notify.RULE_CATALOG
@@ -146,6 +150,7 @@ class NotifyConfigIn(BaseModel):
     email: EmailIn | None = None
     quiet_hours: QuietIn | None = None
     subscriptions: dict[str, bool] | None = None
+    public_base_url: str | None = None  # FU-D17 (not a secret)
 
 
 def _resolve_secret(incoming: str | None, existing: str) -> str:
@@ -274,6 +279,12 @@ def put_notify_config(
             if rid in known:  # ignore junk keys; keep the map clean
                 cfg.subscriptions[rid] = bool(on)
 
+    if body.public_base_url is not None:
+        normalized = notify.normalize_base_url(body.public_base_url)
+        if normalized is None:  # neither empty nor http(s) → reject (never a bare host)
+            return _bad("站台公開網址需為 http(s) 開頭，或留空", "public_base_url")
+        cfg.public_base_url = normalized
+
     notify.save_config(conn, cfg, now=now)
     return _masked_wire(cfg)  # protected mode (guarded above) → full topic
 
@@ -307,13 +318,16 @@ async def test_notify(
             "ok": False,
             "detail": "error: 尚未設定必要欄位",
         }
+    # FU-D17: link the test message to the site when a public base URL is configured, so
+    # the owner verifies the whole deep-link path (empty ⇒ None ⇒ legacy link-free test).
+    link = cfg.public_base_url or None
     outcome = await run_in_threadpool(
         notify.dispatch,
         [channel],
         "portfolio-dash 測試通知",
         "這是一則測試訊息，收到代表通道設定正確。",
         "info",
-        None,
+        link,
     )
     result = outcome.get(body.channel, "error: unknown")
     return {"channel": body.channel, "ok": result == "ok", "detail": result}

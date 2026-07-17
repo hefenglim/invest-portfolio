@@ -61,7 +61,7 @@
         <button type="button" id="tab-csv">CSV 匯入</button>
         <button type="button" id="tab-ai">AI 輸入</button>
         <button type="button" id="tab-div">股利</button>
-        <button type="button" id="tab-fxopen">換匯＋期初</button>
+        <button type="button" id="tab-fxopen">期初庫存</button>
       </div>
     </div>
     <div class="input-body">
@@ -158,6 +158,13 @@
           </div>
         </div>
         <input type="file" id="csv-file-input" accept=".csv,text/csv" hidden="hidden"></input>
+        <!-- FU-D19: date-format chooser — shown only when the date column is genuinely ambiguous
+             (M/D vs D/M). No guess is made; the user picks, and the choice pins preview + commit. -->
+        <div class="datefmt-chooser" id="csv-datefmt" hidden="hidden"
+             style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0;padding:8px 10px;border:1px solid var(--warn,#c58a00);border-radius:6px;background:rgba(197,138,0,0.08);">
+          <span class="hint" style="font-weight:600;">偵測到日期格式不明確，請選擇正確的日期格式：</span>
+          <select class="input" id="csv-datefmt-select" style="max-width:100%;width:auto;"></select>
+        </div>
         <div class="ai-result-head"><span>解析預覽：<b class="num" id="csv-file"></b></span><span class="num" id="csv-counts"></span></div>
         <div class="table-wrap">
           <table class="data"><thead><tr><th></th><th>#</th><th>日期</th><th class="col-text">帳戶</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th class="col-text">狀態</th><th class="col-text">原因</th></tr></thead><tbody id="csv-body"></tbody></table>
@@ -171,10 +178,19 @@
         <div class="state-switch"><span>設計檢視：</span><span id="ai-states" style="display:flex;gap:6px;"></span></div>
         <div id="ai-normal">
           <div class="dc-grid" style="padding-bottom:0;">
-            <div class="field"><label>貼上對帳單文字…</label><textarea class="input" style="min-height:110px;" spellcheck="false"></textarea></div>
-            <div class="dropzone"><span class="glyph">⌗</span><span class="big">或上傳截圖</span></div>
+            <div class="field"><label for="ai-text">貼上對帳單文字…</label><textarea class="input" id="ai-text" style="min-height:110px;" spellcheck="false"></textarea></div>
+            <div class="dropzone" id="ai-dropzone"><span class="glyph">⌗</span><span class="big">上傳或拖放截圖，也可直接貼上圖片</span><span class="hint">PNG／JPEG／WebP，最多 4 張</span></div>
           </div>
-          <div class="ai-actions"><button class="btn btn-primary" id="ai-parse" type="button">解析</button></div>
+          <input type="file" id="ai-file-input" accept="image/*" multiple="multiple" hidden="hidden"></input>
+          <!-- FU-D20: attached-screenshot thumbnail strip (per-image ✕ remove) — built by input.js. -->
+          <div class="ai-images" id="ai-images" hidden="hidden" style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;"></div>
+          <div class="ai-actions" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <label for="ai-model-select" style="font-size:12px;color:var(--muted,#98a2b3);">模型</label>
+            <select class="select" id="ai-model-select" style="width:auto;max-width:100%;"><option value="">自動（角色預設）</option></select>
+            <span class="hint" id="ai-model-hint" hidden="hidden" style="color:var(--warn,#c58a00);">所選模型不支援影像，將改用影像角色鏈</span>
+            <span class="spacer" style="flex:1;"></span>
+            <button class="btn btn-primary" id="ai-parse" type="button">解析</button>
+          </div>
           <div class="ai-result-head"><span>解析來源：<b class="num" id="ai-source"></b></span><span>模型：<b class="num" id="ai-model"></b></span></div>
           <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th>費用</th><th>稅</th><th class="col-text">模型備註</th><th></th></tr></thead><tbody id="ai-body"></tbody></table></div>
           <div class="import-summary"><span class="spacer"></span><button class="btn btn-primary" id="ai-write-all" type="button">寫入全部勾選</button></div>
@@ -194,9 +210,9 @@
               <div class="field"><label for="d-date">日期</label><input class="input" id="d-date" type="date"></input></div>
             </div>
             <div id="d-tw" hidden="hidden"><div class="form-grid" style="margin-top:14px;">
-              <div class="field"><label>類型</label><div class="segmented"><button type="button" class="active">現金股利</button><button type="button">配股</button></div></div>
-              <div class="field"><label for="d-tw-gross">Gross（總額）</label><input class="input" id="d-tw-gross" type="number"></input></div>
-              <div class="field"><label for="d-tw-net">Net（淨入帳）</label><input class="input" id="d-tw-net" type="number"></input></div>
+              <div class="field"><label>類型</label><div class="segmented"><button type="button" id="d-type-cash" class="active">現金股利</button><button type="button" id="d-type-stock">配股</button></div></div>
+              <div class="field"><label id="d-tw-gross-label" for="d-tw-gross">Gross（總額）</label><input class="input" id="d-tw-gross" type="number"></input></div>
+              <div class="field" id="d-tw-net-field"><label for="d-tw-net">Net（淨入帳）</label><input class="input" id="d-tw-net" type="number"></input></div>
             </div></div>
             <div id="d-drip" hidden="hidden"><div class="form-grid" style="margin-top:14px;">
               <div class="field"><label for="d-drip-gross">Gross</label><input class="input" id="d-drip-gross" type="number" step="0.01"></input></div>
@@ -213,23 +229,10 @@
         </div>
       </div>
 
-      <!-- Tab: 換匯 + 期初 -->
+      <!-- Tab: 期初庫存 (換匯 moved to 資金管理 → 換匯中心, 2026-07-03; the orphaned FX card
+           here — zero JS bindings — was removed in FU-D22, 2026-07-17). -->
       <div class="mode-pane" id="pane-fxopen">
         <div class="two-stack">
-          <div class="stack-card"><h3>換匯</h3>
-            <div class="form-grid">
-              <div class="field"><label for="fx-account">帳戶</label><select class="select" id="fx-account"></select></div>
-              <div class="field"><label for="fx-date">日期</label><input class="input" id="fx-date" type="date"></input></div>
-              <div class="field"></div>
-              <div class="field"><label for="fx-from-ccy">賣出幣別</label><select class="select" id="fx-from-ccy"><option value="TWD" selected="selected">TWD</option><option value="USD">USD</option><option value="MYR">MYR</option></select></div>
-              <div class="field"><label for="fx-from-amt">賣出金額</label><input class="input" id="fx-from-amt" type="number" step="0.01"></input></div>
-              <div class="field"></div>
-              <div class="field"><label for="fx-to-ccy">買入幣別</label><select class="select" id="fx-to-ccy"><option value="TWD">TWD</option><option value="USD" selected="selected">USD</option><option value="MYR">MYR</option></select></div>
-              <div class="field"><label for="fx-to-amt">買入金額</label><input class="input" id="fx-to-amt" type="number" step="0.01"></input></div>
-            </div>
-            <div class="fx-implied"><span class="k">隱含匯率</span><span class="v num" id="fx-implied"></span></div>
-            <div class="form-actions"><button class="btn btn-primary" id="fx-confirm" type="button">確認寫入</button></div>
-          </div>
           <div class="stack-card"><h3>期初庫存</h3>
             <div class="form-grid">
               <div class="field"><label for="o-account">帳戶</label><select class="select" id="o-account"></select></div>
@@ -317,6 +320,7 @@
 <script src="pager.js?v=0.1.19"></script>
 <script src="export.js?v=0.1.19"></script>
 <script src="alerts.js?v=0.1.19"></script>
+<script src="inst-quickadd.js?v=0.1.19"></script>
 <script src="input.js?v=0.1.19"></script>
 <script src="ledger.js?v=0.1.19"></script>
 <script>
