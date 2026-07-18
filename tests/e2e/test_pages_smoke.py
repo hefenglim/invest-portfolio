@@ -84,6 +84,71 @@ def test_index_page_smoke(live_server: str, browser_page: Page) -> None:
     assert_page_ok(browser_page, live_server, "/index.html", root_selector=".kpi-card")
 
 
+@pytest.mark.e2e
+def test_dividend_income_card_smoke(live_server: str, browser_page: Page) -> None:
+    """股利收入 card (FU-D38) renders from the shared /api/dashboard payload.
+
+    dividends-card.js is a self-contained additive surface: it awaits the SAME
+    window.pdDashboard promise as app.js/charts.js and renders four blocks from the
+    ALREADY-SERVED aggregates (dividends.ttm_net / dividends.by_year /
+    dividend_projection / ex_dividend_calendar) — no client money math.
+
+    The session golden DB (_seed_golden) seeds ONE cash dividend (2330 5,000 TWD, dated
+    within the trailing 12 months), no dividend events, and no declared projection — so
+    the card exercises the mixed variant: (a) the TTM headline renders its single TWD
+    per-currency stat block (>=1 .dvc-stat); (b) by_year has one year (2026, the partial
+    current year) so the lazy ECharts bar chart mounts a <canvas> inside #dvc-chart; (c)
+    dividend_projection.by_currency and ex_dividend_calendar are BOTH empty, so the
+    projection + calendar blocks render their honest .dvc-empty states (>=2), and the
+    projection block still carries its 預估・僅供參考 forecast badge. Asserts ZERO console +
+    ZERO page errors over the async render (an unhandled rejection or a Decimal-string
+    TypeError would fail it).
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")  # dashboard async render landed
+        # (a) TTM headline: the card booted off the shared promise and rendered its
+        # per-currency stat block(s) (>=1 — the golden seeds one TWD cash dividend).
+        page.wait_for_selector("#dividend-income-card .dvc-stat")
+        stats = page.query_selector_all("#dividend-income-card .dvc-stat")
+        assert len(stats) >= 1, f"expected >=1 TTM currency stat block, got {len(stats)}"
+        # (b) by_year present -> the lazy ECharts bar chart mounted a canvas.
+        page.wait_for_selector("#dvc-chart canvas")
+        # (c) empty golden projection + calendar -> honest empty states (>=2 .dvc-empty).
+        page.wait_for_selector("#dividend-income-card .dvc-empty")
+        empties = page.query_selector_all("#dividend-income-card .dvc-empty")
+        assert len(empties) >= 2, (
+            f"expected projection + calendar empty states, got {len(empties)} .dvc-empty"
+        )
+        # Forecast-only labeling is unmistakable on the projection block.
+        assert page.query_selector("#dividend-income-card .dvc-badge") is not None, (
+            "projection block missing the 預估・僅供參考 forecast badge"
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/index.html (股利收入 card): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
 def _assert_settings_redirect(
     page: Page,
     live_server: str,
@@ -416,6 +481,12 @@ def test_trades_ledger_account_filter_keeps_rows(
     transactions tab to populate, click that chip, then assert (a) at least one
     `#tx-body tr` row survives the filter (did NOT go empty) and (b) ZERO console + page
     errors over the interaction.
+
+    FU-D37 (2026-07-18): this surface is also the representative check for the single
+    frontend account-name resolver (web/names.js -> window.pdNames), which replaced the
+    three drifting per-file ACCOUNT_ZH maps. It asserts the tw_broker chip renders the
+    canonical zh name "台灣券商" AND that window.pdNames is the one source of truth
+    (schwab -> "嘉信 Schwab" / short "嘉信"; an unknown id falls back to the id itself).
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -438,6 +509,22 @@ def test_trades_ledger_account_filter_keeps_rows(
         page.wait_for_selector("#tx-body tr.expandable")
         # The tw_broker chip is built only after boot() re-runs initFilters off real rows.
         page.wait_for_selector('#ledger-filters .chip[data-account-id="tw_broker"]')
+        # FU-D37: the chip renders the canonical zh name via the shared resolver
+        # (web/names.js -> window.pdNames), not a per-file ACCOUNT_ZH map.
+        chip = page.query_selector('#ledger-filters .chip[data-account-id="tw_broker"]')
+        chip_text = chip.inner_text().strip() if chip is not None else None
+        assert chip_text == "台灣券商", (
+            f"tw_broker chip did not render the canonical name via pdNames: {chip_text!r}"
+        )
+        # JS-level sanity: window.pdNames is the single naming authority on the page.
+        resolver = page.evaluate(
+            "() => ({ acct: window.pdNames && window.pdNames.account('schwab'),"
+            " short: window.pdNames && window.pdNames.accountShort('schwab'),"
+            " unknown: window.pdNames && window.pdNames.account('nope') })"
+        )
+        assert resolver == {"acct": "嘉信 Schwab", "short": "嘉信", "unknown": "nope"}, (
+            f"window.pdNames resolver mismatch: {resolver!r}"
+        )
         page.click('#ledger-filters .chip[data-account-id="tw_broker"]')
         # Filter keyed on account_id -> 2330 (tw_broker) rows survive (NOT empty).
         page.wait_for_selector("#tx-body tr.expandable")

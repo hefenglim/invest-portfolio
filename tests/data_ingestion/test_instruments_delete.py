@@ -134,6 +134,36 @@ def test_delete_instrument_removes_symbol_and_all_derived_rows(
     assert "GONE" not in load_target_weights(full_conn)
 
 
+def test_delete_instrument_preserve_market_data_keeps_prices(
+    full_conn: sqlite3.Connection,
+) -> None:
+    """FU-D32 benchmark guard: preserve_market_data=True keeps the market-data rows (prices /
+    dividend_events, keyed instrument) so a benchmark series under the same key survives, while
+    the registry row + every PERSONAL artifact (signals / alerts / skips / target weights) are
+    still removed."""
+    upsert_instrument(full_conn, _inst("0050", market=Market.TW, ccy=Currency.TWD))
+    _seed_derived(full_conn, "0050")
+    save_target_weights(full_conn, {"0050": Decimal("0.10")}, now=_NOW)
+
+    assert delete_instrument(full_conn, "0050", preserve_market_data=True) is True
+
+    # registry row gone; market data SURVIVES
+    assert get_instrument(full_conn, "0050") is None
+    assert full_conn.execute(
+        "SELECT COUNT(*) FROM prices WHERE instrument='0050'").fetchone()[0] == 1
+    assert full_conn.execute(
+        "SELECT COUNT(*) FROM dividend_events WHERE instrument='0050'").fetchone()[0] == 1
+    # personal artifacts still cleaned
+    assert full_conn.execute(
+        "SELECT COUNT(*) FROM signal_states WHERE symbol='0050'").fetchone()[0] == 0
+    assert full_conn.execute(
+        "SELECT COUNT(*) FROM alert_events WHERE symbol='0050'").fetchone()[0] == 0
+    assert full_conn.execute(
+        "SELECT COUNT(*) FROM pending_dividend_skips WHERE fingerprint LIKE 'div:%:0050:%'"
+    ).fetchone()[0] == 0
+    assert "0050" not in load_target_weights(full_conn)
+
+
 def test_delete_instrument_writes_audit(full_conn: sqlite3.Connection) -> None:
     upsert_instrument(full_conn, _inst("AUD"))
     delete_instrument(full_conn, "AUD")

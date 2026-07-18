@@ -170,3 +170,92 @@ def test_runs_unfinished_status_null(
     r = api_client.get("/api/scheduler/runs?job_id=quotes_us")
     row = r.json()["rows"][0]
     assert row["status"] is None and row["finished_at"] is None and row["duration_s"] is None
+
+
+# --- FU-D36 status endpoint (需求七) -------------------------------------------
+
+
+def test_status_shape_all_jobs_idle(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    r = api_client.get("/api/scheduler/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["active"] is False  # golden DB has no runs → nothing active
+    jobs = body["jobs"]
+    assert {"quotes_tw", "quotes_us", "quotes_my"} <= set(jobs)
+    tw = jobs["quotes_tw"]
+    assert set(tw) == {"running", "queued", "last_run"}
+    assert tw["running"] is False and tw["queued"] is False and tw["last_run"] is None
+
+
+def test_status_queued_when_unfinished_row_but_not_inflight(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # A run row inserted (started_at set, finished_at NULL) but the worker has not marked
+    # it running yet → 已排入. active flips True.
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, status) "
+        "VALUES ('quotes_tw','2026-06-11T14:00:00+08:00','running')"
+    )
+    golden_db.commit()
+    body = api_client.get("/api/scheduler/status").json()
+    assert body["active"] is True
+    tw = body["jobs"]["quotes_tw"]
+    assert tw["queued"] is True and tw["running"] is False
+
+
+def test_status_running_when_in_flight_registry(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    import portfolio_dash.scheduler.jobs as J
+
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, status) "
+        "VALUES ('quotes_us','2026-06-11T14:00:00+08:00','running')"
+    )
+    golden_db.commit()
+    J._mark_running("quotes_us")
+    try:
+        body = api_client.get("/api/scheduler/status").json()
+    finally:
+        J._clear_running("quotes_us")
+    us = body["jobs"]["quotes_us"]
+    assert us["running"] is True and us["queued"] is False and body["active"] is True
+
+
+def test_status_last_run_reports_completed_error_with_message(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
+        "VALUES ('quotes_my','2026-06-10T17:30:06+08:00',"
+        "'2026-06-10T17:30:36+08:00','error','provider timeout')"
+    )
+    golden_db.commit()
+    body = api_client.get("/api/scheduler/status").json()
+    my = body["jobs"]["quotes_my"]
+    assert my["running"] is False and my["queued"] is False
+    assert my["last_run"]["ok"] is False
+    assert my["last_run"]["status"] == "error"
+    assert my["last_run"]["message"] == "provider timeout"
+    assert body["active"] is False  # a completed run is not active
+
+
+def test_status_last_run_prefers_latest_completed_over_shadow(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    # A completed ok run, then a later shadow row: last_run must reflect the real run.
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, is_shadow) "
+        "VALUES ('quotes_tw','2026-06-11T14:00:00+08:00','2026-06-11T14:00:05+08:00',"
+        "'ok','3 ok, 0 failed',0)"
+    )
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, is_shadow) "
+        "VALUES ('quotes_tw','2026-06-11T14:01:00+08:00','2026-06-11T14:01:05+08:00',"
+        "'error','shadow noise',1)"
+    )
+    golden_db.commit()
+    tw = api_client.get("/api/scheduler/status").json()["jobs"]["quotes_tw"]
+    assert tw["last_run"]["ok"] is True and tw["last_run"]["message"] == "3 ok, 0 failed"

@@ -42,16 +42,16 @@
      `state.account` holds an account_id ('all' = no filter), NOT the display name —
      the backend rows carry both a stable `account_id` (e.g. "tw_broker") and an English
      `account` display name; filtering/chips key on the stable id and show the zh-TW label
-     via ACCOUNT_ZH (the same map app.js uses).
+     via the shared resolver window.pdNames (web/names.js, FU-D37 — the single frontend
+     account-naming authority that superseded the per-file ACCOUNT_ZH maps).
      WPE (2026-07-07): account + date range moved SERVER-side (the /api/ledgers/*
      endpoints take account_id + from/to) so the pagers stay honest; only the keyword
      search remains a client filter over the CURRENT page (labelled 篩選本頁). */
-  const ACCOUNT_ZH = {
-    tw_broker: '台灣券商',
-    schwab: '嘉信 Schwab',
-    moomoo_my_us: 'Moomoo 美股',
-    moomoo_my_my: 'Moomoo 馬股',
-  };
+  /* Account zh-TW display name — single source of truth is web/names.js (FU-D37,
+     window.pdNames). Local delegator with a graceful no-op (id fallback) when names.js
+     is absent. trades.html loads names.js before this file (ledger.html is a redirect
+     stub -> trades.html). Server-side account.display_name is the planned successor. */
+  const acctZh = (id) => (window.pdNames ? window.pdNames.account(id) : id);
   const state = { account: 'all', q: '', from: '', to: '' };
   const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
   const pageState = {
@@ -81,7 +81,7 @@
     bar.replaceChildren();
     bar.appendChild(el('span', 'group-label', '帳戶'));
     bar.appendChild(mk('all', '全部'));
-    accountList.forEach((a) => bar.appendChild(mk(a.id, ACCOUNT_ZH[a.id] || a.name || a.id)));
+    accountList.forEach((a) => bar.appendChild(mk(a.id, acctZh(a.id))));
   }
 
   /* keyword narrows the CURRENT page only (代號優先、名稱其次 — 2026-07-03 decision) */
@@ -246,7 +246,7 @@
   const accountSel = (current) => {
     const ids = accountList.map((a) => a.id);
     if (current && !ids.includes(current)) ids.push(current);
-    return sel(ids.map((id) => [id, ACCOUNT_ZH[id] || id]), current);
+    return sel(ids.map((id) => [id, acctZh(id)]), current);
   };
 
   function editTx(t) {
@@ -373,7 +373,7 @@
     const fShares = inp(o.shares, 'number', 'any');
     const fAvg = inp(o.avg, 'number', 'any');
     const fDate = inp(o.date, 'date');
-    editModal('編輯期初 — ' + o.symbol + '（' + (ACCOUNT_ZH[o.account_id] || o.account_id) + '）', [
+    editModal('編輯期初 — ' + o.symbol + '（' + acctZh(o.account_id) + '）', [
       ['股數', fShares], ['原始均價', fAvg], ['建檔日', fDate],
     ], async (dismiss) => {
       dismiss();

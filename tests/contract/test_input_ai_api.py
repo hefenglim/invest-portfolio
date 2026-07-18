@@ -173,3 +173,39 @@ def test_ai_preview_model_alias_reaches_completer(
                         json={"text": "buy 2330", "model_alias": "picked-m"})
     assert r.status_code == 200
     assert captured["model_override"] == "picked-m"
+
+
+# --- FU-D33: preview-row machine code for an unregistered symbol ------------------------
+
+
+def _fake_unregistered(*_a: object, **_k: object) -> AiDraftList:
+    """A draft whose symbol (ZZZZ9) is NOT in the golden registry — the AI-input path emits the
+    unregistered-symbol block for it (no fuzzy match to 2330/AAPL)."""
+    return AiDraftList(drafts=[AiDraft(account_id="schwab", symbol="ZZZZ9", side=Side.BUY,
+                                       date=date(2026, 6, 2), shares=Decimal("10"),
+                                       price=Decimal("100"))])
+
+
+def test_ai_preview_unregistered_symbol_carries_code(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FU-D33: an unregistered-symbol row carries the STABLE ``code`` + its symbol so the AI pane
+    can render an inline 立即註冊 action; the human ``reason`` text is unchanged (additive)."""
+    monkeypatch.setattr(agents_mod, "complete_structured", _fake_unregistered)
+    r = api_client.post("/api/input/ai/preview", json={"text": "buy ZZZZ9"})
+    assert r.status_code == 200
+    row = r.json()["rows"][0]
+    assert row["code"] == "unregistered_symbol"
+    assert row["data"]["symbol"] == "ZZZZ9"
+    assert row["status"] == "error"  # unregistered = hard block until registered
+    assert "ZZZZ9" in (row["reason"] or "")  # reason still names the symbol (not replaced)
+
+
+def test_ai_preview_registered_symbol_code_is_null(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registered-symbol row carries ``code: null`` — the field is purely additive."""
+    monkeypatch.setattr(agents_mod, "complete_structured", _fake_ok)
+    r = api_client.post("/api/input/ai/preview", json={"text": "buy 2330"})
+    assert r.status_code == 200
+    assert r.json()["rows"][0]["code"] is None

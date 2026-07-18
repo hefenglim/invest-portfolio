@@ -26,6 +26,7 @@ from portfolio_dash.scheduler.jobs import (
     ensure_job_rows,
     latest_run_unfinished,
     run_job_func,
+    running_job_ids,
     start_job_run,
 )
 from portfolio_dash.scheduler.runtime import reschedule_job
@@ -193,6 +194,79 @@ def run_job_now(
     )
     thread.start()
     return JSONResponse(status_code=202, content={"run_id": run_id, "job_id": job_id})
+
+
+def _status_last_run(row: Any) -> dict[str, Any]:
+    """Map a COMPLETED job_runs row to the FU-D36 ``last_run`` shape.
+
+    ``ok`` is the boolean the chip keys off (green 成功 / red 失敗); ``status`` is passed
+    through raw so the frontend can render the non-terminal ``skipped`` (略過) distinctly.
+    """
+    return {
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "status": row["status"],
+        "ok": row["status"] == "ok",
+        "message": row["detail"] or "",
+    }
+
+
+@router.get("/scheduler/status")
+def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """FU-D36 — per-job live run status for the 排程中心 poll (needs 七).
+
+    For every scheduled job → ``{running, queued, last_run}``. ``running`` = the func is
+    executing right now (the in-process registry). ``queued`` = a run row exists but is
+    not yet marked running (the 已排入 window between enqueue and the worker picking it
+    up). ``last_run`` = the latest COMPLETED run (finished_at set) so ok/message are always
+    meaningful; a job that never completed reports null. Shadow (Loop-4) and legacy
+    ``export:*`` rows are excluded, matching the /runs view. Cheap by design — two windowed
+    queries + a set snapshot — so the frontend polls it ONLY while something is active and
+    stops when ``active`` goes false. The router derives; it computes no business numbers.
+    """
+    ensure_job_rows(conn)
+    job_ids = [
+        r["job_id"]
+        for r in conn.execute("SELECT job_id FROM schedule_config ORDER BY job_id")
+    ]
+    # Latest row overall per job (finished or not) → detects an in-flight run (queued/running).
+    latest_overall: dict[str, Any] = {
+        r["job_id"]: r
+        for r in conn.execute(
+            "SELECT jr.job_id, jr.finished_at FROM job_runs jr "
+            "JOIN (SELECT job_id, MAX(id) AS mid FROM job_runs "
+            "      WHERE COALESCE(is_shadow, 0) = 0 AND job_id NOT LIKE 'export:%' "
+            "      GROUP BY job_id) m ON jr.id = m.mid"
+        )
+    }
+    # Latest COMPLETED row per job → the 上次結果 (ok / message) shown when the job is idle.
+    latest_done: dict[str, Any] = {
+        r["job_id"]: r
+        for r in conn.execute(
+            "SELECT jr.job_id, jr.started_at, jr.finished_at, jr.status, jr.detail "
+            "FROM job_runs jr "
+            "JOIN (SELECT job_id, MAX(id) AS mid FROM job_runs "
+            "      WHERE finished_at IS NOT NULL AND COALESCE(is_shadow, 0) = 0 "
+            "      AND job_id NOT LIKE 'export:%' GROUP BY job_id) m ON jr.id = m.mid"
+        )
+    }
+    running = running_job_ids()
+    jobs: dict[str, Any] = {}
+    active = False
+    for jid in job_ids:
+        overall = latest_overall.get(jid)
+        unfinished = overall is not None and overall["finished_at"] is None
+        is_running = jid in running
+        is_queued = bool(unfinished and not is_running)
+        if is_running or is_queued:
+            active = True
+        done = latest_done.get(jid)
+        jobs[jid] = {
+            "running": is_running,
+            "queued": is_queued,
+            "last_run": _status_last_run(done) if done is not None else None,
+        }
+    return {"jobs": jobs, "active": active}
 
 
 def _run_row(row: sqlite3.Row) -> dict[str, Any]:

@@ -37,6 +37,7 @@ from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import InsightCard
 from portfolio_dash.llm_insight.gating import GateContext, GateResult, evaluate_gates, skip_reasons
 from portfolio_dash.llm_insight.insights_store import HorizonBasis
+from portfolio_dash.llm_insight.official_templates import ON_ALERT_NOTE as _ON_ALERT_NOTE
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.llm_config import LLMBudgetExceeded, LLMError
 
@@ -45,12 +46,10 @@ _AGENT = "insight_generate"
 _DEFAULT_PROMPT_VERSION = "v1"
 
 # on_alert cards force a very short horizon (spec 4.10): an alert reaction is time-critical,
-# so its prediction window is capped at 3 trading days regardless of the task default.
+# so its prediction window is capped at 3 trading days regardless of the task default. The
+# accompanying ``_ON_ALERT_NOTE`` prompt addendum is code-owned in ``official_templates``
+# (FU-D30), imported above under its historical private name.
 _ON_ALERT_MAX_HORIZON = 3
-_ON_ALERT_NOTE = (
-    "\n\n[預警解讀守則] 本卡由風險預警觸發，請給出極短期（≤3 個交易日）的觀察與預測，"
-    "聚焦此事件的即時影響。"
-)
 
 
 class RunInputs(BaseModel):

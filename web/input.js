@@ -883,6 +883,26 @@
     $('#ai-degrade-down').hidden = id !== 'down';
   }
 
+  /* FU-D33: open the shared quick-add dialog for an unregistered symbol in the AI preview.
+     Market is inferred from the row's account (accountMarket — TWD→TW, USD→US, MYR→MY), the
+     same rule the backend uses. On a successful register (or restore) the SAME preview re-runs
+     (runAiPreview rebuilds the request from the unchanged pane state: text + images + model),
+     so the healed row loses its error with zero re-entry. */
+  function openAiQuickAdd(symbol, accId) {
+    if (!window.pdInstQuickAdd) {
+      if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
+      return;
+    }
+    const resume = async () => { await reloadContext(); await runAiPreview(); };
+    window.pdInstQuickAdd({
+      symbol: symbol,
+      market: accountMarket(accId),
+      lockSymbol: true,
+      onConfirm: resume,
+      onBuy: resume,
+    });
+  }
+
   async function runAiPreview() {
     const text = ($('#ai-text') && $('#ai-text').value || '').trim();
     if (!text && !aiImages.length) {
@@ -971,7 +991,19 @@
       if (r.reason) tdNote.appendChild(el('span', 'st-warn', '⚠ ' + r.reason));
       else tdNote.appendChild(el('span', 'st-ok', '✓ 解析完整'));
       tr.appendChild(tdNote);
-      tr.appendChild(el('td'));
+      /* FU-D33: an unregistered-symbol row gets an inline 立即註冊 action opening the SHARED
+         quick-add dialog (symbol prefilled + market inferred from the row's account, exactly
+         as the backend auto-register does). On success the SAME preview re-runs automatically
+         (text + images + model are still in the pane state), so the healed row resumes with
+         zero re-entry. The commit-time auto-register fallback stays untouched. */
+      const tdAct = el('td');
+      if (r.code === 'unregistered_symbol' && symbol) {
+        const reg = el('button', 'btn', '立即註冊'); reg.type = 'button';
+        reg.title = '註冊此標的後自動重新解析';
+        reg.addEventListener('click', () => openAiQuickAdd(symbol, d.account_id));
+        tdAct.appendChild(reg);
+      }
+      tr.appendChild(tdAct);
       tbody.appendChild(tr);
     });
     const s = preview.summary || {};
@@ -1076,7 +1108,7 @@
       o.value = a.id;
       accSel.appendChild(o);
     });
-    accSel.addEventListener('change', renderDivForm);
+    accSel.addEventListener('change', () => { renderDivForm(); onDivAccountChange(); });
     $('#d-date').value = TODAY;
     const typeSeg = document.querySelectorAll('#d-tw .segmented button');
     const isStock = () => {
@@ -1094,6 +1126,7 @@
         : '台股模式：現金股利沖減成本（調整均價下降）；配股以 $0 成本股數入帳。';
     }));
     renderDivForm();
+    initDivPicker();
     $('#d-confirm').addEventListener('click', () => {
       const a = acc($('#d-account').value) || ctx.accounts[0];
       const sym = $('#d-symbol').value.trim();
@@ -1131,6 +1164,9 @@
             'd-drip-shares', 'd-drip-price', 'd-net-amt'].forEach((id) => {
             const n = $('#' + id); if (n) n.value = '';
           });
+          /* a STOCK/DRIP dividend can grow shares (never shrinks); refresh so the picker
+             reflects the latest holdings. Cheap + cached, so unconditional is fine. */
+          loadDivHoldings(a.id, true).catch(() => {});
         });
     });
   }
@@ -1157,6 +1193,205 @@
       $('#d-drip-wh').value = wh.toFixed(2);
       $('#d-drip-net').value = (g - wh).toFixed(2);
     };
+  }
+
+  /* ---- FU-D35 dividend 代號 picker (owner 需求六) ----
+     After an account is chosen, activating 代號 lists that account's CURRENTLY-HELD
+     symbols for point-and-click (dividends normally come from a live position). The
+     「顯示已清倉標的」 toggle additionally lists symbols the account historically held but
+     has since closed — a closed position can still pay a dividend after its ex-date
+     (owner 假設 2). Held/closed come from GET /api/input/holdings?account=… (server-side
+     Decimal share math), cached per account for the page session + refetched after a
+     successful commit. The picker is ASSISTIVE ONLY: it never overwrites what the user
+     types, and manual free entry always remains possible (the commit reads
+     #d-symbol.value directly — an unlisted symbol still submits). */
+  const divHoldingsCache = {};   // { [accountId]: {held:[{symbol,name}], closed:[...]} }
+  let divPickerOpen = false;
+
+  /* Inline-style the picker shell here (keeps the styling in this wave's files — the
+     dividend section owns input.js; the shell ids live in trades.html #pane-div). */
+  function styleDivPicker() {
+    const p = $('#d-sym-picker');
+    if (p) {
+      p.style.cssText = 'position:absolute;left:0;right:0;top:100%;z-index:40;margin-top:4px;'
+        + 'background:var(--panel-2,#141821);border:1px solid var(--border,#2a2f3a);'
+        + 'border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);max-height:260px;'
+        + 'overflow:auto;padding:4px;';
+    }
+    const empty = $('#d-sym-empty');
+    if (empty) empty.style.cssText = 'padding:8px 10px;color:var(--text-3,#8a92a3);font-size:11px;';
+    const foot = $('#d-sym-foot');
+    if (foot) {
+      foot.style.cssText = 'border-top:1px solid var(--border,#2a2f3a);margin-top:4px;'
+        + 'padding:7px 10px 3px;';
+    }
+    const tog = document.querySelector('.sym-pick-toggle');
+    if (tog) {
+      tog.style.cssText = 'display:flex;align-items:center;gap:7px;font-size:11px;'
+        + 'color:var(--text-2,#c2c8d2);cursor:pointer;';
+    }
+  }
+
+  /* Fetch (or return the cached) {held, closed} for an account. Graceful: a failed fetch
+     returns the last cache (or empties) so the picker degrades to a plain typed input. */
+  async function loadDivHoldings(accountId, force) {
+    if (!accountId) return { held: [], closed: [] };
+    if (!force && divHoldingsCache[accountId]) return divHoldingsCache[accountId];
+    let resp;
+    try {
+      resp = await api.get('/api/input/holdings?account=' + encodeURIComponent(accountId));
+    } catch (e) {
+      return divHoldingsCache[accountId] || { held: [], closed: [] };
+    }
+    const data = { held: (resp && resp.held) || [], closed: (resp && resp.closed) || [] };
+    divHoldingsCache[accountId] = data;
+    return data;
+  }
+
+  function closeDivPicker() {
+    const p = $('#d-sym-picker');
+    if (p) p.hidden = true;
+    divPickerOpen = false;
+  }
+
+  function fillDivSymbol(sym) {
+    const inp = $('#d-symbol');
+    if (inp) inp.value = sym;
+    closeDivPicker();
+  }
+
+  /* One selectable row: 代號 + 名稱 (+ a muted 已清倉 tag for closed positions). Selection
+     rides on mousedown+preventDefault so the value lands BEFORE the input's focusout —
+     otherwise the outside-focus close would race the click away. */
+  function divPickRow(item, isClosed) {
+    const row = el('button', null, null);
+    row.type = 'button';
+    row.style.cssText = 'display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;'
+      + 'background:none;border:none;padding:6px 8px;cursor:pointer;color:inherit;'
+      + 'border-radius:6px;font:inherit;';
+    row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,.06)'; });
+    row.addEventListener('mouseleave', () => { row.style.background = 'none'; });
+    const code = el('span', null, item.symbol);
+    code.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums;';
+    row.appendChild(code);
+    const name = el('span', null, item.name || '');
+    name.style.cssText = 'color:var(--text-3,#8a92a3);font-size:11px;overflow:hidden;'
+      + 'text-overflow:ellipsis;white-space:nowrap;';
+    row.appendChild(name);
+    if (isClosed) {
+      const tag = el('span', null, '已清倉');
+      tag.style.cssText = 'margin-left:auto;color:var(--text-3,#8a92a3);font-size:10px;'
+        + 'border:1px solid var(--border,#2a2f3a);border-radius:4px;padding:0 6px;flex:none;';
+      row.appendChild(tag);
+    }
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); fillDivSymbol(item.symbol); });
+    return row;
+  }
+
+  /* Render the list for the current account from {held, closed}, filtered by whatever is
+     typed in 代號 (also matches names). The closed list appears only when the toggle is on
+     AND the account has closed history; it is visually separated by a dashed divider. */
+  function renderDivPicker(data) {
+    const list = $('#d-sym-list');
+    const empty = $('#d-sym-empty');
+    const foot = $('#d-sym-foot');
+    const toggle = $('#d-sym-closed-toggle');
+    if (!list || !empty || !foot) return;
+    list.replaceChildren();
+    const a = acc($('#d-account').value);
+    if (!a) {
+      empty.hidden = false;
+      empty.textContent = '請先選擇帳戶';
+      foot.hidden = true;
+      return;
+    }
+    const held = (data && data.held) || [];
+    const closed = (data && data.closed) || [];
+    foot.hidden = closed.length === 0;   // only offer the toggle where there IS closed history
+    const showClosed = !!(toggle && toggle.checked) && closed.length > 0;
+    const q = ($('#d-symbol').value || '').trim().toUpperCase();
+    const match = (s) => !q || (s.symbol || '').toUpperCase().indexOf(q) >= 0
+      || (s.name || '').toUpperCase().indexOf(q) >= 0;
+    const heldF = held.filter(match);
+    const closedF = showClosed ? closed.filter(match) : [];
+    heldF.forEach((it) => list.appendChild(divPickRow(it, false)));
+    if (closedF.length) {
+      const divider = el('div', null);
+      divider.style.cssText = 'border-top:1px dashed var(--border,#2a2f3a);margin:4px 0;';
+      list.appendChild(divider);
+      closedF.forEach((it) => list.appendChild(divPickRow(it, true)));
+    }
+    /* Empty-state copy — honest about WHY the list is empty; never blocks free entry. */
+    if (heldF.length + closedF.length === 0) {
+      empty.hidden = false;
+      if (held.length === 0 && closed.length === 0) {
+        empty.textContent = '此帳戶尚無標的紀錄 — 可直接輸入代號';
+      } else if (held.length === 0 && !showClosed) {
+        empty.textContent = '此帳戶目前無持有標的；勾選「顯示已清倉標的」可挑選歷史標的';
+      } else {
+        empty.textContent = '無相符標的 — 可直接輸入代號';
+      }
+    } else {
+      empty.hidden = true;
+    }
+  }
+
+  /* Open + populate the dropdown for the chosen account (cache-first paint, then refresh
+     from the fetch). Wrapped so an assistive-picker error can never surface as an
+     unhandled rejection (the e2e smoke asserts ZERO console errors). */
+  async function openDivPicker() {
+    try {
+      const p = $('#d-sym-picker');
+      if (!p) return;
+      p.hidden = false;
+      divPickerOpen = true;
+      const a = acc($('#d-account').value);
+      if (!a) { renderDivPicker({ held: [], closed: [] }); return; }
+      if (divHoldingsCache[a.id]) renderDivPicker(divHoldingsCache[a.id]);
+      const data = await loadDivHoldings(a.id, false);
+      if (divPickerOpen) renderDivPicker(data);
+    } catch (e) { /* picker is assistive — degrade silently */ }
+  }
+
+  /* Account switch: reset the toggle (held-first per account), close, warm the new cache. */
+  function onDivAccountChange() {
+    const toggle = $('#d-sym-closed-toggle');
+    if (toggle) toggle.checked = false;
+    closeDivPicker();
+    const accId = $('#d-account').value;
+    if (accId) loadDivHoldings(accId, false).catch(() => {});
+  }
+
+  function initDivPicker() {
+    styleDivPicker();
+    const inp = $('#d-symbol');
+    if (inp) {
+      inp.addEventListener('focus', () => { openDivPicker(); });
+      inp.addEventListener('click', () => { openDivPicker(); });
+      inp.addEventListener('input', () => {
+        if (!divPickerOpen) { openDivPicker(); return; }
+        const a = acc($('#d-account').value);
+        renderDivPicker((a && divHoldingsCache[a.id]) || { held: [], closed: [] });
+      });
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDivPicker(); });
+    }
+    const toggle = $('#d-sym-closed-toggle');
+    if (toggle) toggle.addEventListener('change', () => {
+      const a = acc($('#d-account').value);
+      renderDivPicker((a && divHoldingsCache[a.id]) || { held: [], closed: [] });
+    });
+    /* Close when focus leaves the 代號 field (input OR the footer toggle). focusout bubbles,
+       so one listener on the container covers both; relatedTarget inside the field (e.g.
+       the toggle) keeps it open. Row clicks preventDefault so focus never leaves the input. */
+    const field = $('#d-symbol-field');
+    if (field) field.addEventListener('focusout', (e) => {
+      const to = e.relatedTarget;
+      if (to && field.contains(to)) return;
+      closeDivPicker();
+    });
+    /* Warm the default account's cache so the first focus paints instantly. */
+    const accId0 = $('#d-account').value;
+    if (accId0) loadDivHoldings(accId0, false).catch(() => {});
   }
 
   /* ================= Tab 5 期初庫存 =================

@@ -24,16 +24,26 @@ from portfolio_dash.api.instrument_service import (
 )
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.store import (
+    delete_instrument,
     get_instrument,
+    has_ledger_history,
     list_accounts,
     list_instruments,
     set_instrument_archived,
     upsert_instrument,
 )
+from portfolio_dash.llm_insight.official_templates import AI_SECTOR_PROMPT
+from portfolio_dash.pricing.benchmarks import BENCHMARKS
 from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.llm import complete_structured
 from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.sectors import (
+    CANONICAL_KEYS,
+    CANONICAL_SECTORS,
+    canonical_sector,
+)
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -71,6 +81,9 @@ def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
         "target_high": decimal_str(inst.target_high) if inst.target_high is not None else None,
         "is_etf": inst.is_etf,
         "archived": inst.archived,
+        # FU-D32: any permanent ledger history (incl. closed positions) — the watchlist
+        # dialog pre-disables 永久移除 (purge) for these (~3 LIMIT-1 queries; fine at scale).
+        "has_history": has_ledger_history(conn, inst.symbol),
     }
 
 
@@ -114,6 +127,60 @@ def lookup(
     confirm). A KNOWN symbol resolves from stored metadata with no provider call
     (``registered`` when active, ``archived`` when soft-deleted → confirming restores it)."""
     return lookup_instrument(conn, symbol=symbol, market=market, now=now).model_dump()
+
+
+# --- FU-D31: canonical sector vocabulary + AI sector detection ------------------------
+
+
+@router.get("/instruments/sectors")
+def sectors() -> dict[str, Any]:
+    """The canonical sector vocabulary that seeds the sector ``<select>`` in the quick-add
+    dialog + the edit form. English ``key`` is the stored/grouped value; ``zh`` is the
+    dropdown label only. Synonyms are SERVER-SIDE (``shared/sectors.canonical_sector``), so
+    the frontend never hardcodes the list (FU-D31)."""
+    return {"sectors": [dict(s) for s in CANONICAL_SECTORS]}
+
+
+class AiSectorBody(BaseModel):
+    symbol: str
+    name: str = ""
+    market: str = ""
+
+
+class AiSectorReply(BaseModel):
+    """The structured contract the model must return: one canonical sector key."""
+
+    sector: str
+
+
+@router.post("/instruments/ai-sector")
+def ai_sector(
+    body: AiSectorBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """「AI 偵測產業類別」 (FU-D31): symbol/name/market → one canonical sector key.
+
+    Calls the DEFAULT-role structured completion with the code-owned registry prompt
+    (``AI_SECTOR_PROMPT``, FU-D30) whose ``{categories}`` is filled from the canonical
+    vocabulary. The reply is ALWAYS re-mapped through ``canonical_sector`` server-side, so a
+    non-canonical value can NEVER escape this endpoint: ``mapped`` is True only when the
+    mapped result is a real dropdown category (the frontend applies the value only then; an
+    unmapped reply leaves the user's selection unchanged + a zh notice). LLM degradation
+    (budget / not-activated / provider) propagates to the global 402 / 409 / 503 handlers
+    (``api/errors.py``) — the same standard envelope the other AI endpoints return; nothing
+    here blocks the rest of the form."""
+    sym = body.symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol 不可為空")
+    prompt = AI_SECTOR_PROMPT.format(
+        categories=", ".join(s["key"] for s in CANONICAL_SECTORS),
+        symbol=sym,
+        name=body.name.strip() or "（未提供）",
+        market=body.market.strip() or "（未提供）",
+    )
+    reply = complete_structured(prompt, AiSectorReply, agent="ai_sector", conn=conn)
+    mapped_sector = canonical_sector(reply.sector)
+    return {"sector": mapped_sector, "mapped": mapped_sector in CANONICAL_KEYS}
 
 
 _TW_BOARDS = {"TWSE", "TPEx"}
@@ -354,3 +421,50 @@ def remove(
             "held", "持倉中的標的不可移除或封存", field="symbol"))
     set_instrument_archived(conn, symbol, True)
     return {"ok": True, "removed": True}
+
+
+# --- FU-D32: 永久移除 (hard purge) — the second, destructive deletion tier -------------
+
+# Benchmark storage keys (``pricing/benchmarks.py``): a purge of one of these keeps its
+# market-data rows so the dashboard TWR benchmark series survives (only ``"0050"`` can ever
+# collide with a real user instrument; ``"^GSPC"`` is not a valid symbol — see benchmarks.py).
+_BENCHMARK_KEYS: frozenset[str] = frozenset(b.storage_key for b in BENCHMARKS)
+
+# The owner's explanation for why a symbol with ANY ledger history (INCLUDING a closed
+# position) can never be hard-purged — surfaced verbatim so the dialog can disable 永久移除.
+_HAS_HISTORY_MSG = (
+    "有歷史帳務紀錄，無法永久移除：已清倉標的的歷史交易仍被現金流回溯、XIRR／歷年報酬、"
+    "股利紀錄、已實現損益報表引用；硬刪會導致帳目無法對帳與孤兒資料。可改用「移除（隱藏）」。"
+)
+
+
+@router.post("/instruments/{symbol}/purge")
+def purge(
+    symbol: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """HARD-delete (永久移除) a never-traded watch symbol + all its personal artifacts (FU-D32).
+
+    Deletion-tier gate, most-specific first: 404 unknown → 422 ``held`` (a held symbol is never
+    purgeable — close the position first) → 422 ``has_history`` for ANY permanent ledger history
+    INCLUDING closed positions (their trades still feed cashflow/XIRR/歷年報酬/股利/已實現報表;
+    hard-deleting orphans the books — the owner's copy) → else ``delete_instrument`` removes the
+    registry row and every derived/cache row in one transaction.
+
+    Benchmark guard: when *symbol* is also a benchmark storage key, the purge PRESERVES the
+    market-data rows (``prices`` / ``dividend_events``) so the dashboard TWR benchmark series
+    is not orphaned — the registry row and personal artifacts are still cleaned; the response
+    flags ``preserved_market_data``. The plain DELETE (soft delete / 隱藏) is untouched."""
+    if get_instrument(conn, symbol) is None:
+        return JSONResponse(status_code=404,
+                            content=error_body("not_found", f"{symbol} 不存在"))
+    account_ids = [a.account_id for a in list_accounts(conn)]
+    if _held(conn, account_ids, symbol):
+        return JSONResponse(status_code=422, content=error_body(
+            "held", "持倉中的標的不可永久移除，請先清空持倉", field="symbol"))
+    if has_ledger_history(conn, symbol):
+        return JSONResponse(status_code=422, content=error_body(
+            "has_history", f"{symbol} {_HAS_HISTORY_MSG}", field="symbol"))
+    preserve = symbol in _BENCHMARK_KEYS
+    delete_instrument(conn, symbol, preserve_market_data=preserve)
+    return {"ok": True, "purged": True, "preserved_market_data": preserve}

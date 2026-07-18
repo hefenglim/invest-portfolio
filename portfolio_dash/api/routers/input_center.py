@@ -118,6 +118,52 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     }
 
 
+@router.get("/input/holdings")
+def input_holdings(
+    account: str, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """Per-account held / closed symbols for the 股利 picker (FU-D35).
+
+    ``held``   — symbols whose CURRENT net shares in *account* are > 0 (a dividend
+                 normally comes from a live position).
+    ``closed`` — symbols with ANY ledger history in *account* (transactions / opening
+                 inventory / dividends) whose current net shares there are 0: a closed
+                 position can still pay a dividend after its ex-date (owner 假設 2).
+
+    Share counts reuse the pure ``current_shares`` helper (opening + buys − sells +
+    zero-cost reinvest shares — the same replay rule as ``build_book``); NO cost-basis
+    math is duplicated here. Classification is strictly per (account, symbol): the SAME
+    symbol may be ``held`` in one account and ``closed`` in another. Names come from the
+    instruments registry (fallback: the raw symbol). Unknown account -> 404.
+    """
+    accounts = {a.account_id for a in list_accounts(conn)}
+    if account not in accounts:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"帳戶 {account} 不存在", field="account"))
+    # Every symbol this account has ever touched, across the three share-bearing ledgers.
+    symbols: set[str] = set()
+    for row in conn.execute(
+        "SELECT DISTINCT symbol FROM transactions WHERE account_id=?", (account,)
+    ):
+        symbols.add(row["symbol"])
+    for row in conn.execute(
+        "SELECT DISTINCT symbol FROM opening_inventory WHERE account_id=?", (account,)
+    ):
+        symbols.add(row["symbol"])
+    for row in conn.execute(
+        "SELECT DISTINCT symbol FROM dividends WHERE account_id=?", (account,)
+    ):
+        symbols.add(row["symbol"])
+    names = {i.symbol: i.name for i in list_instruments(conn)}
+    held: list[dict[str, str]] = []
+    closed: list[dict[str, str]] = []
+    for sym in sorted(symbols):
+        entry = {"symbol": sym, "name": names.get(sym) or sym}
+        target = held if current_shares(conn, account, sym) > _ZERO else closed
+        target.append(entry)
+    return {"held": held, "closed": closed}
+
+
 class ManualBody(BaseModel):
     account_id: str
     symbol: str
@@ -324,6 +370,17 @@ def _row_data(row: PreviewRow) -> dict[str, Any]:
     return data
 
 
+def _row_code(row: PreviewRow) -> str | None:
+    """A STABLE machine code for a row the frontend can act on (FU-D33), additive to the
+    human ``reason`` text. Currently the only code: ``unregistered_symbol`` — an unregistered
+    symbol (``symbol_unresolved`` issue) in the AI / CSV-import preview, which the AI pane
+    surfaces as an inline 立即註冊 action (the row's ``data.symbol`` carries the symbol). Returns
+    None for every other row, so the field is purely additive."""
+    if any(i.kind == "symbol_unresolved" for i in row.issues):
+        return "unregistered_symbol"
+    return None
+
+
 def _preview_wire(preview: ImportPreview) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     counts = {"ok": 0, "warn": 0, "error": 0}
@@ -332,6 +389,7 @@ def _preview_wire(preview: ImportPreview) -> dict[str, Any]:
         counts[st] += 1
         rows.append({"n": r.index, "status": st,
                      "reason": r.issues[0].message if r.issues else None,
+                     "code": _row_code(r),
                      "data": _row_data(r)})
     return {"rows": rows, "summary": {"total": len(preview.rows), **counts}}
 

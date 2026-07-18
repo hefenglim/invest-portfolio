@@ -10,7 +10,7 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 """
 
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from portfolio_dash.data_ingestion.store import (
@@ -64,6 +64,7 @@ from portfolio_dash.shared.models.ledger import (
     OpeningInventory,
     Transaction,
 )
+from portfolio_dash.shared.sectors import canonical_sector
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -175,8 +176,19 @@ def build_dashboard(
     except KeyError:
         returns = None
     allocation: SectorAllocation | None
+    # FU-D31 (P1①): canonicalize sectors at the donut GROUPING seam (read-time only —
+    # stored instrument rows are NOT migrated this round). Both the sector-allocation donut
+    # AND the sector_weight alert group on THIS SectorAllocation (strategy/alerts.py reads
+    # data.allocation.weights), so this ONE canonicalization fixes both — verified single
+    # seam. Holding ROWS keep their RAW stored sector (display of the instrument's own
+    # value, section 8 below); only the grouping is normalized. Canonical keys are English;
+    # zh display is deferred (see shared/sectors.py).
+    alloc_instruments = {
+        sym: inst.model_copy(update={"sector": canonical_sector(inst.sector)})
+        for sym, inst in instruments.items()
+    }
     try:
-        allocation = sector_allocation(valued, instruments, resolver.rate, reporting)
+        allocation = sector_allocation(valued, alloc_instruments, resolver.rate, reporting)
     except KeyError:
         allocation = None
     view: CombinedView | None
@@ -236,8 +248,11 @@ def build_dashboard(
         fx_summary = None
 
     # 6. Dividend summary — cash actually received (incl. DRIP net), native ccy.
+    # ttm_cutoff bounds the trailing-12-month window (display-only attribution).
+    ttm_cutoff = as_of - timedelta(days=365)
     year_ccy: dict[int, dict[Currency, Decimal]] = {}
     total_ccy: dict[Currency, Decimal] = {}
+    ttm_ccy: dict[Currency, Decimal] = {}
     for dv in divs:
         if dv.type is DividendType.STOCK:
             continue  # 配股 adds shares, not cash
@@ -245,10 +260,13 @@ def build_dashboard(
         per_year = year_ccy.setdefault(dv.date.year, {})
         per_year[ccy] = per_year.get(ccy, _ZERO) + dv.net
         total_ccy[ccy] = total_ccy.get(ccy, _ZERO) + dv.net
+        if dv.date >= ttm_cutoff:
+            ttm_ccy[ccy] = ttm_ccy.get(ccy, _ZERO) + dv.net
     dividend_summary = DividendSummary(
         by_year=[DividendYearRow(year=y, by_currency=year_ccy[y])
                  for y in sorted(year_ccy)],
         total_by_currency=total_ccy,
+        ttm_net=ttm_ccy,
     )
 
     # 7. Ex-dividend calendar — held symbols, upcoming only.

@@ -235,7 +235,7 @@
           acts.appendChild(rp);
         }
         const del = el('button', 'btn btn-danger', '移除'); del.type = 'button';
-        del.title = '移除此標的（自前端隱藏；資料仍保留，重新加入可還原。持倉中不可移除）';
+        del.title = '移除此標的：可選「隱藏」（保留資料、可還原）或「永久移除」（硬刪、無法復原）。持倉中不可移除';
         del.addEventListener('click', () => delInstrument(i));
         acts.appendChild(del);
         tdAct.appendChild(acts);
@@ -264,9 +264,25 @@
     nameIn.value = i.name || '';
     nameIn.placeholder = '顯示名稱（可自動查詢失敗後手動補）';
     body.appendChild(fld('名稱', nameIn));
-    const secIn = el('input', 'input');
-    secIn.value = i.sector || '';
-    body.appendChild(fld('產業', secIn));
+    /* FU-D31: canonical sector <select> (dual-text) + AI 偵測 button, sharing the
+       inst-quickadd.js component. The current stored value rides through as an off-list
+       option when it is not (yet) a canonical key, so saving never destroys it. Fallback
+       to a plain input only if the shared script failed to load (defensive). */
+    let sectorField = null;
+    let secIn = null;
+    if (window.pdSectorField) {
+      sectorField = window.pdSectorField({
+        current: i.sector || '',
+        symbol: () => i.symbol,
+        name: () => nameIn.value,
+        market: () => i.market,
+      });
+      body.appendChild(fld('產業', sectorField.element));
+    } else {
+      secIn = el('input', 'input');
+      secIn.value = i.sector || '';
+      body.appendChild(fld('產業', secIn));
+    }
     /* TW 板別可直接改（重新探測仍可自動判定並儲存）；US/MY 板別固定 */
     let boardSel = null;
     if (i.market === 'TW') {
@@ -318,7 +334,7 @@
          Decimal column verbatim. */
       const body2 = {
         name: nameIn.value.trim() || i.name,
-        sector: secIn.value.trim(),
+        sector: sectorField ? sectorField.value() : secIn.value.trim(),
         is_etf: etfCb.checked,
         target_low: raw === '' ? null : raw,
         target_high: rawHi === '' ? null : rawHi,
@@ -338,34 +354,130 @@
     setTimeout(() => nameIn.focus(), 50);
   }
 
-  /* ---- remove / restore (FU-D18, accumulative soft delete) ----
-     移除 → ONE confirm → DELETE, which now SOFT-deletes (archives) ANY non-held symbol: no
-     data is removed, so re-adding restores it and auto-backfills the gap. The backend still
-     refuses a HELD symbol (422 ``held``) — surfaced as an info dialog (the only fix is to
-     close the position). The former has_history → 封存 branch is gone (all non-held symbols
-     soft-delete alike). archiveInstrument PUTs the archive flag (還原 un-archives + triggers
-     the background backfill; archiving a held symbol 422s too). */
+  /* ---- remove: TWO deletion tiers (FU-D32) ----
+     The 移除 dialog offers 取消 / 移除（隱藏）/ 永久移除:
+       • 移除（隱藏）= FU-D18 soft delete: DELETE archives ANY non-held symbol, no data is
+         removed, so re-adding restores it and auto-backfills the gap (accumulative). The
+         backend still refuses a HELD symbol (422 ``held``) → info dialog (close the position).
+       • 永久移除 = HARD purge (POST …/purge): irreversible. Gated by a STRONG confirm — the
+         user must TYPE the symbol EXACTLY before the button enables. A symbol with ANY ledger
+         history (incl. closed positions) renders 永久移除 DISABLED with the owner's explanation
+         (the backend also 422s ``has_history`` as the authoritative guard; the pre-disable is
+         driven by the additive ``has_history`` wire field, so a purge with history can never
+         even be attempted from the UI).
+     archiveInstrument (below) is unchanged (還原 un-archives + background backfill). */
   function delInstrument(i) {
-    window.confirmDialog({
-      title: '移除 ' + i.symbol + (i.name ? ' ' + i.name : ''),
-      body: '移除後將自前端隱藏；所有已抓取的報價與歷史資料仍保留，' +
-        '重新加入即可還原並自動補抓缺口。',
-      confirmLabel: '移除', danger: true,
-      onConfirm: async () => {
-        try {
-          await window.pdApi.del('/api/instruments/' + encodeURIComponent(i.symbol));
-        } catch (err) {
-          if (err && err.status === 422 && err.code === 'held') {
-            window.confirmDialog({ title: '無法移除', body: err.message, confirmLabel: '我知道了' });
-            return;
-          }
-          if (window.toast) window.toast(err && err.message ? err.message : '移除失敗', 'fail', err && err.code);
+    const backdrop = el('div', 'modal-backdrop');
+    const modal = el('div', 'modal');
+    const head = el('div', 'modal-head');
+    head.appendChild(el('h3', 'modal-title', '移除 ' + i.symbol + (i.name ? ' ' + i.name : '')));
+    const close = el('button', 'modal-close', '✕'); close.type = 'button';
+    head.appendChild(close);
+    modal.appendChild(head);
+
+    const body = el('div', 'modal-body');
+    body.appendChild(el('div', 'hint',
+      '兩種移除方式：「移除（隱藏）」自前端隱藏、保留所有資料，可再還原；' +
+      '「永久移除」硬刪此標的與其衍生資料，無法復原。'));
+
+    const hideBox = el('div', 'field');
+    hideBox.appendChild(el('label', null, '移除（隱藏）— 可還原'));
+    hideBox.appendChild(el('div', 'hint',
+      '自前端隱藏；所有已抓取的報價與歷史資料仍保留，重新加入即可還原並自動補抓缺口。'));
+    body.appendChild(hideBox);
+
+    const purgeBox = el('div', 'field');
+    purgeBox.appendChild(el('label', null, '永久移除 — 無法復原'));
+    let confirmIn = null;
+    if (i.has_history) {
+      const warn = el('div', 'hint');
+      warn.style.color = 'var(--amber)';
+      warn.textContent = '此標的有歷史帳務紀錄，無法永久移除：已清倉標的的歷史交易仍被現金流回溯、'
+        + 'XIRR／歷年報酬、股利紀錄、已實現損益報表引用；硬刪會導致帳目無法對帳與孤兒資料。'
+        + '請改用「移除（隱藏）」。';
+      purgeBox.appendChild(warn);
+    } else {
+      purgeBox.appendChild(el('div', 'hint',
+        '硬刪此標的與其衍生資料（報價、配息事件、訊號、預警、目標權重），無法復原。'
+        + '請輸入代號「' + i.symbol + '」以啟用永久移除。'));
+      confirmIn = el('input', 'input purge-confirm');
+      confirmIn.spellcheck = false;
+      confirmIn.placeholder = i.symbol;
+      confirmIn.setAttribute('aria-label', '輸入代號以確認永久移除');
+      purgeBox.appendChild(confirmIn);
+    }
+    body.appendChild(purgeBox);
+    modal.appendChild(body);
+
+    const foot = el('div', 'modal-foot');
+    const cancel = el('button', 'btn', '取消'); cancel.type = 'button';
+    const hideBtn = el('button', 'btn btn-danger', '移除（隱藏）'); hideBtn.type = 'button';
+    const purgeBtn = el('button', 'btn btn-danger', '永久移除'); purgeBtn.type = 'button';
+    purgeBtn.disabled = true;  // STRONG confirm gate: enabled only on an exact symbol match
+    foot.appendChild(cancel); foot.appendChild(hideBtn); foot.appendChild(purgeBtn);
+    modal.appendChild(foot);
+    backdrop.appendChild(modal);
+
+    const dismiss = () => { document.removeEventListener('keydown', onKey); backdrop.remove(); };
+    const onKey = (e) => { if (e.key === 'Escape') dismiss(); };
+    document.addEventListener('keydown', onKey);
+    close.addEventListener('click', dismiss);
+    cancel.addEventListener('click', dismiss);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
+
+    if (confirmIn) {
+      /* Enable 永久移除 ONLY on an exact, case-sensitive symbol match. */
+      confirmIn.addEventListener('input', () => {
+        purgeBtn.disabled = confirmIn.value.trim() !== i.symbol;
+      });
+      /* No <form> here, so there is no implicit submit; still, explicitly swallow Enter so a
+         default submit can never bypass the type-confirm gate (senior-review requirement). */
+      confirmIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
+    }
+
+    hideBtn.addEventListener('click', async () => {
+      const restore = window.pdBusy ? window.pdBusy(hideBtn, '移除中…') : () => {};
+      try {
+        await window.pdApi.del('/api/instruments/' + encodeURIComponent(i.symbol));
+      } catch (err) {
+        restore();
+        if (err && err.status === 422 && err.code === 'held') {
+          dismiss();
+          window.confirmDialog({ title: '無法移除', body: err.message, confirmLabel: '我知道了' });
           return;
         }
-        if (window.toast) window.toast('已移除 ' + i.symbol, 'ok', '資料已保留，重新加入可還原');
-        await refresh();
+        if (window.toast) window.toast(err && err.message ? err.message : '移除失敗', 'fail', err && err.code);
+        return;
       }
+      restore();
+      dismiss();
+      if (window.toast) window.toast('已移除 ' + i.symbol, 'ok', '資料已保留，重新加入可還原');
+      await refresh();
     });
+
+    purgeBtn.addEventListener('click', async () => {
+      if (purgeBtn.disabled) return;  // defensive: the gate must hold
+      const restore = window.pdBusy ? window.pdBusy(purgeBtn, '永久移除中…') : () => {};
+      try {
+        await window.pdApi.post('/api/instruments/' + encodeURIComponent(i.symbol) + '/purge', {});
+      } catch (err) {
+        restore();
+        if (err && err.status === 422) {
+          dismiss();
+          window.confirmDialog({ title: '無法永久移除', body: err.message, confirmLabel: '我知道了' });
+          return;
+        }
+        if (window.toast) window.toast(err && err.message ? err.message : '永久移除失敗', 'fail', err && err.code);
+        return;
+      }
+      restore();
+      dismiss();
+      if (window.toast) window.toast('已永久移除 ' + i.symbol, 'ok', '此標的與其衍生資料已刪除');
+      await refresh();
+    });
+
+    document.body.appendChild(backdrop);
+    if (confirmIn) setTimeout(() => confirmIn.focus(), 50);
   }
 
   async function archiveInstrument(i, archived) {

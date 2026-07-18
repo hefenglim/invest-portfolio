@@ -106,6 +106,17 @@ def _negative_response(account_id: str, ccy: Currency, low: Decimal) -> JSONResp
         "通常代表漏記入金或換匯;確認無誤可強制寫入"))
 
 
+def _fx_insufficient_response(
+    acct: Account, ccy: Currency, available: Decimal, requested: Decimal
+) -> JSONResponse:
+    """FU-D34 (需求五) HARD block:换匯不可透支 — no ack override, no financing."""
+    return JSONResponse(status_code=422, content=error_body(
+        "fx_insufficient_balance",
+        f"換出金額 {decimal_str(requested)} {ccy.value} 超過 {acct.name} 的 "
+        f"{ccy.value} 可用餘額 {decimal_str(available)} — 換匯不可透支（不提供融資）",
+        field="from_amt"))
+
+
 @router.get("/cash")
 def cash_overview(
     limit: int = Query(50, ge=1, le=500),
@@ -382,7 +393,6 @@ class CashFxBody(BaseModel):
     from_amt: Decimal
     to_ccy: Currency
     to_amt: Decimal
-    ack_negative: bool = False
 
 
 @router.post("/cash/fx", status_code=201)
@@ -390,11 +400,15 @@ def add_fx(
     body: CashFxBody,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
-    """FX conversion entry with the date-aware negative-pool guard (audit C3) and
-    currency↔account coherence (audit C2).
+    """FX conversion entry with a HARD balance guard (FU-D34, 需求五) and currency↔account
+    coherence (audit C2).
 
     Writes the SAME fx_conversions ledger row the CSV path writes — one ledger,
-    two doors; this door checks the pool first.
+    two doors; this door checks the pool first. Unlike movement withdrawals (which keep
+    their date-aware ``negative_cash`` guard + ack override), a conversion may NEVER drive
+    the from-pool below zero: the sell amount must be ≤ the pool's current balance (the
+    ``cash_balances`` figure the 換匯中心 balance line shows). There is NO ack override —
+    no financing / overdraft.
     """
     if body.from_amt <= _ZERO or body.to_amt <= _ZERO:
         return JSONResponse(status_code=400, content=error_body(
@@ -414,14 +428,12 @@ def add_fx(
                 f"{leg.value} 非此帳戶可用幣別"
                 f"（交割幣 {acct.settlement_ccy.value}／資金幣 {acct.funding_ccy.value}）",
                 field="from_ccy" if leg is body.from_ccy else "to_ccy"))
-    if not body.ack_negative:
-        synthetic = StoredFxConversion(
-            id=0, account_id=body.account_id, date=body.date, from_ccy=body.from_ccy,
-            from_amount=body.from_amt, to_ccy=body.to_ccy, to_amount=body.to_amt)
-        would_be = [*list_fx_conversions(conn), synthetic]
-        low = _pool_min(conn, body.account_id, body.from_ccy, fx=would_be)
-        if low < _ZERO:
-            return _negative_response(body.account_id, body.from_ccy, low)
+    # FU-D34 (需求五): the from-pool must cover the sell amount — HARD 422, no ack override.
+    # Same cash_balances math the balance line displays (consistency), so frontend hint and
+    # backend authority never disagree; exact-balance conversion (== available) still passes.
+    available = _balances(conn).get((body.account_id, body.from_ccy), _ZERO)
+    if body.from_amt > available:
+        return _fx_insufficient_response(acct, body.from_ccy, available, body.from_amt)
     fx_id = insert_fx_conversion(
         conn, account_id=body.account_id, date=body.date, from_ccy=body.from_ccy,
         from_amount=body.from_amt, to_ccy=body.to_ccy, to_amount=body.to_amt)

@@ -25,6 +25,10 @@ from decimal import Decimal
 from typing import Any
 
 from portfolio_dash.api import auth_store
+from portfolio_dash.llm_insight.official_templates import (
+    DIGEST_NOTE_PROMPT_BODY,
+    DIGEST_NOTE_PROMPT_VERSION,
+)
 from portfolio_dash.ops import digest as digest_store
 from portfolio_dash.ops import notify
 from portfolio_dash.portfolio.dashboard import build_dashboard
@@ -49,7 +53,9 @@ _STALE_AGE_DAYS = 3          # a held symbol's latest close older than this = da
 _EXDIV_WINDOW_DAYS = 14      # weekly: ex-dividends within the next fortnight
 _WEEK_DAYS = 7               # weekly review / signal / chores lookback
 _MOVERS_N = 3                # top-N up + top-N down
-_LLM_PROMPT_VERSION = "digest-daily-note-v1"
+# The digest one-liner prompt is code-owned in the FU-D30 registry (official_templates);
+# imported so all shipped prompt content has one home + a version tag.
+_LLM_PROMPT_VERSION = DIGEST_NOTE_PROMPT_VERSION
 
 # rule_id -> (zh label, severity) from the single push catalog (single source of labels).
 _RULE_META: dict[str, tuple[str, str]] = {
@@ -286,13 +292,8 @@ def _note_prompt(payload: dict[str, Any]) -> str:
         "signals_today_count": len(payload.get("signals_today", [])),
         "stale_quote_count": len(payload.get("data_health", {}).get("stale", [])),
     }
-    return (
-        "你是投資組合摘要助理。以下是今日已計算好的數字（JSON）。\n"
-        "<numbers>\n"
-        f"{json.dumps(numbers, ensure_ascii=False)}\n"
-        "</numbers>\n"
-        "請用繁體中文寫『一句話』的收盤摘要，只能引用上面提供的數字，"
-        "不得杜撰任何新數字或金額。不要加上金額符號。"
+    return DIGEST_NOTE_PROMPT_BODY.format(
+        numbers=json.dumps(numbers, ensure_ascii=False)
     )
 
 

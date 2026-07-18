@@ -1,18 +1,20 @@
-"""E2E flow (Playwright, real server + real frontend) — accumulative watchlist (FU-D18).
+"""E2E flow (Playwright, real server + real frontend) — deletion tiers (FU-D32; over FU-D18).
 
 Drives the REAL stack (uvicorn subprocess + on-disk SQLite + StaticFiles web/) against a
 GUEST DB seeded with a held symbol (2330), a never-traded watch-only symbol (WATCH), and a
-closed-with-history symbol (CLSD). Verifies, entirely through the UI, the FU-D18 soft-delete
-behavior (supersedes FU-D13's three tiers):
-  * 移除 on the never-traded WATCH SOFT-deletes it (ONE confirm; row hides — no hard delete),
-  * 移除 on the closed-with-history CLSD ALSO soft-deletes with ONE confirm — the former
-    has_history 封存 dialog is gone,
-  * 移除 on the held 2330 is refused with the 無法移除 info dialog (422 held),
-  * archived rows hide by default and reappear (dimmed, 已移除) via 顯示已移除／封存,
-  * ZERO console errors (bar the held delete's expected 422) + ZERO uncaught page errors.
+closed-with-history symbol (CLSD). The 移除 dialog now offers two destructive tiers — 移除（隱藏）
+(FU-D18 soft delete, unchanged) and 永久移除 (hard purge). Verified entirely through the UI:
 
-Restore + background gap backfill are covered in the contract / unit suites (with the fetch
-mocked); they are deliberately NOT exercised here so the e2e flow stays network-free.
+  * HELD 2330: 永久移除 is DISABLED (has_history); 移除（隱藏）is refused (422 held) → the 無法移除
+    info dialog; the row stays,
+  * CLOSED-with-history CLSD: 永久移除 is DISABLED with the owner's explanation; 移除（隱藏）
+    soft-deletes it (row hides, still registered),
+  * NEVER-TRADED WATCH: 永久移除 is gated by a type-confirm (disabled until the EXACT symbol is
+    typed) then hard-purges it (row gone entirely — not merely archived),
+  * archived rows hide by default and reappear (dimmed, 已移除) via 顯示已移除／封存,
+  * ZERO console errors (bar the held soft-delete's expected 422) + ZERO uncaught page errors.
+
+Purge does no network I/O (pure row deletes), so this flow stays deterministic + offline.
 """
 
 import sqlite3
@@ -82,7 +84,15 @@ def _row(page: Page, symbol: str) -> Locator:
         has=page.locator(".sym-code", has_text=symbol))
 
 
-def test_delete_and_archive_flow(
+def _open_delete_dialog(page: Page, symbol: str) -> Locator:
+    """Click a row's 移除 → return the freshly-opened three-tier dialog backdrop."""
+    _row(page, symbol).get_by_role("button", name="移除").click()
+    dialog = page.locator(".modal-backdrop").last
+    expect(dialog.get_by_role("button", name="永久移除", exact=True)).to_be_visible()
+    return dialog
+
+
+def test_delete_tiers_flow(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
     base_url = flow_server(_seed_delete_flow)  # guest mode (no users)
@@ -105,38 +115,47 @@ def test_delete_and_archive_flow(
     page.wait_for_selector("#inst-body tr")
     expect(_row(page, "WATCH")).to_have_count(1)
 
-    # 1) 移除 the never-traded WATCH → ONE confirm → row hides (SOFT delete, not hard).
-    _row(page, "WATCH").get_by_role("button", name="移除").click()
-    page.locator(".modal-backdrop").last.get_by_role("button", name="移除").click()
-    expect(_row(page, "WATCH")).to_have_count(0)
-
-    # 2) 移除 the closed-with-history CLSD → ONE confirm → row hides too (no has_history dialog).
-    _row(page, "CLSD").get_by_role("button", name="移除").click()
-    page.locator(".modal-backdrop").last.get_by_role("button", name="移除").click()
-    expect(_row(page, "CLSD")).to_have_count(0)
-
-    # 3) 移除 the HELD 2330 → confirm → backend 422 held → the 無法移除 info dialog; row stays.
-    _row(page, "2330").get_by_role("button", name="移除").click()
-    page.locator(".modal-backdrop").last.get_by_role("button", name="移除").click()
+    # 1) HELD 2330: 永久移除 DISABLED (has_history) → 移除（隱藏）refused (422 held) → info dialog.
+    dialog = _open_delete_dialog(page, "2330")
+    expect(dialog.get_by_role("button", name="永久移除", exact=True)).to_be_disabled()
+    dialog.get_by_role("button", name="移除（隱藏）", exact=True).click()
     ack = page.get_by_role("button", name="我知道了")
     expect(ack).to_be_visible()
     ack.click()
     expect(_row(page, "2330")).to_have_count(1)
 
-    # 4) The 顯示已移除／封存 toggle surfaces (2 archived); reveal → both reappear dimmed, 已移除.
+    # 2) CLOSED CLSD: 永久移除 DISABLED (has_history); 移除（隱藏）soft-deletes it (row hides).
+    dialog = _open_delete_dialog(page, "CLSD")
+    expect(dialog.get_by_role("button", name="永久移除", exact=True)).to_be_disabled()
+    dialog.get_by_role("button", name="移除（隱藏）", exact=True).click()
+    expect(_row(page, "CLSD")).to_have_count(0)
+
+    # 3) NEVER-TRADED WATCH: 永久移除 type-confirm gate → real purge (row gone entirely).
+    dialog = _open_delete_dialog(page, "WATCH")
+    purge_btn = dialog.get_by_role("button", name="永久移除", exact=True)
+    confirm_in = dialog.locator("input.purge-confirm")
+    expect(purge_btn).to_be_disabled()          # gate closed before any typing
+    confirm_in.fill("WRONG")
+    expect(purge_btn).to_be_disabled()          # a non-matching value keeps it closed
+    confirm_in.fill("WATCH")
+    expect(purge_btn).to_be_enabled()           # exact match opens the gate
+    purge_btn.click()
+    expect(_row(page, "WATCH")).to_have_count(0)  # hard-purged (not merely archived)
+
+    # 4) Only CLSD is archived now → toggle surfaces (1); reveal → CLSD reappears dimmed, 已移除.
     toggle = page.locator("#toggle-archived")
     expect(toggle).to_be_visible()
     expect(toggle).to_contain_text("顯示已移除／封存")
     toggle.click()
-    expect(_row(page, "WATCH")).to_have_count(1)
     expect(_row(page, "CLSD")).to_have_count(1)
-    expect(page.locator("#inst-body tr.inst-archived .status-tag.archived")).to_have_count(2)
+    expect(_row(page, "WATCH")).to_have_count(0)  # purge is permanent — no archived row
+    expect(page.locator("#inst-body tr.inst-archived .status-tag.archived")).to_have_count(1)
 
     page.remove_listener("console", _on_console)
     page.remove_listener("pageerror", _on_pageerror)
-    # The held DELETE deliberately 422s; Chromium logs that as a network-level "Failed to
-    # load resource … status of 422" console entry (an EXPECTED response, not a JS fault —
-    # same class E6 documents for its intentional 401). WATCH/CLSD soft-deletes are 200 (no
+    # The held soft-delete deliberately 422s; Chromium logs that as a network-level "Failed to
+    # load resource … status of 422" console entry (an EXPECTED response, not a JS fault — same
+    # class E6 documents for its intentional 401). The CLSD hide + WATCH purge are 200 (no
     # console noise). Tolerate ONLY that exact status; any other console error or ANY uncaught
     # page error still fails the flow.
     real_console = [e for e in console_errors if "status of 422" not in e]

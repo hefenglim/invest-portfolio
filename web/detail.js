@@ -26,10 +26,11 @@
     return n;
   };
 
-  const ACCOUNT_ZH = {
-    tw_broker: '台灣券商', schwab: '嘉信 Schwab',
-    moomoo_my_us: 'Moomoo 美股', moomoo_my_my: 'Moomoo 馬股'
-  };
+  /* Account zh-TW display name — single source of truth is web/names.js (FU-D37,
+     window.pdNames). Local delegator with a graceful no-op (id fallback) when names.js
+     has not loaded on this page yet (index.html's <script> tag is added by the
+     orchestrator sweep). Server-side account.display_name is the planned successor. */
+  const acctZh = (id) => (window.pdNames ? window.pdNames.account(id) : id);
   const MARKET_ZH = { TW: '台股', US: '美股', MY: '馬股' };
   /* dividend wire type (lowercase, from /detail) -> display chip label */
   const DIV_TYPE_ZH = { cash: '現金', drip: 'DRIP', stock: '配股', net: '淨額' };
@@ -202,7 +203,7 @@
     if (h) {
       head.appendChild(el('span', 'sym-name', h.name));
       if (h.board) head.appendChild(el('span', 'board-badge', h.board));
-      head.appendChild(el('span', 'badge', MARKET_ZH[h.market] + '・' + (ACCOUNT_ZH[h.account_id] || h.account_name)));
+      head.appendChild(el('span', 'badge', MARKET_ZH[h.market] + '・' + acctZh(h.account_id)));
       const price = el('span', 'sd-price');
       if (h.market_price === null || h.market_price === undefined) {
         const b = el('span', 'badge badge-missing', '缺價');
@@ -589,7 +590,7 @@
     const tbody = el('tbody');
     rows.forEach((r) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'col-text', ACCOUNT_ZH[r.account_id] || r.account_id));
+      tr.appendChild(el('td', 'col-text', acctZh(r.account_id)));
       tr.appendChild(el('td', 'num', f.num(r.shares_sold)));
       tr.appendChild(el('td', 'num', f.money(r.proceeds_net, r.quote_ccy)));
       tr.appendChild(el('td', 'num', f.money(r.adjusted_cost_removed, r.quote_ccy)));
@@ -665,7 +666,7 @@
       const qty = Number(shares.inp.value);
       const px = Number(price.inp.value);
       if (!qty || !px || qty <= 0 || px <= 0) {
-        note.textContent = '輸入股數與價格後即時試算；費稅依「' + (ACCOUNT_ZH[h.account_id] || h.account_id) + '」費率規則估算。';
+        note.textContent = '輸入股數與價格後即時試算；費稅依「' + acctZh(h.account_id) + '」費率規則估算。';
         return;
       }
       const ft = feeTax(h, mode, qty, px);

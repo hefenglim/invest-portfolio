@@ -31,17 +31,125 @@
   };
   const MARKETS = [['TW', '台股'], ['US', '美股'], ['MY', '馬股']];
 
-  /* Distinct non-empty sectors already in the registry — the datalist suggestions. */
-  async function fetchSectors() {
+  /* ---- FU-D31: shared canonical-sector field (used by BOTH this dialog and the
+     instruments edit form via window.pdSectorField). A <select> of the canonical
+     vocabulary (dual-text labels 「Technology（科技）」) + the current off-vocabulary value
+     preserved as an extra option (so editing an unmigrated row never destroys it) + an
+     「其他…」 escape (free text) + an 「AI 偵測」 button beside the select. The canonical list
+     and its synonyms live SERVER-SIDE (GET /api/instruments/sectors, POST
+     .../ai-sector) — the frontend never hardcodes them. Stored values stay as-is unless
+     the user re-picks; the read-time donut/alert canonicalization is a backend concern
+     (portfolio/dashboard.py). ---- */
+  const OTHER_SECTOR = '__other__';
+  let _sectorVocab = null;  // cached [{key, zh}]
+  async function fetchSectorVocab() {
+    if (_sectorVocab) return _sectorVocab;
     try {
-      const resp = await api.get('/api/instruments');
-      const set = new Set();
-      ((resp && resp.list) || []).forEach((i) => { if (i.sector) set.add(i.sector); });
-      return Array.from(set).sort();
+      const resp = await api.get('/api/instruments/sectors');
+      _sectorVocab = (resp && resp.sectors) || [];
     } catch (e) {
-      return [];
+      _sectorVocab = [];
     }
+    return _sectorVocab;
   }
+
+  function pdSectorField(opts) {
+    opts = opts || {};
+    const wrap = el('div', 'sector-field');
+    const row = el('div', 'sector-row');
+    row.style.cssText = 'display:flex; gap:8px; align-items:center;';
+    const sel = el('select', 'select sector-select');
+    sel.style.flex = '1';
+    const aiBtn = el('button', 'btn sector-ai-btn', 'AI 偵測'); aiBtn.type = 'button';
+    aiBtn.title = '以 AI 依代號／名稱／市場判斷產業類別';
+    row.appendChild(sel); row.appendChild(aiBtn);
+    wrap.appendChild(row);
+    const freeIn = el('input', 'input sector-free');
+    freeIn.placeholder = '自訂產業';
+    freeIn.spellcheck = false;
+    freeIn.style.cssText = 'display:none; margin-top:6px;';
+    wrap.appendChild(freeIn);
+    const note = el('div', 'hint sector-note');
+    note.style.minHeight = '14px';
+    wrap.appendChild(note);
+
+    let keySet = new Set();
+    let current = (opts.current || '').trim();
+
+    function toggleFree() {
+      const other = sel.value === OTHER_SECTOR;
+      freeIn.style.display = other ? '' : 'none';
+      if (other) freeIn.focus();
+    }
+    function ensureOffListOption(v) {
+      const prior = sel.querySelector('option[data-offlist="1"]');
+      if (prior) prior.remove();
+      const o = el('option', null, v + '（目前值）');
+      o.value = v; o.setAttribute('data-offlist', '1');
+      sel.insertBefore(o, sel.firstChild);
+    }
+    /* Apply a raw value: canonical keys select directly; any off-list value is preserved
+       as a "current value" option (never destroyed). Blank selects the empty placeholder,
+       so a blank stored sector is NOT silently migrated to the first canonical option. */
+    function applyValue(v) {
+      v = (v || '').trim();
+      if (!v) { sel.value = ''; toggleFree(); return; }
+      if (keySet.has(v)) { sel.value = v; } else { ensureOffListOption(v); sel.value = v; }
+      toggleFree();
+    }
+    function populate(vocab) {
+      keySet = new Set(vocab.map((s) => s.key));
+      sel.replaceChildren();
+      const ph = el('option', null, '（未設定）'); ph.value = ''; sel.appendChild(ph);
+      vocab.forEach((s) => {
+        const o = el('option', null, s.key + '（' + s.zh + '）'); o.value = s.key;
+        sel.appendChild(o);
+      });
+      const oo = el('option', null, '其他…'); oo.value = OTHER_SECTOR; sel.appendChild(oo);
+      applyValue(current);
+    }
+
+    sel.addEventListener('change', toggleFree);
+    aiBtn.addEventListener('click', async () => {
+      const symbol = (opts.symbol ? opts.symbol() : '') || '';
+      if (!symbol.trim()) { note.textContent = '請先輸入代號再偵測'; return; }
+      note.textContent = '';
+      const restore = window.pdBusy ? window.pdBusy(aiBtn, '偵測中…') : () => {};
+      let resp;
+      try {
+        resp = await api.post('/api/instruments/ai-sector', {
+          symbol: symbol.trim(),
+          name: opts.name ? (opts.name() || '') : '',
+          market: opts.market ? (opts.market() || '') : '',
+        });
+      } catch (err) {
+        restore();
+        if (window.toast) {
+          window.toast(err && err.message ? err.message : 'AI 偵測失敗', 'fail', err && err.code);
+        }
+        return;
+      }
+      restore();
+      if (resp && resp.mapped && resp.sector) {
+        current = resp.sector;
+        applyValue(current);
+        note.textContent = 'AI 判定：' + resp.sector;
+      } else {
+        /* unmappable reply → owner-specified notice; the user's selection is untouched. */
+        note.textContent = 'AI 回傳類別無法對應，保留原選擇';
+      }
+    });
+
+    fetchSectorVocab().then(populate);
+
+    return {
+      element: wrap,
+      value: function () { return sel.value === OTHER_SECTOR ? freeIn.value.trim() : sel.value; },
+      setValue: function (v) { current = (v || '').trim(); applyValue(current); },
+    };
+  }
+  /* Expose the shared field so web/instruments.js (edit form) reuses it (loaded after). */
+  window.pdSectorField = pdSectorField;
 
   window.pdInstQuickAdd = function (opts) {
     opts = opts || {};
@@ -85,15 +193,13 @@
     nameIn.spellcheck = false;
     body.appendChild(fld('名稱', nameIn));
 
-    const dlId = 'iqa-sectors-' + Date.now();
-    const secIn = el('input', 'input');
-    secIn.setAttribute('list', dlId);
-    secIn.placeholder = '產業（可從清單選擇或自行輸入）';
-    secIn.spellcheck = false;
-    const dl = el('datalist'); dl.id = dlId;
-    const secField = fld('產業', secIn);
-    secField.appendChild(dl);
-    body.appendChild(secField);
+    const sectorField = pdSectorField({
+      current: '',
+      symbol: () => symIn.value,
+      name: () => nameIn.value,
+      market: () => mktSel.value,
+    });
+    body.appendChild(fld('產業', sectorField.element));
 
     const etfWrap = el('label', 'hint');
     const etfCb = el('input'); etfCb.type = 'checkbox';
@@ -154,7 +260,7 @@
       }
       /* found & addable (a brand-new symbol, or an archived one to restore) */
       if (r.name && !nameIn.value.trim()) nameIn.value = r.name;
-      if (r.sector && !secIn.value.trim()) secIn.value = r.sector;
+      if (r.sector && !sectorField.value()) sectorField.setValue(r.sector);
       etfCb.checked = !!r.is_etf;
       status.textContent = r.archived
         ? '已封存 — 確認後將還原並於背景補抓缺口'
@@ -167,7 +273,7 @@
       if (!sym) return;
       const reqBody = {
         symbol: sym, market: mktSel.value,
-        name: nameIn.value.trim(), sector: secIn.value.trim(),
+        name: nameIn.value.trim(), sector: sectorField.value(),
         is_etf: etfCb.checked,
       };
       /* Only a TW board rides through (US/MY resolve their board server-side). */
@@ -215,9 +321,6 @@
     }
 
     document.body.appendChild(backdrop);
-    fetchSectors().then((secs) => {
-      secs.forEach((s) => { const o = el('option'); o.value = s; dl.appendChild(o); });
-    });
     runLookup();
     setTimeout(() => { (opts.lockSymbol ? nameIn : symIn).focus(); }, 50);
   };

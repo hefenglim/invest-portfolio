@@ -10,8 +10,8 @@ reference strategies BY NAME, so a version bump needs no preset change).
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v6() -> None:
-    assert ot.LIBRARY_VERSION == "official-v6 (2026-07-17)"
+def test_library_version_is_official_v7() -> None:
+    assert ot.LIBRARY_VERSION == "official-v7 (2026-07-18)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -56,7 +56,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v25_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v6 (2026-07-17)"
+    assert wire["library_version"] == "official-v7 (2026-07-18)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

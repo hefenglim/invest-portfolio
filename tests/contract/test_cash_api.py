@@ -57,26 +57,73 @@ def test_withdraw_negative_guard_then_ack(api_client: TestClient) -> None:
     assert _balance(api_client, "moomoo_my_my", "MYR") == "-500"
 
 
-def test_fx_entry_negative_guard(api_client: TestClient) -> None:
-    # schwab TWD pool is −32,000 already: converting MORE TWD must warn.
+def test_fx_over_balance_hard_block(api_client: TestClient) -> None:
+    # FU-D34 (需求五): schwab TWD pool is −32,000 already — a conversion may NEVER drive it
+    # further negative, so selling ANY TWD out is HARD-blocked (no ack override, no financing).
     r = api_client.post("/api/cash/fx", json={
         "account_id": "schwab", "date": "2026-06-01", "from_ccy": "TWD",
         "from_amt": "10000", "to_ccy": "USD", "to_amt": "300"})
-    assert r.status_code == 422 and r.json()["error"]["code"] == "negative_cash"
-    # deposit FIRST (dated before the golden 2026-01-08 fx-out) -> the running balance
-    # never dips below zero, so the conversion passes and lands in the SAME fx ledger.
-    # (Under the date-aware guard, audit C3, a deposit dated AFTER the drain would still
-    # warn — the pool was negative in between.)
+    assert r.status_code == 422
+    err = r.json()["error"]
+    assert err["code"] == "fx_insufficient_balance"
+    assert err["field"] == "from_amt"
+    assert "-32000" in err["message"]  # the available balance is stated in the message
+    # Fund the pool so the balance covers the sell amount -> the conversion now passes and
+    # lands in the SAME fx ledger the CSV path writes.
     api_client.post("/api/cash/movements", json={
         "account_id": "schwab", "date": "2026-01-05", "kind": "deposit",
         "ccy": "TWD", "amount": "50000"})
+    # schwab TWD is now −32,000 + 50,000 = 18,000; selling 10,000 <= 18,000 passes.
     r2 = api_client.post("/api/cash/fx", json={
         "account_id": "schwab", "date": "2026-06-01", "from_ccy": "TWD",
         "from_amt": "10000", "to_ccy": "USD", "to_amt": "300"})
     assert r2.status_code == 201
     fx_rows = api_client.get("/api/ledgers/fx", params={"limit": 500}).json()["rows"]
     assert any(x["from_amt"] == "10000" and x["to_amt"] == "300" for x in fx_rows)
-    assert _balance(api_client, "schwab", "USD") == "300"  # 0 + 300
+    assert _balance(api_client, "schwab", "USD") == "300"    # 0 + 300
+    assert _balance(api_client, "schwab", "TWD") == "8000"   # 18,000 − 10,000
+
+
+def test_fx_exact_balance_passes(api_client: TestClient) -> None:
+    # FU-D34 boundary: selling EXACTLY the pool balance drains it to zero and is allowed.
+    # moomoo_my_us MYR starts empty; fund it precisely, then convert the whole pool.
+    api_client.post("/api/cash/movements", json={
+        "account_id": "moomoo_my_us", "date": "2026-01-05", "kind": "deposit",
+        "ccy": "MYR", "amount": "44000"})
+    r = api_client.post("/api/cash/fx", json={
+        "account_id": "moomoo_my_us", "date": "2026-01-06", "from_ccy": "MYR",
+        "from_amt": "44000", "to_ccy": "USD", "to_amt": "10000"})
+    assert r.status_code == 201
+    assert _balance(api_client, "moomoo_my_us", "MYR") == "0"
+    assert _balance(api_client, "moomoo_my_us", "USD") == "10000"
+
+
+def test_fx_exact_fractional_balance_is_decimal_exact(api_client: TestClient) -> None:
+    # FU-D34 boundary, both sides, at sub-unit precision: a naive float ceiling could make
+    # the balance 12345.6699… and wrongly reject the exact sell; the Decimal check accepts
+    # == exactly, then rejects even 0.01 beyond the (now zero) pool.
+    api_client.post("/api/cash/movements", json={
+        "account_id": "moomoo_my_us", "date": "2026-01-05", "kind": "deposit",
+        "ccy": "MYR", "amount": "12345.67"})
+    ok = api_client.post("/api/cash/fx", json={
+        "account_id": "moomoo_my_us", "date": "2026-01-06", "from_ccy": "MYR",
+        "from_amt": "12345.67", "to_ccy": "USD", "to_amt": "2743.48"})
+    assert ok.status_code == 201  # exact-balance sell is NOT falsely blocked
+    over = api_client.post("/api/cash/fx", json={
+        "account_id": "moomoo_my_us", "date": "2026-01-07", "from_ccy": "MYR",
+        "from_amt": "0.01", "to_ccy": "USD", "to_amt": "0.01"})
+    assert over.status_code == 422
+    assert over.json()["error"]["code"] == "fx_insufficient_balance"
+
+
+def test_fx_ack_negative_no_longer_bypasses(api_client: TestClient) -> None:
+    # FU-D34: the ack_negative override is REMOVED for /api/cash/fx — passing it (as the
+    # legacy frontend / stress harness still might) must NOT bypass the hard balance block.
+    r = api_client.post("/api/cash/fx", json={
+        "account_id": "schwab", "date": "2026-06-01", "from_ccy": "TWD",
+        "from_amt": "10000", "to_ccy": "USD", "to_amt": "300", "ack_negative": True})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "fx_insufficient_balance"
 
 
 def test_movement_edit_delta_guard_and_delete(api_client: TestClient) -> None:

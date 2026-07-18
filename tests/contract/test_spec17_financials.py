@@ -435,8 +435,9 @@ def test_sector_allocation_reporting(
     eqd(alloc["Shipping"], _D("121000"))
     # ETF = 0056 only (00919 unpriced -> excluded). 304,000 TWD.
     eqd(alloc["ETF"], _D("304000"))
-    # Tech = AAPL+MSFT+NVDA = 38,870 USD * 32 = 1,243,840 TWD.
-    eqd(alloc["Tech"], _D("38870") * _D("32"))
+    # Technology = AAPL+MSFT+NVDA = 38,870 USD * 32 = 1,243,840 TWD. Seed sectors are the
+    # raw 'Tech'; FU-D31 canonicalizes the donut GROUPING key to 'Technology' (read-time).
+    eqd(alloc["Technology"], _D("38870") * _D("32"))
     # Financials = 1155.KL = 9,875 MYR * 7 = 69,125 TWD.
     eqd(alloc["Financials"], _D("9875") * _D("7"))
 

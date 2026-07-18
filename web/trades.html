@@ -206,7 +206,7 @@
           <div>
             <div class="form-grid">
               <div class="field"><label for="d-account">帳戶</label><select class="select" id="d-account"></select></div>
-              <div class="field"><label for="d-symbol">代號</label><input class="input" id="d-symbol" spellcheck="false"></input></div>
+              <div class="field" id="d-symbol-field" style="position:relative;"><label for="d-symbol">代號</label><input class="input" id="d-symbol" spellcheck="false" autocomplete="off"></input><div class="sym-picker" id="d-sym-picker" hidden="hidden"><div class="sym-pick-empty" id="d-sym-empty" hidden="hidden"></div><div id="d-sym-list"></div><div class="sym-pick-foot" id="d-sym-foot" hidden="hidden"><label class="sym-pick-toggle"><input type="checkbox" id="d-sym-closed-toggle"></input>顯示已清倉標的</label></div></div></div>
               <div class="field"><label for="d-date">日期</label><input class="input" id="d-date" type="date"></input></div>
             </div>
             <div id="d-tw" hidden="hidden"><div class="form-grid" style="margin-top:14px;">
@@ -317,6 +317,7 @@
 <script src="api.js?v=0.1.19"></script>
 <script src="shell.js?v=0.1.19"></script>
 <script src="format.js?v=0.1.19"></script>
+<script src="names.js?v=0.1.19"></script>
 <script src="pager.js?v=0.1.19"></script>
 <script src="export.js?v=0.1.19"></script>
 <script src="alerts.js?v=0.1.19"></script>

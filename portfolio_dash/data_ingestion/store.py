@@ -192,30 +192,42 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def delete_instrument(conn: sqlite3.Connection, symbol: str) -> bool:
+def delete_instrument(
+    conn: sqlite3.Connection, symbol: str, *, preserve_market_data: bool = False
+) -> bool:
     """Hard-delete a NEVER-TRADED watch-only symbol and its derived / cache rows, in ONE
     transaction; audit the instruments row first (mirrors ``delete_opening``).
 
-    NOTE (FU-D18, 2026-07-17): the API delete path is now SOFT-delete-only
-    (``set_instrument_archived(True)``); this hard delete is NO LONGER routed. It is
-    retained for internal / test use only (rebuild tooling, fixtures) — callers must
-    still guarantee the symbol is neither held nor has ledger history before invoking it.
+    NOTE (FU-D18, 2026-07-17): the plain DELETE path is SOFT-delete-only
+    (``set_instrument_archived(True)``). This hard delete is routed ONLY by the FU-D32
+    「永久移除」 purge endpoint (``POST /api/instruments/{symbol}/purge``), which guarantees
+    the symbol is neither held nor carries ledger history before invoking it; it also remains
+    available for internal / test use (rebuild tooling, fixtures).
 
     Cleaned in addition to the instruments row: ``prices``, ``dividend_events`` (both keyed
     ``instrument``), ``signal_states`` / ``alert_events`` (keyed ``symbol``), any
     ``pending_dividend_skips`` fingerprint for the symbol, and the symbol's entry in the
     single-row ``target_weights_config`` JSON map. Raw SQL by table name keeps the cleanup
-    atomic without importing upward (data_ingestion imports no higher layer)."""
+    atomic without importing upward (data_ingestion imports no higher layer).
+
+    ``preserve_market_data`` (FU-D32 benchmark guard): when True, the market-data rows
+    (``prices`` / ``dividend_events``, keyed ``instrument``) are KEPT so a benchmark daily
+    series stored under this same ``prices.instrument`` key (``pricing/benchmarks.py`` — e.g.
+    ``"0050"``) survives the purge. The registry row AND every personal artifact
+    (``signal_states`` / ``alert_events`` / ``pending_dividend_skips`` / the target-weights
+    entry) are still removed. The purge route sets this for a symbol that is also a benchmark
+    storage key."""
     _write_audit(
         conn, "instruments", symbol, "delete",
         _capture(conn, "SELECT * FROM instruments WHERE symbol=?", (symbol,)),
     )
-    for table, col in (
-        ("prices", "instrument"),
-        ("dividend_events", "instrument"),
-        ("signal_states", "symbol"),
-        ("alert_events", "symbol"),
-    ):
+    # Market-data tables are keyed ``instrument`` and shared with benchmark series; personal
+    # artifacts are keyed ``symbol`` and always cleaned. preserve_market_data keeps only the
+    # former (so a benchmark's daily-close series stored under the same key is not orphaned).
+    market_data = (("prices", "instrument"), ("dividend_events", "instrument"))
+    personal = (("signal_states", "symbol"), ("alert_events", "symbol"))
+    tables = personal if preserve_market_data else (*market_data, *personal)
+    for table, col in tables:
         if _table_exists(conn, table):
             conn.execute(f"DELETE FROM {table} WHERE {col}=?", (symbol,))  # noqa: S608 (fixed table/col literals)
     if _table_exists(conn, "pending_dividend_skips"):

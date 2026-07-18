@@ -7,6 +7,7 @@ unit-testable; the APScheduler wiring lives in ``runtime.py``.
 
 import logging
 import sqlite3
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -1002,6 +1003,38 @@ def _jobs_by_id() -> dict[str, JobSpec]:
     return {j.id: j for j in JOBS}
 
 
+# --- In-flight job registry (FU-D36) ------------------------------------------
+# A process-local set of the job_ids whose func is EXECUTING right now, so the status
+# endpoint (api/routers/scheduler.py::job_status) can honestly distinguish 執行中 (the
+# func is running) from 已排入 (a run row exists but the worker has not picked it up
+# yet — the brief window between ``start_job_run`` on the request thread and the daemon
+# thread marking itself running). Both the synchronous cron path (:func:`run_job`) and
+# the async manual path (:func:`run_job_func`) mark/clear it; a lock guards every access.
+# This is bookkeeping only — no business logic, never persisted (a process restart clears
+# it, which is correct: a dropped daemon thread is not still running).
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT_JOBS: set[str] = set()
+
+
+def _mark_running(job_id: str) -> None:
+    """Mark a job as executing (idempotent under the lock)."""
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_JOBS.add(job_id)
+
+
+def _clear_running(job_id: str) -> None:
+    """Clear a job's executing mark (no-op if absent). Call ONLY after the run row is
+    finalized, so the status endpoint never briefly reads a finished run as 已排入."""
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_JOBS.discard(job_id)
+
+
+def running_job_ids() -> set[str]:
+    """A thread-safe snapshot copy of the job_ids whose func is executing right now."""
+    with _INFLIGHT_LOCK:
+        return set(_INFLIGHT_JOBS)
+
+
 def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
     """Execute one job, logging start/finish to ``job_runs``; return its run id.
 
@@ -1009,6 +1042,10 @@ def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
     one failing job cannot crash the scheduler or other jobs. The ``job_runs`` row is
     inserted before the job func runs, so the returned id is always valid regardless of
     job success/failure (consumed by the manual-refresh action to report ``run_ids``).
+
+    FU-D36: the job is marked in the in-flight registry while its func runs and cleared
+    only AFTER the row is finalized, so a concurrent status poll reads it as 執行中
+    throughout the run (never briefly as 已排入 on the way out).
     """
     spec = _jobs_by_id()[job_id]
     cur = conn.execute(
@@ -1017,18 +1054,22 @@ def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
     )
     run_id = int(cur.lastrowid or 0)
     conn.commit()
+    _mark_running(job_id)
     try:
-        detail = spec.func(conn, now=now)
-        status = "ok"
-    except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
-        detail, status = str(exc), "error"
-    # finished_at shares *now*'s timezone (M1 fix): a UTC finish next to a +08:00 start
-    # reads as a negative-duration run in any naive display.
-    conn.execute(
-        "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
-        (datetime.now(tz=now.tzinfo or UTC).isoformat(), status, detail, run_id),
-    )
-    conn.commit()
+        try:
+            detail = spec.func(conn, now=now)
+            status = "ok"
+        except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
+            detail, status = str(exc), "error"
+        # finished_at shares *now*'s timezone (M1 fix): a UTC finish next to a +08:00 start
+        # reads as a negative-duration run in any naive display.
+        conn.execute(
+            "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
+            (datetime.now(tz=now.tzinfo or UTC).isoformat(), status, detail, run_id),
+        )
+        conn.commit()
+    finally:
+        _clear_running(job_id)
     return run_id
 
 
@@ -1093,12 +1134,19 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
             ).fetchone()
             if rid is None:
                 return
+            # FU-D36: mark 執行中 once we own the row; the window before this (from
+            # start_job_run inserting the row) is the honest 已排入 state. Clear only
+            # after finish_job_run commits, so the poll never reads a done run as queued.
+            _mark_running(job_id)
             try:
-                detail = _jobs_by_id()[job_id].func(conn, now=now)
-                status = "ok"
-            except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
-                detail, status = str(exc), "error"
-            finish_job_run(conn, int(rid["id"]), status=status, detail=detail, now=now)
+                try:
+                    detail = _jobs_by_id()[job_id].func(conn, now=now)
+                    status = "ok"
+                except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
+                    detail, status = str(exc), "error"
+                finish_job_run(conn, int(rid["id"]), status=status, detail=detail, now=now)
+            finally:
+                _clear_running(job_id)
     except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
         return
 
@@ -1129,8 +1177,16 @@ def run_insight_func(insight_type_id: int, *, now: datetime, run_id: int) -> Non
         runner = _INSIGHT_RUNNER
         if runner is None:
             return
-        with session() as conn:
-            runner(conn, insight_type_id, now=now, run_id=run_id)
+        # FU-D36: mark the kind=insight row 執行中 so the status endpoint reflects it
+        # uniformly with the static jobs; the runner finalizes its own job_runs row, so
+        # clear only after it returns (finalize-then-clear, matching run_job_func).
+        job_id = insight_job_id(insight_type_id)
+        _mark_running(job_id)
+        try:
+            with session() as conn:
+                runner(conn, insight_type_id, now=now, run_id=run_id)
+        finally:
+            _clear_running(job_id)
     except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
         return
 

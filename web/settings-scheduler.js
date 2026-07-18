@@ -13,7 +13,13 @@
    Write paths (all via pdApi; success -> toast + re-fetch; PdApiError -> toast(message,
    'fail', code); try/catch graceful so a failure never throws an unhandled rejection):
    - PUT /api/scheduler/jobs/{id}        (cron / tz / enabled)
-   - POST /api/scheduler/jobs/{id}/run   (manual run; 202 + run_id, 409 already-running) */
+   - POST /api/scheduler/jobs/{id}/run   (manual run; 202 + run_id, 409 already-running)
+
+   FU-D36 (需求七) — run-now live status: each row carries a 狀態 chip fed by
+   GET /api/scheduler/status -> { active, jobs:{ <id>:{running, queued, last_run} } }.
+   Clicking 立即執行 flips the row to 已排入, then polling (every ~3s, ONLY while something
+   is queued/running + a short grace after a trigger) advances it 執行中 -> 成功/失敗 with the
+   last-run message; polling STOPS when nothing is active, so an idle page polls zero times. */
 (function () {
   'use strict';
   const f = window.fmt;
@@ -78,11 +84,124 @@
   };
   const jobLabel = (id, desc) => JOB_ZH[id] || desc || id;
 
+  /* ===== FU-D36 (需求七): per-row live run status ==============================
+     renderJobs stores each row's 狀態 slot + run button by job_id; GET /api/scheduler/
+     status feeds a chip 已排入 → 執行中 → 成功/失敗. Polling runs ONLY while something is
+     queued/running (plus a short grace after a trigger) and STOPS when idle, so an idle
+     page makes zero status requests. Single timer handle → the loop provably terminates. */
+  const rowRefs = new Map();   // job_id -> { statusSlot, runBtn, lastSeed }
+  let statusByJob = {};        // last /status map { <id>:{running,queued,last_run} }
+  let pollActive = false;      // true between start/stop — guards against overlapping ticks
+  let pollTimer = null;        // setTimeout handle (cleared + nulled on stop)
+  let graceUntil = 0;          // keep polling until >= this even if nothing looks active yet
+  const POLL_MS = 3000;
+  const GRACE_MS = 6000;
+
+  /* Run-history status -> [pill class, zh label]. Shared by the history table so a
+     'running'/'skipped' row is not miscoloured as 失敗 (unmapped -> 失敗). */
+  const HIST_STATUS = {
+    ok: ['pill-ok', '成功'],
+    running: ['pill-run', '執行中'],
+    skipped: ['pill-off', '略過'],
+  };
+
+  /* Build the 狀態 chip (+ short last-result message) for a job. `st` = the /status entry
+     ({running,queued,last_run}) when known, else null; `fallbackLast` = the jobs-GET `last`
+     used before the first status poll. Both last-run shapes are normalized. */
+  function statusChip(st, fallbackLast) {
+    const wrap = el('div', 'run-status');
+    if (st && st.running) {
+      wrap.appendChild(_pill('pill-run', '執行中'));
+      return wrap;
+    }
+    if (st && st.queued) {
+      wrap.appendChild(_pill('pill-queued', '已排入'));
+      return wrap;
+    }
+    const lr = (st && st.last_run) || fallbackLast || null;
+    if (!lr) { wrap.appendChild(el('span', 'sign-nil', f.NULL_GLYPH)); return wrap; }
+    // /status last_run: {ok,status,message,...}; jobs-GET last: {status:'ok'|'error',detail}.
+    const status = lr.status;
+    // A seed from jobs-GET `last` can carry an in-flight 'running' status (a run was live
+    // at page load, before the first poll overlays live state) — render it honestly.
+    if (status === 'running') { wrap.appendChild(_pill('pill-run', '執行中')); return wrap; }
+    const ok = lr.ok === true || status === 'ok';
+    const msg = lr.message || lr.detail || '';
+    let cls = 'pill-fail', label = '失敗';
+    if (status === 'skipped') { cls = 'pill-off'; label = '略過'; }
+    else if (ok) { cls = 'pill-ok'; label = '成功'; }
+    const pill = _pill(cls, label);
+    if (msg) pill.title = msg;
+    wrap.appendChild(pill);
+    if (msg) { const m = el('div', 'run-msg', msg); m.title = msg; wrap.appendChild(m); }
+    return wrap;
+  }
+  function _pill(cls, label) {
+    const pill = el('span', 'pill ' + cls);
+    pill.appendChild(el('span', 'dot'));
+    pill.appendChild(document.createTextNode(label));
+    return pill;
+  }
+
+  /* Repaint one row's status slot + toggle its run button (disabled while queued/running,
+     so a re-click can't race a 409). Safe if the row is not currently mounted. */
+  function paintStatus(jobId) {
+    const ref = rowRefs.get(jobId);
+    if (!ref) return;
+    const st = statusByJob[jobId] || null;
+    ref.statusSlot.replaceChildren(statusChip(st, ref.lastSeed));
+    if (ref.runBtn) ref.runBtn.disabled = !!(st && (st.running || st.queued));
+  }
+
+  function applyStatus(map) {
+    statusByJob = map || {};
+    rowRefs.forEach((_ref, jobId) => paintStatus(jobId));
+  }
+
+  /* One status fetch. Returns whether ANY job is active; degrades quietly on error (the
+     grace timeout winds polling down rather than looping on a dead endpoint). */
+  async function refreshStatus() {
+    try {
+      const resp = await api.get('/api/scheduler/status');
+      applyStatus((resp && resp.jobs) || {});
+      return !!(resp && resp.active);
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function startPolling() {
+    graceUntil = Date.now() + GRACE_MS;
+    if (!pollActive) { pollActive = true; pollTick(); }  // idempotent — a 2nd call just bumps grace
+  }
+
+  function stopPolling() {
+    pollActive = false;
+    if (pollTimer != null) { clearTimeout(pollTimer); pollTimer = null; }
+    // Idle by definition when we stop → never leave a run button stuck disabled.
+    rowRefs.forEach((ref) => { if (ref.runBtn) ref.runBtn.disabled = false; });
+  }
+
+  async function pollTick() {
+    if (!pollActive) return;
+    const active = await refreshStatus();
+    if (!pollActive) return;                 // stopped while awaiting (e.g. teardown)
+    if (active || Date.now() < graceUntil) {
+      pollTimer = setTimeout(pollTick, POLL_MS);
+    } else {
+      stopPolling();
+      // Run(s) finished — refresh the jobs table (上次執行 time / next-fire) + run history.
+      refreshJobs();
+      refreshRuns();
+    }
+  }
+
   /* ---- Section A jobs ---- */
   function renderJobs() {
     const tbody = $('#jobs-body');
     if (!tbody) return;
     tbody.replaceChildren();
+    rowRefs.clear();  // rows are rebuilt below; stale slot/button refs must not linger
     jobs.forEach((j) => {
       const tr = el('tr');
       const tdJob = el('td', 'col-text');
@@ -138,6 +257,12 @@
       /* tz */
       tr.appendChild(el('td', 'col-text num', j.tz || ''));
 
+      /* 狀態 (FU-D36): live run-status chip; seeded from j.last, advanced by polling. */
+      const tdStatus = el('td', 'col-text');
+      const statusSlot = el('div');
+      tdStatus.appendChild(statusSlot);
+      tr.appendChild(tdStatus);
+
       /* last run: null when never run -> em-dash. */
       const tdLast = el('td', 'col-text');
       if (!j.last) {
@@ -162,38 +287,36 @@
       if (!j.next) tdNext.classList.add('sign-nil');
       tr.appendChild(tdNext);
 
-      /* manual run -> POST /api/scheduler/jobs/{id}/run */
+      /* manual run -> POST /api/scheduler/jobs/{id}/run (202 + run_id, 409 already-running).
+         The row's 狀態 chip carries the outcome; the button just enqueues + starts polling. */
       const tdRun = el('td');
       const runBtn = el('button', 'btn', '立即執行');
       runBtn.type = 'button';
-      const resultSlot = el('div', 'run-result');
       runBtn.addEventListener('click', async () => {
         runBtn.disabled = true;
-        runBtn.textContent = '執行中…';
-        resultSlot.replaceChildren();
+        statusByJob[j.id] = { running: false, queued: true, last_run: null };  // optimistic 已排入
+        paintStatus(j.id);
         try {
           const resp = await api.post('/api/scheduler/jobs/' + encodeURIComponent(j.id) + '/run');
-          const chip = el('span', 'pill pill-ok');
-          chip.appendChild(el('span', 'dot'));
-          chip.appendChild(document.createTextNode('已排入執行 #' + ((resp && resp.run_id) || '?')));
-          resultSlot.appendChild(chip);
-          _toast('已開始執行', 'ok', j.id);
-          /* refresh the run log so the new run appears once it lands. */
-          await refreshRuns();
+          _toast('已排入執行', 'ok', j.id + ' #' + ((resp && resp.run_id) || '?'));
+          startPolling();  // advance 執行中 -> 成功/失敗 live, then stop when idle
         } catch (err) {
-          const chip = el('span', 'pill pill-fail');
-          chip.appendChild(el('span', 'dot'));
-          chip.appendChild(document.createTextNode((err && err.message) || '執行失敗'));
-          resultSlot.appendChild(chip);
           _toast((err && err.message) || '執行失敗', 'fail', err && err.code);
-        } finally {
-          runBtn.disabled = false;
-          runBtn.textContent = '立即執行';
+          if (err && err.code === 'already_running') {
+            startPolling();  // a run is genuinely in flight (prior trigger / cron) — track it
+          } else {
+            delete statusByJob[j.id];  // enqueue failed; revert to last known status
+            paintStatus(j.id);
+            runBtn.disabled = false;
+          }
         }
       });
       tdRun.appendChild(runBtn);
-      tdRun.appendChild(resultSlot);
       tr.appendChild(tdRun);
+
+      /* register the row so polling can repaint it in place; seed the chip from j.last. */
+      rowRefs.set(j.id, { statusSlot: statusSlot, runBtn: runBtn, lastSeed: j.last || null });
+      paintStatus(j.id);
       tbody.appendChild(tr);
     });
   }
@@ -224,9 +347,12 @@
         }
         tr.appendChild(tdJob);
         const tdSt = el('td');
-        const pill = el('span', 'pill ' + (h.status === 'ok' ? 'pill-ok' : 'pill-fail'));
+        /* Map every terminal/in-flight status honestly (a 'running'/'skipped' row must not
+           read as 失敗): ok→成功, running→執行中, skipped→略過, else (error/…)→失敗. */
+        const st = HIST_STATUS[h.status] || ['pill-fail', '失敗'];
+        const pill = el('span', 'pill ' + st[0]);
         pill.appendChild(el('span', 'dot'));
-        pill.appendChild(document.createTextNode(h.status === 'ok' ? '成功' : '失敗'));
+        pill.appendChild(document.createTextNode(st[1]));
         tdSt.appendChild(pill);
         tr.appendChild(tdSt);
         const tdDetail = el('td', 'log-msg', h.detail || '');
@@ -367,6 +493,9 @@
     initHistFilter();
     await refreshRuns();
     refreshSyslog();  // section C, independent fetch (graceful on failure)
+    // FU-D36: seed live status once (catches a cron / prior-trigger run already in flight);
+    // start polling ONLY if something is active, so an idle page polls zero times.
+    if (await refreshStatus()) startPolling();
   }
 
   /* Lightweight refresh of JUST the jobs table (cron / enabled / next-fire) — run when a
@@ -379,6 +508,10 @@
       jobs = jobsResp.jobs;
       renderJobs();
       initHistFilter();  // job list unchanged in practice; preserves the active filter chip
+      // Overlay live status onto the freshly-rendered rows; resume polling if a run is
+      // active (e.g. switching to this tab mid-run). On the poll stop-path this returns
+      // not-active, so it never re-arms the loop.
+      if (await refreshStatus() && !pollActive) startPolling();
     }
   }
 

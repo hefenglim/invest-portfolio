@@ -77,6 +77,12 @@ class DividendSummary(BaseModel):
 
     by_year: list[DividendYearRow]
     total_by_currency: dict[Currency, Decimal]
+    # Trailing-12-month (the 365 days ending at ``as_of``) net cash dividends, per
+    # currency. DISPLAY-ONLY attribution: never summed across currencies, and NEVER
+    # fed into returns — dividends are already folded into adjusted cost, so this is a
+    # distribution surface, not a second income line. Additive field with an empty
+    # default so DashboardData constructions that predate it still validate.
+    ttm_net: dict[Currency, Decimal] = Field(default_factory=dict)
 
 
 class ExDividendItem(BaseModel):

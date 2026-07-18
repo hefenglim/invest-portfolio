@@ -9,13 +9,11 @@
   let D;                       // set in boot() from the shared /api/dashboard promise
   const f = window.fmt;
 
-  /* zh-TW display names (brief §5) */
-  const ACCOUNT_ZH = {
-    tw_broker: '台灣券商',
-    schwab: '嘉信 Schwab',
-    moomoo_my_us: 'Moomoo 美股',
-    moomoo_my_my: 'Moomoo 馬股'
-  };
+  /* Account zh-TW display name — single source of truth is web/names.js (FU-D37,
+     window.pdNames). Local delegator with a graceful no-op (id fallback) when names.js
+     has not loaded on this page yet (index.html's <script> tag is added by the
+     orchestrator sweep). Server-side account.display_name is the planned successor. */
+  const acctZh = (id) => (window.pdNames ? window.pdNames.account(id) : id);
   const MARKET_ZH = { TW: '台股', US: '美股', MY: '馬股' };
   const CCY_COLOR = { TWD: '#58a6dd', USD: '#9b86d8', MYR: '#d9a13f' };
 
@@ -243,7 +241,7 @@
     bar.appendChild(mkChip('account', 'all', '全部'));
     const seen = [];
     D.holdings.forEach((h) => { if (!seen.includes(h.account_id)) seen.push(h.account_id); });
-    seen.forEach((id) => bar.appendChild(mkChip('account', id, ACCOUNT_ZH[id] || id)));
+    seen.forEach((id) => bar.appendChild(mkChip('account', id, acctZh(id))));
     bar.appendChild(el('span', 'divider'));
     bar.appendChild(el('span', 'group-label', '市場'));
     bar.appendChild(mkChip('market', 'all', '全部'));
@@ -394,7 +392,7 @@
       tr.appendChild(tdSym);
 
       tr.appendChild(el('td', 'col-text', MARKET_ZH[h.market] || h.market));
-      tr.appendChild(el('td', 'col-text', ACCOUNT_ZH[h.account_id] || h.account_name));
+      tr.appendChild(el('td', 'col-text', acctZh(h.account_id)));
       tr.appendChild(el('td', 'num', f.num(h.shares)));
       tr.appendChild(el('td', 'num', f.price(h.original_avg, h.quote_ccy)));
       tr.appendChild(el('td', 'num', f.price(h.adjusted_avg, h.quote_ccy)));
@@ -672,7 +670,7 @@
       const a = fx.by_account[id];
       const card = el('div', 'fx-card');
       const head = el('div', 'fx-card-head');
-      head.appendChild(el('span', 'fx-account', ACCOUNT_ZH[a.account_id] || a.account_id));
+      head.appendChild(el('span', 'fx-account', acctZh(a.account_id)));
       head.appendChild(el('span', 'fx-pair', a.foreign_ccy + ' → ' + a.home_ccy));
       card.appendChild(head);
 
@@ -766,7 +764,7 @@
       });
       tdSym.appendChild(cell);
       tr.appendChild(tdSym);
-      tr.appendChild(el('td', 'col-text', ACCOUNT_ZH[r.account_id] || r.account_id));
+      tr.appendChild(el('td', 'col-text', acctZh(r.account_id)));
       tr.appendChild(el('td', 'num', f.num(r.shares_sold)));
       const tdProceeds = el('td', 'num', f.money(r.proceeds_net, r.quote_ccy));
       tdProceeds.appendChild(el('span', 'kpi-unit', ' ' + r.quote_ccy));

@@ -132,6 +132,17 @@ textarea.input { font-family: var(--font-num); line-height: 1.6; resize: vertica
 .pill-ok { color: var(--ok); border-color: rgba(79, 174, 108, 0.4); background: var(--ok-soft); }
 .pill-fail { color: var(--up); border-color: rgba(240, 84, 79, 0.4); background: var(--up-soft); }
 .pill-off { color: var(--text-3); }
+/* FU-D36 scheduler run-now live status: 執行中 (accent, animated dot) + 已排入 (amber) */
+.pill-run { color: var(--accent); border-color: rgba(88, 166, 221, 0.4); background: var(--accent-soft); }
+.pill-run .dot { animation: pill-pulse 1s ease-in-out infinite; }
+.pill-queued { color: var(--amber); border-color: rgba(217, 161, 63, 0.4); background: var(--amber-soft); }
+@keyframes pill-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+/* short last-result message under a job's status chip (truncated; full text on hover) */
+.run-status { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.run-msg {
+  font-size: 10px; color: var(--text-3); max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* ================= AI 自我進化區（組合器 + 校正庫） ================= */
 
