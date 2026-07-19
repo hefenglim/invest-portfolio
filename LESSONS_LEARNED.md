@@ -23,6 +23,22 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **The type gate must run BARE over the FULL scope, centrally (2026-07-20):** parallel
+  implementation agents each ran `mypy portfolio_dash --strict` (package only, ~210 files)
+  and reported clean; the central bare run (`mypy --no-incremental`, whole 522-file scope
+  incl. tests/scripts) still found 2 real errors in test files. Two causes recur: (a)
+  scoped runs skip tests/scripts entirely, (b) incremental caches mask errors after
+  cross-file edits. Rule: agent-level mypy is a smoke check; the shipping verdict comes
+  only from the orchestrator's bare, full-scope run.
+
+- **Markup↔JS id contracts silently dead-zone — sweep them mechanically (2026-07-20,
+  learned 2026-07-16):** JS that binds `#some-id` which no longer exists in the page
+  markup fails SILENTLY (the feature is simply dead — the CSV drop zone and the 配股
+  buttons both shipped dead this way). Unit and route tests cannot see it; only a
+  mechanical sweep (extract every id the JS binds, diff against the markup) or a
+  real-browser flow test catches the class. Rule: run the id-contract sweep before every
+  ship, and give every new interactive element an e2e flow assertion, not just an API test.
+
 - **Edit-distance similarity has no semantics for exchange codes — resolve exact-only
   (2026-07-19):** the symbol resolver fuzzy-matched an unregistered code against
   REGISTERED instruments with `difflib.SequenceMatcher` at a 0.75 threshold. Any two
