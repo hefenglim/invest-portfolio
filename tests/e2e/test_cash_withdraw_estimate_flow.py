@@ -12,6 +12,10 @@ Driven against the REAL stack (fresh uvicorn + on-disk golden DB + headless chro
   once the buy field is edited manually the auto-fill STOPS (a later sell-amount change
   must not overwrite) and the 重新試算 affordance re-runs it on demand.
 * FU-D40 — the fx_conversions ledger renders under the 換匯中心 tab (golden schwab row).
+* R6-D — FX-form UX hardening: an #cfx-account switch clears both amount fields; a
+  single-currency account (tw_broker, TWD-only) disables the whole FX form and shows
+  #cfx-single-ccy; picking 賣出幣別 == 買入幣別 auto-flips the OTHER select so the two
+  ccy fields can never read equal.
 
 Scenario: moomoo_my_us starts with a clean MYR 50,000 pool (no golden flow touches it).
 Stored USD/MYR 4.4 → MYR→USD inverse rate 0.227273 (6-dp cap); 50,000 × 0.227273 =
@@ -162,4 +166,100 @@ def test_cash_withdraw_guard_maxfill_estimate_and_fx_ledger(
 
     assert not console_errors and not page_errors, (
         f"cash withdraw/estimate flow: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_cash_fx_form_account_switch_single_ccy_never_equal(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """R6-D: FX-form UX hardening (owner-signed 2026-07-19).
+
+    (a) schwab selected -> fill both amounts -> switch account -> both amount fields
+        empty (a stale amount must not carry over and re-validate against the new
+        account's pool).
+    (b) tw_broker (TWD-only, single currency) -> the whole FX form (both ccy selects,
+        both amounts, 確認) is disabled and #cfx-single-ccy shows the TWD reason.
+    (c) schwab (TWD/USD) -> setting 賣出幣別=USD auto-flips 買入幣別 off USD (the
+        never-equal invariant) to schwab's only alternate, TWD.
+
+    Also regression-guards a real ordering defect found in review: updCeiling() ends
+    with an UNCONDITIONAL `confirm.disabled = over`, so ANY updFxBalance() call that
+    runs AFTER the single-ccy gate disabled #cfx-confirm (init's own trailing call at
+    page load, boot()'s async tail, a tab-switch re-boot, post-commit/delete refreshes)
+    would silently RE-ENABLE it while the rest of the form stayed disabled. Both the
+    plain-initial-load path (accounts load `ORDER BY account_id`, so the default first
+    option is moomoo_my_my — MYR-only, also single-ccy) and a forced re-boot while
+    tw_broker stays selected are exercised below, each time explicitly settling the
+    page's async boot/balances refresh (network-idle) before asserting — a bare
+    post-click assertion would race ahead of the very call path that leaked.
+    """
+    base = flow_server(_seed_cash)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    # ---- plain initial load, no select_option: accounts load ORDER BY account_id, so
+    # the default first option is moomoo_my_my (MYR-only, single-currency). Settle the
+    # page's own async boot() (its tail calls updFxBalance() again, after initForms()'s
+    # own gate already disabled 確認) before asserting it is STILL disabled -- this
+    # reproduces the leak deterministically. --------------------------------------
+    page.goto(base + "/cash.html#fx", wait_until="load")
+    page.wait_for_selector("#cfx-account option", state="attached")
+    page.wait_for_load_state("networkidle")
+    assert page.input_value("#cfx-account") == "moomoo_my_my", \
+        "expected moomoo_my_my as the default first account (ORDER BY account_id)"
+    assert page.is_disabled("#cfx-confirm"), \
+        "確認 must stay disabled after the initial boot() settles (moomoo_my_my is single-ccy)"
+
+    # ---- (a) schwab: fill both amounts, then switch account -> both fields clear ----
+    page.select_option("#cfx-account", "schwab")
+    page.wait_for_function(
+        "() => !document.querySelector('#cfx-from-ccy').disabled")
+    page.fill("#cfx-from-amt", "1000")
+    page.fill("#cfx-to-amt", "31000")
+    page.select_option("#cfx-account", "moomoo_my_us")
+    page.wait_for_function(
+        "() => document.querySelector('#cfx-from-amt').value === ''"
+        " && document.querySelector('#cfx-to-amt').value === ''")
+
+    # ---- (b) tw_broker: single-currency account -> whole form disabled + message ----
+    page.select_option("#cfx-account", "tw_broker")
+    page.wait_for_function(
+        "() => document.querySelector('#cfx-from-ccy').disabled === true")
+    for sel in ("#cfx-from-ccy", "#cfx-to-ccy", "#cfx-from-amt", "#cfx-to-amt", "#cfx-confirm"):
+        assert page.is_disabled(sel), f"{sel} must be disabled for a single-ccy account"
+    assert page.is_visible("#cfx-single-ccy")
+    msg = page.text_content("#cfx-single-ccy") or ""
+    assert "TWD" in msg and "單一幣別" in msg and "換匯需帳戶具備兩種以上幣別" in msg, msg
+
+    # ---- ordering-leak regression: force a FRESH boot() while tw_broker stays
+    # selected -- a tab click re-dispatches pd-cash-tab, whose 'fx' branch re-fetches
+    # balances and re-runs updFxBalance() in its tail (the exact call path the review
+    # flagged: updCeiling()'s unconditional confirm.disabled = over would otherwise
+    # re-enable 確認 once the fresh balances read "not over ceiling"). Settle it, then
+    # confirm the single-ccy gate held. -------------------------------------------
+    page.click('.cash-tab[data-tab="fx"]')
+    page.wait_for_load_state("networkidle")
+    assert page.input_value("#cfx-account") == "tw_broker"
+    for sel in ("#cfx-from-ccy", "#cfx-to-ccy", "#cfx-from-amt", "#cfx-to-amt", "#cfx-confirm"):
+        assert page.is_disabled(sel), f"{sel} must stay disabled after a re-boot while selected"
+
+    # ---- switching back to a two-currency account fully re-enables + hides the msg --
+    page.select_option("#cfx-account", "schwab")
+    page.wait_for_function(
+        "() => !document.querySelector('#cfx-from-ccy').disabled")
+    for sel in ("#cfx-from-ccy", "#cfx-to-ccy", "#cfx-from-amt", "#cfx-to-amt", "#cfx-confirm"):
+        assert not page.is_disabled(sel), f"{sel} must re-enable for a two-ccy account"
+    assert page.is_hidden("#cfx-single-ccy")
+
+    # ---- (c) schwab: 賣出幣別=USD must never equal 買入幣別 -> auto-flips to TWD -----
+    assert page.input_value("#cfx-from-ccy") == "TWD"  # default preferred = funding_ccy
+    assert page.input_value("#cfx-to-ccy") == "USD"    # default preferred = settlement_ccy
+    page.select_option("#cfx-from-ccy", "USD")
+    page.wait_for_function(
+        "() => document.querySelector('#cfx-to-ccy').value !== 'USD'")
+    assert page.input_value("#cfx-to-ccy") == "TWD"
+
+    assert not console_errors and not page_errors, (
+        f"cash fx-form hardening flow: console={console_errors!r} page={page_errors!r}"
     )

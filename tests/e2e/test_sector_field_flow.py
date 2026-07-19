@@ -1,9 +1,10 @@
-"""E2E (Playwright, real server + real frontend): the FU-D31 canonical sector field.
+"""E2E (Playwright, real server + real frontend): the FU-D31 / R6 canonical sector field.
 
 Drives the REAL stack against a guest DB with one never-traded instrument. Verifies, through
-the UI, that the instruments EDIT form now shows the canonical sector <select> (dual-text
-options) + the 「AI 偵測」 button, and that clicking AI degrades gracefully (no LLM on the
-flow server → 402/409/503) WITHOUT blocking the form or throwing — the user's selection is
+the UI, that the instruments EDIT form shows the canonical GICS sector <select> (dual-text
+options) + the 「AI 偵測」 button, and that clicking AI — now the UNIFIED
+POST /api/instruments/ai-resolve (sector_only) — degrades gracefully (no LLM on the flow
+server → 402/409/503) WITHOUT blocking the form or throwing; the user's selection is
 preserved. ZERO console errors (bar the intentional degrade status) + ZERO page errors.
 """
 
@@ -77,14 +78,15 @@ def test_edit_form_sector_select_and_ai_detect(
     ai_btn = modal.get_by_role("button", name="AI 偵測")
     expect(ai_btn).to_be_visible()
 
-    # (2) the canonical vocabulary populated the dropdown (dual-text labels), and the
+    # (2) the canonical GICS vocabulary populated the dropdown (dual-text labels), and the
     #     off-vocabulary stored value 'Electronics' is preserved as a current-value option.
-    expect(sel.locator("option", has_text="Technology（科技）")).to_have_count(1)
+    expect(sel.locator("option", has_text="Information Technology（資訊科技）")).to_have_count(1)
     expect(sel).to_have_value("Electronics")  # off-list value preserved, not destroyed
 
-    # (3) clicking AI 偵測 with NO LLM on the flow server degrades gracefully (402/409/503);
-    #     the form is not blocked and the selection is unchanged.
-    with page.expect_response("**/api/instruments/ai-sector") as resp:
+    # (3) clicking AI 偵測 — now the unified /api/instruments/ai-resolve (sector_only) — with NO
+    #     LLM on the flow server degrades gracefully (402/409/503); the form is not blocked and
+    #     the selection is unchanged.
+    with page.expect_response("**/api/instruments/ai-resolve") as resp:
         ai_btn.click()
     assert resp.value.status in (402, 409, 503)
     expect(sel).to_have_value("Electronics")  # unchanged after the failed detect

@@ -20,7 +20,11 @@ from portfolio_dash.data_ingestion.dateparse import DateCandidate, resolve_date_
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
-from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
+from portfolio_dash.data_ingestion.resolve import (
+    ResolutionStatus,
+    resolve,
+    suggestion_tail,
+)
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
 from portfolio_dash.shared.models.enums import Side
@@ -132,26 +136,21 @@ def txn_preview_row(
     issues: list[Issue] = list(validate_transaction(conn, inp))
 
     # --- symbol resolution: write the RESOLVED symbol ---
-    # NEEDS_AI -> HARD issue (unregistered symbol: no quote ccy, not in the pricing
-    # worklist — the row would be uninterpretable; register first). FUZZY -> soft
-    # issue + resolved symbol (no silent phantom write); EXACT -> resolved symbol.
+    # EXACT -> rewrite the payload symbol to the registered symbol. NEEDS_AI (every
+    # non-exact outcome, R6-A) -> HARD issue (unregistered symbol: no quote ccy, not in
+    # the pricing worklist — the row would be uninterpretable; register first). The raw
+    # symbol is kept on the payload and non-binding name suggestions (if any) are
+    # appended to the message — the resolver never coerces a code to a near neighbour.
     res = resolve(conn, inp.symbol)
     symbol = inp.symbol
     if res.status is ResolutionStatus.NEEDS_AI:
+        message = f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊"
+        message += suggestion_tail(res.candidates)
         issues.append(
             Issue(
                 kind="symbol_unresolved",
                 needs_confirm=False,
-                message=f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊",
-            )
-        )
-    elif res.status is ResolutionStatus.FUZZY and res.instrument is not None:
-        symbol = res.instrument.symbol
-        issues.append(
-            Issue(
-                kind="fuzzy_resolved",
-                needs_confirm=True,
-                message=f"{inp.symbol} 視為 {res.instrument.symbol}（模糊比對，請確認）",
+                message=message,
             )
         )
     elif res.instrument is not None:  # EXACT

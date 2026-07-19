@@ -260,17 +260,22 @@ def _complete_with_meta[T: BaseModel](
     *,
     agent: str,
     conn: sqlite3.Connection,
+    temperature: float | None = None,
 ) -> StructuredCompletion[T]:
     """Try one model: call, log usage, parse (retry once); return value + model alias + cost.
 
     When the provider supports it, a json_schema ``response_format`` derived from *schema*
     is sent to FORCE structured output (spec 04.10); unsupported providers fall back to the
-    plain prompt+parse path. The schema-parse retry-once behaviour is unchanged. Raises
-    :exc:`LLMUnavailable` on a provider/parse failure.
+    plain prompt+parse path. The schema-parse retry-once behaviour is unchanged. An explicit
+    *temperature* (e.g. ``0`` for a deterministic classification/resolve call) is forwarded to
+    the provider; ``None`` leaves the provider default untouched (byte-identical to before).
+    Raises :exc:`LLMUnavailable` on a provider/parse failure.
     """
     extra: dict[str, object] = {}
     if _supports_response_format(model):
         extra["response_format"] = _response_format_for(schema)
+    if temperature is not None:
+        extra["temperature"] = temperature
     for _attempt in range(2):
         try:
             resp = litellm.completion(
@@ -341,6 +346,7 @@ def complete_structured_meta[T: BaseModel](
     images: list[bytes] | None = None,
     role: LLMRole | None = None,
     model_override: str | None = None,
+    temperature: float | None = None,
 ) -> StructuredCompletion[T]:
     """Like :func:`complete_structured`, but also returns the model alias + this call's cost.
 
@@ -350,6 +356,8 @@ def complete_structured_meta[T: BaseModel](
 
     *model_override* (FU-D20) is an explicit registry alias put at the head of the candidate
     chain (the role/vision chain stays as fallback); ``None`` = the existing behaviour.
+    *temperature* (e.g. ``0`` for a deterministic classify/resolve call) is forwarded to the
+    provider on every candidate; ``None`` leaves the provider default.
     """
     check_budget(conn)
     candidates = _select_for(
@@ -359,7 +367,9 @@ def complete_structured_meta[T: BaseModel](
     last: LLMUnavailable | None = None
     for model in candidates:
         try:
-            return _complete_with_meta(model, messages, schema, agent=agent, conn=conn)
+            return _complete_with_meta(
+                model, messages, schema, agent=agent, conn=conn, temperature=temperature
+            )
         except LLMUnavailable as exc:
             last = exc
     raise last or LLMUnavailable("no model produced valid output")
@@ -374,6 +384,7 @@ def complete_structured[T: BaseModel](
     images: list[bytes] | None = None,
     role: LLMRole | None = None,
     model_override: str | None = None,
+    temperature: float | None = None,
 ) -> T:
     """Call the configured LLM and parse the response into *schema*.
 
@@ -385,7 +396,8 @@ def complete_structured[T: BaseModel](
     *role* (spec 04.3) selects an alternate model chain (e.g. ``LLMRole.MASTER`` for
     scoring/calibration); omitting it preserves the existing default/vision behaviour.
     *model_override* (FU-D20) forces a specific enabled registry alias first; ``None`` = the
-    existing behaviour.
+    existing behaviour. *temperature* (e.g. ``0``) is forwarded to the provider; ``None`` =
+    the provider default.
 
     Raises :exc:`AINotActivated` (no model for the role), :exc:`LLMBudgetExceeded`
     (cap hit), or :exc:`LLMUnavailable` (all candidates failed). All subclass
@@ -393,7 +405,7 @@ def complete_structured[T: BaseModel](
     """
     return complete_structured_meta(
         prompt, schema, agent=agent, conn=conn, images=images, role=role,
-        model_override=model_override,
+        model_override=model_override, temperature=temperature,
     ).value
 
 

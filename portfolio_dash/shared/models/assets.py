@@ -31,3 +31,5 @@ class Instrument(BaseModel):
     target_high: Decimal | None = None  # price-alert ceiling (FU-D28)
     is_etf: bool = False  # single source of truth for ETF (never derive from sector)
     archived: bool = False  # FU-D13: stop-tracking flag; stays registered, off fetch scopes
+    industry: str | None = None  # GICS industry (R6): nullable free text, filled by the
+    # next wave's AI service; backend plumbing only this wave (no frontend form yet).

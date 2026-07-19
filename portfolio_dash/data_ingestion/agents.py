@@ -1,6 +1,5 @@
 """AI Agents Input: parse natural-language transaction text into a preview."""
 
-import re
 import sqlite3
 from collections.abc import Callable
 from datetime import date, datetime
@@ -15,9 +14,9 @@ from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
 from portfolio_dash.llm_insight.official_templates import AI_INPUT_PROMPT_BODY
-from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm import LLMError, complete_structured
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.symbol_format import matches_market_format
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 
@@ -88,18 +87,11 @@ Completer = Callable[..., AiDraftList]
 _PROMPT = AI_INPUT_PROMPT_BODY
 
 # --- FU-D41: soft symbol-format check per account market (post-parse, warning only) -----
-# The local-exchange-code SHAPE each market's symbols take. Deliberately loose (this is a
-# soft hint, never a gate): TW = TWSE/TPEx numeric code incl. 5–6-digit ETF/TDR codes and
-# preferred/bond suffixes (2330, 00878, 00679B, 2881A); US = a ticker starting with a letter
-# (AAPL, BRK.B); MY = 4-digit Bursa code + optional suffix (1155, 0800EA), ``.KL`` tolerated.
-# A mismatch (the owner's bug: 聯電 parsed to the US ADR "UMC" on a tw_broker row) appends a
-# needs_confirm WARNING issue to the row — it never blocks and never rewrites the symbol;
-# the REAL provider lookup at registration remains the authority.
-_SYMBOL_FORMAT: dict[Market, re.Pattern[str]] = {
-    Market.TW: re.compile(r"^\d{4,6}[A-Z]{0,2}$"),
-    Market.US: re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$"),
-    Market.MY: re.compile(r"^\d{4}[A-Z0-9]{0,4}(\.KL)?$"),
-}
+# The per-market code SHAPE lives in the single source ``shared.symbol_format`` (R6-A) so
+# this soft hint, the resolve gate, and the next-wave AI gate cannot drift apart. A mismatch
+# (the owner's bug: 聯電 parsed to the US ADR "UMC" on a tw_broker row) appends a needs_confirm
+# WARNING issue to the row — it never blocks and never rewrites the symbol; the REAL provider
+# lookup at registration remains the authority.
 
 
 def _append_format_warning(
@@ -107,17 +99,19 @@ def _append_format_warning(
 ) -> None:
     """Append the FU-D41 soft warning when the row's EFFECTIVE symbol shape mismatches
     the account's market (e.g. non-numeric on a TW account). The check runs on the
-    resolved payload symbol (falling back to the draft's), so a CJK name that
-    fuzzy-resolved to a proper local code is never false-flagged. Skipped when the row
-    already carries the HARD ``market_mismatch`` coherence issue (no double flag), when
-    the account is unknown, or when the symbol is blank (other issues cover those)."""
+    resolved payload symbol (falling back to the draft's): an EXACT hit rewrites it to the
+    registered symbol, while an unregistered symbol keeps its raw form and already carries a
+    HARD ``symbol_unresolved`` issue (resolution is exact-only — R6-A — so a near-miss code
+    is never silently rewritten here). Skipped when the row already carries the HARD
+    ``market_mismatch`` coherence issue (no double flag), when the account is unknown, or when
+    the symbol is blank (other issues cover those)."""
     if any(i.kind == "market_mismatch" for i in row.issues):
         return
     market = account_market(conn, draft.account_id)
     if market is None:
         return
     sym = (row.payload.get("symbol") or draft.symbol).strip().upper()
-    if not sym or _SYMBOL_FORMAT[market].match(sym):
+    if not sym or matches_market_format(sym, market):
         return
     row.issues.append(
         Issue(

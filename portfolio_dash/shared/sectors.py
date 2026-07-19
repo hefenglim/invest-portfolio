@@ -1,22 +1,40 @@
-"""Canonical sector vocabulary + read-time normalization (FU-D31, P1①).
+"""Canonical sector vocabulary + sector normalization (GICS 2023, R6 owner-signed).
 
-PROBLEM: instrument sectors are free text. Live data carries ``Tech`` vs ``Technology``
-as two separate donut slices, EN/zh synonyms coexist (``Financials`` / ``金融``), and TW
-stocks are often blank. This poisons BOTH the sector-allocation donut AND the
-``sector_weight`` concentration alert — which group on the SAME aggregated
-``SectorAllocation`` (one seam), so a single read-time canonicalization fixes both.
+PROBLEM (unchanged since FU-D31): instrument sectors are free text. Live data carries
+``Tech`` vs ``Technology`` as two separate donut slices, EN/zh synonyms coexist
+(``Financials`` / ``金融``), and TW stocks are often blank. This poisons BOTH the
+sector-allocation donut AND the ``sector_weight`` concentration alert — which group on the
+SAME aggregated ``SectorAllocation`` (one seam), so a single canonicalization fixes both.
 
-FIX: a curated, GICS-flavored canonical vocabulary of stable ENGLISH keys + a
-synonym → canonical map applied at READ TIME (the dashboard's sector-allocation grouping
-seam, ``portfolio/dashboard.py``). Stored instrument rows are NOT migrated this round —
-canonicalization happens on read only.
+R6 DECISION (owner sign-off 2026-07-19) — supersedes FU-D31's 15-key list:
+adopt **GICS 2023 — 11 sectors** as the canonical vocabulary. Two former standalone keys
+FOLD IN:
+  * **Semiconductors → Information Technology** (GICS places semiconductors inside IT;
+    the owner no longer wants TSMC/NVDA split from generic tech).
+  * **Shipping → Industrials** (GICS classifies marine transportation under Industrials;
+    TW 航運 stops being its own slice).
+The dashboard sector donut and the ``sector_weight`` alert regroup accordingly.
 
-DESIGN RULING (orchestrator, refines the mini-spec parenthetical): canonical vocabulary
-KEYS are ENGLISH (stable, matches provider data such as yfinance sector names). The
-dropdown OPTION LABELS may show dual text 「Technology（科技）」 for usability, but STORED
-VALUES / DONUT LABELS / ALERT TEXT stay canonical English this round; zh display
-everywhere is deferred to the server ``display_name`` phase. The ``zh`` field below feeds
-ONLY the dropdown label, never storage or grouping.
+**ETF stays a special NON-GICS bucket:** GICS classifies companies, not funds, so an ETF
+has no GICS sector; the app keeps ``ETF`` as its own category (and the ``is_etf`` tax flag
+is the source of truth for fee/stamp treatment — never derived from this label).
+
+STORAGE (R6, refines FU-D31): stored instrument sectors are now **actually migrated** — a
+one-time idempotent rewrite through :func:`canonical_sector` at the schema/boot seam
+(``data_ingestion.store.migrate_instrument_sectors``, called from
+``data_ingestion.schema.create_tables``). Read-time canonicalization at the donut grouping
+seam (``portfolio/dashboard.py``) is KEPT as defense-in-depth so a provider- or CSV-supplied
+synonym still groups correctly before the next boot migrates it.
+
+DESIGN RULING (unchanged from FU-D31): canonical vocabulary KEYS are ENGLISH (stable,
+matches provider data such as yfinance sector names). The dropdown OPTION LABELS may show
+dual text 「Information Technology（資訊科技）」 for usability, but STORED VALUES / DONUT
+LABELS / ALERT TEXT stay canonical English; zh display everywhere is deferred to the server
+``display_name`` phase. The ``zh`` field below feeds ONLY the dropdown label, never storage
+or grouping.
+
+DATA INTEGRITY (unchanged): an unrecognized NON-EMPTY sector passes through UNCHANGED — it
+is NEVER silently rebucketed. Only labels we positively know are synonyms merge.
 
 PURITY: no money, no I/O, no imports of internal layers. A sector label is a category,
 never a number of record (invariant #1 is not touched by labeling).
@@ -33,26 +51,18 @@ class CanonicalSector(TypedDict):
     zh: str
 
 
-# The canonical vocabulary — a curated GICS-flavored list covering every sector literal
-# present in the app (golden fixtures: Semiconductors / ETF / Shipping / Tech / Financials;
-# demo seed: + Banking) plus the GICS sectors and a catch-all. Ordered for the dropdown;
-# ``Unclassified`` (the blank/None bucket) is always LAST.
-#
-# ``Semiconductors`` and ``Shipping`` are kept as their OWN keys (not folded into
-# Technology / Industrials): they are deliberate, distinct categories the owner uses
-# (TSMC/NVDA are tagged "Semiconductors" apart from generic "Tech"; TW 航運 is its own
-# slice in the golden). Folding them would silently merge meaningful slices AND could
-# manufacture a spurious concentration alert — so they stay separate.
+# The canonical vocabulary — GICS 2023's 11 sectors + the non-GICS ``ETF`` bucket + a
+# catch-all. Order = dropdown order; ``Unclassified`` (the blank/None bucket) is always LAST.
+# The 11 GICS keys (all but ETF / Unclassified) are also exported as ``GICS_SECTOR_KEYS`` for
+# the next wave's AI sector prompt.
 CANONICAL_SECTORS: list[CanonicalSector] = [
-    {"key": "Technology", "zh": "科技"},
-    {"key": "Semiconductors", "zh": "半導體"},
+    {"key": "Information Technology", "zh": "資訊科技"},
     {"key": "Communication Services", "zh": "通訊服務"},
     {"key": "Financials", "zh": "金融"},
-    {"key": "Healthcare", "zh": "醫療保健"},
+    {"key": "Health Care", "zh": "醫療保健"},
     {"key": "Consumer Discretionary", "zh": "非必需消費"},
     {"key": "Consumer Staples", "zh": "必需消費"},
     {"key": "Industrials", "zh": "工業"},
-    {"key": "Shipping", "zh": "航運"},
     {"key": "Energy", "zh": "能源"},
     {"key": "Materials", "zh": "原物料"},
     {"key": "Utilities", "zh": "公用事業"},
@@ -63,32 +73,42 @@ CANONICAL_SECTORS: list[CanonicalSector] = [
 
 UNCLASSIFIED = "Unclassified"
 
-# The set of canonical keys — the membership test the API uses to decide whether a mapped
-# value is a real dropdown category (``mapped`` in POST /api/instruments/ai-sector).
+# The set of canonical keys — the membership test the API uses to validate an AI-returned
+# sector (POST /api/instruments/ai-resolve downgrades off-vocabulary sectors), and the
+# guard the migration uses before rewriting a stored value.
 CANONICAL_KEYS: frozenset[str] = frozenset(s["key"] for s in CANONICAL_SECTORS)
+
+# The 11 GICS sector keys in dropdown order, EXCLUDING the non-GICS ``ETF`` bucket and the
+# ``Unclassified`` catch-all. The next wave embeds this in the AI sector-detection prompt so
+# the model only proposes real GICS sectors. Derived from CANONICAL_SECTORS to avoid drift.
+GICS_SECTOR_KEYS: tuple[str, ...] = tuple(
+    s["key"] for s in CANONICAL_SECTORS if s["key"] not in {"ETF", UNCLASSIFIED}
+)
 
 
 # Synonym → canonical key. KEYS ARE case-folded (compared against ``raw.strip().casefold()``).
-# Covers EN variants, common abbreviations, provider (yfinance) sector names, and zh-TW
-# labels. Every canonical key maps to ITSELF here so exact canonical input (any case) is
-# stable. Anything NOT listed passes through UNCHANGED — an unrecognized non-empty sector is
-# NEVER silently rebucketed (we only merge labels we positively know are synonyms).
+# Covers EN variants, common abbreviations, provider (yfinance) sector names, zh-TW labels,
+# AND the OLD canonical keys (``Semiconductors`` / ``Shipping`` / ``Technology`` / ``Healthcare``)
+# so BOTH the one-time migration and read-time grouping catch legacy stored values. Every
+# canonical key maps to ITSELF here so exact canonical input (any case) is stable. Anything NOT
+# listed passes through UNCHANGED — an unrecognized non-empty sector is NEVER silently
+# rebucketed (we only merge labels we positively know are synonyms).
 _SYNONYMS: dict[str, str] = {
-    # Technology
-    "technology": "Technology",
-    "tech": "Technology",
-    "information technology": "Technology",
-    "infotech": "Technology",
-    "資訊科技": "Technology",
-    "資訊技術": "Technology",
-    "科技": "Technology",
-    # Semiconductors (kept SEPARATE from Technology on purpose — see CANONICAL_SECTORS)
-    "semiconductors": "Semiconductors",
-    "semiconductor": "Semiconductors",
-    "semis": "Semiconductors",
-    "semi": "Semiconductors",
-    "半導體": "Semiconductors",
-    # Communication Services
+    # Information Technology (GICS) — folds in the former Technology + Semiconductors keys.
+    "information technology": "Information Technology",
+    "technology": "Information Technology",
+    "tech": "Information Technology",
+    "infotech": "Information Technology",
+    "科技": "Information Technology",
+    "資訊科技": "Information Technology",
+    "資訊技術": "Information Technology",
+    # Semiconductors (R6: FOLDED into Information Technology — no longer its own key).
+    "semiconductors": "Information Technology",
+    "semiconductor": "Information Technology",
+    "semis": "Information Technology",
+    "semi": "Information Technology",
+    "半導體": "Information Technology",
+    # Communication Services (GICS) — telecom family.
     "communication services": "Communication Services",
     "communications": "Communication Services",
     "communication": "Communication Services",
@@ -97,7 +117,7 @@ _SYNONYMS: dict[str, str] = {
     "通訊服務": "Communication Services",
     "通訊": "Communication Services",
     "電信": "Communication Services",
-    # Financials
+    # Financials (GICS) — banking family.
     "financials": "Financials",
     "financial": "Financials",
     "financial services": "Financials",
@@ -108,51 +128,50 @@ _SYNONYMS: dict[str, str] = {
     "金融": "Financials",
     "金融服務": "Financials",
     "銀行": "Financials",
-    # Healthcare
-    "healthcare": "Healthcare",
-    "health care": "Healthcare",
-    "醫療保健": "Healthcare",
-    "醫療": "Healthcare",
-    "生技醫療": "Healthcare",
-    # Consumer Discretionary
+    # Health Care (GICS) — note the space; the old ``Healthcare`` key migrates here.
+    "health care": "Health Care",
+    "healthcare": "Health Care",
+    "醫療保健": "Health Care",
+    "醫療": "Health Care",
+    "生技醫療": "Health Care",
+    # Consumer Discretionary (GICS).
     "consumer discretionary": "Consumer Discretionary",
     "consumer cyclical": "Consumer Discretionary",
     "非必需消費": "Consumer Discretionary",
     "非必需性消費": "Consumer Discretionary",
-    # Consumer Staples
+    # Consumer Staples (GICS).
     "consumer staples": "Consumer Staples",
     "consumer defensive": "Consumer Staples",
     "必需消費": "Consumer Staples",
     "必需性消費": "Consumer Staples",
-    # Industrials
+    # Industrials (GICS) — folds in the former Shipping key.
     "industrials": "Industrials",
     "industrial": "Industrials",
     "工業": "Industrials",
-    # Shipping (a TW-popular category present in the golden; its own slice)
-    "shipping": "Shipping",
-    "marine": "Shipping",
-    "航運": "Shipping",
-    # Energy
+    "shipping": "Industrials",
+    "marine": "Industrials",
+    "航運": "Industrials",
+    # Energy (GICS).
     "energy": "Energy",
     "能源": "Energy",
-    # Materials
+    # Materials (GICS).
     "materials": "Materials",
     "basic materials": "Materials",
     "原物料": "Materials",
     "原材料": "Materials",
-    # Utilities
+    # Utilities (GICS).
     "utilities": "Utilities",
     "utility": "Utilities",
     "公用事業": "Utilities",
-    # Real Estate
+    # Real Estate (GICS).
     "real estate": "Real Estate",
     "reit": "Real Estate",
     "reits": "Real Estate",
     "房地產": "Real Estate",
     "不動產": "Real Estate",
-    # ETF (a fund type the app treats as a sector bucket; present in golden + demo seed)
+    # ETF (non-GICS fund bucket the app treats as a sector category).
     "etf": "ETF",
-    # Unclassified (explicit catch-all synonyms)
+    # Unclassified (explicit catch-all synonyms).
     "unclassified": "Unclassified",
     "未分類": "Unclassified",
     "其他": "Unclassified",
@@ -161,7 +180,7 @@ _SYNONYMS: dict[str, str] = {
 
 
 def canonical_sector(raw: str | None) -> str:
-    """Map a free-text sector label to its canonical ENGLISH key (read-time only).
+    """Map a free-text sector label to its canonical ENGLISH GICS key.
 
     Rules, in order:
       1. ``None`` or blank (after strip) → ``"Unclassified"``.

@@ -10,26 +10,26 @@ from fastapi.testclient import TestClient
 _TXN_CSV = (
     "account,symbol,side,date,shares,price\n"
     "tw_broker,2330,buy,2026-06-02,100,600\n"        # ok
-    "tw_broker,2330,sell,2026-06-03,5000,600\n"      # warn: oversell (holds 1000)
-    "tw_broker,23300,buy,2026-06-02,100,600\n"       # warn: 23300 fuzzy-matches 2330
+    "tw_broker,2330,sell,2026-06-03,5000,600\n"      # warn: oversell
+    "tw_broker,23300,buy,2026-06-02,100,600\n"       # error: 23300 is an unregistered code
 )
-# 23300 fuzzy-matches "2330" (SequenceMatcher ratio ~0.889 >= 0.6 threshold) ->
-# resolution is FUZZY (not NEEDS_AI). The importer now surfaces a soft
-# `fuzzy_resolved` (needs_confirm) issue -> status "warn", and the persisted
-# payload symbol is the RESOLVED "2330" (no silent phantom-symbol write).
+# R6-A: "23300" is a code-SHAPED symbol that is not registered. Resolution is exact-only for
+# codes (no fuzzy coercion to 2330), so it is a HARD `symbol_unresolved` issue -> status
+# "error", and the payload keeps the RAW "23300" (never silently rewritten to a near neighbour).
 
 
 def test_import_preview_counts_and_status(api_client: TestClient) -> None:
     r = api_client.post("/api/import/preview", json={"kind": "transactions", "csv_text": _TXN_CSV})
     assert r.status_code == 200
     b = r.json()
-    assert b["summary"] == {"total": 3, "ok": 1, "warn": 2, "error": 0}
+    assert b["summary"] == {"total": 3, "ok": 1, "warn": 1, "error": 1}
     by_n = {row["n"]: row for row in b["rows"]}
     assert by_n[0]["status"] == "ok"
     assert by_n[1]["status"] == "warn"
-    assert by_n[2]["status"] == "warn"
-    # the fuzzy row persists the RESOLVED symbol, not the raw typo
-    assert by_n[2]["data"]["symbol"] == "2330"
+    assert by_n[2]["status"] == "error"
+    # the unregistered code keeps its RAW symbol — never coerced to 2330
+    assert by_n[2]["data"]["symbol"] == "23300"
+    assert by_n[2]["code"] == "unregistered_symbol"
 
 
 def test_import_preview_bad_kind_400(api_client: TestClient) -> None:
@@ -52,13 +52,13 @@ def test_import_commit_warn_requires_ack_422(api_client: TestClient) -> None:
 
 
 def test_import_commit_acked_writes_nonhard_skips_hard(api_client: TestClient) -> None:
-    # _TXN_CSV rows: ok (write), warn-oversell (write on ack), 23300 fuzzy-warn
-    # (write on ack, persisting the RESOLVED 2330) => 3 written, 0 skipped
+    # _TXN_CSV rows: ok (write), warn-oversell (write on ack), 23300 unregistered code
+    # (HARD -> skipped, never coerced) => 2 written, 1 skipped
     r = api_client.post("/api/import/commit",
                         json={"kind": "transactions", "csv_text": _TXN_CSV, "ack_warnings": True})
     assert r.status_code == 200
     body = r.json()
-    assert body["written"] == 3 and body["skipped"] == 0
+    assert body["written"] == 2 and body["skipped"] == 1
 
 
 def test_import_commit_hard_row_skipped(api_client: TestClient) -> None:

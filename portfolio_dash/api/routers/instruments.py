@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
@@ -33,8 +33,8 @@ from portfolio_dash.data_ingestion.store import (
     upsert_instrument,
 )
 from portfolio_dash.llm_insight.official_templates import (
-    AI_SECTOR_PROMPT,
-    AI_SYMBOL_RESOLVE_PROMPT,
+    AI_INSTRUMENT_RESOLVE_PROMPT,
+    AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
 )
 from portfolio_dash.pricing.benchmarks import BENCHMARKS
 from portfolio_dash.pricing.board import probe_tw_board
@@ -78,6 +78,7 @@ def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
     return {
         "symbol": inst.symbol, "name": inst.name, "market": inst.market.value,
         "board": _board_wire(conn, inst), "sector": inst.sector,
+        "industry": inst.industry,  # R6: GICS industry passthrough (null until next-wave fill)
         "ccy": inst.quote_ccy.value, "held": _held(conn, account_ids, inst.symbol),
         "last": last, "chg_pct": chg_pct,
         "target_low": decimal_str(inst.target_low) if inst.target_low is not None else None,
@@ -144,99 +145,175 @@ def sectors() -> dict[str, Any]:
     return {"sectors": [dict(s) for s in CANONICAL_SECTORS]}
 
 
-class AiSectorBody(BaseModel):
-    symbol: str
-    name: str = ""
-    market: str = ""
+# --- R6-B: unified AI instrument-resolve (one impl × four entry points) ----------------
 
 
-class AiSectorReply(BaseModel):
-    """The structured contract the model must return: one canonical sector key."""
+def _parse_market(raw: str) -> Market | None:
+    """Best-effort parse of the wire market string into a :class:`Market`, else None.
 
-    sector: str
-
-
-@router.post("/instruments/ai-sector")
-def ai_sector(
-    body: AiSectorBody,
-    conn: sqlite3.Connection = Depends(get_conn),
-) -> dict[str, Any]:
-    """「AI 偵測產業類別」 (FU-D31): symbol/name/market → one canonical sector key.
-
-    Calls the DEFAULT-role structured completion with the code-owned registry prompt
-    (``AI_SECTOR_PROMPT``, FU-D30) whose ``{categories}`` is filled from the canonical
-    vocabulary. The reply is ALWAYS re-mapped through ``canonical_sector`` server-side, so a
-    non-canonical value can NEVER escape this endpoint: ``mapped`` is True only when the
-    mapped result is a real dropdown category (the frontend applies the value only then; an
-    unmapped reply leaves the user's selection unchanged + a zh notice). LLM degradation
-    (budget / not-activated / provider) propagates to the global 402 / 409 / 503 handlers
-    (``api/errors.py``) — the same standard envelope the other AI endpoints return; nothing
-    here blocks the rest of the form."""
-    sym = body.symbol.strip().upper()
-    if not sym:
-        raise HTTPException(status_code=400, detail="symbol 不可為空")
-    prompt = AI_SECTOR_PROMPT.format(
-        categories=", ".join(s["key"] for s in CANONICAL_SECTORS),
-        symbol=sym,
-        name=body.name.strip() or "（未提供）",
-        market=body.market.strip() or "（未提供）",
-    )
-    reply = complete_structured(prompt, AiSectorReply, agent="ai_sector", conn=conn)
-    mapped_sector = canonical_sector(reply.sector)
-    return {"sector": mapped_sector, "mapped": mapped_sector in CANONICAL_KEYS}
-
-
-# --- FU-D42c: AI symbol resolve (quick-add dialog 查無報價 fallback) -------------------
+    ``None`` disables the provider-verification step (no market to probe) — the reply then
+    stays advisory (candidates), never falsely 'verified'."""
+    try:
+        return Market(raw.strip().upper())
+    except ValueError:
+        return None
 
 
 class AiResolveBody(BaseModel):
-    """Raw user input (symbol and/or name field content) + the dialog's target market."""
+    """Raw user input (symbol and/or name field content) + the dialog's target market.
+
+    ``sector_only`` (the watchlist edit-form 「AI 偵測產業類別」 re-detect case) SKIPS the
+    already-registered short-circuit so the LLM re-classifies a known instrument; the frontend
+    then applies ONLY the returned sector/industry (never symbol/name)."""
 
     query: str = ""
     market: str = ""
+    sector_only: bool = False
 
 
-class AiResolveReply(BaseModel):
-    """The structured contract the model must return: local exchange code + name.
+class AiResolveCandidate(BaseModel):
+    """One uncertain-case candidate the model offers (2-5 when confidence is not high)."""
 
-    ``symbol`` may be empty when the model honestly cannot identify the instrument."""
-
-    symbol: str
+    symbol: str = ""
     name: str = ""
+    gics_sector: str = ""
+
+
+class AiInstrumentResolveReply(BaseModel):
+    """The single structured contract the unified prompt returns.
+
+    ``symbol`` may be empty (with ``not_found=true``) when the model honestly cannot identify
+    the instrument; ``gics_sector`` must be one of the 11 GICS keys (re-validated server-side);
+    ``gics_industry`` is the optional finer GICS level. ``confidence`` is a plain str so a stray
+    value degrades gracefully (normalized to low) rather than failing schema validation."""
+
+    symbol: str = ""
+    name: str = ""
+    gics_sector: str = ""
+    gics_industry: str | None = None
+    confidence: str = "low"
+    candidates: list[AiResolveCandidate] = Field(default_factory=list)
+    not_found: bool = False
 
 
 @router.post("/instruments/ai-resolve")
 def ai_resolve(
     body: AiResolveBody,
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
-    """「AI 判讀代號」 (FU-D42c): raw input + target market → local exchange code + name.
+    """Unified AI instrument-resolve (R6-B, 2026-07-19): ONE LLM call → local exchange code +
+    name + GICS sector (+ optional industry), serving every registration entry point
+    (manual-trade / AI-input / CSV quick-add dialogs) plus the watchlist surfaces.
 
-    Offered by the quick-add dialog when the REAL provider lookup finds nothing (查無報價) —
-    e.g. the owner's bug where 聯電 on a TW account was parsed to the US ADR ticker "UMC".
-    Calls the DEFAULT-role structured completion with the code-owned registry prompt
-    (``AI_SYMBOL_RESOLVE_PROMPT``, FU-D30/D41 local-exchange-code rules). The reply is a
-    SUGGESTION only and is returned UNVERIFIED (``verified: false``): the dialog always
-    re-runs ``GET /api/instruments/lookup`` with the suggested symbol, and that quote-backed
-    lookup remains the sole registration authority — an unverifiable suggestion can never be
-    registered through this endpoint (it registers nothing and computes nothing of record).
-    LLM degradation (budget / not-activated / provider) propagates to the global
-    402 / 409 / 503 handlers — the same standard envelope as ``ai-sector``."""
+    Pipeline: (a) server-side re-gate — a raw input that is ALREADY a registered (active) symbol
+    answers from the registry with NO LLM call (skipped in ``sector_only`` re-detect mode, whose
+    purpose is to re-classify a known symbol); (b) one deterministic (temperature=0) structured
+    LLM call with the code-owned unified prompt; (c) ``gics_sector`` re-mapped through
+    ``canonical_sector`` — an off-vocabulary value downgrades confidence to low; (d) PROVIDER
+    VERIFICATION — the returned symbol is resolved via the REAL quote/name lookup (the sole
+    registration authority): a verified + high-confidence result is ``status:"resolved"``
+    (auto-fill; provider name preferred, AI name as fallback), anything else is
+    ``status:"candidates"`` (manual pick — the unverified primary FIRST, marked
+    ``verified:false``). An honest model not-found → ``status:"not_found"`` with a zh message
+    (never fabricates a code). LLM degradation (budget / not-activated / provider) propagates to
+    the global 402 / 409 / 503 handlers — the same envelope the prior AI endpoints returned;
+    nothing here blocks the form, and the AI never sets ``is_etf``."""
     query = body.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="query 不可為空")
-    prompt = AI_SYMBOL_RESOLVE_PROMPT.format(
-        query=query,
-        market=body.market.strip() or "（未提供）",
+    market = _parse_market(body.market)
+
+    # (a) re-gate: an already-registered ACTIVE symbol resolves from the registry, no LLM call.
+    #     Skipped for sector-only re-detect (which must re-classify a known symbol via the LLM).
+    if not body.sector_only:
+        existing = get_instrument(conn, query.upper())
+        if existing is not None and not existing.archived:
+            return {
+                "status": "resolved",
+                "symbol": existing.symbol,
+                "name": existing.name,
+                "sector": existing.sector,
+                "industry": existing.industry,
+                "confidence": "high",
+                "verified": True,
+                "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+            }
+
+    # (b) single deterministic LLM call (temperature=0).
+    prompt = AI_INSTRUMENT_RESOLVE_PROMPT.format(
+        query=query, market=body.market.strip() or "（未提供）"
     )
     reply = complete_structured(
-        prompt, AiResolveReply, agent="ai_symbol_resolve", conn=conn
+        prompt, AiInstrumentResolveReply, agent="ai_instrument_resolve",
+        conn=conn, temperature=0,
     )
-    return {
-        "symbol": reply.symbol.strip().upper(),
+
+    # honest not-found: the model could not identify the instrument — never invent a code.
+    if reply.not_found or not reply.symbol.strip():
+        return {
+            "status": "not_found",
+            "message": "查無此標的 — 請確認名稱與市場是否正確",
+            "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+        }
+
+    # (c) sector validation: canonicalize; an off-vocabulary sector downgrades to low.
+    primary_symbol = reply.symbol.strip().upper()
+    sector = canonical_sector(reply.gics_sector)
+    sector_ok = sector in CANONICAL_KEYS
+    confidence = reply.confidence.strip().lower()
+    if confidence not in ("high", "medium", "low"):
+        confidence = "low"
+    if not sector_ok:
+        confidence = "low"
+    industry = (reply.gics_industry or "").strip() or None
+
+    # (d) provider verification: the returned symbol must resolve via the REAL quote/name
+    #     lookup (the sole registration authority) before any auto-fill.
+    verified = False
+    provider_name = ""
+    if market is not None:
+        lk = lookup_instrument(conn, symbol=primary_symbol, market=market, now=now)
+        verified = lk.found
+        provider_name = lk.name
+
+    if verified and confidence == "high":
+        return {
+            "status": "resolved",
+            "symbol": primary_symbol,
+            "name": provider_name or reply.name.strip(),  # prefer the provider's name
+            "sector": sector,
+            "industry": industry,
+            "confidence": "high",
+            "verified": True,
+            "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+        }
+
+    # verification fail OR medium/low → candidates; the UNVERIFIED primary goes FIRST.
+    candidates: list[dict[str, Any]] = [{
+        "symbol": primary_symbol,
         "name": reply.name.strip(),
-        # honest wire flag: this is an LLM suggestion; the real lookup verifies it.
+        "sector": sector if sector_ok else "",
         "verified": False,
+    }]
+    for cand in reply.candidates:
+        csym = cand.symbol.strip().upper()
+        if not csym or csym == primary_symbol:
+            continue
+        csector = canonical_sector(cand.gics_sector) if cand.gics_sector.strip() else ""
+        candidates.append({
+            "symbol": csym,
+            "name": cand.name.strip(),
+            "sector": csector if csector in CANONICAL_KEYS else "",
+            "verified": False,
+        })
+        if len(candidates) >= 5:
+            break
+    return {
+        "status": "candidates",
+        "candidates": candidates,
+        "confidence": confidence,
+        "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
     }
 
 
@@ -248,6 +325,7 @@ class RegisterBody(BaseModel):
     market: Market
     name: str = ""
     sector: str = ""
+    industry: str | None = None  # R6: optional GICS 產業細分 (blank ⇒ preserve existing)
     board: str | None = None
     quote_ccy: Currency | None = None
     target_low: Decimal | None = None
@@ -258,26 +336,37 @@ class RegisterBody(BaseModel):
 class UpdateBody(BaseModel):
     name: str | None = None
     sector: str | None = None
+    industry: str | None = None  # R6: GICS 產業細分 (exclude_unset ⇒ omitted = unchanged)
     board: str | None = None
     target_low: Decimal | None = None
     target_high: Decimal | None = None
     is_etf: bool | None = None
 
 
-def _apply_target_high(
-    conn: sqlite3.Connection, inst: Instrument, target_high: Decimal | None
+def _apply_extras(
+    conn: sqlite3.Connection,
+    inst: Instrument,
+    *,
+    target_high: Decimal | None,
+    industry: str | None,
 ) -> Instrument:
-    """Persist an explicit ``target_high`` supplied at REGISTRATION time (FU-D28).
+    """Persist REGISTRATION-time extras the shared onboarding service does not carry.
 
-    The shared onboarding service (``quick_register`` / ``restore_archived``) predates
-    ``target_high`` and does not carry it, so — parallel to how ``target_low`` rides through
-    that service — the router applies ``target_high`` here via a direct upsert once the row
-    exists. ``None`` (the usual case; the quick-add dialog never sends it) is a no-op, so a
-    registration that omits it is byte-identical to before.
+    ``quick_register`` / ``restore_archived`` predate both ``target_high`` (FU-D28) and
+    ``industry`` (R6): they are applied here via a SINGLE read-modify-write upsert once the row
+    exists, so a value the service omitted is written without clobbering any field it DID set
+    (``model_copy`` carries the full row). Each ``None`` extra is skipped — a blank industry
+    from the quick-add dialog therefore never clears a restored row's stored industry — so an
+    all-``None`` call (the usual quick-add case) is a no-op, byte-identical to before.
     """
-    if target_high is None:
+    updates: dict[str, object] = {}
+    if target_high is not None:
+        updates["target_high"] = target_high
+    if industry is not None:
+        updates["industry"] = industry
+    if not updates:
         return inst
-    upsert_instrument(conn, inst.model_copy(update={"target_high": target_high}))
+    upsert_instrument(conn, inst.model_copy(update=updates))
     saved = get_instrument(conn, inst.symbol)
     assert saved is not None
     return saved
@@ -307,6 +396,9 @@ def register(
                             content=error_body("validation_error", "US/MY 不可帶台股板別",
                                                field="board"))
     sym = body.symbol.strip().upper()
+    # R6: a blank industry means "not provided" — never clobbers a stored value (the edit form,
+    # via UpdateBody + exclude_unset, is the path that can explicitly clear it).
+    industry = (body.industry or "").strip() or None
     existing = get_instrument(conn, sym)
     if existing is not None and existing.archived:
         saved = restore_archived(
@@ -314,7 +406,8 @@ def register(
             board=body.board or None, quote_ccy=body.quote_ccy,
             target_low=body.target_low, is_etf=body.is_etf,
         )
-        saved = _apply_target_high(conn, saved, body.target_high)  # FU-D28 (service is low-only)
+        # FU-D28 (target_high) + R6 (industry): the onboarding service carries neither.
+        saved = _apply_extras(conn, saved, target_high=body.target_high, industry=industry)
         last_date = last_price_date(conn, sym)  # read BEFORE the backfill runs
         background_tasks.add_task(gap_backfill, sym, now=now)
         account_ids = [a.account_id for a in list_accounts(conn)]
@@ -337,7 +430,9 @@ def register(
     # the FU-D18 restore path schedules, now consistently wired for a brand-new registration
     # too, so the quick-add dialog's confirm returns fast (「背景抓取報價中」).
     background_tasks.add_task(gap_backfill, sym, now=now)
-    saved = _apply_target_high(conn, outcome.instrument, body.target_high)  # FU-D28
+    saved = _apply_extras(  # FU-D28 (target_high) + R6 (industry)
+        conn, outcome.instrument, target_high=body.target_high, industry=industry
+    )
     account_ids = [a.account_id for a in list_accounts(conn)]
     return _element(conn, saved, account_ids, now)
 

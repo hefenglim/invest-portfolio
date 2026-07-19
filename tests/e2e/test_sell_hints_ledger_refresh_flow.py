@@ -168,3 +168,40 @@ def test_ledger_live_refresh_after_commits(
     assert not console_errors and not page_errors, (
         f"ledger live refresh flow: console={console_errors!r} page={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_draft_preview_position_whatif_and_cash_line(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """R6-E: the 草稿預覽 card gains the drawer-parity 試算 what-if rows + a display-only
+    account-cash line, both SERVER-computed (Decimal strings via window.fmt). A SELL draft on
+    the seeded 2330 holding shows 調整成本移除 / 已實現損益 / 剩餘股數 and the 該帳戶現金 line;
+    switching to BUY swaps in 新持股 / 新原始均價 / 新調整均價 — all with ZERO page errors."""
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/trades.html", wait_until="load")
+    page.wait_for_selector("#m-account option", state="attached")
+    page.select_option("#m-account", "tw_broker")
+    page.fill("#m-symbol", "2330")
+
+    # SELL draft → the position what-if rows + the account-cash line render in the card.
+    page.click("#m-side-sell")
+    page.fill("#m-shares", "500")
+    page.fill("#m-price", "600")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('調整成本移除')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('已實現損益')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('剩餘股數')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('該帳戶現金（TWD）')")
+
+    # BUY draft → the what-if swaps to the buy rows; the cash line stays.
+    page.click("#m-side-buy")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('新原始均價')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('新調整均價')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('該帳戶現金（TWD）')")
+
+    assert not console_errors and not page_errors, (
+        f"draft preview flow: console={console_errors!r} page={page_errors!r}"
+    )

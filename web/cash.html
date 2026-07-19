@@ -86,6 +86,13 @@
   .cfx-reestimate { font-size: 10.5px; color: var(--accent); background: transparent;
     border: none; padding: 0; margin-top: 3px; cursor: pointer; text-decoration: underline dotted currentColor; text-underline-offset: 2px; align-self: flex-start; }
   .cfx-reestimate:hover { filter: brightness(1.15); }
+  /* R6-D: single-currency account -> the FX form disables + shows this inline reason
+     (scoped to the form's own padding, unlike .cash-banner's page-level side margin). */
+  .cfx-single-ccy-msg {
+    margin: 0 0 12px; padding: 8px 12px; font-size: 11.5px;
+    border-radius: var(--radius); color: var(--amber);
+    background: var(--amber-soft); border: 1px solid rgba(217, 161, 63, 0.35);
+  }
   .stmt-chip { font-size: 10px; padding: 0 8px; line-height: 17px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui); color: var(--text-2); }
   @media (max-width: 1100px) { .cash-cards { grid-template-columns: repeat(2, 1fr); } }
 </style>
@@ -215,6 +222,8 @@
 
     <div class="stack-card" data-screen-label="換匯">
       <h3>換匯</h3>
+      <!-- R6-D: shown when the selected account has < 2 distinct currencies -->
+      <div class="cfx-single-ccy-msg" id="cfx-single-ccy" hidden="hidden"></div>
       <div class="form-grid">
         <div class="field">
           <label for="cfx-account">帳戶</label>

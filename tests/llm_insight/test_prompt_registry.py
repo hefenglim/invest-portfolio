@@ -23,6 +23,7 @@ from pathlib import Path
 import portfolio_dash
 from portfolio_dash.llm_insight import master
 from portfolio_dash.llm_insight import official_templates as ot
+from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 _PKG_DIR = Path(portfolio_dash.__file__).resolve().parent
 
@@ -53,9 +54,9 @@ EXPECTED_CALL_SITES: dict[str, list[str] | str] = {
     ],
     "llm_insight/master.py": ["master_score", "master_calibrate", "master_validate"],
     "api/digest_service.py": ["digest_note"],
-    # FU-D31: 「AI 偵測產業類別」 — symbol/name/market → one canonical sector key.
-    # FU-D42c: 「AI 判讀代號」 — raw input + market → local exchange code (lookup re-verifies).
-    "api/routers/instruments.py": ["ai_sector", "ai_symbol_resolve"],
+    # R6-B: unified 「AI 標的判讀」 — raw input + market → local code + name + GICS sector
+    # (+ optional industry) in one reply; the real lookup re-verifies before any auto-fill.
+    "api/routers/instruments.py": ["ai_instrument_resolve"],
     # prompt tester: user-supplied body + the (registered) insight_system system prompt.
     "api/routers/prompts.py": f"{_EXEMPT}: /prompts/test — user body + insight_system prompt",
     # model connectivity probe: a literal "ping", not a prompt of record.
@@ -151,8 +152,7 @@ def test_code_owned_versions_pin_the_module_version_tags() -> None:
         "MASTER_CALIBRATION_SYSTEM": "MASTER_CALIBRATION_PROMPT_VERSION",
         "MASTER_VALIDATE_SYSTEM": "MASTER_VALIDATE_PROMPT_VERSION",
         "DIGEST_NOTE_PROMPT_BODY": "DIGEST_NOTE_PROMPT_VERSION",
-        "AI_SECTOR_PROMPT": "AI_SECTOR_PROMPT_VERSION",
-        "AI_SYMBOL_RESOLVE_PROMPT": "AI_SYMBOL_RESOLVE_PROMPT_VERSION",
+        "AI_INSTRUMENT_RESOLVE_PROMPT": "AI_INSTRUMENT_RESOLVE_PROMPT_VERSION",
     }
     for e in ot.PROMPT_REGISTRY:
         if e["tier"] != "code-owned":
@@ -180,6 +180,20 @@ def test_digest_note_prompt_formats_without_stray_placeholders() -> None:
     assert '{"a": 1}' in rendered  # a JSON value with braces substitutes safely
     assert "你是投資組合摘要助理" in rendered
     assert "{numbers}" not in rendered  # the only placeholder was consumed
+
+
+def test_instrument_resolve_prompt_embeds_every_gics_sector_key() -> None:
+    """Drift guard (R6-B): the unified resolve prompt embeds the GICS vocabulary from its
+    single source (shared/sectors.GICS_SECTOR_KEYS), so EVERY key must appear VERBATIM in the
+    prompt — a vocabulary change that did not propagate into the prompt fails here."""
+    prompt = ot.AI_INSTRUMENT_RESOLVE_PROMPT
+    for key in GICS_SECTOR_KEYS:
+        assert key in prompt, f"GICS key {key!r} missing from AI_INSTRUMENT_RESOLVE_PROMPT"
+    # only the {query}/{market} runtime placeholders interpolate; the example JSON braces stay
+    # escaped, so .format renders cleanly with no stray placeholders.
+    rendered = prompt.format(query="聯電", market="TW")
+    assert "聯電" in rendered and "TW" in rendered
+    assert '{{"symbol"' not in rendered
 
 
 def test_code_owned_prompts_stay_out_of_user_facing_library_wire() -> None:

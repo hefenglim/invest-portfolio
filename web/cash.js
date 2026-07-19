@@ -456,6 +456,51 @@
     if (preferred && opts.some(([c]) => c === preferred)) sel.value = preferred;
   }
 
+  /* ---- R6-D: FX-form UX hardening (never-equal ccy pair + single-ccy-account gate) --- */
+
+  /* First <option> value in `sel` that isn't `exclude`; null if none exists (a
+     single-currency account has no alternate to offer). */
+  function otherCcyOption(sel, exclude) {
+    for (const o of sel.options) { if (o.value !== exclude) return o.value; }
+    return null;
+  }
+
+  /* Never let 賣出幣別 == 買入幣別. `source` names the select that just changed; the
+     OTHER select is flipped to the remaining currency via a plain `.value =` (no event
+     dispatch), so this can never ping-pong with the sibling listener that calls it. */
+  function enforceFxCcyDistinct(source) {
+    const fromSel = $('#cfx-from-ccy');
+    const toSel = $('#cfx-to-ccy');
+    if (!fromSel || !toSel || fromSel.value !== toSel.value) return;
+    if (source === 'from') {
+      const alt = otherCcyOption(toSel, fromSel.value);
+      if (alt !== null) toSel.value = alt;
+    } else {
+      const alt = otherCcyOption(fromSel, toSel.value);
+      if (alt !== null) fromSel.value = alt;
+    }
+  }
+
+  /* An account with < 2 distinct currencies (ccyOptions() is already deduped by ccy
+     code) has nothing to convert between: disable the whole form and show the inline
+     reason; a two-currency account re-enables + hides it. Owns #cfx-from-ccy/-to-ccy/
+     -from-amt/-to-amt + the #cfx-single-ccy message; #cfx-confirm's single-ccy gate is
+     ALSO re-asserted at the end of every updFxBalance() call (see its comment) so the
+     invariant holds regardless of which of the two runs last on any given call path. */
+  function setFxSingleCcyAvailability(accountId) {
+    const opts = ccyOptions(accountId);
+    const single = opts.length < 2;
+    ['#cfx-from-ccy', '#cfx-to-ccy', '#cfx-from-amt', '#cfx-to-amt', '#cfx-confirm']
+      .forEach((sel) => { const node = $(sel); if (node) node.disabled = single; });
+    const msg = $('#cfx-single-ccy');
+    if (msg) {
+      msg.hidden = !single;
+      msg.textContent = single
+        ? '該帳戶僅有單一幣別（' + (opts[0] ? opts[0][0] : '') + '），無可換匯幣別 — 換匯需帳戶具備兩種以上幣別'
+        : '';
+    }
+  }
+
   function openEdit(m) {
     const fDate = el('input', 'input'); fDate.type = 'date'; fDate.value = m.date;
     const fKind = el('select', 'select');
@@ -590,14 +635,30 @@
     confirm.disabled = over;
   }
 
-  /* FU-D34: the 換匯中心 可用餘額 line (sell ceiling) for the chosen 帳戶+賣出幣別. */
+  /* FU-D34: the 換匯中心 可用餘額 line (sell ceiling) for the chosen 帳戶+賣出幣別.
+     R6-D: `active` is keyed off ccyOptions().length rather than the select's `.disabled`
+     attribute — this runs mid-sync in syncFxCcy, BEFORE setFxSingleCcyAvailability
+     updates that attribute for the new account, so the attribute would still reflect
+     the PREVIOUS account. Recomputing directly makes the ceiling correct regardless of
+     call order (single-ccy account -> no ceiling shown, no can-fill affordance).
+     updCeiling() ends with an UNCONDITIONAL confirm.disabled = over — with active:false
+     `over` is always false, so it would otherwise RE-ENABLE 確認 on every call (initial
+     wiring's trailing updFxBalance(), boot()'s tail refresh, post-commit/delete
+     refreshes — anything that runs after setFxSingleCcyAvailability disabled it). Re-
+     asserting the gate here after the shared call makes every updFxBalance() call
+     self-healing: the effective invariant is confirm.disabled = over || single at every
+     seam, regardless of call order. setFxSingleCcyAvailability still owns the other
+     four controls + the #cfx-single-ccy message. */
   function updFxBalance() {
+    const accId = $('#cfx-account').value;
+    const single = ccyOptions(accId).length < 2;
     updCeiling({
       line: '#cfx-balance', err: '#cfx-amt-err', confirm: '#cfx-confirm',
-      amount: '#cfx-from-amt', active: true,
-      account: $('#cfx-account').value, ccy: $('#cfx-from-ccy').value,
+      amount: '#cfx-from-amt', active: !single,
+      account: accId, ccy: $('#cfx-from-ccy').value,
       label: '可用餘額', overMsg: '換出金額超過可用餘額', overTail: '換匯不可透支',
     });
+    if (single) { const c = $('#cfx-confirm'); if (c) c.disabled = true; }
   }
 
   /* FU-D43a: the 出金 賬戶現金 line (withdraw ceiling) — shown only for kind=出金;
@@ -634,15 +695,24 @@
     $('#cm-amount').addEventListener('input', updCmBalance);
     syncMovementCcy();
 
-    /* C2: fx ccy dropdowns track the account; default funding -> settlement */
+    /* C2: fx ccy dropdowns track the account; default funding -> settlement.
+       R6-D: an account switch clears both amount fields FIRST (stale values must not
+       carry over and re-validate against the new account's pool), then rebuilds the
+       ccy options, the never-equal invariant, and every downstream reset — ending with
+       the single-ccy gate, which must run last (see its own comment). */
     const syncFxCcy = () => {
-      const a = accounts.find((x) => x.id === $('#cfx-account').value);
-      fillCcySelect($('#cfx-from-ccy'), $('#cfx-account').value, a && a.funding_ccy);
-      fillCcySelect($('#cfx-to-ccy'), $('#cfx-account').value, a && settlementCcy(a));
+      const accId = $('#cfx-account').value;
+      const a = accounts.find((x) => x.id === accId);
+      $('#cfx-from-amt').value = '';
+      $('#cfx-to-amt').value = '';
+      fillCcySelect($('#cfx-from-ccy'), accId, a && a.funding_ccy);
+      fillCcySelect($('#cfx-to-ccy'), accId, a && settlementCcy(a));
+      enforceFxCcyDistinct('from');  // guards a mis-seeded funding==settlement pair too
       updImplied();
       updFxBalance();  // FU-D34: refresh the 可用餘額 ceiling for the new account/from-ccy
       resetEstimate();     // FU-D43c: an account change makes the buy field pristine again
       scheduleEstimate();
+      setFxSingleCcyAvailability(accId);
     };
     $('#cfx-account').addEventListener('change', syncFxCcy);
     syncFxCcy();
@@ -806,10 +876,16 @@
     $('#cfx-to-amt').addEventListener('input', () => {
       updImplied(); updFxBalance(); markBuyEdited();
     });
-    ['cfx-from-ccy', 'cfx-to-ccy'].forEach((id) =>
-      $('#' + id).addEventListener('input', () => {
-        updImplied(); updFxBalance(); resetEstimate(); scheduleEstimate();
-      }));
+    /* R6-D: never-equal invariant — each select's own change may flip its SIBLING
+       first; either way the shared refresh below runs once, covering both fields. */
+    $('#cfx-from-ccy').addEventListener('input', () => {
+      enforceFxCcyDistinct('from');
+      updImplied(); updFxBalance(); resetEstimate(); scheduleEstimate();
+    });
+    $('#cfx-to-ccy').addEventListener('input', () => {
+      enforceFxCcyDistinct('to');
+      updImplied(); updFxBalance(); resetEstimate(); scheduleEstimate();
+    });
     updImplied();
     updFxBalance();
 

@@ -119,7 +119,7 @@ def test_template_roundtrips_through_real_builder(
     preview = _built(kind, template_conn, render_import_template(kind))
     assert preview.rows, f"{kind}: template produced no data rows"
     kinds = _issue_kinds(preview)
-    # Soft warnings (duplicate / sell-exceeds / fuzzy) would be acceptable; a parse_error or
+    # Soft warnings (duplicate / sell-exceeds) would be acceptable; a parse_error or
     # unknown_account means the template header/columns drifted from the parser.
     assert "parse_error" not in kinds, f"{kind} parse_error: {kinds}"
     assert "unknown_account" not in kinds, f"{kind} unknown_account: {kinds}"

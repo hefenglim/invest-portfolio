@@ -1,7 +1,9 @@
 # Multi-user prep — Phase 0 (DB-open guardrail + target shape)
 
 Date: 2026-07-18 · Decision: **FU-D39** (r4 mini-spec) · Source: research pack
-`docs/reports/2026-07-17-r3-research-pack.md` §R-1.
+`docs/reports/2026-07-17-r3-research-pack.md` §R-1. · **Revised 2026-07-19 (owner
+sign-off, r6):** per-user data lives in a per-user FOLDER, not a flat ledger file —
+see the target-shape table.
 
 This batch implements **Phase 0 only**: a guardrail that pins today's connection-open
 surface, plus this note. The physical `market.db` split (**Phase 1**) is **deferred** to
@@ -16,10 +18,19 @@ writer, alongside the `news.db` that **already** lives in its own file:
 
 | File | Role | Contents (indicative) | Writer |
 | --- | --- | --- | --- |
-| `control.db` (central) | user registry / routing | `auth_users`, `auth_sessions`, user→ledger path map, shared operational keys | admin/auth |
-| `ledger_<user>.db` (personal) | one per user | `transactions`, `dividends`, `fx_conversions`, `opening_inventory`, `cash_movements`, `accounts`, `instruments`, AI records, system logs, snapshots, most config | that user's ledger flows |
+| `control.db` (central) | user registry / routing | `auth_users`, `auth_sessions`, user→**folder** map, shared operational keys | admin/auth |
+| `user_trade/<UserLoginID>/ledger.db` (personal) | one **folder** per user | `transactions`, `dividends`, `fx_conversions`, `opening_inventory`, `cash_movements`, `accounts`, `instruments`, AI records, system logs, snapshots, most config | that user's ledger flows |
 | `market.db` (shared, one copy) | market data fetched once | `prices`, `fx_rates`, `dividend_events`, `external_snapshots` | the scheduler (single writer) |
 | `news.db` (shared — **already exists**) | organized news | `organized_news`, `news_mentions` | news pipeline |
+
+**Owner revision (2026-07-19, r6 sign-off) — per-user FOLDER, not a flat file.** Each
+user's ledger and every user-derived artifact (cost calculations, extended per-user
+records, logs, backups of that ledger) live together under `user_trade/<UserLoginID>/`,
+so the folder is the **unit of backup and restore** — copying one directory captures one
+user completely, and no cross-user data can hide outside it. This slots cleanly into the
+existing convention that logs/backups derive from `db_path.parent`: point a user's
+`db_path` at `user_trade/<id>/ledger.db` and the per-user folder layout falls out of the
+current code with no new path logic. `control.db` maps user → folder (not user → file).
 
 Load-bearing corrections from the study: `auth_*` must live in **`control.db`**, not in a
 per-user ledger (you need the user to find the ledger to find the user — a chicken-and-egg

@@ -180,7 +180,7 @@ def test_ai_preview_model_alias_reaches_completer(
 
 def _fake_unregistered(*_a: object, **_k: object) -> AiDraftList:
     """A draft whose symbol (ZZZZ9) is NOT in the golden registry — the AI-input path emits the
-    unregistered-symbol block for it (no fuzzy match to 2330/AAPL)."""
+    unregistered-symbol block for it (resolution is exact-only, so no coercion to 2330/AAPL)."""
     return AiDraftList(drafts=[AiDraft(account_id="schwab", symbol="ZZZZ9", side=Side.BUY,
                                        date=date(2026, 6, 2), shares=Decimal("10"),
                                        price=Decimal("100"))])

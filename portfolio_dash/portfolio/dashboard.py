@@ -176,13 +176,16 @@ def build_dashboard(
     except KeyError:
         returns = None
     allocation: SectorAllocation | None
-    # FU-D31 (P1①): canonicalize sectors at the donut GROUPING seam (read-time only —
-    # stored instrument rows are NOT migrated this round). Both the sector-allocation donut
-    # AND the sector_weight alert group on THIS SectorAllocation (strategy/alerts.py reads
-    # data.allocation.weights), so this ONE canonicalization fixes both — verified single
-    # seam. Holding ROWS keep their RAW stored sector (display of the instrument's own
-    # value, section 8 below); only the grouping is normalized. Canonical keys are English;
-    # zh display is deferred (see shared/sectors.py).
+    # FU-D31 (P1①) / R6 (2026-07-19): canonicalize sectors at the donut GROUPING seam. Stored
+    # instrument rows ARE now migrated once at the schema/boot seam (R6,
+    # store.migrate_instrument_sectors), so most stored values are already canonical here; this
+    # read-time canonicalization is KEPT as defense-in-depth — a provider- or CSV-supplied
+    # synonym (or a value stored between boots) still groups correctly before the next boot
+    # migrates it. Both the sector-allocation donut AND the sector_weight alert group on THIS
+    # SectorAllocation (strategy/alerts.py reads data.allocation.weights), so this ONE
+    # canonicalization fixes both — verified single seam. Holding ROWS keep their (now usually
+    # already-canonical) stored sector, section 8 below; only the grouping is normalized.
+    # Canonical keys are English; zh display is deferred (see shared/sectors.py).
     alloc_instruments = {
         sym: inst.model_copy(update={"sector": canonical_sector(inst.sector)})
         for sym, inst in instruments.items()

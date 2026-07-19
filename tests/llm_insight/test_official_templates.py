@@ -10,8 +10,8 @@ reference strategies BY NAME, so a version bump needs no preset change).
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v8() -> None:
-    assert ot.LIBRARY_VERSION == "official-v8 (2026-07-19)"
+def test_library_version_is_official_v9() -> None:
+    assert ot.LIBRARY_VERSION == "official-v9 (2026-07-19)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -46,22 +46,30 @@ def test_ai_input_prompt_v3_pins_local_exchange_code_rule() -> None:
     assert "聯電⇒2303" in rendered
 
 
-def test_ai_symbol_resolve_prompt_is_registered_and_versioned() -> None:
-    # FU-D42c: the 「AI 判讀代號」 fallback prompt lives in the registry (code-owned) and
-    # instructs the same local-exchange-code rules; the reply is suggestion-only (the real
-    # lookup re-verifies — stated in the prompt so the model never claims authority).
-    assert ot.AI_SYMBOL_RESOLVE_PROMPT_VERSION == "v1"
-    body = ot.AI_SYMBOL_RESOLVE_PROMPT
+def test_ai_instrument_resolve_prompt_is_registered_and_versioned() -> None:
+    # R6-B: the UNIFIED 「AI 標的判讀」 prompt SUPERSEDES the former ai_sector + ai_symbol_resolve
+    # prompts. It lives in the registry (code-owned), carries the local-exchange-code rules +
+    # the embedded GICS sector vocabulary + all reply-schema fields, and states that the real
+    # lookup re-verifies (so the model claims no authority).
+    assert ot.AI_INSTRUMENT_RESOLVE_PROMPT_VERSION == "v1"
+    body = ot.AI_INSTRUMENT_RESOLVE_PROMPT
     for placeholder in ("{query}", "{market}"):
         assert placeholder in body
     assert "聯電⇒2303" in body and "UMC" in body   # local-code rule + ADR counter-example
-    assert "真實報價查核" in body                    # verification stays with the lookup
+    assert "真實報價覆核" in body                    # verification stays with the lookup
+    # the single-reply schema fields (symbol/name resolution + GICS classify + candidates).
+    for field in ("gics_sector", "gics_industry", "confidence", "candidates", "not_found"):
+        assert field in body
     rendered = body.format(query="聯電", market="TW")
     assert "聯電" in rendered and '{{"symbol"' not in rendered  # braces unescaped by format
-    entry = next(e for e in ot.PROMPT_REGISTRY if e["key"] == "ai_symbol_resolve")
+    entry = next(e for e in ot.PROMPT_REGISTRY if e["key"] == "ai_instrument_resolve")
     assert entry["tier"] == "code-owned"
-    assert entry["default_constant"] == "AI_SYMBOL_RESOLVE_PROMPT"
-    assert entry["agent"] == "ai_symbol_resolve"
+    assert entry["default_constant"] == "AI_INSTRUMENT_RESOLVE_PROMPT"
+    assert entry["agent"] == "ai_instrument_resolve"
+    # the two former single-purpose prompts (and their keys) are GONE.
+    assert not hasattr(ot, "AI_SECTOR_PROMPT")
+    assert not hasattr(ot, "AI_SYMBOL_RESOLVE_PROMPT")
+    assert not any(e["key"] in ("ai_sector", "ai_symbol_resolve") for e in ot.PROMPT_REGISTRY)
 
 
 def test_checkup_strategy_advances_to_v25_citing_rule_signals() -> None:
@@ -89,7 +97,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v25_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v8 (2026-07-19)"
+    assert wire["library_version"] == "official-v9 (2026-07-19)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

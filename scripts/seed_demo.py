@@ -55,16 +55,19 @@ def seed(conn: sqlite3.Connection) -> None:
         return
 
     # --- instruments (fictional but plausible; names tagged DEMO) ---
+    # Sectors use the canonical GICS vocabulary (R6, 2026-07-19): Semiconductors + Tech both
+    # fold into Information Technology; Banking → Financials; ETF stays its own bucket.
     upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=Currency.TWD,
-                                       sector="Semiconductors", name="台積電 (DEMO)", board="TWSE"))
+                                       sector="Information Technology", name="台積電 (DEMO)",
+                                       board="TWSE"))
     upsert_instrument(conn, Instrument(symbol="0056", market=Market.TW, quote_ccy=Currency.TWD,
                                        sector="ETF", name="元大高股息 (DEMO)", board="TWSE"))
     upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=Currency.USD,
-                                       sector="Tech", name="Apple (DEMO)"))
+                                       sector="Information Technology", name="Apple (DEMO)"))
     upsert_instrument(conn, Instrument(symbol="NVDA", market=Market.US, quote_ccy=Currency.USD,
-                                       sector="Semiconductors", name="NVIDIA (DEMO)"))
+                                       sector="Information Technology", name="NVIDIA (DEMO)"))
     upsert_instrument(conn, Instrument(symbol="1155", market=Market.MY, quote_ccy=Currency.MYR,
-                                       sector="Banking", name="Maybank (DEMO)"))
+                                       sector="Financials", name="Maybank (DEMO)"))
 
     # --- transactions across all four accounts ---
     insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,

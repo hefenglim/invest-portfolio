@@ -63,6 +63,7 @@ def test_instruments_list_shape_and_enrichment(api_client: TestClient) -> None:
     assert tsmc["last"] == "600"
     assert tsmc["target_low"] is None
     assert tsmc["target_high"] is None  # FU-D28: additive wire, unset by default
+    assert tsmc["industry"] is None  # R6: GICS industry passthrough, null until next-wave fill
     aapl = by_symbol["AAPL"]
     assert aapl["board"] == "" and aapl["held"] is True and aapl["last"] == "120"
 

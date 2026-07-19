@@ -423,14 +423,43 @@
     $('#m-pc-ccy').textContent = ccy;
     const rows = $('#m-pc-rows');
     rows.replaceChildren();
+    /* Every value below is a SERVER Decimal STRING routed through window.fmt for DISPLAY
+       only (thousands separators / dp) — this module performs no money arithmetic. */
+    const pcRow = (k, v, signCls) => {
+      const row = el('div', 'pc-row');
+      row.appendChild(el('span', 'k', k));
+      row.appendChild(el('span', 'v' + (signCls ? ' ' + signCls : ''), v));
+      rows.appendChild(row);
+    };
     if (hasServer) {
       [['成交金額', preview.gross], ['手續費' + (m.feeOverride ? '（已覆寫）' : ''), preview.fee],
        ['交易稅' + (m.taxOverride ? '（已覆寫）' : ''), preview.tax]].forEach(([k, v]) => {
-        const row = el('div', 'pc-row');
-        row.appendChild(el('span', 'k', k));
-        row.appendChild(el('span', 'v', f.money(v, ccy) + ' ' + ccy));
-        rows.appendChild(row);
+        pcRow(k, f.money(v, ccy) + ' ' + ccy);
       });
+      /* R6-E: drawer-parity 試算 what-if (SERVER-computed; position_preview is null when the
+         symbol is unregistered / inputs incomplete — the rows simply do not render). */
+      const pp = preview.position_preview;
+      if (pp && pp.kind === 'sell') {
+        pcRow('調整成本移除', f.money(pp.cost_removed, ccy) + ' ' + ccy);
+        pcRow('已實現損益', f.signed(pp.realized_pnl, ccy) + ' ' + ccy, f.signClass(pp.realized_pnl));
+        pcRow('剩餘股數', f.num(pp.remain_shares));
+      } else if (pp && pp.kind === 'buy') {
+        pcRow('新持股', f.num(pp.new_shares));
+        pcRow('新原始均價', f.price(pp.new_original_avg, ccy));
+        pcRow('新調整均價', f.price(pp.new_adjusted_avg, ccy));
+      }
+      /* R6-E: DISPLAY-ONLY account cash line (owner-signed: no gating). Visually separated
+         from the what-if rows; null balance -> the shared null glyph. */
+      const ac = preview.account_cash;
+      if (ac) {
+        const row = el('div', 'pc-row');
+        row.style.borderTop = '1px solid var(--border)';
+        row.style.marginTop = '3px';
+        row.appendChild(el('span', 'k', '該帳戶現金（' + ac.ccy + '）'));
+        row.appendChild(el('span', 'v',
+          ac.balance != null ? f.money(ac.balance, ac.ccy) + ' ' + ac.ccy : f.NULL_GLYPH));
+        rows.appendChild(row);
+      }
     }
 
     /* issue list */
@@ -772,7 +801,7 @@
       if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
         window.confirmDialog({
           title: '匯入警告確認',
-          body: '部分列有警告（如賣超 / 模糊代號）— 確認後一併寫入？',
+          body: '部分列有警告（如賣超）— 確認後一併寫入？',
           confirmLabel: '確認寫入',
           onConfirm: async () => {
             try {

@@ -285,17 +285,15 @@
   },
   "allocation": {
     "by_sector": {
-      "Semiconductors": "1200000",
+      "Information Technology": "2443840.0",
       "ETF": "304000",
-      "Shipping": "121000",
-      "Technology": "1243840.0",
+      "Industrials": "121000",
       "Financials": "69125.000"
     },
     "weights": {
-      "Semiconductors": "0.4084459821679291618518260088",
+      "Information Technology": "0.8318138575510600024166387278",
       "ETF": "0.1034729821492087210024625889",
-      "Shipping": "0.04118496986859952382005912256",
-      "Technology": "0.4233678753831308405648127190",
+      "Industrials": "0.04118496986859952382005912256",
       "Financials": "0.02352819043113175276083956072"
     },
     "reporting_currency": "TWD"
@@ -1574,6 +1572,14 @@
       "title": "AAPL 單一持股權重偏高",
       "detail": "單一持股權重 32.8%＞門檻 30.0%",
       "href": "/symbol/AAPL"
+    },
+    {
+      "id": "sector_weight:Information Technology",
+      "sev": "risk",
+      "rule": "sector_weight",
+      "title": "Information Technology 產業權重偏高",
+      "detail": "產業權重 83.2%＞門檻 60.0%",
+      "href": null
     },
     {
       "id": "stale_price:00919",

@@ -1,22 +1,27 @@
-"""Contract: POST /api/instruments/ai-resolve (FU-D42c 「AI 判讀代號」).
+"""Contract: POST /api/instruments/ai-resolve — the UNIFIED AI instrument-resolve (R6-B).
 
-The endpoint returns the LLM's symbol/name SUGGESTION — UNVERIFIED (``verified: false``)
-and registering nothing. Verification is a SEPARATE stage: the dialog re-runs
-GET /api/instruments/lookup with the suggestion, and that quote-backed lookup remains the
-sole registration authority (invariant: the LLM never supplies a number of record; the
-identification itself is qualitative). Both stages are exercised here. LLM degradation
-surfaces as the standard 402 / 409 / 503 envelope via the global handlers.
+ONE endpoint + ONE prompt behind every registration entry point: raw input + target market →
+local exchange code + name + GICS sector (+ optional industry) in a single structured reply.
+The reply is ADVISORY — the endpoint canonicalizes the sector and re-verifies the returned
+symbol against the REAL provider quote/name lookup (the sole registration authority) before any
+auto-fill. Behaviours pinned here (item 7): resolved-high-verified auto-fill; sector-out-of-vocab
+downgrade → candidates; honest not_found (never fabricates); completer degradation → the standard
+402/409/503 envelope; verification-fail downgrade; registered short-circuit (no LLM); the
+sector_only re-detect that SKIPS the short-circuit; and that temperature=0 rides into the call.
 """
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-from portfolio_dash.api import instrument_service
+from portfolio_dash.api.instrument_service import InstrumentLookup
 from portfolio_dash.api.routers import instruments as inst_mod
-from portfolio_dash.api.routers.instruments import AiResolveReply
-from portfolio_dash.pricing.results import RefreshSummary
+from portfolio_dash.api.routers.instruments import (
+    AiInstrumentResolveReply,
+    AiResolveCandidate,
+)
 from portfolio_dash.shared.llm_config import (
     AINotActivated,
     LLMBudgetExceeded,
@@ -24,71 +29,206 @@ from portfolio_dash.shared.llm_config import (
 )
 
 
-def _fake_reply(symbol: str, name: str = "") -> Any:
-    def _f(*_a: object, **_k: object) -> AiResolveReply:
-        return AiResolveReply(symbol=symbol, name=name)
+def _completer(reply: AiInstrumentResolveReply) -> Callable[..., AiInstrumentResolveReply]:
+    def _f(*_a: object, **_k: object) -> AiInstrumentResolveReply:
+        return reply
     return _f
 
 
-def test_ai_resolve_happy_path_returns_unverified_suggestion(
+def _lookup_found(name: str = "台積電") -> Callable[..., InstrumentLookup]:
+    def _f(*_a: object, **_k: object) -> InstrumentLookup:
+        return InstrumentLookup(found=True, registered=False, name=name,
+                               sector="", board="TWSE")
+    return _f
+
+
+def _lookup_miss() -> Callable[..., InstrumentLookup]:
+    def _f(*_a: object, **_k: object) -> InstrumentLookup:
+        return InstrumentLookup(found=False)
+    return _f
+
+
+# --- resolved (verified + high confidence) ---------------------------------------------
+
+
+def test_resolve_high_verified_auto_fills(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The owner's bug input: the model maps 「聯電/UMC」 to the local code 2303. The reply
-    is a suggestion only — flagged unverified, normalized upper, and NOTHING registered."""
-    monkeypatch.setattr(inst_mod, "complete_structured", _fake_reply("2303", "聯電"))
+    """High confidence + canonical sector + provider verification → status:"resolved" with the
+    full auto-fill shape; the provider name is preferred over the AI name."""
+    monkeypatch.setattr(inst_mod, "complete_structured", _completer(
+        AiInstrumentResolveReply(symbol="2303", name="AI 名稱",
+                                 gics_sector="Information Technology",
+                                 gics_industry="Semiconductors", confidence="high")))
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_found(name="聯華電子"))
     r = api_client.post("/api/instruments/ai-resolve",
                         json={"query": "UMC 聯電", "market": "TW"})
     assert r.status_code == 200
-    assert r.json() == {"symbol": "2303", "name": "聯電", "verified": False}
-    # stage boundary: the endpoint registered nothing (the lookup+confirm flow does that).
-    listed = [i["symbol"] for i in api_client.get("/api/instruments").json()["list"]]
-    assert "2303" not in listed
+    body = r.json()
+    assert body["status"] == "resolved"
+    assert body["symbol"] == "2303"
+    assert body["name"] == "聯華電子"  # provider name preferred over the AI name
+    assert body["sector"] == "Information Technology"
+    assert body["industry"] == "Semiconductors"
+    assert body["verified"] is True
+    assert body["confidence"] == "high"
+    assert body["prompt_version"]
 
 
-def test_ai_resolve_normalizes_symbol_case(
+def test_resolve_prefers_ai_name_when_provider_name_blank(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(inst_mod, "complete_structured", _fake_reply("  aapl ", " Apple "))
+    monkeypatch.setattr(inst_mod, "complete_structured", _completer(
+        AiInstrumentResolveReply(symbol="AAPL", name="Apple Inc",
+                                 gics_sector="Information Technology", confidence="high")))
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_found(name=""))
     r = api_client.post("/api/instruments/ai-resolve",
                         json={"query": "蘋果", "market": "US"})
-    assert r.json() == {"symbol": "AAPL", "name": "Apple", "verified": False}
+    assert r.json()["name"] == "Apple Inc"  # AI name is the fallback
 
 
-def test_ai_resolve_empty_model_reply_passes_through_blank(
+# --- downgrades → candidates ------------------------------------------------------------
+
+
+def test_sector_out_of_vocab_downgrades_to_candidates(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An honest cannot-identify reply (blank symbol) flows through unchanged — the dialog
-    shows its own notice; the endpoint never invents a code."""
-    monkeypatch.setattr(inst_mod, "complete_structured", _fake_reply(""))
+    """A high-confidence reply whose sector is OFF-vocabulary downgrades to candidates (the
+    unverified primary first, its off-vocab sector blanked)."""
+    monkeypatch.setattr(inst_mod, "complete_structured", _completer(
+        AiInstrumentResolveReply(symbol="2303", name="聯電",
+                                 gics_sector="Nonsense Sector", confidence="high")))
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_found())
+    r = api_client.post("/api/instruments/ai-resolve",
+                        json={"query": "聯電", "market": "TW"})
+    body = r.json()
+    assert body["status"] == "candidates"
+    assert body["candidates"][0] == {"symbol": "2303", "name": "聯電",
+                                     "sector": "", "verified": False}
+
+
+def test_verification_fail_downgrades_to_candidates(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a high-confidence + canonical-sector reply becomes candidates when the REAL lookup
+    cannot verify the symbol — the LLM never overrides the provider authority."""
+    monkeypatch.setattr(inst_mod, "complete_structured", _completer(
+        AiInstrumentResolveReply(symbol="9999", name="不存在",
+                                 gics_sector="Information Technology", confidence="high")))
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_miss())
+    r = api_client.post("/api/instruments/ai-resolve",
+                        json={"query": "不存在的公司", "market": "TW"})
+    body = r.json()
+    assert body["status"] == "candidates"
+    assert body["candidates"][0]["symbol"] == "9999"
+    assert body["candidates"][0]["verified"] is False
+
+
+def test_medium_confidence_lists_primary_then_ai_candidates(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Medium confidence → candidates: the unverified primary FIRST, then the AI's alternates
+    (deduped, canonicalized, capped at 5), all verified:false."""
+    monkeypatch.setattr(inst_mod, "complete_structured", _completer(
+        AiInstrumentResolveReply(
+            symbol="2303", name="聯電", gics_sector="Information Technology",
+            confidence="medium",
+            candidates=[
+                AiResolveCandidate(symbol="2303", name="dupe"),  # dropped (== primary)
+                AiResolveCandidate(symbol="3034", name="聯詠", gics_sector="金融"),  # synonym
+                AiResolveCandidate(symbol="", name="blank"),  # dropped (blank symbol)
+            ])))
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_found())
+    r = api_client.post("/api/instruments/ai-resolve",
+                        json={"query": "聯", "market": "TW"})
+    body = r.json()
+    assert body["status"] == "candidates"
+    syms = [c["symbol"] for c in body["candidates"]]
+    assert syms == ["2303", "3034"]  # primary first; dupe + blank dropped
+    assert body["candidates"][1]["sector"] == "Financials"  # synonym canonicalized
+
+
+# --- honest not-found (never fabricate) -------------------------------------------------
+
+
+def test_not_found_never_fabricates_a_code(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(inst_mod, "complete_structured", _completer(
+        AiInstrumentResolveReply(not_found=True)))
     r = api_client.post("/api/instruments/ai-resolve",
                         json={"query": "???", "market": "TW"})
-    assert r.status_code == 200
-    assert r.json()["symbol"] == ""
+    body = r.json()
+    assert body["status"] == "not_found"
+    assert "symbol" not in body  # no fabricated code
+    assert body["message"]
+    # stage boundary: the endpoint registered nothing.
+    listed = [i["symbol"] for i in api_client.get("/api/instruments").json()["list"]]
+    assert "???" not in listed
 
 
-def test_ai_resolve_missing_or_blank_query_400(api_client: TestClient) -> None:
+def test_blank_symbol_reply_is_treated_as_not_found(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty symbol (with not_found=false) is still honest not-found — never fabricated."""
+    monkeypatch.setattr(inst_mod, "complete_structured", _completer(
+        AiInstrumentResolveReply(symbol="   ", confidence="low")))
+    r = api_client.post("/api/instruments/ai-resolve",
+                        json={"query": "???", "market": "TW"})
+    assert r.json()["status"] == "not_found"
+
+
+def test_blank_query_400(api_client: TestClient) -> None:
     r = api_client.post("/api/instruments/ai-resolve", json={"query": "   ", "market": "TW"})
     assert r.status_code == 400
     r2 = api_client.post("/api/instruments/ai-resolve", json={"market": "TW"})
     assert r2.status_code == 400  # query defaults blank → same 400, not a 422 schema error
 
 
-def test_ai_resolve_passes_query_and_market_into_prompt(
+# --- registered short-circuit + sector_only re-detect -----------------------------------
+
+
+def test_registered_symbol_short_circuits_without_llm(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    captured: dict[str, object] = {}
+    """A raw input that is ALREADY a registered active symbol answers from the registry with NO
+    LLM call — the completer must not be invoked."""
+    def _boom(*_a: object, **_k: object) -> AiInstrumentResolveReply:
+        raise AssertionError("registered short-circuit must not call the LLM")
+    monkeypatch.setattr(inst_mod, "complete_structured", _boom)
+    r = api_client.post("/api/instruments/ai-resolve",
+                        json={"query": "2330", "market": "TW"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "resolved" and body["symbol"] == "2330"
+    assert body["verified"] is True
 
-    def spy(prompt: str, schema: type, *, agent: str, conn: object = None) -> AiResolveReply:
-        captured["prompt"] = prompt
-        captured["agent"] = agent
-        return AiResolveReply(symbol="2303", name="聯電")
 
-    monkeypatch.setattr(inst_mod, "complete_structured", spy)
-    api_client.post("/api/instruments/ai-resolve", json={"query": "聯電", "market": "TW"})
-    prompt = str(captured["prompt"])
-    assert "聯電" in prompt and "TW" in prompt
-    assert "聯電⇒2303" in prompt  # the FU-D41 local-exchange-code rules ride in the prompt
-    assert captured["agent"] == "ai_symbol_resolve"
+def test_sector_only_skips_short_circuit_and_calls_llm(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watchlist 「AI 偵測產業類別」 re-detect (sector_only=true) MUST re-classify a known
+    symbol via the LLM — the registry short-circuit is skipped so a blank/stale sector can be
+    filled."""
+    called = {"n": 0}
+
+    def _spy(*_a: object, **_k: object) -> AiInstrumentResolveReply:
+        called["n"] += 1
+        return AiInstrumentResolveReply(symbol="2330", name="台積電",
+                                        gics_sector="Information Technology",
+                                        gics_industry="Semiconductors", confidence="high")
+    monkeypatch.setattr(inst_mod, "complete_structured", _spy)
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_found())
+    r = api_client.post("/api/instruments/ai-resolve",
+                        json={"query": "2330", "market": "TW", "sector_only": True})
+    assert called["n"] == 1  # the LLM WAS called despite 2330 being registered
+    body = r.json()
+    assert body["status"] == "resolved"
+    assert body["sector"] == "Information Technology"
+    assert body["industry"] == "Semiconductors"
+
+
+# --- graceful degradation (never a 500, never blocks the form) --------------------------
 
 
 @pytest.mark.parametrize(("exc", "status", "code"), [
@@ -96,60 +236,39 @@ def test_ai_resolve_passes_query_and_market_into_prompt(
     (AINotActivated("AI 未啟用"), 409, "ai_not_activated"),
     (LLMUnavailable("provider down"), 503, "llm_unavailable"),
 ])
-def test_ai_resolve_degradation_maps_to_standard_envelope(
+def test_completer_degradation_maps_to_standard_envelope(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch,
     exc: Exception, status: int, code: str,
 ) -> None:
-    def _boom(*_a: object, **_k: object) -> AiResolveReply:
+    def _boom(*_a: object, **_k: object) -> AiInstrumentResolveReply:
         raise exc
     monkeypatch.setattr(inst_mod, "complete_structured", _boom)
-    r = api_client.post("/api/instruments/ai-resolve", json={"query": "聯電"})
+    # a NON-registered query so the pipeline reaches the LLM call.
+    r = api_client.post("/api/instruments/ai-resolve",
+                        json={"query": "聯電", "market": "TW"})
     assert r.status_code == status and r.json()["error"]["code"] == code
 
 
-# --- stage 2: the REAL lookup verifies (or refuses) the suggestion ----------------------
+# --- prompt / call wiring ---------------------------------------------------------------
 
 
-def test_suggestion_of_registered_symbol_verifies_via_lookup_network_free(
+def test_call_passes_query_market_agent_and_temperature_zero(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stage 1 suggests golden-registered 2330 → stage 2 (the real lookup) verifies it from
-    stored metadata with NO provider call. The suggestion itself proved nothing — found=True
-    comes from the lookup, the same authority every registration path uses."""
-    monkeypatch.setattr(inst_mod, "complete_structured", _fake_reply("2330", "台積電"))
-    r = api_client.post("/api/instruments/ai-resolve",
-                        json={"query": "台積電", "market": "TW"})
-    assert r.json()["verified"] is False  # stage 1 never verifies
+    captured: dict[str, Any] = {}
 
-    def _no_provider(*_a: object, **_k: object) -> None:
-        raise AssertionError("lookup of a registered symbol must not hit the provider")
+    def spy(prompt: str, schema: type, *, agent: str, conn: object = None,
+            temperature: object = None, **_k: object) -> AiInstrumentResolveReply:
+        captured["prompt"] = prompt
+        captured["agent"] = agent
+        captured["temperature"] = temperature
+        return AiInstrumentResolveReply(not_found=True)
 
-    monkeypatch.setattr(instrument_service, "refresh_quotes", _no_provider)
-    monkeypatch.setattr(instrument_service, "probe_tw_board", _no_provider)
-    lr = api_client.get("/api/instruments/lookup",
-                        params={"symbol": r.json()["symbol"], "market": "TW"})
-    assert lr.status_code == 200
-    assert lr.json()["found"] is True and lr.json()["registered"] is True
-
-
-def test_unverifiable_suggestion_stays_unfound_at_lookup(
-    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Stage 1 suggests a symbol NO provider can quote → stage 2 returns found=False, so the
-    dialog keeps its confirm blocked (「AI 判讀後仍查無報價」): an LLM suggestion can never
-    register without passing the real quote check."""
-    monkeypatch.setattr(inst_mod, "complete_structured", _fake_reply("9999", "不存在"))
-    r = api_client.post("/api/instruments/ai-resolve",
-                        json={"query": "不存在的公司", "market": "TW"})
-    sym = r.json()["symbol"]
-
-    def _no_quote(conn: Any, registry: Any, instruments: list[Any], fx_pairs: Any,
-                  *, now: Any) -> RefreshSummary:
-        return RefreshSummary(ok={}, failed=[i.symbol for i in instruments],
-                              fetched_at=now)
-
-    monkeypatch.setattr(instrument_service, "refresh_quotes", _no_quote)
-    monkeypatch.setattr(instrument_service, "probe_tw_board", lambda s, **k: "TWSE")
-    lr = api_client.get("/api/instruments/lookup", params={"symbol": sym, "market": "TW"})
-    assert lr.status_code == 200
-    assert lr.json()["found"] is False  # the authority refused — no registration possible
+    monkeypatch.setattr(inst_mod, "complete_structured", spy)
+    api_client.post("/api/instruments/ai-resolve", json={"query": "聯電", "market": "TW"})
+    prompt = str(captured["prompt"])
+    assert "聯電" in prompt and "TW" in prompt
+    assert "聯電⇒2303" in prompt              # the local-exchange-code rules ride in
+    assert "Information Technology" in prompt  # the embedded GICS vocabulary
+    assert captured["agent"] == "ai_instrument_resolve"
+    assert captured["temperature"] == 0        # deterministic classify/resolve

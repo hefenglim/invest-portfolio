@@ -1,8 +1,10 @@
-"""FU-D31 grouping seam: build_dashboard canonicalizes sectors for the allocation donut.
+"""FU-D31 / R6 grouping seam: build_dashboard canonicalizes sectors for the allocation donut.
 
-The donut (allocation.by_sector / weights) AND the sector_weight alert both consume this
-one SectorAllocation, so canonicalizing here fixes both. Holding ROWS keep their raw stored
-sector (read-time only; stored rows are not migrated this round).
+The donut (allocation.by_sector / weights) AND the sector_weight alert both consume this one
+SectorAllocation, so canonicalizing here fixes both. Under R6 stored rows are migrated once at
+the boot seam, but this read-time canonicalization is KEPT as defense-in-depth; these tests
+seed instruments AFTER bootstrap (so the boot migration is a no-op for them) and prove the
+read-time grouping still merges synonyms while holding ROWS keep their raw stored sector.
 """
 
 import sqlite3
@@ -59,12 +61,13 @@ def test_sectors_canonicalized_at_the_donut_seam(conn: sqlite3.Connection) -> No
 
     assert data.allocation is not None
     by_sector = data.allocation.by_sector
-    # 'Tech' + 'Technology' merged into ONE canonical group; blank surfaced as Unclassified.
-    assert set(by_sector.keys()) == {"Technology", "Unclassified"}
-    assert by_sector["Technology"] == Decimal("2000")   # AAPL 1000 + MSFT 1000
+    # 'Tech' + 'Technology' merged into ONE canonical group (GICS Information Technology);
+    # blank surfaced as Unclassified.
+    assert set(by_sector.keys()) == {"Information Technology", "Unclassified"}
+    assert by_sector["Information Technology"] == Decimal("2000")   # AAPL 1000 + MSFT 1000
     assert by_sector["Unclassified"] == Decimal("1000")  # BLNK
     # weights re-sum to 1 over the merged groups (no value lost in relabeling).
-    assert data.allocation.weights["Technology"] == Decimal("2000") / Decimal("3000")
+    assert data.allocation.weights["Information Technology"] == Decimal("2000") / Decimal("3000")
     assert data.allocation.weights["Unclassified"] == Decimal("1000") / Decimal("3000")
 
 

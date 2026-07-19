@@ -21,8 +21,22 @@ def test_instrument_construction() -> None:
         symbol="AAPL",
         market=Market.US,
         quote_ccy=Currency.USD,
-        sector="Technology",
+        sector="Information Technology",
         name="Apple Inc.",
     )
     assert inst.market is Market.US
     assert inst.quote_ccy is Currency.USD
+    # R6: the GICS industry column defaults to None (filled by the next wave's AI service).
+    assert inst.industry is None
+
+
+def test_instrument_industry_optional_free_text() -> None:
+    inst = Instrument(
+        symbol="NVDA",
+        market=Market.US,
+        quote_ccy=Currency.USD,
+        sector="Information Technology",
+        name="NVIDIA Corp.",
+        industry="Semiconductors",
+    )
+    assert inst.industry == "Semiconductors"

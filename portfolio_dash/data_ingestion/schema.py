@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS instruments (
     target_low TEXT, board_status TEXT NOT NULL DEFAULT 'resolved',
     is_etf INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
-    target_high TEXT
+    target_high TEXT,
+    industry TEXT
 );
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,5 +77,14 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # target_high (FU-D28): the price-alert CEILING, joining target_low (the floor). Both feed
     # the target_cross rule; additive, so an existing DB migrates in without touching any row.
     _add_column_if_missing(conn, "instruments", "target_high", "TEXT")
+    # industry (R6, 2026-07-19): nullable GICS industry, filled by the next wave's AI service.
+    # Backend plumbing only this wave; additive, so an existing DB migrates in untouched.
+    _add_column_if_missing(conn, "instruments", "industry", "TEXT")
     _add_column_if_missing(conn, "transactions", "daytrade", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
+    # One-time idempotent sector rewrite to the canonical GICS vocabulary (R6). Runs after the
+    # column adds + commit so it sees the final schema; a no-op when every value is already
+    # canonical. Local import keeps schema.py free of a module-load dependency on store.py.
+    from portfolio_dash.data_ingestion.store import migrate_instrument_sectors
+
+    migrate_instrument_sectors(conn)

@@ -18,9 +18,11 @@ user-facing :func:`library_wire` payload (``agents.py`` imports it and fills the
 
 from typing import Literal, TypedDict
 
+from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
+
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v8 (2026-07-19)"
+LIBRARY_VERSION = "official-v9 (2026-07-19)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -138,47 +140,56 @@ DIGEST_NOTE_PROMPT_BODY = (
     "不得杜撰任何新數字或金額。不要加上金額符號。"
 )
 
-# AI sector-detection prompt (api/routers/instruments.py::ai_sector, FU-D31). The DEFAULT
-# role classifies a stock into ONE canonical sector KEY. The canonical vocabulary is injected
-# via ``{categories}`` (from shared/sectors.py — the single source of truth) so this prompt
-# never hardcodes the list; the reply is ALWAYS re-mapped through ``canonical_sector``
-# server-side, so a non-canonical value can never escape (invariant: a category label is fine
-# for an LLM; it is NOT a number of record). ``.format`` placeholders: {categories} {symbol}
-# {name} {market}; the ``{{`` / ``}}`` escape the literal JSON braces in the example.
-AI_SECTOR_PROMPT_VERSION = "v1"
-AI_SECTOR_PROMPT = (
-    "<task>你是股票產業分類助理。根據提供的股票代號、名稱與市場，判斷它最貼近下列"
-    "『標準產業類別』中的哪一個。</task>\n"
-    "<categories>{categories}</categories>\n"
-    "<input>代號：{symbol}\n名稱：{name}\n市場：{market}</input>\n"
-    "<rules>只能從 <categories> 選出『一個』最貼切的類別；sector 欄位必須與清單中的英文鍵"
-    "『完全一致』（大小寫、空格、字元皆同）。無法判斷時回傳 \"Unclassified\"。"
-    "不得杜撰清單以外的類別，不得輸出任何數字或金額。</rules>\n"
-    "<example_output>{{\"sector\": \"Technology\"}}</example_output>\n"
-    "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
-)
+# AI instrument-resolve prompt (api/routers/instruments.py::ai_resolve, R6-B 2026-07-19).
+# ONE code-owned prompt serving every registration entry point (manual-trade / AI-input / CSV
+# quick-add dialogs + the watchlist surfaces): the DEFAULT role maps the user's raw input
+# (company name / wrong-form ticker such as a US ADR code) to the target market's LOCAL
+# exchange code + name + GICS sector (+ optional GICS industry) in a SINGLE structured reply.
+# It SUPERSEDES the two former single-purpose prompts (AI_SECTOR_PROMPT + AI_SYMBOL_RESOLVE_
+# PROMPT), consolidating symbol-resolution and sector-classification behind one contract.
+#
+# The reply is ADVISORY ONLY: the endpoint re-maps gics_sector through ``canonical_sector``
+# and re-verifies the returned symbol against the REAL provider quote/name lookup before any
+# auto-fill (invariant #1: the LLM supplies no number of record — a symbol/sector/industry is
+# a qualitative identification, not a price/return).
+#
+# The 11 GICS sector keys are embedded from ``GICS_SECTOR_KEYS`` (shared/sectors.py — the
+# single vocabulary source) via a MODULE-LEVEL join, so the allowed list can never drift from
+# the canonical vocabulary while the constant below stays a plain str. ``.format`` placeholders
+# are {query} and {market} ONLY; the ``{{`` / ``}}`` escape the literal JSON braces in the
+# one-shot example (whose sector uses a real GICS key).
+_GICS_SECTOR_LIST = ", ".join(GICS_SECTOR_KEYS)
 
-# AI symbol-resolve prompt (api/routers/instruments.py::ai_resolve, FU-D42c). When the
-# quick-add dialog's REAL provider lookup finds nothing (查無報價), the DEFAULT role maps the
-# user's raw input (company name / wrong-form ticker such as a US ADR code) to the target
-# market's LOCAL exchange code + name — the same code rules as the AI-input parse prompt
-# (FU-D41). The reply is a SUGGESTION only: the dialog always re-runs the real lookup, which
-# stays the registration authority (invariant: the LLM never supplies a number of record;
-# a symbol/name identification is qualitative). ``.format`` placeholders: {query} {market};
-# the ``{{`` / ``}}`` escape the literal JSON braces in the example.
-AI_SYMBOL_RESOLVE_PROMPT_VERSION = "v1"
-AI_SYMBOL_RESOLVE_PROMPT = (
-    "<task>你是股票代號判讀助理。使用者輸入了一段可能是公司名稱、俗稱或錯誤形式的代號"
-    "（例如把台股打成美股 ADR 代號），請判讀他在目標市場中實際想指的股票，回傳該市場的"
-    "『當地交易所代號』與正式名稱。</task>\n"
+AI_INSTRUMENT_RESOLVE_PROMPT_VERSION = "v1"
+AI_INSTRUMENT_RESOLVE_PROMPT = (
+    "<task>你是股票標的判讀助理。使用者輸入了一段可能是公司名稱、俗稱，或某種形式的代號"
+    "（可能是錯誤形式，例如把台股打成美股 ADR 代號）。請在『目標市場』中判讀他實際想指的"
+    "股票，並一次回傳：該市場的『當地交易所代號』、正式名稱、GICS 產業類別，以及可選的 "
+    "GICS 產業細分。</task>\n"
+    "<market_rules>symbol 必須是『目標市場』的當地交易所代號，格式如下，且絕不可回傳其他"
+    "交易所的代號：\n"
+    "・TW（台股，TWSE/TPEx）：4-6 位數字＋可選英文字尾（如 2330、00878B）。必須輸出當地"
+    "交易所代號：聯電⇒2303、台積電⇒2330、開發金⇒2883，絕不可回傳 UMC／TSM 等美股 ADR "
+    "代號；中文公司名一律對應其數字代號。\n"
+    "・US（美股，NYSE/NASDAQ）：1-5 位英文字母＋可選 .X 類別字尾（如 AAPL、BRK.B）。\n"
+    "・MY（馬股，Bursa）：4 位數字（如 5225）。</market_rules>\n"
+    "<gics_sectors>gics_sector 欄位必須『完全等於』下列 11 個英文 GICS 產業鍵之一（大小寫、"
+    "空格、字元皆同），不得自創、翻譯或輸出清單以外的類別：" + _GICS_SECTOR_LIST +
+    "</gics_sectors>\n"
     "<input>使用者輸入：{query}\n目標市場：{market}</input>\n"
-    "<rules>symbol 必須是目標市場的當地交易所代號 — TW（台股）：TWSE/TPEx 數字代號"
-    "（聯電⇒2303、台積電⇒2330、鴻海⇒2317，絕不可回傳 UMC/TSM 等美股 ADR 代號）；"
-    "US（美股）：美股代號（如 AAPL）；MY（馬股）：Bursa 數字代號（如 1155）。"
-    "name 為該股票的正式名稱。無法判讀時 symbol 回傳空字串，不得亂猜。"
-    "不得輸出任何價格或數字資料；你的回覆僅是建議，系統會以真實報價查核，"
-    "查核不通過即不採用。</rules>\n"
-    '<example_output>{{"symbol": "2303", "name": "聯電"}}</example_output>\n'
+    "<rules>\n"
+    "1. 有把握（單一明確標的）：confidence=\"high\"，填 symbol／name／gics_sector"
+    "（gics_industry 選填，填 GICS 產業細分或給 null），candidates 一律留空陣列。\n"
+    "2. 不確定（可能對應多檔）：confidence=\"medium\" 或 \"low\"，並在 candidates 給 2-5 個"
+    "候選 {{symbol,name,gics_sector}} 供使用者挑選。\n"
+    "3. 若該標的在『目標市場』中不存在／查無此標的：not_found=true，symbol 留空、candidates "
+    "留空陣列，絕不可捏造任何代號。\n"
+    "4. 你只輸出識別與分類這類定性資訊，不得輸出任何價格、報酬或數字資料；你的回覆僅是建議，"
+    "系統會以真實報價覆核，覆核不通過即不採用。\n"
+    "</rules>\n"
+    "<example_output>{{\"symbol\": \"2303\", \"name\": \"聯華電子\", "
+    "\"gics_sector\": \"Information Technology\", \"gics_industry\": \"Semiconductors\", "
+    "\"confidence\": \"high\", \"candidates\": [], \"not_found\": false}}</example_output>\n"
     "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
 )
 
@@ -585,28 +596,18 @@ PROMPT_REGISTRY: list[PromptRegistryEntry] = [
         "storage": "",
         "call_site": "api/digest_service.py:_llm_note",
     },
-    # FU-D31 (wave W-F) — AI 產業偵測 prompt (code-owned; DEFAULT role). ``agent`` matches the
-    # llm_usage label the call site logs under (``ai_sector``).
+    # R6-B (wave W-B, 2026-07-19) — UNIFIED AI instrument-resolve prompt (code-owned; DEFAULT
+    # role). ONE prompt for every registration entry point: raw input + target market → local
+    # exchange code + name + GICS sector (+ optional industry) in a single reply. Supersedes
+    # the former ai_sector + ai_symbol_resolve entries. ``agent`` matches the llm_usage label
+    # the call site logs under (``ai_instrument_resolve``).
     {
-        "key": "ai_sector",
-        "feature": "AI 產業類別偵測（symbol/name/market → 標準產業鍵）",
+        "key": "ai_instrument_resolve",
+        "feature": "AI 標的判讀（名稱／代號＋市場 → 當地代號＋名稱＋GICS 產業，查價覆核）",
         "tier": "code-owned",
-        "version": AI_SECTOR_PROMPT_VERSION,
-        "agent": "ai_sector",
-        "default_constant": "AI_SECTOR_PROMPT",
-        "storage": "",
-        "call_site": "api/routers/instruments.py:ai_sector",
-    },
-    # FU-D42c (r5 wave W-AI) — 「AI 判讀代號」 fallback when the quick-add dialog's real
-    # lookup finds nothing. Suggestion only: the real provider lookup re-verifies before any
-    # registration (the quote check stays the typo authority).
-    {
-        "key": "ai_symbol_resolve",
-        "feature": "AI 代號判讀（原始輸入＋目標市場 → 當地交易所代號＋名稱，查價覆核）",
-        "tier": "code-owned",
-        "version": AI_SYMBOL_RESOLVE_PROMPT_VERSION,
-        "agent": "ai_symbol_resolve",
-        "default_constant": "AI_SYMBOL_RESOLVE_PROMPT",
+        "version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+        "agent": "ai_instrument_resolve",
+        "default_constant": "AI_INSTRUMENT_RESOLVE_PROMPT",
         "storage": "",
         "call_site": "api/routers/instruments.py:ai_resolve",
     },

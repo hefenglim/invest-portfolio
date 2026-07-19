@@ -268,6 +268,12 @@
        inst-quickadd.js component. The current stored value rides through as an off-list
        option when it is not (yet) a canonical key, so saving never destroys it. Fallback
        to a plain input only if the shared script failed to load (defensive). */
+    /* R6: optional GICS 產業細分 input; the merged 「AI 偵測產業類別」 button re-detects an
+       EXISTING instrument's sector + industry (never touches symbol/name) and fills it here. */
+    const industryIn = el('input', 'input');
+    industryIn.value = i.industry || '';
+    industryIn.placeholder = '例：Semiconductors（可用 AI 偵測自動填入，選填）';
+    industryIn.spellcheck = false;
     let sectorField = null;
     let secIn = null;
     if (window.pdSectorField) {
@@ -276,6 +282,7 @@
         symbol: () => i.symbol,
         name: () => nameIn.value,
         market: () => i.market,
+        setIndustry: (v) => { industryIn.value = v; },
       });
       body.appendChild(fld('產業', sectorField.element));
     } else {
@@ -283,6 +290,7 @@
       secIn.value = i.sector || '';
       body.appendChild(fld('產業', secIn));
     }
+    body.appendChild(fld('產業細分（選填）', industryIn));
     /* TW 板別可直接改（重新探測仍可自動判定並儲存）；US/MY 板別固定 */
     let boardSel = null;
     if (i.market === 'TW') {
@@ -335,6 +343,7 @@
       const body2 = {
         name: nameIn.value.trim() || i.name,
         sector: sectorField ? sectorField.value() : secIn.value.trim(),
+        industry: industryIn.value.trim() || null,  // R6: '' clears (exclude_unset ⇒ set)
         is_etf: etfCb.checked,
         target_low: raw === '' ? null : raw,
         target_high: rawHi === '' ? null : rawHi,

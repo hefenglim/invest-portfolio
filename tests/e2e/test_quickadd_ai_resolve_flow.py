@@ -1,19 +1,21 @@
-"""E2E (Playwright, real server + real frontend): FU-D42 quick-add dialog behaviors.
+"""E2E (Playwright, real server + real frontend): the R6-B unified quick-add AI resolve.
 
-Drives the REAL stack (uvicorn subprocess + SQLite + served web/) from the watchlist add
-flow (instruments.html — the shared dialog, so the AI-row 立即註冊 entry gets the identical
-behavior). The two network seams are stubbed with ``page.route`` (the flow server has no
-LLM and must not touch providers):
+Drives the REAL stack (uvicorn subprocess + SQLite + served web/) from the watchlist add flow
+(instruments.html — the shared dialog, so every quick-add entry inherits the identical
+behavior). The two network seams are stubbed with ``page.route`` (the flow server has no LLM
+and must not touch providers):
 
-  * ``GET /api/instruments/lookup`` — canned: UMC/ZZZZ/YYYY → found:false, 2303 → found,
-  * ``POST /api/instruments/ai-resolve`` — canned suggestion (2303/聯電, or YYYY for the
-    still-unfound branch).
+  * ``GET /api/instruments/lookup`` — canned: 2303/2330 → found, everything else → 查無報價,
+  * ``POST /api/instruments/ai-resolve`` — the UNIFIED endpoint, canned by query:
+      - default (UMC/聯電) → status:"resolved" (2303 聯電 + GICS sector + industry),
+      - "MULTI" → status:"candidates" (2303 + 2330),
+      - "NOPE"  → status:"not_found".
 
-Asserts: (a) auto-lookup fires on open with the prefilled symbol (FU-D42b), (b) the symbol
-field is EDITABLE and editing re-fires the lookup + re-fills suggestions (FU-D42a), (c) the
-查無報價 state offers 「AI 判讀代號」 whose suggestion is re-verified by the REAL lookup —
-found ⇒ confirm enabled; still unfound ⇒ the honest 「AI 判讀後仍查無報價」 notice (FU-D42c).
-ZERO console / page errors throughout (all stubbed responses are 200s).
+Asserts the NEW automatic behavior: (a) the AI resolve fires AUTOMATICALLY on a lookup miss and
+auto-fills 代號/名稱/產業/產業細分, then the real lookup re-validates the code (verified ⇒ 確認
+enabled) — the owner's 聯電→UMC bug is fixed with ZERO clicks; (b) a candidates reply renders
+clickable rows whose pick fills + re-validates; (c) a not_found reply shows 「查無此標的」 and the
+manual 「AI 判讀代號」 retry stays available. ZERO console / page errors (all stubs are 200s).
 """
 
 import json
@@ -21,6 +23,7 @@ import sqlite3
 from collections.abc import Iterator
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -62,21 +65,45 @@ def _seed(conn: sqlite3.Connection) -> None:
 
 
 def _route_lookup(page: Page, seen_symbols: list[str]) -> None:
-    """Canned lookup: 2303 is found (name 聯電); everything else is 查無報價."""
+    """Canned lookup: 2303 (聯電) + 2330 (台積電) are found; everything else is 查無報價."""
 
     def _handler(route: Route) -> None:
         params = parse_qs(urlparse(route.request.url).query)
         sym = (params.get("symbol") or [""])[0].upper()
         seen_symbols.append(sym)
-        if sym == "2303":
+        names = {"2303": "聯電", "2330": "台積電"}
+        if sym in names:
             body = {"found": True, "registered": False, "archived": False,
-                    "name": "聯電", "sector": "", "board": "TWSE", "is_etf": False}
+                    "name": names[sym], "sector": "", "board": "TWSE", "is_etf": False}
         else:
             body = {"found": False, "registered": False, "archived": False,
                     "name": "", "sector": "", "board": None, "is_etf": False}
         route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
 
     page.route("**/api/instruments/lookup**", _handler)
+
+
+def _route_ai_resolve(page: Page) -> None:
+    """The UNIFIED resolve, canned by the query in the POST body (status-based replies)."""
+
+    def _handler(route: Route) -> None:
+        post = route.request.post_data or ""
+        body: dict[str, Any]
+        if "MULTI" in post:
+            body = {"status": "candidates", "confidence": "medium", "candidates": [
+                {"symbol": "2303", "name": "聯電", "sector": "Information Technology",
+                 "verified": False},
+                {"symbol": "2330", "name": "台積電", "sector": "Information Technology",
+                 "verified": False}]}
+        elif "NOPE" in post:
+            body = {"status": "not_found", "message": "查無此標的 — 請確認名稱與市場是否正確"}
+        else:  # the owner's bug: UMC/聯電 → the TW local code, sector + industry in one reply.
+            body = {"status": "resolved", "symbol": "2303", "name": "聯電",
+                    "sector": "Information Technology", "industry": "Semiconductors",
+                    "confidence": "high", "verified": True}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/instruments/ai-resolve", _handler)
 
 
 def _open_dialog(page: Page, base_url: str, symbol: str) -> None:
@@ -97,90 +124,71 @@ def _collect_errors(page: Page) -> tuple[list[str], list[str]]:
 
 
 @pytest.mark.e2e
-def test_quickadd_auto_lookup_on_open_and_editable_symbol_refires(
+def test_quickadd_auto_resolve_fills_and_verifies(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """FU-D42a/b: the lookup fires on open WITHOUT typing (查無報價 for UMC), the symbol
-    field is editable, and editing it re-fires the lookup which re-fills the name."""
+    """R6-B: opening with a lookup-miss symbol AUTOMATICALLY fires the unified resolve, which
+    fills 代號/名稱/產業/產業細分, then the real lookup re-validates → 確認 enabled — no clicks."""
     base = flow_server(_seed)
     page = fresh_page
     console_errors, page_errors = _collect_errors(page)
     seen: list[str] = []
     _route_lookup(page, seen)
+    _route_ai_resolve(page)
 
-    _open_dialog(page, base, "UMC")
+    _open_dialog(page, base, "UMC")  # the owner's bug input
     dialog = page.locator(".modal-backdrop").last
     sym_input = dialog.locator("input.qa-symbol")
-    expect(sym_input).to_have_value("UMC")
-    expect(sym_input).to_be_editable()  # FU-D42a: never readonly
+    expect(sym_input).to_be_editable()
 
-    # (b) auto-lookup on open: the not-found notice + AI fallback appear with zero typing.
-    expect(dialog.get_by_text("查無報價")).to_be_visible()
-    expect(dialog.get_by_role("button", name="AI 判讀代號")).to_be_visible()
-    expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_disabled()
-    assert "UMC" in seen  # the open itself queried the real lookup endpoint
-
-    # (a) editing the symbol re-fires the (debounced) lookup and re-fills the name.
-    sym_input.fill("2303")
+    # AUTOMATIC: no button click — the miss auto-resolves UMC → 2303 and re-validates it.
+    expect(sym_input).to_have_value("2303")
     expect(dialog.locator("input.qa-name")).to_have_value("聯電")
+    expect(dialog.locator("input.qa-industry")).to_have_value("Semiconductors")
+    # the GICS sector rode in from the resolve and survived the re-validation lookup.
+    expect(dialog.locator(".sector-select")).to_have_value("Information Technology")
     expect(dialog.get_by_text("已找到")).to_be_visible()
     expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_enabled()
-    expect(dialog.get_by_role("button", name="AI 判讀代號")).to_be_hidden()
-    assert seen[-1] == "2303"
+    assert seen[-1] == "2303"  # the AI suggestion was re-verified by the REAL lookup
 
     assert not console_errors and not page_errors, (
-        f"editable-symbol flow: console={console_errors!r} page={page_errors!r}"
+        f"auto-resolve flow: console={console_errors!r} page={page_errors!r}"
     )
 
 
 @pytest.mark.e2e
-def test_quickadd_ai_resolve_verifies_via_real_lookup(
+def test_quickadd_candidates_pick_then_not_found_retry(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """FU-D42c: 查無報價 → 「AI 判讀代號」 fills the suggestion and AUTO re-runs the lookup
-    (the authority): found ⇒ confirm enabled; a suggestion the lookup still cannot find ⇒
-    the honest 「AI 判讀後仍查無報價」 notice with the confirm still blocked."""
+    """R6-B: a candidates reply renders clickable rows whose pick fills + re-validates; a
+    not_found reply shows 「查無此標的」 with the manual 「AI 判讀代號」 retry available."""
     base = flow_server(_seed)
     page = fresh_page
     console_errors, page_errors = _collect_errors(page)
     seen: list[str] = []
     _route_lookup(page, seen)
+    _route_ai_resolve(page)
 
-    def _ai_route(route: Route) -> None:
-        post = route.request.post_data or ""
-        if "ZZZZ" in post:  # phase 2: a suggestion the lookup cannot verify either
-            body = {"symbol": "YYYY", "name": "", "verified": False}
-        else:  # phase 1 (the owner's bug): UMC/聯電 → the TW local code
-            body = {"symbol": "2303", "name": "聯電", "verified": False}
-        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
-
-    page.route("**/api/instruments/ai-resolve", _ai_route)
-
-    _open_dialog(page, base, "UMC")
+    # Phase A — candidates: open with MULTI → auto-resolve → 2 clickable rows → pick 2303.
+    _open_dialog(page, base, "MULTI")
     dialog = page.locator(".modal-backdrop").last
     sym_input = dialog.locator("input.qa-symbol")
-    ai_btn = dialog.get_by_role("button", name="AI 判讀代號")
-    confirm = dialog.get_by_role("button", name="確認", exact=True)
-
-    # Phase 1: not found → AI resolve → suggestion filled → real lookup verifies → enabled.
-    expect(ai_btn).to_be_visible()
-    ai_btn.click()
+    cands = dialog.locator("button.qa-cand")
+    expect(cands).to_have_count(2)
+    cands.first.click()
     expect(sym_input).to_have_value("2303")
     expect(dialog.locator("input.qa-name")).to_have_value("聯電")
     expect(dialog.get_by_text("已找到")).to_be_visible()
-    expect(confirm).to_be_enabled()
-    assert seen[-1] == "2303"  # the AI suggestion was re-verified by the REAL lookup
+    expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_enabled()
 
-    # Phase 2: an unverifiable suggestion stays blocked with the honest notice.
-    sym_input.fill("ZZZZ")
-    expect(dialog.get_by_text("查無報價")).to_be_visible()
-    expect(ai_btn).to_be_visible()
-    ai_btn.click()
-    expect(sym_input).to_have_value("YYYY")
-    expect(dialog.get_by_text("AI 判讀後仍查無報價")).to_be_visible()
-    expect(confirm).to_be_disabled()
-    assert seen[-1] == "YYYY"  # still verified against the authority, which refused
+    # Phase B — not_found: edit to NOPE → auto-resolve → 查無此標的, confirm blocked, retry shown.
+    sym_input.fill("NOPE")
+    expect(dialog.get_by_text("查無此標的")).to_be_visible()
+    expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_disabled()
+    ai_btn = dialog.get_by_role("button", name="AI 判讀代號")
+    expect(ai_btn).to_be_visible()  # the manual retry affordance for the same call
+    expect(cands).to_have_count(0)  # stale candidates cleared
 
     assert not console_errors and not page_errors, (
-        f"AI-resolve flow: console={console_errors!r} page={page_errors!r}"
+        f"candidates/not_found flow: console={console_errors!r} page={page_errors!r}"
     )

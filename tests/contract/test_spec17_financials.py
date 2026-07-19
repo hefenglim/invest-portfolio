@@ -431,15 +431,19 @@ def test_sector_allocation_reporting(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
     alloc = _dashboard(dashboard_client_factory)["allocation"]["by_sector"]
-    eqd(alloc["Semiconductors"], _D("1200000"))
-    eqd(alloc["Shipping"], _D("121000"))
-    # ETF = 0056 only (00919 unpriced -> excluded). 304,000 TWD.
+    # R6 (GICS): the seed's 'Semiconductors' (2330) and 'Tech' (AAPL/MSFT/NVDA) BOTH fold into
+    # Information Technology, and 'Shipping' (2603) folds into Industrials, at the donut grouping
+    # seam. Information Technology = 2330 (1,200,000 TWD) + AAPL+MSFT+NVDA (38,870 USD * 32 =
+    # 1,243,840 TWD) = 2,443,840 TWD — the exact sum of the two former slices.
+    eqd(alloc["Information Technology"], _D("1200000") + _D("38870") * _D("32"))
+    # Industrials = 2603 長榮 (former Shipping slice) = 121,000 TWD (unchanged value).
+    eqd(alloc["Industrials"], _D("121000"))
+    # ETF = 0056 only (00919 unpriced -> excluded). 304,000 TWD (unchanged).
     eqd(alloc["ETF"], _D("304000"))
-    # Technology = AAPL+MSFT+NVDA = 38,870 USD * 32 = 1,243,840 TWD. Seed sectors are the
-    # raw 'Tech'; FU-D31 canonicalizes the donut GROUPING key to 'Technology' (read-time).
-    eqd(alloc["Technology"], _D("38870") * _D("32"))
-    # Financials = 1155.KL = 9,875 MYR * 7 = 69,125 TWD.
+    # Financials = 1155.KL = 9,875 MYR * 7 = 69,125 TWD (unchanged).
     eqd(alloc["Financials"], _D("9875") * _D("7"))
+    # The folded-away FU-D31 keys no longer appear as their own slices.
+    assert not ({"Semiconductors", "Shipping", "Technology"} & set(alloc))
 
 
 def test_xirr_all_or_nothing_on_missing_price(

@@ -9,11 +9,14 @@
         has not touched (pristine tracking, FU-D42a),
      2. lets the user confirm the name + pick/enter a sector (canonical select + free
         text; the lookup suggestion is preselected),
-     3. when the lookup finds nothing (查無報價), offers 「AI 判讀代號」 (FU-D42c): POST
-        /api/instruments/ai-resolve maps the raw input to the target market's LOCAL
-        exchange code; the REAL lookup then re-verifies (the quote check stays the
-        registration authority — an unverified AI suggestion can never be confirmed);
-        a still-unfound suggestion gets the honest 「AI 判讀後仍查無報價」 notice,
+     3. AUTOMATICALLY (R6-B) calls the UNIFIED AI resolve when the lookup misses — POST
+        /api/instruments/ai-resolve maps the raw input + target market to the LOCAL exchange
+        code + name + GICS sector (+ optional industry) in ONE reply. status:"resolved"
+        auto-fills 代號/名稱/產業/產業細分 (pristine-respecting) then re-runs the real lookup
+        to re-validate; status:"candidates" renders 2-5 clickable rows; status:"not_found"
+        shows 「查無此標的」. The 「AI 判讀代號」 button is the manual RETRY for the same call.
+        The real lookup stays the sole registration authority — an unverified AI suggestion
+        can never be confirmed,
      4. registers via POST /api/instruments — the heavy quote/history fetch runs in the
         BACKGROUND (BackgroundTasks), so the confirm returns fast,
    then calls opts.onConfirm(result) (確認) or opts.onBuy(result) (記一筆買入).
@@ -42,15 +45,16 @@
   };
   const MARKETS = [['TW', '台股'], ['US', '美股'], ['MY', '馬股']];
 
-  /* ---- FU-D31: shared canonical-sector field (used by BOTH this dialog and the
-     instruments edit form via window.pdSectorField). A <select> of the canonical
-     vocabulary (dual-text labels 「Technology（科技）」) + the current off-vocabulary value
-     preserved as an extra option (so editing an unmigrated row never destroys it) + an
-     「其他…」 escape (free text) + an 「AI 偵測」 button beside the select. The canonical list
-     and its synonyms live SERVER-SIDE (GET /api/instruments/sectors, POST
-     .../ai-sector) — the frontend never hardcodes them. Stored values stay as-is unless
-     the user re-picks; the read-time donut/alert canonicalization is a backend concern
-     (portfolio/dashboard.py). ---- */
+  /* ---- FU-D31 / R6: shared canonical-sector field (used by BOTH this dialog and the
+     instruments edit form via window.pdSectorField). A <select> of the canonical GICS
+     vocabulary (dual-text labels 「Information Technology（資訊科技）」) + the current
+     off-vocabulary value preserved as an extra option (so editing an unmigrated row never
+     destroys it) + an 「其他…」 escape (free text) + an 「AI 偵測」 button beside the select.
+     The canonical list + synonyms live SERVER-SIDE (GET /api/instruments/sectors); the AI
+     button calls the UNIFIED POST /api/instruments/ai-resolve with sector_only=true (R6-B) —
+     for an existing instrument it applies ONLY sector (+ industry via opts.setIndustry),
+     never symbol/name. The frontend never hardcodes the vocabulary; the read-time
+     donut/alert canonicalization is a backend concern (portfolio/dashboard.py). ---- */
   const OTHER_SECTOR = '__other__';
   let _sectorVocab = null;  // cached [{key, zh}]
   async function fetchSectorVocab() {
@@ -123,15 +127,19 @@
     sel.addEventListener('change', toggleFree);
     aiBtn.addEventListener('click', async () => {
       const symbol = (opts.symbol ? opts.symbol() : '') || '';
-      if (!symbol.trim()) { note.textContent = '請先輸入代號再偵測'; return; }
+      const name = opts.name ? (opts.name() || '') : '';
+      const query = (symbol.trim() + ' ' + name.trim()).trim();
+      if (!query) { note.textContent = '請先輸入代號或名稱再偵測'; return; }
       note.textContent = '';
       const restore = window.pdBusy ? window.pdBusy(aiBtn, '偵測中…') : () => {};
       let resp;
       try {
-        resp = await api.post('/api/instruments/ai-sector', {
-          symbol: symbol.trim(),
-          name: opts.name ? (opts.name() || '') : '',
+        /* sector_only (R6-B): the merged endpoint re-classifies a KNOWN instrument (skips the
+           registered short-circuit); we apply ONLY sector (+ industry), never symbol/name. */
+        resp = await api.post('/api/instruments/ai-resolve', {
+          query: query,
           market: opts.market ? (opts.market() || '') : '',
+          sector_only: true,
         });
       } catch (err) {
         restore();
@@ -141,12 +149,22 @@
         return;
       }
       restore();
-      if (resp && resp.mapped && resp.sector) {
-        current = resp.sector;
+      /* resolved → sector (+ industry); candidates → the first candidate's sector. */
+      let sector = '';
+      let industry = '';
+      if (resp && resp.status === 'resolved') {
+        sector = resp.sector || '';
+        industry = resp.industry || '';
+      } else if (resp && resp.status === 'candidates' && resp.candidates && resp.candidates.length) {
+        sector = resp.candidates[0].sector || '';
+      }
+      if (sector) {
+        current = sector;
         applyValue(current);
-        note.textContent = 'AI 判定：' + resp.sector;
+        note.textContent = 'AI 判定：' + sector;
+        if (industry && opts.setIndustry) opts.setIndustry(industry);
       } else {
-        /* unmappable reply → owner-specified notice; the user's selection is untouched. */
+        /* not_found / unmappable → owner-specified notice; the user's selection is untouched. */
         note.textContent = 'AI 回傳類別無法對應，保留原選擇';
       }
     });
@@ -206,13 +224,21 @@
     nameIn.spellcheck = false;
     body.appendChild(fld('名稱', nameIn));
 
+    /* R6: optional GICS 產業細分 — AI-populated, editable, submitted on register. Declared
+       before the sector field so its setIndustry closure can fill it (pristine-respecting). */
+    const industryIn = el('input', 'input qa-industry');
+    industryIn.placeholder = '例：Semiconductors（AI 可自動填入，可修改）';
+    industryIn.spellcheck = false;
+
     const sectorField = pdSectorField({
       current: '',
       symbol: () => symIn.value,
       name: () => nameIn.value,
       market: () => mktSel.value,
+      setIndustry: (v) => { if (industryPristine) industryIn.value = v; },
     });
     body.appendChild(fld('產業', sectorField.element));
+    body.appendChild(fld('產業細分（選填）', industryIn));
 
     const etfWrap = el('label', 'hint');
     const etfCb = el('input'); etfCb.type = 'checkbox';
@@ -223,11 +249,16 @@
     const status = el('div', 'hint');
     status.style.cssText = 'min-height:16px;';
     body.appendChild(status);
-    /* FU-D42c: shown only when the lookup reports not-found (查無報價). */
+    /* R6-B: the unified AI resolve fires AUTOMATICALLY on a lookup miss; this button is the
+       manual RETRY for the SAME call (shown when the lookup reports not-found). */
     const aiBtn = el('button', 'btn qa-ai-resolve', 'AI 判讀代號'); aiBtn.type = 'button';
-    aiBtn.title = '以 AI 判讀輸入的代號／名稱對應的正確代號，再以真實報價查核';
+    aiBtn.title = '重新以 AI 判讀輸入的代號／名稱對應的正確代號＋產業，再以真實報價查核';
     aiBtn.style.display = 'none';
     body.appendChild(aiBtn);
+    /* Clickable AI candidate rows (status:"candidates") render here; hidden otherwise. */
+    const candBox = el('div', 'qa-candidates');
+    candBox.style.cssText = 'display:none; flex-direction:column; gap:6px; margin-top:8px;';
+    body.appendChild(candBox);
     modal.appendChild(body);
 
     const foot = el('div', 'modal-foot');
@@ -247,14 +278,22 @@
     let namePristine = true;
     let sectorPristine = true;
     let etfPristine = true;
+    let industryPristine = true;
     nameIn.addEventListener('input', () => { namePristine = false; });
     sectorField.element.addEventListener('change', () => { sectorPristine = false; });
     sectorField.element.addEventListener('input', () => { sectorPristine = false; });
     etfCb.addEventListener('change', () => { etfPristine = false; });
+    industryIn.addEventListener('input', () => { industryPristine = false; });
     /* Stale-response guard: only the LATEST lookup may touch the dialog. */
     let lookupSeq = 0;
+    /* R6-B: the unified AI resolve fires once per DISTINCT settled input (dedup key = query +
+       market, so changing the market legitimately re-fires); aiSeq drops a superseded concurrent
+       AI reply the same way lookupSeq guards lookups. */
+    let lastAiKey = '';
+    let aiSeq = 0;
     /* Set right before the post-AI-resolve verification lookup; consumed by its
-       not-found branch to show the honest 「AI 判讀後仍查無報價」 notice. */
+       not-found branch to show the honest 「AI 判讀後仍查無報價」 notice (and to suppress a
+       re-fire of the automatic AI on an AI-suggested symbol that still cannot be verified). */
     let aiResolveTried = false;
 
     function setEnabled(ok) { okBtn.disabled = !ok; buyBtn.disabled = !ok; }
@@ -276,6 +315,7 @@
       const sym = symIn.value.trim().toUpperCase();
       setEnabled(false);
       aiBtn.style.display = 'none';
+      clearCandidates();
       lookupState = { found: false, registered: false, archived: false, board: null };
       if (!sym) { status.textContent = '請輸入代號'; return; }
       status.textContent = '查詢中…';
@@ -302,16 +342,35 @@
         /* Stale suggestions from a PREVIOUS symbol's lookup are cleared (pristine only). */
         if (namePristine) nameIn.value = '';
         if (sectorPristine) sectorField.setValue('');
-        status.textContent = wasAiResolve
-          ? 'AI 判讀後仍查無報價 — 請確認代號與市場是否正確'
-          : '查無報價 — 請確認代號與市場是否正確';
-        aiBtn.style.display = '';  // FU-D42c fallback entry
+        clearCandidates();
+        aiBtn.style.display = '';  // manual RETRY entry
+        if (wasAiResolve) {
+          /* An AI-suggested symbol the provider still cannot find — no re-fire, honest notice. */
+          status.textContent = 'AI 判讀後仍查無報價 — 請確認代號與市場是否正確';
+          return;
+        }
+        /* AUTOMATIC unified AI resolve (R6-B): fire once per DISTINCT settled input — the
+           observable union of the two spec triggers (code-format miss OR registry+provider
+           miss both surface here as found:false). The form stays fully editable meanwhile. */
+        const q = aiQuery();
+        const key = q + '|' + mktSel.value;
+        if (q && key !== lastAiKey) {
+          lastAiKey = key;
+          runAiResolve({ auto: true });  // sets its own 「AI 判讀中…」 status
+        } else {
+          status.textContent = '查無報價 — 請確認代號與市場是否正確';
+        }
         return;
       }
       /* found & addable (a brand-new symbol, or an archived one to restore); auto-fill
-         replaces prior AUTO-fills but never a user-touched field (pristine tracking). */
-      if (namePristine && r.name) nameIn.value = r.name;
-      if (sectorPristine) sectorField.setValue(r.sector || '');
+         replaces prior AUTO-fills but never a user-touched field (pristine tracking). R6-B:
+         when THIS lookup is the AI-resolve re-validation (wasAiResolve), the AI already
+         supplied name/sector — a sparse provider lookup (sector is blank for a brand-new
+         symbol) must NOT overwrite them; fill only a field the AI left blank. */
+      if (namePristine && r.name && !(wasAiResolve && nameIn.value)) nameIn.value = r.name;
+      if (sectorPristine && !(wasAiResolve && sectorField.value())) {
+        sectorField.setValue(r.sector || '');
+      }
       if (etfPristine) etfCb.checked = !!r.is_etf;
       status.textContent = r.archived
         ? '已封存 — 確認後將還原並於背景補抓缺口'
@@ -319,13 +378,62 @@
       setEnabled(true);
     }
 
-    /* FU-D42c: AI 判讀代號 — maps the raw input (symbol/name fields) + target market to
-       the LOCAL exchange code, then AUTO re-runs the REAL lookup: the provider quote
-       check remains the sole registration authority (the LLM reply is a suggestion, never
-       a verification). Degrade (402/409/503) surfaces as a toast; nothing is blocked. */
-    aiBtn.addEventListener('click', async () => {
-      const query = (symIn.value.trim() + ' ' + nameIn.value.trim()).trim();
+    /* ---- R6-B unified AI resolve (AUTOMATIC on a lookup miss + manual retry) -------------
+       aiQuery() = the settled input (symbol + name). runAiResolve() POSTs the unified
+       /api/instruments/ai-resolve and dispatches on its status; the REAL lookup stays the
+       sole registration authority (an unverified suggestion can never be confirmed). */
+    function aiQuery() {
+      return (symIn.value.trim() + ' ' + nameIn.value.trim()).trim();
+    }
+    function clearCandidates() {
+      candBox.replaceChildren();
+      candBox.style.display = 'none';
+    }
+    /* status:"resolved" — fill the fields (pristine-respecting) then re-run the REAL lookup
+       to re-validate the filled code (also carries the board through + enables 確認 the usual
+       way). The backend already provider-verified, so this lookup normally finds it. */
+    function applyResolved(resp) {
+      symIn.value = (resp.symbol || '').trim().toUpperCase();
+      if (namePristine && resp.name) nameIn.value = resp.name;
+      if (sectorPristine && resp.sector) sectorField.setValue(resp.sector);
+      if (industryPristine && resp.industry) industryIn.value = resp.industry;
+      aiResolveTried = true;
+      runLookup();
+    }
+    /* status:"candidates" — 2-5 clickable rows (代號＋名稱＋產業); a click fills the fields
+       and re-runs the real lookup to verify the pick. */
+    function renderCandidates(list) {
+      candBox.replaceChildren();
+      candBox.appendChild(el('div', 'hint', 'AI 提供候選，請點選正確標的：'));
+      list.slice(0, 5).forEach((c) => {
+        const b = el('button', 'btn qa-cand'); b.type = 'button';
+        b.style.cssText = 'display:block; width:100%; text-align:left;';
+        b.appendChild(el('span', 'sym-code', c.symbol || ''));
+        if (c.name) b.appendChild(el('span', null, '　' + c.name));
+        if (c.sector) b.appendChild(el('span', 'hint', '　' + c.sector));
+        b.addEventListener('click', () => {
+          symIn.value = (c.symbol || '').trim().toUpperCase();
+          if (namePristine && c.name) nameIn.value = c.name;
+          if (sectorPristine && c.sector) sectorField.setValue(c.sector);
+          clearCandidates();
+          aiResolveTried = true;
+          runLookup();
+        });
+        candBox.appendChild(b);
+      });
+      candBox.style.display = 'flex';
+      status.textContent = '請從下方候選中選擇（或直接修改代號）';
+      aiBtn.style.display = '';  // keep the manual retry available
+    }
+    /* o.auto=true (automatic fire) degrades SILENTLY (no toast) — it is not a user action;
+       the manual retry (aiBtn) DOES toast on degrade. aiSeq drops a superseded reply. */
+    async function runAiResolve(o) {
+      o = o || {};
+      const query = aiQuery();
       if (!query) { status.textContent = '請先輸入代號或名稱'; return; }
+      const seq = ++aiSeq;
+      clearCandidates();
+      status.textContent = 'AI 判讀中…';
       const restore = window.pdBusy ? window.pdBusy(aiBtn, '判讀中…') : () => {};
       let resp;
       try {
@@ -333,23 +441,28 @@
           { query: query, market: mktSel.value });
       } catch (err) {
         restore();
-        if (window.toast) {
-          window.toast(err && err.message ? err.message : 'AI 判讀失敗', 'fail',
-            err && err.code);
+        if (seq !== aiSeq) return;  // superseded by a newer AI call
+        status.textContent = '查無報價 — 請確認代號與市場是否正確';
+        aiBtn.style.display = '';
+        if (!o.auto && window.toast) {
+          window.toast(err && err.message ? err.message : 'AI 判讀失敗', 'fail', err && err.code);
         }
         return;
       }
       restore();
-      const suggested = resp && (resp.symbol || '').trim().toUpperCase();
-      if (!suggested) {
-        status.textContent = 'AI 無法判讀 — 請確認代號與市場是否正確';
-        return;
+      if (seq !== aiSeq) return;  // superseded by a newer AI call
+      const st = resp && resp.status;
+      if (st === 'resolved' && resp.symbol) {
+        applyResolved(resp);
+      } else if (st === 'candidates' && resp.candidates && resp.candidates.length) {
+        renderCandidates(resp.candidates);
+      } else {
+        /* not_found (or an empty candidates payload) → honest notice; entry stays unblocked. */
+        status.textContent = (resp && resp.message) || '查無此標的 — 請確認名稱與市場是否正確';
+        aiBtn.style.display = '';
       }
-      symIn.value = suggested;
-      if (namePristine && resp.name) nameIn.value = resp.name;
-      aiResolveTried = true;
-      runLookup();  // the REAL lookup verifies the suggestion (registration authority)
-    });
+    }
+    aiBtn.addEventListener('click', () => runAiResolve({ auto: false }));
 
     async function doRegister(after) {
       const sym = symIn.value.trim().toUpperCase();
@@ -357,6 +470,7 @@
       const reqBody = {
         symbol: sym, market: mktSel.value,
         name: nameIn.value.trim(), sector: sectorField.value(),
+        industry: industryIn.value.trim(),  // R6: optional GICS 產業細分
         is_etf: etfCb.checked,
       };
       /* Only a TW board rides through (US/MY resolve their board server-side). */

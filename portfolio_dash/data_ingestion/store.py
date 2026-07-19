@@ -1,6 +1,7 @@
 """Instruments and transactions persistence helpers (data ingestion store)."""
 
 import json
+import logging
 import sqlite3
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -11,6 +12,9 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import from_db, to_db
+from portfolio_dash.shared.sectors import CANONICAL_KEYS, canonical_sector
+
+logger = logging.getLogger(__name__)
 
 # Transaction price precision cap (audit L11): cap to 4 dp on the way in — same
 # convention as pricing/store (ROUND_HALF_UP, CAP-not-pad; clean values are unchanged).
@@ -83,19 +87,20 @@ def upsert_instrument(conn: sqlite3.Connection, inst: Instrument) -> None:
     register_instrument and intentionally not written here (preserved on conflict)."""
     conn.execute(
         """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board,
-               target_low, target_high, is_etf)
-           VALUES (?,?,?,?,?,?,?,?,?)
+               target_low, target_high, is_etf, industry)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(symbol) DO UPDATE SET
                market=excluded.market, quote_ccy=excluded.quote_ccy,
                sector=excluded.sector, name=excluded.name, board=excluded.board,
                target_low=excluded.target_low, target_high=excluded.target_high,
-               is_etf=excluded.is_etf""",
+               is_etf=excluded.is_etf, industry=excluded.industry""",
         (
             inst.symbol, inst.market.value, inst.quote_ccy.value,
             inst.sector, inst.name, inst.board,
             to_db(inst.target_low) if inst.target_low is not None else None,
             to_db(inst.target_high) if inst.target_high is not None else None,
             1 if inst.is_etf else 0,
+            inst.industry,
         ),
     )
     conn.commit()
@@ -110,6 +115,7 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         target_high=from_db(row["target_high"]) if row["target_high"] else None,
         is_etf=bool(row["is_etf"]),
         archived=bool(row["archived"]),
+        industry=row["industry"],
     )
 
 
@@ -117,7 +123,7 @@ def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, archived FROM instruments WHERE symbol=?",
+        "is_etf, archived, industry FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
     return _row_to_instrument(row) if row is not None else None
@@ -130,9 +136,46 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
     so no money figure is affected by archiving)."""
     rows = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, archived FROM instruments"
+        "is_etf, archived, industry FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
+
+
+def migrate_instrument_sectors(conn: sqlite3.Connection) -> int:
+    """One-time idempotent rewrite of stored instrument sectors to the canonical GICS
+    vocabulary (R6, owner sign-off 2026-07-19). Runs on EVERY boot at the schema seam
+    (``schema.create_tables``); a no-op when every stored value is already canonical.
+
+    For each instruments row with a NON-EMPTY stored sector, ``new = canonical_sector(sector)``;
+    the row is UPDATEd only when ``new != stored`` AND ``new`` is a real canonical key — so a
+    known synonym is folded (``Semiconductors`` → ``Information Technology``, ``Shipping`` →
+    ``Industrials``, ``Healthcare`` → ``Health Care``) while an unrecognized value such as
+    ``Electronics`` is left untouched (never silently rebucketed). Blank/NULL sectors are
+    intentionally left as-is: they already group as ``Unclassified`` at read time, and keeping
+    them NULL preserves the "not yet classified" signal the next wave's AI sector fill relies
+    on (rewriting them to the literal ``"Unclassified"`` would destroy that signal). Returns the
+    number of rows rewritten; logs a single summary line when > 0.
+
+    Idempotent: a second run finds every value already canonical → 0 rewrites, no writes.
+    """
+    rows = conn.execute("SELECT symbol, sector FROM instruments").fetchall()
+    migrated = 0
+    for row in rows:
+        stored = row["sector"]
+        if stored is None or not stored.strip():
+            continue  # blank/NULL stays NULL (see docstring) — not rebucketed to Unclassified
+        new = canonical_sector(stored)
+        if new != stored and new in CANONICAL_KEYS:
+            conn.execute(
+                "UPDATE instruments SET sector=? WHERE symbol=?", (new, row["symbol"])
+            )
+            migrated += 1
+    if migrated:
+        conn.commit()
+        logger.info(
+            "migrated %d instrument sector(s) to the canonical GICS vocabulary", migrated
+        )
+    return migrated
 
 
 # ---------------------------------------------------------------------------

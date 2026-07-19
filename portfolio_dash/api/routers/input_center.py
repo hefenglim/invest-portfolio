@@ -58,6 +58,7 @@ from portfolio_dash.data_ingestion.validate import Issue, TxnInput
 from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.llm_config import get_model
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
@@ -120,33 +121,38 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     }
 
 
-def _adjusted_avg_by_position(conn: sqlite3.Connection) -> dict[tuple[str, str], Decimal]:
-    """(account_id, symbol) → adjusted_avg from the VERIFIED cost-basis replay (FU-D44).
+def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding] | None:
+    """(account_id, symbol) → open Holding from the VERIFIED cost-basis replay (build_book),
+    or ``None`` when the ledger is un-bookable.
 
-    Reuses ``portfolio.cost_basis.build_book`` — the same adjusted-cost engine every
-    dashboard/report number comes from (``adjusted_avg = adjusted_total / shares``,
-    computed on read, never a stored rounded average — domain-ledger.md) — over the
-    ledger models loaded by the ledgers-router ``_to_models`` seam (which already
-    excludes unregistered-symbol rows, the dashboard's degradation). NO cost-basis
-    math is duplicated here.
+    The single source for every position what-if on the input path (FU-D44 sell hints +
+    R6-E 草稿預覽): the same adjusted-cost engine every dashboard/report number comes from
+    (``adjusted_avg = adjusted_total / shares``, computed on read, never a stored rounded
+    average — domain-ledger.md), over the ledger models loaded by the ledgers-router
+    ``_to_models`` seam (which already excludes unregistered-symbol rows, the dashboard's
+    degradation). NO cost-basis math is duplicated here.
 
-    Never-500 (lesson: degrade at EVERY ``build_book`` call site): an un-bookable
-    ledger (e.g. a legacy orphan dividend → ValueError) degrades to an EMPTY map —
-    the sell hints simply hide; the endpoint stays alive. ``allow_oversell=True``
-    keeps an acked 賣超 book from crashing; oversold rows carry no meaningful basis
-    and are skipped.
+    Never-500 (lesson: degrade at EVERY ``build_book`` call site): an un-bookable ledger
+    (e.g. a legacy orphan dividend → ValueError) returns ``None`` — callers then HIDE the
+    position what-if entirely rather than mis-read an unvaluable book as an empty portfolio
+    (which would show fresh-position math for an actually-held symbol). ``allow_oversell=True``
+    keeps an acked 賣超 book from crashing; oversold holdings carry no meaningful basis and
+    are EXCLUDED.
     """
     t_models, d_models, o_models = _to_models(conn)
     instruments = {i.symbol: i for i in list_instruments(conn)}
     try:
         book = build_book(t_models, d_models, o_models, instruments, allow_oversell=True)
     except (ValueError, KeyError):
-        return {}
-    return {
-        (h.account_id, h.symbol): h.adjusted_avg
-        for h in book.holdings
-        if not h.oversold
-    }
+        return None
+    return {(h.account_id, h.symbol): h for h in book.holdings if not h.oversold}
+
+
+def _adjusted_avg_by_position(conn: sqlite3.Connection) -> dict[tuple[str, str], Decimal]:
+    """(account_id, symbol) → adjusted_avg for the FU-D44 sell hints — a thin projection of
+    :func:`_holdings_or_none` (one build_book replay; un-bookable → EMPTY map so the hint
+    simply hides, the same degradation as before)."""
+    return {key: h.adjusted_avg for key, h in (_holdings_or_none(conn) or {}).items()}
 
 
 @router.get("/input/holdings")
@@ -297,6 +303,92 @@ def _cash_overdraft_issue(
     return None
 
 
+def _position_preview(
+    conn: sqlite3.Connection, body: ManualBody, fee: Decimal, tax: Decimal, gross: Decimal
+) -> dict[str, Any] | None:
+    """SERVER-computed what-if position math for the draft (草稿預覽, R6-E) — the same
+    information the per-holding drawer's 試算 shows, but computed HERE as Decimal strings
+    (the frontend renders only; no front-end arithmetic). Additive; null when the symbol is
+    unregistered (EXACT-only resolution) or the inputs are incomplete (shares/price ≤ 0).
+    Never-500: any degradation path → null.
+
+    * SELL, position currently held → ``cost_removed`` = adjusted_total × (qty / held_shares),
+      ``realized_pnl`` = (gross − fee − tax) − cost_removed, ``remain_shares`` =
+      max(0, held − qty). cost_removed/realized_pnl replicate build_book's OWN sell arithmetic
+      exactly (via the position TOTALS, not a re-divided average), so the preview equals the
+      booked realized row bit-for-bit — a mirror of the ledger's sell math, NOT a second source
+      (no double counting). Oversell (qty > held) still renders honestly; remain floors at 0.
+      Not held → null.
+    * BUY → ``new_shares`` / ``new_original_avg`` / ``new_adjusted_avg`` from the held totals +
+      this trade's ALL-IN cost (gross+fee+tax); not held → fresh-position math (held = 0, both
+      averages = all-in / qty). Averages are computed from totals on read, never a stored
+      rounded average (domain-ledger.md).
+    """
+    inst = next((i for i in list_instruments(conn) if i.symbol == body.symbol), None)
+    if inst is None:
+        return None
+    qty = body.shares
+    if qty <= _ZERO or body.price <= _ZERO:
+        return None
+    try:
+        holdings = _holdings_or_none(conn)
+        if holdings is None:  # un-bookable ledger → no trustworthy position math
+            return None
+        held = holdings.get((body.account_id, body.symbol))
+        if parse_side(body.side) is Side.SELL:
+            if held is None:
+                return None
+            # frac / removed mirror build_book's ev.quantity / pos.shares and
+            # pos.adjusted_total × frac EXACTLY (same operands, same order) so the preview
+            # realized == the booked realized row (see the contract-test cross-check).
+            cost_removed = held.adjusted_cost_total * (qty / held.shares)
+            realized_pnl = (gross - fee - tax) - cost_removed
+            remain = held.shares - qty
+            return {
+                "kind": "sell",
+                "cost_removed": decimal_str(cost_removed),
+                "realized_pnl": decimal_str(realized_pnl),
+                "remain_shares": decimal_str(remain if remain > _ZERO else _ZERO),
+            }
+        all_in = gross + fee + tax
+        held_shares = held.shares if held is not None else _ZERO
+        held_original = held.original_cost_total if held is not None else _ZERO
+        held_adjusted = held.adjusted_cost_total if held is not None else _ZERO
+        new_shares = held_shares + qty  # qty > 0 guaranteed, so never a zero divisor
+        return {
+            "kind": "buy",
+            "new_shares": decimal_str(new_shares),
+            "new_original_avg": decimal_str((held_original + all_in) / new_shares),
+            "new_adjusted_avg": decimal_str((held_adjusted + all_in) / new_shares),
+        }
+    except (ValueError, KeyError, ArithmeticError):
+        return None
+
+
+def _account_cash(conn: sqlite3.Connection, body: ManualBody) -> dict[str, Any] | None:
+    """DISPLAY-ONLY cash-pool balance for the trade's settlement (quote) currency (R6-E) —
+    the SAME ``cash_balances`` figure /api/cash serves, so the draft line and the 資金 page
+    never disagree. null when the symbol is unregistered (no quote ccy); ``balance`` null when
+    the pool has no tracked activity. Adds NO issue and NO gating (owner-signed). Never-500.
+    """
+    inst = next((i for i in list_instruments(conn) if i.symbol == body.symbol), None)
+    if inst is None:
+        return None
+    amount: Decimal | None
+    try:
+        bal = cash_balances(
+            list_cash_movements(conn), list_fx_conversions(conn), list_transactions(conn),
+            list_dividends(conn), {i.symbol: i for i in list_instruments(conn)},
+        )
+        amount = bal.get((body.account_id, inst.quote_ccy))
+    except (ValueError, KeyError, ArithmeticError):
+        amount = None
+    return {
+        "ccy": inst.quote_ccy.value,
+        "balance": decimal_str(amount) if amount is not None else None,
+    }
+
+
 @router.post("/input/manual/preview")
 def manual_preview(
     body: ManualBody,
@@ -323,6 +415,11 @@ def manual_preview(
         if rule is not None and rule.rebate_rate > _ZERO
         else None
     )
+    # R6-E (additive): the drawer-parity position what-if + the display-only account-cash line,
+    # both SERVER-computed as Decimal strings (the frontend renders only). null on any
+    # degradation / unregistered symbol / incomplete inputs — the base preview never fails.
+    position_preview = _position_preview(conn, body, draft.fee, draft.tax, gross)
+    account_cash = _account_cash(conn, body)
     return {
         "fee": decimal_str(draft.fee), "tax": decimal_str(draft.tax),
         "gross": decimal_str(gross), "total": decimal_str(total),
@@ -330,6 +427,8 @@ def manual_preview(
         "fee_overridden": body.fee_override is not None,
         "tax_overridden": body.tax_override is not None,
         "rebate_estimate": rebate_estimate,
+        "position_preview": position_preview,
+        "account_cash": account_cash,
         "issues": [_issue_wire_manual(i, body.symbol) for i in issues],
     }
 

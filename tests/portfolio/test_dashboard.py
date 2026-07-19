@@ -120,7 +120,9 @@ def test_build_dashboard_happy_path(conn: sqlite3.Connection) -> None:
     assert data.returns is not None
     assert data.returns.by_currency[TWD].unrealized == Decimal("105000")
     assert data.allocation is not None
-    assert data.allocation.by_sector["Semiconductors"] == Decimal("600000")
+    # R6: 2330 ('Semiconductors') + AAPL ('Tech') both fold into GICS Information Technology
+    # at the grouping seam — 600,000 TWD (2330) + 1,200 USD @33 = 39,600 TWD (AAPL).
+    assert data.allocation.by_sector == {"Information Technology": Decimal("639600")}
     assert data.currency_view is not None
     assert data.currency_view.by_currency_value == {TWD: Decimal("600000"),
                                                     USD: Decimal("1200")}
