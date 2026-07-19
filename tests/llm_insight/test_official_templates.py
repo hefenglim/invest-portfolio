@@ -10,8 +10,8 @@ reference strategies BY NAME, so a version bump needs no preset change).
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v7() -> None:
-    assert ot.LIBRARY_VERSION == "official-v7 (2026-07-18)"
+def test_library_version_is_official_v8() -> None:
+    assert ot.LIBRARY_VERSION == "official-v8 (2026-07-19)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -29,6 +29,39 @@ def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
     wire = ot.library_wire()
     assert "AI_INPUT_PROMPT_BODY" not in wire
     assert body not in str(wire.get("system_prompt", "")) + str(wire.get("strategies", ""))
+
+
+def test_ai_input_prompt_v3_pins_local_exchange_code_rule() -> None:
+    # FU-D41 (owner bug): 「前天聯電買入1張」 on a tw_broker row parsed to the US ADR
+    # ticker "UMC" → dead lookup. The v3 prompt must carry the explicit LOCAL-exchange-code
+    # rule with the numeric-code examples and the ADR counter-example.
+    assert ot.AI_INPUT_PROMPT_VERSION == "v3"
+    body = ot.AI_INPUT_PROMPT_BODY
+    assert "LOCAL exchange code" in body
+    assert "聯電⇒2303" in body and "台積電⇒2330" in body and "鴻海⇒2317" in body
+    assert "UMC" in body and "TSM" in body        # the never-an-ADR counter-example
+    assert "Bursa" in body                        # MY accounts take the Bursa code
+    # the rule text must survive .format (no stray placeholders were introduced).
+    rendered = body.format(accounts="a=b (TWD)", today="2026-07-19", text="x")
+    assert "聯電⇒2303" in rendered
+
+
+def test_ai_symbol_resolve_prompt_is_registered_and_versioned() -> None:
+    # FU-D42c: the 「AI 判讀代號」 fallback prompt lives in the registry (code-owned) and
+    # instructs the same local-exchange-code rules; the reply is suggestion-only (the real
+    # lookup re-verifies — stated in the prompt so the model never claims authority).
+    assert ot.AI_SYMBOL_RESOLVE_PROMPT_VERSION == "v1"
+    body = ot.AI_SYMBOL_RESOLVE_PROMPT
+    for placeholder in ("{query}", "{market}"):
+        assert placeholder in body
+    assert "聯電⇒2303" in body and "UMC" in body   # local-code rule + ADR counter-example
+    assert "真實報價查核" in body                    # verification stays with the lookup
+    rendered = body.format(query="聯電", market="TW")
+    assert "聯電" in rendered and '{{"symbol"' not in rendered  # braces unescaped by format
+    entry = next(e for e in ot.PROMPT_REGISTRY if e["key"] == "ai_symbol_resolve")
+    assert entry["tier"] == "code-owned"
+    assert entry["default_constant"] == "AI_SYMBOL_RESOLVE_PROMPT"
+    assert entry["agent"] == "ai_symbol_resolve"
 
 
 def test_checkup_strategy_advances_to_v25_citing_rule_signals() -> None:
@@ -56,7 +89,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v25_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v7 (2026-07-18)"
+    assert wire["library_version"] == "official-v8 (2026-07-19)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

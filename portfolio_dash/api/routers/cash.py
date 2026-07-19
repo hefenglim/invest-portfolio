@@ -3,19 +3,25 @@
 GET /api/cash — balances per (account, ccy) + a best-effort reporting-ccy total
 (skip-not-abort on a missing FX rate — a dust pool no longer nulls the whole total,
 audit C6) + a negative-pool list (overdraft visibility, audit C1a) + the movements
-ledger. Writes: deposits/withdrawals/openings and FX conversions, both guarded by the
-DATE-AWARE running-balance check (audit C3): an entry that would drive the pool below
+ledger. Writes: deposits/withdrawals/openings and FX conversions. WITHDRAWALS (FU-D43a)
+and FX conversions (FU-D34) are HARD-blocked when the pool cannot cover them — 422
+``withdraw_insufficient_balance`` / ``fx_insufficient_balance``, NO ack override, no
+financing. Deposit/opening-side mutations (edits/deletes that shrink funding) keep the
+DATE-AWARE running-balance check (audit C3): a change that would drive the pool below
 zero at ANY point in time answers 422 ``negative_cash`` until explicitly acked — a
 negative pool almost always means a missed deposit/conversion, the cash analog of the
 oversell guard. Currency↔account coherence is enforced too (audit C2): a movement/FX
 leg must be in the account's {settlement, funding} currencies. GET /api/cash/statement
 serves the merged, date-ordered flow timeline with a server-computed running balance
-(audit C5). Corrections (edit/delete) follow the ledger discipline.
+(audit C5). GET /api/cash/fx-estimate (FU-D43c) serves the SERVER-computed buy-amount
+what-if from the latest stored rate — the frontend only displays it; the fx ledger
+still records the user's actual amounts. Corrections (edit/delete) follow the ledger
+discipline.
 """
 
 import sqlite3
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -48,6 +54,7 @@ from portfolio_dash.portfolio.cash import (
 )
 from portfolio_dash.pricing.store import get_fx
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account
 from portfolio_dash.shared.wire import decimal_str
 
@@ -68,9 +75,15 @@ def _allowed_ccys(account: Account) -> set[Currency]:
     return {account.settlement_ccy, account.funding_ccy}
 
 
-def _balances(conn: sqlite3.Connection) -> dict[tuple[str, Currency], Decimal]:
+def _balances(
+    conn: sqlite3.Connection,
+    *,
+    movements: list[StoredCashMovement] | None = None,
+) -> dict[tuple[str, Currency], Decimal]:
+    """Pool balances; ``movements`` overrides the stored movement ledger (would-be /
+    excluding-a-row reads for the withdraw guard, FU-D43a)."""
     return cash_balances(
-        list_cash_movements(conn),
+        movements if movements is not None else list_cash_movements(conn),
         list_fx_conversions(conn),
         list_transactions(conn),
         list_dividends(conn),
@@ -115,6 +128,58 @@ def _fx_insufficient_response(
         f"換出金額 {decimal_str(requested)} {ccy.value} 超過 {acct.name} 的 "
         f"{ccy.value} 可用餘額 {decimal_str(available)} — 換匯不可透支（不提供融資）",
         field="from_amt"))
+
+
+def _withdraw_insufficient_response(
+    acct: Account, ccy: Currency, available: Decimal, requested: Decimal
+) -> JSONResponse:
+    """FU-D43a HARD block: 出金不可透支 — no ack override (mirrors the FX-center guard)."""
+    return JSONResponse(status_code=422, content=error_body(
+        "withdraw_insufficient_balance",
+        f"出金金額 {decimal_str(requested)} {ccy.value} 超過 {acct.name} 的 "
+        f"{ccy.value} 賬戶現金 {decimal_str(available)} — 出金不可透支"
+        "（請先補登入金或換匯）",
+        field="amount"))
+
+
+def _withdraw_guard(
+    conn: sqlite3.Connection,
+    body: "MovementBody",
+    acct: Account,
+    *,
+    exclude_id: int | None = None,
+) -> JSONResponse | None:
+    """FU-D43a: a withdrawal may NEVER overdraft its pool — HARD 422, no ack override.
+
+    Primary check: the amount must be covered by the pool's CURRENT balance — the same
+    ``cash_balances`` figure the 賬戶現金 line displays, so the frontend hint and the
+    backend authority never disagree; an exact-balance withdrawal (== available) passes.
+    For a PUT edit, ``exclude_id`` strips the edited row's own prior effect from the
+    balance first, so raising a withdraw within the headroom its old amount already
+    consumed is not falsely blocked.
+
+    Date-aware check (audit C3, hardened for withdrawals): a withdraw that INTRODUCES or
+    DEEPENS a below-zero dip in the pool's running timeline (e.g. back-dated before its
+    funding) is blocked too — with the ack override removed, a missed deposit/conversion
+    must be recorded first. A PRE-EXISTING dip this withdraw does not worsen never blocks
+    it (scoped like the ledger-correction replay guard, audit H3).
+    """
+    without = [m for m in list_cash_movements(conn) if m.id != exclude_id]
+    available = _balances(conn, movements=without).get(
+        (body.account_id, body.ccy), _ZERO)
+    if body.amount > available:
+        return _withdraw_insufficient_response(acct, body.ccy, available, body.amount)
+    would_be = [*without, _synthetic_movement(body, "WITHDRAW")]
+    low_after = _pool_min(conn, body.account_id, body.ccy, movements=would_be)
+    low_before = _pool_min(conn, body.account_id, body.ccy, movements=without)
+    if low_after < min(low_before, _ZERO):
+        return JSONResponse(status_code=422, content=error_body(
+            "withdraw_insufficient_balance",
+            f"此筆出金會使 {acct.name} 的 {body.ccy.value} 現金於某時點降至 "
+            f"{decimal_str(low_after)}（出金日早於資金到位）— 出金不可透支，"
+            "請先補登入金或換匯",
+            field="amount"))
+    return None
 
 
 @router.get("/cash")
@@ -326,11 +391,13 @@ def add_movement(
     if bad is not None:
         return bad
     kind = body.kind.strip().upper()
-    if kind == "WITHDRAW" and not body.ack_negative:
-        would_be = [*list_cash_movements(conn), _synthetic_movement(body, kind)]
-        low = _pool_min(conn, body.account_id, body.ccy, movements=would_be)
-        if low < _ZERO:
-            return _negative_response(body.account_id, body.ccy, low)
+    if kind == "WITHDRAW":
+        # FU-D43a: HARD block — ``ack_negative`` no longer bypasses a withdrawal that the
+        # pool cannot cover (deposit/opening/rebate credits need no balance guard on POST).
+        acct = _accounts(conn)[body.account_id]  # exists (checked in _movement_guard)
+        blocked = _withdraw_guard(conn, body, acct)
+        if blocked is not None:
+            return blocked
     move_id = insert_cash_movement(
         conn, account_id=body.account_id, move_date=body.date, kind=kind,
         ccy=body.ccy, amount=body.amount, note=body.note)
@@ -351,14 +418,30 @@ def edit_movement(
     if bad is not None:
         return bad
     kind = body.kind.strip().upper()
+    if kind == "WITHDRAW":
+        # FU-D43a: the edited withdraw is HARD-guarded on its target pool, with the
+        # balance computed EXCLUDING this row's own prior effect (self-exclusion) —
+        # no ack override for what the withdraw itself consumes.
+        acct = _accounts(conn)[body.account_id]  # exists (checked in _movement_guard)
+        blocked = _withdraw_guard(conn, body, acct, exclude_id=move_id)
+        if blocked is not None:
+            return blocked
     if not body.ack_negative:
         edited = _synthetic_movement(body, kind)
         would_be = [edited if m.id == move_id else m for m in list_cash_movements(conn)]
+        without = [m for m in list_cash_movements(conn) if m.id != move_id]
         # Any pool the edit touches (old or new account/ccy) must stay non-negative.
         for account_id, ccy in {
             (existing.account_id, existing.ccy), (body.account_id, body.ccy)
         }:
-            low = _pool_min(conn, account_id, ccy, movements=would_be)
+            if kind == "WITHDRAW" and (account_id, ccy) == (body.account_id, body.ccy):
+                # Target pool of a withdraw: the NEW withdraw is hard-guarded above and
+                # must never resurface as an ack-able warning. What remains ack-able here
+                # is only the effect of REMOVING the old row (e.g. a deposit edited into
+                # a withdraw stranding later flows) — deposit-side semantics, untouched.
+                low = _pool_min(conn, account_id, ccy, movements=without)
+            else:
+                low = _pool_min(conn, account_id, ccy, movements=would_be)
             if low < _ZERO:
                 return _negative_response(account_id, ccy, low)
     update_cash_movement(
@@ -438,3 +521,63 @@ def add_fx(
         conn, account_id=body.account_id, date=body.date, from_ccy=body.from_ccy,
         from_amount=body.from_amt, to_ccy=body.to_ccy, to_amount=body.to_amt)
     return {"id": fx_id}
+
+
+_RATE_MAX_DP = 6  # FX-rate precision cap (matches the pricing write seam's 6-dp rule)
+
+
+def _cap_rate(rate: Decimal) -> Decimal:
+    """Cap a derived rate at 6 dp (ROUND_HALF_UP) — cap only, never pad.
+
+    Stored direct rates are already ≤ 6 dp (the pricing write-seam cap); only the
+    trivial inverse division (1/rate) can grow a 28-digit tail, which is representation
+    noise, not information (same posture as ``pricing/store._cap_dp``).
+    """
+    exp = rate.as_tuple().exponent
+    if isinstance(exp, int) and exp < -_RATE_MAX_DP:
+        return rate.quantize(Decimal(1).scaleb(-_RATE_MAX_DP), rounding=ROUND_HALF_UP)
+    return rate
+
+
+@router.get("/cash/fx-estimate")
+def cash_fx_estimate(
+    from_ccy: Currency = Query(...),
+    to_ccy: Currency = Query(...),
+    amount: Decimal = Query(...),
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """FU-D43c: SERVER-computed buy-amount what-if for the 換匯中心 form.
+
+    Resolves the LATEST stored rate for ``from_ccy``→``to_ccy`` (direct pair, else the
+    trivial inverse — exactly the dashboard RateResolver's semantics) and converts via
+    the single shared FX helper, quantized to the buy currency's minor unit. Pure
+    display aid: the frontend fills the buy field with the returned STRING and never
+    computes; the fx ledger still records the user's ACTUAL entered amounts (the
+    implied actual rate stays authoritative). No stored rate → ``available: false``
+    with a zh reason (degrade, never guess).
+    """
+    if amount <= _ZERO:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "金額必須大於 0", field="amount"))
+    if from_ccy is to_ccy:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "換出與換入幣別不可相同", field="to_ccy"))
+    read = get_fx(conn, from_ccy, to_ccy, now=now)
+    if read is not None:
+        rate, as_of = read.rate, read.as_of
+    else:
+        inv = get_fx(conn, to_ccy, from_ccy, now=now)
+        if inv is None or inv.rate == _ZERO:
+            return {
+                "available": False,
+                "reason": f"尚無 {from_ccy.value}/{to_ccy.value} 匯率資料，無法試算",
+            }
+        rate, as_of = _cap_rate(Decimal("1") / inv.rate), inv.as_of
+    estimate = convert(amount, rate, to_currency=to_ccy)
+    return {
+        "available": True,
+        "estimate": decimal_str(estimate),
+        "rate": decimal_str(rate),
+        "rate_as_of": as_of.isoformat(),
+    }

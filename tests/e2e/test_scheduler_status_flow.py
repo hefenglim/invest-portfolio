@@ -6,6 +6,8 @@ guest DB seeded with golden holdings. Verifies the 排程中心 needs-七 loop e
   * clicking 立即執行 on a NETWORK-FREE job (``snapshot_monthly`` — writes the current-month
     KPI snapshot from the DB, no provider calls) advances that row's chip to a terminal
     成功 WITHOUT a page reload (the poll → 執行中 → 成功 loop), and the run button re-enables,
+  * FU-D46: the completed chip is clickable → the detail modal renders the run's meta
+    (status pill / 開始 / 結束 / 耗時) + detail text, and closes on BOTH Esc and ✕,
   * ZERO console errors + ZERO uncaught page errors throughout.
 
 snapshot_monthly is chosen because run-now executes on the flow server via a daemon thread
@@ -103,6 +105,30 @@ def test_run_now_status_advances_to_success_inplace(
         }""",
         timeout=30_000,
     )
+
+    # ---- FU-D46: the completed chip is clickable → detail modal → Esc closes it ----
+    # Small settle so the post-stop refreshJobs re-render finishes before we click (the
+    # table is rebuilt once when polling stops; clicking mid-swap would race detach).
+    page.wait_for_timeout(500)
+    row = page.locator("#jobs-body tr").filter(has_text="snapshot_monthly")
+    row.locator(".run-status").click()
+    modal = page.locator(".modal-backdrop .modal")
+    modal.wait_for(state="visible", timeout=10_000)
+    title = modal.locator(".modal-title").inner_text()
+    assert "執行結果" in title and "快照" in title, f"unexpected modal title {title!r}"
+    body_txt = modal.locator(".modal-body").inner_text()
+    assert "開始" in body_txt and "耗時" in body_txt, f"modal body missing meta: {body_txt!r}"
+    # 成功 pill rendered inside the modal too.
+    assert "成功" in body_txt
+    page.keyboard.press("Escape")
+    page.wait_for_selector(".modal-backdrop", state="detached", timeout=10_000)
+
+    # Re-open via the chip and close with the ✕ button (both paths must dismiss cleanly).
+    # (.modal-close is scoped to the backdrop — the class is reused by other widgets.)
+    row.locator(".run-status").click()
+    page.locator(".modal-backdrop .modal").wait_for(state="visible", timeout=10_000)
+    page.locator(".modal-backdrop .modal-close").click()
+    page.wait_for_selector(".modal-backdrop", state="detached", timeout=10_000)
 
     assert not console_errors and not page_errors, (
         f"scheduler run-now status: console errors={console_errors!r}; "

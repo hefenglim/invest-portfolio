@@ -54,7 +54,8 @@ EXPECTED_CALL_SITES: dict[str, list[str] | str] = {
     "llm_insight/master.py": ["master_score", "master_calibrate", "master_validate"],
     "api/digest_service.py": ["digest_note"],
     # FU-D31: 「AI 偵測產業類別」 — symbol/name/market → one canonical sector key.
-    "api/routers/instruments.py": ["ai_sector"],
+    # FU-D42c: 「AI 判讀代號」 — raw input + market → local exchange code (lookup re-verifies).
+    "api/routers/instruments.py": ["ai_sector", "ai_symbol_resolve"],
     # prompt tester: user-supplied body + the (registered) insight_system system prompt.
     "api/routers/prompts.py": f"{_EXEMPT}: /prompts/test — user body + insight_system prompt",
     # model connectivity probe: a literal "ping", not a prompt of record.
@@ -151,6 +152,7 @@ def test_code_owned_versions_pin_the_module_version_tags() -> None:
         "MASTER_VALIDATE_SYSTEM": "MASTER_VALIDATE_PROMPT_VERSION",
         "DIGEST_NOTE_PROMPT_BODY": "DIGEST_NOTE_PROMPT_VERSION",
         "AI_SECTOR_PROMPT": "AI_SECTOR_PROMPT_VERSION",
+        "AI_SYMBOL_RESOLVE_PROMPT": "AI_SYMBOL_RESOLVE_PROMPT_VERSION",
     }
     for e in ot.PROMPT_REGISTRY:
         if e["tier"] != "code-owned":

@@ -86,23 +86,26 @@ def test_index_page_smoke(live_server: str, browser_page: Page) -> None:
 
 @pytest.mark.e2e
 def test_dividend_income_card_smoke(live_server: str, browser_page: Page) -> None:
-    """股利收入 card (FU-D38) renders from the shared /api/dashboard payload.
+    """股利總覽 — the ONE consolidated dividend surface (FU-D47) renders every block.
 
-    dividends-card.js is a self-contained additive surface: it awaits the SAME
-    window.pdDashboard promise as app.js/charts.js and renders four blocks from the
-    ALREADY-SERVED aggregates (dividends.ttm_net / dividends.by_year /
-    dividend_projection / ex_dividend_calendar) — no client money math.
+    Owner ruling (r5 mini-spec): the legacy 年度股利 chart + 除息日曆 panels
+    (app.js/charts.js) and the r4 股利收入 card were replaced by a single surface in
+    #dividend-income-card (stable container id), rendered by dividends-card.js off the
+    SAME shared window.pdDashboard promise — composing ONLY served aggregates
+    (dividends.ttm_net/by_year/total_by_currency, dividend_projection,
+    ex_dividend_calendar, holdings[].payback_ratio/dividend_portion): no client money
+    math (the old client-side 入帳預覽/年內預估 float estimates are gone).
 
-    The session golden DB (_seed_golden) seeds ONE cash dividend (2330 5,000 TWD, dated
-    within the trailing 12 months), no dividend events, and no declared projection — so
-    the card exercises the mixed variant: (a) the TTM headline renders its single TWD
-    per-currency stat block (>=1 .dvc-stat); (b) by_year has one year (2026, the partial
-    current year) so the lazy ECharts bar chart mounts a <canvas> inside #dvc-chart; (c)
-    dividend_projection.by_currency and ex_dividend_calendar are BOTH empty, so the
-    projection + calendar blocks render their honest .dvc-empty states (>=2), and the
-    projection block still carries its 預估・僅供參考 forecast badge. Asserts ZERO console +
-    ZERO page errors over the async render (an unhandled rejection or a Decimal-string
-    TypeError would fail it).
+    The session golden DB (_seed_golden) seeds ONE cash dividend (2330 5,000 TWD, within
+    the trailing 12 months), no dividend events, and no declared projection — the mixed
+    variant: (a) the headline strip renders per-ccy 實收 tiles (>=1 .dvc-stat) plus the
+    forecast tile carrying the 預估・僅供參考 badge; (b) by_year has one year (2026, the
+    partial current year) so the lazy ECharts bar chart mounts a <canvas> in #dvc-chart;
+    (c) dividend_projection.by_currency and ex_dividend_calendar are BOTH empty ->
+    honest .dvc-empty states (>=2); (d) 2330 carries payback_ratio > 0 -> the 回本進度
+    strip renders >=1 .dvc-pb-item. Also sweeps the REMOVED legacy ids (#dividend-chart /
+    #exdiv-list / #exdiv-summary / #div-chips / #exdiv-toggle) — none may remain in the
+    DOM. Asserts ZERO console + ZERO page errors over the async render.
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -122,12 +125,15 @@ def test_dividend_income_card_smoke(live_server: str, browser_page: Page) -> Non
     try:
         page.goto(live_server + "/index.html", wait_until="load")
         page.wait_for_selector(".kpi-card")  # dashboard async render landed
-        # (a) TTM headline: the card booted off the shared promise and rendered its
-        # per-currency stat block(s) (>=1 — the golden seeds one TWD cash dividend).
+        # (a) headline strip: per-ccy 實收 stat tiles (>=1 — golden seeds a TWD dividend)
+        # + the forecast tile's unmistakable 預估・僅供參考 badge.
         page.wait_for_selector("#dividend-income-card .dvc-stat")
         stats = page.query_selector_all("#dividend-income-card .dvc-stat")
-        assert len(stats) >= 1, f"expected >=1 TTM currency stat block, got {len(stats)}"
-        # (b) by_year present -> the lazy ECharts bar chart mounted a canvas.
+        assert len(stats) >= 1, f"expected >=1 per-ccy stat tile, got {len(stats)}"
+        assert page.query_selector("#dividend-income-card .dvc-badge") is not None, (
+            "forecast tile missing the 預估・僅供參考 badge"
+        )
+        # (b) by_year present -> the ONE yearly ECharts bar chart mounted a canvas.
         page.wait_for_selector("#dvc-chart canvas")
         # (c) empty golden projection + calendar -> honest empty states (>=2 .dvc-empty).
         page.wait_for_selector("#dividend-income-card .dvc-empty")
@@ -135,16 +141,21 @@ def test_dividend_income_card_smoke(live_server: str, browser_page: Page) -> Non
         assert len(empties) >= 2, (
             f"expected projection + calendar empty states, got {len(empties)} .dvc-empty"
         )
-        # Forecast-only labeling is unmistakable on the projection block.
-        assert page.query_selector("#dividend-income-card .dvc-badge") is not None, (
-            "projection block missing the 預估・僅供參考 forecast badge"
-        )
+        # (d) 回本進度 attribution strip: 2330 has payback_ratio > 0 in golden.
+        page.wait_for_selector("#dividend-income-card .dvc-pb-item")
+        # Removed-id sweep: the legacy 股利區 chart/calendar DOM is GONE — no orphans.
+        for legacy_id in (
+            "dividend-chart", "exdiv-list", "exdiv-summary", "div-chips", "exdiv-toggle",
+        ):
+            assert page.query_selector(f"#{legacy_id}") is None, (
+                f"legacy dividend id #{legacy_id} still present after FU-D47 consolidation"
+            )
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
 
     assert not console_errors and not page_errors, (
-        f"/index.html (股利收入 card): console errors={console_errors!r}; "
+        f"/index.html (股利總覽 consolidated card): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 

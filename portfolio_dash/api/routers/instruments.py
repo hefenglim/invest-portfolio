@@ -32,7 +32,10 @@ from portfolio_dash.data_ingestion.store import (
     set_instrument_archived,
     upsert_instrument,
 )
-from portfolio_dash.llm_insight.official_templates import AI_SECTOR_PROMPT
+from portfolio_dash.llm_insight.official_templates import (
+    AI_SECTOR_PROMPT,
+    AI_SYMBOL_RESOLVE_PROMPT,
+)
 from portfolio_dash.pricing.benchmarks import BENCHMARKS
 from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
@@ -181,6 +184,60 @@ def ai_sector(
     reply = complete_structured(prompt, AiSectorReply, agent="ai_sector", conn=conn)
     mapped_sector = canonical_sector(reply.sector)
     return {"sector": mapped_sector, "mapped": mapped_sector in CANONICAL_KEYS}
+
+
+# --- FU-D42c: AI symbol resolve (quick-add dialog 查無報價 fallback) -------------------
+
+
+class AiResolveBody(BaseModel):
+    """Raw user input (symbol and/or name field content) + the dialog's target market."""
+
+    query: str = ""
+    market: str = ""
+
+
+class AiResolveReply(BaseModel):
+    """The structured contract the model must return: local exchange code + name.
+
+    ``symbol`` may be empty when the model honestly cannot identify the instrument."""
+
+    symbol: str
+    name: str = ""
+
+
+@router.post("/instruments/ai-resolve")
+def ai_resolve(
+    body: AiResolveBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """「AI 判讀代號」 (FU-D42c): raw input + target market → local exchange code + name.
+
+    Offered by the quick-add dialog when the REAL provider lookup finds nothing (查無報價) —
+    e.g. the owner's bug where 聯電 on a TW account was parsed to the US ADR ticker "UMC".
+    Calls the DEFAULT-role structured completion with the code-owned registry prompt
+    (``AI_SYMBOL_RESOLVE_PROMPT``, FU-D30/D41 local-exchange-code rules). The reply is a
+    SUGGESTION only and is returned UNVERIFIED (``verified: false``): the dialog always
+    re-runs ``GET /api/instruments/lookup`` with the suggested symbol, and that quote-backed
+    lookup remains the sole registration authority — an unverifiable suggestion can never be
+    registered through this endpoint (it registers nothing and computes nothing of record).
+    LLM degradation (budget / not-activated / provider) propagates to the global
+    402 / 409 / 503 handlers — the same standard envelope as ``ai-sector``."""
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query 不可為空")
+    prompt = AI_SYMBOL_RESOLVE_PROMPT.format(
+        query=query,
+        market=body.market.strip() or "（未提供）",
+    )
+    reply = complete_structured(
+        prompt, AiResolveReply, agent="ai_symbol_resolve", conn=conn
+    )
+    return {
+        "symbol": reply.symbol.strip().upper(),
+        "name": reply.name.strip(),
+        # honest wire flag: this is an LLM suggestion; the real lookup verifies it.
+        "verified": False,
+    }
 
 
 _TW_BOARDS = {"TWSE", "TPEx"}

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
+from portfolio_dash.api.routers.ledgers import _to_models
 from portfolio_dash.api.wire import div_model_wire, fee_rules_wire, issue_wire, parse_side
 from portfolio_dash.data_ingestion.agents import ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
@@ -56,6 +57,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
 from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
+from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.shared.llm_config import get_model
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
@@ -118,23 +120,59 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     }
 
 
+def _adjusted_avg_by_position(conn: sqlite3.Connection) -> dict[tuple[str, str], Decimal]:
+    """(account_id, symbol) → adjusted_avg from the VERIFIED cost-basis replay (FU-D44).
+
+    Reuses ``portfolio.cost_basis.build_book`` — the same adjusted-cost engine every
+    dashboard/report number comes from (``adjusted_avg = adjusted_total / shares``,
+    computed on read, never a stored rounded average — domain-ledger.md) — over the
+    ledger models loaded by the ledgers-router ``_to_models`` seam (which already
+    excludes unregistered-symbol rows, the dashboard's degradation). NO cost-basis
+    math is duplicated here.
+
+    Never-500 (lesson: degrade at EVERY ``build_book`` call site): an un-bookable
+    ledger (e.g. a legacy orphan dividend → ValueError) degrades to an EMPTY map —
+    the sell hints simply hide; the endpoint stays alive. ``allow_oversell=True``
+    keeps an acked 賣超 book from crashing; oversold rows carry no meaningful basis
+    and are skipped.
+    """
+    t_models, d_models, o_models = _to_models(conn)
+    instruments = {i.symbol: i for i in list_instruments(conn)}
+    try:
+        book = build_book(t_models, d_models, o_models, instruments, allow_oversell=True)
+    except (ValueError, KeyError):
+        return {}
+    return {
+        (h.account_id, h.symbol): h.adjusted_avg
+        for h in book.holdings
+        if not h.oversold
+    }
+
+
 @router.get("/input/holdings")
 def input_holdings(
     account: str, conn: sqlite3.Connection = Depends(get_conn)
 ) -> Any:
-    """Per-account held / closed symbols for the 股利 picker (FU-D35).
+    """Per-account held / closed symbols: 股利 picker (FU-D35) + sell-entry hints (FU-D44).
 
     ``held``   — symbols whose CURRENT net shares in *account* are > 0 (a dividend
-                 normally comes from a live position).
+                 normally comes from a live position). FU-D44 (additive): each held
+                 entry also carries ``shares`` + ``adjusted_avg`` as Decimal STRINGS
+                 (可賣股數 / 持有均價 for the manual sell hints); ``adjusted_avg`` is
+                 null when the book cannot value the position (un-bookable ledger or
+                 unregistered symbol) — the hint hides, never guesses.
     ``closed`` — symbols with ANY ledger history in *account* (transactions / opening
                  inventory / dividends) whose current net shares there are 0: a closed
                  position can still pay a dividend after its ex-date (owner 假設 2).
+                 Closed entries stay ``{symbol, name}`` — the extension is held-only.
 
     Share counts reuse the pure ``current_shares`` helper (opening + buys − sells +
-    zero-cost reinvest shares — the same replay rule as ``build_book``); NO cost-basis
-    math is duplicated here. Classification is strictly per (account, symbol): the SAME
-    symbol may be ``held`` in one account and ``closed`` in another. Names come from the
-    instruments registry (fallback: the raw symbol). Unknown account -> 404.
+    zero-cost reinvest shares — the same replay rule as ``build_book``); adjusted_avg
+    comes from the verified cost-basis replay itself (``_adjusted_avg_by_position`` →
+    ``build_book``). NO cost-basis math is duplicated here. Classification is strictly
+    per (account, symbol): the SAME symbol may be ``held`` in one account and ``closed``
+    in another. Names come from the instruments registry (fallback: the raw symbol).
+    Unknown account -> 404.
     """
     accounts = {a.account_id for a in list_accounts(conn)}
     if account not in accounts:
@@ -155,12 +193,22 @@ def input_holdings(
     ):
         symbols.add(row["symbol"])
     names = {i.symbol: i.name for i in list_instruments(conn)}
-    held: list[dict[str, str]] = []
+    avg_map: dict[tuple[str, str], Decimal] | None = None  # built once, on first held row
+    held: list[dict[str, Any]] = []
     closed: list[dict[str, str]] = []
     for sym in sorted(symbols):
-        entry = {"symbol": sym, "name": names.get(sym) or sym}
-        target = held if current_shares(conn, account, sym) > _ZERO else closed
-        target.append(entry)
+        shares = current_shares(conn, account, sym)
+        if shares > _ZERO:
+            if avg_map is None:
+                avg_map = _adjusted_avg_by_position(conn)
+            avg = avg_map.get((account, sym))
+            held.append({
+                "symbol": sym, "name": names.get(sym) or sym,
+                "shares": decimal_str(shares),
+                "adjusted_avg": decimal_str(avg) if avg is not None else None,
+            })
+        else:
+            closed.append({"symbol": sym, "name": names.get(sym) or sym})
     return {"held": held, "closed": closed}
 
 

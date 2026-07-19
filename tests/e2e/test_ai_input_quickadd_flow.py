@@ -11,9 +11,10 @@ flow server, so the two AI-parse seams are stubbed with ``page.route``:
 
 The registration POST (``/api/instruments``) is NOT routed — it hits the REAL endpoint, so the
 symbol is genuinely registered. The flow asserts: the unregistered row shows an inline 立即註冊
-action → the shared dialog opens PREFILLED with the symbol (market inferred from the row's
-account) → confirming registers → the SAME preview re-runs automatically → the row heals, all
-with ZERO console / page errors.
+action → the shared dialog opens PREFILLED with the symbol (EDITABLE since FU-D42a — a wrong
+AI-parsed symbol is fixable in place; market inferred from the row's account) → confirming
+registers → the SAME preview re-runs automatically → the row heals, all with ZERO console /
+page errors.
 """
 
 import json
@@ -108,11 +109,13 @@ def test_ai_input_inline_register_resumes(
     reg_btn = page.locator("#ai-body").get_by_role("button", name="立即註冊")
     reg_btn.wait_for(state="visible")
 
-    # Click 立即註冊 → the shared quick-add dialog opens PREFILLED with the symbol (readonly).
+    # Click 立即註冊 → the shared quick-add dialog opens PREFILLED with the symbol. FU-D42a:
+    # the field is EDITABLE (lockSymbol is deprecated/ignored) so a wrong symbol is fixable.
     reg_btn.click()
     dialog = page.locator(".modal-backdrop").last
-    sym_input = dialog.locator("input[readonly]")
+    sym_input = dialog.locator("input.qa-symbol")
     expect(sym_input).to_have_value(_SYMBOL)
+    expect(sym_input).to_be_editable()  # editable = enabled + NOT readonly (FU-D42a)
 
     # The canned lookup enables 確認; confirming registers via the REAL endpoint.
     confirm = dialog.get_by_role("button", name="確認", exact=True)
@@ -120,8 +123,12 @@ def test_ai_input_inline_register_resumes(
     confirm.click()
 
     # The SAME preview re-runs automatically (call 2 → healed) → the row loses its error and
-    # the 立即註冊 action disappears.
-    expect(page.locator("#ai-body").get_by_role("button", name="立即註冊")).to_have_count(0)
+    # the 立即註冊 action disappears. Generous timeout: the confirm crosses the REAL
+    # POST /api/instruments, whose synchronous instant-quote fetch probes live providers —
+    # on a network-restricted runner that probe can stall well past the 5s default before
+    # force-registering (the flow itself is correct; only the latency varies by host).
+    expect(page.locator("#ai-body").get_by_role("button", name="立即註冊")).to_have_count(
+        0, timeout=30000)
     expect(page.locator("#ai-body .st-ok")).to_have_count(1)
     assert calls["n"] >= 2  # first parse + the automatic resume re-preview
 

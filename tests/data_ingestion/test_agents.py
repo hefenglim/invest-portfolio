@@ -4,7 +4,12 @@ from decimal import Decimal
 
 import pytest
 
-from portfolio_dash.data_ingestion.agents import AiDraft, AiDraftList, ai_agents_input
+from portfolio_dash.data_ingestion.agents import (
+    AiDraft,
+    AiDraftList,
+    Completer,
+    ai_agents_input,
+)
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.csv_import import write_transaction_row
 from portfolio_dash.data_ingestion.preview import commit_preview
@@ -160,3 +165,69 @@ def test_ai_input_forwards_images_and_model_alias_to_completer(
     )
     assert seen["images"] == [b"\x89PNG\r\n\x1a\nDATA"]
     assert seen["model_override"] == "my-vision"
+
+
+# --- FU-D41: soft symbol-format check per account market (post-parse) -------------------
+
+
+def _one_draft_completer(account_id: str, symbol: str) -> Completer:
+    """A completer emitting one BUY draft for *account_id*/*symbol* (format-check probes)."""
+
+    def _f(
+        prompt: str, schema: type, *, agent: str, conn: object = None,
+        images: list[bytes] | None = None, model_override: str | None = None,
+    ) -> AiDraftList:
+        return AiDraftList(drafts=[AiDraft(
+            account_id=account_id, symbol=symbol, side=Side.BUY,
+            date=date(2026, 6, 1), shares=Decimal("10"), price=Decimal("76"),
+        )])
+
+    return _f
+
+
+def test_ai_input_flags_us_ticker_on_tw_account_as_format_warning(
+    conn: sqlite3.Connection,
+) -> None:
+    # The owner's bug: 「前天聯電買入1張，76元」 parsed to the US ADR ticker "UMC" on a
+    # tw_broker row. The soft check appends a WARNING (needs_confirm — never blocks) and
+    # never rewrites the symbol; the row also keeps its unregistered-symbol hard issue.
+    _setup(conn)
+    result = ai_agents_input(conn, "前天聯電買入1張，76元",
+                             completer=_one_draft_completer("tw_broker", "UMC"))
+    row = result.preview.rows[0]
+    warn = [i for i in row.issues if i.kind == "symbol_format_mismatch"]
+    assert len(warn) == 1
+    assert warn[0].needs_confirm is True  # warning severity — surfaces, never blocks
+    assert warn[0].message == "代號格式與帳戶市場不符，請確認"
+    # the symbol is NOT rewritten by the check (the real lookup stays the authority).
+    assert row.payload.get("symbol") == "UMC"
+
+
+def test_ai_input_numeric_tw_symbol_is_clean_of_format_warning(
+    conn: sqlite3.Connection,
+) -> None:
+    # 2303 (unregistered but correctly-shaped TWSE code) must NOT trigger the format
+    # warning — only the ordinary unregistered-symbol issue applies.
+    _setup(conn)
+    result = ai_agents_input(conn, "前天聯電買入1張，76元",
+                             completer=_one_draft_completer("tw_broker", "2303"))
+    row = result.preview.rows[0]
+    assert not any(i.kind == "symbol_format_mismatch" for i in row.issues)
+
+
+def test_ai_input_flags_cjk_symbol_on_us_account(conn: sqlite3.Connection) -> None:
+    # The US-account mirror: a CJK (or numeric) symbol on a USD account is format-flagged.
+    _setup(conn)
+    result = ai_agents_input(conn, "嘉信買台積電 5 股 @210",
+                             completer=_one_draft_completer("schwab", "台積電"))
+    row = result.preview.rows[0]
+    assert any(i.kind == "symbol_format_mismatch" for i in row.issues)
+
+
+def test_ai_input_registered_clean_row_has_no_format_warning(
+    conn: sqlite3.Connection,
+) -> None:
+    # The happy path (registered 2330 on tw_broker) stays byte-identical: zero issues.
+    _setup(conn)
+    result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
+    assert result.preview.rows[0].issues == []

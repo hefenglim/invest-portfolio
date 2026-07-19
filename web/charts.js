@@ -1,4 +1,4 @@
-/* portfolio-dash — ECharts setup (trend, sector allocation, dividends by year).
+/* portfolio-dash — ECharts setup (trend, sector allocation).
    Reads the SAME /api/dashboard payload as app.js via the shared window.pdDashboard
    promise (one network request, identical data). Money in tooltips/labels routes
    through window.fmt (Decimal strings coerced for display only). */
@@ -262,61 +262,9 @@
     });
   }
 
-  /* ============ H1. 年度股利 stacked bar (原幣金額) ============ */
-  function initDividends() {
-    buildPalette();
-    const host = document.getElementById('dividend-chart');
-    const dv = D.dividends;
-    if (!dv || !dv.by_year || dv.by_year.length === 0) {
-      host.replaceChildren(window.emptyState('尚無股利資料'));
-      host.style.height = 'auto';
-      return;
-    }
-    const years = dv.by_year.map((y) => String(y.year));
-    const ccys = [];
-    dv.by_year.forEach((y) => Object.keys(y.by_currency).forEach((c) => {
-      if (!ccys.includes(c)) ccys.push(c);
-    }));
-    const chart = echarts.init(host);
-    charts.push(chart);
-    chart.setOption({
-      grid: { left: 60, right: 16, top: 30, bottom: 28 },
-      legend: {
-        top: 0, left: 0, icon: 'rect', itemWidth: 10, itemHeight: 10,
-        textStyle: { color: C.text, fontSize: 11, fontFamily: C.fontNum }
-      },
-      tooltip: {
-        ...baseTooltip, trigger: 'axis', axisPointer: { type: 'shadow' },
-        formatter: (params) => {
-          let html = '<div style="font-size:11px;color:' + C.faint + '">' +
-                     params[0].axisValue + ' 年（原幣金額）</div>';
-          params.forEach((p) => {
-            if (p.value === null || p.value === undefined) return;
-            html += '<div>' + p.seriesName + '&nbsp;&nbsp;<b>' +
-                    f.money(p.value, p.seriesName) + '</b></div>';
-          });
-          return html;
-        }
-      },
-      xAxis: {
-        type: 'category', data: years,
-        axisLine: { lineStyle: { color: C.grid } },
-        axisLabel: { color: C.text, fontSize: 11, fontFamily: C.fontNum },
-        axisTick: { show: false }
-      },
-      yAxis: {
-        type: 'value',
-        splitLine: { lineStyle: { color: C.grid, type: 'dashed' } },
-        axisLabel: { color: C.faint, fontSize: 10, fontFamily: C.fontNum }
-      },
-      series: ccys.map((ccy) => ({
-        name: ccy, type: 'bar', stack: 'div', barWidth: 36,
-        itemStyle: { color: C.ccy[ccy] || '#777' },
-        data: dv.by_year.map((y) =>
-          y.by_currency[ccy] !== undefined ? Number(y.by_currency[ccy]) : null)
-      }))
-    });
-  }
+  /* ============ H1. 年度股利 stacked bar ============
+     REMOVED (FU-D47, 2026-07-19): the yearly dividend chart now lives in the
+     consolidated #dividend-income-card surface (dividends-card.js owns it). */
 
   /* ============ C2. 績效比較 (TWR overlay, FU-D27) ============ */
 
@@ -477,13 +425,12 @@
     buildPalette();
     initTrend();
     initSector();
-    initDividends();
     initTrendMode();
   }
 
   /* ============ boot ============ */
   /* Await the SAME shared /api/dashboard promise as app.js (created by whichever script
-     runs first) before building charts, so the trend/sector/dividend series read real
+     runs first) before building charts, so the trend/sector series read real
      data. On failure (non-401; api.js handles 401) leave the chart hosts empty rather
      than throwing — the e2e smoke asserts ZERO console errors / pageerrors. */
   async function boot() {

@@ -184,6 +184,7 @@
   let previewTimer = null;
   function schedulePreview() {
     renderSymbolHint();          // local, instant
+    renderSellHints();           // FU-D44: instant from cache; async fill on a cache miss
     if (previewTimer) clearTimeout(previewTimer);
     previewTimer = setTimeout(runManualPreview, 180);
   }
@@ -206,6 +207,65 @@
       symHint.appendChild(reg);
     } else if (it) {
       symHint.textContent = it.name + '・' + it.ccy + (it.etf ? '・ETF' : '');
+    }
+  }
+
+  /* ---- FU-D44 sell-entry hints ----
+     side=sell + a REGISTERED symbol chosen: under 股數 show 「可賣 {shares} 股」, under 價格
+     show 「持有均價 {adjusted_avg}」 — clicking either fills its field. BOTH values are
+     SERVER-computed (GET /api/input/holdings: shares via current_shares, adjusted_avg via
+     the verified build_book cost-basis replay) and arrive as Decimal STRINGS: display goes
+     through window.fmt only; the click-fill writes the RAW wire string (this module never
+     computes money). Registered but not held in the selected account -> a muted
+     此帳戶無持股 note (the sell preview still warns downstream as today). Buy side hides
+     everything. The per-account cache is SHARED with the dividend picker
+     (acctHoldingsCache) and dropped after every successful commit (FU-D45), so a
+     just-committed trade updates 可賣 immediately. */
+  let sellHintSeq = 0;
+  function renderSellHints() {
+    const sharesHint = $('#m-shares-hint');
+    const priceHint = $('#m-price-hint');
+    if (!sharesHint || !priceHint) return;
+    const hide = (n) => { n.hidden = true; n.replaceChildren(); };
+    const a = acc($('#m-account').value);
+    const it = inst($('#m-symbol').value.trim());
+    if (m.side !== 'sell' || !a || !it) { hide(sharesHint); hide(priceHint); return; }
+    const data = acctHoldingsCache[a.id];
+    if (!data) {
+      /* cache miss: fetch, then re-render ONLY if the cache actually filled (a failed
+         fetch must never loop) and no newer render superseded this request. */
+      hide(sharesHint); hide(priceHint);
+      const seq = ++sellHintSeq;
+      loadAcctHoldings(a.id, false).then(() => {
+        if (seq === sellHintSeq && acctHoldingsCache[a.id]) renderSellHints();
+      }).catch(() => {});
+      return;
+    }
+    const held = (data.held || []).find((h) => h.symbol === it.symbol);
+    hide(priceHint);
+    sharesHint.hidden = false;
+    sharesHint.replaceChildren();
+    if (!held) {
+      sharesHint.textContent = '此帳戶無持股';
+      return;
+    }
+    const fillBtn = (label, inputSel, raw) => {
+      const b = el('button', null, label);
+      b.type = 'button';
+      b.title = '點擊帶入';
+      b.style.cssText = 'background:none;border:none;padding:0;color:var(--accent);'
+        + 'cursor:pointer;font-size:inherit;text-decoration:underline;';
+      b.addEventListener('click', () => { $(inputSel).value = raw; schedulePreview(); });
+      return b;
+    };
+    /* fractional shares (DRIP $0-cost adds) show up to 4 dp; whole counts stay integer —
+       a STRING shape check on the wire value, not arithmetic. */
+    const sharesTxt = held.shares.indexOf('.') >= 0 ? f.num(held.shares, 4) : f.num(held.shares);
+    sharesHint.appendChild(fillBtn('可賣 ' + sharesTxt + ' 股', '#m-shares', held.shares));
+    if (held.adjusted_avg != null) {
+      priceHint.hidden = false;
+      priceHint.appendChild(
+        fillBtn('持有均價 ' + f.price(held.adjusted_avg, it.ccy), '#m-price', held.adjusted_avg));
     }
   }
 
@@ -468,6 +528,7 @@
     applyOverrideState('fee', false); applyOverrideState('tax', false); m.acked = false;
     $('#m-shares').value = '';
     $('#m-price').value = '';
+    afterCommitRefresh();  // FU-D45: ledger tables + holdings caches (可賣 just changed)
     schedulePreview();
   }
 
@@ -738,6 +799,7 @@
       banner.appendChild(el('div', null, '✓ 寫入完成：成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆'));
     }
     if (window.toast) window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆');
+    afterCommitRefresh();  // FU-D45: covers CSV import AND the AI 寫入全部 path
   }
 
   /* ================= Tab 3 AI 輸入 =================
@@ -894,10 +956,11 @@
       return;
     }
     const resume = async () => { await reloadContext(); await runAiPreview(); };
+    /* FU-D42a: the symbol stays EDITABLE (no lockSymbol) — an AI mis-parse (e.g. a US-style
+       ticker on a TW account) is corrected right in the dialog; editing re-runs the lookup. */
     window.pdInstQuickAdd({
       symbol: symbol,
       market: accountMarket(accId),
-      lockSymbol: true,
       onConfirm: resume,
       onBuy: resume,
     });
@@ -1054,11 +1117,28 @@
   function oneRowCsv(header, values) {
     return header.join(',') + '\n' + values.map(csvEscape).join(',');
   }
+
+  /* ---- FU-D45 ledger live refresh ----
+     Called from EVERY successful commit path (manual / CSV / AI 寫入全部 / dividend /
+     opening) — and ONLY on success; every failure path returns before reaching it.
+     (1) re-fetches the lower 帳本記錄 tables in place via the seam ledger.js exposes
+     (window.pdLedgerRefresh — a plain function reference, no event binding, so repeated
+     commits can never double-fire), and (2) drops the per-account holdings cache so the
+     可賣/均價 sell hints and the dividend picker reflect the just-committed rows, then
+     re-warms the two panes' selected accounts. */
+  function afterCommitRefresh() {
+    Object.keys(acctHoldingsCache).forEach((k) => { delete acctHoldingsCache[k]; });
+    if (window.pdLedgerRefresh) window.pdLedgerRefresh();
+    renderSellHints();   // cache miss -> refetch for the selected manual account
+    const dSel = $('#d-account');
+    if (dSel && dSel.value) loadAcctHoldings(dSel.value, false).catch(() => {});
+  }
   async function commitOneRow(kind, csvText, btn, okSub, onDone) {
     const restore = window.pdBusy ? window.pdBusy(btn, '寫入中…') : () => {};
     const finishOk = (resp) => {
       if (resp && resp.written >= 1) {
         if (window.toast) window.toast('寫入成功', 'ok', okSub);
+        afterCommitRefresh();  // FU-D45: dividend / opening single-row commits
         if (onDone) onDone();
       } else if (window.toast) {
         window.toast('未寫入', 'fail', '資料列被跳過，請檢查欄位');
@@ -1164,9 +1244,8 @@
             'd-drip-shares', 'd-drip-price', 'd-net-amt'].forEach((id) => {
             const n = $('#' + id); if (n) n.value = '';
           });
-          /* a STOCK/DRIP dividend can grow shares (never shrinks); refresh so the picker
-             reflects the latest holdings. Cheap + cached, so unconditional is fine. */
-          loadDivHoldings(a.id, true).catch(() => {});
+          /* holdings refresh (STOCK/DRIP can grow shares) now rides afterCommitRefresh
+             (FU-D45): the shared cache is dropped + this account re-warmed on success. */
         });
     });
   }
@@ -1205,7 +1284,10 @@
      successful commit. The picker is ASSISTIVE ONLY: it never overwrites what the user
      types, and manual free entry always remains possible (the commit reads
      #d-symbol.value directly — an unlisted symbol still submits). */
-  const divHoldingsCache = {};   // { [accountId]: {held:[{symbol,name}], closed:[...]} }
+  /* Shared per-account holdings cache (FU-D35 picker + FU-D44 sell hints). Held entries
+     additionally carry shares + adjusted_avg as Decimal STRINGS (FU-D44); dropped after
+     every successful commit (FU-D45, afterCommitRefresh). */
+  const acctHoldingsCache = {};   // { [accountId]: {held:[{symbol,name,shares,adjusted_avg}], closed:[{symbol,name}]} }
   let divPickerOpen = false;
 
   /* Inline-style the picker shell here (keeps the styling in this wave's files — the
@@ -1234,17 +1316,17 @@
 
   /* Fetch (or return the cached) {held, closed} for an account. Graceful: a failed fetch
      returns the last cache (or empties) so the picker degrades to a plain typed input. */
-  async function loadDivHoldings(accountId, force) {
+  async function loadAcctHoldings(accountId, force) {
     if (!accountId) return { held: [], closed: [] };
-    if (!force && divHoldingsCache[accountId]) return divHoldingsCache[accountId];
+    if (!force && acctHoldingsCache[accountId]) return acctHoldingsCache[accountId];
     let resp;
     try {
       resp = await api.get('/api/input/holdings?account=' + encodeURIComponent(accountId));
     } catch (e) {
-      return divHoldingsCache[accountId] || { held: [], closed: [] };
+      return acctHoldingsCache[accountId] || { held: [], closed: [] };
     }
     const data = { held: (resp && resp.held) || [], closed: (resp && resp.closed) || [] };
-    divHoldingsCache[accountId] = data;
+    acctHoldingsCache[accountId] = data;
     return data;
   }
 
@@ -1347,8 +1429,8 @@
       divPickerOpen = true;
       const a = acc($('#d-account').value);
       if (!a) { renderDivPicker({ held: [], closed: [] }); return; }
-      if (divHoldingsCache[a.id]) renderDivPicker(divHoldingsCache[a.id]);
-      const data = await loadDivHoldings(a.id, false);
+      if (acctHoldingsCache[a.id]) renderDivPicker(acctHoldingsCache[a.id]);
+      const data = await loadAcctHoldings(a.id, false);
       if (divPickerOpen) renderDivPicker(data);
     } catch (e) { /* picker is assistive — degrade silently */ }
   }
@@ -1359,7 +1441,7 @@
     if (toggle) toggle.checked = false;
     closeDivPicker();
     const accId = $('#d-account').value;
-    if (accId) loadDivHoldings(accId, false).catch(() => {});
+    if (accId) loadAcctHoldings(accId, false).catch(() => {});
   }
 
   function initDivPicker() {
@@ -1371,14 +1453,14 @@
       inp.addEventListener('input', () => {
         if (!divPickerOpen) { openDivPicker(); return; }
         const a = acc($('#d-account').value);
-        renderDivPicker((a && divHoldingsCache[a.id]) || { held: [], closed: [] });
+        renderDivPicker((a && acctHoldingsCache[a.id]) || { held: [], closed: [] });
       });
       inp.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDivPicker(); });
     }
     const toggle = $('#d-sym-closed-toggle');
     if (toggle) toggle.addEventListener('change', () => {
       const a = acc($('#d-account').value);
-      renderDivPicker((a && divHoldingsCache[a.id]) || { held: [], closed: [] });
+      renderDivPicker((a && acctHoldingsCache[a.id]) || { held: [], closed: [] });
     });
     /* Close when focus leaves the 代號 field (input OR the footer toggle). focusout bubbles,
        so one listener on the container covers both; relatedTarget inside the field (e.g.
@@ -1391,7 +1473,7 @@
     });
     /* Warm the default account's cache so the first focus paints instantly. */
     const accId0 = $('#d-account').value;
-    if (accId0) loadDivHoldings(accId0, false).catch(() => {});
+    if (accId0) loadAcctHoldings(accId0, false).catch(() => {});
   }
 
   /* ================= Tab 5 期初庫存 =================

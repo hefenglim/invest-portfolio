@@ -44,20 +44,24 @@ def test_fx_leg_ccy_not_allowed_rejected(api_client: TestClient) -> None:
 # --- C3: date-aware running-balance guard ----------------------------------
 
 
-def test_backdated_withdraw_before_funding_warns(api_client: TestClient) -> None:
+def test_backdated_withdraw_before_funding_hard_blocks(api_client: TestClient) -> None:
+    # C3 semantics HARDENED by FU-D43a: a withdraw dated BEFORE its funding (end
+    # aggregate +500, but the pool was −500 between 2026-04-01 and the deposit) is now a
+    # hard 422 withdraw_insufficient_balance — the ack override is removed for
+    # withdrawals, so the missed deposit must be recorded first.
     api_client.post("/api/cash/movements", json={
         "account_id": "moomoo_my_us", "date": "2026-05-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
-    # withdraw dated BEFORE the deposit: end aggregate is +500, but the pool was −500
-    # between 2026-04-01 and the deposit -> must warn (was passing before the C3 fix).
     r = api_client.post("/api/cash/movements", json={
         "account_id": "moomoo_my_us", "date": "2026-04-01", "kind": "withdraw",
         "ccy": "USD", "amount": "500"})
-    assert r.status_code == 422 and r.json()["error"]["code"] == "negative_cash"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "withdraw_insufficient_balance"
     r2 = api_client.post("/api/cash/movements", json={
         "account_id": "moomoo_my_us", "date": "2026-04-01", "kind": "withdraw",
         "ccy": "USD", "amount": "500", "ack_negative": True})
-    assert r2.status_code == 201
+    assert r2.status_code == 422  # ack no longer bypasses a withdraw guard
+    assert r2.json()["error"]["code"] == "withdraw_insufficient_balance"
 
 
 # --- C4: opening (期初資金) movement kind -----------------------------------
@@ -151,3 +155,22 @@ def test_reporting_total_skips_missing_rate(
     excluded = {e["ccy"] for e in body["reporting_total_excluded"]}
     assert "MYR" in excluded
     assert body["reporting_total_unavailable_reason"]  # annotated
+
+
+# --- FU-D43c: fx-estimate degrade when no rate is stored ---------------------
+
+
+def test_fx_estimate_no_stored_rate_degrades(
+    dashboard_client_factory: Callable[..., TestClient],
+) -> None:
+    """No rate in EITHER direction -> {available: false, zh reason} — 200, never a guess
+    (the golden DB stores every pair among its three currencies, so this uses a rate-free
+    seed)."""
+    client = dashboard_client_factory(seed_accounts)
+    r = client.get("/api/cash/fx-estimate",
+                   params={"from_ccy": "USD", "to_ccy": "TWD", "amount": "100"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is False
+    assert "USD/TWD" in body["reason"] and "匯率" in body["reason"]
+    assert "estimate" not in body  # nothing fabricated

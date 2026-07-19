@@ -1,18 +1,29 @@
-/* portfolio-dash — shared instrument quick-add dialog (FU-D23).
+/* portfolio-dash — shared instrument quick-add dialog (FU-D23; FU-D42 editable symbol +
+   auto-lookup + AI resolve fallback).
 
    window.pdInstQuickAdd(opts) opens a modal that:
      1. runs GET /api/instruments/lookup — fast identify (name + suggested sector +
-        board/is_etf); found:false is the typo guard and blocks the confirm,
-     2. lets the user confirm the name + pick/enter a sector (datalist of the EXISTING
-        sectors + free text; the lookup suggestion is preselected),
-     3. registers via POST /api/instruments — the heavy quote/history fetch runs in the
+        board/is_etf); found:false is the typo guard and blocks the confirm. The lookup
+        fires automatically on open (prefilled symbol) AND re-fires (debounced) whenever
+        the user edits the symbol or market; auto-fills only overwrite fields the user
+        has not touched (pristine tracking, FU-D42a),
+     2. lets the user confirm the name + pick/enter a sector (canonical select + free
+        text; the lookup suggestion is preselected),
+     3. when the lookup finds nothing (查無報價), offers 「AI 判讀代號」 (FU-D42c): POST
+        /api/instruments/ai-resolve maps the raw input to the target market's LOCAL
+        exchange code; the REAL lookup then re-verifies (the quote check stays the
+        registration authority — an unverified AI suggestion can never be confirmed);
+        a still-unfound suggestion gets the honest 「AI 判讀後仍查無報價」 notice,
+     4. registers via POST /api/instruments — the heavy quote/history fetch runs in the
         BACKGROUND (BackgroundTasks), so the confirm returns fast,
    then calls opts.onConfirm(result) (確認) or opts.onBuy(result) (記一筆買入).
 
    opts:
-     symbol      prefill symbol (both call sites prefill it)
+     symbol      prefill symbol (all call sites prefill it)
      market      'TW' | 'US' | 'MY' (default 'TW')
-     lockSymbol  symbol field readonly when true (prefilled)
+     lockSymbol  DEPRECATED (FU-D42a) — accepted but IGNORED: the symbol field is always
+                 editable, so a wrong AI-parsed symbol (owner bug: 聯電 → "UMC" on a TW
+                 row) can be fixed in place. No call site genuinely needs a locked field.
      onConfirm(result)  after 確認 registers
      onBuy(result)      after 記一筆買入 registers (the caller navigates to the manual pane)
    result = the POST /api/instruments response element (+ restored / last_price_date when a
@@ -173,11 +184,13 @@
       return w;
     };
 
-    const symIn = el('input', 'input');
+    /* FU-D42a: the symbol is ALWAYS editable (opts.lockSymbol is deprecated and ignored)
+       — a wrong prefilled symbol (e.g. an AI-parsed US ticker on a TW row) is fixed here,
+       and every edit re-runs the real lookup below. */
+    const symIn = el('input', 'input qa-symbol');
     symIn.value = (opts.symbol || '').trim().toUpperCase();
     symIn.spellcheck = false;
     symIn.placeholder = '例：2330、AAPL';
-    if (opts.lockSymbol) symIn.readOnly = true;
     body.appendChild(fld('代號', symIn));
 
     const mktSel = el('select', 'select');
@@ -188,7 +201,7 @@
     });
     body.appendChild(fld('市場', mktSel));
 
-    const nameIn = el('input', 'input');
+    const nameIn = el('input', 'input qa-name');
     nameIn.placeholder = '名稱（自動查詢，可修改）';
     nameIn.spellcheck = false;
     body.appendChild(fld('名稱', nameIn));
@@ -210,6 +223,11 @@
     const status = el('div', 'hint');
     status.style.cssText = 'min-height:16px;';
     body.appendChild(status);
+    /* FU-D42c: shown only when the lookup reports not-found (查無報價). */
+    const aiBtn = el('button', 'btn qa-ai-resolve', 'AI 判讀代號'); aiBtn.type = 'button';
+    aiBtn.title = '以 AI 判讀輸入的代號／名稱對應的正確代號，再以真實報價查核';
+    aiBtn.style.display = 'none';
+    body.appendChild(aiBtn);
     modal.appendChild(body);
 
     const foot = el('div', 'modal-foot');
@@ -223,6 +241,21 @@
     /* Latest lookup result — board rides through to the POST so TW is not re-probed. */
     let lookupState = { found: false, registered: false, archived: false, board: null };
     let busy = false;
+    /* FU-D42a pristine tracking: a lookup auto-fill only overwrites a field the USER has
+       never touched. Programmatic fills do not fire these events, so pristine survives
+       auto-fill → re-lookup → re-fill chains; one user keystroke/pick pins the field. */
+    let namePristine = true;
+    let sectorPristine = true;
+    let etfPristine = true;
+    nameIn.addEventListener('input', () => { namePristine = false; });
+    sectorField.element.addEventListener('change', () => { sectorPristine = false; });
+    sectorField.element.addEventListener('input', () => { sectorPristine = false; });
+    etfCb.addEventListener('change', () => { etfPristine = false; });
+    /* Stale-response guard: only the LATEST lookup may touch the dialog. */
+    let lookupSeq = 0;
+    /* Set right before the post-AI-resolve verification lookup; consumed by its
+       not-found branch to show the honest 「AI 判讀後仍查無報價」 notice. */
+    let aiResolveTried = false;
 
     function setEnabled(ok) { okBtn.disabled = !ok; buyBtn.disabled = !ok; }
     setEnabled(false);
@@ -237,36 +270,86 @@
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop && !busy) dismiss(); });
 
     async function runLookup() {
+      const seq = ++lookupSeq;
+      const wasAiResolve = aiResolveTried;
+      aiResolveTried = false;  // consumed by THIS run only
       const sym = symIn.value.trim().toUpperCase();
       setEnabled(false);
+      aiBtn.style.display = 'none';
       lookupState = { found: false, registered: false, archived: false, board: null };
       if (!sym) { status.textContent = '請輸入代號'; return; }
       status.textContent = '查詢中…';
+      /* FU-D42b: lookup-in-flight indicator on the name field (pristine only — a
+         user-typed name is never masked). */
+      if (namePristine) nameIn.placeholder = '查詢中…';
       let r;
       try {
         r = await api.get('/api/instruments/lookup', { symbol: sym, market: mktSel.value });
       } catch (err) {
+        if (seq !== lookupSeq) return;  // superseded by a newer edit
+        nameIn.placeholder = '名稱（自動查詢，可修改）';
         status.textContent = '查詢失敗，請稍後再試';
         return;
       }
+      if (seq !== lookupSeq) return;  // superseded by a newer edit
+      nameIn.placeholder = '名稱（自動查詢，可修改）';
       lookupState = r || { found: false };
       if (r && r.registered) {
         status.textContent = '已註冊 — 此標的已在觀察清單中';
         return;
       }
       if (!r || !r.found) {
-        status.textContent = '查無報價 — 請確認代號與市場是否正確';
+        /* Stale suggestions from a PREVIOUS symbol's lookup are cleared (pristine only). */
+        if (namePristine) nameIn.value = '';
+        if (sectorPristine) sectorField.setValue('');
+        status.textContent = wasAiResolve
+          ? 'AI 判讀後仍查無報價 — 請確認代號與市場是否正確'
+          : '查無報價 — 請確認代號與市場是否正確';
+        aiBtn.style.display = '';  // FU-D42c fallback entry
         return;
       }
-      /* found & addable (a brand-new symbol, or an archived one to restore) */
-      if (r.name && !nameIn.value.trim()) nameIn.value = r.name;
-      if (r.sector && !sectorField.value()) sectorField.setValue(r.sector);
-      etfCb.checked = !!r.is_etf;
+      /* found & addable (a brand-new symbol, or an archived one to restore); auto-fill
+         replaces prior AUTO-fills but never a user-touched field (pristine tracking). */
+      if (namePristine && r.name) nameIn.value = r.name;
+      if (sectorPristine) sectorField.setValue(r.sector || '');
+      if (etfPristine) etfCb.checked = !!r.is_etf;
       status.textContent = r.archived
         ? '已封存 — 確認後將還原並於背景補抓缺口'
         : '已找到，確認後加入觀察清單（報價與歷史於背景抓取）';
       setEnabled(true);
     }
+
+    /* FU-D42c: AI 判讀代號 — maps the raw input (symbol/name fields) + target market to
+       the LOCAL exchange code, then AUTO re-runs the REAL lookup: the provider quote
+       check remains the sole registration authority (the LLM reply is a suggestion, never
+       a verification). Degrade (402/409/503) surfaces as a toast; nothing is blocked. */
+    aiBtn.addEventListener('click', async () => {
+      const query = (symIn.value.trim() + ' ' + nameIn.value.trim()).trim();
+      if (!query) { status.textContent = '請先輸入代號或名稱'; return; }
+      const restore = window.pdBusy ? window.pdBusy(aiBtn, '判讀中…') : () => {};
+      let resp;
+      try {
+        resp = await api.post('/api/instruments/ai-resolve',
+          { query: query, market: mktSel.value });
+      } catch (err) {
+        restore();
+        if (window.toast) {
+          window.toast(err && err.message ? err.message : 'AI 判讀失敗', 'fail',
+            err && err.code);
+        }
+        return;
+      }
+      restore();
+      const suggested = resp && (resp.symbol || '').trim().toUpperCase();
+      if (!suggested) {
+        status.textContent = 'AI 無法判讀 — 請確認代號與市場是否正確';
+        return;
+      }
+      symIn.value = suggested;
+      if (namePristine && resp.name) nameIn.value = resp.name;
+      aiResolveTried = true;
+      runLookup();  // the REAL lookup verifies the suggestion (registration authority)
+    });
 
     async function doRegister(after) {
       const sym = symIn.value.trim().toUpperCase();
@@ -312,16 +395,16 @@
     okBtn.addEventListener('click', () => doRegister('confirm'));
     buyBtn.addEventListener('click', () => doRegister('buy'));
     mktSel.addEventListener('change', runLookup);
-    if (!opts.lockSymbol) {
-      let t = null;
-      symIn.addEventListener('input', () => {
-        if (t) clearTimeout(t);
-        t = setTimeout(runLookup, 300);
-      });
-    }
+    /* FU-D42a: editing the symbol re-runs the lookup (debounced; always attached — the
+       symbol is always editable). The seq guard in runLookup drops superseded replies. */
+    let t = null;
+    symIn.addEventListener('input', () => {
+      if (t) clearTimeout(t);
+      t = setTimeout(runLookup, 300);
+    });
 
     document.body.appendChild(backdrop);
-    runLookup();
-    setTimeout(() => { (opts.lockSymbol ? nameIn : symIn).focus(); }, 50);
+    runLookup();  // FU-D42b: auto-lookup on open (prefilled symbol identifies immediately)
+    setTimeout(() => { (symIn.value ? nameIn : symIn).focus(); }, 50);
   };
 })();

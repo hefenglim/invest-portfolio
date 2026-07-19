@@ -16,10 +16,19 @@
    - POST /api/scheduler/jobs/{id}/run   (manual run; 202 + run_id, 409 already-running)
 
    FU-D36 (需求七) — run-now live status: each row carries a 狀態 chip fed by
-   GET /api/scheduler/status -> { active, jobs:{ <id>:{running, queued, last_run} } }.
+   GET /api/scheduler/status -> { active, jobs:{ <id>:{running, queued, progress, last_run} } }.
    Clicking 立即執行 flips the row to 已排入, then polling (every ~3s, ONLY while something
    is queued/running + a short grace after a trigger) advances it 執行中 -> 成功/失敗 with the
-   last-run message; polling STOPS when nothing is active, so an idle page polls zero times. */
+   last-run message; polling STOPS when nothing is active, so an idle page polls zero times.
+
+   FU-D46 — progress sub-text + completion detail modal: while 執行中 the chip shows the
+   job's live `progress` message (re-painted each poll tick). A COMPLETED chip (成功/失敗/
+   略過) is clickable -> a detail modal (shared .modal-backdrop pattern from styles.css):
+   zh job name, status, started/finished + duration_seconds, the full detail text
+   (scrollable pre-wrap), an LLM Token/費用 line when the status served a `cost` block
+   (cost_usd is a Decimal STRING -> f.num, same Finding-8 discipline), and a 前往 button
+   for jobs with a verified landing page (JOB_HREF map below). One modal at a time; closes
+   on ✕ / backdrop / Esc, and the Esc listener is removed on dismiss (no listener leak). */
 (function () {
   'use strict';
   const f = window.fmt;
@@ -105,13 +114,173 @@
     skipped: ['pill-off', '略過'],
   };
 
+  /* ===== FU-D46: per-job landing pages + completion detail modal ============== */
+
+  /* VERIFIED landing targets only (each page/anchor exists in web/): quotes -> the
+     dashboard (latest quotes surface); history/backup -> 資料中心; dividend sweeps ->
+     待確認匯入; the external-snapshot ingests -> 資料來源 health tab; alert scan -> 預警
+     規則 tab; AI loops + insight tasks -> insights.html; news -> news.html; digests ->
+     their index cards (anchored panel ids). snapshot_monthly / signal_scan have no
+     natural user-facing page today -> deliberately absent (no 前往 button). */
+  const JOB_HREF = {
+    quotes_tw: 'index.html',
+    quotes_us: 'index.html',
+    quotes_my: 'index.html',
+    history_daily: 'data-center.html',
+    backup_daily: 'data-center.html',
+    dividends_daily: 'dividend-inbox.html',
+    dividend_inbox_scan: 'dividend-inbox.html',
+    finmind_chips_daily: 'settings.html#datasources',
+    finmind_valuation_daily: 'settings.html#datasources',
+    finmind_fundamentals_monthly: 'settings.html#datasources',
+    sentiment_daily: 'settings.html#datasources',
+    index_quotes_daily: 'settings.html#datasources',
+    consensus_daily: 'settings.html#datasources',
+    alert_scan: 'settings.html#alerts',
+    evaluate_insights: 'insights.html',
+    generate_calibrations: 'insights.html',
+    news_daily: 'news.html',
+    digest_daily: 'index.html#digest-daily-panel',
+    digest_weekly: 'index.html#digest-weekly-panel',
+  };
+  function jobHref(id) {
+    if (JOB_HREF[id]) return JOB_HREF[id];
+    if (id.indexOf('insight:') === 0) return 'insights.html'; // AI 洞察任務卡片頁
+    return null;
+  }
+  /* Same-page settings targets switch the tab directly (a bare hash assignment would not
+     re-fire on an identical hash); everything else is a normal navigation. */
+  function navigateTo(href) {
+    if (href.indexOf('settings.html#') === 0 && window.showSettingsTab) {
+      window.showSettingsTab(href.split('#')[1]);
+      return;
+    }
+    window.location.href = href;
+  }
+
+  /* One modal at a time; closes on ✕ / backdrop / Esc. The Esc keydown listener is
+     bound on open and removed inside dismiss, so repeated open/close cycles never
+     accumulate document-level listeners (senior-review invariant). */
+  let activeModal = null; // () => void — the current modal's dismiss, else null
+
+  function openRunModal(jobId, lr) {
+    if (!lr) return;
+    if (activeModal) activeModal(); // never stack
+    const backdrop = el('div', 'modal-backdrop');
+    const modal = el('div', 'modal');
+    const head = el('div', 'modal-head');
+    head.appendChild(el('h3', 'modal-title', jobLabel(jobId, '') + ' — 執行結果'));
+    const close = el('button', 'modal-close', '✕');
+    close.type = 'button';
+    head.appendChild(close);
+    modal.appendChild(head);
+
+    const body = el('div', 'modal-body');
+    /* normalize BOTH last-run shapes: /status last_run {started_at,finished_at,status,
+       message,duration_seconds,cost} and the jobs-GET seed {status,at,detail,duration_s}. */
+    const status = lr.status;
+    const ok = lr.ok === true || status === 'ok';
+    let cls = 'pill-fail', label = '失敗';
+    if (status === 'skipped') { cls = 'pill-off'; label = '略過'; }
+    else if (ok) { cls = 'pill-ok'; label = '成功'; }
+    const metaRow = el('div');
+    metaRow.style.display = 'flex';
+    metaRow.style.flexWrap = 'wrap';
+    metaRow.style.gap = '8px 16px';
+    metaRow.style.alignItems = 'center';
+    metaRow.appendChild(_pill(cls, label));
+    const started = lr.started_at || lr.at || null;
+    const finished = lr.finished_at || null;
+    const dur = lr.duration_seconds != null ? lr.duration_seconds
+      : (lr.duration_s != null ? lr.duration_s : null);
+    const meta = (labelTxt, value) => {
+      const wrapEl = el('span', 'hint');
+      wrapEl.appendChild(el('span', null, labelTxt + '：'));
+      const v = el('span', 'num', value == null ? f.NULL_GLYPH : value);
+      if (value == null) v.classList.add('sign-nil');
+      wrapEl.appendChild(v);
+      return wrapEl;
+    };
+    metaRow.appendChild(meta('開始', started ? f.datetime(started) : null));
+    metaRow.appendChild(meta('結束', finished ? f.datetime(finished) : null));
+    /* duration is a count (seconds), not money — f.num at 1 dp. */
+    metaRow.appendChild(meta('耗時', dur == null ? null : f.num(dur, 1) + 's'));
+    body.appendChild(metaRow);
+
+    /* full run detail — scrollable pre-wrap so a long source/target breakdown stays
+       readable inside the modal (never widens the page). */
+    const detail = el('div', null, (lr.message || lr.detail || '') || '（無詳細資訊）');
+    detail.style.whiteSpace = 'pre-wrap';
+    detail.style.wordBreak = 'break-word';
+    detail.style.maxHeight = '40vh';
+    detail.style.overflowY = 'auto';
+    detail.style.fontSize = '12px';
+    detail.style.lineHeight = '1.6';
+    detail.style.border = '1px solid var(--line, rgba(128,128,128,0.25))';
+    detail.style.borderRadius = '6px';
+    detail.style.padding = '8px 10px';
+    if (!(lr.message || lr.detail)) detail.classList.add('sign-nil');
+    body.appendChild(detail);
+
+    /* LLM Token/費用 line — only when the status served a cost block. cost_usd is a
+       Decimal STRING ("0.012"): nil-check == null, render via f.num (Finding 8). */
+    const cost = lr.cost || null;
+    if (cost && cost.cost_usd != null) {
+      let txt;
+      if (cost.tokens_in != null) {
+        txt = 'Token／費用：' + f.num(cost.tokens_in) + ' in ／ ' + f.num(cost.tokens_out)
+          + ' out ・ $' + f.num(cost.cost_usd, 3)
+          + (cost.calls != null ? '（' + f.num(cost.calls) + ' 次呼叫）' : '');
+      } else {
+        txt = '費用：$' + f.num(cost.cost_usd, 3);
+      }
+      body.appendChild(el('div', 'hint', txt));
+    }
+    modal.appendChild(body);
+
+    const foot = el('div', 'modal-foot');
+    const href = jobHref(jobId);
+    function dismiss() {
+      document.removeEventListener('keydown', onKey);
+      backdrop.remove();
+      activeModal = null;
+    }
+    function onKey(e) { if (e.key === 'Escape') dismiss(); }
+    if (href) {
+      const go = el('button', 'btn btn-primary', '前往查看');
+      go.type = 'button';
+      go.title = href;
+      go.addEventListener('click', () => { dismiss(); navigateTo(href); });
+      foot.appendChild(go);
+    }
+    const closeBtn = el('button', 'btn', '關閉');
+    closeBtn.type = 'button';
+    closeBtn.addEventListener('click', dismiss);
+    foot.appendChild(closeBtn);
+    modal.appendChild(foot);
+
+    backdrop.appendChild(modal);
+    close.addEventListener('click', dismiss);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
+    document.addEventListener('keydown', onKey);
+    activeModal = dismiss;
+    document.body.appendChild(backdrop);
+  }
+
   /* Build the 狀態 chip (+ short last-result message) for a job. `st` = the /status entry
-     ({running,queued,last_run}) when known, else null; `fallbackLast` = the jobs-GET `last`
-     used before the first status poll. Both last-run shapes are normalized. */
-  function statusChip(st, fallbackLast) {
+     ({running,queued,progress,last_run}) when known, else null; `fallbackLast` = the
+     jobs-GET `last` used before the first status poll. Both last-run shapes are
+     normalized. FU-D46: 執行中 rows append the live progress sub-text; terminal chips
+     become clickable -> the detail modal. */
+  function statusChip(jobId, st, fallbackLast) {
     const wrap = el('div', 'run-status');
     if (st && st.running) {
       wrap.appendChild(_pill('pill-run', '執行中'));
+      if (st.progress) {
+        const p = el('div', 'run-msg run-progress', st.progress);
+        p.title = st.progress;
+        wrap.appendChild(p);
+      }
       return wrap;
     }
     if (st && st.queued) {
@@ -131,9 +300,19 @@
     if (status === 'skipped') { cls = 'pill-off'; label = '略過'; }
     else if (ok) { cls = 'pill-ok'; label = '成功'; }
     const pill = _pill(cls, label);
-    if (msg) pill.title = msg;
+    pill.title = msg ? msg + '（點擊查看詳情）' : '點擊查看詳情';
     wrap.appendChild(pill);
     if (msg) { const m = el('div', 'run-msg', msg); m.title = msg; wrap.appendChild(m); }
+    /* FU-D46: the whole terminal chip (pill + message) opens the detail modal. The
+       handler lives on the wrap, which is replaced wholesale on every repaint —
+       no accumulating listeners. Click or Enter (keyboard reachable). */
+    wrap.style.cursor = 'pointer';
+    wrap.setAttribute('role', 'button');
+    wrap.setAttribute('tabindex', '0');
+    wrap.addEventListener('click', () => openRunModal(jobId, lr));
+    wrap.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openRunModal(jobId, lr); }
+    });
     return wrap;
   }
   function _pill(cls, label) {
@@ -149,7 +328,7 @@
     const ref = rowRefs.get(jobId);
     if (!ref) return;
     const st = statusByJob[jobId] || null;
-    ref.statusSlot.replaceChildren(statusChip(st, ref.lastSeed));
+    ref.statusSlot.replaceChildren(statusChip(jobId, st, ref.lastSeed));
     if (ref.runBtn) ref.runBtn.disabled = !!(st && (st.running || st.queued));
   }
 

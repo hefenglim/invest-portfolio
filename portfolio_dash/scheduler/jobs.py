@@ -5,12 +5,14 @@ business logic. This module is import-safe without APScheduler so it is fully
 unit-testable; the APScheduler wiring lives in ``runtime.py``.
 """
 
+import inspect
 import logging
 import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from portfolio_dash.llm_insight import alerts_bridge
 from portfolio_dash.ops import backup as backup_ops
@@ -96,6 +98,7 @@ def digest_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     runner = _DIGEST_RUNNER
     if runner is None:
         return "no digest runner registered"
+    set_progress("digest_daily", "組裝每日收盤摘要")
     return str(runner(conn, "daily", now=now))
 
 
@@ -104,6 +107,7 @@ def digest_weekly(conn: sqlite3.Connection, *, now: datetime) -> str:
     runner = _DIGEST_RUNNER
     if runner is None:
         return "no digest runner registered"
+    set_progress("digest_weekly", "組裝每週行動清單")
     return str(runner(conn, "weekly", now=now))
 
 
@@ -304,23 +308,39 @@ def _summarize(summary: RefreshSummary) -> str:
     return " ".join(parts)
 
 
-def refresh_quotes_for(conn: sqlite3.Connection, market: Market, *, now: datetime) -> str:
-    """Refresh latest quotes + FX for one market's instruments."""
+def refresh_quotes_for(
+    conn: sqlite3.Connection,
+    market: Market,
+    *,
+    now: datetime,
+    progress_job_id: str | None = None,
+) -> str:
+    """Refresh latest quotes + FX for one market's instruments.
+
+    FU-D46: when invoked as a scheduled job the caller passes its ``progress_job_id``
+    so the in-flight registry shows the stage. Providers batch latest quotes per
+    market (one routed call for the whole list), so one honest stage message —
+    no fake per-symbol counter.
+    """
     instruments, fx_pairs = build_worklist(conn, market)
+    if progress_job_id is not None:
+        set_progress(
+            progress_job_id, f"擷取 {market.value} 報價＋匯率（{len(instruments)} 檔）"
+        )
     summary = refresh_quotes(conn, default_registry(conn), instruments, fx_pairs, now=now)
     return _summarize(summary)
 
 
 def quotes_tw(conn: sqlite3.Connection, *, now: datetime) -> str:
-    return refresh_quotes_for(conn, Market.TW, now=now)
+    return refresh_quotes_for(conn, Market.TW, now=now, progress_job_id="quotes_tw")
 
 
 def quotes_us(conn: sqlite3.Connection, *, now: datetime) -> str:
-    return refresh_quotes_for(conn, Market.US, now=now)
+    return refresh_quotes_for(conn, Market.US, now=now, progress_job_id="quotes_us")
 
 
 def quotes_my(conn: sqlite3.Connection, *, now: datetime) -> str:
-    return refresh_quotes_for(conn, Market.MY, now=now)
+    return refresh_quotes_for(conn, Market.MY, now=now, progress_job_id="quotes_my")
 
 
 def _refresh_benchmark_history(conn: sqlite3.Connection, start: date, *, now: datetime) -> str:
@@ -344,11 +364,24 @@ def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Backfill a recent history window for all instruments + benchmarks (FU-D27).
 
     Deep backfill is manual; this is the recent-window sweep. Benchmarks share the same
-    7-day window and degrade silently.
+    7-day window and degrade silently. FU-D46: the registry routes quote HISTORY
+    per instrument anyway (``Registry.fetch_quote_history`` is a per-ref loop), so the
+    loop lives here and reports honest per-symbol progress; per-ref summaries merge
+    into the same single summary as the old one-call form.
     """
     instruments, _ = build_worklist(conn, None)
     start = (now - timedelta(days=_HISTORY_LOOKBACK_DAYS)).date()
-    summary = refresh_history(conn, default_registry(conn), instruments, start, now=now)
+    registry = default_registry(conn)
+    ok: dict[str, str] = {}
+    failed: list[str] = []
+    total = len(instruments)
+    for i, ref in enumerate(instruments, start=1):
+        set_progress("history_daily", f"回補 {ref.symbol} ({i}/{total})")
+        s = refresh_history(conn, registry, [ref], start, now=now)
+        ok.update(s.ok)
+        failed.extend(s.failed)
+    summary = RefreshSummary(ok=ok, failed=failed, fetched_at=now)
+    set_progress("history_daily", "回補基準指數")
     bench = _refresh_benchmark_history(conn, start, now=now)
     return f"{_summarize(summary)} · benchmarks: {bench}"
 
@@ -356,6 +389,7 @@ def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
 def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Sweep dividend/ex-div events for all instruments."""
     instruments, _ = build_worklist(conn, None)
+    set_progress("dividends_daily", f"掃描 {len(instruments)} 檔股利事件")
     summary = refresh_dividends(conn, default_registry(conn), instruments, now=now)
     return _summarize(summary)
 
@@ -393,6 +427,7 @@ def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> str:
     runner = _SNAPSHOT_RUNNER
     if runner is None:
         return "no snapshot runner registered"
+    set_progress("snapshot_monthly", "寫入本月 KPI 快照")
     return str(runner(conn, now=now))
 
 
@@ -421,11 +456,13 @@ def signal_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     runner = _SIGNAL_SCAN_RUNNER
     if runner is None:
         return "no signal scan runner registered"
+    set_progress("signal_scan", "掃描技術訊號")
     return str(runner(conn, now=now))
 
 
 def dividend_inbox_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Daily: refresh dividend events for acquired symbols + report pending count."""
+    set_progress("dividend_inbox_scan", "掃描配息事件")
     runner = _DIVIDEND_SCAN_RUNNER
     if runner is not None:
         return str(runner(conn, now=now))
@@ -482,6 +519,7 @@ def _run_ingest(
     failure escalates health only when THIS run makes the trailing error streak reach the
     threshold (spec 20.12). Either way the exception re-raises for the ``job_runs`` log.
     """
+    set_progress(job_id, "擷取外部快照資料")
     try:
         written = fn()
         return f"{written} snapshot(s) written"
@@ -625,6 +663,7 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     per (rule, symbol), 24h-debounced. Returns a short summary for the ``job_runs`` detail.
     """
     alerts_bridge.ensure_tables(conn)
+    set_progress("alert_scan", "計算預警規則")
     alerts = _compute_alerts_for_scan(conn, now=now)
     rules_seen: list[str] = []
     for alert in alerts:
@@ -637,6 +676,7 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     runner = _INSIGHT_RUNNER
     dispatched = 0
     if runner is not None:
+        set_progress("alert_scan", "派發 AI 預警卡")
         dispatched = alerts_bridge.dispatch_alert_events(conn, runner, now=now)
     else:
         # No runner wired (scheduler-only process): still consume events so they do not
@@ -647,6 +687,7 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     # enabled channels. Uses the SEPARATE notified_at marker (independent of `consumed`
     # above). Wrapped so a push-path failure can never fail the alert scan itself.
     try:
+        set_progress("alert_scan", "推播通知")
         notify_detail = notify_dispatch.dispatch_notifications(conn, now=now)
     except Exception as exc:  # noqa: BLE001 - the push path must never break the scan
         logger.warning("notify dispatch failed in alert_scan: %s", exc)
@@ -674,6 +715,7 @@ def evaluate_insights(conn: sqlite3.Connection, *, now: datetime) -> str:
     runner = _EVALUATION_RUNNER
     if runner is None:
         return "no evaluate runner registered"
+    set_progress("evaluate_insights", "評分到期洞察")
     runner(conn, now=now)
     return "evaluate pass complete"
 
@@ -688,17 +730,47 @@ def generate_calibrations(conn: sqlite3.Connection, *, now: datetime) -> str:
     runner = _CALIBRATION_RUNNER
     if runner is None:
         return "no calibration runner registered"
+    set_progress("generate_calibrations", "產生校準版本")
     runner(conn, now=now)
     return "calibration pass complete"
 
 
+def _accepts_progress(fn: Callable[..., object]) -> bool:
+    """True when *fn* can take a ``progress`` keyword (additive runner seam, FU-D46).
+
+    Signature inspection keeps the seam additive-safe: an older/stub runner without
+    the parameter is simply called without it (never a TypeError probe, which could
+    mask a genuine TypeError from inside the runner).
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # builtins / exotic callables — assume not
+        return False
+    return "progress" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
 def news_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Batch ④ nightly: run the news pipeline (discover→fetch→organize→store) via the
-    registered runner (``news_service.run_news_daily``). No runner wired → safe no-op."""
+    registered runner (``news_service.run_news_daily``). No runner wired → safe no-op.
+
+    FU-D46: when the registered runner accepts a ``progress`` keyword (the real
+    ``run_news_daily`` does — additive optional param), it receives a callback that
+    updates this job's in-flight progress message per pipeline step; a stub/legacy
+    runner without the parameter is called exactly as before.
+    """
     runner = _NEWS_RUNNER
     if runner is None:
         return "no news runner registered"
-    result = runner(conn, now=now)
+    set_progress("news_daily", "執行新聞管線")
+    kwargs: dict[str, Any] = {"now": now}
+    if _accepts_progress(runner):
+        def _report(msg: str) -> None:
+            set_progress("news_daily", msg)
+
+        kwargs["progress"] = _report
+    result = runner(conn, **kwargs)
     if isinstance(result, dict):
         return (f"news: organized {result.get('organized', 0)}, "
                 f"headline {result.get('headline_only', 0)}, "
@@ -724,6 +796,7 @@ def backup_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     trailing consecutive-failure streak had already reached the threshold on prior runs,
     logs a best-effort 3-consecutive-fail warning. Returns a short ``job_runs.detail``.
     """
+    set_progress("backup_daily", "資料庫完整性檢查")
     ok, detail = backup_ops.check_integrity()
     if not ok:
         logger.warning("backup_daily integrity_check failed: %s", detail)
@@ -733,6 +806,7 @@ def backup_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
             "backup_daily recovered after %d+ consecutive failed run(s); backup resuming",
             _FAIL_STREAK_THRESHOLD,
         )
+    set_progress("backup_daily", "寫入備份檔")
     path = backup_ops.backup_database(now=now)
     return f"backup ok -> {path.name}"
 
@@ -946,6 +1020,40 @@ def _backfill_benchmarks(
         return "error"
 
 
+# FU-D46: the pseudo job id backfill progress reports under. The manual action
+# (POST /api/actions/backfill-history) runs synchronously on the request thread and is
+# NOT marked in the in-flight registry, so these calls are no-ops there today; any
+# future wrapper that marks this id (async backfill) lights them up unchanged.
+_BACKFILL_PROGRESS_ID = "backfill_history"
+
+
+def _backfill_prices_per_symbol(
+    conn: sqlite3.Connection,
+    registry: Registry,
+    groups: list[tuple[date, list[InstrumentRef]]],
+    total: int,
+    *,
+    now: datetime,
+) -> RefreshSummary:
+    """Per-symbol price backfill over ``(start, refs)`` groups, reporting progress.
+
+    ``Registry.fetch_quote_history`` routes per instrument anyway, so single-ref calls
+    are behaviorally identical to the old batched call; the loop lives here purely so
+    每檔 progress (「回補 {sym} (i/n)」) is honest. Summaries merge into one.
+    """
+    ok: dict[str, str] = {}
+    failed: list[str] = []
+    done = 0
+    for start, refs in groups:
+        for ref in refs:
+            done += 1
+            set_progress(_BACKFILL_PROGRESS_ID, f"回補 {ref.symbol} ({done}/{total})")
+            s = refresh_history(conn, registry, [ref], start, now=now)
+            ok.update(s.ok)
+            failed.extend(s.failed)
+    return RefreshSummary(ok=ok, failed=failed, fetched_at=now)
+
+
 def backfill_history_all(
     conn: sqlite3.Connection, *, now: datetime, days: int | None = None
 ) -> str:
@@ -963,9 +1071,13 @@ def backfill_history_all(
     default_start = (now - timedelta(days=default_days)).date()
 
     if days is not None:
-        p_summary = refresh_history(conn, registry, instruments, default_start, now=now)
+        p_summary = _backfill_prices_per_symbol(
+            conn, registry, [(default_start, instruments)], len(instruments), now=now
+        )
+        set_progress(_BACKFILL_PROGRESS_ID, "回補匯率")
         f_summary = refresh_fx_history(conn, registry, fx_pairs, default_start, now=now)
         # Benchmarks (FU-D27): uniform-window explicit-days runs use the same window.
+        set_progress(_BACKFILL_PROGRESS_ID, "回補基準指數")
         b_summary = _backfill_benchmarks(conn, registry, default_start, now=now)
         return (
             f"prices: {_summarize(p_summary)} · fx: {_summarize(f_summary)} · "
@@ -978,20 +1090,18 @@ def backfill_history_all(
         first = acq.get(ref.symbol)
         start = min(default_start, first) if first is not None else default_start
         by_start.setdefault(start, []).append(ref)
-    p_ok: dict[str, str] = {}
-    p_failed: list[str] = []
-    for start, refs in sorted(by_start.items()):
-        s = refresh_history(conn, registry, refs, start, now=now)
-        p_ok.update(s.ok)
-        p_failed.extend(s.failed)
-    p_summary = RefreshSummary(ok=p_ok, failed=p_failed, fetched_at=now)
+    p_summary = _backfill_prices_per_symbol(
+        conn, registry, sorted(by_start.items()), len(instruments), now=now
+    )
 
     flow = earliest_ledger_flow(conn)
     fx_start = min(default_start, flow) if flow is not None else default_start
+    set_progress(_BACKFILL_PROGRESS_ID, "回補匯率")
     f_summary = refresh_fx_history(conn, registry, fx_pairs, fx_start, now=now)
     # Benchmarks (FU-D27): no acquisition date — backfill from the earliest ledger flow
     # (like the FX pairs) so the "all" TWR window has a benchmark on the portfolio's full
     # span; the floor otherwise. Silent-degrade — a benchmark fetch never fails the job.
+    set_progress(_BACKFILL_PROGRESS_ID, "回補基準指數")
     b_summary = _backfill_benchmarks(conn, registry, fx_start, now=now)
     return (
         f"prices: {_summarize(p_summary)} · fx(from {fx_start.isoformat()}): "
@@ -1003,36 +1113,69 @@ def _jobs_by_id() -> dict[str, JobSpec]:
     return {j.id: j for j in JOBS}
 
 
-# --- In-flight job registry (FU-D36) ------------------------------------------
-# A process-local set of the job_ids whose func is EXECUTING right now, so the status
+# --- In-flight job registry (FU-D36 / FU-D46) ---------------------------------
+# A process-local map of the job_ids whose func is EXECUTING right now, so the status
 # endpoint (api/routers/scheduler.py::job_status) can honestly distinguish 執行中 (the
 # func is running) from 已排入 (a run row exists but the worker has not picked it up
 # yet — the brief window between ``start_job_run`` on the request thread and the daemon
 # thread marking itself running). Both the synchronous cron path (:func:`run_job`) and
 # the async manual path (:func:`run_job_func`) mark/clear it; a lock guards every access.
+# FU-D46: the value carries ``{since, progress}`` — jobs update ``progress`` mid-run via
+# :func:`set_progress` so the status endpoint can show WHAT a running job is doing.
 # This is bookkeeping only — no business logic, never persisted (a process restart clears
 # it, which is correct: a dropped daemon thread is not still running).
 _INFLIGHT_LOCK = threading.Lock()
-_INFLIGHT_JOBS: set[str] = set()
+
+
+@dataclass
+class _Inflight:
+    """Registry value: when the func started executing + its live progress message."""
+
+    since: str
+    progress: str | None = None
+
+
+_INFLIGHT_JOBS: dict[str, _Inflight] = {}
 
 
 def _mark_running(job_id: str) -> None:
-    """Mark a job as executing (idempotent under the lock)."""
+    """Mark a job as executing (idempotent under the lock; a re-mark resets progress)."""
     with _INFLIGHT_LOCK:
-        _INFLIGHT_JOBS.add(job_id)
+        _INFLIGHT_JOBS[job_id] = _Inflight(since=datetime.now(UTC).isoformat())
 
 
 def _clear_running(job_id: str) -> None:
     """Clear a job's executing mark (no-op if absent). Call ONLY after the run row is
-    finalized, so the status endpoint never briefly reads a finished run as 已排入."""
+    finalized, so the status endpoint never briefly reads a finished run as 已排入.
+    Clearing drops the progress message too — progress can never outlive the run."""
     with _INFLIGHT_LOCK:
-        _INFLIGHT_JOBS.discard(job_id)
+        _INFLIGHT_JOBS.pop(job_id, None)
+
+
+def set_progress(job_id: str, msg: str) -> None:
+    """Update a RUNNING job's live progress message (FU-D46). Lock-guarded.
+
+    A strict no-op when the job is not marked in-flight (e.g. the same function
+    invoked synchronously outside the run wrappers), so wiring progress calls into
+    shared code paths is always safe. Transient bookkeeping only — never persisted;
+    it dies with the run (:func:`_clear_running`).
+    """
+    with _INFLIGHT_LOCK:
+        entry = _INFLIGHT_JOBS.get(job_id)
+        if entry is not None:
+            entry.progress = msg
 
 
 def running_job_ids() -> set[str]:
     """A thread-safe snapshot copy of the job_ids whose func is executing right now."""
     with _INFLIGHT_LOCK:
         return set(_INFLIGHT_JOBS)
+
+
+def running_progress() -> dict[str, str | None]:
+    """Thread-safe snapshot: running job_id -> its current progress message (or None)."""
+    with _INFLIGHT_LOCK:
+        return {job_id: entry.progress for job_id, entry in _INFLIGHT_JOBS.items()}
 
 
 def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
@@ -1183,6 +1326,7 @@ def run_insight_func(insight_type_id: int, *, now: datetime, run_id: int) -> Non
         job_id = insight_job_id(insight_type_id)
         _mark_running(job_id)
         try:
+            set_progress(job_id, "產生 AI 洞察卡")
             with session() as conn:
                 runner(conn, insight_type_id, now=now, run_id=run_id)
         finally:
@@ -1255,10 +1399,18 @@ def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int
             )
             _record_skipped_overlap(conn, job_id, payload, now=now)
             return None
+        # FU-D46: mark the cron-fired insight run in the in-flight registry too (the
+        # manual path marks in run_insight_func) so the status endpoint shows 執行中 +
+        # progress uniformly regardless of the trigger.
+        _mark_running(job_id)
         try:
-            runner(conn, payload, now=now)
-        except Exception:  # noqa: BLE001 — a runner failure must never crash the scheduler
-            logger.exception("insight runner failed for %s", job_id)
+            set_progress(job_id, "產生 AI 洞察卡")
+            try:
+                runner(conn, payload, now=now)
+            except Exception:  # noqa: BLE001 — a runner failure must never crash the scheduler
+                logger.exception("insight runner failed for %s", job_id)
+        finally:
+            _clear_running(job_id)
         return None
     if job_id not in _jobs_by_id():
         logger.warning(

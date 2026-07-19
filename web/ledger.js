@@ -596,6 +596,14 @@
     await Promise.all([loadTx(), loadDiv(), loadFx(), loadOpen()]);
   }
 
+  /* FU-D45: live-refresh seam for the input panes (trades.html). After ANY successful
+     input commit, input.js calls this to re-fetch the ledger tables IN PLACE (current
+     account/date filters + page offsets preserved; NO page reload). All four panes
+     refresh — they share one filter state and a hidden pane must not go stale for the
+     next tab switch — so the ACTIVE tab always re-renders. A plain function assignment
+     (not addEventListener), so repeated calls/loads can never double-bind. */
+  window.pdLedgerRefresh = loadAll;
+
   /* pagers: pane hosts exist on trades.html only — guarded per the 略過 convention */
   if (window.pdPager) {
     const HOSTS = [

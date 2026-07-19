@@ -185,8 +185,9 @@ def test_status_shape_all_jobs_idle(
     jobs = body["jobs"]
     assert {"quotes_tw", "quotes_us", "quotes_my"} <= set(jobs)
     tw = jobs["quotes_tw"]
-    assert set(tw) == {"running", "queued", "last_run"}
+    assert set(tw) == {"running", "queued", "progress", "last_run"}
     assert tw["running"] is False and tw["queued"] is False and tw["last_run"] is None
+    assert tw["progress"] is None  # FU-D46: idle jobs carry no progress
 
 
 def test_status_queued_when_unfinished_row_but_not_inflight(
@@ -259,3 +260,136 @@ def test_status_last_run_prefers_latest_completed_over_shadow(
     golden_db.commit()
     tw = api_client.get("/api/scheduler/status").json()["jobs"]["quotes_tw"]
     assert tw["last_run"]["ok"] is True and tw["last_run"]["message"] == "3 ok, 0 failed"
+
+
+# --- FU-D46: progress + duration_seconds + honest cost block -------------------
+
+
+def test_status_progress_served_while_running(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A running job's live progress message rides the status payload; idle jobs None."""
+    import portfolio_dash.scheduler.jobs as J
+
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, status) "
+        "VALUES ('history_daily','2026-06-11T14:00:00+08:00','running')"
+    )
+    golden_db.commit()
+    J._mark_running("history_daily")
+    J.set_progress("history_daily", "回補 2330 (3/18)")
+    try:
+        body = api_client.get("/api/scheduler/status").json()
+    finally:
+        J._clear_running("history_daily")
+    job = body["jobs"]["history_daily"]
+    assert job["running"] is True
+    assert job["progress"] == "回補 2330 (3/18)"
+    assert body["jobs"]["quotes_tw"]["progress"] is None
+
+
+def test_status_last_run_duration_seconds_and_no_cost_for_non_llm(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """duration_seconds is server-computed; a non-LLM job kind serves cost = None."""
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
+        "VALUES ('quotes_my','2026-06-10T17:30:06+08:00',"
+        "'2026-06-10T17:30:36+08:00','ok','3 ok, 0 failed')"
+    )
+    golden_db.commit()
+    my = api_client.get("/api/scheduler/status").json()["jobs"]["quotes_my"]
+    assert my["last_run"]["duration_seconds"] == 30.0
+    assert my["last_run"]["cost"] is None
+
+
+def _usage_row(
+    conn: sqlite3.Connection, ts: str, agent: str, cost: str, tin: int, tout: int
+) -> None:
+    conn.execute(
+        "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost) "
+        "VALUES (?,?,?,?,?,?)",
+        (ts, "test-model", agent, tin, tout, cost),
+    )
+
+
+def test_status_cost_block_news_window_sum_honest(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """news_daily cost = sum of news_organize llm_usage rows INSIDE the run window only;
+    other agents and out-of-window rows are excluded. Decimal-string math, no floats."""
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
+        "VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
+        "'2026-06-11T06:10:00+08:00','ok','news: organized 2')"
+    )
+    _usage_row(golden_db, "2026-06-11T06:02:00+08:00", "news_organize", "0.010", 100, 50)
+    _usage_row(golden_db, "2026-06-11T06:08:30+08:00", "news_organize", "0.002", 10, 5)
+    _usage_row(golden_db, "2026-06-11T07:00:00+08:00", "news_organize", "9", 999, 999)
+    _usage_row(golden_db, "2026-06-11T06:05:00+08:00", "insight_generate", "5", 500, 500)
+    golden_db.commit()
+    lr = api_client.get("/api/scheduler/status").json()["jobs"]["news_daily"]["last_run"]
+    assert lr["cost"] == {
+        "cost_usd": "0.012",
+        "tokens_in": 110,
+        "tokens_out": 55,
+        "calls": 2,
+        "source": "usage_window",
+    }
+
+
+def test_status_cost_none_when_llm_job_made_no_calls(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """An LLM-capable job whose window saw zero usage rows honestly serves no block."""
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
+        "VALUES ('digest_daily','2026-06-11T15:10:00+08:00',"
+        "'2026-06-11T15:10:05+08:00','ok','daily digest: 3 blocks')"
+    )
+    golden_db.commit()
+    lr = api_client.get("/api/scheduler/status").json()["jobs"]["digest_daily"]["last_run"]
+    assert lr["cost"] is None
+
+
+def test_status_insight_cost_from_run_row(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """insight:* runs serve the EXACT cost_usd their runner recorded on the run row."""
+    golden_db.execute(
+        "INSERT INTO schedule_config (job_id, enabled, cron, timezone, kind, payload) "
+        "VALUES ('insight:7', 1, '0 9 * * *', 'Asia/Taipei', 'insight', '7')"
+    )
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, cost_usd) "
+        "VALUES ('insight:7','2026-06-11T09:00:00+08:00',"
+        "'2026-06-11T09:00:40+08:00','ok','2 card(s)','0.05')"
+    )
+    golden_db.commit()
+    lr = api_client.get("/api/scheduler/status").json()["jobs"]["insight:7"]["last_run"]
+    assert lr["cost"] == {
+        "cost_usd": "0.05",
+        "tokens_in": None,
+        "tokens_out": None,
+        "calls": None,
+        "source": "run_row",
+    }
+    assert lr["duration_seconds"] == 40.0
+
+
+def test_status_insight_zero_cost_run_serves_no_block(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A zero-cost insight run (skipped / no calls) serves no cost block (not $0 noise)."""
+    golden_db.execute(
+        "INSERT INTO schedule_config (job_id, enabled, cron, timezone, kind, payload) "
+        "VALUES ('insight:8', 1, '0 9 * * *', 'Asia/Taipei', 'insight', '8')"
+    )
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, cost_usd) "
+        "VALUES ('insight:8','2026-06-11T09:00:00+08:00',"
+        "'2026-06-11T09:00:01+08:00','skipped','already_running','0')"
+    )
+    golden_db.commit()
+    lr = api_client.get("/api/scheduler/status").json()["jobs"]["insight:8"]["last_run"]
+    assert lr["cost"] is None

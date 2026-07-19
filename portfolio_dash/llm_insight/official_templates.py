@@ -20,7 +20,7 @@ from typing import Literal, TypedDict
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v7 (2026-07-18)"
+LIBRARY_VERSION = "official-v8 (2026-07-19)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -43,7 +43,10 @@ LIBRARY_VERSION = "official-v7 (2026-07-18)"
 # JSON braces so only those three placeholders interpolate. Extended for screenshots: an
 # attached broker-statement image may list MULTIPLE transactions, so the model must emit
 # one draft per visible row under the same JSON-only contract.
-AI_INPUT_PROMPT_VERSION = "v2"
+# v3 (FU-D41, 2026-07-19): explicit LOCAL-exchange-code rule — 「前天聯電買入1張」 on a TW
+# account must parse to 2303, never the US ADR ticker UMC; agents.py adds a matching
+# soft row-level format check post-parse (warning only, never rewrites the symbol).
+AI_INPUT_PROMPT_VERSION = "v3"
 AI_INPUT_PROMPT_BODY = (
     "<task>Extract stock transactions from the user's text and any attached statement\n"
     "screenshot into JSON.</task>\n"
@@ -61,7 +64,13 @@ AI_INPUT_PROMPT_BODY = (
     "</example_output>\n"
     "<rules>Return JSON only, no prose. account_id MUST be one of the ids listed in\n"
     "<accounts> (match the user's broker wording to the account name); never invent\n"
-    "an id. Dates resolve against <today>: a month/day without a year means the most\n"
+    "an id. symbol MUST be the LOCAL exchange code of the ACCOUNT's market, never a\n"
+    "cross-listed/ADR ticker from another exchange: a TW (TWD) account takes the\n"
+    "TWSE/TPEx numeric code (聯電⇒2303, 台積電⇒2330, 鴻海⇒2317 — NEVER US tickers\n"
+    "like UMC/TSM even if the company also trades as a US ADR); a US (USD) account\n"
+    "takes the US ticker (AAPL); a MY (MYR) account takes the Bursa numeric code\n"
+    "(e.g. 1155). A Chinese company name on a TW account always maps to its numeric\n"
+    "code. Dates resolve against <today>: a month/day without a year means the most\n"
     "recent PAST occurrence (a trade date is never in the future); relative words\n"
     "(今天/昨天/上週五) resolve from <today>. One draft per transaction — text may\n"
     "contain several. An attached screenshot is a broker statement that may list\n"
@@ -146,6 +155,30 @@ AI_SECTOR_PROMPT = (
     "『完全一致』（大小寫、空格、字元皆同）。無法判斷時回傳 \"Unclassified\"。"
     "不得杜撰清單以外的類別，不得輸出任何數字或金額。</rules>\n"
     "<example_output>{{\"sector\": \"Technology\"}}</example_output>\n"
+    "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
+)
+
+# AI symbol-resolve prompt (api/routers/instruments.py::ai_resolve, FU-D42c). When the
+# quick-add dialog's REAL provider lookup finds nothing (查無報價), the DEFAULT role maps the
+# user's raw input (company name / wrong-form ticker such as a US ADR code) to the target
+# market's LOCAL exchange code + name — the same code rules as the AI-input parse prompt
+# (FU-D41). The reply is a SUGGESTION only: the dialog always re-runs the real lookup, which
+# stays the registration authority (invariant: the LLM never supplies a number of record;
+# a symbol/name identification is qualitative). ``.format`` placeholders: {query} {market};
+# the ``{{`` / ``}}`` escape the literal JSON braces in the example.
+AI_SYMBOL_RESOLVE_PROMPT_VERSION = "v1"
+AI_SYMBOL_RESOLVE_PROMPT = (
+    "<task>你是股票代號判讀助理。使用者輸入了一段可能是公司名稱、俗稱或錯誤形式的代號"
+    "（例如把台股打成美股 ADR 代號），請判讀他在目標市場中實際想指的股票，回傳該市場的"
+    "『當地交易所代號』與正式名稱。</task>\n"
+    "<input>使用者輸入：{query}\n目標市場：{market}</input>\n"
+    "<rules>symbol 必須是目標市場的當地交易所代號 — TW（台股）：TWSE/TPEx 數字代號"
+    "（聯電⇒2303、台積電⇒2330、鴻海⇒2317，絕不可回傳 UMC/TSM 等美股 ADR 代號）；"
+    "US（美股）：美股代號（如 AAPL）；MY（馬股）：Bursa 數字代號（如 1155）。"
+    "name 為該股票的正式名稱。無法判讀時 symbol 回傳空字串，不得亂猜。"
+    "不得輸出任何價格或數字資料；你的回覆僅是建議，系統會以真實報價查核，"
+    "查核不通過即不採用。</rules>\n"
+    '<example_output>{{"symbol": "2303", "name": "聯電"}}</example_output>\n'
     "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
 )
 
@@ -563,6 +596,19 @@ PROMPT_REGISTRY: list[PromptRegistryEntry] = [
         "default_constant": "AI_SECTOR_PROMPT",
         "storage": "",
         "call_site": "api/routers/instruments.py:ai_sector",
+    },
+    # FU-D42c (r5 wave W-AI) — 「AI 判讀代號」 fallback when the quick-add dialog's real
+    # lookup finds nothing. Suggestion only: the real provider lookup re-verifies before any
+    # registration (the quote check stays the typo authority).
+    {
+        "key": "ai_symbol_resolve",
+        "feature": "AI 代號判讀（原始輸入＋目標市場 → 當地交易所代號＋名稱，查價覆核）",
+        "tier": "code-owned",
+        "version": AI_SYMBOL_RESOLVE_PROMPT_VERSION,
+        "agent": "ai_symbol_resolve",
+        "default_constant": "AI_SYMBOL_RESOLVE_PROMPT",
+        "storage": "",
+        "call_site": "api/routers/instruments.py:ai_resolve",
     },
 ]
 

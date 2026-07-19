@@ -786,93 +786,11 @@
     });
   }
 
-  /* ============ H. 股利區 ============ */
-  function renderDividendChips() {
-    const wrap = $('#div-chips');
-    wrap.replaceChildren();
-    Object.keys(D.dividends.total_by_currency).forEach((ccy) => {
-      const chip = el('span', 'ccy-chip');
-      chip.appendChild(el('span', null, ccy + ' '));
-      chip.appendChild(el('b', null, f.money(D.dividends.total_by_currency[ccy], ccy)));
-      wrap.appendChild(chip);
-    });
-  }
-
-  function renderExDivCalendar() {
-    const list = $('#exdiv-list');
-    list.replaceChildren();
-    const sum = $('#exdiv-summary');
-    if (sum) sum.replaceChildren();
-    /* E3: 列表/月曆雙視圖切換 */
-    ensureExdivToggle();
-    if (!D.ex_dividend_calendar || D.ex_dividend_calendar.length === 0) {
-      list.appendChild(emptyState('近期無除息事件'));
-      if (sum) sum.appendChild(el('span', null, '近期無除息事件'));
-      return;
-    }
-    if (sum) {
-      const next = D.ex_dividend_calendar[0];
-      const chip = el('span', 'ccy-chip');
-      chip.appendChild(el('span', null, '下次除息 '));
-      chip.appendChild(el('b', null, f.date(next.ex_date) + ' ' + next.name));
-      sum.appendChild(chip);
-      sum.appendChild(el('span', null, '共 ' + D.ex_dividend_calendar.length + ' 筆'));
-      /* F5: 年度股利現金流預估（已宣告事件 × 持有股數，各幣別分列、不可加總） */
-      const proj = {};
-      D.ex_dividend_calendar.forEach((e2) => {
-        const held = D.holdings.find((h) => h.symbol === e2.symbol);
-        if (held && e2.cash_amount) {
-          proj[e2.currency] = (proj[e2.currency] || 0) + held.shares * e2.cash_amount;
-        }
-      });
-      Object.keys(proj).forEach((ccy) => {
-        const pchip = el('span', 'ccy-chip');
-        pchip.title = '年內已宣告除息事件 × 目前持有股數（稅前估算）；各幣別分列，不可跨幣加總';
-        pchip.appendChild(el('span', null, '年內股利預估 '));
-        pchip.appendChild(el('b', null, f.money(proj[ccy], ccy) + ' ' + ccy));
-        sum.appendChild(pchip);
-      });
-    }
-    if (exdivView === 'month') { renderExDivMonth(list); return; }
-    D.ex_dividend_calendar.forEach((e) => {
-      const item = el('div', 'exdiv-item');
-      const dt = el('div', 'exdiv-date');
-      dt.appendChild(el('span', 'mm', e.ex_date.slice(0, 7)));
-      dt.appendChild(el('span', 'dd', e.ex_date.slice(8, 10)));
-      dt.title = '除息日 ' + f.date(e.ex_date);
-      item.appendChild(dt);
-      const main = el('div', 'exdiv-main');
-      const sym = el('div', 'exdiv-sym sym-link');
-      sym.title = '點擊查看個股詳情';
-      sym.addEventListener('click', () => {
-        if (window.openSymbolDrawer) window.openSymbolDrawer(e.symbol);
-      });
-      sym.appendChild(el('span', 'sym-code', e.symbol));
-      sym.appendChild(el('span', 'sym-name', e.name));
-      main.appendChild(sym);
-      main.appendChild(el('span', 'exdiv-pay', '發放日 ' + f.date(e.pay_date)));
-      /* A3: 入帳預覽 — 持倉標的預估入帳金額與調整均價影響 */
-      const held = D.holdings.find((h) => h.symbol === e.symbol);
-      if (held && e.cash_amount) {
-        const est = held.shares * e.cash_amount;
-        let preview = '預估入帳 ' + f.money(est, e.currency) + ' ' + e.currency;
-        if (held.account_id === 'tw_broker') {
-          const newAvg = (held.adjusted_cost_total - est) / held.shares;
-          preview += '・沖減後調整均價 ' + f.price(held.adjusted_avg, e.currency) + ' → ' + f.price(newAvg, e.currency);
-        } else if (held.account_id === 'schwab' || held.account_id === 'moomoo_my_us') {
-          preview += '（稅前；預扣 30% 後約 ' + f.money(est * 0.7, e.currency) + '）';
-        }
-        main.appendChild(el('span', 'exdiv-preview', preview));
-      }
-      item.appendChild(main);
-      const amt = el('div', 'exdiv-amt');
-      const a = el('span', 'a', f.price(e.cash_amount, e.currency));
-      amt.appendChild(a);
-      amt.appendChild(el('span', 'c', e.currency + ' / 股'));
-      item.appendChild(amt);
-      list.appendChild(item);
-    });
-  }
+  /* ============ H. 股利區 ============
+     REMOVED (FU-D47, 2026-07-19): the legacy 年度股利 chips + 除息日曆 (list/month views,
+     client-side 入帳預覽/年內預估 float math) were consolidated into the single
+     #dividend-income-card surface rendered by dividends-card.js — which composes ONLY
+     server-computed Decimal strings (dividend_projection replaces the client estimates). */
 
   /* ============ I. AI 洞察 ============ */
   function renderInsights() {
@@ -968,79 +886,6 @@
     return wrap;
   }
   window.emptyState = emptyState;
-
-  /* ============ E3: 除息月曆視圖 ============ */
-  let exdivView = 'list';
-  function ensureExdivToggle() {
-    if (document.getElementById('exdiv-toggle')) return;
-    const sum = $('#exdiv-summary');
-    if (!sum || !sum.parentElement) return;
-    const seg = el('div', 'segmented');
-    seg.id = 'exdiv-toggle';
-    seg.style.marginLeft = '10px';
-    const bList = el('button', exdivView === 'list' ? 'active' : '', '列表');
-    bList.type = 'button';
-    const bMonth = el('button', exdivView === 'month' ? 'active' : '', '月曆');
-    bMonth.type = 'button';
-    bList.addEventListener('click', () => { exdivView = 'list'; bList.classList.add('active'); bMonth.classList.remove('active'); renderExDivCalendar(); });
-    bMonth.addEventListener('click', () => { exdivView = 'month'; bMonth.classList.add('active'); bList.classList.remove('active'); renderExDivCalendar(); });
-    seg.appendChild(bList);
-    seg.appendChild(bMonth);
-    sum.parentElement.appendChild(seg);
-  }
-
-  function renderExDivMonth(host) {
-    /* months covered by events (ex_date 與 pay_date 都標) */
-    const months = [];
-    D.ex_dividend_calendar.forEach((e) => {
-      [e.ex_date, e.pay_date].forEach((d) => {
-        if (d) { const m = d.slice(0, 7); if (!months.includes(m)) months.push(m); }
-      });
-    });
-    months.sort();
-    const wrap = el('div', 'exdiv-months');
-    months.forEach((m) => {
-      const [yy, mm] = m.split('-').map(Number);
-      const first = new Date(Date.UTC(yy, mm - 1, 1));
-      const daysIn = new Date(Date.UTC(yy, mm, 0)).getUTCDate();
-      const startDow = first.getUTCDay(); /* 0=Sun */
-      const monthBox = el('div', 'exdiv-month');
-      monthBox.appendChild(el('div', 'exm-title', yy + ' 年 ' + mm + ' 月'));
-      const grid = el('div', 'exm-grid');
-      ['日', '一', '二', '三', '四', '五', '六'].forEach((d) => grid.appendChild(el('span', 'exm-dow', d)));
-      for (let i = 0; i < startDow; i++) grid.appendChild(el('span', 'exm-cell empty'));
-      for (let d = 1; d <= daysIn; d++) {
-        const dateStr = m + '-' + String(d).padStart(2, '0');
-        const cell = el('span', 'exm-cell');
-        cell.appendChild(el('span', 'exm-day', String(d)));
-        const today = (D.as_of || '').slice(0, 10);
-        if (dateStr === today) cell.classList.add('today');
-        D.ex_dividend_calendar.forEach((e) => {
-          if (e.ex_date === dateStr) {
-            const chip = el('span', 'exm-ev ev-ex sym-link', e.symbol);
-            chip.title = e.name + ' 除息・每股 ' + f.price(e.cash_amount, e.currency) + ' ' + e.currency;
-            chip.addEventListener('click', () => { if (window.openSymbolDrawer) window.openSymbolDrawer(e.symbol); });
-            cell.appendChild(chip);
-          }
-          if (e.pay_date === dateStr) {
-            const chip = el('span', 'exm-ev ev-pay sym-link', e.symbol);
-            chip.title = e.name + ' 發放日';
-            chip.addEventListener('click', () => { if (window.openSymbolDrawer) window.openSymbolDrawer(e.symbol); });
-            cell.appendChild(chip);
-          }
-        });
-        grid.appendChild(cell);
-      }
-      monthBox.appendChild(grid);
-      wrap.appendChild(monthBox);
-    });
-    const legend = el('div', 'exm-legend');
-    legend.appendChild(el('span', 'exm-ev ev-ex', '除息日'));
-    legend.appendChild(el('span', 'exm-ev ev-pay', '發放日'));
-    legend.appendChild(el('span', null, '點擊代號開啟個股詳情'));
-    host.appendChild(wrap);
-    host.appendChild(legend);
-  }
 
   /* ============ E6: 鍵盤導航 (j/k/↑/↓ 移動、Enter 開抽屜) ============ */
   let kbIndex = -1;
@@ -1207,8 +1052,6 @@
     renderCashMini();
     renderSnapshots();
     renderRealized();
-    renderDividendChips();
-    renderExDivCalendar();
     renderInsights();
     renderFreshness();
     wireExports();

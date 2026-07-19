@@ -72,10 +72,20 @@
   }
   .cash-help { padding: 0 var(--pad) 12px; font-size: 10.5px; color: var(--text-3); }
   /* FU-D34: 換匯中心 可用餘額 ceiling line + inline oversell error (amber = the app's
-     warning language, theme-aware via --amber; NOT the red/green P&L axis). */
+     warning language, theme-aware via --amber; NOT the red/green P&L axis).
+     FU-D43a reuses the same classes for the 出金 賬戶現金 line (#cm-balance/#cm-amt-err). */
   .cfx-balance { font-size: 10.5px; color: var(--text-3); margin-top: 4px; font-family: var(--font-num); }
   .cfx-balance.warn { color: var(--amber); font-weight: 700; }
   .cfx-amt-err { font-size: 10.5px; color: var(--amber); font-weight: 700; margin-top: 3px; }
+  /* FU-D43b: the balance FIGURE is a max-fill affordance (dotted underline + pointer +
+     title 「點擊帶入全額」); theme-aware via currentColor — works in both themes. */
+  .cfx-balance .can-fill { cursor: pointer; text-decoration: underline dotted currentColor; text-underline-offset: 2px; }
+  .cfx-balance .can-fill:hover { color: var(--text); }
+  /* FU-D43c: server-computed FX estimate caption + the 重新試算 re-run affordance. */
+  .cfx-estimate { font-size: 10.5px; color: var(--text-3); margin-top: 4px; }
+  .cfx-reestimate { font-size: 10.5px; color: var(--accent); background: transparent;
+    border: none; padding: 0; margin-top: 3px; cursor: pointer; text-decoration: underline dotted currentColor; text-underline-offset: 2px; align-self: flex-start; }
+  .cfx-reestimate:hover { filter: brightness(1.15); }
   .stmt-chip { font-size: 10px; padding: 0 8px; line-height: 17px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui); color: var(--text-2); }
   @media (max-width: 1100px) { .cash-cards { grid-template-columns: repeat(2, 1fr); } }
 </style>
@@ -163,6 +173,9 @@
         <div class="field">
           <label for="cm-amount">金額</label>
           <input class="input" id="cm-amount" type="number" step="0.01" min="0"></input>
+          <!-- FU-D43a: 出金 shows the pool's 賬戶現金 (the withdraw ceiling) + live oversell error -->
+          <div class="cfx-balance" id="cm-balance"></div>
+          <div class="cfx-amt-err" id="cm-amt-err" hidden="hidden"></div>
         </div>
         <div class="field">
           <label for="cm-note">備註（選）</label>
@@ -173,7 +186,7 @@
         <button class="btn btn-primary" id="cm-confirm" type="button">確認寫入</button>
       </div>
     </div>
-    <div class="cash-flows-note">會讓現金變負的寫入將先要求確認（通常代表漏記入金或換匯）。</div>
+    <div class="cash-flows-note">出金不可超過該帳戶的賬戶現金（不提供透支）；其他會讓現金變負的更正將先要求確認（通常代表漏記入金或換匯）。</div>
 
     <!-- C. 入金/出金紀錄 -->
     <section class="panel" data-screen-label="資金紀錄">
@@ -239,6 +252,9 @@
         <div class="field">
           <label for="cfx-to-amt">買入金額</label>
           <input class="input" id="cfx-to-amt" type="number" step="0.01" min="0"></input>
+          <!-- FU-D43c: server-computed estimate caption + manual-override re-run affordance -->
+          <div class="cfx-estimate" id="cfx-estimate" hidden="hidden"></div>
+          <button class="cfx-reestimate" id="cfx-reestimate" type="button" hidden="hidden">重新試算</button>
         </div>
       </div>
       <div class="fx-implied">
@@ -250,6 +266,26 @@
       </div>
     </div>
     <div class="cash-flows-note">賣出一種幣別、買入另一種；換匯會進入各資金池的收支明細與「交易帳本 › 換匯」（同一本帳）。</div>
+
+    <!-- FU-D40: the fx_conversions ledger, listed where the operator acts (same ledger as
+         交易帳本 › 換匯 — one book, two doors; edit/delete stays in 交易帳本). -->
+    <section class="panel" data-screen-label="換匯紀錄">
+      <div class="panel-head">
+        <h2 class="panel-title">換匯紀錄</h2>
+        <span class="panel-sub">與「交易帳本 › 換匯」同一本帳；編輯／刪除請至交易帳本</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>日期</th><th class="col-text">帳戶</th><th>賣出</th><th>買入</th><th>匯率</th>
+            </tr>
+          </thead>
+          <tbody id="cfx-ledger-body"></tbody>
+        </table>
+      </div>
+      <div id="cfx-ledger-pager" hidden="hidden"></div>
+    </section>
 
   </div>
 

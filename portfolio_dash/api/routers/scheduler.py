@@ -10,6 +10,7 @@ router computes no business numbers.
 import sqlite3
 import threading
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,7 @@ from portfolio_dash.scheduler.jobs import (
     latest_run_unfinished,
     run_job_func,
     running_job_ids,
+    running_progress,
     start_job_run,
 )
 from portfolio_dash.scheduler.runtime import reschedule_job
@@ -196,11 +198,114 @@ def run_job_now(
     return JSONResponse(status_code=202, content={"run_id": run_id, "job_id": job_id})
 
 
-def _status_last_run(row: Any) -> dict[str, Any]:
-    """Map a COMPLETED job_runs row to the FU-D36 ``last_run`` shape.
+# FU-D46 — honest LLM-cost attribution per job kind. Each LLM-bearing STATIC job maps to
+# the exact ``llm_usage.agent`` string(s) its run writes (they are 1:1 — no other code path
+# logs those agents), so summing usage rows inside the run's [started_at, finished_at]
+# window attributes that run's spend. Deliberate omissions:
+#   * ``insight:*`` runs — their runner already records the EXACT per-run spend on the
+#     ``job_runs.cost_usd`` column (served via the run-row path below; no window sum).
+#   * ``alert_scan`` — its on_alert dispatch spawns ``insight:*`` runs which record their
+#     own cost rows; window-summing ``insight_generate`` here would double-count them.
+#   * everything else — no LLM involvement, no cost block. Never guessed.
+_LLM_JOB_AGENTS: dict[str, list[str]] = {
+    "news_daily": ["news_organize"],
+    "digest_daily": ["digest_note"],
+    "digest_weekly": ["digest_note"],
+    "evaluate_insights": ["master_score"],
+    "generate_calibrations": ["master_calibrate", "master_validate"],
+}
+
+
+def _usage_window_cost(
+    conn: sqlite3.Connection, agents: list[str], started_at: str, finished_at: str
+) -> dict[str, Any] | None:
+    """Sum ``llm_usage`` calls/tokens/cost for *agents* within the run window, or None.
+
+    Aggregation of already-recorded audit numbers (same altitude as ``_duration_s``) —
+    the router computes no business numbers. Degrades to None (no cost block) on any
+    unparseable timestamp / missing table / malformed cost string, and when the window
+    saw ZERO calls (an LLM-capable run that made no calls honestly serves no block).
+    Cost is summed as Decimal and serialized as a string.
+    """
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = datetime.fromisoformat(finished_at)
+    except (TypeError, ValueError):
+        return None
+    placeholders = ",".join("?" for _ in agents)
+    try:
+        rows = conn.execute(
+            f"SELECT ts, input_tokens, output_tokens, cost FROM llm_usage "
+            f"WHERE agent IN ({placeholders})",
+            tuple(agents),
+        ).fetchall()
+    except sqlite3.Error:  # table absent (partial bootstrap) — no block, never a 500
+        return None
+    calls = tokens_in = tokens_out = 0
+    total = Decimal("0")
+    for row in rows:
+        try:
+            ts = datetime.fromisoformat(row["ts"])
+            in_window = start <= ts <= end
+        except (TypeError, ValueError):  # unparseable / naive-vs-aware mix — skip row
+            continue
+        if not in_window:
+            continue
+        try:
+            total += Decimal(row["cost"])
+        except (InvalidOperation, TypeError):
+            continue
+        calls += 1
+        tokens_in += int(row["input_tokens"] or 0)
+        tokens_out += int(row["output_tokens"] or 0)
+    if calls == 0:
+        return None
+    return {
+        "cost_usd": str(total),
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "calls": calls,
+        "source": "usage_window",
+    }
+
+
+def _cost_block(conn: sqlite3.Connection, job_id: str, row: Any) -> dict[str, Any] | None:
+    """The FU-D46 ``last_run.cost`` block for a completed run, or None (omitted).
+
+    ``insight:*`` → the run row's own exact ``cost_usd`` (written by the insight runner;
+    tokens are not recorded per-run, so those fields are null). Mapped static LLM jobs →
+    the agent/window sum. Zero-cost run rows (skipped / no calls) serve no block.
+    """
+    if job_id.startswith("insight:"):
+        cost_usd = row["cost_usd"] if "cost_usd" in row.keys() else None
+        if cost_usd is None:
+            return None
+        try:
+            if Decimal(cost_usd) == 0:
+                return None
+        except (InvalidOperation, TypeError):
+            return None
+        return {
+            "cost_usd": cost_usd,
+            "tokens_in": None,
+            "tokens_out": None,
+            "calls": None,
+            "source": "run_row",
+        }
+    agents = _LLM_JOB_AGENTS.get(job_id)
+    if not agents or not row["finished_at"]:
+        return None
+    return _usage_window_cost(conn, agents, row["started_at"], row["finished_at"])
+
+
+def _status_last_run(conn: sqlite3.Connection, job_id: str, row: Any) -> dict[str, Any]:
+    """Map a COMPLETED job_runs row to the FU-D36/D46 ``last_run`` shape.
 
     ``ok`` is the boolean the chip keys off (green 成功 / red 失敗); ``status`` is passed
     through raw so the frontend can render the non-terminal ``skipped`` (略過) distinctly.
+    FU-D46 adds ``duration_seconds`` (server-computed) and the honest ``cost`` block
+    (null unless the run is LLM-bearing AND its spend is attributable — see
+    ``_LLM_JOB_AGENTS`` / ``_cost_block``).
     """
     return {
         "started_at": row["started_at"],
@@ -208,21 +313,27 @@ def _status_last_run(row: Any) -> dict[str, Any]:
         "status": row["status"],
         "ok": row["status"] == "ok",
         "message": row["detail"] or "",
+        "duration_seconds": _duration_s(row["started_at"], row["finished_at"]),
+        "cost": _cost_block(conn, job_id, row),
     }
 
 
 @router.get("/scheduler/status")
 def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-    """FU-D36 — per-job live run status for the 排程中心 poll (needs 七).
+    """FU-D36/D46 — per-job live run status for the 排程中心 poll (needs 七).
 
-    For every scheduled job → ``{running, queued, last_run}``. ``running`` = the func is
-    executing right now (the in-process registry). ``queued`` = a run row exists but is
-    not yet marked running (the 已排入 window between enqueue and the worker picking it
-    up). ``last_run`` = the latest COMPLETED run (finished_at set) so ok/message are always
-    meaningful; a job that never completed reports null. Shadow (Loop-4) and legacy
-    ``export:*`` rows are excluded, matching the /runs view. Cheap by design — two windowed
-    queries + a set snapshot — so the frontend polls it ONLY while something is active and
-    stops when ``active`` goes false. The router derives; it computes no business numbers.
+    For every scheduled job → ``{running, queued, progress, last_run}``. ``running`` = the
+    func is executing right now (the in-process registry). ``queued`` = a run row exists
+    but is not yet marked running (the 已排入 window between enqueue and the worker picking
+    it up). ``progress`` (FU-D46) = the running job's live stage message from the registry
+    (null when idle/queued or the job has not reported yet). ``last_run`` = the latest
+    COMPLETED run (finished_at set) so ok/message are always meaningful — with
+    ``duration_seconds`` and the honest ``cost`` block (see ``_cost_block``); a job that
+    never completed reports null. Shadow (Loop-4) and legacy ``export:*`` rows are
+    excluded, matching the /runs view. Cheap by design — two windowed queries + a registry
+    snapshot (+ a small usage-window sum only for the few LLM-kind jobs) — so the frontend
+    polls it ONLY while something is active and stops when ``active`` goes false. The
+    router derives; it computes no business numbers.
     """
     ensure_job_rows(conn)
     job_ids = [
@@ -243,14 +354,15 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     latest_done: dict[str, Any] = {
         r["job_id"]: r
         for r in conn.execute(
-            "SELECT jr.job_id, jr.started_at, jr.finished_at, jr.status, jr.detail "
-            "FROM job_runs jr "
+            "SELECT jr.job_id, jr.started_at, jr.finished_at, jr.status, jr.detail, "
+            "jr.cost_usd FROM job_runs jr "
             "JOIN (SELECT job_id, MAX(id) AS mid FROM job_runs "
             "      WHERE finished_at IS NOT NULL AND COALESCE(is_shadow, 0) = 0 "
             "      AND job_id NOT LIKE 'export:%' GROUP BY job_id) m ON jr.id = m.mid"
         )
     }
     running = running_job_ids()
+    progress_by_job = running_progress()
     jobs: dict[str, Any] = {}
     active = False
     for jid in job_ids:
@@ -264,7 +376,8 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         jobs[jid] = {
             "running": is_running,
             "queued": is_queued,
-            "last_run": _status_last_run(done) if done is not None else None,
+            "progress": progress_by_job.get(jid) if is_running else None,
+            "last_run": _status_last_run(conn, jid, done) if done is not None else None,
         }
     return {"jobs": jobs, "active": active}
 
