@@ -46,6 +46,7 @@
   /* Every interactive control of the two notify sections — disabled wholesale in the
      guest demo state so the UI never invites a write the backend will 403. */
   const CONTROL_IDS = [
+    'nt-base-url', 'nt-base-url-save',
     'nt-ntfy-enabled', 'nt-ntfy-server', 'nt-ntfy-topic', 'nt-ntfy-topic-copy',
     'nt-ntfy-token', 'nt-ntfy-test', 'nt-ntfy-save',
     'nt-tg-enabled', 'nt-tg-token', 'nt-tg-chat', 'nt-tg-test', 'nt-tg-save',
@@ -53,6 +54,44 @@
     'nt-em-pass', 'nt-em-from', 'nt-em-to', 'nt-em-test', 'nt-em-save',
     'nt-qh-enabled', 'nt-qh-start', 'nt-qh-end', 'nt-prefs-save',
   ];
+
+  /* FU-D17 — the public base URL field is built DYNAMICALLY here (settings.html is owned
+     by another wave; we never edit it). It is injected once into the 通知通道 section
+     (top-level: the URL feeds every channel's push deep links) with its own save button.
+     public_base_url is NOT a secret, so it round-trips in the clear. */
+  function ensureBaseUrlField() {
+    if ($('nt-base-url')) return;                 // idempotent: fill() runs on every PUT echo
+    const anchor = $('nt-ntfy-server');
+    const section = anchor && anchor.closest('section');
+    if (!section) return;
+    const block = el('div', 'nt-base-url-block');
+    const field = el('div', 'field span-2');
+    const label = el('label', null, '站台公開網址（推播點擊直達）');
+    label.htmlFor = 'nt-base-url';
+    field.appendChild(label);
+    const row = el('div', 'input-row');
+    const input = el('input', 'input');
+    input.id = 'nt-base-url';
+    input.spellcheck = false;
+    input.placeholder = 'https://invest.example.com';
+    const btn = el('button', 'btn btn-primary', '儲存');
+    btn.id = 'nt-base-url-save';
+    btn.type = 'button';
+    row.appendChild(input);
+    row.appendChild(btn);
+    field.appendChild(row);
+    field.appendChild(el('span', 'hint',
+      '站台公開網址，用於推播點擊直達，例如 https://invest.example.com（留空則推播不附連結）'));
+    block.appendChild(field);
+    const head = section.querySelector('.panel-head');
+    if (head && head.nextSibling) section.insertBefore(block, head.nextSibling);
+    else section.insertBefore(block, section.firstChild);
+    btn.addEventListener('click', () => doSave(saveBaseUrl, '站台網址已儲存'));
+  }
+
+  function saveBaseUrl() {
+    return put({ public_base_url: getVal('nt-base-url').trim() });
+  }
 
   function applyGuestState() {
     if (!GUEST) return;
@@ -78,6 +117,8 @@
     const n = cfg.ntfy || {}, t = cfg.telegram || {}, e = cfg.email || {}, q = cfg.quiet_hours || {};
     /* Guest wire shape: no full topic — only topic_masked/topic_set (read secret). */
     GUEST = !('topic' in n) && (('topic_set' in n) || ('topic_masked' in n));
+    ensureBaseUrlField();                       // FU-D17: build the field before disabling
+    setVal('nt-base-url', cfg.public_base_url); // not a secret — shown in the clear
     setToggle('nt-ntfy-enabled', n.enabled);
     setVal('nt-ntfy-server', n.server);
     if (GUEST) setVal('nt-ntfy-topic', n.topic_set ? (n.topic_masked || '•••') : '');

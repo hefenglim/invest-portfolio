@@ -50,7 +50,9 @@ def list_all(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             "settlement_ccy": a.settlement_ccy.value,
             "funding_ccy": a.funding_ccy.value,
             "div_model": div_model_wire(meta[a.account_id]["dividend_model"]),
-            "fee_rules": fee_rules_wire(get_fee_rule_set(meta[a.account_id]["fee_rule_set"])),
+            "fee_rules": fee_rules_wire(
+                get_fee_rule_set(meta[a.account_id]["fee_rule_set"], conn)
+            ),
         }
         for a in list_accounts(conn)
     ]

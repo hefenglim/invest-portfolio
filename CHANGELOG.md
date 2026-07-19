@@ -50,6 +50,79 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.20] - 2026-07-20
+
+Six follow-up rounds on the v0.1.19 surface (owner-driven; decision records FU-D1..D54 in
+`docs/reports/2026-07-1[5-9]-v0119-followups*-minispec.md`, one mini-spec per round).
+
+### Added
+- **Unified AI instrument resolve (FU-D50):** ONE `POST /api/instruments/ai-resolve` + one
+  code-owned prompt (`ai_instrument_resolve` v1; LIBRARY_VERSION official-v9) returning local
+  exchange code + name + GICS sector (+ optional industry) at temperature=0; confidence-gated
+  (high auto-fill / medium-low 2-5 candidates / honest not_found, never fabricated), always
+  provider-verified before auto-fill; auto-triggers in the shared quick-add dialog (manual /
+  AI-input / CSV entries) on format-fail or lookup miss; watchlist AI-sector button re-pointed
+  (`sector_only`). `/ai-sector` route removed. New `shared/symbol_format.py` = single source of
+  per-market code shapes (TW/US/MY).
+- **GICS 2023 sector vocabulary + real migration (FU-D51):** 11 sectors + ETF bucket +
+  Unclassified; Semiconductors→Information Technology, Shipping→Industrials (donut +
+  `sector_weight` alert regroup — a new 資訊科技 concentration alert on real data is the
+  expected consequence); idempotent boot-seam rewrite of stored sectors; new nullable
+  `instruments.industry` column end-to-end; goldens re-baselined (slice merges verified).
+- **Draft-preview what-if + account cash (FU-D53):** server-computed `position_preview`
+  (sell: cost_removed / realized_pnl / remain_shares — bit-identical to the booked-sell
+  arithmetic, cross-checked in tests; buy: new shares/averages) and a display-only
+  `account_cash` line on the manual preview.
+- **Trade-input aids (r5):** sell hints 可賣股數/持有均價 (click-fill, build_book replay),
+  ledger live refresh after every successful commit, dividend symbol picker (held +
+  show-closed toggle), AI-input vision + model picker + local-exchange-code prompt v3,
+  inline quick registration with auto-resume.
+- **資金管理 (r3-r6):** three tabs (pools/flows/fx); FX center balance display + click-to-fill
+  + server-side latest-rate estimate (as-of captioned; ledger records actual amounts) + FX
+  ledger list; hard no-overdraft guards for FX and withdrawals (422, incl. back-dated rows —
+  ack_negative removed on those paths); account switch clears amounts; sell/buy currencies
+  never equal; single-currency accounts get a disabled form with an inline reason (FU-D52).
+- **Dashboard (r3-r5):** consolidated 股利總覽 section (TTM received, yearly bars, forecast-only
+  estimate, ex-div calendar, payback strip — replaces the legacy dividend row + its frontend
+  float math), TWR benchmark overlay (0050 / S&P 500), target-price crossing alerts,
+  net-worth-incl-cash trend, per-account cash mini cards.
+- **Scheduler feedback (FU-D36 + r5):** run-now 排入→執行中(progress)→成功/失敗 across all jobs,
+  result detail modal (duration, output, honest LLM token/cost attribution), verified 前往 links.
+- **Watchlist lifecycle (r2-r4):** accumulative soft-delete (archive; restore triggers
+  background gap backfill), 3-tier deletion — permanent purge only for never-traded
+  watch-only symbols with type-the-symbol confirmation; deep links in push notifications;
+  資料中心 page (db stats); CSV import suite (per-kind templates, ambiguous-date chooser).
+- **Fee-rule center (r1, FU-D1):** editable per-account fee-rule overrides
+  (`fee_rule_overrides`, conn-aware `get_fee_rule_set` at every money path; reset = delete);
+  費率明細 page now data-driven from the API. Historical rows still governed by their
+  per-row `fee_rule_snapshot`.
+- **Site-wide prompt registry (FU-D30):** `PROMPT_REGISTRY` typed index over code-owned vs
+  user-editable prompts + completeness guard test pinning every LLM call site.
+- **Multi-user prep Phase 0 (FU-D39/D54):** DB-open-surface guardrail test (5 opens / 3 files
+  pinned); target blueprint revised to per-user folders (`user_trade/<UserLoginID>/ledger.db`
+  = unit of backup/restore). Physical splits deferred to their own batch.
+
+### Fixed
+- **Symbol fuzzy-coercion trap (FU-D49):** `difflib` ratio on 4-digit exchange codes scores
+  exactly 0.75 for any one-digit-apart pair, so unregistered codes coerced to registered
+  neighbours (live bug: 2303 聯電→2330, 2883 開發金→2882 — the LLM output was correct; the
+  local resolver rewrote it). Resolution is now EXACT-only for code-shaped input; the
+  「視為…（模糊比對）」 coercion class is removed; name-shaped input yields non-binding
+  NAME-only suggestions. Regression-pinned with the two real pairs.
+- 配股 (stock-dividend) entry buttons were dead in trades.html (ids never existed — STOCK
+  dividends silently booked as CASH); fixed + e2e-pinned (r3).
+- e2e harness: flow modules' socket teardown clobbered the session loopback window under
+  random ordering — self-healing `_assert_loopback_window()` at every socket-needing seam.
+- FX-form confirm could be silently re-enabled on single-currency accounts by late async
+  refreshes; `updFxBalance` now re-asserts the gate at every seam (invariant over ∨ single).
+
+### Changed
+- Contract changes recorded: FX conversions and withdrawals now HARD-block negative pools
+  (was confirmable), incl. back-dated rows; watchlist delete became archive (r2 hard-delete
+  superseded); `/api/instruments/ai-sector` merged into `/ai-resolve`; `ResolutionStatus.FUZZY`
+  removed. MY code format tightened to `^\d{4}$` (non-matching Bursa suffixes fall to the AI
+  flow; warning-only).
+
 ## [v0.1.19] - 2026-07-15
 
 ### Added

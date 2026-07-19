@@ -25,6 +25,15 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from portfolio_dash.llm_insight.official_templates import (
+    MASTER_CALIBRATION_SYSTEM as _CALIBRATION_SYSTEM,
+)
+from portfolio_dash.llm_insight.official_templates import (
+    MASTER_SCORE_SYSTEM as _SCORE_SYSTEM,
+)
+from portfolio_dash.llm_insight.official_templates import (
+    MASTER_VALIDATE_SYSTEM as _VALIDATE_SYSTEM,
+)
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.llm_config import LLMRole
 
@@ -49,54 +58,9 @@ _DENYLIST: tuple[str, ...] = (
     "停利",
 )
 
-# The §4.8 self-correct safety lock, carried in the calibration-generation system prompt.
-_CALIBRATION_SYSTEM = (
-    "<role>你是投資洞察系統的校正大師。你只負責改寫『敘事品質校正規則』，"
-    "絕不下達任何買賣、加減碼、調整持倉部位的越權建議，也絕不要求幣別混算。</role>\n"
-    "<safety_lock>\n"
-    "1. 校正規則只能附加/精煉：新增規則時必須重構並精簡既有邏輯，避免條款膨脹。\n"
-    "2. 全文總字數不得超過 600 字（精簡為先）。\n"
-    "3. 不得為了避免失誤而產出含糊、無預測價值的廢話；每條規則都要可檢驗。\n"
-    "4. 保留仍有效的條款，只修訂已失效的；個股層級的失誤寫成「（個股）…」條款。\n"
-    "5. 時效優先：校正規則應要求洞察標注資料基準日，並以近期資料為主要判讀依據。\n"
-    "</safety_lock>\n"
-    "<output>僅回傳 JSON：{\"body\": \"完整新版校正規則\", \"cause\": \"本次修訂原因\"}，"
-    "不要 Markdown 圍欄、不要額外散文。</output>"
-)
-
-# v2 rubric (2026-07-05 audit §2.4): the narrative score is Loop-3's LEARNING SIGNAL —
-# without dimensions/anchors/a miss definition, the calibration loop learns from noise.
-_SCORE_SYSTEM = (
-    "<role>你是投資洞察回測評分大師。輸入為一張到期洞察卡的原文、產卡當時的輸入快照、"
-    "以及到期時的實際結果。請依下列準則評估該卡的『敘事準確度』。</role>\n"
-    "<rubric>\n"
-    "四維度加權（總分 0-100）：\n"
-    "1. 方向正確性 40%：卡片的方向性判讀（偏多／偏空／觀望）與實際走勢的相符程度。\n"
-    "2. 數字引用正確性 30%：卡內引用的數字是否忠於產卡當時的輸入快照；"
-    "引用快照中不存在的數字＝捏造，重罰。\n"
-    "3. 條件情境效度 20%：卡片給的條件式情境（如「跌破 60 日均線宜重新評估」）"
-    "是否被實際走勢觸發且有效。\n"
-    "4. 時間性 10%：卡片是否標注資料基準日、結論是否與資料時效相符"
-    "（把過期資料當即時資料使用＝扣分）。\n"
-    "分數錨：90-100＝方向對、數字全對、情境被驗證；70-89＝方向對但有小瑕疵；"
-    "50-69＝方向模糊或部分引用有誤；30-49＝方向錯但有誠實的避險語；"
-    "0-29＝方向錯且引用捏造或誤導。\n"
-    "miss=true 的定義：方向判讀與實際走勢相反，或卡內出現快照中不存在的捏造數字。"
-    "資料不足以判定時維持 miss=false 並在 note 說明原因。\n"
-    "</rubric>\n"
-    "<rules>數字一律以輸入為準，不得自行捏造價格或報酬；只評敘事品質，不重算損益。"
-    "note 必須引用具體證據（卡內原句對照實際數字），不接受空泛評語。</rules>\n"
-    "<output>僅回傳 JSON："
-    "{\"narrative_score\": 0-100 整數, \"miss\": true|false, \"note\": \"具體證據簡評\"}，"
-    "不要 Markdown 圍欄、不要額外散文。</output>"
-)
-
-_VALIDATE_SYSTEM = (
-    "<role>你是校正規則安全審查員。審查一段候選校正規則是否越權"
-    "（下達買賣/加減碼/調整持倉等投資指令）或要求幣別混算。</role>\n"
-    "<output>僅回傳 JSON：{\"ok\": true|false, \"reasons\": [\"...\"]}；"
-    "ok=true 表示安全可採用。不要 Markdown 圍欄。</output>"
-)
+# The master-role system prompts (§4.8 safety lock, the v2 scoring rubric, the safety
+# validator) are code-owned and consolidated in ``official_templates`` (FU-D30); imported
+# above under their historical private names so the call sites below are unchanged.
 
 
 class _NarrativeScore(BaseModel):

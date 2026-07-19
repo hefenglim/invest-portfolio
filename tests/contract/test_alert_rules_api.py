@@ -15,6 +15,19 @@ def test_get_alert_rules(api_client: TestClient) -> None:
     assert rules["calib_gap"]["min"] == "5" and rules["calib_gap"]["max"] == "50"
     # calibration_regression stays a spec-04c EVENT (alert_events), NOT a rule here (W3).
     assert "calibration_regression" not in rules
+    # FU-D28: target_cross is a toggle-only rule (no numeric threshold — per-symbol targets).
+    assert rules["target_cross"]["value"] is None
+    assert rules["target_cross"]["unit"] is None
+    assert rules["target_cross"]["enabled"] is True
+
+
+def test_put_toggle_target_cross_off_round_trips(api_client: TestClient) -> None:
+    # FU-D28: the on/off toggle persists (value:null ignored — it is a toggle-only rule).
+    r = api_client.put("/api/alert-rules",
+                       json={"rules": [{"id": "target_cross", "enabled": False, "value": None}]})
+    assert r.status_code == 200
+    rules = {row["id"]: row for row in r.json()["rules"]}
+    assert rules["target_cross"]["enabled"] is False and rules["target_cross"]["value"] is None
 
 
 def test_put_alert_rules_merges_over_current(api_client: TestClient) -> None:

@@ -102,9 +102,12 @@ def test_smart_backfill_windows(
 
     detail = backfill_history_all(conn, now=_NOW)
 
+    # FU-D46: prices refresh per symbol (the registry routes per-ref anyway; the loop
+    # moved into jobs.py so per-symbol progress is honest) — the WINDOW math is unchanged.
     windows = {tuple(syms): start for syms, start in price_calls}
     assert windows[("OLD",)] == date(2024, 1, 10)          # extended to first buy
-    assert windows[("NEW", "WATCH")] == _DEFAULT_START     # default 12-month window
+    assert windows[("NEW",)] == _DEFAULT_START             # default 12-month window
+    assert windows[("WATCH",)] == _DEFAULT_START           # watch-only -> default window
     # FX from the earliest ledger flow (OLD's first buy, older than 12mo)
     assert fx_calls == [date(2024, 1, 10)]
     assert "fx(from 2024-01-10)" in detail

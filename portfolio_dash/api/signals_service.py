@@ -117,8 +117,12 @@ def _registered_symbols(conn: sqlite3.Connection) -> list[str]:
     ``signal_scan`` universe (P2 batch 3). A watched symbol is an entry candidate: its
     signals / TechScore / transition events matter exactly as a held one's do (a golden
     cross on a watchlist name IS the build-a-position moment). Technical signals are
-    symbol-level, so this enumerates instruments directly (no ``build_dashboard``)."""
-    return sorted({i.symbol for i in list_instruments(conn)})
+    symbol-level, so this enumerates instruments directly (no ``build_dashboard``).
+
+    Archived symbols (FU-D13) are excluded: a stopped-tracking name is no longer an entry
+    candidate, so it drops out of the scan + evaluate_all universe (its money still counts
+    everywhere else — archiving never touches the dashboard)."""
+    return sorted({i.symbol for i in list_instruments(conn) if not i.archived})
 
 
 def _account_ids(conn: sqlite3.Connection) -> list[str]:

@@ -1,19 +1,116 @@
-"""Transaction CSV importer: parse → validate → fee-compute → preview/commit."""
+"""Transaction CSV importer: parse → validate → fee-compute → preview/commit.
+
+Also hosts the SHARED import-seam helpers (FU-D19) used by every kind's importer via the
+router: :func:`canonical_header` (strip a template annotation from a column name) and
+:func:`normalize_import_csv` (canonicalize headers + resolve the date column to ISO, refusing
+to guess an ambiguous M/D-vs-D/M column).  The per-kind builders stay ISO-only; the router
+normalizes first, so annotated templates and Excel-reformatted dates parse through every kind.
+"""
 
 import csv
 import io
+import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
+from portfolio_dash.data_ingestion.dateparse import DateCandidate, resolve_date_column
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
-from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
+from portfolio_dash.data_ingestion.resolve import (
+    ResolutionStatus,
+    resolve,
+    suggestion_tail,
+)
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
 from portfolio_dash.shared.models.enums import Side
+
+# Canonical CSV column order for the transactions import — the SINGLE SOURCE the downloadable
+# template header is built from (see data_ingestion.import_templates). These names MUST match
+# the keys the DictReader in build_transaction_preview reads below (required: account, symbol,
+# side, date, shares, price; optional: fee, tax, daytrade, note). The round-trip guard test
+# re-parses the generated template to prove header ↔ parser stay in lockstep.
+TRANSACTION_COLUMNS: list[str] = [
+    "account", "symbol", "side", "date", "shares", "price",
+    "fee", "tax", "daytrade", "note",
+]
+
+# A column-name annotation from the downloadable template — half- or full-width parentheses,
+# e.g. ``date(YYYY-MM-DD)`` / ``fee（選填）``. Stripped so annotated templates parse like plain.
+_ANNOTATION_RE = re.compile(r"[(（][^)）]*[)）]")
+
+
+def canonical_header(name: str) -> str:
+    """Canonical column key: drop any parenthetical annotation (half/full-width) + surrounding
+    whitespace, then lowercase.  ``date(YYYY-MM-DD)`` -> ``date``, ``fee（選填）`` -> ``fee``, a
+    leading BOM + ``Account`` -> ``account``; a plain header is returned unchanged (byte-clean
+    templates stay byte-identical).  Applied at the import seam so annotated templates and
+    hand-typed casing both match the parsers' canonical column names."""
+    return _ANNOTATION_RE.sub("", name).lstrip("\ufeff").strip().lower()
+
+
+@dataclass(frozen=True)
+class DateAmbiguity:
+    """A column-level date ambiguity the user must resolve before any write (FU-D19)."""
+
+    column: str
+    samples: list[str]
+    candidates: list[DateCandidate]
+
+
+@dataclass(frozen=True)
+class NormalizedImport:
+    """Result of :func:`normalize_import_csv`: rewritten CSV text + any date ambiguity."""
+
+    text: str
+    ambiguity: DateAmbiguity | None
+
+
+def normalize_import_csv(
+    csv_text: str, date_col: str, *, date_format: str | None = None
+) -> NormalizedImport:
+    """Rewrite *csv_text* to canonical headers + ISO dates for the per-kind builder.
+
+    Headers are canonicalized (annotation + case stripped) so annotated templates parse; the
+    *date_col* is inferred at COLUMN level (:func:`dateparse.resolve_date_column`) and each cell
+    rewritten to ISO.  A genuine M/D-vs-D/M ambiguity is NOT guessed: ``ambiguity`` is returned
+    and the date cells are left as-is so the ISO-only builder errors each row until the caller
+    pins *date_format*.  A cell that does not parse under the resolved format is likewise left
+    as-is, so the builder reports the offending value per row (unchanged behaviour).
+
+    The AI path and the single-row forms already emit ISO -> the fast path leaves them intact.
+    """
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
+    fieldnames = reader.fieldnames
+    if not fieldnames:
+        return NormalizedImport(text=csv_text, ambiguity=None)  # header-only / empty: nothing to do
+    canon = [canonical_header(f) for f in fieldnames]
+    rows: list[dict[str, str]] = [
+        {canonical_header(k): (v or "").strip() for k, v in row.items() if k is not None}
+        for row in reader
+    ]
+
+    ambiguity: DateAmbiguity | None = None
+    if date_col in canon:
+        result = resolve_date_column([r.get(date_col, "") for r in rows], pinned=date_format)
+        if result.ambiguous:
+            ambiguity = DateAmbiguity(
+                column=date_col, samples=result.samples, candidates=result.candidates)
+        else:
+            for r, d in zip(rows, result.dates, strict=True):
+                if d is not None:
+                    r[date_col] = d.isoformat()
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf, fieldnames=canon, lineterminator="\r\n", extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return NormalizedImport(text=buf.getvalue(), ambiguity=ambiguity)
 
 
 def txn_preview_row(
@@ -39,26 +136,21 @@ def txn_preview_row(
     issues: list[Issue] = list(validate_transaction(conn, inp))
 
     # --- symbol resolution: write the RESOLVED symbol ---
-    # NEEDS_AI -> HARD issue (unregistered symbol: no quote ccy, not in the pricing
-    # worklist — the row would be uninterpretable; register first). FUZZY -> soft
-    # issue + resolved symbol (no silent phantom write); EXACT -> resolved symbol.
+    # EXACT -> rewrite the payload symbol to the registered symbol. NEEDS_AI (every
+    # non-exact outcome, R6-A) -> HARD issue (unregistered symbol: no quote ccy, not in
+    # the pricing worklist — the row would be uninterpretable; register first). The raw
+    # symbol is kept on the payload and non-binding name suggestions (if any) are
+    # appended to the message — the resolver never coerces a code to a near neighbour.
     res = resolve(conn, inp.symbol)
     symbol = inp.symbol
     if res.status is ResolutionStatus.NEEDS_AI:
+        message = f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊"
+        message += suggestion_tail(res.candidates)
         issues.append(
             Issue(
                 kind="symbol_unresolved",
                 needs_confirm=False,
-                message=f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊",
-            )
-        )
-    elif res.status is ResolutionStatus.FUZZY and res.instrument is not None:
-        symbol = res.instrument.symbol
-        issues.append(
-            Issue(
-                kind="fuzzy_resolved",
-                needs_confirm=True,
-                message=f"{inp.symbol} 視為 {res.instrument.symbol}（模糊比對，請確認）",
+                message=message,
             )
         )
     elif res.instrument is not None:  # EXACT
@@ -78,7 +170,7 @@ def txn_preview_row(
         # finding 2026-07-15): a registered instrument's is_etf wins; the input
         # flag only covers unregistered symbols (e.g. an AI draft pre-registration).
         is_etf = res.instrument.is_etf if res.instrument is not None else inp.is_etf
-        rules = get_fee_rule_set(acc["fee_rule_set"])
+        rules = get_fee_rule_set(acc["fee_rule_set"], conn)
         # FE-D2: Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure).
         stamp_fx: Decimal | None = None
         if rules.has_us_stamp:
@@ -147,7 +239,9 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
     Returns:
         :class:`ImportPreview` containing one :class:`PreviewRow` per data row.
     """
-    reader = csv.DictReader(io.StringIO(csv_text))
+    # lstrip a leading UTF-8 BOM: the downloadable template ships WITH a BOM (Excel), so a
+    # download->re-upload (or paste) round-trip must not turn the first header into a BOM+account.
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
     rows: list[PreviewRow] = []
 
     for idx, raw_row in enumerate(reader):

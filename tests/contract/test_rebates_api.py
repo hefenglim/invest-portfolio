@@ -9,6 +9,7 @@ that month is PENDING; drives the inbox endpoints. Confirm books a cash-pool CRE
 import sqlite3
 from datetime import date
 from decimal import Decimal
+from typing import cast
 
 from fastapi.testclient import TestClient
 
@@ -50,7 +51,57 @@ def test_list_shape_and_decimal_strings(
     # money/forecast are Decimal STRINGS: fee_total 142, expected floor(142×0.77)=109
     assert hit["fee_total"] == "142" and hit["expected"] == "109"
     assert hit["ccy"] == "TWD"
+    # FU-D6: the month carries a per-trade breakdown that sums to its own totals
+    assert len(hit["trades"]) == 1
     assert body["total_count"] >= 1 and body["skipped"] == []
+
+
+def test_trades_breakdown_shape_and_sum_invariants(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """FU-D6: rows carry a per-trade breakdown ordered by trade_date; Σ == month totals."""
+    insert_transaction(
+        golden_db, account_id=_TW, symbol="2330", side=Side.BUY, quantity=Decimal("1000"),
+        price=Decimal("500"), fees=Decimal("142"), tax=Decimal("0"),
+        trade_date=date(2026, 5, 5))
+    insert_transaction(
+        golden_db, account_id=_TW, symbol="2330", side=Side.SELL, quantity=Decimal("1000"),
+        price=Decimal("520"), fees=Decimal("156"), tax=Decimal("0"),
+        trade_date=date(2026, 5, 20))
+    hit = next(r for r in _rows(api_client)
+               if r["account_id"] == _TW and r["month"] == "2026-05")
+    trades = cast(list[dict[str, str]], hit["trades"])
+    assert len(trades) == 2
+    for t in trades:
+        assert set(t.keys()) == {"trade_date", "symbol", "name", "side", "fee", "expected"}
+    # ordered by trade_date ascending
+    assert [t["trade_date"] for t in trades] == ["2026-05-05", "2026-05-20"]
+    # instrument display name resolved once (2330 -> TSMC); side is the enum's wire value
+    assert trades[0]["name"] == "TSMC" and trades[0]["symbol"] == "2330"
+    assert trades[0]["side"] == "BUY" and trades[1]["side"] == "SELL"
+    # money is Decimal STRINGS; per-trade floor(fee×0.77): 142->109, 156->120
+    assert trades[0]["fee"] == "142" and trades[0]["expected"] == "109"
+    assert trades[1]["fee"] == "156" and trades[1]["expected"] == "120"
+    # INVARIANT: Σ trade.fee == month fee_total; Σ trade.expected == month expected
+    assert sum((Decimal(t["fee"]) for t in trades), Decimal("0")) == Decimal(str(hit["fee_total"]))
+    assert (sum((Decimal(t["expected"]) for t in trades), Decimal("0"))
+            == Decimal(str(hit["expected"])))
+    assert hit["fee_total"] == "298" and hit["expected"] == "229"
+
+
+def test_trade_name_falls_back_to_symbol(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A traded symbol with no instrument row shows the symbol itself as the name."""
+    insert_transaction(
+        golden_db, account_id=_TW, symbol="9999", side=Side.BUY, quantity=Decimal("100"),
+        price=Decimal("10"), fees=Decimal("100"), tax=Decimal("0"),
+        trade_date=date(2026, 5, 5))
+    hit = next(r for r in _rows(api_client)
+               if r["account_id"] == _TW and r["month"] == "2026-05")
+    trades = cast(list[dict[str, str]], hit["trades"])
+    t = next(x for x in trades if x["symbol"] == "9999")
+    assert t["name"] == "9999"
 
 
 def test_count_endpoint(api_client: TestClient, golden_db: sqlite3.Connection) -> None:
@@ -113,6 +164,8 @@ def test_skip_unskip_resurfaces(
     assert all(x["month"] != "2026-05" for x in body["rows"])
     sk = next(x for x in body["skipped"] if x["month"] == "2026-05")
     assert sk["account_id"] == _TW and sk["detail"]["expected"] == "109"
+    # skipped detail nests the same per-trade breakdown shape (FU-D6)
+    assert len(sk["detail"]["trades"]) == 1 and sk["detail"]["trades"][0]["fee"] == "142"
     u = api_client.post("/api/rebates/unskip", json={"account_id": _TW, "month": "2026-05"})
     assert u.status_code == 200 and u.json()["unskipped"] == 1
     assert any(x["month"] == "2026-05" for x in _rows(api_client))

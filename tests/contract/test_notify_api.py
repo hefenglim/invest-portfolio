@@ -141,6 +141,10 @@ def test_put_empty_string_clears_secret(client: TestClient, conn: sqlite3.Connec
     {"email": {"host": "user@smtp.example.com"}},
     {"email": {"host": "smtp.example.com:587"}},
     {"email": {"host": "smtp.exa mple.com"}},
+    # FU-D17: the public base URL must be empty or an http(s) URL — never a bare host.
+    {"public_base_url": "invest.example.com"},
+    {"public_base_url": "ftp://nope"},
+    {"public_base_url": "javascript:alert(1)"},
 ])
 def test_put_junk_400(client: TestClient, payload: dict[str, object]) -> None:
     r = client.put("/api/notify/config", json=payload)
@@ -158,6 +162,33 @@ def test_put_subscriptions_merge_and_ignore_junk(
     assert b["subscriptions"]["single_weight"] is False
     assert "bogus_rule" not in b["subscriptions"]  # junk keys ignored
     assert notify.load_config(conn).subscriptions.get("bogus_rule") is None
+
+
+# --- FU-D17: public base URL (deep links; NOT a secret) -------------------------
+
+
+def test_get_config_public_base_url_default_empty(client: TestClient) -> None:
+    b = client.get("/api/notify/config").json()
+    assert b["public_base_url"] == ""  # default: deep links off
+
+
+def test_put_public_base_url_strips_trailing_slash(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    r = client.put(
+        "/api/notify/config", json={"public_base_url": "https://invest.example.com/"}
+    )
+    assert r.status_code == 200
+    assert r.json()["public_base_url"] == "https://invest.example.com"  # trailing slash gone
+    assert notify.load_config(conn).public_base_url == "https://invest.example.com"
+
+
+def test_put_public_base_url_empty_clears(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    client.put("/api/notify/config", json={"public_base_url": "https://x.co"})
+    client.put("/api/notify/config", json={"public_base_url": ""})
+    assert notify.load_config(conn).public_base_url == ""
 
 
 def test_test_send_unconfigured_channel(client: TestClient) -> None:
@@ -205,6 +236,8 @@ def test_guest_get_masks_topic(guest_client: TestClient) -> None:
     # the rest of the read surface still works for the demo (catalog, subscriptions)
     assert len(b["rule_catalog"]) == len(notify.RULE_CATALOG)
     assert "token_masked" in n and "bot_token_masked" in b["telegram"]
+    # the public base URL is NOT a secret → exposed even to a demo visitor (FU-D17)
+    assert b["public_base_url"] == ""
 
 
 def test_protected_put_allowed(client: TestClient) -> None:

@@ -23,6 +23,37 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **The type gate must run BARE over the FULL scope, centrally (2026-07-20):** parallel
+  implementation agents each ran `mypy portfolio_dash --strict` (package only, ~210 files)
+  and reported clean; the central bare run (`mypy --no-incremental`, whole 522-file scope
+  incl. tests/scripts) still found 2 real errors in test files. Two causes recur: (a)
+  scoped runs skip tests/scripts entirely, (b) incremental caches mask errors after
+  cross-file edits. Rule: agent-level mypy is a smoke check; the shipping verdict comes
+  only from the orchestrator's bare, full-scope run.
+
+- **Markup↔JS id contracts silently dead-zone — sweep them mechanically (2026-07-20,
+  learned 2026-07-16):** JS that binds `#some-id` which no longer exists in the page
+  markup fails SILENTLY (the feature is simply dead — the CSV drop zone and the 配股
+  buttons both shipped dead this way). Unit and route tests cannot see it; only a
+  mechanical sweep (extract every id the JS binds, diff against the markup) or a
+  real-browser flow test catches the class. Rule: run the id-contract sweep before every
+  ship, and give every new interactive element an e2e flow assertion, not just an API test.
+
+- **Edit-distance similarity has no semantics for exchange codes — resolve exact-only
+  (2026-07-19):** the symbol resolver fuzzy-matched an unregistered code against
+  REGISTERED instruments with `difflib.SequenceMatcher` at a 0.75 threshold. Any two
+  4-digit codes differing in ONE digit score EXACTLY `2*3/8 = 0.75` (2303 vs 2330,
+  2883 vs 2882), so unrelated companies coerced into one another behind a 「視為」
+  confirmation the user waved through — the LLM's correct output (2303 聯電) was
+  overwritten by the local resolver. `ratio()` measures character overlap, which is
+  meaningless for opaque identifiers where a one-symbol difference is a DIFFERENT
+  entity, not a near-synonym. Rule: code-shaped input resolves EXACT-only and routes
+  unregistered symbols to the register-first flow; name-similarity survives only as
+  NON-BINDING suggestions (name-vs-name, never vs symbol), and the per-market code
+  SHAPE lives in one source (`shared/symbol_format.py`) so the gate, the format
+  warning, and the next-wave AI gate cannot drift. A regression test must pin the
+  actual 0.75-tie pairs, not a generic near-miss.
+
 - **Independently re-verify subagent gate claims; sanitize every user-derived HTTP
   header (2026-07-14):** one implementation agent reported "ruff clean" while 4 real
   violations existed (it likely ran the gate before its final edits) — a later agent

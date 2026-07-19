@@ -87,6 +87,21 @@ class ConsensusDelta(BaseModel):
     days_apart: int | None = None
 
 
+class TargetLevels(BaseModel):
+    """Per-symbol latest price + configured target band for ``target_cross`` (FU-D28; fed).
+
+    ``price`` is the latest stored close; ``target_low`` / ``target_high`` are the
+    instrument's configured alert levels (either may be unset). A missing price makes the
+    symbol silent; an unset level makes that leg non-firing. Both legs may fire at once for
+    pathological ``low > high`` data — that is the user's own band, reported honestly, not
+    clamped. All three are Decimals: the comparison is exact (never float).
+    """
+
+    price: Decimal | None = None
+    target_low: Decimal | None = None
+    target_high: Decimal | None = None
+
+
 # --- display formatting (FH2 fix, 2026-07-07) ----------------------------------
 # Alert title/detail are USER-FACING strings rendered verbatim by the topbar bell —
 # the app's first attention surface. They must read as product copy (中文, display-
@@ -136,6 +151,7 @@ def compute_alerts_from(
     symbol_metrics: dict[str, SymbolMetric] | None = None,
     target_weights: dict[str, Decimal] | None = None,
     consensus_deltas: dict[str, ConsensusDelta] | None = None,
+    target_levels: dict[str, TargetLevels] | None = None,
 ) -> list[Alert]:
     """Run the rule engine over the fed inputs; returns display-ready alerts.
 
@@ -151,8 +167,10 @@ def compute_alerts_from(
     The P3-batch-2 market-risk rules read three FED maps (assembled at the api/scheduler
     seam, never here — strategy/ cannot import pricing): ``symbol_metrics`` (per-symbol
     52-week drawdown + 30d/90d annualized vol), ``target_weights`` (symbol → ratio), and
-    ``consensus_deltas`` (latest-vs-7-day-older analyst consensus). An absent map / None
-    field means "insufficient data" → the rule is honestly silent for that symbol.
+    ``consensus_deltas`` (latest-vs-7-day-older analyst consensus). ``target_levels`` (FU-D28)
+    feeds ``target_cross`` the per-symbol latest price + configured target band the same way.
+    An absent map / None field means "insufficient data" → the rule is honestly silent for
+    that symbol.
     """
     alerts: list[Alert] = []
     as_of = data.as_of.date()
@@ -160,6 +178,7 @@ def compute_alerts_from(
     metrics = symbol_metrics or {}
     targets = target_weights or {}
     consensus = consensus_deltas or {}
+    levels = target_levels or {}
 
     if rules.single_weight.enabled and rules.single_weight.value is not None:
         thr = rules.single_weight.value
@@ -337,6 +356,31 @@ def compute_alerts_from(
                 title=f"{sym} 分析師共識轉弱",
                 detail="；".join(parts) + window,
                 href=f"/symbol/{sym}"))
+
+    # target_cross (FU-D28; held AND watch): the latest price crossed a PER-SYMBOL alert
+    # level. The thresholds live in the instruments table (target_low / target_high, edited on
+    # the 觀察清單 page), NOT in the rule config — so this rule is toggle-only. Boundary is
+    # INCLUSIVE both ways: price <= target_low → 跌破 (floor), price >= target_high → 突破
+    # (ceiling). Comparisons are Decimal-exact. A missing price skips the symbol; an unset level
+    # skips that leg. Both legs may fire for a pathological low > high band (the user's data,
+    # reported honestly). The two legs carry distinct id suffixes (:low / :high) so the scan
+    # debounces / notifies them independently.
+    if rules.target_cross.enabled and levels:
+        for sym, t in levels.items():
+            if t.price is None:
+                continue  # no stored price → cannot judge a cross → silent (never fabricated)
+            if t.target_low is not None and t.price <= t.target_low:
+                alerts.append(Alert(
+                    id=f"target_cross:{sym}:low", sev="warn", rule="target_cross",
+                    title=f"{sym} 跌破目標價",
+                    detail=f"現價 {t.price} ≤ 目標下限 {t.target_low}",
+                    href=f"/symbol/{sym}"))
+            if t.target_high is not None and t.price >= t.target_high:
+                alerts.append(Alert(
+                    id=f"target_cross:{sym}:high", sev="warn", rule="target_cross",
+                    title=f"{sym} 突破目標價",
+                    detail=f"現價 {t.price} ≥ 目標上限 {t.target_high}",
+                    href=f"/symbol/{sym}"))
 
     return alerts
 

@@ -10,11 +10,12 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 """
 
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
+    list_cash_movements,
     list_dividends,
     list_fx_conversions,
     list_instruments,
@@ -24,6 +25,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.forex.fx_pnl import compute_fx_summary
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.allocation import combined_view, sector_allocation
+from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard_models import (
     DashboardData,
@@ -39,6 +41,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     TrendSeries,
 )
 from portfolio_dash.portfolio.dividends import project_dividends
+from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.pnl import value_holdings
 from portfolio_dash.portfolio.results import CombinedView, ReturnSummary, SectorAllocation
 from portfolio_dash.portfolio.returns import total_return, xirr_reporting
@@ -61,6 +64,7 @@ from portfolio_dash.shared.models.ledger import (
     OpeningInventory,
     Transaction,
 )
+from portfolio_dash.shared.sectors import canonical_sector
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -172,8 +176,22 @@ def build_dashboard(
     except KeyError:
         returns = None
     allocation: SectorAllocation | None
+    # FU-D31 (P1①) / R6 (2026-07-19): canonicalize sectors at the donut GROUPING seam. Stored
+    # instrument rows ARE now migrated once at the schema/boot seam (R6,
+    # store.migrate_instrument_sectors), so most stored values are already canonical here; this
+    # read-time canonicalization is KEPT as defense-in-depth — a provider- or CSV-supplied
+    # synonym (or a value stored between boots) still groups correctly before the next boot
+    # migrates it. Both the sector-allocation donut AND the sector_weight alert group on THIS
+    # SectorAllocation (strategy/alerts.py reads data.allocation.weights), so this ONE
+    # canonicalization fixes both — verified single seam. Holding ROWS keep their (now usually
+    # already-canonical) stored sector, section 8 below; only the grouping is normalized.
+    # Canonical keys are English; zh display is deferred (see shared/sectors.py).
+    alloc_instruments = {
+        sym: inst.model_copy(update={"sector": canonical_sector(inst.sector)})
+        for sym, inst in instruments.items()
+    }
     try:
-        allocation = sector_allocation(valued, instruments, resolver.rate, reporting)
+        allocation = sector_allocation(valued, alloc_instruments, resolver.rate, reporting)
     except KeyError:
         allocation = None
     view: CombinedView | None
@@ -198,14 +216,17 @@ def build_dashboard(
         )
 
     xirr_value: Decimal | None = None
+    xirr_window_days: int | None = None
     xirr_reason: str | None = None
     if has_oversold:
         # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
         xirr_reason = "ledger has an oversold (賣超) position — 待釐清"
     else:
         try:
-            xirr_value = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
-                                        price_map, resolver.rate, as_of, reporting)
+            outcome = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
+                                     price_map, resolver.rate, as_of, reporting)
+            xirr_value = outcome.rate
+            xirr_window_days = outcome.window_days
         except KeyError as exc:
             xirr_reason = str(exc).strip("'\"")
     if xirr_value is None and xirr_reason is None:
@@ -230,8 +251,11 @@ def build_dashboard(
         fx_summary = None
 
     # 6. Dividend summary — cash actually received (incl. DRIP net), native ccy.
+    # ttm_cutoff bounds the trailing-12-month window (display-only attribution).
+    ttm_cutoff = as_of - timedelta(days=365)
     year_ccy: dict[int, dict[Currency, Decimal]] = {}
     total_ccy: dict[Currency, Decimal] = {}
+    ttm_ccy: dict[Currency, Decimal] = {}
     for dv in divs:
         if dv.type is DividendType.STOCK:
             continue  # 配股 adds shares, not cash
@@ -239,10 +263,13 @@ def build_dashboard(
         per_year = year_ccy.setdefault(dv.date.year, {})
         per_year[ccy] = per_year.get(ccy, _ZERO) + dv.net
         total_ccy[ccy] = total_ccy.get(ccy, _ZERO) + dv.net
+        if dv.date >= ttm_cutoff:
+            ttm_ccy[ccy] = ttm_ccy.get(ccy, _ZERO) + dv.net
     dividend_summary = DividendSummary(
         by_year=[DividendYearRow(year=y, by_currency=year_ccy[y])
                  for y in sorted(year_ccy)],
         total_by_currency=total_ccy,
+        ttm_net=ttm_ccy,
     )
 
     # 7. Ex-dividend calendar — held symbols, upcoming only.
@@ -310,6 +337,32 @@ def build_dashboard(
                                    fx_history, reporting, end=as_of)
         if not trend.available:
             trend_reason = "missing FX history for a ledger flow date"
+        else:
+            # 9b. Total net worth (FU-D29 / deferred C8): compose the UNCHANGED trend
+            # with a daily cash series. Cash is read from the SAME Stored rows the 資金管理
+            # /api/cash view uses (unregistered symbols skipped inside cash_balances,
+            # exactly as there), converted at carry-forward FX per day. Display-only
+            # attribution — no money-of-record path is touched.
+            cash_movements = list_cash_movements(conn)
+            cash_txs = list_transactions(conn)
+            cash_divs = list_dividends(conn)
+            cash_convs = list_fx_conversions(conn)
+            cash_ccys = {
+                ccy for _acct, ccy in cash_balances(
+                    cash_movements, cash_convs, cash_txs, cash_divs, instruments)
+            }
+            cash_fx_history: FxHistory = {}
+            for ccy in cash_ccys:
+                if ccy == reporting:
+                    continue
+                for base, quote in ((ccy, reporting), (reporting, ccy)):
+                    rows = get_fx_history(conn, base, quote, _EPOCH, as_of)
+                    if rows:
+                        cash_fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
+            cash_by_date = daily_cash_series(
+                cash_movements, cash_convs, cash_txs, cash_divs, instruments,
+                cash_fx_history, reporting, end=as_of)
+            trend = compose_net_worth(trend, cash_by_date)
     else:
         trend = TrendSeries(points=[], reporting_currency=reporting, available=False)
         trend_reason = "no ledger events"
@@ -341,6 +394,7 @@ def build_dashboard(
         realized_total=realized_total,
         unrealized_total=unrealized_total,
         xirr=xirr_value,
+        xirr_window_days=xirr_window_days,
         fx_realized=fx_summary.reporting_realized_fx if fx_summary is not None else None,
         fx_unrealized=(fx_summary.reporting_unrealized_fx
                        if fx_summary is not None else None),

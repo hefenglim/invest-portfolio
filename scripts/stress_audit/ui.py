@@ -62,7 +62,8 @@ class UiDriver:
 
     def cash_move(self, account_id, kind, ccy, d, amount):
         p = self.page
-        p.goto(self.base + "/cash.html", wait_until="load")
+        # FU-D25 split cash.html into tabs; #flows activates 出金入金 where the form lives.
+        p.goto(self.base + "/cash.html#flows", wait_until="load")
         p.wait_for_function(
             "() => document.querySelector('#cm-account') && "
             "document.querySelector('#cm-account').options.length > 0")
@@ -75,11 +76,21 @@ class UiDriver:
 
     def fx(self, account_id, d, from_ccy, from_amt, to_ccy, to_amt):
         p = self.page
-        p.goto(self.base + "/cash.html", wait_until="load")
+        # FU-D25: the FX form lives under the 換匯中心 tab (#fx).
+        p.goto(self.base + "/cash.html#fx", wait_until="load")
         p.wait_for_function(
             "() => document.querySelector('#cfx-account') && "
             "document.querySelector('#cfx-account').options.length > 0")
         p.select_option("#cfx-account", account_id)
+        # R6-D: a single-currency account (e.g. tw_broker) disables the ccy/amount
+        # controls -- callers MUST pass a two-currency account (schwab / moomoo_my_us).
+        # Wait for the controls to actually be enabled before touching them: the
+        # account switch's re-sync (clear amounts, dedupe ccy options, single-ccy
+        # gate) now runs on every #cfx-account change, and the default first option in
+        # the dropdown (tw_broker) is single-currency, so this also fails fast with a
+        # clear message if a caller ever passes a single-currency account by mistake,
+        # instead of a confusing Playwright action-timeout inside select_option below.
+        p.wait_for_function("() => !document.querySelector('#cfx-from-ccy').disabled")
         p.fill("#cfx-date", d)
         p.select_option("#cfx-from-ccy", from_ccy)
         p.fill("#cfx-from-amt", str(from_amt))

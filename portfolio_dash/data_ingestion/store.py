@@ -1,6 +1,7 @@
 """Instruments and transactions persistence helpers (data ingestion store)."""
 
 import json
+import logging
 import sqlite3
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -11,6 +12,9 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import from_db, to_db
+from portfolio_dash.shared.sectors import CANONICAL_KEYS, canonical_sector
+
+logger = logging.getLogger(__name__)
 
 # Transaction price precision cap (audit L11): cap to 4 dp on the way in — same
 # convention as pricing/store (ROUND_HALF_UP, CAP-not-pad; clean values are unchanged).
@@ -83,17 +87,20 @@ def upsert_instrument(conn: sqlite3.Connection, inst: Instrument) -> None:
     register_instrument and intentionally not written here (preserved on conflict)."""
     conn.execute(
         """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board,
-               target_low, is_etf)
-           VALUES (?,?,?,?,?,?,?,?)
+               target_low, target_high, is_etf, industry)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(symbol) DO UPDATE SET
                market=excluded.market, quote_ccy=excluded.quote_ccy,
                sector=excluded.sector, name=excluded.name, board=excluded.board,
-               target_low=excluded.target_low, is_etf=excluded.is_etf""",
+               target_low=excluded.target_low, target_high=excluded.target_high,
+               is_etf=excluded.is_etf, industry=excluded.industry""",
         (
             inst.symbol, inst.market.value, inst.quote_ccy.value,
             inst.sector, inst.name, inst.board,
             to_db(inst.target_low) if inst.target_low is not None else None,
+            to_db(inst.target_high) if inst.target_high is not None else None,
             1 if inst.is_etf else 0,
+            inst.industry,
         ),
     )
     conn.commit()
@@ -105,27 +112,198 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         quote_ccy=Currency(row["quote_ccy"]), sector=row["sector"], name=row["name"],
         board=row["board"] or "",
         target_low=from_db(row["target_low"]) if row["target_low"] else None,
+        target_high=from_db(row["target_high"]) if row["target_high"] else None,
         is_etf=bool(row["is_etf"]),
+        archived=bool(row["archived"]),
+        industry=row["industry"],
     )
 
 
 def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
-        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf "
-        "FROM instruments WHERE symbol=?",
+        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
+        "is_etf, archived, industry FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
     return _row_to_instrument(row) if row is not None else None
 
 
 def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
-    """Return all instruments in the database."""
+    """Return all instruments in the database (archived included; callers that must
+    exclude archived symbols — quote/signal/news fetch scopes — filter on ``.archived``,
+    never here: the dashboard / portfolio / exports keep seeing EVERY registered symbol
+    so no money figure is affected by archiving)."""
     rows = conn.execute(
-        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, is_etf "
-        "FROM instruments"
+        "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
+        "is_etf, archived, industry FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
+
+
+def migrate_instrument_sectors(conn: sqlite3.Connection) -> int:
+    """One-time idempotent rewrite of stored instrument sectors to the canonical GICS
+    vocabulary (R6, owner sign-off 2026-07-19). Runs on EVERY boot at the schema seam
+    (``schema.create_tables``); a no-op when every stored value is already canonical.
+
+    For each instruments row with a NON-EMPTY stored sector, ``new = canonical_sector(sector)``;
+    the row is UPDATEd only when ``new != stored`` AND ``new`` is a real canonical key — so a
+    known synonym is folded (``Semiconductors`` → ``Information Technology``, ``Shipping`` →
+    ``Industrials``, ``Healthcare`` → ``Health Care``) while an unrecognized value such as
+    ``Electronics`` is left untouched (never silently rebucketed). Blank/NULL sectors are
+    intentionally left as-is: they already group as ``Unclassified`` at read time, and keeping
+    them NULL preserves the "not yet classified" signal the next wave's AI sector fill relies
+    on (rewriting them to the literal ``"Unclassified"`` would destroy that signal). Returns the
+    number of rows rewritten; logs a single summary line when > 0.
+
+    Idempotent: a second run finds every value already canonical → 0 rewrites, no writes.
+    """
+    rows = conn.execute("SELECT symbol, sector FROM instruments").fetchall()
+    migrated = 0
+    for row in rows:
+        stored = row["sector"]
+        if stored is None or not stored.strip():
+            continue  # blank/NULL stays NULL (see docstring) — not rebucketed to Unclassified
+        new = canonical_sector(stored)
+        if new != stored and new in CANONICAL_KEYS:
+            conn.execute(
+                "UPDATE instruments SET sector=? WHERE symbol=?", (new, row["symbol"])
+            )
+            migrated += 1
+    if migrated:
+        conn.commit()
+        logger.info(
+            "migrated %d instrument sector(s) to the canonical GICS vocabulary", migrated
+        )
+    return migrated
+
+
+# ---------------------------------------------------------------------------
+# Watchlist deletion / archive (FU-D13; API path superseded by FU-D18)
+# ---------------------------------------------------------------------------
+# The instruments registry IS the watchlist. Ledger tables reference ``symbol`` with no
+# foreign keys, and the dashboard silently DROPS any ledger row whose symbol lacks an
+# instruments row from ALL computation — so a HARD delete of a symbol with history would
+# corrupt realized P&L / XIRR.
+#
+# FU-D18 (2026-07-17) makes watchlist deletion ACCUMULATIVE: the API DELETE now SOFT-deletes
+# EVERY non-held symbol (never-traded included) by setting ``archived=1`` — no data is ever
+# removed, and re-adding a symbol restores it and gap-backfills the missing price window. The
+# hard-delete ``delete_instrument`` below is RETAINED for internal / test use but is NO LONGER
+# routed (see its docstring). Only two API tiers remain:
+#   * currently held -> DELETE refused (422 ``held``); a held symbol is never archived,
+#   * everything else -> SOFT delete (archived=1), fully reversible.
+# Invariant "held => not archived" is enforced at the single booking seam below
+# (``insert_transaction`` / ``upsert_opening`` un-archive on any new booking).
+
+
+def has_ledger_history(conn: sqlite3.Connection, symbol: str) -> bool:
+    """Whether *symbol* appears in ANY permanent ledger (transactions / dividends /
+    opening_inventory) — the guard that forbids a hard delete (ledger integrity / 重算)."""
+    for sql in (
+        "SELECT 1 FROM transactions WHERE symbol=? LIMIT 1",
+        "SELECT 1 FROM dividends WHERE symbol=? LIMIT 1",
+        "SELECT 1 FROM opening_inventory WHERE symbol=? LIMIT 1",
+    ):
+        if conn.execute(sql, (symbol,)).fetchone() is not None:
+            return True
+    return False
+
+
+def set_instrument_archived(
+    conn: sqlite3.Connection, symbol: str, archived: bool
+) -> bool:
+    """Set (or clear) the archived flag on one instrument. Returns False if unknown."""
+    cur = conn.execute(
+        "UPDATE instruments SET archived=? WHERE symbol=?",
+        (1 if archived else 0, symbol),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """Whether a table exists — cleanup guards spare a fresh/partial DB (some derived
+    tables are created lazily by their own module's bootstrap)."""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+def _like_escape(value: str) -> str:
+    r"""Escape LIKE metacharacters (``\`` ``%`` ``_``) for use with ``ESCAPE '\'``."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def delete_instrument(
+    conn: sqlite3.Connection, symbol: str, *, preserve_market_data: bool = False
+) -> bool:
+    """Hard-delete a NEVER-TRADED watch-only symbol and its derived / cache rows, in ONE
+    transaction; audit the instruments row first (mirrors ``delete_opening``).
+
+    NOTE (FU-D18, 2026-07-17): the plain DELETE path is SOFT-delete-only
+    (``set_instrument_archived(True)``). This hard delete is routed ONLY by the FU-D32
+    「永久移除」 purge endpoint (``POST /api/instruments/{symbol}/purge``), which guarantees
+    the symbol is neither held nor carries ledger history before invoking it; it also remains
+    available for internal / test use (rebuild tooling, fixtures).
+
+    Cleaned in addition to the instruments row: ``prices``, ``dividend_events`` (both keyed
+    ``instrument``), ``signal_states`` / ``alert_events`` (keyed ``symbol``), any
+    ``pending_dividend_skips`` fingerprint for the symbol, and the symbol's entry in the
+    single-row ``target_weights_config`` JSON map. Raw SQL by table name keeps the cleanup
+    atomic without importing upward (data_ingestion imports no higher layer).
+
+    ``preserve_market_data`` (FU-D32 benchmark guard): when True, the market-data rows
+    (``prices`` / ``dividend_events``, keyed ``instrument``) are KEPT so a benchmark daily
+    series stored under this same ``prices.instrument`` key (``pricing/benchmarks.py`` — e.g.
+    ``"0050"``) survives the purge. The registry row AND every personal artifact
+    (``signal_states`` / ``alert_events`` / ``pending_dividend_skips`` / the target-weights
+    entry) are still removed. The purge route sets this for a symbol that is also a benchmark
+    storage key."""
+    _write_audit(
+        conn, "instruments", symbol, "delete",
+        _capture(conn, "SELECT * FROM instruments WHERE symbol=?", (symbol,)),
+    )
+    # Market-data tables are keyed ``instrument`` and shared with benchmark series; personal
+    # artifacts are keyed ``symbol`` and always cleaned. preserve_market_data keeps only the
+    # former (so a benchmark's daily-close series stored under the same key is not orphaned).
+    market_data = (("prices", "instrument"), ("dividend_events", "instrument"))
+    personal = (("signal_states", "symbol"), ("alert_events", "symbol"))
+    tables = personal if preserve_market_data else (*market_data, *personal)
+    for table, col in tables:
+        if _table_exists(conn, table):
+            conn.execute(f"DELETE FROM {table} WHERE {col}=?", (symbol,))  # noqa: S608 (fixed table/col literals)
+    if _table_exists(conn, "pending_dividend_skips"):
+        # fingerprint form: ``div:{account}:{symbol}:{ex_date}[:stock]`` (symbol = 3rd part).
+        conn.execute(
+            r"DELETE FROM pending_dividend_skips WHERE fingerprint LIKE ? ESCAPE '\'",
+            (f"div:%:{_like_escape(symbol)}:%",),
+        )
+    if _table_exists(conn, "target_weights_config"):
+        row = conn.execute(
+            "SELECT weights_json FROM target_weights_config WHERE id=1"
+        ).fetchone()
+        if row is not None and row[0]:
+            weights = json.loads(row[0])
+            if symbol in weights:
+                del weights[symbol]
+                conn.execute(
+                    "UPDATE target_weights_config SET weights_json=? WHERE id=1",
+                    (json.dumps(weights),),
+                )
+    cur = conn.execute("DELETE FROM instruments WHERE symbol=?", (symbol,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def _unarchive_on_booking(conn: sqlite3.Connection, symbol: str) -> None:
+    """Un-archive *symbol* on ANY new booking — the single write seam upholding the
+    "held => not archived" invariant across the manual, CSV, and opening-edit paths (they
+    all funnel through ``insert_transaction`` / ``upsert_opening``). No commit here: it
+    joins the caller's transaction (batch-import atomicity is preserved)."""
+    conn.execute(
+        "UPDATE instruments SET archived=0 WHERE symbol=? AND archived=1", (symbol,)
+    )
 
 
 def list_accounts(conn: sqlite3.Connection) -> list[Account]:
@@ -207,6 +385,7 @@ def insert_transaction(
             1 if daytrade else 0,
         ),
     )
+    _unarchive_on_booking(conn, symbol)  # held => not archived (FU-D13)
     if commit:
         conn.commit()
     return int(cur.lastrowid or 0)
@@ -274,6 +453,7 @@ def upsert_opening(
             build_date.isoformat(),
         ),
     )
+    _unarchive_on_booking(conn, symbol)  # held => not archived (FU-D13)
     if commit:
         conn.commit()
 

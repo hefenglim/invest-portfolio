@@ -249,6 +249,12 @@ $$\boxed{\text{fee} = \text{comm} + \text{platform} + \text{clearing} + \text{ss
 
 - **手動覆寫**：使用者於輸入／編輯時可顯式改寫 `fee` / `tax`；此時系統以覆寫值為準，並在 `snapshot`
   標記 `override: true`（見 §10 之 `_recompute_edit_fees`）。
+- **費率可調整（FU-D1，overlay）**：各規則集的費率／稅率／捨入方式可於「設定→帳戶與費率」調整，
+  由一層 DB overlay（`data_ingestion/fee_overrides.py`，表 `fee_rule_overrides`）疊加於 v2 種子預設之上；
+  **有效規則集＝v2 預設 ⊕ overlay**，於每個金額計算點 conn-aware 解析（`get_fee_rule_set(name, conn)`；
+  `conn=None` 恆回種子預設，供 oracle／單元測試）。調整**僅影響未來交易**——歷史列仍以其
+  `fee_rule_snapshot`（本節 §3、§10.2）為最終裁定，永不重算。重設語意：清空該欄位（null＝還原單一欄位）
+  或刪除整列 overlay（每規則集／全部重設）即回種子預設。
 - **fee-engine v2 已依 owner 完整費表實作（2026-07-15）**：`config_seed.py::FEE_RULES` 已載入
   `docs/reference/broker-fee-schedules-2026-07.md` 之完整費表；§3.1–§3.4 記述的即為 v2 引擎實際計算。先前 v1
   與費表之「已知分歧」（US `sec_fee` 0.0000278→0.0000206、TAF/CAT/平台/交收費、MY 結構、TW 捨入）**已於 v2
@@ -635,6 +641,21 @@ $$\text{declared\_gross}[ccy] = \sum \text{shares}_h \times \text{cash\_amount}_
 > **驗證錨點：無**（`trend` / `net_invested` 無壓測斷言，**建議納入下次壓測**）；其成分（`price × shares`、all-in 買入成本、賣出淨額、股利淨額、`convert`）已於 §4／§5／§7 驗證。
 > **實作位置**：`portfolio/timeseries.py`（`daily_value_series`、`_at_or_before`、`_fx_at`）、`portfolio/dashboard.py`（step 9 預載歷史）。
 > **依據**：`.claude/rules/domain-ledger.md`（XIRR 流量符號；carry-forward valuation）、`.claude/rules/data-and-pricing.md`。
+
+### 7.6 總淨值（含現金）（FU-D29 / deferred C8）
+
+實作：`portfolio/networth.py`（純函式組合層，`portfolio/dashboard.py` step 9b 呼叫）。**顯示／歸因用途，非記錄金額（money-of-record）**，不進入任何報酬指標；在**不修改** §7.5 `daily_value_series` 的前提下，於其上疊加一條每日現金序列後合成（報告幣）：
+
+$$\text{net\_worth}_t \;=\; \underbrace{\textstyle\sum_{h:\ shares>0}\operatorname{convert}(\text{price}_{\le t}\times\text{shares}_h,\ \text{fx}_{\le t})}_{\text{市值 } total\_value_t\ (\S7.5)} \;+\; \underbrace{\textstyle\sum_{p\in pools}\operatorname{convert}(\text{balance}_{p,\le t},\ \text{fx}_{p,\le t})}_{\text{當日現金 } cash_t}$$
+
+- **每日現金 `cash_t`**：對每個 `(account, ccy)` 池，取其**逐日流量（`pool_lines`：movements ± fx legs ± 交割 ± 現金股利）當日或之前最後 running balance（carry-forward）**，以**當日或之前最後匯率**換算報告幣後跨池加總。**未註冊標的之列自動略過**（與 `cash_balances` 一致，不污染序列）。
+- **合成 `compose_net_worth`**：沿 §7.5 之日期軸對齊（首筆現金流量前 = 0），**僅新增 `net_worth` 欄，其餘 `TrendPoint` 欄位逐位元不變**（單元測試守護）。
+- **incomplete 規則（比照 §7.5）**：某日若有**非零**池無「當日或之前」匯率 → 該日 `cash_t` 標 incomplete，`compose_net_worth` 令 `net_worth = None`（前端畫斷點，**不臆造**）；**零餘額池缺匯率不污染該日**。持倉缺價之日（§7.5 之 incomplete）`net_worth` 仍為部分值（與市值線一致，靠共用標記提示）。
+- **一致性錨點（invariant）**：末個現金完整日之 `cash_t` **等於** `cash_balances` 導出、`GET /api/cash` 提供之報告幣現金總額（同一 fixture 雙路徑逐位元相等）。**換匯不加疊**：本序列已把現金各幣別於當日匯率換算合計，非在市值上另計換匯損益（§8.4 invariant I5）。
+
+> **驗證錨點**：`tests/portfolio/test_networth.py`（逐日 carry-forward、換匯兩腿、缺匯 incomplete、零池不污染、負池不 floor、合成不動既有欄）＋ `tests/contract/test_networth_dashboard.py`（跨端點一致）＋ golden 追加（**僅 `net_worth`**）。
+> **實作位置**：`portfolio/networth.py`（`daily_cash_series`、`compose_net_worth`、`CashDay`）、`portfolio/dashboard.py`（step 9b）、`portfolio/dashboard_models.py`（`TrendPoint.net_worth` 追加欄）。
+> **依據**：`.claude/rules/domain-ledger.md`（現金池；FX 拆解不加疊）、`.claude/rules/data-and-pricing.md`（Decimal；carry-forward）。
 
 ---
 

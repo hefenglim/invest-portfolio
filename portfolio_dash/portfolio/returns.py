@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
@@ -70,6 +71,22 @@ def total_return(
 DateFxRate = Callable[[date, Currency, Currency], Decimal]
 
 
+@dataclass(frozen=True)
+class XirrOutcome:
+    """The reporting-currency XIRR plus the flow-window span it was measured over.
+
+    ``rate`` is the annualized money-weighted return (``None`` when not computable).
+    ``window_days`` is ``(as_of - earliest input-flow date).days`` — the observation
+    window is a property of the cashflow series, so it is populated even when ``rate``
+    is ``None``; it is ``None`` only when there are no input flows at all. The UI uses a
+    short window (< 365) as a low-confidence hint (XIRR annualizes, so a sub-year window
+    makes the figure volatile).
+    """
+
+    rate: Decimal | None
+    window_days: int | None
+
+
 def xirr_reporting(
     transactions: list[Transaction],
     dividends: list[Dividend],
@@ -81,16 +98,17 @@ def xirr_reporting(
     current_fx: FxRate,
     as_of: date,
     reporting: Currency,
-) -> Decimal | None:
-    """Reporting-currency money-weighted XIRR. Returns None if it cannot be computed.
+) -> XirrOutcome:
+    """Reporting-currency money-weighted XIRR + its observation window.
 
     Flows: buy - (gross incl. fees+tax), sell + (net), cash dividend + (net), DRIP/stock
     neutral, opening - (original_cost_total at build_date), final market value + at as_of.
     Each flow converted at its trade-date FX; final value at current spot.
 
-    All-or-nothing on missing prices: if ANY held symbol lacks a current price this
-    returns None (the terminal value can't be formed), unlike total_return/allocation
-    which degrade partially. Also returns None on non-convergence / non-finite results.
+    All-or-nothing on missing prices: if ANY held symbol lacks a current price the rate
+    is None (the terminal value can't be formed), unlike total_return/allocation which
+    degrade partially. The rate is also None on non-convergence / non-finite results.
+    ``window_days`` is still reported in every one of these degraded cases.
     """
 
     def ccy_of(symbol: str) -> Currency:
@@ -119,11 +137,15 @@ def xirr_reporting(
             add(dv.date, ccy_of(dv.symbol), dv.net)
         # DRIP / STOCK are neutral (no external cashflow)
 
+    # Observation window: as_of minus the earliest INPUT flow date (measured before the
+    # terminal value is appended). Independent of whether the rate ultimately converges.
+    window_days = (as_of - min(dates)).days if dates else None
+
     final = Decimal("0")
     for h in holdings:
         price = current_prices.get(h.symbol)
         if price is None:
-            return None
+            return XirrOutcome(rate=None, window_days=window_days)
         final += convert(price * h.shares, current_fx(h.quote_ccy, reporting))
     if final != _ZERO:
         dates.append(as_of)
@@ -133,8 +155,8 @@ def xirr_reporting(
         rate = _xirr(dates, amounts)
     except InvalidPaymentsError:
         # No sign change in the cashflow series (e.g. all outflows) — not computable.
-        return None
+        return XirrOutcome(rate=None, window_days=window_days)
     if rate is None or not math.isfinite(rate):
         # Non-finite (e.g. conflicting same-date flows yield inf) — never surface it.
-        return None
-    return Decimal(str(rate))
+        return XirrOutcome(rate=None, window_days=window_days)
+    return XirrOutcome(rate=Decimal(str(rate)), window_days=window_days)

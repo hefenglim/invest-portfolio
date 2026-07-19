@@ -128,12 +128,36 @@ def cash_balances(
 
 @dataclass(frozen=True)
 class CashLine:
-    """One dated flow into a single (account, currency) pool."""
+    """One dated flow into a single (account, currency) pool.
+
+    ``ref``/``delta`` are the load-bearing fields the running balance is built from;
+    ``kind`` selects the label. The trailing OPTIONAL fields carry structured detail so
+    the 說明 column (and the CSV/report exports) can render a human-readable line without
+    the frontend recomputing anything (all values already Decimal, computed here):
+
+    * ``buy`` / ``sell`` — ``symbol``, ``name``, ``qty``, ``price``, ``fee``, ``tax``
+      (``delta`` is still the net settlement, unchanged).
+    * ``dividend`` — ``symbol``, ``name`` (``delta`` is the cash net).
+    * ``fx_in`` / ``fx_out`` — ``fx_rate`` (implied home-per-foreign = from/to), plus the
+      PAIRED leg as ``counter_ccy`` + ``counter_amount`` signed by ITS pool's effect
+      (fx_in: the from-pool lost money → negative; fx_out: the to-pool gained → positive).
+    * movements (deposit/withdraw/opening/rebate) — no structured detail; ``ref`` is the note.
+    """
 
     date: date
-    kind: str  # deposit | withdraw | opening | fx_in | fx_out | buy | sell | dividend
-    ref: str   # symbol or note
+    kind: str  # deposit | withdraw | opening | rebate | fx_in | fx_out | buy | sell | dividend
+    ref: str   # symbol or note (or the fx pair string)
     delta: Decimal
+    # optional structured detail (None when the field does not apply to the kind)
+    symbol: str | None = None
+    name: str | None = None
+    qty: Decimal | None = None
+    price: Decimal | None = None
+    fee: Decimal | None = None
+    tax: Decimal | None = None
+    fx_rate: Decimal | None = None
+    counter_ccy: str | None = None
+    counter_amount: Decimal | None = None
 
 
 def pool_lines(
@@ -146,7 +170,11 @@ def pool_lines(
     instruments: dict[str, Instrument],
 ) -> list[CashLine]:
     """Every dated flow into ONE (account, ccy) pool (movements + fx legs + trade
-    settlements + cash dividends). Unsorted; use :func:`running_statement`/`running_min`."""
+    settlements + cash dividends). Unsorted; use :func:`running_statement`/`running_min`.
+
+    Each line also carries structured detail (symbol/name/qty/price/fee/tax for trades,
+    symbol/name for dividends, fx_rate/counter_* for fx legs) drawn from the same in-scope
+    rows — the ``delta`` and ordering math is UNCHANGED (detail is additive)."""
     lines: list[CashLine] = []
     for m in movements:
         if m.account_id != account_id or m.ccy != ccy:
@@ -157,26 +185,32 @@ def pool_lines(
         if c.account_id != account_id:
             continue
         pair = f"{c.from_ccy.value}→{c.to_ccy.value}"
+        rate = c.from_amount / c.to_amount if c.to_amount != _ZERO else None
         if c.to_ccy == ccy:
-            lines.append(CashLine(c.date, "fx_in", pair, c.to_amount))
+            # fx_in: this pool RECEIVED to_amount; the paired from-pool LOST from_amount.
+            lines.append(CashLine(c.date, "fx_in", pair, c.to_amount, fx_rate=rate,
+                                  counter_ccy=c.from_ccy.value, counter_amount=-c.from_amount))
         if c.from_ccy == ccy:
-            lines.append(CashLine(c.date, "fx_out", pair, -c.from_amount))
+            # fx_out: this pool SPENT from_amount; the paired to-pool GAINED to_amount.
+            lines.append(CashLine(c.date, "fx_out", pair, -c.from_amount, fx_rate=rate,
+                                  counter_ccy=c.to_ccy.value, counter_amount=c.to_amount))
     for t in transactions:
         inst = instruments.get(t.symbol)
         if inst is None or t.account_id != account_id or inst.quote_ccy != ccy:
             continue
-        if t.side is Side.BUY:
-            lines.append(CashLine(t.trade_date, "buy", t.symbol,
-                                  -(t.quantity * t.price + t.fees + t.tax)))
-        else:
-            lines.append(CashLine(t.trade_date, "sell", t.symbol,
-                                  t.quantity * t.price - t.fees - t.tax))
+        kind = "buy" if t.side is Side.BUY else "sell"
+        delta = (-(t.quantity * t.price + t.fees + t.tax) if t.side is Side.BUY
+                 else t.quantity * t.price - t.fees - t.tax)
+        lines.append(CashLine(t.trade_date, kind, t.symbol, delta, symbol=t.symbol,
+                              name=inst.name, qty=t.quantity, price=t.price,
+                              fee=t.fees, tax=t.tax))
     for d in dividends:
         inst = instruments.get(d.symbol)
         if inst is None or d.account_id != account_id or inst.quote_ccy != ccy:
             continue
         if d.type in CASH_DIVIDEND_TYPES:
-            lines.append(CashLine(d.date, "dividend", d.symbol, d.net))
+            lines.append(CashLine(d.date, "dividend", d.symbol, d.net,
+                                  symbol=d.symbol, name=inst.name))
     return lines
 
 
@@ -208,3 +242,34 @@ def running_statement(lines: Sequence[CashLine]) -> list[tuple[CashLine, Decimal
         bal += ln.delta
         out.append((ln, bal))
     return out
+
+
+def account_statement(
+    account_id: str,
+    movements: Sequence[_MovementRow],
+    fx_conversions: Sequence[_FxRow],
+    transactions: Sequence[_TxRow],
+    dividends: Sequence[_DivRow],
+    instruments: dict[str, Instrument],
+    *,
+    ccy: Currency | None = None,
+) -> list[tuple[Currency, list[tuple[CashLine, Decimal]]]]:
+    """Per-(account, ccy) running statements for one account.
+
+    Returns ``[(ccy, running_statement)]`` in a stable currency order. The running balance
+    is ALWAYS computed within its own (account, ccy) pool — currencies are never blended.
+
+    * ``ccy`` given → exactly that one pool (even if empty, mirroring the single-pool view).
+    * ``ccy`` None → every currency the account has activity in (empty pools dropped).
+
+    The one shared source for the single-pool statement, the account-wide combined view,
+    and the CSV/report exports (so all three read identical numbers)."""
+    candidates = [ccy] if ccy is not None else list(Currency)
+    result: list[tuple[Currency, list[tuple[CashLine, Decimal]]]] = []
+    for c in candidates:
+        stmt = running_statement(pool_lines(
+            account_id, c, movements, fx_conversions, transactions, dividends, instruments))
+        if ccy is None and not stmt:
+            continue  # skip currencies this account never touched
+        result.append((c, stmt))
+    return result

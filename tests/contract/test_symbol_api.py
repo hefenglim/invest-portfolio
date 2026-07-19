@@ -24,6 +24,10 @@ def test_symbol_detail_held_symbol_full_shape(api_client: TestClient) -> None:
     # as_of is the frozen clock's date.
     assert body["as_of"] == "2026-06-11"
 
+    # Registry enrichment (FU-D24): name + market for the drawer title.
+    assert body["name"] == "TSMC"
+    assert body["market"] == "TW"
+
     # cost_basis -> Q1 most-shares account; money as Decimal strings.
     cb = body["cost_basis"]
     assert cb["account_id"] == "tw_broker"
@@ -73,6 +77,9 @@ def test_symbol_detail_non_held_symbol_null_cost_basis(
 
     body = api_client.get("/api/symbol/NVDA/detail").json()
     assert body["symbol"] == "NVDA"
+    # Registry enrichment is present for a registered-but-unheld watchlist symbol.
+    assert body["name"] == "NVIDIA"
+    assert body["market"] == "US"
     assert body["cost_basis"] is None
     # No stored prices for NVDA -> price_history unavailable, with a note.
     assert body["price_history"]["available"] is False
@@ -91,6 +98,16 @@ def test_symbol_detail_days_window(api_client: TestClient) -> None:
     near = api_client.get("/api/symbol/2330/detail?days=180").json()
     assert near["price_history"]["available"] is True
     assert any(p["date"] == "2026-06-09" for p in near["price_history"]["points"])
+
+
+def test_symbol_detail_unregistered_symbol_null_name_market(api_client: TestClient) -> None:
+    # A symbol with no instrument row: name/market degrade to null (FU-D24).
+    body = api_client.get("/api/symbol/ZZZZ/detail").json()
+    assert body["symbol"] == "ZZZZ"
+    assert body["name"] is None
+    assert body["market"] is None
+    assert body["cost_basis"] is None
+    assert body["price_history"]["available"] is False
 
 
 def test_symbol_detail_money_and_date_field(api_client: TestClient) -> None:

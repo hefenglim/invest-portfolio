@@ -120,7 +120,9 @@ def test_build_dashboard_happy_path(conn: sqlite3.Connection) -> None:
     assert data.returns is not None
     assert data.returns.by_currency[TWD].unrealized == Decimal("105000")
     assert data.allocation is not None
-    assert data.allocation.by_sector["Semiconductors"] == Decimal("600000")
+    # R6: 2330 ('Semiconductors') + AAPL ('Tech') both fold into GICS Information Technology
+    # at the grouping seam — 600,000 TWD (2330) + 1,200 USD @33 = 39,600 TWD (AAPL).
+    assert data.allocation.by_sector == {"Information Technology": Decimal("639600")}
     assert data.currency_view is not None
     assert data.currency_view.by_currency_value == {TWD: Decimal("600000"),
                                                     USD: Decimal("1200")}
@@ -247,3 +249,47 @@ def test_xirr_flow_predates_fx_history(conn: sqlite3.Connection) -> None:
     reason = data.freshness.xirr_unavailable_reason
     assert reason is not None and "USD/TWD" in reason and "2026-01-10" in reason
     assert data.trend.available is False     # same missing flow-date FX
+
+
+def test_dividend_ttm_net_excludes_events_older_than_365_days(
+    conn: sqlite3.Connection,
+) -> None:
+    """ttm_net is the trailing-365-day window (display-only attribution); by_year and
+    total_by_currency keep the full history. A cash dividend just outside the window is
+    excluded from ttm_net yet still counts in the yearly + all-time totals; an event that
+    lands exactly on the cutoff is included (inclusive lower bound)."""
+    upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=TWD,
+                                       sector="Semiconductors", name="TSMC", board="TWSE"))
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2024, 1, 5))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2025, 1, 1))
+    # NOW = 2026-06-10 -> trailing-12-month cutoff = 2025-06-10 (inclusive).
+    insert_dividend(conn, account_id="tw_broker", symbol="2330", div_date=date(2025, 1, 15),
+                    div_type="CASH", gross=Decimal("3000"), withholding=Decimal("0"),
+                    net=Decimal("3000"))   # older than the window -> excluded from ttm_net
+    insert_dividend(conn, account_id="tw_broker", symbol="2330", div_date=date(2025, 6, 10),
+                    div_type="CASH", gross=Decimal("1000"), withholding=Decimal("0"),
+                    net=Decimal("1000"))   # exactly on cutoff -> included
+    insert_dividend(conn, account_id="tw_broker", symbol="2330", div_date=date(2026, 3, 1),
+                    div_type="CASH", gross=Decimal("5000"), withholding=Decimal("0"),
+                    net=Decimal("5000"))   # within window
+    insert_dividend(conn, account_id="schwab", symbol="AAPL", div_date=date(2026, 4, 1),
+                    div_type="CASH", gross=Decimal("100"), withholding=Decimal("30"),
+                    net=Decimal("70"))     # within window, different currency
+
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    dv = data.dividends
+    # all-time total keeps every cash dividend
+    assert dv.total_by_currency == {TWD: Decimal("9000"), USD: Decimal("70")}
+    # by_year splits 2025 (3000 + 1000) and 2026 (5000)
+    by_year = {r.year: r.by_currency for r in dv.by_year}
+    assert by_year[2025][TWD] == Decimal("4000")
+    assert by_year[2026][TWD] == Decimal("5000")
+    # trailing 12 months drops the 2025-01-15 event, keeps the on-cutoff 2025-06-10 one;
+    # never summed across currencies (TWD and USD stay separate keys).
+    assert dv.ttm_net == {TWD: Decimal("6000"), USD: Decimal("70")}

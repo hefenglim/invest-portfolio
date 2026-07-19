@@ -30,7 +30,9 @@
   /* Map a backend Alert.href onto the static-frontend routing scheme. Backend hrefs are
      server-route shaped (/symbol/{sym}, /settings, …) with no matching StaticFiles page,
      so we translate them HERE in the renderer (route knowledge stays out of api.js).
-     Returns { href, sym? }: sym set when the alert points at a symbol (→ drawer). */
+     Returns { href, sym? }: sym set when the alert points at a symbol (→ drawer).
+     MUST stay in sync with portfolio_dash/ops/notify.py `_frontend_path` (the push
+     deep-link builder — FU-D17); a unit test there pins every case. */
   function mapAlertHref(href) {
     if (!href) return { href: '#' };
     const sym = href.match(/^\/symbol\/(.+)$/);
@@ -179,34 +181,114 @@
     bell.appendChild(el('span', 'bell-count' + (riskCount ? ' risk' : ''), String(alerts.length)));
   }
 
+  /* Severity ranking for the group row's colour (group sev = max within the group). */
+  const SEV_RANK = { risk: 3, warn: 2, info: 1 };
+  function maxSev(items) {
+    let best = 'info';
+    items.forEach((a) => {
+      if ((SEV_RANK[a && a.sev] || 0) > (SEV_RANK[best] || 0)) best = a.sev;
+    });
+    return best;
+  }
+
+  /* The symbol an alert pertains to: from its href (/symbol/X or #sym=X) or, failing
+     that, the suffix of a "rule:symbol" id. '' when the alert is global (no symbol). */
+  function symbolOf(a) {
+    const mapped = mapAlertHref(a && a.href);
+    if (mapped.sym) return mapped.sym;
+    const id = (a && a.id) || '';
+    const i = id.indexOf(':');
+    return i > -1 ? id.slice(i + 1) : '';
+  }
+
+  /* The rule-level noun for a group label: per-symbol titles are "{symbol} {noun}"
+     (e.g. "2330 報價過期"), so strip the leading symbol to get the shared noun; fall
+     back to the whole title when it doesn't start with the symbol. */
+  function ruleNoun(a) {
+    const sym = symbolOf(a);
+    const t = (a && a.title) || '';
+    if (sym && t.indexOf(sym + ' ') === 0) return t.slice(sym.length + 1);
+    return t;
+  }
+
+  /* Group a rule's rows into a detail line: up to 4 symbols, then 「等 N 檔」 for the rest. */
+  function groupDetail(items) {
+    const syms = items.map(symbolOf).filter(Boolean);
+    if (!syms.length) return '';
+    if (syms.length <= 4) return syms.join('、');
+    return syms.slice(0, 4).join('、') + ' 等 ' + syms.length + ' 檔';
+  }
+
+  /* A group's target href: the shared href when every row points to the same place,
+     else the dashboard (a multi-symbol group can't open a single drawer). */
+  function groupHref(items) {
+    const first = items[0] && items[0].href;
+    return items.every((a) => a && a.href === first) ? first : 'index.html';
+  }
+
+  /* Build one bell row (single alert OR a grouped rule). Symbol rows open the drawer
+     in place; others navigate via the href (kept for middle-click / a11y). */
+  function makeItemRow(sev, titleText, detailText, href) {
+    const mapped = mapAlertHref(href);
+    const item = el('a', 'bell-item sev-' + sev);
+    item.href = mapped.href || '#';
+    if (mapped.sym && window.pdOpenSymbol) {
+      item.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        panel.hidden = true;
+        window.pdOpenSymbol(mapped.sym);
+      });
+    }
+    item.appendChild(el('span', 'sev-dot'));
+    const txt = el('div', 'bell-txt');
+    txt.appendChild(el('div', 'bell-title', titleText));
+    txt.appendChild(el('div', 'bell-detail', detailText));
+    item.appendChild(txt);
+    return item;
+  }
+
+  /* Group the flat alert list by `rule`, preserving first-appearance order. */
+  function groupByRule(list) {
+    const order = [];
+    const byRule = {};
+    list.forEach((a) => {
+      const key = (a && a.rule) || '';
+      if (!byRule[key]) { byRule[key] = []; order.push(key); }
+      byRule[key].push(a);
+    });
+    return order.map((k) => ({ rule: k, items: byRule[k] }));
+  }
+
   function fillPanel() {
     panel.replaceChildren();
     const head = el('div', 'bell-head');
     head.appendChild(el('span', null, '風險預警'));
     head.appendChild(el('span', 'bell-sub', '規則引擎・非 AI 生成'));
+    /* FU-D26: a scope caption so the bell's LIVE snapshot (即時狀態) is not confused with
+       the digest card's 今日警示 (a scan-event count — a different statistic by design). */
+    const scope = el('span', 'bell-sub', alerts.length ? '即時狀態・' + alerts.length + ' 項' : '即時狀態');
+    scope.style.marginLeft = 'auto';
+    head.appendChild(scope);
     panel.appendChild(head);
     if (!alerts.length) {
       panel.appendChild(el('div', 'bell-empty', '目前無預警事項'));
       return;
     }
-    alerts.forEach((a) => {
-      const mapped = mapAlertHref(a.href);
-      const item = el('a', 'bell-item sev-' + a.sev);
-      item.href = mapped.href || '#';
-      /* 含個股代號的預警 → 就地彈出抽屜，不跳轉（保留 href 供中鍵/可及性） */
-      if (mapped.sym && window.pdOpenSymbol) {
-        item.addEventListener('click', (ev) => {
-          ev.preventDefault();
-          panel.hidden = true;
-          window.pdOpenSymbol(mapped.sym);
+    /* FU-D26: collapse a rule with ≥2 firings into ONE row (「{noun} ×N」 + a symbols
+       summary); singleton rules render exactly as before. */
+    groupByRule(alerts).forEach((g) => {
+      if (g.rule && g.items.length >= 2) {
+        panel.appendChild(makeItemRow(
+          maxSev(g.items),
+          ruleNoun(g.items[0]) + ' ×' + g.items.length,
+          groupDetail(g.items),
+          groupHref(g.items),
+        ));
+      } else {
+        g.items.forEach((a) => {
+          panel.appendChild(makeItemRow(a.sev, a.title, a.detail, a.href));
         });
       }
-      item.appendChild(el('span', 'sev-dot'));
-      const txt = el('div', 'bell-txt');
-      txt.appendChild(el('div', 'bell-title', a.title));
-      txt.appendChild(el('div', 'bell-detail', a.detail));
-      item.appendChild(txt);
-      panel.appendChild(item);
     });
   }
 

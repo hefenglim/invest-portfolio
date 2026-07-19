@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.19"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.19"></link>
-<link rel="stylesheet" href="input.css?v=0.1.19"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.20"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.20"></link>
+<link rel="stylesheet" href="input.css?v=0.1.20"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   /* settings tab bar */
@@ -31,6 +31,16 @@
   .set-view { display: none; flex-direction: column; gap: var(--gap);
     width: 100%; min-width: 0; box-sizing: border-box; }
   .set-view.active { display: flex; }
+  /* 8 tabs (FU-D3 added 通知中心): wrap on wide, become a single scroll strip on narrow.
+     FU-D26.6: a right-edge fade cues that the strip scrolls; JS scrolls the active tab
+     into view on load / switch so it is never hidden off-screen. */
+  @media (max-width: 760px) {
+    .set-tabbar { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), rgba(0,0,0,0.12));
+      mask-image: linear-gradient(to right, #000 calc(100% - 24px), rgba(0,0,0,0.12)); }
+    .set-tab { flex: 0 0 auto; white-space: nowrap; }
+  }
 
   /* LLM specific */
   .model-health-row { display: flex; align-items: center; gap: 6px; }
@@ -91,6 +101,26 @@
   .fee-row .k { color:var(--text-3); }
   .fee-row .v { font-family:var(--font-num); }
   .fee-row .v.placeholder { color:var(--amber);font-family:var(--font-ui);font-size:10.5px; }
+  /* fee-rule editor (FU-D2, data-driven) */
+  .fee-note { margin:12px var(--pad) 0;font-size:11px;color:var(--text-2);background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius-sm);padding:8px 12px; }
+  #fee-rules-wrap { padding-top:8px; }
+  .fee-detail .fee-updated { margin-left:auto;font-size:10px;color:var(--text-3);font-weight:400;font-family:var(--font-num); }
+  .fee-detail .fee-count { font-size:10px;font-weight:600;padding:0 7px;line-height:16px;border-radius:999px;color:var(--accent);border:1px solid rgba(88,166,221,.4);background:var(--accent-soft); }
+  .fee-field { display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;font-size:11.5px;padding:6px 0;border-bottom:1px dashed var(--border-soft); }
+  .fee-field:last-of-type { border-bottom:none; }
+  .fee-field .ff-label { color:var(--text-2);display:flex;align-items:center;gap:8px; }
+  .fee-field .ff-key { color:var(--text-3);font-family:var(--font-num);font-size:9.5px; }
+  .fee-mod { font-size:9px;font-weight:600;padding:0 6px;line-height:15px;border-radius:999px;color:var(--amber);border:1px solid rgba(217,161,63,.4);background:var(--amber-soft); }
+  .fee-ctrl { display:flex;align-items:center;gap:7px; }
+  .fee-input { width:120px;min-height:26px;font-size:11.5px;font-family:var(--font-num);text-align:right; }
+  /* FU-D26.2: selects size to their longest option (e.g. 「無條件捨去 (floor)」) instead of
+     clipping at the numeric-input 120px; bounded so the row layout stays intact. */
+  select.fee-input { text-align:left; width:auto; min-width:120px; max-width:180px; }
+  .fee-revert { font-size:10px;padding:1px 7px;color:var(--text-3);background:transparent;border:1px solid var(--border-soft);border-radius:var(--radius-sm);cursor:pointer; }
+  .fee-revert:hover { color:var(--accent);border-color:var(--accent); }
+  .fee-revert[hidden] { display:none; }
+  .fee-foot { display:flex;align-items:center;gap:10px;padding:10px var(--pad) 12px;border-top:1px solid var(--border-soft); }
+  .fee-foot .spacer { flex:1; }
   .gen-rows { padding:12px var(--pad) 14px;display:flex;flex-direction:column; }
   .gen-row { display:grid;grid-template-columns:180px 1fr;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12px;align-items:center; }
   .gen-row:last-child { border-bottom:none; }
@@ -175,9 +205,10 @@
     <button class="set-tab" data-tab="accounts" type="button">帳戶與費率</button>
     <button class="set-tab" data-tab="llm" type="button">AI 與額度</button>
     <button class="set-tab" data-tab="prompts" type="button">AI 提示詞</button>
-    <button class="set-tab" data-tab="scheduler" type="button">排程</button>
+    <button class="set-tab" data-tab="scheduler" type="button">排程中心</button>
     <button class="set-tab" data-tab="datasources" type="button">資料來源</button>
     <button class="set-tab" data-tab="alerts" type="button">預警規則</button>
+    <button class="set-tab" data-tab="notify" type="button">通知中心</button>
     <button class="set-tab" data-tab="exports" type="button">匯出中心</button>
   </div>
 
@@ -292,13 +323,22 @@
     </section>
   </div>
 
-  <!-- ===== 排程 ===== -->
-  <div class="set-view" id="view-scheduler" data-screen-label="排程">
+  <!-- ===== 排程中心 ===== -->
+  <div class="set-view" id="view-scheduler" data-screen-label="排程中心">
+    <!-- ===== 摘要與週報 (P3 batch 3) — moved here (FU-D3): send-time is a schedule row,
+         so it lives with the jobs table it drives (single source of truth). ===== -->
+    <section class="panel" id="digest-settings-card">
+      <div class="panel-head">
+        <h2 class="panel-title">摘要與週報</h2>
+        <span class="panel-sub">每日收盤摘要與每週行動清單・發送時間與下方排程工作表為同一設定（單一事實來源）・純計算，AI 一句話為選用（預設關閉）</span>
+      </div>
+      <div id="digest-config-wrap" class="digest-config"></div>
+    </section>
     <section class="panel">
       <div class="panel-head"><h2 class="panel-title">排程工作表</h2><span class="panel-sub">時區 <span class="num" id="sched-tz"></span></span></div>
       <div class="table-wrap"><table class="data" id="jobs-table"><thead><tr>
         <th class="col-text">工作</th><th>啟用</th><th class="col-text">排程 (cron)</th>
-        <th class="col-text">時區</th><th class="col-text">上次執行</th><th>下次執行</th><th></th>
+        <th class="col-text">時區</th><th class="col-text">狀態</th><th class="col-text">上次執行</th><th>下次執行</th><th></th>
       </tr></thead><tbody id="jobs-body"></tbody></table></div>
     </section>
     <section class="panel">
@@ -339,20 +379,21 @@
     <section class="panel">
       <div class="panel-head"><h2 class="panel-title">帳戶</h2><span class="panel-sub">v1 唯讀</span></div>
       <div class="acct-grid">
-        <div class="acct-card"><span class="acct-name">台灣券商</span><span class="div-mode dm-tw">股利：成本沖減</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">tw_default</span></div></div>
-        <div class="acct-card"><span class="acct-name">嘉信 Schwab</span><span class="div-mode dm-drip">股利：DRIP 預扣 30%</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">schwab_zero</span></div></div>
+        <div class="acct-card"><span class="acct-name">台灣券商</span><span class="div-mode dm-tw">股利：成本沖減</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">tw</span></div></div>
+        <div class="acct-card"><span class="acct-name">嘉信 Schwab</span><span class="div-mode dm-drip">股利：DRIP 預扣 30%</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">schwab</span></div></div>
         <div class="acct-card"><span class="acct-name">Moomoo 美股</span><span class="div-mode dm-drip">股利：DRIP 預扣 30%</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_us</span></div></div>
         <div class="acct-card"><span class="acct-name">Moomoo 馬股</span><span class="div-mode dm-net">股利：淨額</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_my</span></div></div>
       </div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">費率明細</h2></div>
-      <div style="margin:12px var(--pad) 0;font-size:11px;color:var(--text-2);background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius-sm);padding:8px 12px;">費率為版本化設定 — 修改需經設定檔變更紀錄（v1 唯讀）。</div>
-      <div style="height:8px;"></div>
-      <details class="fee-detail" open="open"><summary><span class="caret">▶</span>台灣券商 <span class="panel-sub num">tw_default</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">券商費率</span><span class="v">0.1425%</span></div><div class="fee-row"><span class="k">折扣</span><span class="v">1.0</span></div><div class="fee-row"><span class="k">最低手續費</span><span class="v">NT$20</span></div><div class="fee-row"><span class="k">證交稅（現股）</span><span class="v">0.3%</span></div><div class="fee-row"><span class="k">證交稅（ETF）</span><span class="v">0.1%</span></div></div></details>
-      <details class="fee-detail"><summary><span class="caret">▶</span>嘉信 Schwab <span class="panel-sub num">schwab_zero</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">佣金</span><span class="v">$0</span></div><div class="fee-row"><span class="k">股利預扣</span><span class="v">30%</span></div></div></details>
-      <details class="fee-detail"><summary><span class="caret">▶</span>Moomoo 美股 <span class="panel-sub num">moomoo_us</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">佣金</span><span class="v">$0</span></div><div class="fee-row"><span class="k">平台費</span><span class="v">USD 0.99 / 筆</span></div></div></details>
-      <details class="fee-detail"><summary><span class="caret">▶</span>Moomoo 馬股 <span class="panel-sub num">moomoo_my</span></summary><div class="fee-rows"><div class="fee-row"><span class="k">Clearing fee</span><span class="v">0.03%</span></div><div class="fee-row"><span class="k">Stamp duty</span><span class="v placeholder">依設定檔</span></div></div></details>
+      <div class="panel-head">
+        <h2 class="panel-title">費率明細</h2>
+        <span class="panel-sub">各券商規則集的費率／稅率／捨入方式 · 可調整（僅影響未來交易）</span>
+        <span class="spacer"></span>
+        <button class="btn" id="fee-reset-all" type="button">全部重設為系統預設</button>
+      </div>
+      <div class="fee-note" id="fee-page-note">歷史交易以交易列快照為準；調整費率僅影響未來交易。系統預設載自 fee-engine v2 官方費表。</div>
+      <div id="fee-rules-wrap"></div>
     </section>
     <section class="panel">
       <div class="panel-head"><h2 class="panel-title">一般</h2><span class="panel-sub">系統資訊與介面偏好</span></div>
@@ -369,22 +410,9 @@
             <option value="200">200</option>
           </select>
         </span></div>
+        <!-- 資料庫統計 moved to its own 資料中心 page (FU-D15); this is a pointer only. -->
+        <div class="gen-row"><span class="k">資料庫統計</span><span class="v"><a href="data-center.html">前往「資料中心」 →</a></span></div>
       </div>
-    </section>
-    <!-- 資料庫統計 (2026-07-07 owner decision): read-only observation panel — canonical
-         tabbed surface ONLY (the standalone settings pages are redirect stubs). -->
-    <section class="panel" data-screen-label="資料庫統計">
-      <div class="panel-head">
-        <h2 class="panel-title">資料庫統計</h2>
-        <span class="panel-sub">唯讀 — 各資料表筆數與最早記錄，供保留期限評估；目前不做任何自動清理</span>
-        <span class="spacer"></span>
-        <button class="btn" id="dbstats-refresh" type="button"><span class="ico">⟳</span>重新整理</button>
-      </div>
-      <div class="gen-rows" id="dbstats-files" style="padding-bottom:0;"></div>
-      <div class="table-wrap"><table class="data"><thead><tr>
-        <th class="col-text">類別</th><th class="col-text">資料表</th><th>筆數</th><th>最早記錄</th>
-      </tr></thead><tbody id="dbstats-body"></tbody></table></div>
-      <div class="set-body" style="padding-top:6px;"><span class="panel-sub" id="dbstats-note"></span></div>
     </section>
   </div>
 
@@ -426,6 +454,11 @@
     </section>
     <div class="save-bar"><span class="note">權重為比率（非金額），以 Decimal 4dp 儲存於伺服器；再平衡試算抽屜開啟時自動帶入</span><button class="btn btn-primary" id="target-weights-save" type="button">儲存目標配置</button></div>
 
+  </div>
+
+  <!-- ===== 通知中心 (FU-D3: channels + quiet hours + per-rule subscriptions moved here
+       from 預警規則; all element ids/classes preserved so settings-notify.js is unchanged) ===== -->
+  <div class="set-view" id="view-notify" data-screen-label="通知中心">
     <!-- ===== 通知通道 (WP 3B) ===== -->
     <section class="panel">
       <div class="panel-head">
@@ -495,15 +528,6 @@
       </div>
     </section>
 
-    <!-- ===== 摘要與週報 (P3 batch 3) ===== -->
-    <section class="panel" id="digest-settings-card">
-      <div class="panel-head">
-        <h2 class="panel-title">摘要與週報</h2>
-        <span class="panel-sub">每日收盤摘要與每週行動清單・發送時間與「排程」分頁為同一設定（單一事實來源）・純計算，AI 一句話為選用（預設關閉）</span>
-      </div>
-      <div id="digest-config-wrap" class="digest-config"></div>
-    </section>
-
     <!-- ===== 靜音時段 + 規則訂閱 (WP 3B) ===== -->
     <section class="panel">
       <div class="panel-head">
@@ -560,23 +584,23 @@
   </div>
 </div>
 
-<script src="api.js?v=0.1.19"></script>
-<script src="shell.js?v=0.1.19"></script>
-<script src="format.js?v=0.1.19"></script>
-<script src="pager.js?v=0.1.19"></script>
-<script src="export.js?v=0.1.19"></script>
-<script src="alerts.js?v=0.1.19"></script>
-<script src="vars.js?v=0.1.19"></script>
-<script src="settings-llm.js?v=0.1.19"></script>
-<script src="settings-prompts.js?v=0.1.19"></script>
-<script src="settings-scheduler.js?v=0.1.19"></script>
-<script src="settings-datasources.js?v=0.1.19"></script>
-<script src="settings-alerts.js?v=0.1.19"></script>
-<script src="settings-notify.js?v=0.1.19"></script>
-<script src="settings-digest.js?v=0.1.19"></script>
-<script src="settings-users.js?v=0.1.19"></script>
-<script src="settings-dbstats.js?v=0.1.19"></script>
-<script src="settings-prefs.js?v=0.1.19"></script>
+<script src="api.js?v=0.1.20"></script>
+<script src="shell.js?v=0.1.20"></script>
+<script src="format.js?v=0.1.20"></script>
+<script src="pager.js?v=0.1.20"></script>
+<script src="export.js?v=0.1.20"></script>
+<script src="alerts.js?v=0.1.20"></script>
+<script src="vars.js?v=0.1.20"></script>
+<script src="settings-llm.js?v=0.1.20"></script>
+<script src="settings-prompts.js?v=0.1.20"></script>
+<script src="settings-scheduler.js?v=0.1.20"></script>
+<script src="settings-datasources.js?v=0.1.20"></script>
+<script src="settings-alerts.js?v=0.1.20"></script>
+<script src="settings-notify.js?v=0.1.20"></script>
+<script src="settings-digest.js?v=0.1.20"></script>
+<script src="settings-users.js?v=0.1.20"></script>
+<script src="settings-fees.js?v=0.1.20"></script>
+<script src="settings-prefs.js?v=0.1.20"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs）→ reconciliation channel
    (POST /api/export/llm-usage / /api/export/job-runs; empty body -> full history).
@@ -624,6 +648,13 @@
       v.classList.toggle('active', v.id === 'view-' + id);
     });
     if (!skipHash) { try { history.replaceState(null, '', '#' + id); } catch (e) { /* noop */ } }
+    /* FU-D26.6: keep the active tab visible in the ≤760px scroll strip (block:'nearest'
+       avoids any vertical page jump; a no-op when the tabbar isn't a scroll container). */
+    var activeTab = document.querySelector('.set-tab.active');
+    if (activeTab && activeTab.scrollIntoView) {
+      try { activeTab.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'auto' }); }
+      catch (e) { /* noop */ }
+    }
     window.dispatchEvent(new CustomEvent('pd-settings-tab', { detail: id }));
   };
   document.querySelectorAll('.set-tab').forEach(function (b) {
@@ -631,7 +662,7 @@
   });
   /* activate from hash or default */
   var hash = location.hash.slice(1);
-  var valid = ['llm','prompts','scheduler','accounts','datasources','alerts','exports'];
+  var valid = ['llm','prompts','scheduler','accounts','datasources','alerts','notify','exports'];
   showSettingsTab(valid.includes(hash) ? hash : 'accounts', true);
   window.addEventListener('hashchange', function () {
     var h = location.hash.slice(1);

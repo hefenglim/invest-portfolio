@@ -406,6 +406,96 @@ def test_complete_structured_default_role_unchanged(
     assert seen == ["openai/a"]
 
 
+# --- FU-D20: per-run model_override (the AI-input model picker) ----------------
+
+
+def test_model_override_prepends_to_chain(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # An enabled override (not bound to any role) is tried FIRST, ahead of the role chain.
+    upsert_model(conn, _model("override_m"))
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        return _Resp('{"x": 21}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("hi", Out, agent="ov", conn=conn, model_override="override_m")
+    assert out.x == 21
+    assert seen == ["openai/override_m"]  # override at the head of the chain
+
+
+def test_model_override_falls_back_to_role_chain_on_failure(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # Override leads; if it errors the role chain ('a') remains as the fallback.
+    upsert_model(conn, _model("ov_bad"))
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        if kw["model"] == "openai/ov_bad":
+            raise RuntimeError("override down")
+        return _Resp('{"x": 9}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("hi", Out, agent="ov", conn=conn, model_override="ov_bad")
+    assert out.x == 9
+    assert seen == ["openai/ov_bad", "openai/a"]  # tried override, then fellover to the role
+
+
+def test_model_override_vision_supplies_chain_when_role_unset(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # A vision override + images: no VISION role is bound, so the override alone carries the
+    # call (vision routing engaged; the not-activated refusal is NOT propagated).
+    upsert_model(conn, _model("vis_override", vision=True))
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        return _Resp('{"x": 22}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("read", Out, agent="ov2", conn=conn,
+                              images=[b"img"], model_override="vis_override")
+    assert out.x == 22
+    assert seen == ["openai/vis_override"]
+
+
+def test_model_override_disabled_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # A disabled override is a no-op — the role chain ('a') runs as if no override was given.
+    upsert_model(conn, _model("ov_off", enabled=False))
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        return _Resp('{"x": 5}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    out = complete_structured("hi", Out, agent="ov", conn=conn, model_override="ov_off")
+    assert out.x == 5
+    assert seen == ["openai/a"]
+
+
+def test_model_override_none_is_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # Explicit model_override=None must be identical to the default path (fixture model 'a').
+    seen: list[str] = []
+
+    def completion(**kw: object) -> _Resp:
+        seen.append(str(kw["model"]))
+        return _Resp('{"x": 2}')
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    complete_structured("hi", Out, agent="t", conn=conn, model_override=None)
+    assert seen == ["openai/a"]
+
+
 # --- Request ledger (2026-07-07): cache-token capture ---------------------------
 
 

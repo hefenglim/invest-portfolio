@@ -132,6 +132,17 @@ textarea.input { font-family: var(--font-num); line-height: 1.6; resize: vertica
 .pill-ok { color: var(--ok); border-color: rgba(79, 174, 108, 0.4); background: var(--ok-soft); }
 .pill-fail { color: var(--up); border-color: rgba(240, 84, 79, 0.4); background: var(--up-soft); }
 .pill-off { color: var(--text-3); }
+/* FU-D36 scheduler run-now live status: 執行中 (accent, animated dot) + 已排入 (amber) */
+.pill-run { color: var(--accent); border-color: rgba(88, 166, 221, 0.4); background: var(--accent-soft); }
+.pill-run .dot { animation: pill-pulse 1s ease-in-out infinite; }
+.pill-queued { color: var(--amber); border-color: rgba(217, 161, 63, 0.4); background: var(--amber-soft); }
+@keyframes pill-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+/* short last-result message under a job's status chip (truncated; full text on hover) */
+.run-status { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.run-msg {
+  font-size: 10px; color: var(--text-3); max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* ================= AI 自我進化區（組合器 + 校正庫） ================= */
 
@@ -443,7 +454,9 @@ table.vars-table td { height: auto; padding: 6px 8px; }
 .status-tag.hold { color: var(--accent); border-color: rgba(88, 166, 221, 0.4); background: var(--accent-soft); }
 .status-tag.watch { color: var(--text-2); }
 
-/* sticky save bar */
+/* sticky save bar — FULLY OPAQUE (FU-D26.1): the earlier translucent color-mix + blur
+   let underlying scrolled text bleed through. Solid var(--panel) + a top-edge shadow so
+   the bar reads as a distinct layer above the content it floats over. Stays sticky. */
 .save-bar {
   position: sticky;
   bottom: 0;
@@ -452,10 +465,10 @@ table.vars-table td { height: auto; padding: 6px 8px; }
   align-items: center;
   gap: 12px;
   padding: 11px var(--pad);
-  background: color-mix(in srgb, var(--panel) 92%, transparent);
-  backdrop-filter: blur(6px);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  box-shadow: 0 -8px 20px -10px rgba(0, 0, 0, 0.4);
 }
 .save-bar .note { font-size: 11px; color: var(--text-3); flex: 1; }
 

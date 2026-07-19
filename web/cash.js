@@ -7,8 +7,19 @@
    comes from the server. Wave 2B additions: currency dropdowns constrained to the
    account's {交割幣, 資金幣} (audit C2), an 期初資金 movement kind (C4), a transfer/pool
    statement (C5), a negative-pool banner (C1a), and a missing-rate annotation (C6).
-   The negative-pool 422 (audit C3) surfaces as a danger confirm before re-sending with
-   ack_negative. */
+   For deposit/opening-side CORRECTIONS (edit/delete), the negative-pool 422 (audit C3)
+   surfaces as a danger confirm before re-sending with ack_negative. FX conversions
+   (FU-D34, 需求五) and WITHDRAWALS (FU-D43a) are DIFFERENT: neither may overdraft, so the
+   換匯中心 shows the pool's 可用餘額 (the sell ceiling), the 出金 form shows 賬戶現金 (the
+   withdraw ceiling), and both amounts are HARD-blocked when they exceed it — live
+   disabled-確認 + inline error, backed by the server's fx_insufficient_balance /
+   withdraw_insufficient_balance 422 (no ack override).
+   FU-D43b: clicking either ceiling figure fills the amount field with the full balance.
+   FU-D43c: the buy amount auto-fills from GET /api/cash/fx-estimate (SERVER-computed;
+   this file only places the returned strings — it never multiplies money) while the buy
+   field is pristine; a manual edit stops the auto-fill (重新試算 re-runs it).
+   FU-D40: the fx_conversions ledger (same /api/ledgers/fx the 交易帳本 uses) is listed
+   under the 換匯中心 tab, paged like the movements ledger. */
 (function () {
   'use strict';
   const f = window.fmt;
@@ -32,9 +43,58 @@
   };
   const settlementCcy = (a) => (a && (a.settlement_ccy || a.ccy)) || '';
 
+  /* FU-D34: Decimal-safe compare of two numeric STRINGS — the sell amount vs. the pool
+     balance. This is a display-only UX HINT (the backend re-validates as the authority),
+     but comparing the raw strings (not Number()) keeps the EXACT-balance case (a == b)
+     from ever being falsely blocked by binary-float drift. Returns 1 if a>b, −1 if a<b,
+     0 if equal; falls back to Number() only for non-plain-decimal input (e.g. "3e5"). */
+  const DEC_RE = /^[+-]?\d*\.?\d+$/;
+  function parseDec(s) {
+    let neg = false;
+    if (s[0] === '+') s = s.slice(1);
+    else if (s[0] === '-') { neg = true; s = s.slice(1); }
+    const dot = s.indexOf('.');
+    let int = dot < 0 ? s : s.slice(0, dot);
+    let frac = dot < 0 ? '' : s.slice(dot + 1);
+    int = int.replace(/^0+(?=\d)/, '') || '0';
+    frac = frac.replace(/0+$/, '');
+    if (int === '0' && frac === '') neg = false;  // normalize −0
+    return { neg: neg, int: int, frac: frac };
+  }
+  function cmpMag(a, b) {
+    if (a.int.length !== b.int.length) return a.int.length > b.int.length ? 1 : -1;
+    if (a.int !== b.int) return a.int > b.int ? 1 : -1;
+    const len = Math.max(a.frac.length, b.frac.length);
+    const fa = a.frac.padEnd(len, '0');
+    const fb = b.frac.padEnd(len, '0');
+    if (fa === fb) return 0;
+    return fa > fb ? 1 : -1;
+  }
+  function decCmp(a, b) {
+    a = String(a).trim(); b = String(b).trim();
+    if (!DEC_RE.test(a) || !DEC_RE.test(b)) {
+      const na = Number(a);
+      const nb = Number(b);
+      return na > nb ? 1 : na < nb ? -1 : 0;
+    }
+    const pa = parseDec(a);
+    const pb = parseDec(b);
+    if (pa.neg !== pb.neg) return pa.neg ? -1 : 1;
+    const m = cmpMag(pa, pb);
+    return pa.neg ? -m : m;
+  }
+
   let D = { balances: [], movements: [], negative_pools: [] };
   let accounts = [];  // from /api/input/context (id, name, ccy, settlement_ccy, funding_ccy)
   let cmKind = 'deposit';
+  let booted = false;  // FU-D25: gate pd-cash-tab re-renders until the first boot() populated D
+  /* FU-D43c estimate state — MODULE scope, not initForms: syncFxCcy() calls
+     resetEstimate() early in initForms(), and `let` declarations further down initForms
+     would sit in their temporal dead zone at that call (the exact TDZ-abort class the
+     cash page smoke guards against). */
+  let estPristine = true;  // buy field untouched -> the estimate may write it
+  let estSeq = 0;          // stale-response fence (bumped on reset + every request)
+  let estTimer = null;     // debounce so typing does not spray requests
 
   /* WPE (2026-07-07): movements ledger pages via the endpoint's limit/offset */
   const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
@@ -59,6 +119,58 @@
     });
   }
 
+  /* ---- FU-D40: fx-conversions ledger under 換匯中心 (paged like the movements ledger) ---- */
+  const cfxLed = { offset: 0, limit: PAGE, total: 0, rows: [] };
+  let cfxLedPager = null;
+  if (window.pdPager) {
+    cfxLedPager = window.pdPager.create({
+      host: document.getElementById('cfx-ledger-pager'),
+      limit: cfxLed.limit, offset: 0, totalCount: 0,
+      onPage: (offset) => { cfxLed.offset = offset; loadFxLedger(); },
+    });
+  }
+
+  async function loadFxLedger() {
+    let resp;
+    try {
+      resp = await api.get('/api/ledgers/fx', { limit: cfxLed.limit, offset: cfxLed.offset });
+    } catch (err) {
+      cfxLed.rows = []; cfxLed.total = 0;
+      renderFxLedger();
+      if (cfxLedPager) cfxLedPager.update({ offset: cfxLed.offset, totalCount: 0 });
+      if (window.toast) window.toast('換匯紀錄載入失敗', 'fail', (err && err.message) || undefined);
+      return;
+    }
+    cfxLed.rows = (resp && resp.rows) || [];
+    cfxLed.total = (resp && resp.total_count) || 0;
+    renderFxLedger();
+    if (cfxLedPager) cfxLedPager.update({ offset: cfxLed.offset, totalCount: cfxLed.total });
+  }
+
+  function renderFxLedger() {
+    const tbody = $('#cfx-ledger-body');
+    if (!tbody) return;
+    tbody.replaceChildren();
+    cfxLed.rows.forEach((x) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'num', f.date(x.date)));
+      tr.appendChild(el('td', 'col-text', x.account));
+      tr.appendChild(el('td', 'num', f.money(x.from_amt, x.from_ccy) + ' ' + x.from_ccy));
+      tr.appendChild(el('td', 'num', f.money(x.to_amt, x.to_ccy) + ' ' + x.to_ccy));
+      /* implied rate is computed by the backend (from/to, home per foreign) — never here */
+      tr.appendChild(el('td', 'num',
+        '1 ' + x.to_ccy + ' = ' + f.rate(x.implied_rate) + ' ' + x.from_ccy));
+      tbody.appendChild(tr);
+    });
+    if (!cfxLed.rows.length) {
+      const tr = el('tr');
+      const td = el('td', 'hint', '尚無換匯紀錄 — 上方表單寫入的換匯會列在這裡');
+      td.colSpan = 5;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+  }
+
   /* ---- A. balance cards (clickable -> statement) ---- */
   function renderCards() {
     const wrap = $('#cash-cards');
@@ -70,7 +182,13 @@
     });
     accounts.forEach((a) => {
       const card = el('div', 'cash-card');
-      card.appendChild(el('div', 'acct', a.name));
+      /* Account name = clickable header -> the ACCOUNT-LEVEL all-currency statement
+         (openStatement with ccy=null); active when that combined view is open. */
+      const acctDiv = el('div', 'acct clickable', a.name);
+      if (stmt.account === a.id && stmt.ccy == null) acctDiv.classList.add('active');
+      acctDiv.title = '點擊查看全部幣別收支明細';
+      acctDiv.addEventListener('click', () => openStatement(a.id, null));
+      card.appendChild(acctDiv);
       const entry = byAcct.get(a.id);
       if (!entry || !entry.lines.length) {
         card.appendChild(el('div', 'hint', '尚無現金紀錄'));
@@ -144,38 +262,137 @@
     if (stmtPager) stmtPager.update({ offset: stmt.offset, totalCount: stmt.total });
   }
 
+  /* Compose the 說明 line from a row's structured detail (display-only formatting via the
+     f.* helpers). Falls back to the note/ref for movements; empty note -> 「（無備註）」. */
+  function describe(r) {
+    const ccy = r.ccy;
+    if (r.kind === 'buy' || r.kind === 'sell') {
+      const verb = r.kind === 'buy' ? '買入' : '賣出';
+      const nm = r.name ? r.name + '（' + r.symbol + '）' : (r.symbol || '');
+      return verb + ' ' + nm + ' ' + f.num(r.qty, 0) + ' 股 @ ' + f.price(r.price, ccy) +
+        '（費 ' + f.money(r.fee, ccy) + '・稅 ' + f.money(r.tax, ccy) + '）';
+    }
+    if (r.kind === 'dividend') {
+      const nm = r.name ? r.name + '（' + r.symbol + '）' : (r.symbol || '');
+      return '配息 ' + nm;
+    }
+    if (r.kind === 'fx_in' || r.kind === 'fx_out') {
+      let s = '換匯 ' + (r.ref || '');
+      if (r.fx_rate != null) s += ' @ ' + f.rate(r.fx_rate);
+      if (r.counter_amount != null && r.counter_ccy) {
+        s += '（對應 ' + f.signed(r.counter_amount, r.counter_ccy) + ' ' + r.counter_ccy + '）';
+      }
+      return s;
+    }
+    const note = (r.ref || '').trim();
+    return note || '（無備註）';
+  }
+
   function renderStatement(resp) {
+    const combined = resp.ccy == null;  // account-level all-currency view
     const sub = $('#cash-stmt-sub');
     if (sub) {
-      sub.textContent = (resp.account || stmt.account) + '・' + resp.ccy +
-        '　目前餘額 ' + f.money(resp.current_balance, resp.ccy) + ' ' + resp.ccy;
+      if (combined) {
+        const bals = (resp.balances || [])
+          .map((b) => b.ccy + ' ' + f.money(b.balance, b.ccy)).join('　·　');
+        sub.textContent = (resp.account || stmt.account) + '・全部幣別' +
+          (bals ? '　目前餘額 ' + bals : '');
+      } else {
+        sub.textContent = (resp.account || stmt.account) + '・' + resp.ccy +
+          '　目前餘額 ' + f.money(resp.current_balance, resp.ccy) + ' ' + resp.ccy;
+      }
     }
+    const ccyTh = $('#cash-stmt-ccy-th');
+    if (ccyTh) ccyTh.hidden = !combined;
     const tbody = $('#cash-stmt-body');
     tbody.replaceChildren();
     (resp.rows || []).forEach((r) => {
+      const rowCcy = r.ccy || resp.ccy;
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(r.date)));
       const tdKind = el('td', 'col-text');
       tdKind.appendChild(el('span', 'stmt-chip', KIND_LABEL[r.kind] || r.kind));
       tr.appendChild(tdKind);
-      tr.appendChild(el('td', 'col-text', r.ref || ''));
+      if (combined) tr.appendChild(el('td', 'num col-ccy', rowCcy));
+      tr.appendChild(el('td', 'col-text', describe(r)));
       const tdDelta = el('td', 'num');
-      tdDelta.textContent = f.signed(r.delta, resp.ccy);
+      tdDelta.textContent = f.signed(r.delta, rowCcy);
       if (String(r.delta).indexOf('-') === 0) tdDelta.classList.add('sign-down');
       tr.appendChild(tdDelta);
       const tdBal = el('td', 'num');
-      tdBal.textContent = f.money(r.balance, resp.ccy);
+      tdBal.textContent = f.money(r.balance, rowCcy);
       if (String(r.balance).indexOf('-') === 0) { tdBal.style.color = 'var(--amber)'; }
       tr.appendChild(tdBal);
       tbody.appendChild(tr);
     });
     if (!(resp.rows || []).length) {
-      const tr = el('tr');
-      const td = el('td', 'hint', '此資金池尚無收支紀錄');
-      td.colSpan = 5;
-      tr.appendChild(td);
-      tbody.appendChild(tr);
+      tbody.appendChild(stmtEmptyRow('empty', combined));
     }
+  }
+
+  /* FU-D25 statement empty state — window.emptyState() glyph + one-line explanation, plus
+     a hint pointing back at the pools above. Two honest variants:
+       'pre'   — no pool chosen yet (initial / cleared);
+       'empty' — a pool is selected but the ledger has no rows.
+     Rendered inside a full-width <td> so the table structure (ids) is unchanged. */
+  function stmtEmptyRow(kind, combined) {
+    const tr = el('tr');
+    const td = el('td');
+    td.colSpan = combined ? 6 : 5;
+    let main;
+    let hint;
+    if (kind === 'pre') {
+      main = '尚未選擇資金池';
+      hint = '點擊上方任一資金池即可檢視該池收支明細與滾動餘額';
+    } else {
+      main = '此資金池尚無收支紀錄';
+      hint = '入金／出金、換匯或買賣收付都會列在這裡（點上方切換其他資金池）';
+    }
+    const es = window.emptyState ? window.emptyState(main) : el('div', 'empty-state', main);
+    es.appendChild(el('div', 'stmt-empty-hint', hint));
+    td.appendChild(es);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  /* Pre-selection state: no pool chosen yet -> show guidance, not a blank table. */
+  function renderStatementPre() {
+    const sub = $('#cash-stmt-sub');
+    if (sub) sub.textContent = '點帳戶名稱看全部幣別，或點某個幣別看單一資金池的收支明細與滾動餘額';
+    const ccyTh = $('#cash-stmt-ccy-th');
+    if (ccyTh) ccyTh.hidden = true;
+    const tbody = $('#cash-stmt-body');
+    if (tbody) tbody.replaceChildren(stmtEmptyRow('pre', false));
+  }
+
+  /* ---- statement exports: server-side reconciliation channel (匯出 CSV / 匯出報告) ----
+     Both post the CURRENT statement scope {account, ccy} (ccy null = all-currency view).
+     House style: pdBusy guards double-clicks, fail toast, filename from Content-Disposition. */
+  function makeStmtExportButton(label, icon, path) {
+    const b = el('button', 'btn btn-sm');
+    b.type = 'button';
+    b.appendChild(el('span', 'ico', icon));
+    b.appendChild(el('span', null, label));
+    b.addEventListener('click', async () => {
+      if (!stmt.account) { if (window.toast) window.toast('請先選擇資金池', 'fail'); return; }
+      const restore = window.pdBusy ? window.pdBusy(b, '匯出中…') : () => {};
+      try {
+        await api.download(path, { account: stmt.account, ccy: stmt.ccy });
+      } catch (err) {
+        if (window.toast) window.toast((err && err.message) || '匯出失敗', 'fail', err && err.code);
+      } finally {
+        restore();
+      }
+    });
+    return b;
+  }
+
+  function initStmtExports() {
+    const host = $('#cash-stmt-export');
+    if (!host) return;
+    host.replaceChildren();
+    host.appendChild(makeStmtExportButton('匯出 CSV', '⬇', '/api/export/cash-statement'));
+    host.appendChild(makeStmtExportButton('匯出報告', '⎙', '/api/export/cash-statement-report'));
   }
 
   /* ---- C. movements ledger ---- */
@@ -237,6 +454,51 @@
       sel.appendChild(o);
     });
     if (preferred && opts.some(([c]) => c === preferred)) sel.value = preferred;
+  }
+
+  /* ---- R6-D: FX-form UX hardening (never-equal ccy pair + single-ccy-account gate) --- */
+
+  /* First <option> value in `sel` that isn't `exclude`; null if none exists (a
+     single-currency account has no alternate to offer). */
+  function otherCcyOption(sel, exclude) {
+    for (const o of sel.options) { if (o.value !== exclude) return o.value; }
+    return null;
+  }
+
+  /* Never let 賣出幣別 == 買入幣別. `source` names the select that just changed; the
+     OTHER select is flipped to the remaining currency via a plain `.value =` (no event
+     dispatch), so this can never ping-pong with the sibling listener that calls it. */
+  function enforceFxCcyDistinct(source) {
+    const fromSel = $('#cfx-from-ccy');
+    const toSel = $('#cfx-to-ccy');
+    if (!fromSel || !toSel || fromSel.value !== toSel.value) return;
+    if (source === 'from') {
+      const alt = otherCcyOption(toSel, fromSel.value);
+      if (alt !== null) toSel.value = alt;
+    } else {
+      const alt = otherCcyOption(fromSel, toSel.value);
+      if (alt !== null) fromSel.value = alt;
+    }
+  }
+
+  /* An account with < 2 distinct currencies (ccyOptions() is already deduped by ccy
+     code) has nothing to convert between: disable the whole form and show the inline
+     reason; a two-currency account re-enables + hides it. Owns #cfx-from-ccy/-to-ccy/
+     -from-amt/-to-amt + the #cfx-single-ccy message; #cfx-confirm's single-ccy gate is
+     ALSO re-asserted at the end of every updFxBalance() call (see its comment) so the
+     invariant holds regardless of which of the two runs last on any given call path. */
+  function setFxSingleCcyAvailability(accountId) {
+    const opts = ccyOptions(accountId);
+    const single = opts.length < 2;
+    ['#cfx-from-ccy', '#cfx-to-ccy', '#cfx-from-amt', '#cfx-to-amt', '#cfx-confirm']
+      .forEach((sel) => { const node = $(sel); if (node) node.disabled = single; });
+    const msg = $('#cfx-single-ccy');
+    if (msg) {
+      msg.hidden = !single;
+      msg.textContent = single
+        ? '該帳戶僅有單一幣別（' + (opts[0] ? opts[0][0] : '') + '），無可換匯幣別 — 換匯需帳戶具備兩種以上幣別'
+        : '';
+    }
   }
 
   function openEdit(m) {
@@ -322,6 +584,94 @@
     });
   }
 
+  /* ---- FU-D34 / FU-D43a: balance ceiling lines + live oversell guards ---- */
+  /* Current balance of the (account, ccy) pool from the already-fetched /api/cash data.
+     null = unknown (balances not loaded yet) → the hint stays neutral and never blocks;
+     an absent pool AFTER load is a real 0 (an empty pool cannot fund a conversion). */
+  function poolBalance(accountId, ccy) {
+    if (!accountId || !ccy || !booted) return null;
+    const row = D.balances.find((b) => b.account_id === accountId && b.ccy === ccy);
+    return row ? row.amount : '0';
+  }
+
+  /* FU-D43b: render one ceiling line — 「{label}：{figure} {ccy}」. The FIGURE is a
+     max-fill affordance when positive (.can-fill + title 「點擊帶入全額」); the RAW Decimal
+     string rides on line.dataset.raw so the click handler fills the input with the exact
+     server value (never the display-formatted one). */
+  function renderCeilingLine(line, label, bal, ccy) {
+    line.replaceChildren();
+    line.classList.remove('warn');
+    if (bal == null) { line.dataset.raw = ''; return; }
+    const neg = String(bal).indexOf('-') === 0;
+    const fillable = !neg && decCmp(String(bal), '0') > 0;  // a 0/negative pool fills nothing
+    line.dataset.raw = fillable ? String(bal) : '';
+    line.appendChild(document.createTextNode(label + '：'));
+    const fig = el('span', null, f.money(bal, ccy) + ' ' + ccy);
+    if (fillable) {
+      fig.classList.add('can-fill');
+      fig.title = '點擊帶入全額';
+    }
+    line.appendChild(fig);
+    line.classList.toggle('warn', neg);
+  }
+
+  /* Shared live ceiling validation: over-balance → inline field error + disabled 確認.
+     Display-only — the backend HARD-blocks the same case and is the authority; this
+     only saves a round-trip. */
+  function updCeiling(opts) {
+    const line = $(opts.line);
+    const errEl = $(opts.err);
+    const confirm = $(opts.confirm);
+    if (!line || !errEl || !confirm) return;
+    const bal = opts.active ? poolBalance(opts.account, opts.ccy) : null;
+    renderCeilingLine(line, opts.label, bal, opts.ccy);
+    const amtStr = opts.active ? $(opts.amount).value.trim() : '';
+    const over = bal != null && amtStr !== '' && decCmp(amtStr, bal) > 0;
+    errEl.hidden = !over;
+    if (over) {
+      errEl.textContent = opts.overMsg + '（' + f.money(bal, opts.ccy) + ' ' + opts.ccy +
+        '）— ' + opts.overTail;
+    }
+    confirm.disabled = over;
+  }
+
+  /* FU-D34: the 換匯中心 可用餘額 line (sell ceiling) for the chosen 帳戶+賣出幣別.
+     R6-D: `active` is keyed off ccyOptions().length rather than the select's `.disabled`
+     attribute — this runs mid-sync in syncFxCcy, BEFORE setFxSingleCcyAvailability
+     updates that attribute for the new account, so the attribute would still reflect
+     the PREVIOUS account. Recomputing directly makes the ceiling correct regardless of
+     call order (single-ccy account -> no ceiling shown, no can-fill affordance).
+     updCeiling() ends with an UNCONDITIONAL confirm.disabled = over — with active:false
+     `over` is always false, so it would otherwise RE-ENABLE 確認 on every call (initial
+     wiring's trailing updFxBalance(), boot()'s tail refresh, post-commit/delete
+     refreshes — anything that runs after setFxSingleCcyAvailability disabled it). Re-
+     asserting the gate here after the shared call makes every updFxBalance() call
+     self-healing: the effective invariant is confirm.disabled = over || single at every
+     seam, regardless of call order. setFxSingleCcyAvailability still owns the other
+     four controls + the #cfx-single-ccy message. */
+  function updFxBalance() {
+    const accId = $('#cfx-account').value;
+    const single = ccyOptions(accId).length < 2;
+    updCeiling({
+      line: '#cfx-balance', err: '#cfx-amt-err', confirm: '#cfx-confirm',
+      amount: '#cfx-from-amt', active: !single,
+      account: accId, ccy: $('#cfx-from-ccy').value,
+      label: '可用餘額', overMsg: '換出金額超過可用餘額', overTail: '換匯不可透支',
+    });
+    if (single) { const c = $('#cfx-confirm'); if (c) c.disabled = true; }
+  }
+
+  /* FU-D43a: the 出金 賬戶現金 line (withdraw ceiling) — shown only for kind=出金;
+     deposit/opening entry has no ceiling (credits need no balance). */
+  function updCmBalance() {
+    updCeiling({
+      line: '#cm-balance', err: '#cm-amt-err', confirm: '#cm-confirm',
+      amount: '#cm-amount', active: cmKind === 'withdraw',
+      account: $('#cm-account').value, ccy: $('#cm-ccy').value,
+      label: '賬戶現金', overMsg: '出金金額超過賬戶現金', overTail: '出金不可透支',
+    });
+  }
+
   /* ---- B. forms ---- */
   function initForms() {
     const accSelects = [$('#cm-account'), $('#cfx-account')];
@@ -336,16 +686,33 @@
     $('#cfx-date').value = TODAY;
 
     /* C2: movement ccy dropdown tracks the selected account */
-    const syncMovementCcy = () => fillCcySelect($('#cm-ccy'), $('#cm-account').value);
+    const syncMovementCcy = () => {
+      fillCcySelect($('#cm-ccy'), $('#cm-account').value);
+      updCmBalance();  // FU-D43a: refresh the 賬戶現金 ceiling for the new account/ccy
+    };
     $('#cm-account').addEventListener('change', syncMovementCcy);
+    $('#cm-ccy').addEventListener('change', updCmBalance);
+    $('#cm-amount').addEventListener('input', updCmBalance);
     syncMovementCcy();
 
-    /* C2: fx ccy dropdowns track the account; default funding -> settlement */
+    /* C2: fx ccy dropdowns track the account; default funding -> settlement.
+       R6-D: an account switch clears both amount fields FIRST (stale values must not
+       carry over and re-validate against the new account's pool), then rebuilds the
+       ccy options, the never-equal invariant, and every downstream reset — ending with
+       the single-ccy gate, which must run last (see its own comment). */
     const syncFxCcy = () => {
-      const a = accounts.find((x) => x.id === $('#cfx-account').value);
-      fillCcySelect($('#cfx-from-ccy'), $('#cfx-account').value, a && a.funding_ccy);
-      fillCcySelect($('#cfx-to-ccy'), $('#cfx-account').value, a && settlementCcy(a));
+      const accId = $('#cfx-account').value;
+      const a = accounts.find((x) => x.id === accId);
+      $('#cfx-from-amt').value = '';
+      $('#cfx-to-amt').value = '';
+      fillCcySelect($('#cfx-from-ccy'), accId, a && a.funding_ccy);
+      fillCcySelect($('#cfx-to-ccy'), accId, a && settlementCcy(a));
+      enforceFxCcyDistinct('from');  // guards a mis-seeded funding==settlement pair too
       updImplied();
+      updFxBalance();  // FU-D34: refresh the 可用餘額 ceiling for the new account/from-ccy
+      resetEstimate();     // FU-D43c: an account change makes the buy field pristine again
+      scheduleEstimate();
+      setFxSingleCcyAvailability(accId);
     };
     $('#cfx-account').addEventListener('change', syncFxCcy);
     syncFxCcy();
@@ -359,35 +726,56 @@
       $('#cm-kind-in').classList.toggle('active', k === 'deposit');
       $('#cm-kind-out').classList.toggle('active', k === 'withdraw');
       if (openBtn) openBtn.classList.toggle('active', k === 'opening');
+      updCmBalance();  // FU-D43a: the ceiling line exists only while kind=出金
     }
 
+    /* FU-D43b: clicking a ceiling FIGURE fills the amount field with the full raw
+       balance (delegated to the line so the re-rendered span needs no re-binding). */
+    $('#cm-balance').addEventListener('click', (e) => {
+      const raw = $('#cm-balance').dataset.raw;
+      if (!e.target.closest('.can-fill') || !raw || raw.indexOf('-') === 0) return;
+      $('#cm-amount').value = raw;
+      updCmBalance();
+    });
+    $('#cfx-balance').addEventListener('click', (e) => {
+      const raw = $('#cfx-balance').dataset.raw;
+      if (!e.target.closest('.can-fill') || !raw || raw.indexOf('-') === 0) return;
+      $('#cfx-from-amt').value = raw;
+      updImplied();
+      updFxBalance();
+      scheduleEstimate();  // a programmatic sell-amount change re-estimates like typing
+    });
+
+    /* FU-D43a: NO ack-retry on movement POST — a withdrawal may never overdraft (the
+       backend answers a hard 422 withdraw_insufficient_balance; deposits/openings are
+       credits and need no balance guard, so POST can no longer answer negative_cash).
+       The live check already disables 確認 while the amount exceeds 賬戶現金; a backend
+       422 renders inline under the amount as the authority (mirrors the FX form). */
     $('#cm-confirm').addEventListener('click', async () => {
       const amount = $('#cm-amount').value.trim();
       if (!amount) { if (window.toast) window.toast('請輸入金額', 'fail'); return; }
-      const send = (ack) => api.post('/api/cash/movements', {
-        account_id: $('#cm-account').value, date: $('#cm-date').value, kind: cmKind,
-        ccy: $('#cm-ccy').value, amount: amount,
-        note: $('#cm-note').value.trim() || null, ack_negative: ack,
-      });
       const restore = window.pdBusy ? window.pdBusy($('#cm-confirm'), '寫入中…') : () => {};
       try {
-        await send(false);
+        await api.post('/api/cash/movements', {
+          account_id: $('#cm-account').value, date: $('#cm-date').value, kind: cmKind,
+          ccy: $('#cm-ccy').value, amount: amount,
+          note: $('#cm-note').value.trim() || null,
+        });
         restore();
         if (window.toast) window.toast('寫入成功', 'ok', (KIND_LABEL[cmKind] || '') + ' ' + amount);
         $('#cm-amount').value = ''; $('#cm-note').value = '';
         await boot();
       } catch (err) {
         restore();
-        if (!negConfirmRetry(err, async () => {
-          try {
-            await send(true);
-            if (window.toast) window.toast('寫入成功', 'ok');
-            $('#cm-amount').value = '';
-            await boot();
-          } catch (e2) { if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail'); }
-        })) {
-          if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
+        if (err && err.status === 422 && err.code === 'withdraw_insufficient_balance') {
+          // Backend authority: render ITS message inline (verbatim) and keep 確認 blocked.
+          // Editing the amount/帳戶/幣別 fires updCmBalance(), which re-validates against
+          // the pool and clears the block once the amount is within 賬戶現金.
+          const errEl = $('#cm-amt-err');
+          if (errEl) { errEl.hidden = false; errEl.textContent = err.message; }
+          $('#cm-confirm').disabled = true;
         }
+        if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
       }
     });
 
@@ -402,38 +790,135 @@
         ? '1 ' + $('#cfx-to-ccy').value + ' = ' + (fromA / toA).toFixed(4) + ' ' + $('#cfx-from-ccy').value
         : f.NULL_GLYPH;
     }
-    ['cfx-from-amt', 'cfx-to-amt', 'cfx-from-ccy', 'cfx-to-ccy'].forEach((id) =>
-      $('#' + id).addEventListener('input', updImplied));
+
+    /* ---- FU-D43c: server-computed buy-amount estimate --------------------------------
+       While the buy field is PRISTINE (untouched since the last account/ccy change or
+       submit), a sell-amount change asks GET /api/cash/fx-estimate and places the
+       returned strings — the ESTIMATE into the buy field and the caption 「以 {date}
+       匯率 {rate} 試算…」. A manual edit of the buy field flips it dirty: auto-fill stops
+       (it can never fight the user) and the 重新試算 affordance appears; erasing the buy
+       field to empty makes it pristine again (filling an EMPTY field destroys nothing).
+       All hoisted function declarations — syncFxCcy() above calls them during init;
+       the estPristine/estSeq/estTimer state lives at MODULE scope (TDZ, see top). */
+
+    function setReestimateVisible(vis) {
+      const b = $('#cfx-reestimate');
+      if (b) b.hidden = !vis;
+    }
+
+    function resetEstimate() {
+      estSeq += 1;  // drop any in-flight response
+      if (estTimer) { clearTimeout(estTimer); estTimer = null; }
+      estPristine = true;
+      setReestimateVisible(false);
+      const cap = $('#cfx-estimate');
+      if (cap) { cap.hidden = true; cap.textContent = ''; }
+    }
+
+    async function runEstimate() {
+      if (!estPristine) return;
+      const cap = $('#cfx-estimate');
+      const from = $('#cfx-from-ccy').value;
+      const to = $('#cfx-to-ccy').value;
+      const amt = $('#cfx-from-amt').value.trim();
+      if (!from || !to || from === to || amt === '' || decCmp(amt, '0') <= 0) {
+        if (cap) { cap.hidden = true; cap.textContent = ''; }
+        return;
+      }
+      const seq = ++estSeq;
+      let resp;
+      try {
+        resp = await api.get('/api/cash/fx-estimate',
+          { from_ccy: from, to_ccy: to, amount: amt });
+      } catch (err) {
+        return;  // the estimate is a hint — fail silent, never block entry
+      }
+      if (seq !== estSeq || !estPristine) return;  // stale, or the user took over
+      if (!resp || resp.available === false) {
+        if (cap) { cap.hidden = false; cap.textContent = (resp && resp.reason) || '暫無法試算'; }
+        return;
+      }
+      $('#cfx-to-amt').value = resp.estimate;  // server Decimal string, placed verbatim
+      if (cap) {
+        cap.hidden = false;
+        cap.textContent = '以 ' + f.date(resp.rate_as_of) + ' 匯率 ' + f.rate(resp.rate) +
+          ' 試算，可依實際成交調整';
+      }
+      updImplied();
+      updFxBalance();
+    }
+
+    function scheduleEstimate() {
+      if (!estPristine) return;
+      if (estTimer) clearTimeout(estTimer);
+      estTimer = setTimeout(() => { estTimer = null; runEstimate(); }, 250);
+    }
+
+    /* manual edit of the buy field -> dirty (stop auto-overwrite); erased-empty -> pristine */
+    function markBuyEdited() {
+      estPristine = $('#cfx-to-amt').value.trim() === '';
+      setReestimateVisible(!estPristine);
+      if (estPristine) {
+        const cap = $('#cfx-estimate');
+        if (cap) { cap.hidden = true; cap.textContent = ''; }
+      }
+    }
+
+    $('#cfx-reestimate').addEventListener('click', () => {
+      estPristine = true;  // explicit user request: the estimate may overwrite again
+      setReestimateVisible(false);
+      runEstimate();
+    });
+
+    $('#cfx-from-amt').addEventListener('input', () => {
+      updImplied(); updFxBalance(); scheduleEstimate();
+    });
+    $('#cfx-to-amt').addEventListener('input', () => {
+      updImplied(); updFxBalance(); markBuyEdited();
+    });
+    /* R6-D: never-equal invariant — each select's own change may flip its SIBLING
+       first; either way the shared refresh below runs once, covering both fields. */
+    $('#cfx-from-ccy').addEventListener('input', () => {
+      enforceFxCcyDistinct('from');
+      updImplied(); updFxBalance(); resetEstimate(); scheduleEstimate();
+    });
+    $('#cfx-to-ccy').addEventListener('input', () => {
+      enforceFxCcyDistinct('to');
+      updImplied(); updFxBalance(); resetEstimate(); scheduleEstimate();
+    });
     updImplied();
+    updFxBalance();
 
     $('#cfx-confirm').addEventListener('click', async () => {
       const fromA = $('#cfx-from-amt').value.trim();
       const toA = $('#cfx-to-amt').value.trim();
       if (!fromA || !toA) { if (window.toast) window.toast('請填兩側金額', 'fail'); return; }
-      const send = (ack) => api.post('/api/cash/fx', {
-        account_id: $('#cfx-account').value, date: $('#cfx-date').value,
-        from_ccy: $('#cfx-from-ccy').value, from_amt: fromA,
-        to_ccy: $('#cfx-to-ccy').value, to_amt: toA, ack_negative: ack,
-      });
+      /* FU-D34: NO ack-retry — a conversion may never overdraft the pool. The live check
+         already disables 確認 when the amount exceeds 可用餘額; the backend re-validates as
+         the authority and a 422 fx_insufficient_balance renders inline under the amount. */
       const restore = window.pdBusy ? window.pdBusy($('#cfx-confirm'), '寫入中…') : () => {};
       try {
-        await send(false);
+        await api.post('/api/cash/fx', {
+          account_id: $('#cfx-account').value, date: $('#cfx-date').value,
+          from_ccy: $('#cfx-from-ccy').value, from_amt: fromA,
+          to_ccy: $('#cfx-to-ccy').value, to_amt: toA,
+        });
         restore();
         if (window.toast) window.toast('換匯已寫入', 'ok', fromA + ' ' + $('#cfx-from-ccy').value + ' → ' + toA + ' ' + $('#cfx-to-ccy').value);
         $('#cfx-from-amt').value = ''; $('#cfx-to-amt').value = ''; updImplied();
-        await boot();
+        resetEstimate();  // FU-D43c: cleared form -> pristine again, drop in-flight estimates
+        await boot();  // refresh balances → the 可用餘額 ceiling updates (+ FU-D40 ledger)
       } catch (err) {
         restore();
-        if (!negConfirmRetry(err, async () => {
-          try {
-            await send(true);
-            if (window.toast) window.toast('換匯已寫入', 'ok');
-            $('#cfx-from-amt').value = ''; $('#cfx-to-amt').value = ''; updImplied();
-            await boot();
-          } catch (e2) { if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail'); }
-        })) {
-          if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
+        if (err && err.status === 422 && err.code === 'fx_insufficient_balance') {
+          // The backend is the authority: render ITS message inline (verbatim) and keep 確認
+          // blocked. Editing the amount/帳戶/幣別 fires updFxBalance(), which re-validates
+          // against the pool and clears the block once the amount is within 可用餘額.
+          const errEl = $('#cfx-amt-err');
+          if (errEl) { errEl.hidden = false; errEl.textContent = err.message; }
+          $('#cfx-confirm').disabled = true;
         }
+        if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
       }
     });
   }
@@ -463,7 +948,38 @@
     renderMovements();
     if (cmPager) cmPager.update({ offset: cmState.offset, totalCount: cmState.total });
     if (stmt.account) await loadStatement();  // keep the open statement fresh
+    else renderStatementPre();  // FU-D25: guidance instead of a blank statement table
+    await loadFxLedger();  // FU-D40: keep the 換匯中心 ledger in step with every refresh
+    booted = true;
+    updFxBalance();  // FU-D34: refresh the 換匯中心 可用餘額 ceiling from the fresh balances
+    updCmBalance();  // FU-D43a: refresh the 出金 賬戶現金 ceiling too
   }
+
+  /* FU-D25: re-render the activated tab's section from cached state on every tab switch.
+     boot() already refetches + re-renders all sections eagerly (even while a tab is
+     display:none — this ECharts-free page has no measurement path that mis-sizes when
+     hidden), so this is a belt-and-braces re-render, not the source of freshness. */
+  function onCashTab(e) {
+    if (!booted) return;
+    const tab = e && e.detail;
+    if (tab === 'pools') {
+      renderCards();
+      if (!stmt.account) renderStatementPre();
+    } else if (tab === 'flows') {
+      renderMovements();
+      // FU-D43a (mirrors r4's FX fix): show the 出金 ceiling from cached balances
+      // IMMEDIATELY, then re-fetch so it is CURRENT.
+      updCmBalance();
+      boot();  // async; its trailing updCmBalance() refreshes the ceiling once balances land
+    } else if (tab === 'fx') {
+      // FU-D34: opening 換匯中心 shows the ceiling from cached balances IMMEDIATELY, then
+      // re-fetches so it is CURRENT — the pools may have changed via other surfaces since
+      // this page last booted (e.g. a tab switch is a fragment nav, not a reload).
+      updFxBalance();
+      boot();  // async; its trailing updFxBalance() refreshes the ceiling (+ FU-D40 ledger)
+    }
+  }
+  window.addEventListener('pd-cash-tab', onCashTab);
 
   (async function init() {
     try {
@@ -473,6 +989,7 @@
       accounts = [];
     }
     initForms();
+    initStmtExports();
     await boot();
   })();
 })();

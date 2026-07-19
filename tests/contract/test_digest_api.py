@@ -125,7 +125,7 @@ def test_history_pages_and_total_constant(
 
 def test_history_validation_400s(client: TestClient) -> None:
     def _hist(params: dict[str, object]) -> int:
-        return client.get("/api/digest/history", params=params).status_code
+        return int(client.get("/api/digest/history", params=params).status_code)
 
     assert _hist({"kind": "daily", "limit": 0}) == 400
     assert _hist({"kind": "daily", "limit": 21}) == 400
@@ -165,12 +165,20 @@ def test_run_bad_kind_400(client: TestClient) -> None:
     assert r.status_code == 400
 
 
-# --- guest lockdown (writes 403; reads open) ----------------------------------
+# --- guest gate (FU-D4: run now OPEN; config PUT stays 403; reads open) --------
 
 
-def test_guest_run_and_config_put_403(guest_client: TestClient) -> None:
+def test_guest_run_now_is_open_202(guest_client: TestClient) -> None:
+    # FU-D4: the manual run is a compute+cache action → open in guest/demo mode (the
+    # outbound push is separately suppressed in digest_service._push). Async 202, same as
+    # the protected path (the background worker uses its own session; a second immediate
+    # run is refused with 409 exactly as the protected in-flight test asserts).
     run = guest_client.post("/api/digest/run", json={"kind": "daily"})
-    assert run.status_code == 403
+    assert run.status_code == 202
+    assert run.json()["kind"] == "daily" and isinstance(run.json()["run_id"], int)
+
+
+def test_guest_config_put_stays_403(guest_client: TestClient) -> None:
     cfg = guest_client.put("/api/digest/config", json={"llm_summary_enabled": True})
     assert cfg.status_code == 403
 

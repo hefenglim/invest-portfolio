@@ -11,6 +11,14 @@ from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import upsert_opening
 from portfolio_dash.data_ingestion.validate import Issue
 
+# Canonical CSV column order for the opening_inventory import — SINGLE SOURCE for the
+# downloadable template header (see data_ingestion.import_templates). Required: account, symbol,
+# shares, original_avg_cost, build_date; optional: original_cost_total (computed when omitted).
+# Kept in lockstep with the DictReader keys below by the round-trip guard test.
+OPENING_COLUMNS: list[str] = [
+    "account", "symbol", "shares", "original_avg_cost", "build_date", "original_cost_total",
+]
+
 
 def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     """Parse *csv_text* into an :class:`ImportPreview` of opening_inventory rows.
@@ -18,7 +26,7 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
     Expected columns: account, symbol, shares, original_avg_cost, build_date.
     Optional column: original_cost_total (computed as avg * shares when omitted).
     """
-    reader = csv.DictReader(io.StringIO(csv_text))
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))  # tolerate a leading BOM
     rows: list[PreviewRow] = []
     for idx, raw0 in enumerate(reader):
         raw: dict[str, str] = {k.strip(): (v or "").strip() for k, v in raw0.items()}

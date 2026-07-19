@@ -24,6 +24,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from portfolio_dash.api import auth_store
+from portfolio_dash.llm_insight.official_templates import (
+    DIGEST_NOTE_PROMPT_BODY,
+    DIGEST_NOTE_PROMPT_VERSION,
+)
 from portfolio_dash.ops import digest as digest_store
 from portfolio_dash.ops import notify
 from portfolio_dash.portfolio.dashboard import build_dashboard
@@ -48,7 +53,9 @@ _STALE_AGE_DAYS = 3          # a held symbol's latest close older than this = da
 _EXDIV_WINDOW_DAYS = 14      # weekly: ex-dividends within the next fortnight
 _WEEK_DAYS = 7               # weekly review / signal / chores lookback
 _MOVERS_N = 3                # top-N up + top-N down
-_LLM_PROMPT_VERSION = "digest-daily-note-v1"
+# The digest one-liner prompt is code-owned in the FU-D30 registry (official_templates);
+# imported so all shipped prompt content has one home + a version tag.
+_LLM_PROMPT_VERSION = DIGEST_NOTE_PROMPT_VERSION
 
 # rule_id -> (zh label, severity) from the single push catalog (single source of labels).
 _RULE_META: dict[str, tuple[str, str]] = {
@@ -115,9 +122,21 @@ def _weighted_pct(
 
 
 def _movers(
-    per_symbol_pct: dict[str, Decimal | None], names: dict[str, str], *, n: int = _MOVERS_N
+    per_symbol_pct: dict[str, Decimal | None],
+    names: dict[str, str],
+    *,
+    meta: dict[str, tuple[str | None, str | None, str | None]] | None = None,
+    n: int = _MOVERS_N,
 ) -> dict[str, list[dict[str, str]]]:
-    """Top-*n* up + top-*n* down symbols by day-change %, each ``{symbol, name, pct}``."""
+    """Top-*n* up + top-*n* down symbols by day-change %.
+
+    Each entry is ``{symbol, name, pct}`` plus, when the per-symbol *meta* map supplies
+    them, ``quote_date`` (the later close's ``as_of_date``), ``fetched_at`` (that price row's
+    fetch timestamp) and ``close`` (that later close as a Decimal string, FU-D14) — all wire
+    strings the movers tooltip renders. Absent meta keys are simply omitted (older stored
+    digests never carried them; the renderer tolerates it and keeps its round-1 format).
+    """
+    meta = meta or {}
     ranked: list[tuple[str, Decimal]] = sorted(
         ((sym, pct) for sym, pct in per_symbol_pct.items() if pct is not None),
         key=lambda kv: kv[1],
@@ -125,7 +144,15 @@ def _movers(
     )
 
     def _entry(sym: str, pct: Decimal) -> dict[str, str]:
-        return {"symbol": sym, "name": names.get(sym, sym), "pct": decimal_str(pct)}
+        entry = {"symbol": sym, "name": names.get(sym, sym), "pct": decimal_str(pct)}
+        quote_date, fetched_at, close = meta.get(sym, (None, None, None))
+        if quote_date is not None:
+            entry["quote_date"] = quote_date
+        if fetched_at is not None:
+            entry["fetched_at"] = fetched_at
+        if close is not None:
+            entry["close"] = close
+        return entry
 
     ups = [_entry(s, p) for s, p in ranked if p > 0][:n]
     downs = [_entry(s, p) for s, p in reversed(ranked) if p < 0][:n]
@@ -158,21 +185,34 @@ def _holding_weights(rows: list[HoldingRow]) -> list[tuple[str, Decimal]]:
 
 def _per_symbol_day_change(
     conn: sqlite3.Connection, symbols: list[str], *, now: datetime
-) -> tuple[dict[str, Decimal | None], str | None]:
-    """Per-symbol day-change ratio (last two stored closes) + the latest close date used."""
+) -> tuple[
+    dict[str, Decimal | None], str | None, dict[str, tuple[str | None, str | None, str | None]]
+]:
+    """Per-symbol day-change ratio (last two stored closes) + the latest close date used +
+    per-symbol ``(quote_date, fetched_at, close)`` metadata for the later close feeding each
+    pct.
+
+    The metadata reuses the SAME ``get_price_history`` read (no extra query): the later close
+    is ``hist[-1]``, whose ``as_of`` is the quote date, ``fetched_at`` the fetch timestamp,
+    and ``value`` the close price (FU-D14 tooltip source). Only symbols with a computable pct
+    get a metadata entry.
+    """
     start = now.date() - timedelta(days=_DAY_CHANGE_LOOKBACK_DAYS)
     end = now.date()
     out: dict[str, Decimal | None] = {}
+    meta: dict[str, tuple[str | None, str | None, str | None]] = {}
     latest_as_of: date | None = None
     for sym in symbols:
         hist = get_price_history(conn, sym, start, end)
         pct = _pct_from_last_two([p.value for p in hist])
         out[sym] = pct
         if pct is not None and hist:
-            d = hist[-1].as_of
-            if latest_as_of is None or d > latest_as_of:
-                latest_as_of = d
-    return out, (latest_as_of.isoformat() if latest_as_of is not None else None)
+            later = hist[-1]
+            fetched = later.fetched_at.isoformat() if later.fetched_at is not None else None
+            meta[sym] = (later.as_of.isoformat(), fetched, decimal_str(later.value))
+            if latest_as_of is None or later.as_of > latest_as_of:
+                latest_as_of = later.as_of
+    return out, (latest_as_of.isoformat() if latest_as_of is not None else None), meta
 
 
 def _alerts_today(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
@@ -252,13 +292,8 @@ def _note_prompt(payload: dict[str, Any]) -> str:
         "signals_today_count": len(payload.get("signals_today", [])),
         "stale_quote_count": len(payload.get("data_health", {}).get("stale", [])),
     }
-    return (
-        "你是投資組合摘要助理。以下是今日已計算好的數字（JSON）。\n"
-        "<numbers>\n"
-        f"{json.dumps(numbers, ensure_ascii=False)}\n"
-        "</numbers>\n"
-        "請用繁體中文寫『一句話』的收盤摘要，只能引用上面提供的數字，"
-        "不得杜撰任何新數字或金額。不要加上金額符號。"
+    return DIGEST_NOTE_PROMPT_BODY.format(
+        numbers=json.dumps(numbers, ensure_ascii=False)
     )
 
 
@@ -293,19 +328,27 @@ def _signed_pct(pct: str) -> str:
     return f"{sign}{abs(q)}%"
 
 
-def push_text(kind: str, payload: dict[str, Any], *, now: datetime) -> tuple[str, str]:
+def push_text(
+    kind: str, payload: dict[str, Any], *, now: datetime, linked: bool = False
+) -> tuple[str, str]:
     """Compose the push ``(title, body)`` — counts + percentages + a jump hint ONLY.
 
     HARD RULE (B3-D4): the body contains NO currency amount. A unit test asserts this
     (regex guard). Kept module-public so that test can hit it directly.
+
+    When ``linked`` is True a clickable deep link WILL be attached by the channel
+    (FU-D17), so the redundant 「開啟儀表板查看」 hint is dropped. ``linked=False`` (the
+    default, taken whenever no public base URL is configured) keeps the byte-identical
+    legacy text.
     """
     md = now.strftime("%m/%d")
+    hint = "" if linked else "・開啟儀表板查看"
     if kind == "weekly":
         items = payload.get("items", [])
         body = (
-            f"本週待辦 {len(items)} 項・開啟儀表板查看"
+            f"本週待辦 {len(items)} 項{hint}"
             if items
-            else "本週無待辦事項・開啟儀表板查看"
+            else f"本週無待辦事項{hint}"
         )
         return f"週行動清單 {md}", body
     parts: list[str] = []
@@ -316,7 +359,8 @@ def push_text(kind: str, payload: dict[str, Any], *, now: datetime) -> tuple[str
     parts.append(f"上漲 {len(movers.get('up', []))}・下跌 {len(movers.get('down', []))}")
     parts.append(f"警示 {sum(int(a.get('count', 0)) for a in payload.get('alerts_today', []))}")
     parts.append(f"訊號 {len(payload.get('signals_today', []))}")
-    parts.append("開啟儀表板查看")
+    if not linked:
+        parts.append("開啟儀表板查看")
     return f"收盤摘要 {md}", "・".join(parts)
 
 
@@ -330,10 +374,17 @@ def _push(
 ) -> str:
     """Dispatch the digest to the enabled channels (gated). Returns a short push note.
 
-    Gates (in order): no enabled channel → skip; rule unsubscribed → skip; quiet hours →
-    skip (the stored digest is unaffected). Never raises (``sender`` isolates channel
-    failures). The push text carries counts + percentages only (B3-D4).
+    Gates (in order): guest/demo mode → suppress outbound dispatch entirely (FU-D4 — the
+    digest run is open in guest mode so the demo can be exercised, but outbound push stays
+    locked; the stored digest is unaffected); no enabled channel → skip; rule unsubscribed →
+    skip; quiet hours → skip. Never raises (``sender`` isolates channel failures). The push
+    text carries counts + percentages only (B3-D4).
     """
+    if not auth_store.is_protected(conn):
+        logger.info(
+            "digest push suppressed in guest/demo mode (kind=%s): outbound stays locked", kind
+        )
+        return "示範模式略過推播"
     cfg = notify.load_config(conn)
     rule_id = f"digest_{kind}"
     channels = notify.build_enabled_channels(cfg)
@@ -343,8 +394,11 @@ def _push(
         return "未訂閱"
     if notify.in_quiet_hours(cfg.quiet_hours, now):
         return "靜音時段略過推播"
-    title, body = push_text(kind, payload, now=now)
-    outcome = sender(channels, title, body, "info", None)
+    # FU-D17: link the digest push to the dashboard when a public base URL is configured
+    # (frontend_url(base, None) → base + "/index.html"; empty base → None ⇒ legacy text).
+    link = notify.frontend_url(cfg.public_base_url, None)
+    title, body = push_text(kind, payload, now=now, linked=link is not None)
+    outcome = sender(channels, title, body, "info", link)
     ok = sum(1 for v in outcome.values() if v == "ok")
     return f"推播 {ok}/{len(channels)} 通道"
 
@@ -372,8 +426,11 @@ def run_digest_daily(
     # (the payload is opaque ``dict[str, Any]``, so the annotations must live here). The
     # tuple defaults are typed constants — an inline ``({}, None)`` would infer too narrow
     # for the invariant dict inside the tuple.
-    empty_day_change: tuple[dict[str, Decimal | None], str | None] = ({}, None)
-    per_symbol_pct, as_of = _try(
+    empty_day_change: tuple[
+        dict[str, Decimal | None], str | None,
+        dict[str, tuple[str | None, str | None, str | None]],
+    ] = ({}, None, {})
+    per_symbol_pct, as_of, mover_meta = _try(
         lambda: _per_symbol_day_change(conn, held, now=now), empty_day_change
     )
     empty_pf: tuple[Decimal | None, int] = (None, 0)
@@ -381,7 +438,7 @@ def run_digest_daily(
         lambda: _weighted_pct(_holding_weights(data.holdings), per_symbol_pct), empty_pf
     )
     movers: dict[str, list[dict[str, str]]] = _try(
-        lambda: _movers(per_symbol_pct, names), {"up": [], "down": []}
+        lambda: _movers(per_symbol_pct, names, meta=mover_meta), {"up": [], "down": []}
     )
     alerts_today: list[dict[str, Any]] = _try(lambda: _alerts_today(conn, now), [])
     signals_today: list[dict[str, Any]] = _try(lambda: _signals_today(conn, now), [])

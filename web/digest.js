@@ -20,13 +20,96 @@
     return n;
   }
 
-  var EMPTY_MSG = '尚未產生摘要 — 於 設定 → 預警規則 → 摘要與週報 啟用，或按「立即產生」。';
+  var POLL_MS = 2000;        // poll /latest every ~2s after a manual run…
+  var POLL_MAX_MS = 90000;   // …up to ~90s before giving up (generation is a background job)
+
+  /* ---- empty state: link + inline 立即產生 (items 4) ----
+     Shown when NO digest of this kind exists yet. Offers a real jump to the settings
+     surface that enables scheduled digests AND an inline generate button that POSTs
+     /api/digest/run and polls /latest until the fresh digest appears (no page reload). */
+  function renderEmpty(host, kind, renderFn) {
+    host.replaceChildren();
+    var box = el('div', 'digest-empty');
+    var msg = el('div', 'digest-empty-msg');
+    msg.appendChild(document.createTextNode('尚未產生摘要 — 於 '));
+    var link = el('a', 'digest-empty-link', '設定 → 排程中心 → 摘要與週報');
+    link.href = 'settings.html#scheduler';
+    msg.appendChild(link);
+    msg.appendChild(document.createTextNode(' 啟用，或立即產生。'));
+    box.appendChild(msg);
+    var btn = el('button', 'btn btn-sm digest-gen-btn', '立即產生');
+    btn.type = 'button';
+    btn.addEventListener('click', function () { _runNow(kind, host, renderFn, btn); });
+    box.appendChild(btn);
+    host.appendChild(box);
+  }
+
+  /* POST /api/digest/run for one kind, then poll /latest until the digest lands. The
+     endpoint is async (202 + background thread); 409 means a run is already in flight —
+     either way we poll for the result. Errors restore the button + toast the server message. */
+  function _runNow(kind, host, renderFn, btn) {
+    if (!api) return;
+    btn.disabled = true;
+    btn.textContent = '產生中…';
+    api.post('/api/digest/run', { kind: kind })
+      .then(function () { _pollLatest(kind, host, renderFn); })
+      .catch(function (e) {
+        if (e && e.status === 409) {                       // already running → still poll
+          if (window.toast) window.toast('已在產生中', 'ok');
+          _pollLatest(kind, host, renderFn);
+          return;
+        }
+        if (window.toast) window.toast((e && e.message) || '產生失敗', 'fail', e && e.code);
+        btn.disabled = false;
+        btn.textContent = '立即產生';
+      });
+  }
+
+  function _pollLatest(kind, host, renderFn) {
+    var deadline = Date.now() + POLL_MAX_MS;
+    function tick() {
+      api.get('/api/digest/latest', { kind: kind })
+        .then(function (d) {
+          if (d && d.payload) { renderFn(host, d); return; }   // fresh digest → render in place
+          if (Date.now() >= deadline) { _pollTimeout(host, renderFn); return; }
+          setTimeout(tick, POLL_MS);
+        })
+        .catch(function () {
+          if (Date.now() >= deadline) { _pollTimeout(host, renderFn); return; }
+          setTimeout(tick, POLL_MS);
+        });
+    }
+    setTimeout(tick, POLL_MS);
+  }
+
+  function _pollTimeout(host, renderFn) {
+    if (window.toast) window.toast('產生逾時，請稍後重試', 'fail');
+    renderFn(host, null);   // re-render the empty state (restores a fresh 立即產生 button)
+  }
+
+  /* movers tooltip (FU-D14): 名稱（代號）・股價 {close}・更新 {YYYY-MM-DD HH:MM}.
+     `close` is a Decimal STRING off the wire — rendered verbatim (no JS math, no coercion).
+     更新 = fetched_at, falling back to quote_date. Older stored digests without `close`
+     keep the round-1 format (名稱（代號）・收盤 {date}・更新 {datetime}). */
+  function _moverTitle(m) {
+    var parts = [];
+    parts.push(m.name ? (m.name + '（' + m.symbol + '）') : m.symbol);
+    if (m.close != null) {
+      parts.push('股價 ' + m.close);
+      if (m.fetched_at) parts.push('更新 ' + f.datetime(m.fetched_at));
+      else if (m.quote_date) parts.push('更新 ' + f.date(m.quote_date));
+    } else {
+      if (m.quote_date) parts.push('收盤 ' + f.date(m.quote_date));
+      if (m.fetched_at) parts.push('更新 ' + f.datetime(m.fetched_at));
+    }
+    return parts.join('・');
+  }
 
   /* ---- daily card ---- */
   function renderDaily(host, d) {
     if (!host) return;
     host.replaceChildren();
-    if (!d || !d.payload) { host.appendChild(el('div', 'digest-empty', EMPTY_MSG)); return; }
+    if (!d || !d.payload) { renderEmpty(host, 'daily', renderDaily); return; }
     var p = d.payload;
 
     /* headline: value-weighted portfolio day-change (price-only, excludes FX drift). */
@@ -49,9 +132,9 @@
       var chips = el('div', 'digest-movers');
       ups.concat(downs).forEach(function (m) {
         var chip = el('span', 'digest-mover ' + f.signClass(m.pct));
-        chip.appendChild(el('span', 'digest-mover-sym', m.symbol));
+        chip.appendChild(el('span', 'digest-mover-sym', m.name || m.symbol));
         chip.appendChild(el('span', 'digest-mover-pct', f.signedPct(m.pct)));
-        chip.title = m.name || m.symbol;
+        chip.title = _moverTitle(m);
         chips.appendChild(chip);
       });
       host.appendChild(chips);
@@ -63,7 +146,11 @@
     }, 0);
     var sigN = (p.signals_today || []).length;
     var counts = el('div', 'digest-counts');
-    counts.appendChild(_countLink('今日警示', alertN, 'settings.html#alerts'));
+    /* FU-D26: 今日警示 counts TODAY'S scheduled-scan alert events — a different statistic
+       from the top-right bell's live 即時狀態 snapshot. A tooltip states the scope (the
+       least-noisy option; the chip layout is unchanged). */
+    counts.appendChild(_countLink('今日警示', alertN, 'settings.html#alerts',
+      '今日排程掃描記錄的警示事件數（與右上角鈴鐺的即時狀態為不同統計）'));
     counts.appendChild(_countLink('今日訊號', sigN, 'instruments.html'));
     host.appendChild(counts);
 
@@ -88,9 +175,10 @@
     host.appendChild(el('div', 'digest-stamp', '產生於 ' + f.datetime(d.generated_at)));
   }
 
-  function _countLink(label, n, href) {
+  function _countLink(label, n, href, title) {
     var a = el('a', 'digest-count', label + ' ' + n);
     a.href = href;
+    if (title) a.title = title;
     return a;
   }
 
@@ -98,7 +186,7 @@
   function renderWeekly(host, d) {
     if (!host) return;
     host.replaceChildren();
-    if (!d || !d.payload) { host.appendChild(el('div', 'digest-empty', EMPTY_MSG)); return; }
+    if (!d || !d.payload) { renderEmpty(host, 'weekly', renderWeekly); return; }
     var items = d.payload.items || [];
     if (!items.length) {
       host.appendChild(el('div', 'digest-empty', '本週無待辦事項 — 一切就緒。'));

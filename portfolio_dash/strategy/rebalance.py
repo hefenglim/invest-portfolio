@@ -244,7 +244,7 @@ def compute_rebalance(
             if rn is None:
                 missing_rule = True
                 break
-            rules_by_acct[h.account_id] = get_fee_rule_set(rn)
+            rules_by_acct[h.account_id] = get_fee_rule_set(rn, conn)
         if missing_rule:
             excluded.append(symbol)
             continue

@@ -84,6 +84,82 @@ def test_index_page_smoke(live_server: str, browser_page: Page) -> None:
     assert_page_ok(browser_page, live_server, "/index.html", root_selector=".kpi-card")
 
 
+@pytest.mark.e2e
+def test_dividend_income_card_smoke(live_server: str, browser_page: Page) -> None:
+    """股利總覽 — the ONE consolidated dividend surface (FU-D47) renders every block.
+
+    Owner ruling (r5 mini-spec): the legacy 年度股利 chart + 除息日曆 panels
+    (app.js/charts.js) and the r4 股利收入 card were replaced by a single surface in
+    #dividend-income-card (stable container id), rendered by dividends-card.js off the
+    SAME shared window.pdDashboard promise — composing ONLY served aggregates
+    (dividends.ttm_net/by_year/total_by_currency, dividend_projection,
+    ex_dividend_calendar, holdings[].payback_ratio/dividend_portion): no client money
+    math (the old client-side 入帳預覽/年內預估 float estimates are gone).
+
+    The session golden DB (_seed_golden) seeds ONE cash dividend (2330 5,000 TWD, within
+    the trailing 12 months), no dividend events, and no declared projection — the mixed
+    variant: (a) the headline strip renders per-ccy 實收 tiles (>=1 .dvc-stat) plus the
+    forecast tile carrying the 預估・僅供參考 badge; (b) by_year has one year (2026, the
+    partial current year) so the lazy ECharts bar chart mounts a <canvas> in #dvc-chart;
+    (c) dividend_projection.by_currency and ex_dividend_calendar are BOTH empty ->
+    honest .dvc-empty states (>=2); (d) 2330 carries payback_ratio > 0 -> the 回本進度
+    strip renders >=1 .dvc-pb-item. Also sweeps the REMOVED legacy ids (#dividend-chart /
+    #exdiv-list / #exdiv-summary / #div-chips / #exdiv-toggle) — none may remain in the
+    DOM. Asserts ZERO console + ZERO page errors over the async render.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/index.html", wait_until="load")
+        page.wait_for_selector(".kpi-card")  # dashboard async render landed
+        # (a) headline strip: per-ccy 實收 stat tiles (>=1 — golden seeds a TWD dividend)
+        # + the forecast tile's unmistakable 預估・僅供參考 badge.
+        page.wait_for_selector("#dividend-income-card .dvc-stat")
+        stats = page.query_selector_all("#dividend-income-card .dvc-stat")
+        assert len(stats) >= 1, f"expected >=1 per-ccy stat tile, got {len(stats)}"
+        assert page.query_selector("#dividend-income-card .dvc-badge") is not None, (
+            "forecast tile missing the 預估・僅供參考 badge"
+        )
+        # (b) by_year present -> the ONE yearly ECharts bar chart mounted a canvas.
+        page.wait_for_selector("#dvc-chart canvas")
+        # (c) empty golden projection + calendar -> honest empty states (>=2 .dvc-empty).
+        page.wait_for_selector("#dividend-income-card .dvc-empty")
+        empties = page.query_selector_all("#dividend-income-card .dvc-empty")
+        assert len(empties) >= 2, (
+            f"expected projection + calendar empty states, got {len(empties)} .dvc-empty"
+        )
+        # (d) 回本進度 attribution strip: 2330 has payback_ratio > 0 in golden.
+        page.wait_for_selector("#dividend-income-card .dvc-pb-item")
+        # Removed-id sweep: the legacy 股利區 chart/calendar DOM is GONE — no orphans.
+        for legacy_id in (
+            "dividend-chart", "exdiv-list", "exdiv-summary", "div-chips", "exdiv-toggle",
+        ):
+            assert page.query_selector(f"#{legacy_id}") is None, (
+                f"legacy dividend id #{legacy_id} still present after FU-D47 consolidation"
+            )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/index.html (股利總覽 consolidated card): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
 def _assert_settings_redirect(
     page: Page,
     live_server: str,
@@ -416,6 +492,12 @@ def test_trades_ledger_account_filter_keeps_rows(
     transactions tab to populate, click that chip, then assert (a) at least one
     `#tx-body tr` row survives the filter (did NOT go empty) and (b) ZERO console + page
     errors over the interaction.
+
+    FU-D37 (2026-07-18): this surface is also the representative check for the single
+    frontend account-name resolver (web/names.js -> window.pdNames), which replaced the
+    three drifting per-file ACCOUNT_ZH maps. It asserts the tw_broker chip renders the
+    canonical zh name "台灣券商" AND that window.pdNames is the one source of truth
+    (schwab -> "嘉信 Schwab" / short "嘉信"; an unknown id falls back to the id itself).
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -438,6 +520,22 @@ def test_trades_ledger_account_filter_keeps_rows(
         page.wait_for_selector("#tx-body tr.expandable")
         # The tw_broker chip is built only after boot() re-runs initFilters off real rows.
         page.wait_for_selector('#ledger-filters .chip[data-account-id="tw_broker"]')
+        # FU-D37: the chip renders the canonical zh name via the shared resolver
+        # (web/names.js -> window.pdNames), not a per-file ACCOUNT_ZH map.
+        chip = page.query_selector('#ledger-filters .chip[data-account-id="tw_broker"]')
+        chip_text = chip.inner_text().strip() if chip is not None else None
+        assert chip_text == "台灣券商", (
+            f"tw_broker chip did not render the canonical name via pdNames: {chip_text!r}"
+        )
+        # JS-level sanity: window.pdNames is the single naming authority on the page.
+        resolver = page.evaluate(
+            "() => ({ acct: window.pdNames && window.pdNames.account('schwab'),"
+            " short: window.pdNames && window.pdNames.accountShort('schwab'),"
+            " unknown: window.pdNames && window.pdNames.account('nope') })"
+        )
+        assert resolver == {"acct": "嘉信 Schwab", "short": "嘉信", "unknown": "nope"}, (
+            f"window.pdNames resolver mismatch: {resolver!r}"
+        )
         page.click('#ledger-filters .chip[data-account-id="tw_broker"]')
         # Filter keyed on account_id -> 2330 (tw_broker) rows survive (NOT empty).
         page.wait_for_selector("#tx-body tr.expandable")
@@ -500,13 +598,14 @@ def test_instruments_page_smoke(live_server: str, browser_page: Page) -> None:
 def test_instruments_quick_add_duplicate_surfaces_backend_error(
     live_server: str, browser_page: Page
 ) -> None:
-    """One-step add hits the REAL POST /api/instruments/quick (2026-07-02).
+    """The 加入 button opens the shared quick-add dialog (FU-D23), which runs the fast
+    GET /api/instruments/lookup.
 
-    Deterministic + provider-free path: adding golden-registered 2330 answers 409
-    duplicate_symbol BEFORE any quote fetch, so the e2e never touches the network.
-    Asserts (a) the button POSTs the real endpoint and receives the 409, (b) the
-    backend message surfaces as a fail toast, and (c) ZERO console + page errors
-    over the interaction (an unhandled POST rejection would fail this).
+    Deterministic + provider-free path: looking up golden-registered 2330 resolves
+    ``registered:true`` from stored metadata BEFORE any provider call, so the e2e never
+    touches the network. Asserts (a) the button fires the real lookup endpoint (200),
+    (b) the dialog surfaces the 「已註冊」 duplicate signal in-place and holds the confirm
+    disabled, and (c) ZERO console + page errors over the interaction.
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -527,23 +626,26 @@ def test_instruments_quick_add_duplicate_surfaces_backend_error(
         page.goto(live_server + "/instruments.html", wait_until="load")
         page.wait_for_selector("#inst-body tr")  # list landed (page fully booted)
         page.fill("#new-symbol", "2330")
-        # Market defaults to TW; the one-step add POSTs /api/instruments/quick.
-        with page.expect_response("**/api/instruments/quick") as resp_info:
+        # Market defaults to TW; 加入 opens the dialog which GETs /api/instruments/lookup.
+        with page.expect_response("**/api/instruments/lookup**") as resp_info:
             page.click("#quick-add-btn")
-        assert resp_info.value.status == 409, f"quick status {resp_info.value.status}"
-        # The backend duplicate message surfaces as a fail toast.
-        page.wait_for_selector(".toast-fail")
-        assert "已註冊" in page.inner_text(".toast-fail")
+        assert resp_info.value.status == 200, f"lookup status {resp_info.value.status}"
+        # The dialog surfaces the duplicate in-place and keeps the confirm disabled.
+        page.wait_for_selector(".modal-backdrop")
+        page.wait_for_function(
+            "() => { const m = document.querySelector('.modal-body');"
+            " return m && m.textContent.includes('已註冊'); }"
+        )
+        page.wait_for_function(
+            "() => { const b = [...document.querySelectorAll('.modal-foot .btn-primary')]"
+            ".find(x => x.textContent.trim() === '確認'); return b && b.disabled; }"
+        )
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
 
-    # Chrome logs a console "error" for ANY non-2xx fetch ("Failed to load
-    # resource: ... 409") — that is network logging of the DELIBERATE 409, not an
-    # app error. Filter it; everything else (and all page errors) stays fatal.
-    app_errors = [e for e in console_errors if "Failed to load resource" not in e]
-    assert not app_errors and not page_errors, (
-        f"/instruments.html (quick add): console errors={app_errors!r}; "
+    assert not console_errors and not page_errors, (
+        f"/instruments.html (quick add dialog): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
@@ -799,14 +901,8 @@ def test_settings_combined_page_smoke(live_server: str, browser_page: Page) -> N
             "() => { const v = document.querySelector('#sys-prompt');"
             " return v && v.value && v.value.trim().length > 0; }"
         )
-        # 資料庫統計 (WPA, 2026-07-07): the read-only stats panel boots off
-        # GET /api/db-stats — wait for its boot signal (the note text renders on
-        # BOTH success and failure paths; file-size rows land with it).
-        page.wait_for_function(
-            "() => { const n = document.querySelector('#dbstats-note');"
-            " return n && n.textContent && n.textContent.indexOf('唯讀統計') !== -1; }"
-        )
-        page.wait_for_selector("#dbstats-body tr", state="attached")
+        # 資料庫統計 moved off settings to its own 資料中心 page (FU-D15, 2026-07-16);
+        # its smoke lives in test_data_center_page_smoke. Nothing to wait for here now.
         # Q1 fix (2026-07-07): the Request 明細 panel must exist on the CANONICAL tabbed
         # surface (previously only on standalone settings-llm.html), and clicking the
         # AI 與額度 tab must still render the daily chart (an unguarded ledger wiring
@@ -1100,7 +1196,8 @@ def test_settings_notify_channels_render(
     rule_catalog). The live_server golden DB is GUEST mode (no auth users — the public
     demo), so since the F1 lockdown the wire carries topic_masked/topic_set instead of the
     full topic and the page must render the honest demo state: masked topic in the input,
-    the #nt-demo-note notice, and every control disabled. Navigate /settings.html#alerts,
+    the #nt-demo-note notice, and every control disabled. Navigate /settings.html#notify
+    (FU-D3: the notify channels + quiet hours + subscriptions moved to the 通知中心 tab),
     wait for the rendered subscription rows, then assert the guest state + ZERO console +
     ZERO page errors over the async boot (an unhandled fetch rejection would fail it).
     """
@@ -1120,7 +1217,7 @@ def test_settings_notify_channels_render(
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
     try:
-        page.goto(live_server + "/settings.html#alerts", wait_until="load")
+        page.goto(live_server + "/settings.html#notify", wait_until="load")
         # Subscription checkboxes mount only after GET /api/notify/config resolves.
         # Waiting on the RENDERED result (not the response event) avoids racing the late
         # fetch in the long settings script chain.
@@ -1140,7 +1237,7 @@ def test_settings_notify_channels_render(
         page.remove_listener("pageerror", _on_pageerror)
 
     assert not console_errors and not page_errors, (
-        f"/settings.html#alerts (notify channels): console errors={console_errors!r}; "
+        f"/settings.html#notify (notify channels): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
@@ -1498,8 +1595,9 @@ def test_dashboard_digest_cards_smoke(live_server: str, browser_page: Page) -> N
 
 @pytest.mark.e2e
 def test_settings_digest_card_smoke(live_server: str, browser_page: Page) -> None:
-    """摘要與週報 card on /settings.html#alerts renders daily + weekly rows clean.
+    """摘要與週報 card on /settings.html#scheduler renders daily + weekly rows clean.
 
+    FU-D3 moved the digest card into the 排程中心 tab (above the jobs table it drives).
     settings-digest.js boots off GET /api/scheduler/jobs (the digest_daily/digest_weekly
     rows are seeded by the lifespan) + GET /api/digest/config, then renders the two edition
     rows with a friendly time picker (the default crons are simple, so a #digest-config-wrap
@@ -1521,9 +1619,9 @@ def test_settings_digest_card_smoke(live_server: str, browser_page: Page) -> Non
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
     try:
-        page.goto(live_server + "/settings.html#alerts", wait_until="load")
-        # Rows mount only after GET /api/scheduler/jobs resolves; the alerts tab is not the
-        # active tab, so wait for ATTACHED. The default simple crons render a time input.
+        page.goto(live_server + "/settings.html#scheduler", wait_until="load")
+        # Rows mount only after GET /api/scheduler/jobs resolves. The default simple crons
+        # render a time input; wait for ATTACHED (robust regardless of active-tab timing).
         page.wait_for_selector("#digest-config-wrap .digest-cfg-hhmm", state="attached")
         rows = page.query_selector_all("#digest-config-wrap .digest-cfg-row")
         assert len(rows) >= 3, f"expected daily+weekly+LLM rows, got {len(rows)}"
@@ -1532,19 +1630,150 @@ def test_settings_digest_card_smoke(live_server: str, browser_page: Page) -> Non
         page.remove_listener("pageerror", _on_pageerror)
 
     assert not console_errors and not page_errors, (
-        f"/settings.html#alerts (digest card): console errors={console_errors!r}; "
+        f"/settings.html#scheduler (digest card): console errors={console_errors!r}; "
+        f"page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_settings_digest_edit_updates_jobs_row_without_reload(
+    live_server: str, browser_page: Page
+) -> None:
+    """FU-D3 desync fix: editing the digest send-time updates the matching 排程工作表 row LIVE.
+
+    The digest card + jobs table now share the 排程中心 tab. settings-digest.js PUTs the new
+    cron then broadcasts ``pd-jobs-changed``; settings-scheduler.js listens and re-fetches, so
+    the ``digest_daily`` row's raw-cron input reflects the new schedule WITHOUT a page reload
+    (the stale-frontend-cache bug this fix targets). Guest mode is fine — the scheduler PUT is
+    config-class (no owner gate). Asserts the live propagation + ZERO console/page errors.
+    """
+    page = browser_page
+    assert isinstance(page, Page)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/settings.html#scheduler", wait_until="load")
+        # Both surfaces mount after GET /api/scheduler/jobs resolves.
+        page.wait_for_selector("#digest-config-wrap .digest-cfg-hhmm")
+        page.wait_for_selector("#jobs-body tr")
+
+        daily_time = page.locator("#digest-config-wrap .digest-cfg-hhmm").first
+        cur = daily_time.input_value()
+        new_time = "06:17" if cur != "06:17" else "07:23"
+        hh, mm = new_time.split(":")
+        expected_cron = f"{int(mm)} {int(hh)} * * mon-fri"
+
+        # Edit the daily send-time -> PUT /api/scheduler/jobs/digest_daily (change-event persist).
+        with page.expect_response("**/api/scheduler/jobs/digest_daily") as resp_info:
+            daily_time.fill(new_time)
+            daily_time.dispatch_event("change")
+        assert resp_info.value.request.method == "PUT", "expected a PUT to the digest_daily job"
+
+        # WITHOUT a reload, the digest_daily jobs-table row's cron input reflects the new cron.
+        page.wait_for_function(
+            """(cron) => {
+                for (const tr of document.querySelectorAll('#jobs-body tr')) {
+                    const code = tr.querySelector('.cron-code');
+                    if (code && code.textContent.trim() === 'digest_daily') {
+                        const inp = tr.querySelector('.cron-friendly input');
+                        return !!inp && inp.value === cron;
+                    }
+                }
+                return false;
+            }""",
+            arg=expected_cron,
+        )
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/settings.html#scheduler (digest→jobs desync): console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
 
 
 @pytest.mark.e2e
 def test_cash_page_smoke(live_server: str, browser_page: Page) -> None:
-    """/cash.html loads clean and its input forms actually initialize.
+    """/cash.html loads clean across its THREE tabs (FU-D25) with ZERO console/page errors.
 
     Regression guard for the stress-audit finding (2026-07-15): a TDZ ReferenceError
     in cash.js initForms() aborted BEFORE the deposit/FX click handlers were attached,
-    so the buttons silently did nothing — and no smoke covered this page. Waits for a
-    post-render selector so the async boot (balances + forms) is observed, then asserts
-    zero console/page errors.
+    so the buttons silently did nothing — and no smoke covered this page. FU-D5: on the
+    default 賬戶現金 tab, click one per-ccy cash line and assert the statement renders
+    real server rows (the describe()/detail path must not throw). FU-D25: the deposit
+    button and the FX button now live under the 出金入金 / 換匯中心 tabs — activate each
+    tab and assert its key control becomes visible (a hidden-tab id-drift regression guard).
     """
-    assert_page_ok(browser_page, live_server, "/cash.html", root_selector="#cm-confirm")
+    page = browser_page
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def _on_console(msg: object) -> None:
+        if getattr(msg, "type", None) == "error":
+            console_errors.append(getattr(msg, "text", repr(msg)))
+
+    def _on_pageerror(exc: object) -> None:
+        page_errors.append(str(exc))
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    try:
+        page.goto(live_server + "/cash.html", wait_until="load")
+
+        # 賬戶現金 (default tab): pools + statement.
+        page.wait_for_selector(".cash-line.clickable")       # balance cards rendered
+        page.click(".cash-line.clickable")                    # open one pool's statement
+        # td.num rows are REAL server rows (the empty-state row has no .num cell), so this
+        # also proves the click drove the statement rather than matching the pre-select hint.
+        page.wait_for_selector("#cash-stmt-body tr td.num")
+
+        # 出金入金 tab: the deposit form + movements ledger. #cm-confirm is the key
+        # control; the ledger tbody (#cm-body) is empty in the golden seed (an empty
+        # tbody has no box → not a reliable visibility target), so assert it is attached.
+        page.click('.cash-tab[data-tab="flows"]')
+        page.wait_for_selector("#cm-confirm", state="visible")  # deposit button visible
+        page.wait_for_selector("#cm-body", state="attached")    # movements ledger mounted
+
+        # 換匯中心 tab: the FX form.
+        page.click('.cash-tab[data-tab="fx"]')
+        page.wait_for_selector("#cfx-confirm", state="visible")  # FX button visible
+    finally:
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+
+    assert not console_errors and not page_errors, (
+        f"/cash.html: console errors={console_errors!r}; page errors={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_data_center_page_smoke(live_server: str, browser_page: Page) -> None:
+    """/data-center.html (FU-D15) renders the db-stats table + 概況 summary strip off
+    GET /api/db-stats with ZERO console/page errors, and the sidebar exposes the new
+    資料中心 nav item.
+
+    The db-stats section moved verbatim off 系統設定 (same #dbstats-* ids); this page
+    adds a summary strip (#dc-summary) and per-category 小計 subtotal rows. Waiting on
+    a #dbstats-body row proves the async boot landed; the summary strip renders in the
+    same pass, so it is present once the table is.
+    """
+    page = browser_page
+    assert_page_ok(page, live_server, "/data-center.html", root_selector="#dbstats-body tr")
+    # summary strip populated + at least one per-category subtotal row rendered.
+    page.wait_for_selector("#dc-summary .dc-stat", state="attached")
+    page.wait_for_selector("#dbstats-body tr.dc-subtotal", state="attached")
+    # the new nav item is present and points at this page.
+    nav = page.query_selector("#sidebar a[href='data-center.html']")
+    assert nav is not None, "資料中心 nav item missing from the sidebar"

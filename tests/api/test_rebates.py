@@ -46,6 +46,32 @@ def test_groups_by_month_and_floors_per_trade(golden_db: sqlite3.Connection) -> 
     assert hit.ccy == "TWD"
 
 
+def test_trade_breakdown_sums_to_month_totals(golden_db: sqlite3.Connection) -> None:
+    """FU-D6: per-trade breakdown is ordered by trade_date and sums to the month totals."""
+    _buy(golden_db, d=date(2026, 5, 5), fee="142")
+    _buy(golden_db, d=date(2026, 5, 20), fee="156")
+    hit = next(p for p in svc.detect(golden_db, now=_at(2026, 6, 11))
+               if p.account_id == _TW and p.month == "2026-05")
+    assert [t.trade_date for t in hit.trades] == [date(2026, 5, 5), date(2026, 5, 20)]
+    assert [t.expected for t in hit.trades] == [Decimal("109"), Decimal("120")]
+    # INVARIANT: Σ per-trade fee/expected == the month aggregate
+    assert sum((t.fee for t in hit.trades), Decimal("0")) == hit.fee_total
+    assert sum((t.expected for t in hit.trades), Decimal("0")) == hit.expected
+    # instrument display name resolved once (golden 2330 -> TSMC); side preserved
+    assert hit.trades[0].name == "TSMC" and hit.trades[0].side == Side.BUY
+
+
+def test_trade_name_falls_back_to_symbol(golden_db: sqlite3.Connection) -> None:
+    """A symbol with no instrument row keeps the symbol as its breakdown name."""
+    insert_transaction(
+        golden_db, account_id=_TW, symbol="9999", side=Side.BUY, quantity=Decimal("100"),
+        price=Decimal("10"), fees=Decimal("100"), tax=Decimal("0"),
+        trade_date=date(2026, 5, 5))
+    hit = next(p for p in svc.detect(golden_db, now=_at(2026, 6, 11)) if p.account_id == _TW)
+    t = next(x for x in hit.trades if x.symbol == "9999")
+    assert t.name == "9999"
+
+
 def test_distinct_months_are_distinct_items(golden_db: sqlite3.Connection) -> None:
     _buy(golden_db, d=date(2026, 4, 10), fee="100")
     _buy(golden_db, d=date(2026, 5, 10), fee="200")
@@ -96,6 +122,7 @@ def test_skip_then_unskip_resurfaces(golden_db: sqlite3.Connection) -> None:
     skipped = svc.list_skipped(golden_db, now=now)
     row = next(s for s in skipped if s.account_id == _TW and s.month == "2026-05")
     assert row.detail is not None and row.detail.expected == Decimal("109")
+    assert len(row.detail.trades) == 1 and row.detail.trades[0].fee == Decimal("142")
     assert svc.unskip(golden_db, [(_TW, "2026-05")]) == 1
     assert [p for p in svc.detect(golden_db, now=now) if p.month == "2026-05"]
 

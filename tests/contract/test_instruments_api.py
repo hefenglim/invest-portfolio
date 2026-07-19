@@ -62,6 +62,8 @@ def test_instruments_list_shape_and_enrichment(api_client: TestClient) -> None:
     assert tsmc["ccy"] == "TWD" and tsmc["held"] is True
     assert tsmc["last"] == "600"
     assert tsmc["target_low"] is None
+    assert tsmc["target_high"] is None  # FU-D28: additive wire, unset by default
+    assert tsmc["industry"] is None  # R6: GICS industry passthrough, null until next-wave fill
     aapl = by_symbol["AAPL"]
     assert aapl["board"] == "" and aapl["held"] is True and aapl["last"] == "120"
 
@@ -220,8 +222,107 @@ def test_put_explicit_null_clears_target_low(api_client: TestClient) -> None:
     assert r2.status_code == 200 and r2.json()["target_low"] is None
 
 
+def test_put_updates_and_clears_target_high(api_client: TestClient) -> None:
+    """FU-D28: target_high rides through the same PUT path as target_low (set + explicit-null
+    clear). Both bounds are independent."""
+    r = api_client.put("/api/instruments/2330",
+                       json={"target_low": "550", "target_high": "700"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["target_low"] == "550" and body["target_high"] == "700"
+    # clearing the ceiling leaves the floor intact (exclude_unset: only sent keys change)
+    r2 = api_client.put("/api/instruments/2330", json={"target_high": None})
+    assert r2.status_code == 200
+    assert r2.json()["target_high"] is None and r2.json()["target_low"] == "550"
+
+
+def test_register_persists_target_high(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FU-D28: an explicit target_high supplied at registration is persisted (the router
+    applies it after the shared onboarding service, which is target_low-only)."""
+    _stub_pricing(monkeypatch)
+    r = api_client.post("/api/instruments", json={
+        "symbol": "6488", "market": "TW", "name": "環球晶", "sector": "Semis",
+        "board": "TPEx", "target_low": "450", "target_high": "900"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["target_low"] == "450" and body["target_high"] == "900"
+    # and it survives a re-read through the list
+    listed = {i["symbol"]: i for i in api_client.get("/api/instruments").json()["list"]}
+    assert listed["6488"]["target_high"] == "900"
+
+
 def test_list_and_update_carry_is_etf(api_client: TestClient) -> None:
     lst = api_client.get("/api/instruments").json()["list"]
     assert all(isinstance(i["is_etf"], bool) for i in lst)
     r = api_client.put("/api/instruments/2330", json={"is_etf": True})
     assert r.status_code == 200 and r.json()["is_etf"] is True
+
+
+# --- FU-D23 fast lookup (quick-add dialog identify) ----------------------------------
+
+
+def test_lookup_registered_symbol_is_network_free(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A KNOWN (registered, non-archived) symbol resolves from stored metadata with NO
+    provider call — the deterministic, network-free duplicate signal for the dialog."""
+    def _boom(*a: Any, **k: Any) -> Any:  # any provider touch would be a bug here
+        raise AssertionError("lookup of a registered symbol must not hit the provider")
+
+    monkeypatch.setattr(instrument_service, "refresh_quotes", _boom)
+    monkeypatch.setattr(instrument_service, "probe_tw_board", _boom)
+    r = api_client.get("/api/instruments/lookup", params={"symbol": "2330", "market": "TW"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["found"] is True and body["registered"] is True
+    assert body["archived"] is False and body["name"] == "TSMC" and body["board"] == "TWSE"
+
+
+def test_lookup_new_symbol_found(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A brand-new symbol is provider-verified: a real quote -> found, name filled, no
+    history fetch (registered stays false)."""
+    _stub_pricing(monkeypatch, price="245.90", name="Tesla")
+    r = api_client.get("/api/instruments/lookup", params={"symbol": "TSLA", "market": "US"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["found"] is True and body["registered"] is False
+    assert body["name"] == "Tesla"
+    # a lookup NEVER registers the symbol
+    listed = {i["symbol"] for i in api_client.get("/api/instruments").json()["list"]}
+    assert "TSLA" not in listed
+
+
+def test_lookup_typo_not_found(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No source supplies a quote -> found:false (the typo guard the dialog blocks on)."""
+    _stub_pricing(monkeypatch, quote_ok=False)
+    r = api_client.get("/api/instruments/lookup", params={"symbol": "FAKE9", "market": "US"})
+    assert r.status_code == 200 and r.json()["found"] is False
+
+
+def test_lookup_archived_symbol_restorable_network_free(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ARCHIVED symbol is found from stored metadata (registered:false, archived:true =
+    confirming will restore it) — also network-free."""
+    api_client.put("/api/instruments/2330", json={"is_etf": False})  # ensure it exists
+    # archive it via the delete (soft-delete) door — but 2330 is held; use AAPL? AAPL is held
+    # too. Archive a fresh never-held symbol instead.
+    _stub_pricing(monkeypatch, price="99.9", name="MediaTek")
+    api_client.post("/api/instruments/quick", json={"symbol": "2454", "market": "TW"})
+    assert api_client.delete("/api/instruments/2454").status_code == 200  # soft-delete
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("archived lookup must not hit the provider")
+
+    monkeypatch.setattr(instrument_service, "refresh_quotes", _boom)
+    monkeypatch.setattr(instrument_service, "probe_tw_board", _boom)
+    r = api_client.get("/api/instruments/lookup", params={"symbol": "2454", "market": "TW"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["found"] is True and body["registered"] is False and body["archived"] is True

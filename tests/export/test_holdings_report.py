@@ -86,9 +86,11 @@ def test_allocation_has_sector_and_currency_tables() -> None:
     doc = art.content.decode("utf-8")
     assert "產業配置" in doc
     assert "幣別配置" in doc
-    # sector names from the seed instruments.
-    assert "Semiconductors" in doc
-    assert "Tech" in doc
+    # Allocation-table sector name (canonicalized): R6 folds the seed's 'Semiconductors' (2330)
+    # and 'Tech' (AAPL) into the single GICS Information Technology slice. ('Tech' is a substring
+    # of 'Technology' inside that label, so we assert only the disappeared 'Semiconductors'.)
+    assert "Information Technology" in doc
+    assert "Semiconductors" not in doc
 
 
 def test_dynamic_strings_are_html_escaped() -> None:

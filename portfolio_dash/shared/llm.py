@@ -18,6 +18,7 @@ from portfolio_dash.shared.llm_config import (
     LLMUnavailable,
     ModelConfig,
     check_budget,
+    get_model,
     litellm_model_string,
     select_models,
     select_role_models,
@@ -34,17 +35,41 @@ _ROLE_FALLBACK: dict[LLMRole, LLMRole] = {
 
 
 def _select_for(
-    conn: sqlite3.Connection, *, role: LLMRole | None, vision: bool
+    conn: sqlite3.Connection,
+    *,
+    role: LLMRole | None,
+    vision: bool,
+    model_override: str | None = None,
 ) -> list[ModelConfig]:
     """Resolve the candidate model chain for a call.
 
     When *role* is given it selects that role's [primary, fallback] pair (spec 04.3 master
     path); otherwise it falls back to the legacy vision/default selection. A role with no
     registered fallback companion uses the default-fallback slot.
+
+    *model_override* (FU-D20 per-run model picker) names an explicit registry alias: when it
+    resolves to an ENABLED model that model is placed at the HEAD of the chain and the
+    role/vision chain remains as the fallback. A blank / unknown / disabled override is
+    ignored (the API validates + rejects an invalid pick up front — this is a defensive
+    no-op). When the override is the only usable model (the role chain is unset →
+    :exc:`AINotActivated`) the override alone is returned rather than propagating the
+    not-activated refusal. With ``model_override=None`` the path is byte-identical to before.
     """
-    if role is not None:
-        return select_role_models(conn, role, _ROLE_FALLBACK.get(role, LLMRole.DEFAULT_FALLBACK))
-    return select_models(conn, vision=vision)
+    override = get_model(conn, model_override) if model_override else None
+    if override is not None and not override.enabled:
+        override = None
+    try:
+        if role is not None:
+            base = select_role_models(
+                conn, role, _ROLE_FALLBACK.get(role, LLMRole.DEFAULT_FALLBACK)
+            )
+        else:
+            base = select_models(conn, vision=vision)
+    except AINotActivated:
+        if override is None:
+            raise
+        return [override]
+    return [override, *base] if override is not None else base
 
 __all__ = [
     "AINotActivated",
@@ -235,17 +260,22 @@ def _complete_with_meta[T: BaseModel](
     *,
     agent: str,
     conn: sqlite3.Connection,
+    temperature: float | None = None,
 ) -> StructuredCompletion[T]:
     """Try one model: call, log usage, parse (retry once); return value + model alias + cost.
 
     When the provider supports it, a json_schema ``response_format`` derived from *schema*
     is sent to FORCE structured output (spec 04.10); unsupported providers fall back to the
-    plain prompt+parse path. The schema-parse retry-once behaviour is unchanged. Raises
-    :exc:`LLMUnavailable` on a provider/parse failure.
+    plain prompt+parse path. The schema-parse retry-once behaviour is unchanged. An explicit
+    *temperature* (e.g. ``0`` for a deterministic classification/resolve call) is forwarded to
+    the provider; ``None`` leaves the provider default untouched (byte-identical to before).
+    Raises :exc:`LLMUnavailable` on a provider/parse failure.
     """
     extra: dict[str, object] = {}
     if _supports_response_format(model):
         extra["response_format"] = _response_format_for(schema)
+    if temperature is not None:
+        extra["temperature"] = temperature
     for _attempt in range(2):
         try:
             resp = litellm.completion(
@@ -315,20 +345,31 @@ def complete_structured_meta[T: BaseModel](
     conn: sqlite3.Connection,
     images: list[bytes] | None = None,
     role: LLMRole | None = None,
+    model_override: str | None = None,
+    temperature: float | None = None,
 ) -> StructuredCompletion[T]:
     """Like :func:`complete_structured`, but also returns the model alias + this call's cost.
 
     Use this when the caller must persist WHICH model produced the card (insights.model)
     and/or attribute the per-call cost without a separate ``llm_usage`` lookup. Same gate /
     role-selection / failover / parse semantics; same exceptions.
+
+    *model_override* (FU-D20) is an explicit registry alias put at the head of the candidate
+    chain (the role/vision chain stays as fallback); ``None`` = the existing behaviour.
+    *temperature* (e.g. ``0`` for a deterministic classify/resolve call) is forwarded to the
+    provider on every candidate; ``None`` leaves the provider default.
     """
     check_budget(conn)
-    candidates = _select_for(conn, role=role, vision=bool(images))
+    candidates = _select_for(
+        conn, role=role, vision=bool(images), model_override=model_override
+    )
     messages = _build_messages(prompt + _json_instruction(schema), images)
     last: LLMUnavailable | None = None
     for model in candidates:
         try:
-            return _complete_with_meta(model, messages, schema, agent=agent, conn=conn)
+            return _complete_with_meta(
+                model, messages, schema, agent=agent, conn=conn, temperature=temperature
+            )
         except LLMUnavailable as exc:
             last = exc
     raise last or LLMUnavailable("no model produced valid output")
@@ -342,22 +383,29 @@ def complete_structured[T: BaseModel](
     conn: sqlite3.Connection,
     images: list[bytes] | None = None,
     role: LLMRole | None = None,
+    model_override: str | None = None,
+    temperature: float | None = None,
 ) -> T:
     """Call the configured LLM and parse the response into *schema*.
 
-    Order: budget gate -> role selection (the explicit *role* chain if given, else vision
-    when *images*, else default) -> try each candidate model in order (failover on provider
-    error) -> parse (retry once) -> log cost.
+    Order: budget gate -> model selection (an explicit *model_override* at the head of the
+    chain if given; then the *role* chain if given, else vision when *images*, else default)
+    -> try each candidate model in order (failover on provider error) -> parse (retry once)
+    -> log cost.
 
     *role* (spec 04.3) selects an alternate model chain (e.g. ``LLMRole.MASTER`` for
     scoring/calibration); omitting it preserves the existing default/vision behaviour.
+    *model_override* (FU-D20) forces a specific enabled registry alias first; ``None`` = the
+    existing behaviour. *temperature* (e.g. ``0``) is forwarded to the provider; ``None`` =
+    the provider default.
 
     Raises :exc:`AINotActivated` (no model for the role), :exc:`LLMBudgetExceeded`
     (cap hit), or :exc:`LLMUnavailable` (all candidates failed). All subclass
     :exc:`LLMError`, so callers may catch the base for graceful degradation.
     """
     return complete_structured_meta(
-        prompt, schema, agent=agent, conn=conn, images=images, role=role
+        prompt, schema, agent=agent, conn=conn, images=images, role=role,
+        model_override=model_override, temperature=temperature,
     ).value
 
 

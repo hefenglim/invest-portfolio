@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8"></meta>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+<title>portfolio-dash — 資料中心</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"></link>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
+<link rel="stylesheet" href="styles.css?v=0.1.20"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.20"></link>
+<style>
+  /* 概況 summary strip — headline aggregates (integer counts + file sizes), display-only. */
+  .dc-summary { display:grid; grid-template-columns:repeat(4,1fr); gap:var(--gap); padding:12px var(--pad) 14px; }
+  .dc-stat { background:var(--panel-2); border:1px solid var(--border-soft); border-radius:var(--radius); padding:12px 14px; display:flex; flex-direction:column; gap:4px; }
+  .dc-stat-label { font-size:11px; color:var(--text-3); }
+  .dc-stat-value { font-size:22px; font-weight:700; font-family:var(--font-num); }
+  .dc-stat-sub { font-size:10px; color:var(--text-3); font-family:var(--font-num); }
+  @media(max-width:1100px){ .dc-summary { grid-template-columns:repeat(2,1fr); } }
+
+  /* 檔案大小 rows (mirrors the settings 一般 gen-rows styling, kept local to this page) */
+  .gen-rows { padding:12px var(--pad) 14px;display:flex;flex-direction:column; }
+  .gen-row { display:grid;grid-template-columns:240px 1fr;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12px;align-items:center; }
+  .gen-row:last-child { border-bottom:none; }
+  .gen-row .k { color:var(--text-3);font-size:11px; }
+
+  /* 資料庫統計 table (moved verbatim from settings.html, FU-D8): bounded scroll + sticky
+     header (table.data th is already position:sticky — it pins to this container). */
+  .table-wrap.dbstats-scroll { max-height:60vh; overflow-y:auto; }
+  .table-wrap.dbstats-scroll table.data th { top:-1px; }
+  #dbstats-updated { font-size:10.5px;color:var(--text-3); }
+  /* per-category 小計 subtotal row — emphasized, stable on hover. */
+  tr.dc-subtotal td { font-weight:700;color:var(--text-2);background:var(--panel-2);border-top:1px solid var(--border-soft); }
+  tr.dc-subtotal:hover td { background:var(--panel-2); }
+</style>
+</head>
+<body data-page="datacenter" data-title="資料中心">
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="shell-main">
+<header id="topbar" class="topbar"></header>
+<div class="page">
+
+  <!-- A. 概況 summary strip -->
+  <section class="panel" data-screen-label="概況">
+    <div class="panel-head">
+      <h2 class="panel-title">概況</h2>
+      <span class="panel-sub">跨主資料庫與新聞庫的資料表數、總筆數與檔案大小總覽</span>
+    </div>
+    <div class="dc-summary" id="dc-summary"></div>
+  </section>
+
+  <!-- B. 資料庫統計 (moved verbatim from 系統設定 › 一般, FU-D8) -->
+  <section class="panel" data-screen-label="資料庫統計">
+    <div class="panel-head">
+      <h2 class="panel-title">資料庫統計</h2>
+      <span class="panel-sub">唯讀 — 各資料表筆數與最早記錄，供保留期限評估；目前不做任何自動清理</span>
+      <span class="spacer"></span>
+      <span class="panel-sub num" id="dbstats-updated"></span>
+      <button class="btn" id="dbstats-refresh" type="button"><span class="ico">⟳</span>重新整理</button>
+    </div>
+    <div class="gen-rows" id="dbstats-files" style="padding-bottom:0;"></div>
+    <div class="table-wrap dbstats-scroll"><table class="data"><thead><tr>
+      <th class="col-text">類別</th><th class="col-text">資料表</th><th>筆數</th><th>最早記錄</th>
+    </tr></thead><tbody id="dbstats-body"></tbody></table></div>
+    <div class="set-body" style="padding-top:6px;"><span class="panel-sub" id="dbstats-note"></span></div>
+  </section>
+
+  <!-- C. 資料保留策略 (copy-only forward-looking note; no controls exist yet) -->
+  <section class="panel" data-screen-label="資料保留策略">
+    <div class="panel-head">
+      <h2 class="panel-title">資料保留策略</h2>
+      <span class="panel-sub">未來規劃</span>
+    </div>
+    <div class="set-body"><span class="panel-sub">本頁為唯讀統計。未來將於此設定各資料表的保留期限與自動清理策略；目前所有歷史完整保留，不做任何自動清理。</span></div>
+  </section>
+
+</div>
+</div>
+</div>
+
+<script src="api.js?v=0.1.20"></script>
+<script src="shell.js?v=0.1.20"></script>
+<script src="format.js?v=0.1.20"></script>
+<script src="data-center.js?v=0.1.20"></script>
+</body>
+</html>

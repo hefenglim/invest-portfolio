@@ -42,16 +42,16 @@
      `state.account` holds an account_id ('all' = no filter), NOT the display name —
      the backend rows carry both a stable `account_id` (e.g. "tw_broker") and an English
      `account` display name; filtering/chips key on the stable id and show the zh-TW label
-     via ACCOUNT_ZH (the same map app.js uses).
+     via the shared resolver window.pdNames (web/names.js, FU-D37 — the single frontend
+     account-naming authority that superseded the per-file ACCOUNT_ZH maps).
      WPE (2026-07-07): account + date range moved SERVER-side (the /api/ledgers/*
      endpoints take account_id + from/to) so the pagers stay honest; only the keyword
      search remains a client filter over the CURRENT page (labelled 篩選本頁). */
-  const ACCOUNT_ZH = {
-    tw_broker: '台灣券商',
-    schwab: '嘉信 Schwab',
-    moomoo_my_us: 'Moomoo 美股',
-    moomoo_my_my: 'Moomoo 馬股',
-  };
+  /* Account zh-TW display name — single source of truth is web/names.js (FU-D37,
+     window.pdNames). Local delegator with a graceful no-op (id fallback) when names.js
+     is absent. trades.html loads names.js before this file (ledger.html is a redirect
+     stub -> trades.html). Server-side account.display_name is the planned successor. */
+  const acctZh = (id) => (window.pdNames ? window.pdNames.account(id) : id);
   const state = { account: 'all', q: '', from: '', to: '' };
   const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
   const pageState = {
@@ -81,7 +81,7 @@
     bar.replaceChildren();
     bar.appendChild(el('span', 'group-label', '帳戶'));
     bar.appendChild(mk('all', '全部'));
-    accountList.forEach((a) => bar.appendChild(mk(a.id, ACCOUNT_ZH[a.id] || a.name || a.id)));
+    accountList.forEach((a) => bar.appendChild(mk(a.id, acctZh(a.id))));
   }
 
   /* keyword narrows the CURRENT page only (代號優先、名稱其次 — 2026-07-03 decision) */
@@ -246,7 +246,7 @@
   const accountSel = (current) => {
     const ids = accountList.map((a) => a.id);
     if (current && !ids.includes(current)) ids.push(current);
-    return sel(ids.map((id) => [id, ACCOUNT_ZH[id] || id]), current);
+    return sel(ids.map((id) => [id, acctZh(id)]), current);
   };
 
   function editTx(t) {
@@ -281,6 +281,22 @@
     }
     [fShares, fPrice].forEach((n) => n.addEventListener('input', recompute));
     [fAcc, fSym, fSide, fDate].forEach((n) => n.addEventListener('change', recompute));
+    /* FU-D7: a per-field 還原自動 (↺) affordance beside fee/tax. Once you type in the
+       dialog the field is dirty and there is otherwise no way back within it; this clears
+       the dirty flag and re-runs recompute() so the account's computed value returns and
+       fee_overridden/tax_overridden save as false. */
+    const revertCell = (field, clearDirty) => {
+      const wrap = el('div', 'edit-revert-line');
+      wrap.appendChild(field);
+      const btn = el('button', 'btn btn-sm edit-revert', '↺ 還原自動');
+      btn.type = 'button';
+      btn.title = '清除手動費用／稅，改回依帳戶規則自動計算';
+      btn.addEventListener('click', () => { clearDirty(); recompute(); });
+      wrap.appendChild(btn);
+      return wrap;
+    };
+    const feeCell = revertCell(fFee, () => { feeDirty = false; });
+    const taxCell = revertCell(fTax, () => { taxDirty = false; });
     /* 改「代號 / 帳戶」= 把這筆帳移到另一個持倉：兩邊的成本與損益都會由帳本重建。
        合法（改正輸錯的代號），但要讓使用者知道影響範圍（2026-07-03, item 12）。 */
     const warn = el('div', 'hint',
@@ -288,7 +304,7 @@
       '新代號必須與帳戶市場相符且已註冊，會先做賣超與孤兒紀錄檢核；未手動改費用／稅時會依新帳戶規則重算。');
     editModal('編輯交易 #' + t.id + ' — ' + t.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['方向', fSide],
-      ['股數', fShares], ['價格', fPrice], ['手續費', fFee], ['交易稅', fTax], ['備註', fNote],
+      ['股數', fShares], ['價格', fPrice], ['手續費', feeCell], ['交易稅', taxCell], ['備註', fNote],
       ['', warn],
     ], async (dismiss) => {
       dismiss();
@@ -357,7 +373,7 @@
     const fShares = inp(o.shares, 'number', 'any');
     const fAvg = inp(o.avg, 'number', 'any');
     const fDate = inp(o.date, 'date');
-    editModal('編輯期初 — ' + o.symbol + '（' + (ACCOUNT_ZH[o.account_id] || o.account_id) + '）', [
+    editModal('編輯期初 — ' + o.symbol + '（' + acctZh(o.account_id) + '）', [
       ['股數', fShares], ['原始均價', fAvg], ['建檔日', fDate],
     ], async (dismiss) => {
       dismiss();
@@ -579,6 +595,14 @@
     loadFailToasted = false;
     await Promise.all([loadTx(), loadDiv(), loadFx(), loadOpen()]);
   }
+
+  /* FU-D45: live-refresh seam for the input panes (trades.html). After ANY successful
+     input commit, input.js calls this to re-fetch the ledger tables IN PLACE (current
+     account/date filters + page offsets preserved; NO page reload). All four panes
+     refresh — they share one filter state and a hidden pane must not go stale for the
+     next tab switch — so the ACTIVE tab always re-renders. A plain function assignment
+     (not addEventListener), so repeated calls/loads can never double-bind. */
+  window.pdLedgerRefresh = loadAll;
 
   /* pagers: pane hosts exist on trades.html only — guarded per the 略過 convention */
   if (window.pdPager) {

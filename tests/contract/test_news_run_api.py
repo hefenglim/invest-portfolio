@@ -3,10 +3,11 @@
 Self-contained (mirrors ``tests/contract/test_digest_api.py``): an in-memory DB, a local
 FastAPI app mounting ONLY ``news.router``, ``get_conn``/``get_now`` overridden, sockets
 re-enabled for the in-process TestClient transport. The default ``client`` runs PROTECTED
-(one auth user — the router's guest lockdown checks ``auth_store.is_protected``);
-``guest_client`` runs the same app over a guest DB (auth tables present, ZERO users) for the
-403 test. ``run_news_for`` is monkeypatched so the background thread never touches the
-network/LLM (the assertions only check the synchronous HTTP response anyway).
+(one auth user); ``guest_client`` runs the same app over a guest DB (auth tables present,
+ZERO users) — as of FU-D4 (2026-07-15) the manual fetch is OPEN in guest mode too (compute+
+cache, no outbound push), so the guest run is accepted (202), not forbidden. ``run_news_for``
+is monkeypatched so the background thread never touches the network/LLM (the assertions only
+check the synchronous HTTP response anyway).
 """
 
 import sqlite3
@@ -121,6 +122,11 @@ def test_run_409_while_in_flight(client: TestClient) -> None:
     assert second.json()["error"]["code"] == "already_running"
 
 
-def test_run_guest_403(guest_client: TestClient) -> None:
+def test_run_guest_accepted_202(guest_client: TestClient) -> None:
+    """FU-D4 (2026-07-15): the manual news fetch is a compute+cache action with no outbound
+    push, so it is now OPEN in guest/demo mode — no more 403. It behaves exactly like the
+    protected run (202 + a job id)."""
     r = guest_client.post("/api/news/run", json={"scope": "all"})
-    assert r.status_code == 403
+    assert r.status_code == 202
+    body = r.json()
+    assert body["scope"] == "all" and isinstance(body["run_id"], int)

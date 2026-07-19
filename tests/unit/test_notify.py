@@ -390,3 +390,86 @@ def test_rule_catalog_covers_backend_rule_ids() -> None:
     assert set(RULE_IDS) <= catalog_ids, "a risk rule has no push label"
     signal_ids = {EVENT_TREND, EVENT_CROSS, EVENT_MOMENTUM}
     assert signal_ids <= catalog_ids, "a signal event has no push label"
+    # FU-D28: the new target_cross rule MUST carry a push label (explicit guard so the
+    # subset check above can never be quietly satisfied by an unrelated future entry).
+    assert "target_cross" in catalog_ids
+    assert notify._RULE_LABEL["target_cross"] == ("目標價穿越", "warn")
+
+
+# --- format_event linked / unlinked (FU-D17) ----------------------------------
+
+
+def test_format_event_unlinked_keeps_dashboard_tail() -> None:
+    # legacy path (no base URL): the body keeps 「請至儀表板查看詳情」 byte-identical.
+    _, body, _ = notify.format_event("single_weight", "2330")
+    assert body == "2330：觸發「單一標的集中度」預警，請至儀表板查看詳情。"
+    _, gbody, _ = notify.format_event("quota_low", None)
+    assert gbody == "觸發「AI 額度偏低」預警，請至儀表板查看詳情。"
+
+
+def test_format_event_linked_drops_dashboard_tail() -> None:
+    # a deep link will be attached → the redundant tail is dropped; trigger sentence stays.
+    _, body, _ = notify.format_event("single_weight", "2330", linked=True)
+    assert body == "2330：觸發「單一標的集中度」預警。"
+    assert "請至儀表板查看詳情" not in body
+    _, gbody, _ = notify.format_event("quota_low", None, linked=True)
+    assert gbody == "觸發「AI 額度偏低」預警。"
+
+
+# --- frontend_url deep-link mapping (MUST mirror web/alerts.js mapAlertHref) ---
+
+_BASE = "https://invest.example.com"
+
+
+@pytest.mark.parametrize(("href", "expected_path"), [
+    (None, "/index.html"),                              # global alert → dashboard fallback
+    ("", "/index.html"),                                # empty → dashboard fallback
+    ("/symbol/2330", "/index.html#sym=2330"),           # per-symbol → drawer anchor
+    ("/symbol/^GSPC", "/index.html#sym=%5EGSPC"),        # encodeURIComponent-equivalent (^)
+    ("index.html#sym=2330", "/index.html#sym=2330"),     # already anchored → pass through
+    ("/settings", "/settings.html"),
+    ("/settings#llm", "/settings.html#llm"),
+    ("/insights", "/insights.html"),
+    ("/pipeline", "/pipeline-hub.html"),
+    ("settings.html#alerts", "/settings.html#alerts"),   # already a static page → pass through
+])
+def test_frontend_url_mapping_table(href: str | None, expected_path: str) -> None:
+    assert notify.frontend_url(_BASE, href) == _BASE + expected_path
+
+
+def test_frontend_url_none_when_base_empty() -> None:
+    # no public base URL configured → no link (caller falls back to legacy link-free text).
+    assert notify.frontend_url("", "/symbol/2330") is None
+    assert notify.frontend_url("", None) is None
+
+
+def test_frontend_url_strips_trailing_slash_on_base() -> None:
+    assert notify.frontend_url("https://x.co/", "/settings") == "https://x.co/settings.html"
+
+
+# --- normalize_base_url validation (FU-D17) -----------------------------------
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("", ""),
+    ("   ", ""),
+    ("https://invest.example.com", "https://invest.example.com"),
+    ("https://invest.example.com/", "https://invest.example.com"),
+    ("http://localhost:8000/", "http://localhost:8000"),
+    ("  https://x.co  ", "https://x.co"),
+])
+def test_normalize_base_url_accepts(raw: str, expected: str) -> None:
+    assert notify.normalize_base_url(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["ftp://nope", "invest.example.com", "javascript:alert(1)"])
+def test_normalize_base_url_rejects_non_http(raw: str) -> None:
+    assert notify.normalize_base_url(raw) is None
+
+
+def test_config_round_trip_public_base_url(conn: sqlite3.Connection) -> None:
+    cfg = notify.load_config(conn)
+    assert cfg.public_base_url == ""  # default: deep links off
+    cfg.public_base_url = "https://invest.example.com"
+    notify.save_config(conn, cfg, now=_now(10))
+    assert notify.load_config(conn).public_base_url == "https://invest.example.com"

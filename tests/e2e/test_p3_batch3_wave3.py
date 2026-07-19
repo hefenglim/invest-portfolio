@@ -74,7 +74,7 @@ def test_bell_dot_clears_on_open_and_relights_after_reset(
     """3A: the bell dot lights for UNSEEN alert ids, clears when the panel is opened (ids
     marked seen in localStorage), stays clear across a reload, and re-lights once the
     seen-set is cleared. Golden seeds 2330 at ~94% weight -> a single_weight alert."""
-    make = flow_server  # type: ignore[assignment]
+    make = flow_server
     base = make(_seed_golden)  # type: ignore[operator]
     page = fresh_page
 
@@ -102,9 +102,10 @@ def test_bell_dot_clears_on_open_and_relights_after_reset(
 def test_news_manual_fetch_button_smoke(
     live_server: str, browser_page: Page
 ) -> None:
-    """3C: the 抓取新聞 button posts /api/news/run. The golden server is GUEST -> 403, which
-    the page surfaces as a fail toast (no unhandled rejection). Asserts the toolbar rendered,
-    the button click produced a fail toast, and NO page errors / no non-403 console errors."""
+    """3C + FU-D4 (2026-07-15): the 抓取新聞 button posts /api/news/run. The golden server is
+    GUEST, and the manual fetch is now OPEN in guest/demo mode (compute+cache, no outbound
+    push), so the click is ACCEPTED (202) and a persistent progress toast appears — no fail
+    toast, no page errors, no app console errors."""
     page = browser_page
     console_errors: list[str] = []
     page_errors: list[str] = []
@@ -123,13 +124,14 @@ def test_news_manual_fetch_button_smoke(
         page.wait_for_selector("#nw-toolbar #nw-run")
         with page.expect_response("**/api/news/run") as resp_info:
             page.click("#nw-run")
-        assert resp_info.value.status == 403  # guest lockdown
-        page.wait_for_selector(".toast-fail")
+        assert resp_info.value.status == 202  # guest can now trigger (FU-D4)
+        # the run kicks off a persistent progress toast (created synchronously on click).
+        page.wait_for_selector(".toast-progress")
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
-    # A non-2xx fetch logs a browser "Failed to load resource" console error — that is the
-    # DELIBERATE 403, not an app defect. Everything else stays fatal.
+    # The background completion poll of /api/scheduler/runs may log incidental resource
+    # noise; only real app console errors + uncaught page errors are fatal.
     app_errors = [e for e in console_errors if "Failed to load resource" not in e]
     assert not app_errors and not page_errors, (
         f"news manual fetch: console errors={app_errors!r}; page errors={page_errors!r}"
@@ -149,7 +151,7 @@ def test_inbox_skip_then_unskip_resurfaces(
     flow_server: object, fresh_page: Page
 ) -> None:
     """3E: skip an inbox item -> it moves to 已忽略 -> 取消忽略 -> it re-surfaces."""
-    make = flow_server  # type: ignore[assignment]
+    make = flow_server
     base = make(_seed_with_event)  # type: ignore[operator]
     page = fresh_page
 
@@ -174,7 +176,7 @@ def test_inbox_confirm_then_undo_resurfaces(
 ) -> None:
     """3E: confirm an inbox item -> the 已入帳 strip shows it -> 復原 (delete the ledger row,
     ack the confirm dialog) -> the item re-surfaces in the inbox."""
-    make = flow_server  # type: ignore[assignment]
+    make = flow_server
     base = make(_seed_with_event)  # type: ignore[operator]
     page = fresh_page
 

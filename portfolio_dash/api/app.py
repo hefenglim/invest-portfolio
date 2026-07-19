@@ -38,6 +38,7 @@ from portfolio_dash.api.routers import (
     digest,
     dividend_inbox,
     export,
+    fee_rules,
     health,
     input_center,
     insights,
@@ -46,6 +47,7 @@ from portfolio_dash.api.routers import (
     llm_settings,
     news,
     notify,
+    performance,
     prompts,
     rebates,
     scheduler,
@@ -242,6 +244,7 @@ def create_app() -> FastAPI:
     app.include_router(rebates.router, prefix="/api")
     app.include_router(actions.router, prefix="/api")
     app.include_router(accounts.router, prefix="/api")
+    app.include_router(fee_rules.router, prefix="/api")
     app.include_router(datasources.router, prefix="/api")
     app.include_router(llm_settings.router, prefix="/api")
     app.include_router(strategy.router, prefix="/api")
@@ -257,6 +260,7 @@ def create_app() -> FastAPI:
     app.include_router(news.router, prefix="/api")
     app.include_router(insights.router, prefix="/api")
     app.include_router(notify.router, prefix="/api")
+    app.include_router(performance.router, prefix="/api")
     app.include_router(digest.router, prefix="/api")
     app.include_router(whatsnew.router, prefix="/api")
     if _WEB_DIR.is_dir():

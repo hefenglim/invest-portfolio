@@ -27,9 +27,11 @@ from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
     list_cash_movements,
+    list_instruments,
     list_transactions,
 )
 from portfolio_dash.shared.models.assets import Account
+from portfolio_dash.shared.models.enums import Side
 
 _ZERO = Decimal("0")
 # The cash movement kind that BOOKS a confirmed rebate (deposit-like credit). Stored
@@ -65,11 +67,29 @@ def _is_pending(month: str, now: datetime) -> bool:
     return (my, mm) < (now.year, now.month)
 
 
+class RebateTrade(BaseModel):
+    """One fee-bearing trade contributing to a month's forecast rebate (§3.6 breakdown).
+
+    ``expected`` is this single trade's ``floor(fee × rebate_rate)`` — the same per-trade
+    forecast that is summed into the parent :class:`PendingRebate`'s ``expected`` (so
+    ``Σ trade.expected == month.expected`` and ``Σ trade.fee == month.fee_total`` by
+    construction). FORECAST-ONLY; never money of record (FE-D1).
+    """
+
+    trade_date: date
+    symbol: str
+    name: str  # instrument display name; falls back to the symbol when unknown
+    side: Side
+    fee: Decimal
+    expected: Decimal
+
+
 class PendingRebate(BaseModel):
     """One month's forecast rebate awaiting the owner's receipt confirmation.
 
     ``expected`` is Σ per-trade ``floor(fee × rebate_rate)`` — a FORECAST, never money of
-    record. The confirm amount is editable (this is only the prefill).
+    record. The confirm amount is editable (this is only the prefill). ``trades`` is the
+    per-trade breakdown (§3.6), ordered by ``trade_date``, that sums to the month totals.
     """
 
     account_id: str
@@ -79,6 +99,7 @@ class PendingRebate(BaseModel):
     fee_total: Decimal
     expected: Decimal
     ccy: str
+    trades: list[RebateTrade] = []
 
 
 class SkippedRebate(BaseModel):
@@ -110,7 +131,7 @@ def _rebate_accounts(conn: sqlite3.Connection) -> dict[str, tuple[Account, Decim
         rule_name = rule_by_acct.get(a.account_id)
         if rule_name is None:
             continue
-        rate = get_fee_rule_set(rule_name).rebate_rate
+        rate = get_fee_rule_set(rule_name, conn).rebate_rate
         if rate > _ZERO:
             out[a.account_id] = (a, rate)
     return out
@@ -144,21 +165,31 @@ def detect(
         for m in list_cash_movements(conn)
         if m.kind.upper() == REBATE_KIND and m.note
     }
+    # Instrument display names, looked up ONCE; unknown symbol -> the symbol itself.
+    names = {i.symbol: i.name for i in list_instruments(conn)}
 
-    # (account_id, month) -> [trade_count, fee_total, expected]
+    # (account_id, month) -> [fee_total, expected]; parallel per-trade breakdown.
     agg: dict[tuple[str, str], list[Decimal]] = {}
     counts: dict[tuple[str, str], int] = {}
+    trades: dict[tuple[str, str], list[RebateTrade]] = {}
+    # list_transactions is ordered by trade_date ASC, so per-key trade lists inherit that order.
     for t in list_transactions(conn):
         if t.account_id not in accts:
             continue
         if t.fees is None or t.fees <= _ZERO:  # skip fee-free rows (nothing to rebate)
             continue
         rate = accts[t.account_id][1]
+        trade_expected = forecast_tw_rebate(t.fees, rate)
         key = (t.account_id, _month_key(t.trade_date))
         cell = agg.setdefault(key, [_ZERO, _ZERO])
         cell[0] += t.fees
-        cell[1] += forecast_tw_rebate(t.fees, rate)
+        cell[1] += trade_expected
         counts[key] = counts.get(key, 0) + 1
+        trades.setdefault(key, []).append(RebateTrade(
+            trade_date=t.trade_date, symbol=t.symbol,
+            name=names.get(t.symbol, t.symbol), side=t.side,
+            fee=t.fees, expected=trade_expected,
+        ))
 
     out: list[PendingRebate] = []
     for (account_id, month), (fee_total, expected) in agg.items():
@@ -173,6 +204,7 @@ def detect(
             account_id=account_id, account_name=account.name, month=month,
             trade_count=counts[(account_id, month)], fee_total=fee_total,
             expected=expected, ccy=account.settlement_ccy.value,
+            trades=trades[(account_id, month)],
         ))
     out.sort(key=lambda p: (p.month, p.account_id), reverse=True)
     return out

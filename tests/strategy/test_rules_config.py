@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from decimal import Decimal
 
@@ -61,3 +62,32 @@ def test_calib_gap_roundtrip_preserves_enabled_and_value() -> None:
     got = get_alert_rules(conn)
     assert got.calib_gap.value == Decimal("22")
     assert got.calib_gap.enabled is False
+
+
+def test_target_cross_default_and_meta() -> None:
+    # FU-D28: target_cross is toggle-only (no numeric threshold — per-symbol targets), enabled
+    # by default, same META shape as stale_price / missing_price.
+    assert DEFAULT_RULES.target_cross.enabled is True
+    assert DEFAULT_RULES.target_cross.value is None
+    assert RULE_META["target_cross"] == (None, None, None, None)
+
+
+def test_target_cross_defaults_on_for_existing_install_missing_the_field() -> None:
+    # An install whose alert_rules_config JSON predates target_cross (the key is absent) must
+    # bring the rule online at its default (enabled) via the additive default-on-read merge —
+    # never silently off. Simulate by writing a config row WITHOUT the target_cross key.
+    conn = _conn()
+    legacy = {
+        "single_weight": {"enabled": True, "value": "0.30"},
+        "stale_price": {"enabled": True, "value": None},
+    }
+    conn.execute(
+        "INSERT INTO alert_rules_config (id, rules_json) VALUES (1, ?) "
+        "ON CONFLICT(id) DO UPDATE SET rules_json = excluded.rules_json",
+        (json.dumps(legacy),),
+    )
+    conn.commit()
+    got = get_alert_rules(conn)
+    assert got.target_cross.enabled is True and got.target_cross.value is None
+    # a stored rule keeps its saved state verbatim (proves only ABSENT keys take the default)
+    assert got.single_weight.value == Decimal("0.30")

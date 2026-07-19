@@ -196,9 +196,31 @@ DEFAULT_ACCOUNTS: list[AccountConfig] = [
     ),
 ]
 
-def get_fee_rule_set(name: str) -> FeeRuleSet:
-    """Return the named FeeRuleSet; raises KeyError if not found."""
-    return FEE_RULES[name]
+def get_fee_rule_set(
+    name: str, conn: sqlite3.Connection | None = None
+) -> FeeRuleSet:
+    """Return the EFFECTIVE FeeRuleSet for *name*; raises KeyError if not found.
+
+    ``conn=None`` -> the pure fee-engine v2 defaults (deterministic; keeps the oracle and the
+    unit tests hermetic). With a ``conn`` -> the v2 defaults merged with the user's DB overlay
+    (FU-D1, :mod:`data_ingestion.fee_overrides`). EVERY money call site must pass its ``conn``
+    so user rate edits actually take effect (the "engine supports it but the entry never passes
+    it" bug class, LESSONS_LEARNED.md).
+    """
+    base = FEE_RULES[name]
+    if conn is None:
+        return base
+    # Local import: fee_overrides imports FeeRuleSet from this module (avoid a cycle).
+    from portfolio_dash.data_ingestion.fee_overrides import apply_overlay
+
+    return apply_overlay(conn, name, base)
+
+
+def get_effective_fee_rules(conn: sqlite3.Connection) -> dict[str, FeeRuleSet]:
+    """Every rule set with the user's overlay applied (bulk: accounts wire, export dump)."""
+    from portfolio_dash.data_ingestion.fee_overrides import apply_overlay
+
+    return {name: apply_overlay(conn, name, rs) for name, rs in FEE_RULES.items()}
 
 
 def seed_accounts(conn: sqlite3.Connection) -> None:

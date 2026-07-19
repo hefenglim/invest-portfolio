@@ -9,7 +9,11 @@ from pydantic import BaseModel, Field
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
-from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
+from portfolio_dash.data_ingestion.resolve import (
+    ResolutionStatus,
+    resolve,
+    suggestion_tail,
+)
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
 from portfolio_dash.shared.models.assets import Instrument
@@ -45,7 +49,7 @@ def enter_transaction(
     Pipeline stages:
     1. Validate the input against the current ledger (account exists, qty/price
        positive, sell-exceeds-holdings guard).
-    2. Resolve the symbol to an Instrument (exact → fuzzy → NEEDS_AI).
+    2. Resolve the symbol to an Instrument (exact match, else register-first).
     3. Auto-compute fee + tax from the account's FeeRuleSet, unless the caller
        already supplied explicit values on *inp*.
     4. If *confirm* is True **and** there are no hard (non-confirmable) issues,
@@ -72,21 +76,16 @@ def enter_transaction(
         # quote currency, no pricing worklist entry — so the ledger row would be
         # uninterpretable downstream (dashboard KeyError, permanently missing price).
         # There is no valid "confirm" path; the fix is to register the symbol first.
+        # Code-shaped input resolves EXACT-only (R6-A), so this is the only non-exact
+        # outcome; for name-shaped input, non-binding name suggestions are appended as a
+        # hint — the resolver never binds them (no 「視為」 coercion).
+        message = f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊後再入帳"
+        message += suggestion_tail(res.candidates)
         issues.append(
             Issue(
                 kind="symbol_unresolved",
                 needs_confirm=False,
-                message=f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊後再入帳",
-            )
-        )
-    elif res.status is ResolutionStatus.FUZZY and instrument is not None:
-        # The resolved symbol is already written below; surface the fuzzy match
-        # as a soft (needs_confirm) issue so it is not silently accepted.
-        issues.append(
-            Issue(
-                kind="fuzzy_resolved",
-                needs_confirm=True,
-                message=f"{inp.symbol} 視為 {instrument.symbol}（模糊比對，請確認）",
+                message=message,
             )
         )
 
@@ -105,7 +104,7 @@ def enter_transaction(
         # Stress-audit finding 2026-07-15: entry paths defaulted is_etf=False, taxing
         # ETF sells at the 現股 0.3% rate instead of 0.1%.
         is_etf = instrument.is_etf if instrument is not None else inp.is_etf
-        rules = get_fee_rule_set(acc["fee_rule_set"])
+        rules = get_fee_rule_set(acc["fee_rule_set"], conn)
         # FE-D2: the Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure,
         # so the seam resolves it here, like is_etf). No rate -> stamp 0 + a soft issue.
         stamp_fx: Decimal | None = None

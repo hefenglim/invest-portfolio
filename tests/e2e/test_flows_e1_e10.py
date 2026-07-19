@@ -137,6 +137,64 @@ def test_e2_manual_buy_commit_grows_position(
 
 
 @pytest.mark.e2e
+def test_fee_override_pencil_is_a_true_toggle(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """FU-D7: the fee 覆寫 pencil is a TRUE toggle. ON -> field editable + 已覆寫 badge;
+    OFF -> field read-only again, badge hidden, and the next preview REPOPULATES the
+    auto-computed fee (the custom value is dropped from the commit body)."""
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/input.html", wait_until="load")
+    page.wait_for_selector("#m-account option", state="attached")
+    page.select_option("#m-account", "tw_broker")
+    page.fill("#m-symbol", "2330")
+    page.fill("#m-shares", "1000")
+    with page.expect_response("**/api/input/manual/preview") as pv:
+        page.fill("#m-price", "612.5")
+    assert pv.value.status == 200
+
+    # the auto-computed fee lands in the (read-only) field; capture it for the OFF check.
+    page.wait_for_function(
+        "() => { const e = document.querySelector('#m-fee');"
+        " return e && e.value.trim() !== ''; }"
+    )
+    auto_fee = page.input_value("#m-fee")
+    assert page.locator("#m-fee").evaluate("e => e.readOnly") is True
+
+    # toggle ON: field editable, pencil pressed, 已覆寫 badge shows.
+    page.click("#m-fee-pencil")
+    assert page.locator("#m-fee").evaluate("e => e.readOnly") is False
+    assert page.locator("#m-fee-pencil").get_attribute("aria-pressed") == "true"
+    page.wait_for_selector("#m-fee-ovr", state="visible")
+
+    # type a custom fee -> the badge stays; the override rides through the preview.
+    page.fill("#m-fee", "99999")
+    page.wait_for_selector("#m-fee-ovr", state="visible")
+
+    # toggle OFF: field read-only again, pencil released, badge hidden, and the next
+    # preview response repopulates the auto value (the custom 99999 is gone).
+    with page.expect_response("**/api/input/manual/preview") as pv_off:
+        page.click("#m-fee-pencil")
+    assert pv_off.value.status == 200
+    assert page.locator("#m-fee").evaluate("e => e.readOnly") is True
+    assert page.locator("#m-fee-pencil").get_attribute("aria-pressed") == "false"
+    page.wait_for_selector("#m-fee-ovr", state="hidden")
+    page.wait_for_function(
+        "(expected) => { const e = document.querySelector('#m-fee');"
+        " return e && e.value.trim() === expected; }",
+        arg=auto_fee,
+    )
+    assert page.input_value("#m-fee") != "99999"
+
+    assert not console_errors and not page_errors, (
+        f"FU-D7: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_e4_oversell_soft_warning_gates_confirm_until_ack(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:

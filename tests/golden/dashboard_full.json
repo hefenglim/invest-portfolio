@@ -9,6 +9,7 @@
     "realized_total": "8000.0",
     "unrealized_total": "462765.0000000000000000000000",
     "xirr": null,
+    "xirr_window_days": 157,
     "fx_realized": "2000",
     "fx_unrealized": "10545.0"
   },
@@ -256,13 +257,6 @@
   },
   "returns": {
     "by_currency": {
-      "TWD": {
-        "realized": "8000.0",
-        "unrealized": "237000.0000000000000000000000",
-        "total_return": "245000.0000000000000000000000",
-        "gross_invested": "1595000",
-        "rate": "0.1536050156739811912225705329"
-      },
       "USD": {
         "realized": "0",
         "unrealized": "6820.0",
@@ -276,6 +270,13 @@
         "total_return": "1075.000",
         "gross_invested": "9000",
         "rate": "0.1194444444444444444444444444"
+      },
+      "TWD": {
+        "realized": "8000.0",
+        "unrealized": "237000.0000000000000000000000",
+        "total_return": "245000.0000000000000000000000",
+        "gross_invested": "1595000",
+        "rate": "0.1536050156739811912225705329"
       }
     },
     "reporting_currency": "TWD",
@@ -284,17 +285,15 @@
   },
   "allocation": {
     "by_sector": {
-      "Semiconductors": "1200000",
+      "Information Technology": "2443840.0",
       "ETF": "304000",
-      "Shipping": "121000",
-      "Tech": "1243840.0",
+      "Industrials": "121000",
       "Financials": "69125.000"
     },
     "weights": {
-      "Semiconductors": "0.4084459821679291618518260088",
+      "Information Technology": "0.8318138575510600024166387278",
       "ETF": "0.1034729821492087210024625889",
-      "Shipping": "0.04118496986859952382005912256",
-      "Tech": "0.4233678753831308405648127190",
+      "Industrials": "0.04118496986859952382005912256",
       "Financials": "0.02352819043113175276083956072"
     },
     "reporting_currency": "TWD"
@@ -354,6 +353,11 @@
       "TWD": "20000",
       "USD": "70",
       "MYR": "200"
+    },
+    "ttm_net": {
+      "TWD": "20000",
+      "USD": "70",
+      "MYR": "200"
     }
   },
   "ex_dividend_calendar": [],
@@ -363,949 +367,1107 @@
         "date": "2026-01-05",
         "total_value": "0",
         "net_invested": "500000",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-500000"
       },
       {
         "date": "2026-01-06",
         "total_value": "0",
         "net_invested": "860000",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-860000"
       },
       {
         "date": "2026-01-07",
         "total_value": "0",
         "net_invested": "960000",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-960000"
       },
       {
         "date": "2026-01-08",
         "total_value": "0",
         "net_invested": "1075000",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1075000"
       },
       {
         "date": "2026-01-09",
         "total_value": "0",
         "net_invested": "1075000",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1075000"
       },
       {
         "date": "2026-01-10",
         "total_value": "0",
         "net_invested": "1853100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1853100"
       },
       {
         "date": "2026-01-11",
         "total_value": "0",
         "net_invested": "1853100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1853100"
       },
       {
         "date": "2026-01-12",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-13",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-14",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-15",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-16",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-17",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-18",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-19",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-20",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-21",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-22",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-23",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-24",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-25",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-26",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-27",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-28",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-29",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-30",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-01-31",
         "total_value": "0",
         "net_invested": "1977100",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-1977100"
       },
       {
         "date": "2026-02-01",
         "total_value": "0",
         "net_invested": "2038300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2038300.0"
       },
       {
         "date": "2026-02-02",
         "total_value": "0",
         "net_invested": "2038300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2038300.0"
       },
       {
         "date": "2026-02-03",
         "total_value": "0",
         "net_invested": "2038300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2038300.0"
       },
       {
         "date": "2026-02-04",
         "total_value": "0",
         "net_invested": "2038300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2038300.0"
       },
       {
         "date": "2026-02-05",
         "total_value": "0",
         "net_invested": "2558300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2558300.0"
       },
       {
         "date": "2026-02-06",
         "total_value": "0",
         "net_invested": "2558300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2558300.0"
       },
       {
         "date": "2026-02-07",
         "total_value": "0",
         "net_invested": "2558300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2558300.0"
       },
       {
         "date": "2026-02-08",
         "total_value": "0",
         "net_invested": "2558300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2558300.0"
       },
       {
         "date": "2026-02-09",
         "total_value": "0",
         "net_invested": "2558300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2558300.0"
       },
       {
         "date": "2026-02-10",
         "total_value": "0",
         "net_invested": "2558300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2557120.0"
       },
       {
         "date": "2026-02-11",
         "total_value": "0",
         "net_invested": "2558300.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2557120.0"
       },
       {
         "date": "2026-02-12",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-13",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-14",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-15",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-16",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-17",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-18",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-19",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-20",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-21",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-22",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-23",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-24",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-25",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-26",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-27",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-02-28",
         "total_value": "0",
         "net_invested": "2651225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2658120.0"
       },
       {
         "date": "2026-03-01",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-02",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-03",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-04",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-05",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-06",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-07",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-08",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-09",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-10",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-11",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-12",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-13",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-14",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-15",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-16",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-17",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-18",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-19",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-20",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-21",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-22",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-23",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-24",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-25",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-26",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-27",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-28",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-29",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-30",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-03-31",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-04-01",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-04-02",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-04-03",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-04-04",
         "total_value": "0",
         "net_invested": "2631225.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2638120.0"
       },
       {
         "date": "2026-04-05",
         "total_value": "0",
         "net_invested": "2629865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2636760.0"
       },
       {
         "date": "2026-04-06",
         "total_value": "0",
         "net_invested": "2629865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2636760.0"
       },
       {
         "date": "2026-04-07",
         "total_value": "0",
         "net_invested": "2629865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2636760.0"
       },
       {
         "date": "2026-04-08",
         "total_value": "0",
         "net_invested": "2629865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2636760.0"
       },
       {
         "date": "2026-04-09",
         "total_value": "0",
         "net_invested": "2629865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2636760.0"
       },
       {
         "date": "2026-04-10",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-11",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-12",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-13",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-14",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-15",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-16",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-17",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-18",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-19",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-20",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-21",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-22",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-23",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-24",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-25",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-26",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-27",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-28",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-29",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-04-30",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2556760.0"
       },
       {
         "date": "2026-05-01",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-02",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-03",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-04",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-05",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-06",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-07",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-08",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-09",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-10",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-11",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-12",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-13",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-14",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-15",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-16",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-17",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-18",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-19",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-20",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-21",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-22",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-23",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-24",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-25",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-26",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-27",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-28",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-29",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-30",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-05-31",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-06-01",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-06-02",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-06-03",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-06-04",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-06-05",
         "total_value": "0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2555760.0"
       },
       {
         "date": "2026-06-06",
         "total_value": "141750.0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2414010.0"
       },
       {
         "date": "2026-06-07",
         "total_value": "141750.0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2414010.0"
       },
       {
         "date": "2026-06-08",
         "total_value": "141750.0",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "-2414010.0"
       },
       {
         "date": "2026-06-09",
         "total_value": "2937965.000",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "367240.000"
       },
       {
         "date": "2026-06-10",
         "total_value": "2937965.000",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "367240.000"
       },
       {
         "date": "2026-06-11",
         "total_value": "2937965.000",
         "net_invested": "2549865.0",
-        "incomplete": true
+        "incomplete": true,
+        "net_worth": "367240.000"
       }
     ],
     "reporting_currency": "TWD",
@@ -1410,6 +1572,14 @@
       "title": "AAPL 單一持股權重偏高",
       "detail": "單一持股權重 32.8%＞門檻 30.0%",
       "href": "/symbol/AAPL"
+    },
+    {
+      "id": "sector_weight:Information Technology",
+      "sev": "risk",
+      "rule": "sector_weight",
+      "title": "Information Technology 產業權重偏高",
+      "detail": "產業權重 83.2%＞門檻 60.0%",
+      "href": null
     },
     {
       "id": "stale_price:00919",

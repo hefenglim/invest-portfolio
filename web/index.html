@@ -8,8 +8,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.19"></link>
-<link rel="stylesheet" href="detail.css?v=0.1.19"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.20"></link>
+<link rel="stylesheet" href="detail.css?v=0.1.20"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 </head>
 <body data-page="dashboard" data-title="儀表板" data-chips="1" data-refresh="1">
@@ -73,18 +73,42 @@
   <div class="row-trend" data-screen-label="趨勢與洞察">
   <section class="panel trend-panel" data-screen-label="趨勢圖">
     <div class="panel-head">
-      <h2 class="panel-title">總市值 vs 累計淨投入</h2>
-      <span class="panel-sub">TWD・日線</span>
+      <h2 class="panel-title" id="trend-title">總市值 vs 累計淨投入</h2>
+      <span class="panel-sub" id="trend-sub">TWD・日線</span>
+      <span class="panel-sub" id="trend-networth" hidden="hidden"></span>
       <span class="trend-note" id="trend-note" hidden="hidden"><span class="dot"></span>○ 標記＝部分標的當日無價格</span>
       <span class="spacer"></span>
-      <div class="range-group">
+      <div class="range-group" id="trend-mode" role="tablist" aria-label="趨勢圖模式">
+        <button class="range-btn active" type="button" data-mode="value">市值</button>
+        <button class="range-btn" type="button" data-mode="twr">績效比較</button>
+      </div>
+      <div class="range-group" id="value-ranges">
         <button class="range-btn" type="button" data-range="1">1M</button>
         <button class="range-btn" type="button" data-range="3">3M</button>
         <button class="range-btn" type="button" data-range="6">6M</button>
         <button class="range-btn active" type="button" data-range="all">全部</button>
       </div>
+      <div id="twr-controls" hidden="hidden"
+           style="display:flex; gap:8px; align-items:center;">
+        <select id="twr-benchmark" aria-label="比較基準"
+                style="font-size:11px; font-family:var(--font-num); padding:2px 6px;
+                       border-radius:var(--radius-sm); border:1px solid var(--border);
+                       background:var(--panel-2); color:var(--text-2); cursor:pointer;">
+          <option value="0050">元大台灣50</option>
+          <option value="sp500">S&amp;P 500</option>
+        </select>
+        <div class="range-group" id="twr-windows">
+          <button class="range-btn" type="button" data-win="1y">1年</button>
+          <button class="range-btn active" type="button" data-win="3y">3年</button>
+          <button class="range-btn" type="button" data-win="all">全部</button>
+        </div>
+      </div>
     </div>
     <div id="trend-chart"></div>
+    <div id="twr-chart" hidden="hidden" style="width:100%; height:360px; max-width:100%;"></div>
+    <div id="twr-caption" hidden="hidden"
+         style="font-size:11px; color:var(--text-3); padding:6px 2px 0;
+                font-family:var(--font-num);"></div>
   </section>
   <section class="panel insights-panel" data-screen-label="AI 洞察">
     <div class="panel-head">
@@ -179,24 +203,19 @@
     <div class="realized-footer" id="realized-footer"></div>
   </section>
 
-  <!-- H. 股利區 -->
-  <div class="row-2 align-start" data-screen-label="股利">
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">年度股利</h2>
-        <span class="panel-sub">堆疊為各幣別原幣金額，不可跨幣加總</span>
-      </div>
-      <div class="div-chips sum-chips" id="div-chips" style="padding: 8px 16px 0; margin-left: 0;"></div>
-      <div class="chart-box" id="dividend-chart"></div>
-    </section>
-    <section class="panel" data-screen-label="除息日曆">
-      <div class="panel-head">
-        <h2 class="panel-title">除息日曆</h2>
-        <span class="sum-chips" id="exdiv-summary" style="margin-left: auto;"></span>
-      </div>
-      <div class="exdiv-list" id="exdiv-list"></div>
-    </section>
-  </div>
+  <!-- H. 股利總覽 (FU-D47) — the ONE consolidated dividend surface. Replaces BOTH the
+       former 年度股利/除息日曆 row (app.js/charts.js) AND the r4 股利收入 card (FU-D38):
+       TTM 實收 + 本年/歷年累計 per ccy, forecast-only 年度預估, ONE yearly received bar
+       chart, the full 除息日曆 list, and the 回本進度 attribution strip. DISPLAY-ONLY:
+       dividends are already folded into adjusted cost; nothing here feeds returns.
+       Rendered by the self-contained dividends-card.js (container id is stable). -->
+  <section class="panel" id="dividend-income-card" data-screen-label="股利總覽">
+    <div class="panel-head">
+      <h2 class="panel-title">股利總覽</h2>
+      <span class="panel-sub">近 12 個月實收・歷年分佈・年度預估・除息日曆（已計入調整成本，不另計入報酬）</span>
+    </div>
+    <div id="dvc-body"></div>
+  </section>
 
   <!-- I2. 月度成績（R6 item 8） -->
   <section class="panel" data-screen-label="月度成績">
@@ -241,15 +260,17 @@
 </div>
 </div>
 
-<script src="api.js?v=0.1.19"></script>
-<script src="shell.js?v=0.1.19"></script>
-<script src="format.js?v=0.1.19"></script>
-<script src="export.js?v=0.1.19"></script>
-<script src="alerts.js?v=0.1.19"></script>
-<script src="app.js?v=0.1.19"></script>
-<script src="charts.js?v=0.1.19"></script>
-<script src="detail.js?v=0.1.19"></script>
-<script src="rebalance.js?v=0.1.19"></script>
-<script src="digest.js?v=0.1.19"></script>
+<script src="api.js?v=0.1.20"></script>
+<script src="shell.js?v=0.1.20"></script>
+<script src="format.js?v=0.1.20"></script>
+<script src="export.js?v=0.1.20"></script>
+<script src="alerts.js?v=0.1.20"></script>
+<script src="names.js?v=0.1.20"></script>
+<script src="app.js?v=0.1.20"></script>
+<script src="charts.js?v=0.1.20"></script>
+<script src="dividends-card.js?v=0.1.20"></script>
+<script src="detail.js?v=0.1.20"></script>
+<script src="rebalance.js?v=0.1.20"></script>
+<script src="digest.js?v=0.1.20"></script>
 </body>
 </html>

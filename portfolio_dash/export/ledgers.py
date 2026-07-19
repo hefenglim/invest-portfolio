@@ -13,7 +13,7 @@ import json
 import sqlite3
 from datetime import datetime
 
-from portfolio_dash.data_ingestion.config_seed import FEE_RULES
+from portfolio_dash.data_ingestion.config_seed import get_effective_fee_rules
 from portfolio_dash.export.artifact import ExportArtifact, csv_artifact, csv_blob, zip_artifact
 from portfolio_dash.shared.wire import to_wire
 
@@ -77,7 +77,10 @@ def build_ledgers_zip(conn: sqlite3.Connection, *, now: datetime) -> ExportArtif
         blob, n = _dump_table(conn, table)
         files[f"{table}.csv"] = blob
         counts[table] = n
-    fee_snapshot = {name: to_wire(rs.model_dump()) for name, rs in FEE_RULES.items()}
+    fee_snapshot = {
+        name: to_wire(rs.model_dump())
+        for name, rs in get_effective_fee_rules(conn).items()
+    }
     files["fee_rules_snapshot.json"] = json.dumps(
         fee_snapshot, ensure_ascii=False, indent=2).encode("utf-8")
     manifest = {"as_of": as_of, "schema_version": _SCHEMA_VERSION,

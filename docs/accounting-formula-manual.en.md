@@ -294,6 +294,15 @@ assumption).
 - **Manual override**: on input / edit the user may explicitly overwrite `fee` / `tax`;
   the system then uses the override value and marks `override: true` in `snapshot`
   (see §10's `_recompute_edit_fees`).
+- **User-adjustable rates (FU-D1, overlay)**: each rule set's rates / tax rates / rounding mode
+  can be adjusted under Settings → Accounts & Fees, backed by a DB overlay
+  (`data_ingestion/fee_overrides.py`, table `fee_rule_overrides`) layered over the v2 seed
+  defaults: **effective rule set = v2 defaults ⊕ overlay**, resolved conn-aware at EVERY money
+  call site (`get_fee_rule_set(name, conn)`; `conn=None` always returns the seed defaults, for
+  the oracle / unit tests). Edits affect **FUTURE trades only** — historical rows are still
+  arbitrated by their own `fee_rule_snapshot` (§3, §10.2) and are never recomputed. Reset
+  semantics: clearing a field (null = revert one field) or deleting the whole overlay row
+  (per-set / reset-all) returns it to the seed defaults.
 - **fee-engine v2 is implemented from the owner's complete schedules (2026-07-15)**:
   `config_seed.py::FEE_RULES` now carries the complete schedules from
   `docs/reference/broker-fee-schedules-2026-07.md`; §3.1–§3.4 document what the v2 engine
@@ -822,6 +831,43 @@ with §7.2 XIRR's all-or-nothing).
 > `_fx_at`), `portfolio/dashboard.py` (step 9 preload history).
 > **Basis**: `.claude/rules/domain-ledger.md` (XIRR flow signs; carry-forward valuation),
 > `.claude/rules/data-and-pricing.md`.
+
+### 7.6 Total Net Worth (incl. cash) (FU-D29 / deferred C8)
+
+Implementation: `portfolio/networth.py` (a pure composition layer, called from
+`portfolio/dashboard.py` step 9b). **Display / attribution only — NOT a money-of-record
+figure**; it feeds no return metric. Without modifying §7.5's `daily_value_series`, it
+layers a daily cash series on top and composes (reporting currency):
+
+$$\text{net\_worth}_t \;=\; \underbrace{\textstyle\sum_{h:\ shares>0}\operatorname{convert}(\text{price}_{\le t}\times\text{shares}_h,\ \text{fx}_{\le t})}_{\text{market value } total\_value_t\ (\S7.5)} \;+\; \underbrace{\textstyle\sum_{p\in pools}\operatorname{convert}(\text{balance}_{p,\le t},\ \text{fx}_{p,\le t})}_{\text{cash that day } cash_t}$$
+
+- **Daily cash `cash_t`**: for each `(account, ccy)` pool, take its **carry-forward
+  end-of-day running balance** from the dated lines (`pool_lines`: movements ± fx legs ±
+  trade settlements ± cash dividends), convert at the **last FX rate on or before that
+  day**, and sum across pools into the reporting currency. **Unregistered-symbol rows are
+  skipped** (exactly as `cash_balances` does — an unbookable row never poisons the series).
+- **Composition `compose_net_worth`**: aligns on §7.5's date axis (cash before its first
+  line = 0) and **adds ONLY the `net_worth` field — every other `TrendPoint` field is copied
+  byte-identically** (guarded by a unit test).
+- **Incomplete rule (mirrors §7.5)**: on a day where a **non-zero** pool has no on-or-before
+  FX, `cash_t` is flagged incomplete and `compose_net_worth` leaves `net_worth = None` (the
+  frontend draws a gap — **no fabrication**); a **zero-balance pool missing FX does not
+  poison the day**. On a holdings-incomplete day (§7.5's `incomplete`) `net_worth` is still a
+  partial value, mirroring the market-value line (flagged by the shared marker).
+- **Consistency anchor (invariant)**: the last cash-complete day's `cash_t` **equals** the
+  `cash_balances`-derived reporting cash total that `GET /api/cash` serves (same fixture,
+  both paths, byte-identical). **No FX double count**: this series already sums each pool at
+  the day's FX; it is not an FX gain/loss added on top of market value (§8.4 invariant I5).
+
+> **Verification anchor**: `tests/portfolio/test_networth.py` (per-day carry-forward, both
+> fx legs, missing-FX incomplete, zero-pool no-poison, negative pool not floored, composition
+> leaves pre-existing fields intact) + `tests/contract/test_networth_dashboard.py`
+> (cross-endpoint consistency) + golden addition (**`net_worth` only**).
+> **Implementation**: `portfolio/networth.py` (`daily_cash_series`, `compose_net_worth`,
+> `CashDay`), `portfolio/dashboard.py` (step 9b), `portfolio/dashboard_models.py`
+> (`TrendPoint.net_worth` additive field).
+> **Basis**: `.claude/rules/domain-ledger.md` (cash pools; FX decomposition never added on
+> top), `.claude/rules/data-and-pricing.md` (Decimal; carry-forward).
 
 ---
 

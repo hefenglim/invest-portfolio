@@ -11,6 +11,11 @@ from portfolio_dash.data_ingestion.store import insert_fx_conversion
 from portfolio_dash.data_ingestion.validate import Issue
 from portfolio_dash.shared.enums import Currency
 
+# Canonical CSV column order for the fx_conversions import — SINGLE SOURCE for the downloadable
+# template header (see data_ingestion.import_templates). Kept in lockstep with the DictReader
+# keys below by the round-trip guard test.
+FX_COLUMNS: list[str] = ["account", "date", "from_ccy", "from_amount", "to_ccy", "to_amount"]
+
 
 def build_fx_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     """Parse *csv_text* into an :class:`ImportPreview` of fx_conversions rows.
@@ -23,7 +28,7 @@ def build_fx_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     - ``non_positive_amount``: from_amount or to_amount <= 0.
     - ``same_currency``: from_ccy == to_ccy.
     """
-    reader = csv.DictReader(io.StringIO(csv_text))
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))  # tolerate a leading BOM
     rows: list[PreviewRow] = []
     for idx, raw0 in enumerate(reader):
         raw: dict[str, str] = {k.strip(): (v or "").strip() for k, v in raw0.items()}

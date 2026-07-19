@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from portfolio_dash.api import auth_store, news_service
+from portfolio_dash.api import news_service
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.news import store as news_store
@@ -101,14 +101,6 @@ class _RunBody(BaseModel):
     scope: str  # "all" (held ∪ watchlist) or a single registered symbol
 
 
-def _guest_forbidden() -> JSONResponse:
-    """403 for the manual news fetch in guest/demo mode (mirrors the notify/digest lockdown)."""
-    return JSONResponse(
-        status_code=403,
-        content=error_body("forbidden", "手動抓取新聞僅於受保護模式開放（示範站不開放）"),
-    )
-
-
 def _news_run_worker(
     universe: list[tuple[str, str]], *, now: datetime, job_id: str
 ) -> None:
@@ -151,14 +143,16 @@ def run_news(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    """Manually fetch + AI-organize news (async 202). Guest → 403; already-running → 409.
+    """Manually fetch + AI-organize news (async 202). Already-running → 409.
 
     ``scope`` is ``"all"`` (every registered instrument — held ∪ watchlist) or a single
     registered symbol (market resolved from the registry). NEVER runs the pipeline on the
     request thread — it spawns a background worker (the LLM batch-only invariant).
+
+    Open in guest/demo mode (FU-D4, 2026-07-15): this is a compute+cache action with no
+    outbound push, so the demo site can trigger it; the 409 in-flight lock still holds and
+    all config writes stay 403.
     """
-    if not auth_store.is_protected(conn):
-        return _guest_forbidden()
     universe = news_service.resolve_news_scope(conn, body.scope)
     if universe is None:
         return JSONResponse(

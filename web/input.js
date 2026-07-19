@@ -115,18 +115,8 @@
     });
     const mdt = $('#m-daytrade');
     if (mdt) mdt.addEventListener('change', schedulePreview);
-    $('#m-fee-pencil').addEventListener('click', () => {
-      m.feeOverride = true;
-      $('#m-fee').readOnly = false;
-      $('#m-fee').focus();
-      schedulePreview();
-    });
-    $('#m-tax-pencil').addEventListener('click', () => {
-      m.taxOverride = true;
-      $('#m-tax').readOnly = false;
-      $('#m-tax').focus();
-      schedulePreview();
-    });
+    $('#m-fee-pencil').addEventListener('click', () => toggleOverride('fee'));
+    $('#m-tax-pencil').addEventListener('click', () => toggleOverride('tax'));
     $('#m-fee').addEventListener('input', schedulePreview);
     $('#m-tax').addEventListener('input', schedulePreview);
     $('#m-confirm').addEventListener('click', commitManual);
@@ -139,6 +129,27 @@
     $('#m-side-sell').classList.toggle('active', s === 'sell');
     $('#m-side-sell').classList.toggle('sell-on', s === 'sell');
     schedulePreview();
+  }
+
+  /* fee/tax override is a TRUE toggle (FU-D7). ON: flag true, field editable, pencil
+     pressed. OFF: flag false, field read-only, pencil released — schedulePreview() then
+     repopulates the auto-computed value (runManualPreview only writes fee/tax back when
+     the flag is false) and the commit body drops fee_override/tax_override. Visual state
+     rides on the pencil's aria-pressed (styled in input.css) + a swapped title. */
+  function applyOverrideState(kind, on) {
+    const isFee = kind === 'fee';
+    if (isFee) m.feeOverride = on; else m.taxOverride = on;
+    const field = $(isFee ? '#m-fee' : '#m-tax');
+    const pencil = $(isFee ? '#m-fee-pencil' : '#m-tax-pencil');
+    field.readOnly = !on;
+    pencil.setAttribute('aria-pressed', on ? 'true' : 'false');
+    pencil.title = on ? '取消覆寫（回自動計算）' : '覆寫';
+  }
+  function toggleOverride(kind) {
+    const on = !(kind === 'fee' ? m.feeOverride : m.taxOverride);
+    applyOverrideState(kind, on);
+    if (on) $(kind === 'fee' ? '#m-fee' : '#m-tax').focus();
+    schedulePreview();  // OFF -> auto value returns; ON -> re-preview with the override
   }
 
   /* Build the ManualBody for /input/manual/preview & /commit. fee/tax overrides ride
@@ -173,6 +184,7 @@
   let previewTimer = null;
   function schedulePreview() {
     renderSymbolHint();          // local, instant
+    renderSellHints();           // FU-D44: instant from cache; async fill on a cache miss
     if (previewTimer) clearTimeout(previewTimer);
     previewTimer = setTimeout(runManualPreview, 180);
   }
@@ -183,9 +195,133 @@
     const symHint = $('#m-sym-hint');
     symHint.replaceChildren();
     if (sym && !it) {
-      symHint.textContent = '未註冊 — 寫入時將自動查詢並註冊（依帳戶判定市場）';
+      symHint.appendChild(el('span', null, '未註冊 — 寫入時將自動查詢並註冊（依帳戶判定市場）　'));
+      /* FU-D23: an inline 立即註冊 action opens the shared quick-add dialog with the symbol
+         pre-filled + market inferred from the account. The commit-time auto-register fallback
+         stays, so this is optional convenience, not a gate. */
+      const reg = el('button', null, '立即註冊');
+      reg.type = 'button';
+      reg.style.cssText = 'background:none;border:none;padding:0;color:var(--accent);'
+        + 'cursor:pointer;font-size:inherit;text-decoration:underline;';
+      reg.addEventListener('click', () => openManualQuickAdd(sym));
+      symHint.appendChild(reg);
     } else if (it) {
       symHint.textContent = it.name + '・' + it.ccy + (it.etf ? '・ETF' : '');
+    }
+  }
+
+  /* ---- FU-D44 sell-entry hints ----
+     side=sell + a REGISTERED symbol chosen: under 股數 show 「可賣 {shares} 股」, under 價格
+     show 「持有均價 {adjusted_avg}」 — clicking either fills its field. BOTH values are
+     SERVER-computed (GET /api/input/holdings: shares via current_shares, adjusted_avg via
+     the verified build_book cost-basis replay) and arrive as Decimal STRINGS: display goes
+     through window.fmt only; the click-fill writes the RAW wire string (this module never
+     computes money). Registered but not held in the selected account -> a muted
+     此帳戶無持股 note (the sell preview still warns downstream as today). Buy side hides
+     everything. The per-account cache is SHARED with the dividend picker
+     (acctHoldingsCache) and dropped after every successful commit (FU-D45), so a
+     just-committed trade updates 可賣 immediately. */
+  let sellHintSeq = 0;
+  function renderSellHints() {
+    const sharesHint = $('#m-shares-hint');
+    const priceHint = $('#m-price-hint');
+    if (!sharesHint || !priceHint) return;
+    const hide = (n) => { n.hidden = true; n.replaceChildren(); };
+    const a = acc($('#m-account').value);
+    const it = inst($('#m-symbol').value.trim());
+    if (m.side !== 'sell' || !a || !it) { hide(sharesHint); hide(priceHint); return; }
+    const data = acctHoldingsCache[a.id];
+    if (!data) {
+      /* cache miss: fetch, then re-render ONLY if the cache actually filled (a failed
+         fetch must never loop) and no newer render superseded this request. */
+      hide(sharesHint); hide(priceHint);
+      const seq = ++sellHintSeq;
+      loadAcctHoldings(a.id, false).then(() => {
+        if (seq === sellHintSeq && acctHoldingsCache[a.id]) renderSellHints();
+      }).catch(() => {});
+      return;
+    }
+    const held = (data.held || []).find((h) => h.symbol === it.symbol);
+    hide(priceHint);
+    sharesHint.hidden = false;
+    sharesHint.replaceChildren();
+    if (!held) {
+      sharesHint.textContent = '此帳戶無持股';
+      return;
+    }
+    const fillBtn = (label, inputSel, raw) => {
+      const b = el('button', null, label);
+      b.type = 'button';
+      b.title = '點擊帶入';
+      b.style.cssText = 'background:none;border:none;padding:0;color:var(--accent);'
+        + 'cursor:pointer;font-size:inherit;text-decoration:underline;';
+      b.addEventListener('click', () => { $(inputSel).value = raw; schedulePreview(); });
+      return b;
+    };
+    /* fractional shares (DRIP $0-cost adds) show up to 4 dp; whole counts stay integer —
+       a STRING shape check on the wire value, not arithmetic. */
+    const sharesTxt = held.shares.indexOf('.') >= 0 ? f.num(held.shares, 4) : f.num(held.shares);
+    sharesHint.appendChild(fillBtn('可賣 ' + sharesTxt + ' 股', '#m-shares', held.shares));
+    if (held.adjusted_avg != null) {
+      priceHint.hidden = false;
+      priceHint.appendChild(
+        fillBtn('持有均價 ' + f.price(held.adjusted_avg, it.ccy), '#m-price', held.adjusted_avg));
+    }
+  }
+
+  /* Market inferred from the selected account's settlement ccy — mirrors the backend
+     auto-register (data_ingestion.markets.account_market): TWD→TW, USD→US, MYR→MY. */
+  const _CCY_MARKET = { TWD: 'TW', USD: 'US', MYR: 'MY' };
+  function accountMarket(accId) {
+    const a = acc(accId);
+    return a ? (_CCY_MARKET[a.settlement_ccy || a.ccy] || 'TW') : 'TW';
+  }
+
+  /* FU-D23: open the shared quick-add dialog for the manual pane's unregistered symbol.
+     After a successful register (or restore), re-fetch /api/input/context so the hint clears
+     and the user continues the SAME entry — the draft form is NOT cleared. */
+  function openManualQuickAdd(sym) {
+    if (!window.pdInstQuickAdd) {
+      if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
+      return;
+    }
+    const cont = async () => {
+      await reloadContext();
+      renderSymbolHint();
+      schedulePreview();
+    };
+    window.pdInstQuickAdd({
+      symbol: sym,
+      market: accountMarket($('#m-account').value),
+      lockSymbol: true,
+      onConfirm: cont,
+      onBuy: cont,
+    });
+  }
+
+  /* Re-fetch structural context (accounts / instruments / holdings) into `ctx` + refresh the
+     manual symbol datalist, so a just-registered symbol resolves immediately (the 未註冊 hint
+     clears). Graceful: a failed refetch keeps the prior ctx. */
+  async function reloadContext() {
+    let resp;
+    try {
+      resp = await api.get('/api/input/context');
+    } catch (e) {
+      return;
+    }
+    ctx = {
+      accounts: (resp && resp.accounts) || ctx.accounts,
+      fee_rules: (resp && resp.fee_rules) || ctx.fee_rules,
+      instruments: (resp && resp.instruments) || ctx.instruments,
+      holdings: (resp && resp.holdings) || ctx.holdings,
+    };
+    const dl = $('#m-symbols');
+    if (dl) {
+      dl.replaceChildren();
+      ctx.instruments.forEach((i) => {
+        const o = el('option'); o.value = i.symbol; o.label = i.name;
+        dl.appendChild(o);
+      });
     }
   }
 
@@ -287,14 +423,43 @@
     $('#m-pc-ccy').textContent = ccy;
     const rows = $('#m-pc-rows');
     rows.replaceChildren();
+    /* Every value below is a SERVER Decimal STRING routed through window.fmt for DISPLAY
+       only (thousands separators / dp) — this module performs no money arithmetic. */
+    const pcRow = (k, v, signCls) => {
+      const row = el('div', 'pc-row');
+      row.appendChild(el('span', 'k', k));
+      row.appendChild(el('span', 'v' + (signCls ? ' ' + signCls : ''), v));
+      rows.appendChild(row);
+    };
     if (hasServer) {
       [['成交金額', preview.gross], ['手續費' + (m.feeOverride ? '（已覆寫）' : ''), preview.fee],
        ['交易稅' + (m.taxOverride ? '（已覆寫）' : ''), preview.tax]].forEach(([k, v]) => {
-        const row = el('div', 'pc-row');
-        row.appendChild(el('span', 'k', k));
-        row.appendChild(el('span', 'v', f.money(v, ccy) + ' ' + ccy));
-        rows.appendChild(row);
+        pcRow(k, f.money(v, ccy) + ' ' + ccy);
       });
+      /* R6-E: drawer-parity 試算 what-if (SERVER-computed; position_preview is null when the
+         symbol is unregistered / inputs incomplete — the rows simply do not render). */
+      const pp = preview.position_preview;
+      if (pp && pp.kind === 'sell') {
+        pcRow('調整成本移除', f.money(pp.cost_removed, ccy) + ' ' + ccy);
+        pcRow('已實現損益', f.signed(pp.realized_pnl, ccy) + ' ' + ccy, f.signClass(pp.realized_pnl));
+        pcRow('剩餘股數', f.num(pp.remain_shares));
+      } else if (pp && pp.kind === 'buy') {
+        pcRow('新持股', f.num(pp.new_shares));
+        pcRow('新原始均價', f.price(pp.new_original_avg, ccy));
+        pcRow('新調整均價', f.price(pp.new_adjusted_avg, ccy));
+      }
+      /* R6-E: DISPLAY-ONLY account cash line (owner-signed: no gating). Visually separated
+         from the what-if rows; null balance -> the shared null glyph. */
+      const ac = preview.account_cash;
+      if (ac) {
+        const row = el('div', 'pc-row');
+        row.style.borderTop = '1px solid var(--border)';
+        row.style.marginTop = '3px';
+        row.appendChild(el('span', 'k', '該帳戶現金（' + ac.ccy + '）'));
+        row.appendChild(el('span', 'v',
+          ac.balance != null ? f.money(ac.balance, ac.ccy) + ' ' + ac.ccy : f.NULL_GLYPH));
+        rows.appendChild(row);
+      }
     }
 
     /* issue list */
@@ -388,11 +553,11 @@
         : '';
       window.toast('寫入成功', 'ok', '交易已寫入帳本 ' + id + arTxt);
     }
-    /* reset draft state and re-preview a clean form */
-    m.feeOverride = false; m.taxOverride = false; m.acked = false;
-    $('#m-fee').readOnly = true; $('#m-tax').readOnly = true;
+    /* reset draft state and re-preview a clean form (clears the override toggles too) */
+    applyOverrideState('fee', false); applyOverrideState('tax', false); m.acked = false;
     $('#m-shares').value = '';
     $('#m-price').value = '';
+    afterCommitRefresh();  // FU-D45: ledger tables + holdings caches (可賣 just changed)
     schedulePreview();
   }
 
@@ -400,13 +565,23 @@
   /* kind chips map the UI label to the import endpoint `kind`. */
   const CSV_KINDS = [['交易', 'transactions'], ['股利', 'dividends'], ['換匯', 'fx'], ['期初', 'openings']];
   let csvKind = 'transactions';
+  /* FU-D19: the pinned date format (a dateparse format id) once the user resolves an
+     ambiguous date column; null = let the backend infer. Reset whenever the CSV text or
+     the kind changes so a new file re-detects from scratch. */
+  let csvDateFormat = null;
 
-  /* per-kind CSV header hints shown in the dropzone */
+  /* Shown in #csv-kind-note: the expected date shape + the never-guess promise (FU-D19). */
+  const CSV_DATE_NOTE = '日期欄位建議 YYYY-MM-DD；2026/7/10、20260710 等常見格式亦可自動辨識，'
+    + '無法判斷（如 3/4/2026）時會請你選擇格式。';
+
+  /* per-kind CSV header hints shown in the dropzone — the FULL canonical header (leads with
+     the REQUIRED `account` column; matches the *_COLUMNS constants in the backend parsers +
+     the downloadable 範本; date carries its YYYY-MM-DD hint, optional columns marked 選填). */
   const CSV_HINTS = {
-    transactions: '交易欄位：date・side・symbol・shares・price・fee（選）・tax（選）',
-    dividends: '股利欄位：account・symbol・date・type(CASH/STOCK/DRIP/NET)・gross・net（選）・reinvest_shares（選）・reinvest_price（選）',
-    fx: '換匯欄位：account・date・from_ccy・from_amount・to_ccy・to_amount',
-    openings: '期初欄位：account・symbol・shares・original_avg_cost・build_date・original_cost_total（選）',
+    transactions: '欄位：account・symbol・side・date(YYYY-MM-DD)・shares・price・fee（選填）・tax（選填）・daytrade（選填）・note（選填）',
+    dividends: '欄位：account・symbol・date(YYYY-MM-DD)・type(CASH/STOCK/DRIP/NET)・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）',
+    fx: '欄位：account・date(YYYY-MM-DD)・from_ccy・from_amount・to_ccy・to_amount',
+    openings: '欄位：account・symbol・shares・original_avg_cost・build_date(YYYY-MM-DD)・original_cost_total（選填）',
   };
 
   function initCsv() {
@@ -418,16 +593,50 @@
         bar.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
         c.classList.add('active');
         csvKind = kind;
+        csvDateFormat = null;      // FU-D19: a different kind re-detects the date format
+        hideDateFmtChooser();
         const note = $('#csv-kind-note');
-        if (note) note.textContent = kind === 'transactions' ? '' : '（' + label + ' CSV：解析同此模式）';
+        if (note) note.textContent = CSV_DATE_NOTE + (kind === 'transactions' ? '' : '（' + label + ' CSV：解析同此模式）');
         const hint = $('#csv-dz-hint');
         if (hint) hint.textContent = CSV_HINTS[kind] || '';
+        scheduleCsvPreview();      // re-run so any prior ambiguity re-evaluates for this kind
       });
       bar.appendChild(c);
     });
+    /* seed the dropzone hint + date note for the default (transactions) kind — the chip
+       handler above only refreshes them on a switch. */
+    const dzHint0 = $('#csv-dz-hint');
+    if (dzHint0) dzHint0.textContent = CSV_HINTS[csvKind] || '';
+    const note0 = $('#csv-kind-note');
+    if (note0) note0.textContent = CSV_DATE_NOTE;
+
+    /* FU-D19: picking a date format pins it and re-previews (which now resolves cleanly). */
+    const fmtSel = $('#csv-datefmt-select');
+    if (fmtSel) fmtSel.addEventListener('change', () => {
+      csvDateFormat = fmtSel.value || null;
+      runCsvPreview();
+    });
+
+    /* 下載範本：GET /api/import/template?kind=… (BOM+CRLF text/csv) for the ACTIVE kind.
+       pdApi.download issues a GET when no body is passed; the filename rides the endpoint's
+       Content-Disposition. The template is a single-source of the parser column order. */
+    const tplBtn = $('#csv-template');
+    if (tplBtn) {
+      tplBtn.addEventListener('click', async () => {
+        const restore = window.pdBusy ? window.pdBusy(tplBtn, '下載中…') : () => {};
+        try {
+          await api.download('/api/import/template?kind=' + encodeURIComponent(csvKind));
+        } catch (err) {
+          if (window.toast) window.toast((err && err.message) || '範本下載失敗', 'fail', err && err.code);
+        } finally {
+          restore();
+        }
+      });
+    }
 
     const paste = $('#csv-paste');
-    if (paste) paste.addEventListener('input', scheduleCsvPreview);
+    /* a manual edit invalidates any pinned date format — re-detect from the new text. */
+    if (paste) paste.addEventListener('input', () => { csvDateFormat = null; scheduleCsvPreview(); });
     $('#csv-confirm').addEventListener('click', commitCsv);
     $('#csv-confirm').disabled = true;
 
@@ -441,6 +650,7 @@
       const r = new FileReader();
       r.onload = () => {
         if (paste) paste.value = String(r.result || '').trim();
+        csvDateFormat = null;      // FU-D19: a fresh file re-detects the date format
         $('#csv-file').textContent = f.name;
         if (window.toast) window.toast('已載入 ' + f.name, 'ok', '解析預覽已更新，確認後寫入');
         scheduleCsvPreview();
@@ -468,6 +678,27 @@
     csvTimer = setTimeout(runCsvPreview, 250);
   }
 
+  /* FU-D19 date-format chooser helpers. */
+  function hideDateFmtChooser() {
+    const box = $('#csv-datefmt');
+    if (box) box.hidden = true;
+    const sel = $('#csv-datefmt-select');
+    if (sel) sel.replaceChildren();
+  }
+  function showDateFmtChooser(amb) {
+    const box = $('#csv-datefmt');
+    const sel = $('#csv-datefmt-select');
+    if (!box || !sel) return;
+    sel.replaceChildren();
+    const ph = el('option', null, '請選擇日期格式…'); ph.value = ''; sel.appendChild(ph);
+    (amb.candidates || []).forEach((c) => {
+      const o = el('option', null, c.label + ' — ' + c.example_in + ' → ' + c.example_out);
+      o.value = c.id;
+      sel.appendChild(o);
+    });
+    box.hidden = false;
+  }
+
   async function runCsvPreview() {
     const paste = $('#csv-paste');
     const csvText = paste ? paste.value.trim() : '';
@@ -477,11 +708,15 @@
       $('#csv-counts').textContent = '';
       $('#csv-file').textContent = '';
       $('#csv-confirm').disabled = true;
+      csvDateFormat = null;
+      hideDateFmtChooser();
       return;
     }
+    const reqBody = { kind: csvKind, csv_text: csvText };
+    if (csvDateFormat) reqBody.date_format = csvDateFormat;  // FU-D19: pin once chosen
     let resp;
     try {
-      resp = await api.post('/api/import/preview', { kind: csvKind, csv_text: csvText });
+      resp = await api.post('/api/import/preview', reqBody);
     } catch (err) {
       if (window.toast) window.toast((err && err.message) || '解析失敗', 'fail', err && err.code);
       return;
@@ -529,6 +764,15 @@
     const s = preview.summary || { ok: 0, warn: 0, error: 0 };
     $('#csv-counts').textContent =
       '可寫入 ' + (s.ok || 0) + '・警告 ' + (s.warn || 0) + '・錯誤 ' + (s.error || 0);
+    /* FU-D19: an unresolved ambiguous date column -> show the chooser + hold the confirm
+       disabled until a format is pinned (all date rows are errors until then anyway). */
+    const amb = preview.date_ambiguity;
+    if (amb && !csvDateFormat) {
+      showDateFmtChooser(amb);
+      $('#csv-confirm').disabled = true;
+      return;
+    }
+    hideDateFmtChooser();
     /* confirm enables when there is anything non-error to write */
     $('#csv-confirm').disabled = ((s.ok || 0) + (s.warn || 0)) === 0;
   }
@@ -540,18 +784,28 @@
     const paste = $('#csv-paste');
     const csvText = paste ? paste.value.trim() : '';
     if (!csvText) return;
+    const commitBody = (ack) => {
+      const b = { kind: csvKind, csv_text: csvText, ack_warnings: ack };
+      if (csvDateFormat) b.date_format = csvDateFormat;  // FU-D19: carry the pinned format
+      return b;
+    };
     try {
-      const resp = await api.post('/api/import/commit', { kind: csvKind, csv_text: csvText, ack_warnings: false });
+      const resp = await api.post('/api/import/commit', commitBody(false));
       onCsvWritten(resp);
     } catch (err) {
+      /* FU-D19: server refused because the date column is still ambiguous — never a guess. */
+      if (err && err.status === 422 && err.code === 'date_ambiguity_unresolved') {
+        if (window.toast) window.toast('日期格式不明確', 'fail', '請先於上方選擇日期格式再寫入');
+        return;
+      }
       if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
         window.confirmDialog({
           title: '匯入警告確認',
-          body: '部分列有警告（如賣超 / 模糊代號）— 確認後一併寫入？',
+          body: '部分列有警告（如賣超）— 確認後一併寫入？',
           confirmLabel: '確認寫入',
           onConfirm: async () => {
             try {
-              const resp = await api.post('/api/import/commit', { kind: csvKind, csv_text: csvText, ack_warnings: true });
+              const resp = await api.post('/api/import/commit', commitBody(true));
               onCsvWritten(resp);
             } catch (e2) {
               if (window.toast) window.toast((e2 && e2.message) || '匯入失敗', 'fail', e2 && e2.code);
@@ -574,6 +828,7 @@
       banner.appendChild(el('div', null, '✓ 寫入完成：成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆'));
     }
     if (window.toast) window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆');
+    afterCommitRefresh();  // FU-D45: covers CSV import AND the AI 寫入全部 path
   }
 
   /* ================= Tab 3 AI 輸入 =================
@@ -588,10 +843,125 @@
     $('#ai-parse').addEventListener('click', runAiPreview);
     const writeAll = $('#ai-write-all');
     if (writeAll) writeAll.addEventListener('click', commitAi);
+    initAiImages();   // FU-D20: dropzone click / drag-drop / clipboard-paste screenshot intake
+    loadAiModels();   // FU-D20: per-run model picker (enabled models + 自動; last-used persisted)
   }
 
   /* The CSV text the AI run returns; written via the import/commit path on 寫入全部. */
   let aiCsvText = '';
+  /* FU-D20 attached screenshots for the current run: {name, dataUrl}. The dataUrl is the
+     FileReader readAsDataURL result (a full `data:image/...;base64,` string) sent as-is —
+     the server tolerates + strips the prefix. Money/quantity of record NEVER come from
+     here: the LLM only extracts what the image shows, then preview→confirm→commit computes. */
+  let aiImages = [];
+  const AI_MAX_IMAGES = 4;
+
+  /* Render the thumbnail strip with a per-image ✕ remove control. */
+  function renderAiThumbs() {
+    const strip = $('#ai-images');
+    if (!strip) return;
+    strip.replaceChildren();
+    strip.hidden = aiImages.length === 0;
+    aiImages.forEach((img, i) => {
+      const cell = el('div', 'ai-thumb');
+      cell.style.cssText = 'position:relative;width:64px;height:64px;border:1px solid ' +
+        'var(--border,#2a2f3a);border-radius:6px;overflow:hidden;background:#0d0f14;';
+      const im = el('img');
+      im.src = img.dataUrl; im.alt = img.name || ('image ' + (i + 1));
+      im.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+      const x = el('button', null, '✕'); x.type = 'button'; x.title = '移除';
+      x.style.cssText = 'position:absolute;top:2px;right:2px;width:18px;height:18px;' +
+        'line-height:16px;padding:0;border:none;border-radius:50%;cursor:pointer;' +
+        'background:rgba(0,0,0,0.6);color:#fff;font-size:11px;';
+      x.addEventListener('click', () => { aiImages.splice(i, 1); renderAiThumbs(); });
+      cell.appendChild(im); cell.appendChild(x);
+      strip.appendChild(cell);
+    });
+  }
+
+  /* Read image Files -> base64 data URLs, capping the total at AI_MAX_IMAGES (toast on excess). */
+  function addAiImages(files) {
+    const list = Array.prototype.slice.call(files || [])
+      .filter((fl) => fl && fl.type && fl.type.indexOf('image/') === 0);
+    if (!list.length) return;
+    const room = AI_MAX_IMAGES - aiImages.length;
+    if (room <= 0) {
+      if (window.toast) window.toast('最多 ' + AI_MAX_IMAGES + ' 張圖片', 'fail');
+      return;
+    }
+    if (list.length > room && window.toast) {
+      window.toast('最多 ' + AI_MAX_IMAGES + ' 張圖片', 'fail', '已略過多餘的圖片');
+    }
+    list.slice(0, room).forEach((fl) => {
+      const r = new FileReader();
+      r.onload = () => {
+        if (aiImages.length >= AI_MAX_IMAGES) return;   // guard the async race
+        aiImages.push({ name: fl.name, dataUrl: String(r.result || '') });
+        renderAiThumbs();
+      };
+      r.onerror = () => { if (window.toast) window.toast('圖片讀取失敗', 'fail', fl.name); };
+      r.readAsDataURL(fl);
+    });
+  }
+
+  /* Wire the three intake paths onto the dropzone / hidden file input / pane paste. */
+  function initAiImages() {
+    const dz = $('#ai-dropzone');
+    const fileIn = $('#ai-file-input');
+    if (dz && fileIn) {
+      dz.style.cursor = 'pointer';
+      dz.addEventListener('click', () => fileIn.click());
+      fileIn.addEventListener('change', () => { addAiImages(fileIn.files); fileIn.value = ''; });
+      dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dz-over'); });
+      dz.addEventListener('dragleave', () => dz.classList.remove('dz-over'));
+      dz.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dz.classList.remove('dz-over');
+        addAiImages(e.dataTransfer && e.dataTransfer.files);
+      });
+    }
+    /* clipboard paste of an image while focus is anywhere in the AI pane. */
+    const pane = $('#pane-ai');
+    if (pane) {
+      pane.addEventListener('paste', (e) => {
+        const items = (e.clipboardData && e.clipboardData.items) || [];
+        const imgs = [];
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
+            const fl = items[i].getAsFile();
+            if (fl) imgs.push(fl);
+          }
+        }
+        if (imgs.length) { e.preventDefault(); addAiImages(imgs); }
+      });
+    }
+  }
+
+  /* Populate the model picker from GET /api/llm/config (enabled models only). Persist the
+     choice in localStorage `pd_ai_model`; a stale/disabled persisted alias silently falls
+     back to 自動 (it simply won't match any option). AI-off / guest leaves 自動 only. */
+  async function loadAiModels() {
+    const sel = $('#ai-model-select');
+    if (!sel) return;
+    let cfg;
+    try { cfg = await api.get('/api/llm/config'); } catch (e) { return; }
+    const models = (cfg && cfg.models) || [];
+    models.filter((mo) => mo.enabled).forEach((mo) => {
+      const o = el('option', null, mo.alias + (mo.vision ? '・支援影像' : ''));
+      o.value = mo.alias;
+      o.dataset.vision = mo.vision ? '1' : '';
+      sel.appendChild(o);
+    });
+    try {
+      const saved = localStorage.getItem('pd_ai_model');
+      if (saved && Array.prototype.some.call(sel.options, (o) => o.value === saved)) {
+        sel.value = saved;
+      }
+    } catch (e) { /* noop */ }
+    sel.addEventListener('change', () => {
+      try { localStorage.setItem('pd_ai_model', sel.value); } catch (e) { /* noop */ }
+    });
+  }
 
   /* Map a PdApiError code to the matching degraded panel. */
   function showAiDegrade(code) {
@@ -604,15 +974,54 @@
     $('#ai-degrade-down').hidden = id !== 'down';
   }
 
-  async function runAiPreview() {
-    const text = ($('#ai-text') && $('#ai-text').value || '').trim();
-    if (!text) {
-      if (window.toast) window.toast('請先貼上對帳單文字', 'fail');
+  /* FU-D33: open the shared quick-add dialog for an unregistered symbol in the AI preview.
+     Market is inferred from the row's account (accountMarket — TWD→TW, USD→US, MYR→MY), the
+     same rule the backend uses. On a successful register (or restore) the SAME preview re-runs
+     (runAiPreview rebuilds the request from the unchanged pane state: text + images + model),
+     so the healed row loses its error with zero re-entry. */
+  function openAiQuickAdd(symbol, accId) {
+    if (!window.pdInstQuickAdd) {
+      if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
       return;
     }
+    const resume = async () => { await reloadContext(); await runAiPreview(); };
+    /* FU-D42a: the symbol stays EDITABLE (no lockSymbol) — an AI mis-parse (e.g. a US-style
+       ticker on a TW account) is corrected right in the dialog; editing re-runs the lookup. */
+    window.pdInstQuickAdd({
+      symbol: symbol,
+      market: accountMarket(accId),
+      onConfirm: resume,
+      onBuy: resume,
+    });
+  }
+
+  async function runAiPreview() {
+    const text = ($('#ai-text') && $('#ai-text').value || '').trim();
+    if (!text && !aiImages.length) {
+      if (window.toast) window.toast('請貼上對帳單文字或上傳截圖', 'fail');
+      return;
+    }
+    /* Resolve the per-run model. If a non-vision model is chosen WITH images attached,
+       fall back to 自動 (the vision role chain) + show the inline hint — this keeps the
+       frontend consistent with the server rule (which 400s a non-vision alias + images),
+       so we never send that invalid combination. */
+    const sel = $('#ai-model-select');
+    let modelAlias = sel ? sel.value : '';
+    const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
+    const modelIsVision = !!(opt && opt.dataset && opt.dataset.vision);
+    const hint = $('#ai-model-hint');
+    if (modelAlias && aiImages.length && !modelIsVision) {
+      modelAlias = '';
+      if (hint) hint.hidden = false;
+    } else if (hint) {
+      hint.hidden = true;
+    }
+    const payload = { text: text };
+    if (aiImages.length) payload.images = aiImages.map((im) => im.dataUrl);
+    if (modelAlias) payload.model_alias = modelAlias;
     let resp;
     try {
-      resp = await api.post('/api/input/ai/preview', { text: text });
+      resp = await api.post('/api/input/ai/preview', payload);
     } catch (err) {
       /* graceful degradation: 402 額度 / 409 未啟用 / 503 不可用 -> degraded panel + toast */
       if (err && (err.status === 402 || err.status === 409 || err.status === 503)) {
@@ -674,7 +1083,19 @@
       if (r.reason) tdNote.appendChild(el('span', 'st-warn', '⚠ ' + r.reason));
       else tdNote.appendChild(el('span', 'st-ok', '✓ 解析完整'));
       tr.appendChild(tdNote);
-      tr.appendChild(el('td'));
+      /* FU-D33: an unregistered-symbol row gets an inline 立即註冊 action opening the SHARED
+         quick-add dialog (symbol prefilled + market inferred from the row's account, exactly
+         as the backend auto-register does). On success the SAME preview re-runs automatically
+         (text + images + model are still in the pane state), so the healed row resumes with
+         zero re-entry. The commit-time auto-register fallback stays untouched. */
+      const tdAct = el('td');
+      if (r.code === 'unregistered_symbol' && symbol) {
+        const reg = el('button', 'btn', '立即註冊'); reg.type = 'button';
+        reg.title = '註冊此標的後自動重新解析';
+        reg.addEventListener('click', () => openAiQuickAdd(symbol, d.account_id));
+        tdAct.appendChild(reg);
+      }
+      tr.appendChild(tdAct);
       tbody.appendChild(tr);
     });
     const s = preview.summary || {};
@@ -725,11 +1146,28 @@
   function oneRowCsv(header, values) {
     return header.join(',') + '\n' + values.map(csvEscape).join(',');
   }
+
+  /* ---- FU-D45 ledger live refresh ----
+     Called from EVERY successful commit path (manual / CSV / AI 寫入全部 / dividend /
+     opening) — and ONLY on success; every failure path returns before reaching it.
+     (1) re-fetches the lower 帳本記錄 tables in place via the seam ledger.js exposes
+     (window.pdLedgerRefresh — a plain function reference, no event binding, so repeated
+     commits can never double-fire), and (2) drops the per-account holdings cache so the
+     可賣/均價 sell hints and the dividend picker reflect the just-committed rows, then
+     re-warms the two panes' selected accounts. */
+  function afterCommitRefresh() {
+    Object.keys(acctHoldingsCache).forEach((k) => { delete acctHoldingsCache[k]; });
+    if (window.pdLedgerRefresh) window.pdLedgerRefresh();
+    renderSellHints();   // cache miss -> refetch for the selected manual account
+    const dSel = $('#d-account');
+    if (dSel && dSel.value) loadAcctHoldings(dSel.value, false).catch(() => {});
+  }
   async function commitOneRow(kind, csvText, btn, okSub, onDone) {
     const restore = window.pdBusy ? window.pdBusy(btn, '寫入中…') : () => {};
     const finishOk = (resp) => {
       if (resp && resp.written >= 1) {
         if (window.toast) window.toast('寫入成功', 'ok', okSub);
+        afterCommitRefresh();  // FU-D45: dividend / opening single-row commits
         if (onDone) onDone();
       } else if (window.toast) {
         window.toast('未寫入', 'fail', '資料列被跳過，請檢查欄位');
@@ -779,7 +1217,7 @@
       o.value = a.id;
       accSel.appendChild(o);
     });
-    accSel.addEventListener('change', renderDivForm);
+    accSel.addEventListener('change', () => { renderDivForm(); onDivAccountChange(); });
     $('#d-date').value = TODAY;
     const typeSeg = document.querySelectorAll('#d-tw .segmented button');
     const isStock = () => {
@@ -797,6 +1235,7 @@
         : '台股模式：現金股利沖減成本（調整均價下降）；配股以 $0 成本股數入帳。';
     }));
     renderDivForm();
+    initDivPicker();
     $('#d-confirm').addEventListener('click', () => {
       const a = acc($('#d-account').value) || ctx.accounts[0];
       const sym = $('#d-symbol').value.trim();
@@ -834,6 +1273,8 @@
             'd-drip-shares', 'd-drip-price', 'd-net-amt'].forEach((id) => {
             const n = $('#' + id); if (n) n.value = '';
           });
+          /* holdings refresh (STOCK/DRIP can grow shares) now rides afterCommitRefresh
+             (FU-D45): the shared cache is dropped + this account re-warmed on success. */
         });
     });
   }
@@ -860,6 +1301,208 @@
       $('#d-drip-wh').value = wh.toFixed(2);
       $('#d-drip-net').value = (g - wh).toFixed(2);
     };
+  }
+
+  /* ---- FU-D35 dividend 代號 picker (owner 需求六) ----
+     After an account is chosen, activating 代號 lists that account's CURRENTLY-HELD
+     symbols for point-and-click (dividends normally come from a live position). The
+     「顯示已清倉標的」 toggle additionally lists symbols the account historically held but
+     has since closed — a closed position can still pay a dividend after its ex-date
+     (owner 假設 2). Held/closed come from GET /api/input/holdings?account=… (server-side
+     Decimal share math), cached per account for the page session + refetched after a
+     successful commit. The picker is ASSISTIVE ONLY: it never overwrites what the user
+     types, and manual free entry always remains possible (the commit reads
+     #d-symbol.value directly — an unlisted symbol still submits). */
+  /* Shared per-account holdings cache (FU-D35 picker + FU-D44 sell hints). Held entries
+     additionally carry shares + adjusted_avg as Decimal STRINGS (FU-D44); dropped after
+     every successful commit (FU-D45, afterCommitRefresh). */
+  const acctHoldingsCache = {};   // { [accountId]: {held:[{symbol,name,shares,adjusted_avg}], closed:[{symbol,name}]} }
+  let divPickerOpen = false;
+
+  /* Inline-style the picker shell here (keeps the styling in this wave's files — the
+     dividend section owns input.js; the shell ids live in trades.html #pane-div). */
+  function styleDivPicker() {
+    const p = $('#d-sym-picker');
+    if (p) {
+      p.style.cssText = 'position:absolute;left:0;right:0;top:100%;z-index:40;margin-top:4px;'
+        + 'background:var(--panel-2,#141821);border:1px solid var(--border,#2a2f3a);'
+        + 'border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);max-height:260px;'
+        + 'overflow:auto;padding:4px;';
+    }
+    const empty = $('#d-sym-empty');
+    if (empty) empty.style.cssText = 'padding:8px 10px;color:var(--text-3,#8a92a3);font-size:11px;';
+    const foot = $('#d-sym-foot');
+    if (foot) {
+      foot.style.cssText = 'border-top:1px solid var(--border,#2a2f3a);margin-top:4px;'
+        + 'padding:7px 10px 3px;';
+    }
+    const tog = document.querySelector('.sym-pick-toggle');
+    if (tog) {
+      tog.style.cssText = 'display:flex;align-items:center;gap:7px;font-size:11px;'
+        + 'color:var(--text-2,#c2c8d2);cursor:pointer;';
+    }
+  }
+
+  /* Fetch (or return the cached) {held, closed} for an account. Graceful: a failed fetch
+     returns the last cache (or empties) so the picker degrades to a plain typed input. */
+  async function loadAcctHoldings(accountId, force) {
+    if (!accountId) return { held: [], closed: [] };
+    if (!force && acctHoldingsCache[accountId]) return acctHoldingsCache[accountId];
+    let resp;
+    try {
+      resp = await api.get('/api/input/holdings?account=' + encodeURIComponent(accountId));
+    } catch (e) {
+      return acctHoldingsCache[accountId] || { held: [], closed: [] };
+    }
+    const data = { held: (resp && resp.held) || [], closed: (resp && resp.closed) || [] };
+    acctHoldingsCache[accountId] = data;
+    return data;
+  }
+
+  function closeDivPicker() {
+    const p = $('#d-sym-picker');
+    if (p) p.hidden = true;
+    divPickerOpen = false;
+  }
+
+  function fillDivSymbol(sym) {
+    const inp = $('#d-symbol');
+    if (inp) inp.value = sym;
+    closeDivPicker();
+  }
+
+  /* One selectable row: 代號 + 名稱 (+ a muted 已清倉 tag for closed positions). Selection
+     rides on mousedown+preventDefault so the value lands BEFORE the input's focusout —
+     otherwise the outside-focus close would race the click away. */
+  function divPickRow(item, isClosed) {
+    const row = el('button', null, null);
+    row.type = 'button';
+    row.style.cssText = 'display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;'
+      + 'background:none;border:none;padding:6px 8px;cursor:pointer;color:inherit;'
+      + 'border-radius:6px;font:inherit;';
+    row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,.06)'; });
+    row.addEventListener('mouseleave', () => { row.style.background = 'none'; });
+    const code = el('span', null, item.symbol);
+    code.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums;';
+    row.appendChild(code);
+    const name = el('span', null, item.name || '');
+    name.style.cssText = 'color:var(--text-3,#8a92a3);font-size:11px;overflow:hidden;'
+      + 'text-overflow:ellipsis;white-space:nowrap;';
+    row.appendChild(name);
+    if (isClosed) {
+      const tag = el('span', null, '已清倉');
+      tag.style.cssText = 'margin-left:auto;color:var(--text-3,#8a92a3);font-size:10px;'
+        + 'border:1px solid var(--border,#2a2f3a);border-radius:4px;padding:0 6px;flex:none;';
+      row.appendChild(tag);
+    }
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); fillDivSymbol(item.symbol); });
+    return row;
+  }
+
+  /* Render the list for the current account from {held, closed}, filtered by whatever is
+     typed in 代號 (also matches names). The closed list appears only when the toggle is on
+     AND the account has closed history; it is visually separated by a dashed divider. */
+  function renderDivPicker(data) {
+    const list = $('#d-sym-list');
+    const empty = $('#d-sym-empty');
+    const foot = $('#d-sym-foot');
+    const toggle = $('#d-sym-closed-toggle');
+    if (!list || !empty || !foot) return;
+    list.replaceChildren();
+    const a = acc($('#d-account').value);
+    if (!a) {
+      empty.hidden = false;
+      empty.textContent = '請先選擇帳戶';
+      foot.hidden = true;
+      return;
+    }
+    const held = (data && data.held) || [];
+    const closed = (data && data.closed) || [];
+    foot.hidden = closed.length === 0;   // only offer the toggle where there IS closed history
+    const showClosed = !!(toggle && toggle.checked) && closed.length > 0;
+    const q = ($('#d-symbol').value || '').trim().toUpperCase();
+    const match = (s) => !q || (s.symbol || '').toUpperCase().indexOf(q) >= 0
+      || (s.name || '').toUpperCase().indexOf(q) >= 0;
+    const heldF = held.filter(match);
+    const closedF = showClosed ? closed.filter(match) : [];
+    heldF.forEach((it) => list.appendChild(divPickRow(it, false)));
+    if (closedF.length) {
+      const divider = el('div', null);
+      divider.style.cssText = 'border-top:1px dashed var(--border,#2a2f3a);margin:4px 0;';
+      list.appendChild(divider);
+      closedF.forEach((it) => list.appendChild(divPickRow(it, true)));
+    }
+    /* Empty-state copy — honest about WHY the list is empty; never blocks free entry. */
+    if (heldF.length + closedF.length === 0) {
+      empty.hidden = false;
+      if (held.length === 0 && closed.length === 0) {
+        empty.textContent = '此帳戶尚無標的紀錄 — 可直接輸入代號';
+      } else if (held.length === 0 && !showClosed) {
+        empty.textContent = '此帳戶目前無持有標的；勾選「顯示已清倉標的」可挑選歷史標的';
+      } else {
+        empty.textContent = '無相符標的 — 可直接輸入代號';
+      }
+    } else {
+      empty.hidden = true;
+    }
+  }
+
+  /* Open + populate the dropdown for the chosen account (cache-first paint, then refresh
+     from the fetch). Wrapped so an assistive-picker error can never surface as an
+     unhandled rejection (the e2e smoke asserts ZERO console errors). */
+  async function openDivPicker() {
+    try {
+      const p = $('#d-sym-picker');
+      if (!p) return;
+      p.hidden = false;
+      divPickerOpen = true;
+      const a = acc($('#d-account').value);
+      if (!a) { renderDivPicker({ held: [], closed: [] }); return; }
+      if (acctHoldingsCache[a.id]) renderDivPicker(acctHoldingsCache[a.id]);
+      const data = await loadAcctHoldings(a.id, false);
+      if (divPickerOpen) renderDivPicker(data);
+    } catch (e) { /* picker is assistive — degrade silently */ }
+  }
+
+  /* Account switch: reset the toggle (held-first per account), close, warm the new cache. */
+  function onDivAccountChange() {
+    const toggle = $('#d-sym-closed-toggle');
+    if (toggle) toggle.checked = false;
+    closeDivPicker();
+    const accId = $('#d-account').value;
+    if (accId) loadAcctHoldings(accId, false).catch(() => {});
+  }
+
+  function initDivPicker() {
+    styleDivPicker();
+    const inp = $('#d-symbol');
+    if (inp) {
+      inp.addEventListener('focus', () => { openDivPicker(); });
+      inp.addEventListener('click', () => { openDivPicker(); });
+      inp.addEventListener('input', () => {
+        if (!divPickerOpen) { openDivPicker(); return; }
+        const a = acc($('#d-account').value);
+        renderDivPicker((a && acctHoldingsCache[a.id]) || { held: [], closed: [] });
+      });
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDivPicker(); });
+    }
+    const toggle = $('#d-sym-closed-toggle');
+    if (toggle) toggle.addEventListener('change', () => {
+      const a = acc($('#d-account').value);
+      renderDivPicker((a && acctHoldingsCache[a.id]) || { held: [], closed: [] });
+    });
+    /* Close when focus leaves the 代號 field (input OR the footer toggle). focusout bubbles,
+       so one listener on the container covers both; relatedTarget inside the field (e.g.
+       the toggle) keeps it open. Row clicks preventDefault so focus never leaves the input. */
+    const field = $('#d-symbol-field');
+    if (field) field.addEventListener('focusout', (e) => {
+      const to = e.relatedTarget;
+      if (to && field.contains(to)) return;
+      closeDivPicker();
+    });
+    /* Warm the default account's cache so the first focus paints instantly. */
+    const accId0 = $('#d-account').value;
+    if (accId0) loadAcctHoldings(accId0, false).catch(() => {});
   }
 
   /* ================= Tab 5 期初庫存 =================
@@ -920,14 +1563,7 @@
   }
 
   boot();
-
-  /* AI 截圖拖放區：Vision 解析尚未開通 — 誠實提示（CSV 拖放區已是真上傳，見 initCsv） */
-  (function () {
-    const dz = document.getElementById('ai-dropzone');
-    if (!dz) return;
-    dz.style.cursor = 'pointer';
-    dz.addEventListener('click', () => {
-      if (window.toast) window.toast('截圖解析尚未開通', 'fail', 'Vision 模型解析將於 AI 功能開通時提供 — 目前請貼上文字解析');
-    });
-  })();
+  /* NOTE (FU-D20, 2026-07-17): the old "截圖解析尚未開通" AI-dropzone stub is retired — the
+     dropzone is now a REAL screenshot intake wired in initAi()/initAiImages() (click /
+     drag-drop / clipboard-paste → vision parse via /api/input/ai/preview). */
 })();
