@@ -150,7 +150,7 @@ def _setup_opening(conn: sqlite3.Connection) -> None:
     upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW,
                                        quote_ccy=Currency.TWD, sector="Tech", name="TSMC"))
     upsert_opening(conn, account_id="tw_broker", symbol="2330", shares=Decimal("100"),
-                   original_avg_cost=Decimal("500"), original_cost_total=Decimal("50000"),
+                   original_cost_total=Decimal("50000"),
                    build_date=date(2026, 1, 1))
 
 
@@ -158,7 +158,7 @@ def test_ledger_audit_captures_before_on_opening_update(conn: sqlite3.Connection
     _setup_opening(conn)
     # a second upsert on the same (account, symbol) key hits the update path -> audits prior.
     upsert_opening(conn, account_id="tw_broker", symbol="2330", shares=Decimal("200"),
-                   original_avg_cost=Decimal("505"), original_cost_total=Decimal("101000"),
+                   original_cost_total=Decimal("101000"),
                    build_date=date(2026, 1, 1))
     audit = list_ledger_audit(conn, table_name="opening_inventory")
     assert len(audit) == 1 and audit[0]["action"] == "update"

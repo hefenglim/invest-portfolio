@@ -167,3 +167,89 @@ def test_model_column_round_trips() -> None:
     ns.upsert_news(conn, item, discovered_for="2330")
     row = ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0]
     assert row.model == "haiku-4.5"
+
+
+# ---------------------------------------------------------------------------
+# Fetch-observability columns + retry backlog (2026-07-21).
+# ---------------------------------------------------------------------------
+
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+
+def _days_ago(n: int) -> str:
+    """A fetched_at ISO stamp *n* days before real UTC now (list_refetch_candidates uses
+    SQLite date('now'), so candidates must be dated relative to wall-clock, not a fixture)."""
+    return (datetime.now(UTC) - timedelta(days=n)).isoformat()
+
+
+def _empty_row(link: str, *, fetched_at: str, title: str = "H") -> ns.OrganizedNews:
+    """A headline-only degrade row (empty body) with a chosen fetched_at."""
+    return ns.OrganizedNews(
+        link=link, title=title, news_date="2026-07-05", body_summary="",
+        related_stocks=["2330"], source="src", lang="zh",
+        fetched_at=fetched_at, organized_at=fetched_at,
+    )
+
+
+def test_fetch_columns_migration_idempotent() -> None:
+    # create_tables adds fetch_status / fetch_attempts via ALTER-if-missing; re-running is a
+    # no-op (an already-migrated DB must not error on the second call).
+    conn = _conn()
+    ns.create_tables(conn)  # second call — must not raise
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(organized_news)")}
+    assert {"fetch_status", "fetch_attempts"} <= cols
+
+
+def test_record_fetch_attempt_bumps_and_sets_status() -> None:
+    conn = _conn()
+    ns.upsert_news(conn, _empty_row("http://a", fetched_at=_days_ago(1)), discovered_for="2330")
+    ns.record_fetch_attempt(conn, "http://a", status="http_error")
+    ns.record_fetch_attempt(conn, "http://a", status="too_short")
+    row = conn.execute(
+        "SELECT fetch_attempts, fetch_status FROM organized_news WHERE link = ?",
+        ("http://a",)).fetchone()
+    assert row["fetch_attempts"] == 2 and row["fetch_status"] == "too_short"
+    # no-op on an unknown link (row upserted first by the caller in real use)
+    ns.record_fetch_attempt(conn, "http://missing", status="error")  # must not raise
+
+
+def test_list_refetch_candidates_excludes_non_empty_bodies() -> None:
+    conn = _conn()
+    ns.upsert_news(conn, _item("http://full", "2026-07-05", ["2330"]),
+                   discovered_for="2330")  # has a summary
+    ns.upsert_news(conn, _empty_row("http://empty", fetched_at=_days_ago(2)),
+                   discovered_for="2330")
+    links = [c.link for c in ns.list_refetch_candidates(conn)]
+    assert links == ["http://empty"]
+
+
+def test_list_refetch_candidates_age_window() -> None:
+    conn = _conn()
+    ns.upsert_news(conn, _empty_row("http://recent", fetched_at=_days_ago(2)),
+                   discovered_for="2330")
+    ns.upsert_news(conn, _empty_row("http://old", fetched_at=_days_ago(40)),
+                   discovered_for="2330")
+    links = [c.link for c in ns.list_refetch_candidates(conn, max_age_days=14)]
+    assert links == ["http://recent"]  # the 40-day-old row aged out
+
+
+def test_list_refetch_candidates_attempt_cap() -> None:
+    conn = _conn()
+    ns.upsert_news(conn, _empty_row("http://tries2", fetched_at=_days_ago(1)),
+                   discovered_for="2330")
+    ns.upsert_news(conn, _empty_row("http://tries3", fetched_at=_days_ago(1)),
+                   discovered_for="2330")
+    for _ in range(2):
+        ns.record_fetch_attempt(conn, "http://tries2", status="error")
+    for _ in range(3):
+        ns.record_fetch_attempt(conn, "http://tries3", status="error")
+    links = [c.link for c in ns.list_refetch_candidates(conn, max_attempts=3)]
+    assert links == ["http://tries2"]  # tries3 hit the cap and drops out
+
+
+def test_list_refetch_candidates_limit() -> None:
+    conn = _conn()
+    for i in range(15):
+        ns.upsert_news(conn, _empty_row(f"http://e{i}", fetched_at=_days_ago(1)),
+                       discovered_for="2330")
+    assert len(ns.list_refetch_candidates(conn, limit=10)) == 10

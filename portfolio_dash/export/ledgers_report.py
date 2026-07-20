@@ -267,7 +267,7 @@ def _openings_section(
             f'<td class="l">{_esc(accts.get(o.account_id, o.account_id))}</td>'
             f"{_sym_cell(o.symbol, names.get(o.symbol, ''))}"
             f'<td class="num">{_fmt_shares(o.shares)}</td>'
-            f'<td class="num">{_fmt_amount(o.original_avg_cost, ccy)}</td>'
+            f'<td class="num">{_fmt_amount(o.original_avg, ccy)}</td>'
             f'<td class="num">{_amount_ccy(o.original_cost_total, ccy)}</td>'
             f'<td class="num">{_esc(o.build_date.isoformat())}</td>'
             "</tr>"

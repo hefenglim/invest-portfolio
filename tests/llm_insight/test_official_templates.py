@@ -10,8 +10,8 @@ reference strategies BY NAME, so a version bump needs no preset change).
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v9() -> None:
-    assert ot.LIBRARY_VERSION == "official-v9 (2026-07-19)"
+def test_library_version_is_official_v10() -> None:
+    assert ot.LIBRARY_VERSION == "official-v10 (2026-07-21)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -31,11 +31,12 @@ def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
     assert body not in str(wire.get("system_prompt", "")) + str(wire.get("strategies", ""))
 
 
-def test_ai_input_prompt_v3_pins_local_exchange_code_rule() -> None:
+def test_ai_input_prompt_v4_pins_local_exchange_code_rule() -> None:
     # FU-D41 (owner bug): 「前天聯電買入1張」 on a tw_broker row parsed to the US ADR
-    # ticker "UMC" → dead lookup. The v3 prompt must carry the explicit LOCAL-exchange-code
-    # rule with the numeric-code examples and the ADR counter-example.
-    assert ot.AI_INPUT_PROMPT_VERSION == "v3"
+    # ticker "UMC" → dead lookup. The prompt must carry the explicit LOCAL-exchange-code
+    # rule with the numeric-code examples and the ADR counter-example. v4 (W1 batch-A) adds
+    # the parity MY (Bursa) guidance (pinned by test_prompts_v2_carry_my_bursa_guidance).
+    assert ot.AI_INPUT_PROMPT_VERSION == "v4"
     body = ot.AI_INPUT_PROMPT_BODY
     assert "LOCAL exchange code" in body
     assert "聯電⇒2303" in body and "台積電⇒2330" in body and "鴻海⇒2317" in body
@@ -51,7 +52,7 @@ def test_ai_instrument_resolve_prompt_is_registered_and_versioned() -> None:
     # prompts. It lives in the registry (code-owned), carries the local-exchange-code rules +
     # the embedded GICS sector vocabulary + all reply-schema fields, and states that the real
     # lookup re-verifies (so the model claims no authority).
-    assert ot.AI_INSTRUMENT_RESOLVE_PROMPT_VERSION == "v1"
+    assert ot.AI_INSTRUMENT_RESOLVE_PROMPT_VERSION == "v2"
     body = ot.AI_INSTRUMENT_RESOLVE_PROMPT
     for placeholder in ("{query}", "{market}"):
         assert placeholder in body
@@ -70,6 +71,30 @@ def test_ai_instrument_resolve_prompt_is_registered_and_versioned() -> None:
     assert not hasattr(ot, "AI_SECTOR_PROMPT")
     assert not hasattr(ot, "AI_SYMBOL_RESOLVE_PROMPT")
     assert not any(e["key"] in ("ai_sector", "ai_symbol_resolve") for e in ot.PROMPT_REGISTRY)
+
+
+def test_prompts_v2_carry_my_bursa_guidance() -> None:
+    """W1 batch-A: the MY (Bursa) clause is raised to TW parity in BOTH the unified resolve
+    prompt and the AI-input prompt — verified name⇒code exemplars, the ACE-market leading-zero
+    rule, and the brand/mall→listed-parent rule. Guards against silent regression to the old
+    one-line MY clause (「MY（馬股，Bursa）：4 位數字（如 5225）」)."""
+    resolve = ot.AI_INSTRUMENT_RESOLVE_PROMPT
+    # verified name⇒code exemplars (each confirmed against the fetched Bursa directory).
+    for pair in ("Maybank／馬銀行⇒1155", "Public Bank／大眾銀行⇒1295",
+                 "Tenaga Nasional／國家能源⇒5347", "CIMB⇒1023", "Inari Amertron⇒0166",
+                 "IOI Corporation⇒1961", "IOI Properties⇒5249"):
+        assert pair in resolve, pair
+    # leading-zero rule (ACE codes keep the zero — 0166, never 166).
+    assert "保留前導零" in resolve and "絕不可寫成 166" in resolve
+    # brand/mall/subsidiary → LISTED parent, else not_found (never fabricate).
+    assert "上市母公司" in resolve and "IOI Mall" in resolve
+    # the AI-input prompt mirrors the same MY guidance (condensed).
+    body = ot.AI_INPUT_PROMPT_BODY
+    assert "Maybank⇒1155" in body and "Inari⇒0166" in body
+    assert "0166, never 166" in body and "IOI Mall⇒IOI Properties 5249" in body
+    # both still .format cleanly (the MY expansion introduced no stray placeholder).
+    assert "0166" in resolve.format(query="Inari", market="MY")
+    assert "0166" in body.format(accounts="a=b", today="2026-07-21", text="x")
 
 
 def test_checkup_strategy_advances_to_v25_citing_rule_signals() -> None:
@@ -97,7 +122,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v25_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v9 (2026-07-19)"
+    assert wire["library_version"] == "official-v10 (2026-07-21)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

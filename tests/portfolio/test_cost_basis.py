@@ -47,7 +47,7 @@ def test_buys_weighted_average_includes_fees() -> None:
 
 def test_opening_inventory_seeds_position() -> None:
     oi = OpeningInventory(account_id="a", symbol="2330.TW", shares=Decimal("1000"),
-                          original_avg_cost=Decimal("500"), original_cost_total=Decimal("500000"),
+                          original_cost_total=Decimal("500000"),
                           build_date=date(2024, 12, 31))
     book = build_book([], [], [oi], INSTR)
     h = book.holdings[0]
@@ -167,7 +167,7 @@ def test_multi_account_same_symbol_isolated() -> None:
 
 def test_opening_inventory_plus_subsequent_buy_accumulates() -> None:
     oi = OpeningInventory(account_id="a", symbol="AAPL", shares=Decimal("10"),
-                          original_avg_cost=Decimal("100"), original_cost_total=Decimal("1000"),
+                          original_cost_total=Decimal("1000"),
                           build_date=date(2024, 12, 31))
     txs = [_buy("AAPL", "10", "120", date(2025, 1, 2))]
     book = build_book(txs, [], [oi], INSTR)

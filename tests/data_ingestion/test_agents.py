@@ -8,6 +8,7 @@ from portfolio_dash.data_ingestion.agents import (
     AiDraft,
     AiDraftList,
     Completer,
+    _drafts_to_csv,
     ai_agents_input,
 )
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
@@ -231,3 +232,29 @@ def test_ai_input_registered_clean_row_has_no_format_warning(
     _setup(conn)
     result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
     assert result.preview.rows[0].issues == []
+
+
+# --- _drafts_to_csv: one-line-per-draft invariant (C7 row<->line mapping) -------------------
+
+
+def _draft(note: str | None) -> AiDraft:
+    return AiDraft(account_id="tw_broker", symbol="2330", side=Side.BUY,
+                   date=date(2026, 1, 2), shares=Decimal("1000"), price=Decimal("600"),
+                   note=note)
+
+
+def test_drafts_to_csv_one_line_per_draft() -> None:
+    csv = _drafts_to_csv([_draft(None), _draft("手動")])
+    lines = csv.rstrip("\n").split("\n")
+    assert lines[0] == "account,symbol,side,date,shares,price,note"
+    assert len(lines) == 3  # header + one line per draft (the mapping invariant)
+
+
+def test_drafts_to_csv_sanitizes_embedded_newlines_in_note() -> None:
+    """A note carrying CR/LF must NOT split a draft across csv lines — else the AI preview's
+    row index (n) would no longer map to csv data line n+1 (C7)."""
+    csv = _drafts_to_csv([_draft("line1\nline2\r\nline3\rline4")])
+    lines = csv.rstrip("\n").split("\n")
+    assert len(lines) == 2  # header + exactly one data line
+    assert "\r" not in csv
+    assert lines[1].endswith("line1 line2 line3 line4")

@@ -22,7 +22,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v9 (2026-07-19)"
+LIBRARY_VERSION = "official-v10 (2026-07-21)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -48,7 +48,10 @@ LIBRARY_VERSION = "official-v9 (2026-07-19)"
 # v3 (FU-D41, 2026-07-19): explicit LOCAL-exchange-code rule — 「前天聯電買入1張」 on a TW
 # account must parse to 2303, never the US ADR ticker UMC; agents.py adds a matching
 # soft row-level format check post-parse (warning only, never rewrites the symbol).
-AI_INPUT_PROMPT_VERSION = "v3"
+# v4 (W1 batch-A, 2026-07-21): MY (Bursa) guidance raised to TW parity — 4-digit code
+# exemplars, the ACE-market leading-zero rule (0166, never 166), and the brand/mall →
+# listed-parent rule (IOI Mall ⇒ IOI Properties). Mirrors AI_INSTRUMENT_RESOLVE_PROMPT.
+AI_INPUT_PROMPT_VERSION = "v4"
 AI_INPUT_PROMPT_BODY = (
     "<task>Extract stock transactions from the user's text and any attached statement\n"
     "screenshot into JSON.</task>\n"
@@ -70,9 +73,12 @@ AI_INPUT_PROMPT_BODY = (
     "cross-listed/ADR ticker from another exchange: a TW (TWD) account takes the\n"
     "TWSE/TPEx numeric code (聯電⇒2303, 台積電⇒2330, 鴻海⇒2317 — NEVER US tickers\n"
     "like UMC/TSM even if the company also trades as a US ADR); a US (USD) account\n"
-    "takes the US ticker (AAPL); a MY (MYR) account takes the Bursa numeric code\n"
-    "(e.g. 1155). A Chinese company name on a TW account always maps to its numeric\n"
-    "code. Dates resolve against <today>: a month/day without a year means the most\n"
+    "takes the US ticker (AAPL); a MY (MYR) account takes the 4-digit Bursa code\n"
+    "(Maybank⇒1155, Tenaga⇒5347, Inari⇒0166 — ACE-market codes KEEP the leading\n"
+    "zero: 0166, never 166; map a brand/mall/subsidiary to its LISTED parent, e.g.\n"
+    "IOI Mall⇒IOI Properties 5249). A Chinese company name on a TW account always\n"
+    "maps to its numeric code. Dates resolve against <today>: a month/day without a\n"
+    "year means the most\n"
     "recent PAST occurrence (a trade date is never in the future); relative words\n"
     "(今天/昨天/上週五) resolve from <today>. One draft per transaction — text may\n"
     "contain several. An attached screenshot is a broker statement that may list\n"
@@ -160,7 +166,12 @@ DIGEST_NOTE_PROMPT_BODY = (
 # one-shot example (whose sector uses a real GICS key).
 _GICS_SECTOR_LIST = ", ".join(GICS_SECTOR_KEYS)
 
-AI_INSTRUMENT_RESOLVE_PROMPT_VERSION = "v1"
+# v2 (W1 batch-A, 2026-07-21): the MY (Bursa) clause was one thin line vs. rich TW guidance —
+# the app's weakest resolve market. Raised to TW parity: 4-digit code exemplars (verified
+# against the fetched Bursa directory), the ACE-market leading-zero rule (0166, never 166),
+# and the brand/mall/subsidiary → LISTED-parent rule (IOI Mall → IOI Properties). Paired with
+# the baked ``pricing.bursa_registry`` so a valid code now verifies offline → status:"resolved".
+AI_INSTRUMENT_RESOLVE_PROMPT_VERSION = "v2"
 AI_INSTRUMENT_RESOLVE_PROMPT = (
     "<task>你是股票標的判讀助理。使用者輸入了一段可能是公司名稱、俗稱，或某種形式的代號"
     "（可能是錯誤形式，例如把台股打成美股 ADR 代號）。請在『目標市場』中判讀他實際想指的"
@@ -172,7 +183,13 @@ AI_INSTRUMENT_RESOLVE_PROMPT = (
     "交易所代號：聯電⇒2303、台積電⇒2330、開發金⇒2883，絕不可回傳 UMC／TSM 等美股 ADR "
     "代號；中文公司名一律對應其數字代號。\n"
     "・US（美股，NYSE/NASDAQ）：1-5 位英文字母＋可選 .X 類別字尾（如 AAPL、BRK.B）。\n"
-    "・MY（馬股，Bursa）：4 位數字（如 5225）。</market_rules>\n"
+    "・MY（馬股，Bursa Malaysia）：4 位數字代號（Main Market 多為 1xxx–9xxx，ACE Market "
+    "多以 0 開頭）。必須輸出當地交易所代號：Maybank／馬銀行⇒1155、Public Bank／大眾銀行"
+    "⇒1295、Tenaga Nasional／國家能源⇒5347、CIMB⇒1023、Inari Amertron⇒0166、IOI "
+    "Corporation⇒1961、IOI Properties⇒5249。ACE Market 及以 0 開頭之代號必須保留前導零"
+    "（Inari 為 0166，絕不可寫成 166）。品牌、商場或子公司名一律對應其『上市母公司』"
+    "（例：IOI Mall／IOI 廣場 → IOI Properties＝5249）；若查無對應之上市母公司則回 "
+    "not_found，絕不可捏造代號。</market_rules>\n"
     "<gics_sectors>gics_sector 欄位必須『完全等於』下列 11 個英文 GICS 產業鍵之一（大小寫、"
     "空格、字元皆同），不得自創、翻譯或輸出清單以外的類別：" + _GICS_SECTOR_LIST +
     "</gics_sectors>\n"

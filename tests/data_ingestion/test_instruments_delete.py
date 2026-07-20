@@ -84,7 +84,7 @@ def test_has_ledger_history_dividend(conn: sqlite3.Connection) -> None:
 def test_has_ledger_history_opening(conn: sqlite3.Connection) -> None:
     upsert_instrument(conn, _inst("OP"))
     upsert_opening(conn, account_id="schwab", symbol="OP", shares=Decimal("5"),
-                   original_avg_cost=Decimal("10"), original_cost_total=Decimal("50"),
+                   original_cost_total=Decimal("50"),
                    build_date=date(2026, 1, 1))
     assert has_ledger_history(conn, "OP") is True
 
@@ -210,7 +210,7 @@ def test_upsert_opening_unarchives(conn: sqlite3.Connection) -> None:
     upsert_instrument(conn, _inst("ARCO"))
     set_instrument_archived(conn, "ARCO", True)
     upsert_opening(conn, account_id="schwab", symbol="ARCO", shares=Decimal("5"),
-                   original_avg_cost=Decimal("10"), original_cost_total=Decimal("50"),
+                   original_cost_total=Decimal("50"),
                    build_date=date(2026, 1, 1))
     assert get_instrument(conn, "ARCO").archived is False  # type: ignore[union-attr]
 

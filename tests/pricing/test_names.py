@@ -33,9 +33,34 @@ def test_us_and_my_suffixes(monkeypatch: pytest.MonkeyPatch) -> None:
         return "X"
 
     monkeypatch.setattr(names, "_yf_name", yf)
+    # Isolate the yfinance-suffix path: force a registry MISS so MY falls through to .KL.
+    monkeypatch.setattr(names, "bursa_name", lambda s: None)
     assert names.lookup_name("AAPL", Market.US) == "X"
     assert names.lookup_name("0138", Market.MY) == "X"
     assert seen == ["AAPL", "0138.KL"]
+
+
+def test_my_uses_bursa_registry_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MY resolves offline via the baked Bursa registry BEFORE yfinance — the registry
+    covers counters the ``.KL`` feed lacks (the resolve-demotion fix, W1 batch-A)."""
+    monkeypatch.setattr(names, "bursa_name", lambda s: "MYEG" if s == "0138" else None)
+    monkeypatch.setattr(names, "_yf_name", lambda s: pytest.fail("must not hit yfinance"))
+    assert names.lookup_name("0138", Market.MY) == "MYEG"
+
+
+def test_my_falls_through_to_yfinance_on_registry_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def yf(sym: str) -> str | None:
+        seen.append(sym)
+        return "SomeCounter"
+
+    monkeypatch.setattr(names, "bursa_name", lambda s: None)  # not in the static list
+    monkeypatch.setattr(names, "_yf_name", yf)
+    assert names.lookup_name("9999", Market.MY) == "SomeCounter"
+    assert seen == ["9999.KL"]
 
 
 def test_tw_static_table_failure_still_falls_through(

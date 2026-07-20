@@ -1,13 +1,14 @@
-"""E2E: the 期初庫存 (opening inventory) input pane, driven against the REAL stack (FU-D21).
+"""E2E: the 期初庫存 (opening inventory) input pane, driven against the REAL stack (A6).
 
-Drives the opening-inventory form (which lives in the tab renamed 換匯＋期初 → 期初庫存 after the
-FX card was removed in FU-D22) through the one-row-CSV import seam, then verifies the DOWNSTREAM
-holding via /api/dashboard and the row via the 期初 ledger tab.
+Drives the SIMPLIFIED opening-inventory form (A6, 2026-07-21) through the one-row-CSV import
+seam, then verifies the DOWNSTREAM holding via /api/dashboard and the row via the 期初 ledger tab.
 
-Covers the o-avg / o-total interplay explicitly (both fields are editable):
-  * total PROVIDED  → original_cost_total wins server-side; the holding's original_avg is
-    recomputed on read as total / shares (NOT the entered avg).
-  * total OMITTED   → original_cost_total is computed as avg × shares.
+A6 form contract:
+  * 原始總成本 (``#o-total``) is REQUIRED — the authoritative money of record.
+  * 原始均價 is a READ-ONLY computed hint (``#o-avg-view`` = total / shares) — never entered,
+    never stored; the ledger's ``avg`` wire field is computed on read (total / shares).
+  * ``#o-symbol`` is wired to the ``#m-symbols`` datalist (instrument suggestions).
+  * On a successful commit the form clears (symbol / shares / total) and the avg hint resets.
 
 ZERO console / page errors throughout.
 """
@@ -19,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.data_ingestion.store import upsert_instrument
@@ -88,7 +89,7 @@ def _commit_opening(page: Page) -> None:
 
 
 @pytest.mark.e2e
-def test_opening_inventory_downstream_and_ledger(
+def test_opening_inventory_simplified_form_downstream_and_ledger(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
     base = flow_server(_seed_openings)
@@ -97,38 +98,51 @@ def test_opening_inventory_downstream_and_ledger(
 
     _open_opening_tab(page, base)
 
-    # ===== (A) total PROVIDED (12,000) ≠ avg×shares (50×200=10,000): total wins server-side ==
+    # ===== the datalist wiring: #o-symbol offers the page's registered instruments ===========
+    assert page.get_attribute("#o-symbol", "list") == "m-symbols"
+    assert page.locator("#m-symbols option").count() > 0
+
+    # ===== (A) total is the money of record; 均價 is a live READ-ONLY hint (total / shares) ===
     page.select_option("#o-account", "tw_broker")
     page.fill("#o-symbol", "2454")
     page.fill("#o-shares", "200")
-    page.fill("#o-avg", "50")
+    # avg hint is 「—」 until BOTH shares and total are present.
+    expect(page.locator("#o-avg-view")).to_have_text("—")
     page.fill("#o-total", "12000")
     page.fill("#o-date", "2025-06-01")
+    # live avg hint = 12000 / 200 = 60 (display-only; never a value of record).
+    expect(page.locator("#o-avg-view")).to_contain_text("60")
     _commit_opening(page)
 
     a = _holding(base, "2454", "tw_broker")
     assert a is not None
     assert Decimal(a["shares"]) == Decimal("200")
-    assert Decimal(a["original_cost_total"]) == Decimal("12000")   # the provided total wins
+    assert Decimal(a["original_cost_total"]) == Decimal("12000")   # the entered total is stored
     assert Decimal(a["adjusted_cost_total"]) == Decimal("12000")
     assert Decimal(a["original_avg"]) == Decimal("60")             # 12000 / 200, computed on read
 
-    # ===== (B) total OMITTED: original_cost_total computed as avg × shares ===================
+    # ===== the form CLEARS on success (no double-submit of the same opening) =================
+    expect(page.locator("#o-symbol")).to_have_value("")
+    expect(page.locator("#o-shares")).to_have_value("")
+    expect(page.locator("#o-total")).to_have_value("")
+    expect(page.locator("#o-avg-view")).to_have_text("—")
+
+    # ===== (B) a second opening, different symbol ============================================
     page.select_option("#o-account", "tw_broker")
     page.fill("#o-symbol", "2317")
     page.fill("#o-shares", "100")
-    page.fill("#o-avg", "100")
-    page.fill("#o-total", "")                                      # omitted -> computed
+    page.fill("#o-total", "10000")
     page.fill("#o-date", "2025-06-02")
+    expect(page.locator("#o-avg-view")).to_contain_text("100")
     _commit_opening(page)
 
     b = _holding(base, "2317", "tw_broker")
     assert b is not None
     assert Decimal(b["shares"]) == Decimal("100")
-    assert Decimal(b["original_cost_total"]) == Decimal("10000")   # 100 × 100 computed
+    assert Decimal(b["original_cost_total"]) == Decimal("10000")
     assert Decimal(b["original_avg"]) == Decimal("100")
 
-    # ===== the 期初 ledger tab lists both openings (reload so the ledger re-fetches) =========
+    # ===== the 期初 ledger tab lists both openings; avg is computed on read (total / shares) ==
     page.goto(base + "/trades.html", wait_until="load")
     page.wait_for_selector("#open-body tr", state="attached")
     page.click("#tab-lopen")
@@ -137,10 +151,9 @@ def test_opening_inventory_downstream_and_ledger(
         "() => { const t = document.querySelector('#open-body');"
         " return t && t.textContent.includes('2454') && t.textContent.includes('2317'); }"
     )
-    # the LEDGER keeps the AS-ENTERED avg (50) even though the holding recomputed it to 60.
     openings = _get_json(base, "/api/ledgers/openings?symbol=2454")["rows"]
     assert len(openings) == 1
-    assert Decimal(openings[0]["avg"]) == Decimal("50")           # stored as entered
+    assert Decimal(openings[0]["avg"]) == Decimal("60")            # total / shares, computed
     assert Decimal(openings[0]["total"]) == Decimal("12000")
     assert Decimal(openings[0]["shares"]) == Decimal("200")
 

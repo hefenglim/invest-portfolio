@@ -85,13 +85,19 @@ CREATE INDEX IF NOT EXISTS ix_news_mentions_symbol ON news_mentions(symbol);
 CREATE INDEX IF NOT EXISTS ix_organized_news_date ON organized_news(news_date);
 """
 
-# Columns added after the first schema (batch ④ cost tracking + AI attribution); added to
-# a pre-existing organized_news via ALTER-if-missing so a populated news.db upgrades in place.
+# Columns added after the first schema (batch ④ cost tracking + AI attribution; then the
+# 2026-07-21 fetch-observability pair); added to a pre-existing organized_news via
+# ALTER-if-missing so a populated news.db upgrades in place.
+#   fetch_status   — last fetch outcome for this link (see news.fetcher.FetchOutcome.status);
+#                    '' until first recorded. Makes an empty body_summary auditable, not silent.
+#   fetch_attempts — how many times the pipeline has fetched this link; caps the retry queue.
 _ADDED_COLUMNS = (
     ("cost_usd", "TEXT NOT NULL DEFAULT '0'"),
     ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
     ("tokens_out", "INTEGER NOT NULL DEFAULT 0"),
     ("model", "TEXT"),
+    ("fetch_status", "TEXT DEFAULT ''"),
+    ("fetch_attempts", "INTEGER DEFAULT 0"),
 )
 
 
@@ -218,6 +224,51 @@ def add_mention(conn: sqlite3.Connection, link: str, symbol: str) -> bool:
     )
     conn.commit()
     return True
+
+
+def record_fetch_attempt(conn: sqlite3.Connection, link: str, *, status: str) -> None:
+    """Record one fetch attempt against *link*: bump ``fetch_attempts`` + set ``fetch_status``.
+
+    Called by the pipeline after every real fetch (main loop AND retry stage), so a link
+    that keeps failing climbs toward the retry cap and its latest outcome is always visible.
+    A no-op when the row does not exist (the caller upserts the row first). ``status`` is a
+    :class:`~portfolio_dash.news.fetcher.FetchOutcome` status string.
+    """
+    conn.execute(
+        "UPDATE organized_news SET fetch_attempts = fetch_attempts + 1, fetch_status = ? "
+        "WHERE link = ?",
+        (status, link),
+    )
+    conn.commit()
+
+
+def list_refetch_candidates(
+    conn: sqlite3.Connection,
+    *,
+    max_age_days: int = 14,
+    max_attempts: int = 3,
+    limit: int = 10,
+) -> list[OrganizedNews]:
+    """Stored rows with an EMPTY body still worth another fetch — the retry backlog.
+
+    Selects links whose ``body_summary`` is blank (a headline-only degrade), that were first
+    fetched within ``max_age_days`` (comparing the ``YYYY-MM-DD`` prefix of ``fetched_at``
+    against SQLite ``date('now')`` — format-robust, avoids the ISO-tz string-compare trap),
+    and that are under ``max_attempts`` fetch tries. Fully-organized rows (non-empty body)
+    are excluded. Least-tried first, bounded to ``limit``. The pipeline re-fetches these each
+    run even after discovery stops surfacing the link, so a transient miss is no longer a
+    permanent empty row.
+    """
+    rows = conn.execute(
+        "SELECT o.* FROM organized_news AS o "
+        "WHERE (o.body_summary IS NULL OR TRIM(o.body_summary) = '') "
+        "AND o.fetch_attempts < ? "
+        "AND substr(o.fetched_at, 1, 10) >= date('now', ?) "
+        "ORDER BY o.fetch_attempts ASC, o.news_date DESC, o.id DESC "
+        "LIMIT ?",
+        (max_attempts, f"-{max_age_days} days", limit),
+    ).fetchall()
+    return [_from_row(r) for r in rows]
 
 
 def query_by_symbol(

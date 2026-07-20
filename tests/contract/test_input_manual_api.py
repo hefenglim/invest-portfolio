@@ -435,9 +435,9 @@ def test_account_cash_matches_cash_balances_endpoint(api_client: TestClient) -> 
 
 
 def test_manual_preview_additive_contract_pinned_case(api_client: TestClient) -> None:
-    """The R6-E fields are ADDITIVE: every pre-existing preview field stays byte-identical to
-    the pinned buy case (see test_manual_preview_buy_computes_fee_and_total), with the new
-    position_preview + account_cash keys present alongside."""
+    """The R6-E + R7 fields are ADDITIVE: every pre-existing preview field stays byte-identical
+    to the pinned buy case (see test_manual_preview_buy_computes_fee_and_total), with the new
+    position_preview + account_cash + cash_after keys present alongside."""
     b = api_client.post("/api/input/manual/preview", json={
         "account_id": "tw_broker", "symbol": "2330", "side": "buy",
         "date": "2026-06-11", "shares": "1000", "price": "612.5"}).json()
@@ -446,6 +446,125 @@ def test_manual_preview_additive_contract_pinned_case(api_client: TestClient) ->
     assert b["gross"] == "612500.0" and b["total"] == "-613372.0"
     assert b["fee_overridden"] is False and b["tax_overridden"] is False
     assert b["rebate_estimate"] == "671" and b["issues"] == []
+    # account_cash stays the byte-identical {ccy, balance} pair (cash_after is a SIBLING top-
+    # level key, so this exact-dict pin holds).
+    assert b["account_cash"] == {"ccy": "TWD", "balance": "-495000"}
     # new additive fields — present.
     assert b["position_preview"]["kind"] == "buy"
-    assert b["account_cash"]["ccy"] == "TWD"
+    assert b["cash_after"] is not None
+
+
+# ============================================================================
+# R7 A3: 扣款後現金 (cash_after) — projected pool after settlement
+# ============================================================================
+# cash_after = the account-cash balance + the ALREADY-SIGNED total (BUY negative /
+# SELL positive), in the SAME quote ccy as account_cash. Emitted only when the balance
+# is known (else null). A pure Decimal add over figures the response already carries — no
+# new engine call, no float.
+
+
+def test_cash_after_buy_is_balance_plus_signed_total(api_client: TestClient) -> None:
+    """BUY: cash_after pushes the (already-negative golden) pool further negative by the
+    all-in cost. balance −495,000 + total −613,372.0 = −1,108,372.0 (exact string)."""
+    b = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "1000", "price": "612.5"}).json()
+    assert b["cash_after"] == "-1108372.0"
+    # cash_after is exactly balance + total (the additive contract) — scale-proof derivation.
+    assert b["cash_after"] == format(
+        Decimal(b["account_cash"]["balance"]) + Decimal(b["total"]), "f")
+
+
+def test_cash_after_sell_adds_proceeds(api_client: TestClient) -> None:
+    """SELL: proceeds add back. balance −495,000 + total (300,000 − 427 fee − 900 tax =
+    298,673) = −196,327 (exact string)."""
+    s = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-11", "shares": "500", "price": "600"}).json()
+    assert s["cash_after"] == "-196327"
+    assert s["cash_after"] == format(
+        Decimal(s["account_cash"]["balance"]) + Decimal(s["total"]), "f")
+
+
+def test_cash_after_null_when_balance_unknown(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """account_cash present but balance null (moomoo_my_my MYR pool has no golden activity)
+    → cash_after null too (nothing to project from). Same dynamic ccy label (MYR)."""
+    upsert_instrument(golden_db, Instrument(
+        symbol="1155.KL", market=Market.MY, quote_ccy=Currency.MYR,
+        sector="Financials", name="Maybank"))
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "moomoo_my_my", "symbol": "1155.KL", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "9"}).json()
+    assert r["account_cash"] == {"ccy": "MYR", "balance": None}
+    assert r["cash_after"] is None
+
+
+def test_cash_after_null_for_unregistered_symbol(api_client: TestClient) -> None:
+    """Unregistered symbol → account_cash null (no quote ccy) → cash_after null."""
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "GHOST", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "10"}).json()
+    assert r["account_cash"] is None
+    assert r["cash_after"] is None
+
+
+# ============================================================================
+# R7 A4: OLD-vs-NEW position_preview triple (old_shares / old_original_avg / old_adjusted_avg)
+# ============================================================================
+# Additive to position_preview: the PRE-trade position, so the draft renders 持股/原始均價/
+# 調整均價 old→new. Averages computed from totals on read (never a stored rounded average);
+# null for a fresh position. Existing new_* fields stay byte-identical.
+
+
+def test_position_preview_old_fields_buy_dividend_adjusted(
+    dashboard_client_factory: DashboardClientFactory
+) -> None:
+    """BUY into a dividend-adjusted holding: the OLD triple reflects the REAL build_book basis —
+    old_original_avg (500,000/1,000 = 500) ≠ old_adjusted_avg (497,500/1,000 = 497.5). The
+    new_* fields are unchanged (additive)."""
+    client: TestClient = dashboard_client_factory(_seed_2330_div_adjusted)
+    pp = client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "500", "price": "600"}).json()["position_preview"]
+    assert pp["kind"] == "buy"
+    assert Decimal(pp["old_shares"]) == Decimal("1000")
+    assert Decimal(pp["old_original_avg"]) == Decimal("500")
+    assert Decimal(pp["old_adjusted_avg"]) == Decimal("497.5")
+    # the dividend split is visible in the OLD triple (original ≠ adjusted).
+    assert Decimal(pp["old_original_avg"]) != Decimal(pp["old_adjusted_avg"])
+
+
+def test_position_preview_old_fields_sell_dividend_adjusted(
+    dashboard_client_factory: DashboardClientFactory
+) -> None:
+    """SELL also carries the OLD triple; the sell branch emits no new_*_avg (avg unchanged),
+    so the frontend renders old==new for the average pair (Senior Review #10)."""
+    client: TestClient = dashboard_client_factory(_seed_2330_div_adjusted)
+    pp = client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-11", "shares": "500", "price": "600"}).json()["position_preview"]
+    assert pp["kind"] == "sell"
+    assert Decimal(pp["old_shares"]) == Decimal("1000")
+    assert Decimal(pp["old_original_avg"]) == Decimal("500")
+    assert Decimal(pp["old_adjusted_avg"]) == Decimal("497.5")
+
+
+def test_position_preview_old_fields_null_for_fresh_position(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A fresh (registered but unheld) BUY → old_* null; the new_* fields still compute the
+    fresh-position math."""
+    upsert_instrument(golden_db, Instrument(
+        symbol="2454", market=Market.TW, quote_ccy=Currency.TWD,
+        sector="Semiconductors", name="MediaTek", board="TWSE"))
+    pp = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2454", "side": "buy",
+        "date": "2026-06-11", "shares": "1000", "price": "100"}).json()["position_preview"]
+    assert pp["kind"] == "buy"
+    assert pp["old_shares"] is None
+    assert pp["old_original_avg"] is None
+    assert pp["old_adjusted_avg"] is None
+    # new_* fresh-position math unchanged (fee 142 → all-in 100,142 / 1,000 = 100.142).
+    assert pp["new_original_avg"] == "100.142"

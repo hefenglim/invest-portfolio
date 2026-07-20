@@ -332,9 +332,14 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
                 from_ccy=r["from_ccy"], from_amt=dec(r["from_amount"]),
                 to_ccy=r["to_ccy"], to_amt=dec(r["to_amount"])))
         for r in conn.execute("SELECT * FROM opening_inventory"):
+            # original_avg_cost is dropped (A6): the average is computed on read (total/shares).
+            # The oracle keys money-of-record off orig_total only; orig_avg is informational.
+            _shares = dec(r["shares"])
+            _total = dec(r["original_cost_total"])
             f.openings.append(O.OpenFact(
-                account_id=r["account_id"], symbol=r["symbol"], shares=dec(r["shares"]),
-                orig_avg=dec(r["original_avg_cost"]), orig_total=dec(r["original_cost_total"]),
+                account_id=r["account_id"], symbol=r["symbol"], shares=_shares,
+                orig_avg=(_total / _shares if _shares else _total),
+                orig_total=_total,
                 build_date=date.fromisoformat(r["build_date"])))
         for r in conn.execute("SELECT * FROM cash_movements ORDER BY date, id"):
             f.cash.append(O.CashFact(
