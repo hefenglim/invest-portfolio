@@ -98,8 +98,11 @@ def run_news_for(
             yahoo_fetcher=fetcher.fetch_html, finmind_start=start,
         )
 
-    def do_fetch(url: str) -> str | None:
-        return fetcher.fetch_article_text(url)
+    def do_fetch(url: str) -> fetcher.FetchOutcome:
+        # Return the RICH outcome (classified status + detail) so the pipeline records the
+        # fetch status on the row and the WARNING log (emitted inside fetch_article) fires
+        # for every non-ok fetch — an empty body is now auditable, not silent.
+        return fetcher.fetch_article(url)
 
     def do_organize(link: news_sources.NewsLink, text: str) -> OrganizedNews:
         if progress is not None:

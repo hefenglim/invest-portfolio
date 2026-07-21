@@ -38,8 +38,8 @@ def test_current_shares_counts_opening_and_noncash_dividends(
     """
     seed_accounts(conn)
     conn.execute(
-        "INSERT INTO opening_inventory (account_id, symbol, shares, original_avg_cost, "
-        "original_cost_total, build_date) VALUES ('tw_broker','2330','500','450',"
+        "INSERT INTO opening_inventory (account_id, symbol, shares, "
+        "original_cost_total, build_date) VALUES ('tw_broker','2330','500',"
         "'225000','2026-01-02')")
     _raw_tx(conn, "tw_broker", "2330", Side.BUY, "1000")
     _raw_tx(conn, "tw_broker", "2330", Side.SELL, "300")
@@ -60,8 +60,8 @@ def test_sell_of_opening_backed_position_no_false_oversell(
 ) -> None:
     seed_accounts(conn)
     conn.execute(
-        "INSERT INTO opening_inventory (account_id, symbol, shares, original_avg_cost, "
-        "original_cost_total, build_date) VALUES ('tw_broker','2330','1000','450',"
+        "INSERT INTO opening_inventory (account_id, symbol, shares, "
+        "original_cost_total, build_date) VALUES ('tw_broker','2330','1000',"
         "'450000','2026-01-02')")
     conn.commit()
     issues = validate_transaction(conn, _inp("tw_broker", "2330", Side.SELL, "800"))
@@ -103,8 +103,8 @@ def test_shares_on_counts_strictly_before_date(conn: sqlite3.Connection) -> None
 
     seed_accounts(conn)
     conn.execute(
-        "INSERT INTO opening_inventory (account_id, symbol, shares, original_avg_cost, "
-        "original_cost_total, build_date) VALUES ('tw_broker','2330','500','450',"
+        "INSERT INTO opening_inventory (account_id, symbol, shares, "
+        "original_cost_total, build_date) VALUES ('tw_broker','2330','500',"
         "'225000','2026-01-02')")
     _raw_tx(conn, "tw_broker", "2330", Side.BUY, "1000")      # 2026-01-01
     conn.execute(

@@ -194,7 +194,7 @@ def openings(
             "date": o.build_date.isoformat(), "account_id": o.account_id,
             "account": accts.get(o.account_id, o.account_id), "symbol": o.symbol,
             "name": names.get(o.symbol, ""), "shares": decimal_str(o.shares),
-            "avg": decimal_str(o.original_avg_cost),
+            "avg": decimal_str(o.original_avg),  # computed on read (total / shares) — A6
             "total": decimal_str(o.original_cost_total),
             "ccy": ccys.get(o.symbol, ""),
         })
@@ -250,7 +250,6 @@ def _to_models(
     ]
     o_models = [
         OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_avg_cost=s.original_avg_cost,
                          original_cost_total=s.original_cost_total,
                          build_date=s.build_date)
         for s in s_open if s.symbol in instruments
@@ -681,8 +680,13 @@ def remove_fx(
 
 
 class OpeningEditBody(BaseModel):
+    """Opening-inventory correction (A6). The authoritative money of record is
+    ``total`` (原始總成本); ``avg`` is a legacy alias — when ``total`` is omitted the total is
+    derived (avg * shares). One of ``total`` / ``avg`` is required."""
+
     shares: Decimal
-    avg: Decimal
+    total: Decimal | None = None
+    avg: Decimal | None = None  # legacy: total derived = avg * shares when total omitted
     date: date
     ack_oversell: bool = False
 
@@ -698,12 +702,20 @@ def edit_opening(
     if existing is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"期初 {account_id}/{symbol} 不存在"))
-    if body.shares <= 0 or body.avg < 0:
+    # Resolve the authoritative total: prefer the explicit 原始總成本; fall back to the legacy
+    # avg (total = avg * shares). A rounded average is NEVER stored as the authority.
+    if body.total is not None:
+        total = body.total
+    elif body.avg is not None:
+        total = body.avg * body.shares
+    else:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "股數必須大於 0、均價不可為負", field="shares"))
-    total = body.avg * body.shares
+            "validation_error", "請提供原始總成本", field="total"))
+    if body.shares <= 0 or total < 0:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "股數必須大於 0、原始總成本不可為負", field="shares"))
     edited = existing.model_copy(update={
-        "shares": body.shares, "original_avg_cost": body.avg,
+        "shares": body.shares,
         "original_cost_total": total, "build_date": body.date,
     })
     would_be = [edited if (o.account_id == account_id and o.symbol == symbol) else o
@@ -713,7 +725,7 @@ def edit_opening(
         return blocked
     upsert_opening(
         conn, account_id=account_id, symbol=symbol, shares=body.shares,
-        original_avg_cost=body.avg, original_cost_total=total, build_date=body.date,
+        original_cost_total=total, build_date=body.date,
     )
     return {"ok": True}
 

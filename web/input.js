@@ -431,25 +431,42 @@
       row.appendChild(el('span', 'v' + (signCls ? ' ' + signCls : ''), v));
       rows.appendChild(row);
     };
+    /* R7 A4: OLD → NEW comparison row — two SERVER-formatted strings joined by an arrow (a
+       fresh position renders old as「—」via fmt's null glyph). No money arithmetic here. */
+    const pcPair = (k, oldV, newV) => {
+      const row = el('div', 'pc-row');
+      row.appendChild(el('span', 'k', k));
+      const v = el('span', 'v');
+      v.appendChild(el('span', 'pc-old', oldV));
+      v.appendChild(el('span', 'pc-arrow', ' → '));
+      v.appendChild(el('span', 'pc-new', newV));
+      row.appendChild(v);
+      rows.appendChild(row);
+    };
     if (hasServer) {
       [['成交金額', preview.gross], ['手續費' + (m.feeOverride ? '（已覆寫）' : ''), preview.fee],
        ['交易稅' + (m.taxOverride ? '（已覆寫）' : ''), preview.tax]].forEach(([k, v]) => {
         pcRow(k, f.money(v, ccy) + ' ' + ccy);
       });
-      /* R6-E: drawer-parity 試算 what-if (SERVER-computed; position_preview is null when the
-         symbol is unregistered / inputs incomplete — the rows simply do not render). */
+      /* R6-E + R7 A4: drawer-parity 試算 what-if rendered as OLD → NEW pairs (SERVER-computed;
+         position_preview is null when the symbol is unregistered / inputs incomplete — the
+         rows simply do not render). A SELL leaves the averages unchanged (no new_*_avg), so
+         those pairs show old == old; a fresh BUY has null old_* → old renders as「—」. */
       const pp = preview.position_preview;
       if (pp && pp.kind === 'sell') {
+        pcPair('持股', f.num(pp.old_shares), f.num(pp.remain_shares));
+        pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.old_original_avg, ccy));
+        pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.old_adjusted_avg, ccy));
         pcRow('調整成本移除', f.money(pp.cost_removed, ccy) + ' ' + ccy);
         pcRow('已實現損益', f.signed(pp.realized_pnl, ccy) + ' ' + ccy, f.signClass(pp.realized_pnl));
-        pcRow('剩餘股數', f.num(pp.remain_shares));
       } else if (pp && pp.kind === 'buy') {
-        pcRow('新持股', f.num(pp.new_shares));
-        pcRow('新原始均價', f.price(pp.new_original_avg, ccy));
-        pcRow('新調整均價', f.price(pp.new_adjusted_avg, ccy));
+        pcPair('持股', f.num(pp.old_shares), f.num(pp.new_shares));
+        pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.new_original_avg, ccy));
+        pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.new_adjusted_avg, ccy));
       }
-      /* R6-E: DISPLAY-ONLY account cash line (owner-signed: no gating). Visually separated
-         from the what-if rows; null balance -> the shared null glyph. */
+      /* R6-E: DISPLAY-ONLY account cash line + R7 A3 扣款後現金 (owner-signed: no gating).
+         Visually separated from the what-if rows; both use the SAME dynamic ccy label (ac.ccy);
+         null balance / cash_after -> the shared null glyph. */
       const ac = preview.account_cash;
       if (ac) {
         const row = el('div', 'pc-row');
@@ -459,6 +476,11 @@
         row.appendChild(el('span', 'v',
           ac.balance != null ? f.money(ac.balance, ac.ccy) + ' ' + ac.ccy : f.NULL_GLYPH));
         rows.appendChild(row);
+        const afterRow = el('div', 'pc-row');
+        afterRow.appendChild(el('span', 'k', '扣款後現金（' + ac.ccy + '）'));
+        afterRow.appendChild(el('span', 'v',
+          preview.cash_after != null ? f.money(preview.cash_after, ac.ccy) + ' ' + ac.ccy : f.NULL_GLYPH));
+        rows.appendChild(afterRow);
       }
     }
 
@@ -581,7 +603,7 @@
     transactions: '欄位：account・symbol・side・date(YYYY-MM-DD)・shares・price・fee（選填）・tax（選填）・daytrade（選填）・note（選填）',
     dividends: '欄位：account・symbol・date(YYYY-MM-DD)・type(CASH/STOCK/DRIP/NET)・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）',
     fx: '欄位：account・date(YYYY-MM-DD)・from_ccy・from_amount・to_ccy・to_amount',
-    openings: '欄位：account・symbol・shares・original_avg_cost・build_date(YYYY-MM-DD)・original_cost_total（選填）',
+    openings: '欄位：account・symbol・shares・original_cost_total・build_date(YYYY-MM-DD)・original_avg_cost（選填・舊檔相容）',
   };
 
   function initCsv() {
@@ -818,6 +840,10 @@
     }
   }
 
+  /* CSV-import success handler (C7): full success (skipped == 0) clears the paste + resets the
+     date-format select; a PARTIAL success keeps the ENTIRE raw paste (the user's data is never
+     rewritten) plus the banner. Failure paths return before reaching here. The AI 寫入 path has
+     its OWN handler (onAiCommitted) so its banner + clear target the AI pane. */
   function onCsvWritten(resp) {
     const written = resp && resp.written !== undefined ? resp.written : 0;
     const skipped = resp && resp.skipped !== undefined ? resp.skipped : 0;
@@ -828,7 +854,20 @@
       banner.appendChild(el('div', null, '✓ 寫入完成：成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆'));
     }
     if (window.toast) window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆');
-    afterCommitRefresh();  // FU-D45: covers CSV import AND the AI 寫入全部 path
+    afterCommitRefresh();  // FU-D45
+    if (skipped === 0) {
+      /* full success -> clear the input so a second identical commit is impossible. */
+      const paste = $('#csv-paste');
+      if (paste) paste.value = '';
+      csvDateFormat = null;
+      hideDateFmtChooser();
+      const tbody = $('#csv-body');
+      if (tbody) tbody.replaceChildren();
+      $('#csv-counts').textContent = '';
+      $('#csv-file').textContent = '';
+      $('#csv-confirm').disabled = true;
+    }
+    /* partial -> keep the entire pasted text + preview + banner (never rewrite raw paste). */
   }
 
   /* ================= Tab 3 AI 輸入 =================
@@ -843,6 +882,7 @@
     $('#ai-parse').addEventListener('click', runAiPreview);
     const writeAll = $('#ai-write-all');
     if (writeAll) writeAll.addEventListener('click', commitAi);
+    refreshAiWriteBtn();   // no parse yet -> 寫入 starts disabled (no empty commit)
     initAiImages();   // FU-D20: dropzone click / drag-drop / clipboard-paste screenshot intake
     loadAiModels();   // FU-D20: per-run model picker (enabled models + 自動; last-used persisted)
   }
@@ -1040,6 +1080,7 @@
     $('#ai-degrade-quota').hidden = true;
     $('#ai-degrade-down').hidden = true;
     $('#ai-normal').hidden = false;
+    clearAiBanner();                    // a fresh parse retires any prior success banner
     aiCsvText = preview.csv_text || '';
     const meta = preview.meta || {};
     if ($('#ai-source')) {
@@ -1048,15 +1089,28 @@
       $('#ai-source').textContent = (meta.via || 'litellm') + cost;
     }
     if ($('#ai-model')) $('#ai-model').textContent = meta.model || '';
+    renderAiRows(preview.rows || []);
+    refreshAiWriteBtn();
+    const s = preview.summary || {};
+    if (window.toast) window.toast('解析完成', 'ok', '共 ' + (s.total || 0) + ' 筆草稿');
+  }
 
+  /* Render the AI preview table body from server rows {n, status, reason, code, data}.
+     Each checkbox carries `dataset.n = r.n` (the 0-based draft index) — commitAi rebuilds the
+     committed csv from ONLY the checked rows' source lines (csv data line n+1), so an unchecked
+     row is never written (C7). The per-row money in `data` is Decimal STRINGS -> fmt. */
+  function renderAiRows(rows) {
     const tbody = $('#ai-body');
+    if (!tbody) return;
     tbody.replaceChildren();
-    (preview.rows || []).forEach((r) => {
+    (rows || []).forEach((r) => {
       const d = r.data || {};
       const tr = el('tr');
       const tdCb = el('td');
       const cb = el('input'); cb.type = 'checkbox'; cb.checked = r.status !== 'error';
       cb.disabled = r.status === 'error';
+      cb.dataset.n = String(r.n || 0);
+      cb.addEventListener('change', refreshAiWriteBtn);
       tdCb.appendChild(cb);
       tr.appendChild(tdCb);
       tr.appendChild(el('td', 'col-text', d.account_id || ''));
@@ -1080,7 +1134,8 @@
       tr.appendChild(el('td', 'num', d.fee !== undefined ? f.money(d.fee, ccy) : f.NULL_GLYPH));
       tr.appendChild(el('td', 'num', d.tax !== undefined ? f.money(d.tax, ccy) : f.NULL_GLYPH));
       const tdNote = el('td', 'err-msg');
-      if (r.reason) tdNote.appendChild(el('span', 'st-warn', '⚠ ' + r.reason));
+      if (r.status === 'error') tdNote.appendChild(el('span', 'st-error', '✕ ' + (r.reason || '無法寫入')));
+      else if (r.reason) tdNote.appendChild(el('span', 'st-warn', '⚠ ' + r.reason));
       else tdNote.appendChild(el('span', 'st-ok', '✓ 解析完整'));
       tr.appendChild(tdNote);
       /* FU-D33: an unregistered-symbol row gets an inline 立即註冊 action opening the SHARED
@@ -1098,33 +1153,98 @@
       tr.appendChild(tdAct);
       tbody.appendChild(tr);
     });
-    const s = preview.summary || {};
-    if (window.toast) window.toast('解析完成', 'ok', '共 ' + (s.total || 0) + ' 筆草稿');
   }
 
-  /* Write the AI-parsed drafts: the run returns a canonical csv_text, so the commit
-     reuses the SAME import/commit transaction path (single write seam). */
+  /* Rebuild the committed csv from ONLY the checked rows (header + their source lines). The AI
+     csv is one-line-per-draft in draft order (agents._drafts_to_csv), and each checkbox's
+     dataset.n is that draft's 0-based index, so checked row n -> csv data line n+1. Returns
+     {count, text}; count 0 means nothing is selected (the commit is blocked). */
+  function aiCheckedCsv() {
+    const lines = (aiCsvText || '').split('\n');
+    const header = lines[0] || '';
+    const picked = [];
+    const boxes = $('#ai-body') ? $('#ai-body').querySelectorAll('input[type=checkbox]') : [];
+    Array.prototype.forEach.call(boxes, (cb) => {
+      if (!cb.checked || cb.disabled) return;
+      const n = parseInt(cb.dataset.n, 10);
+      if (!Number.isNaN(n) && lines[n + 1] !== undefined) picked.push({ n: n, line: lines[n + 1] });
+    });
+    picked.sort((a, b) => a.n - b.n);
+    const text = picked.length
+      ? header + '\n' + picked.map((p) => p.line).join('\n') + '\n'
+      : '';
+    return { count: picked.length, text: text };
+  }
+
+  /* 寫入 is disabled unless there is a parsed csv AND at least one row is checked (no empty
+     commit, no double-submit after a full-success clear). */
+  function refreshAiWriteBtn() {
+    const btn = $('#ai-write-all');
+    if (btn) btn.disabled = !aiCsvText || aiCheckedCsv().count === 0;
+  }
+
+  function aiBanner(text) {
+    const b = $('#ai-result');
+    if (!b) return;
+    b.hidden = false;
+    b.replaceChildren();
+    b.appendChild(el('div', null, text));
+  }
+  function clearAiBanner() {
+    const b = $('#ai-result');
+    if (b) { b.hidden = true; b.replaceChildren(); }
+  }
+
+  /* Full-success reset (C7): wipe the pasted text, the parsed csv, attached screenshots, and
+     the preview table so a second identical commit is impossible. The banner is left to the
+     caller (it shows the success summary). */
+  function clearAiInputs() {
+    const t = $('#ai-text'); if (t) t.value = '';
+    aiCsvText = '';
+    aiImages = [];
+    renderAiThumbs();
+    const tb = $('#ai-body'); if (tb) tb.replaceChildren();
+    if ($('#ai-source')) $('#ai-source').textContent = '';
+    if ($('#ai-model')) $('#ai-model').textContent = '';
+    refreshAiWriteBtn();
+  }
+
+  /* Write the AI-parsed drafts — but ONLY the CHECKED rows (C7 real filtering). The 422
+     warnings-unacknowledged re-commit reuses the SAME filtered text. Success routes to
+     onAiCommitted (in-pane banner + clear/keep), never the CSV pane's handler. */
   async function commitAi() {
     if (!aiCsvText) {
       if (window.toast) window.toast('請先解析', 'fail');
       return;
     }
+    const filtered = aiCheckedCsv();
+    if (filtered.count === 0) {
+      if (window.toast) window.toast('請至少勾選一列', 'fail');
+      return;
+    }
+    const text = filtered.text;
+    const restore = window.pdBusy ? window.pdBusy($('#ai-write-all'), '寫入中…') : () => {};
     try {
       const resp = await api.post('/api/import/commit',
-        { kind: 'transactions', csv_text: aiCsvText, ack_warnings: false });
-      onCsvWritten(resp);
+        { kind: 'transactions', csv_text: text, ack_warnings: false });
+      restore();
+      await onAiCommitted(resp, text);
     } catch (err) {
+      restore();
       if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
         window.confirmDialog({
           title: '匯入警告確認',
           body: 'AI 草稿中部分列有警告 — 確認後一併寫入？',
           confirmLabel: '確認寫入',
           onConfirm: async () => {
+            const r2 = window.pdBusy ? window.pdBusy($('#ai-write-all'), '寫入中…') : () => {};
             try {
               const resp = await api.post('/api/import/commit',
-                { kind: 'transactions', csv_text: aiCsvText, ack_warnings: true });
-              onCsvWritten(resp);
+                { kind: 'transactions', csv_text: text, ack_warnings: true });
+              r2();
+              await onAiCommitted(resp, text);
             } catch (e2) {
+              r2();
               if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail', e2 && e2.code);
             }
           }
@@ -1133,6 +1253,36 @@
       }
       if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
     }
+  }
+
+  /* AI commit success handler (C7). Full success (skipped == 0) clears every AI input +
+     shows a summary banner in the AI pane. On a PARTIAL success the committed csv is
+     re-previewed to identify the rows that could NOT be written; only those remain visible
+     (with statuses) and aiCsvText is rebuilt to just them (re-indexed) so a retry targets the
+     remainder without re-writing the rows already committed. A failed re-preview degrades to
+     keeping the current table (the banner still reports the counts). */
+  async function onAiCommitted(resp, committedCsv) {
+    const written = resp && resp.written !== undefined ? resp.written : 0;
+    const skipped = resp && resp.skipped !== undefined ? resp.skipped : 0;
+    if (window.toast) window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・略過 ' + skipped + ' 筆');
+    afterCommitRefresh();  // FU-D45
+    if (skipped === 0) {
+      clearAiInputs();
+      aiBanner('✓ 寫入完成：成功 ' + written + ' 筆');
+      return;
+    }
+    aiBanner('已寫入 ' + written + ' 筆／略過 ' + skipped + ' 筆');
+    try {
+      const pv = await api.post('/api/import/preview',
+        { kind: 'transactions', csv_text: committedCsv });
+      const lines = committedCsv.split('\n');
+      const header = lines[0] || '';
+      const remaining = (pv.rows || []).filter((r) => r.status !== 'ok');
+      const kept = remaining.map((r) => lines[(r.n || 0) + 1]).filter((l) => l !== undefined);
+      aiCsvText = kept.length ? header + '\n' + kept.join('\n') + '\n' : '';
+      renderAiRows(remaining.map((r, i) => Object.assign({}, r, { n: i })));
+      refreshAiWriteBtn();
+    } catch (e) { /* degrade: keep the current table + banner (never fabricate) */ }
   }
 
   /* ================= 單筆寫入共用：一列 CSV 走匯入通道 =================
@@ -1515,25 +1665,50 @@
       oAccSel.appendChild(o);
     });
     $('#o-date').value = TODAY;
+    /* A6: 原始總成本 is the money of record (required); 均價 is a live READ-ONLY display hint
+       (total / shares). This division is the ONE sanctioned client-side money math — it is a
+       DISPLAY of two user-entered raw numbers, never a value of record (the backend stores the
+       total verbatim; the average is computed on read everywhere). */
+    function updateAvgView() {
+      const view = $('#o-avg-view');
+      if (!view) return;
+      const a = acc($('#o-account').value) || ctx.accounts[0];
+      const ccy = a ? a.ccy : '';
+      const sharesRaw = $('#o-shares').value.trim();
+      const totalRaw = $('#o-total').value.trim();
+      const shares = Number(sharesRaw);
+      const total = Number(totalRaw);
+      if (sharesRaw !== '' && totalRaw !== '' && shares > 0 && isFinite(total)) {
+        view.textContent = f.price(String(total / shares), ccy);
+      } else {
+        view.textContent = f.NULL_GLYPH;
+      }
+    }
+    ['o-account', 'o-shares', 'o-total'].forEach((id) => {
+      const n = $('#' + id);
+      if (n) n.addEventListener('input', updateAvgView);
+    });
+    if (oAccSel) oAccSel.addEventListener('change', updateAvgView);
+    updateAvgView();
     $('#o-confirm').addEventListener('click', () => {
       const accId = $('#o-account').value || (ctx.accounts[0] && ctx.accounts[0].id) || '';
       const sym = $('#o-symbol').value.trim();
       const shares = $('#o-shares').value.trim();
-      const avg = $('#o-avg').value.trim();
+      const total = $('#o-total').value.trim();
       const dte = $('#o-date').value;
-      if (!accId || !sym || !shares || !avg || !dte) {
-        if (window.toast) window.toast('請填寫帳戶、代號、股數、均價與建檔日', 'fail');
+      if (!accId || !sym || !shares || !total || !dte) {
+        if (window.toast) window.toast('請填寫帳戶、代號、股數、原始總成本與建檔日', 'fail');
         return;
       }
       const csv = oneRowCsv(
-        ['account', 'symbol', 'shares', 'original_avg_cost', 'build_date',
-          'original_cost_total'],
-        [accId, sym, shares, avg, dte, $('#o-total').value.trim()]);
+        ['account', 'symbol', 'shares', 'original_cost_total', 'build_date'],
+        [accId, sym, shares, total, dte]);
       commitOneRow('openings', csv, $('#o-confirm'),
         sym + ' 期初庫存已建檔（同鍵覆蓋更新）', () => {
-          ['o-symbol', 'o-shares', 'o-avg', 'o-total'].forEach((id) => {
+          ['o-symbol', 'o-shares', 'o-total'].forEach((id) => {
             const n = $('#' + id); if (n) n.value = '';
           });
+          updateAvgView();
         });
     });
   }

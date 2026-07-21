@@ -132,7 +132,6 @@ def build_dashboard(
     ]
     opening = [
         OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_avg_cost=s.original_avg_cost,
                          original_cost_total=s.original_cost_total,
                          build_date=s.build_date)
         for s in list_opening(conn)

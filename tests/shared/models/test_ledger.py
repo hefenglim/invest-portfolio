@@ -76,8 +76,9 @@ def test_opening_inventory_construction() -> None:
         account_id="tw",
         symbol="2330.TW",
         shares=Decimal("2000"),
-        original_avg_cost=Decimal("500"),
         original_cost_total=Decimal("1000000"),
         build_date=date(2024, 12, 31),
     )
     assert oi.original_cost_total == Decimal("1000000")
+    # A6: the average is NEVER stored — it is computed on read (total / shares).
+    assert oi.original_avg == Decimal("500")

@@ -83,7 +83,6 @@ def symbol_detail(
     ]
     opening = [
         OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_avg_cost=s.original_avg_cost,
                          original_cost_total=s.original_cost_total,
                          build_date=s.build_date)
         for s in list_opening(conn)
@@ -154,7 +153,7 @@ def symbol_detail(
             events.append((o.build_date, 0, {
                 "date": o.build_date.isoformat(), "side": "open",
                 "shares": decimal_str(o.shares),
-                "price": decimal_str(o.original_avg_cost)}))
+                "price": decimal_str(o.original_avg)}))  # computed on read (total/shares) — A6
     for tx in txs:
         if tx.symbol == symbol:
             side = "buy" if tx.side is Side.BUY else "sell"

@@ -27,6 +27,7 @@ from portfolio_dash.data_ingestion.store import (
     upsert_instrument,
 )
 from portfolio_dash.pricing.board import probe_tw_board
+from portfolio_dash.pricing.bursa_registry import bursa_name
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.names import lookup_name
 from portfolio_dash.pricing.refresh import (
@@ -132,6 +133,23 @@ def lookup_instrument(
     except Exception:  # noqa: BLE001 — a provider crash degrades like "no quote" (typo guard)
         logger.warning("lookup quote fetch crashed for %s", sym, exc_info=True)
     if not quote_ok:
+        # MY offline fallback: a valid Bursa code verifies against the baked registry even
+        # when the only MY quote provider (yfinance ``.KL``) lacks the counter. This lets a
+        # correct AI-resolve answer reach status:"resolved" instead of being demoted to a
+        # candidate. Consequence (by design): the symbol registers with no price row and
+        # shows as stale until a provider covers it; the manual-trade auto-register path
+        # (quick_register force=False) still 422s quote_not_found — unchanged.
+        if market is Market.MY:
+            reg_name = bursa_name(sym)
+            if reg_name is not None:
+                return InstrumentLookup(
+                    found=True,
+                    registered=False,
+                    name=reg_name,
+                    sector="",
+                    board=DEFAULT_BOARD[Market.MY],
+                    is_etf=False,
+                )
         return InstrumentLookup(found=False)
     return InstrumentLookup(
         found=True,

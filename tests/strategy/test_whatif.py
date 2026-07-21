@@ -135,3 +135,64 @@ def test_account_omitted_resolves_to_most_shares() -> None:
                 price=Decimal("600"), account_id=None)
     assert r["account_id"] == "tw_broker"
     conn.close()
+
+
+# --- R7 A4: OLD-vs-NEW fields (old_shares / old_*_avg / old_weight) + remaining_market_value ---
+
+
+def test_old_fields_and_old_weight_present_on_buy() -> None:
+    """The OLD triple reflects the held basis (500,000/1,000 = 500, no dividend so
+    adjusted == original); old_weight = current position value / current total (single-holding
+    portfolio → 1), surfaced from the SAME dashboard pass as new_weight (no duplicate build)."""
+    conn = _db()
+    r = _whatif(conn, symbol="2330", side=Side.BUY, shares=Decimal("1000"),
+                price=Decimal("600"), account_id="tw_broker")
+    assert Decimal(str(r["old_shares"])) == Decimal("1000")
+    assert Decimal(str(r["old_original_avg"])) == Decimal("500")
+    assert Decimal(str(r["old_adjusted_avg"])) == Decimal("500")
+    assert r["old_weight"] is not None
+    assert Decimal(str(r["old_weight"])) == Decimal("1")
+    conn.close()
+
+
+def test_sell_remaining_market_value_is_remaining_times_current_price() -> None:
+    """SELL 剩餘市值 = remaining shares × the CURRENT quote-ccy price (600), computed
+    server-side — remaining 600 × 600 = 360,000. The OLD triple + old_weight ride along."""
+    conn = _db()
+    r = _whatif(conn, symbol="2330", side=Side.SELL, shares=Decimal("400"),
+                price=Decimal("600"), account_id="tw_broker")
+    assert Decimal(str(r["remaining_market_value"])) == Decimal("360000")
+    # exactly remaining_shares × current price (not the trade price — the market price is 600).
+    assert Decimal(str(r["remaining_market_value"])) == (
+        Decimal(str(r["remaining_shares"])) * Decimal("600"))
+    assert Decimal(str(r["old_shares"])) == Decimal("1000")
+    assert r["old_weight"] is not None
+    conn.close()
+
+
+def test_sell_oversell_remaining_market_value_floors_at_zero() -> None:
+    """Oversell: remaining_shares stays negative (unchanged), but 剩餘市值 floors at 0 — a
+    negative market value is never fabricated."""
+    conn = _db()
+    r = _whatif(conn, symbol="2330", side=Side.SELL, shares=Decimal("5000"),
+                price=Decimal("600"), account_id="tw_broker")
+    assert r["oversell"] is True
+    assert Decimal(str(r["remaining_shares"])) == Decimal("-4000")  # unchanged
+    assert Decimal(str(r["remaining_market_value"])) == Decimal("0")
+    conn.close()
+
+
+def test_old_fields_null_for_fresh_buy() -> None:
+    """A fresh (unheld, unpriced) symbol → old_* null; new_weight/old_weight honestly None
+    (no current price to weight against)."""
+    conn = _db()
+    upsert_instrument(conn, Instrument(symbol="2454", market=Market.TW,
+                                       quote_ccy=Currency.TWD, sector="Semiconductors",
+                                       name="MediaTek", board="TWSE"))
+    r = _whatif(conn, symbol="2454", side=Side.BUY, shares=Decimal("100"),
+                price=Decimal("1000"), account_id="tw_broker")
+    assert r["old_shares"] is None
+    assert r["old_original_avg"] is None
+    assert r["old_adjusted_avg"] is None
+    assert r["old_weight"] is None
+    conn.close()

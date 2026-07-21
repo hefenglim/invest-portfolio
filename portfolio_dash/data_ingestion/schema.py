@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS fx_conversions (
 );
 CREATE TABLE IF NOT EXISTS opening_inventory (
     account_id TEXT NOT NULL, symbol TEXT NOT NULL,
-    shares TEXT NOT NULL, original_avg_cost TEXT NOT NULL, original_cost_total TEXT NOT NULL,
+    shares TEXT NOT NULL, original_cost_total TEXT NOT NULL,
     build_date TEXT NOT NULL,
     PRIMARY KEY (account_id, symbol)
 );
@@ -65,6 +65,19 @@ def _add_column_if_missing(
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
+def _drop_column_if_present(
+    conn: sqlite3.Connection, table: str, column: str
+) -> None:
+    """Idempotent DROP COLUMN migration (SQLite >= 3.35; bundled 3.49). The repo's FIRST
+    destructive migration (A6, 2026-07-21). Guarded by ``pragma table_info`` so it is a no-op
+    once the column is gone; the column must be non-PK and unindexed (opening_inventory's
+    ``original_avg_cost`` is both). Fresh DBs never have the column (the DDL omits it), so this
+    only fires for a legacy DB migrating in."""
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column in cols:
+        conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+
+
 def create_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
     _add_column_if_missing(conn, "instruments", "board", "TEXT")  # migrate legacy DBs
@@ -81,6 +94,11 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # Backend plumbing only this wave; additive, so an existing DB migrates in untouched.
     _add_column_if_missing(conn, "instruments", "industry", "TEXT")
     _add_column_if_missing(conn, "transactions", "daytrade", "INTEGER NOT NULL DEFAULT 0")
+    # original_avg_cost drop (A6, 2026-07-21): the stored rounded average is retired — cost
+    # basis / XIRR key off original_cost_total only, and the average is computed on read. A
+    # legacy DB carried a NOT NULL original_avg_cost column that upsert_opening no longer fills,
+    # so it MUST be dropped (else a new insert would violate the NOT NULL constraint).
+    _drop_column_if_present(conn, "opening_inventory", "original_avg_cost")
     conn.commit()
     # One-time idempotent sector rewrite to the canonical GICS vocabulary (R6). Runs after the
     # column adds + commit so it sees the final schema; a no-op when every value is already

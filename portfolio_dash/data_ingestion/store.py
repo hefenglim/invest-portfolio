@@ -397,14 +397,24 @@ def insert_transaction(
 
 
 class StoredOpening(BaseModel):
-    """Pydantic model for a persisted opening_inventory row."""
+    """Pydantic model for a persisted opening_inventory row.
+
+    ``original_cost_total`` is the authoritative money of record; the original average is
+    NEVER stored (A6, 2026-07-21) — it is computed on read via :attr:`original_avg`
+    (domain-ledger.md: a rounded average must never be the authority).
+    """
 
     account_id: str
     symbol: str
     shares: Decimal
-    original_avg_cost: Decimal
     original_cost_total: Decimal
     build_date: date
+
+    @property
+    def original_avg(self) -> Decimal:
+        """Original average cost, computed on read (total / shares). Display-only; never the
+        authority. Zero shares -> Decimal(0) defensively (a valid opening has shares > 0)."""
+        return self.original_cost_total / self.shares if self.shares else Decimal(0)
 
 
 def upsert_opening(
@@ -413,7 +423,6 @@ def upsert_opening(
     account_id: str,
     symbol: str,
     shares: Decimal,
-    original_avg_cost: Decimal,
     original_cost_total: Decimal,
     build_date: date,
     commit: bool = True,
@@ -437,18 +446,16 @@ def upsert_opening(
     )
     conn.execute(
         """INSERT INTO opening_inventory
-               (account_id, symbol, shares, original_avg_cost, original_cost_total, build_date)
-           VALUES (?,?,?,?,?,?)
+               (account_id, symbol, shares, original_cost_total, build_date)
+           VALUES (?,?,?,?,?)
            ON CONFLICT(account_id, symbol) DO UPDATE SET
                shares=excluded.shares,
-               original_avg_cost=excluded.original_avg_cost,
                original_cost_total=excluded.original_cost_total,
                build_date=excluded.build_date""",
         (
             account_id,
             symbol,
             to_db(shares),
-            to_db(original_avg_cost),
             to_db(original_cost_total),
             build_date.isoformat(),
         ),
@@ -476,7 +483,7 @@ def list_opening(
         where = ""
         params = []
     rows = conn.execute(
-        f"SELECT account_id, symbol, shares, original_avg_cost, original_cost_total, "
+        f"SELECT account_id, symbol, shares, original_cost_total, "
         f"build_date FROM opening_inventory{where} ORDER BY account_id, symbol",
         params,
     ).fetchall()
@@ -485,7 +492,6 @@ def list_opening(
             account_id=r["account_id"],
             symbol=r["symbol"],
             shares=from_db(r["shares"]),
-            original_avg_cost=from_db(r["original_avg_cost"]),
             original_cost_total=from_db(r["original_cost_total"]),
             build_date=date.fromisoformat(r["build_date"]),
         )

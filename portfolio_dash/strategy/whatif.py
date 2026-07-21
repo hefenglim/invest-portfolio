@@ -127,7 +127,6 @@ def compute_whatif(
     ]
     opening = [
         OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_avg_cost=s.original_avg_cost,
                          original_cost_total=s.original_cost_total,
                          build_date=s.build_date)
         for s in list_opening(conn)
@@ -171,6 +170,18 @@ def compute_whatif(
         "fee_rule_desc": fee_rule_desc,
     }
 
+    # OLD-vs-NEW pre-trade triple (R7 A4, C5): the held position as it stands, so the drawer
+    # renders 持股/原始均價/調整均價 old→new. Null when nothing is held (held_shares == 0);
+    # averages computed from totals on read (domain-ledger.md), never a stored rounded average.
+    if held_shares > _ZERO:
+        out["old_shares"] = str(held_shares)
+        out["old_original_avg"] = str(held_orig_total / held_shares)
+        out["old_adjusted_avg"] = str(held_adj_total / held_shares)
+    else:
+        out["old_shares"] = None
+        out["old_original_avg"] = None
+        out["old_adjusted_avg"] = None
+
     if side is Side.BUY:
         total_cost = amount + fee + tax
         new_shares = held_shares + shares
@@ -198,9 +209,20 @@ def compute_whatif(
         )
         result_shares = remaining_shares
 
-    out["new_weight"] = _new_weight(
+    # Single dashboard pass surfaces BOTH weights (new + old) AND the current quote-ccy price,
+    # so the SELL branch's 剩餘市值 needs no extra query (Senior Review #13).
+    new_weight, old_weight, current_price = _new_weight(
         conn, now=now, reporting=reporting, symbol=symbol, inst=inst,
         held=held, result_shares=result_shares)
+    out["new_weight"] = new_weight
+    out["old_weight"] = old_weight
+    if side is Side.SELL:
+        # 剩餘市值 in the QUOTE ccy = max(remaining, 0) × current price (server-side; keeps the
+        # drawer's no-local-money-math rule). Floors at 0 so an oversell shows no negative value;
+        # None when the price is unavailable (honest degradation, never fabricated).
+        rem = result_shares if result_shares > _ZERO else _ZERO
+        out["remaining_market_value"] = (
+            str(rem * current_price) if current_price is not None else None)
     return out
 
 
@@ -213,20 +235,28 @@ def _new_weight(
     inst: object,
     held: Holding | None,
     result_shares: Decimal,
-) -> str | None:
-    """The resulting position's reporting-ccy weight of the resulting total MV.
+) -> tuple[str | None, str | None, Decimal | None]:
+    """Return ``(new_weight, old_weight, current_price)`` for the position (C5 refactor).
 
-    Honest degradation: any missing current price or FX rate -> None, never fabricated.
-    new_total = current_total - old_position_reporting_value + new_position_reporting_value.
+    * ``new_weight`` — the resulting position's reporting-ccy weight of the resulting total MV
+      (new_total = current_total − old_position_reporting_value + new_position_reporting_value).
+    * ``old_weight`` — the CURRENT position's reporting-ccy weight of the current total MV
+      (old_position_reporting_value / current_total), surfaced from the SAME dashboard pass
+      (operands already exist internally — no duplicate dashboard build, Senior Review #9).
+    * ``current_price`` — the symbol's current QUOTE-ccy price (market_value / shares), reused
+      by the SELL branch's 剩餘市值.
+
+    Honest degradation: any missing current price or FX rate -> None for the affected field(s),
+    never fabricated.
     """
     if inst is None:
-        return None
+        return None, None, None
     quote_ccy: Currency = inst.quote_ccy  # type: ignore[attr-defined]
 
     dash = build_dashboard(conn, now=now, reporting=reporting)
     current_total = dash.kpis.total_market_value
     if current_total is None:
-        return None
+        return None, None, None
 
     # Current price of the symbol in its quote ccy (from any valued dashboard holding row).
     current_price: Decimal | None = None
@@ -241,17 +271,20 @@ def _new_weight(
                         old_position_reporting_value_q,
                         RateResolver(conn, now=now).rate(quote_ccy, reporting))
                 except KeyError:
-                    return None
+                    return None, None, current_price
     if current_price is None:
-        return None
+        return None, None, None
 
+    old_weight = (
+        None if current_total == _ZERO
+        else str(old_position_reporting_value / current_total))
     try:
         rate = RateResolver(conn, now=now).rate(quote_ccy, reporting)
     except KeyError:
-        return None
+        return None, old_weight, current_price
     new_position_value_quote = result_shares * current_price
     new_position_reporting_value = convert(new_position_value_quote, rate)
     new_total = current_total - old_position_reporting_value + new_position_reporting_value
     if new_total == _ZERO:
-        return None
-    return str(new_position_reporting_value / new_total)
+        return None, old_weight, current_price
+    return str(new_position_reporting_value / new_total), old_weight, current_price

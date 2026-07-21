@@ -303,6 +303,23 @@ def _cash_overdraft_issue(
     return None
 
 
+def _old_position_fields(held: Holding | None) -> dict[str, str | None]:
+    """The PRE-trade position triple for the R7 OLD-vs-NEW comparison (C5, additive).
+
+    ``old_shares`` / ``old_original_avg`` / ``old_adjusted_avg`` come straight from the held
+    Holding (averages = total / shares, computed on read — never a stored rounded average,
+    domain-ledger.md). Null for a fresh position (held None or 0 shares), so a first-time buy
+    renders 新 values against an OLD dash.
+    """
+    if held is None or held.shares <= _ZERO:
+        return {"old_shares": None, "old_original_avg": None, "old_adjusted_avg": None}
+    return {
+        "old_shares": decimal_str(held.shares),
+        "old_original_avg": decimal_str(held.original_cost_total / held.shares),
+        "old_adjusted_avg": decimal_str(held.adjusted_cost_total / held.shares),
+    }
+
+
 def _position_preview(
     conn: sqlite3.Connection, body: ManualBody, fee: Decimal, tax: Decimal, gross: Decimal
 ) -> dict[str, Any] | None:
@@ -311,6 +328,10 @@ def _position_preview(
     (the frontend renders only; no front-end arithmetic). Additive; null when the symbol is
     unregistered (EXACT-only resolution) or the inputs are incomplete (shares/price ≤ 0).
     Never-500: any degradation path → null.
+
+    Every branch also carries the R7 (C5) OLD-vs-NEW pre-trade triple (``old_shares`` /
+    ``old_original_avg`` / ``old_adjusted_avg``) via :func:`_old_position_fields`; the
+    existing ``new_*`` fields are byte-identical.
 
     * SELL, position currently held → ``cost_removed`` = adjusted_total × (qty / held_shares),
       ``realized_pnl`` = (gross − fee − tax) − cost_removed, ``remain_shares`` =
@@ -349,6 +370,7 @@ def _position_preview(
                 "cost_removed": decimal_str(cost_removed),
                 "realized_pnl": decimal_str(realized_pnl),
                 "remain_shares": decimal_str(remain if remain > _ZERO else _ZERO),
+                **_old_position_fields(held),
             }
         all_in = gross + fee + tax
         held_shares = held.shares if held is not None else _ZERO
@@ -360,20 +382,28 @@ def _position_preview(
             "new_shares": decimal_str(new_shares),
             "new_original_avg": decimal_str((held_original + all_in) / new_shares),
             "new_adjusted_avg": decimal_str((held_adjusted + all_in) / new_shares),
+            **_old_position_fields(held),
         }
     except (ValueError, KeyError, ArithmeticError):
         return None
 
 
-def _account_cash(conn: sqlite3.Connection, body: ManualBody) -> dict[str, Any] | None:
+def _account_cash(
+    conn: sqlite3.Connection, body: ManualBody
+) -> tuple[dict[str, Any] | None, Decimal | None]:
     """DISPLAY-ONLY cash-pool balance for the trade's settlement (quote) currency (R6-E) —
     the SAME ``cash_balances`` figure /api/cash serves, so the draft line and the 資金 page
     never disagree. null when the symbol is unregistered (no quote ccy); ``balance`` null when
     the pool has no tracked activity. Adds NO issue and NO gating (owner-signed). Never-500.
+
+    Returns ``(wire_dict, balance)``: the wire dict is the byte-identical ``{ccy, balance}``
+    the response embeds, and ``balance`` is the SAME raw Decimal so the caller can compute the
+    additive R7 ``cash_after`` line (C5) WITHOUT a second ``cash_balances`` pass (no new engine
+    call). ``balance`` is None whenever the pool amount is unknown.
     """
     inst = next((i for i in list_instruments(conn) if i.symbol == body.symbol), None)
     if inst is None:
-        return None
+        return None, None
     amount: Decimal | None
     try:
         bal = cash_balances(
@@ -383,10 +413,11 @@ def _account_cash(conn: sqlite3.Connection, body: ManualBody) -> dict[str, Any] 
         amount = bal.get((body.account_id, inst.quote_ccy))
     except (ValueError, KeyError, ArithmeticError):
         amount = None
-    return {
+    wire = {
         "ccy": inst.quote_ccy.value,
         "balance": decimal_str(amount) if amount is not None else None,
     }
+    return wire, amount
 
 
 @router.post("/input/manual/preview")
@@ -419,7 +450,12 @@ def manual_preview(
     # both SERVER-computed as Decimal strings (the frontend renders only). null on any
     # degradation / unregistered symbol / incomplete inputs — the base preview never fails.
     position_preview = _position_preview(conn, body, draft.fee, draft.tax, gross)
-    account_cash = _account_cash(conn, body)
+    account_cash, cash_bal = _account_cash(conn, body)
+    # R7 A3 (additive, C5): projected pool AFTER settlement = balance + the ALREADY-SIGNED total
+    # (BUY total is negative, SELL positive), in the SAME quote ccy as account_cash. Emitted only
+    # when the balance is known (else null) — a pure Decimal add over figures already computed,
+    # NO new engine call, NO float. Frontend renders it verbatim under 該帳戶現金.
+    cash_after = decimal_str(cash_bal + total) if cash_bal is not None else None
     return {
         "fee": decimal_str(draft.fee), "tax": decimal_str(draft.tax),
         "gross": decimal_str(gross), "total": decimal_str(total),
@@ -429,6 +465,7 @@ def manual_preview(
         "rebate_estimate": rebate_estimate,
         "position_preview": position_preview,
         "account_cash": account_cash,
+        "cash_after": cash_after,
         "issues": [_issue_wire_manual(i, body.symbol) for i in issues],
     }
 

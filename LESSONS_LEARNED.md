@@ -23,6 +23,16 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A UI-label change must enumerate every EXISTING e2e that pins the old label
+  (2026-07-21):** W3 changed the draft-preview rows from single values to 舊→新 pairs
+  and its brief listed only the contract tests it owned; a prior round's e2e
+  (`test_sell_hints_ledger_refresh_flow.py`) still waited for the old 「剩餘股數」/
+  「新原始均價」 labels and failed the central pytest gate, costing a full gate rerun.
+  Rule: before dispatching a unit that renames/restructures visible UI text, grep
+  `tests/e2e` (and contract HTML assertions) for the affected labels/selectors and put
+  every hit in the unit's ownership + test list. (Same class as the 2026-07-20 bare-mypy
+  lesson: agent-scoped verification is a smoke check, the tree-wide sweep is the gate.)
+
 - **The type gate must run BARE over the FULL scope, centrally (2026-07-20):** parallel
   implementation agents each ran `mypy portfolio_dash --strict` (package only, ~210 files)
   and reported clean; the central bare run (`mypy --no-incremental`, whole 522-file scope

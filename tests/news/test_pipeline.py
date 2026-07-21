@@ -1,15 +1,33 @@
 """Unit tests for the news pipeline orchestration (all seams injected; no I/O)."""
 
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.news import pipeline as P
 from portfolio_dash.news import store as ns
+from portfolio_dash.news.fetcher import FetchOutcome
 from portfolio_dash.news.sources import NewsLink
 from portfolio_dash.shared.llm_config import AINotActivated, LLMUnavailable
 
 NOW = datetime(2026, 7, 6, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+
+
+def _recent(days: int) -> str:
+    """A fetched_at *days* before real UTC now (retry candidacy uses SQLite date('now'))."""
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+
+def _seed_empty(conn: sqlite3.Connection, link: str, *, fetched_at: str,
+                attempts: int = 0) -> None:
+    """Seed a headline-only (empty-body) row as if a prior run had left it."""
+    ns.upsert_news(conn, ns.OrganizedNews(
+        link=link, title="seed", news_date="2026-07-05", body_summary="",
+        related_stocks=[], source="src", lang="zh",
+        fetched_at=fetched_at, organized_at=fetched_at), discovered_for="2330",
+        index_symbols={"2330"})
+    for _ in range(attempts):
+        ns.record_fetch_attempt(conn, link, status="error")
 
 
 def _conn() -> sqlite3.Connection:
@@ -181,3 +199,113 @@ def test_pipeline_indexes_only_held_symbols() -> None:
         fetch=lambda u: "t", organize=organize, now=NOW)
     assert ns.query_by_symbol(conn, "9999", since_date="2026-07-01") == []  # not indexed
     assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].link == "http://x"
+
+
+# ---------------------------------------------------------------------------
+# Fetch-status recording + retry stage (2026-07-21).
+# ---------------------------------------------------------------------------
+
+def _status(conn: sqlite3.Connection, link: str) -> tuple[str, int]:
+    r = conn.execute(
+        "SELECT fetch_status, fetch_attempts FROM organized_news WHERE link = ?",
+        (link,)).fetchone()
+    return r["fetch_status"], r["fetch_attempts"]
+
+
+def test_fetch_status_and_attempts_recorded_for_organized() -> None:
+    # A rich FetchOutcome flows through the seam: the classified status lands on the row and
+    # one attempt is counted.
+    conn = _conn()
+    P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://1")],
+        fetch=lambda u: FetchOutcome("body", "salvaged", "p_cluster"),
+        organize=_org, now=NOW)
+    status, attempts = _status(conn, "http://1")
+    assert status == "salvaged" and attempts == 1
+
+
+def test_fetch_status_recorded_on_degrade() -> None:
+    # A failing fetch records the failure reason (not a silent empty row).
+    conn = _conn()
+    P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://x")],
+        fetch=lambda u: FetchOutcome(None, "http_error", "HTTP 403"),
+        organize=_org, now=NOW)
+    status, attempts = _status(conn, "http://x")
+    assert status == "http_error" and attempts == 1
+    assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].body_summary == ""
+
+
+def test_retry_stage_recovers_aged_empty_row_discovery_no_longer_surfaces() -> None:
+    # The core new behavior: an empty row from a prior run is re-fetched even though the
+    # current discovery surfaces nothing, and a successful fetch organizes it.
+    conn = _conn()
+    _seed_empty(conn, "http://aged", fetched_at=_recent(3), attempts=1)
+    res = P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [],  # discovery no longer finds the link
+        fetch=lambda u: "recovered body", organize=_org, now=NOW)
+    assert res["refetched"] == 1 and res["organized"] == 1
+    assert ns.is_fully_organized(conn, "http://aged") is True
+    _, attempts = _status(conn, "http://aged")
+    assert attempts == 2  # 1 seeded + 1 this run
+    # the recovered article is retrievable under its held symbol
+    assert ns.query_by_symbol(conn, "2330", since_date="2026-07-01")[0].link == "http://aged"
+
+
+def test_retry_stage_increments_attempts_on_repeat_failure() -> None:
+    conn = _conn()
+    _seed_empty(conn, "http://aged", fetched_at=_recent(3), attempts=1)
+    res = P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [], fetch=lambda u: FetchOutcome(None, "too_short"),
+        organize=_org, now=NOW)
+    assert res["refetched"] == 1 and res["organized"] == 0
+    status, attempts = _status(conn, "http://aged")
+    assert attempts == 2 and status == "too_short"
+    assert ns.is_fully_organized(conn, "http://aged") is False  # still empty, retriable
+
+
+def test_retry_stage_respects_attempt_cap() -> None:
+    conn = _conn()
+    _seed_empty(conn, "http://capped", fetched_at=_recent(3), attempts=3)  # at the cap
+    res = P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [], fetch=lambda u: "body", organize=_org, now=NOW,
+        refetch_max_attempts=3)
+    assert res["refetched"] == 0 and res["organized"] == 0  # not retried
+    assert ns.is_fully_organized(conn, "http://capped") is False
+
+
+def test_retry_stage_bounded_per_run() -> None:
+    conn = _conn()
+    for i in range(12):
+        _seed_empty(conn, f"http://a{i}", fetched_at=_recent(2))
+    res = P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [], fetch=lambda u: "body", organize=_org, now=NOW,
+        refetch_limit=10)
+    assert res["refetched"] == 10 and res["organized"] == 10  # bounded to the limit
+
+
+def test_retry_stage_skips_links_fetched_in_discovery_this_run() -> None:
+    # A link both discovered AND a retry candidate is fetched ONCE (main loop), never twice.
+    conn = _conn()
+    _seed_empty(conn, "http://x", fetched_at=_recent(1), attempts=1)
+    res = P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://x")],
+        fetch=lambda u: None, organize=_org, now=NOW)  # fetch keeps failing
+    _, attempts = _status(conn, "http://x")
+    assert attempts == 2 and res["refetched"] == 0  # main loop bumped once; retry skipped it
+
+
+def test_retry_stage_skipped_when_budget_stopped() -> None:
+    # A budget stop in the main loop ends the run; the retry stage must not run afterwards.
+    conn = _conn()
+    _seed_empty(conn, "http://aged", fetched_at=_recent(3), attempts=1)
+
+    def organize(link: NewsLink, text: str) -> ns.OrganizedNews:
+        raise AINotActivated("no default model")
+
+    res = P.run_news_pipeline(conn, [("2330", "TW")],
+        discover=lambda s, m: [NewsLink(title="n", link="http://new")],
+        fetch=lambda u: "body", organize=organize, now=NOW)
+    assert res["stopped_budget"] is True and res["refetched"] == 0
+    _, attempts = _status(conn, "http://aged")
+    assert attempts == 1  # untouched — retry never ran

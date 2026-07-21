@@ -69,12 +69,19 @@ def _latest_meta(conn: sqlite3.Connection) -> AiMeta:
 
 
 def _drafts_to_csv(drafts: list[AiDraft]) -> str:
-    """Render drafts as canonical transaction CSV for /api/import/commit."""
+    """Render drafts as canonical transaction CSV for /api/import/commit — ONE line per draft.
+
+    The one-line-per-draft invariant is load-bearing: the AI preview's per-row index maps to
+    csv data line ``index + 1`` so the frontend can commit only the CHECKED rows (C7). A note
+    carrying an embedded newline would split a draft across lines and break that mapping, so
+    CR/LF in the note are collapsed to a single space here (this generator does no CSV quoting).
+    """
     lines = ["account,symbol,side,date,shares,price,note"]
     for d in drafts:
+        note = (d.note or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
         lines.append(
             f"{d.account_id},{d.symbol},{d.side.value},{d.date.isoformat()},"
-            f"{d.shares},{d.price},{d.note or ''}"
+            f"{d.shares},{d.price},{note}"
         )
     return "\n".join(lines) + "\n"
 

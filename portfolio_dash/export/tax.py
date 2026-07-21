@@ -71,7 +71,6 @@ def build_tax_package_zip(
                      net=s.net, reinvest_shares=s.reinvest_shares,
                      reinvest_price=s.reinvest_price) for s in list_dividends(conn)]
     opening = [OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                                original_avg_cost=s.original_avg_cost,
                                 original_cost_total=s.original_cost_total,
                                 build_date=s.build_date) for s in list_opening(conn)]
     convs = [FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,

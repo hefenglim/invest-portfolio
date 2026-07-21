@@ -60,7 +60,7 @@ def _seed_holdings(conn: sqlite3.Connection) -> None:
     # tw_broker: 2317 closed — opening inventory fully sold (exercises the opening source
     # in the symbol-universe union, not just transactions).
     upsert_opening(conn, account_id="tw_broker", symbol="2317", shares=Decimal("1000"),
-                   original_avg_cost=Decimal("100"), original_cost_total=Decimal("100000"),
+                   original_cost_total=Decimal("100000"),
                    build_date=date(2025, 12, 1))
     insert_transaction(conn, account_id="tw_broker", symbol="2317", side=Side.SELL,
                        quantity=Decimal("1000"), price=Decimal("110"),

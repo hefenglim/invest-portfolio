@@ -50,6 +50,82 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.21] - 2026-07-21
+
+Round-7 owner batch (Batch A, FU-D55..D60). Phase-1 plan + Senior Review:
+`docs/reports/2026-07-21-batchA-phase1-plan.md`; decisions + traceability:
+`docs/reports/2026-07-21-batchA-r7-minispec.md`. The Moomoo account merge (Batch B)
+is deferred to its own round.
+
+### Added
+- **Bursa registry + MY offline verification (FU-D55).** New
+  `pricing/bursa_registry.py` — 1,079 four-digit Bursa Malaysia codes → official
+  short names, baked at dev time from the live directory (provenance + retrieval
+  date in the module docstring; never model memory). `lookup_instrument` now
+  verifies an unregistered MY code against the registry when the quote feed lacks
+  the counter, so a correct AI resolve reaches `status:"resolved"` instead of being
+  demoted to candidates; `pricing/names.py` resolves MY names registry-first.
+  Consequence (by design): a registry-verified symbol can register price-less and
+  shows as stale until a provider covers it.
+- **Draft-preview cash-after (FU-D57).** `POST /input/manual/preview` emits
+  `cash_after` = account cash pool + the signed trade total (same quote currency,
+  dynamic label); rendered under 該帳戶現金. Display-only, null when unknown.
+- **Old-vs-new position comparison (FU-D58).** `_position_preview` and
+  `/api/whatif` emit `old_shares` / `old_original_avg` / `old_adjusted_avg`
+  (+ `old_weight` and SELL `remaining_market_value`, floored at 0, on whatif);
+  draft preview and the detail 試算 drawer render 舊 → 新 pairs.
+- **News fetch observability + retry (FU-D56).** `FetchOutcome` classification
+  (ok / http_error / non_html / too_short / salvaged / blocked_scheme / error),
+  single WARNING log seam with the URL, `fetch_status` + `fetch_attempts` columns
+  (ALTER-if-missing), and a bounded retry queue (14 days / 3 attempts / 10 per run)
+  that re-fetches empty-body rows even after discovery stops surfacing them.
+
+### Changed
+- **MY prompt guidance to TW parity (FU-D55).** `AI_INSTRUMENT_RESOLVE_PROMPT` v2 and
+  `AI_INPUT_PROMPT_BODY` v4: directory-verified name⇒code exemplars, the ACE-market
+  leading-zero rule (0166, never 166), and the brand/mall→listed-parent rule;
+  `LIBRARY_VERSION` → official-v10.
+- **News fetcher HTTP layer (FU-D56).** Browser-like `Accept`/`Accept-Language`
+  headers + cookie-carrying opener (consent redirects complete); byte cap raised
+  200 KB → 1.5 MB; extraction falls back block-strip → JSON-LD/embedded-JSON →
+  largest `<p>` cluster → `salvaged` text (LLM trims) instead of silently storing
+  an empty body. Zero new dependencies.
+- **試算 drawer is now backend-computed (FU-D58).** The detail-page 試算 section
+  POSTs `/api/whatif` (debounced) and renders server Decimal strings only; ALL
+  local fee/P&L math and the `window.pdFeeTax` mirror are deleted; on request
+  failure it shows 試算暫不可用 (never fabricates).
+- **Clear-on-success + real checkbox filtering (FU-D59).** The AI input commit
+  writes ONLY checked rows (`_drafts_to_csv` newline-sanitizes notes so the
+  one-line-per-draft mapping is robust; the warnings-ack recommit reuses the same
+  filtered text); full success clears the AI inputs (banner in the new in-pane
+  `#ai-result`) / the CSV paste; partial success keeps only unwritten rows (AI) or
+  the entire raw paste (CSV).
+- **Opening-inventory contract inverted (FU-D60).** Required columns are now
+  `account,symbol,shares,original_cost_total,build_date`; `original_avg_cost` is
+  optional/legacy (avg-only derives the total with a soft `opening_total_derived`
+  issue; both-and-disagreeing raises soft `opening_cost_mismatch` beyond
+  max(1 minor unit, 0.5% × total)). The form takes 股數＋原始總成本 with a live
+  read-only 均價 hint and an instrument datalist on `#o-symbol`;
+  `PUT /ledgers/openings/{acct}/{sym}` accepts authoritative `total` (legacy `avg`
+  still derives).
+
+### Removed
+- **`opening_inventory.original_avg_cost` column (FU-D60)** — the repo's first
+  destructive migration (idempotent `DROP COLUMN`, guarded by `pragma table_info`;
+  required because the legacy column was NOT NULL). A rounded average is never
+  stored as authority (domain-ledger rule); every reader — reports, tax, whatif,
+  dashboard, symbol events, ledgers wire fields, the stress-audit oracle — now
+  computes `original_avg = total / shares` on read. No money-of-record figure
+  changes (cost basis / XIRR always keyed off `original_cost_total`).
+
+### Verification
+- Full pytest 0 failed / 0 errors; bare `mypy --strict --no-incremental` clean over
+  527 files; ruff clean; stress-audit phase 1 `--ui` ops=66 **pass=1066 fail=0**
+  (oracle independence verified); id-contract sweep: no new dead zones. Demo
+  behavior probe 12/12 including a live-LLM resolve of "Inari Amertron" → 0166
+  (`resolved`, GICS sector + industry). No money-of-record formula changed — the
+  accounting manual is intentionally untouched.
+
 ## [v0.1.20] - 2026-07-20
 
 Six follow-up rounds on the v0.1.19 surface (owner-driven; decision records FU-D1..D54 in

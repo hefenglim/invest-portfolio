@@ -45,8 +45,8 @@ def _buy(conn: sqlite3.Connection, symbol: str, d: str) -> None:
 
 def _opening(conn: sqlite3.Connection, symbol: str, d: str) -> None:
     conn.execute(
-        "INSERT INTO opening_inventory (account_id, symbol, shares, original_avg_cost, "
-        "original_cost_total, build_date) VALUES ('tw_broker', ?, '100', '10', '1000', ?)",
+        "INSERT INTO opening_inventory (account_id, symbol, shares, "
+        "original_cost_total, build_date) VALUES ('tw_broker', ?, '100', '1000', ?)",
         (symbol, d))
 
 

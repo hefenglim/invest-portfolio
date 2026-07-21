@@ -66,6 +66,67 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.21 (round-7 batch A, FU-D55..D60) -----------------------------------------
+    Feature(
+        version="0.1.21",
+        id="my-resolve-hardening",
+        title="馬股標的判讀大幅強化",
+        desc="內建 Bursa 全市場 1,079 檔代號名錄：輸入 inari、maybank 等名稱即判讀出正確代號"
+        "（含 0 開頭代號），冷門股不再因報價源缺漏而判讀失敗",
+        href="instruments.html",
+        area="觀察清單 → 快速註冊",
+        target="#quick-add-btn",
+    ),
+    Feature(
+        version="0.1.21",
+        id="news-fetch-hardening",
+        title="新聞內文抓取強化",
+        desc="抓取器補上瀏覽器身分與 cookie、放寬讀取上限並新增多段內文擷取後備；"
+        "空內文會記錄原因並自動重抓，不再永久留白",
+        href="news.html",
+        area="新聞庫",
+        target="#nw-run",
+    ),
+    Feature(
+        version="0.1.21",
+        id="draft-preview-oldnew",
+        title="草稿預覽：舊→新對比＋扣款後現金",
+        desc="買賣試算改為「舊 → 新」成對顯示（持股／原始均價／調整均價），"
+        "並在該帳戶現金下方新增扣款後現金預估（幣別跟隨標的）",
+        href="trades.html",
+        area="交易輸入 → 草稿預覽",
+        target="#m-pc-rows",
+    ),
+    Feature(
+        version="0.1.21",
+        id="whatif-drawer-backend",
+        title="個股試算抽屜改由後端計算",
+        desc="試算全數改由後端試算引擎供數並以舊→新對比呈現，新增賣出剩餘市值；"
+        "前端不再自行計算任何金額",
+        href="index.html",
+        area="儀表板 → 個股詳情 → 試算",
+        target="#holdings-body",
+    ),
+    Feature(
+        version="0.1.21",
+        id="input-clear-on-success",
+        title="寫入成功自動清空＋勾選精準寫入",
+        desc="AI 智能輸入的勾選框現在真正生效（只寫入勾選列）；AI／CSV 全數寫入成功後"
+        "自動清空輸入避免誤觸重複寫入，部分成功則只保留未寫入列供檢查",
+        href="trades.html",
+        area="交易輸入 → AI 智能輸入",
+        target="#ai-result",
+    ),
+    Feature(
+        version="0.1.21",
+        id="opening-simplified",
+        title="期初庫存輸入簡化",
+        desc="只需填股數與原始總成本（均價改為即時試算顯示），代號欄可直接挑選既有標的；"
+        "舊 CSV 仍相容，均價與總成本不一致時會提醒確認",
+        href="trades.html",
+        area="交易輸入 → 期初庫存",
+        target="#o-total",
+    ),
     # --- v0.1.20 (v0.1.19 follow-up rounds r1-r6, FU-D1..D54) ---------------------------
     Feature(
         version="0.1.20",
@@ -815,6 +876,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.21": "2026-07-21",
     "0.1.20": "2026-07-20",
     "0.1.19": "2026-07-15",
     "0.1.18": "2026-07-14",

@@ -85,8 +85,8 @@ def test_normalize_pinned_format_resolves_ambiguity() -> None:
 
 
 def test_normalize_openings_uses_build_date_column() -> None:
-    text = "account,symbol,shares,original_avg_cost,build_date(YYYY-MM-DD)\r\n" \
-           "tw_broker,2330,1000,500,2026/1/2\r\n"
+    text = "account,symbol,shares,original_cost_total,build_date(YYYY-MM-DD)\r\n" \
+           "tw_broker,2330,1000,500000,2026/1/2\r\n"
     out = normalize_import_csv(text, "build_date")
     assert out.ambiguity is None
     lines = out.text.splitlines()

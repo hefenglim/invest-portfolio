@@ -102,7 +102,7 @@ def test_opening_inventory_section_renders_rows_and_total() -> None:
     try:
         upsert_opening(
             conn, account_id="tw_broker", symbol="2330", shares=Decimal("2000"),
-            original_avg_cost=Decimal("450"), original_cost_total=Decimal("900000"),
+            original_cost_total=Decimal("900000"),
             build_date=date(2025, 12, 1),
         )
         conn.commit()

@@ -174,10 +174,11 @@ def test_ledger_live_refresh_after_commits(
 def test_draft_preview_position_whatif_and_cash_line(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """R6-E: the 草稿預覽 card gains the drawer-parity 試算 what-if rows + a display-only
-    account-cash line, both SERVER-computed (Decimal strings via window.fmt). A SELL draft on
-    the seeded 2330 holding shows 調整成本移除 / 已實現損益 / 剩餘股數 and the 該帳戶現金 line;
-    switching to BUY swaps in 新持股 / 新原始均價 / 新調整均價 — all with ZERO page errors."""
+    """R6-E + R7 A4/A3: the 草稿預覽 card shows the drawer-parity 試算 what-if as OLD→NEW
+    pair rows plus the display-only 該帳戶現金 / 扣款後現金 lines, all SERVER-computed
+    (Decimal strings via window.fmt). A SELL draft on the seeded 2330 holding shows
+    調整成本移除 / 已實現損益 and the 持股 old→new pair; switching to BUY swaps to the
+    持股/原始均價/調整均價 pairs — all with ZERO page errors."""
     base = flow_server(_seed_golden)
     page = fresh_page
     console_errors, page_errors = _sink(page)
@@ -187,20 +188,22 @@ def test_draft_preview_position_whatif_and_cash_line(
     page.select_option("#m-account", "tw_broker")
     page.fill("#m-symbol", "2330")
 
-    # SELL draft → the position what-if rows + the account-cash line render in the card.
+    # SELL draft → the trade figures + the 持股 old→new pair + both cash lines render.
     page.click("#m-side-sell")
     page.fill("#m-shares", "500")
     page.fill("#m-price", "600")
     page.wait_for_selector("#m-pc-rows .pc-row:has-text('調整成本移除')")
     page.wait_for_selector("#m-pc-rows .pc-row:has-text('已實現損益')")
-    page.wait_for_selector("#m-pc-rows .pc-row:has-text('剩餘股數')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('持股') .pc-arrow")
     page.wait_for_selector("#m-pc-rows .pc-row:has-text('該帳戶現金（TWD）')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('扣款後現金（TWD）')")
 
-    # BUY draft → the what-if swaps to the buy rows; the cash line stays.
+    # BUY draft → the what-if swaps to the old→new avg pairs; the cash lines stay.
     page.click("#m-side-buy")
-    page.wait_for_selector("#m-pc-rows .pc-row:has-text('新原始均價')")
-    page.wait_for_selector("#m-pc-rows .pc-row:has-text('新調整均價')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('原始均價') .pc-new")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('調整均價') .pc-old")
     page.wait_for_selector("#m-pc-rows .pc-row:has-text('該帳戶現金（TWD）')")
+    page.wait_for_selector("#m-pc-rows .pc-row:has-text('扣款後現金（TWD）')")
 
     assert not console_errors and not page_errors, (
         f"draft preview flow: console={console_errors!r} page={page_errors!r}"

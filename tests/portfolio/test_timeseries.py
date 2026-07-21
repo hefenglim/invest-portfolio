@@ -84,7 +84,7 @@ def test_dividend_and_sell_reduce_net_invested() -> None:
 
 def test_opening_inventory_counts_as_invested() -> None:
     opening = [OpeningInventory(account_id="tw_broker", symbol="BBB",
-                                shares=Decimal("10"), original_avg_cost=Decimal("90"),
+                                shares=Decimal("10"),
                                 original_cost_total=Decimal("900"),
                                 build_date=date(2026, 6, 1))]
     prices = {"BBB": [(date(2026, 6, 1), Decimal("100"))]}

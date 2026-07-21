@@ -8,10 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.20"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.20"></link>
-<link rel="stylesheet" href="trades.css?v=0.1.20"></link>
-<link rel="stylesheet" href="input.css?v=0.1.20"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.21"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.21"></link>
+<link rel="stylesheet" href="trades.css?v=0.1.21"></link>
+<link rel="stylesheet" href="input.css?v=0.1.21"></link>
 <style>
   .trades-page { display: flex; flex-direction: column; gap: var(--gap); }
   .ledger-section { display: flex; flex-direction: column; gap: 0; }
@@ -195,6 +195,7 @@
           </div>
           <div class="ai-result-head"><span>解析來源：<b class="num" id="ai-source"></b></span><span>模型：<b class="num" id="ai-model"></b></span></div>
           <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th>費用</th><th>稅</th><th class="col-text">模型備註</th><th></th></tr></thead><tbody id="ai-body"></tbody></table></div>
+          <div class="result-banner" id="ai-result" hidden="hidden"></div>
           <div class="import-summary"><span class="spacer"></span><button class="btn btn-primary" id="ai-write-all" type="button">寫入全部勾選</button></div>
         </div>
         <div class="degrade-panel" id="ai-degrade-off" hidden="hidden"><span class="glyph">◈</span><span class="ttl">AI 未啟用</span><span class="sub">尚未設定任何 LLM 模型</span><a class="btn btn-primary" href="settings.html#llm">前往 AI 與額度設定</a></div>
@@ -238,10 +239,10 @@
           <div class="stack-card"><h3>期初庫存</h3>
             <div class="form-grid">
               <div class="field"><label for="o-account">帳戶</label><select class="select" id="o-account"></select></div>
-              <div class="field"><label for="o-symbol">代號</label><input class="input" id="o-symbol" spellcheck="false"></input></div>
+              <div class="field"><label for="o-symbol">代號</label><input class="input" id="o-symbol" list="m-symbols" spellcheck="false"></input></div>
               <div class="field"><label for="o-shares">股數</label><input class="input" id="o-shares" type="number"></input></div>
-              <div class="field"><label for="o-avg">原始均價</label><input class="input" id="o-avg" type="number" step="0.001"></input></div>
               <div class="field"><label for="o-total">原始總成本</label><input class="input" id="o-total" type="number" step="0.01"></input></div>
+              <div class="field"><label for="o-avg-view">原始均價（自動）</label><div class="input" id="o-avg-view" aria-live="polite" style="display:flex;align-items:center;color:var(--text-2);background:var(--panel-2);cursor:default;">—</div></div>
               <div class="field"><label for="o-date">建檔日</label><input class="input" id="o-date" type="date"></input></div>
             </div>
             <div class="form-actions"><button class="btn btn-primary" id="o-confirm" type="button">確認建檔</button></div>
@@ -316,16 +317,16 @@
 </div>
 </div>
 
-<script src="api.js?v=0.1.20"></script>
-<script src="shell.js?v=0.1.20"></script>
-<script src="format.js?v=0.1.20"></script>
-<script src="names.js?v=0.1.20"></script>
-<script src="pager.js?v=0.1.20"></script>
-<script src="export.js?v=0.1.20"></script>
-<script src="alerts.js?v=0.1.20"></script>
-<script src="inst-quickadd.js?v=0.1.20"></script>
-<script src="input.js?v=0.1.20"></script>
-<script src="ledger.js?v=0.1.20"></script>
+<script src="api.js?v=0.1.21"></script>
+<script src="shell.js?v=0.1.21"></script>
+<script src="format.js?v=0.1.21"></script>
+<script src="names.js?v=0.1.21"></script>
+<script src="pager.js?v=0.1.21"></script>
+<script src="export.js?v=0.1.21"></script>
+<script src="alerts.js?v=0.1.21"></script>
+<script src="inst-quickadd.js?v=0.1.21"></script>
+<script src="input.js?v=0.1.21"></script>
+<script src="ledger.js?v=0.1.21"></script>
 <script>
 /* glue: collapse toggle */
 document.getElementById('input-toggle').addEventListener('click', function (e) {

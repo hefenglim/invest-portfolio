@@ -188,8 +188,9 @@ def test_delete_fx_removes_row(api_client: TestClient) -> None:
 
 
 def _seed_opening(api_client: TestClient) -> None:
-    csv_text = ("account,symbol,shares,original_avg_cost,build_date\n"
-                "tw_broker,2330,500,450,2026-01-02\n")
+    # A6: original_cost_total is the REQUIRED authoritative money of record.
+    csv_text = ("account,symbol,shares,original_cost_total,build_date\n"
+                "tw_broker,2330,500,225000,2026-01-02\n")
     r = api_client.post("/api/import/commit",
                         json={"kind": "openings", "csv_text": csv_text,
                               "ack_warnings": True})
@@ -197,6 +198,23 @@ def _seed_opening(api_client: TestClient) -> None:
 
 
 def test_edit_opening_updates_values(api_client: TestClient) -> None:
+    """A6: the PUT accepts 股數 + 原始總成本 (total is the money of record); avg is computed
+    on read (total / shares) and never stored."""
+    _seed_opening(api_client)
+    r = api_client.put("/api/ledgers/openings/tw_broker/2330",
+                       json={"shares": "2000", "total": "1000000", "date": "2026-01-05"})
+    assert r.status_code == 200
+    rows = api_client.get("/api/ledgers/openings", params={"limit": 500}).json()["rows"]
+    edited = next(x for x in rows
+                  if x["account_id"] == "tw_broker" and x["symbol"] == "2330")
+    assert edited["shares"] == "2000" and edited["total"] == "1000000"
+    assert edited["avg"] == "500"  # 1000000 / 2000 computed on read
+    assert api_client.get("/api/dashboard").status_code == 200
+
+
+def test_edit_opening_legacy_avg_derives_total(api_client: TestClient) -> None:
+    """Backward compat: an older client sending 均價 (no 總成本) still works — the total is
+    derived (avg * shares) and stored; the average is never persisted."""
     _seed_opening(api_client)
     r = api_client.put("/api/ledgers/openings/tw_broker/2330",
                        json={"shares": "2000", "avg": "500", "date": "2026-01-05"})
@@ -204,9 +222,7 @@ def test_edit_opening_updates_values(api_client: TestClient) -> None:
     rows = api_client.get("/api/ledgers/openings", params={"limit": 500}).json()["rows"]
     edited = next(x for x in rows
                   if x["account_id"] == "tw_broker" and x["symbol"] == "2330")
-    assert edited["shares"] == "2000" and edited["avg"] == "500"
-    assert edited["total"] == "1000000"  # avg * shares, computed by the backend
-    assert api_client.get("/api/dashboard").status_code == 200
+    assert edited["total"] == "1000000" and edited["avg"] == "500"
 
 
 def test_delete_opening_removes_row(api_client: TestClient) -> None:

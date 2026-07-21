@@ -1,6 +1,7 @@
 """Source-of-truth ledger models: transactions, dividends, FX, opening inventory."""
 
 from datetime import date
+from decimal import Decimal
 
 from pydantic import BaseModel
 
@@ -48,11 +49,21 @@ class FXConversion(BaseModel):
 
 
 class OpeningInventory(BaseModel):
-    """A pre-existing position seeded at a build date (not a trade flow; feeds XIRR)."""
+    """A pre-existing position seeded at a build date (not a trade flow; feeds XIRR).
+
+    ``original_cost_total`` is the authoritative money of record (cost basis / XIRR key off
+    it). The original average is NEVER stored — a rounded average must never be the authority
+    (domain-ledger.md); it is computed on read via :attr:`original_avg`.
+    """
 
     account_id: str
     symbol: str
     shares: Money
-    original_avg_cost: Money
     original_cost_total: Money
     build_date: date
+
+    @property
+    def original_avg(self) -> Decimal:
+        """Original average cost, computed on read (total / shares). Display-only; never the
+        authority. Zero shares -> Decimal(0) defensively (a valid opening has shares > 0)."""
+        return self.original_cost_total / self.shares if self.shares else Decimal(0)

@@ -42,13 +42,14 @@ DATE_COLUMN_BY_KIND: dict[str, str] = {
 
 # Optional (may-be-blank) columns per kind — mirrors the required set each parser enforces:
 # transactions require account/symbol/side/date/shares/price; dividends require
-# account/symbol/date/type/gross; fx requires every column; openings require all but the
-# derived original_cost_total. Marked ``(選填)`` in the downloadable template header.
+# account/symbol/date/type/gross; fx requires every column; openings require
+# account/symbol/shares/original_cost_total/build_date and treat original_avg_cost as the
+# legacy-optional column (A6). Marked ``(選填)`` in the downloadable template header.
 OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     "transactions": frozenset({"fee", "tax", "daytrade", "note"}),
     "dividends": frozenset({"withholding", "net", "reinvest_shares", "reinvest_price"}),
     "fx": frozenset(),
-    "openings": frozenset({"original_cost_total"}),
+    "openings": frozenset({"original_avg_cost"}),
 }
 
 # Example rows align POSITIONALLY with each kind's column constant. Fixed recent ISO dates;
@@ -85,9 +86,10 @@ _FX_ROWS: list[list[str]] = [
 ]
 
 _OPENING_ROWS: list[list[str]] = [
-    # original_cost_total blank -> computed as avg * shares; supplied on the second row.
-    ["tw_broker", "2330", "1000", "500", "2026-01-02", ""],
-    ["schwab", "AAPL", "10", "100", "2026-01-02", "1000"],
+    # A6: original_cost_total is REQUIRED (authoritative money of record); original_avg_cost is
+    # legacy-optional. Row 1 supplies total only; row 2 also carries a matching legacy avg.
+    ["tw_broker", "2330", "1000", "500000", "2026-01-02", ""],
+    ["schwab", "AAPL", "10", "1000", "2026-01-02", "100"],
 ]
 
 _HEADERS: dict[str, list[str]] = {

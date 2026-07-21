@@ -10,9 +10,10 @@
        weight, market_value, unrealized_pnl, capital_gain, …) which the detail endpoint
        does NOT carry. Fetched ONCE per page; created here when not already present.
    Money/price values are Decimal STRINGS — displayed via window.fmt (f.*), which coerces
-   internally; the drawer NEVER sums or compares them as money. The 試算 (what-if) block
-   is the documented spec-03 exception: a local fee/P&L estimate over USER INPUT only
-   (window.pdFeeTax mirror), never a display of backend money-of-record.
+   internally; the drawer NEVER sums or compares them as money. The 試算 (what-if) block is
+   NO LONGER a local-compute exception (R7 A4): it POSTs /api/whatif and renders the backend's
+   OLD-vs-NEW figures verbatim — zero front-end money arithmetic (the prior spec-03 local
+   fee/P&L estimate is retired).
 
    Requires: api.js (window.pdApi), format.js, echarts. */
 (function () {
@@ -57,13 +58,6 @@
     momentum_12_1: { positive: '正動能', negative: '負動能', flat: '動能持平' },
     rsi_regime: { overbought: '超買', oversold: '超賣', neutral: '中性' }
   };
-  /* 試算-only approximate spot rates to the reporting ccy (TWD), used SOLELY inside the
-     local what-if weight estimate (documented spec-03 exception). NOT a display path for
-     backend money — every backend Decimal is rendered via f.* untouched. The dashboard
-     payload carries no per-currency spot table, so the what-if weight is an estimate; the
-     real权重 shown in 部位摘要 comes from the backend (h.weight). */
-  const FX_TO_TWD = { TWD: 1, USD: 32.90, MYR: 7.05 };
-
   /* Shared /api/dashboard promise — the SAME one app.js / charts.js / alerts.js use, so
      opening the drawer on the dashboard reuses the in-flight/resolved payload (one fetch).
      Off-dashboard, this creates it once. holdings[] here is the rich holding summary. */
@@ -74,8 +68,8 @@
   /* The resolved holdings list (set once both fetches land in openSymbolDrawer); used by
      prev/next cycling. Null until a successful open; cycling is disabled while null. */
   let currentHoldings = null;
-  /* The resolved dashboard payload (set alongside currentHoldings); the 試算 block reads
-     kpis.total_market_value from it for the local 新權重 estimate. Null until first open. */
+  /* The resolved dashboard payload (set alongside currentHoldings). Cached for the shared
+     holdings list; the 試算 block no longer reads it (weights now come from /api/whatif). */
   let currentDash = null;
 
   function holdingOf(symbol) {
@@ -86,31 +80,6 @@
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
-
-  /* ---------- fee/tax estimate per account (mirror of the backend fee engine, 試算 only) ---------- */
-  /* exposed for rebalance.js — single front-end mirror of the fee engine (試算 only) */
-  function feeTax(h, side, shares, price) {
-    const amount = shares * price;
-    if (h.account_id === 'tw_broker') {
-      const fee = Math.max(20, Math.round(amount * 0.001425));
-      const taxRate = side === 'sell' ? (h.sector === 'ETF' ? 0.001 : 0.003) : 0;
-      return { fee, tax: Math.round(amount * taxRate), dp: 0,
-        rule: '0.1425%・最低 NT$20' + (side === 'sell' ? (h.sector === 'ETF' ? '・證交稅 ETF 0.1%' : '・證交稅 0.3%') : '') };
-    }
-    if (h.account_id === 'schwab') {
-      const tax = side === 'sell' ? Number((amount * 0.0000278).toFixed(2)) : 0;
-      return { fee: 0, tax, dp: 2, rule: '$0 佣金' + (side === 'sell' ? '・SEC fee 0.00278%' : '') };
-    }
-    if (h.account_id === 'moomoo_my_us') {
-      return { fee: 0.99, tax: 0, dp: 2, rule: '平台費 USD 0.99/筆' };
-    }
-    /* moomoo_my_my */
-    const clearing = Math.min(1000, Number((amount * 0.0003).toFixed(2)));
-    const stamp = side === 'buy' || side === 'sell' ? Number((amount * 0.001).toFixed(2)) : 0;
-    return { fee: clearing, tax: stamp, dp: 2, rule: 'clearing 0.03% (cap RM1,000)・stamp 0.1%' };
-  }
-
-  window.pdFeeTax = feeTax;
 
   /* ---------- drawer scaffold ---------- */
   let chart = null;
@@ -603,11 +572,11 @@
     return sec;
   }
 
-  /* ---------- 試算 (compute-only, never writes) ---------- */
+  /* ---------- 試算 (backend /api/whatif — compute-only, never writes) ---------- */
   function simSection(h) {
     const sec = el('div', 'sd-section');
     const badge = el('span', 'sd-sim-badge', '試算不寫入帳本');
-    sec.appendChild(secHead('試算', '後端 試算 模式 — 僅計算', badge));
+    sec.appendChild(secHead('試算', '後端 試算 模式 — POST /api/whatif', badge));
     const box = el('div', 'sd-sim');
 
     const controls = el('div', 'sd-sim-controls');
@@ -627,17 +596,14 @@
       return { fd, inp };
     };
     const dp = h.quote_ccy === 'MYR' ? '0.001' : '0.01';
-    /* 試算-LOCAL numeric copies of the holding's Decimal-STRING fields. The what-if is the
-       documented spec-03 exception (a local estimate over user input, not money-of-record
-       display): coerce ONCE here so the local arithmetic (+/-) is numeric, never string
-       concatenation. Every DISPLAY of these still routes through f.* on the computed value. */
-    const hShares = Number(h.shares);
-    const hAdjAvg = Number(h.adjusted_avg);
-    const hMktPrice = (h.market_price === null || h.market_price === undefined) ? null : Number(h.market_price);
-    const hOrigTotal = Number(h.original_cost_total);
-    const hAdjTotal = Number(h.adjusted_cost_total);
+    const ccy = h.quote_ccy;
+    /* Prefills are the holding's Decimal-STRING fields, passed to /api/whatif AS-IS. The
+       drawer performs ZERO money arithmetic: `shares`/`price` are the RAW input strings the
+       backend computes over, and every result is a SERVER Decimal string rendered via f.*. */
+    const hShares = (h.shares === null || h.shares === undefined) ? '' : String(h.shares);
+    const hMktPrice = (h.market_price === null || h.market_price === undefined) ? '' : String(h.market_price);
     const shares = mkField('股數', 'sim-shares', hShares, '1');
-    const price = mkField('價格（' + h.quote_ccy + '）', 'sim-price', hMktPrice !== null ? hMktPrice : '', dp);
+    const price = mkField('價格（' + ccy + '）', 'sim-price', hMktPrice, dp);
     controls.appendChild(shares.fd);
     controls.appendChild(price.fd);
     box.appendChild(controls);
@@ -648,10 +614,12 @@
     box.appendChild(note);
 
     let mode = 'sell';
-    bSell.addEventListener('click', () => { mode = 'sell'; bSell.classList.add('active'); bBuy.classList.remove('active'); shares.inp.value = hShares; compute(); });
-    bBuy.addEventListener('click', () => { mode = 'buy'; bBuy.classList.add('active'); bSell.classList.remove('active'); shares.inp.value = ''; compute(); });
-    shares.inp.addEventListener('input', compute);
-    price.inp.addEventListener('input', compute);
+    let seq = 0;       // stale-response guard (mirrors inst-quickadd.js runLookup)
+    let timer = null;  // debounce handle
+    bSell.addEventListener('click', () => { mode = 'sell'; bSell.classList.add('active'); bBuy.classList.remove('active'); shares.inp.value = hShares; schedule(); });
+    bBuy.addEventListener('click', () => { mode = 'buy'; bBuy.classList.add('active'); bSell.classList.remove('active'); shares.inp.value = ''; schedule(); });
+    shares.inp.addEventListener('input', schedule);
+    price.inp.addEventListener('input', schedule);
 
     function kv(k, v, signCls) {
       const d = el('div', 'kv');
@@ -659,67 +627,87 @@
       d.appendChild(el('span', 'v' + (signCls ? ' ' + signCls : ''), v));
       return d;
     }
+    /* OLD → NEW comparison row — two SERVER-formatted strings joined by an arrow; no math. */
+    function pair(k, oldV, newV) {
+      const d = el('div', 'kv sd-sim-pair');
+      d.appendChild(el('span', 'k', k));
+      const v = el('span', 'v');
+      v.appendChild(el('span', 'sd-old', oldV));
+      v.appendChild(el('span', 'sd-arrow', ' → '));
+      v.appendChild(el('span', 'sd-new', newV));
+      d.appendChild(v);
+      return d;
+    }
 
-    function compute() {
-      result.replaceChildren();
-      note.textContent = '';
-      const qty = Number(shares.inp.value);
-      const px = Number(price.inp.value);
-      if (!qty || !px || qty <= 0 || px <= 0) {
-        note.textContent = '輸入股數與價格後即時試算；費稅依「' + acctZh(h.account_id) + '」費率規則估算。';
+    /* debounce (~300 ms) — same cadence as inst-quickadd.js's lookup debounce. */
+    function schedule() {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(run, 300);
+    }
+
+    /* POST the RAW input strings; the backend owns all fee/tax/position math (C6). */
+    function run() {
+      const qtyRaw = shares.inp.value.trim();
+      const pxRaw = price.inp.value.trim();
+      /* completeness gate is a NUMERIC guard on the raw fields — never money arithmetic. */
+      const qtyNum = Number(qtyRaw);
+      const pxNum = Number(pxRaw);
+      if (!qtyRaw || !pxRaw || !(qtyNum > 0) || !(pxNum > 0)) {
+        result.replaceChildren();
+        note.textContent = '輸入股數與價格後即時試算（後端計算費稅與部位）。';
         return;
       }
-      const ft = feeTax(h, mode, qty, px);
-      const amount = qty * px;
-      /* total reporting-ccy market value for the local 新權重 estimate — Decimal STRING
-         from the shared dashboard payload; Number() ONCE for the local what-if math. */
-      const totalRaw = currentDash && currentDash.kpis && currentDash.kpis.total_market_value;
-      const totalTwd = (totalRaw === null || totalRaw === undefined) ? null : Number(totalRaw);
-      const fxRate = FX_TO_TWD[h.quote_ccy] || 1;
-
-      if (mode === 'sell') {
-        if (qty > hShares) {
-          note.textContent = '⚠ 賣出股數 ' + f.num(qty) + ' 超過持有 ' + f.num(hShares) + ' — 實際寫入時將要求確認（輸入錯誤或放空）。';
-        }
-        const proceeds = amount - ft.fee - ft.tax;
-        const costRemoved = hAdjAvg * qty;
-        const realized = proceeds - costRemoved;
-        const remainShares = Math.max(0, hShares - qty);
-        const remainValue = hMktPrice !== null ? remainShares * hMktPrice : null;
-        result.appendChild(kv('成交金額', f.money(amount, h.quote_ccy) + ' ' + h.quote_ccy));
-        result.appendChild(kv('手續費', f.money(ft.fee, h.quote_ccy)));
-        result.appendChild(kv('稅', f.money(ft.tax, h.quote_ccy)));
-        result.appendChild(kv('淨收款', f.money(proceeds, h.quote_ccy) + ' ' + h.quote_ccy));
-        result.appendChild(kv('調整成本移除', f.money(costRemoved, h.quote_ccy)));
-        result.appendChild(kv('已實現損益', f.signed(realized, h.quote_ccy) + ' ' + h.quote_ccy, f.signClass(realized)));
-        result.appendChild(kv('剩餘股數', f.num(remainShares)));
-        if (remainValue !== null && totalTwd) {
-          const newTotal = totalTwd - (qty * hMktPrice * fxRate) + (proceeds - amount) * fxRate;
-          result.appendChild(kv('剩餘市值', f.money(remainValue, h.quote_ccy) + ' ' + h.quote_ccy));
-          result.appendChild(kv('新權重（約）', f.pct((remainValue * fxRate) / newTotal)));
-        }
-        if (!note.textContent) note.textContent = '費稅規則：' + ft.rule + '。已實現損益以調整均價計算。';
-      } else {
-        const cost = amount + ft.fee + ft.tax;
-        const newShares = hShares + qty;
-        const newOrigTotal = hOrigTotal + cost;
-        const newAdjTotal = hAdjTotal + cost;
-        result.appendChild(kv('成交金額', f.money(amount, h.quote_ccy) + ' ' + h.quote_ccy));
-        result.appendChild(kv('手續費', f.money(ft.fee, h.quote_ccy)));
-        result.appendChild(kv('稅', f.money(ft.tax, h.quote_ccy)));
-        result.appendChild(kv('總成本（含費稅）', f.money(cost, h.quote_ccy) + ' ' + h.quote_ccy));
-        result.appendChild(kv('新持股', f.num(newShares)));
-        result.appendChild(kv('新原始均價', f.price(newOrigTotal / newShares, h.quote_ccy)));
-        result.appendChild(kv('新調整均價', f.price(newAdjTotal / newShares, h.quote_ccy)));
-        if (hMktPrice !== null && totalTwd) {
-          const newValue = newShares * hMktPrice;
-          const newTotal = totalTwd + (qty * hMktPrice * fxRate);
-          result.appendChild(kv('新權重（約）', f.pct((newValue * fxRate) / newTotal)));
-        }
-        note.textContent = '費稅規則：' + ft.rule + '。';
-      }
+      const mySeq = ++seq;
+      note.textContent = '試算中…';  // loading state while the request is in flight
+      window.pdApi.post('/api/whatif', {
+        symbol: h.symbol, side: mode, shares: qtyRaw, price: pxRaw, account_id: h.account_id
+      }).then((r) => {
+        if (mySeq !== seq) return;  // superseded by a newer edit — drop this reply
+        render(r);
+      }).catch(() => {
+        if (mySeq !== seq) return;  // superseded — ignore a stale failure
+        result.replaceChildren();
+        note.textContent = '試算暫不可用';  // never fabricate, never fall back to local math
+      });
     }
-    compute();
+
+    function render(r) {
+      result.replaceChildren();
+      note.textContent = '';
+      /* OLD → NEW pairs (持股 / 原始均價 / 調整均價 / 權重). On a SELL the averages are
+         unchanged, so the backend returns no new_*_avg — new == old is a correct render, not
+         a gap (Senior Review #10); 持股-new is the remaining shares. */
+      const newShares = mode === 'sell' ? r.remaining_shares : r.new_shares;
+      const newOrigAvg = mode === 'sell' ? r.old_original_avg : r.new_original_avg;
+      const newAdjAvg = mode === 'sell' ? r.old_adjusted_avg : r.new_adjusted_avg;
+      result.appendChild(pair('持股', f.num(r.old_shares), f.num(newShares)));
+      result.appendChild(pair('原始均價', f.price(r.old_original_avg, ccy), f.price(newOrigAvg, ccy)));
+      result.appendChild(pair('調整均價', f.price(r.old_adjusted_avg, ccy), f.price(newAdjAvg, ccy)));
+      result.appendChild(pair('權重', f.pct(r.old_weight), f.pct(r.new_weight)));
+
+      /* transaction figures — all SERVER Decimal strings, rendered via f.* (zero arithmetic). */
+      result.appendChild(kv('成交金額', f.money(r.amount, ccy) + ' ' + ccy));
+      result.appendChild(kv('手續費', f.money(r.fee, ccy)));
+      result.appendChild(kv('稅', f.money(r.tax, ccy)));
+      if (mode === 'sell') {
+        result.appendChild(kv('淨收款', f.money(r.proceeds_net, ccy) + ' ' + ccy));
+        result.appendChild(kv('調整成本移除', f.money(r.adjusted_cost_removed, ccy)));
+        result.appendChild(kv('已實現損益', f.signed(r.realized, ccy) + ' ' + ccy, f.signClass(r.realized)));
+        result.appendChild(kv('剩餘股數', f.num(r.remaining_shares)));
+        result.appendChild(kv('剩餘市值', f.money(r.remaining_market_value, ccy) + ' ' + ccy));
+      } else {
+        result.appendChild(kv('總成本（含費稅）', f.money(r.total_cost, ccy) + ' ' + ccy));
+      }
+      /* fee/tax rule summary + oversell honesty, from the backend reply. */
+      const parts = [];
+      if (r.fee_rule_desc) parts.push('費稅規則：' + r.fee_rule_desc);
+      if (mode === 'sell' && r.oversell) {
+        parts.push('⚠ 賣出股數超過持有 — 實際寫入時將要求確認（輸入錯誤或放空）');
+      }
+      note.textContent = parts.join('。');
+    }
+
+    schedule();  // auto-run the initial (sell, full holding) 試算 on open
     sec.appendChild(box);
     return sec;
   }
