@@ -236,6 +236,33 @@ def test_run_reconciles_end_to_end(tmp_path: Path) -> None:
     assert result.pre["engine"]["kpis"]["total_market_value"] is not None
 
 
+def test_run_handles_previous_release_schema(tmp_path: Path) -> None:
+    """A DB produced by the PREVIOUS release lacks this release's additive tables (e.g.
+    ``account_market_rules``) — exactly what the first real prod-copy run hit (2026-07-22).
+    ``run`` must schema-prep the COPY (mirroring bootstrap) before the PRE snapshot."""
+    db = tmp_path / "prev_release.db"
+    _build_legacy_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE account_market_rules")  # simulate the v0.1.21-shaped schema
+    conn.commit()
+    conn.close()
+
+    result = mr.run_reconcile(db, as_of=AS_OF, reporting=Currency.TWD)
+
+    assert result.migrated is True
+    assert result.mismatches == []
+    assert set(result.post["raw"]["accounts"]) == {"moomoo_my", "schwab"}
+    # The input file itself still has the previous-release shape (schema prep ran on the copy).
+    conn = sqlite3.connect(db)
+    try:
+        names = {
+            r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "account_market_rules" not in names
+    finally:
+        conn.close()
+
+
 def test_run_leaves_input_file_untouched(tmp_path: Path) -> None:
     db = tmp_path / "legacy.db"
     _build_legacy_db(db)

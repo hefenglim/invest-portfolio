@@ -117,6 +117,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.data_ingestion.moomoo_merge import migrate_moomoo_accounts
+from portfolio_dash.data_ingestion.schema import create_tables
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.portfolio.twr import twr_index
@@ -555,14 +556,37 @@ def _apply_migration(copy: Path) -> bool:
     return migrated
 
 
+def _prep_schema(copy: Path) -> None:
+    """Bring the COPY's schema up to the current release before the PRE snapshot.
+
+    A DB produced by the PREVIOUS release lacks this release's additive tables/columns
+    (e.g. ``account_market_rules``), and the engine readers assume the boot seam
+    (``create_tables``) has run — exactly as the real app boot does before the merge
+    migration. Mirroring bootstrap on the COPY (schema-only, idempotent) lets the PRE
+    snapshot read a previous-release DB; it touches no account/ledger row the merge or
+    the diff cares about. (Found live on the first prod-copy run, 2026-07-22.)
+    """
+    conn = sqlite3.connect(copy)
+    conn.row_factory = sqlite3.Row
+    try:
+        create_tables(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def run_reconcile(
     db_path: Path, *, as_of: datetime, reporting: Currency
 ) -> ReconcileResult:
-    """Copy → snapshot(pre) → migrate copy → snapshot(post) → diff. Input is never touched."""
+    """Copy → schema-prep → snapshot(pre) → migrate copy → snapshot(post) → diff.
+
+    The input file is never touched; the schema prep runs on the COPY only, mirroring
+    the real boot order (bootstrap_db → merge migration)."""
     with tempfile.TemporaryDirectory(prefix="merge_reconcile_") as tmp:
         copy = Path(tmp) / "copy.db"
         _copy_db_files(db_path, copy)
         _consolidate_wal(copy)
+        _prep_schema(copy)
         pre = snapshot_db(copy, as_of=as_of, reporting=reporting)
         migrated = _apply_migration(copy)
         post = snapshot_db(copy, as_of=as_of, reporting=reporting)
