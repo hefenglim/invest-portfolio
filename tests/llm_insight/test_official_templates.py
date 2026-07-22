@@ -10,8 +10,8 @@ reference strategies BY NAME, so a version bump needs no preset change).
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v10() -> None:
-    assert ot.LIBRARY_VERSION == "official-v10 (2026-07-21)"
+def test_library_version_is_official_v11() -> None:
+    assert ot.LIBRARY_VERSION == "official-v11 (2026-07-22)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -31,20 +31,25 @@ def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
     assert body not in str(wire.get("system_prompt", "")) + str(wire.get("strategies", ""))
 
 
-def test_ai_input_prompt_v4_pins_local_exchange_code_rule() -> None:
+def test_ai_input_prompt_v5_pins_local_exchange_code_rule() -> None:
     # FU-D41 (owner bug): 「前天聯電買入1張」 on a tw_broker row parsed to the US ADR
     # ticker "UMC" → dead lookup. The prompt must carry the explicit LOCAL-exchange-code
     # rule with the numeric-code examples and the ADR counter-example. v4 (W1 batch-A) adds
-    # the parity MY (Bursa) guidance (pinned by test_prompts_v2_carry_my_bursa_guidance).
-    assert ot.AI_INPUT_PROMPT_VERSION == "v4"
+    # the parity MY (Bursa) guidance (pinned by test_prompts_v2_carry_my_bursa_guidance);
+    # v5 (W3 batch-B) adds the merged multi-market clause + optional ``market`` output field.
+    assert ot.AI_INPUT_PROMPT_VERSION == "v5"
     body = ot.AI_INPUT_PROMPT_BODY
     assert "LOCAL exchange code" in body
     assert "聯電⇒2303" in body and "台積電⇒2330" in body and "鴻海⇒2317" in body
     assert "UMC" in body and "TSM" in body        # the never-an-ADR counter-example
     assert "Bursa" in body                        # MY accounts take the Bursa code
+    # v5 merged multi-market guidance + the optional market output field in the schema.
+    assert "merged account" in body and "STOCK'S market" in body
+    assert '"market"}}]}}' in body                # schema carries the optional market field
+    assert "market\nfield to that market's value (US/TW/MY)" in body
     # the rule text must survive .format (no stray placeholders were introduced).
-    rendered = body.format(accounts="a=b (TWD)", today="2026-07-19", text="x")
-    assert "聯電⇒2303" in rendered
+    rendered = body.format(accounts="a=b (USD:US＋MYR:MY)", today="2026-07-19", text="x")
+    assert "聯電⇒2303" in rendered and "STOCK'S market" in rendered
 
 
 def test_ai_instrument_resolve_prompt_is_registered_and_versioned() -> None:
@@ -122,7 +127,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v25_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v10 (2026-07-21)"
+    assert wire["library_version"] == "official-v11 (2026-07-22)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

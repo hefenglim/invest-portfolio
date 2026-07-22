@@ -44,15 +44,17 @@ def run(ev: C.Evidence, api: C.Api, ui):
                  [], cash_errs, "phase2")
 
     # ---- cash flows (API; UI blocked when the cash page has an uncaught JS error) ----
+    # Batch B: both MYR deposits + the MYR->USD conversion fund the SAME merged dual-market
+    # moomoo_my (its two pools: USD from the conversion, MYR from deposits + MY-market trades).
     op.cash_move("tw_broker", "deposit", "TWD", "2026-01-05", 2000000)
     op.cash_move("schwab", "deposit", "USD", "2026-01-05", 100000)
-    op.cash_move("moomoo_my_us", "deposit", "MYR", "2026-01-05", 100000)
-    op.cash_move("moomoo_my_my", "deposit", "MYR", "2026-01-05", 50000)
-    op.fx("moomoo_my_us", "2026-01-07", "MYR", 45000, "USD", 10000)
+    op.cash_move("moomoo_my", "deposit", "MYR", "2026-01-05", 100000)
+    op.cash_move("moomoo_my", "deposit", "MYR", "2026-01-05", 50000)
+    op.fx("moomoo_my", "2026-01-07", "MYR", 45000, "USD", 10000)
     op.cash_move("tw_broker", "withdraw", "TWD", "2026-06-25", 50000)
+    # moomoo_my now contributes exactly TWO pools (USD + MYR) instead of the legacy three.
     touched_pools |= {("tw_broker", "TWD"), ("schwab", "USD"),
-                      ("moomoo_my_us", "MYR"), ("moomoo_my_us", "USD"),
-                      ("moomoo_my_my", "MYR")}
+                      ("moomoo_my", "MYR"), ("moomoo_my", "USD")}
 
     # ---- buys (UI-first, mix of API) ----
     op.trade("tw_broker", "3008", "buy", "2026-01-10", 5, 600, via_ui=True)      # min-fee odd lot
@@ -62,7 +64,7 @@ def run(ev: C.Evidence, api: C.Api, ui):
     op.trade("schwab", "TSLA", "buy", "2026-03-01", 5, 250, via_ui=True)
     op.trade("schwab", "TSLA", "sell", "2026-03-20", 5, 260, via_ui=True)         # sell-all
     op.trade("schwab", "TSLA", "buy", "2026-04-01", 3, 240)                       # rebuy (API)
-    op.trade("moomoo_my_my", "5225", "buy", "2026-01-30", 1000, "2.50", via_ui=True)
+    op.trade("moomoo_my", "5225", "buy", "2026-01-30", 1000, "2.50", via_ui=True)
 
     # ---- mid checkpoint ----
     mid = snapshot(api)
@@ -89,7 +91,7 @@ def run(ev: C.Evidence, api: C.Api, ui):
     # ---- dividends (UI form; all three account models) ----
     op.dividend_ui("tw_broker", "tw", "3008", "2026-06-05", 3000)                 # TW cash
     op.dividend_ui("schwab", "drip", "MSFT", "2026-06-06", 100, reinvest_price=400)  # US DRIP
-    op.dividend_ui("moomoo_my_my", "net", "5225", "2026-06-07", 200)              # MY net
+    op.dividend_ui("moomoo_my", "net", "5225", "2026-06-07", 200)              # MY net
 
     # ---- dividend-inbox refresh + confirm (UI; real provider scan, best-effort) ----
     try:

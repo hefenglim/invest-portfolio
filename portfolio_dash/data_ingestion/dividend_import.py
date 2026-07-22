@@ -9,8 +9,19 @@ from decimal import Decimal, InvalidOperation
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
+from portfolio_dash.data_ingestion.rules_binding import dividend_model_for
 from portfolio_dash.data_ingestion.store import insert_dividend
-from portfolio_dash.data_ingestion.validate import Issue
+from portfolio_dash.data_ingestion.validate import Issue, alias_import_account
+
+# Batch B (F01): the CSV `type` values each STORED (account, market) dividend model accepts.
+# A merged dual-market account would otherwise mis-book one market's dividends (MY cash as
+# DRIP with a fabricated 30% withholding, or a US dividend missing withholding) — corrupt
+# money of record. Dormant for a single-market account whose only model matches its rows.
+_MODEL_ALLOWED_TYPES: dict[str, set[str]] = {
+    "cash_cost_reduction": {"CASH", "STOCK"},  # TW: cash cost-reduction (+ optional 配股)
+    "drip_us": {"DRIP"},                        # US Schwab/Moomoo: 30% withholding + reinvest
+    "cash": {"NET"},                            # MY single-tier: net received
+}
 
 # Canonical CSV column order for the dividends import — SINGLE SOURCE for the downloadable
 # template header (see data_ingestion.import_templates). Required: account, symbol, date, type,
@@ -51,7 +62,8 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
 
         # --- parse required fields ---
         try:
-            account_id = raw["account"]
+            # Legacy Moomoo account id -> moomoo_my (+ soft info issue appended below).
+            account_id, alias_issue = alias_import_account(raw["account"])
             symbol = raw["symbol"]
             div_date = date.fromisoformat(raw["date"])
             # Normalize + validate type (2026-07-03): the raw value used to be
@@ -72,6 +84,9 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
             )
             continue
 
+        if alias_issue is not None:
+            issues.append(alias_issue)
+
         # --- parse optional numeric overrides ---
         withholding_override = _opt_decimal(raw, "withholding")
         net_override = _opt_decimal(raw, "net")
@@ -79,18 +94,22 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
         reinvest_price_override = _opt_decimal(raw, "reinvest_price")
 
         # --- validate account exists (hard issue) ---
-        if (
+        account_known = (
             conn.execute(
                 "SELECT 1 FROM accounts WHERE account_id=?", (account_id,)
             ).fetchone()
-            is None
-        ):
+            is not None
+        )
+        if not account_known:
             issues.append(
                 Issue(kind="unknown_account", message=f"unknown account {account_id!r}")
             )
 
-        # --- warn if symbol cannot be resolved (soft — needs confirm) ---
-        if resolve(conn, symbol).status is ResolutionStatus.NEEDS_AI:
+        # --- resolve the symbol once: soft unresolved warning + type/market coherence ---
+        res = resolve(conn, symbol)
+        if res.status is ResolutionStatus.NEEDS_AI:
+            # Unregistered symbol -> soft warning (existing handling); no coherence check
+            # (its market is unknown until it is registered).
             issues.append(
                 Issue(
                     kind="symbol_unresolved",
@@ -98,6 +117,21 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
                     message=f"unresolved {symbol}",
                 )
             )
+        elif res.instrument is not None and account_known:
+            # Batch B (F01): the row's `type` must match the dividend model bound to
+            # (account, the RESOLVED instrument's market). Mismatch -> soft needs_confirm
+            # (importable only after explicit confirm). Only reachable for a KNOWN account +
+            # REGISTERED symbol; a single-market account's coherent rows never trip it.
+            model = dividend_model_for(conn, account_id, res.instrument.market)
+            allowed = _MODEL_ALLOWED_TYPES.get(model)
+            if allowed is not None and div_type not in allowed:
+                issues.append(
+                    Issue(
+                        kind="dividend_type_mismatch",
+                        needs_confirm=True,
+                        message="股利類型與該市場模型不符，請確認",
+                    )
+                )
 
         # --- apply dividend model to compute withholding / net / reinvest_shares ---
         amounts = apply_dividend_model(

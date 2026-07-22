@@ -1,10 +1,13 @@
 """Shared API wire mappers: enum case, Issue shape, fee-rule + dividend-model serialization."""
 
+import sqlite3
+from collections.abc import Mapping
 from typing import Any
 
-from portfolio_dash.data_ingestion.config_seed import FeeRuleSet
+from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.validate import Issue
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.models.assets import MarketRule
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
 
@@ -41,6 +44,32 @@ def issue_wire(issue: Issue) -> dict[str, Any]:
 def div_model_wire(dividend_model: str) -> str:
     """Map the stored accounts.dividend_model to the frontend div_model (tw/drip/net)."""
     return _DIV_MODEL.get(dividend_model, dividend_model)
+
+
+def account_markets_wire(
+    market_rules: Mapping[str, MarketRule], conn: sqlite3.Connection
+) -> dict[str, dict[str, Any]]:
+    """Per-market rule bundle for the Batch-B merged-account wire (ADDITIVE).
+
+    Keyed by market VALUE ("US"/"TW"/"MY"); each entry carries the SAME ``fee_rules``
+    shape (:func:`fee_rules_wire`) and ``div_model`` vocabulary (:func:`div_model_wire`)
+    as the legacy per-account scalar fields, resolved per (account, market) from the
+    account's ``market_rules`` bindings (``store.list_accounts`` populates them from the
+    ``account_market_rules`` table).
+
+    A SINGLE-market account yields exactly ONE entry mirroring its legacy scalar fields
+    (the binding mirrors the scalar today), so any consumer that ignores ``markets`` — and
+    every current account — sees byte-identical behaviour. A future merged dual-market
+    account yields one entry per bound market so the frontend can book each market's
+    dividends under the right model (F01) and show the right fee schedule.
+    """
+    return {
+        market_val: {
+            "fee_rules": fee_rules_wire(get_fee_rule_set(rule.fee_rule_set, conn)),
+            "div_model": div_model_wire(rule.dividend_model),
+        }
+        for market_val, rule in market_rules.items()
+    }
 
 
 def _tw_label(r: FeeRuleSet) -> str:

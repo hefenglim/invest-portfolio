@@ -101,7 +101,7 @@ def _seed_golden(conn: sqlite3.Connection) -> None:
 def _seed_dual_account(conn: sqlite3.Connection) -> None:
     """A portfolio where ONE symbol (AAPL) is genuinely held in TWO accounts.
 
-    AAPL: schwab 30 sh @100 + moomoo_my_us 10 sh @110 (both US, USD) — the cross-account
+    AAPL: schwab 30 sh @100 + moomoo_my 10 sh @110 (both US, USD) — the cross-account
     duplicate the combined-aware rebalance engine must treat as a single position. 2330 in
     tw_broker (1000 sh) gives a TW single-account symbol alongside it. Current: AAPL 120 USD,
     2330 600 TWD; USD/TWD 33. Used by the dual-account rebalance flow/contract tests — kept
@@ -118,7 +118,7 @@ def _seed_dual_account(conn: sqlite3.Connection) -> None:
     insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
                        quantity=Decimal("30"), price=Decimal("100"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
-    insert_transaction(conn, account_id="moomoo_my_us", symbol="AAPL", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
                        quantity=Decimal("10"), price=Decimal("110"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 12))
     upsert_prices(conn, [

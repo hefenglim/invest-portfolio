@@ -2,13 +2,13 @@
 
 architecture.md: ``pricing`` and ``data_ingestion`` are sibling lower layers; pricing
 must NOT import data_ingestion (a cross-peer layering violation). ``datasources_store``
-previously imported ``data_ingestion.config_seed.DEFAULT_ACCOUNTS``; it now iterates its
-own local ``_ACCOUNT_MARKET`` map. These tests lock the boundary and pin the per-account
-fallback-chain seeding to its pre-change values (byte-equivalent regression guard).
+does not import ``data_ingestion.config_seed.DEFAULT_ACCOUNTS``; it owns its per-market
+quote routing outright. These tests lock that boundary and pin the current seeding
+reality: quote routing is per-MARKET, and the legacy per-account ``data_source_fallbacks``
+table is retained but never seeded (zero rows on a fresh DB).
 """
 
 import ast
-import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,15 +17,6 @@ import pytest
 
 import portfolio_dash.pricing as pricing_pkg
 from portfolio_dash.pricing import datasources_store as store
-
-# Per-account fallback chains as they were seeded BEFORE the #2 refactor. Iterating
-# the local _ACCOUNT_MARKET must reproduce these exactly (no behavior change).
-_EXPECTED_CHAINS: dict[str, list[str]] = {
-    "tw_broker": ["twse", "tpex", "yfinance", "twstock"],
-    "schwab": ["yfinance", "stockprices_dev"],
-    "moomoo_my_us": ["yfinance", "stockprices_dev"],
-    "moomoo_my_my": ["yfinance", "klsescreener", "malaysiastock"],
-}
 
 
 def _pricing_sources() -> list[Path]:
@@ -62,25 +53,18 @@ def ds_conn() -> Iterator[sqlite3.Connection]:
     c.close()
 
 
-def test_seed_writes_expected_per_account_chains(ds_conn: sqlite3.Connection) -> None:
-    """seed() persists the same per-account fallback chains as before the refactor."""
+def test_seed_writes_no_per_account_fallback_rows(ds_conn: sqlite3.Connection) -> None:
+    """seed() no longer seeds the legacy per-account fallback table (quote routing is
+    per-MARKET). A freshly seeded DB therefore carries zero ``data_source_fallbacks`` rows."""
     store.seed(ds_conn)
-    rows = ds_conn.execute(
-        "SELECT account_id, chain FROM data_source_fallbacks"
-    ).fetchall()
-    seeded = {r["account_id"]: json.loads(r["chain"]) for r in rows}
-    assert seeded == _EXPECTED_CHAINS
+    n = ds_conn.execute("SELECT COUNT(*) AS n FROM data_source_fallbacks").fetchone()["n"]
+    assert n == 0
 
 
-def test_account_chains_from_seeded_table(ds_conn: sqlite3.Connection) -> None:
-    """account_chains() reads the persisted chains unchanged after seeding."""
-    store.seed(ds_conn)
-    assert store.account_chains(ds_conn) == _EXPECTED_CHAINS
-
-
-def test_account_chains_empty_table_falls_back_to_market_defaults(
-    ds_conn: sqlite3.Connection,
-) -> None:
-    """With no rows persisted, account_chains() returns the same hardcoded defaults."""
-    # Tables created but not seeded -> empty data_source_fallbacks.
-    assert store.account_chains(ds_conn) == _EXPECTED_CHAINS
+def test_fallbacks_table_still_created(ds_conn: sqlite3.Connection) -> None:
+    """The legacy table is retained (deferred debt) even though it is never seeded/read,
+    so the db-stats registry entry keeps resolving and existing rows are never dropped."""
+    row = ds_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='data_source_fallbacks'"
+    ).fetchone()
+    assert row is not None

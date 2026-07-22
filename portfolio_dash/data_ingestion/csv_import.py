@@ -25,8 +25,14 @@ from portfolio_dash.data_ingestion.resolve import (
     resolve,
     suggestion_tail,
 )
+from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
 from portfolio_dash.data_ingestion.store import insert_transaction
-from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
+from portfolio_dash.data_ingestion.validate import (
+    Issue,
+    TxnInput,
+    alias_import_account,
+    validate_transaction,
+)
 from portfolio_dash.shared.models.enums import Side
 
 # Canonical CSV column order for the transactions import — the SINGLE SOURCE the downloadable
@@ -170,7 +176,14 @@ def txn_preview_row(
         # finding 2026-07-15): a registered instrument's is_etf wins; the input
         # flag only covers unregistered symbols (e.g. an AI draft pre-registration).
         is_etf = res.instrument.is_etf if res.instrument is not None else inp.is_etf
-        rules = get_fee_rule_set(acc["fee_rule_set"], conn)
+        # Market-aware fee rule (Batch B): the resolved instrument selects the rule set bound
+        # to (account, its market); an unregistered symbol (res.instrument None) keeps the
+        # account scalar. Snapshot semantics unchanged (binding mirrors the scalar today).
+        rule_name = (
+            fee_rule_for(conn, inp.account_id, res.instrument.market)
+            if res.instrument is not None else acc["fee_rule_set"]
+        )
+        rules = get_fee_rule_set(rule_name, conn)
         # FE-D2: Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure).
         stamp_fx: Decimal | None = None
         if rules.has_us_stamp:
@@ -249,8 +262,10 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
 
         # --- parse: build TxnInput from CSV columns ---
         try:
+            # Legacy Moomoo account id -> moomoo_my (+ soft info issue appended below).
+            account_id, alias_issue = alias_import_account(raw["account"])
             inp = TxnInput(
-                account_id=raw["account"],
+                account_id=account_id,
                 symbol=raw["symbol"],
                 side=Side(raw["side"].upper()),
                 quantity=Decimal(raw["shares"]),
@@ -271,7 +286,10 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
             )
             continue
 
-        rows.append(txn_preview_row(conn, idx, raw, inp))
+        row = txn_preview_row(conn, idx, raw, inp)
+        if alias_issue is not None:
+            row.issues.append(alias_issue)
+        rows.append(row)
 
     return ImportPreview(rows=rows)
 

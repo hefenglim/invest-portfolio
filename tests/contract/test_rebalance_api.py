@@ -62,7 +62,7 @@ def test_rebalance_negative_ratio_400(api_client: TestClient) -> None:
 def test_rebalance_dual_account_one_row_with_accounts_and_legs(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
-    """A dual-account symbol (AAPL in schwab + moomoo_my_us) is ONE row carrying the
+    """A dual-account symbol (AAPL in schwab + moomoo_my) is ONE row carrying the
     `accounts` constituents + `legs`; money stays Decimal strings; the request is unchanged."""
     client = dashboard_client_factory(_seed_dual_account)
     # Same wire shape as before: {"targets": {symbol: ratio-string}} — no new request fields.
@@ -81,7 +81,7 @@ def test_rebalance_dual_account_one_row_with_accounts_and_legs(
     assert aapl["side"] == "buy"  # combined ~0.209 -> 0.40
     # accounts: both constituents, most-shares first, shares as STRINGS
     accts = aapl["accounts"]
-    assert [a["account_id"] for a in accts] == ["schwab", "moomoo_my_us"]
+    assert [a["account_id"] for a in accts] == ["schwab", "moomoo_my"]
     assert all(isinstance(a["shares"], str) for a in accts)
     # legs: one buy leg to the most-shares account; money as STRINGS + odd_lot bool
     legs = aapl["legs"]

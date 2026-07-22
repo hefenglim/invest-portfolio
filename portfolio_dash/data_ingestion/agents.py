@@ -9,16 +9,22 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.csv_import import txn_preview_row
-from portfolio_dash.data_ingestion.markets import account_market
+from portfolio_dash.data_ingestion.markets import CCY_MARKET
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
+from portfolio_dash.data_ingestion.rules_binding import allowed_markets
 from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput
 from portfolio_dash.llm_insight.official_templates import AI_INPUT_PROMPT_BODY
+from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm import LLMError, complete_structured
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.symbol_format import matches_market_format
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
+
+# Market VALUE -> that market's quote ccy (inverse of markets.CCY_MARKET). Used to render a
+# MERGED account's per-market catalog line (id=name (USD:US＋MYR:MY)) for the AI parse prompt.
+_MARKET_CCY = {m.value: ccy for ccy, m in CCY_MARKET.items()}
 
 
 class AiDraft(BaseModel):
@@ -33,6 +39,11 @@ class AiDraft(BaseModel):
     daytrade: bool = False
     is_etf: bool = False
     note: str | None = None
+    # Batch B (F15): optional target market ("US"/"TW"/"MY") naming the stock's exchange, for a
+    # MERGED (multi-market) account where the ticker alone is ambiguous. Advisory — it seeds the
+    # quick-add dialog's market default in the preview and steers the per-row format check; the
+    # real provider lookup at registration stays the authority. Blank on single-market accounts.
+    market: str = ""
 
 
 class AiDraftList(BaseModel):
@@ -101,24 +112,51 @@ _PROMPT = AI_INPUT_PROMPT_BODY
 # lookup at registration remains the authority.
 
 
+def _draft_market(value: str) -> Market | None:
+    """Parse a draft's optional market string ('US'/'TW'/'MY', any case) -> Market or None."""
+    v = (value or "").strip().upper()
+    if not v:
+        return None
+    try:
+        return Market(v)
+    except ValueError:
+        return None
+
+
 def _append_format_warning(
     conn: sqlite3.Connection, row: PreviewRow, draft: AiDraft
 ) -> None:
     """Append the FU-D41 soft warning when the row's EFFECTIVE symbol shape mismatches
-    the account's market (e.g. non-numeric on a TW account). The check runs on the
+    the account's market(s) (e.g. non-numeric on a TW account). The check runs on the
     resolved payload symbol (falling back to the draft's): an EXACT hit rewrites it to the
     registered symbol, while an unregistered symbol keeps its raw form and already carries a
     HARD ``symbol_unresolved`` issue (resolution is exact-only — R6-A — so a near-miss code
     is never silently rewritten here). Skipped when the row already carries the HARD
     ``market_mismatch`` coherence issue (no double flag), when the account is unknown, or when
-    the symbol is blank (other issues cover those)."""
+    the symbol is blank (other issues cover those).
+
+    Batch B (F15) — MERGED accounts: the check is over the account's ALLOWED markets, not one
+    settlement-ccy market. When the draft names an explicit (allowed) market, the shape is
+    checked against THAT market only; otherwise the warning fires only when the symbol fits NO
+    allowed market's pattern. A single-market account has exactly one allowed market, so this
+    reduces to the prior behaviour byte-for-byte."""
     if any(i.kind == "market_mismatch" for i in row.issues):
         return
-    market = account_market(conn, draft.account_id)
-    if market is None:
-        return
     sym = (row.payload.get("symbol") or draft.symbol).strip().upper()
-    if not sym or matches_market_format(sym, market):
+    if not sym:
+        return
+    try:
+        markets = allowed_markets(conn, draft.account_id)
+    except (KeyError, ValueError):  # unknown account / unmapped ccy — other issues cover it
+        return
+    if not markets:
+        return
+    explicit = _draft_market(draft.market)
+    if explicit is not None and explicit in markets:
+        mismatch = not matches_market_format(sym, explicit)  # explicit market -> that pattern
+    else:
+        mismatch = not any(matches_market_format(sym, m) for m in markets)  # fits none allowed
+    if not mismatch:
         return
     row.issues.append(
         Issue(
@@ -134,11 +172,20 @@ def _accounts_catalog(conn: sqlite3.Connection) -> str:
 
     Without this the model had to GUESS ids ("嘉信" → a made-up ``charles_schwab``)
     and every non-example account failed validation with "unknown account".
+
+    Batch B (F15): a MERGED (multi-market) account instead renders each bound market with its
+    quote ccy — ``id=name (USD:US＋MYR:MY)`` — so the model picks the ticker format of the
+    STOCK's market, not one settlement ccy. Single-market accounts keep the ``(ccy)`` form.
     """
-    return "; ".join(
-        f"{a.account_id}={a.name} ({a.settlement_ccy.value})"
-        for a in list_accounts(conn)
-    )
+    lines: list[str] = []
+    for a in list_accounts(conn):
+        markets = sorted(a.market_rules)
+        if len(markets) > 1:
+            bundle = "＋".join(f"{_MARKET_CCY.get(mv, mv)}:{mv}" for mv in markets)
+            lines.append(f"{a.account_id}={a.name} ({bundle})")
+        else:
+            lines.append(f"{a.account_id}={a.name} ({a.settlement_ccy.value})")
+    return "; ".join(lines)
 
 
 def ai_agents_input(
@@ -224,6 +271,11 @@ def ai_agents_input(
             note=d.note,
         )
         row = txn_preview_row(conn, idx, {"text": text}, inp)
+        if d.market:
+            # Batch B (F15): carry the AI-suggested market to the frontend preview row so the
+            # quick-add dialog can default its market select. PREVIEW-ONLY — the committed CSV
+            # (_drafts_to_csv) is unchanged, so the C7 row<->line commit mapping is preserved.
+            row.payload["market"] = d.market
         _append_format_warning(conn, row, d)  # FU-D41 soft check — warns, never rewrites
         rows.append(row)
 

@@ -251,6 +251,70 @@ def test_xirr_flow_predates_fx_history(conn: sqlite3.Connection) -> None:
     assert data.trend.available is False     # same missing flow-date FX
 
 
+def test_fx_exposure_counts_only_settlement_ccy_holdings(
+    conn: sqlite3.Connection,
+) -> None:
+    """FX exposure per account sums ONLY holdings quoted in that account's settlement
+    (foreign) currency. Bug-proofing for the Moomoo dual-market merge: an account with
+    settlement USD / funding MYR may hold BOTH USD-quoted (US) and MYR-quoted (MY)
+    instruments; the USD exposure figure must count only the USD holding, never fold the
+    MYR-quoted value in (that would mis-sum two currencies into one number).
+
+    moomoo_my is settlement USD / funding MYR. Booking a MYR-quoted MY stock into it
+    alongside a USD-quoted US stock reproduces the post-merge dual-market shape directly.
+    schwab (settlement USD, all-USD holdings) confirms a single-market account is unchanged.
+    """
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Apple"))
+    upsert_instrument(conn, Instrument(symbol="MSFT", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Microsoft"))
+    upsert_instrument(conn, Instrument(symbol="1155", market=Market.MY, quote_ccy=MYR,
+                                       sector="Financials", name="Maybank"))
+    # moomoo_my (settlement USD / funding MYR): one USD holding + one MYR holding.
+    insert_transaction(conn, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    insert_transaction(conn, account_id="moomoo_my", symbol="1155", side=Side.BUY,
+                       quantity=Decimal("100"), price=Decimal("9"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 12))
+    # MYR->USD funding conversion establishes the USD pool acquisition rate (4.4 MYR/USD).
+    insert_fx_conversion(conn, account_id="moomoo_my", date=date(2026, 1, 8),
+                         from_ccy=MYR, from_amount=Decimal("4400"),
+                         to_ccy=USD, to_amount=Decimal("1000"))
+    # schwab (settlement USD / funding TWD): single-market, all-USD holding.
+    insert_transaction(conn, account_id="schwab", symbol="MSFT", side=Side.BUY,
+                       quantity=Decimal("5"), price=Decimal("200"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    upsert_prices(conn, [
+        PriceRow(instrument="AAPL", market=Market.US, as_of=date(2026, 6, 9),
+                 close=Decimal("120"), source="test"),   # 10 * 120 = 1,200 USD
+        PriceRow(instrument="MSFT", market=Market.US, as_of=date(2026, 6, 9),
+                 close=Decimal("250"), source="test"),   # 5 * 250 = 1,250 USD
+        PriceRow(instrument="1155", market=Market.MY, as_of=date(2026, 6, 9),
+                 close=Decimal("9"), source="test"),     # 100 * 9 = 900 MYR
+    ], fetched_at=NOW)
+    upsert_fx(conn, [
+        FxRow(base=MYR, quote=TWD, as_of=date(2026, 6, 9), rate=Decimal("7"),
+              source="test"),   # moomoo_my home(MYR)->reporting(TWD) rollup rate
+        FxRow(base=USD, quote=MYR, as_of=date(2026, 6, 9), rate=Decimal("4.5"),
+              source="test"),   # USD->MYR current spot (foreign->home)
+        FxRow(base=USD, quote=TWD, as_of=date(2026, 6, 9), rate=Decimal("32"),
+              source="test"),
+    ], fetched_at=NOW)
+
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    assert data.fx is not None
+    # Dual-market account: ONLY the USD holding (AAPL: 1,200 USD) counts as USD exposure.
+    # The MYR-quoted 1155 (900 MYR) is excluded; the buggy sum would have been 2,100.
+    moomoo = data.fx.by_account["moomoo_my"]
+    assert moomoo.foreign_ccy == USD
+    assert moomoo.foreign_stock_value == Decimal("1200")
+    # Single-market account is unchanged: all-USD holding sums exactly to its own value.
+    schwab = data.fx.by_account["schwab"]
+    assert schwab.foreign_ccy == USD
+    assert schwab.foreign_stock_value == Decimal("1250")
+
+
 def test_dividend_ttm_net_excludes_events_older_than_365_days(
     conn: sqlite3.Connection,
 ) -> None:

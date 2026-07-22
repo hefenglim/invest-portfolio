@@ -180,19 +180,19 @@ def test_fx_drift_fires() -> None:
 def test_fx_drift_uses_account_display_name() -> None:
     # FH2 fix: the bell shows the accounts table's display name, not the raw id.
     acct = AccountFXResult(
-        account_id="moomoo_my_us", home_ccy=Currency.MYR, foreign_ccy=Currency.USD,
+        account_id="moomoo_my", home_ccy=Currency.MYR, foreign_ccy=Currency.USD,
         avg_rate=Decimal("4.0"), current_spot=Decimal("4.6"),
         foreign_cash=Decimal("0"), foreign_stock_value=Decimal("0"),
         realized_fx=None, unrealized_fx_stocks=None, unrealized_fx_cash=None)
-    fx = FXSummary(by_account={"moomoo_my_us": acct}, reporting_currency=Currency.TWD,
+    fx = FXSummary(by_account={"moomoo_my": acct}, reporting_currency=Currency.TWD,
                    reporting_realized_fx=Decimal("0"), reporting_unrealized_fx=Decimal("0"))
     data = _minimal_data(fx=fx, calendar=[])
     alerts = compute_alerts_from(
         data, DEFAULT_RULES, quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
-        account_names={"moomoo_my_us": "Moomoo MY (US)"})
-    fd = next(a for a in alerts if a.id == "fx_drift:moomoo_my_us")
+        account_names={"moomoo_my": "Moomoo MY (US)"})
+    fd = next(a for a in alerts if a.id == "fx_drift:moomoo_my")
     assert "Moomoo MY (US)" in fd.title
-    assert "moomoo_my_us" not in fd.title
+    assert "moomoo_my" not in fd.title
 
 
 def test_exdiv_upcoming_fires() -> None:

@@ -7,6 +7,18 @@ from pydantic import BaseModel
 from portfolio_dash.shared.enums import Currency, Market
 
 
+class MarketRule(BaseModel):
+    """Fee + dividend rule set bound to one (account, market) pair.
+
+    Carried on :class:`Account` so the PURE compute layer can read per-market rules
+    WITHOUT a DB connection (architecture rule: ``portfolio/`` is pure). Additive; the
+    account-level scalar fields remain the fallback when a market has no binding.
+    """
+
+    fee_rule_set: str
+    dividend_model: str
+
+
 class Account(BaseModel):
     """A broker account (first-class entity; fee/dividend rules bind here)."""
 
@@ -16,6 +28,10 @@ class Account(BaseModel):
     settlement_ccy: Currency
     funding_ccy: Currency
     dividend_model: str  # DB truth; per-account dividend rule (e.g. drip_us, cash)
+    # (account, market) rule bindings, keyed by market VALUE ("US"/"TW"/"MY"). Populated
+    # from account_market_rules by store.list_accounts; empty {} for readers that don't
+    # carry it — the scalar fields above stay the fallback. NOTHING consumes this yet.
+    market_rules: dict[str, MarketRule] = {}
 
 
 class Instrument(BaseModel):

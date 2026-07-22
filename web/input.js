@@ -269,12 +269,46 @@
     }
   }
 
-  /* Market inferred from the selected account's settlement ccy — mirrors the backend
-     auto-register (data_ingestion.markets.account_market): TWD→TW, USD→US, MYR→MY. */
+  /* Market resolution for the input forms (Batch B — merged multi-market accounts).
+     - A REGISTERED symbol's market is AUTHORITATIVE: `inst(sym).market` from the context
+       instruments list. F06 (per-row ccy) and the dividend model follow this.
+     - The account's bound markets come from `a.markets` (the per-market /input/context wire):
+       a single-market account has exactly one; a MERGED account has several with no single
+       settlement-ccy answer, so the quick-add dialog's market select is the resolution path.
+     `_CCY_MARKET` remains ONLY as a legacy fallback for a stale ctx lacking `a.markets`. */
   const _CCY_MARKET = { TWD: 'TW', USD: 'US', MYR: 'MY' };
-  function accountMarket(accId) {
+  function acctMarkets(a) {
+    return (a && a.markets && typeof a.markets === 'object') ? Object.keys(a.markets) : [];
+  }
+  function isMultiMarket(a) { return acctMarkets(a).length > 1; }
+  function symbolMarket(sym) { const it = inst(sym); return it ? it.market : null; }
+  /* Default market for a quick-add dialog opened on an UNREGISTERED symbol under `accId`.
+     Single-market account -> its one bound market (identical to the old settlement-ccy
+     inference). Merged account -> the `hint` market when it is bound, else the first bound
+     one (the user can change it in the dialog). Legacy fallback when `a.markets` is absent. */
+  function accountMarket(accId, hint) {
     const a = acc(accId);
+    const mk = acctMarkets(a);
+    if (mk.length > 1) return (hint && mk.indexOf(hint) >= 0) ? hint : mk[0];
+    if (mk.length === 1) return mk[0];
     return a ? (_CCY_MARKET[a.settlement_ccy || a.ccy] || 'TW') : 'TW';
+  }
+  /* Dividend MODEL (tw/drip/net) for the current dividend entry.
+     Single-market account -> its one model (byte-identical to the old `a.div_model`).
+     Merged account -> the model bound to the ENTERED SYMBOL's market (a.markets[market]).
+     Returns null when a merged account has no symbol resolvable to a bound market yet
+     (blank / unregistered) — the caller then prompts to pick/register first (never guesses). */
+  function divModelFor(a, sym) {
+    if (!a) return 'tw';
+    const mk = (a.markets && typeof a.markets === 'object') ? a.markets : null;
+    const keys = mk ? Object.keys(mk) : [];
+    if (keys.length > 1) {
+      const it = inst(sym);
+      if (!it || !mk[it.market]) return null;   // symbol not yet resolved to a bound market
+      return mk[it.market].div_model;
+    }
+    if (keys.length === 1) return mk[keys[0]].div_model;
+    return a.div_model || 'tw';   // legacy fallback (markets absent from a stale ctx)
   }
 
   /* FU-D23: open the shared quick-add dialog for the manual pane's unregistered symbol.
@@ -365,8 +399,11 @@
     }
     mPreview = resp;
     /* Server amounts are Decimal STRINGS -> reflect computed fee/tax into the
-       (read-only) input fields via fmt; when overridden, the user's own value stays. */
-    const ccy = a.ccy;
+       (read-only) input fields via fmt; when overridden, the user's own value stays.
+       F06: fee/tax are in the RESOLVED instrument's quote ccy (MYR for an MY draft on a
+       merged account); fall back to the account ccy when unresolved. Single-market: same. */
+    const it = inst(sym);
+    const ccy = (it && it.ccy) || a.ccy;
     if (!m.feeOverride) $('#m-fee').value = resp.fee !== undefined ? f.money(resp.fee, ccy) : '0';
     if (!m.taxOverride) $('#m-tax').value = resp.tax !== undefined ? f.money(resp.tax, ccy) : '0';
     if (resp.fee_rule_label) $('#m-fee-rule').textContent = resp.fee_rule_label;
@@ -378,7 +415,11 @@
      present; the confirm button enables only then with no hard issues + ack satisfied. */
   function renderManual(preview, issues, serverOk) {
     const a = acc($('#m-account').value) || ctx.accounts[0];
-    const ccy = a ? a.ccy : '';
+    /* F06: a REGISTERED symbol's own quote ccy drives the preview-card money labels + prices
+       (an MY draft on a merged account shows MYR + 3-dp), falling back to the account
+       settlement ccy when unresolved. Single-market: it.ccy === a.ccy, so unchanged. */
+    const it = inst($('#m-symbol').value);
+    const ccy = (it && it.ccy) || (a ? a.ccy : '');
     $('#m-fee-ovr').hidden = !m.feeOverride;
     $('#m-tax-ovr').hidden = !m.taxOverride;
 
@@ -1019,17 +1060,19 @@
      same rule the backend uses. On a successful register (or restore) the SAME preview re-runs
      (runAiPreview rebuilds the request from the unchanged pane state: text + images + model),
      so the healed row loses its error with zero re-entry. */
-  function openAiQuickAdd(symbol, accId) {
+  function openAiQuickAdd(symbol, accId, marketHint) {
     if (!window.pdInstQuickAdd) {
       if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
       return;
     }
     const resume = async () => { await reloadContext(); await runAiPreview(); };
     /* FU-D42a: the symbol stays EDITABLE (no lockSymbol) — an AI mis-parse (e.g. a US-style
-       ticker on a TW account) is corrected right in the dialog; editing re-runs the lookup. */
+       ticker on a TW account) is corrected right in the dialog; editing re-runs the lookup.
+       Batch B (F15): on a merged account the dialog's market defaults to the AI row's
+       suggested `market` when present (else the first bound market — the user can change it). */
     window.pdInstQuickAdd({
       symbol: symbol,
-      market: accountMarket(accId),
+      market: accountMarket(accId, marketHint),
       onConfirm: resume,
       onBuy: resume,
     });
@@ -1147,7 +1190,7 @@
       if (r.code === 'unregistered_symbol' && symbol) {
         const reg = el('button', 'btn', '立即註冊'); reg.type = 'button';
         reg.title = '註冊此標的後自動重新解析';
-        reg.addEventListener('click', () => openAiQuickAdd(symbol, d.account_id));
+        reg.addEventListener('click', () => openAiQuickAdd(symbol, d.account_id, d.market));
         tdAct.appendChild(reg);
       }
       tr.appendChild(tdAct);
@@ -1394,10 +1437,18 @@
         if (window.toast) window.toast('請填寫帳戶、代號與日期', 'fail');
         return;
       }
+      /* F01: the committed row `type` follows the model of the ENTERED SYMBOL's market on a
+         merged account (single-market accounts keep their one model). A merged account whose
+         symbol is blank/unregistered -> null -> prompt to pick a registered symbol first. */
+      const model = divModelFor(a, sym);
+      if (model === null) {
+        if (window.toast) window.toast('此帳戶橫跨多個市場，請先輸入已註冊的標的', 'fail');
+        return;
+      }
       const header = ['account', 'symbol', 'date', 'type', 'gross', 'withholding', 'net',
         'reinvest_shares', 'reinvest_price'];
       let values;
-      if (a.div_model === 'tw') {
+      if (model === 'tw') {
         if (isStock()) {
           const shares = $('#d-tw-gross').value.trim();
           if (!shares) { if (window.toast) window.toast('請輸入配股股數', 'fail'); return; }
@@ -1407,7 +1458,7 @@
           if (!gross) { if (window.toast) window.toast('請輸入股利總額', 'fail'); return; }
           values = [a.id, sym, dte, 'CASH', gross, '', $('#d-tw-net').value.trim(), '', ''];
         }
-      } else if (a.div_model === 'drip') {
+      } else if (model === 'drip') {
         const gross = $('#d-drip-gross').value.trim();
         if (!gross) { if (window.toast) window.toast('請輸入股利總額', 'fail'); return; }
         values = [a.id, sym, dte, 'DRIP', gross, '', '',
@@ -1430,9 +1481,20 @@
   }
   function renderDivForm() {
     const a = acc($('#d-account').value) || ctx.accounts[0];
-    const model = a ? a.div_model : 'tw';
+    /* F01: on a MERGED account the model follows the ENTERED SYMBOL's market; single-market
+       accounts get their one model (byte-identical to the old `a.div_model`). */
+    const sym = ($('#d-symbol') && $('#d-symbol').value || '').trim();
+    const model = divModelFor(a, sym);
     ['d-tw', 'd-drip', 'd-net'].forEach((id) => { $('#' + id).hidden = true; });
     const note = $('#d-model-note');
+    if (model === null) {
+      /* Merged account, no symbol resolvable to a bound market yet: hide every model form and
+         prompt the user to enter/pick a REGISTERED symbol first (its market picks the model). */
+      if (note) {
+        note.textContent = '此帳戶橫跨多個市場，請先輸入或選擇已註冊標的，表單將依標的所屬市場切換股利模式。';
+      }
+      return;
+    }
     if (model === 'tw') {
       $('#d-tw').hidden = false;
       note.textContent = '台股模式：現金股利沖減成本（調整均價下降）；配股以 $0 成本股數入帳。';
@@ -1518,6 +1580,8 @@
   function fillDivSymbol(sym) {
     const inp = $('#d-symbol');
     if (inp) inp.value = sym;
+    /* Merged account: the picked symbol's market may switch the dividend model (F01). */
+    if (isMultiMarket(acc($('#d-account').value))) renderDivForm();
     closeDivPicker();
   }
 
@@ -1630,6 +1694,10 @@
       inp.addEventListener('focus', () => { openDivPicker(); });
       inp.addEventListener('click', () => { openDivPicker(); });
       inp.addEventListener('input', () => {
+        /* Merged accounts switch the dividend MODEL by the entered symbol's market (F01) —
+           re-render the form so the right sub-form + note appear. Gated on multi-market so a
+           single-market account keeps exactly today's behaviour (no per-keystroke re-render). */
+        if (isMultiMarket(acc($('#d-account').value))) renderDivForm();
         if (!divPickerOpen) { openDivPicker(); return; }
         const a = acc($('#d-account').value);
         renderDivPicker((a && acctHoldingsCache[a.id]) || { held: [], closed: [] });
@@ -1673,7 +1741,11 @@
       const view = $('#o-avg-view');
       if (!view) return;
       const a = acc($('#o-account').value) || ctx.accounts[0];
-      const ccy = a ? a.ccy : '';
+      /* F06: the average-cost hint uses the RESOLVED symbol's quote ccy (3-dp for an MY
+         counter on a merged account), falling back to the account ccy when unresolved.
+         Single-market: it.ccy === a.ccy, so the label is unchanged. */
+      const it = inst($('#o-symbol').value);
+      const ccy = (it && it.ccy) || (a ? a.ccy : '');
       const sharesRaw = $('#o-shares').value.trim();
       const totalRaw = $('#o-total').value.trim();
       const shares = Number(sharesRaw);
@@ -1684,7 +1756,7 @@
         view.textContent = f.NULL_GLYPH;
       }
     }
-    ['o-account', 'o-shares', 'o-total'].forEach((id) => {
+    ['o-account', 'o-symbol', 'o-shares', 'o-total'].forEach((id) => {
       const n = $('#' + id);
       if (n) n.addEventListener('input', updateAvgView);
     });

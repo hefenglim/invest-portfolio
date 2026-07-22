@@ -30,14 +30,17 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     # ---- deposits (funding) ----
     op.cash_move("tw_broker", "deposit", "TWD", "2026-01-05", 2000000, via_ui=True)
     op.cash_move("schwab", "deposit", "TWD", "2026-01-05", 2700000)
-    op.cash_move("moomoo_my_us", "deposit", "MYR", "2026-01-05", 120000)
-    op.cash_move("moomoo_my_my", "deposit", "MYR", "2026-01-05", 100000)
+    # Batch B merged-account proof: BOTH MYR deposits fund the SAME dual-market moomoo_my — its
+    # MYR pool feeds MY-market MYR buys directly AND the MYR->USD conversions that fund the US pool.
+    op.cash_move("moomoo_my", "deposit", "MYR", "2026-01-05", 120000)
+    op.cash_move("moomoo_my", "deposit", "MYR", "2026-01-05", 100000)
 
     # ---- fx conversions (multiple rates -> non-trivial weighted avg) ----
     op.fx("schwab", "2026-01-06", "TWD", 320000, "USD", 10000, via_ui=True)   # 32.0
     op.fx("schwab", "2026-02-10", "TWD", 2310000, "USD", 70000)               # 33.0 -> avg 32.875
-    op.fx("moomoo_my_us", "2026-01-07", "MYR", 44000, "USD", 10000)           # 4.4
-    op.fx("moomoo_my_us", "2026-03-05", "MYR", 46000, "USD", 10000)           # 4.6 -> avg 4.5
+    # MYR->USD feeding the merged moomoo_my USD pool (funds the US-market NVDA buys below).
+    op.fx("moomoo_my", "2026-01-07", "MYR", 44000, "USD", 10000)           # 4.4
+    op.fx("moomoo_my", "2026-03-05", "MYR", 46000, "USD", 10000)           # 4.6 -> avg 4.5
 
     # ---- BUY wave 1 (buys precede dependent sells) ----
     buy("B1", "tw_broker", "2330", "2026-01-10", 1000, 600, via_ui=True)
@@ -51,14 +54,20 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("B21", "schwab", "AAPL", "2026-03-20", 25, 185)
     buy("B7", "schwab", "MSFT", "2026-01-20", 40, 400)
     buy("B17", "schwab", "MSFT", "2026-02-28", 15, 405)
-    buy("B10", "moomoo_my_us", "NVDA", "2026-01-25", 30, 500)
-    buy("B19", "moomoo_my_us", "NVDA", "2026-02-12", 10, 520)
-    buy("B11", "moomoo_my_us", "NVDA", "2026-03-10", 20, 550)
-    buy("B12", "moomoo_my_my", "1155", "2026-01-30", 1000, "9.50")
-    buy("B13", "moomoo_my_my", "1155", "2026-02-25", 500, "10.20")
-    buy("B18", "moomoo_my_my", "1155", "2026-03-15", 200, "10.50")
+    # Batch B merged-account proof (on ONE account, moomoo_my): US-market NVDA trades book USD
+    # fees (commission + platform + settlement + CAT, SELL: SEC/TAF, + MY stamp booked USD, FE-D2)
+    # via the moomoo_us rule; MY-market 1155/0800EA trades book MYR fees (commission + platform RM3
+    # + clearing + SST 8%; stamp step, ETF-exempt) via the moomoo_my rule. The oracle routes each
+    # by the instrument's market (fee_rule_for) and reconciles both, plus the USD FX pool (scoped
+    # to USD holdings only) and both dividend models (US DRIP + MY cash), against the app.
+    buy("B10", "moomoo_my", "NVDA", "2026-01-25", 30, 500)     # US: moomoo_us fees + USD FX pool
+    buy("B19", "moomoo_my", "NVDA", "2026-02-12", 10, 520)
+    buy("B11", "moomoo_my", "NVDA", "2026-03-10", 20, 550)
+    buy("B12", "moomoo_my", "1155", "2026-01-30", 1000, "9.50")   # MY: moomoo_my fees (MYR)
+    buy("B13", "moomoo_my", "1155", "2026-02-25", 500, "10.20")
+    buy("B18", "moomoo_my", "1155", "2026-03-15", 200, "10.50")
     # MY ETF buy -> fee-engine v2 stamp EXEMPTION: tax must be RM0 despite the step formula.
-    buy("BME", "moomoo_my_my", "0800EA", "2026-02-08", 1000, "1.15")
+    buy("BME", "moomoo_my", "0800EA", "2026-02-08", 1000, "1.15")
 
     reconcile(ev, api, db_path, "checkpoint1", valuation=True)
 
@@ -73,14 +82,15 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     sell("S4", "schwab", "TSLA", "2026-04-20", 20, 260)                    # sell-all
     buy("B9", "schwab", "TSLA", "2026-05-01", 10, 240)                     # rebuy
     sell("S3", "schwab", "AAPL", "2026-05-15", 60, 200)                    # partial
-    sell("S6", "moomoo_my_my", "1155", "2026-05-20", 400, "11.00")        # partial
-    sell("S5", "moomoo_my_us", "NVDA", "2026-06-01", 25, 600)             # partial
+    sell("S6", "moomoo_my", "1155", "2026-05-20", 400, "11.00")        # partial
+    sell("S5", "moomoo_my", "NVDA", "2026-06-01", 25, 600)             # partial
 
-    # ---- dividends (all three account models) ----
+    # ---- dividends (all three account models; the merged moomoo_my exercises BOTH US DRIP
+    #      and MY cash on ONE account — US market -> drip_us, MY market -> cash) ----
     op.dividend("schwab", "MSFT", "2026-03-15", "DRIP", 100, reinvest_price=350)
     op.dividend("schwab", "AAPL", "2026-04-05", "DRIP", 50, reinvest_price=200)
-    op.dividend("moomoo_my_us", "NVDA", "2026-04-08", "DRIP", 60, reinvest_price=560)
-    op.dividend("moomoo_my_my", "1155", "2026-04-15", "NET", 300)
+    op.dividend("moomoo_my", "NVDA", "2026-04-08", "DRIP", 60, reinvest_price=560)  # US DRIP
+    op.dividend("moomoo_my", "1155", "2026-04-15", "NET", 300)                      # MY cash
     op.dividend("tw_broker", "2330", "2026-06-10", "CASH", 5000)
     op.dividend("tw_broker", "0050", "2026-06-12", "CASH", 800)
 
@@ -114,14 +124,14 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
              "201", str(rdup.get("status")), "phase1")
 
     op.dividend("tw_broker", "2330", "2026-03-01", "CASH", 2000)
-    op.dividend("moomoo_my_my", "1155", "2026-06-14", "NET", 150)
+    op.dividend("moomoo_my", "1155", "2026-06-14", "NET", 150)
     op.cash_move("schwab", "deposit", "TWD", "2026-04-01", 300000)  # top-up deposit
     buy("B22", "tw_broker", "2330", "2026-04-15", 100, 630)
-    buy("B23", "moomoo_my_us", "NVDA", "2026-05-28", 5, 580)
+    buy("B23", "moomoo_my", "NVDA", "2026-05-28", 5, 580)
     op.dividend("schwab", "MSFT", "2026-06-08", "DRIP", 40, reinvest_price=415)
     sell("S8", "tw_broker", "2330", "2026-06-22", 100, 710)
     sell("S9", "schwab", "AAPL", "2026-06-23", 20, 208)
-    sell("S10", "moomoo_my_my", "1155", "2026-06-24", 100, "11.50")
+    sell("S10", "moomoo_my", "1155", "2026-06-24", 100, "11.50")
     sell("S11", "tw_broker", "2330", "2026-06-26", 50, 715)
 
     # ---- Found-bug op #2 — TW daytrade sell taxes at 0.15% (not 0.3%). Two surfaces:

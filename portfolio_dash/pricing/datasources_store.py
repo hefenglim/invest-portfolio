@@ -1,16 +1,22 @@
-"""Data-source management persistence: keys, health, and per-account fallback chains.
+"""Data-source management persistence: keys, health, and per-market quote routing.
 
-Spec 14.0 introduces three ``config_store`` tables (category ``"data_sources"``):
+Four ``config_store`` tables (category ``"data_sources"``):
 
-- ``data_sources``           — API key + enabled flag, keyed by source id.
-- ``data_source_health``     — last connection-test status / latency / detail.
-- ``data_source_fallbacks``  — per-account quote-source fallback chain (JSON array).
+- ``data_sources``             — API key + enabled flag + token tier, keyed by source id.
+- ``data_source_health``       — last connection-test status / latency / detail.
+- ``data_source_market_order`` — per-MARKET quote-source order; the REAL fetch chain
+  ``pricing.defaults.default_registry`` walks (2026-07-03, item 9). Accounts decide
+  fees/dividend rules, never quote routing — a quote's source depends on the
+  instrument's MARKET.
+- ``data_source_fallbacks``    — LEGACY per-account fallback chain. Superseded by
+  ``data_source_market_order`` and no longer seeded or read: it has zero production
+  consumers, so a fresh DB carries no rows. The empty table is retained (not dropped)
+  so an existing DB's rows survive and the db-stats registry keeps its entry — dropping
+  it is recorded deferred debt.
 
 Static source *descriptions* (name / type / markets / auth / note) are a Python
 constant table here — they are config-as-code, not user data, so they never hit
-the DB (spec 14.0). The fallback chains are seeded from ``pricing/defaults.py``'s
-current ``DEFAULT_PROVIDER_ORDER`` so this layer is the single source of truth once
-seeded; an empty table falls back to the hardcoded default (see ``account_chains``).
+the DB (spec 14.0).
 """
 
 import json
@@ -139,6 +145,7 @@ CREATE TABLE IF NOT EXISTS data_source_health (
     latency_ms INTEGER,
     detail TEXT
 );
+-- LEGACY: retained but never seeded/read; superseded by data_source_market_order.
 CREATE TABLE IF NOT EXISTS data_source_fallbacks (
     account_id TEXT PRIMARY KEY,
     chain TEXT NOT NULL
@@ -210,24 +217,16 @@ def set_quote_order(conn: sqlite3.Connection, market: Market, chain: list[str]) 
     conn.commit()
 
 
-# Each account's fallback chain seeds from its market's default quote order. This
-# local map is the account source for seeding (one entry per default account id), so
-# pricing/ needs no import from data_ingestion (architecture.md: sibling lower layers
-# must not import each other). Keep in sync with data_ingestion's DEFAULT_ACCOUNTS.
-_ACCOUNT_MARKET: dict[str, Market] = {
-    "tw_broker": Market.TW,
-    "schwab": Market.US,
-    "moomoo_my_us": Market.US,
-    "moomoo_my_my": Market.MY,
-}
-
-
 def seed(conn: sqlite3.Connection) -> None:
-    """Seed one row per known source and per account fallback chain. Idempotent.
+    """Seed one row per known source into ``data_sources`` + ``data_source_health``.
+
+    Idempotent. Quote routing is per-MARKET (``data_source_market_order``, resolved
+    from ``DEFAULT_PROVIDER_ORDER`` on read), so nothing is seeded here — and the
+    legacy per-account ``data_source_fallbacks`` table is intentionally left empty
+    (see the module docstring).
 
     - ``data_sources``: a row per source id with no key, enabled.
     - ``data_source_health``: a row per source id, status ``"unknown"``.
-    - ``data_source_fallbacks``: per-account chain from the market's default order.
     """
     for sid in source_ids():
         conn.execute(
@@ -240,13 +239,6 @@ def seed(conn: sqlite3.Connection) -> None:
             "latency_ms, detail) VALUES (?, 'unknown', NULL, NULL, NULL) "
             "ON CONFLICT(source_id) DO NOTHING",
             (sid,),
-        )
-    for account_id, market in _ACCOUNT_MARKET.items():
-        chain = _default_quote_chain(market)
-        conn.execute(
-            "INSERT INTO data_source_fallbacks (account_id, chain) VALUES (?, ?) "
-            "ON CONFLICT(account_id) DO NOTHING",
-            (account_id, json.dumps(chain)),
         )
     conn.commit()
 
@@ -324,24 +316,6 @@ def get_api_key(conn: sqlite3.Connection, source_id: str) -> str | None:
     return key if key else None
 
 
-def account_chains(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    """Return per-account fallback chains; empty table -> hardcoded market defaults."""
-    rows = conn.execute(
-        "SELECT account_id, chain FROM data_source_fallbacks"
-    ).fetchall()
-    if rows:
-        out: dict[str, list[str]] = {}
-        for r in rows:
-            parsed = json.loads(r["chain"])
-            out[r["account_id"]] = [str(x) for x in parsed]
-        return out
-    # No rows persisted yet: fall back to the hardcoded default per account market.
-    return {
-        account_id: _default_quote_chain(market)
-        for account_id, market in _ACCOUNT_MARKET.items()
-    }
-
-
 # --- Writes -------------------------------------------------------------------
 
 
@@ -412,19 +386,6 @@ def upsert_health(
         "detail = excluded.detail",
         (source_id, status, last_test, latency_ms, detail),
     )
-    conn.commit()
-
-
-def set_account_chains(
-    conn: sqlite3.Connection, chains: dict[str, list[str]]
-) -> None:
-    """Overwrite the per-account fallback chains for the given accounts (idempotent)."""
-    for account_id, chain in chains.items():
-        conn.execute(
-            "INSERT INTO data_source_fallbacks (account_id, chain) VALUES (?, ?) "
-            "ON CONFLICT(account_id) DO UPDATE SET chain = excluded.chain",
-            (account_id, json.dumps(chain)),
-        )
     conn.commit()
 
 

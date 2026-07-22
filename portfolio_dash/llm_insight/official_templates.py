@@ -22,7 +22,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v10 (2026-07-21)"
+LIBRARY_VERSION = "official-v11 (2026-07-22)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -51,12 +51,15 @@ LIBRARY_VERSION = "official-v10 (2026-07-21)"
 # v4 (W1 batch-A, 2026-07-21): MY (Bursa) guidance raised to TW parity — 4-digit code
 # exemplars, the ACE-market leading-zero rule (0166, never 166), and the brand/mall →
 # listed-parent rule (IOI Mall ⇒ IOI Properties). Mirrors AI_INSTRUMENT_RESOLVE_PROMPT.
-AI_INPUT_PROMPT_VERSION = "v4"
+# v5 (W3 batch-B, 2026-07-22): merged (multi-market) account support (F15) — such an account
+# is listed with its per-market ccys (e.g. USD:US＋MYR:MY); the model takes the ticker format
+# OF THE STOCK'S market and sets the new optional ``market`` output field to that market.
+AI_INPUT_PROMPT_VERSION = "v5"
 AI_INPUT_PROMPT_BODY = (
     "<task>Extract stock transactions from the user's text and any attached statement\n"
     "screenshot into JSON.</task>\n"
     '<schema>{{"drafts": [{{"account_id","symbol","side":"BUY|SELL","date":"YYYY-MM-DD",\n'
-    '"shares","price","daytrade":false,"is_etf":false,"note"}}]}}</schema>\n'
+    '"shares","price","daytrade":false,"is_etf":false,"note","market"}}]}}</schema>\n'
     "<accounts>{accounts}</accounts>\n"
     "<today>{today}</today>\n"
     "<example_input>在元大買 10 股 2330 @ 600</example_input>\n"
@@ -77,7 +80,11 @@ AI_INPUT_PROMPT_BODY = (
     "(Maybank⇒1155, Tenaga⇒5347, Inari⇒0166 — ACE-market codes KEEP the leading\n"
     "zero: 0166, never 166; map a brand/mall/subsidiary to its LISTED parent, e.g.\n"
     "IOI Mall⇒IOI Properties 5249). A Chinese company name on a TW account always\n"
-    "maps to its numeric code. Dates resolve against <today>: a month/day without a\n"
+    "maps to its numeric code. A merged account is listed with MULTIPLE markets (shown\n"
+    "as e.g. USD:US＋MYR:MY): take the ticker format OF THE STOCK'S market (a US stock\n"
+    "its US ticker, an MY stock its 4-digit Bursa code) and set the optional market\n"
+    "field to that market's value (US/TW/MY). Dates resolve against <today>: a month/day\n"
+    "without a\n"
     "year means the most\n"
     "recent PAST occurrence (a trade date is never in the future); relative words\n"
     "(今天/昨天/上週五) resolve from <today>. One draft per transaction — text may\n"

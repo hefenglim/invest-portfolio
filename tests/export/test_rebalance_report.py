@@ -1,7 +1,7 @@
 """Unit tests for the 再平衡試算執行報告 HTML builder (export.rebalance_report).
 
 Drives ``build_rebalance_report_html`` directly over the dual-account seed (AAPL held in
-schwab + moomoo_my_us; 2330 in tw_broker) so the cross-account structure, the （零股）TW
+schwab + moomoo_my; 2330 in tw_broker) so the cross-account structure, the （零股）TW
 odd-lot annotation, per-account subtotals, XSS escaping, and self-containment are all
 asserted without the HTTP layer. Numbers of record come from compute_rebalance; this module
 only formats them.
@@ -66,10 +66,10 @@ def test_document_structure_and_both_accounts_in_execution_list() -> None:
         assert heading in doc
 
     # 執行清單 groups by account: BOTH accounts carrying a leg appear (schwab AAPL buy +
-    # tw_broker 2330 sell). The AAPL constituents line lists the moomoo_my_us holding too.
+    # tw_broker 2330 sell). The AAPL constituents line lists the moomoo_my holding too.
     assert "TW Broker" in doc
     assert "Charles Schwab" in doc
-    assert "Moomoo MY (US)" in doc  # AAPL's second constituent (chip under the summary row)
+    assert "Moomoo MY" in doc  # AAPL's second constituent (chip under the summary row)
 
     # A per-account subtotal is rendered.
     assert "小計" in doc

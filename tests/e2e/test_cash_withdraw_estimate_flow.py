@@ -17,7 +17,7 @@ Driven against the REAL stack (fresh uvicorn + on-disk golden DB + headless chro
   #cfx-single-ccy; picking 賣出幣別 == 買入幣別 auto-flips the OTHER select so the two
   ccy fields can never read equal.
 
-Scenario: moomoo_my_us starts with a clean MYR 50,000 pool (no golden flow touches it).
+Scenario: moomoo_my starts with a clean MYR 50,000 pool (no golden flow touches it).
 Stored USD/MYR 4.4 → MYR→USD inverse rate 0.227273 (6-dp cap); 50,000 × 0.227273 =
 11,363.65 and 40,000 × 0.227273 = 9,090.92 — both SERVER-computed figures the page only
 places. ZERO console / page errors throughout.
@@ -51,9 +51,9 @@ def _loopback_sockets() -> Iterator[None]:
 
 
 def _seed_cash(conn: Any) -> None:
-    """Golden scenario + a clean, KNOWN moomoo_my_us MYR pool (funding ccy)."""
+    """Golden scenario + a clean, KNOWN moomoo_my MYR pool (funding ccy)."""
     _seed_golden(conn)
-    insert_cash_movement(conn, account_id="moomoo_my_us", move_date=date(2026, 1, 5),
+    insert_cash_movement(conn, account_id="moomoo_my", move_date=date(2026, 1, 5),
                          kind="DEPOSIT", ccy=Currency.MYR, amount=Decimal("50000"))
     conn.commit()
 
@@ -91,7 +91,7 @@ def test_cash_withdraw_guard_maxfill_estimate_and_fx_ledger(
     # ===== 換匯中心 first (the estimate/click-fill part needs the still-full MYR pool) ====
     page.goto(base + "/cash.html#fx", wait_until="load")
     page.wait_for_selector("#cfx-account option", state="attached")
-    page.select_option("#cfx-account", "moomoo_my_us")
+    page.select_option("#cfx-account", "moomoo_my")
     page.wait_for_function(
         "() => { const n = document.querySelector('#cfx-balance');"
         " return n && n.textContent.includes('可用餘額') && n.textContent.includes('50,000')"
@@ -134,7 +134,7 @@ def test_cash_withdraw_guard_maxfill_estimate_and_fx_ledger(
     # ===== 出金入金: the withdraw ceiling + max-fill + hard guard + real round-trip ======
     page.goto(base + "/cash.html#flows", wait_until="load")
     page.wait_for_selector("#cm-account option", state="attached")
-    page.select_option("#cm-account", "moomoo_my_us")
+    page.select_option("#cm-account", "moomoo_my")
     page.click("#cm-kind-out")
     page.select_option("#cm-ccy", "MYR")
     page.wait_for_function(
@@ -162,7 +162,7 @@ def test_cash_withdraw_guard_maxfill_estimate_and_fx_ledger(
     page.wait_for_selector(".toast-ok")
 
     # ---- downstream (server-authoritative): the MYR pool drained to 0 -------------------
-    assert _cash_balance(base, "moomoo_my_us", "MYR") == "0"
+    assert _cash_balance(base, "moomoo_my", "MYR") == "0"
 
     assert not console_errors and not page_errors, (
         f"cash withdraw/estimate flow: console={console_errors!r} page={page_errors!r}"
@@ -187,29 +187,32 @@ def test_cash_fx_form_account_switch_single_ccy_never_equal(
     with an UNCONDITIONAL `confirm.disabled = over`, so ANY updFxBalance() call that
     runs AFTER the single-ccy gate disabled #cfx-confirm (init's own trailing call at
     page load, boot()'s async tail, a tab-switch re-boot, post-commit/delete refreshes)
-    would silently RE-ENABLE it while the rest of the form stayed disabled. Both the
-    plain-initial-load path (accounts load `ORDER BY account_id`, so the default first
-    option is moomoo_my_my — MYR-only, also single-ccy) and a forced re-boot while
-    tw_broker stays selected are exercised below, each time explicitly settling the
-    page's async boot/balances refresh (network-idle) before asserting — a bare
-    post-click assertion would race ahead of the very call path that leaked.
+    would silently RE-ENABLE it while the rest of the form stayed disabled. The forced
+    re-boot while tw_broker (single-ccy) stays selected reproduces that leak below, each
+    time explicitly settling the page's async boot/balances refresh (network-idle) before
+    asserting — a bare post-click assertion would race ahead of the call path that leaked.
+
+    Batch B note: the default first account (accounts load `ORDER BY account_id`) is now the
+    merged `moomoo_my` — a DUAL-currency (USD/MYR) account, so the plain initial load is NOT
+    single-ccy-gated; the single-ccy gate + its confirm-re-enable leak are exercised through
+    tw_broker (TWD-only) instead.
     """
     base = flow_server(_seed_cash)
     page = fresh_page
     console_errors, page_errors = _sink(page)
 
-    # ---- plain initial load, no select_option: accounts load ORDER BY account_id, so
-    # the default first option is moomoo_my_my (MYR-only, single-currency). Settle the
-    # page's own async boot() (its tail calls updFxBalance() again, after initForms()'s
-    # own gate already disabled 確認) before asserting it is STILL disabled -- this
-    # reproduces the leak deterministically. --------------------------------------
+    # ---- plain initial load, no select_option: accounts load ORDER BY account_id, so the
+    # default first option is the merged moomoo_my (USD/MYR dual-currency). A dual-ccy account
+    # is NOT single-ccy-gated: the ccy selects are enabled and #cfx-single-ccy is hidden.
+    # Settle the page's async boot() before asserting. -----------------------------
     page.goto(base + "/cash.html#fx", wait_until="load")
     page.wait_for_selector("#cfx-account option", state="attached")
     page.wait_for_load_state("networkidle")
-    assert page.input_value("#cfx-account") == "moomoo_my_my", \
-        "expected moomoo_my_my as the default first account (ORDER BY account_id)"
-    assert page.is_disabled("#cfx-confirm"), \
-        "確認 must stay disabled after the initial boot() settles (moomoo_my_my is single-ccy)"
+    assert page.input_value("#cfx-account") == "moomoo_my", \
+        "expected moomoo_my as the default first account (ORDER BY account_id)"
+    assert not page.is_disabled("#cfx-from-ccy"), \
+        "a dual-ccy account must not trip the single-ccy gate on initial load"
+    assert page.is_hidden("#cfx-single-ccy")
 
     # ---- (a) schwab: fill both amounts, then switch account -> both fields clear ----
     page.select_option("#cfx-account", "schwab")
@@ -217,7 +220,7 @@ def test_cash_fx_form_account_switch_single_ccy_never_equal(
         "() => !document.querySelector('#cfx-from-ccy').disabled")
     page.fill("#cfx-from-amt", "1000")
     page.fill("#cfx-to-amt", "31000")
-    page.select_option("#cfx-account", "moomoo_my_us")
+    page.select_option("#cfx-account", "moomoo_my")
     page.wait_for_function(
         "() => document.querySelector('#cfx-from-amt').value === ''"
         " && document.querySelector('#cfx-to-amt').value === ''")

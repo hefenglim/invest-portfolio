@@ -82,10 +82,10 @@ def seed(conn: sqlite3.Connection) -> None:
     insert_transaction(conn, account_id="schwab", symbol="NVDA", side=Side.BUY,
                        quantity=Decimal("20"), price=Decimal("140"), fees=Decimal("0"),
                        tax=Decimal("0"), trade_date=date(2026, 3, 3))
-    insert_transaction(conn, account_id="moomoo_my_us", symbol="AAPL", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
                        quantity=Decimal("10"), price=Decimal("240"), fees=Decimal("1"),
                        tax=Decimal("0"), trade_date=date(2026, 4, 1))
-    insert_transaction(conn, account_id="moomoo_my_my", symbol="1155", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="1155", side=Side.BUY,
                        quantity=Decimal("3000"), price=Decimal("10"), fees=Decimal("15"),
                        tax=Decimal("0"), trade_date=date(2026, 2, 20))
 
@@ -98,7 +98,7 @@ def seed(conn: sqlite3.Connection) -> None:
     insert_fx_conversion(conn, account_id="schwab", date=date(2026, 1, 12),
                          from_ccy=Currency.TWD, from_amount=Decimal("220000"),
                          to_ccy=Currency.USD, to_amount=Decimal("6875"))
-    insert_fx_conversion(conn, account_id="moomoo_my_us", date=date(2026, 3, 28),
+    insert_fx_conversion(conn, account_id="moomoo_my", date=date(2026, 3, 28),
                          from_ccy=Currency.MYR, from_amount=Decimal("11000"),
                          to_ccy=Currency.USD, to_amount=Decimal("2400"))
 

@@ -8,7 +8,9 @@ from portfolio_dash.data_ingestion.dividend_import import (
 )
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.data_ingestion.preview import commit_preview
-from portfolio_dash.data_ingestion.store import list_dividends
+from portfolio_dash.data_ingestion.store import list_dividends, upsert_instrument
+from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.models.assets import Instrument
 
 
 def test_drip_model_30pct_withholding_and_reinvest() -> None:
@@ -64,3 +66,53 @@ def test_csv_unknown_type_hard_blocks(conn: sqlite3.Connection) -> None:
     p = build_dividend_preview(conn, csv)
     assert p.rows[0].has_hard_issue
     assert any(i.kind == "parse_error" for i in p.rows[0].issues)
+
+
+# --- Batch B (F01): dividend type/market coherence -------------------------------------
+
+
+def _register(conn: sqlite3.Connection, symbol: str, market: Market, ccy: Currency) -> None:
+    upsert_instrument(conn, Instrument(symbol=symbol, market=market, quote_ccy=ccy,
+                                       sector="Tech", name=symbol))
+
+
+def test_csv_dividend_type_market_mismatch_needs_confirm(conn: sqlite3.Connection) -> None:
+    # A registered US symbol on schwab (DRIP model) booked as a CASH dividend is a
+    # type/market mismatch -> soft needs_confirm (importable only after explicit confirm),
+    # never a hard block. This is the merged-account corruption guard (MY cash-as-DRIP etc.).
+    seed_accounts(conn)
+    _register(conn, "AAPL", Market.US, Currency.USD)
+    csv = "account,symbol,date,type,gross\nschwab,AAPL,2026-06-01,CASH,100\n"
+    p = build_dividend_preview(conn, csv)
+    row = p.rows[0]
+    mism = [i for i in row.issues if i.kind == "dividend_type_mismatch"]
+    assert len(mism) == 1
+    assert mism[0].needs_confirm is True
+    assert mism[0].message == "股利類型與該市場模型不符，請確認"
+    assert not row.has_hard_issue  # soft -> importable after confirm
+
+
+def test_csv_dividend_type_market_coherent_has_no_mismatch(
+    conn: sqlite3.Connection,
+) -> None:
+    # A coherent row (DRIP on schwab US) carries NO mismatch issue — dormant for the
+    # correct case. Also proves a single-market account's normal rows are unaffected.
+    seed_accounts(conn)
+    _register(conn, "AAPL", Market.US, Currency.USD)
+    csv = ("account,symbol,date,type,gross,reinvest_price\n"
+           "schwab,AAPL,2026-06-01,DRIP,100,20\n")
+    p = build_dividend_preview(conn, csv)
+    assert not any(i.kind == "dividend_type_mismatch" for i in p.rows[0].issues)
+
+
+def test_csv_dividend_unregistered_symbol_skips_coherence(
+    conn: sqlite3.Connection,
+) -> None:
+    # An UNREGISTERED symbol keeps its existing soft unresolved handling and is NOT
+    # coherence-checked (its market is unknown until registered) — no mismatch issue.
+    seed_accounts(conn)
+    csv = "account,symbol,date,type,gross\nschwab,NOPE,2026-06-01,CASH,100\n"
+    p = build_dividend_preview(conn, csv)
+    kinds = {i.kind for i in p.rows[0].issues}
+    assert "symbol_unresolved" in kinds
+    assert "dividend_type_mismatch" not in kinds

@@ -14,6 +14,7 @@ from portfolio_dash.data_ingestion.resolve import (
     resolve,
     suggestion_tail,
 )
+from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
 from portfolio_dash.shared.models.assets import Instrument
@@ -104,7 +105,15 @@ def enter_transaction(
         # Stress-audit finding 2026-07-15: entry paths defaulted is_etf=False, taxing
         # ETF sells at the 現股 0.3% rate instead of 0.1%.
         is_etf = instrument.is_etf if instrument is not None else inp.is_etf
-        rules = get_fee_rule_set(acc["fee_rule_set"], conn)
+        # Market-aware fee rule (Batch B): a resolved instrument selects the rule set bound to
+        # (account, its market); an unregistered symbol (instrument None) keeps the account
+        # scalar exactly as before. Snapshot semantics are unchanged — today's single-market
+        # bindings mirror the scalar, so the same rule-set name flows into the same snapshot.
+        rule_name = (
+            fee_rule_for(conn, inp.account_id, instrument.market)
+            if instrument is not None else acc["fee_rule_set"]
+        )
+        rules = get_fee_rule_set(rule_name, conn)
         # FE-D2: the Moomoo US MY stamp needs the trade-date USD/MYR rate (fees.py is pure,
         # so the seam resolves it here, like is_etf). No rate -> stamp 0 + a soft issue.
         stamp_fx: Decimal | None = None

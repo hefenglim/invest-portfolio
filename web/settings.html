@@ -79,7 +79,7 @@
   .pill-warn { color:var(--amber);border-color:rgba(217,161,63,.4);background:var(--amber-soft); }
 
   /* accounts */
-  .acct-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:var(--gap);padding:12px var(--pad) 14px; }
+  .acct-grid { display:grid;grid-template-columns:repeat(3,1fr);gap:var(--gap);padding:12px var(--pad) 14px; }
   .acct-card { background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--radius);padding:13px 15px;display:flex;flex-direction:column;gap:8px; }
   .acct-name { font-weight:700;font-size:13px; }
   .acct-kv { display:flex;justify-content:space-between;font-size:11px;border-bottom:1px dashed var(--border-soft);padding:4px 0; }
@@ -381,8 +381,10 @@
       <div class="acct-grid">
         <div class="acct-card"><span class="acct-name">台灣券商</span><span class="div-mode dm-tw">股利：成本沖減</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">tw</span></div></div>
         <div class="acct-card"><span class="acct-name">嘉信 Schwab</span><span class="div-mode dm-drip">股利：DRIP 預扣 30%</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">TWD</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">schwab</span></div></div>
-        <div class="acct-card"><span class="acct-name">Moomoo 美股</span><span class="div-mode dm-drip">股利：DRIP 預扣 30%</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_us</span></div></div>
-        <div class="acct-card"><span class="acct-name">Moomoo 馬股</span><span class="div-mode dm-net">股利：淨額</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_my</span></div></div>
+        <!-- Batch B: moomoo_my_us + moomoo_my_my merged into ONE dual-currency Moomoo MY
+             account (settlement USD / funding MYR; markets US+MY; fee rule sets
+             moomoo_us + moomoo_my; dividends US=DRIP 30% withholding / MY=cash). -->
+        <div class="acct-card"><span class="acct-name">Moomoo MY</span><span class="div-mode dm-drip">US 股利：DRIP 預扣 30%</span><span class="div-mode dm-net">MY 股利：現金</span><div class="acct-kv"><span class="k">結算幣別</span><span class="v">USD</span></div><div class="acct-kv"><span class="k">資金幣別</span><span class="v">MYR</span></div><div class="acct-kv"><span class="k">市場</span><span class="v">US＋MY</span></div><div class="acct-kv"><span class="k">費率規則</span><span class="v">moomoo_us＋moomoo_my</span></div></div>
       </div>
     </section>
     <section class="panel">

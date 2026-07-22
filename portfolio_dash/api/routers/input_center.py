@@ -16,7 +16,13 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
 from portfolio_dash.api.routers.ledgers import _to_models
-from portfolio_dash.api.wire import div_model_wire, fee_rules_wire, issue_wire, parse_side
+from portfolio_dash.api.wire import (
+    account_markets_wire,
+    div_model_wire,
+    fee_rules_wire,
+    issue_wire,
+    parse_side,
+)
 from portfolio_dash.data_ingestion.agents import ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.csv_import import (
@@ -46,6 +52,7 @@ from portfolio_dash.data_ingestion.opening_import import (
     write_opening_row,
 )
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, commit_preview
+from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
     list_cash_movements,
@@ -59,6 +66,7 @@ from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Holding
+from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm_config import get_model
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
@@ -86,6 +94,10 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             "settlement_ccy": a.settlement_ccy.value,
             "funding_ccy": a.funding_ccy.value,
             "div_model": div_model_wire(meta[a.account_id]["dividend_model"]),
+            # Batch B (additive): per-market fee-rule + dividend-model bundle, so the input
+            # forms can follow the ENTERED SYMBOL's market on a merged account (F01/F05). A
+            # single-market account gets one mirrored entry -> legacy behaviour is unchanged.
+            "markets": account_markets_wire(a.market_rules, conn),
         }
         for a in accts
     ]
@@ -232,6 +244,11 @@ class ManualBody(BaseModel):
     daytrade: bool = False  # TW same-day round trip → 0.15% sell tax (persisted, MED-1)
     note: str | None = None
     ack_oversell: bool = False  # used by commit (Task 3)
+    # Batch B (F05): explicit target market for an UNREGISTERED symbol on a MERGED
+    # (multi-market) account, where the settlement ccy no longer picks one market. Blank on a
+    # single-market account (the one market is inferred exactly as before); a merged account
+    # with a blank market + unknown symbol is a commit-time 422 (market_required).
+    market: str = ""
 
 
 def _txn_input(body: ManualBody) -> TxnInput:
@@ -245,22 +262,67 @@ def _txn_input(body: ManualBody) -> TxnInput:
     )
 
 
-def _rule_for(conn: sqlite3.Connection, account_id: str) -> FeeRuleSet | None:
-    row = conn.execute(
-        "SELECT fee_rule_set FROM accounts WHERE account_id=?", (account_id,)
-    ).fetchone()
-    return get_fee_rule_set(row["fee_rule_set"], conn) if row is not None else None
+def _rule_for(
+    conn: sqlite3.Connection, account_id: str, market: Market | None
+) -> FeeRuleSet | None:
+    """Fee rule set for (*account_id*, *market*) — the manual-preview per-trade rule.
+
+    Batch B: market-aware via the (account, market) binding table. When *market* is None
+    (unregistered symbol — no resolved instrument) fall back to the account scalar exactly as
+    before (mirrors the whatif None-fallback). An unknown account -> None (unchanged).
+    """
+    if market is None:
+        row = conn.execute(
+            "SELECT fee_rule_set FROM accounts WHERE account_id=?", (account_id,)
+        ).fetchone()
+        return get_fee_rule_set(row["fee_rule_set"], conn) if row is not None else None
+    try:
+        rule_name = fee_rule_for(conn, account_id, market)
+    except KeyError:  # unknown account — preserve the pre-swap None return
+        return None
+    return get_fee_rule_set(rule_name, conn)
 
 
-def _issue_wire_manual(issue: Issue, symbol: str) -> dict[str, Any]:
+def _parse_market(value: str) -> Market | None:
+    """Wire market string ('US'/'TW'/'MY', any case) -> Market; None when blank/invalid."""
+    v = value.strip().upper()
+    if not v:
+        return None
+    try:
+        return Market(v)
+    except ValueError:
+        return None
+
+
+def _account_markets(conn: sqlite3.Connection, account_id: str) -> frozenset[Market]:
+    """Markets bound to *account_id* (empty on an unknown account, never raises here)."""
+    try:
+        return allowed_markets(conn, account_id)
+    except (KeyError, ValueError):
+        return frozenset()
+
+
+def _issue_wire_manual(
+    issue: Issue, symbol: str, *, multi_market: bool = False
+) -> dict[str, Any]:
     """issue_wire + the manual-entry auto-register overlay (2026-07-02).
 
     ``symbol_unresolved`` is a HARD block at the data_ingestion layer (the ledger
     safety net stands), but the manual COMMIT path auto-registers unknown symbols,
     so the PREVIEW presents it as an info-severity note instead of an error — the
     confirm button must not be gated on a condition the commit resolves itself.
+
+    On a MERGED (multi-market) account the settlement ccy no longer picks one market, so
+    the auto-register cannot guess: the preview note tells the user to register/pick a
+    market first (F05) rather than promising an auto-register the commit will 422.
     """
     if issue.kind == "symbol_unresolved":
+        if multi_market:
+            return {
+                "sev": "info", "code": "symbol_needs_market",
+                "text": f"未註冊標的 {symbol} — 此帳戶橫跨多個市場，請先於標的管理選擇市場註冊",
+                "field": "symbol",
+            }
         return {
             "sev": "info", "code": "symbol_auto_register",
             "text": f"未註冊標的 {symbol} — 寫入時將自動查詢並註冊（查無報價則無法寫入）",
@@ -433,7 +495,13 @@ def manual_preview(
         if draft.inp.side.value == "BUY"
         else (gross - draft.fee - draft.tax)
     )
-    rule = _rule_for(conn, body.account_id)
+    # Market-aware per-trade rule (Batch B): the resolved instrument's market picks the rule
+    # set; an unregistered symbol (draft.instrument None) keeps the account scalar (whatif
+    # None-fallback). The preview never fails on the lookup — degrades to None.
+    rule = _rule_for(
+        conn, body.account_id,
+        draft.instrument.market if draft.instrument is not None else None,
+    )
     issues = list(draft.issues)
     overdraft = _cash_overdraft_issue(conn, body, draft.fee, draft.tax)
     if overdraft is not None:
@@ -456,6 +524,9 @@ def manual_preview(
     # when the balance is known (else null) — a pure Decimal add over figures already computed,
     # NO new engine call, NO float. Frontend renders it verbatim under 該帳戶現金.
     cash_after = decimal_str(cash_bal + total) if cash_bal is not None else None
+    # Merged-account preview overlay (F05): the unregistered-symbol note tells the user to
+    # pick a market first. Dormant for single-market accounts (exactly one bound market).
+    multi_market = len(_account_markets(conn, body.account_id)) > 1
     return {
         "fee": decimal_str(draft.fee), "tax": decimal_str(draft.tax),
         "gross": decimal_str(gross), "total": decimal_str(total),
@@ -466,7 +537,7 @@ def manual_preview(
         "position_preview": position_preview,
         "account_cash": account_cash,
         "cash_after": cash_after,
-        "issues": [_issue_wire_manual(i, body.symbol) for i in issues],
+        "issues": [_issue_wire_manual(i, body.symbol, multi_market=multi_market) for i in issues],
     }
 
 
@@ -480,13 +551,30 @@ def manual_commit(
     inp = _txn_input(body)
     draft = enter_transaction(conn, inp, confirm=False, today=today)  # inspect, no write
 
-    # Auto-register an unknown symbol (2026-07-02): infer the market from the
-    # account's settlement currency and run the one-step registration (which
-    # REQUIRES a real quote — the typo guard). Success -> the entry proceeds as if
-    # the symbol had been registered first; failure -> a clear 400, nothing written.
+    # Auto-register an unknown symbol (2026-07-02): infer the market and run the one-step
+    # registration (which REQUIRES a real quote — the typo guard). Success -> the entry
+    # proceeds as if the symbol had been registered first; failure -> a clear 400, nothing
+    # written.
+    #
+    # Market determination (Batch B, F05): a SINGLE-market account infers the one market from
+    # its settlement ccy exactly as before (byte-identical). A MERGED (multi-market) account
+    # has no settlement-ccy answer, so it REQUIRES an explicit, allowed ``body.market``; a
+    # blank/invalid market -> 422 market_required (never guess which market to book into).
     auto_registered: dict[str, Any] | None = None
     if any(i.kind == "symbol_unresolved" for i in draft.issues):
-        market = _account_market(conn, body.account_id)
+        markets = _account_markets(conn, body.account_id)
+        market: Market | None
+        if len(markets) > 1:
+            chosen = _parse_market(body.market)
+            if chosen is None or chosen not in markets:
+                allowed = "／".join(sorted(m.value for m in markets))
+                return JSONResponse(status_code=422, content=error_body(
+                    "market_required",
+                    f"此帳戶橫跨多個市場（{allowed}），請指定要註冊到哪個市場再寫入",
+                    field="market"))
+            market = chosen
+        else:
+            market = _account_market(conn, body.account_id)
         if market is None:
             return JSONResponse(status_code=400, content=error_body(
                 "validation_error", f"帳戶 {body.account_id} 不存在，無法自動註冊標的",

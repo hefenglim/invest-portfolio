@@ -8,13 +8,26 @@ from portfolio_dash.data_ingestion.config_seed import (
 )
 
 
-def test_seed_accounts_writes_four(conn: sqlite3.Connection) -> None:
+def test_seed_accounts_writes_three(conn: sqlite3.Connection) -> None:
     seed_accounts(conn)
     seed_accounts(conn)  # idempotent
     rows = list(conn.execute("SELECT account_id FROM accounts"))
     ids = {r[0] for r in rows}
-    assert ids == {"tw_broker", "schwab", "moomoo_my_us", "moomoo_my_my"}
-    assert len(rows) == 4  # no duplicates
+    # Batch B: the two legacy Moomoo accounts are merged into ONE dual-market moomoo_my.
+    assert ids == {"tw_broker", "schwab", "moomoo_my"}
+    assert len(rows) == 3  # no duplicates
+
+
+def test_seed_binds_moomoo_my_to_both_markets(conn: sqlite3.Connection) -> None:
+    seed_accounts(conn)
+    bindings = {
+        r["market"]: (r["fee_rule_set"], r["dividend_model"])
+        for r in conn.execute(
+            "SELECT market, fee_rule_set, dividend_model FROM account_market_rules "
+            "WHERE account_id='moomoo_my'"
+        )
+    }
+    assert bindings == {"US": ("moomoo_us", "drip_us"), "MY": ("moomoo_my", "cash")}
 
 
 def test_tw_fee_rule_defaults() -> None:

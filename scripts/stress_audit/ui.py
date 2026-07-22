@@ -83,7 +83,7 @@ class UiDriver:
             "document.querySelector('#cfx-account').options.length > 0")
         p.select_option("#cfx-account", account_id)
         # R6-D: a single-currency account (e.g. tw_broker) disables the ccy/amount
-        # controls -- callers MUST pass a two-currency account (schwab / moomoo_my_us).
+        # controls -- callers MUST pass a two-currency account (schwab / moomoo_my).
         # Wait for the controls to actually be enabled before touching them: the
         # account switch's re-sync (clear amounts, dedupe ccy options, single-ccy
         # gate) now runs on every #cfx-account change, and the default first option in

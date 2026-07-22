@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
+from portfolio_dash.data_ingestion.rules_binding import rule_sets_for
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
     list_cash_movements,
@@ -121,19 +122,21 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
 
 
 def _rebate_accounts(conn: sqlite3.Connection) -> dict[str, tuple[Account, Decimal]]:
-    """account_id -> (account, rebate_rate) for every account whose rule set rebates (>0)."""
-    rule_by_acct = {
-        r["account_id"]: r["fee_rule_set"]
-        for r in conn.execute("SELECT account_id, fee_rule_set FROM accounts")
-    }
+    """account_id -> (account, rebate_rate) for every account ANY of whose bound rule sets
+    rebates (>0).
+
+    Batch B: an account may bind several rule sets (one per market); the first bound set
+    (alphabetical, per ``rule_sets_for``) with ``rebate_rate > 0`` supplies the rate.
+    Behaviour-identical today — only the TW rule set rebates, and every account binds a
+    single market, so exactly one rule set is ever consulted.
+    """
     out: dict[str, tuple[Account, Decimal]] = {}
     for a in list_accounts(conn):
-        rule_name = rule_by_acct.get(a.account_id)
-        if rule_name is None:
-            continue
-        rate = get_fee_rule_set(rule_name, conn).rebate_rate
-        if rate > _ZERO:
-            out[a.account_id] = (a, rate)
+        for rule_name in rule_sets_for(conn, a.account_id):
+            rate = get_fee_rule_set(rule_name, conn).rebate_rate
+            if rate > _ZERO:
+                out[a.account_id] = (a, rate)
+                break
     return out
 
 

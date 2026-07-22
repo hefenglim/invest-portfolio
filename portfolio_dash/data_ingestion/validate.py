@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
+from portfolio_dash.data_ingestion.rules_binding import allowed_markets
 from portfolio_dash.data_ingestion.store import get_instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import from_db
@@ -53,6 +54,37 @@ class Issue(BaseModel):
     kind: str
     message: str
     needs_confirm: bool = False
+
+
+# Batch B (2026-07-21): legacy Moomoo account ids merged into ``moomoo_my``. An uploaded CSV
+# authored before the merge may still carry a legacy id; the importers rewrite it here so the
+# row lands on the merged account. ONE map + helper, shared by every CSV importer (transactions,
+# dividends, fx, opening) — never five copies. The single-trade manual path uses the registered
+# account dropdown, which only offers the current ids, so it needs no aliasing.
+LEGACY_ACCOUNT_ALIAS: dict[str, str] = {
+    "moomoo_my_us": "moomoo_my",
+    "moomoo_my_my": "moomoo_my",
+}
+
+
+def alias_import_account(raw_account: str) -> tuple[str, Issue | None]:
+    """Resolve a CSV-supplied account id, mapping a legacy Moomoo id to ``moomoo_my``.
+
+    Returns ``(resolved_id, issue)``: for a legacy id, ``resolved_id`` is ``moomoo_my`` and
+    ``issue`` is a SOFT (``needs_confirm=True``) info finding announcing the auto-conversion;
+    for any other id, ``(raw_account, None)`` (byte-identical passthrough). The issue is soft
+    (not hard) on purpose — a hard/non-confirmable issue would BLOCK the row's commit
+    (:attr:`preview.PreviewRow.has_hard_issue`), defeating the merge; soft lets the aliased
+    row import once accepted while still surfacing the notice.
+    """
+    resolved = LEGACY_ACCOUNT_ALIAS.get(raw_account)
+    if resolved is None:
+        return raw_account, None
+    return resolved, Issue(
+        kind="account_alias",
+        needs_confirm=True,
+        message=f"帳戶 {raw_account} 已合併為 {resolved},已自動轉換",
+    )
 
 
 def validate_transaction(
@@ -96,10 +128,17 @@ def validate_transaction(
         issues.append(Issue(kind="negative_tax", message="交易稅不可為負"))
 
     # --- account↔instrument market coherence (H1): only when BOTH are known ---
+    # Batch B: relaxed from a 1:1 (account market == instrument market) check to a
+    # SET membership test — a row is coherent iff the instrument's market is one of the
+    # account's ALLOWED markets (the bound set; a merged Moomoo account holds US + MY).
+    # For a single-market account the allowed set is the settlement-derived singleton, so
+    # this is behavior-identical to the prior check. ``acct_mkt`` (settlement-derived) is
+    # kept as the None-guard for an unmapped ccy AND as the account-side message label, so
+    # the single-market rejection message stays byte-identical.
     inst = get_instrument(conn, inp.symbol)
     if acc is not None and inst is not None:
         acct_mkt = CCY_MARKET.get(acc["settlement_ccy"])
-        if acct_mkt is not None and inst.market is not acct_mkt:
+        if acct_mkt is not None and inst.market not in allowed_markets(conn, inp.account_id):
             issues.append(
                 Issue(
                     kind="market_mismatch",

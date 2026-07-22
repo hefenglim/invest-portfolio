@@ -47,10 +47,10 @@ def test_withdraw_over_balance_hard_block(api_client: TestClient) -> None:
     # the available figure, and ack_negative does NOT bypass (the override is removed for
     # withdrawals only).
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_my", "date": "2026-01-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-01-01", "kind": "deposit",
         "ccy": "MYR", "amount": "1000"})
     r = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_my", "date": "2026-02-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "MYR", "amount": "1500"})
     assert r.status_code == 422
     err = r.json()["error"]
@@ -58,26 +58,26 @@ def test_withdraw_over_balance_hard_block(api_client: TestClient) -> None:
     assert err["field"] == "amount"
     assert "1000" in err["message"]  # the available balance is stated in the message
     r2 = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_my", "date": "2026-02-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "MYR", "amount": "1500", "ack_negative": True})
     assert r2.status_code == 422  # no ack override for withdrawals
     assert r2.json()["error"]["code"] == "withdraw_insufficient_balance"
-    assert _balance(api_client, "moomoo_my_my", "MYR") == "1000"  # nothing was written
+    assert _balance(api_client, "moomoo_my", "MYR") == "1000"  # nothing was written
 
 
 def test_withdraw_exact_balance_passes(api_client: TestClient) -> None:
     # FU-D43a boundary: withdrawing EXACTLY the pool balance drains it to zero and is
     # allowed; even 0.01 beyond the (now zero) pool is then blocked.
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_my", "date": "2026-01-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-01-01", "kind": "deposit",
         "ccy": "MYR", "amount": "1234.56"})
     ok = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_my", "date": "2026-02-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "MYR", "amount": "1234.56"})
     assert ok.status_code == 201
-    assert _balance(api_client, "moomoo_my_my", "MYR") == "0.00"
+    assert _balance(api_client, "moomoo_my", "MYR") == "0.00"
     over = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_my", "date": "2026-02-02", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-02", "kind": "withdraw",
         "ccy": "MYR", "amount": "0.01"})
     assert over.status_code == 422
     assert over.json()["error"]["code"] == "withdraw_insufficient_balance"
@@ -112,16 +112,16 @@ def test_fx_over_balance_hard_block(api_client: TestClient) -> None:
 
 def test_fx_exact_balance_passes(api_client: TestClient) -> None:
     # FU-D34 boundary: selling EXACTLY the pool balance drains it to zero and is allowed.
-    # moomoo_my_us MYR starts empty; fund it precisely, then convert the whole pool.
+    # moomoo_my MYR starts empty; fund it precisely, then convert the whole pool.
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-05", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-01-05", "kind": "deposit",
         "ccy": "MYR", "amount": "44000"})
     r = api_client.post("/api/cash/fx", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-06", "from_ccy": "MYR",
+        "account_id": "moomoo_my", "date": "2026-01-06", "from_ccy": "MYR",
         "from_amt": "44000", "to_ccy": "USD", "to_amt": "10000"})
     assert r.status_code == 201
-    assert _balance(api_client, "moomoo_my_us", "MYR") == "0"
-    assert _balance(api_client, "moomoo_my_us", "USD") == "10000"
+    assert _balance(api_client, "moomoo_my", "MYR") == "0"
+    assert _balance(api_client, "moomoo_my", "USD") == "10000"
 
 
 def test_fx_exact_fractional_balance_is_decimal_exact(api_client: TestClient) -> None:
@@ -129,14 +129,14 @@ def test_fx_exact_fractional_balance_is_decimal_exact(api_client: TestClient) ->
     # the balance 12345.6699… and wrongly reject the exact sell; the Decimal check accepts
     # == exactly, then rejects even 0.01 beyond the (now zero) pool.
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-05", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-01-05", "kind": "deposit",
         "ccy": "MYR", "amount": "12345.67"})
     ok = api_client.post("/api/cash/fx", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-06", "from_ccy": "MYR",
+        "account_id": "moomoo_my", "date": "2026-01-06", "from_ccy": "MYR",
         "from_amt": "12345.67", "to_ccy": "USD", "to_amt": "2743.48"})
     assert ok.status_code == 201  # exact-balance sell is NOT falsely blocked
     over = api_client.post("/api/cash/fx", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-07", "from_ccy": "MYR",
+        "account_id": "moomoo_my", "date": "2026-01-07", "from_ccy": "MYR",
         "from_amt": "0.01", "to_ccy": "USD", "to_amt": "0.01"})
     assert over.status_code == 422
     assert over.json()["error"]["code"] == "fx_insufficient_balance"
@@ -154,16 +154,16 @@ def test_fx_ack_negative_no_longer_bypasses(api_client: TestClient) -> None:
 
 def test_movement_edit_delta_guard_and_delete(api_client: TestClient) -> None:
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-01-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
     rows = api_client.get("/api/cash").json()["movements"]["rows"]
-    dep = next(x for x in rows if x["account_id"] == "moomoo_my_us")
+    dep = next(x for x in rows if x["account_id"] == "moomoo_my")
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-02-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "USD", "amount": "800"})
     # shrinking the deposit below the withdraw strands the pool -> 422
     r = api_client.put(f"/api/cash/movements/{dep['id']}", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-01-01", "kind": "deposit",
         "ccy": "USD", "amount": "500"})
     assert r.status_code == 422 and r.json()["error"]["code"] == "negative_cash"
     # deleting it outright is guarded too
@@ -255,13 +255,13 @@ def test_statement_same_day_newest_first_balance_on_top(api_client: TestClient) 
     """Same-day rows are ordered newest-first (reverse of the credit-before-debit
     chronological order), so the end-of-day balance sits on top."""
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-05-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-05-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-05-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-05-01", "kind": "withdraw",
         "ccy": "USD", "amount": "300"})
     body = api_client.get("/api/cash/statement",
-                          params={"account": "moomoo_my_us", "ccy": "USD"}).json()
+                          params={"account": "moomoo_my", "ccy": "USD"}).json()
     assert [r["kind"] for r in body["rows"]] == ["withdraw", "deposit"]
     assert body["rows"][0]["balance"] == "700" and body["rows"][1]["balance"] == "1000"
 
@@ -324,27 +324,27 @@ def test_withdraw_put_edit_self_exclusion(api_client: TestClient) -> None:
     """Editing a withdraw validates against the balance EXCLUDING the row's own prior
     effect: raising it to exactly the row-free balance passes; one cent beyond blocks."""
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-01-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-02-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "USD", "amount": "800"})
-    assert _balance(api_client, "moomoo_my_us", "USD") == "200"
-    wid = _withdraw_row_id(api_client, "moomoo_my_us", "USD")
+    assert _balance(api_client, "moomoo_my", "USD") == "200"
+    wid = _withdraw_row_id(api_client, "moomoo_my", "USD")
     # 1000.01 > 1000 (balance excluding this row's own −800) -> hard 422, ack ignored
     over = api_client.put(f"/api/cash/movements/{wid}", json={
-        "account_id": "moomoo_my_us", "date": "2026-02-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "USD", "amount": "1000.01", "ack_negative": True})
     assert over.status_code == 422
     err = over.json()["error"]
     assert err["code"] == "withdraw_insufficient_balance" and "1000" in err["message"]
-    assert _balance(api_client, "moomoo_my_us", "USD") == "200"  # unchanged
+    assert _balance(api_client, "moomoo_my", "USD") == "200"  # unchanged
     # exactly the row-free balance -> allowed (NOT falsely blocked by its own old amount)
     ok = api_client.put(f"/api/cash/movements/{wid}", json={
-        "account_id": "moomoo_my_us", "date": "2026-02-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "USD", "amount": "1000"})
     assert ok.status_code == 200
-    assert _balance(api_client, "moomoo_my_us", "USD") == "0"
+    assert _balance(api_client, "moomoo_my", "USD") == "0"
 
 
 def test_withdraw_backdated_before_funding_hard_blocked(api_client: TestClient) -> None:
@@ -352,15 +352,15 @@ def test_withdraw_backdated_before_funding_hard_blocked(api_client: TestClient) 
     before its funding dips the running balance -> hard 422 (ack removed); re-dated
     after the funding it passes."""
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-05-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-05-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
     r = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-04-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-04-01", "kind": "withdraw",
         "ccy": "USD", "amount": "500", "ack_negative": True})
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "withdraw_insufficient_balance"
     ok = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-05-02", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-05-02", "kind": "withdraw",
         "ccy": "USD", "amount": "500"})
     assert ok.status_code == 201
 
@@ -370,28 +370,28 @@ def test_deposit_edit_to_withdraw_keeps_removal_ack(api_client: TestClient) -> N
     the dip caused by REMOVING the old deposit's funding stays deposit-side semantics —
     ack-able negative_cash, exactly as before (FU-D43a touches withdrawals only)."""
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-01-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-02-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "USD", "amount": "400"})
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-03-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-03-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
     rows = api_client.get("/api/cash", params={"limit": 500}).json()["movements"]["rows"]
-    dep = next(x for x in rows if x["account_id"] == "moomoo_my_us"
+    dep = next(x for x in rows if x["account_id"] == "moomoo_my"
                and x["kind"] == "deposit" and x["date"] == "2026-01-01")
     # Convert the Jan deposit into a small Apr withdraw: end balance covers it (600 left)
     # and the new withdraw itself introduces no NEW dip — but removing the Jan funding
     # strands the Feb withdraw below zero -> the ack-able negative_cash warning fires.
-    body = {"account_id": "moomoo_my_us", "date": "2026-04-01", "kind": "withdraw",
+    body = {"account_id": "moomoo_my", "date": "2026-04-01", "kind": "withdraw",
             "ccy": "USD", "amount": "100"}
     r = api_client.put(f"/api/cash/movements/{dep['id']}", json=body)
     assert r.status_code == 422 and r.json()["error"]["code"] == "negative_cash"
     r2 = api_client.put(f"/api/cash/movements/{dep['id']}",
                         json={**body, "ack_negative": True})
     assert r2.status_code == 200
-    assert _balance(api_client, "moomoo_my_us", "USD") == "500"  # −400 +1000 −100
+    assert _balance(api_client, "moomoo_my", "USD") == "500"  # −400 +1000 −100
 
 
 def test_deposit_and_opening_posts_unaffected(api_client: TestClient) -> None:
@@ -402,7 +402,7 @@ def test_deposit_and_opening_posts_unaffected(api_client: TestClient) -> None:
         "ccy": "TWD", "amount": "10"})
     assert r.status_code == 201
     r2 = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_my", "date": "2026-01-01", "kind": "opening",
+        "account_id": "moomoo_my", "date": "2026-01-01", "kind": "opening",
         "ccy": "MYR", "amount": "5"})
     assert r2.status_code == 201
 

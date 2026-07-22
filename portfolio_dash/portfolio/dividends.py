@@ -2,11 +2,15 @@
 no ledger writes. Net applies each holding account's dividend model (withholding only --
 the Moomoo-US per-dividend platform fee is probe-pending and deferred).
 
-dividend_model is read from the ``accounts`` param (``Account.dividend_model``), which
-is DB truth (``list_accounts`` selects the ``accounts.dividend_model`` column). This is
-the single source of the per-account dividend rule -- there is no config-as-code map. A
-holding referencing an unknown account_id raises KeyError (fail loud on corrupt data
-rather than silently defaulting net = gross).
+The dividend model is resolved PER MARKET off the ``accounts`` param: a holding's
+instrument market selects the account's ``market_rules`` binding
+(``Account.market_rules[market]``) when present, else the account-level
+``Account.dividend_model`` scalar (the fallback -- a single-market account with no
+binding behaves identically). Both come from ``list_accounts`` (DB truth); there is no
+config-as-code map. Staying pure (no conn) is the architecture rule for ``portfolio/``;
+the per-market data rides on the Account model. A holding referencing an unknown
+account_id raises KeyError (fail loud on corrupt data rather than silently defaulting
+net = gross).
 """
 
 from collections import defaultdict
@@ -45,11 +49,11 @@ def project_dividends(
     """Per-currency declared gross/net dividend cash flow for ``year``.
 
     declared_only basis: only ex-dividend events for held symbols with a cash amount
-    and ``ex_date.year == year``. Net applies each holding account's dividend model
-    (read from ``accounts[h.account_id].dividend_model`` -- DB truth; an unknown
-    account_id raises KeyError = fail loud on corrupt data). Currencies are NEVER summed
-    across; ``by_currency`` is keyed by the event currency (falling back to the
-    instrument's quote currency).
+    and ``ex_date.year == year``. Net applies each holding's per-market dividend model
+    (``accounts[h.account_id].market_rules[market]`` if bound, else the account scalar;
+    an unknown account_id raises KeyError = fail loud on corrupt data). Currencies are
+    NEVER summed across; ``by_currency`` is keyed by the event currency (falling back to
+    the instrument's quote currency).
     """
     gross: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     net: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
@@ -67,7 +71,14 @@ def project_dividends(
         contributed = False
         for h in by_symbol.get(ev.symbol, []):
             g = h.shares * ev.cash_amount
-            model = accounts[h.account_id].dividend_model
+            # Per-market dividend model: the holding's instrument market (h.symbol ==
+            # ev.symbol) selects the account's (account, market) binding when present,
+            # else the account-level scalar. Resolved off the Account model -- pure, no
+            # conn (architecture: portfolio/ is pure). Only reached when a holding exists,
+            # so instruments[h.symbol] is safe (an unheld event never looks it up here).
+            account = accounts[h.account_id]
+            rule = account.market_rules.get(instruments[h.symbol].market.value)
+            model = rule.dividend_model if rule is not None else account.dividend_model
             div_type = _MODEL_DIV_TYPE.get(model, "cash")
             gross[ccy] += g
             net[ccy] += apply_dividend_model(div_type, gross=g).net
