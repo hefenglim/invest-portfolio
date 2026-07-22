@@ -50,15 +50,15 @@ def test_backdated_withdraw_before_funding_hard_blocks(api_client: TestClient) -
     # hard 422 withdraw_insufficient_balance — the ack override is removed for
     # withdrawals, so the missed deposit must be recorded first.
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-05-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-05-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
     r = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-04-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-04-01", "kind": "withdraw",
         "ccy": "USD", "amount": "500"})
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "withdraw_insufficient_balance"
     r2 = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-04-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-04-01", "kind": "withdraw",
         "ccy": "USD", "amount": "500", "ack_negative": True})
     assert r2.status_code == 422  # ack no longer bypasses a withdraw guard
     assert r2.json()["error"]["code"] == "withdraw_insufficient_balance"
@@ -69,10 +69,10 @@ def test_backdated_withdraw_before_funding_hard_blocks(api_client: TestClient) -
 
 def test_opening_movement_credits_pool(api_client: TestClient) -> None:
     r = api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-01-01", "kind": "opening",
+        "account_id": "moomoo_my", "date": "2026-01-01", "kind": "opening",
         "ccy": "USD", "amount": "1000"})
     assert r.status_code == 201
-    assert _balance(api_client, "moomoo_my_us", "USD") == "1000"  # credited like a deposit
+    assert _balance(api_client, "moomoo_my", "USD") == "1000"  # credited like a deposit
     rows = api_client.get("/api/cash").json()["movements"]["rows"]
     assert any(m["kind"] == "opening" for m in rows)
 
@@ -91,14 +91,14 @@ def test_negative_pools_listed(api_client: TestClient) -> None:
 
 def test_cash_statement_shape_and_running_balance(api_client: TestClient) -> None:
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-05-01", "kind": "deposit",
+        "account_id": "moomoo_my", "date": "2026-05-01", "kind": "deposit",
         "ccy": "USD", "amount": "1000"})
     api_client.post("/api/cash/movements", json={
-        "account_id": "moomoo_my_us", "date": "2026-06-01", "kind": "withdraw",
+        "account_id": "moomoo_my", "date": "2026-06-01", "kind": "withdraw",
         "ccy": "USD", "amount": "300"})
     body = api_client.get("/api/cash/statement",
-                          params={"account": "moomoo_my_us", "ccy": "USD"}).json()
-    assert body["account_id"] == "moomoo_my_us" and body["ccy"] == "USD"
+                          params={"account": "moomoo_my", "ccy": "USD"}).json()
+    assert body["account_id"] == "moomoo_my" and body["ccy"] == "USD"
     assert body["current_balance"] == "700" and body["total_count"] == 2
     # newest-first: withdraw (balance 700) then deposit (balance 1000)
     assert body["rows"][0]["kind"] == "withdraw" and body["rows"][0]["balance"] == "700"
@@ -110,10 +110,10 @@ def test_cash_statement_shape_and_running_balance(api_client: TestClient) -> Non
 def test_cash_statement_paging(api_client: TestClient) -> None:
     for i in range(1, 4):
         api_client.post("/api/cash/movements", json={
-            "account_id": "moomoo_my_us", "date": f"2026-0{i}-01", "kind": "deposit",
+            "account_id": "moomoo_my", "date": f"2026-0{i}-01", "kind": "deposit",
             "ccy": "USD", "amount": "100"})
     p1 = api_client.get("/api/cash/statement",
-                        params={"account": "moomoo_my_us", "ccy": "USD", "limit": 2}).json()
+                        params={"account": "moomoo_my", "ccy": "USD", "limit": 2}).json()
     assert p1["total_count"] == 3 and len(p1["rows"]) == 2
 
 
@@ -145,7 +145,7 @@ def test_reporting_total_skips_missing_rate(
         insert_cash_movement(conn, account_id="tw_broker", move_date=date(2026, 1, 1),
                              kind="DEPOSIT", ccy=Currency.TWD, amount=Decimal("1000"))
         # MYR pool with NO MYR/TWD rate stored anywhere -> must be skipped, not fatal.
-        insert_cash_movement(conn, account_id="moomoo_my_my", move_date=date(2026, 1, 1),
+        insert_cash_movement(conn, account_id="moomoo_my", move_date=date(2026, 1, 1),
                              kind="DEPOSIT", ccy=Currency.MYR, amount=Decimal("500"))
 
     client = dashboard_client_factory(seed, reporting=Currency.TWD)

@@ -50,6 +50,7 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
+from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
 from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData, HoldingRow
@@ -71,12 +72,17 @@ def _round_shares(raw: Decimal, market: Market) -> Decimal:
     return raw.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
 
-def _fee_rule_set_name(conn: sqlite3.Connection, account_id: str) -> str | None:
-    """The account's fee-rule-set name (the Account model omits it; query directly)."""
-    row = conn.execute(
-        "SELECT fee_rule_set FROM accounts WHERE account_id=?", (account_id,)
-    ).fetchone()
-    return row["fee_rule_set"] if row is not None else None
+def _fee_rule_set_name(
+    conn: sqlite3.Connection, account_id: str, market: Market
+) -> str | None:
+    """The account's fee-rule-set name for *market* (Batch B: market-aware via the
+    (account, market) binding table). An unknown account -> None (degrade, don't crash).
+    Every constituent of one symbol shares that symbol's single market, so the per-account
+    rule stays unambiguous."""
+    try:
+        return fee_rule_for(conn, account_id, market)
+    except KeyError:  # unknown account — preserve the pre-swap None return
+        return None
 
 
 def _priced_constituents(holdings: list[HoldingRow], symbol: str) -> list[HoldingRow]:
@@ -240,7 +246,7 @@ def compute_rebalance(
         rules_by_acct: dict[str, FeeRuleSet] = {}
         missing_rule = False
         for h in cons:
-            rn = _fee_rule_set_name(conn, h.account_id)
+            rn = _fee_rule_set_name(conn, h.account_id, h.market)
             if rn is None:
                 missing_rule = True
                 break

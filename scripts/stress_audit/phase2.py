@@ -31,6 +31,10 @@ NEW_INSTRUMENTS = [
     ("5225", "MY", "MYR", "IHH Healthcare", "Healthcare", False),
 ]
 
+# symbol -> market, so the fee check can route the merged dual-market moomoo_my's per-market rule
+# (Batch B): a moomoo_my US trade books moomoo_us fees, an MY trade books moomoo_my fees.
+_MARKET_OF = {sym: mkt for sym, mkt, *_ in NEW_INSTRUMENTS}
+
 
 class Ops2:
     def __init__(self, ev: C.Evidence, api: C.Api, ui, phase="phase2"):
@@ -74,7 +78,12 @@ class Ops2:
         got = C.read_fee_tax_from_api(self.api, txn_id)
         if got is None:
             return
-        fee, tax, _ = O.fee_tax(account_id, side.upper(), dec(qty), dec(price), is_etf)
+        # Batch B: route the merged moomoo_my's fee rule by the instrument's market. The demo
+        # exposes no USD/MYR rate, so a moomoo_my US trade's MY stamp is 0 on both sides
+        # (stamp_fx=None here == the app's None) — native fees still reconcile exactly.
+        market = _MARKET_OF.get(symbol)
+        fee, tax, _ = O.fee_tax(account_id, side.upper(), dec(qty), dec(price), is_etf,
+                                market=market)
         self.ev.check("fee_engine.fee", f"{account_id}/{symbol} {side} {qty}@{price} id={txn_id}",
                       fee, got[0], self.phase)
         self.ev.check("fee_engine.tax", f"{account_id}/{symbol} {side} {qty}@{price} id={txn_id}",

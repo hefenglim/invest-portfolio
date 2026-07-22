@@ -16,7 +16,10 @@
     return n;
   };
 
-  const RS_NAMES = { tw: '台灣券商', schwab: '嘉信 Schwab', moomoo_us: 'Moomoo 美股', moomoo_my: 'Moomoo 馬股' };
+  /* Display labels for FEE RULE SETS (not accounts): after the Batch B merge, ONE account
+     (Moomoo MY) references TWO sets — moomoo_us + moomoo_my — so each label reads as a
+     rule set, never an account name. The set id is still shown verbatim beside the label. */
+  const RS_NAMES = { tw: '台灣券商規則', schwab: '嘉信 Schwab 規則', moomoo_us: 'Moomoo 美股規則', moomoo_my: 'Moomoo 馬股規則' };
   const LABELS = {
     brokerage: '券商費率', discount: '折扣', min_fee: '最低手續費',
     tax_normal: '證交稅（現股）', tax_etf: '證交稅（ETF）', tax_daytrade: '證交稅（當沖）',

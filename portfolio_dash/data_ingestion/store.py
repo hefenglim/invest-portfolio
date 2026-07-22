@@ -9,7 +9,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pydantic import BaseModel, Field
 
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.models.assets import Account, Instrument
+from portfolio_dash.shared.models.assets import Account, Instrument, MarketRule
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import from_db, to_db
 from portfolio_dash.shared.sectors import CANONICAL_KEYS, canonical_sector
@@ -307,17 +307,30 @@ def _unarchive_on_booking(conn: sqlite3.Connection, symbol: str) -> None:
 
 
 def list_accounts(conn: sqlite3.Connection) -> list[Account]:
-    """Return all broker accounts (seeded by ``config_seed.seed_accounts``)."""
+    """Return all broker accounts (seeded by ``config_seed.seed_accounts``).
+
+    Each ``Account`` carries its ``account_market_rules`` bindings in ``market_rules``
+    (keyed by market value) so the pure compute layer can read per-market rules without a
+    ``conn``. Absent bindings -> empty dict; the scalar fields remain the fallback.
+    """
     rows = conn.execute(
         "SELECT account_id, name, broker, settlement_ccy, funding_ccy, dividend_model "
         "FROM accounts ORDER BY account_id"
     ).fetchall()
+    by_account: dict[str, dict[str, MarketRule]] = {}
+    for b in conn.execute(
+        "SELECT account_id, market, fee_rule_set, dividend_model FROM account_market_rules"
+    ).fetchall():
+        by_account.setdefault(b["account_id"], {})[b["market"]] = MarketRule(
+            fee_rule_set=b["fee_rule_set"], dividend_model=b["dividend_model"]
+        )
     return [
         Account(
             account_id=r["account_id"], name=r["name"], broker=r["broker"],
             settlement_ccy=Currency(r["settlement_ccy"]),
             funding_ccy=Currency(r["funding_ccy"]),
             dividend_model=r["dividend_model"],
+            market_rules=by_account.get(r["account_id"], {}),
         )
         for r in rows
     ]

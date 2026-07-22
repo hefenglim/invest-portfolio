@@ -56,7 +56,7 @@ def _seed_dividends(conn: Any) -> None:
     * 2330 / tw_broker  — TW CASH (from golden; already carries a 5,000 net CASH dividend).
     * 2454 / tw_broker  — TW STOCK 配股 (fresh, never-dividended; 500 sh @ 800 = 400,000).
     * AAPL / schwab     — DRIP (from golden; 10 sh @ 100 = 1,000).
-    * 1155 / moomoo_my_my — MY NET (fresh; 1,000 sh @ 9 MYR = 9,000).
+    * 1155 / moomoo_my — MY NET (fresh; 1,000 sh @ 9 MYR = 9,000).
     """
     _seed_golden(conn)
     upsert_instrument(conn, Instrument(symbol="2454", market=Market.TW, quote_ccy=Currency.TWD,
@@ -66,7 +66,7 @@ def _seed_dividends(conn: Any) -> None:
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 6))
     upsert_instrument(conn, Instrument(symbol="1155", market=Market.MY, quote_ccy=Currency.MYR,
                                        sector="Banks", name="Maybank", board=".KL"))
-    insert_transaction(conn, account_id="moomoo_my_my", symbol="1155", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="1155", side=Side.BUY,
                        quantity=Decimal("1000"), price=Decimal("9"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 7))
     conn.commit()
@@ -206,20 +206,25 @@ def test_dividend_all_models_downstream_numbers(
     assert Decimal(drip_rows[0]["reinvest_shares"]) == Decimal("0.5")
 
     # ============ (4) MY NET — adjusted cost drops by the net received ======================
-    my_div_before = _dividend_line_count(base, "moomoo_my_my", "MYR")
-    page.select_option("#d-account", "moomoo_my_my")
+    # Batch B (Moomoo merge): moomoo_my is now a DUAL-market account, so the dividend model
+    # follows the ENTERED SYMBOL's market (F01), not an account scalar. #d-symbol still holds
+    # the prior step's US "AAPL" here, which resolves to the US→DRIP block — so the MY symbol
+    # must be entered FIRST for the form to switch to the MY→NET block (the pre-merge premise
+    # of "select moomoo_my ⇒ NET" no longer holds).
+    my_div_before = _dividend_line_count(base, "moomoo_my", "MYR")
+    page.select_option("#d-account", "moomoo_my")
+    page.fill("#d-symbol", "1155")                             # MY symbol picks the NET model
     page.wait_for_selector("#d-net", state="visible")          # model-block: net
     page.wait_for_selector("#d-drip", state="hidden")
-    page.fill("#d-symbol", "1155")
     page.fill("#d-net-amt", "200")
     _commit_dividend(page)
 
-    my = _holding(base, "1155", "moomoo_my_my")
+    my = _holding(base, "1155", "moomoo_my")
     assert my is not None
     assert Decimal(my["adjusted_cost_total"]) == Decimal("8800")         # 9000 − 200 net
     assert Decimal(my["original_cost_total"]) == Decimal("9000")         # original untouched
     assert Decimal(my["shares"]) == Decimal("1000")
-    assert _dividend_line_count(base, "moomoo_my_my", "MYR") == my_div_before + 1
+    assert _dividend_line_count(base, "moomoo_my", "MYR") == my_div_before + 1
 
     assert not console_errors and not page_errors, (
         f"dividend input flow: console={console_errors!r} page={page_errors!r}"

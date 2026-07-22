@@ -64,6 +64,10 @@ from portfolio_dash.api.signals_service import scan_signals as signal_scan_runne
 from portfolio_dash.api.snapshots import snapshot_job
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
+from portfolio_dash.data_ingestion.moomoo_merge import (
+    migrate_moomoo_accounts,
+    needs_moomoo_merge,
+)
 from portfolio_dash.llm_insight.alerts_bridge import ensure_tables as ensure_alert_events_tables
 from portfolio_dash.llm_insight.alerts_bridge import suppress_stale_quota_low
 from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_composer_seeded
@@ -73,6 +77,7 @@ from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.news.organizer_prompt import ensure_news_prompt_seeded
 from portfolio_dash.ops import digest as digest_ops
 from portfolio_dash.ops import notify as notify_ops
+from portfolio_dash.ops.backup import pre_write_snapshot
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
@@ -137,6 +142,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         bootstrap_db(conn)  # ledger tables (accounts, instruments, transactions, ...)
         create_pricing_tables(conn)  # prices + fx_rates (the dashboard valuation reads these)
         datasources_store.ensure_seeded(conn)  # data_sources + tiers + health (spec 14)
+        # Batch B one-time Moomoo merge (2026-07-21): relabel every ledger row + rules binding
+        # from the two legacy account ids (moomoo_my_us / moomoo_my_my) to the merged dual-market
+        # moomoo_my, atomically. Runs BEFORE seed_accounts so the merge (not the re-seed) owns the
+        # legacy-row rewrite; seed_accounts then idempotently re-asserts the canonical config. The
+        # S0 predicate gates a pre-migration backup snapshot to EXACTLY one per actual migration —
+        # a reboot after success sees no legacy ids and takes neither snapshot nor migration.
+        if needs_moomoo_merge(conn):
+            pre_write_snapshot(prefix="pre_migrate_", now=app_now())
+            migrate_moomoo_accounts(conn)
         # Seed the broker accounts from the single canonical config (DEFAULT_ACCOUNTS). Idempotent
         # upsert: adding a future account THERE auto-seeds it on next launch; today there is no
         # account-edit UI so the defaults are fixed config. (When an add/edit-account UI lands,

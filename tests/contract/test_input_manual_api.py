@@ -206,6 +206,102 @@ def test_manual_commit_registered_symbol_skips_auto_register(
     assert r.json()["auto_registered"] is None
 
 
+# --- Batch B (F05): merged (multi-market) account market determination ------------------
+# A single settlement ccy no longer picks one market on the future merged Moomoo account, so
+# an UNREGISTERED symbol must carry an explicit ``market`` — else the commit 422s rather than
+# guess which market to book into (which would apply the wrong fee/dividend rules).
+
+
+def _insert_merged_account(conn: sqlite3.Connection) -> None:
+    """Insert a synthetic merged Moomoo account bound to BOTH US (drip) and MY (net)."""
+    conn.execute(
+        "INSERT INTO accounts (account_id, name, broker, settlement_ccy, funding_ccy, "
+        "fee_rule_set, dividend_model) VALUES (?,?,?,?,?,?,?)",
+        ("moomoo_merged", "Moomoo MY", "Moomoo MY", "USD", "MYR", "moomoo_us", "drip_us"),
+    )
+    conn.executemany(
+        "INSERT INTO account_market_rules (account_id, market, fee_rule_set, dividend_model) "
+        "VALUES (?,?,?,?)",
+        [("moomoo_merged", "US", "moomoo_us", "drip_us"),
+         ("moomoo_merged", "MY", "moomoo_my", "cash")],
+    )
+    conn.commit()
+
+
+def _fake_quick_register_us(symbol: str = "GHOST", name: str = "Ghost Corp") -> Any:
+    def fake(conn: Any, **kw: Any) -> QuickRegisterOutcome:
+        inst = Instrument(symbol=symbol, market=Market.US, quote_ccy=Currency.USD,
+                          sector="", name=name)
+        upsert_instrument(conn, inst)
+        return QuickRegisterOutcome(instrument=inst, board="", last=None,
+                                    name_source="provider", history_points=True)
+    return fake
+
+
+def test_manual_preview_merged_unregistered_symbol_needs_market(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    _insert_merged_account(golden_db)
+    r = api_client.post("/api/input/manual/preview", json={
+        "account_id": "moomoo_merged", "symbol": "GHOST", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "10"})
+    assert r.status_code == 200
+    codes = {i["code"]: i for i in r.json()["issues"]}
+    # the merged account surfaces the market-needed note (not the single-market auto-register).
+    assert "symbol_needs_market" in codes
+    assert "symbol_auto_register" not in codes
+    assert codes["symbol_needs_market"]["sev"] == "info"
+    assert "多個市場" in codes["symbol_needs_market"]["text"]
+
+
+def test_manual_commit_merged_unregistered_symbol_blank_market_422(
+    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _insert_merged_account(golden_db)
+
+    def boom(conn: Any, **kw: Any) -> QuickRegisterOutcome:
+        raise AssertionError("quick_register must not run without a chosen market")
+
+    monkeypatch.setattr(input_center, "quick_register", boom)
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "moomoo_merged", "symbol": "GHOST", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "10"})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "market_required"
+
+
+def test_manual_commit_merged_explicit_market_auto_registers(
+    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _insert_merged_account(golden_db)
+    monkeypatch.setattr(input_center, "quick_register", _fake_quick_register_us())
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "moomoo_merged", "symbol": "GHOST", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "10", "market": "US"})
+    assert r.status_code == 201
+    assert r.json()["auto_registered"]["symbol"] == "GHOST"
+    lg = api_client.get("/api/ledgers/transactions",
+                        params={"account_id": "moomoo_merged"}).json()
+    assert any(t["symbol"] == "GHOST" for t in lg["rows"])
+
+
+def test_manual_commit_merged_invalid_market_422(
+    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An explicit market the account is NOT bound to (TW) is rejected the same as blank.
+    _insert_merged_account(golden_db)
+
+    def boom(conn: Any, **kw: Any) -> QuickRegisterOutcome:
+        raise AssertionError("quick_register must not run for a non-bound market")
+
+    monkeypatch.setattr(input_center, "quick_register", boom)
+    r = api_client.post("/api/input/manual/commit", json={
+        "account_id": "moomoo_merged", "symbol": "GHOST", "side": "buy",
+        "date": "2026-06-11", "shares": "100", "price": "10", "market": "TW"})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "market_required"
+
+
 def test_manual_preview_etf_sell_uses_etf_tax_rate(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
@@ -489,13 +585,13 @@ def test_cash_after_sell_adds_proceeds(api_client: TestClient) -> None:
 def test_cash_after_null_when_balance_unknown(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    """account_cash present but balance null (moomoo_my_my MYR pool has no golden activity)
+    """account_cash present but balance null (moomoo_my's MYR pool has no golden activity)
     → cash_after null too (nothing to project from). Same dynamic ccy label (MYR)."""
     upsert_instrument(golden_db, Instrument(
         symbol="1155.KL", market=Market.MY, quote_ccy=Currency.MYR,
         sector="Financials", name="Maybank"))
     r = api_client.post("/api/input/manual/preview", json={
-        "account_id": "moomoo_my_my", "symbol": "1155.KL", "side": "buy",
+        "account_id": "moomoo_my", "symbol": "1155.KL", "side": "buy",
         "date": "2026-06-11", "shares": "100", "price": "9"}).json()
     assert r["account_cash"] == {"ccy": "MYR", "balance": None}
     assert r["cash_after"] is None

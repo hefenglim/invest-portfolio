@@ -8,7 +8,7 @@ from portfolio_dash.portfolio.dashboard_models import ExDividendItem
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.models.assets import Account, Instrument
+from portfolio_dash.shared.models.assets import Account, Instrument, MarketRule
 
 
 def _accounts() -> dict[str, Account]:
@@ -96,11 +96,11 @@ def _holding(account_id: str, symbol: str, ccy: Currency,
 
 
 def test_multi_account_same_symbol_counts_event_once() -> None:
-    # AAPL held in both schwab (10 sh) and moomoo_my_us (20 sh); both DRIP.
+    # AAPL held in both schwab (10 sh) and moomoo_my (20 sh); both DRIP.
     # A single AAPL ex-div event sums shares across accounts but counts as 1 event.
     holdings = [
         _holding("schwab", "AAPL", Currency.USD, Decimal("10")),
-        _holding("moomoo_my_us", "AAPL", Currency.USD, Decimal("20")),
+        _holding("moomoo_my", "AAPL", Currency.USD, Decimal("20")),
     ]
     cal = [_ev("AAPL", date(2026, 11, 1), Decimal("0.50"), Currency.USD)]
     proj = project_dividends(holdings, cal, _accounts(), _instruments(), year=2026)
@@ -118,3 +118,52 @@ def test_unheld_symbol_contributes_no_bucket() -> None:
     proj = project_dividends(holdings, cal, _accounts(), _instruments(), year=2026)
     assert Currency.USD not in proj.by_currency
     assert proj.by_currency == {}
+
+
+def test_dual_market_account_resolves_dividend_model_per_market() -> None:
+    """One account bound to TWO markets applies a DIFFERENT dividend model to each of its
+    holdings by the holding's instrument market (the merged Moomoo shape): a US-market
+    holding gets DRIP (30% withholding) while an MY-market holding of the SAME account
+    gets cash (net = gross).
+
+    The account SCALAR ``dividend_model`` is set to ``drip_us`` -- deliberately WRONG for
+    the MY leg. The asserted outcome (US net = 0.7*gross AND MY net = gross, same
+    account) is UNREACHABLE under any single scalar (a scalar makes both legs DRIP or
+    both cash), so passing proves per-market resolution off ``market_rules``, not the
+    fallback scalar.
+    """
+    merged = Account(
+        account_id="moomoo_merged", name="Moomoo (merged)", broker="Moomoo",
+        settlement_ccy=Currency.USD, funding_ccy=Currency.MYR,
+        dividend_model="drip_us",  # scalar fallback -- wrong for the MY leg on purpose
+        market_rules={
+            "US": MarketRule(fee_rule_set="moomoo_us", dividend_model="drip_us"),
+            "MY": MarketRule(fee_rule_set="moomoo_my", dividend_model="cash"),
+        },
+    )
+    accounts = {merged.account_id: merged}
+    instruments = {
+        "MSFT": Instrument(symbol="MSFT", market=Market.US, quote_ccy=Currency.USD,
+                           sector="Tech", name="Microsoft"),
+        "1155": Instrument(symbol="1155", market=Market.MY, quote_ccy=Currency.MYR,
+                           sector="Banking", name="Maybank", board=".KL"),
+    }
+    holdings = [
+        _holding("moomoo_merged", "MSFT", Currency.USD, Decimal("10")),
+        _holding("moomoo_merged", "1155", Currency.MYR, Decimal("1000")),
+    ]
+    cal = [
+        _ev("MSFT", date(2026, 5, 10), Decimal("0.50"), Currency.USD),
+        _ev("1155", date(2026, 4, 15), Decimal("0.30"), Currency.MYR),
+    ]
+    proj = project_dividends(holdings, cal, accounts, instruments, year=2026)
+
+    us = proj.by_currency[Currency.USD]
+    assert us.declared_gross == Decimal("5.00")   # 10 * 0.50
+    assert us.declared_net == Decimal("3.50")     # US leg -> drip_us: 5.00 * 0.70
+    assert us.events == 1
+
+    my = proj.by_currency[Currency.MYR]
+    assert my.declared_gross == Decimal("300.00")  # 1000 * 0.30
+    assert my.declared_net == Decimal("300.00")    # MY leg -> cash: net = gross (NOT 0.7)
+    assert my.events == 1

@@ -27,6 +27,7 @@ from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.markets import MARKET_ZH, account_market
+from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
     StoredDividend,
     StoredOpening,
@@ -377,8 +378,12 @@ def _mutation_guard(
                 f"未註冊標的 {symbol} — 請先至「標的管理」註冊", field="symbol"))
         rekeyed = account_id != prev_account_id or symbol != prev_symbol
         if rekeyed:
+            # Batch B: coherence relaxed to allowed-market SET membership (a merged Moomoo
+            # account holds US + MY). ``acct_mkt`` (settlement-derived) stays the None-guard
+            # + message label; for a single-market account the allowed set is that singleton,
+            # so this is behavior-identical and the rejection message is byte-identical.
             acct_mkt = account_market(conn, account_id)
-            if acct_mkt is not None and inst.market is not acct_mkt:
+            if acct_mkt is not None and inst.market not in allowed_markets(conn, account_id):
                 return JSONResponse(status_code=400, content=error_body(
                     "validation_error",
                     f"{symbol} 屬 {inst.market.value} 市場,"
@@ -468,12 +473,18 @@ def _recompute_edit_fees(
     snapshot: dict[str, str] | None = None
     recompute = core_changed and not (body.fee_overridden and body.tax_overridden)
     if recompute:
-        row = conn.execute(
-            "SELECT fee_rule_set FROM accounts WHERE account_id=?", (body.account_id,)
-        ).fetchone()
         inst = get_instrument(conn, body.symbol)
-        if row is not None:
-            rules = get_fee_rule_set(row["fee_rule_set"], conn)
+        if inst is not None:
+            # Batch B: (account, market)-bound fee rule set; single-market -> account scalar.
+            fee_rule_set: str | None = fee_rule_for(conn, body.account_id, inst.market)
+        else:
+            # Degradation: no instrument -> no market to bind; fall back to the account scalar.
+            scalar = conn.execute(
+                "SELECT fee_rule_set FROM accounts WHERE account_id=?", (body.account_id,)
+            ).fetchone()
+            fee_rule_set = scalar["fee_rule_set"] if scalar is not None else None
+        if fee_rule_set is not None:
+            rules = get_fee_rule_set(fee_rule_set, conn)
             # FE-D2: resolve the trade-date USD/MYR rate for the Moomoo US MY stamp. No rate
             # -> stamp 0 (recorded in the snapshot); the edit path has no soft-issue surface.
             stamp_fx = resolve_stamp_fx(conn, body.date) if rules.has_us_stamp else None

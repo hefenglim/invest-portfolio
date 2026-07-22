@@ -181,8 +181,8 @@
       ]
     },
     {
-      "account_id": "moomoo_my_my",
-      "account_name": "Moomoo MY (MY)",
+      "account_id": "moomoo_my",
+      "account_name": "Moomoo MY",
       "symbol": "1155.KL",
       "name": "Maybank",
       "market": "MY",
@@ -209,8 +209,8 @@
       ]
     },
     {
-      "account_id": "moomoo_my_us",
-      "account_name": "Moomoo MY (US)",
+      "account_id": "moomoo_my",
+      "account_name": "Moomoo MY",
       "symbol": "NVDA",
       "name": "NVIDIA",
       "market": "US",
@@ -309,8 +309,8 @@
   },
   "fx": {
     "by_account": {
-      "moomoo_my_us": {
-        "account_id": "moomoo_my_us",
+      "moomoo_my": {
+        "account_id": "moomoo_my",
         "home_ccy": "MYR",
         "foreign_ccy": "USD",
         "avg_rate": "4.5",

@@ -131,11 +131,11 @@ def seed_full(conn: sqlite3.Connection) -> None:
                        quantity=_D("10"), price=_D("400"), fees=_D("0"), tax=_D("0"),
                        trade_date=date(2026, 1, 12))
     # 1155.KL (Moomoo MY): buy 1000 @ 9 (then MY cash dividend below).
-    insert_transaction(conn, account_id="moomoo_my_my", symbol="1155.KL", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="1155.KL", side=Side.BUY,
                        quantity=_D("1000"), price=_D("9"), fees=_D("0"), tax=_D("0"),
                        trade_date=date(2026, 2, 1))
     # NVDA (Moomoo MY US): buy 25 @ 118.
-    insert_transaction(conn, account_id="moomoo_my_us", symbol="NVDA", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="NVDA", side=Side.BUY,
                        quantity=_D("25"), price=_D("118"), fees=_D("0"), tax=_D("0"),
                        trade_date=date(2026, 2, 12))
 
@@ -152,7 +152,7 @@ def seed_full(conn: sqlite3.Connection) -> None:
                     div_type="DRIP", gross=_D("100"), withholding=_D("30"), net=_D("70"),
                     reinvest_shares=_D("0.4"), reinvest_price=_D("175"))
     # 1155.KL MY cash: net 200 received -> reduce adjusted cost.
-    insert_dividend(conn, account_id="moomoo_my_my", symbol="1155.KL", div_date=date(2026, 4, 5),
+    insert_dividend(conn, account_id="moomoo_my", symbol="1155.KL", div_date=date(2026, 4, 5),
                     div_type="CASH", gross=_D("200"), withholding=_D("0"), net=_D("200"))
 
     # --- FX conversions (currency-exchange ledger) ---
@@ -164,7 +164,7 @@ def seed_full(conn: sqlite3.Connection) -> None:
                          from_ccy=Currency.USD, from_amount=_D("2000"),
                          to_ccy=Currency.TWD, to_amount=_D("64000"))
     # Moomoo USD pool anchored in MYR: acquire 2,950 USD @ 4.50.
-    insert_fx_conversion(conn, account_id="moomoo_my_us", date=date(2026, 2, 10),
+    insert_fx_conversion(conn, account_id="moomoo_my", date=date(2026, 2, 10),
                          from_ccy=Currency.MYR, from_amount=_D("13275"),
                          to_ccy=Currency.USD, to_amount=_D("2950"))
 

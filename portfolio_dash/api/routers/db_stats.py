@@ -88,6 +88,7 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("whatsnew_config", "新功能面板設定", "設定", None),
     _TableSpec("fee_rule_overrides", "費率調整", "設定", "updated_at"),
     _TableSpec("ui_prefs_config", "介面偏好", "設定", None),
+    _TableSpec("account_market_rules", "帳戶市場規則", "設定", None),
     _TableSpec("settings_meta", "設定種子記錄", "設定", None),
 )
 _PORTFOLIO_CATEGORIES = ("帳本", "市場資料", "AI 記錄", "系統記錄", "設定")

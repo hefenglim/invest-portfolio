@@ -114,7 +114,7 @@ def test_ai_input_prompt_carries_live_account_catalog(conn: sqlite3.Connection) 
     ai_agents_input(conn, "在嘉信買 10 股 AAPL @211.40", completer=spy_completer)
     prompt = seen["prompt"]
     assert "<accounts>" in prompt
-    for account_id in ("tw_broker", "schwab", "moomoo_my_us", "moomoo_my_my"):
+    for account_id in ("tw_broker", "schwab", "moomoo_my"):
         assert account_id in prompt
 
 
@@ -232,6 +232,125 @@ def test_ai_input_registered_clean_row_has_no_format_warning(
     _setup(conn)
     result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
     assert result.preview.rows[0].issues == []
+
+
+# --- Batch B (F15): merged (multi-market) account catalog + per-market format check ----
+
+
+def _insert_merged_account(conn: sqlite3.Connection) -> None:
+    """A synthetic merged Moomoo account bound to BOTH US (drip) and MY (net)."""
+    # The moomoo_us US rule carries the FE-D2 MY stamp, whose fee auto-fill consults fx_rates;
+    # the data_ingestion conn only bootstraps the ledger schema, so create the pricing tables
+    # (no rate seeded -> stamp degrades to a soft note, which is irrelevant to these checks).
+    from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
+    create_pricing_tables(conn)
+    conn.execute(
+        "INSERT INTO accounts (account_id, name, broker, settlement_ccy, funding_ccy, "
+        "fee_rule_set, dividend_model) VALUES (?,?,?,?,?,?,?)",
+        ("moomoo_merged", "Moomoo Merged", "Moomoo MY", "USD", "MYR", "moomoo_us", "drip_us"),
+    )
+    conn.executemany(
+        "INSERT INTO account_market_rules (account_id, market, fee_rule_set, dividend_model) "
+        "VALUES (?,?,?,?)",
+        [("moomoo_merged", "US", "moomoo_us", "drip_us"),
+         ("moomoo_merged", "MY", "moomoo_my", "cash")],
+    )
+    conn.commit()
+
+
+def _draft_completer_market(account_id: str, symbol: str, market: str) -> Completer:
+    """A completer emitting one BUY draft carrying an explicit ``market``."""
+
+    def _f(
+        prompt: str, schema: type, *, agent: str, conn: object = None,
+        images: list[bytes] | None = None, model_override: str | None = None,
+    ) -> AiDraftList:
+        return AiDraftList(drafts=[AiDraft(
+            account_id=account_id, symbol=symbol, side=Side.BUY,
+            date=date(2026, 6, 1), shares=Decimal("10"), price=Decimal("76"),
+            market=market,
+        )])
+
+    return _f
+
+
+def test_accounts_catalog_renders_merged_account_per_market(
+    conn: sqlite3.Connection,
+) -> None:
+    # A merged account renders each bound market with its quote ccy (sorted: MY, US) so the
+    # model picks the ticker format of the STOCK's market; single-market accounts keep (ccy).
+    from portfolio_dash.data_ingestion.agents import _accounts_catalog
+
+    _setup(conn)
+    _insert_merged_account(conn)
+    cat = _accounts_catalog(conn)
+    assert "tw_broker=TW Broker (TWD)" in cat                       # single-market unchanged
+    assert "moomoo_merged=Moomoo Merged (MYR:MY＋USD:US)" in cat     # per-market bundle
+
+
+def test_ai_input_merged_symbol_fits_a_bound_market_no_warning(
+    conn: sqlite3.Connection,
+) -> None:
+    # AAPL (US-shaped) on the US+MY merged account fits an allowed market -> no format warning.
+    _setup(conn)
+    _insert_merged_account(conn)
+    result = ai_agents_input(
+        conn, "buy AAPL", completer=_one_draft_completer("moomoo_merged", "AAPL"))
+    assert not any(
+        i.kind == "symbol_format_mismatch" for i in result.preview.rows[0].issues)
+
+
+def test_ai_input_merged_symbol_fits_no_bound_market_warns(
+    conn: sqlite3.Connection,
+) -> None:
+    # A symbol shaped like NO allowed market (2 digits: neither US letters nor MY 4-digit).
+    _setup(conn)
+    _insert_merged_account(conn)
+    result = ai_agents_input(
+        conn, "buy", completer=_one_draft_completer("moomoo_merged", "12"))
+    assert any(
+        i.kind == "symbol_format_mismatch" for i in result.preview.rows[0].issues)
+
+
+def test_ai_input_merged_explicit_market_checks_that_pattern(
+    conn: sqlite3.Connection,
+) -> None:
+    # explicit market US + a numeric (non-US) symbol -> mismatch against the US pattern only.
+    _setup(conn)
+    _insert_merged_account(conn)
+    result = ai_agents_input(
+        conn, "buy", completer=_draft_completer_market("moomoo_merged", "1234", "US"))
+    assert any(
+        i.kind == "symbol_format_mismatch" for i in result.preview.rows[0].issues)
+
+
+def test_ai_input_merged_explicit_market_matches_no_warning(
+    conn: sqlite3.Connection,
+) -> None:
+    # explicit market MY + a 4-digit code -> matches the MY pattern -> no warning.
+    _setup(conn)
+    _insert_merged_account(conn)
+    result = ai_agents_input(
+        conn, "buy", completer=_draft_completer_market("moomoo_merged", "1234", "MY"))
+    assert not any(
+        i.kind == "symbol_format_mismatch" for i in result.preview.rows[0].issues)
+
+
+def test_ai_draft_market_rides_preview_payload(conn: sqlite3.Connection) -> None:
+    # F15: the AI-suggested market reaches the frontend preview row data (quick-add default).
+    _setup(conn)
+    _insert_merged_account(conn)
+    result = ai_agents_input(
+        conn, "buy", completer=_draft_completer_market("moomoo_merged", "5225", "MY"))
+    assert result.preview.rows[0].payload.get("market") == "MY"
+
+
+def test_ai_draft_without_market_omits_payload_key(conn: sqlite3.Connection) -> None:
+    # No market on the draft -> the payload key is NOT added (purely additive; single-market
+    # accounts and the committed CSV are untouched).
+    _setup(conn)
+    result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
+    assert "market" not in result.preview.rows[0].payload
 
 
 # --- _drafts_to_csv: one-line-per-draft invariant (C7 row<->line mapping) -------------------

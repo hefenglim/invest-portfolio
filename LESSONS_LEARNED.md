@@ -23,6 +23,25 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **Subagents stall waiting on their own background tasks (2026-07-22):** three
+  Batch-B agents stopped mid-verification "waiting for the monitor/background sweep"
+  — a subagent's background children can never re-invoke it, so the agent ends and
+  the task orphans. Rule: agent briefs mandate FOREGROUND verification (no
+  run_in_background, no monitors inside subagents); when one stalls anyway, resume
+  it with an explicit synchronous-finish order plus ownership-based failure triage.
+  (Related: the orchestrator's own long gates DO use detached scripts + a monitor —
+  that pattern is for the main loop only, where notifications re-invoke it.)
+
+- **A migration's blast radius includes every WRITER of the old shape, not just
+  readers (2026-07-22):** the Batch-B deep review swept readers exhaustively yet
+  still missed that boot-time `seed_accounts` re-INSERTS the deleted legacy
+  accounts every launch (config-as-code writer) and that `seed_demo.py` books
+  transactions under legacy ids (script writer). Both were caught late (one by an
+  adversarial verifier, one by an implementing agent's escalation). Rule: for any
+  id/shape migration, grep for WRITERS (seeds, scripts, importers, config-as-code)
+  as their own checklist section, and test the full boot lifecycle twice — the
+  migration function in isolation proves nothing about the seam it lives in.
+
 - **A UI-label change must enumerate every EXISTING e2e that pins the old label
   (2026-07-21):** W3 changed the draft-preview rows from single values to 舊→新 pairs
   and its brief listed only the contract tests it owned; a prior round's e2e

@@ -44,7 +44,13 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     "NVDA": D("610"), "1155": D("11.20"), "TSLA": D("250"), "0800EA": D("1.20"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
-FX_RATES = {("USD", "TWD"): D("32.5"), ("USD", "MYR"): D("4.5"), ("MYR", "TWD"): D("7.2")}
+# USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
+# (4.5, from the two MYR->USD conversions) so the merged account's unrealized FX is NON-ZERO —
+# otherwise (spot == avg) the FX-exposure figure multiplies by 0 and a bug that mis-scopes the
+# MYR MY-stock value into the USD pool would be masked. USD/MYR does not enter the reporting
+# XIRR (USD->TWD and MYR->TWD are direct) or the trade-date stamp (early 4.3), so this is inert
+# to every other check and purely strengthens the Batch-B merged-account FX proof.
+FX_RATES = {("USD", "TWD"): D("32.5"), ("USD", "MYR"): D("4.6"), ("MYR", "TWD"): D("7.2")}
 ASOF = date(2026, 7, 14)
 
 # Trade-date FX seeded at the scenario start: every Jan-Jun flow resolves on-or-before
@@ -119,19 +125,24 @@ class Ops:
             conn.close()
 
     def _fee_check(self, txn_id, account_id, side, qty, price, symbol, d, daytrade=False):
-        # is_etf comes from the instrument REGISTRY (found-bug: entry paths must honour it,
-        # not default False); daytrade is the per-transaction TW same-day flag (0.15%).
-        is_etf = dict((i[0], i[5]) for i in INSTRUMENTS).get(symbol, False)
-        # FE-D2: the Moomoo US MY stamp needs the trade-date USD/MYR rate. Resolve it from the
-        # harness-owned seeded schedule (on-or-before), mirroring the app's caller seam.
+        # is_etf + market come from the instrument REGISTRY (found-bug: entry paths must honour
+        # is_etf, not default False); daytrade is the per-transaction TW same-day flag (0.15%).
+        # Batch B: the merged dual-market moomoo_my routes fees by the instrument's market (US ->
+        # moomoo_us, MY -> moomoo_my), so the oracle resolves the rule WITH the market too.
+        reg = {i[0]: i for i in INSTRUMENTS}
+        is_etf = bool(reg[symbol][5]) if symbol in reg else False
+        market = reg[symbol][1] if symbol in reg else None
+        # FE-D2: the Moomoo US MY stamp needs the trade-date USD/MYR rate. It applies only when
+        # the (account, market)-resolved rule is moomoo_us (a moomoo_my US trade). Resolve it from
+        # the harness-owned seeded schedule (on-or-before), mirroring the app's caller seam.
         stamp_fx = None
-        if O.ACCOUNTS[account_id][0] == "moomoo_us":
+        if O.fee_rule_for(account_id, market) == "moomoo_us":
             try:
                 stamp_fx = fx_on_resolver()(date.fromisoformat(d), "USD", "MYR")
             except KeyError:
                 stamp_fx = None
         fee, tax, notes = O.fee_tax(account_id, side.upper(), dec(qty), dec(price),
-                                    is_etf, daytrade, stamp_fx)
+                                    is_etf, daytrade, stamp_fx, market=market)
         got_fee, got_tax = C.read_fee_tax_from_db(self.db, txn_id)
         tag = "daytrade" if daytrade else ("etf" if is_etf else "normal")
         self.ev.check("fee_engine.fee",
@@ -444,9 +455,14 @@ def _reconcile_fx_unrealized(ev, res, kpis, facts, prices, sp, phase):
             spot = sp.rate(settle, funding)
         except KeyError:
             continue
+        # Batch B: an account may hold instruments in >1 currency (the dual-market moomoo_my
+        # holds USD-quoted US stocks AND MYR-quoted MY stocks). The FX pool exposure is the
+        # FOREIGN (settlement) currency ONLY — fold in JUST settle-ccy holdings, mirroring the
+        # app's dashboard exposure filter (h.quote_ccy == settlement_ccy, dashboard.py). Without
+        # this the MYR stock value would be mis-summed into the USD exposure.
         stock_val = O.ZERO
         for (acct, sym), h in res.holdings.items():
-            if acct == aid and h.shares > O.ZERO and sym in prices:
+            if acct == aid and h.quote_ccy == settle and h.shares > O.ZERO and sym in prices:
                 stock_val += prices[sym] * h.shares
         fcash = res.fx_foreign_cash.get(aid, O.ZERO)
         unreal_home = (stock_val + fcash) * (spot - avg)

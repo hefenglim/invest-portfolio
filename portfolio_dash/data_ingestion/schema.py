@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS opening_inventory (
     build_date TEXT NOT NULL,
     PRIMARY KEY (account_id, symbol)
 );
+CREATE TABLE IF NOT EXISTS account_market_rules (
+    account_id TEXT NOT NULL, market TEXT NOT NULL,
+    fee_rule_set TEXT NOT NULL, dividend_model TEXT NOT NULL,
+    PRIMARY KEY (account_id, market)
+);
 CREATE TABLE IF NOT EXISTS cash_movements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT NOT NULL, date TEXT NOT NULL,

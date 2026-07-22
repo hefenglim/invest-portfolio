@@ -11,8 +11,8 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.3` (2026-07-15)
-> **Code baseline**: `v0.1.18 + feat/fee-engine-v2`
+> **Version**: `v1.4` (2026-07-22)
+> **Code baseline**: `v0.1.20 + Batch B (Moomoo merge)`
 > **Arbitration status**: **Formally signed off by the owner (2026-07-15)**; effective
 > as the site's single **arbitration standard** for any money dispute **from version
 > v0.1.19 onward**.
@@ -29,10 +29,15 @@
 > and the code they cite govern, and the conflict is reported.
 >
 > **Verification basis**: every numeric worked example in this manual is drawn from — or
-> reconciled against — a set of **966 adversarial reconciliation assertions**
-> (`stress/oplog.jsonl` + `stress/assertions.jsonl`, **966/966 passing** against this
-> code). Each numeric example is tagged with its `scope` verification anchor. The manual
-> author fabricated no numbers.
+> reconciled against — the **post-merge (Batch B) live stress run**: a set of **1,060
+> adversarial reconciliation assertions** (`scripts/stress_audit/evidence/oplog.jsonl` +
+> `scripts/stress_audit/evidence/assertions.jsonl`; phase-1 `--ui` run of **66 ops,
+> 1,060/1,060 passing, 0 fail**). Each numeric example is tagged with its `scope`
+> verification anchor; scenario-dependent terminal values also carry their phase
+> (`phase1:final` etc.). The manual author fabricated no numbers. **Note**: the stress
+> scenario evolves per release (the post-merge scenario differs from the v1.3-basis 966
+> run), so this version has re-reconciled every anchor against the current run above (see
+> §12.3 v1.4).
 
 ---
 
@@ -72,7 +77,7 @@ override a ledger replay. The ruling procedure is in
 | I3 | **Quote numbers come from finance APIs, never from an LLM.** | `data-and-pricing.md` |
 | I4 | **Dividends enter total return exactly once** (via cost adjustment, not a separate income line). | §6 |
 | I5 | **FX gain/loss is a *decomposition* of the reporting-currency total return, never added on top.** | §8 |
-| I6 | **Fees / tax bind to the "account", not the "market".** | §2, §3 |
+| I6 | **Fees / tax / dividend rules bind to the (account, market) pair**, not the "market" alone; a single-market account degenerates to the old statement (equivalent to binding to the account). The account row's scalar columns (`fee_rule_set` / `dividend_model` / `settlement_ccy`) remain as a documented fallback. | §2, §3 |
 | I7 | **Average cost is always computed on read; a rounded average is never stored as the authoritative value.** | §4 |
 
 ### 1.3 Precision Model (non-negotiable)
@@ -130,29 +135,45 @@ shows a need). Arbitration always uses the replay.
 
 Three orthogonal dimensions: **market** (where it trades) · **account** (which broker
 holds it) · **currency** (the instrument's quote currency). **The same market can span
-multiple accounts with different rules**, so fee / tax / dividend rules bind to the
-**account** (invariant I6).
+multiple accounts, and the same account can span multiple markets, with different rules**,
+so fee / tax / dividend rules bind to the **(account, market) pair** (invariant I6).
 
 | `account_id` | Name | Market | Settlement ccy `settlement_ccy` | Funding ccy `funding_ccy` | Dividend model `dividend_model` | Fee rule set `fee_rule_set` |
 | --- | --- | --- | --- | --- | --- | --- |
 | `tw_broker` | TW Broker | TW | TWD | TWD | `cash_cost_reduction` (cash → cost reduction) | `tw` |
 | `schwab` | Charles Schwab | US | USD | **TWD** | `drip_us` (DRIP, 30% withholding) | `schwab` |
-| `moomoo_my_us` | Moomoo MY (US) | US | USD | **MYR** | `drip_us` (DRIP, 30% withholding) | `moomoo_us` |
-| `moomoo_my_my` | Moomoo MY (MY) | MY | MYR | MYR | `cash` (single-tier net) | `moomoo_my` |
+| `moomoo_my` | Moomoo MY | **US + MY** | USD (US leg) / MYR (MY leg) | **MYR** | US=`drip_us` (DRIP, 30% withholding) / MY=`cash` (single-tier net) | US=`moomoo_us` / MY=`moomoo_my` (bound per (account, market)) |
+
+> **Batch B merge (2026-07-21)**: the **two former per-market Moomoo accounts (one
+> US-settled, one MY-settled; their legacy account ids are documented in
+> `data_ingestion/moomoo_merge.py`) are merged into ONE dual-market account `moomoo_my`**.
+> Each market's rules are held as an explicit binding in `account_market_rules`
+> (US → (`moomoo_us`, `drip_us`), MY → (`moomoo_my`, `cash`)); the account row's **scalar
+> columns** (`settlement_ccy=USD` / `fee_rule_set=moomoo_us` / `dividend_model=drip_us`) pin
+> the US pair as a **fallback for single-market accounts with no binding** (`tw_broker` /
+> `schwab` take this fallback, equivalent to the old "bind to account" statement).
 
 Key points:
 
-- **The US market spans `schwab` and `moomoo_my_us` with different cost structures** →
-  exactly why fee rules bind to the account.
-- Moomoo MY is **one brokerage account** holding both USD-settled US stocks (funded via
-  MYR→USD conversion) and MYR-settled MY stocks, so it is split into two `account_id`s
-  (`moomoo_my_us` / `moomoo_my_my`).
+- **The US market spans `schwab` and `moomoo_my` (the latter's US market leg) with
+  different cost structures** → exactly why fee / tax / dividend rules bind to the
+  **(account, market)** pair (not the market alone).
+- **Moomoo MY is one brokerage account (`moomoo_my`) spanning two markets**: the US market
+  leg holds USD-settled US stocks (funded via MYR→USD conversion), and the MY market leg
+  holds MYR-settled MY stocks. The two markets carry different fee / tax / dividend rules,
+  hence the (account, market) binding. **The MYR cash pool is a single shared
+  `(moomoo_my, MYR)` operational pool across the two market legs** (see §9); the USD
+  exposure is `moomoo_my`'s USD FX pool, anchored in MYR (see §8).
 - A transaction row carries `account_id` + `symbol`; the `instruments` table knows that
-  symbol's `market` and `quote_ccy`.
+  symbol's `market` and `quote_ccy` (the market is fixed by the symbol, so post-merge the
+  fee/tax worked examples' `scope` anchors are written as `moomoo_my/<symbol>`, with the
+  market carried by the symbol).
 - The FX pool's **home currency = the account's `funding_ccy`**: the Schwab USD pool is
-  anchored in **TWD**, the Moomoo USD pool is anchored in **MYR** (see §8).
+  anchored in **TWD**, the `moomoo_my` USD pool is anchored in **MYR** (see §8).
 
-> **Implementation**: `data_ingestion/config_seed.py::DEFAULT_ACCOUNTS`,
+> **Implementation**: `data_ingestion/config_seed.py::DEFAULT_ACCOUNTS` (incl.
+> `MarketBinding` per-market bindings), `data_ingestion/moomoo_merge.py` (Batch B one-time
+> merge, 2026-07-21), table `account_market_rules`,
 > `shared/models/assets.py` (`Account` / `Instrument`, incl. `is_etf`).
 > **Basis**: `.claude/rules/domain-ledger.md` (Accounts), `.claude/rules/markets-and-fees.md`.
 
@@ -260,11 +281,11 @@ and `stamp_myr`. Seed values: `commission_rate = 0.0003` (min 0.01), `platform_f
 
 | Scenario | fee breakdown | fee | tax (stamp, in USD) | Verification anchor |
 | --- | --- | ---: | ---: | --- |
-| NVDA buy 30@500 | 4.50+0.99+0.09+0.00 | **5.58** | ⌈64,500/1000⌉=65 → 65/4.3=**15.12** | `fee_engine.fee/tax moomoo_my_us/NVDA buy 30@500` |
-| NVDA sell 25@600 | 4.50+0.99+0.08+0.00+SEC0.31+TAF0.01 | **5.89** | 65/4.3=**15.12** | `fee_engine.fee/tax moomoo_my_us/NVDA sell 25@600` |
+| NVDA buy 30@500 | 4.50+0.99+0.09+0.00 | **5.58** | ⌈64,500/1000⌉=65 → 65/4.3=**15.12** | `fee_engine.fee/tax moomoo_my/NVDA buy 30@500` |
+| NVDA sell 25@600 | 4.50+0.99+0.08+0.00+SEC0.31+TAF0.01 | **5.89** | 65/4.3=**15.12** | `fee_engine.fee/tax moomoo_my/NVDA sell 25@600` |
 | buy 1,000@0.10 (**settlement cap**) | 0.03+0.99+min(3.00,1.00)+0.00 | **2.02** | — | unit `test_moomoo_us_settlement_cap` |
 
-### 3.4 MY (`moomoo_my_my` → rule set `moomoo_my`, `market = MY`, native MYR)
+### 3.4 MY (account `moomoo_my`'s MY market leg → rule set `moomoo_my`, `market = MY`, native MYR)
 
 $$\text{comm} = \max(0.0003\times n,\ 0.01),\quad \text{clearing} = \min(0.0003\times n,\ 1000)$$
 
@@ -285,9 +306,9 @@ assumption).
 
 | Scenario | fee breakdown | fee | tax (stamp) | Verification anchor |
 | --- | --- | ---: | ---: | --- |
-| 1155 buy 1,000@9.50 | 2.85+3.00+2.85+0.70 | **9.40** | ⌈9,500/1000⌉=10 → **10.00** | `fee_engine.fee/tax moomoo_my_my/1155 buy 1000@9.50` |
-| 1155 sell 400@11.00 | 1.32+3.00+1.32+0.45 | **6.09** | ⌈4,400/1000⌉=5 → **5.00** | `fee_engine.fee/tax moomoo_my_my/1155 sell 400@11.00` |
-| **0800EA buy 1,000@1.15 (ETF)** | 0.35+3.00+0.35+0.30 | **4.00** | **0.00 (ETF exempt)** | `fee_engine.fee/tax moomoo_my_my/0800EA buy 1000@1.15 [etf]` |
+| 1155 buy 1,000@9.50 | 2.85+3.00+2.85+0.70 | **9.40** | ⌈9,500/1000⌉=10 → **10.00** | `fee_engine.fee/tax moomoo_my/1155 buy 1000@9.50` |
+| 1155 sell 400@11.00 | 1.32+3.00+1.32+0.45 | **6.09** | ⌈4,400/1000⌉=5 → **5.00** | `fee_engine.fee/tax moomoo_my/1155 sell 400@11.00` |
+| **0800EA buy 1,000@1.15 (ETF)** | 0.35+3.00+0.35+0.30 | **4.00** | **0.00 (ETF exempt)** | `fee_engine.fee/tax moomoo_my/0800EA buy 1000@1.15 [etf]` |
 
 ### 3.5 Overrides, Coexisting Regimes & Rate Governance (fee-engine v2 is live)
 
@@ -452,10 +473,15 @@ double counting). Cross-currency is aggregated by currency in `RealizedPnL.by_cu
 | Sell | proceeds_net | adjusted_removed | realized | Verification anchor |
 | --- | ---: | ---: | ---: | --- |
 | `tw_broker/0050` 2026-04-10 (50@140) | 6,973 | 6,609.0909… | **363.9090…** | `realized.realized tw_broker/0050@2026-04-10` |
-| `schwab/TSLA` 2026-04-20 (20@260) | 5,199.86 | 5,000.00 | **199.86** | `realized.realized schwab/TSLA@2026-04-20` |
+| `schwab/TSLA` 2026-04-20 (20@260) | 5,199.88 | 5,000.00 | **199.88** | `realized.realized schwab/TSLA@2026-04-20 #3` (`phase1:final`) |
 
-(Currency-aggregated verified: `realized_by_ccy = {TWD: 46,492.2877…, USD: 3,576.8159…,
-MYR: 835.9766…}`.)
+(The TSLA sell fee = 0.12 (SEC 0.11 + TAF 0.01, see §3.2 / E4) → `proceeds_net = 5,200 −
+0.12 = 5,199.88`. Per-currency realized is anchored by the per-event `realized.realized`
+rows (14 rows, `phase1:final`); the reporting-currency cumulative realized after conversion
+is `kpi.realized_total TWD = 186,333.50…` (`phase1:final`, see §7.1). The native-ccy
+cumulative sums are not a single anchor, so this version cites the anchored per-event rows
+and the reporting-currency total instead of a run-specific hand-summed three-currency
+aggregate.)
 
 ### 5.2 Unrealized P&L and Capital Gain
 
@@ -487,8 +513,9 @@ Verification anchor: `holding.unrealized_pnl / holding.market_value schwab|TSLA`
     `oversold` (**to be clarified**). This is not short-sale accounting.
   - Fix: enter the missing opening inventory / buy.
 
-> **Verification anchor**: `guard.oversell_blocks` (oplog `op42` returns 422 → `op43` with
-> ack succeeds → `op44` deletes).
+> **Verification anchor**: `guard.oversell_blocks`, `scope = tw_broker/0050 sell 200>held 110`
+> (sell 200 > held 110 → 422 `oversell_unacknowledged`). (Stress op numbers are renumbered
+> per release, so this cites the stable check + scope rather than pinning run-specific op numbers.)
 > **Implementation**: `portfolio/cost_basis.py` (`OversellError`, `RealizedRow`),
 > `portfolio/pnl.py::value_holdings`, `api/routers/input_center.py::manual_commit`.
 > **Basis**: `.claude/rules/domain-ledger.md` (P&L and returns; Data integrity).
@@ -512,7 +539,7 @@ $$\text{adjusted\_total} \mathrel{-}= \text{net}\qquad(\text{net 於 TW 現金 =
 and with no sell thereafter) → acts fully on the final 110 shares → `dividend_portion =
 800.00`, `adjusted_total = 14,050.909…` (see §4.2).
 
-### 6.2 US DRIP (`DRIP`, `schwab` / `moomoo_my_us`) — 30% Withholding, $0-Cost Reinvestment
+### 6.2 US DRIP (`DRIP`, `schwab` / `moomoo_my`'s US market leg) — 30% Withholding, $0-Cost Reinvestment
 
 $$\text{withholding} = \text{gross}\times 0.30\qquad \text{net} = \text{gross} - \text{withholding}$$
 
@@ -530,14 +557,15 @@ cost. So MSFT `dividend_portion = 0.00` (adjusted cost unchanged by the dividend
 Verification anchor: `ledger.div.gross/net` (`schwab|MSFT`),
 `holding.dividend_portion schwab|MSFT = 0.00`, `holding.shares schwab|MSFT`.
 
-`US_WITHHOLDING = 0.30` applies to both US accounts, Schwab and Moomoo (W-8BEN).
+`US_WITHHOLDING = 0.30` applies to both US-stock legs, Schwab and `moomoo_my`'s US market
+leg (W-8BEN).
 
-### 6.3 MY Cash (`NET`, `moomoo_my_my`) — Single-Tier Net Cost Reduction
+### 6.3 MY Cash (`NET`, `moomoo_my`'s MY market leg) — Single-Tier Net Cost Reduction
 
 Malaysia's single-tier system: record the **net amount received**, following the same
 cost-reduction path as TW cash: `adjusted_total −= net`.
-Verification anchor: `ledger.div.net moomoo_my_my|1155`;
-`holding.dividend_portion moomoo_my_my/1155 = 306.25` (note: because that position had a later sell after the
+Verification anchor: `ledger.div.net moomoo_my|1155`;
+`holding.dividend_portion moomoo_my/1155 = 306.25` (note: because that position had a later sell after the
 dividend, `dividend_portion` is **proportionally removed** by the sell, so it does not
 equal the cumulative dividend total — cross-reference §4.1 proportional removal, §5.1).
 
@@ -598,7 +626,7 @@ distribution share counts.
 ledger dividend row within **±45 days** of the ex-dividend date, or the user has skipped
 it (skip fingerprint persisted) → it no longer appears in the inbox.
 
-> **Verification anchor**: the 966 stress assertions do not cover the inbox estimate
+> **Verification anchor**: the 1,060 stress assertions do not cover the inbox estimate
 > scalars (`detect` is a read-only projection that writes no ledger); this section's
 > formulas rest on `apply_dividend_model` (DRIP 30% is already anchored via §6.2's
 > `ledger.div.gross/net`) and `shares_on`. **The stock-dividend par-value conversion and
@@ -635,16 +663,16 @@ $$\text{rate}_{ccy} = \frac{\text{total\_return}_{ccy}}{\text{gross\_invested}_{
 > numerator but the cost stays in the denominator → the simple rate **understates**
 > return. So the rate is a secondary glance metric; **XIRR is the rigorous metric**.
 
-**Verified rollup (reporting = TWD, spot USD/TWD = 32.5, MYR/TWD = 7.2)**
+**Verified rollup (reporting = TWD, spot USD/TWD = 32.5, MYR/TWD = 7.2; `phase1:final`)**
 
 | KPI | Value (TWD) | Verification anchor |
 | --- | ---: | --- |
-| `realized_total` | 168,757.84 | `kpi.realized_total TWD` |
-| `unrealized_total` | 345,995.01 | `kpi.unrealized_total TWD` |
-| `total_return` (= realized + unrealized) | **514,752.85** | `kpi.total_return TWD` |
-| `total_market_value` | 3,887,889.28 | `kpi.total_market_value TWD` |
+| `realized_total` | 186,333.50 | `kpi.realized_total TWD` (`phase1:final`) |
+| `unrealized_total` | 330,003.05 | `kpi.unrealized_total TWD` (`phase1:final`) |
+| `total_return` (= realized + unrealized) | **516,336.55** | `kpi.total_return TWD` (`phase1:final`) |
+| `total_market_value` | 3,896,529.28 | `kpi.total_market_value TWD` (`phase1:final`) |
 
-(Cross-check: 168,757.84 + 345,995.01 = 514,752.85 ✓.)
+(Cross-check: 186,333.50 + 330,003.05 = 516,336.55 ✓.)
 
 **Blended reporting-currency return rate (blended reporting rate, dashboard KPI
 `total_return_rate`)** (`portfolio/dashboard.py` step 10):
@@ -690,9 +718,9 @@ anchor)**
 
 | Date | Event | Flow (USD) | Anchor |
 | --- | --- | ---: | --- |
-| 2026-04-01 | buy 20@250 | −5,000.00 | `ledger.tx.total …TSLA id=22` |
-| 2026-04-20 | sell 20@260 | +5,199.86 | `ledger.tx.total …TSLA id=23` |
-| 2026-05-01 | buy 10@240 | −2,400.00 | `ledger.tx.total …TSLA id=24` |
+| 2026-04-01 | buy 20@250 | −5,000.00 | `ledger.tx.total id=23` (TSLA buy, `phase1:final`) |
+| 2026-04-20 | sell 20@260 | +5,199.88 | `ledger.tx.total id=24` (TSLA sell, `phase1:final`) |
+| 2026-05-01 | buy 10@240 | −2,400.00 | `ledger.tx.total id=25` (TSLA buy, `phase1:final`) |
 | `as_of` | terminal 10 shares @250 | +2,500.00 | `holding.market_value schwab|TSLA` |
 
 XIRR is the annualized rate r that makes the NPV of the `(dates, amounts)` sequence above
@@ -701,8 +729,9 @@ equal zero.
 > **Verification anchor (added by the resident harness 2026-07-15)**: the XIRR **scalar**
 > is anchored by the **independent solver** in `scripts/stress_audit/` (Newton+bisection,
 > not using `pyxirr`) — for the same cash-flow sequence and the applied value, the suite's
-> only "documented tolerance" comparison `|Δ| ≤ 1e-6`; measured `checkpoint1` diff
-> 1.0e-12, `final` diff 2.8e-12 (a live phase-1 run with 1,006/1,006 assertions passing).
+> only "documented tolerance" comparison `|Δ| ≤ 1e-6`; the measured diff is **well within
+> tolerance** (`checkpoint1` / `final` both ≪ 1e-6) (post-merge phase-1 run with
+> **1,060/1,060** assertions passing; `kpi.xirr` `phase1:final ≈ 0.4092`).
 > The cash-flow construction rules remain governed by `returns.py::xirr_reporting` (the
 > table above can be rebuilt from the verified `ledger.tx.total` and
 > `holding.market_value`).
@@ -878,8 +907,8 @@ account_id, from_ccy, from_amount, to_ccy, to_amount` → implied rate `implied_
 from_amount / to_amount` (**home per 1 unit foreign**; e.g. `id=1` TWD 320,000→USD 10,000
 → 320,000/10,000 = **32**, anchor `ledger.fx.implied id=1`). Each foreign pool (per
 account) carries a **home-currency (home = the account's `funding_ccy`) cost basis = the
-weighted-average acquisition rate**. The Schwab USD pool is anchored in **TWD**; the Moomoo
-USD pool is anchored in **MYR**.
+weighted-average acquisition rate**. The Schwab USD pool is anchored in **TWD**; the
+`moomoo_my` USD pool is anchored in **MYR**.
 
 ### 8.1 Weighted-Average Acquisition Rate (home per foreign)
 
@@ -893,7 +922,7 @@ $$\text{avg\_rate} = \frac{\sum \text{from\_amount}\ (\text{home})}{\sum \text{t
 | Account | home→foreign conversions | avg_rate | Anchor |
 | --- | --- | ---: | --- |
 | `schwab` | TWD 320,000→USD 10,000 (32.0); TWD 2,310,000→USD 70,000 (33.0) | (320,000+2,310,000)/(10,000+70,000) = **32.875** | `fx.avg_rate schwab` |
-| `moomoo_my_us` | MYR 44,000→USD 10,000 (4.4); MYR 46,000→USD 10,000 (4.6) | 90,000/20,000 = **4.5** | `fx.avg_rate moomoo_my_us` |
+| `moomoo_my` (USD pool, anchored in MYR) | MYR 44,000→USD 10,000 (4.4); MYR 46,000→USD 10,000 (4.6) | 90,000/20,000 = **4.5** | `fx.avg_rate moomoo_my` |
 
 ### 8.2 Realized FX P&L (on reconversion foreign→home)
 
@@ -905,10 +934,15 @@ $$\text{realized\_fx} = \text{home\_received} - \text{foreign\_sold}\times\text{
 (Deliberately **not** through `shared.fx.convert`, because `avg_rate` is a **derived pool
 rate**, not a market spot.) `avg_rate = None` (no cost basis) → returns `None`; a basis
 but no reconversion → 0.
-**Verified example**: during the stress run there was no USD→TWD / USD→MYR reconversion
-(`op47`'s USD→TWD was blocked by `negative_cash`) → `realized_fx = 0`. Anchors:
-`fx.realized schwab = 0`, `fx.realized moomoo_my_us = 0`,
-`fx.reporting_realized rollup = 0`.
+**Verified example (`phase1:final`)**: the post-merge scenario includes one Schwab USD→TWD
+reconversion (USD 5,000 → TWD 162,000, implied rate 32.4, 2026-06-20). Before it the Schwab
+USD pool `avg_rate = 32.875` (see §8.1), so
+`realized_fx = 162,000 − 5,000 × 32.875 = −2,375.00 TWD` (reconverted at 32.4, below the
+acquisition avg 32.875 → FX loss). `moomoo_my` has no foreign→home reconversion in this
+scenario → `realized_fx = 0`. Anchors: `fx.realized schwab = −2,375.000`,
+`fx.realized moomoo_my = 0`, `fx.reporting_realized rollup = −2,375.000` (all `phase1:final`;
+at `checkpoint1` / `checkpoint2` there is no reconversion yet, so it is `= 0` there — the
+scenario evolves by phase).
 
 ### 8.3 Unrealized FX P&L (remaining foreign exposure mark-to-spot)
 
@@ -924,24 +958,31 @@ from conversions + foreign buys/sells + foreign cash dividends; **different from
 operating cash pool**, see the C9 note in the `forex/pools.py` file header). `avg_rate is
 None` or `spot is None` → unrealized = `None`.
 
-**Verified example — `schwab` (reporting = home = TWD)**
+**Verified example (`phase1:final`; spot USD/TWD = 32.5, USD/MYR = 4.6, MYR/TWD = 7.2)**
 
-- Foreign exposure: USD stock market value 61,723.21 + FX-view USD cash 23,159.29 =
-  **84,882.50 USD**
-- `avg_rate = 32.875`, `spot(USD→TWD) = 32.5` → `spot − avg = −0.375`
-- Unrealized FX = 84,882.50 × (−0.375) = **−31,830.94 TWD** (bought USD at avg 32.875,
-  now 32.5 → TWD appreciated / USD depreciated → FX loss)
+Each account is valued as "its remaining foreign exposure × (spot − avg_rate)", with the
+rollup converted into the reporting currency (TWD):
 
-`moomoo_my_us`: `avg_rate = 4.5`, `spot(USD→MYR) = 4.5` → diff 0 → unrealized FX = 0.
-So the reporting (TWD) rollup unrealized FX = **−31,830.938…**. Anchor:
-`fx.reporting_unrealized rollup`.
+- **Schwab (home = TWD)**: `avg_rate = 32.875`, `spot(USD→TWD) = 32.5` → `spot − avg =
+  −0.375` (USD depreciated → FX loss; contributes a **negative** amount on Schwab's USD
+  exposure).
+- **`moomoo_my` (USD pool, home = MYR)**: `avg_rate = 4.5`, `spot(USD→MYR) = 4.6` →
+  `spot − avg = +0.10` (USD appreciated vs MYR → FX gain; contributes a **positive** amount
+  — unlike the v1.3-basis run's "diff 0", the spot has now moved to 4.6), its MYR value then
+  converted into the reporting currency via `MYR→TWD`.
+
+Composing both legs: the reporting (TWD) rollup unrealized FX = **−11,757.483… TWD**. Anchor:
+`fx.reporting_unrealized rollup` (`phase1:final`). (Each account's foreign-exposure
+components (FX-view cash + stock market value) vary by scenario and have no single assertion
+anchor, so this version pins only the anchored rollup plus the verifiable avg_rate / spot;
+the per-account exposure decomposition is governed by replaying the formula.)
 
 ### 8.4 CRITICAL — FX P&L is a "decomposition", never added on top (invariant I5)
 
 The reporting-currency total return / XIRR **already embeds** FX (flows converted at
 trade-date rates, terminal value at the current rate). **FX P&L is an attribution
 decomposition of that number (asset P&L vs FX P&L), never an extra gain added on top of
-total return.** Any practice of adding `reporting_unrealized_fx` (e.g. the −31,830.94
+total return.** Any practice of adding `reporting_unrealized_fx` (e.g. the −11,757.48
 above) on top of `total_return` (§7) is **double counting** and is a bug.
 
 > **Implementation**: `forex/pools.py` (`average_acquisition_rate`,
@@ -988,19 +1029,28 @@ inflow can cover a same-day outflow and the balance does not falsely dip negativ
 instant. `running_statement` returns each row + its subsequent **per-row running balance**;
 `running_min` returns the **minimum running balance within the period** (empty pool = 0).
 
-**Verified terminal balances (reporting = TWD)**
+**Verified terminal balances (reporting = TWD; `phase1:final`)**
 
 | Pool | Terminal balance | Anchor |
 | --- | ---: | --- |
-| `tw_broker` / TWD | 1,085,715 | `cash.balance` / `cash.statement.terminal tw_broker|TWD` |
-| `schwab` / USD | 23,159.29 | `cash.balance schwab|USD` |
-| `schwab` / TWD | 370,000 | `cash.balance schwab|TWD` |
-| `moomoo_my_us` / USD | 894.63 | `cash.balance moomoo_my_us|USD` |
-| `moomoo_my_us` / MYR | 30,000 | `cash.balance moomoo_my_us|MYR` |
-| `moomoo_my_my` / MYR | 94,360.58 | `cash.balance moomoo_my_my|MYR` |
+| `tw_broker` / TWD | 1,089,099 | `cash.balance` / `cash.statement.terminal tw_broker|TWD` |
+| `schwab` / USD | 18,159.42 | `cash.balance schwab|USD` |
+| `schwab` / TWD | 532,000 | `cash.balance schwab|TWD` |
+| `moomoo_my` / USD | 829.95 | `cash.balance moomoo_my|USD` |
+| `moomoo_my` / MYR | **123,201.91** | `cash.balance moomoo_my|MYR` |
 
 (The `cash.balance` and `cash.statement.terminal` anchor sets agree at the terminal,
 proving the rollup view and the per-row statement converge on the same value.)
+
+> **Batch B merged MYR pool (important)**: cash pools are keyed by `(account_id, ccy)`
+> (`portfolio/cash.py`), so after the merge `moomoo_my`'s MYR exposure is a **single
+> `(moomoo_my, MYR)` operational pool**. The post-merge stress suite now anchors this single
+> pool directly: `cash.balance moomoo_my|MYR = 123,201.91` (`phase1:final`; the US market
+> leg's MYR funding and the MY market leg's MYR now share this pool, per-ccy conservation
+> guaranteed by `data_ingestion/moomoo_merge.py`'s in-span self-check). **The earlier
+> v1.3-basis version derived this value as the sum of the two legacy pools; this version
+> adopts the single-pool terminal value directly anchored by the current run** (no formula
+> changed; §9.1's balance identity is unchanged).
 
 ### 9.3 Negative-Pool Semantics and Guards (date-aware guard)
 
@@ -1018,9 +1068,14 @@ layers:
   cash pool < 0, it attaches a **warning issue (never a hard block)**. Accounts not
   tracking cash do not trigger it.
 
-**Verified example**: `op47` (schwab USD 5,000 → TWD 162,000) is rejected, message
-contains `降至 -24000.00` (date-aware detection that it would overdraw at some point).
-Anchor: oplog `op47` status 422 `negative_cash`.
+**Example and current coverage**: once the `running_min` hard guard detects that a pool
+would go negative at **some point** without `ack_negative`, it returns **422 `negative_cash`**
+(message of the form `此筆會使 … 現金於某時點降至 …`). The post-merge stress scenario **does not
+trigger** a `negative_cash` block (its single Schwab USD→TWD reconversion, USD 5,000 → TWD
+162,000, passes the running_min check and settles — see §8.2; the scenario has no
+`negative_cash` assertion). This hard guard's behaviour is anchored by unit tests (the
+`_negative_response` / `_pool_min` paths under `tests/api/…`), not by a single op in this
+phase-1 scenario.
 
 > **Implementation**: `portfolio/cash.py` (`cash_balances`, `pool_lines`, `running_min`,
 > `running_statement`), `api/routers/cash.py` (`_pool_min`, `_negative_response`,
@@ -1211,23 +1266,23 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 
 | # | Example | Section | Verification anchor (`scope`) |
 | --- | --- | --- | --- |
-| E1 | TW fee/tax (2330 buy 1,000@600 → fee 855) | §3.1 | `fee_engine.fee tw_broker/2330 buy 1000@600 id=1` |
-| E2 | TW cash-equity sell tax (2330 sell 300@700 → tax 630) | §3.1 | `fee_engine.tax tw_broker/2330 sell 300@700 id=18` |
-| E3 | TW ETF sell tax (0050 sell 50@140 → tax 7) | §3.1 | `fee_engine.tax tw_broker/0050 sell 50@140 id=21` |
-| E4 | US Schwab sell (TSLA 20@260 → fee 0.14) | §3.2 | `fee_engine.fee schwab/TSLA sell 20@260 id=23` |
-| E5 | US Moomoo sell (NVDA 25@600 → fee 1.41) | §3.3 | `fee_engine.fee moomoo_my_us/NVDA sell 25@600 id=27` |
-| E6 | MY fee + stamp (1155 buy 1,000@9.50 → fee 10.45 / tax 9.50) | §3.4 | `fee_engine.fee/tax moomoo_my_my/1155 buy 1000@9.50 id=15` |
+| E1 | TW fee/tax (2330 buy 1,000@600 → fee 855) | §3.1 | `fee_engine.fee tw_broker/2330 buy 1000@600` |
+| E2 | TW cash-equity sell tax (2330 sell 300@700 → tax 630) | §3.1 | `fee_engine.tax tw_broker/2330 sell 300@700` |
+| E3 | TW ETF sell tax (0050 sell 50@140 → tax 7) | §3.1 | `fee_engine.tax tw_broker/0050 sell 50@140` |
+| E4 | US Schwab sell (TSLA 20@260 → fee 0.12) | §3.2 | `fee_engine.fee schwab/TSLA sell 20@260` |
+| E5 | US Moomoo sell (NVDA 25@600 → fee 5.89) | §3.3 | `fee_engine.fee moomoo_my/NVDA sell 25@600` |
+| E6 | MY fee + stamp (1155 buy 1,000@9.50 → fee 9.40 / tax 10.00) | §3.4 | `fee_engine.fee/tax moomoo_my/1155 buy 1000@9.50` |
 | E7 | Weighted-average cost (0050 full replay → orig 14,850.91 / adj 14,050.91) | §4.2 | `holding.* tw_broker|0050` |
 | E8 | Realized (0050 sell → 363.9091) | §5.1 | `realized.realized tw_broker/0050@2026-04-10` |
 | E9 | Unrealized (TSLA → 100.00) | §5.2 | `holding.unrealized_pnl schwab|TSLA` |
 | E10 | DRIP (MSFT gross 100 → 0.20 shares $0 cost, div_portion 0) | §6.2 | `holding.dividend_portion schwab|MSFT = 0.00` |
 | E11 | TW cash dividend cost reduction (0050 net 800 → div_portion 800) | §6.1 | `holding.dividend_portion tw_broker|0050 = 800` |
-| E12 | Total return (TWD 514,752.85) | §7.1 | `kpi.total_return TWD` |
-| E13 | FX weighted-avg rate (schwab 32.875 / moomoo 4.5) | §8.1 | `fx.avg_rate schwab / moomoo_my_us` |
-| E14 | Unrealized FX (rollup −31,830.94 TWD) | §8.3 | `fx.reporting_unrealized rollup` |
-| E15 | Cash-pool terminal (tw_broker TWD 1,085,715) | §9.2 | `cash.balance tw_broker|TWD` |
-| E16 | Negative-pool guard (op47 → 422, drops to −24,000) | §9.3 | oplog `op47` `negative_cash` |
-| E17 | Oversell block + ack + delete | §5.3 / §10.5 | `guard.oversell_blocks`; oplog `op42–44` |
+| E12 | Total return (TWD 516,336.55) | §7.1 | `kpi.total_return TWD` (`phase1:final`) |
+| E13 | FX weighted-avg rate (schwab 32.875 / moomoo 4.5) | §8.1 | `fx.avg_rate schwab / moomoo_my` |
+| E14 | Unrealized FX (rollup −11,757.48 TWD) | §8.3 | `fx.reporting_unrealized rollup` (`phase1:final`) |
+| E15 | Cash-pool terminal (tw_broker TWD 1,089,099) | §9.2 | `cash.balance tw_broker|TWD` (`phase1:final`) |
+| E16 | Negative-pool guard (`negative_cash` hard guard; not triggered in the current scenario, behaviour anchored by unit tests) | §9.3 | unit `_negative_response` / `_pool_min` |
+| E17 | Oversell block (422 `oversell_unacknowledged`) | §5.3 / §10.5 | `guard.oversell_blocks` (`tw_broker/0050 sell 200>held 110`) |
 
 ### 12.2 Glossary (Chinese term ↔ English identifier)
 
@@ -1273,6 +1328,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.1-draft` | 2026-07-15 | **Adversarial completeness audit**: after a repo-wide census of every amount / ratio / metric calculation, filled in the missing class-A formulas — added §6.5 (dividend-detection inbox estimation: pre-ex-date entitlement, DRIP reinvest-price estimate, TW stock-dividend par-value-10 conversion), §7.1 blended reporting-currency return rate + monthly snapshot, §7.3 (single-holding / sector / market allocation weight, currency view, reporting-currency valuation rule, export TOTAL rows, tax realized converted at sell-date FX), §7.4 (dividend-income summary + annual projection), §7.5 (net-value and cumulative-invested trend), §11.4 (rebalance turnover / fees / projected balance + leg amounts), §11.5 (What-if simulation). Added §12.5 "Inventory of numeric formulas outside arbitration scope", itemizing all class B (technical indicators / alert thresholds / export ratios) and class C (LLM budget / spend), achieving "complete enumeration". Baseline unchanged; **still pending owner confirmation.** |
 | `v1.2` | 2026-07-15 | **Formally signed off by the owner as the arbitration standard, effective from v0.1.19** (removed the "pending owner confirmation" draft status; version leaves -draft). Folds in the owner's four rulings: ① added the English mirror `docs/accounting-formula-manual.en.md` (a working copy for AI/agent reading; the zh manual is the arbitration authority, and each zh change must regenerate the mirror in the same change set); ② this activation (this row); ③ the §11.1 rebalance ruling's canonical date is set to **2026-07-13** (the ship record's 07-14 was only the ship date); ④ §3 rate honest statement: the owner's complete schedules are on file (→ `docs/reference/broker-fee-schedules-2026-07.md`), superseding the seed rates at the fee-engine-v2 upgrade; until then §3 documents what the current engine computes and lists the known divergences (sec_fee 0.0000278→0.0000206, TAF/CAT/platform/settlement not modeled, MY schedule shape differs, TW Capital Securities (群益) 23%-of-list charge-first-refund-later + rounding divergence), and a fee-dispute note was added to §12.4; ⑤ the §7.3 / §12.5 boundary ruling is settled (weights / return rates remain within arbitration scope). Baseline unchanged. |
 | `v1.3` | 2026-07-15 | **fee-engine v2 shipped** (owner sign-off; §3 fully rewritten). ① **TW rounding FE-D3**: fee/tax switch from round-half-up to **unconditional floor (ROUND_DOWN) to integer NT$**, with the min-NT$20 compared after the floor (群益 142.5→142; day-trade tax example 11→10); ② **US regulatory v2**: Schwab / Moomoo US commission $0 / platform $0.99, SELL adds SEC `0.0000206` + TAF `0.000195` (cap $9.79), settlement `0.003/share` (cap 1%), CAT `0.000003/share` — each component rounded then summed; ③ **MY v2**: commission `0.03%` (min RM0.01) + platform RM3 + clearing (cap RM1,000) + **SST 8%**; stamp becomes `ceil(amount/1000)×RM1` (stock cap RM1,000, **ETF exempt**); ④ **FE-D2 US stamp**: the MY stamp on US trades is computed in MYR, booked in USD (`stamp_fx` resolved by the caller; no rate → 0 + soft issue); ⑤ **FE-D1 rebate**: new §3.6 forecast `⌊fee×0.77⌋` (**not a number of record**, never in `compute_fees`; inbox/confirm is Wave B); ⑥ the snapshot carries `engine="v2"`, a **per-row regime** (old rows arbitrated under their old snapshot, never recomputed). All rates live in config. §3 example anchors updated to fee-engine v2 stress phase1 (`fee_engine.*` 80/80). Mirror regenerated in the same change set. Baseline unchanged. |
+| `v1.4` | 2026-07-22 | **Batch B (Moomoo merge) revision** (baseline `v0.1.20 + Batch B`). ① **Account model**: the two former per-market Moomoo accounts (legacy ids documented in `data_ingestion/moomoo_merge.py`) are merged into ONE dual-market account `moomoo_my` (settlement USD / funding MYR; rules bind per (account, market): US→(`moomoo_us`,`drip_us`), MY→(`moomoo_my`,`cash`), held in `account_market_rules`) — §2 account table 4→3 rows, invariant I6 changed from "bind to account" to "bind to (account, market)", and the account labels + `scope` anchors in §3.3/§3.4/§6.2/§6.3/§8/§9 re-anchored onto `moomoo_my` (market carried by the symbol). ② **Full anchor re-reconciliation**: the stress suite was regenerated to the post-merge topology (1,060 assertions, 66 ops, 1,060/1,060 passing, 0 fail; spot USD/MYR 4.5→**4.6**, plus one Schwab USD→TWD reconversion). Scenario-dependent terminal values updated to this current run: §7.1 total return 514,752.85→**516,336.55** (realized 186,333.50 / unrealized 330,003.05), §8.2 realized FX 0→**−2,375** (Schwab reconversion), §8.3 unrealized FX rollup −31,830.94→**−11,757.48** (`moomoo_my` now contributes a positive leg because spot 4.6≠avg 4.5), §9.2 cash pools fully updated with the MYR pool now a single directly-anchored `moomoo_my|MYR = 123,201.91`, §5.1 TSLA proceeds/realized 5,199.86/199.86→**5,199.88/199.88** (SEC fee 0.14→0.12); fixed pre-existing typos E5 (NVDA fee 1.41→5.89) and E6 (1155 fee/tax 10.45/9.50→9.40/10.00). ③ **Anchor robustness**: the volatile `id=NN` (renumbered per release) removed from the §12.1 fee examples, keeping the stable check+scope; the `negative_cash` example (former op47) — no longer triggered by the scenario — is re-anchored to unit tests (§9.3/E16); the oversell anchor is stated via the `guard.oversell_blocks` scope. ④ Verification-basis line, §7.2 harness count (1,006→1,060), §6.5 count (966→1,060) updated. Mirror regenerated in the same change set. **No formula or accounting-definition change — purely a (account, market) binding relabel + anchor re-reconciliation.** |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

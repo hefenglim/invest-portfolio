@@ -40,7 +40,7 @@ def _seed_holdings(conn: sqlite3.Connection) -> None:
 
     * tw_broker  — 2330 HELD (buy 1000); 2317 CLOSED via opening 1000 + full sell 1000.
     * schwab     — AAPL CLOSED (buy 10, then sell 10).
-    * moomoo_my_us — AAPL HELD (buy 10)  → same symbol, opposite class vs schwab.
+    * moomoo_my  — AAPL HELD (buy 10, US market)  → same symbol, opposite class vs schwab.
     """
     seed_accounts(conn)
     upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=Currency.TWD,
@@ -72,10 +72,21 @@ def _seed_holdings(conn: sqlite3.Connection) -> None:
     insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.SELL,
                        quantity=Decimal("10"), price=Decimal("120"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 2, 10))
-    # moomoo_my_us: AAPL held.
-    insert_transaction(conn, account_id="moomoo_my_us", symbol="AAPL", side=Side.BUY,
+    # moomoo_my: AAPL held (US market).
+    insert_transaction(conn, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
                        quantity=Decimal("10"), price=Decimal("110"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 12))
+    conn.commit()
+
+
+def _seed_tw_only(conn: sqlite3.Connection) -> None:
+    """Only tw_broker has any ledger history -> moomoo_my is genuinely empty (held+closed)."""
+    seed_accounts(conn)
+    upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=Currency.TWD,
+                                       sector="Semiconductors", name="TSMC", board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 5))
     conn.commit()
 
 
@@ -107,10 +118,10 @@ def test_holdings_fully_sold_is_closed(
 def test_holdings_per_account_isolation(
     dashboard_client_factory: DashboardClientFactory
 ) -> None:
-    """AAPL is CLOSED in schwab but HELD in moomoo_my_us — classification is per account."""
+    """AAPL is CLOSED in schwab but HELD in moomoo_my — classification is per account."""
     client: TestClient = dashboard_client_factory(_seed_holdings)
     schwab = client.get("/api/input/holdings?account=schwab").json()
-    moomoo = client.get("/api/input/holdings?account=moomoo_my_us").json()
+    moomoo = client.get("/api/input/holdings?account=moomoo_my").json()
     assert "AAPL" in _symbols(schwab["closed"]) and "AAPL" not in _symbols(schwab["held"])
     assert "AAPL" in _symbols(moomoo["held"]) and "AAPL" not in _symbols(moomoo["closed"])
 
@@ -119,8 +130,8 @@ def test_holdings_empty_account(
     dashboard_client_factory: DashboardClientFactory
 ) -> None:
     """An account with no ledger history returns empty held + closed (honest empty)."""
-    client: TestClient = dashboard_client_factory(_seed_holdings)
-    b = client.get("/api/input/holdings?account=moomoo_my_my").json()
+    client: TestClient = dashboard_client_factory(_seed_tw_only)
+    b = client.get("/api/input/holdings?account=moomoo_my").json()
     assert b == {"held": [], "closed": []}
 
 
@@ -140,7 +151,7 @@ def test_holdings_held_carries_shares_and_adjusted_avg(
     held = {h["symbol"]: h for h in b["held"]}
     assert held["2330"]["shares"] == "1000"
     assert held["2330"]["adjusted_avg"] == "497.5"
-    moo = client.get("/api/input/holdings?account=moomoo_my_us").json()
+    moo = client.get("/api/input/holdings?account=moomoo_my").json()
     aapl = {h["symbol"]: h for h in moo["held"]}["AAPL"]
     assert aapl["shares"] == "10"
     assert aapl["adjusted_avg"] == "110"          # 10 × 110 / 10 — no dividend here

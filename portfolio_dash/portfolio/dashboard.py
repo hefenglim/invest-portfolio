@@ -233,13 +233,25 @@ def build_dashboard(
                        "or non-convergence)")
 
     # 5. FX P&L — settlement != funding accounts; cold-start KeyError -> None.
+    # The exposure figure is the market value of equity holdings quoted in the account's
+    # FOREIGN (settlement) currency — it is labelled and marked-to-spot in that one
+    # currency (compute_account_fx: foreign_stock_value * (spot - avg_rate)). Sum ONLY
+    # holdings whose quote currency IS that settlement currency: an account may hold
+    # instruments in more than one currency (a dual-market account with settlement USD /
+    # funding MYR would also hold MYR-quoted MY stocks), and folding a MYR-quoted value
+    # into the USD exposure would mis-sum two currencies into one number. h.quote_ccy is
+    # the instrument's quote currency (Holding carries it, sourced in build_book), so no
+    # instruments-map lookup is needed here. On all current data each such account holds
+    # only settlement-ccy instruments, so this filter is a no-op today (bug-proofing).
     exposure: dict[str, tuple[Currency, Decimal]] = {}
     for acct in accounts.values():
         if acct.settlement_ccy == acct.funding_ccy:
             continue
         stock_value = _ZERO
         for h in valued:
-            if h.account_id == acct.account_id and h.market_value is not None:
+            if (h.account_id == acct.account_id
+                    and h.quote_ccy == acct.settlement_ccy
+                    and h.market_value is not None):
                 stock_value += h.market_value
         exposure[acct.account_id] = (acct.settlement_ccy, stock_value)
     fx_summary: FXSummary | None

@@ -76,7 +76,7 @@ def test_export_rebalance_report_audit_in_action_log(
 def test_export_rebalance_report_dual_account(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
-    """A dual-account symbol (AAPL: schwab + moomoo_my_us) renders both leg accounts and the
+    """A dual-account symbol (AAPL: schwab + moomoo_my) renders both leg accounts and the
     constituent under 執行清單/摘要表, over the real API path."""
     client = dashboard_client_factory(_seed_dual_account)
     r = client.post(
@@ -85,5 +85,5 @@ def test_export_rebalance_report_dual_account(
     assert r.status_code == 200
     doc = r.content.decode("utf-8")
     assert "Charles Schwab" in doc and "TW Broker" in doc
-    assert "Moomoo MY (US)" in doc  # AAPL's second constituent
+    assert "Moomoo MY" in doc  # AAPL's second constituent (merged account name)
     assert "小計" in doc  # per-account subtotal

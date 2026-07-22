@@ -282,7 +282,7 @@ def test_rebalance_dual_account_single_row_with_chips(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
     """Combined cross-account rebalance: a symbol held in TWO accounts (AAPL: schwab +
-    moomoo_my_us) renders as EXACTLY ONE drawer row with account chips; editing its target
+    moomoo_my) renders as EXACTLY ONE drawer row with account chips; editing its target
     fires the preview and populates its OWN action cell (the pre-fix orphan bug is gone) —
     and one row means the footer counts the symbol once. ZERO console + page errors."""
     base = flow_server(_seed_dual_account)
@@ -300,7 +300,7 @@ def test_rebalance_dual_account_single_row_with_chips(
         has=page.locator(".sym-code", has_text="AAPL"),
     )
     assert aapl_rows.count() == 1  # ONE row for the dual-account symbol (no duplicate)
-    # the account chips list BOTH constituents (schwab 30 + moomoo_my_us 10)
+    # the account chips list BOTH constituents (schwab 30 + moomoo_my 10)
     assert aapl_rows.locator(".rb-acct-chip").count() == 2
 
     # editing AAPL's target fires the debounced preview; its OWN action cell then computes

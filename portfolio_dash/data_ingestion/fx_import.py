@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.store import insert_fx_conversion
-from portfolio_dash.data_ingestion.validate import Issue
+from portfolio_dash.data_ingestion.validate import Issue, alias_import_account
 from portfolio_dash.shared.enums import Currency
 
 # Canonical CSV column order for the fx_conversions import — SINGLE SOURCE for the downloadable
@@ -36,7 +36,8 @@ def build_fx_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
 
         # --- parse required fields ---
         try:
-            account_id = raw["account"]
+            # Legacy Moomoo account id -> moomoo_my (+ soft info issue appended below).
+            account_id, alias_issue = alias_import_account(raw["account"])
             conv_date = date.fromisoformat(raw["date"])
             from_ccy = Currency(raw["from_ccy"])
             from_amount = Decimal(raw["from_amount"])
@@ -51,6 +52,9 @@ def build_fx_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
                 )
             )
             continue
+
+        if alias_issue is not None:
+            issues.append(alias_issue)
 
         # --- validate account exists (hard) ---
         if (

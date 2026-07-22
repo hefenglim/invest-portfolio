@@ -66,6 +66,38 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.22 (Batch B: the Moomoo account merge) ------------------------------------
+    Feature(
+        version="0.1.22",
+        id="moomoo-account-merge",
+        title="Moomoo 帳戶合併為單一雙市場帳戶",
+        desc="兩個 Moomoo 帳戶合併為一個「Moomoo MY」:買美股扣 USD、買馬股扣 MYR,"
+        "馬幣同一池(餘額改為合計);首次啟動自動遷移並先建備份快照;"
+        "此帳戶的換匯表單開機即可用",
+        href="cash.html",
+        area="資金管理",
+        target="#cm-account",
+    ),
+    Feature(
+        version="0.1.22",
+        id="per-market-dividends",
+        title="股利依標的市場自動分流",
+        desc="同一帳戶下,美股股利走 DRIP(30% 預扣)、馬股走現金入帳——"
+        "表單模式與寫入型別跟隨輸入代號的市場;CSV 匯入型別不符該市場模型時會要求確認",
+        href="trades.html",
+        area="交易輸入 → 股利",
+        target="#d-symbol",
+    ),
+    Feature(
+        version="0.1.22",
+        id="merged-input-hardening",
+        title="多市場帳戶輸入強化",
+        desc="未註冊代號需明確選擇市場(絕不猜測);草稿預覽的幣別與價格精度跟隨標的"
+        "(馬股顯示 MYR、3 位小數);帶舊 Moomoo 帳戶代號的 CSV 會自動轉換並提示",
+        href="trades.html",
+        area="交易輸入",
+        target="#m-symbol",
+    ),
     # --- v0.1.21 (round-7 batch A, FU-D55..D60) -----------------------------------------
     Feature(
         version="0.1.21",
@@ -876,6 +908,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.22": "2026-07-22",
     "0.1.21": "2026-07-21",
     "0.1.20": "2026-07-20",
     "0.1.19": "2026-07-15",

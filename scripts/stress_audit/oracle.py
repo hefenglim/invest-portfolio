@@ -46,12 +46,29 @@ CENT = D("0.01")
 # --- per-currency minor units (data-and-pricing.md) --------------------------------
 MINOR_UNITS = {"TWD": 0, "USD": 2, "MYR": 2}
 
-# --- account -> (fee_rule, settlement_ccy, funding_ccy) (config_seed DEFAULT_ACCOUNTS)
-ACCOUNTS = {
+# --- account -> (fee_rule, settlement_ccy, funding_ccy) (config_seed DEFAULT_ACCOUNTS) ---
+# Batch B (2026-07-21 merge): the two legacy Moomoo accounts (moomoo_my_us + moomoo_my_my) are
+# MERGED into ONE dual-market account ``moomoo_my`` — a single brokerage account that settles US
+# trades in USD (funded via MYR->USD) AND holds MY-market MYR stocks, so settlement_ccy=USD /
+# funding_ccy=MYR (mirrors config_seed.DEFAULT_ACCOUNTS). The fee_rule slot is None because a
+# dual-market account has NO single fee rule: routing is per-market via ACCOUNT_MARKET_RULE /
+# fee_rule_for(). settlement/funding still define the account's ONE FX-exposed pool (USD vs MYR).
+ACCOUNTS: dict[str, tuple[str | None, str, str]] = {
     "tw_broker": ("tw", "TWD", "TWD"),
     "schwab": ("schwab", "USD", "TWD"),
-    "moomoo_my_us": ("moomoo_us", "USD", "MYR"),
-    "moomoo_my_my": ("moomoo_my", "MYR", "MYR"),
+    "moomoo_my": (None, "USD", "MYR"),   # dual-market; fee rule resolved per market
+}
+
+# --- (account, market) -> fee_rule_set (config_seed account_market_rules bindings) ----------
+# The app resolves a trade's fee rule by (account, instrument.market) via fee_rule_for() over the
+# account_market_rules table (data_ingestion/rules_binding.py). We re-derive the same mapping here
+# (independent of the app) so a moomoo_my US trade books moomoo_us fees and a moomoo_my MY trade
+# books moomoo_my fees — the merged-account fee proof. Single-market accounts have one binding row.
+ACCOUNT_MARKET_RULE: dict[tuple[str, str], str] = {
+    ("tw_broker", "TW"): "tw",
+    ("schwab", "US"): "schwab",
+    ("moomoo_my", "US"): "moomoo_us",
+    ("moomoo_my", "MY"): "moomoo_my",
 }
 
 # --- fee-rule parameters (fee-engine v2, transcribed from config_seed.FEE_RULES) ---
@@ -99,12 +116,31 @@ def _ceil_int(value: Decimal) -> Decimal:
     return value.quantize(ONE, rounding=ROUND_CEILING)
 
 
+def fee_rule_for(account_id: str, market: str | None) -> str:
+    """Resolve the fee-rule-set name for a trade, per-market (Batch B dual-market merge).
+
+    Mirrors the app's rules_binding.fee_rule_for over account_market_rules: a trade's rule binds
+    to (account, instrument.market). For a SINGLE-market account ``market`` may be omitted (its
+    sole binding is used); the merged dual-market ``moomoo_my`` REQUIRES a market so a US trade
+    routes to ``moomoo_us`` and an MY trade to ``moomoo_my``. Raises KeyError when the account is
+    multi-market and no matching market is supplied — the harness never guesses a fee regime.
+    """
+    if market is not None and (account_id, market) in ACCOUNT_MARKET_RULE:
+        return ACCOUNT_MARKET_RULE[(account_id, market)]
+    rules = {m: r for (a, m), r in ACCOUNT_MARKET_RULE.items() if a == account_id}
+    if len(rules) == 1:
+        return next(iter(rules.values()))
+    raise KeyError(
+        f"account {account_id!r} is multi-market; a valid market is required (got {market!r})")
+
+
 # ===================================================================================
 # LAYER 1 — FEE ENGINE ORACLE (rule-derived; compared vs app-stored fee/tax)
 # ===================================================================================
 def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
             is_etf: bool, daytrade: bool = False,
-            stamp_fx: Decimal | None = None) -> tuple[Decimal, Decimal, list[str]]:
+            stamp_fx: Decimal | None = None,
+            market: str | None = None) -> tuple[Decimal, Decimal, list[str]]:
     """Return (fee, tax, notes[]) expected from the fee-engine v2 spec (independent derive).
 
     ``side`` in {"BUY","SELL"}. Logic is re-derived from the mini-spec + reference doc
@@ -114,9 +150,11 @@ def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
     Rounding: TW floors to integer NT$ (FE-D3); US/MY quantize each component to the cent
     (ROUND_HALF_UP) then sum. ``is_etf`` is the instrument-REGISTRY flag (TW sell tax rate;
     MY/US stamp cap). ``daytrade`` is the per-transaction TW flag. ``stamp_fx`` is the
-    trade-date USD/MYR rate for the Moomoo US MY stamp (FE-D2); None -> stamp 0.
+    trade-date USD/MYR rate for the Moomoo US MY stamp (FE-D2); None -> stamp 0. ``market`` is
+    the instrument's market (US/TW/MY): it routes the per-market fee rule for the merged
+    dual-market ``moomoo_my`` (Batch B) and may be omitted for single-market accounts.
     """
-    rule_name = ACCOUNTS[account_id][0]
+    rule_name = fee_rule_for(account_id, market)
     r = FEE_RULES[rule_name]
     notional = qty * price
     fee = ZERO

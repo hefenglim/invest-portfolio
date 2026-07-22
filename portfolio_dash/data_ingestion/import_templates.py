@@ -53,9 +53,10 @@ OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
 }
 
 # Example rows align POSITIONALLY with each kind's column constant. Fixed recent ISO dates;
-# accounts + symbols are the seeded ids (tw_broker / schwab / moomoo_my_us / moomoo_my_my,
-# 2330 / AAPL / a MY ETF) so the guard test resolves every reference cleanly. is_etf is NOT
-# a column — it comes from the instrument registry (hence the MY-ETF row's note).
+# accounts + symbols are the seeded ids (tw_broker / schwab / moomoo_my, 2330 / AAPL / a MY
+# ETF) so the guard test resolves every reference cleanly. moomoo_my is the merged dual-market
+# account (Batch B), so it books BOTH a US-market and an MY-market example row. is_etf is NOT a
+# column — it comes from the instrument registry (hence the MY-ETF row's note).
 _TRANSACTION_ROWS: list[list[str]] = [
     # TW buy — fee/tax auto-computed (blank -> account fee-rule set fills them).
     ["tw_broker", "2330", "buy", "2026-07-10", "1000", "612.5", "", "", "", ""],
@@ -63,10 +64,10 @@ _TRANSACTION_ROWS: list[list[str]] = [
     ["tw_broker", "2330", "sell", "2026-07-13", "1000", "620", "", "", "1", "當沖"],
     # Schwab US sell — SEC/TAF regulatory fees auto-computed on the sell side.
     ["schwab", "AAPL", "sell", "2026-07-13", "5", "210", "", "", "", ""],
-    # Moomoo MY (US market) buy.
-    ["moomoo_my_us", "AAPL", "buy", "2026-07-14", "3", "205", "", "", "", ""],
-    # Moomoo MY (MY market) ETF buy — the ETF stamp exemption keys off the registry flag.
-    ["moomoo_my_my", "0800EA", "buy", "2026-07-14", "100", "1.25", "", "", "",
+    # Moomoo MY, US-market buy (settles USD; US fee/dividend rules bound to this market).
+    ["moomoo_my", "AAPL", "buy", "2026-07-14", "3", "205", "", "", "", ""],
+    # Moomoo MY, MY-market ETF buy — the ETF stamp exemption keys off the registry flag.
+    ["moomoo_my", "0800EA", "buy", "2026-07-14", "100", "1.25", "", "", "",
      "ETF 以標的登錄為準"],
     # Manual fee + tax override — both columns supplied -> auto-compute skipped for this row.
     ["tw_broker", "2330", "sell", "2026-07-15", "500", "620", "20", "5", "", "手動覆寫費稅"],
@@ -80,9 +81,9 @@ _DIVIDEND_ROWS: list[list[str]] = [
 ]
 
 _FX_ROWS: list[list[str]] = [
-    # Schwab funds USD from TWD; Moomoo funds USD from MYR.
+    # Schwab funds USD from TWD; Moomoo MY funds USD from MYR.
     ["schwab", "2026-07-10", "TWD", "32000", "USD", "1000"],
-    ["moomoo_my_us", "2026-07-11", "MYR", "4400", "USD", "1000"],
+    ["moomoo_my", "2026-07-11", "MYR", "4400", "USD", "1000"],
 ]
 
 _OPENING_ROWS: list[list[str]] = [

@@ -155,7 +155,7 @@ def test_my_market_rounds_to_100_lot() -> None:
     upsert_instrument(conn, Instrument(symbol="1155", market=Market.MY,
                                        quote_ccy=Currency.MYR, sector="Banks",
                                        name="Maybank", board="Main"))
-    insert_transaction(conn, account_id="moomoo_my_my", symbol="1155", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="1155", side=Side.BUY,
                        quantity=Decimal("5000"), price=Decimal("1.00"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 2, 1))
     upsert_prices(conn, [PriceRow(instrument="1155", market=Market.MY,
@@ -193,7 +193,7 @@ def test_my_market_leg_snaps_to_100_lot() -> None:
     upsert_instrument(conn, Instrument(symbol="1155", market=Market.MY,
                                        quote_ccy=Currency.MYR, sector="Banks",
                                        name="Maybank", board="Main"))
-    insert_transaction(conn, account_id="moomoo_my_my", symbol="1155", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="1155", side=Side.BUY,
                        quantity=Decimal("5000"), price=Decimal("1.00"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 2, 1))
     upsert_prices(conn, [PriceRow(instrument="1155", market=Market.MY,
@@ -208,7 +208,7 @@ def test_my_market_leg_snaps_to_100_lot() -> None:
     legs = row["legs"]
     assert isinstance(legs, list) and len(legs) == 1
     leg = legs[0]
-    assert leg["account_id"] == "moomoo_my_my"
+    assert leg["account_id"] == "moomoo_my"
     assert Decimal(str(leg["shares"])) % Decimal("100") == 0  # board-lot rounding per leg
     assert leg["odd_lot"] is False  # odd_lot only flags TW 張 (not MY)
     conn.close()
@@ -216,7 +216,7 @@ def test_my_market_leg_snaps_to_100_lot() -> None:
 
 # --- combined cross-account engine (owner ruling 2026-07-13) -----------------------------
 
-# _dual: AAPL genuinely held in TWO accounts (schwab 30 @100 + moomoo_my_us 10 @110), plus
+# _dual: AAPL genuinely held in TWO accounts (schwab 30 @100 + moomoo_my 10 @110), plus
 # 2330 (tw_broker 1000 @500) and a watch-only 2454 (registered, unheld). Current: AAPL 120
 # USD, 2330 600 TWD, USD/TWD 33.  total = 600000 (2330) + 40*120*33 (AAPL) = 758400 TWD.
 _TOTAL_DUAL = Decimal("758400")
@@ -243,7 +243,7 @@ def _dual() -> sqlite3.Connection:
     insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
                        quantity=Decimal("30"), price=Decimal("100"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
-    insert_transaction(conn, account_id="moomoo_my_us", symbol="AAPL", side=Side.BUY,
+    insert_transaction(conn, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
                        quantity=Decimal("10"), price=Decimal("110"),
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 12))
     upsert_prices(conn, [
@@ -269,7 +269,7 @@ def test_dual_combined_current_weight_on_the_row() -> None:
     # constituents surfaced (both accounts, most-shares first)
     accounts = row["accounts"]
     assert isinstance(accounts, list)
-    assert [a["account_id"] for a in accounts] == ["schwab", "moomoo_my_us"]
+    assert [a["account_id"] for a in accounts] == ["schwab", "moomoo_my"]
     assert [Decimal(str(a["shares"])) for a in accounts] == [Decimal("30"), Decimal("10")]
     conn.close()
 
@@ -305,8 +305,8 @@ def test_dual_target_zero_liquidates_all_accounts_greedy() -> None:
     assert row["side"] == "sell"
     legs = row["legs"]
     assert isinstance(legs, list)
-    # greedy most-shares-first: schwab (30) then moomoo_my_us (10) — both fully liquidated
-    assert [lg["account_id"] for lg in legs] == ["schwab", "moomoo_my_us"]
+    # greedy most-shares-first: schwab (30) then moomoo_my (10) — both fully liquidated
+    assert [lg["account_id"] for lg in legs] == ["schwab", "moomoo_my"]
     assert [Decimal(str(lg["shares"])) for lg in legs] == [Decimal("30"), Decimal("10")]
     assert Decimal(str(row["shares"])) == Decimal("40")  # aggregate = all shares
     assert row["new_weight"] == Decimal("0")  # combined position fully closed
@@ -326,7 +326,7 @@ def test_dual_partial_sell_spans_accounts_bounded() -> None:
     result = compute_rebalance(conn, now=_NOW, reporting=Currency.TWD, targets={"AAPL": target})
     row = _rows_by_symbol(result)["AAPL"]
     legs = _list(row["legs"])
-    assert [lg["account_id"] for lg in legs] == ["schwab", "moomoo_my_us"]
+    assert [lg["account_id"] for lg in legs] == ["schwab", "moomoo_my"]
     assert Decimal(str(legs[0]["shares"])) == Decimal("30")  # schwab fully drained first
     assert Decimal(str(legs[1]["shares"])) == Decimal("5")   # remainder from moomoo, bounded
     conn.close()

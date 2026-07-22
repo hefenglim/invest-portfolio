@@ -215,7 +215,7 @@ def test_my_net_dividend_books_and_dashboard_survives(
     upsert_instrument(golden_db, Instrument(
         symbol="1155", market=Market.MY, quote_ccy=Currency.MYR,
         sector="Banking", name="Maybank", board=".KL"))
-    insert_transaction(golden_db, account_id="moomoo_my_my", symbol="1155",
+    insert_transaction(golden_db, account_id="moomoo_my", symbol="1155",
                        side=Side.BUY, quantity=Decimal("1000"), price=Decimal("9"),
                        fees=Decimal("0"), tax=Decimal("0"),
                        trade_date=ddate(2026, 2, 1))
@@ -268,3 +268,78 @@ def test_same_event_cash_and_stock_are_independent_items(
     assert kinds == {"cash", "stock"}
     fps = {x["fingerprint"] for x in rows}
     assert len(fps) == 2  # distinct fingerprints (:stock suffix)
+
+
+# --- Batch B Wave 2: per-market dividend model on a dual-bound account ------------
+
+
+def test_inbox_resolves_dividend_model_per_market_for_dual_bound_account(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """A single account bound to TWO markets (the merged Moomoo shape) books each holding
+    per the INSTRUMENT market, not one account-wide model: a US holding surfaces as a
+    DRIP item (30% withholding) and an MY holding of the SAME account surfaces as a NET
+    item (single-tier, net = gross).
+
+    Binding rows are inserted via SQL. The account SCALAR ``dividend_model`` is set to
+    ``drip_us`` -- deliberately WRONG for the MY leg; asserting the MY item is ``net``
+    with zero withholding proves the estimator resolved the MY binding, not the scalar.
+    """
+    from portfolio_dash.api.dividend_inbox import detect
+    from portfolio_dash.data_ingestion.store import insert_transaction, upsert_instrument
+    from portfolio_dash.shared.models.assets import Instrument
+    from portfolio_dash.shared.models.enums import Side
+
+    # Merged dual-market account; scalar drip_us is the fallback that is wrong for MY.
+    golden_db.execute(
+        "INSERT INTO accounts (account_id, name, broker, settlement_ccy, funding_ccy, "
+        "fee_rule_set, dividend_model) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("moomoo_merged", "Moomoo (merged)", "Moomoo", "USD", "MYR",
+         "moomoo_us", "drip_us"),
+    )
+    for market, fee_set, model in (("US", "moomoo_us", "drip_us"),
+                                   ("MY", "moomoo_my", "cash")):
+        golden_db.execute(
+            "INSERT INTO account_market_rules (account_id, market, fee_rule_set, "
+            "dividend_model) VALUES (?, ?, ?, ?)",
+            ("moomoo_merged", market, fee_set, model),
+        )
+    upsert_instrument(golden_db, Instrument(
+        symbol="MSFT", market=Market.US, quote_ccy=Currency.USD,
+        sector="Tech", name="Microsoft"))
+    upsert_instrument(golden_db, Instrument(
+        symbol="1155", market=Market.MY, quote_ccy=Currency.MYR,
+        sector="Banking", name="Maybank", board=".KL"))
+    insert_transaction(golden_db, account_id="moomoo_merged", symbol="MSFT",
+                       side=Side.BUY, quantity=Decimal("10"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=ddate(2026, 1, 5))
+    insert_transaction(golden_db, account_id="moomoo_merged", symbol="1155",
+                       side=Side.BUY, quantity=Decimal("1000"), price=Decimal("9"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=ddate(2026, 2, 1))
+    upsert_dividend_events(golden_db, [
+        DividendEvent(instrument="MSFT", market=Market.US, ex_date=ddate(2026, 5, 10),
+                      cash_amount=Decimal("0.25"), currency=Currency.USD,
+                      source="yfinance"),
+        DividendEvent(instrument="1155", market=Market.MY, ex_date=ddate(2026, 4, 15),
+                      cash_amount=Decimal("0.30"), currency=Currency.MYR,
+                      source="yfinance"),
+    ], fetched_at=_NOW)
+    golden_db.commit()
+
+    items = detect(golden_db, now=_NOW)
+    us = next(p for p in items
+              if p.symbol == "MSFT" and p.account_id == "moomoo_merged")
+    my = next(p for p in items
+              if p.symbol == "1155" and p.account_id == "moomoo_merged")
+
+    # US leg -> per-market drip_us: DRIP item with 30% withholding.
+    assert us.kind == "drip"
+    assert us.est_gross == Decimal("2.50")       # 0.25 * 10
+    assert us.est_withhold == Decimal("0.75")    # 2.50 * 0.30
+    assert us.est_net == Decimal("1.75")
+
+    # MY leg -> per-market cash: NET item, zero withholding (NOT the scalar's drip).
+    assert my.kind == "net"
+    assert my.est_gross == Decimal("300.00")     # 0.30 * 1000
+    assert my.est_withhold == Decimal("0")
+    assert my.est_net == Decimal("300.00")

@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import upsert_opening
-from portfolio_dash.data_ingestion.validate import Issue
+from portfolio_dash.data_ingestion.validate import Issue, alias_import_account
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.money import MINOR_UNITS
 
@@ -54,7 +54,8 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
 
         # --- parse required identity/quantity fields + optional legacy avg ---
         try:
-            account_id = raw["account"]
+            # Legacy Moomoo account id -> moomoo_my (+ soft info issue appended below).
+            account_id, alias_issue = alias_import_account(raw["account"])
             symbol = raw["symbol"]
             shares = Decimal(raw["shares"])
             build = date.fromisoformat(raw["build_date"])
@@ -71,6 +72,9 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
                 )
             )
             continue
+
+        if alias_issue is not None:
+            issues.append(alias_issue)
 
         # --- validate account exists (also yields the settlement ccy for the mismatch tol) ---
         acct_row = conn.execute(

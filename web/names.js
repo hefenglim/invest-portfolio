@@ -24,12 +24,17 @@
 (function () {
   'use strict';
 
-  /* id -> { name: full canonical zh, short: compact zh for chips }. Closed set: the
-     four first-class, config-seeded accounts (CLAUDE.md — account is a first-class
-     entity). An unknown id falls through to the id itself (see the resolver below). */
+  /* id -> { name: full canonical zh, short: compact zh for chips }. The three
+     first-class, config-seeded accounts after the Batch B merge (CLAUDE.md — account is
+     a first-class entity), plus two RETAINED legacy ids (see below). An unknown id falls
+     through to the id itself (see the resolver below). */
   const ACCOUNTS = {
     tw_broker:    { name: '台灣券商',    short: '台灣券商' },
     schwab:       { name: '嘉信 Schwab', short: '嘉信' },
+    moomoo_my:    { name: 'Moomoo MY',   short: 'Moomoo MY' },
+    /* Legacy pre-merge ids (Batch B merged moomoo_my_us + moomoo_my_my into moomoo_my).
+       Retained so any pre-migration data snapshot still resolves to a name; harmless dict
+       leftovers that T10's migration release may drop. */
     moomoo_my_us: { name: 'Moomoo 美股', short: 'Moomoo 美股' },
     moomoo_my_my: { name: 'Moomoo 馬股', short: 'Moomoo 馬股' }
   };

@@ -29,6 +29,7 @@ from decimal import Decimal
 from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.holdings import shares_on
+from portfolio_dash.data_ingestion.rules_binding import dividend_model_for
 from portfolio_dash.data_ingestion.store import (
     insert_dividend,
     list_accounts,
@@ -252,7 +253,11 @@ def detect(
                 held = shares_on(conn, account_id, symbol, before=ev.ex_date)
                 if held <= _ZERO:
                     continue
-                model = account.dividend_model
+                # Per-market dividend model: the instrument's market selects the
+                # account's (account, market) binding when present, else the
+                # account-level scalar. For a dual-market account (merged Moomoo) a US
+                # holding resolves drip_us and an MY holding resolves cash -- same acct.
+                model = dividend_model_for(conn, account_id, inst.market)
 
                 def _mk(  # noqa: PLR0913 — a typed builder beats an untyped **dict
                     fingerprint: str, kind: str, per_share: Decimal,

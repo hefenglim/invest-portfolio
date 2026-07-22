@@ -31,6 +31,19 @@ def test_default_order_when_no_override(conn: sqlite3.Connection) -> None:
     assert order[Market.TW] == ["twse", "tpex", "yfinance", "twstock"]
 
 
+def test_seed_leaves_market_order_defaults_byte_identical(conn: sqlite3.Connection) -> None:
+    """Seeding writes NO data_source_market_order rows, so quote_order() resolves to the
+    byte-identical DEFAULT_PROVIDER_ORDER per-market chains (routing is untouched by seed)."""
+    rows = conn.execute("SELECT COUNT(*) AS n FROM data_source_market_order").fetchone()["n"]
+    assert rows == 0  # ensure_seeded() ran in the fixture; it must not seed market order
+    order = datasources_store.quote_order(conn)
+    assert order == {
+        Market.US: ["yfinance", "stockprices_dev"],
+        Market.TW: ["twse", "tpex", "yfinance", "twstock"],
+        Market.MY: ["yfinance", "klsescreener", "malaysiastock"],
+    }
+
+
 def test_registry_walks_the_stored_override(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

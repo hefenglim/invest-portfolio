@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 
 from portfolio_dash.api.deps import get_conn
-from portfolio_dash.api.wire import div_model_wire, fee_rules_wire
+from portfolio_dash.api.wire import account_markets_wire, div_model_wire, fee_rules_wire
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.store import list_accounts
 
@@ -53,6 +53,9 @@ def list_all(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             "fee_rules": fee_rules_wire(
                 get_fee_rule_set(meta[a.account_id]["fee_rule_set"], conn)
             ),
+            # Batch B (additive): per-market fee-rule + dividend-model bundle. Legacy scalar
+            # fields above stay byte-identical; single-market accounts get one mirrored entry.
+            "markets": account_markets_wire(a.market_rules, conn),
         }
         for a in list_accounts(conn)
     ]

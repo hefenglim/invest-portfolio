@@ -15,6 +15,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
+from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
 from portfolio_dash.data_ingestion.store import (
     list_dividends,
     list_instruments,
@@ -24,7 +25,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.results import Holding
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
@@ -52,11 +53,25 @@ def _most_shares_account(holdings: list[Holding], symbol: str) -> str | None:
     return max(candidates, key=lambda h: h.shares).account_id
 
 
-def _fee_rule_set_name(conn: sqlite3.Connection, account_id: str) -> str | None:
-    row = conn.execute(
-        "SELECT fee_rule_set FROM accounts WHERE account_id=?", (account_id,)
-    ).fetchone()
-    return row["fee_rule_set"] if row is not None else None
+def _fee_rule_set_name(
+    conn: sqlite3.Connection, account_id: str, market: Market | None
+) -> str | None:
+    """Fee-rule-set name for (*account_id*, *market*); None if the account is unknown.
+
+    Batch B: market-aware via the (account, market) binding table. LOCKED fallback — when
+    *market* is None (unregistered symbol: no resolved instrument, hence no market to bind
+    on) read the account scalar exactly as before, so the pre-swap behaviour is preserved.
+    """
+    if market is None:
+        # No instrument (unregistered symbol): keep reading the account scalar as today.
+        row = conn.execute(
+            "SELECT fee_rule_set FROM accounts WHERE account_id=?", (account_id,)
+        ).fetchone()
+        return row["fee_rule_set"] if row is not None else None
+    try:
+        return fee_rule_for(conn, account_id, market)
+    except KeyError:  # unknown account — preserve the pre-swap None return
+        return None
 
 
 def _fee_rule_desc(snapshot: dict[str, str], side: Side) -> str:
@@ -139,7 +154,12 @@ def compute_whatif(
     if resolved is None:
         raise WhatIfError(
             f"無法推斷帳戶：{symbol} 未持有且未指定 account_id")
-    rule_name = _fee_rule_set_name(conn, resolved)
+    inst = instruments.get(symbol)
+    # Market-aware fee rule (Batch B): pass the resolved instrument's market so a dual-market
+    # account picks the market-appropriate rule set. An unregistered symbol (inst None) has no
+    # market, so the helper keeps reading the account scalar exactly as before.
+    rule_name = _fee_rule_set_name(
+        conn, resolved, inst.market if inst is not None else None)
     if rule_name is None:
         raise WhatIfError(f"未知帳戶 {resolved}")
     rules = get_fee_rule_set(rule_name, conn)
@@ -150,7 +170,6 @@ def compute_whatif(
     held_adj_total = held.adjusted_cost_total if held is not None else _ZERO
     held_adj_avg = (held_adj_total / held_shares) if held_shares > _ZERO else _ZERO
 
-    inst = instruments.get(symbol)
     is_etf = inst.is_etf if inst is not None else False
 
     # 3. Fee/tax via the REAL engine — never re-implement the math. FE-D2 estimate path:

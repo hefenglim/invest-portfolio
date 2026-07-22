@@ -13,6 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from portfolio_dash.data_ingestion.markets import market_for_settlement_ccy
 from portfolio_dash.shared.enums import Currency, Market
 
 
@@ -73,8 +74,29 @@ class FeeRuleSet(BaseModel):
         return self.market is Market.US and self.stamp_unit > 0
 
 
+class MarketBinding(BaseModel):
+    """One explicit (market, fee_rule_set, dividend_model) rule binding for an account.
+
+    Batch B: a MULTI-market account (the merged ``moomoo_my``, holding US-settled and
+    MY-settled instruments in one brokerage account) declares one binding row per market
+    it holds. Accounts WITHOUT explicit bindings fall back to a single settlement-ccy-derived
+    row that mirrors their scalar rules (see :func:`_binding_seed_rows`), so single-market
+    accounts are untouched.
+    """
+
+    market: Market
+    fee_rule_set: str
+    dividend_model: str
+
+
 class AccountConfig(BaseModel):
-    """Static configuration for a broker account."""
+    """Static configuration for a broker account.
+
+    ``fee_rule_set`` / ``dividend_model`` are the account-level SCALAR live-fallback values
+    (NOT NULL in the accounts table; the resolvers fall back to them when a market has no
+    binding). ``market_bindings`` (optional) declares explicit per-market rule rows for a
+    multi-market account; when omitted the seed derives ONE binding from the settlement ccy.
+    """
 
     account_id: str
     name: str
@@ -83,6 +105,7 @@ class AccountConfig(BaseModel):
     funding_ccy: Currency
     fee_rule_set: str
     dividend_model: str
+    market_bindings: list[MarketBinding] | None = None
 
 
 # Annually-adjusted US regulatory rates (reference doc §肆.1 — configurable, not hard-coded).
@@ -176,23 +199,24 @@ DEFAULT_ACCOUNTS: list[AccountConfig] = [
         fee_rule_set="schwab",
         dividend_model="drip_us",
     ),
+    # Batch B (2026-07-21): the two legacy Moomoo accounts (``moomoo_my_us`` +
+    # ``moomoo_my_my``) are MERGED into ONE dual-market account. It is ONE brokerage account
+    # that settles US trades in USD (funded via MYR->USD) AND holds MY-market MYR stocks, so
+    # settlement_ccy=USD / funding_ccy=MYR and the scalar rules pin the US-market pair
+    # (consistent with settlement USD). The two markets carry EXPLICIT bindings: US ->
+    # (moomoo_us, drip_us), MY -> (moomoo_my, cash). Name matches web/names.js ("Moomoo MY").
     AccountConfig(
-        account_id="moomoo_my_us",
-        name="Moomoo MY (US)",
+        account_id="moomoo_my",
+        name="Moomoo MY",
         broker="Moomoo MY",
         settlement_ccy=Currency.USD,
         funding_ccy=Currency.MYR,
         fee_rule_set="moomoo_us",
         dividend_model="drip_us",
-    ),
-    AccountConfig(
-        account_id="moomoo_my_my",
-        name="Moomoo MY (MY)",
-        broker="Moomoo MY",
-        settlement_ccy=Currency.MYR,
-        funding_ccy=Currency.MYR,
-        fee_rule_set="moomoo_my",
-        dividend_model="cash",
+        market_bindings=[
+            MarketBinding(market=Market.US, fee_rule_set="moomoo_us", dividend_model="drip_us"),
+            MarketBinding(market=Market.MY, fee_rule_set="moomoo_my", dividend_model="cash"),
+        ],
     ),
 ]
 
@@ -223,8 +247,40 @@ def get_effective_fee_rules(conn: sqlite3.Connection) -> dict[str, FeeRuleSet]:
     return {name: apply_overlay(conn, name, rs) for name, rs in FEE_RULES.items()}
 
 
+def _binding_seed_rows() -> list[tuple[str, str, str, str]]:
+    """The (account_id, market, fee_rule_set, dividend_model) binding rows to seed.
+
+    An account with EXPLICIT ``market_bindings`` (the merged dual-market ``moomoo_my``)
+    emits one row per declared binding. An account WITHOUT explicit bindings mirrors its
+    CURRENT scalars into ONE row for its single market (derived from the settlement-ccy map
+    in ``markets.py`` — not a new hardcoded map), unchanged from Batch B Wave 1: the
+    resolvers still fall back to the accounts scalars when a market has no binding row.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    for a in DEFAULT_ACCOUNTS:
+        if a.market_bindings:
+            rows.extend(
+                (a.account_id, b.market.value, b.fee_rule_set, b.dividend_model)
+                for b in a.market_bindings
+            )
+            continue
+        market = market_for_settlement_ccy(a.settlement_ccy.value)
+        if market is None:  # every default account has a mapped settlement ccy
+            raise ValueError(
+                f"account {a.account_id!r} has unmapped settlement_ccy "
+                f"{a.settlement_ccy.value!r}"
+            )
+        rows.append((a.account_id, market.value, a.fee_rule_set, a.dividend_model))
+    return rows
+
+
 def seed_accounts(conn: sqlite3.Connection) -> None:
-    """Insert DEFAULT_ACCOUNTS into the accounts table; idempotent via upsert."""
+    """Insert DEFAULT_ACCOUNTS into the accounts table; idempotent via upsert.
+
+    Also mirrors each account's current scalar rules into ONE ``account_market_rules``
+    binding row for its single (settlement-ccy-derived) market. Idempotent: re-seeding
+    upserts the same rows. Does NOT change DEFAULT_ACCOUNTS membership or any scalar.
+    """
     conn.executemany(
         """INSERT INTO accounts
                (account_id, name, broker, settlement_ccy, funding_ccy,
@@ -249,5 +305,14 @@ def seed_accounts(conn: sqlite3.Connection) -> None:
             )
             for a in DEFAULT_ACCOUNTS
         ],
+    )
+    conn.executemany(
+        """INSERT INTO account_market_rules
+               (account_id, market, fee_rule_set, dividend_model)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(account_id, market) DO UPDATE SET
+               fee_rule_set   = excluded.fee_rule_set,
+               dividend_model = excluded.dividend_model""",
+        _binding_seed_rows(),
     )
     conn.commit()
