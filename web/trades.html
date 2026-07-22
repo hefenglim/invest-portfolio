@@ -23,8 +23,12 @@
   .collapsible-input.open .input-toggle .caret { transform: rotate(90deg); }
   .collapsible-input .input-body { display: none; }
   .collapsible-input.open .input-body { display: block; }
-  .ledger-added-row { background: var(--ok-soft) !important; animation: row-flash 1.5s ease forwards; }
-  @keyframes row-flash { 0% { background: var(--ok-soft); } 100% { background: transparent; } }
+  /* #10: the committed-row highlight is a soft ~8× pulse reusing the GLOBAL wn-flash-pulse
+     keyframes (defined in styles.css, owned by another agent). The old single-blink
+     row-flash is retired. input.js's commit funnel applies .ledger-added-row to the newest
+     top row of whichever ledger was written (all four, not just 交易). */
+  .ledger-added-row { animation: wn-flash-pulse 1s ease-in-out 8; }
+  @media (prefers-reduced-motion: reduce) { .ledger-added-row { animation: none; } }
   .input-shortcut { display: flex; gap: 8px; padding: 10px var(--pad); }
   .type-chip { font-size: 10px; padding: 0 8px; line-height: 17px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui); }
   .chip-cash  { color: var(--accent); border-color: rgba(88,166,221,0.4); background: var(--accent-soft); }
@@ -75,9 +79,22 @@
                 <label for="m-account">帳戶</label>
                 <select class="select" id="m-account"></select>
               </div>
-              <div class="field">
+              <div class="field" id="m-symbol-field" style="position:relative;">
                 <label for="m-symbol">代號</label>
-                <input class="input" id="m-symbol" list="m-symbols" placeholder="輸入代號…" spellcheck="false"></input>
+                <input class="input" id="m-symbol" placeholder="輸入或點選代號…" spellcheck="false" autocomplete="off"></input>
+                <!-- #8 grouped 代號 picker (已持有／未持有, market-filtered by the selected
+                     account), modeled on the dividend picker. Shell is inline-styled from
+                     input.js (styleManualPicker); the footer 「＋新增標的」 opens the shared
+                     quick-add dialog. -->
+                <div class="sym-picker" id="m-sym-picker" hidden="hidden">
+                  <div class="sym-pick-empty" id="m-sym-empty" hidden="hidden"></div>
+                  <div id="m-sym-list"></div>
+                  <div class="sym-pick-foot" id="m-sym-foot">
+                    <button type="button" id="m-sym-addnew" class="sym-pick-addnew">＋新增標的</button>
+                  </div>
+                </div>
+                <!-- #m-symbols datalist retained for #o-symbol (期初庫存) autocomplete; the
+                     manual 代號 field no longer uses it (replaced by the grouped picker). -->
                 <datalist id="m-symbols"></datalist>
                 <span class="hint" id="m-sym-hint"></span>
               </div>
@@ -417,18 +434,11 @@ document.getElementById('tab-tx').click();
   slot.appendChild(reportBtn);
 })();
 /* 待確認匯入收件匣：真實接線在 inbox.js（2026-07-03, R4）。 */
-/* glue: on confirm write — flash new row in ledger */
-var origConfirm = document.getElementById('m-confirm');
-if (origConfirm) {
-  origConfirm.addEventListener('click', function() {
-    setTimeout(function() {
-      var rows = document.querySelectorAll('#tx-body tr.expandable');
-      if (rows.length) {
-        rows[0].classList.add('ledger-added-row');
-      }
-    }, 300);
-  });
-}
+/* #10: the new-row flash is no longer a fixed-300ms guess wired to #m-confirm (that flashed
+   ONLY manual/tx commits). It now rides input.js's shared commit funnel (afterCommitRefresh
+   → highlightCommitted), which — after the committed ledger's table has actually refreshed —
+   flashes the correct table's newest row for EVERY commit type (manual · CSV · AI · dividend
+   · opening) and auto-switches the lower ledger tab to match. */
 </script>
 </body>
 </html>

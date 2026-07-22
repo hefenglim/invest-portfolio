@@ -353,6 +353,33 @@
     return wrap;
   }
 
+  /* The 合計 footer FOLLOWS the active (account, market) filter. The server pre-aggregates
+     every filter cell in the reporting currency (D.holdings_subtotals); the client only
+     SELECTS the matching cell and PRINTS its Decimal STRINGS — it never sums money in JS
+     (money is computed server-side). 'all' on an axis maps to null (the server's "all"
+     marker), so (all, all) is the grand cell and equals the KPI totals — unchanged from
+     before. A combo the server emitted no cell for (a filter with no holdings) falls back to
+     an honest zero cell so the footer stays truthful. */
+  function holdingsSubtotal() {
+    const norm = (v) => (v === undefined || v === null ? null : v);
+    const acct = holdingsState.account === 'all' ? null : holdingsState.account;
+    const mkt = holdingsState.market === 'all' ? null : holdingsState.market;
+    const list = (D && D.holdings_subtotals) || [];
+    const hit = list.find((s) => norm(s.account_id) === acct && norm(s.market) === mkt);
+    return hit || { total_market_value: '0', unrealized_total: '0' };
+  }
+
+  /* Body for the filtered holdings exports (CSV / 報告): the active chips, with 'all' on an
+     axis OMITTED (undefined -> dropped by JSON.stringify) so the backend serves the full set
+     for that axis. Sent via pdApi.download -> POST /api/export/*; the backend re-computes the
+     filtered snapshot (no client math). */
+  function holdingsFilterBody() {
+    return {
+      account: holdingsState.account === 'all' ? undefined : holdingsState.account,
+      market: holdingsState.market === 'all' ? undefined : holdingsState.market
+    };
+  }
+
   function renderHoldings() {
     const tbody = $('#holdings-body');
     tbody.replaceChildren();
@@ -481,17 +508,19 @@
       tbody.appendChild(tr);
     });
 
-    /* totals row — TWD totals come from kpis (already merged in reporting ccy) */
+    /* totals row — the subtotal FOLLOWS the active filter, selected from the server's
+       per-cell reporting-currency aggregation (holdingsSubtotal()). No client money math. */
     const tfoot = $('#holdings-foot');
     tfoot.replaceChildren();
     const tr = el('tr');
     const tdLabel = el('td', 'col-text', '合計（' + D.reporting_currency + '，缺價標的除外）');
     tdLabel.colSpan = 8;
     tr.appendChild(tdLabel);
+    const sub = holdingsSubtotal();
     const tdMv = el('td', 'num');
-    tdMv.textContent = f.money(D.kpis && D.kpis.total_market_value, D.reporting_currency);
+    tdMv.textContent = f.money(sub.total_market_value, D.reporting_currency);
     tr.appendChild(tdMv);
-    const pnl = D.kpis && D.kpis.unrealized_total;
+    const pnl = sub.unrealized_total;
     const tdPnl = el('td', 'num ' + f.signClass(pnl), f.signed(pnl, D.reporting_currency));
     tr.appendChild(tdPnl);
     const tdRest = el('td');
@@ -945,7 +974,8 @@
     const holdingsHead = document.querySelector('#holdings-table');
     if (holdingsHead) {
       const panelHead = holdingsHead.closest('.panel').querySelector('.panel-head');
-      panelHead.appendChild(csvExportButton('匯出 CSV', '/api/export/holdings', () => ({})));
+      panelHead.appendChild(csvExportButton('匯出 CSV', '/api/export/holdings',
+        () => holdingsFilterBody()));
       /* 匯出報告: print-optimized 持倉報告 (self-contained HTML from the backend). Server
          recomputes everything (no client math). House style: silent on success, fail toast,
          busy state guards double-clicks. Compact tier + leading ⎙ icon so the whole holdings
@@ -958,7 +988,7 @@
       reportBtn.addEventListener('click', async () => {
         const restore = window.pdBusy(reportBtn, '產出中…');
         try {
-          await window.pdApi.download('/api/export/holdings-report', {});
+          await window.pdApi.download('/api/export/holdings-report', holdingsFilterBody());
         } catch (err) {
           if (window.toast) {
             window.toast(err && err.message ? err.message : '匯出報告失敗', 'fail', err && err.code);

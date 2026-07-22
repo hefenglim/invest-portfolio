@@ -106,9 +106,16 @@
     }
   }
   let currentSymbol = null;
+  /* Monotonic open token: bumped on EVERY drawer open (even a re-open of the SAME symbol).
+     Async section work (e.g. the 交易明細 self-fetch + its pager) captures the token in effect
+     when it started and drops any reply whose token is stale — so a fetch in flight when the
+     drawer is closed / re-opened can never write into a torn-down (or superseded) DOM. The
+     `currentSymbol === symbol` guard alone cannot see a same-symbol re-open; this can. */
+  let drawerSeq = 0;
 
   window.openSymbolDrawer = function (symbol) {
     close();
+    drawerSeq += 1;
     currentSymbol = symbol;
 
     /* Synchronous scaffold: backdrop + drawer + keydown are wired immediately so Esc /
@@ -219,6 +226,11 @@
       body.appendChild(signalsSection(symbol));
       body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
     }
+    /* 交易明細 — ALL transactions for this symbol, paginated 10/page. Appended after the
+       holding sections (held: after 已實現記錄) OR after the watchlist note (a CLOSED position
+       is unheld yet still has history), so it self-fetches regardless of `h`; it omits itself
+       when the symbol has zero transactions. Its own DOM is scoped to this drawer open. */
+    body.appendChild(txSection(symbol));
     renderChart(detail, h);
   }
 
@@ -262,12 +274,28 @@
     const closes = ph.points.map((p) => Number(p.close));
     const markLines = [];
     if (h) {
-      markLines.push({ yAxis: Number(h.original_avg), name: '原始均價',
-        lineStyle: { color: cssVar('--series-gray'), type: 'dashed' },
-        label: { formatter: '原始均價 ' + f.price(h.original_avg, h.quote_ccy), position: 'insideEndTop', color: cssVar('--text-3'), fontSize: 10 } });
-      markLines.push({ yAxis: Number(h.adjusted_avg), name: '調整均價',
-        lineStyle: { color: cssVar('--series-myr'), type: 'dashed' },
-        label: { formatter: '調整均價 ' + f.price(h.adjusted_avg, h.quote_ccy), position: 'insideEndBottom', color: cssVar('--series-myr'), fontSize: 10 } });
+      /* Cost-line labels anchor to the LEFT/START edge (insideStart*), NOT the crowded right
+         end where the latest price + the newest trade markers cluster — the owner screenshot
+         showed 原始均價 / 調整均價 / 買… / 賣… stacked into an illegible clump on the right.
+         EQUAL-average edge case: when the two averages render IDENTICALLY at display precision
+         (no dividend adjustment, or a payback that lands within one displayed tick — exactly
+         the 原始=調整=1,721.33 screenshot), collapse to ONE combined line + a single「均價」
+         label instead of two identical stacked labels. The comparison is on the SERVER-
+         formatted display strings (f.price) — a presentation decision, never money arithmetic. */
+      const origPx = f.price(h.original_avg, h.quote_ccy);
+      const adjPx = f.price(h.adjusted_avg, h.quote_ccy);
+      if (origPx === adjPx) {
+        markLines.push({ yAxis: Number(h.original_avg), name: '均價',
+          lineStyle: { color: cssVar('--series-myr'), type: 'dashed' },
+          label: { formatter: '均價 ' + origPx, position: 'insideStartTop', color: cssVar('--series-myr'), fontSize: 10 } });
+      } else {
+        markLines.push({ yAxis: Number(h.original_avg), name: '原始均價',
+          lineStyle: { color: cssVar('--series-gray'), type: 'dashed' },
+          label: { formatter: '原始均價 ' + origPx, position: 'insideStartTop', color: cssVar('--text-3'), fontSize: 10 } });
+        markLines.push({ yAxis: Number(h.adjusted_avg), name: '調整均價',
+          lineStyle: { color: cssVar('--series-myr'), type: 'dashed' },
+          label: { formatter: '調整均價 ' + adjPx, position: 'insideStartBottom', color: cssVar('--series-myr'), fontSize: 10 } });
+      }
     }
     const closeOn = (date) => {
       let last = closes[0];
@@ -281,15 +309,20 @@
       const label = DIV_TYPE_ZH[d.type] || d.type;
       markPoints.push({ coord: [d.date, closeOn(d.date)], name: '配息',
         symbol: 'pin', symbolSize: 26, itemStyle: { color: cssVar('--series-myr') },
-        label: { formatter: '息', fontSize: 9, color: '#0c1015' },
+        label: { show: true, formatter: '息', fontSize: 9, color: '#0c1015' },
         value: label + ' ' + (d.net !== null && d.net !== undefined ? f.money(d.net, d.ccy) + ' ' + (d.ccy || '') : '') });
     });
     (detail.trade_events || []).forEach((t) => {
       if (t.date < dates[0]) return;
       const isBuy = t.side !== 'sell';
+      /* Symbol-ONLY marker: the persistent「買/賣 N 股 @ price」text label is suppressed
+         (label.show=false) so recent trades no longer stack into an unreadable clump on the
+         right edge. The detail string lives on `value`, surfaced ONLY on hover via the
+         markPoint tooltip formatter below. Triangle(buy)/arrow(sell) + colors are unchanged. */
       markPoints.push({ coord: [t.date, closeOn(t.date)], name: isBuy ? '買進' : '賣出',
         symbol: isBuy ? 'triangle' : 'arrow', symbolSize: 9, symbolRotate: isBuy ? 0 : 180,
         itemStyle: { color: isBuy ? cssVar('--accent') : cssVar('--text-2') },
+        label: { show: false },
         value: (t.side === 'open' ? '期初 ' : isBuy ? '買 ' : '賣 ') + f.num(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
     });
     chart.setOption({
@@ -311,6 +344,10 @@
         borderColor: cssVar('--border'), backgroundColor: 'transparent' }],
       series: [{
         type: 'line', data: closes, showSymbol: false,
+        /* Overlap avoidance for any residual label collisions (e.g. two cost lines whose
+           averages are close-but-not-identical): ECharts drops the loser rather than letting
+           labels overprint. Symbol-only trade markers already carry no label to collide. */
+        labelLayout: { hideOverlap: true },
         lineStyle: { color: cssVar('--accent'), width: 1.6 },
         areaStyle: { color: cssVar('--accent-soft') },
         markLine: { symbol: 'none', silent: true, data: markLines },
@@ -569,6 +606,140 @@
     table.appendChild(tbody);
     wrap.appendChild(table);
     sec.appendChild(wrap);
+    return sec;
+  }
+
+  /* ---------- 交易明細 (all transactions for this symbol, paginated 10/page) ---------- */
+  /* pager.js is not on every page that hosts the drawer — index.html (the drawer's home)
+     omits it from its <script> list. Lazy-load it ON DEMAND so 交易明細 pagination works
+     without touching the page markup. Idempotent: at most one injected tag; concurrent
+     callers share one Promise; an inject failure degrades to page-1-only (never rejects). */
+  let pagerLoad = null;
+  function ensurePager() {
+    if (window.pdPager) return Promise.resolve();
+    if (pagerLoad) return pagerLoad;
+    pagerLoad = new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.src = 'pager.js';
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => resolve();
+      document.head.appendChild(s);
+    });
+    return pagerLoad;
+  }
+
+  /* 買賣方向 chip — reuses the ledger's neutral direction chip classes (.dir-chip /.dir-buy/
+     .dir-sell in styles.css: 買賣是方向不是損益 → NOT red/green). `open`(期初) falls back to the
+     base neutral chip. Wire `side` is lowercase (buy/sell) from GET /api/ledgers/transactions. */
+  function sideChip(side) {
+    const s = String(side || '').toLowerCase();
+    if (s === 'sell') return el('span', 'dir-chip dir-sell', '賣');
+    if (s === 'open') return el('span', 'dir-chip', '期初');
+    return el('span', 'dir-chip dir-buy', '買');
+  }
+
+  /* Self-fetching, self-paginating 交易明細 section. Scoped to THIS drawer open via the
+     `drawerSeq` token captured at build time: a fetch (initial or page-change) that resolves
+     after the drawer was closed / re-opened is dropped (stale token OR the section detached
+     from the DOM), so no leak and no write into a torn-down tree. Money is NEVER computed
+     here — every cell renders the server's Decimal STRING through f.*. */
+  function txSection(symbol) {
+    const sec = el('div', 'sd-section sd-tx-section');
+    const seq = drawerSeq;   // lifecycle token for this drawer instance
+    const LIMIT = 10;
+    sec.appendChild(el('div', 'sd-tx-loading sd-sim-note', '載入交易明細…'));
+
+    let pager = null;
+    let tbody = null;
+    let built = false;
+
+    /* Build the section chrome ONCE, on the first successful fetch (we need total_count for
+       the head count and the omit-when-empty decision). */
+    function build(totalCount) {
+      sec.replaceChildren();
+      sec.appendChild(secHead('交易明細', '帳本 transactions・共 ' + totalCount + ' 筆'));
+      const wrap = el('div', 'table-wrap');
+      const table = el('table', 'data');
+      const thead = el('thead');
+      const trh = el('tr');
+      /* 日期 / 帳戶 / 買賣 / 股數 / 價格 / 費用 / 稅 / 合計 (帳戶 + 買賣 are text-aligned) */
+      ['日期', '帳戶', '買賣', '股數', '價格', '費用', '稅', '合計'].forEach((t, i) => {
+        trh.appendChild(el('th', (i === 1 || i === 2) ? 'col-text' : null, t));
+      });
+      thead.appendChild(trh);
+      table.appendChild(thead);
+      tbody = el('tbody');
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      sec.appendChild(wrap);
+      const pagerHost = el('div');
+      sec.appendChild(pagerHost);
+      pager = window.pdPager
+        ? window.pdPager.create({ host: pagerHost, limit: LIMIT, offset: 0,
+            totalCount: totalCount, onPage: (offset) => fetchPage(offset) })
+        : null;
+      built = true;
+    }
+
+    function renderRows(rows) {
+      tbody.replaceChildren();
+      rows.forEach((t) => {
+        const tr = el('tr');
+        tr.appendChild(el('td', 'num', f.date(t.date)));
+        tr.appendChild(el('td', 'col-text', t.account));
+        const tdSide = el('td', 'col-text');
+        tdSide.appendChild(sideChip(t.side));
+        tr.appendChild(tdSide);
+        tr.appendChild(el('td', 'num', f.num(t.shares)));
+        tr.appendChild(el('td', 'num', f.price(t.price, t.ccy)));
+        tr.appendChild(el('td', 'num', f.money(t.fee, t.ccy)));
+        tr.appendChild(el('td', 'num', f.money(t.tax, t.ccy)));
+        /* 合計 is a signed cash-flow (buy −, sell +) — the ledger renders it neutral (direction,
+           not P&L), so no sign colour here either; the server Decimal STRING is shown verbatim. */
+        const tdTotal = el('td', 'num');
+        tdTotal.textContent = f.signed(t.total, t.ccy) + ' ' + t.ccy;
+        tr.appendChild(tdTotal);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function fetchPage(offset) {
+      if (seq !== drawerSeq) return;   // superseded before the request even started
+      window.pdApi.get('/api/ledgers/transactions',
+        { symbol: symbol, limit: LIMIT, offset: offset })
+        .then((resp) => {
+          if (seq !== drawerSeq || !sec.isConnected) return;  // drawer closed / re-opened
+          const rows = (resp && resp.rows) || [];
+          const total = (resp && resp.total_count) || 0;
+          if (!built) {
+            if (total === 0) { sec.remove(); return; }  // no history → omit the section
+            /* Make sure the pager utility is present (index.html omits it) BEFORE building
+               the paginated chrome; the guard re-checks after the extra async hop. */
+            return ensurePager().then(() => {
+              if (seq !== drawerSeq || !sec.isConnected) return;
+              build(total);
+              renderRows(rows);
+              if (pager) pager.update({ limit: LIMIT, offset: offset, totalCount: total });
+            });
+          }
+          renderRows(rows);
+          if (pager) pager.update({ limit: LIMIT, offset: offset, totalCount: total });
+          return undefined;
+        })
+        .catch(() => {
+          if (seq !== drawerSeq || !sec.isConnected) return;
+          if (!built) {
+            sec.replaceChildren();
+            sec.appendChild(secHead('交易明細', null));
+            sec.appendChild(el('div', 'sd-empty', '交易明細暫時無法取得'));
+          } else if (pager) {
+            pager.update({});  // clear the pager busy state; keep the last good page
+          }
+        });
+    }
+
+    fetchPage(0);
     return sec;
   }
 

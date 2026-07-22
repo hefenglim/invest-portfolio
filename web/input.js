@@ -88,6 +88,7 @@
     } catch (e) { /* noop */ }
     accSel.addEventListener('change', () => {
       try { localStorage.setItem('pd_last_account', accSel.value); } catch (e) { /* noop */ }
+      onManualAccountChange();   // #8: close the picker + re-scope holdings to the new account
     });
     const dl = $('#m-symbols');
     ctx.instruments.forEach((i) => {
@@ -120,6 +121,7 @@
     $('#m-fee').addEventListener('input', schedulePreview);
     $('#m-tax').addEventListener('input', schedulePreview);
     $('#m-confirm').addEventListener('click', commitManual);
+    initManualPicker();   // #8: grouped 已持有／未持有 代號 picker (replaces the free-text datalist)
     schedulePreview();
   }
   function setSide(s) {
@@ -333,6 +335,230 @@
     });
   }
 
+  /* ================= #8 manual-tab grouped 代號 picker =================
+     Replaces the manual pane's free-text datalist with a grouped dropdown modeled on the
+     dividend picker (initDivPicker/renderDivPicker): the account's symbols are grouped
+     已持有 / 未持有 and MARKET-FILTERED by the selected account — a symbol shows only when
+     its `.market` ∈ acctMarkets(account); a MERGED Moomoo account unions its markets and tags
+     each 未持有 row with its market. 已持有 rows are annotated with 股數 + 均價 (from the
+     SHARED per-account holdings cache — server Decimal strings via fmt; no money math here).
+
+     ASSISTIVE ONLY: selecting a row writes #m-symbol.value and re-runs the SAME pipeline the
+     rest of the form already reads (schedulePreview → renderSymbolHint + renderSellHints +
+     runManualPreview), so free typing, the 未註冊 auto-register, preview, and commit are all
+     untouched. A footer 「＋新增標的」 opens the shared quick-add dialog; on a successful
+     register the context reloads and the new symbol (landing in 未持有) is auto-selected. The
+     sell-side 可賣/持有均價 fill buttons (renderSellHints) stay as convenience FILLS — they are
+     complementary to the picker's selection-time 股數+均價 annotation, not a duplicate. */
+  let mPickerOpen = false;
+
+  /* Inline-style the picker shell (styling stays in this wave's files; ids live in
+     trades.html #pane-manual). Mirrors styleDivPicker. */
+  function styleManualPicker() {
+    const p = $('#m-sym-picker');
+    if (p) {
+      p.style.cssText = 'position:absolute;left:0;right:0;top:100%;z-index:40;margin-top:4px;'
+        + 'background:var(--panel-2,#141821);border:1px solid var(--border,#2a2f3a);'
+        + 'border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);max-height:280px;'
+        + 'overflow:auto;padding:4px;';
+    }
+    const empty = $('#m-sym-empty');
+    if (empty) empty.style.cssText = 'padding:8px 10px;color:var(--text-3,#8a92a3);font-size:11px;';
+    const foot = $('#m-sym-foot');
+    if (foot) {
+      foot.style.cssText = 'border-top:1px solid var(--border,#2a2f3a);margin-top:4px;padding:4px;';
+    }
+    const add = $('#m-sym-addnew');
+    if (add) {
+      add.style.cssText = 'display:flex;align-items:center;gap:7px;width:100%;text-align:left;'
+        + 'background:none;border:none;padding:7px 8px;cursor:pointer;color:var(--accent,#58a6dd);'
+        + 'font:inherit;font-weight:600;border-radius:6px;';
+      add.addEventListener('mouseenter', () => { add.style.background = 'rgba(255,255,255,.06)'; });
+      add.addEventListener('mouseleave', () => { add.style.background = 'none'; });
+    }
+  }
+
+  function closeManualPicker() {
+    const p = $('#m-sym-picker');
+    if (p) p.hidden = true;
+    mPickerOpen = false;
+  }
+
+  /* Selection: set #m-symbol then re-run the existing preview pipeline (schedulePreview
+     already fires renderSymbolHint + renderSellHints + the debounced runManualPreview). */
+  function fillManualSymbol(sym) {
+    const inp = $('#m-symbol');
+    if (inp) inp.value = sym;
+    closeManualPicker();
+    schedulePreview();
+  }
+
+  /* One selectable row. 已持有 rows carry a right-aligned 股數 + 均價 annotation; 未持有 rows
+     on a MERGED account carry a small market tag. Selection rides mousedown+preventDefault so
+     the value lands BEFORE the input's focusout (which would otherwise race the close). */
+  function manualPickRow(item, isHeld, multiMarket) {
+    const it = inst(item.symbol);
+    const ccy = (it && it.ccy) || item.ccy || '';
+    const market = (it && it.market) || item.market || '';
+    const row = el('button', null, null);
+    row.type = 'button';
+    row.style.cssText = 'display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;'
+      + 'background:none;border:none;padding:6px 8px;cursor:pointer;color:inherit;'
+      + 'border-radius:6px;font:inherit;';
+    row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,.06)'; });
+    row.addEventListener('mouseleave', () => { row.style.background = 'none'; });
+    const code = el('span', null, item.symbol);
+    code.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums;flex:none;';
+    row.appendChild(code);
+    const name = el('span', null, item.name || (it ? it.name : '') || '');
+    name.style.cssText = 'color:var(--text-3,#8a92a3);font-size:11px;overflow:hidden;'
+      + 'text-overflow:ellipsis;white-space:nowrap;';
+    row.appendChild(name);
+    if (isHeld) {
+      const ann = el('span', null, null);
+      ann.style.cssText = 'margin-left:auto;display:flex;gap:10px;flex:none;font-size:10.5px;'
+        + 'font-variant-numeric:tabular-nums;color:var(--text-2,#c2c8d2);';
+      const sharesTxt = (item.shares != null && String(item.shares).indexOf('.') >= 0)
+        ? f.num(item.shares, 4) : f.num(item.shares);
+      ann.appendChild(el('span', null, sharesTxt + ' 股'));
+      if (item.adjusted_avg != null) {
+        ann.appendChild(el('span', null, '均價 ' + f.price(item.adjusted_avg, ccy)));
+      }
+      row.appendChild(ann);
+    } else if (multiMarket && market) {
+      const tag = el('span', null, market);
+      tag.style.cssText = 'margin-left:auto;color:var(--text-3,#8a92a3);font-size:10px;'
+        + 'border:1px solid var(--border,#2a2f3a);border-radius:4px;padding:0 6px;flex:none;';
+      row.appendChild(tag);
+    }
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); fillManualSymbol(item.symbol); });
+    return row;
+  }
+
+  /* Render the grouped list for the current account from {held} + the instrument registry
+     (未持有 = registry minus held), filtered by the typed query (symbol OR name) AND by the
+     account's bound markets. When `a.markets` is absent (legacy ctx) the market filter is a
+     no-op, so the list degrades to the old unfiltered behaviour. */
+  function renderManualPicker(data) {
+    const list = $('#m-sym-list');
+    const empty = $('#m-sym-empty');
+    if (!list || !empty) return;
+    list.replaceChildren();
+    const a = acc($('#m-account').value);
+    if (!a) { empty.hidden = false; empty.textContent = '請先選擇帳戶'; return; }
+    const markets = acctMarkets(a);
+    const multi = markets.length > 1;
+    const inMarket = (mk) => markets.length === 0 || markets.indexOf(mk) >= 0;
+    const held = (data && data.held) || [];
+    const heldSet = {};
+    held.forEach((h) => { heldSet[h.symbol] = true; });
+    const notHeld = ctx.instruments.filter((i) => !heldSet[i.symbol] && inMarket(i.market));
+    const q = ($('#m-symbol').value || '').trim().toUpperCase();
+    const match = (sym, name) => !q || (sym || '').toUpperCase().indexOf(q) >= 0
+      || (name || '').toUpperCase().indexOf(q) >= 0;
+    const heldF = held.filter((h) => match(h.symbol, h.name || (inst(h.symbol) || {}).name));
+    const notHeldF = notHeld.filter((i) => match(i.symbol, i.name));
+    const header = (txt) => {
+      const h = el('div', null, txt);
+      h.style.cssText = 'padding:6px 10px 3px;color:var(--text-3,#8a92a3);font-size:10px;'
+        + 'letter-spacing:.04em;font-weight:700;';
+      return h;
+    };
+    if (heldF.length) {
+      list.appendChild(header('已持有'));
+      heldF.forEach((h) => list.appendChild(manualPickRow(h, true, multi)));
+    }
+    if (notHeldF.length) {
+      list.appendChild(header('未持有'));
+      notHeldF.forEach((i) => list.appendChild(manualPickRow(i, false, multi)));
+    }
+    if (heldF.length + notHeldF.length === 0) {
+      empty.hidden = false;
+      empty.textContent = q
+        ? '無相符標的 — 可直接輸入代號，或點下方「＋新增標的」'
+        : '此帳戶所屬市場尚無標的 — 點下方「＋新增標的」新增';
+    } else {
+      empty.hidden = true;
+    }
+  }
+
+  /* Open + populate the dropdown for the chosen account (cache-first paint, then refresh from
+     the fetch). Wrapped so an assistive-picker error can never surface as an unhandled
+     rejection (the e2e smoke asserts ZERO console errors). Mirrors openDivPicker. */
+  async function openManualPicker() {
+    try {
+      const p = $('#m-sym-picker');
+      if (!p) return;
+      p.hidden = false;
+      mPickerOpen = true;
+      const a = acc($('#m-account').value);
+      if (!a) { renderManualPicker({ held: [] }); return; }
+      if (acctHoldingsCache[a.id]) renderManualPicker(acctHoldingsCache[a.id]);
+      const data = await loadAcctHoldings(a.id, false);
+      if (mPickerOpen) renderManualPicker(data);
+    } catch (e) { /* assistive — degrade silently */ }
+  }
+
+  /* 「＋新增標的」: open the shared quick-add dialog (symbol editable, market inferred from the
+     account). On a successful register the context reloads and the new symbol — which lands in
+     未持有 — is auto-selected, driving the preview pipeline. */
+  function openManualQuickAddNew() {
+    if (!window.pdInstQuickAdd) {
+      if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
+      return;
+    }
+    const typed = ($('#m-symbol').value || '').trim().toUpperCase();
+    closeManualPicker();
+    const select = async (resp) => {
+      await reloadContext();
+      const sym = (resp && resp.symbol) || typed;
+      if (sym) fillManualSymbol(sym);
+      else { renderSymbolHint(); schedulePreview(); }
+    };
+    window.pdInstQuickAdd({
+      symbol: typed,
+      market: accountMarket($('#m-account').value),
+      lockSymbol: false,
+      onConfirm: select,
+      onBuy: select,
+    });
+  }
+
+  /* Account switch: close the picker + warm the new account's holdings cache (the sell hints
+     share the same cache). Mirrors onDivAccountChange. */
+  function onManualAccountChange() {
+    closeManualPicker();
+    const accId = $('#m-account').value;
+    if (accId) loadAcctHoldings(accId, false).catch(() => {});
+  }
+
+  function initManualPicker() {
+    styleManualPicker();
+    const inp = $('#m-symbol');
+    if (inp) {
+      inp.addEventListener('focus', () => { openManualPicker(); });
+      inp.addEventListener('click', () => { openManualPicker(); });
+      inp.addEventListener('input', () => {
+        if (!mPickerOpen) { openManualPicker(); return; }
+        const a = acc($('#m-account').value);
+        renderManualPicker((a && acctHoldingsCache[a.id]) || { held: [] });
+      });
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeManualPicker(); });
+    }
+    const add = $('#m-sym-addnew');
+    if (add) add.addEventListener('mousedown', (e) => { e.preventDefault(); openManualQuickAddNew(); });
+    /* Close when focus leaves the 代號 field; relatedTarget inside the field keeps it open. */
+    const field = $('#m-symbol-field');
+    if (field) field.addEventListener('focusout', (e) => {
+      const to = e.relatedTarget;
+      if (to && field.contains(to)) return;
+      closeManualPicker();
+    });
+    /* Warm the default account's cache so the first focus paints instantly. */
+    const accId0 = $('#m-account').value;
+    if (accId0) loadAcctHoldings(accId0, false).catch(() => {});
+  }
+
   /* Re-fetch structural context (accounts / instruments / holdings) into `ctx` + refresh the
      manual symbol datalist, so a just-registered symbol resolves immediately (the 未註冊 hint
      clears). Graceful: a failed refetch keeps the prior ctx. */
@@ -505,7 +731,7 @@
         pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.new_original_avg, ccy));
         pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.new_adjusted_avg, ccy));
       }
-      /* R6-E: DISPLAY-ONLY account cash line + R7 A3 扣款後現金 (owner-signed: no gating).
+      /* R6-E: DISPLAY-ONLY account cash line + R7 A3 交易後現金 (A4 rename; owner-signed: no gating).
          Visually separated from the what-if rows; both use the SAME dynamic ccy label (ac.ccy);
          null balance / cash_after -> the shared null glyph. */
       const ac = preview.account_cash;
@@ -518,7 +744,7 @@
           ac.balance != null ? f.money(ac.balance, ac.ccy) + ' ' + ac.ccy : f.NULL_GLYPH));
         rows.appendChild(row);
         const afterRow = el('div', 'pc-row');
-        afterRow.appendChild(el('span', 'k', '扣款後現金（' + ac.ccy + '）'));
+        afterRow.appendChild(el('span', 'k', '交易後現金（' + ac.ccy + '）'));
         afterRow.appendChild(el('span', 'v',
           preview.cash_after != null ? f.money(preview.cash_after, ac.ccy) + ' ' + ac.ccy : f.NULL_GLYPH));
         rows.appendChild(afterRow);
@@ -620,7 +846,9 @@
     applyOverrideState('fee', false); applyOverrideState('tax', false); m.acked = false;
     $('#m-shares').value = '';
     $('#m-price').value = '';
-    afterCommitRefresh();  // FU-D45: ledger tables + holdings caches (可賣 just changed)
+    /* FU-D45 + #10: ledger tables + holdings caches (可賣 just changed); a manual write is
+       always a full-success transaction row -> flash + auto-switch the 交易 tab. */
+    afterCommitRefresh('transactions');
     schedulePreview();
   }
 
@@ -895,7 +1123,9 @@
       banner.appendChild(el('div', null, '✓ 寫入完成：成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆'));
     }
     if (window.toast) window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆');
-    afterCommitRefresh();  // FU-D45
+    /* FU-D45 + #10: refresh always; flash + auto-switch only on FULL success (skipped == 0),
+       matching the Batch-A clear-on-success rule (a partial import keeps its paste + banner). */
+    afterCommitRefresh(csvKind, skipped === 0);
     if (skipped === 0) {
       /* full success -> clear the input so a second identical commit is impossible. */
       const paste = $('#csv-paste');
@@ -1308,7 +1538,8 @@
     const written = resp && resp.written !== undefined ? resp.written : 0;
     const skipped = resp && resp.skipped !== undefined ? resp.skipped : 0;
     if (window.toast) window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・略過 ' + skipped + ' 筆');
-    afterCommitRefresh();  // FU-D45
+    /* FU-D45 + #10: AI writes are transactions; flash + auto-switch only on FULL success. */
+    afterCommitRefresh('transactions', skipped === 0);
     if (skipped === 0) {
       clearAiInputs();
       aiBanner('✓ 寫入完成：成功 ' + written + ' 筆');
@@ -1348,19 +1579,55 @@
      commits can never double-fire), and (2) drops the per-account holdings cache so the
      可賣/均價 sell hints and the dividend picker reflect the just-committed rows, then
      re-warms the two panes' selected accounts. */
-  function afterCommitRefresh() {
+  /* #10: map an import `kind` to its lower 帳本記錄 tab id + tbody. The import kind `openings`
+     (plural) normalizes to the singular `lopen` tab / #open-body table. */
+  const LEDGER_KIND = {
+    transactions: { tab: 'tx', body: 'tx-body' },
+    dividends: { tab: 'ldiv', body: 'div-body' },
+    fx: { tab: 'lfx', body: 'fx-body' },
+    openings: { tab: 'lopen', body: 'open-body' },
+  };
+
+  /* #10: after the committed ledger's table has refreshed, auto-switch the lower ledger to
+     that tab and soft-pulse (~8×, wn-flash-pulse) its newest top row. Called ONLY on FULL
+     success. Strip-then-re-add forces the animation to restart even when the same top row
+     flashes twice (a repeat commit landing on the same row). */
+  function highlightCommitted(kind) {
+    const map = LEDGER_KIND[kind];
+    if (!map) return;
+    const tabBtn = document.getElementById('tab-' + map.tab);
+    if (tabBtn) tabBtn.click();   // switch the lower ledger tab to match the committed type
+    const tbody = document.getElementById(map.body);
+    const row = tbody && tbody.querySelector('tr');
+    if (!row) return;
+    row.classList.remove('ledger-added-row');
+    void row.offsetWidth;         // reflow so the pulse retriggers on a repeat flash
+    row.classList.add('ledger-added-row');
+  }
+
+  async function afterCommitRefresh(kind, highlight) {
     Object.keys(acctHoldingsCache).forEach((k) => { delete acctHoldingsCache[k]; });
-    if (window.pdLedgerRefresh) window.pdLedgerRefresh();
+    if (window.pdLedgerRefresh) {
+      /* AWAIT the in-place table refresh so the flash targets the ACTUAL new row (was a
+         fixed-300ms guess wired to #m-confirm). A refresh failure must not break the commit
+         flow — the caller already toasted success. */
+      try { await window.pdLedgerRefresh(); } catch (e) { /* degrade silently */ }
+    }
     renderSellHints();   // cache miss -> refetch for the selected manual account
     const dSel = $('#d-account');
     if (dSel && dSel.value) loadAcctHoldings(dSel.value, false).catch(() => {});
+    /* #10: flash + auto-switch on FULL success only (highlight !== false); partial/failed
+       commits still refresh the tables above but never switch tabs or flash. */
+    if (highlight !== false) highlightCommitted(kind);
   }
   async function commitOneRow(kind, csvText, btn, okSub, onDone) {
     const restore = window.pdBusy ? window.pdBusy(btn, '寫入中…') : () => {};
     const finishOk = (resp) => {
       if (resp && resp.written >= 1) {
         if (window.toast) window.toast('寫入成功', 'ok', okSub);
-        afterCommitRefresh();  // FU-D45: dividend / opening single-row commits
+        /* FU-D45 + #10: dividend / opening single-row commits — a written>=1 row here is a
+           full success, so flash + auto-switch the matching ledger tab (kind in scope). */
+        afterCommitRefresh(kind);
         if (onDone) onDone();
       } else if (window.toast) {
         window.toast('未寫入', 'fail', '資料列被跳過，請檢查欄位');

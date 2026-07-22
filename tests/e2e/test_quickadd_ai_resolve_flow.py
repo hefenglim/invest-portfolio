@@ -15,7 +15,9 @@ Asserts the NEW automatic behavior: (a) the AI resolve fires AUTOMATICALLY on a 
 auto-fills 代號/名稱/產業/產業細分, then the real lookup re-validates the code (verified ⇒ 確認
 enabled) — the owner's 聯電→UMC bug is fixed with ZERO clicks; (b) a candidates reply renders
 clickable rows whose pick fills + re-validates; (c) a not_found reply shows 「查無此標的」 and the
-manual 「AI 判讀代號」 retry stays available. ZERO console / page errors (all stubs are 200s).
+manual 「AI 辨識」 retry stays available; (d) Wave A1: the single unified 「AI 辨識」 action ALWAYS
+fills 產業 (the old standalone sector-detect else-branch left it unset). ZERO console / page
+errors (all stubs are 200s).
 """
 
 import json
@@ -161,7 +163,7 @@ def test_quickadd_candidates_pick_then_not_found_retry(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
     """R6-B: a candidates reply renders clickable rows whose pick fills + re-validates; a
-    not_found reply shows 「查無此標的」 with the manual 「AI 判讀代號」 retry available."""
+    not_found reply shows 「查無此標的」 with the manual 「AI 辨識」 retry available."""
     base = flow_server(_seed)
     page = fresh_page
     console_errors, page_errors = _collect_errors(page)
@@ -185,10 +187,43 @@ def test_quickadd_candidates_pick_then_not_found_retry(
     sym_input.fill("NOPE")
     expect(dialog.get_by_text("查無此標的")).to_be_visible()
     expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_disabled()
-    ai_btn = dialog.get_by_role("button", name="AI 判讀代號")
+    ai_btn = dialog.get_by_role("button", name="AI 辨識")
     expect(ai_btn).to_be_visible()  # the manual retry affordance for the same call
     expect(cands).to_have_count(0)  # stale candidates cleared
 
     assert not console_errors and not page_errors, (
         f"candidates/not_found flow: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_quickadd_unified_ai_button_fills_sector(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """Wave A1 regression: the SINGLE 「AI 辨識」 action ALWAYS fills 產業 through one path.
+
+    The old standalone sector-detect button's else-branch set only a note and left 產業 unset
+    (owner screenshot: 「AI 偵測完成，遺漏了產業自動帶入」). Here a symbol the lookup FINDS but with
+    a blank sector, then a MANUAL 「AI 辨識」 click, must populate the sector <select> AND 產業細分
+    via the unified applyResolved path — proving the else-branch dead end is gone."""
+    base = flow_server(_seed)
+    page = fresh_page
+    console_errors, page_errors = _collect_errors(page)
+    seen: list[str] = []
+    _route_lookup(page, seen)  # 2330 → found with sector "" (blank); resolve returns the sector
+    _route_ai_resolve(page)
+
+    _open_dialog(page, base, "2330")  # lookup FINDS 2330 (sector blank) → no auto-resolve fires
+    dialog = page.locator(".modal-backdrop").last
+    # found, but the provider lookup carried NO sector → the select is unset (the bug's setup).
+    expect(dialog.get_by_text("已找到")).to_be_visible()
+    expect(dialog.locator(".sector-select")).to_have_value("")
+
+    # ONE manual click on the unified action → 產業 (sector) + 產業細分 (industry) both fill.
+    dialog.get_by_role("button", name="AI 辨識").click()
+    expect(dialog.locator(".sector-select")).to_have_value("Information Technology")
+    expect(dialog.locator("input.qa-industry")).to_have_value("Semiconductors")
+
+    assert not console_errors and not page_errors, (
+        f"unified-AI sector-fill flow: console={console_errors!r} page={page_errors!r}"
     )

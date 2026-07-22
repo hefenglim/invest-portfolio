@@ -31,25 +31,74 @@ from portfolio_dash.export.report_html import (
     _version_line,
 )
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
-from portfolio_dash.portfolio.dashboard_models import DashboardData, HoldingRow
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.portfolio.dashboard_models import (
+    DashboardData,
+    HoldingRow,
+    HoldingSubtotal,
+)
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 
 _ZERO = Decimal("0")
+
+# zh-TW market labels for the filter statement (matches web/app.js MARKET_ZH).
+_MARKET_ZH = {Market.TW: "台股", Market.US: "美股", Market.MY: "馬股"}
+
+
+def _matches(h: HoldingRow, account: str | None, market: Market | None) -> bool:
+    """The holdings-filter predicate — account / market chips, each independent; None on an
+    axis means "all" there (so no filter == every row). Mirrors export.holdings._matches."""
+    return (account is None or h.account_id == account) and (
+        market is None or h.market == market
+    )
+
+
+def _find_subtotal(
+    data: DashboardData, account: str | None, market: Market | None
+) -> HoldingSubtotal | None:
+    """The server-computed reporting-currency subtotal cell for this (account, market)
+    filter, or None if the payload emitted no such cell (a combo with no holdings)."""
+    for s in data.holdings_subtotals:
+        if s.account_id == account and s.market == market:
+            return s
+    return None
+
+
+def _filter_label(
+    data: DashboardData, account: str | None, market: Market | None
+) -> str | None:
+    """A human 篩選 statement for the active filter, or None when nothing is filtered.
+
+    The account display name is read from the already-enriched holding rows (no new
+    lookup); an account with no held rows falls back to its id."""
+    if account is None and market is None:
+        return None
+    acct_names = {h.account_id: h.account_name for h in data.holdings}
+    acct_txt = "全部" if account is None else acct_names.get(account, account)
+    mkt_txt = "全部" if market is None else _MARKET_ZH.get(market, market.value)
+    return f"篩選　帳戶 {acct_txt}　·　市場 {mkt_txt}"
 
 
 # --- header / footer ----------------------------------------------------------------------
 
 
-def _header_html(now: datetime, reporting_ccy: str, total_mv: Decimal | None) -> str:
+def _header_html(
+    now: datetime, reporting_ccy: str, total_mv: Decimal | None, filter_label: str | None
+) -> str:
     gen = now.strftime("%Y-%m-%d %H:%M")  # minute precision, generation wall-clock
     nature = "數字以生成當下之市價與匯率計算；市價或匯率不可得時該欄以「—」標示，不臆測。"
+    # When a filter is active the total-value line reports the FILTERED subtotal (server
+    # computed) and the filter is stated on its own meta line, so the header never claims a
+    # grand figure while the table below shows a filtered subset.
+    total_label = "篩選後市值" if filter_label else "投資組合總市值"
     meta = [
         f"生成時間 {_esc(gen)}",
-        f"報告幣別 {_esc(reporting_ccy)}　·　投資組合總市值 "
+        f"報告幣別 {_esc(reporting_ccy)}　·　{total_label} "
         f"{_amount_ccy(total_mv, reporting_ccy)}",
-        _version_line(),
     ]
+    if filter_label:
+        meta.append(_esc(filter_label))
+    meta.append(_version_line())
     return _page_header(title="持倉報告", meta_lines=meta, nature=nature)
 
 
@@ -64,8 +113,13 @@ def _footer_html() -> str:
 # --- KPI 摘要 -----------------------------------------------------------------------------
 
 
-def _kpi_html(data: DashboardData, reporting_ccy: str) -> str:
-    """A compact KPI grid — only the figures the dashboard payload actually provides."""
+def _kpi_html(data: DashboardData, reporting_ccy: str, *, filtered: bool = False) -> str:
+    """A compact KPI grid — only the figures the dashboard payload actually provides.
+
+    The KPIs (總報酬 / XIRR / 已實現 / 未實現) are whole-portfolio, money-weighted figures
+    that do not decompose per filter, so when a filter is active the heading is annotated
+    「（全組合）」 to make clear this section is NOT filtered (only the 持倉明細表 below is)."""
+    heading = "KPI 摘要（全組合）" if filtered else "KPI 摘要"
     k = data.kpis
     cards: list[tuple[str, str]] = []
     if k.total_market_value is not None:
@@ -80,13 +134,14 @@ def _kpi_html(data: DashboardData, reporting_ccy: str) -> str:
     if k.realized_total is not None:
         cards.append(("已實現損益", _amount_ccy(k.realized_total, reporting_ccy)))
     if not cards:
-        return '<section><h2>KPI 摘要</h2><p class="note">目前無可用的績效指標。</p></section>'
+        return (f'<section><h2>{_esc(heading)}</h2>'
+                '<p class="note">目前無可用的績效指標。</p></section>')
     grid = "".join(
         f'<div class="kv"><span class="k">{_esc(label)}</span>'
         f'<span class="v num">{value}</span></div>'
         for label, value in cards
     )
-    return f'<section><h2>KPI 摘要</h2><div class="sum-grid">{grid}</div></section>'
+    return f'<section><h2>{_esc(heading)}</h2><div class="sum-grid">{grid}</div></section>'
 
 
 # --- 持倉明細表 ---------------------------------------------------------------------------
@@ -113,10 +168,20 @@ def _return_ratio(h: HoldingRow) -> Decimal | None:
 
 
 def _holdings_table_html(
-    data: DashboardData, resolver: RateResolver, reporting: Currency, reporting_ccy: str
+    data: DashboardData,
+    resolver: RateResolver,
+    reporting: Currency,
+    reporting_ccy: str,
+    *,
+    account: str | None = None,
+    market: Market | None = None,
 ) -> str:
+    # Filter the row SET to the active (account, market) chips; the TOTAL row below sums the
+    # filtered rows' per-holding reporting values, so it reflects the filter automatically
+    # (and equals the server-side holdings_subtotals cell for the same combo).
+    filtered = [h for h in data.holdings if _matches(h, account, market)]
     holdings = sorted(
-        data.holdings, key=lambda h: (h.weight if h.weight is not None else _ZERO), reverse=True
+        filtered, key=lambda h: (h.weight if h.weight is not None else _ZERO), reverse=True
     )
     if not holdings:
         return '<section><h2>持倉明細表</h2><p class="note">目前無持倉。</p></section>'
@@ -171,8 +236,13 @@ def _holdings_table_html(
 # --- 配置 ---------------------------------------------------------------------------------
 
 
-def _allocation_html(data: DashboardData, reporting_ccy: str) -> str:
-    """Sector allocation table + currency allocation table (each only if the payload has it)."""
+def _allocation_html(data: DashboardData, reporting_ccy: str, *, filtered: bool = False) -> str:
+    """Sector allocation table + currency allocation table (each only if the payload has it).
+
+    Allocation is a whole-portfolio breakdown (it is not recomputed per filter), so when a
+    filter is active the heading is annotated 「（全組合）」 for the same honesty reason as
+    the KPI section."""
+    heading = "配置（全組合）" if filtered else "配置"
     blocks: list[str] = []
 
     alloc = data.allocation
@@ -219,25 +289,44 @@ def _allocation_html(data: DashboardData, reporting_ccy: str) -> str:
         )
 
     if not blocks:
-        return ('<section><h2>配置</h2>'
+        return (f'<section><h2>{_esc(heading)}</h2>'
                 '<p class="note">目前無可用的配置資料（缺匯率）。</p></section>')
-    return f"<section><h2>配置</h2>{''.join(blocks)}</section>"
+    return f"<section><h2>{_esc(heading)}</h2>{''.join(blocks)}</section>"
 
 
 def build_holdings_report_html(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    reporting: Currency,
+    account: str | None = None,
+    market: Market | None = None,
 ) -> ExportArtifact:
-    """Build the print-optimized 持倉報告 from the current dashboard snapshot (no writes)."""
+    """Build the print-optimized 持倉報告 from the current dashboard snapshot (no writes).
+
+    Optional (account, market) filter: the 持倉明細表 (rows + TOTAL) and the header total
+    follow the active dashboard chips; the whole-portfolio KPI / 配置 sections stay grand
+    and are annotated 「（全組合）」 so the report is never internally misleading."""
     data = build_dashboard(conn, now=now, reporting=reporting)
     resolver = RateResolver(conn, now=now)
     reporting_ccy = reporting.value
 
+    filter_label = _filter_label(data, account, market)
+    filtered = filter_label is not None
+    # Header total: the server-computed subtotal cell when filtered, else the grand KPI.
+    if filtered:
+        cell = _find_subtotal(data, account, market)
+        header_total = cell.total_market_value if cell is not None else _ZERO
+    else:
+        header_total = data.kpis.total_market_value
+
     body = "\n".join(
         [
-            _header_html(now, reporting_ccy, data.kpis.total_market_value),
-            _kpi_html(data, reporting_ccy),
-            _holdings_table_html(data, resolver, reporting, reporting_ccy),
-            _allocation_html(data, reporting_ccy),
+            _header_html(now, reporting_ccy, header_total, filter_label),
+            _kpi_html(data, reporting_ccy, filtered=filtered),
+            _holdings_table_html(data, resolver, reporting, reporting_ccy,
+                                 account=account, market=market),
+            _allocation_html(data, reporting_ccy, filtered=filtered),
             _footer_html(),
         ]
     )

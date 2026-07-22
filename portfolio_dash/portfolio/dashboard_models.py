@@ -67,6 +67,28 @@ class KpiSummary(BaseModel):
     fx_unrealized: Decimal | None = None
 
 
+class HoldingSubtotal(BaseModel):
+    """One holdings-filter cell's reporting-currency subtotal (server-computed money).
+
+    A re-AGGREGATION of the SAME per-holding computed values that feed ``KpiSummary`` —
+    NOT a new money-of-record formula. ``account_id`` / ``market`` are the filter
+    selectors; ``None`` on an axis means "all" on that axis, so ``(None, None)`` is the
+    grand cell and EQUALS ``KpiSummary.total_market_value`` / ``.unrealized_total`` by
+    construction (identical terms, merely regrouped). 缺價 (missing-price) holdings are
+    excluded per cell exactly as the KPI excludes them; oversold positions carry a null
+    market value and drop out the same way. Every figure is in the reporting currency via
+    the shared FX helper. Money is ``Decimal | None`` — None honours the same
+    all-or-nothing FX degradation the KPI uses (the reporting-currency blend could not be
+    formed), never a fabricated number. The frontend's 合計 footer and the filtered
+    CSV/report SELECT the matching cell and print it; they never sum money client-side.
+    """
+
+    account_id: str | None = None
+    market: Market | None = None
+    total_market_value: Decimal | None = None
+    unrealized_total: Decimal | None = None
+
+
 class DividendYearRow(BaseModel):
     year: int
     by_currency: dict[Currency, Decimal]
@@ -181,6 +203,11 @@ class DashboardData(BaseModel):
     reporting_currency: Currency
     kpis: KpiSummary
     holdings: list[HoldingRow]
+    # Per-(account, market) reporting-currency subtotals so the holdings 合計 footer and
+    # the filtered CSV/report can follow the active filter WITHOUT any client money math
+    # (see HoldingSubtotal). Additive field with an empty default so DashboardData
+    # constructions that predate it still validate; build_dashboard always populates it.
+    holdings_subtotals: list[HoldingSubtotal] = Field(default_factory=list)
     realized: RealizedPnL
     returns: ReturnSummary | None
     allocation: SectorAllocation | None

@@ -10,6 +10,8 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 """
 
 import sqlite3
+from collections import defaultdict
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -36,6 +38,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     FreshnessReport,
     FxFreshness,
     HoldingRow,
+    HoldingSubtotal,
     KpiSummary,
     PriceFreshness,
     TrendSeries,
@@ -55,7 +58,7 @@ from portfolio_dash.pricing.store import (
     get_latest_price,
     get_price_history,
 )
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import (
@@ -103,6 +106,83 @@ class RateResolver:
         if read is None:
             raise KeyError(f"no FX rate stored for {base.value}/{quote.value}")
         return read.rate
+
+
+# Fixed market order for the per-market subtotal rows (deterministic wire order).
+_MARKET_ORDER = (Market.TW, Market.US, Market.MY)
+_SubtotalKey = tuple[str | None, Market | None]
+
+
+def _holdings_subtotals(
+    holding_rows: list[HoldingRow],
+    fx_rate: Callable[[Currency, Currency], Decimal],
+    reporting: Currency,
+    *,
+    value_available: bool,
+    unrealized_available: bool,
+) -> list[HoldingSubtotal]:
+    """Re-aggregate the per-holding reporting-currency market value + unrealized P&L into
+    the (account, market) filter cells the dashboard 合計 footer and the filtered
+    CSV/report select. This is a REGROUPING of the SAME per-holding values that feed
+    ``kpis`` — not a new money formula (see ``HoldingSubtotal``).
+
+    Every cell excludes 缺價 (``market_value is None``) holdings exactly as the KPI does
+    (oversold positions carry a null market value, so they drop out here too). Because
+    ``convert`` is pure ``amount * rate`` with no rounding, the grand ``(None, None)``
+    cell reproduces ``KpiSummary.total_market_value`` / ``.unrealized_total`` exactly.
+
+    Degradation mirrors the KPI's all-or-nothing FX rule: ``value_available`` /
+    ``unrealized_available`` reflect whether the reporting-currency blend could be formed
+    (``combined_view`` / ``total_return`` did not raise). When a blend is unavailable the
+    corresponding figure is ``None`` on every cell — never a partial or fabricated number.
+    When it IS available, every held currency has a resolvable rate, so no conversion here
+    can raise.
+    """
+    mv_sum: dict[_SubtotalKey, Decimal] = defaultdict(lambda: Decimal("0"))
+    ur_sum: dict[_SubtotalKey, Decimal] = defaultdict(lambda: Decimal("0"))
+    seen_accounts: list[str] = []
+    seen_markets: set[Market] = set()
+    seen_cells: list[tuple[str, Market]] = []
+
+    for h in holding_rows:
+        acct, mkt = h.account_id, h.market
+        if acct not in seen_accounts:
+            seen_accounts.append(acct)
+        seen_markets.add(mkt)
+        if (acct, mkt) not in seen_cells:
+            seen_cells.append((acct, mkt))
+        # The four buckets this holding contributes to: grand, its account, its market,
+        # and its (account, market) cell. The grand bucket is accumulated in holding-list
+        # order — identical to combined_view / total_return — so it matches the KPI byte
+        # for byte on total_market_value.
+        keys: tuple[_SubtotalKey, ...] = (
+            (None, None), (acct, None), (None, mkt), (acct, mkt),
+        )
+        if value_available and h.market_value is not None:
+            rep_mv = convert(h.market_value, fx_rate(h.quote_ccy, reporting))
+            for k in keys:
+                mv_sum[k] += rep_mv
+        if unrealized_available and h.unrealized_pnl is not None:
+            rep_ur = convert(h.unrealized_pnl, fx_rate(h.quote_ccy, reporting))
+            for k in keys:
+                ur_sum[k] += rep_ur
+
+    def cell(key: _SubtotalKey) -> HoldingSubtotal:
+        acct, mkt = key
+        return HoldingSubtotal(
+            account_id=acct,
+            market=mkt,
+            total_market_value=(mv_sum[key] if value_available else None),
+            unrealized_total=(ur_sum[key] if unrealized_available else None),
+        )
+
+    # Deterministic emission: grand, per-account (first-seen order), per-market (fixed
+    # TW/US/MY among those present), per (account, market) cell (first-seen order).
+    out: list[HoldingSubtotal] = [cell((None, None))]
+    out.extend(cell((acct, None)) for acct in seen_accounts)
+    out.extend(cell((None, mkt)) for mkt in _MARKET_ORDER if mkt in seen_markets)
+    out.extend(cell(c) for c in seen_cells)
+    return out
 
 
 def build_dashboard(
@@ -411,6 +491,19 @@ def build_dashboard(
                        if fx_summary is not None else None),
     )
 
+    # 10b. Holdings subtotals — a per-(account, market) FILTER re-aggregation of the SAME
+    # per-holding reporting-currency values that feed `kpis` (NOT a new money formula). The
+    # grand cell equals kpis.total_market_value / unrealized_total by construction; the
+    # frontend's 合計 footer + filtered CSV/report pick the matching cell WITHOUT any client
+    # math. Value availability mirrors the KPI's all-or-nothing FX rule: total_market_value
+    # is derived from `view` (None -> the combined blend was unformable) and unrealized from
+    # `returns` (None likewise).
+    holdings_subtotals = _holdings_subtotals(
+        holding_rows, resolver.rate, reporting,
+        value_available=view is not None,
+        unrealized_available=returns is not None,
+    )
+
     # 11. Freshness.
     price_fresh = [
         PriceFreshness(symbol=sym,
@@ -447,6 +540,7 @@ def build_dashboard(
         reporting_currency=reporting,
         kpis=kpis,
         holdings=holding_rows,
+        holdings_subtotals=holdings_subtotals,
         realized=book.realized,
         returns=returns,
         allocation=allocation,
