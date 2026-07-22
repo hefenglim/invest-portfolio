@@ -50,6 +50,81 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.22] - 2026-07-22
+
+**Batch B — the Moomoo account merge.** `moomoo_my_us` + `moomoo_my_my` are merged
+into ONE dual-market account `moomoo_my` (markets US+MY, settlement USD / funding
+MYR, shared MYR pool, USD pool MYR-anchored), matching the physical brokerage
+account. Blueprint (56-agent deep review, 45 confirmed findings) and decisions:
+the Batch-B blueprint artifact; owner sign-off 2026-07-21. This is a LOCKED-model
+change recorded here per `CLAUDE.md`: fee/tax/dividend rules now bind to the
+**(account, market)** pair (accounts-table scalars remain as single-market
+fallback); the accounting manual is revised to v1.4 accordingly.
+
+### Added
+- **(account, market) rule binding.** New `account_market_rules` table + idempotent
+  seed; resolvers `fee_rule_for` / `dividend_model_for` / `allowed_markets` /
+  `rule_sets_for` (`data_ingestion/rules_binding.py`) with accounts-scalar
+  fallback; `Account.market_rules` carriage so pure `portfolio/` needs no conn.
+- **One-time atomic boot migration** (`data_ingestion/moomoo_merge.py`): single
+  `BEGIN IMMEDIATE` span; S0 + partial-release guards; opening-inventory PK
+  collision → loud ABORT (never OR IGNORE/REPLACE); dividend-skip fingerprint
+  rewrite; in-span self-check (zero legacy ids incl. TEXT-embedded fingerprints,
+  per-currency cash-pool conservation, merged-row currency pins); `api/app.py`
+  orchestrates exactly ONE `pre_migrate_` snapshot per actual migration.
+  `DEFAULT_ACCOUNTS` reshaped 4→3 in the same change (seed can never resurrect
+  the legacy accounts). Legacy account ids in imported CSVs alias to `moomoo_my`
+  with a soft notice; downloadable templates re-anchored.
+- **Per-market wire + dividend entry.** `/api/accounts` + `/api/input/context`
+  gain an additive `markets` object ({fee_rules, div_model} per bound market);
+  the manual dividend form and committed row `type` follow the entered SYMBOL's
+  market on a multi-market account; `dividend_import` gains a type/market
+  coherence `needs_confirm` guard. `ManualBody.market` + `422 market_required`
+  for unregistered symbols on multi-market accounts (never guess the market).
+- **Pre/post reconciliation harness** (`scripts/merge_reconcile.py`): read-only
+  snapshots (URI mode=ro + write-denying authorizer) of engine + raw-SQL figures,
+  alias-fold diff, copy-only `run` — the real-data continuity proof executed on a
+  prod DB copy before deploy.
+- 8 merged-account browser e2e flows (dual-market cash/fee split, US-DRIP+MY-NET
+  dividend split, preview ccy/precision pins, migration-produced-DB serving,
+  legacy-CSV alias, FX-form boot behavior, both cash-overdraft orderings).
+
+### Changed
+- All fee-rule lookups resolver-swapped (6 market-aware sites + 2 rebate sites via
+  `rule_sets_for` any-bound-set-rebates semantics); dividend compute sites
+  per-market; H1 + ledger-edit coherence guards accept allowed-market SETS
+  (single-market behavior byte-identical, messages unchanged).
+- Dashboard FX exposure counts only settlement-ccy holdings (a pre-merge no-op;
+  prevents MYR holdings folding into the USD exposure of the merged account).
+- AI input: accounts catalog renders multi-market accounts; `AiDraft.market`
+  carries the model's market judgment to the preview; prompt v5 /
+  `LIBRARY_VERSION` official-v11. Preview-card + opening-hint money labels follow
+  the resolved instrument's currency (MYR + 3-dp for MY drafts).
+- Frontend surfaces: `names.js` merged entry; `settings.html` static account
+  panel regenerated to 3 cards (dual-currency Moomoo MY card, pinned by a
+  source-scan test — the id-scan is blind to that file); `settings-fees.js`
+  labels read as rule sets.
+- Stress harness reshaped to the merged topology (oracle `fee_tax` per-market;
+  permanent merged-account scenario: US+MY trades, MYR→USD conversion, both
+  dividend models on one account); accounting manual v1.3 → **v1.4** (invariant
+  I6 → (account, market); anchors reconciled to the regenerated merged evidence;
+  two pre-existing example typos fixed).
+
+### Removed
+- Legacy per-account quote-source debris: `_ACCOUNT_MARKET` seed map, dead
+  `account_chains`/`set_account_chains` APIs, per-account `data_source_fallbacks`
+  seeding (quote routing has been per-market since 2026-07-03; the empty legacy
+  table remains as recorded deferred debt).
+
+### Verification
+- Full pytest 0 failed / 0 errors; bare `mypy --strict --no-incremental` clean
+  over 541 files; ruff clean; id-contract sweep baseline unchanged; stress-audit
+  phase 1 `--ui` ops=66 **pass=1060 fail=0** (oracle independence intact); full
+  e2e suite green. **Demo live-migration rehearsal passed**: boot auto-merged the
+  demo ledger → 3 accounts, exactly one `pre_migrate_` snapshot, second boot
+  no-op, `verify_live` ALL PASS. Money-of-record continuity: migration self-check
+  + the reconciliation harness (prod-copy run at deploy); no formula changed.
+
 ## [v0.1.21] - 2026-07-21
 
 Round-7 owner batch (Batch A, FU-D55..D60). Phase-1 plan + Senior Review:
