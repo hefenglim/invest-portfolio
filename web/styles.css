@@ -1516,6 +1516,58 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
 .btn-warn { color: var(--amber); border-color: rgba(217, 161, 63, 0.45); background: var(--amber-soft); }
 .btn-warn:hover { border-color: var(--amber); }
 
+/* ---------- Wave A1: instrument add / edit dialog (web/inst-quickadd.js) ----------
+   The shared pdInstQuickAdd dialog. Its unified 「AI 辨識」 action and AI candidate rows used to
+   fall back to bare `.btn`, so they did not read as interactive (owner: 候選的按鈕有點不像按鈕).
+   These give them a clear, tokened look in both themes; `.sector-row` replaces the field's former
+   inline flex. Specificity note: settings.css defines base `.input`/`.select` and loads AFTER
+   styles.css, so the read-only lock uses a two-class selector (0,2,0) to win regardless. */
+
+/* shared sector field: the <select> flexes; the EDIT-only 「重新偵測產業」 button is a compact,
+   non-shrinking secondary action beside it. */
+.sector-row { display: flex; gap: 8px; align-items: center; }
+.sector-ai-btn { flex: none; white-space: nowrap; }
+.sector-ai-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* locked 代號 / 市場 in EDIT mode: visibly read-only, not a live control. */
+.input.qa-readonly, .select.qa-readonly {
+  background: var(--panel-3);
+  color: var(--text-2);
+  cursor: default;
+  opacity: 1;   /* override the UA disabled dimming on the market <select> */
+}
+
+/* the ONE unified 「AI 辨識」 action — an accent-tinted action row, distinct from the primary
+   確認 submit, left-aligned as its own line in the dialog body. */
+.qa-ai-resolve {
+  align-self: flex-start;
+  color: var(--accent);
+  border-color: rgba(88, 166, 221, 0.45);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.qa-ai-resolve:hover { border-color: var(--accent); color: var(--accent); }
+.qa-ai-resolve:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* AI candidate list: a column of full-width, selectable list-rows (each is a `.btn qa-cand`). */
+.qa-candidates { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.qa-cand {
+  display: flex; align-items: baseline; gap: 8px; width: 100%;
+  justify-content: flex-start; text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.qa-cand:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.qa-cand:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.qa-cand .sym-code { color: var(--text); }
+.qa-cand:hover .sym-code { color: var(--accent); }
+.qa-cand-name { color: var(--text); }
+.qa-cand-sector { margin-left: auto; color: var(--text-3); font-size: 11px; white-space: nowrap; }
+
 /* `.toolbar`: a named action row. `.spacer` right-pushes trailing items (replaces
    ad-hoc per-button margin-left:auto). align-items:center so mixed tiers share one
    centre line. `.panel-head` is the other action-row host; its buttons centre too. */

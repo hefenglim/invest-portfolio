@@ -77,12 +77,18 @@ def compute_account_fx(
     foreign_cash = foreign_cash_balance(transactions, dividends, conversions, instruments, foreign)
     realized = _realized_fx(conversions, home, foreign, avg_rate)
 
+    unreal_total: Decimal | None
     if avg_rate is None or spot is None:
         unreal_stocks: Decimal | None = None
         unreal_cash: Decimal | None = None
+        unreal_total = None
     else:
         unreal_stocks = foreign_stock_value * (spot - avg_rate)
         unreal_cash = foreign_cash * (spot - avg_rate)
+        # Combined unrealized FX computed with Decimal at the source, so the wire carries
+        # the sum as a Decimal string and the frontend never re-adds the two components.
+        # None whenever either component is None (they are always both-or-neither here).
+        unreal_total = unreal_stocks + unreal_cash
 
     return AccountFXResult(
         account_id=account.account_id,
@@ -95,6 +101,7 @@ def compute_account_fx(
         realized_fx=realized,
         unrealized_fx_stocks=unreal_stocks,
         unrealized_fx_cash=unreal_cash,
+        unrealized_fx_total=unreal_total,
     )
 
 

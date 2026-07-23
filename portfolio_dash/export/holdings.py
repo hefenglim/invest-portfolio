@@ -5,7 +5,8 @@ from datetime import datetime
 
 from portfolio_dash.export.artifact import ExportArtifact, csv_artifact
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.portfolio.dashboard_models import HoldingRow
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 
 _COLUMNS = [
@@ -21,13 +22,30 @@ def _s(value: object) -> str:
     return "" if value is None else str(value)
 
 
+def _matches(h: HoldingRow, account: str | None, market: Market | None) -> bool:
+    """The holdings-filter predicate — mirrors the dashboard chips (account / market),
+    each independent; None means "all" on that axis (so no filter == every row)."""
+    return (account is None or h.account_id == account) and (
+        market is None or h.market == market
+    )
+
+
 def build_holdings_csv(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    reporting: Currency,
+    account: str | None = None,
+    market: Market | None = None,
 ) -> ExportArtifact:
+    # Optional (account, market) filter so the CSV follows the dashboard's active chips.
+    # Filtering the row SET only — every money value still comes straight from the
+    # per-holding numbers build_dashboard already computed (no re-computation here).
     data = build_dashboard(conn, now=now, reporting=reporting)
     resolver = RateResolver(conn, now=now)
+    holdings = [h for h in data.holdings if _matches(h, account, market)]
     rows: list[list[str]] = []
-    for h in data.holdings:
+    for h in holdings:
         reporting_value = ""
         if h.market_value is not None:
             try:
@@ -46,7 +64,14 @@ def build_holdings_csv(
     as_of = data.as_of.date().isoformat()
     fx_rates = _fx_footer(resolver, reporting)
     footer = [f"as_of={as_of}, fx_rates={{{fx_rates}}}, generated={now.isoformat()}"]
-    return csv_artifact(f"holdings_snapshot_{as_of}.csv",
+    # When a filter is active, record it in the footer AND the filename so the download is
+    # self-describing (an unfiltered export keeps the byte-identical name/footer it had).
+    suffix = ""
+    if account is not None or market is not None:
+        filt = f"account={account or 'all'}, market={market.value if market else 'all'}"
+        footer.append(f"filter: {filt}")
+        suffix = f"_{account or 'all'}_{market.value if market else 'all'}"
+    return csv_artifact(f"holdings_snapshot_{as_of}{suffix}.csv",
                         header=_COLUMNS, rows=rows, footer_lines=footer)
 
 

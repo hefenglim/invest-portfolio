@@ -551,7 +551,8 @@ def test_manual_preview_additive_contract_pinned_case(api_client: TestClient) ->
 
 
 # ============================================================================
-# R7 A3: 扣款後現金 (cash_after) — projected pool after settlement
+# R7 A3: 交易後現金 (cash_after; UI label renamed from 扣款後現金 in A4)
+# — projected pool after settlement
 # ============================================================================
 # cash_after = the account-cash balance + the ALREADY-SIGNED total (BUY negative /
 # SELL positive), in the SAME quote ccy as account_cash. Emitted only when the balance

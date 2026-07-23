@@ -113,6 +113,41 @@ def test_suppressed_by_matching_rebate_movement(golden_db: sqlite3.Connection) -
     assert not [p for p in svc.detect(golden_db, now=_at(2026, 6, 11)) if p.month == "2026-05"]
 
 
+def test_suppressed_by_movement_date_even_if_note_edited(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """F2d/F12: the STRUCTURAL date key suppresses a booked month independent of the
+    (user-editable) note tag — a mangled note can no longer re-surface the month for a
+    second credit. The rebate movement is dated in the refund month (2026-06) → the covered
+    trade month is 2026-05."""
+    _buy(golden_db, d=date(2026, 5, 5), fee="142")
+    now = _at(2026, 6, 11)
+    assert [p for p in svc.detect(golden_db, now=now) if p.month == "2026-05"]
+    insert_cash_movement(
+        golden_db, account_id=_TW, move_date=date(2026, 6, 1), kind=svc.REBATE_KIND,
+        ccy=Currency.TWD, amount=Decimal("109"), note="totally unrelated note")
+    assert not [p for p in svc.detect(golden_db, now=now) if p.month == "2026-05"]
+
+
+def test_current_month_accrues_not_pending(golden_db: sqlite3.Connection) -> None:
+    """owner #1: a current-month trade is ACCRUING (not-yet-due), a prior month is PENDING.
+
+    detect() lists only pending months; detect_accruing() lists only current/future months.
+    The two are disjoint and carry the same forecast shape."""
+    now = _at(2026, 6, 11)
+    _buy(golden_db, d=date(2026, 6, 3), fee="142")   # current month (2026-06) -> accruing
+    _buy(golden_db, d=date(2026, 5, 5), fee="142")   # prior month (2026-05) -> pending
+    pending_months = {p.month for p in svc.detect(golden_db, now=now) if p.account_id == _TW}
+    assert "2026-05" in pending_months and "2026-06" not in pending_months
+    acc = svc.detect_accruing(golden_db, now=now)
+    acc_months = {p.month for p in acc if p.account_id == _TW}
+    assert "2026-06" in acc_months and "2026-05" not in acc_months
+    hit = next(p for p in acc if p.account_id == _TW and p.month == "2026-06")
+    assert hit.expected == Decimal("109") and hit.trade_count == 1 and len(hit.trades) == 1
+    # accruing is never counted in the pending badge
+    assert svc.pending_count(golden_db, now=now) == 1
+
+
 def test_skip_then_unskip_resurfaces(golden_db: sqlite3.Connection) -> None:
     _buy(golden_db, d=date(2026, 5, 5), fee="142")
     now = _at(2026, 6, 11)

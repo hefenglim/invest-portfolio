@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.data_ingestion.store import insert_transaction, upsert_instrument
@@ -99,6 +99,9 @@ def test_dividend_symbol_picker_held_closed_and_commit(
     page.wait_for_selector("#d-sym-picker", state="visible")
     # held symbol listed; closed footer offered (there IS closed history)…
     page.wait_for_selector("#d-sym-list button:has-text('2330')")
+    # Wave C: the dividend picker's held rows now ALSO carry the 股數 + 均價 annotation
+    # (parity with the manual picker via the shared component).
+    expect(page.locator("#d-sym-list button:has-text('2330')")).to_contain_text("均價")
     page.wait_for_selector("#d-sym-foot", state="visible")
     # …but the closed symbol is NOT shown while the toggle is off.
     assert page.locator("#d-sym-list button:has-text('2454')").count() == 0

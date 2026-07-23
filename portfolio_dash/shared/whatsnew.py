@@ -66,6 +66,77 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.23 (Round-8 + 8.1: register unification, drawer, shared picker, rebate) ------
+    Feature(
+        version="0.1.23",
+        id="unified-instrument-register",
+        title="標的加入/註冊/編輯統一為一套視窗 + AI 辨識",
+        desc="加入觀察清單、快速註冊、編輯面板收斂成同一套表單,日後改一處即全部同步;"
+        "產業「AI 辨識」一鍵帶入名稱/產業/細分,候選以可點清單呈現,點選候選不再清空已填資料",
+        href="instruments.html",
+        area="標的管理",
+        target="#quick-add-btn",
+    ),
+    Feature(
+        version="0.1.23",
+        id="drawer-position-activity",
+        title="個股抽屜:跨帳戶部位彙總 + 交易明細對帳",
+        desc="部位摘要以總股數為主、附各帳戶明細(同一股跨多帳戶不再只顯示單一帳戶);"
+        "新增「交易明細」含期初庫存,以對帳頁尾證明 期初＋買−賣＝部位摘要;多帳戶可過濾",
+        href="index.html",
+        area="儀表板 → 個股抽屜",
+        target="#holdings-body",
+    ),
+    Feature(
+        version="0.1.23",
+        id="drawer-trade-markers",
+        title="價格與成本圖:買賣事件彩色標記",
+        desc="買入以綠色▲(價格下方)、賣出以紅色▼(價格上方)標示,加常駐股數與圖例,一眼可辨;"
+        "原始均價與調整均價相同時合併為單一「均價」線",
+        href="index.html",
+        area="儀表板 → 個股抽屜",
+        target="#holdings-body",
+    ),
+    Feature(
+        version="0.1.23",
+        id="holdings-filter-totals",
+        title="持倉過濾即時重算合計 + 匯出跟隨過濾",
+        desc="切換帳戶/市場過濾時,下方「合計」即時重算(伺服器分組小計);"
+        "匯出 CSV 與匯出報告皆採用當前過濾範圍",
+        href="index.html",
+        area="儀表板 → 持倉明細",
+        target="#filter-bar",
+    ),
+    Feature(
+        version="0.1.23",
+        id="unified-symbol-picker",
+        title="選股框統一為分組清單(已持有/未持有)",
+        desc="所有輸入代號的欄位改用同一套分組選單,已持有標上股數與均價,並依帳戶可交易市場過濾;"
+        "點開顯示完整清單、打字才過濾;內建「＋新增標的」導向快速註冊",
+        href="trades.html",
+        area="交易輸入",
+        target="#m-sym-picker",
+    ),
+    Feature(
+        version="0.1.23",
+        id="ledger-refresh-ux",
+        title="交易帳本:成功後自動切分頁 + 柔和閃縮;交易後現金",
+        desc="寫入成功後自動切換到對應分頁(交易/股利/換匯/期初),新列以柔和閃縮提示;"
+        "草稿預覽「扣款後現金」改為「交易後現金」(賣出亦通順)",
+        href="trades.html",
+        area="交易帳本",
+        target="#tab-tx",
+    ),
+    Feature(
+        version="0.1.23",
+        id="rebate-accruing-and-expand",
+        title="待確認退款:當月累計預估 + 整條展開",
+        desc="新增「當月累計預估(未到期,次月退款)」區塊,讓本月剛輸入的折讓即時可見;"
+        "橫條可整條點擊展開/收合明細;並防止折讓款重複入帳",
+        href="dividend-inbox.html",
+        area="待確認退款",
+        target="#rebate-section",
+    ),
     # --- v0.1.22 (Batch B: the Moomoo account merge) ------------------------------------
     Feature(
         version="0.1.22",
@@ -908,6 +979,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.23": "2026-07-24",
     "0.1.22": "2026-07-22",
     "0.1.21": "2026-07-21",
     "0.1.20": "2026-07-20",

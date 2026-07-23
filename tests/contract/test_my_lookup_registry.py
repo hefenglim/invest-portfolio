@@ -9,6 +9,7 @@ despite the provider not pricing it (the demotion fix, end to end); (d) a non-re
 stays advisory (candidates), never falsely resolved.
 """
 
+from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,15 @@ from portfolio_dash.api import instrument_service
 from portfolio_dash.api.routers import instruments as inst_mod
 from portfolio_dash.api.routers.instruments import AiInstrumentResolveReply
 from portfolio_dash.pricing.results import RefreshSummary
+
+
+@pytest.fixture(autouse=True)
+def _clear_ai_resolve_cache() -> Iterator[None]:
+    """Isolate the process-global ai-resolve dedup cache (F4c) between tests (the frozen test
+    clock never expires an entry on its own)."""
+    inst_mod._AI_RESOLVE_CACHE.clear()
+    yield
+    inst_mod._AI_RESOLVE_CACHE.clear()
 
 
 def _quotes_fail(

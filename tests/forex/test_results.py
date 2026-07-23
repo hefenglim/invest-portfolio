@@ -19,6 +19,7 @@ def test_account_fx_result_optional_fields() -> None:
     )
     assert r.avg_rate is None
     assert r.realized_fx is None
+    assert r.unrealized_fx_total is None   # additive field defaults None when omitted
 
 
 def test_fx_summary_holds_accounts() -> None:
@@ -33,6 +34,7 @@ def test_fx_summary_holds_accounts() -> None:
         realized_fx=Decimal("0"),
         unrealized_fx_stocks=Decimal("10800"),
         unrealized_fx_cash=Decimal("1000"),
+        unrealized_fx_total=Decimal("11800"),
     )
     s = FXSummary(
         by_account={"schwab": r},
@@ -41,4 +43,5 @@ def test_fx_summary_holds_accounts() -> None:
         reporting_unrealized_fx=Decimal("11800"),
     )
     assert s.by_account["schwab"].unrealized_fx_stocks == Decimal("10800")
+    assert s.by_account["schwab"].unrealized_fx_total == Decimal("11800")
     assert s.reporting_unrealized_fx == Decimal("11800")

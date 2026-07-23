@@ -403,6 +403,30 @@ def test_kpis_total_return_excludes_fx_double_count(
     eqd(k["fx_realized"], _D("64000") - _D("2000") * _D("31"))   # 2,000
 
 
+def test_fx_unrealized_total_is_server_computed_string(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """F10: 未實現匯損益（合計）is a SERVER-computed money field (unrealized_fx_total) on
+    each per-account FX-exposure object — a Decimal STRING equal to
+    ``unrealized_fx_stocks + unrealized_fx_cash`` — so the frontend DISPLAYS it and never
+    re-sums two Decimal strings with JS floats (the locked no-money-math-in-frontend
+    invariant). None whenever either component is None."""
+    by_account = _dashboard(dashboard_client_factory)["fx"]["by_account"]
+    for acct in by_account.values():
+        st, ca, tot = (acct["unrealized_fx_stocks"], acct["unrealized_fx_cash"],
+                       acct["unrealized_fx_total"])
+        if st is None or ca is None:
+            assert tot is None
+        else:
+            assert isinstance(tot, str)  # money is a STRING, never a JSON number
+            eqd(tot, _D(st) + _D(ca))
+    # Hand-computed against the seeded scenario (spot USD/TWD=32, USD/MYR=4.40):
+    #   schwab  : stocks 34,620 + cash -21,100 = 13,520 TWD.
+    #   moomoo_my: stocks -425 + cash 0        =   -425 MYR.
+    eqd(by_account["schwab"]["unrealized_fx_total"], _D("34620") + _D("-21100"))   # 13,520
+    eqd(by_account["moomoo_my"]["unrealized_fx_total"], _D("-425") + _D("0"))      # -425
+
+
 def test_returns_by_currency_never_cross_summed(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
@@ -454,6 +478,119 @@ def test_xirr_all_or_nothing_on_missing_price(
     # with an honest reason (all-or-nothing, never a fabricated number).
     assert body["kpis"]["xirr"] is None
     assert body["freshness"]["xirr_unavailable_reason"] is not None
+
+
+# --- holdings subtotals (filter re-aggregation; Wave A3) ---------------------------
+# The 合計 footer + filtered CSV/report select these server-computed cells; each is a
+# regrouping of the SAME per-holding reporting values that feed kpis, so first-principles
+# oracles reuse the same magnitudes verified above (spot USD/TWD=32, MYR/TWD=7).
+
+
+def _subtotal(body: dict[str, Any], account: str | None, market: str | None) -> dict[str, Any]:
+    hits = [
+        s for s in body["holdings_subtotals"]
+        if s["account_id"] == account and s["market"] == market
+    ]
+    assert len(hits) == 1, f"expected exactly one cell for ({account}, {market}), got {hits}"
+    cell: dict[str, Any] = hits[0]
+    return cell
+
+
+def test_holdings_subtotals_grand_equals_kpis(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """The grand cell (account=None, market=None) reproduces the whole-portfolio KPI
+    exactly — total_market_value BYTE-identical (same combined_view summation), unrealized
+    numerically identical (re-aggregation of the same per-holding values)."""
+    body = _dashboard(dashboard_client_factory)
+    grand = _subtotal(body, None, None)
+    # total_market_value: identical terms in identical order -> byte-exact string match.
+    assert grand["total_market_value"] == body["kpis"]["total_market_value"]
+    eqd(grand["total_market_value"], _D("2937965"))
+    # unrealized_total: numerically equal (trailing-zero scale noise is not a contract diff).
+    eqd(grand["unrealized_total"], _D(body["kpis"]["unrealized_total"]))
+    eqd(grand["unrealized_total"], _D("462765"))
+
+
+def test_holdings_subtotals_per_account(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    body = _dashboard(dashboard_client_factory)
+    # tw_broker (TW only): 2330 1,200,000 + 0056 304,000 + 2603 121,000 (00919 unpriced ->
+    # EXCLUDED, exactly as the KPI excludes it). ur = 200,000 + 16,000 + 21,000.
+    tw = _subtotal(body, "tw_broker", None)
+    eqd(tw["total_market_value"], _D("1625000"))
+    eqd(tw["unrealized_total"], _D("237000"))
+    # schwab (US only): AAPL 30,120 + MSFT 4,500 USD, at spot 32. ur (5,020+500)*32.
+    schwab = _subtotal(body, "schwab", None)
+    eqd(schwab["total_market_value"], (_D("30120") + _D("4500")) * _D("32"))
+    eqd(schwab["unrealized_total"], (_D("5020") + _D("500")) * _D("32"))
+    # moomoo_my (US + MY): NVDA 4,250 USD * 32 + 1155.KL 9,875 MYR * 7.
+    moomoo = _subtotal(body, "moomoo_my", None)
+    eqd(moomoo["total_market_value"], _D("4250") * _D("32") + _D("9875") * _D("7"))
+    eqd(moomoo["unrealized_total"], _D("1300") * _D("32") + _D("1075") * _D("7"))
+
+
+def test_holdings_subtotals_per_market_multi_currency(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """Per-market cells blend currencies at spot: US spans schwab (USD) + moomoo_my (USD),
+    MY is MYR — each converted through the shared FX helper, never raw-summed."""
+    body = _dashboard(dashboard_client_factory)
+    # TW = tw_broker only.
+    eqd(_subtotal(body, None, "TW")["total_market_value"], _D("1625000"))
+    # US = (AAPL 30,120 + MSFT 4,500 + NVDA 4,250) USD * 32 = 1,243,840 TWD.
+    us = _subtotal(body, None, "US")
+    eqd(us["total_market_value"], (_D("30120") + _D("4500") + _D("4250")) * _D("32"))
+    eqd(us["unrealized_total"], (_D("5020") + _D("500") + _D("1300")) * _D("32"))
+    # MY = 1155.KL 9,875 MYR * 7 = 69,125 TWD.
+    my = _subtotal(body, None, "MY")
+    eqd(my["total_market_value"], _D("9875") * _D("7"))
+    eqd(my["unrealized_total"], _D("1075") * _D("7"))
+
+
+def test_holdings_subtotals_per_cell_and_dual_market_account(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """Per (account, market) cells split the dual-market moomoo_my account into its US and
+    MY halves — the finest filter combo the dashboard chips can select."""
+    body = _dashboard(dashboard_client_factory)
+    # moomoo_my US = NVDA only; moomoo_my MY = 1155.KL only.
+    eqd(_subtotal(body, "moomoo_my", "US")["total_market_value"], _D("4250") * _D("32"))
+    eqd(_subtotal(body, "moomoo_my", "US")["unrealized_total"], _D("1300") * _D("32"))
+    eqd(_subtotal(body, "moomoo_my", "MY")["total_market_value"], _D("9875") * _D("7"))
+    eqd(_subtotal(body, "moomoo_my", "MY")["unrealized_total"], _D("1075") * _D("7"))
+    # schwab US == the schwab account cell (schwab holds only US).
+    eqd(
+        _subtotal(body, "schwab", "US")["total_market_value"],
+        (_D("30120") + _D("4500")) * _D("32"),
+    )
+    # A combo with no holdings (schwab has no MY) emits NO cell -> the frontend zero-fallbacks.
+    assert not any(
+        s["account_id"] == "schwab" and s["market"] == "MY"
+        for s in body["holdings_subtotals"]
+    )
+
+
+def test_holdings_subtotals_grand_sums_to_the_parts(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """Adding the per-account (market=None) cells reproduces the grand cell — an internal
+    consistency check on the re-aggregation (Decimal-exact at these magnitudes)."""
+    body = _dashboard(dashboard_client_factory)
+    per_account = [
+        s for s in body["holdings_subtotals"]
+        if s["account_id"] is not None and s["market"] is None
+    ]
+    total_mv = sum((_D(s["total_market_value"]) for s in per_account), _D("0"))
+    total_ur = sum((_D(s["unrealized_total"]) for s in per_account), _D("0"))
+    grand = _subtotal(body, None, None)
+    assert total_mv == _D(grand["total_market_value"])
+    assert total_ur == _D(grand["unrealized_total"])
+    # Money must stay a STRING on every cell (never a JSON number).
+    for s in body["holdings_subtotals"]:
+        assert isinstance(s["total_market_value"], str)
+        assert isinstance(s["unrealized_total"], str)
 
 
 # --- frozen golden snapshot (regression lock; spec-17 §17.6.1) --------------------

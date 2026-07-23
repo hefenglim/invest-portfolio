@@ -237,6 +237,74 @@
       ]
     }
   ],
+  "holdings_subtotals": [
+    {
+      "account_id": null,
+      "market": null,
+      "total_market_value": "2937965.000",
+      "unrealized_total": "462765.0000000000000000000000"
+    },
+    {
+      "account_id": "tw_broker",
+      "market": null,
+      "total_market_value": "1625000",
+      "unrealized_total": "237000.0000000000000000000000"
+    },
+    {
+      "account_id": "schwab",
+      "market": null,
+      "total_market_value": "1107840.0",
+      "unrealized_total": "176640.0"
+    },
+    {
+      "account_id": "moomoo_my",
+      "market": null,
+      "total_market_value": "205125.000",
+      "unrealized_total": "49125.000"
+    },
+    {
+      "account_id": null,
+      "market": "TW",
+      "total_market_value": "1625000",
+      "unrealized_total": "237000.0000000000000000000000"
+    },
+    {
+      "account_id": null,
+      "market": "US",
+      "total_market_value": "1243840.0",
+      "unrealized_total": "218240.0"
+    },
+    {
+      "account_id": null,
+      "market": "MY",
+      "total_market_value": "69125.000",
+      "unrealized_total": "7525.000"
+    },
+    {
+      "account_id": "tw_broker",
+      "market": "TW",
+      "total_market_value": "1625000",
+      "unrealized_total": "237000.0000000000000000000000"
+    },
+    {
+      "account_id": "schwab",
+      "market": "US",
+      "total_market_value": "1107840.0",
+      "unrealized_total": "176640.0"
+    },
+    {
+      "account_id": "moomoo_my",
+      "market": "MY",
+      "total_market_value": "69125.000",
+      "unrealized_total": "7525.000"
+    },
+    {
+      "account_id": "moomoo_my",
+      "market": "US",
+      "total_market_value": "136000",
+      "unrealized_total": "41600"
+    }
+  ],
   "realized": {
     "rows": [
       {
@@ -257,19 +325,19 @@
   },
   "returns": {
     "by_currency": {
-      "USD": {
-        "realized": "0",
-        "unrealized": "6820.0",
-        "total_return": "6820.0",
-        "gross_invested": "32050",
-        "rate": "0.2127925117004680187207488300"
-      },
       "MYR": {
         "realized": "0",
         "unrealized": "1075.000",
         "total_return": "1075.000",
         "gross_invested": "9000",
         "rate": "0.1194444444444444444444444444"
+      },
+      "USD": {
+        "realized": "0",
+        "unrealized": "6820.0",
+        "total_return": "6820.0",
+        "gross_invested": "32050",
+        "rate": "0.2127925117004680187207488300"
       },
       "TWD": {
         "realized": "8000.0",
@@ -319,7 +387,8 @@
         "foreign_stock_value": "4250",
         "realized_fx": "0",
         "unrealized_fx_stocks": "-425.0",
-        "unrealized_fx_cash": "-0.0"
+        "unrealized_fx_cash": "-0.0",
+        "unrealized_fx_total": "-425.0"
       },
       "schwab": {
         "account_id": "schwab",
@@ -331,7 +400,8 @@
         "foreign_stock_value": "34620.0",
         "realized_fx": "2000",
         "unrealized_fx_stocks": "34620.0",
-        "unrealized_fx_cash": "-21100"
+        "unrealized_fx_cash": "-21100",
+        "unrealized_fx_total": "13520.0"
       }
     },
     "reporting_currency": "TWD",

@@ -46,7 +46,8 @@
     window.pdInstQuickAdd({
       symbol: sym,
       market: market,
-      lockSymbol: true,
+      /* A3/F9c: lockSymbol RETIRED — the dialog's symbol field is always editable so a wrong
+         AI-parsed code can be fixed in place; passing a locked flag re-introduced that dead-end. */
       onConfirm: async () => {
         $('#new-symbol').value = '';
         await refresh();
@@ -200,37 +201,45 @@
         if (!i.archived && i.market === 'TW') {
           const rp = el('button', 'btn', '重新探測'); rp.type = 'button';
           rp.title = '重新探測 TWSE / TPEx 板別並儲存結果';
+          /* F4: the handler is a TWO-await chain (probe → PUT). pdBusy disables the button, but
+             an explicit in-flight guard makes the double-click race impossible even if a second
+             click slips in before the disable paints. One try/finally clears it on every exit. */
+          let probing = false;
           rp.addEventListener('click', async () => {
+            if (probing) return;
+            probing = true;
             const restore = window.pdBusy ? window.pdBusy(rp, '探測中…') : () => {};
-            let resp;
             try {
-              resp = await window.pdApi.post('/api/instruments/probe', { symbol: i.symbol });
-            } catch (err) {
-              restore();
-              if (window.toast) window.toast('探測失敗', 'fail', err && err.message ? err.message : undefined);
-              return;
-            }
-            /* persist the probe result (2026-07-02) — the old flow only toasted it,
-               leaving an unresolved board unresolved forever. */
-            const board = resp && resp.board;
-            if (board) {
+              let resp;
               try {
-                await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol),
-                  { board: board });
+                resp = await window.pdApi.post('/api/instruments/probe', { symbol: i.symbol });
               } catch (err) {
-                restore();
-                if (window.toast) window.toast('板別儲存失敗', 'fail', err && err.message ? err.message : undefined);
+                if (window.toast) window.toast('探測失敗', 'fail', err && err.message ? err.message : undefined);
                 return;
               }
+              /* persist the probe result (2026-07-02) — the old flow only toasted it,
+                 leaving an unresolved board unresolved forever. */
+              const board = resp && resp.board;
+              if (board) {
+                try {
+                  await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol),
+                    { board: board });
+                } catch (err) {
+                  if (window.toast) window.toast('板別儲存失敗', 'fail', err && err.message ? err.message : undefined);
+                  return;
+                }
+              }
+              if (window.toast) {
+                window.toast(board ? '板別已更新' : '探測完成',
+                  board ? 'ok' : 'fail',
+                  i.symbol + ' 判定 ' + (resp && resp.board_label ? resp.board_label : '未解析') +
+                  (board ? '（已儲存）' : '，未變更'));
+              }
+              if (board) await refresh();
+            } finally {
+              probing = false;
+              restore();
             }
-            restore();
-            if (window.toast) {
-              window.toast(board ? '板別已更新' : '探測完成',
-                board ? 'ok' : 'fail',
-                i.symbol + ' 判定 ' + (resp && resp.board_label ? resp.board_label : '未解析') +
-                (board ? '（已儲存）' : '，未變更'));
-            }
-            if (board) await refresh();
           });
           acts.appendChild(rp);
         }
@@ -243,124 +252,30 @@
         tbody.appendChild(tr);
       });
   }
-  /* ---- edit modal（名稱、產業、板別(TW)、ETF、目標價下限/上限 — 全市場一致，
-     2026-07-03；上限 FU-D28）。目標價下限/上限即為 target_cross 預警規則的逐檔門檻。 ---- */
+  /* ---- edit modal — now a THIN caller of the SHARED pdInstQuickAdd builder (Wave A1,
+     mode:'edit'). ONE modal definition holds 名稱／產業／產業細分／板別(TW)／ETF／目標價下限/上限
+     for both flows, so a future field/validation change touches one place. 目標價下限/上限 are the
+     per-symbol target_cross 門檻; the sector 「重新偵測產業」 affordance lives in the shared field.
+     Save is PUT /api/instruments/{symbol}; 記一筆買入 is dropped in edit. ---- */
   function openEdit(i) {
-    const backdrop = el('div', 'modal-backdrop');
-    const modal = el('div', 'modal');
-    const head = el('div', 'modal-head');
-    head.appendChild(el('h3', 'modal-title', '編輯標的 — ' + i.symbol + ' ' + i.name));
-    const close = el('button', 'modal-close', '✕'); close.type = 'button';
-    head.appendChild(close);
-    modal.appendChild(head);
-    const body = el('div', 'modal-body');
-    const fld = (label, node) => {
-      const w = el('div', 'field');
-      w.appendChild(el('label', null, label));
-      w.appendChild(node);
-      return w;
-    };
-    const nameIn = el('input', 'input');
-    nameIn.value = i.name || '';
-    nameIn.placeholder = '顯示名稱（可自動查詢失敗後手動補）';
-    body.appendChild(fld('名稱', nameIn));
-    /* FU-D31: canonical sector <select> (dual-text) + AI 偵測 button, sharing the
-       inst-quickadd.js component. The current stored value rides through as an off-list
-       option when it is not (yet) a canonical key, so saving never destroys it. Fallback
-       to a plain input only if the shared script failed to load (defensive). */
-    /* R6: optional GICS 產業細分 input; the merged 「AI 偵測產業類別」 button re-detects an
-       EXISTING instrument's sector + industry (never touches symbol/name) and fills it here. */
-    const industryIn = el('input', 'input');
-    industryIn.value = i.industry || '';
-    industryIn.placeholder = '例：Semiconductors（可用 AI 偵測自動填入，選填）';
-    industryIn.spellcheck = false;
-    let sectorField = null;
-    let secIn = null;
-    if (window.pdSectorField) {
-      sectorField = window.pdSectorField({
-        current: i.sector || '',
-        symbol: () => i.symbol,
-        name: () => nameIn.value,
-        market: () => i.market,
-        setIndustry: (v) => { industryIn.value = v; },
-      });
-      body.appendChild(fld('產業', sectorField.element));
-    } else {
-      secIn = el('input', 'input');
-      secIn.value = i.sector || '';
-      body.appendChild(fld('產業', secIn));
+    if (!window.pdInstQuickAdd) {
+      if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
+      return;
     }
-    body.appendChild(fld('產業細分（選填）', industryIn));
-    /* TW 板別可直接改（重新探測仍可自動判定並儲存）；US/MY 板別固定 */
-    let boardSel = null;
-    if (i.market === 'TW') {
-      boardSel = el('select', 'select');
-      [['TWSE', 'TWSE 上市'], ['TPEx', 'TPEx 上櫃']].forEach(([v, label]) => {
-        const o = el('option', null, label); o.value = v;
-        if (i.board === v) o.selected = true;
-        boardSel.appendChild(o);
-      });
-      body.appendChild(fld('板別', boardSel));
-    }
-    const etfWrap = el('label', 'hint');
-    const etfCb = el('input');
-    etfCb.type = 'checkbox';
-    etfCb.checked = !!i.etf || !!i.is_etf;
-    etfWrap.appendChild(etfCb);
-    etfWrap.appendChild(el('span', null, ' 此標的為 ETF（影響台股賣出稅率 0.1%）'));
-    body.appendChild(fld('類別', etfWrap));
-    const tgtStep = i.ccy === 'MYR' ? '0.001' : '0.01';
-    const tgtIn = el('input', 'input');
-    tgtIn.id = 'edit-target-low';
-    tgtIn.type = 'number'; tgtIn.min = '0'; tgtIn.step = tgtStep;
-    tgtIn.placeholder = '留空 = 不提醒';
-    if (i.target_low !== null && i.target_low !== undefined) tgtIn.value = i.target_low;
-    body.appendChild(fld('目標價下限（現價 ≤ 此值時提醒，' + i.ccy + '）', tgtIn));
-    const tgtHiIn = el('input', 'input');
-    tgtHiIn.id = 'edit-target-high';
-    tgtHiIn.type = 'number'; tgtHiIn.min = '0'; tgtHiIn.step = tgtStep;
-    tgtHiIn.placeholder = '留空 = 不提醒';
-    if (i.target_high !== null && i.target_high !== undefined) tgtHiIn.value = i.target_high;
-    body.appendChild(fld('目標價上限（現價 ≥ 此值時提醒，' + i.ccy + '）', tgtHiIn));
-    body.appendChild(el('div', 'hint', '市場與幣別由註冊流程決定，不可更改。'));
-    modal.appendChild(body);
-    const foot = el('div', 'modal-foot');
-    const cancel = el('button', 'btn', '取消'); cancel.type = 'button';
-    const ok = el('button', 'btn btn-primary', '儲存'); ok.type = 'button';
-    foot.appendChild(cancel); foot.appendChild(ok);
-    modal.appendChild(foot);
-    backdrop.appendChild(modal);
-    const dismiss = () => backdrop.remove();
-    close.addEventListener('click', dismiss);
-    cancel.addEventListener('click', dismiss);
-    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
-    ok.addEventListener('click', async () => {
-      const raw = tgtIn.value.trim();
-      const rawHi = tgtHiIn.value.trim();
-      /* target_low / target_high ride through as STRINGS (never parseFloat'd into money).
-         Empty clears the bound (explicit null); otherwise the raw string reaches the backend
-         Decimal column verbatim. */
-      const body2 = {
-        name: nameIn.value.trim() || i.name,
-        sector: sectorField ? sectorField.value() : secIn.value.trim(),
-        industry: industryIn.value.trim() || null,  // R6: '' clears (exclude_unset ⇒ set)
-        is_etf: etfCb.checked,
-        target_low: raw === '' ? null : raw,
-        target_high: rawHi === '' ? null : rawHi,
-      };
-      if (boardSel) body2.board = boardSel.value;
-      try {
-        await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol), body2);
-      } catch (err) {
-        if (window.toast) window.toast(err && err.message ? err.message : '儲存失敗', 'fail', err && err.code);
-        return;
-      }
-      dismiss();
-      if (window.toast) window.toast('已儲存', 'ok', i.symbol + ' 已更新');
-      await refresh();
+    window.pdInstQuickAdd({
+      mode: 'edit',
+      symbol: i.symbol,
+      market: i.market,
+      name: i.name || '',
+      sector: i.sector || '',
+      industry: i.industry || '',
+      board: i.board || null,
+      is_etf: !!i.is_etf,  // F5: the wire (_element) only ever sends `is_etf`; the old `i.etf` dual-read was dead
+      ccy: i.ccy,
+      target_low: i.target_low,   // string | null | undefined — the builder null-guards
+      target_high: i.target_high,
+      onSaved: async () => { await refresh(); },
     });
-    document.body.appendChild(backdrop);
-    setTimeout(() => nameIn.focus(), 50);
   }
 
   /* ---- remove: TWO deletion tiers (FU-D32) ----
@@ -536,7 +451,14 @@
   }
 
   render();  // empty table before the fetch resolves
-  $('#inst-search').addEventListener('input', (e) => render(e.target.value));
+  /* F1: debounce the search re-render — render() rebuilds every row + its listeners, so a
+     per-keystroke rebuild churns the whole table; a short debounce coalesces fast typing. */
+  let searchT = null;
+  $('#inst-search').addEventListener('input', (e) => {
+    const v = e.target.value;
+    if (searchT) clearTimeout(searchT);
+    searchT = setTimeout(() => render(v), 150);
+  });
   $('#toggle-archived').addEventListener('click', () => {
     showArchived = !showArchived;
     render($('#inst-search').value);

@@ -502,16 +502,34 @@
   }
 
   function openEdit(m) {
+    /* F2d/F12 — double-credit guard: a 折讓款 (rebate) movement is a system-tagged cash
+       refund whose {kind, note, date} form the suppression key the rebate inbox uses to
+       avoid re-listing (and re-crediting) an already-booked month. Editing any of those
+       would break the tag and re-surface the month. So on a REBATE row we LOCK kind/note/
+       date and allow ONLY the amount to be corrected (the actual refund vs. the estimate);
+       to undo a booking the owner deletes the row instead. The PUT re-sends the ORIGINAL
+       kind/note/date verbatim. A backend guard on the movement PUT is the belt-and-braces
+       stop for direct API calls (see the escalation note). */
+    const isRebate = m.kind === 'rebate';
     const fDate = el('input', 'input'); fDate.type = 'date'; fDate.value = m.date;
-    const fKind = el('select', 'select');
-    [['deposit', '入金'], ['withdraw', '出金'], ['opening', '期初資金']].forEach(([v, label]) => {
-      const o = el('option', null, label); o.value = v;
-      if (m.kind === v) o.selected = true;
-      fKind.appendChild(o);
-    });
+    let fKind;
+    if (isRebate) {
+      fKind = el('input', 'input');
+      fKind.value = KIND_LABEL.rebate;  // 折讓款
+      fKind.disabled = true;
+      fDate.disabled = true;
+    } else {
+      fKind = el('select', 'select');
+      [['deposit', '入金'], ['withdraw', '出金'], ['opening', '期初資金']].forEach(([v, label]) => {
+        const o = el('option', null, label); o.value = v;
+        if (m.kind === v) o.selected = true;
+        fKind.appendChild(o);
+      });
+    }
     const fAmt = el('input', 'input'); fAmt.type = 'number'; fAmt.step = '0.01';
     fAmt.value = m.amount;
     const fNote = el('input', 'input'); fNote.value = m.note || '';
+    if (isRebate) fNote.disabled = true;
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal');
     const head = el('div', 'modal-head');
@@ -526,6 +544,11 @@
       w.appendChild(node);
       body.appendChild(w);
     });
+    if (isRebate) {
+      body.appendChild(el('div', 'inbox-rule',
+        '折讓款為系統標記的現金退款 — 類型／備註／日期已鎖定以避免重複入帳,僅可修正金額;' +
+        '若要撤銷此筆退款,請直接刪除。'));
+    }
     modal.appendChild(body);
     const foot = el('div', 'modal-foot');
     const cancel = el('button', 'btn', '取消'); cancel.type = 'button';
@@ -540,8 +563,12 @@
     ok.addEventListener('click', async () => {
       dismiss();
       const send = async (ack) => api.put('/api/cash/movements/' + m.id, {
-        account_id: m.account_id, date: fDate.value, kind: fKind.value,
-        ccy: m.ccy, amount: fAmt.value, note: fNote.value.trim() || null,
+        account_id: m.account_id,
+        // rebate rows re-send the ORIGINAL kind/note/date (locked) — only the amount changes.
+        date: isRebate ? m.date : fDate.value,
+        kind: isRebate ? 'rebate' : fKind.value,
+        ccy: m.ccy, amount: fAmt.value,
+        note: isRebate ? m.note : (fNote.value.trim() || null),
         ack_negative: ack,
       });
       try {

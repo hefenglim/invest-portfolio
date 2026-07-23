@@ -35,9 +35,18 @@ from portfolio_dash.export.rebalance_report import build_rebalance_report_html
 from portfolio_dash.export.symbol_detail import build_symbol_detail_csv
 from portfolio_dash.export.tax import build_tax_package_zip
 from portfolio_dash.export.usage import build_job_runs_csv, build_llm_usage_csv
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.enums import Currency, Market
 
 router = APIRouter()
+
+
+class HoldingsFilterBody(BaseModel):
+    """Optional (account, market) filter for the holdings CSV / report exports so a download
+    follows the dashboard's active chips. Both optional; an absent or empty body ({}, or no
+    body at all) means the full, unfiltered snapshot (identical to the legacy behaviour)."""
+
+    account: str | None = None
+    market: Market | None = None
 
 
 def _respond(art: ExportArtifact) -> Response:
@@ -79,11 +88,16 @@ def _bad_range(body: RangeBody) -> JSONResponse | None:
 
 @router.post("/export/holdings")
 def export_holdings(
+    body: HoldingsFilterBody | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:
-    return _respond(build_holdings_csv(conn, now=now, reporting=reporting))
+    # Optional (account, market) filter follows the dashboard chips; no body -> full set.
+    account = body.account if body is not None else None
+    market = body.market if body is not None else None
+    return _respond(build_holdings_csv(
+        conn, now=now, reporting=reporting, account=account, market=market))
 
 
 @router.post("/export/ledgers")
@@ -151,12 +165,17 @@ def export_symbol_detail(
 
 @router.post("/export/holdings-report")
 def export_holdings_report(
+    body: HoldingsFilterBody | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:
-    # Print-optimized 持倉報告 (self-contained HTML). Empty JSON body {} — no parameters.
-    return _respond(build_holdings_report_html(conn, now=now, reporting=reporting))
+    # Print-optimized 持倉報告 (self-contained HTML). Optional (account, market) filter
+    # follows the dashboard chips; empty/absent body -> the full unfiltered report.
+    account = body.account if body is not None else None
+    market = body.market if body is not None else None
+    return _respond(build_holdings_report_html(
+        conn, now=now, reporting=reporting, account=account, market=market))
 
 
 @router.post("/export/ledgers-report")

@@ -414,6 +414,21 @@ def edit_movement(
     if existing is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"紀錄 #{move_id} 不存在"))
+    # FE-D1 (R8.1): a booked 折讓款 (REBATE) credit is the structural suppression anchor for its
+    # trade month — api/rebates._confirmed_months maps it back by movement DATE (and, as a
+    # secondary key, the note tag). Editing the note is safe (the date key still suppresses, and
+    # a test relies on that), but changing the KIND (drops it from the confirmed set) or the DATE
+    # (re-anchors it to a different month) would let the original month re-surface as pending and
+    # be confirmed — and credited — a second time. Block those two; amount stays correctable. To
+    # reverse a rebate, delete the row instead.
+    if existing.kind.upper() == "REBATE" and (
+        body.kind.strip().upper() != "REBATE"
+        or body.date != existing.date
+    ):
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error",
+            "折讓款的類型與日期已鎖定以避免重複入帳(可修正金額或備註;如需撤銷請刪除此筆)",
+            field="kind"))
     bad = _movement_guard(conn, body)
     if bad is not None:
         return bad

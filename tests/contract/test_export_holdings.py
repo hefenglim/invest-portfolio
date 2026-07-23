@@ -19,6 +19,39 @@ def test_export_holdings_csv(api_client: TestClient) -> None:
     assert "# as_of=2026-06-11" in text and "fx_rates=" in text
 
 
+def test_export_holdings_csv_filtered_by_account(api_client: TestClient) -> None:
+    """Wave A3: the CSV follows the dashboard's account chip. Golden = 2330 (tw_broker) +
+    AAPL (schwab); filtering to tw_broker keeps 2330 and drops AAPL, and the filter is
+    recorded in both the filename and the footer."""
+    r = api_client.post("/api/export/holdings", json={"account": "tw_broker"})
+    assert r.status_code == 200
+    assert "holdings_snapshot_2026-06-11_tw_broker_all.csv" in r.headers["content-disposition"]
+    text = r.content[3:].decode("utf-8")  # strip UTF-8 BOM
+    assert "\r\n2330," in text          # tw_broker holding present
+    assert "\r\nAAPL," not in text      # schwab holding filtered out
+    assert "filter: account=tw_broker, market=all" in text
+
+
+def test_export_holdings_csv_filtered_by_market(api_client: TestClient) -> None:
+    r = api_client.post("/api/export/holdings", json={"market": "US"})
+    assert r.status_code == 200
+    assert "holdings_snapshot_2026-06-11_all_US.csv" in r.headers["content-disposition"]
+    text = r.content[3:].decode("utf-8")
+    assert "\r\nAAPL," in text           # US holding present
+    assert "\r\n2330," not in text       # TW holding filtered out
+    assert "filter: account=all, market=US" in text
+
+
+def test_export_holdings_csv_no_filter_is_full_set(api_client: TestClient) -> None:
+    """account=all & market=all (empty body) is byte-for-byte the legacy full snapshot:
+    both holdings present, no filename suffix, no filter footer line."""
+    r = api_client.post("/api/export/holdings", json={})
+    text = r.content[3:].decode("utf-8")
+    assert "\r\n2330," in text and "\r\nAAPL," in text
+    assert "holdings_snapshot_2026-06-11.csv" in r.headers["content-disposition"]
+    assert "filter:" not in text
+
+
 def test_export_holdings_audit_in_action_log(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:

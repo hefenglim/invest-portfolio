@@ -353,6 +353,33 @@
     return wrap;
   }
 
+  /* The 合計 footer FOLLOWS the active (account, market) filter. The server pre-aggregates
+     every filter cell in the reporting currency (D.holdings_subtotals); the client only
+     SELECTS the matching cell and PRINTS its Decimal STRINGS — it never sums money in JS
+     (money is computed server-side). 'all' on an axis maps to null (the server's "all"
+     marker), so (all, all) is the grand cell and equals the KPI totals — unchanged from
+     before. A combo the server emitted no cell for (a filter with no holdings) falls back to
+     an honest zero cell so the footer stays truthful. */
+  function holdingsSubtotal() {
+    const norm = (v) => (v === undefined || v === null ? null : v);
+    const acct = holdingsState.account === 'all' ? null : holdingsState.account;
+    const mkt = holdingsState.market === 'all' ? null : holdingsState.market;
+    const list = (D && D.holdings_subtotals) || [];
+    const hit = list.find((s) => norm(s.account_id) === acct && norm(s.market) === mkt);
+    return hit || { total_market_value: '0', unrealized_total: '0' };
+  }
+
+  /* Body for the filtered holdings exports (CSV / 報告): the active chips, with 'all' on an
+     axis OMITTED (undefined -> dropped by JSON.stringify) so the backend serves the full set
+     for that axis. Sent via pdApi.download -> POST /api/export/*; the backend re-computes the
+     filtered snapshot (no client math). */
+  function holdingsFilterBody() {
+    return {
+      account: holdingsState.account === 'all' ? undefined : holdingsState.account,
+      market: holdingsState.market === 'all' ? undefined : holdingsState.market
+    };
+  }
+
   function renderHoldings() {
     const tbody = $('#holdings-body');
     tbody.replaceChildren();
@@ -481,17 +508,19 @@
       tbody.appendChild(tr);
     });
 
-    /* totals row — TWD totals come from kpis (already merged in reporting ccy) */
+    /* totals row — the subtotal FOLLOWS the active filter, selected from the server's
+       per-cell reporting-currency aggregation (holdingsSubtotal()). No client money math. */
     const tfoot = $('#holdings-foot');
     tfoot.replaceChildren();
     const tr = el('tr');
     const tdLabel = el('td', 'col-text', '合計（' + D.reporting_currency + '，缺價標的除外）');
     tdLabel.colSpan = 8;
     tr.appendChild(tdLabel);
+    const sub = holdingsSubtotal();
     const tdMv = el('td', 'num');
-    tdMv.textContent = f.money(D.kpis && D.kpis.total_market_value, D.reporting_currency);
+    tdMv.textContent = f.money(sub.total_market_value, D.reporting_currency);
     tr.appendChild(tdMv);
-    const pnl = D.kpis && D.kpis.unrealized_total;
+    const pnl = sub.unrealized_total;
     const tdPnl = el('td', 'num ' + f.signClass(pnl), f.signed(pnl, D.reporting_currency));
     tr.appendChild(tdPnl);
     const tdRest = el('td');
@@ -686,6 +715,10 @@
       rates.appendChild(b2);
       if (a.avg_rate !== null && a.current_spot !== null &&
           a.avg_rate !== undefined && a.current_spot !== undefined) {
+        /* Rate delta (現時 − 平均取得). Rates are formally NOT money (see
+           data-and-pricing.md), so this display-only subtraction is not the money-of-record
+           invariant breach the combined-unrealized fix addresses; there is no server-side
+           rate-delta field, and adding one would be over-reach. Left intentionally. */
         const delta = a.current_spot - a.avg_rate;
         rates.appendChild(el('span', 'fx-delta ' + f.signClass(delta),
           f.signedNum(delta, a.current_spot < 10 ? 4 : 2)));
@@ -693,19 +726,17 @@
       card.appendChild(rates);
 
       const stats = el('div', 'fx-stats');
-      /* Per-account combined unrealized FX is a DISPLAY attribution of two components
-         the backend already broke out (no combined per-account field on the wire). Both
-         are Decimal STRINGS — coerce via Number() so we add, not string-concatenate
-         ("1"+"2"="12"). The authoritative reporting-currency total is backend-supplied. */
-      const unrelSum = (a.unrealized_fx_stocks ?? null) === null || (a.unrealized_fx_cash ?? null) === null
-        ? null : Number(a.unrealized_fx_stocks) + Number(a.unrealized_fx_cash);
+      /* 未實現匯損益（合計）is server-computed (unrealized_fx_total, Decimal string =
+         stocks + cash, null when either is null). The frontend only DISPLAYS it — it must
+         NEVER re-sum the two component strings in JS (that is float money math over exact
+         Decimal values; the locked invariant forbids money arithmetic in the frontend). */
       const items = [
         ['外幣現金', a.foreign_cash, a.foreign_ccy, false],
         ['外幣股票市值', a.foreign_stock_value, a.foreign_ccy, false],
         ['已實現匯損益', a.realized_fx, a.home_ccy, true],
         ['未實現匯損益（股票）', a.unrealized_fx_stocks, a.home_ccy, true],
         ['未實現匯損益（現金）', a.unrealized_fx_cash, a.home_ccy, true],
-        ['未實現匯損益（合計）', unrelSum, a.home_ccy, true]
+        ['未實現匯損益（合計）', a.unrealized_fx_total ?? null, a.home_ccy, true]
       ];
       items.forEach(([k, v, ccy, isSigned]) => {
         const st = el('div', 'fx-stat');
@@ -945,7 +976,8 @@
     const holdingsHead = document.querySelector('#holdings-table');
     if (holdingsHead) {
       const panelHead = holdingsHead.closest('.panel').querySelector('.panel-head');
-      panelHead.appendChild(csvExportButton('匯出 CSV', '/api/export/holdings', () => ({})));
+      panelHead.appendChild(csvExportButton('匯出 CSV', '/api/export/holdings',
+        () => holdingsFilterBody()));
       /* 匯出報告: print-optimized 持倉報告 (self-contained HTML from the backend). Server
          recomputes everything (no client math). House style: silent on success, fail toast,
          busy state guards double-clicks. Compact tier + leading ⎙ icon so the whole holdings
@@ -958,7 +990,7 @@
       reportBtn.addEventListener('click', async () => {
         const restore = window.pdBusy(reportBtn, '產出中…');
         try {
-          await window.pdApi.download('/api/export/holdings-report', {});
+          await window.pdApi.download('/api/export/holdings-report', holdingsFilterBody());
         } catch (err) {
           if (window.toast) {
             window.toast(err && err.message ? err.message : '匯出報告失敗', 'fail', err && err.code);

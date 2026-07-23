@@ -138,6 +138,52 @@ def test_empty_portfolio_still_valid_document() -> None:
     assert "目前無持倉" in doc
 
 
+def test_filtered_report_account_shows_only_that_account() -> None:
+    """Wave A3: filtering to tw_broker keeps 2330 and drops AAPL from the 持倉明細表; the
+    header states the filter and reports the FILTERED subtotal (2330 = 1000 * 600 = 600,000
+    TWD); the whole-portfolio KPI/配置 sections are annotated 「（全組合）」."""
+    conn = _golden_conn()
+    try:
+        art = build_holdings_report_html(conn, now=GOLDEN_NOW, reporting=Currency.TWD,
+                                         account="tw_broker")
+    finally:
+        conn.close()
+    doc = art.content.decode("utf-8")
+    assert "2330" in doc and "TSMC" in doc
+    assert "AAPL" not in doc and "Apple" not in doc  # filtered out of the table
+    assert "篩選" in doc
+    assert "KPI 摘要（全組合）" in doc
+    assert "配置（全組合）" in doc
+    assert "600,000" in doc  # filtered subtotal (header 篩選後市值 + 持倉明細表 TOTAL)
+
+
+def test_filtered_report_market_us_shows_only_us() -> None:
+    conn = _golden_conn()
+    try:
+        art = build_holdings_report_html(conn, now=GOLDEN_NOW, reporting=Currency.TWD,
+                                         market=Market.US)
+    finally:
+        conn.close()
+    doc = art.content.decode("utf-8")
+    assert "AAPL" in doc and "Apple" in doc
+    assert "2330" not in doc  # TW holding filtered out of the table
+    assert "篩選" in doc
+    assert "39,600" in doc  # AAPL reporting value = 10 * 120 * 33 (USD/TWD) = 39,600 TWD
+
+
+def test_unfiltered_report_is_the_full_set() -> None:
+    conn = _golden_conn()
+    try:
+        art = build_holdings_report_html(conn, now=GOLDEN_NOW, reporting=Currency.TWD)
+    finally:
+        conn.close()
+    doc = art.content.decode("utf-8")
+    assert "2330" in doc and "AAPL" in doc
+    assert "篩選" not in doc     # no filter statement when unfiltered
+    assert "全組合" not in doc    # sections un-annotated
+    assert "639,600" in doc     # grand total (600,000 + 39,600) present
+
+
 def test_per_holding_return_ratio_is_display_percentage() -> None:
     """A holding with a positive adjusted cost renders a 2-dp percentage return =
     unrealized ÷ adjusted cost. 2330 = 105,000 / 495,000 ≈ 21.21%. The adjusted avg

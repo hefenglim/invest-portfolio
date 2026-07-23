@@ -8,10 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.22"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.22"></link>
-<link rel="stylesheet" href="trades.css?v=0.1.22"></link>
-<link rel="stylesheet" href="input.css?v=0.1.22"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.23"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.23"></link>
+<link rel="stylesheet" href="trades.css?v=0.1.23"></link>
+<link rel="stylesheet" href="input.css?v=0.1.23"></link>
 <style>
   .trades-page { display: flex; flex-direction: column; gap: var(--gap); }
   .ledger-section { display: flex; flex-direction: column; gap: 0; }
@@ -23,8 +23,12 @@
   .collapsible-input.open .input-toggle .caret { transform: rotate(90deg); }
   .collapsible-input .input-body { display: none; }
   .collapsible-input.open .input-body { display: block; }
-  .ledger-added-row { background: var(--ok-soft) !important; animation: row-flash 1.5s ease forwards; }
-  @keyframes row-flash { 0% { background: var(--ok-soft); } 100% { background: transparent; } }
+  /* #10: the committed-row highlight is a soft ~8× pulse reusing the GLOBAL wn-flash-pulse
+     keyframes (defined in styles.css, owned by another agent). The old single-blink
+     row-flash is retired. input.js's commit funnel applies .ledger-added-row to the newest
+     top row of whichever ledger was written (all four, not just 交易). */
+  .ledger-added-row { animation: wn-flash-pulse 1s ease-in-out 8; }
+  @media (prefers-reduced-motion: reduce) { .ledger-added-row { animation: none; } }
   .input-shortcut { display: flex; gap: 8px; padding: 10px var(--pad); }
   .type-chip { font-size: 10px; padding: 0 8px; line-height: 17px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui); }
   .chip-cash  { color: var(--accent); border-color: rgba(88,166,221,0.4); background: var(--accent-soft); }
@@ -75,10 +79,21 @@
                 <label for="m-account">帳戶</label>
                 <select class="select" id="m-account"></select>
               </div>
-              <div class="field">
+              <div class="field" id="m-symbol-field" style="position:relative;">
                 <label for="m-symbol">代號</label>
-                <input class="input" id="m-symbol" list="m-symbols" placeholder="輸入代號…" spellcheck="false"></input>
-                <datalist id="m-symbols"></datalist>
+                <input class="input" id="m-symbol" placeholder="輸入或點選代號…" spellcheck="false" autocomplete="off"></input>
+                <!-- Wave C grouped 代號 picker (已持有／未持有, market-filtered by the selected
+                     account, archived excluded). Driven by the SHARED component web/sym-picker.js
+                     (window.pdSymPicker) — same shell as the dividend + opening pickers; the shell
+                     is inline-styled by the component; the footer 「＋新增標的」 opens the shared
+                     quick-add dialog. -->
+                <div class="sym-picker" id="m-sym-picker" hidden="hidden">
+                  <div class="sym-pick-empty" id="m-sym-empty" hidden="hidden"></div>
+                  <div id="m-sym-list"></div>
+                  <div class="sym-pick-foot" id="m-sym-foot">
+                    <button type="button" id="m-sym-addnew" class="sym-pick-addnew">＋新增標的</button>
+                  </div>
+                </div>
                 <span class="hint" id="m-sym-hint"></span>
               </div>
               <div class="field">
@@ -239,7 +254,7 @@
           <div class="stack-card"><h3>期初庫存</h3>
             <div class="form-grid">
               <div class="field"><label for="o-account">帳戶</label><select class="select" id="o-account"></select></div>
-              <div class="field"><label for="o-symbol">代號</label><input class="input" id="o-symbol" list="m-symbols" spellcheck="false"></input></div>
+              <div class="field" id="o-symbol-field" style="position:relative;"><label for="o-symbol">代號</label><input class="input" id="o-symbol" placeholder="輸入或點選代號…" spellcheck="false" autocomplete="off"></input><div class="sym-picker" id="o-sym-picker" hidden="hidden"><div class="sym-pick-empty" id="o-sym-empty" hidden="hidden"></div><div id="o-sym-list"></div><div class="sym-pick-foot" id="o-sym-foot"><button type="button" id="o-sym-addnew" class="sym-pick-addnew">＋新增標的</button></div></div></div>
               <div class="field"><label for="o-shares">股數</label><input class="input" id="o-shares" type="number"></input></div>
               <div class="field"><label for="o-total">原始總成本</label><input class="input" id="o-total" type="number" step="0.01"></input></div>
               <div class="field"><label for="o-avg-view">原始均價（自動）</label><div class="input" id="o-avg-view" aria-live="polite" style="display:flex;align-items:center;color:var(--text-2);background:var(--panel-2);cursor:default;">—</div></div>
@@ -317,16 +332,17 @@
 </div>
 </div>
 
-<script src="api.js?v=0.1.22"></script>
-<script src="shell.js?v=0.1.22"></script>
-<script src="format.js?v=0.1.22"></script>
-<script src="names.js?v=0.1.22"></script>
-<script src="pager.js?v=0.1.22"></script>
-<script src="export.js?v=0.1.22"></script>
-<script src="alerts.js?v=0.1.22"></script>
-<script src="inst-quickadd.js?v=0.1.22"></script>
-<script src="input.js?v=0.1.22"></script>
-<script src="ledger.js?v=0.1.22"></script>
+<script src="api.js?v=0.1.23"></script>
+<script src="shell.js?v=0.1.23"></script>
+<script src="format.js?v=0.1.23"></script>
+<script src="names.js?v=0.1.23"></script>
+<script src="pager.js?v=0.1.23"></script>
+<script src="export.js?v=0.1.23"></script>
+<script src="alerts.js?v=0.1.23"></script>
+<script src="inst-quickadd.js?v=0.1.23"></script>
+<script src="sym-picker.js?v=0.1.23"></script>
+<script src="input.js?v=0.1.23"></script>
+<script src="ledger.js?v=0.1.23"></script>
 <script>
 /* glue: collapse toggle */
 document.getElementById('input-toggle').addEventListener('click', function (e) {
@@ -417,18 +433,11 @@ document.getElementById('tab-tx').click();
   slot.appendChild(reportBtn);
 })();
 /* 待確認匯入收件匣：真實接線在 inbox.js（2026-07-03, R4）。 */
-/* glue: on confirm write — flash new row in ledger */
-var origConfirm = document.getElementById('m-confirm');
-if (origConfirm) {
-  origConfirm.addEventListener('click', function() {
-    setTimeout(function() {
-      var rows = document.querySelectorAll('#tx-body tr.expandable');
-      if (rows.length) {
-        rows[0].classList.add('ledger-added-row');
-      }
-    }, 300);
-  });
-}
+/* #10: the new-row flash is no longer a fixed-300ms guess wired to #m-confirm (that flashed
+   ONLY manual/tx commits). It now rides input.js's shared commit funnel (afterCommitRefresh
+   → highlightCommitted), which — after the committed ledger's table has actually refreshed —
+   flashes the correct table's newest row for EVERY commit type (manual · CSV · AI · dividend
+   · opening) and auto-switches the lower ledger tab to match. */
 </script>
 </body>
 </html>

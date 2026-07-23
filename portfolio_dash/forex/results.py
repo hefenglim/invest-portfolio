@@ -27,6 +27,14 @@ class AccountFXResult(BaseModel):
     realized_fx: Decimal | None
     unrealized_fx_stocks: Decimal | None
     unrealized_fx_cash: Decimal | None
+    # Server-computed combined unrealized FX (in ``home_ccy``) = stocks + cash, or None
+    # when EITHER component is None (no ``avg_rate`` / no current spot). This is the money
+    # of record for 未實現匯損益（合計）: the frontend DISPLAYS this Decimal string and must
+    # NEVER re-sum the two components client-side (adding two Decimal strings via JS
+    # ``Number()`` is float money math over exact values — the locked invariant forbids it).
+    # Additive field with a default so pre-existing AccountFXResult constructions still
+    # validate; the sole real builder (``compute_account_fx``) always sets it explicitly.
+    unrealized_fx_total: Decimal | None = None
 
 
 class FxRealizedRow(BaseModel):

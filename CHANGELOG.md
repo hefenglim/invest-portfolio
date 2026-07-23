@@ -50,6 +50,66 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.23] - 2026-07-24
+
+Round-8 (owner UI feedback) + Round-8.1 (demo-verification follow-ups + a deep systemic
+audit). Frontend + read-side API only — no money-of-record formula changed, no boot
+migration.
+
+### Added
+- **Unified instrument register/edit surface.** The add-to-watchlist, quick-register and
+  edit panels are one shared modal (`inst-quickadd.js` gains an `edit` mode; `instruments.js`
+  `openEdit` is a thin caller) — fix one place, all entry points follow.
+- **Single "AI 辨識" resolve.** The former 產業「AI 偵測」 and 代號「AI 判讀」 are merged into one
+  action with a single result-application path that fills 代號/名稱/產業/產業細分 consistently.
+- **Symbol drawer — 交易明細 + cross-account 部位摘要.** A new per-symbol activity list
+  (opening + buys + sells + DRIP/配股) served from `/api/symbol/{symbol}/detail` (reusing
+  `build_dashboard`), 10/page, with a reconciliation footer (期初＋買−賣 ＝ 部位摘要) and an
+  account filter; 部位摘要 now shows a server-computed cross-account aggregate + per-account
+  breakdown instead of the first account only.
+- **Shared grouped symbol picker** (`web/sym-picker.js`) used by the manual, dividend and
+  opening-inventory inputs: 已持有/未持有 groups, 股數+均價 annotation, per-account market
+  filter, and a 「＋新增標的」 quick-register entry. Replaces the two copy-paste pickers + the
+  opening datalist.
+- **Rebate inbox — 當月累計預估.** A non-confirmable 「當月累計預估(未到期,次月退款)」 section
+  surfaces the current-month 折讓 forecast immediately (`GET /api/rebates` gains `accruing`);
+  the whole item bar toggles its 明細.
+- **Holdings 合計 + exports follow the filter** (from the earlier Round-8 work): a
+  server-computed `holdings_subtotals` field feeds a filter-aware 合計 footer; CSV/report
+  exports carry the active account/market filter.
+
+### Changed
+- **Chart buy/sell markers** are colored labeled triangles (green ▲ below price / red ▼ above)
+  with a legend; detail on hover. Equal original/adjusted average collapses to one 均價 line.
+- **Symbol pickers filter only on keyboard input** — a focus/click open shows the full grouped
+  list (no longer filtered down to the already-selected symbol).
+- **Trade ledger UX:** the new-row highlight is a soft 8× pulse (reduced-motion guarded); a
+  fully-successful commit auto-switches to the matching tab; 「扣款後現金」 → 「交易後現金」.
+- **`ai_resolve` de-duplication:** an in-process fingerprint cache + a bare-symbol registry
+  re-gate stop redundant LLM calls; the AI-input pane no longer re-runs the vision parse when
+  a single symbol is registered (local re-validate, preserving checkbox state).
+
+### Fixed
+- **Candidate pick no longer wipes 名稱/產業.** Picking an AI candidate whose live re-validation
+  misses used to blank the just-filled name/sector (pristine tracking ignored programmatic
+  fills); AI-sourced fills are now pinned and 確認 stays usable.
+- **交易明細 reconciles with 部位摘要** — the old transactions-only list omitted opening
+  inventory and DRIP shares; a symbol held in two accounts no longer understates 部位摘要.
+- **Rebate double-credit (F2d) closed.** Month suppression is keyed structurally on the
+  movement date (not only its editable note), and a booked 折讓款 movement's kind/date are
+  locked (frontend + a `routers/cash.py` guard), so a refund can never be confirmed twice.
+- **Frontend money-math invariant restored (F10).** 未實現匯損益（合計） is no longer a JS float
+  sum of two Decimal strings — a server-computed Decimal `unrealized_fx_total` is added to the
+  FX wire and displayed as a string.
+- **Archived instruments** no longer leak into the picker's 未持有 group (`/api/input/context`
+  wires the `archived` flag); sidebar inbox badge + context refresh after a commit.
+
+### Verification
+- ruff clean; `mypy --strict` (bare, 543 files) clean; regression pytest 0 failures; full
+  Playwright e2e 0 failures; stress-audit phase 1 `ops=66 pass=1060 fail=0`.
+- Contract: `/api/dashboard` gains `unrealized_fx_total` — spec-17 golden + spec-18 round-trip
+  updated. Iterated on the test site (demo) and behaviour-verified before promotion.
+
 ## [v0.1.22] - 2026-07-22
 
 **Batch B — the Moomoo account merge.** `moomoo_my_us` + `moomoo_my_my` are merged

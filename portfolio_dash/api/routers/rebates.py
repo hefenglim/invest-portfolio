@@ -36,10 +36,14 @@ def list_rebates(
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     pending = svc.detect(conn, now=now)
+    accruing = svc.detect_accruing(conn, now=now)
     skipped = svc.list_skipped(conn, now=now)
     return {
         "rows": [to_wire(p.model_dump()) for p in pending],
         "total_count": len(pending),
+        # owner #1: current / not-yet-due months — a NON-confirmable forecast (未到期,次月退款).
+        # Rendered as an informational section; NOT counted in the sidebar badge.
+        "accruing": [to_wire(p.model_dump()) for p in accruing],
         "skipped": [to_wire(s.model_dump()) for s in skipped],
     }
 
