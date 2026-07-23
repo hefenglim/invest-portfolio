@@ -325,3 +325,39 @@ prevents recurrence.
   ordering. Copy the fixture from `test_whatsnew_flow.py` into every new flow-server
   e2e file, and treat "passes alone, fails in suite" as an ordering/isolation smell,
   not flakiness to retry.
+
+- **2026-07-24 — "A shown total and the detail beside it must come from ONE definition"
+  recurred a THIRD time.** The symbol drawer's 交易明細 read the transactions ledger only
+  (no opening inventory, no DRIP shares) while 部位摘要 used the four-source `build_book`,
+  so their share sums disagreed — the exact class of the 2026-07-02 `current_shares`
+  bug. Fix: the drawer's activity list and summary are now both derived from the same
+  authoritative combiner (`build_dashboard`/symbol endpoint), with a visible
+  reconciliation footer. Rule: whenever a UI puts an aggregate next to its detail rows,
+  they must share a single server-side source; add a reconciliation assertion, and when
+  this smell appears grep for OTHER aggregate/detail pairs (dashboard 合計 vs holdings,
+  section footers vs lists) in the same pass.
+
+- **2026-07-24 — "field is pristine" tracking that keys on DOM input/change events is
+  blind to programmatic AND user-pick fills.** The quick-add candidate pick wrote
+  名稱/產業 with `el.value = …` (no event), so the `namePristine`/`sectorPristine` flags
+  stayed true; a subsequent re-validation miss then blanked the freshly-picked data as
+  "stale". Rule: when you fill a field programmatically, also update whatever guard
+  protects it (pin it, or clear/set the pristine flag) — never assume a value assignment
+  and a user keystroke leave the same state. A user's explicit pick is NOT "untouched".
+
+- **2026-07-24 — long gate runs (`pytest tests/e2e`, full regression) get killed as
+  harness background jobs; run them OS-detached + poll with Monitor.** `Bash
+  run_in_background` on a ~20-min suite was terminated mid-run twice (killed at ~27%);
+  the same suite launched via `Start-Process -WindowStyle Hidden` writing an
+  `*_exit.txt`, watched by a `Monitor` until-loop, completes reliably. Rule: for any gate
+  longer than a couple minutes, use the detached `.cmd` + exit-file + Monitor pattern —
+  exit codes are authoritative (ignore the trailing Windows ProactorEventLoop teardown
+  noise and the missing pytest summary line).
+
+- **2026-07-24 — an idempotency/suppression key must be structural, never editable
+  free-text.** The 折讓款 inbox suppressed an already-booked month by matching the cash
+  movement's editable `note`; editing that note re-surfaced the month → a second confirm
+  double-credited the refund. Fix: suppress on the movement DATE (structural) as the
+  primary key and lock the anchor fields (kind/date) of a booked rebate movement
+  (frontend + backend guard). Rule: anything that prevents a double-write must hinge on
+  data the user cannot silently edit.
