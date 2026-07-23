@@ -44,7 +44,8 @@ def test_list_shape_and_decimal_strings(
 ) -> None:
     _seed_may_trade(golden_db)
     body = api_client.get("/api/rebates").json()
-    assert set(body.keys()) == {"rows", "total_count", "skipped"}
+    # owner #1 added the accruing field (current / not-yet-due forecast) to the envelope.
+    assert set(body.keys()) == {"rows", "total_count", "accruing", "skipped"}
     hit = next(r for r in body["rows"] if r["account_id"] == _TW and r["month"] == "2026-05")
     assert hit["account_name"] == "TW Broker"
     assert hit["trade_count"] == 1
@@ -53,7 +54,8 @@ def test_list_shape_and_decimal_strings(
     assert hit["ccy"] == "TWD"
     # FU-D6: the month carries a per-trade breakdown that sums to its own totals
     assert len(hit["trades"]) == 1
-    assert body["total_count"] >= 1 and body["skipped"] == []
+    # the only seeded trade (2026-05) is PENDING under GOLDEN_NOW=2026-06 → nothing accruing.
+    assert body["total_count"] >= 1 and body["skipped"] == [] and body["accruing"] == []
 
 
 def test_trades_breakdown_shape_and_sum_invariants(
@@ -135,6 +137,89 @@ def test_confirm_books_editable_credit_and_suppresses(
     r2 = api_client.post("/api/rebates/confirm",
                          json={"account_id": _TW, "month": "2026-05", "amount": "150"})
     assert r2.status_code == 400 and r2.json()["error"]["field"] == "month"
+
+
+def test_accruing_month_listed_but_not_confirmable(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """owner #1: a CURRENT-month trade surfaces as an accruing (未到期) forecast, NOT a
+    pending/confirmable item — it is not counted in the badge and confirming it is rejected
+    (the refund is not yet due). GOLDEN_NOW=2026-06 → a 2026-06 trade is the current month."""
+    insert_transaction(
+        golden_db, account_id=_TW, symbol="2330", side=Side.BUY, quantity=Decimal("1000"),
+        price=Decimal("500"), fees=Decimal("142"), tax=Decimal("0"),
+        trade_date=date(2026, 6, 5))
+    body = api_client.get("/api/rebates").json()
+    acc = next(a for a in body["accruing"]
+               if a["account_id"] == _TW and a["month"] == "2026-06")
+    # accruing carries the SAME forecast shape (Decimal strings + per-trade breakdown)
+    assert acc["expected"] == "109" and acc["trade_count"] == 1 and len(acc["trades"]) == 1
+    assert all(r["month"] != "2026-06" for r in body["rows"])  # not in the pending list
+    # accruing is NOT counted in the pending sidebar badge
+    assert api_client.get("/api/rebates/count").json()["count"] == 0
+    # confirming a not-yet-due month is rejected (未到次月)
+    r = api_client.post("/api/rebates/confirm",
+                        json={"account_id": _TW, "month": "2026-06", "amount": "109"})
+    assert r.status_code == 400 and r.json()["error"]["field"] == "month"
+
+
+def test_confirmed_month_not_double_booked_after_note_edit(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """F2d/F12 double-credit guard: once a month is booked, editing the confirmed rebate
+    movement's (free-text) note must NOT re-surface it as pending — the structural date key
+    keeps it suppressed, so it can never be confirmed (and credited) a second time."""
+    _seed_may_trade(golden_db)  # 2026-05 pending, estimate 109
+    r = api_client.post("/api/rebates/confirm",
+                        json={"account_id": _TW, "month": "2026-05", "amount": "109"})
+    assert r.status_code == 200
+    move_id = r.json()["id"]
+    booked_balance = _balance(api_client, _TW, "TWD")  # includes the single 109 credit
+    # Edit ONLY the note of the confirmed rebate movement (the old double-credit vector). The
+    # movement stays kind=rebate dated 2026-06-01 (the refund month); the note tag is broken.
+    # ack_negative: the golden tw_broker pool is negative from the un-funded buy, so any edit
+    # trips the date-aware negative_cash ack — the owner would confirm it (irrelevant to the
+    # suppression we are proving).
+    e = api_client.put(f"/api/cash/movements/{move_id}", json={
+        "account_id": _TW, "date": "2026-06-01", "kind": "rebate",
+        "ccy": "TWD", "amount": "109", "note": "some other note", "ack_negative": True})
+    assert e.status_code == 200
+    # the month is STILL suppressed (structural key: movement dated in 2026-06 → month 2026-05)
+    assert all(x["month"] != "2026-05" for x in _rows(api_client) if x["account_id"] == _TW)
+    # a re-confirm is rejected → no second credit
+    r2 = api_client.post("/api/rebates/confirm",
+                         json={"account_id": _TW, "month": "2026-05", "amount": "109"})
+    assert r2.status_code == 400 and r2.json()["error"]["field"] == "month"
+    # the pool was credited EXACTLY ONCE (balance unchanged by the note edit + failed confirm)
+    assert _balance(api_client, _TW, "TWD") == booked_balance
+
+
+def test_rebate_movement_kind_and_date_are_locked(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """F2d residual guard: a booked 折讓款 movement may have its amount (and note) corrected, but
+    its kind and date are LOCKED — changing the date re-anchors the structural suppression month
+    and changing the kind drops it from the confirmed set, either of which would let the month be
+    confirmed (and credited) a second time. The backend PUT rejects both with 400."""
+    _seed_may_trade(golden_db)  # 2026-05 pending, estimate 109
+    r = api_client.post("/api/rebates/confirm",
+                        json={"account_id": _TW, "month": "2026-05", "amount": "109"})
+    assert r.status_code == 200
+    move_id = r.json()["id"]
+    base = {"account_id": _TW, "ccy": "TWD", "amount": "109", "ack_negative": True}
+    # date change (would re-anchor 2026-05's suppression to another month) -> 400
+    d = api_client.put(f"/api/cash/movements/{move_id}",
+                       json={**base, "date": "2026-07-01", "kind": "rebate", "note": None})
+    assert d.status_code == 400 and d.json()["error"]["field"] == "kind"
+    # kind change (would drop it from the confirmed set) -> 400
+    k = api_client.put(f"/api/cash/movements/{move_id}",
+                       json={**base, "date": "2026-06-01", "kind": "deposit", "note": None})
+    assert k.status_code == 400
+    # amount-only correction (same kind + date) -> allowed
+    ok = api_client.put(f"/api/cash/movements/{move_id}",
+                        json={**base, "date": "2026-06-01", "kind": "rebate",
+                              "amount": "100", "note": None})
+    assert ok.status_code == 200
 
 
 def test_confirm_400s(api_client: TestClient, golden_db: sqlite3.Connection) -> None:

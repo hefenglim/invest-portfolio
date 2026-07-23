@@ -131,38 +131,67 @@ def _seed_chart(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _seed_multi_account(conn: sqlite3.Connection) -> None:
+    """AAPL genuinely held in TWO accounts (schwab 30 @100 + moomoo_my 10 @110): the drawer
+    部位摘要 must show the AGGREGATE (40 sh) + a per-account breakdown, the head 「2 個帳戶」, and
+    交易明細 an account filter (round-8.1 Wave A owner #2c / #2b)."""
+    seed_accounts(conn)
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=Currency.USD,
+                                       sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("30"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    insert_transaction(conn, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("110"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 12))
+    upsert_prices(conn, [
+        PriceRow(instrument="AAPL", market=Market.US, as_of=date(2026, 6, 9),
+                 close=Decimal("120"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    _base_fx(conn)
+    conn.commit()
+
+
 # --- 交易明細 pagination -------------------------------------------------------------
 
 @pytest.mark.e2e
 def test_symbol_drawer_tx_pagination(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """交易明細: 12 tx → 10 rows on page 1, 「共 12 筆」pager, 2 rows after paging to offset=10."""
+    """交易明細 (round-8.1 Wave A): the UNIFIED activity list from /api/symbol/{sym}/detail,
+    paginated 10/page CLIENT-SIDE (no per-page network). 12 buys → 10 rows on page 1, a
+    「共 12 筆」pager, 2 rows on page 2, and a reconciliation footer proving
+    買 1,200 ＝ 部位摘要."""
     base = flow_server(_seed_many_tx)
     page = fresh_page
     console_errors, page_errors = _collect_errors(page)
 
     page.goto(base + "/index.html", wait_until="load")
     page.wait_for_selector(".kpi-card")  # dashboard async render landed
-    with page.expect_response("**/api/ledgers/transactions**") as resp_info:
+    # the drawer self-fetches the per-symbol detail (which now carries the activity list).
+    with page.expect_response("**/api/symbol/2330/detail") as resp_info:
         page.evaluate("() => window.pdOpenSymbol('2330')")
-    assert resp_info.value.status == 200, f"tx status {resp_info.value.status}"
+    assert resp_info.value.status == 200, f"detail status {resp_info.value.status}"
 
     sec = page.locator(".sd-tx-section")
     page.wait_for_selector(".sd-tx-section table.data tbody tr")
     rows = sec.locator("table.data tbody tr")
-    expect(rows).to_have_count(10)  # page 1 of 2 (12 rows, 10/page)
+    expect(rows).to_have_count(10)  # page 1 of 2 (12 activity rows, 10/page)
 
-    # section head + count, columns, and a reused neutral 買/賣 direction chip.
+    # section head + count, columns, and the reused neutral 買/賣 direction chip.
     expect(sec.locator(".sd-sec-title")).to_have_text("交易明細")
     expect(sec.locator(".pd-pager .pg-label")).to_contain_text("共 12 筆")
-    expect(sec.locator("thead th")).to_have_count(8)  # 日期/帳戶/買賣/股數/價格/費用/稅/合計
+    expect(sec.locator("thead th")).to_have_count(8)  # 日期/帳戶/事件/股數/價格/費用/稅/合計
     expect(sec.locator("tbody .dir-chip").first).to_be_visible()
 
-    # page 2 → refetch at offset=10 → the 2 remaining rows.
-    with page.expect_response("**offset=10**") as resp2:
-        sec.locator(".pd-pager .pg-btn").filter(has_text="2").click()
-    assert resp2.value.status == 200, f"page-2 tx status {resp2.value.status}"
+    # reconciliation footer: 12 buys × 100 sh = 1,200 shares = 部位摘要, balanced.
+    foot = sec.locator(".sd-tx-reconcile")
+    expect(foot).to_contain_text("＋買 1,200")
+    expect(foot).to_contain_text("部位摘要 1,200 股")
+    expect(foot).to_contain_text("對帳一致")
+
+    # page 2 → CLIENT-SIDE re-slice (NO network) → the 2 remaining rows.
+    sec.locator(".pd-pager .pg-btn").filter(has_text="2").click()
     expect(rows).to_have_count(2)
 
     assert not console_errors and not page_errors, (
@@ -174,15 +203,15 @@ def test_symbol_drawer_tx_pagination(
 def test_symbol_drawer_tx_section_omitted_when_no_history(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """A watchlist symbol with ZERO transactions → the 交易明細 section omits itself entirely."""
+    """A watchlist symbol with ZERO activity → the 交易明細 section omits itself entirely."""
     base = flow_server(_seed_chart)
     page = fresh_page
     console_errors, page_errors = _collect_errors(page)
 
     page.goto(base + "/index.html", wait_until="load")
     page.wait_for_selector(".kpi-card")
-    # MSFT is not seeded → no instrument, no transactions → total_count 0 → section removed.
-    with page.expect_response("**/api/ledgers/transactions**") as resp_info:
+    # MSFT is not seeded → no instrument, no activity → detail.activity == [] → section omitted.
+    with page.expect_response("**/api/symbol/MSFT/detail") as resp_info:
         page.evaluate("() => window.pdOpenSymbol('MSFT')")
     assert resp_info.value.status == 200
     page.wait_for_selector(".sd-drawer .sd-signals")  # drawer fully rendered
@@ -197,7 +226,8 @@ def test_symbol_drawer_tx_section_omitted_when_no_history(
 
 def _read_chart(page: Page, expected_markline_len: int) -> dict[str, Any]:
     """Wait until the live ECharts option carries exactly `expected_markline_len` cost lines,
-    then return the markLine names + the buy/sell markPoint label.show (canvas -> read option)."""
+    then return the markLine names + the buy/sell markPoint's symbol / colour / label (the
+    round-8.1 Wave A redesign: coloured labelled triangle — canvas, so read via the option)."""
     page.wait_for_selector(".sd-drawer #sd-chart")
     page.wait_for_function(
         "n => { const b = document.getElementById('sd-chart');"
@@ -214,7 +244,9 @@ def _read_chart(page: Page, expected_markline_len: int) -> dict[str, Any]:
         " const mp = (s.markPoint && s.markPoint.data) || [];"
         " const t = mp.find(d => d.name === '買進' || d.name === '賣出');"
         " return { names: (s.markLine.data || []).map(d => d.name),"
-        "   tradeShow: t ? (t.label ? t.label.show : null) : 'no-trade' }; }"
+        "   tradeShow: t ? (t.label ? !!t.label.show : null) : 'no-trade',"
+        "   tradeLabel: t && t.label ? String(t.label.formatter || '') : '',"
+        "   tradeSymbol: t ? String(t.symbol || '') : '' }; }"
     )
     return result
 
@@ -223,7 +255,9 @@ def _read_chart(page: Page, expected_markline_len: int) -> dict[str, Any]:
 def test_symbol_drawer_cost_line_labels(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """Equal averages → ONE「均價」line; distinct → TWO lines; trade markers carry no label."""
+    """Equal averages → ONE「均價」line; distinct → TWO lines. Buy/sell markers are the
+    redesigned coloured labelled triangles (owner #6): a path:// symbol + an always-on
+    「買N」/「賣N」 label when trades are sparse, plus a ▲買/▼賣 legend."""
     base = flow_server(_seed_chart)
     page = fresh_page
     console_errors, page_errors = _collect_errors(page)
@@ -235,8 +269,15 @@ def test_symbol_drawer_cost_line_labels(
     page.evaluate("() => window.pdOpenSymbol('AAPL')")
     aapl = _read_chart(page, 1)
     assert aapl["names"] == ["均價"], f"combined cost line expected, got {aapl['names']!r}"
-    # symbol-only trade marker: the persistent value label is suppressed (hover-only detail).
-    assert aapl["tradeShow"] is False, f"trade markPoint label.show={aapl['tradeShow']!r}"
+    # redesigned buy marker: custom triangle+stem path, always-on 「買N」 label (sparse: 1 buy).
+    assert aapl["tradeSymbol"].startswith("path://"), f"symbol={aapl['tradeSymbol']!r}"
+    assert aapl["tradeShow"] is True, f"trade label.show={aapl['tradeShow']!r}"
+    assert aapl["tradeLabel"].startswith("買"), f"trade label={aapl['tradeLabel']!r}"
+    # the ▲買 / ▼賣 legend renders alongside the chart.
+    legend = page.locator(".sd-drawer .sd-chart-legend")
+    expect(legend).to_be_visible()
+    expect(legend).to_contain_text("買")
+    expect(legend).to_contain_text("賣")
 
     # 2330: a cash dividend adjusts the average → TWO distinct labels.
     page.evaluate("() => window.pdOpenSymbol('2330')")
@@ -247,4 +288,50 @@ def test_symbol_drawer_cost_line_labels(
 
     assert not console_errors and not page_errors, (
         f"cost-line labels: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+# --- multi-account aggregate 部位摘要 + account filter (owner #2c / #2b) --------------
+
+@pytest.mark.e2e
+def test_symbol_drawer_multi_account_position(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """AAPL held in schwab (30) + moomoo_my (10): the drawer head shows「2 個帳戶」, 部位摘要 the
+    AGGREGATE 40 股 + a per-account breakdown, and 交易明細 an account filter that narrows both
+    the table and its reconciliation footer."""
+    base = flow_server(_seed_multi_account)
+    page = fresh_page
+    console_errors, page_errors = _collect_errors(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    with page.expect_response("**/api/symbol/AAPL/detail") as resp:
+        page.evaluate("() => window.pdOpenSymbol('AAPL')")
+    assert resp.value.status == 200
+    page.wait_for_selector(".sd-drawer .sd-stats")
+    drawer = page.locator(".sd-drawer")
+
+    # head reflects the aggregate (owner #2c): 「2 個帳戶」, not one account's name.
+    expect(drawer.locator(".sd-head")).to_contain_text("2 個帳戶")
+    # 部位摘要 股數 stat = the AGGREGATE 40 (30 + 10), not one account's 30 or 10.
+    shares_stat = drawer.locator(".sd-stat").filter(has_text="股數").locator(".v")
+    expect(shares_stat).to_have_text("40")
+    # SECONDARY per-account breakdown table with exactly 2 account rows.
+    breakdown = drawer.locator(".sd-acct-breakdown")
+    expect(breakdown).to_be_visible()
+    expect(breakdown.locator("tbody tr")).to_have_count(2)
+
+    # 交易明細 account filter (owner #2b): 全部 + 2 accounts = 3 buttons; both buys shown.
+    tx = drawer.locator(".sd-tx-section")
+    flt = tx.locator(".sd-tx-filter")
+    expect(flt).to_be_visible()
+    expect(flt.locator("button")).to_have_count(3)
+    expect(tx.locator("table.data tbody tr")).to_have_count(2)
+    # filter to the first specific account → the table narrows to that account's single row.
+    flt.locator("button").nth(1).click()
+    expect(tx.locator("table.data tbody tr")).to_have_count(1)
+
+    assert not console_errors and not page_errors, (
+        f"multi-account position: console={console_errors!r} page={page_errors!r}"
     )

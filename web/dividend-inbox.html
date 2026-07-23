@@ -30,6 +30,14 @@
     background: var(--panel-2); margin: 4px 0; }
   .inbox-skipped .sk-main { flex: 1; min-width: 0; }
   .inbox-skipped .sk-sub { font-size: 10px; color: var(--text-3); }
+  /* owner #1: 當月累計預估（未到期）forecast section — muted, non-actionable */
+  .rbt-accruing { margin: 4px var(--pad) 0; }
+  .rbt-accruing-head { font-size: 12px; font-weight: 700; color: var(--text-2);
+    padding: 6px 2px; display: flex; align-items: center; gap: 8px; }
+  .rbt-accruing-head::before { content: "⏳"; font-size: 11px; }
+  .rbt-accruing-item { opacity: 0.86; }
+  .rbt-accruing-item .inbox-main:hover { opacity: 1; }
+  .rbt-caret { color: var(--text-3); font-size: 10px; margin-left: 6px; }
 </style>
 </head>
 <body data-page="divinbox" data-title="收件匣">
@@ -61,6 +69,10 @@
       <span class="panel-sub">台股券商先收後退:次月退回約定比例的手續費折讓 — 確認實際入帳後記入該帳戶現金池,<b>不計入成本／損益／XIRR</b></span>
     </div>
     <div class="inbox-list" id="rebate-list"></div>
+    <div class="rbt-accruing" id="rebate-accruing" hidden="hidden">
+      <div class="rbt-accruing-head">當月累計預估（未到期,次月退款）</div>
+      <div class="inbox-list" id="rebate-accruing-list"></div>
+    </div>
     <details class="inbox-skipped" id="rebate-skipped" hidden="hidden">
       <summary><span id="rebate-skipped-label">已略過</span></summary>
       <div id="rebate-skipped-list"></div>

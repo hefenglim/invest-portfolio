@@ -30,9 +30,12 @@
    opts (ADD — the cross-agent contract, do NOT break):
      symbol      prefill symbol (all call sites prefill it)
      market      'TW' | 'US' | 'MY' (default 'TW')
-     lockSymbol  DEPRECATED (FU-D42a) — accepted but IGNORED: the symbol field is always
-                 editable, so a wrong AI-parsed symbol (owner bug: 聯電 → "UMC" on a TW
-                 row) can be fixed in place. No call site genuinely needs a locked field.
+     lockSymbol  RETIRED (R8.1 Wave B, A3/F9c) — the symbol field is ALWAYS editable, so a wrong
+                 AI-parsed symbol (owner bug: 聯電 → "UMC" on a TW row) can be fixed in place; a
+                 locked field re-introduces that dead-end, so honoring it would be wrong. The
+                 param is no longer passed by this project's own caller (web/instruments.js). It
+                 stays tolerated-and-ignored here ONLY until web/input.js's two callers are
+                 cleaned up (Wave C); do NOT re-introduce it. No call site genuinely needs it.
      onConfirm(result)  after 確認 registers
      onBuy(result)      after 記一筆買入 registers (the caller navigates to the manual pane)
    opts (EDIT — additive):
@@ -204,7 +207,7 @@
     /* Wave A1: ONE modal builder for BOTH flows. mode:'edit' turns this into the instrument
        editor (locked 代號/市場, edit-only 目標價 + TW 板別, PUT save, no 記一筆買入); the DEFAULT
        (add) mode is byte-for-byte the prior register flow, so the cross-agent add caller shape
-       {symbol, market, lockSymbol, onConfirm, onBuy} is unchanged. */
+       {symbol, market, onConfirm, onBuy} is unchanged (lockSymbol is RETIRED — see the header). */
     const isEdit = opts.mode === 'edit';
 
     const backdrop = el('div', 'modal-backdrop');
@@ -421,15 +424,33 @@
           return;
         }
         if (!r || !r.found) {
-          /* Stale suggestions from a PREVIOUS symbol's lookup are cleared (pristine only). */
-          if (namePristine) nameIn.value = '';
-          if (sectorPristine) sectorField.setValue('');
           clearCandidates();
           if (wasAiResolve) {
-            /* An AI-suggested symbol the provider still cannot find — no re-fire, honest notice. */
-            status.textContent = 'AI 判讀後仍查無報價 — 請確認代號與市場是否正確';
+            /* Fix #1 (owner bug #4 — the candidate-pick wipe): an AI-sourced fill (a picked
+               candidate OR applyResolved) is TRUSTED. The backend provider-verifies only the
+               PRIMARY symbol, so a picked candidate's live re-validation quote commonly MISSES —
+               but the AI already supplied a trusted 名稱/產業, so a miss must NOT wipe them
+               (the old code cleared name+sector here BEFORE this branch ran, blanking the just
+               filled data). KEEP every field. A6 (no dead-end): when 代號+名稱+產業 are all
+               present the user can still register — POST /api/instruments force-registers a
+               quote-less symbol — so 確認 is ENABLED. Only when the fill is incomplete do we fall
+               back to the honest blocked notice. */
+            const canProceed = !!(sym && nameIn.value.trim() && sectorField.value());
+            if (canProceed) {
+              status.textContent = '報價暫無 — 已保留 AI 判讀名稱/產業，請確認代號/市場';
+              setEnabled(true);
+            } else {
+              status.textContent = 'AI 判讀後仍查無報價 — 請確認代號與市場是否正確';
+            }
             return;
           }
+          /* Genuine stale-suggestion case (a USER symbol/market edit that no longer resolves):
+             clear the prior AUTO-filled suggestions — pristine only, so a user-typed field is
+             never touched. A5: the wipe is now SYMMETRIC across 名稱/產業/產業細分 (industry was
+             previously left stale on a miss). */
+          if (namePristine) nameIn.value = '';
+          if (sectorPristine) sectorField.setValue('');
+          if (industryPristine) industryIn.value = '';
           /* AUTOMATIC unified AI resolve (R6-B): fire once per DISTINCT settled input — the
              observable union of the two spec triggers (code-format miss OR registry+provider
              miss both surface here as found:false). The form stays fully editable meanwhile. */
@@ -466,6 +487,13 @@
       function aiQuery() {
         return (symIn.value.trim() + ' ' + nameIn.value.trim()).trim();
       }
+      /* A2 dedup: mark the CURRENT settled form state as already AI-resolved so a later NON-AI
+         re-lookup MISS on the same state never redundantly re-fires the automatic resolver.
+         Called (a) when any resolve STARTS — including the manual 「AI 辨識」 button, which never
+         seeded lastAiKey before, so a following miss re-paid the LLM for an input the user
+         already resolved — and (b) POST-fill in applyResolved + a candidate pick, so the
+         re-validation lookup and any later identical-state miss are recognized as done. */
+      function markAiKey() { lastAiKey = aiQuery() + '|' + mktSel.value; }
       function clearCandidates() {
         candBox.replaceChildren();
         candBox.hidden = true;
@@ -479,6 +507,7 @@
         if (namePristine && resp.name) nameIn.value = resp.name;
         if (sectorPristine && resp.sector) sectorField.setValue(resp.sector);
         if (industryPristine && resp.industry) industryIn.value = resp.industry;
+        markAiKey();  // A2: the filled state is now AI-resolved — a re-validation miss won't re-fire
         aiResolveTried = true;
         runLookup();
       }
@@ -493,10 +522,14 @@
           if (c.name) b.appendChild(el('span', 'qa-cand-name', c.name));
           if (c.sector) b.appendChild(el('span', 'qa-cand-sector', c.sector));
           b.addEventListener('click', () => {
+            /* Fix #2(a): a candidate the user EXPLICITLY picked is trusted. We still run the real
+               lookup (it enriches board / detects already-registered / archived), but per Fix #1
+               a re-validation MISS no longer wipes these fields nor blocks 確認. */
             symIn.value = (c.symbol || '').trim().toUpperCase();
             if (namePristine && c.name) nameIn.value = c.name;
             if (sectorPristine && c.sector) sectorField.setValue(c.sector);
             clearCandidates();
+            markAiKey();  // A2: the picked state is AI-resolved — no redundant auto re-fire
             aiResolveTried = true;
             runLookup();
           });
@@ -511,6 +544,10 @@
         o = o || {};
         const query = aiQuery();
         if (!query) { status.textContent = '請先輸入代號或名稱'; return; }
+        /* A2: seed the dedup key on ANY resolve start, INCLUDING the manual 「AI 辨識」 button
+           (the automatic path also seeds it at the fire guard; the manual button never did, so a
+           following non-AI miss re-fired the LLM for an already-resolved input). */
+        markAiKey();
         const seq = ++aiSeq;
         clearCandidates();
         status.textContent = 'AI 判讀中…';

@@ -33,6 +33,9 @@ def test_compute_account_fx_unrealized_split() -> None:
     assert r.realized_fx == Decimal("0")
     assert r.unrealized_fx_stocks == Decimal("10800")
     assert r.unrealized_fx_cash == Decimal("1000")
+    # Combined unrealized FX is server-computed (stocks + cash), so the frontend never sums.
+    assert r.unrealized_fx_total == Decimal("11800")
+    assert r.unrealized_fx_total == r.unrealized_fx_stocks + r.unrealized_fx_cash
 
 
 def test_compute_account_fx_realized_on_reconversion() -> None:
@@ -57,6 +60,7 @@ def test_compute_account_fx_no_conversions_all_none() -> None:
     assert r.realized_fx is None
     assert r.unrealized_fx_stocks is None
     assert r.unrealized_fx_cash is None
+    assert r.unrealized_fx_total is None   # None when the components are None
 
 
 def test_compute_account_fx_missing_spot_unrealized_none_realized_ok() -> None:
@@ -68,6 +72,7 @@ def test_compute_account_fx_missing_spot_unrealized_none_realized_ok() -> None:
     assert r.realized_fx == Decimal("0")
     assert r.unrealized_fx_stocks is None
     assert r.unrealized_fx_cash is None
+    assert r.unrealized_fx_total is None   # None when spot is missing (no unrealized)
 
 
 def test_compute_account_fx_fx_loss_when_spot_below_avg() -> None:
@@ -80,6 +85,7 @@ def test_compute_account_fx_fx_loss_when_spot_below_avg() -> None:
     assert r.avg_rate == Decimal("32")
     assert r.unrealized_fx_stocks == Decimal("-9000")   # 9000 * (31-32)
     assert r.unrealized_fx_cash == Decimal("-10000")    # 10000 * (31-32)
+    assert r.unrealized_fx_total == Decimal("-19000")   # server-computed sum (-9000 + -10000)
 
 
 def test_compute_account_fx_two_rates_blended_then_reconversion() -> None:

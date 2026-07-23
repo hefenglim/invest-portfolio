@@ -69,13 +69,9 @@
      prev/next cycling. Null until a successful open; cycling is disabled while null. */
   let currentHoldings = null;
   /* The resolved dashboard payload (set alongside currentHoldings). Cached for the shared
-     holdings list; the 試算 block no longer reads it (weights now come from /api/whatif). */
+     holdings list; the drawer's holding summary now comes from detail.position (the server
+     cross-account aggregate), NOT a lookup into this list (round-8.1 Wave A owner #2c). */
   let currentDash = null;
-
-  function holdingOf(symbol) {
-    if (!currentHoldings) return null;
-    return currentHoldings.find((h) => h.symbol === symbol) || null;
-  }
 
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -151,9 +147,10 @@
     ]).then(([detail, dash]) => {
       if (currentSymbol !== symbol) return;  // a newer open superseded this one
       currentDash = dash || null;
-      currentHoldings = (dash && dash.holdings) || [];
-      const h = holdingOf(symbol);
-      renderDrawer(drawer, head, body, symbol, detail, h);
+      currentHoldings = (dash && dash.holdings) || [];  // for ←/→ cycling (dashboard order)
+      /* The holding summary the drawer renders is the SERVER aggregate (detail.position) — the
+         cross-account TOTAL — NOT a single dashboard holding row (round-8.1 Wave A owner #2c). */
+      renderDrawer(drawer, head, body, symbol, detail);
     }).catch((err) => {
       if (currentSymbol !== symbol) return;
       head.replaceChildren(el('span', 'sym-code', symbol));
@@ -169,36 +166,47 @@
     });
   };
 
-  /* Render head + sections once both /detail and /dashboard have resolved. `h` is the
-     rich dashboard holding summary (null for an unheld / watchlist symbol); `detail` is
-     the /api/symbol/{symbol}/detail payload. */
-  function renderDrawer(drawer, head, body, symbol, detail, h) {
+  /* Render head + sections once both /detail and /dashboard have resolved. The holding
+     summary is the SERVER aggregate ``pos`` = detail.position (the cross-account TOTAL: total
+     shares / market value / unrealized, blended avg cost) — NOT a single dashboard holding row
+     (that was the FIRST account only, understating a symbol held in >1 account: owner #2c).
+     ``accts`` = detail.position_accounts is the per-account breakdown behind the aggregate.
+     Both are null/empty for an unheld / watchlist symbol. */
+  function renderDrawer(drawer, head, body, symbol, detail) {
+    const pos = (detail && detail.position) || null;
+    const accts = (detail && detail.position_accounts) || [];
     /* head */
     head.replaceChildren();
     head.appendChild(el('span', 'sym-code', symbol));
-    if (h) {
-      head.appendChild(el('span', 'sym-name', h.name));
-      if (h.board) head.appendChild(el('span', 'board-badge', h.board));
-      head.appendChild(el('span', 'badge', MARKET_ZH[h.market] + '・' + acctZh(h.account_id)));
+    if (pos) {
+      if (pos.name) head.appendChild(el('span', 'sym-name', pos.name));
+      if (pos.board) head.appendChild(el('span', 'board-badge', pos.board));
+      /* Aggregate-aware account label: 「N 個帳戶」 when the symbol spans >1 account, else the
+         single account's name (owner #2c — the head reflects the aggregate, not one account). */
+      const acctLabel = accts.length > 1
+        ? (accts.length + ' 個帳戶')
+        : (accts.length === 1 ? acctZh(accts[0].account_id) : '');
+      head.appendChild(el('span', 'badge',
+        MARKET_ZH[pos.market] + (acctLabel ? '・' + acctLabel : '')));
       const price = el('span', 'sd-price');
-      if (h.market_price === null || h.market_price === undefined) {
+      if (pos.market_price === null || pos.market_price === undefined) {
         const b = el('span', 'badge badge-missing', '缺價');
         b.title = '無法取得價格資料';
         price.appendChild(b);
       } else {
-        price.appendChild(el('span', 'v', f.price(h.market_price, h.quote_ccy)));
-        price.appendChild(el('span', 'c', h.quote_ccy));
-        if (h.price_stale) {
+        price.appendChild(el('span', 'v', f.price(pos.market_price, pos.quote_ccy)));
+        price.appendChild(el('span', 'c', pos.quote_ccy));
+        if (pos.price_stale) {
           const b = el('span', 'badge badge-stale-mini', '過期');
-          b.title = '價格日期 ' + f.date(h.price_as_of);
+          b.title = '價格日期 ' + f.date(pos.price_as_of);
           price.appendChild(b);
         }
       }
       head.appendChild(price);
     } else {
-      /* Non-held / watchlist: no rich holding summary, but the /detail payload now
-         carries the registry name (FU-D24). Fallback order: holding.name → detail.name. */
-      const nm = (h && h.name) || (detail && detail.name);
+      /* Non-held / watchlist: no position summary, but the /detail payload carries the
+         registry name (FU-D24). */
+      const nm = detail && detail.name;
       if (nm) head.appendChild(el('span', 'sym-name', nm));
       head.appendChild(el('span', 'badge', '非持倉標的'));
       head.appendChild(el('span', 'header-spacer'));
@@ -211,12 +219,15 @@
 
     /* body */
     body.replaceChildren();
-    body.appendChild(chartSection(detail, h));
-    if (h) {
-      body.appendChild(statsSection(h));
+    body.appendChild(chartSection(detail, pos));
+    if (pos) {
+      body.appendChild(statsSection(pos, accts));
       body.appendChild(signalsSection(symbol));
-      body.appendChild(splitSection(h));
-      body.appendChild(simSection(h));
+      body.appendChild(splitSection(pos));
+      /* 試算 binds to ONE account (fees/tax are per-account); default to the PRIMARY
+         (most-shares) account, which the server returns first in position_accounts. */
+      const primary = accts[0] || null;
+      if (primary) body.appendChild(simSection(primary));
       body.appendChild(dividendSection(symbol, detail));
       body.appendChild(realizedSection(symbol, detail));
     } else {
@@ -226,12 +237,13 @@
       body.appendChild(signalsSection(symbol));
       body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
     }
-    /* 交易明細 — ALL transactions for this symbol, paginated 10/page. Appended after the
-       holding sections (held: after 已實現記錄) OR after the watchlist note (a CLOSED position
-       is unheld yet still has history), so it self-fetches regardless of `h`; it omits itself
-       when the symbol has zero transactions. Its own DOM is scoped to this drawer open. */
-    body.appendChild(txSection(symbol));
-    renderChart(detail, h);
+    /* 交易明細 — the UNIFIED activity list (期初 + 買 + 賣 + 配股/DRIP), rendered from
+       detail.activity with a reconciliation footer + (when multi-account) an account filter.
+       A CLOSED position is unheld yet still has history, so it renders whenever activity is
+       present; null (omitted) for a pure watchlist name with zero activity. */
+    const tx = txSection(symbol, detail);
+    if (tx) body.appendChild(tx);
+    renderChart(detail, pos);
   }
 
   /* ---------- sections ---------- */
@@ -244,7 +256,7 @@
     return head;
   }
 
-  function chartSection(detail, h) {
+  function chartSection(detail, pos) {
     const sec = el('div', 'sd-section');
     sec.appendChild(secHead('價格與成本', '日線・配息與買賣事件標記'));
     const ph = detail.price_history || {};
@@ -259,10 +271,42 @@
     }
     const box = el('div'); box.id = 'sd-chart';
     sec.appendChild(box);
+    /* Compact legend for the redesigned buy/sell markers (owner #6: 彩色標籤三角 + 圖例). Shown
+       whenever the chart will carry ≥1 buy/sell marker. Buy=green ▲ / sell=red ▼ — the
+       owner-signed chart convention (a trading-platform idiom), deliberately distinct from the
+       TW P&L sign colours (where red=gain). Inline-styled so it needs no styles.css addition. */
+    const hasTrades = (detail.trade_events || []).some(
+      (t) => t.side === 'buy' || t.side === 'sell');
+    if (hasTrades) {
+      const legend = el('div', 'sd-chart-legend');
+      legend.style.cssText =
+        'display:flex;gap:16px;margin-top:6px;font-size:11px;color:var(--text-3)';
+      const item = (glyph, label, color) => {
+        const s = el('span');
+        const g = el('span', null, glyph);
+        g.style.cssText = 'color:' + color + ';font-weight:700;margin-right:4px';
+        s.appendChild(g);
+        s.appendChild(document.createTextNode(label));
+        return s;
+      };
+      /* --down is green, --up is red in the token set (values, not P&L semantics). */
+      legend.appendChild(item('▲', '買', cssVar('--down')));
+      legend.appendChild(item('▼', '賣', cssVar('--up')));
+      sec.appendChild(legend);
+    }
     return sec;
   }
 
-  function renderChart(detail, h) {
+  /* Custom marker paths (owner #6): a filled triangle + a thin stem bar that reaches the price
+     point, so buy/sell read at a glance by colour+shape+position. Path box is 0..100; ECharts
+     scales it to symbolSize. BUY points UP with the stem at the TOP (marker sits BELOW the
+     point); SELL points DOWN with the stem at the BOTTOM (marker sits ABOVE the point). The
+     stem is a real (non-zero-area) bar so it renders under a fill-only symbol. */
+  const BUY_MARK = 'path://M46,0 L54,0 L54,40 L46,40 Z M8,100 L92,100 L50,40 Z';
+  const SELL_MARK = 'path://M46,60 L54,60 L54,100 L46,100 Z M8,0 L92,0 L50,60 Z';
+  const TRADE_LABEL_MAX = 8;  // ≤ this many buy/sell markers → always-on labels; else hover-only
+
+  function renderChart(detail, pos) {
     const box = document.getElementById('sd-chart');
     if (!box || !window.echarts) return;
     const ph = detail.price_history || {};
@@ -273,6 +317,7 @@
        series + markPoint coords (chart plotting). All DISPLAY labels go through f.*. */
     const closes = ph.points.map((p) => Number(p.close));
     const markLines = [];
+    const h = pos;  // cost lines anchor to the AGGREGATE blended average cost
     if (h) {
       /* Cost-line labels anchor to the LEFT/START edge (insideStart*), NOT the crowded right
          end where the latest price + the newest trade markers cluster — the owner screenshot
@@ -312,18 +357,36 @@
         label: { show: true, formatter: '息', fontSize: 9, color: '#0c1015' },
         value: label + ' ' + (d.net !== null && d.net !== undefined ? f.money(d.net, d.ccy) + ' ' + (d.ccy || '') : '') });
     });
+    /* Buy/sell markers, redesigned (owner #6). Green ▲ (buy) BELOW the point / red ▼ (sell)
+       ABOVE the point, each larger + with a stem reaching the price point. An always-on label
+       「買N」/「賣N」 shows when trades are SPARSE (≤ TRADE_LABEL_MAX in view) so they never
+       clump; otherwise labels are hover-only. The full 「買/賣 N 股 @ price」 is always on the
+       hover tooltip via `value`. Opening rows render a small neutral marker (the cost line +
+       交易明細 carry their detail). --down=green / --up=red are token VALUES (not P&L sign). */
+    const GREEN = cssVar('--down');
+    const RED = cssVar('--up');
+    const tradesInView = (detail.trade_events || []).filter(
+      (t) => (t.side === 'buy' || t.side === 'sell') && t.date >= dates[0]);
+    const showTradeLabels = tradesInView.length <= TRADE_LABEL_MAX;
     (detail.trade_events || []).forEach((t) => {
       if (t.date < dates[0]) return;
-      const isBuy = t.side !== 'sell';
-      /* Symbol-ONLY marker: the persistent「買/賣 N 股 @ price」text label is suppressed
-         (label.show=false) so recent trades no longer stack into an unreadable clump on the
-         right edge. The detail string lives on `value`, surfaced ONLY on hover via the
-         markPoint tooltip formatter below. Triangle(buy)/arrow(sell) + colors are unchanged. */
+      if (t.side === 'open') {
+        markPoints.push({ coord: [t.date, closeOn(t.date)], name: '期初',
+          symbol: 'diamond', symbolSize: 9, itemStyle: { color: cssVar('--series-gray') },
+          label: { show: false },
+          value: '期初 ' + f.num(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
+        return;
+      }
+      const isBuy = t.side === 'buy';
       markPoints.push({ coord: [t.date, closeOn(t.date)], name: isBuy ? '買進' : '賣出',
-        symbol: isBuy ? 'triangle' : 'arrow', symbolSize: 9, symbolRotate: isBuy ? 0 : 180,
-        itemStyle: { color: isBuy ? cssVar('--accent') : cssVar('--text-2') },
-        label: { show: false },
-        value: (t.side === 'open' ? '期初 ' : isBuy ? '買 ' : '賣 ') + f.num(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
+        symbol: isBuy ? BUY_MARK : SELL_MARK, symbolSize: [18, 22],
+        /* offset the marker off the point so its stem tip touches (buy below / sell above). */
+        symbolOffset: [0, isBuy ? '50%' : '-50%'],
+        itemStyle: { color: isBuy ? GREEN : RED },
+        label: { show: showTradeLabels, position: isBuy ? 'bottom' : 'top',
+          formatter: (isBuy ? '買' : '賣') + f.num(t.shares),
+          color: isBuy ? GREEN : RED, fontSize: 10, fontWeight: 'bold' },
+        value: (isBuy ? '買 ' : '賣 ') + f.num(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
     });
     chart.setOption({
       animation: false,
@@ -357,9 +420,15 @@
     });
   }
 
-  function statsSection(h) {
+  /* 部位摘要 — the AGGREGATE across accounts is PRIMARY (owner #2c). `h` is detail.position
+     (server-computed cross-account Decimal totals); `accts` is the per-account breakdown,
+     rendered as a SECONDARY table only when the symbol spans >1 account. The drawer NEVER
+     sums money across accounts — every figure here is a server Decimal STRING via f.*. */
+  function statsSection(h, accts) {
+    const multi = !!(accts && accts.length > 1);
     const sec = el('div', 'sd-section');
-    sec.appendChild(secHead('部位摘要', '原幣金額'));
+    sec.appendChild(secHead('部位摘要',
+      multi ? ('原幣金額・' + accts.length + ' 個帳戶合計') : '原幣金額'));
     const grid = el('div', 'sd-stats');
     const stat = (k, v, sub, signCls) => {
       const d = el('div', 'sd-stat');
@@ -383,7 +452,32 @@
     grid.appendChild(stat('累計配息', f.money(h.dividend_portion, h.quote_ccy), h.quote_ccy));
     grid.appendChild(stat('回本進度', f.pct(h.payback_ratio), '配息 / 原始成本'));
     sec.appendChild(grid);
+    if (multi) sec.appendChild(accountBreakdown(accts));
     return sec;
+  }
+
+  /* Per-account breakdown table (SECONDARY to the aggregate). Each figure is a server Decimal
+     STRING from detail.position_accounts — never a client-side split of the aggregate. */
+  function accountBreakdown(accts) {
+    const wrap = el('div', 'table-wrap sd-acct-breakdown');
+    wrap.style.marginTop = '10px';
+    const table = el('table', 'data');
+    table.innerHTML = '<thead><tr><th class="col-text">帳戶</th><th>股數</th><th>市值</th>'
+      + '<th>未實現</th><th>原始均價</th><th>調整均價</th></tr></thead>';
+    const tbody = el('tbody');
+    accts.forEach((a) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'col-text', acctZh(a.account_id)));
+      tr.appendChild(el('td', 'num', f.num(a.shares)));
+      tr.appendChild(el('td', 'num', a.market_value == null ? f.NULL_GLYPH : f.money(a.market_value, a.quote_ccy)));
+      tr.appendChild(el('td', 'num ' + f.signClass(a.unrealized_pnl), a.unrealized_pnl == null ? f.NULL_GLYPH : f.signed(a.unrealized_pnl, a.quote_ccy)));
+      tr.appendChild(el('td', 'num', f.price(a.original_avg, a.quote_ccy)));
+      tr.appendChild(el('td', 'num', f.price(a.adjusted_avg, a.quote_ccy)));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
   }
 
   /* ---------- 技術訊號 (rule engine signals) ---------- */
@@ -629,57 +723,75 @@
     return pagerLoad;
   }
 
-  /* 買賣方向 chip — reuses the ledger's neutral direction chip classes (.dir-chip /.dir-buy/
-     .dir-sell in styles.css: 買賣是方向不是損益 → NOT red/green). `open`(期初) falls back to the
-     base neutral chip. Wire `side` is lowercase (buy/sell) from GET /api/ledgers/transactions. */
+  /* 事件別 chip — reuses the ledger's neutral direction chip classes (.dir-chip /.dir-buy/
+     .dir-sell in styles.css: 買賣是方向不是損益 → NOT red/green). The unified activity list adds
+     期初 (open) / DRIP再投 (drip) / 配股 (stock) reinvest rows beyond buy/sell; each gets a
+     neutral chip. Wire `side` is lowercase (open/buy/sell/drip/stock) from /api/symbol/detail. */
   function sideChip(side) {
     const s = String(side || '').toLowerCase();
     if (s === 'sell') return el('span', 'dir-chip dir-sell', '賣');
     if (s === 'open') return el('span', 'dir-chip', '期初');
+    if (s === 'drip') return el('span', 'dir-chip', 'DRIP再投');
+    if (s === 'stock') return el('span', 'dir-chip', '配股');
     return el('span', 'dir-chip dir-buy', '買');
   }
 
-  /* Self-fetching, self-paginating 交易明細 section. Scoped to THIS drawer open via the
-     `drawerSeq` token captured at build time: a fetch (initial or page-change) that resolves
-     after the drawer was closed / re-opened is dropped (stale token OR the section detached
-     from the DOM), so no leak and no write into a torn-down tree. Money is NEVER computed
-     here — every cell renders the server's Decimal STRING through f.*. */
-  function txSection(symbol) {
-    const sec = el('div', 'sd-section sd-tx-section');
-    const seq = drawerSeq;   // lifecycle token for this drawer instance
+  /* 交易明細 — the UNIFIED, account-tagged activity list (期初 + 買 + 賣 + 配股/DRIP), rendered
+     from detail.activity (owner #2a). This is the ONE authoritative share-affecting list, so
+     its share sum reconciles with 部位摘要 by construction — a reconciliation FOOTER makes that
+     identity visible (期初＋買−賣(＋配股/DRIP)＝部位摘要). When the symbol spans >1 account an
+     account filter (全部 / each account) narrows the table AND the footer. Paginated 10/page
+     over the in-memory activity via pdPager (no per-page network — the whole list arrives in
+     the /detail payload). Returns null (section omitted) when there is no activity at all.
+     Money is NEVER computed here — every cell + footer figure is a server Decimal STRING. */
+  function txSection(symbol, detail) {
+    const allRows = (detail && detail.activity) || [];
+    if (!allRows.length) return null;   // pure watchlist name → omit the section
+    const reconcile = (detail && detail.activity_reconcile) || { total: null, by_account: {} };
+    const seq = drawerSeq;   // lifecycle token (guards the async pager-load hop only)
     const LIMIT = 10;
-    sec.appendChild(el('div', 'sd-tx-loading sd-sim-note', '載入交易明細…'));
 
+    /* distinct accounts, first-seen order */
+    const accounts = [];
+    allRows.forEach((r) => {
+      if (!accounts.some((a) => a.id === r.account_id)) {
+        accounts.push({ id: r.account_id, name: r.account });
+      }
+    });
+    const multi = accounts.length > 1;
+
+    let filterAcct = null;   // null = 全部
     let pager = null;
-    let tbody = null;
-    let built = false;
 
-    /* Build the section chrome ONCE, on the first successful fetch (we need total_count for
-       the head count and the omit-when-empty decision). */
-    function build(totalCount) {
-      sec.replaceChildren();
-      sec.appendChild(secHead('交易明細', '帳本 transactions・共 ' + totalCount + ' 筆'));
-      const wrap = el('div', 'table-wrap');
-      const table = el('table', 'data');
-      const thead = el('thead');
-      const trh = el('tr');
-      /* 日期 / 帳戶 / 買賣 / 股數 / 價格 / 費用 / 稅 / 合計 (帳戶 + 買賣 are text-aligned) */
-      ['日期', '帳戶', '買賣', '股數', '價格', '費用', '稅', '合計'].forEach((t, i) => {
-        trh.appendChild(el('th', (i === 1 || i === 2) ? 'col-text' : null, t));
-      });
-      thead.appendChild(trh);
-      table.appendChild(thead);
-      tbody = el('tbody');
-      table.appendChild(tbody);
-      wrap.appendChild(table);
-      sec.appendChild(wrap);
-      const pagerHost = el('div');
-      sec.appendChild(pagerHost);
-      pager = window.pdPager
-        ? window.pdPager.create({ host: pagerHost, limit: LIMIT, offset: 0,
-            totalCount: totalCount, onPage: (offset) => fetchPage(offset) })
-        : null;
-      built = true;
+    const sec = el('div', 'sd-section sd-tx-section');
+    const filterHost = multi ? el('div', 'sd-tx-filter') : null;
+    if (filterHost) filterHost.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
+    sec.appendChild(secHead('交易明細', '帳本活動・共 ' + allRows.length + ' 筆', filterHost));
+
+    const wrap = el('div', 'table-wrap');
+    const table = el('table', 'data');
+    const thead = el('thead');
+    const trh = el('tr');
+    /* 日期 / 帳戶 / 事件 / 股數 / 價格 / 費用 / 稅 / 合計 (帳戶 + 事件 are text-aligned) */
+    ['日期', '帳戶', '事件', '股數', '價格', '費用', '稅', '合計'].forEach((t, i) => {
+      trh.appendChild(el('th', (i === 1 || i === 2) ? 'col-text' : null, t));
+    });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+    const tbody = el('tbody');
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    sec.appendChild(wrap);
+
+    const pagerHost = el('div');
+    sec.appendChild(pagerHost);
+    const footHost = el('div', 'sd-tx-reconcile');
+    footHost.style.cssText =
+      'margin-top:8px;font-size:11px;color:var(--text-2);font-family:var(--font-num)';
+    sec.appendChild(footHost);
+
+    function currentRows() {
+      return filterAcct ? allRows.filter((r) => r.account_id === filterAcct) : allRows;
     }
 
     function renderRows(rows) {
@@ -692,54 +804,84 @@
         tdSide.appendChild(sideChip(t.side));
         tr.appendChild(tdSide);
         tr.appendChild(el('td', 'num', f.num(t.shares)));
-        tr.appendChild(el('td', 'num', f.price(t.price, t.ccy)));
-        tr.appendChild(el('td', 'num', f.money(t.fee, t.ccy)));
-        tr.appendChild(el('td', 'num', f.money(t.tax, t.ccy)));
-        /* 合計 is a signed cash-flow (buy −, sell +) — the ledger renders it neutral (direction,
-           not P&L), so no sign colour here either; the server Decimal STRING is shown verbatim. */
+        /* opening/配股 may carry no price/fee/tax → em-dash (never fabricate a 0). */
+        tr.appendChild(el('td', 'num', t.price == null ? f.NULL_GLYPH : f.price(t.price, t.ccy)));
+        tr.appendChild(el('td', 'num', t.fee == null ? f.NULL_GLYPH : f.money(t.fee, t.ccy)));
+        tr.appendChild(el('td', 'num', t.tax == null ? f.NULL_GLYPH : f.money(t.tax, t.ccy)));
+        /* 合計 is a signed cash-flow (買 −, 賣 +, 期初 −成本, 再投 0) — neutral like the ledger
+           (direction, not P&L), so no sign colour; the server Decimal STRING is shown verbatim. */
         const tdTotal = el('td', 'num');
-        tdTotal.textContent = f.signed(t.total, t.ccy) + ' ' + t.ccy;
+        tdTotal.textContent = f.signed(t.total, t.ccy) + (t.ccy ? ' ' + t.ccy : '');
         tr.appendChild(tdTotal);
         tbody.appendChild(tr);
       });
     }
 
-    function fetchPage(offset) {
-      if (seq !== drawerSeq) return;   // superseded before the request even started
-      window.pdApi.get('/api/ledgers/transactions',
-        { symbol: symbol, limit: LIMIT, offset: offset })
-        .then((resp) => {
-          if (seq !== drawerSeq || !sec.isConnected) return;  // drawer closed / re-opened
-          const rows = (resp && resp.rows) || [];
-          const total = (resp && resp.total_count) || 0;
-          if (!built) {
-            if (total === 0) { sec.remove(); return; }  // no history → omit the section
-            /* Make sure the pager utility is present (index.html omits it) BEFORE building
-               the paginated chrome; the guard re-checks after the extra async hop. */
-            return ensurePager().then(() => {
-              if (seq !== drawerSeq || !sec.isConnected) return;
-              build(total);
-              renderRows(rows);
-              if (pager) pager.update({ limit: LIMIT, offset: offset, totalCount: total });
-            });
-          }
-          renderRows(rows);
-          if (pager) pager.update({ limit: LIMIT, offset: offset, totalCount: total });
-          return undefined;
-        })
-        .catch(() => {
-          if (seq !== drawerSeq || !sec.isConnected) return;
-          if (!built) {
-            sec.replaceChildren();
-            sec.appendChild(secHead('交易明細', null));
-            sec.appendChild(el('div', 'sd-empty', '交易明細暫時無法取得'));
-          } else if (pager) {
-            pager.update({});  // clear the pager busy state; keep the last good page
-          }
-        });
+    /* Reconciliation footer — 期初 X ＋買 Y −賣 Z （＋配股/DRIP W）＝ 部位摘要 N，with a
+       server-provided ✓/⚠ balances flag. Uses the total reconcile, or the per-account one when
+       filtered — both are server-computed (no client share arithmetic). */
+    function renderFooter() {
+      footHost.replaceChildren();
+      const rec = filterAcct
+        ? (reconcile.by_account && reconcile.by_account[filterAcct])
+        : reconcile.total;
+      if (!rec) return;
+      const parts = ['期初 ' + f.num(rec.opening_shares),
+        '＋買 ' + f.num(rec.buy_shares), '−賣 ' + f.num(rec.sell_shares)];
+      if (Number(rec.reinvest_shares) !== 0) {
+        parts.push('＋配股/DRIP ' + f.num(rec.reinvest_shares));
+      }
+      footHost.appendChild(el('span', null,
+        parts.join(' ') + ' ＝ 部位摘要 ' + f.num(rec.book_shares) + ' 股'));
+      const badge = el('span', null, rec.balances ? ' ✓ 對帳一致' : ' ⚠ 對帳不一致');
+      badge.style.cssText = 'margin-left:8px;font-weight:700;color:'
+        + (rec.balances ? cssVar('--down') : cssVar('--up'));
+      footHost.appendChild(badge);
     }
 
-    fetchPage(0);
+    function showPage(offset) {
+      const rows = currentRows();
+      renderRows(rows.slice(offset, offset + LIMIT));
+      if (pager) pager.update({ limit: LIMIT, offset: offset, totalCount: rows.length });
+    }
+
+    function buildFilter() {
+      if (!filterHost) return;
+      filterHost.replaceChildren();
+      const mk = (id, label) => {
+        const active = id === filterAcct;
+        const b = el('button', 'sd-tx-filter-btn' + (active ? ' active' : ''), label);
+        b.type = 'button';
+        b.style.cssText = 'font-size:11px;padding:2px 9px;border-radius:6px;cursor:pointer;'
+          + 'border:1px solid var(--border);background:'
+          + (active ? 'var(--accent-soft)' : 'transparent')
+          + ';color:' + (active ? 'var(--accent)' : 'var(--text-2)');
+        b.addEventListener('click', () => {
+          if (id === filterAcct) return;
+          filterAcct = id;
+          buildFilter();
+          showPage(0);      // reset to page 1 of the filtered set
+          renderFooter();
+        });
+        return b;
+      };
+      filterHost.appendChild(mk(null, '全部'));
+      accounts.forEach((a) => filterHost.appendChild(mk(a.id, acctZh(a.id))));
+    }
+
+    /* Lazy-load pager.js (index.html omits it) then wire client-side pagination; on inject
+       failure the page-1 rows already rendered below stand (graceful degrade). */
+    ensurePager().then(() => {
+      if (seq !== drawerSeq || !sec.isConnected) return;
+      pager = window.pdPager
+        ? window.pdPager.create({ host: pagerHost, limit: LIMIT, offset: 0,
+            totalCount: currentRows().length, onPage: (offset) => showPage(offset) })
+        : null;
+    });
+
+    buildFilter();
+    renderRows(currentRows().slice(0, LIMIT));
+    renderFooter();
     return sec;
   }
 

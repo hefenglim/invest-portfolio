@@ -403,6 +403,30 @@ def test_kpis_total_return_excludes_fx_double_count(
     eqd(k["fx_realized"], _D("64000") - _D("2000") * _D("31"))   # 2,000
 
 
+def test_fx_unrealized_total_is_server_computed_string(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """F10: 未實現匯損益（合計）is a SERVER-computed money field (unrealized_fx_total) on
+    each per-account FX-exposure object — a Decimal STRING equal to
+    ``unrealized_fx_stocks + unrealized_fx_cash`` — so the frontend DISPLAYS it and never
+    re-sums two Decimal strings with JS floats (the locked no-money-math-in-frontend
+    invariant). None whenever either component is None."""
+    by_account = _dashboard(dashboard_client_factory)["fx"]["by_account"]
+    for acct in by_account.values():
+        st, ca, tot = (acct["unrealized_fx_stocks"], acct["unrealized_fx_cash"],
+                       acct["unrealized_fx_total"])
+        if st is None or ca is None:
+            assert tot is None
+        else:
+            assert isinstance(tot, str)  # money is a STRING, never a JSON number
+            eqd(tot, _D(st) + _D(ca))
+    # Hand-computed against the seeded scenario (spot USD/TWD=32, USD/MYR=4.40):
+    #   schwab  : stocks 34,620 + cash -21,100 = 13,520 TWD.
+    #   moomoo_my: stocks -425 + cash 0        =   -425 MYR.
+    eqd(by_account["schwab"]["unrealized_fx_total"], _D("34620") + _D("-21100"))   # 13,520
+    eqd(by_account["moomoo_my"]["unrealized_fx_total"], _D("-425") + _D("0"))      # -425
+
+
 def test_returns_by_currency_never_cross_summed(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:

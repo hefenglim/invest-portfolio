@@ -35,11 +35,12 @@ def _loopback_sockets() -> Iterator[None]:
 
 
 def _seed_rebate(conn: object) -> None:
-    """Golden scenario + a prior-calendar-month tw_broker trade WITH a real fee.
+    """Golden scenario + a prior-month PENDING trade + a current-month ACCRUING trade.
 
-    The trade month (5th of last month, relative to the real clock the flow server runs
-    under) is always < the current month -> its rebate is PENDING; fee 142 -> estimate
-    floor(142 × 0.77) = 109.
+    The prior-month trade (5th of last month, relative to the real clock the flow server
+    runs under) is always < the current month -> its rebate is PENDING; fee 142 -> estimate
+    floor(142 × 0.77) = 109. The current-month trade (1st of this month) is NOT yet due ->
+    it surfaces in the 當月累計預估（未到期）section (owner #1), never in the pending list.
     """
     _seed_golden(conn)  # type: ignore[arg-type]
     prior_month_last = date.today().replace(day=1) - timedelta(days=1)
@@ -49,6 +50,11 @@ def _seed_rebate(conn: object) -> None:
         account_id="tw_broker", symbol="2330", side=Side.BUY,
         quantity=Decimal("1000"), price=Decimal("500"), fees=Decimal("142"),
         tax=Decimal("0"), trade_date=trade_date)
+    insert_transaction(
+        conn,  # type: ignore[arg-type]
+        account_id="tw_broker", symbol="2330", side=Side.BUY,
+        quantity=Decimal("1000"), price=Decimal("500"), fees=Decimal("142"),
+        tax=Decimal("0"), trade_date=date.today().replace(day=1))
 
 
 @pytest.mark.e2e
@@ -79,15 +85,27 @@ def test_rebate_inbox_two_panel_and_confirm(
         page.wait_for_selector("#inbox-list .inbox-note")
         page.wait_for_selector("#rebate-list .inbox-item")
         # sidebar badge counts the pending rebate (1 rebate + 0 dividends) on every page.
+        # The current-month ACCRUING trade is NOT counted, so the badge stays at 1.
         page.wait_for_selector(".sb-badge-alert")
+        assert page.inner_text(".sb-badge-alert").strip() == "1"
 
-        # 明細 (FU-D6): expand the collapsed per-trade breakdown. The sole prior-month trade
-        # renders (2330 buy, fee 142 -> 預估 109). The 明細 toggle is the item's only .btn-sm,
-        # so 確認入帳 stays the only .btn-primary (the confirm selector below is unaffected).
-        page.click("#rebate-list .inbox-item .btn-sm")
+        # owner #3: the WHOLE bar (.inbox-main) toggles the per-trade 明細 — no extra button
+        # is added, so the item keeps exactly one .btn-sm (明細) and one .btn-primary (確認入帳),
+        # preserving the confirm/toggle selectors below.
+        item = "#rebate-list .inbox-item"
+        assert page.locator(f"{item} .btn-sm").count() == 1
+        assert page.locator(f"{item} .btn-primary").count() == 1
+        page.click(f"{item} .inbox-main")   # whole-bar click expands the collapsed detail
         page.wait_for_selector("#rebate-list .rbt-detail:not([hidden]) .rbt-table tbody tr")
         detail_text = page.inner_text("#rebate-list .rbt-detail")
         assert "142" in detail_text and "109" in detail_text and "2330" in detail_text
+        page.click(f"{item} .inbox-main")   # whole-bar click collapses it again
+        page.wait_for_selector("#rebate-list .rbt-detail", state="hidden")
+
+        # owner #1: the current-month trade shows in the 當月累計預估（未到期）section as a
+        # NON-confirmable forecast — no confirm/skip buttons at all.
+        page.wait_for_selector("#rebate-accruing:not([hidden]) .rbt-accruing-item")
+        assert page.locator("#rebate-accruing-list .btn").count() == 0
 
         # 確認入帳 -> a small prompt with the estimate PREFILLED into an editable amount input.
         page.click("#rebate-list .inbox-item .btn-primary")
@@ -101,6 +119,9 @@ def test_rebate_inbox_two_panel_and_confirm(
             f"confirm status {resp_info.value.status}"
         )
         page.wait_for_selector("#rebate-list .inbox-note")  # back to the empty state
+        # F2b/F8: the sidebar 收件匣 badge refreshes to 0 after the confirm self-heals the
+        # month (rebate 0 + dividend 0) — the badge is removed, not left stale.
+        page.wait_for_selector(".sb-badge-alert", state="detached")
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)

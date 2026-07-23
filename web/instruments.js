@@ -46,7 +46,8 @@
     window.pdInstQuickAdd({
       symbol: sym,
       market: market,
-      lockSymbol: true,
+      /* A3/F9c: lockSymbol RETIRED — the dialog's symbol field is always editable so a wrong
+         AI-parsed code can be fixed in place; passing a locked flag re-introduced that dead-end. */
       onConfirm: async () => {
         $('#new-symbol').value = '';
         await refresh();
@@ -200,37 +201,45 @@
         if (!i.archived && i.market === 'TW') {
           const rp = el('button', 'btn', '重新探測'); rp.type = 'button';
           rp.title = '重新探測 TWSE / TPEx 板別並儲存結果';
+          /* F4: the handler is a TWO-await chain (probe → PUT). pdBusy disables the button, but
+             an explicit in-flight guard makes the double-click race impossible even if a second
+             click slips in before the disable paints. One try/finally clears it on every exit. */
+          let probing = false;
           rp.addEventListener('click', async () => {
+            if (probing) return;
+            probing = true;
             const restore = window.pdBusy ? window.pdBusy(rp, '探測中…') : () => {};
-            let resp;
             try {
-              resp = await window.pdApi.post('/api/instruments/probe', { symbol: i.symbol });
-            } catch (err) {
-              restore();
-              if (window.toast) window.toast('探測失敗', 'fail', err && err.message ? err.message : undefined);
-              return;
-            }
-            /* persist the probe result (2026-07-02) — the old flow only toasted it,
-               leaving an unresolved board unresolved forever. */
-            const board = resp && resp.board;
-            if (board) {
+              let resp;
               try {
-                await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol),
-                  { board: board });
+                resp = await window.pdApi.post('/api/instruments/probe', { symbol: i.symbol });
               } catch (err) {
-                restore();
-                if (window.toast) window.toast('板別儲存失敗', 'fail', err && err.message ? err.message : undefined);
+                if (window.toast) window.toast('探測失敗', 'fail', err && err.message ? err.message : undefined);
                 return;
               }
+              /* persist the probe result (2026-07-02) — the old flow only toasted it,
+                 leaving an unresolved board unresolved forever. */
+              const board = resp && resp.board;
+              if (board) {
+                try {
+                  await window.pdApi.put('/api/instruments/' + encodeURIComponent(i.symbol),
+                    { board: board });
+                } catch (err) {
+                  if (window.toast) window.toast('板別儲存失敗', 'fail', err && err.message ? err.message : undefined);
+                  return;
+                }
+              }
+              if (window.toast) {
+                window.toast(board ? '板別已更新' : '探測完成',
+                  board ? 'ok' : 'fail',
+                  i.symbol + ' 判定 ' + (resp && resp.board_label ? resp.board_label : '未解析') +
+                  (board ? '（已儲存）' : '，未變更'));
+              }
+              if (board) await refresh();
+            } finally {
+              probing = false;
+              restore();
             }
-            restore();
-            if (window.toast) {
-              window.toast(board ? '板別已更新' : '探測完成',
-                board ? 'ok' : 'fail',
-                i.symbol + ' 判定 ' + (resp && resp.board_label ? resp.board_label : '未解析') +
-                (board ? '（已儲存）' : '，未變更'));
-            }
-            if (board) await refresh();
           });
           acts.appendChild(rp);
         }
@@ -261,7 +270,7 @@
       sector: i.sector || '',
       industry: i.industry || '',
       board: i.board || null,
-      is_etf: !!i.etf || !!i.is_etf,
+      is_etf: !!i.is_etf,  // F5: the wire (_element) only ever sends `is_etf`; the old `i.etf` dual-read was dead
       ccy: i.ccy,
       target_low: i.target_low,   // string | null | undefined — the builder null-guards
       target_high: i.target_high,
@@ -442,7 +451,14 @@
   }
 
   render();  // empty table before the fetch resolves
-  $('#inst-search').addEventListener('input', (e) => render(e.target.value));
+  /* F1: debounce the search re-render — render() rebuilds every row + its listeners, so a
+     per-keystroke rebuild churns the whole table; a short debounce coalesces fast typing. */
+  let searchT = null;
+  $('#inst-search').addEventListener('input', (e) => {
+    const v = e.target.value;
+    if (searchT) clearTimeout(searchT);
+    searchT = setTimeout(() => render(v), 150);
+  });
   $('#toggle-archived').addEventListener('click', () => {
     showArchived = !showArchived;
     render($('#inst-search').value);

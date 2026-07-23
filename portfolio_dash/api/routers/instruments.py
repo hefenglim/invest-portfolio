@@ -4,7 +4,7 @@ Thin over data_ingestion.store + pricing.store reads. Computes nothing of record
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -171,6 +171,71 @@ class AiResolveBody(BaseModel):
     sector_only: bool = False
 
 
+def _regate_keys(query: str) -> list[str]:
+    """Registry re-gate lookup keys for a raw dialog query (R8.1 Wave B, F4c).
+
+    The quick-add dialog sends the symbol + name field concatenated (e.g. ``"2330 台積電"``), so
+    the WHOLE string never matches a registered symbol row and the registered short-circuit at
+    the top of :func:`ai_resolve` used to miss — forcing an LLM call (and, downstream, a
+    re-lookup that could wipe the picked candidate). Try the full upper string first (a bare
+    ``"symbol"`` query), then the leading whitespace-delimited token (the concatenated case), so
+    an already-registered symbol short-circuits with NO LLM call. Deduped, order-preserving."""
+    keys: list[str] = []
+    full = query.strip().upper()
+    if full:
+        keys.append(full)
+    first = full.split(None, 1)[0] if full else ""
+    if first and first not in keys:
+        keys.append(first)
+    return keys
+
+
+# --- R8.1 Wave B (F4c): in-process AI-resolve dedup cache ------------------------------
+# The dialog can fire ai-resolve repeatedly for the same settled input (auto on a lookup miss
+# PLUS a manual retry), and the concatenated-query re-gate above only catches symbols that are
+# ALREADY registered. For a not-yet-registered symbol, an identical query within a short window
+# must not re-pay the LLM. Mirror the llm_insight "cache everything" posture, kept deliberately
+# simple/in-process (1-2 users, single instance): a plain dict keyed on
+# (normalized query + market + mode + prompt version) → the already-computed reply, with a short
+# TTL and a small size cap. Degradation (a raising completer) is NEVER cached — the raise
+# happens before the store, so an outage never freezes a stale error.
+_AI_RESOLVE_TTL_S = 300
+_AI_RESOLVE_CACHE_CAP = 256
+# fingerprint -> (expiry, response). Reset per-test via the autouse fixture in the ai-resolve
+# contract tests (the frozen test clock never expires an entry on its own).
+_AI_RESOLVE_CACHE: dict[str, tuple[datetime, dict[str, Any]]] = {}
+
+
+def _ai_resolve_fingerprint(query: str, market_raw: str, sector_only: bool) -> str:
+    """Cache key for one ai-resolve query: normalized query + market + mode + prompt version.
+
+    Including the prompt version means a prompt change invalidates every cached reply (the same
+    fingerprint discipline the ``insights`` cache uses)."""
+    return "\x1f".join((
+        query.strip().upper(),
+        market_raw.strip().upper(),
+        "S" if sector_only else "R",
+        AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+    ))
+
+
+def _ai_resolve_cache_get(fp: str, now: datetime) -> dict[str, Any] | None:
+    hit = _AI_RESOLVE_CACHE.get(fp)
+    if hit is None:
+        return None
+    expiry, resp = hit
+    if now >= expiry:
+        _AI_RESOLVE_CACHE.pop(fp, None)
+        return None
+    return resp
+
+
+def _ai_resolve_cache_put(fp: str, resp: dict[str, Any], now: datetime) -> None:
+    if len(_AI_RESOLVE_CACHE) >= _AI_RESOLVE_CACHE_CAP:
+        _AI_RESOLVE_CACHE.clear()  # simple bound — a full flush is fine at this data scale
+    _AI_RESOLVE_CACHE[fp] = (now + timedelta(seconds=_AI_RESOLVE_TTL_S), resp)
+
+
 class AiResolveCandidate(BaseModel):
     """One uncertain-case candidate the model offers (2-5 when confidence is not high)."""
 
@@ -225,22 +290,35 @@ def ai_resolve(
     market = _parse_market(body.market)
 
     # (a) re-gate: an already-registered ACTIVE symbol resolves from the registry, no LLM call.
-    #     Skipped for sector-only re-detect (which must re-classify a known symbol via the LLM).
+    #     The dialog query is "symbol name" concatenated, so try the bare symbol token too (F4c)
+    #     — otherwise a registered symbol never short-circuits. Skipped for sector-only re-detect
+    #     (which must re-classify a known symbol via the LLM).
     if not body.sector_only:
-        existing = get_instrument(conn, query.upper())
-        if existing is not None and not existing.archived:
-            return {
-                "status": "resolved",
-                "symbol": existing.symbol,
-                "name": existing.name,
-                "sector": existing.sector,
-                "industry": existing.industry,
-                "confidence": "high",
-                "verified": True,
-                "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
-            }
+        for key in _regate_keys(query):
+            existing = get_instrument(conn, key)
+            if existing is not None and not existing.archived:
+                return {
+                    "status": "resolved",
+                    "symbol": existing.symbol,
+                    "name": existing.name,
+                    "sector": existing.sector,
+                    "industry": existing.industry,
+                    "confidence": "high",
+                    "verified": True,
+                    "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+                }
 
-    # (b) single deterministic LLM call (temperature=0).
+    # (a2) dedup cache: an identical NOT-yet-registered query within the TTL returns the already
+    #      computed reply without re-paying the LLM (F4c). Placed AFTER the registry re-gate so a
+    #      freshly-registered symbol is never masked by a stale cached candidates reply.
+    fp = _ai_resolve_fingerprint(query, body.market, body.sector_only)
+    cached = _ai_resolve_cache_get(fp, now)
+    if cached is not None:
+        return cached
+
+    # (b) single deterministic LLM call (temperature=0). A raising completer (budget / not
+    #     activated / provider) propagates to the global handlers BEFORE any cache store, so a
+    #     transient outage is never frozen into the cache.
     prompt = AI_INSTRUMENT_RESOLVE_PROMPT.format(
         query=query, market=body.market.strip() or "（未提供）"
     )
@@ -249,72 +327,78 @@ def ai_resolve(
         conn=conn, temperature=0,
     )
 
+    result: dict[str, Any]
     # honest not-found: the model could not identify the instrument — never invent a code.
     if reply.not_found or not reply.symbol.strip():
-        return {
+        result = {
             "status": "not_found",
             "message": "查無此標的 — 請確認名稱與市場是否正確",
             "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
         }
+    else:
+        # (c) sector validation: canonicalize; an off-vocabulary sector downgrades to low.
+        primary_symbol = reply.symbol.strip().upper()
+        sector = canonical_sector(reply.gics_sector)
+        sector_ok = sector in CANONICAL_KEYS
+        confidence = reply.confidence.strip().lower()
+        if confidence not in ("high", "medium", "low"):
+            confidence = "low"
+        if not sector_ok:
+            confidence = "low"
+        industry = (reply.gics_industry or "").strip() or None
 
-    # (c) sector validation: canonicalize; an off-vocabulary sector downgrades to low.
-    primary_symbol = reply.symbol.strip().upper()
-    sector = canonical_sector(reply.gics_sector)
-    sector_ok = sector in CANONICAL_KEYS
-    confidence = reply.confidence.strip().lower()
-    if confidence not in ("high", "medium", "low"):
-        confidence = "low"
-    if not sector_ok:
-        confidence = "low"
-    industry = (reply.gics_industry or "").strip() or None
+        # (d) provider verification: the returned symbol must resolve via the REAL quote/name
+        #     lookup (the sole registration authority) before any auto-fill.
+        verified = False
+        provider_name = ""
+        if market is not None:
+            lk = lookup_instrument(conn, symbol=primary_symbol, market=market, now=now)
+            verified = lk.found
+            provider_name = lk.name
 
-    # (d) provider verification: the returned symbol must resolve via the REAL quote/name
-    #     lookup (the sole registration authority) before any auto-fill.
-    verified = False
-    provider_name = ""
-    if market is not None:
-        lk = lookup_instrument(conn, symbol=primary_symbol, market=market, now=now)
-        verified = lk.found
-        provider_name = lk.name
+        if verified and confidence == "high":
+            result = {
+                "status": "resolved",
+                "symbol": primary_symbol,
+                "name": provider_name or reply.name.strip(),  # prefer the provider's name
+                "sector": sector,
+                "industry": industry,
+                "confidence": "high",
+                "verified": True,
+                "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+            }
+        else:
+            # verification fail OR medium/low → candidates; the UNVERIFIED primary goes FIRST.
+            candidates: list[dict[str, Any]] = [{
+                "symbol": primary_symbol,
+                "name": reply.name.strip(),
+                "sector": sector if sector_ok else "",
+                "verified": False,
+            }]
+            for cand in reply.candidates:
+                csym = cand.symbol.strip().upper()
+                if not csym or csym == primary_symbol:
+                    continue
+                csector = (
+                    canonical_sector(cand.gics_sector) if cand.gics_sector.strip() else ""
+                )
+                candidates.append({
+                    "symbol": csym,
+                    "name": cand.name.strip(),
+                    "sector": csector if csector in CANONICAL_KEYS else "",
+                    "verified": False,
+                })
+                if len(candidates) >= 5:
+                    break
+            result = {
+                "status": "candidates",
+                "candidates": candidates,
+                "confidence": confidence,
+                "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+            }
 
-    if verified and confidence == "high":
-        return {
-            "status": "resolved",
-            "symbol": primary_symbol,
-            "name": provider_name or reply.name.strip(),  # prefer the provider's name
-            "sector": sector,
-            "industry": industry,
-            "confidence": "high",
-            "verified": True,
-            "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
-        }
-
-    # verification fail OR medium/low → candidates; the UNVERIFIED primary goes FIRST.
-    candidates: list[dict[str, Any]] = [{
-        "symbol": primary_symbol,
-        "name": reply.name.strip(),
-        "sector": sector if sector_ok else "",
-        "verified": False,
-    }]
-    for cand in reply.candidates:
-        csym = cand.symbol.strip().upper()
-        if not csym or csym == primary_symbol:
-            continue
-        csector = canonical_sector(cand.gics_sector) if cand.gics_sector.strip() else ""
-        candidates.append({
-            "symbol": csym,
-            "name": cand.name.strip(),
-            "sector": csector if csector in CANONICAL_KEYS else "",
-            "verified": False,
-        })
-        if len(candidates) >= 5:
-            break
-    return {
-        "status": "candidates",
-        "candidates": candidates,
-        "confidence": confidence,
-        "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
-    }
+    _ai_resolve_cache_put(fp, result, now)
+    return result
 
 
 _TW_BOARDS = {"TWSE", "TPEx"}

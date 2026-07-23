@@ -106,6 +106,11 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         for aid, m in meta.items()
     }
     insts = list_instruments(conn)
+    # `archived` is wired (Fable F7) so the shared 代號 picker excludes archived symbols from
+    # its 未持有 candidate group (a stealth 缺價 risk — an archived symbol is off the fetch
+    # scopes, so registering a trade against it silently ships without a price). Held positions
+    # are unaffected: they come from the holdings read, not this registry list, and the
+    # "held => not archived" booking invariant keeps a live symbol un-archived anyway.
     instruments = [
         {
             "symbol": i.symbol,
@@ -113,6 +118,7 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             "market": i.market.value,
             "ccy": i.quote_ccy.value,
             "etf": i.is_etf,
+            "archived": i.archived,
         }
         for i in insts
     ]

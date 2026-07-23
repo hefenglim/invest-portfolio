@@ -13,6 +13,9 @@ from portfolio_dash.shared.models.ledger import FXConversion, Transaction
 SCHWAB = Account(account_id="schwab", name="Schwab", broker="Schwab",
                  settlement_ccy=Currency.USD, funding_ccy=Currency.TWD,
                  dividend_model="drip_us")
+MOOMOO = Account(account_id="moomoo_my", name="Moomoo", broker="Moomoo",
+                 settlement_ccy=Currency.USD, funding_ccy=Currency.MYR,
+                 dividend_model="drip_us")
 AAPL = Instrument(symbol="AAPL", market=Market.US, quote_ccy=Currency.USD,
                   sector="Tech", name="Apple")
 INSTR = {"AAPL": AAPL}
@@ -40,9 +43,52 @@ def test_fx_summary_rollup_and_worked_example() -> None:
     r = summary.by_account["schwab"]
     assert r.unrealized_fx_stocks == Decimal("10800")
     assert r.unrealized_fx_cash == Decimal("1000")
+    assert r.unrealized_fx_total == Decimal("11800")  # server-computed combined (stocks + cash)
     assert r.realized_fx == Decimal("0")
     assert summary.reporting_unrealized_fx == Decimal("11800")  # home TWD == reporting TWD
     assert summary.reporting_realized_fx == Decimal("0")
+
+
+def test_fx_summary_unrealized_total_multi_account() -> None:
+    """F10: ``unrealized_fx_total`` is the SERVER-computed combined unrealized FX per
+    account (stocks + cash) — a Decimal string on the wire so the frontend never re-sums
+    the two components with JS floats. None whenever either component is None. Verified
+    across two FX-exposed accounts (one with a cost basis, one with none)."""
+    def spot(frm: Currency, to: Currency) -> Decimal:
+        if frm is to:
+            return Decimal("1")
+        rates = {
+            (Currency.USD, Currency.TWD): Decimal("33"),
+            (Currency.USD, Currency.MYR): Decimal("4.4"),
+            (Currency.MYR, Currency.TWD): Decimal("7"),
+        }
+        return rates[(frm, to)]
+
+    accts = {"schwab": SCHWAB, "moomoo_my": MOOMOO}
+    # schwab: TWD->USD @ 32 avg; buy spends 9,000 USD -> cash 1,000; stock value 10,800.
+    convs = [FXConversion(account_id="schwab", date=date(2025, 1, 1), from_ccy=Currency.TWD,
+                          from_amount=Decimal("320000"), to_ccy=Currency.USD,
+                          to_amount=Decimal("10000"))]
+    txs = [Transaction(account_id="schwab", symbol="AAPL", side=Side.BUY, quantity=Decimal("90"),
+                       price=Decimal("100"), fees=Decimal("0"), tax=Decimal("0"),
+                       trade_date=date(2025, 1, 2))]
+    # moomoo_my: NO conversions -> no avg_rate -> unrealized components (and total) are None.
+    foreign_exposure = {
+        "schwab": (Currency.USD, Decimal("10800")),
+        "moomoo_my": (Currency.USD, Decimal("5000")),
+    }
+    summary = compute_fx_summary(
+        accts, INSTR, txs, [], convs, foreign_exposure, spot, Currency.TWD
+    )
+    sch = summary.by_account["schwab"]
+    assert sch.unrealized_fx_stocks == Decimal("10800")   # 10800 * (33 - 32)
+    assert sch.unrealized_fx_cash == Decimal("1000")      # 1000 * (33 - 32)
+    assert sch.unrealized_fx_total == Decimal("11800")    # server sum, not client-side
+    assert sch.unrealized_fx_total == sch.unrealized_fx_stocks + sch.unrealized_fx_cash
+    moo = summary.by_account["moomoo_my"]
+    assert moo.unrealized_fx_stocks is None
+    assert moo.unrealized_fx_cash is None
+    assert moo.unrealized_fx_total is None                # None when components are None
 
 
 def test_decomposition_identity_no_double_count() -> None:

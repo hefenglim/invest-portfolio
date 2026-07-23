@@ -24,7 +24,7 @@ import pytest
 from playwright.sync_api import Page, expect
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
-from portfolio_dash.data_ingestion.store import upsert_instrument
+from portfolio_dash.data_ingestion.store import set_instrument_archived, upsert_instrument
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from tests.conftest import _seed_golden
@@ -106,6 +106,87 @@ def test_manual_grouped_picker_groups_and_market_filter(
 
     assert not console_errors and not page_errors, (
         f"grouped picker flow: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_manual_picker_open_shows_full_list_type_filters(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """Fable F5 (open-vs-type): opening the picker by CLICK shows the FULL grouped list even when
+    the field already holds a previously-selected symbol — the value is IGNORED on open. Only a
+    genuine keystroke filters. Before the fix, re-opening filtered down to the one selected code
+    (2317 vanished); the shared component fixes this everywhere at once."""
+    base = flow_server(_seed_picker)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/trades.html", wait_until="load")
+    page.wait_for_selector("#m-account option", state="attached")
+    page.select_option("#m-account", "tw_broker")
+
+    # select 2330 via the picker so the field carries a value.
+    page.click("#m-symbol")
+    page.wait_for_selector("#m-sym-picker", state="visible")
+    page.click("#m-sym-list button:has-text('2330')")
+    assert page.input_value("#m-symbol") == "2330"
+    page.wait_for_selector("#m-sym-picker", state="hidden")
+
+    # RE-OPEN by click → the FULL grouped list shows, NOT filtered to the selected 2330.
+    page.click("#m-symbol")
+    page.wait_for_selector("#m-sym-picker", state="visible")
+    page.wait_for_selector("#m-sym-list button:has-text('2330')")   # 已持有 still present
+    page.wait_for_selector("#m-sym-list button:has-text('2317')")   # 未持有 NOT filtered away
+
+    # TYPING filters: entering 2317 narrows to that symbol (2330 drops out).
+    page.fill("#m-symbol", "2317")
+    page.wait_for_selector("#m-sym-list button:has-text('2317')")
+    expect(page.locator("#m-sym-list button:has-text('2330')")).to_have_count(0)
+
+    assert not console_errors and not page_errors, (
+        f"open-vs-type flow: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+def _seed_archived(conn: Any) -> None:
+    """Golden + a live-but-unheld TW 2317 (a valid 未持有 candidate) + an ARCHIVED 8888 that must
+    never appear as a 未持有 pick (Fable F7 — archived symbols are off the fetch scopes)."""
+    _seed_golden(conn)
+    upsert_instrument(conn, Instrument(symbol="2317", market=Market.TW, quote_ccy=Currency.TWD,
+                                       sector="Electronics", name="Hon Hai", board="TWSE"))
+    upsert_instrument(conn, Instrument(symbol="8888", market=Market.TW, quote_ccy=Currency.TWD,
+                                       sector="Electronics", name="Archived Co", board="TWSE"))
+    set_instrument_archived(conn, "8888", True)
+    conn.commit()
+
+
+@pytest.mark.e2e
+def test_manual_picker_excludes_archived(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """Fable F7: an ARCHIVED instrument is excluded from the picker's 未持有 candidate group — it
+    is a stealth 缺價 risk (off the quote/signal fetch scopes). Even typing its exact code surfaces
+    nothing (it is excluded from candidates, not merely filtered out of view)."""
+    base = flow_server(_seed_archived)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/trades.html", wait_until="load")
+    page.wait_for_selector("#m-account option", state="attached")
+    page.select_option("#m-account", "tw_broker")
+
+    page.click("#m-symbol")
+    page.wait_for_selector("#m-sym-picker", state="visible")
+    page.wait_for_selector("#m-sym-list button:has-text('2317')")     # the live candidate shows
+    assert page.locator("#m-sym-list button:has-text('8888')").count() == 0  # archived hidden
+
+    # typing the archived code surfaces nothing — it is not a candidate at all.
+    page.fill("#m-symbol", "8888")
+    page.wait_for_selector("#m-sym-empty", state="visible")
+    assert page.locator("#m-sym-list button:has-text('8888')").count() == 0
+
+    assert not console_errors and not page_errors, (
+        f"archived-exclusion flow: console={console_errors!r} page={page_errors!r}"
     )
 
 

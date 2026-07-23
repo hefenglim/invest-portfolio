@@ -387,7 +387,8 @@
         "foreign_stock_value": "4250",
         "realized_fx": "0",
         "unrealized_fx_stocks": "-425.0",
-        "unrealized_fx_cash": "-0.0"
+        "unrealized_fx_cash": "-0.0",
+        "unrealized_fx_total": "-425.0"
       },
       "schwab": {
         "account_id": "schwab",
@@ -399,7 +400,8 @@
         "foreign_stock_value": "34620.0",
         "realized_fx": "2000",
         "unrealized_fx_stocks": "34620.0",
-        "unrealized_fx_cash": "-21100"
+        "unrealized_fx_cash": "-21100",
+        "unrealized_fx_total": "13520.0"
       }
     },
     "reporting_currency": "TWD",

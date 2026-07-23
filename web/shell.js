@@ -223,6 +223,14 @@
       .catch(() => SYMBOLS);
     return _symbolsPromise;
   }
+  /* F2b/F8: the global-search instrument registry is cached per page load; adding an
+     instrument (觀察清單/quick-add) elsewhere would otherwise not appear in search until a
+     reload. Expose a trivial invalidation hook so those surfaces can drop the cache — the
+     next pdLoadSymbols() refetches GET /api/instruments. */
+  window.pdInvalidateSymbols = function () {
+    _symbolsPromise = null;
+    SYMBOLS = [];
+  };
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -744,30 +752,46 @@
   /* 收件匣 sidebar badge (R6 item 4; Wave B): ONE pending-count on the 收件匣 nav item =
      配息偵測 + 待確認折讓款, so both surfaces are visible from ANY page. Two lightweight
      count fetches summed into a single badge number. Non-critical: silent on failure. */
-  function pdInitInboxBadge() {
-    if (page === 'login') return;
-    pdEnsureApi()
+
+  /* Paint (or update/remove) the badge from already-fetched counts. IDEMPOTENT: it targets
+     the SINGLE `.sb-badge-alert` on the 收件匣 nav item — updating its text when the count
+     changed and REMOVING it when the count drops to 0 — so repeated refreshes never stack
+     duplicate badges (F2b/F8). Leaves any static `.sb-badge` (non-alert) untouched. */
+  function pdPaintInboxBadge(dv, rb) {
+    const n = dv + rb;
+    let nav = null;
+    const items = document.querySelectorAll('#sidebar .sb-item');
+    for (const a of items) {
+      if (a.getAttribute('href') === 'dividend-inbox.html') { nav = a; break; }
+    }
+    if (!nav) return;
+    let b = nav.querySelector('.sb-badge-alert');
+    if (!n) { if (b) b.remove(); return; }
+    if (!b) { b = el('span', 'sb-badge sb-badge-alert', String(n)); nav.appendChild(b); }
+    else { b.textContent = String(n); }
+    b.title = n + ' 筆待確認（配息 ' + dv + '・折讓款 ' + rb + '）';
+  }
+
+  /* Fetch the two counts and repaint. Exposed as window.pdRefreshInboxBadge so any surface
+     that changes the pending set (a rebate confirm/skip, a dividend commit, an inbox action)
+     can refresh the badge WITHOUT a full page reload (F2b/F8 — the badge was previously
+     computed once at load and went stale). Returns the promise for callers that want to await
+     it. Non-critical: silent on failure, so it never blocks or errors a caller's flow. */
+  function pdRefreshInboxBadge() {
+    if (page === 'login') return Promise.resolve();
+    return pdEnsureApi()
       .then((ok) => (ok ? Promise.all([
         window.pdApi.get('/api/dividend-inbox/count').catch(() => null),
         window.pdApi.get('/api/rebates/count').catch(() => null),
       ]) : null))
       .then((results) => {
         if (!results) return;
-        const dv = (results[0] && results[0].count) || 0;
-        const rb = (results[1] && results[1].count) || 0;
-        const n = dv + rb;
-        if (!n) return;
-        const items = document.querySelectorAll('#sidebar .sb-item');
-        for (const a of items) {
-          if (a.getAttribute('href') === 'dividend-inbox.html') {
-            const b = el('span', 'sb-badge sb-badge-alert', String(n));
-            b.title = n + ' 筆待確認（配息 ' + dv + '・折讓款 ' + rb + '）';
-            a.appendChild(b);
-            break;
-          }
-        }
+        pdPaintInboxBadge(
+          (results[0] && results[0].count) || 0,
+          (results[1] && results[1].count) || 0);
       })
       .catch(() => { /* silent: the badge is a hint, not a gate */ });
   }
-  pdInitInboxBadge();
+  window.pdRefreshInboxBadge = pdRefreshInboxBadge;
+  pdRefreshInboxBadge();
 })();

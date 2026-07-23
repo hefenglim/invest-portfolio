@@ -82,9 +82,10 @@
               <div class="field" id="m-symbol-field" style="position:relative;">
                 <label for="m-symbol">代號</label>
                 <input class="input" id="m-symbol" placeholder="輸入或點選代號…" spellcheck="false" autocomplete="off"></input>
-                <!-- #8 grouped 代號 picker (已持有／未持有, market-filtered by the selected
-                     account), modeled on the dividend picker. Shell is inline-styled from
-                     input.js (styleManualPicker); the footer 「＋新增標的」 opens the shared
+                <!-- Wave C grouped 代號 picker (已持有／未持有, market-filtered by the selected
+                     account, archived excluded). Driven by the SHARED component web/sym-picker.js
+                     (window.pdSymPicker) — same shell as the dividend + opening pickers; the shell
+                     is inline-styled by the component; the footer 「＋新增標的」 opens the shared
                      quick-add dialog. -->
                 <div class="sym-picker" id="m-sym-picker" hidden="hidden">
                   <div class="sym-pick-empty" id="m-sym-empty" hidden="hidden"></div>
@@ -93,9 +94,6 @@
                     <button type="button" id="m-sym-addnew" class="sym-pick-addnew">＋新增標的</button>
                   </div>
                 </div>
-                <!-- #m-symbols datalist retained for #o-symbol (期初庫存) autocomplete; the
-                     manual 代號 field no longer uses it (replaced by the grouped picker). -->
-                <datalist id="m-symbols"></datalist>
                 <span class="hint" id="m-sym-hint"></span>
               </div>
               <div class="field">
@@ -256,7 +254,7 @@
           <div class="stack-card"><h3>期初庫存</h3>
             <div class="form-grid">
               <div class="field"><label for="o-account">帳戶</label><select class="select" id="o-account"></select></div>
-              <div class="field"><label for="o-symbol">代號</label><input class="input" id="o-symbol" list="m-symbols" spellcheck="false"></input></div>
+              <div class="field" id="o-symbol-field" style="position:relative;"><label for="o-symbol">代號</label><input class="input" id="o-symbol" placeholder="輸入或點選代號…" spellcheck="false" autocomplete="off"></input><div class="sym-picker" id="o-sym-picker" hidden="hidden"><div class="sym-pick-empty" id="o-sym-empty" hidden="hidden"></div><div id="o-sym-list"></div><div class="sym-pick-foot" id="o-sym-foot"><button type="button" id="o-sym-addnew" class="sym-pick-addnew">＋新增標的</button></div></div></div>
               <div class="field"><label for="o-shares">股數</label><input class="input" id="o-shares" type="number"></input></div>
               <div class="field"><label for="o-total">原始總成本</label><input class="input" id="o-total" type="number" step="0.01"></input></div>
               <div class="field"><label for="o-avg-view">原始均價（自動）</label><div class="input" id="o-avg-view" aria-live="polite" style="display:flex;align-items:center;color:var(--text-2);background:var(--panel-2);cursor:default;">—</div></div>
@@ -342,6 +340,7 @@
 <script src="export.js?v=0.1.22"></script>
 <script src="alerts.js?v=0.1.22"></script>
 <script src="inst-quickadd.js?v=0.1.22"></script>
+<script src="sym-picker.js?v=0.1.22"></script>
 <script src="input.js?v=0.1.22"></script>
 <script src="ledger.js?v=0.1.22"></script>
 <script>

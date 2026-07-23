@@ -71,7 +71,7 @@
   }
 
   /* A `.btn-sm` toggle (deliberately NOT `.btn-primary`, so the e2e's single-primary =
-     確認入帳 invariant holds) that shows/hides a `buildDetail` block. */
+     確認入帳 invariant holds) that shows/hides a `buildDetail` block. Used by the 已略過 rows. */
   function makeToggle(detailEl) {
     const btn = el('button', 'btn btn-sm', '明細 ▸');
     btn.type = 'button';
@@ -85,6 +85,30 @@
     return btn;
   }
 
+  /* Owner #3: make a whole row bar clickable to expand/collapse its 明細 without adding a
+     button — so the e2e invariant (明細 is the item's ONLY `.btn-sm`, 確認入帳 the ONLY
+     `.btn-primary`) is preserved. `target` (the `.inbox-main` bar) gets role/tabindex/pointer
+     + Enter/Space keyboard support; `onChange(show)` keeps any affordance (the 明細 button's
+     caret, an accruing row's ▸/▾) in sync. Returns the toggle fn so a paired button can
+     drive the SAME state. */
+  function bindToggle(target, detailEl, onChange) {
+    target.setAttribute('role', 'button');
+    target.setAttribute('tabindex', '0');
+    target.setAttribute('aria-expanded', 'false');
+    target.style.cursor = 'pointer';
+    const toggle = () => {
+      const show = detailEl.hidden;
+      detailEl.hidden = !show;
+      target.setAttribute('aria-expanded', show ? 'true' : 'false');
+      if (onChange) onChange(show);
+    };
+    target.addEventListener('click', toggle);
+    target.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+    return toggle;
+  }
+
   /* skip / unskip — both recomputed server-side; refresh the panel after. */
   async function act(kind, r) {
     try {
@@ -95,6 +119,8 @@
           r.month + '・' + (r.account_name || ''));
       }
       await boot();
+      /* F2b/F8: refresh the sidebar 收件匣 badge — a skip/unskip changes the pending count. */
+      if (window.pdRefreshInboxBadge) window.pdRefreshInboxBadge();
     } catch (err) {
       if (window.toast) window.toast((err && err.message) || '操作失敗', 'fail', err && err.code);
     }
@@ -163,6 +189,8 @@
           r.month + '・' + f.money(resp.amount, resp.ccy) + ' ' + resp.ccy + ' 已記入現金池');
       }
       await boot();
+      /* F2b/F8: the confirmed month left the inbox — refresh the sidebar 收件匣 badge count. */
+      if (window.pdRefreshInboxBadge) window.pdRefreshInboxBadge();
     } catch (err) {
       if (window.toast) window.toast((err && err.message) || '入帳失敗', 'fail', err && err.code);
     }
@@ -191,21 +219,69 @@
       const acts = el('div', 'inbox-actions');
       const ok = el('button', 'btn btn-primary', '確認入帳');
       ok.type = 'button';
-      ok.addEventListener('click', () => openConfirm(r));
+      /* the action buttons live in a SIBLING container (not inside `.inbox-main`), so a
+         click never bubbles into the bar toggle; stopPropagation is belt-and-braces. */
+      ok.addEventListener('click', (e) => { e.stopPropagation(); openConfirm(r); });
       acts.appendChild(ok);
-      /* 明細 toggle (per-trade §3.6 breakdown), collapsed by default. */
+      /* 明細 toggle (per-trade §3.6 breakdown), collapsed by default. Owner #3: the whole
+         `.inbox-main` bar toggles the SAME detail — the button stays the item's only
+         `.btn-sm` (no second button added) so the e2e invariants hold. */
       let detail = null;
       if (r.trades && r.trades.length) {
         detail = buildDetail(r);
-        acts.appendChild(makeToggle(detail));
+        const btn = el('button', 'btn btn-sm', '明細 ▸');
+        btn.type = 'button';
+        btn.setAttribute('aria-expanded', 'false');
+        const toggle = bindToggle(main, detail, (show) => {
+          btn.textContent = show ? '明細 ▾' : '明細 ▸';
+          btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+        });
+        btn.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
+        acts.appendChild(btn);
       }
       const sk = el('button', 'btn', '略過');
       sk.type = 'button';
-      sk.addEventListener('click', () => act('skip', r));
+      sk.addEventListener('click', (e) => { e.stopPropagation(); act('skip', r); });
       acts.appendChild(sk);
       item.appendChild(acts);
       if (detail) item.appendChild(detail);
       list.appendChild(item);
+    });
+  }
+
+  /* Owner #1: the 當月累計預估（未到期,次月退款） section — current / not-yet-due months as a
+     NON-confirmable forecast. NO 確認／略過 buttons (the refund is not yet due; the confirm
+     endpoint rejects it) — the whole bar is clickable to reveal the same per-trade 明細.
+     Purely informational; these months are NOT counted in the pending badge. */
+  function renderAccruing(items) {
+    const wrap = $('#rebate-accruing');
+    const listEl = $('#rebate-accruing-list');
+    if (!wrap || !listEl) return;
+    listEl.replaceChildren();
+    if (!items.length) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+    items.forEach((r) => {
+      const item = el('div', 'inbox-item rbt-item rbt-accruing-item');
+      const main = el('div', 'inbox-main');
+      const title = el('span', 'inbox-title');
+      title.appendChild(document.createTextNode(
+        r.month + ' 折讓款預估（' + r.account_name + '）'));
+      const caret = el('span', 'rbt-caret', '▸');
+      title.appendChild(caret);
+      main.appendChild(title);
+      main.appendChild(el('span', 'inbox-sub',
+        '當月 ' + r.trade_count + ' 筆交易・手續費合計 ' +
+        f.money(r.fee_total, r.ccy) + ' ' + r.ccy + ' → 預估退款 ' +
+        f.money(r.expected, r.ccy) + ' ' + r.ccy + '（未到期）'));
+      main.appendChild(el('span', 'inbox-rule',
+        '尚未到退款月份 — 台股先收後退,次月起才會列入「待確認」可確認入帳;此為累計預估,僅供參考。'));
+      item.appendChild(main);
+      if (r.trades && r.trades.length) {
+        const detail = buildDetail(r);
+        bindToggle(main, detail, (show) => { caret.textContent = show ? '▾' : '▸'; });
+        item.appendChild(detail);
+      }
+      listEl.appendChild(item);
     });
   }
 
@@ -249,6 +325,7 @@
       resp = await window.pdApi.get('/api/rebates');
     } catch (err) {
       render([]);
+      renderAccruing([]);
       renderSkipped([]);
       if (window.toast) {
         window.toast('待確認退款載入失敗', 'fail', (err && err.message) || undefined);
@@ -256,6 +333,7 @@
       return;
     }
     render((resp && resp.rows) || []);
+    renderAccruing((resp && resp.accruing) || []);
     renderSkipped((resp && resp.skipped) || []);
   }
 

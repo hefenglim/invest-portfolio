@@ -10,7 +10,7 @@ downgrade → candidates; honest not_found (never fabricates); completer degrada
 sector_only re-detect that SKIPS the short-circuit; and that temperature=0 rides into the call.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -27,6 +27,16 @@ from portfolio_dash.shared.llm_config import (
     LLMBudgetExceeded,
     LLMUnavailable,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_ai_resolve_cache() -> Iterator[None]:
+    """The dedup cache (F4c) is a process-global dict; the frozen test clock never expires an
+    entry, so a cached reply would poison a later same-query test (several tests reuse the query
+    '聯電'/'UMC 聯電' with DIFFERENT monkeypatched completers). Clear it around every test."""
+    inst_mod._AI_RESOLVE_CACHE.clear()
+    yield
+    inst_mod._AI_RESOLVE_CACHE.clear()
 
 
 def _completer(reply: AiInstrumentResolveReply) -> Callable[..., AiInstrumentResolveReply]:
@@ -202,6 +212,65 @@ def test_registered_symbol_short_circuits_without_llm(
     body = r.json()
     assert body["status"] == "resolved" and body["symbol"] == "2330"
     assert body["verified"] is True
+
+
+def test_registered_symbol_shortcircuits_on_concatenated_query(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4c: the quick-add dialog sends 'SYMBOL NAME' concatenated. The bare-symbol re-gate must
+    still short-circuit an already-registered symbol with NO LLM call — previously the whole
+    'symbol name' string never matched a registry row, so this forced a needless LLM round-trip
+    (and a re-lookup that could wipe the picked candidate)."""
+    def _boom(*_a: object, **_k: object) -> AiInstrumentResolveReply:
+        raise AssertionError("concatenated-query re-gate must not call the LLM")
+    monkeypatch.setattr(inst_mod, "complete_structured", _boom)
+    r = api_client.post("/api/instruments/ai-resolve",
+                        json={"query": "2330 台積電", "market": "TW"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "resolved" and body["symbol"] == "2330"
+    assert body["verified"] is True
+
+
+def test_ai_resolve_caches_repeat_query_no_second_llm_call(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4c dedup cache: a repeat identical (not-yet-registered) query within the TTL returns the
+    already-computed reply WITHOUT a second LLM call — the dialog's auto-fire + manual-retry can
+    hit the same input twice, and must not re-pay the LLM (llm_insight 'cache everything')."""
+    calls = {"n": 0}
+
+    def _spy(*_a: object, **_k: object) -> AiInstrumentResolveReply:
+        calls["n"] += 1
+        return AiInstrumentResolveReply(symbol="2303", name="聯電",
+                                        gics_sector="Information Technology",
+                                        gics_industry="Semiconductors", confidence="high")
+    monkeypatch.setattr(inst_mod, "complete_structured", _spy)
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_found(name="聯華電子"))
+    payload = {"query": "UMC 聯電", "market": "TW"}  # not registered → reaches the LLM once
+    r1 = api_client.post("/api/instruments/ai-resolve", json=payload)
+    r2 = api_client.post("/api/instruments/ai-resolve", json=payload)
+    assert calls["n"] == 1  # second call served entirely from the cache
+    assert r1.json() == r2.json()  # byte-identical (the cache is transparent to the client)
+    assert r1.json()["status"] == "resolved" and r1.json()["symbol"] == "2303"
+
+
+def test_ai_resolve_cache_separates_market_and_sector_only(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fingerprint keys on market + sector_only, so the same query in a different market (or
+    the sector-only re-detect) is a distinct cache slot — never a cross-served stale reply."""
+    calls = {"n": 0}
+
+    def _spy(*_a: object, **_k: object) -> AiInstrumentResolveReply:
+        calls["n"] += 1
+        return AiInstrumentResolveReply(symbol="2303", name="聯電",
+                                        gics_sector="Information Technology", confidence="high")
+    monkeypatch.setattr(inst_mod, "complete_structured", _spy)
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_found())
+    api_client.post("/api/instruments/ai-resolve", json={"query": "聯電", "market": "TW"})
+    api_client.post("/api/instruments/ai-resolve", json={"query": "聯電", "market": "US"})
+    assert calls["n"] == 2  # TW and US are separate fingerprints → both reach the LLM
 
 
 def test_sector_only_skips_short_circuit_and_calls_llm(

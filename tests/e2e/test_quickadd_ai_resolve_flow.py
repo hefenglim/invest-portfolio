@@ -197,6 +197,122 @@ def test_quickadd_candidates_pick_then_not_found_retry(
 
 
 @pytest.mark.e2e
+def test_candidate_pick_keeps_name_sector_when_revalidation_misses(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """Fix #1 (owner bug #4 — the candidate-pick wipe): picking a candidate whose LIVE
+    re-validation quote MISSES must KEEP the AI-supplied 名稱/產業 (never blank them) and still let
+    the user register — 確認 stays ENABLED because POST /api/instruments force-registers a
+    quote-less symbol (A6, no dead-end). Before the fix, the miss wiped name+sector (they were
+    programmatically filled, so still 'pristine') and left 確認 disabled."""
+    base = flow_server(_seed)
+    page = fresh_page
+    console_errors, page_errors = _collect_errors(page)
+
+    def _lookup(route: Route) -> None:
+        params = parse_qs(urlparse(route.request.url).query)
+        sym = (params.get("symbol") or [""])[0].upper()
+        # 9998 (the picked candidate) is UNPRICED — the exact owner-bug condition.
+        found = sym == "2330"
+        body = {"found": found, "registered": False, "archived": False,
+                "name": "台積電" if found else "", "sector": "",
+                "board": "TWSE" if found else None, "is_etf": False}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    def _resolve(route: Route) -> None:
+        body = {"status": "candidates", "confidence": "medium", "candidates": [
+            {"symbol": "9998", "name": "測試電子", "sector": "Information Technology",
+             "verified": False},
+            {"symbol": "2330", "name": "台積電", "sector": "Information Technology",
+             "verified": False}]}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/instruments/lookup**", _lookup)
+    page.route("**/api/instruments/ai-resolve", _resolve)
+
+    _open_dialog(page, base, "PICKME")  # a miss → auto-resolve → candidates
+    dialog = page.locator(".modal-backdrop").last
+    cands = dialog.locator("button.qa-cand")
+    expect(cands).to_have_count(2)
+
+    # Pick the UNPRICED candidate 9998 → its live re-validation MISSES.
+    cands.first.click()
+    sym_input = dialog.locator("input.qa-symbol")
+    expect(sym_input).to_have_value("9998")
+    # THE FIX: name + sector are KEPT despite the re-validation miss (owner bug #4).
+    expect(dialog.locator("input.qa-name")).to_have_value("測試電子")
+    expect(dialog.locator(".sector-select")).to_have_value("Information Technology")
+    # A6: no dead-end — 確認 is enabled so the user can register the quote-less symbol.
+    expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_enabled()
+    expect(dialog.get_by_text("已保留 AI 判讀名稱")).to_be_visible()
+
+    assert not console_errors and not page_errors, (
+        f"candidate-keep flow: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_manual_ai_resolve_seeds_dedup_key_no_redundant_refire(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """A2: a MANUAL 「AI 辨識」 resolve seeds the dedup key, so re-checking the SAME settled
+    (still-unpriced) input does not redundantly re-fire the automatic resolver — the LLM is
+    consulted once for the manual action, not a second time on the benign re-lookup."""
+    base = flow_server(_seed)
+    page = fresh_page
+    console_errors, page_errors = _collect_errors(page)
+
+    resolve_posts: list[str] = []
+
+    def _lookup(route: Route) -> None:
+        params = parse_qs(urlparse(route.request.url).query)
+        sym = (params.get("symbol") or [""])[0].upper()
+        found = sym == "2330"  # opening symbol found (no auto-fire); resolved 9998 stays unpriced
+        body = {"found": found, "registered": False, "archived": False,
+                "name": "台積電" if found else "", "sector": "",
+                "board": "TWSE" if found else None, "is_etf": False}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    def _resolve(route: Route) -> None:
+        resolve_posts.append(route.request.post_data or "")
+        body = {"status": "resolved", "symbol": "9998", "name": "測試電子",
+                "sector": "Information Technology", "industry": "Semiconductors",
+                "confidence": "high", "verified": True}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/instruments/lookup**", _lookup)
+    page.route("**/api/instruments/ai-resolve", _resolve)
+
+    _open_dialog(page, base, "2330")  # FOUND → no auto-fire on open
+    dialog = page.locator(".modal-backdrop").last
+    expect(dialog.get_by_text("已找到")).to_be_visible()
+    assert resolve_posts == []  # nothing auto-fired
+
+    # MANUAL resolve → fills 9998 (unpriced); the re-validation MISS keeps fields + seeds the key.
+    dialog.get_by_role("button", name="AI 辨識").click()
+    sym_input = dialog.locator("input.qa-symbol")
+    expect(sym_input).to_have_value("9998")
+    expect(dialog.locator("input.qa-name")).to_have_value("測試電子")
+    expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_enabled()
+    assert len(resolve_posts) == 1
+
+    # The user reviews/touches the name (so a benign re-lookup preserves it → the settled key is
+    # stable), then re-enters the SAME symbol. The dedup key seeded by the manual resolve must
+    # suppress a redundant automatic re-fire. The sector clearing PROVES the re-lookup actually
+    # ran (its pristine-only stale-clear fired), so count==1 is a real no-refire, not a no-op.
+    dialog.locator("input.qa-name").dispatch_event("input")
+    sym_input.fill("9998")
+    page.wait_for_timeout(600)  # cover the 300ms symbol-input debounce + margin
+    expect(dialog.locator("input.qa-name")).to_have_value("測試電子")  # kept (name is non-pristine)
+    expect(dialog.locator(".sector-select")).to_have_value("")          # re-lookup DID run
+    assert len(resolve_posts) == 1, f"redundant automatic re-fire: {resolve_posts!r}"
+
+    assert not console_errors and not page_errors, (
+        f"manual-seed flow: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
 def test_quickadd_unified_ai_button_fills_sector(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:

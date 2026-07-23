@@ -7,7 +7,9 @@ A6 form contract:
   * 原始總成本 (``#o-total``) is REQUIRED — the authoritative money of record.
   * 原始均價 is a READ-ONLY computed hint (``#o-avg-view`` = total / shares) — never entered,
     never stored; the ledger's ``avg`` wire field is computed on read (total / shares).
-  * ``#o-symbol`` is wired to the ``#m-symbols`` datalist (instrument suggestions).
+  * ``#o-symbol`` uses the SHARED grouped 代號 picker (Wave C — same component as the manual +
+    dividend pickers): 已持有 / 未持有, market-filtered by the account, archived excluded. (Was a
+    native ``#m-symbols`` datalist before Wave C.)
   * On a successful commit the form clears (symbol / shares / total) and the avg hint resets.
 
 ZERO console / page errors throughout.
@@ -98,12 +100,17 @@ def test_opening_inventory_simplified_form_downstream_and_ledger(
 
     _open_opening_tab(page, base)
 
-    # ===== the datalist wiring: #o-symbol offers the page's registered instruments ===========
-    assert page.get_attribute("#o-symbol", "list") == "m-symbols"
-    assert page.locator("#m-symbols option").count() > 0
+    # ===== the shared grouped picker: #o-symbol opens 已持有 / 未持有 (Wave C, not a datalist) ==
+    assert page.get_attribute("#o-symbol", "list") is None   # the datalist wiring is retired
+    page.select_option("#o-account", "tw_broker")
+    page.click("#o-symbol")
+    page.wait_for_selector("#o-sym-picker", state="visible")
+    page.wait_for_selector("#o-sym-list:has-text('未持有')")
+    # the registered-but-unheld TW instruments appear as 未持有 candidates (market-filtered).
+    page.wait_for_selector("#o-sym-list button:has-text('2454')")
+    page.wait_for_selector("#o-sym-list button:has-text('2317')")
 
     # ===== (A) total is the money of record; 均價 is a live READ-ONLY hint (total / shares) ===
-    page.select_option("#o-account", "tw_broker")
     page.fill("#o-symbol", "2454")
     page.fill("#o-shares", "200")
     # avg hint is 「—」 until BOTH shares and total are present.

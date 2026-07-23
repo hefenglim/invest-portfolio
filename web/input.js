@@ -39,6 +39,11 @@
   /* Structural context from GET /api/input/context (replaces window.INPUT_DATA).
      Starts empty so any pre-fetch render is blank; populated on boot. */
   let ctx = { accounts: [], fee_rules: {}, instruments: [], holdings: {} };
+  /* Shared grouped 代號 picker controllers (Wave C — one component, three inputs). Assigned
+     in each tab's init(); referenced by the account-change + add-new handlers. */
+  let manualPicker = null;
+  let divPicker = null;
+  let openingPicker = null;
   const acc = (id) => ctx.accounts.find((a) => a.id === id);
   const inst = (sym) => {
     const s = (sym || '').trim();
@@ -89,11 +94,6 @@
     accSel.addEventListener('change', () => {
       try { localStorage.setItem('pd_last_account', accSel.value); } catch (e) { /* noop */ }
       onManualAccountChange();   // #8: close the picker + re-scope holdings to the new account
-    });
-    const dl = $('#m-symbols');
-    ctx.instruments.forEach((i) => {
-      const o = el('option'); o.value = i.symbol; o.label = i.name;
-      dl.appendChild(o);
     });
     $('#m-date').value = TODAY;
     $('#m-date').max = TODAY;  // audit M5: discourage a future trade date (server soft-warns too)
@@ -335,188 +335,39 @@
     });
   }
 
-  /* ================= #8 manual-tab grouped 代號 picker =================
-     Replaces the manual pane's free-text datalist with a grouped dropdown modeled on the
-     dividend picker (initDivPicker/renderDivPicker): the account's symbols are grouped
-     已持有 / 未持有 and MARKET-FILTERED by the selected account — a symbol shows only when
-     its `.market` ∈ acctMarkets(account); a MERGED Moomoo account unions its markets and tags
-     each 未持有 row with its market. 已持有 rows are annotated with 股數 + 均價 (from the
-     SHARED per-account holdings cache — server Decimal strings via fmt; no money math here).
+  /* ================= #8 manual-tab grouped 代號 picker (Wave C: shared component) =========
+     The manual pane's grouped dropdown is now produced by the ONE shared component
+     (window.pdSymPicker — web/sym-picker.js), which also drives the dividend and opening
+     pickers. It groups 已持有 / 未持有, MARKET-FILTERS 未持有 by the selected account, EXCLUDES
+     archived instruments from 未持有 (Fable F7), annotates 已持有 rows with 股數 + 均價 (SHARED
+     per-account holdings cache — server Decimal strings via fmt; no money math), and shows the
+     FULL list on a focus/click open (filtering only once the user types — Fable F5). A footer
+     「＋新增標的」 opens the shared quick-add dialog and auto-selects the newly-registered symbol.
 
      ASSISTIVE ONLY: selecting a row writes #m-symbol.value and re-runs the SAME pipeline the
      rest of the form already reads (schedulePreview → renderSymbolHint + renderSellHints +
      runManualPreview), so free typing, the 未註冊 auto-register, preview, and commit are all
-     untouched. A footer 「＋新增標的」 opens the shared quick-add dialog; on a successful
-     register the context reloads and the new symbol (landing in 未持有) is auto-selected. The
-     sell-side 可賣/持有均價 fill buttons (renderSellHints) stay as convenience FILLS — they are
-     complementary to the picker's selection-time 股數+均價 annotation, not a duplicate. */
-  let mPickerOpen = false;
-
-  /* Inline-style the picker shell (styling stays in this wave's files; ids live in
-     trades.html #pane-manual). Mirrors styleDivPicker. */
-  function styleManualPicker() {
-    const p = $('#m-sym-picker');
-    if (p) {
-      p.style.cssText = 'position:absolute;left:0;right:0;top:100%;z-index:40;margin-top:4px;'
-        + 'background:var(--panel-2,#141821);border:1px solid var(--border,#2a2f3a);'
-        + 'border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);max-height:280px;'
-        + 'overflow:auto;padding:4px;';
-    }
-    const empty = $('#m-sym-empty');
-    if (empty) empty.style.cssText = 'padding:8px 10px;color:var(--text-3,#8a92a3);font-size:11px;';
-    const foot = $('#m-sym-foot');
-    if (foot) {
-      foot.style.cssText = 'border-top:1px solid var(--border,#2a2f3a);margin-top:4px;padding:4px;';
-    }
-    const add = $('#m-sym-addnew');
-    if (add) {
-      add.style.cssText = 'display:flex;align-items:center;gap:7px;width:100%;text-align:left;'
-        + 'background:none;border:none;padding:7px 8px;cursor:pointer;color:var(--accent,#58a6dd);'
-        + 'font:inherit;font-weight:600;border-radius:6px;';
-      add.addEventListener('mouseenter', () => { add.style.background = 'rgba(255,255,255,.06)'; });
-      add.addEventListener('mouseleave', () => { add.style.background = 'none'; });
-    }
-  }
-
-  function closeManualPicker() {
-    const p = $('#m-sym-picker');
-    if (p) p.hidden = true;
-    mPickerOpen = false;
-  }
-
-  /* Selection: set #m-symbol then re-run the existing preview pipeline (schedulePreview
-     already fires renderSymbolHint + renderSellHints + the debounced runManualPreview). */
-  function fillManualSymbol(sym) {
-    const inp = $('#m-symbol');
-    if (inp) inp.value = sym;
-    closeManualPicker();
-    schedulePreview();
-  }
-
-  /* One selectable row. 已持有 rows carry a right-aligned 股數 + 均價 annotation; 未持有 rows
-     on a MERGED account carry a small market tag. Selection rides mousedown+preventDefault so
-     the value lands BEFORE the input's focusout (which would otherwise race the close). */
-  function manualPickRow(item, isHeld, multiMarket) {
-    const it = inst(item.symbol);
-    const ccy = (it && it.ccy) || item.ccy || '';
-    const market = (it && it.market) || item.market || '';
-    const row = el('button', null, null);
-    row.type = 'button';
-    row.style.cssText = 'display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;'
-      + 'background:none;border:none;padding:6px 8px;cursor:pointer;color:inherit;'
-      + 'border-radius:6px;font:inherit;';
-    row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,.06)'; });
-    row.addEventListener('mouseleave', () => { row.style.background = 'none'; });
-    const code = el('span', null, item.symbol);
-    code.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums;flex:none;';
-    row.appendChild(code);
-    const name = el('span', null, item.name || (it ? it.name : '') || '');
-    name.style.cssText = 'color:var(--text-3,#8a92a3);font-size:11px;overflow:hidden;'
-      + 'text-overflow:ellipsis;white-space:nowrap;';
-    row.appendChild(name);
-    if (isHeld) {
-      const ann = el('span', null, null);
-      ann.style.cssText = 'margin-left:auto;display:flex;gap:10px;flex:none;font-size:10.5px;'
-        + 'font-variant-numeric:tabular-nums;color:var(--text-2,#c2c8d2);';
-      const sharesTxt = (item.shares != null && String(item.shares).indexOf('.') >= 0)
-        ? f.num(item.shares, 4) : f.num(item.shares);
-      ann.appendChild(el('span', null, sharesTxt + ' 股'));
-      if (item.adjusted_avg != null) {
-        ann.appendChild(el('span', null, '均價 ' + f.price(item.adjusted_avg, ccy)));
-      }
-      row.appendChild(ann);
-    } else if (multiMarket && market) {
-      const tag = el('span', null, market);
-      tag.style.cssText = 'margin-left:auto;color:var(--text-3,#8a92a3);font-size:10px;'
-        + 'border:1px solid var(--border,#2a2f3a);border-radius:4px;padding:0 6px;flex:none;';
-      row.appendChild(tag);
-    }
-    row.addEventListener('mousedown', (e) => { e.preventDefault(); fillManualSymbol(item.symbol); });
-    return row;
-  }
-
-  /* Render the grouped list for the current account from {held} + the instrument registry
-     (未持有 = registry minus held), filtered by the typed query (symbol OR name) AND by the
-     account's bound markets. When `a.markets` is absent (legacy ctx) the market filter is a
-     no-op, so the list degrades to the old unfiltered behaviour. */
-  function renderManualPicker(data) {
-    const list = $('#m-sym-list');
-    const empty = $('#m-sym-empty');
-    if (!list || !empty) return;
-    list.replaceChildren();
-    const a = acc($('#m-account').value);
-    if (!a) { empty.hidden = false; empty.textContent = '請先選擇帳戶'; return; }
-    const markets = acctMarkets(a);
-    const multi = markets.length > 1;
-    const inMarket = (mk) => markets.length === 0 || markets.indexOf(mk) >= 0;
-    const held = (data && data.held) || [];
-    const heldSet = {};
-    held.forEach((h) => { heldSet[h.symbol] = true; });
-    const notHeld = ctx.instruments.filter((i) => !heldSet[i.symbol] && inMarket(i.market));
-    const q = ($('#m-symbol').value || '').trim().toUpperCase();
-    const match = (sym, name) => !q || (sym || '').toUpperCase().indexOf(q) >= 0
-      || (name || '').toUpperCase().indexOf(q) >= 0;
-    const heldF = held.filter((h) => match(h.symbol, h.name || (inst(h.symbol) || {}).name));
-    const notHeldF = notHeld.filter((i) => match(i.symbol, i.name));
-    const header = (txt) => {
-      const h = el('div', null, txt);
-      h.style.cssText = 'padding:6px 10px 3px;color:var(--text-3,#8a92a3);font-size:10px;'
-        + 'letter-spacing:.04em;font-weight:700;';
-      return h;
-    };
-    if (heldF.length) {
-      list.appendChild(header('已持有'));
-      heldF.forEach((h) => list.appendChild(manualPickRow(h, true, multi)));
-    }
-    if (notHeldF.length) {
-      list.appendChild(header('未持有'));
-      notHeldF.forEach((i) => list.appendChild(manualPickRow(i, false, multi)));
-    }
-    if (heldF.length + notHeldF.length === 0) {
-      empty.hidden = false;
-      empty.textContent = q
-        ? '無相符標的 — 可直接輸入代號，或點下方「＋新增標的」'
-        : '此帳戶所屬市場尚無標的 — 點下方「＋新增標的」新增';
-    } else {
-      empty.hidden = true;
-    }
-  }
-
-  /* Open + populate the dropdown for the chosen account (cache-first paint, then refresh from
-     the fetch). Wrapped so an assistive-picker error can never surface as an unhandled
-     rejection (the e2e smoke asserts ZERO console errors). Mirrors openDivPicker. */
-  async function openManualPicker() {
-    try {
-      const p = $('#m-sym-picker');
-      if (!p) return;
-      p.hidden = false;
-      mPickerOpen = true;
-      const a = acc($('#m-account').value);
-      if (!a) { renderManualPicker({ held: [] }); return; }
-      if (acctHoldingsCache[a.id]) renderManualPicker(acctHoldingsCache[a.id]);
-      const data = await loadAcctHoldings(a.id, false);
-      if (mPickerOpen) renderManualPicker(data);
-    } catch (e) { /* assistive — degrade silently */ }
-  }
+     untouched. The sell-side 可賣/持有均價 fill buttons (renderSellHints) stay complementary. */
 
   /* 「＋新增標的」: open the shared quick-add dialog (symbol editable, market inferred from the
      account). On a successful register the context reloads and the new symbol — which lands in
-     未持有 — is auto-selected, driving the preview pipeline. */
-  function openManualQuickAddNew() {
+     未持有 — is auto-selected, driving the preview pipeline. `typed` is the picker's current
+     query (so the dialog prefills what the user typed). */
+  function openManualQuickAddNew(typed) {
     if (!window.pdInstQuickAdd) {
       if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
       return;
     }
-    const typed = ($('#m-symbol').value || '').trim().toUpperCase();
-    closeManualPicker();
+    const sym0 = ((typed || $('#m-symbol').value || '')).trim().toUpperCase();
+    if (manualPicker) manualPicker.close();
     const select = async (resp) => {
       await reloadContext();
-      const sym = (resp && resp.symbol) || typed;
-      if (sym) fillManualSymbol(sym);
+      const sym = (resp && resp.symbol) || sym0;
+      if (sym && manualPicker) manualPicker.select(sym);
       else { renderSymbolHint(); schedulePreview(); }
     };
     window.pdInstQuickAdd({
-      symbol: typed,
+      symbol: sym0,
       market: accountMarket($('#m-account').value),
       lockSymbol: false,
       onConfirm: select,
@@ -525,43 +376,43 @@
   }
 
   /* Account switch: close the picker + warm the new account's holdings cache (the sell hints
-     share the same cache). Mirrors onDivAccountChange. */
+     share the same cache). */
   function onManualAccountChange() {
-    closeManualPicker();
+    if (manualPicker) manualPicker.close();
     const accId = $('#m-account').value;
     if (accId) loadAcctHoldings(accId, false).catch(() => {});
   }
 
   function initManualPicker() {
-    styleManualPicker();
-    const inp = $('#m-symbol');
-    if (inp) {
-      inp.addEventListener('focus', () => { openManualPicker(); });
-      inp.addEventListener('click', () => { openManualPicker(); });
-      inp.addEventListener('input', () => {
-        if (!mPickerOpen) { openManualPicker(); return; }
-        const a = acc($('#m-account').value);
-        renderManualPicker((a && acctHoldingsCache[a.id]) || { held: [] });
-      });
-      inp.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeManualPicker(); });
-    }
-    const add = $('#m-sym-addnew');
-    if (add) add.addEventListener('mousedown', (e) => { e.preventDefault(); openManualQuickAddNew(); });
-    /* Close when focus leaves the 代號 field; relatedTarget inside the field keeps it open. */
-    const field = $('#m-symbol-field');
-    if (field) field.addEventListener('focusout', (e) => {
-      const to = e.relatedTarget;
-      if (to && field.contains(to)) return;
-      closeManualPicker();
+    manualPicker = window.pdSymPicker.create({
+      input: $('#m-symbol'),
+      field: $('#m-symbol-field'),
+      panel: $('#m-sym-picker'),
+      list: $('#m-sym-list'),
+      empty: $('#m-sym-empty'),
+      foot: $('#m-sym-foot'),
+      mode: 'held-unheld',
+      marketFilter: true,
+      annotateHeld: true,
+      accountOf: () => acc($('#m-account').value),
+      instrumentsOf: () => ctx.instruments,
+      instOf: (s) => inst(s),
+      loadHoldings: (id, force) => loadAcctHoldings(id, force),
+      cachedHoldings: (id) => acctHoldingsCache[id],
+      addNew: { button: $('#m-sym-addnew'), onAdd: (q) => openManualQuickAddNew(q) },
+      onPick: () => { schedulePreview(); },
+      emptyText: (built, q) => q
+        ? '無相符標的 — 可直接輸入代號，或點下方「＋新增標的」'
+        : '此帳戶所屬市場尚無標的 — 點下方「＋新增標的」新增',
     });
     /* Warm the default account's cache so the first focus paints instantly. */
     const accId0 = $('#m-account').value;
     if (accId0) loadAcctHoldings(accId0, false).catch(() => {});
   }
 
-  /* Re-fetch structural context (accounts / instruments / holdings) into `ctx` + refresh the
-     manual symbol datalist, so a just-registered symbol resolves immediately (the 未註冊 hint
-     clears). Graceful: a failed refetch keeps the prior ctx. */
+  /* Re-fetch structural context (accounts / instruments / holdings) into `ctx`, so a
+     just-registered symbol resolves immediately (the 未註冊 hint clears + it appears in the
+     pickers, which read ctx.instruments live). Graceful: a failed refetch keeps the prior ctx. */
   async function reloadContext() {
     let resp;
     try {
@@ -575,14 +426,6 @@
       instruments: (resp && resp.instruments) || ctx.instruments,
       holdings: (resp && resp.holdings) || ctx.holdings,
     };
-    const dl = $('#m-symbols');
-    if (dl) {
-      dl.replaceChildren();
-      ctx.instruments.forEach((i) => {
-        const o = el('option'); o.value = i.symbol; o.label = i.name;
-        dl.appendChild(o);
-      });
-    }
   }
 
   /* Fetch the server preview (computed fee/tax + issues) and render. Local-only field
@@ -832,7 +675,7 @@
     }
   }
 
-  function onManualWritten(resp) {
+  async function onManualWritten(resp) {
     if (window.toast) {
       const id = resp && resp.txn_id !== undefined ? '（#' + resp.txn_id + '）' : '';
       const ar = resp && resp.auto_registered;
@@ -846,6 +689,11 @@
     applyOverrideState('fee', false); applyOverrideState('tax', false); m.acked = false;
     $('#m-shares').value = '';
     $('#m-price').value = '';
+    /* Fable F8: a commit that AUTO-REGISTERED an unknown symbol must refresh ctx so the 未註冊
+       hint clears, the symbol resolves in the preview, and it appears in every picker (manual /
+       opening read ctx.instruments live). Awaited before schedulePreview so renderSymbolHint
+       resolves the now-registered symbol. */
+    if (resp && resp.auto_registered) await reloadContext();
     /* FU-D45 + #10: ledger tables + holdings caches (可賣 just changed); a manual write is
        always a full-success transaction row -> flash + auto-switch the 交易 tab. */
     afterCommitRefresh('transactions');
@@ -1160,6 +1008,10 @@
 
   /* The CSV text the AI run returns; written via the import/commit path on 寫入全部. */
   let aiCsvText = '';
+  /* The current parsed AI rows {n, status, reason, code, data} — kept in state so an inline
+     register can heal ONE row locally (Fable F4d) without a second vision parse. renderAiRows
+     is the single writer. */
+  let aiRows = [];
   /* FU-D20 attached screenshots for the current run: {name, dataUrl}. The dataUrl is the
      FileReader readAsDataURL result (a full `data:image/...;base64,` string) sent as-is —
      the server tolerates + strips the prefix. Money/quantity of record NEVER come from
@@ -1287,15 +1139,21 @@
 
   /* FU-D33: open the shared quick-add dialog for an unregistered symbol in the AI preview.
      Market is inferred from the row's account (accountMarket — TWD→TW, USD→US, MYR→MY), the
-     same rule the backend uses. On a successful register (or restore) the SAME preview re-runs
-     (runAiPreview rebuilds the request from the unchanged pane state: text + images + model),
-     so the healed row loses its error with zero re-entry. */
+     same rule the backend uses.
+
+     Fable F4d (Wave C): registering a symbol NO LONGER re-runs the whole paid vision parse
+     (the old `await runAiPreview()` re-POSTed /api/input/ai/preview — a fresh LLM call per
+     registered symbol that also discarded the user's checkbox selections). Instead the resume
+     ONLY reloads the structural context and re-validates the affected row(s) LOCALLY: any row
+     whose unregistered symbol now resolves against the fresh ctx heals to ✓, while every other
+     row + its checkbox state is preserved. The final /api/import/commit re-validates server-side,
+     so an optimistic local heal can never write a bad row. */
   function openAiQuickAdd(symbol, accId, marketHint) {
     if (!window.pdInstQuickAdd) {
       if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
       return;
     }
-    const resume = async () => { await reloadContext(); await runAiPreview(); };
+    const resume = async () => { await reloadContext(); healAiUnregisteredFromContext(); };
     /* FU-D42a: the symbol stays EDITABLE (no lockSymbol) — an AI mis-parse (e.g. a US-style
        ticker on a TW account) is corrected right in the dialog; editing re-runs the lookup.
        Batch B (F15): on a merged account the dialog's market defaults to the AI row's
@@ -1306,6 +1164,29 @@
       onConfirm: resume,
       onBuy: resume,
     });
+  }
+
+  /* Fable F4d: after a register, re-validate the parsed AI rows against the FRESH ctx WITHOUT a
+     second vision parse. Captures the current checkbox states, flips any row whose formerly
+     unregistered symbol now resolves (inst()) to a clean ✓ (auto-checked), and re-renders while
+     preserving every OTHER row's checkbox state. A row whose symbol still does not resolve
+     (e.g. the user registered a DIFFERENT symbol) honestly stays in error. */
+  function healAiUnregisteredFromContext() {
+    if (!aiRows.length) return;
+    const prevChecked = {};
+    const boxes = $('#ai-body') ? $('#ai-body').querySelectorAll('input[type=checkbox]') : [];
+    Array.prototype.forEach.call(boxes, (cb) => { prevChecked[cb.dataset.n] = cb.checked; });
+    let healed = false;
+    aiRows.forEach((r) => {
+      if (r.code === 'unregistered_symbol' && inst((r.data && r.data.symbol) || '')) {
+        r.status = 'ok';
+        r.code = null;
+        r.reason = null;
+        prevChecked[String(r.n)] = true;   // newly valid -> auto-check
+        healed = true;
+      }
+    });
+    if (healed) { renderAiRows(aiRows, prevChecked); refreshAiWriteBtn(); }
   }
 
   async function runAiPreview() {
@@ -1371,8 +1252,14 @@
   /* Render the AI preview table body from server rows {n, status, reason, code, data}.
      Each checkbox carries `dataset.n = r.n` (the 0-based draft index) — commitAi rebuilds the
      committed csv from ONLY the checked rows' source lines (csv data line n+1), so an unchecked
-     row is never written (C7). The per-row money in `data` is Decimal STRINGS -> fmt. */
-  function renderAiRows(rows) {
+     row is never written (C7). The per-row money in `data` is Decimal STRINGS -> fmt.
+
+     `prevChecked` (Fable F4d): an optional {n: bool} map preserving checkbox state across a
+     LOCAL re-render (an inline register heals one row without re-parsing). When present, each
+     enabled row restores its prior checked state (a healed row is passed as checked); when
+     absent, the default applies (checked unless the row is an error). */
+  function renderAiRows(rows, prevChecked) {
+    aiRows = rows || [];
     const tbody = $('#ai-body');
     if (!tbody) return;
     tbody.replaceChildren();
@@ -1380,8 +1267,11 @@
       const d = r.data || {};
       const tr = el('tr');
       const tdCb = el('td');
-      const cb = el('input'); cb.type = 'checkbox'; cb.checked = r.status !== 'error';
+      const cb = el('input'); cb.type = 'checkbox';
       cb.disabled = r.status === 'error';
+      cb.checked = cb.disabled ? false
+        : (prevChecked && (String(r.n) in prevChecked)
+          ? !!prevChecked[String(r.n)] : r.status !== 'error');
       cb.dataset.n = String(r.n || 0);
       cb.addEventListener('change', refreshAiWriteBtn);
       tdCb.appendChild(cb);
@@ -1782,208 +1672,81 @@
     };
   }
 
-  /* ---- FU-D35 dividend 代號 picker (owner 需求六) ----
-     After an account is chosen, activating 代號 lists that account's CURRENTLY-HELD
-     symbols for point-and-click (dividends normally come from a live position). The
-     「顯示已清倉標的」 toggle additionally lists symbols the account historically held but
-     has since closed — a closed position can still pay a dividend after its ex-date
-     (owner 假設 2). Held/closed come from GET /api/input/holdings?account=… (server-side
-     Decimal share math), cached per account for the page session + refetched after a
-     successful commit. The picker is ASSISTIVE ONLY: it never overwrites what the user
-     types, and manual free entry always remains possible (the commit reads
-     #d-symbol.value directly — an unlisted symbol still submits). */
-  /* Shared per-account holdings cache (FU-D35 picker + FU-D44 sell hints). Held entries
-     additionally carry shares + adjusted_avg as Decimal STRINGS (FU-D44); dropped after
-     every successful commit (FU-D45, afterCommitRefresh). */
+  /* ---- FU-D35 dividend 代號 picker (owner 需求六) — Wave C: the shared component ----
+     After an account is chosen, activating 代號 lists that account's CURRENTLY-HELD symbols
+     for point-and-click (dividends normally come from a live position). Held rows now ALSO
+     show 股數 + 均價 (Wave C parity with the manual picker). The 「顯示已清倉標的」 toggle
+     additionally lists symbols the account historically held but has since closed — a closed
+     position can still pay a dividend after its ex-date (owner 假設 2). Held/closed come from
+     GET /api/input/holdings?account=… (server-side Decimal share math), cached per account +
+     refetched after a successful commit. ASSISTIVE ONLY: it never overwrites what the user
+     types (the commit reads #d-symbol.value directly — an unlisted symbol still submits). */
+  /* Shared per-account holdings cache (dividend/manual/opening pickers + FU-D44 sell hints).
+     Held entries carry shares + adjusted_avg as Decimal STRINGS; dropped after every successful
+     commit (FU-D45, afterCommitRefresh). */
   const acctHoldingsCache = {};   // { [accountId]: {held:[{symbol,name,shares,adjusted_avg}], closed:[{symbol,name}]} }
-  let divPickerOpen = false;
-
-  /* Inline-style the picker shell here (keeps the styling in this wave's files — the
-     dividend section owns input.js; the shell ids live in trades.html #pane-div). */
-  function styleDivPicker() {
-    const p = $('#d-sym-picker');
-    if (p) {
-      p.style.cssText = 'position:absolute;left:0;right:0;top:100%;z-index:40;margin-top:4px;'
-        + 'background:var(--panel-2,#141821);border:1px solid var(--border,#2a2f3a);'
-        + 'border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);max-height:260px;'
-        + 'overflow:auto;padding:4px;';
-    }
-    const empty = $('#d-sym-empty');
-    if (empty) empty.style.cssText = 'padding:8px 10px;color:var(--text-3,#8a92a3);font-size:11px;';
-    const foot = $('#d-sym-foot');
-    if (foot) {
-      foot.style.cssText = 'border-top:1px solid var(--border,#2a2f3a);margin-top:4px;'
-        + 'padding:7px 10px 3px;';
-    }
-    const tog = document.querySelector('.sym-pick-toggle');
-    if (tog) {
-      tog.style.cssText = 'display:flex;align-items:center;gap:7px;font-size:11px;'
-        + 'color:var(--text-2,#c2c8d2);cursor:pointer;';
-    }
-  }
+  /* Fable F9a in-flight dedup: focus + click on a cold cache both call the picker's open, which
+     each call loadAcctHoldings; a shared in-flight promise collapses those into ONE fetch. */
+  const acctHoldingsInflight = {};
 
   /* Fetch (or return the cached) {held, closed} for an account. Graceful: a failed fetch
      returns the last cache (or empties) so the picker degrades to a plain typed input. */
   async function loadAcctHoldings(accountId, force) {
     if (!accountId) return { held: [], closed: [] };
     if (!force && acctHoldingsCache[accountId]) return acctHoldingsCache[accountId];
-    let resp;
-    try {
-      resp = await api.get('/api/input/holdings?account=' + encodeURIComponent(accountId));
-    } catch (e) {
-      return acctHoldingsCache[accountId] || { held: [], closed: [] };
-    }
-    const data = { held: (resp && resp.held) || [], closed: (resp && resp.closed) || [] };
-    acctHoldingsCache[accountId] = data;
-    return data;
-  }
-
-  function closeDivPicker() {
-    const p = $('#d-sym-picker');
-    if (p) p.hidden = true;
-    divPickerOpen = false;
-  }
-
-  function fillDivSymbol(sym) {
-    const inp = $('#d-symbol');
-    if (inp) inp.value = sym;
-    /* Merged account: the picked symbol's market may switch the dividend model (F01). */
-    if (isMultiMarket(acc($('#d-account').value))) renderDivForm();
-    closeDivPicker();
-  }
-
-  /* One selectable row: 代號 + 名稱 (+ a muted 已清倉 tag for closed positions). Selection
-     rides on mousedown+preventDefault so the value lands BEFORE the input's focusout —
-     otherwise the outside-focus close would race the click away. */
-  function divPickRow(item, isClosed) {
-    const row = el('button', null, null);
-    row.type = 'button';
-    row.style.cssText = 'display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;'
-      + 'background:none;border:none;padding:6px 8px;cursor:pointer;color:inherit;'
-      + 'border-radius:6px;font:inherit;';
-    row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,.06)'; });
-    row.addEventListener('mouseleave', () => { row.style.background = 'none'; });
-    const code = el('span', null, item.symbol);
-    code.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums;';
-    row.appendChild(code);
-    const name = el('span', null, item.name || '');
-    name.style.cssText = 'color:var(--text-3,#8a92a3);font-size:11px;overflow:hidden;'
-      + 'text-overflow:ellipsis;white-space:nowrap;';
-    row.appendChild(name);
-    if (isClosed) {
-      const tag = el('span', null, '已清倉');
-      tag.style.cssText = 'margin-left:auto;color:var(--text-3,#8a92a3);font-size:10px;'
-        + 'border:1px solid var(--border,#2a2f3a);border-radius:4px;padding:0 6px;flex:none;';
-      row.appendChild(tag);
-    }
-    row.addEventListener('mousedown', (e) => { e.preventDefault(); fillDivSymbol(item.symbol); });
-    return row;
-  }
-
-  /* Render the list for the current account from {held, closed}, filtered by whatever is
-     typed in 代號 (also matches names). The closed list appears only when the toggle is on
-     AND the account has closed history; it is visually separated by a dashed divider. */
-  function renderDivPicker(data) {
-    const list = $('#d-sym-list');
-    const empty = $('#d-sym-empty');
-    const foot = $('#d-sym-foot');
-    const toggle = $('#d-sym-closed-toggle');
-    if (!list || !empty || !foot) return;
-    list.replaceChildren();
-    const a = acc($('#d-account').value);
-    if (!a) {
-      empty.hidden = false;
-      empty.textContent = '請先選擇帳戶';
-      foot.hidden = true;
-      return;
-    }
-    const held = (data && data.held) || [];
-    const closed = (data && data.closed) || [];
-    foot.hidden = closed.length === 0;   // only offer the toggle where there IS closed history
-    const showClosed = !!(toggle && toggle.checked) && closed.length > 0;
-    const q = ($('#d-symbol').value || '').trim().toUpperCase();
-    const match = (s) => !q || (s.symbol || '').toUpperCase().indexOf(q) >= 0
-      || (s.name || '').toUpperCase().indexOf(q) >= 0;
-    const heldF = held.filter(match);
-    const closedF = showClosed ? closed.filter(match) : [];
-    heldF.forEach((it) => list.appendChild(divPickRow(it, false)));
-    if (closedF.length) {
-      const divider = el('div', null);
-      divider.style.cssText = 'border-top:1px dashed var(--border,#2a2f3a);margin:4px 0;';
-      list.appendChild(divider);
-      closedF.forEach((it) => list.appendChild(divPickRow(it, true)));
-    }
-    /* Empty-state copy — honest about WHY the list is empty; never blocks free entry. */
-    if (heldF.length + closedF.length === 0) {
-      empty.hidden = false;
-      if (held.length === 0 && closed.length === 0) {
-        empty.textContent = '此帳戶尚無標的紀錄 — 可直接輸入代號';
-      } else if (held.length === 0 && !showClosed) {
-        empty.textContent = '此帳戶目前無持有標的；勾選「顯示已清倉標的」可挑選歷史標的';
-      } else {
-        empty.textContent = '無相符標的 — 可直接輸入代號';
+    if (!force && acctHoldingsInflight[accountId]) return acctHoldingsInflight[accountId];
+    const p = (async () => {
+      let resp;
+      try {
+        resp = await api.get('/api/input/holdings?account=' + encodeURIComponent(accountId));
+      } catch (e) {
+        return acctHoldingsCache[accountId] || { held: [], closed: [] };
       }
-    } else {
-      empty.hidden = true;
-    }
-  }
-
-  /* Open + populate the dropdown for the chosen account (cache-first paint, then refresh
-     from the fetch). Wrapped so an assistive-picker error can never surface as an
-     unhandled rejection (the e2e smoke asserts ZERO console errors). */
-  async function openDivPicker() {
-    try {
-      const p = $('#d-sym-picker');
-      if (!p) return;
-      p.hidden = false;
-      divPickerOpen = true;
-      const a = acc($('#d-account').value);
-      if (!a) { renderDivPicker({ held: [], closed: [] }); return; }
-      if (acctHoldingsCache[a.id]) renderDivPicker(acctHoldingsCache[a.id]);
-      const data = await loadAcctHoldings(a.id, false);
-      if (divPickerOpen) renderDivPicker(data);
-    } catch (e) { /* picker is assistive — degrade silently */ }
+      const data = { held: (resp && resp.held) || [], closed: (resp && resp.closed) || [] };
+      acctHoldingsCache[accountId] = data;
+      return data;
+    })();
+    acctHoldingsInflight[accountId] = p;
+    try { return await p; } finally { delete acctHoldingsInflight[accountId]; }
   }
 
   /* Account switch: reset the toggle (held-first per account), close, warm the new cache. */
   function onDivAccountChange() {
     const toggle = $('#d-sym-closed-toggle');
     if (toggle) toggle.checked = false;
-    closeDivPicker();
+    if (divPicker) divPicker.close();
     const accId = $('#d-account').value;
     if (accId) loadAcctHoldings(accId, false).catch(() => {});
   }
 
   function initDivPicker() {
-    styleDivPicker();
-    const inp = $('#d-symbol');
-    if (inp) {
-      inp.addEventListener('focus', () => { openDivPicker(); });
-      inp.addEventListener('click', () => { openDivPicker(); });
-      inp.addEventListener('input', () => {
-        /* Merged accounts switch the dividend MODEL by the entered symbol's market (F01) —
-           re-render the form so the right sub-form + note appear. Gated on multi-market so a
-           single-market account keeps exactly today's behaviour (no per-keystroke re-render). */
-        if (isMultiMarket(acc($('#d-account').value))) renderDivForm();
-        if (!divPickerOpen) { openDivPicker(); return; }
-        const a = acc($('#d-account').value);
-        renderDivPicker((a && acctHoldingsCache[a.id]) || { held: [], closed: [] });
-      });
-      inp.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDivPicker(); });
-    }
-    const toggle = $('#d-sym-closed-toggle');
-    if (toggle) toggle.addEventListener('change', () => {
-      const a = acc($('#d-account').value);
-      renderDivPicker((a && acctHoldingsCache[a.id]) || { held: [], closed: [] });
-    });
-    /* Close when focus leaves the 代號 field (input OR the footer toggle). focusout bubbles,
-       so one listener on the container covers both; relatedTarget inside the field (e.g.
-       the toggle) keeps it open. Row clicks preventDefault so focus never leaves the input. */
-    const field = $('#d-symbol-field');
-    if (field) field.addEventListener('focusout', (e) => {
-      const to = e.relatedTarget;
-      if (to && field.contains(to)) return;
-      closeDivPicker();
+    divPicker = window.pdSymPicker.create({
+      input: $('#d-symbol'),
+      field: $('#d-symbol-field'),
+      panel: $('#d-sym-picker'),
+      list: $('#d-sym-list'),
+      empty: $('#d-sym-empty'),
+      foot: $('#d-sym-foot'),
+      mode: 'held-closed',
+      annotateHeld: true,
+      accountOf: () => acc($('#d-account').value),
+      instOf: (s) => inst(s),
+      loadHoldings: (id, force) => loadAcctHoldings(id, force),
+      cachedHoldings: (id) => acctHoldingsCache[id],
+      closedToggle: { checkbox: $('#d-sym-closed-toggle') },
+      /* Merged accounts switch the dividend MODEL by the entered/picked symbol's market (F01);
+         gated on multi-market so a single-market account keeps today's behaviour. */
+      onType: () => { if (isMultiMarket(acc($('#d-account').value))) renderDivForm(); },
+      onPick: () => { if (isMultiMarket(acc($('#d-account').value))) renderDivForm(); },
+      emptyText: (built, q) => {
+        const held = built.held || [];
+        const closed = built.closed || [];
+        if (held.length === 0 && closed.length === 0) return '此帳戶尚無標的紀錄 — 可直接輸入代號';
+        if (held.length === 0 && !built.showClosed) {
+          return '此帳戶目前無持有標的；勾選「顯示已清倉標的」可挑選歷史標的';
+        }
+        return '無相符標的 — 可直接輸入代號';
+      },
     });
     /* Warm the default account's cache so the first focus paints instantly. */
     const accId0 = $('#d-account').value;
@@ -2027,8 +1790,62 @@
       const n = $('#' + id);
       if (n) n.addEventListener('input', updateAvgView);
     });
-    if (oAccSel) oAccSel.addEventListener('change', updateAvgView);
+
+    /* Wave C: 期初庫存 代號 now uses the SAME shared grouped picker (was a native datalist) —
+       已持有 / 未持有, market-filtered, archived excluded, held rows annotated 股數 + 均價. */
+    function openOpeningQuickAddNew(typed) {
+      if (!window.pdInstQuickAdd) {
+        if (window.toast) window.toast('對話框載入失敗，請重新整理', 'fail');
+        return;
+      }
+      const sym0 = ((typed || $('#o-symbol').value || '')).trim().toUpperCase();
+      if (openingPicker) openingPicker.close();
+      const select = async (resp) => {
+        await reloadContext();
+        const sym = (resp && resp.symbol) || sym0;
+        if (sym && openingPicker) openingPicker.select(sym);
+        else updateAvgView();
+      };
+      window.pdInstQuickAdd({
+        symbol: sym0,
+        market: accountMarket($('#o-account').value),
+        lockSymbol: false,
+        onConfirm: select,
+        onBuy: select,
+      });
+    }
+    openingPicker = window.pdSymPicker.create({
+      input: $('#o-symbol'),
+      field: $('#o-symbol-field'),
+      panel: $('#o-sym-picker'),
+      list: $('#o-sym-list'),
+      empty: $('#o-sym-empty'),
+      foot: $('#o-sym-foot'),
+      mode: 'held-unheld',
+      marketFilter: true,
+      annotateHeld: true,
+      accountOf: () => acc($('#o-account').value),
+      instrumentsOf: () => ctx.instruments,
+      instOf: (s) => inst(s),
+      loadHoldings: (id, force) => loadAcctHoldings(id, force),
+      cachedHoldings: (id) => acctHoldingsCache[id],
+      addNew: { button: $('#o-sym-addnew'), onAdd: (q) => openOpeningQuickAddNew(q) },
+      onPick: () => { updateAvgView(); },
+      emptyText: (built, q) => q
+        ? '無相符標的 — 可直接輸入代號，或點下方「＋新增標的」'
+        : '此帳戶所屬市場尚無標的 — 點下方「＋新增標的」新增',
+    });
+
+    if (oAccSel) oAccSel.addEventListener('change', () => {
+      updateAvgView();
+      if (openingPicker) openingPicker.close();   // re-scope the picker to the new account
+      const accId = $('#o-account').value;
+      if (accId) loadAcctHoldings(accId, false).catch(() => {});
+    });
     updateAvgView();
+    /* Warm the default account's cache so the first focus paints instantly. */
+    const oAccId0 = $('#o-account').value;
+    if (oAccId0) loadAcctHoldings(oAccId0, false).catch(() => {});
     $('#o-confirm').addEventListener('click', () => {
       const accId = $('#o-account').value || (ctx.accounts[0] && ctx.accounts[0].id) || '';
       const sym = $('#o-symbol').value.trim();
