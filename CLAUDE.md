@@ -27,8 +27,10 @@ in `CHANGELOG.md`.
   `/api/*`) serving a **static vanilla-JS frontend** (`web/`, served via `StaticFiles`)
   + **ECharts** (CDN). Vanilla JS only — **no framework, no bundler, no build step**.
   The frontend never computes money or returns; all numbers come from the API as
-  Decimal **strings** (`web/api.js` is the single fetch layer). `mock-data.js` is the
-  documented JSON contract; spec-17 golden-payload + spec-18 round-trip tests guard it.
+  Decimal **strings** (`web/api.js` is the single fetch layer). The **spec-17 golden
+  payload** (`tests/golden/dashboard_full.json`) is the documented JSON contract, guarded
+  by the spec-17 + spec-18 round-trip tests. (`mock-data.js` was retired under spec-19 §6;
+  `tests/contract/test_web_pdapi_only.py` asserts it stays deleted.)
 - **Storage:** **SQLite**. DuckDB is deferred — add it *only* if analytical query
   volume later justifies a second engine. Do not add it pre-emptively.
 - **Financial math:** pandas / numpy / numpy-financial. **Money is never `float`** —

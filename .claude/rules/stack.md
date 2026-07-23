@@ -11,7 +11,7 @@ decision in `CHANGELOG.md` before acting.
 | Language | Python 3.12 | Most "native" language for LLM code-gen; one language = smallest error surface |
 | Web framework | FastAPI | Async, Pydantic-native, minimal boilerplate |
 | Frontend (decision (B), 2026-06-13) | Static vanilla JS + ECharts (CDN) | No framework, no bundler, no build step; served by FastAPI `StaticFiles`. Supersedes Jinja2/HTMX/Alpine — see CHANGELOG. |
-| Front/back contract | JSON over `/api/*` | Money as Decimal **strings**; frontend never computes; `web/api.js` single fetch layer; `mock-data.js` = documented contract |
+| Front/back contract | JSON over `/api/*` | Money as Decimal **strings**; frontend never computes; `web/api.js` single fetch layer; **spec-17 golden payload** (`tests/golden/dashboard_full.json`) = documented contract (`mock-data.js` retired under spec-19 §6; `test_web_pdapi_only` asserts it stays deleted) |
 | Charts | ECharts (CDN) | Visual quality lives in the chart lib + CSS, not in a JS framework |
 | Storage | SQLite | Tiny data volume; zero-ops; one file |
 | DataFrames / math | pandas, numpy | Idiomatic financial computation |
