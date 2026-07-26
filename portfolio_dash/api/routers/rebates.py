@@ -32,15 +32,24 @@ _ZERO = Decimal("0")
 
 @router.get("/rebates")
 def list_rebates(
+    older: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
-    pending = svc.detect(conn, now=now)
+    """Pending + accruing + skipped rebate months.
+
+    ``older=1`` lifts the default 12-month window (audit L4). ``older_count`` is ALWAYS
+    reported so the bounded default can never read as an empty backlog.
+    """
+    pending = svc.detect(conn, now=now, include_older=older)
     accruing = svc.detect_accruing(conn, now=now)
     skipped = svc.list_skipped(conn, now=now)
     return {
         "rows": [to_wire(p.model_dump()) for p in pending],
         "total_count": len(pending),
+        # months older than the window that are still pending (0 when `older` is on).
+        "older_count": 0 if older else svc.older_pending_count(conn, now=now),
+        "window_months": svc.WINDOW_MONTHS,
         # owner #1: current / not-yet-due months — a NON-confirmable forecast (未到期,次月退款).
         # Rendered as an informational section; NOT counted in the sidebar badge.
         "accruing": [to_wire(p.model_dump()) for p in accruing],
@@ -97,7 +106,9 @@ def confirm(
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"帳戶 {body.account_id} 無折讓款設定", field="account_id"))
 
-    pending_months = {p.month for p in svc.detect(conn, now=now)
+    # include_older: the default list is windowed for readability, but a month the user
+    # revealed via 「顯示更早」 must stay bookable — the window is a view, not a cap (L4).
+    pending_months = {p.month for p in svc.detect(conn, now=now, include_older=True)
                       if p.account_id == body.account_id}
     if body.month not in pending_months:
         return JSONResponse(status_code=400, content=error_body(

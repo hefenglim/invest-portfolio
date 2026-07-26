@@ -2,6 +2,7 @@
 
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -34,7 +35,24 @@ class Holding(BaseModel):
 
 
 class RealizedRow(BaseModel):
-    """One realized event from a sell."""
+    """One realized event: a sell, or a cash dividend paid after the position closed.
+
+    ``kind`` (audit H2, 2026-07-26) distinguishes the two, because a post-close dividend is
+    realized INCOME, not a capital gain:
+
+    * ``"sale"`` — the original meaning. ``shares_sold`` > 0; ``realized`` = net proceeds −
+      adjusted cost removed.
+    * ``"dividend"`` — a CASH-family dividend whose payment date falls after the position
+      already reached zero shares (TW/MY pay weeks after the ex-date, so selling out in
+      between is ordinary). There is no cost left to reduce, so the payout is booked here
+      instead of vanishing with the closed position. ``shares_sold`` and both cost fields
+      are 0; ``proceeds_net`` == ``realized`` == the dividend net; ``sell_date`` is the
+      dividend's payment date.
+
+    Consumers that mean CAPITAL GAIN specifically (the tax package's realized-gains sheet)
+    MUST filter on ``kind == "sale"`` — the dividend is reported there on its own sheet,
+    from the dividend ledger, and counting it twice would misstate taxable income.
+    """
 
     account_id: str
     symbol: str
@@ -45,6 +63,7 @@ class RealizedRow(BaseModel):
     original_cost_removed: Decimal
     adjusted_cost_removed: Decimal
     realized: Decimal
+    kind: Literal["sale", "dividend"] = "sale"
 
 
 class RealizedPnL(BaseModel):

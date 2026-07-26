@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.store import (
+    insert_cash_movement,
     insert_dividend,
     insert_fx_conversion,
     insert_transaction,
@@ -45,6 +46,63 @@ def _already_seeded(conn: sqlite3.Connection) -> bool:
     return bool(count)
 
 
+def _month_starts(first: date, last: date) -> list[date]:
+    """The 1st of every month from *first*'s month through *last*, plus *last* itself."""
+    out: list[date] = []
+    y, m = first.year, first.month
+    while (y, m) <= (last.year, last.month):
+        out.append(date(y, m, 1))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    if out and out[-1] != last:
+        out.append(last)
+    return out
+
+
+# Monthly close path per symbol: (market, currency, [closes aligned to _month_starts]).
+# Fictional but monotone-ish, ending at the current price seeded below.
+_HISTORY: dict[str, tuple[Market, Currency, list[str]]] = {
+    "2330": (Market.TW, Currency.TWD,
+             ["590", "610", "700", "820", "1100", "1650", "2100", "2500"]),
+    "0056": (Market.TW, Currency.TWD,
+             ["37.6", "38.0", "38.4", "39.1", "39.8", "40.4", "41.0", "41.5"]),
+    "AAPL": (Market.US, Currency.USD,
+             ["220", "228", "236", "245", "258", "270", "284", "294"]),
+    "NVDA": (Market.US, Currency.USD,
+             ["132", "136", "140", "146", "151", "157", "161", "165"]),
+    "1155": (Market.MY, Currency.MYR,
+             ["9.80", "9.95", "10.10", "10.25", "10.40", "10.55", "10.68", "10.78"]),
+}
+
+# Monthly FX path per pair, same alignment; the last point equals the spot seeded below.
+_FX_HISTORY: dict[tuple[Currency, Currency], list[str]] = {
+    (Currency.USD, Currency.TWD): ["32.0", "32.1", "32.2", "32.3", "32.4", "32.5",
+                                   "32.5", "32.5"],
+    (Currency.USD, Currency.MYR): ["4.60", "4.58", "4.56", "4.53", "4.50", "4.48",
+                                   "4.46", "4.45"],
+    (Currency.MYR, Currency.TWD): ["6.96", "7.01", "7.06", "7.13", "7.20", "7.26",
+                                   "7.29", "7.30"],
+}
+
+
+def _seed_history(conn: sqlite3.Connection) -> None:
+    """Monthly price + FX series from the first ledger flow to today (audit L6)."""
+    days = _month_starts(date(2026, 1, 1), _TODAY)
+    price_rows = []
+    for symbol, (market, _ccy, closes) in _HISTORY.items():
+        for i, day in enumerate(days):
+            close = closes[min(i, len(closes) - 1)]
+            price_rows.append(PriceRow(instrument=symbol, market=market, as_of=day,
+                                       close=Decimal(close), source="demo"))
+    upsert_prices(conn, price_rows, fetched_at=_NOW)
+
+    fx_rows = []
+    for (base, quote), rates in _FX_HISTORY.items():
+        for i, day in enumerate(days):
+            fx_rows.append(FxRow(base=base, quote=quote, as_of=day,
+                                 rate=Decimal(rates[min(i, len(rates) - 1)]), source="demo"))
+    upsert_fx(conn, fx_rows, fetched_at=_NOW)
+
+
 def seed(conn: sqlite3.Connection) -> None:
     # Idempotent table setup (safe whether the app has booted this DB yet or not).
     bootstrap_db(conn)
@@ -68,6 +126,22 @@ def seed(conn: sqlite3.Connection) -> None:
                                        sector="Information Technology", name="NVIDIA (DEMO)"))
     upsert_instrument(conn, Instrument(symbol="1155", market=Market.MY, quote_ccy=Currency.MYR,
                                        sector="Financials", name="Maybank (DEMO)"))
+
+    # --- funding deposits (audit L6, 2026-07-26) ---
+    # Without these every pool on the demo read NEGATIVE: the seed booked trades and FX legs
+    # but never the money that paid for them, so 資金管理 showed five overdrawn accounts AND
+    # the FX card marked a negative USD cash balance to spot (換匯損益 is computed on
+    # stock value + cash — see forex/pools.py). Each deposit lands before the first flow it
+    # funds and is sized to leave a small positive residue, as a real account would.
+    insert_cash_movement(conn, account_id="tw_broker", move_date=date(2026, 1, 2),
+                         kind="DEPOSIT", ccy=Currency.TWD, amount=Decimal("1600000"),
+                         note="期初匯入 (DEMO)")
+    insert_cash_movement(conn, account_id="schwab", move_date=date(2026, 1, 2),
+                         kind="DEPOSIT", ccy=Currency.TWD, amount=Decimal("350000"),
+                         note="期初匯入 (DEMO)")
+    insert_cash_movement(conn, account_id="moomoo_my", move_date=date(2026, 1, 2),
+                         kind="DEPOSIT", ccy=Currency.MYR, amount=Decimal("50000"),
+                         note="期初匯入 (DEMO)")
 
     # --- transactions across all four accounts ---
     insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
@@ -95,12 +169,25 @@ def seed(conn: sqlite3.Connection) -> None:
                     net=Decimal("6000"))
 
     # --- funding FX conversions ---
+    # Sized so each USD pool stays POSITIVE after the USD buys it funds (audit L6): schwab
+    # buys 9,550 USD of stock, moomoo_my 2,401. The implied rates are unchanged for schwab
+    # (320,000/10,000 = 32.0, as before) so the FX attribution keeps the same cost basis.
     insert_fx_conversion(conn, account_id="schwab", date=date(2026, 1, 12),
-                         from_ccy=Currency.TWD, from_amount=Decimal("220000"),
-                         to_ccy=Currency.USD, to_amount=Decimal("6875"))
+                         from_ccy=Currency.TWD, from_amount=Decimal("320000"),
+                         to_ccy=Currency.USD, to_amount=Decimal("10000"))
     insert_fx_conversion(conn, account_id="moomoo_my", date=date(2026, 3, 28),
-                         from_ccy=Currency.MYR, from_amount=Decimal("11000"),
-                         to_ccy=Currency.USD, to_amount=Decimal("2400"))
+                         from_ccy=Currency.MYR, from_amount=Decimal("11500"),
+                         to_ccy=Currency.USD, to_amount=Decimal("2500"))
+
+    # --- price + FX HISTORY (audit L6, 2026-07-26) ---
+    # The seed used to store ONE price row and ONE FX row, both dated today. Two flagship
+    # surfaces died on that: XIRR needs a trade-date rate for every flow
+    # (`no FX rate stored on or before 2026-01-15 for USD/TWD`) and the 總市值 trend needs a
+    # dated series (`missing FX history for a ledger flow date`) — so the public demo showed
+    # an empty XIRR card and an empty chart, which are the two things it exists to show.
+    # A monthly series from the first flow to today fixes both; the app carries values
+    # forward between points, so monthly granularity renders a smooth line.
+    _seed_history(conn)
 
     # --- current prices ---
     upsert_prices(conn, [

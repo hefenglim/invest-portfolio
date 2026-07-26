@@ -397,6 +397,13 @@ def build_dashboard(
                           / total_value)
             except KeyError:
                 weight = None
+        # Per-holding unrealized return rate, computed HERE so the frontend never derives it
+        # (audit H1). Basis = original invested cost — see HoldingRow.unrealized_pct for why
+        # adjusted cost is both inconsistent with the KPI definition and unsafe (it may be
+        # <= 0, which flips the ratio's sign on a fully-recovered position).
+        unrealized_pct: Decimal | None = None
+        if h.unrealized_pnl is not None and h.original_cost_total != _ZERO:
+            unrealized_pct = h.unrealized_pnl / h.original_cost_total
         data = h.model_dump()
         data.update(
             account_name=acct.name, name=inst.name, market=inst.market,
@@ -404,6 +411,7 @@ def build_dashboard(
             price_as_of=pr.as_of if pr is not None else None,
             price_stale=pr.stale if pr is not None else True,
             weight=weight,
+            unrealized_pct=unrealized_pct,
         )
         holding_rows.append(HoldingRow(**data))
 

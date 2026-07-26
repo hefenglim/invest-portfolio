@@ -66,6 +66,101 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.24 (full-site audit remediation: H1/H2 + M1-M5 + L1-L6) ----------------------
+    Feature(
+        version="0.1.24",
+        id="post-close-dividend-realized",
+        title="清倉後才入帳的現金股利,現在計入總報酬",
+        desc="台股/馬股除息在前、發放在後,期間賣光的話,那筆股利原本會從「總報酬」消失"
+        "(股利總覽與 XIRR 卻都有計入,三個數字互相矛盾);現在改列為一筆已實現收益,"
+        "在已實現損益表以「股利」標記,恰好計入一次",
+        href="index.html",
+        area="儀表板 → 已實現損益",
+        target="#realized-body",
+    ),
+    Feature(
+        version="0.1.24",
+        id="drawer-unrealized-pct-basis",
+        title="個股抽屜未實現百分比修正:配息已回本的標的不再顯示負數",
+        desc="累計配息超過原始成本時,未實現損益的百分比會翻成負號(獲利卻顯示 −1399%);"
+        "改由伺服器以「未實現 ÷ 原始成本」計算,與回本進度、累計報酬率同一基準並在副標註明;"
+        "調整均價為負時加註「已回本」",
+        href="index.html",
+        area="儀表板 → 個股抽屜",
+        target="#holdings-body",
+    ),
+    Feature(
+        version="0.1.24",
+        id="narrow-window-layout",
+        title="窄視窗排版修正:儀表板不再整頁左右捲動",
+        desc="視窗寬度 761–1279px(非全螢幕、分割畫面、小筆電)時,整頁會被撐出橫向捲軸、"
+        "重新整理鈕被推出畫面、KPI 卡片文字被裁;現已修正,並在 ≤1365px 將工具列收為圖示"
+        "以維持單行",
+        href="index.html",
+        area="儀表板 → KPI",
+        target="#kpi-band",
+    ),
+    Feature(
+        version="0.1.24",
+        id="datacenter-narrow-layout",
+        title="資料中心窄視窗排版修正",
+        desc="手機寬度下正文段落無法折行、把整頁撐寬,右側欄位落在畫面外;現已修正,"
+        "表格仍在自己的容器內水平捲動",
+        href="data-center.html",
+        area="資料中心 → 資料庫統計",
+        target="#dbstats-body",
+    ),
+    Feature(
+        version="0.1.24",
+        id="manual-entry-clear-button",
+        title="交易輸入「清除」按鈕真的會清除了",
+        desc="此鈕先前沒有接上任何動作,點了毫無反應;現在會清空代號/股數/價格/費稅、"
+        "買賣切回買進、日期回今天、解除費稅覆寫,並保留目前帳戶(連續輸入同帳戶較方便)",
+        href="trades.html",
+        area="交易帳本 → 手動輸入",
+        target="#m-clear",
+    ),
+    Feature(
+        version="0.1.24",
+        id="fx-negative-cash-notice",
+        title="換匯損益:外幣現金為負時明確提示",
+        desc="外幣現金池是由換匯與交易反推的,出入金若未完整登錄會變成負值,"
+        "而未實現匯損益(現金)正是以該負值計算;現在會在該帳戶卡片標示並說明,"
+        "補登入金後提示自動消失",
+        href="index.html",
+        area="儀表板 → 換匯損益",
+        target="#fx-grid",
+    ),
+    Feature(
+        version="0.1.24",
+        id="dividend-amount-gate",
+        title="股利金額守恆檢核(兩條寫入路徑一致)",
+        desc="編輯股利時若「預扣 + 淨額」超過「總額」會被擋下並說明,匯入預覽亦同;"
+        "但淨額少於總額的合法情形(補充保費、匯費、ADR fee)一律放行,不會逼你竄改總額",
+        href="trades.html",
+        area="交易帳本 → 股利帳本",
+        target="#pane-ldiv",
+    ),
+    Feature(
+        version="0.1.24",
+        id="rebate-recent-window",
+        title="待確認退款預設只列最近 12 個月",
+        desc="匯入多年歷史時,折讓款收件匣原本會一次湧現數十筆;現在預設只列最近 12 個月,"
+        "並固定顯示「另有 N 個更早的月份」與「顯示更早」,不會靜默隱藏",
+        href="dividend-inbox.html",
+        area="收件匣 → 待確認退款",
+        target="#rebate-section",
+    ),
+    Feature(
+        version="0.1.24",
+        id="exact-display-rounding",
+        title="金額顯示改為精確十進位運算",
+        desc="顯示層原本以浮點取位,在 .xx5 邊界可能與後端差 1 分;現改為字串精確運算,"
+        "已依各帳戶捨入方式(台股費稅為無條件捨去)算好的金額,顯示時保證逐位元原樣呈現",
+        href="index.html",
+        area="全站 → 金額顯示",
+        target="#kpi-band",
+    ),
     # --- v0.1.23 (Round-8 + 8.1: register unification, drawer, shared picker, rebate) ------
     Feature(
         version="0.1.23",
@@ -979,6 +1074,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.24": "2026-07-26",
     "0.1.23": "2026-07-24",
     "0.1.22": "2026-07-22",
     "0.1.21": "2026-07-21",

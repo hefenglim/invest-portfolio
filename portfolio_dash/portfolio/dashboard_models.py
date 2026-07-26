@@ -45,6 +45,16 @@ class HoldingRow(BaseModel):
     price_as_of: date | None = None
     weight: Decimal | None = None
     oversold: bool = False  # 賣超: negative shares, 待釐清 value (see Holding.oversold)
+    # Unrealized return rate for THIS holding, server-computed (audit H1, 2026-07-26):
+    # ``unrealized_pnl / original_cost_total``. The denominator is deliberately the ORIGINAL
+    # invested cost — the same basis as ``KpiSummary.total_return_rate`` (domain-ledger.md:
+    # "total return / original invested cost") and as ``payback_ratio``, so every percentage
+    # the UI shows for a holding shares ONE basis. It is also the only SAFE basis: adjusted
+    # cost MAY be <= 0 once cumulative cash dividends exceed cost (explicitly legal, never
+    # floored), and dividing by it silently FLIPS the sign of the ratio; original cost is a
+    # sum of non-negative costs and can never be negative. None when unpriced/oversold (no
+    # unrealized) or when original cost is zero.
+    unrealized_pct: Decimal | None = None
 
 
 class KpiSummary(BaseModel):

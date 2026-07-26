@@ -17,7 +17,8 @@ from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
 from tests.conftest import GOLDEN_NOW, _seed_golden, init_golden_base
 
-_COLS = ("account_id,symbol,quote_ccy,sell_date,shares_sold,proceeds_net,"
+# `kind` added 2026-07-26 (audit H2) — see tests/contract/test_export_realized.py.
+_COLS = ("account_id,symbol,quote_ccy,kind,sell_date,shares_sold,proceeds_net,"
          "original_cost_removed,adjusted_cost_removed,realized")
 
 

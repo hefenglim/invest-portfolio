@@ -102,6 +102,9 @@ def compute_account_fx(
         unrealized_fx_stocks=unreal_stocks,
         unrealized_fx_cash=unreal_cash,
         unrealized_fx_total=unreal_total,
+        # Derived-on-the-server display values (the frontend computes neither).
+        spot_delta=(spot - avg_rate if spot is not None and avg_rate is not None else None),
+        cash_basis_incomplete=foreign_cash < _ZERO,
     )
 
 

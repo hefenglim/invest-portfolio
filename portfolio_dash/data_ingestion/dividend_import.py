@@ -6,7 +6,7 @@ import sqlite3
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
-from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
+from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model, check_amounts
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.rules_binding import dividend_model_for
@@ -142,6 +142,13 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
             reinvest_shares=reinvest_shares_override,
             reinvest_price=reinvest_price_override,
         )
+
+        # Conservation gate (audit M5): a payout can never deliver more than it declared.
+        # Hard issue — the same check the ledger edit endpoint enforces, so both write paths
+        # agree instead of one silently accepting what the other rejects.
+        amount_issue = check_amounts(amounts.gross, amounts.withholding, amounts.net)
+        if amount_issue is not None:
+            issues.append(Issue(kind="dividend_amounts", message=amount_issue))
 
         payload: dict[str, str] = {
             "account_id": account_id,

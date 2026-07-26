@@ -73,9 +73,13 @@ def test_visible_versions_bounded_to_max() -> None:
     out = visible_versions("9.9.9")
     assert len(out) <= _MAX_VERSIONS
     assert len(out) == _MAX_VERSIONS  # the catalog seeds >6 versions
-    # The 6 NEWEST are kept; the older versions drop off.
-    assert "0.1.18" in out
-    assert "0.1.12" not in out
+    # The N NEWEST are kept and the rest drop off. Asserted RELATIVELY, against the catalog's
+    # own ordering — a literal version here would age out of the window on a release and turn
+    # this test red for no reason (2026-07-26: the pinned "0.1.18" did exactly that, and the
+    # same rot had already reddened both what's-new e2e flows). See LESSONS_LEARNED.md.
+    newest_first = sorted({f.version for f in CATALOG}, key=_version_key, reverse=True)
+    assert out == newest_first[:_MAX_VERSIONS]
+    assert newest_first[_MAX_VERSIONS] not in out  # the first one past the cap is excluded
 
 
 def test_all_visible_versions_uncapped_and_newest_first() -> None:

@@ -50,6 +50,118 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.24] - 2026-07-26
+
+Remediation of the 2026-07-25 full-site audit: 2 high / 5 medium / 6 low findings, plus
+3 incidental defects and 2 pre-existing red tests found during implementation. **One
+money-of-record change** (H2, owner ruling recorded below); everything else is display,
+layout, validation or tooling.
+
+**Owner ruling (H2, 2026-07-26).** A CASH-family dividend whose payment date falls after
+its position already reached zero shares is booked as REALIZED INCOME, not absorbed into
+the closed position. The owner confirmed the real case: dividends imported for symbols
+that were later closed belong in that symbol's historical return. Consequence to expect
+on the real ledger: **the historical total return of already-closed symbols RISES** by the
+sum of such payouts (they were previously dropped). 股利總覽 and the XIRR cashflow series
+already counted them, so this makes the three figures agree instead of disagree.
+
+### Added
+- **Post-close cash dividend → realized income** (audit H2). `RealizedRow` gains
+  `kind: "sale" | "dividend"`; `cost_basis.build_book` emits a `kind="dividend"` row
+  (`realized = proceeds_net = net`, zero shares, zero cost removed, dated at payment)
+  when a CASH/NET dividend lands on a zero-share position. Booked exactly once — the
+  cost-reduction path is skipped, not doubled (invariant I4 holds). Accounting manual
+  §6.3b (zh authority + en mirror); oracle + phase-1 scenario op "Found-bug op #3"
+  (`moomoo_my/5225` buy → sell-all → post-close NET dividend).
+- **`HoldingRow.unrealized_pct`** (audit H1) — per-holding unrealized return, server-computed
+  against ORIGINAL cost: the same basis as `KpiSummary.total_return_rate` and `payback_ratio`,
+  and the only safe one (adjusted cost may legally be ≤ 0). Surfaced on the drawer aggregate
+  and per-account breakdown, plus a `fully_recovered` flag for the 已回本 label.
+- **`AccountFXResult.cash_basis_incomplete` + `spot_delta`** (audit M4/L2) — the negative
+  foreign-cash signal the `foreign_cash` docstring always asked consumers to flag, and the
+  rate delta the UI used to derive by subtracting two Decimal strings.
+- **`fee_tax` on rebalance preview rows** (audit L1) — the combined cost, summed in Decimal
+  server-side; the UI no longer adds `fee` and `tax` in float.
+- **`dividend_model.check_amounts()`** (audit M5) — one conservation gate
+  (`withholding + net ≤ gross`, non-negative) shared by the CSV/manual import preview AND
+  the ledger edit endpoint. Deliberately NOT `gross − withholding == net`: that identity is
+  the US DRIP model's, and TW 二代健保補充保費 / 匯費 and US ADR fees legitimately break it.
+  No levy other than the US 30% DRIP withholding is computed anywhere (owner decision
+  2026-07-26: fees/taxes stop at 手續費 + 證交稅).
+- **Rebate inbox window** (audit L4) — pending months default to the last 12; `older_count`
+  and `window_months` are ALWAYS reported and the UI offers 「顯示更早」, so the bound is never
+  silent. Confirm still accepts an older month (the window is a view, not a cap).
+- **`tests/e2e/test_no_horizontal_scroll.py`** — the document must never scroll sideways:
+  six measured boundary widths on the dashboard, two widths across nine pages, plus a
+  single-row-topbar assertion for 1280–1600px.
+- **`tests/e2e/test_format_exact_rounding.py`** — exact-formatting cases in a real browser.
+- **`tests/portfolio/test_post_close_dividend.py`** — five H2 cases including the
+  closed → re-bought → paid ordering case.
+
+### Changed
+- **Exact decimal formatting in `web/format.js`** (audit L5) — money/percentage rendering
+  moved off `Number().toLocaleString()` onto string decimal arithmetic. Two properties now
+  hold: a value already quantized by the fee engine under its account's `rounding`
+  (TW 手續費/證交稅 are 無條件捨去 per 財政部 FE-D3) is reproduced BYTE-FOR-BYTE, and an
+  unquantized value rounds exactly as `Decimal.quantize(ROUND_HALF_UP)` would. Floor is
+  deliberately NOT implemented in the display layer — it is a property of the TW fee/tax
+  engine, and applying it to other TWD amounts would be wrong.
+- **Narrow-window layout** (audit M1/M2) — removed `.topbar { flex-wrap: nowrap }` from the
+  label-anti-wrap section (declared far below the `.topbar` block, it won on order and pinned
+  the document at 1,257px for every viewport from 761 to 1279px); the base rule now owns
+  wrapping. `.kpi-band.v2` added to the 1280/860 breakpoints — two classes out-specify a bare
+  `.kpi-band`, so those breakpoints were dead for the v2 band; new ≤1023px tablet tier.
+  `.panel-sub`'s nowrap scoped to panel HEADS — on body copy it made a paragraph one
+  unwrappable line (and `overflow: hidden` is inert on an inline element). Topbar labels
+  collapse to icons at ≤1365px so common laptops keep a single-row header.
+- **Realized-P&L surfaces** carry `kind`: the dashboard table and the drawer mark a post-close
+  dividend row and show 賣出股數 / 調整成本移除 as 不適用; `realized_pnl_*.csv` gains a `kind`
+  column. The tax package's `realized_gains_{year}.csv` filters to `kind == "sale"` — the
+  payout is already reported on the dividends sheet, and counting it twice would misstate
+  taxable income.
+- **`returns.by_currency` iteration is sorted** — it was built from a `set`, so the order (and
+  therefore the dashboard's 各幣別報酬 chip order and the golden snapshot) varied per process.
+  Values unchanged.
+- **The unavailable-figure KPI badge shows a short zh label**, with the backend's (long,
+  English) reason in the tooltip; the 資料新鮮度 panel still prints it in full.
+- **`scripts/seed_demo.py`** now seeds funding deposits and a monthly price/FX history, so the
+  demo instance shows a real XIRR and trend instead of "no FX rate stored…" and five overdrawn
+  cash pools. Demo-only; no effect on prod data.
+- **Export filter bodies reject unknown keys** (audit L3, `extra="forbid"`) — a misspelled
+  filter key used to be dropped silently and return the WHOLE portfolio with a footer reading
+  `filter: account=all`. Silently widening a reconciliation export's scope is its worst
+  failure mode.
+
+### Fixed
+- **Drawer unrealized percentage flipped sign on a fully-recovered holding** (audit H1) — the
+  frontend divided by ADJUSTED cost, which is legally ≤ 0 once cumulative dividends exceed
+  cost, rendering a +223,473 gain as −1399.07%.
+- **交易輸入「清除」was a dead button** (audit M3) — declared in the markup, referenced by no
+  JS anywhere; clicking it did nothing at all.
+- **What's-new e2e flows had been red since v0.1.23** — they pinned
+  `data-wn-key="0.1.17:market-risk-alerts"`, and the ✦ panel keeps only the six most recent
+  versions, so v0.1.17 aged out of the window. Both flows now discover a still-visible
+  settings-tab feature from the live payload, and the blink assertion checks the anchor
+  relationship rather than a fixed descendant selector.
+
+### Verification
+- Full `pytest` suite (including all e2e): exit 0.
+- `mypy` bare, full scope: **546 source files, no issues**. `ruff check portfolio_dash tests
+  scripts`: clean.
+- Independent Decimal oracle, stress-audit phase 1: **ops=69 pass=1088 fail=0** (was 66/1060 —
+  the H2 scenario adds 3 ops / 28 assertions).
+- Real-browser width sweep: 16 widths on the dashboard + 11 pages × 3 widths → **0 pages with
+  page-level horizontal scroll** (9 page-widths failed before).
+- Fee-engine verification matrix: 4 account rule sets × buy/sell × ETF × daytrade × 9
+  quantity/price cases = **162/162** agree with `compute_fees()`, driven by the EFFECTIVE
+  config (defaults + settings-page overlay).
+- Golden contract snapshot regenerated and diff-reviewed: four additive fields
+  (`unrealized_pct`, `spot_delta`, `cash_basis_incomplete`, `kind`) plus the by-currency
+  ordering stabilisation; **no existing value changed**.
+- Audit artifacts: `docs/audit/full-system-audit-2026-07-25.html` (findings),
+  `remediation-2026-07-26.html` (what changed + evidence), `rootcause-demo-2026-07-26.html`
+  (the four root-cause divergences, demonstrated in real cascade).
+
 ## [v0.1.23] - 2026-07-24
 
 Round-8 (owner UI feedback) + Round-8.1 (demo-verification follow-ups + a deep systemic

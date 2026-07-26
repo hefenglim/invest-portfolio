@@ -38,6 +38,7 @@
       "price_as_of": "2026-06-09",
       "weight": "0.4084459821679291618518260088",
       "oversold": false,
+      "unrealized_pct": "0.1960784313725490196078431373",
       "spark_30d": [
         "600"
       ]
@@ -66,6 +67,7 @@
       "price_as_of": "2026-06-09",
       "weight": "0.1034729821492087210024625889",
       "oversold": false,
+      "unrealized_pct": "0.05555555555555555555555555556",
       "spark_30d": [
         "38"
       ]
@@ -94,6 +96,7 @@
       "price_as_of": "2026-06-09",
       "weight": "0.04118496986859952382005912256",
       "oversold": false,
+      "unrealized_pct": "0.21000000000000000000000",
       "spark_30d": [
         "110"
       ]
@@ -122,6 +125,7 @@
       "price_as_of": null,
       "weight": null,
       "oversold": false,
+      "unrealized_pct": null,
       "spark_30d": []
     },
     {
@@ -148,6 +152,7 @@
       "price_as_of": "2026-06-09",
       "weight": "0.3280638128772807027993866503",
       "oversold": false,
+      "unrealized_pct": "0.2",
       "spark_30d": [
         "300"
       ]
@@ -176,6 +181,7 @@
       "price_as_of": "2026-06-06",
       "weight": "0.04901351786015149942221912106",
       "oversold": false,
+      "unrealized_pct": "0.125",
       "spark_30d": [
         "450"
       ]
@@ -204,6 +210,7 @@
       "price_as_of": "2026-06-09",
       "weight": "0.02352819043113175276083956072",
       "oversold": false,
+      "unrealized_pct": "0.1194444444444444444444444444",
       "spark_30d": [
         "9.875"
       ]
@@ -232,6 +239,7 @@
       "price_as_of": "2026-06-09",
       "weight": "0.04629054464569863834320694767",
       "oversold": false,
+      "unrealized_pct": "0.4406779661016949152542372881",
       "spark_30d": [
         "170"
       ]
@@ -316,7 +324,8 @@
         "proceeds_net": "80000",
         "original_cost_removed": "72000.0",
         "adjusted_cost_removed": "72000.0",
-        "realized": "8000.0"
+        "realized": "8000.0",
+        "kind": "sale"
       }
     ],
     "by_currency": {
@@ -332,19 +341,19 @@
         "gross_invested": "9000",
         "rate": "0.1194444444444444444444444444"
       },
-      "USD": {
-        "realized": "0",
-        "unrealized": "6820.0",
-        "total_return": "6820.0",
-        "gross_invested": "32050",
-        "rate": "0.2127925117004680187207488300"
-      },
       "TWD": {
         "realized": "8000.0",
         "unrealized": "237000.0000000000000000000000",
         "total_return": "245000.0000000000000000000000",
         "gross_invested": "1595000",
         "rate": "0.1536050156739811912225705329"
+      },
+      "USD": {
+        "realized": "0",
+        "unrealized": "6820.0",
+        "total_return": "6820.0",
+        "gross_invested": "32050",
+        "rate": "0.2127925117004680187207488300"
       }
     },
     "reporting_currency": "TWD",
@@ -388,7 +397,9 @@
         "realized_fx": "0",
         "unrealized_fx_stocks": "-425.0",
         "unrealized_fx_cash": "-0.0",
-        "unrealized_fx_total": "-425.0"
+        "unrealized_fx_total": "-425.0",
+        "spot_delta": "-0.1",
+        "cash_basis_incomplete": false
       },
       "schwab": {
         "account_id": "schwab",
@@ -401,7 +412,9 @@
         "realized_fx": "2000",
         "unrealized_fx_stocks": "34620.0",
         "unrealized_fx_cash": "-21100",
-        "unrealized_fx_total": "13520.0"
+        "unrealized_fx_total": "13520.0",
+        "spot_delta": "1",
+        "cash_basis_incomplete": true
       }
     },
     "reporting_currency": "TWD",

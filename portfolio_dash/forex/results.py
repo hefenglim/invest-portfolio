@@ -35,6 +35,18 @@ class AccountFXResult(BaseModel):
     # Additive field with a default so pre-existing AccountFXResult constructions still
     # validate; the sole real builder (``compute_account_fx``) always sets it explicitly.
     unrealized_fx_total: Decimal | None = None
+    # ``current_spot - avg_rate`` (home per foreign), server-computed (audit L2, 2026-07-26).
+    # Rates are formally not money, but the derived delta still belongs on this side of the
+    # wire: the UI used to subtract two Decimal STRINGS via JS coercion, which yields a silent
+    # NaN the moment either side is non-numeric. None when either rate is unavailable.
+    spot_delta: Decimal | None = None
+    # True when ``foreign_cash`` is NEGATIVE — the reconstructed foreign pool has been drawn
+    # below zero, which means funding reached the account by a path this ledger does not
+    # track (a direct foreign deposit that was never recorded). The unrealized FX figures are
+    # still computed exactly as specified, but their CASH leg is then marking a balance that
+    # does not exist, so the consumer MUST flag it rather than present the number bare
+    # (audit M4; the ``foreign_cash`` docstring above has always asked for this).
+    cash_basis_incomplete: bool = False
 
 
 class FxRealizedRow(BaseModel):

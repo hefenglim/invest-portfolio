@@ -9,7 +9,10 @@ from fastapi.testclient import TestClient
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.shared.models.enums import Side
 
-_HEADER = ("account_id,symbol,quote_ccy,sell_date,shares_sold,proceeds_net,"
+# `kind` added 2026-07-26 (audit H2): "sale" | "dividend" — a cash dividend paid AFTER the
+# position closed is realized income and now appears in these rows, so the export must say
+# which it is (the tax package's capital-gains sheet filters on it).
+_HEADER = ("account_id,symbol,quote_ccy,kind,sell_date,shares_sold,proceeds_net,"
            "original_cost_removed,adjusted_cost_removed,realized")
 
 

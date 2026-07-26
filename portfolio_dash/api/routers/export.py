@@ -43,7 +43,15 @@ router = APIRouter()
 class HoldingsFilterBody(BaseModel):
     """Optional (account, market) filter for the holdings CSV / report exports so a download
     follows the dashboard's active chips. Both optional; an absent or empty body ({}, or no
-    body at all) means the full, unfiltered snapshot (identical to the legacy behaviour)."""
+    body at all) means the full, unfiltered snapshot (identical to the legacy behaviour).
+
+    ``extra="forbid"`` (audit L3, 2026-07-26): a MISSPELLED filter key used to be dropped
+    silently by Pydantic's default, so a caller asking for one account received the WHOLE
+    portfolio — with a footer that read ``filter: account=all``, giving no hint that the
+    request had been ignored. Silently WIDENING the scope of a reconciliation export is the
+    worst failure mode available to it, so an unknown key is now a loud 422."""
+
+    model_config = {"extra": "forbid"}
 
     account: str | None = None
     market: Market | None = None
@@ -62,7 +70,7 @@ def _respond(art: ExportArtifact) -> Response:
 class RangeBody(BaseModel):
     frm: str | None = Field(default=None, alias="from")
     to: str | None = None
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
 
 class LedgerBody(RangeBody):

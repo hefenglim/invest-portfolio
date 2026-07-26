@@ -11,8 +11,8 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.4` (2026-07-22)
-> **Code baseline**: `v0.1.20 + Batch B (Moomoo merge)`
+> **Version**: `v1.5` (2026-07-26)
+> **Code baseline**: `v0.1.24` (full-site audit remediation)
 > **Arbitration status**: **Formally signed off by the owner (2026-07-15)**; effective
 > as the site's single **arbitration standard** for any money dispute **from version
 > v0.1.19 onward**.
@@ -457,7 +457,8 @@ Final position (matches `build_book` output digit for digit):
 
 ### 5.1 Realized P&L
 
-Each **sell** produces a `RealizedRow` (`cost_basis.py`):
+Each **sell** produces a `RealizedRow` (`cost_basis.py`, `kind="sale"`; a second kind,
+`kind="dividend"`, is described in §6.3b):
 
 $$\text{proceeds\_net} = \text{quantity}\times\text{price} - \text{fees} - \text{tax}$$
 
@@ -568,6 +569,44 @@ Verification anchor: `ledger.div.net moomoo_my|1155`;
 `holding.dividend_portion moomoo_my/1155 = 306.25` (note: because that position had a later sell after the
 dividend, `dividend_portion` is **proportionally removed** by the sell, so it does not
 equal the cumulative dividend total — cross-reference §4.1 proportional removal, §5.1).
+
+### 6.3b Cash Dividend Paid After the Position Closed (`CASH` / `NET`) — Realized Income
+
+**Rule (audit H2, 2026-07-26; applies to TW `CASH` and MY `NET`)**: when a cash dividend's
+payment date falls **after** its `(account, symbol)` position has already reached zero
+shares (TW/MY pay weeks after the ex-date, so selling out in between is ordinary), there is
+**no cost basis left to reduce**, and the net is booked as one **realized** row
+(`RealizedRow`, `kind="dividend"`):
+
+$$\text{realized} = \text{proceeds\_net} = \text{net},\qquad
+\text{shares\_sold} = \text{original\_removed} = \text{adjusted\_removed} = 0$$
+
+$$\text{sell\_date} = \text{the dividend's payment date}$$
+
+**The test is the share count at the moment of the event** (same-day order: opening 0 →
+buy 1 → sell 2 → dividend 3):
+
+| Case | Shares at payment | Handling |
+| --- | ---: | --- |
+| Dividend while held | > 0 | `adjusted_total −= net` (§6.1 / §6.3, unchanged) |
+| Dividend after a partial sale | > 0 | Same, against the remaining position (unchanged) |
+| **Dividend after full close** | **= 0** | **One realized row (`kind="dividend"`)** |
+| Closed, re-bought, then paid | > 0 | Reduces the **new** position's cost (not a special case) |
+
+**No double counting (invariant I4 holds)**: the two paths are mutually exclusive — either
+cost reduction or a realized row, exactly once. The `dividends` ledger itself (the dividend
+overview) and the XIRR cashflow series (§7.2) each already counted the payout; after the
+fix all three agree.
+
+**Tax separation**: a `kind="dividend"` row is **not** a capital gain. The annual tax
+package's `realized_gains_{year}.csv` takes `kind == "sale"` only; the payout is already
+reported by `dividends_{year}.csv` from the dividend ledger (`export/tax.py`), so it is
+never filed twice.
+
+**Verification anchor**: `moomoo_my/5225` buy 200@6.00 (2026-05-04) → sell 200@6.50
+(2026-05-20, position → 0) → `NET` dividend 120 (2026-06-16) → the payout enters
+`realized.by_currency[MYR]` (`scripts/stress_audit/run_phase1.py`, "Found-bug op #3";
+hermetic regression in `tests/portfolio/test_post_close_dividend.py`).
 
 ### 6.4 Stock Dividend (`STOCK`) and Display-Only Payback Progress
 
@@ -1329,6 +1368,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.2` | 2026-07-15 | **Formally signed off by the owner as the arbitration standard, effective from v0.1.19** (removed the "pending owner confirmation" draft status; version leaves -draft). Folds in the owner's four rulings: ① added the English mirror `docs/accounting-formula-manual.en.md` (a working copy for AI/agent reading; the zh manual is the arbitration authority, and each zh change must regenerate the mirror in the same change set); ② this activation (this row); ③ the §11.1 rebalance ruling's canonical date is set to **2026-07-13** (the ship record's 07-14 was only the ship date); ④ §3 rate honest statement: the owner's complete schedules are on file (→ `docs/reference/broker-fee-schedules-2026-07.md`), superseding the seed rates at the fee-engine-v2 upgrade; until then §3 documents what the current engine computes and lists the known divergences (sec_fee 0.0000278→0.0000206, TAF/CAT/platform/settlement not modeled, MY schedule shape differs, TW Capital Securities (群益) 23%-of-list charge-first-refund-later + rounding divergence), and a fee-dispute note was added to §12.4; ⑤ the §7.3 / §12.5 boundary ruling is settled (weights / return rates remain within arbitration scope). Baseline unchanged. |
 | `v1.3` | 2026-07-15 | **fee-engine v2 shipped** (owner sign-off; §3 fully rewritten). ① **TW rounding FE-D3**: fee/tax switch from round-half-up to **unconditional floor (ROUND_DOWN) to integer NT$**, with the min-NT$20 compared after the floor (群益 142.5→142; day-trade tax example 11→10); ② **US regulatory v2**: Schwab / Moomoo US commission $0 / platform $0.99, SELL adds SEC `0.0000206` + TAF `0.000195` (cap $9.79), settlement `0.003/share` (cap 1%), CAT `0.000003/share` — each component rounded then summed; ③ **MY v2**: commission `0.03%` (min RM0.01) + platform RM3 + clearing (cap RM1,000) + **SST 8%**; stamp becomes `ceil(amount/1000)×RM1` (stock cap RM1,000, **ETF exempt**); ④ **FE-D2 US stamp**: the MY stamp on US trades is computed in MYR, booked in USD (`stamp_fx` resolved by the caller; no rate → 0 + soft issue); ⑤ **FE-D1 rebate**: new §3.6 forecast `⌊fee×0.77⌋` (**not a number of record**, never in `compute_fees`; inbox/confirm is Wave B); ⑥ the snapshot carries `engine="v2"`, a **per-row regime** (old rows arbitrated under their old snapshot, never recomputed). All rates live in config. §3 example anchors updated to fee-engine v2 stress phase1 (`fee_engine.*` 80/80). Mirror regenerated in the same change set. Baseline unchanged. |
 | `v1.4` | 2026-07-22 | **Batch B (Moomoo merge) revision** (baseline `v0.1.20 + Batch B`). ① **Account model**: the two former per-market Moomoo accounts (legacy ids documented in `data_ingestion/moomoo_merge.py`) are merged into ONE dual-market account `moomoo_my` (settlement USD / funding MYR; rules bind per (account, market): US→(`moomoo_us`,`drip_us`), MY→(`moomoo_my`,`cash`), held in `account_market_rules`) — §2 account table 4→3 rows, invariant I6 changed from "bind to account" to "bind to (account, market)", and the account labels + `scope` anchors in §3.3/§3.4/§6.2/§6.3/§8/§9 re-anchored onto `moomoo_my` (market carried by the symbol). ② **Full anchor re-reconciliation**: the stress suite was regenerated to the post-merge topology (1,060 assertions, 66 ops, 1,060/1,060 passing, 0 fail; spot USD/MYR 4.5→**4.6**, plus one Schwab USD→TWD reconversion). Scenario-dependent terminal values updated to this current run: §7.1 total return 514,752.85→**516,336.55** (realized 186,333.50 / unrealized 330,003.05), §8.2 realized FX 0→**−2,375** (Schwab reconversion), §8.3 unrealized FX rollup −31,830.94→**−11,757.48** (`moomoo_my` now contributes a positive leg because spot 4.6≠avg 4.5), §9.2 cash pools fully updated with the MYR pool now a single directly-anchored `moomoo_my|MYR = 123,201.91`, §5.1 TSLA proceeds/realized 5,199.86/199.86→**5,199.88/199.88** (SEC fee 0.14→0.12); fixed pre-existing typos E5 (NVDA fee 1.41→5.89) and E6 (1155 fee/tax 10.45/9.50→9.40/10.00). ③ **Anchor robustness**: the volatile `id=NN` (renumbered per release) removed from the §12.1 fee examples, keeping the stable check+scope; the `negative_cash` example (former op47) — no longer triggered by the scenario — is re-anchored to unit tests (§9.3/E16); the oversell anchor is stated via the `guard.oversell_blocks` scope. ④ Verification-basis line, §7.2 harness count (1,006→1,060), §6.5 count (966→1,060) updated. Mirror regenerated in the same change set. **No formula or accounting-definition change — purely a (account, market) binding relabel + anchor re-reconciliation.** |
+| `v1.5` | 2026-07-26 | **A cash dividend paid after the position closed is booked as realized income** (audit H2, owner ruling 2026-07-26; baseline `v0.1.24`). New **§6.3b**: when a CASH/NET dividend lands while its `(account, symbol)` position is already at zero shares there is no cost basis left to reduce, so it becomes one `RealizedRow(kind="dividend")` (`realized = proceeds_net = net`; shares_sold / original_removed / adjusted_removed all 0; `sell_date` = the payment date). Before the fix the payout was absorbed by the zero-share position and discarded with it, so the dividend overview and the XIRR cashflows counted it while total return did not — three figures, three answers. It is now counted exactly once and **invariant I4 holds**. §5.1 notes that `RealizedRow` now carries `kind: "sale" | "dividend"`. **Tax separation**: the annual package's `realized_gains_{year}.csv` takes `kind == "sale"` only — the payout is already reported by `dividends_{year}.csv` from the dividend ledger, so it is never filed twice. Verification anchor: `moomoo_my/5225` buy 200@6.00 → sell 200@6.50 (position → 0) → NET dividend 120 enters `realized.by_currency[MYR]` (run_phase1 "Found-bug op #3"; stress ops 66→**69**, assertions 1,060→**1,088**, fail=0); hermetic regression `tests/portfolio/test_post_close_dividend.py` (5 cases, including closed → re-bought → paid, which still reduces cost). **Effect on a real ledger: the historical total return of already-closed symbols RISES** (previously dropped payouts now count). Mirror regenerated in the same change set. No other formula changed. |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

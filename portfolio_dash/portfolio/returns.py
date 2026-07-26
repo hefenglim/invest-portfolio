@@ -44,7 +44,15 @@ def total_return(
         if h.unrealized_pnl is not None:
             unrealized[h.quote_ccy] = unrealized.get(h.quote_ccy, _ZERO) + h.unrealized_pnl
 
-    ccys = set(book.gross_invested) | set(book.realized.by_currency) | set(unrealized)
+    # Sorted, not raw set order: set iteration over Currency is hash-seed dependent ACROSS
+    # PROCESSES, so an unsorted loop gives `by_currency` (and therefore the dashboard's
+    # 各幣別報酬 chips, which render Object.keys order) a different order on every restart —
+    # and churns the golden snapshot on every regeneration. Same determinism fix already
+    # applied to the FX freshness lists in dashboard.py. Values are unaffected.
+    ccys = sorted(
+        set(book.gross_invested) | set(book.realized.by_currency) | set(unrealized),
+        key=lambda c: c.value,
+    )
     by_ccy: dict[Currency, CurrencyReturn] = {}
     reporting_total = _ZERO
     for ccy in ccys:

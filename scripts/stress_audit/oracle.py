@@ -336,6 +336,11 @@ class RealizedRow:
     original_cost_removed: Decimal
     adjusted_cost_removed: Decimal
     realized: Decimal
+    # "sale" | "dividend". A CASH-family dividend whose payment date falls after the position
+    # already reached zero shares is realized INCOME: there is no cost left to reduce, so
+    # (domain-ledger.md, 2026-07-26) it is booked as a realized row of net = proceeds rather
+    # than being absorbed by — and then discarded with — the closed position.
+    kind: str = "sale"
 
 
 @dataclass
@@ -423,7 +428,15 @@ def replay(facts: Facts) -> OracleResult:
             if pos is None:
                 raise ValueError(f"dividend for unknown position {key}")
             if ev.type in CASH_DIVIDEND_TYPES:
-                pos.adjusted_total -= ev.net
+                if pos.shares == ZERO:
+                    # Position already closed when the payout landed (TW/MY pay weeks after
+                    # the ex-date). No cost basis remains to reduce, so the net is realized
+                    # income — booked exactly once, never absorbed into a dropped position.
+                    realized_rows.append(RealizedRow(
+                        ev.account_id, ev.symbol, qccy(ev.symbol), ev.d, ZERO,
+                        ev.net, ZERO, ZERO, ev.net, "dividend"))
+                else:
+                    pos.adjusted_total -= ev.net
             else:  # DRIP / STOCK -> add shares at zero cost
                 if ev.reinvest_shares is None:
                     raise ValueError(f"{ev.type} needs reinvest_shares for {key}")

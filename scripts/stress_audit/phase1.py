@@ -42,6 +42,9 @@ INSTRUMENTS = [
 PRICES = {  # current spot / valuation prices, dated ASOF
     "2330": D("700"), "0050": D("145"), "AAPL": D("205"), "MSFT": D("420"),
     "NVDA": D("610"), "1155": D("11.20"), "TSLA": D("250"), "0800EA": D("1.20"),
+    # 5225 joined the ledger with the audit-H2 op (buy -> sell-all -> post-close dividend).
+    # It ends FLAT, so this price only completes its history series; no holding reads it.
+    "5225": D("6.40"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
