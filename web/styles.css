@@ -610,6 +610,15 @@ button.is-busy {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* A KPI label carries a title PLUS an optional status badge (「資料不足」,
+     「觀察期 N 天・短窗參考」…). Both are nowrap, so without wrapping the pair sets a floor
+     the card cannot shrink below and pushes the whole document sideways at phone widths —
+     found on the LIVE demo at 390px, where an XIRR exists and its short-window badge made
+     this 207px inside a 145px card (audit M1 follow-up, 2026-07-26; the local dataset had no
+     XIRR, so only the richer demo data exposed it). */
+  flex-wrap: wrap;
+  row-gap: 2px;
+  min-width: 0;
 }
 .kpi-value {
   font-family: var(--font-num);
@@ -1070,7 +1079,12 @@ details.collapsible > summary .panel-title { font-size: 13px; font-weight: 700; 
 .insight-head { display: flex; align-items: center; gap: 8px; }
 .insight-title { margin: 0; font-size: 13px; font-weight: 700; }
 .insight-body { margin: 0; font-size: 12px; color: var(--text-2); line-height: 1.65; }
-.insight-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* wrap: the AI attribution line (timestamp + model + tokens + cost) is longer than a phone
+   card is wide, and both halves are nowrap (audit M1 follow-up — live demo @390px). */
+.insight-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  flex-wrap: wrap; row-gap: 3px;
+}
 .insight-time { font-size: 10px; color: var(--text-3); font-family: var(--font-num); }
 .insight-cost { font-size: 10px; color: var(--text-3); }
 
@@ -1890,6 +1904,15 @@ button[disabled], .btn[disabled] {
     overflow: hidden;
     text-overflow: ellipsis;
   }
+
+  /* Phone-width fits for figures the local dataset was too small to expose (audit M1
+     follow-up, found on the LIVE demo at 390px, 2026-07-26):
+     · a 8-digit hero value (16,797,972 TWD) needs 165px in a ~145px card → step the hero
+       font down rather than clip the number, which is the one thing a money UI must not do;
+     · 換匯損益's per-card stats are a 2-column grid whose values are nowrap — one column
+       at phone width (the card itself was already single-column from <=1023px). */
+  .kpi-card.kpi-hero .kpi-value { font-size: 19px; }
+  .fx-stats { grid-template-columns: 1fr; }
 
   /* FM2: 待確認匯入 rows stack vertically on phones (chip → text → actions) instead of
      keeping the 3-column desktop row (one dividend card ≈ two screens tall before). */
