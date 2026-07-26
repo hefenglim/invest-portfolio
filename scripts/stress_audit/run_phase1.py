@@ -134,6 +134,17 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     sell("S10", "moomoo_my", "1155", "2026-06-24", 100, "11.50")
     sell("S11", "tw_broker", "2330", "2026-06-26", 50, 715)
 
+    # ---- Found-bug op #3 (audit H2, 2026-07-26) — a CASH-family dividend paid AFTER the
+    #      position is fully closed. TW/MY pay weeks after the ex-date, so holding on the
+    #      ex-date and being flat by the payment date is ordinary. The payout used to be
+    #      absorbed into the zero-share position and then DISCARDED with it: 股利總覽 and the
+    #      XIRR flows counted it, 總報酬 / 已實現 did not. It is now a realized row
+    #      (kind="dividend"). 5225 is otherwise untraded, so the position genuinely reaches
+    #      zero and the op cannot be satisfied by any other code path.
+    buy("BH2", "moomoo_my", "5225", "2026-05-04", 200, "6.00")
+    sell("SH2", "moomoo_my", "5225", "2026-05-20", 200, "6.50")   # position -> 0
+    op.dividend("moomoo_my", "5225", "2026-06-16", "NET", 120)    # lands AFTER the close
+
     # ---- Found-bug op #2 — TW daytrade sell taxes at 0.15% (not 0.3%). Two surfaces:
     #      (a) the MANUAL entry API body flag; (b) a CSV `daytrade` column row. Each is a
     #      same-day buy+sell so no position is left dangling.

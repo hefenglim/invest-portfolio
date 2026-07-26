@@ -342,7 +342,10 @@
     const searchBtn = el('button', 'search-btn');
     searchBtn.type = 'button';
     searchBtn.title = '搜尋標的（Cmd/Ctrl + K）';
-    searchBtn.appendChild(el('span', null, '⌕ 搜尋標的'));
+    /* icon / label split so the narrow-desktop tier (<=1279px) can drop the words and keep
+       the control (audit M1). The title attribute carries the meaning when the label hides. */
+    searchBtn.appendChild(el('span', 'tb-ico', '⌕'));
+    searchBtn.appendChild(el('span', 'tb-lbl', '搜尋標的'));
     searchBtn.appendChild(el('kbd', null, '⌘K'));
     searchBtn.addEventListener('click', openSearch);
     tb.appendChild(searchBtn);
@@ -365,7 +368,10 @@
     themeBtn.type = 'button';
     const setLabel = () => {
       const cur = document.documentElement.dataset.theme || 'dark';
-      themeBtn.textContent = cur === 'dark' ? '☾ 深色' : '☀ 淺色';
+      themeBtn.replaceChildren(
+        el('span', 'tb-ico', cur === 'dark' ? '☾' : '☀'),
+        el('span', 'tb-lbl', cur === 'dark' ? '深色' : '淺色')
+      );
       themeBtn.title = '切換深色 / 淺色主題';
     };
     setLabel();
@@ -379,7 +385,10 @@
     tb.appendChild(themeBtn);
     if (document.body.dataset.refresh === '1') {
       const wrap = el('div', 'refresh-wrap');
-      const btn = el('button', 'btn-refresh', '⟳ 重新整理 ▾');
+      const btn = el('button', 'btn-refresh');
+      btn.appendChild(el('span', 'tb-ico', '⟳'));
+      btn.appendChild(el('span', 'tb-lbl', '重新整理'));
+      btn.appendChild(el('span', 'tb-caret', '▾'));
       btn.type = 'button';
       btn.title = '更新報價或重建統計（後端接線後生效）';
       const menu = el('div', 'refresh-menu');

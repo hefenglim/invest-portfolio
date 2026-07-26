@@ -370,7 +370,13 @@
 
     /* Double-counting guard copy: this card is a distribution view, not income on top. */
     host.appendChild(elc('div', 'dvc-caption',
-      '股利已計入調整成本，此為分佈展示，不另計入報酬。各幣別分列，不可跨幣加總。'));
+      /* 「恰好一次」 rather than the old 「已計入調整成本」: since audit H2 (2026-07-26) a
+         payout landing AFTER its position closed is booked as realized income instead of a
+         cost reduction, so the cost-reduction wording is no longer universally true. What
+         IS invariant — and what this line exists to say — is that it enters return exactly
+         once and must not be added on top of 總報酬 (domain-ledger invariant I4). */
+      '股利已計入報酬（持有中沖減成本；清倉後入帳者列為已實現），恰好一次，'
+      + '此為分佈展示，不重複計算。各幣別分列，不可跨幣加總。'));
 
     /* (a) headline strip: 實收 tiles + forecast-only 預估 tile. */
     renderHeadline(D, host, curYear);

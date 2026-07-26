@@ -129,7 +129,13 @@ a { color: inherit; }
   display: flex;
   align-items: baseline;
   gap: 12px;
+  row-gap: 6px;
   padding: 12px var(--pad) 0;
+  /* AUDIT M1/M2 (2026-07-26): a panel head carries a title + a subtitle + N action buttons,
+     all nowrap. Without wrapping, a head with two or three actions sets a ~410px floor that
+     the page cannot shrink below — the second source of mobile horizontal scroll after the
+     topbar. Wrapping keeps every action reachable instead. */
+  flex-wrap: wrap;
 }
 
 .panel-title {
@@ -250,13 +256,35 @@ a { color: inherit; }
   z-index: 40;
   display: flex;
   align-items: center;
+  /* AUDIT M1 (2026-07-26) — the structural no-overflow guarantee.
+     Every topbar child is a nowrap control whose flex `min-width` resolves to `auto`, so a
+     single non-wrapping row simply REFUSED to shrink: between 761px and 1279px the bar kept
+     its 1,061px intrinsic width, pushed 重新整理 / avatar off-screen, and gave the WHOLE
+     document a fixed 1,257px horizontal scroll. `wrap` makes the row break instead of
+     pushing — the page can never scroll sideways again at any width, independently of how
+     many controls a future page adds. The narrow-desktop tier below then trims labels so
+     the break rarely has to happen. */
+  flex-wrap: wrap;
   gap: 14px;
+  row-gap: 8px;
   padding: 11px 20px;
   background: color-mix(in srgb, var(--bg) 92%, transparent);
   backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--border);
 }
-.topbar .page-title { margin: 0; font-size: 15px; font-weight: 700; }
+/* The greeting is the only elastic item — it yields space FIRST (ellipsis) so the controls
+   stay on one line as long as possible. `min-width: 0` releases the flex auto-minimum. */
+.topbar .page-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tb-ico { line-height: 1; }
+.tb-caret { font-size: 10px; opacity: 0.75; }
 .topbar .avatar {
   width: 26px; height: 26px;
   border-radius: 50%;
@@ -938,6 +966,32 @@ details.collapsible > summary .panel-title { font-size: 13px; font-weight: 700; 
 .fx-stat:nth-last-child(-n+2) { border-bottom: none; }
 .fx-stat .k { color: var(--text-3); }
 .fx-stat .v { font-family: var(--font-num); }
+/* 外幣現金池為負 (audit M4): the flagged value + the card-level explanation under it.
+   Amber, not red — the FX figures are still computed exactly as specified; what is
+   uncertain is the LEDGER's completeness, which is the user's to fix. */
+.fx-stat .v.fx-flagged { color: var(--amber); }
+/* 已實現損益 row marker for a post-close cash dividend (audit H2) — realized INCOME, not a
+   capital gain, so it reads differently from the sale rows around it. */
+.rz-kind {
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.fx-note {
+  margin: 8px var(--pad) 0;
+  padding: 6px 9px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-left: 2px solid var(--amber);
+  border-radius: 0 4px 4px 0;
+}
 
 .fx-footer {
   display: flex;
@@ -1089,6 +1143,10 @@ table.fresh td:last-child { text-align: right; }
   gap: 6px;
   align-items: baseline;
   white-space: nowrap;
+  /* Wrap BETWEEN the segments rather than clipping the line (audit M1): each child stays
+     nowrap, so a break never lands mid-number. The <=640px rule still ellipsizes, where a
+     second line would cost more than it gives. */
+  flex-wrap: wrap;
 }
 .kpi-combo { gap: 6px; }
 .kpi-combo .combo-row {
@@ -1643,10 +1701,21 @@ details.freshness > summary > span,
 }
 .panel-sub {
   text-wrap: pretty;
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+/* `white-space: nowrap` belongs to the panel HEAD only — there `.panel-sub` is a flex item
+   next to a title and actions, so one clipped line is the intended read. The SAME class is
+   also used for body copy (e.g. 資料中心 › 資料保留策略), and there nowrap turned a whole
+   Chinese paragraph into one 584px unwrappable line that pushed the document sideways at
+   mobile widths — inline elements ignore `overflow: hidden`, so the ellipsis never even
+   engaged to hide it. Audit M2 (root cause corrected on implementation: the panel's own
+   copy, not the table, was the culprit — the table wrap already scrolled correctly). */
+.panel-head .panel-sub,
+.input-toggle .panel-sub,
+.set-head .panel-sub {
+  white-space: nowrap;
 }
 .topbar .asof,
 .topbar .asof .label,
@@ -1654,17 +1723,54 @@ details.freshness > summary > span:not(.sum-chips) {
   white-space: nowrap;
 }
 .sum-chips { flex-wrap: wrap; row-gap: 4px; }
-.topbar { flex-wrap: nowrap; }
+/* `.topbar { flex-wrap: nowrap }` USED TO LIVE HERE and was the actual root cause of audit
+   M1: this label-anti-wrap section sits far below the `.topbar` block, so at equal
+   specificity it won and forced the header to stay on one non-shrinking line — the document
+   then carried a fixed 1,257px scroll width at every viewport from 761px to 1279px. The
+   base `.topbar` rule now owns wrapping (and the <=1279px tier below trims labels so the
+   break rarely happens). Do NOT re-add a nowrap here. */
 .topbar .page-title { white-space: nowrap; }
 
 /* ---------- responsive fallback (low priority, simple stacking) ---------- */
 
+/* ---- narrow-desktop tier (<=1365px): trim topbar labels to icons (audit M1) ----
+   Not decoration — this is what keeps the control row on ONE line. Measured intrinsic widths
+   (dashboard, with the alert bell + quota chip present): full labels need ~1,084px of bar,
+   i.e. a >=1,280px viewport once the 196px sidebar is taken; trimmed labels need ~918px,
+   i.e. >=1,114px. The tier therefore starts BELOW the common 1,366px laptop (where full
+   labels still fit comfortably) and not at 1,280 — a 1,280 threshold left the bar wrapping
+   to two rows at exactly 1,280 while one pixel narrower it was a single row. Every trimmed
+   control keeps its `title`. Below ~1,114px the `flex-wrap` on `.topbar` takes over and the
+   row breaks — which is the point: it breaks instead of pushing the page sideways. */
+@media (max-width: 1365px) {
+  .topbar .search-btn .tb-lbl,
+  .topbar .search-btn kbd,
+  .topbar .btn-refresh .tb-lbl,
+  .topbar .asof .label { display: none; }
+  .topbar .search-btn, .topbar .btn-refresh { padding-left: 10px; padding-right: 10px; }
+}
+
 @media (max-width: 1280px) {
-  .kpi-band { grid-template-columns: repeat(4, 1fr); }
+  /* `.kpi-band.v2` (two class selectors) OUT-SPECIFIES a bare `.kpi-band` — media queries
+     add no specificity — so this breakpoint was DEAD for the v2 band and it kept five fixed
+     columns all the way down to 761px. That, not flex shrinking, is what squeezed each KPI
+     card to ~150px and clipped 「no FX rate stored」/「vs 原始投入成本」 (audit M1, root cause
+     corrected on implementation). The <=760px rule further down already named v2 explicitly;
+     these two did not. */
+  .kpi-band, .kpi-band.v2 { grid-template-columns: repeat(4, 1fr); }
   .row-trend { grid-template-columns: 1fr; }
 }
+/* ---- tablet / split-screen tier (<=1023px), audit M1 ----
+   The old ladder jumped 1280 -> 860, leaving 861–1023px under-served: the KPI band kept
+   FOUR columns (cards squeezed to ~122px against a 151px value) and 換匯損益 kept TWO
+   card columns (752px of min-content in a 647px box). Both were measured overflow sources
+   at 900px. Three KPI columns keep the density; the FX cards go single-column. */
+@media (max-width: 1023px) {
+  .kpi-band, .kpi-band.v2 { grid-template-columns: repeat(3, 1fr); }
+  .fx-grid, .row-2 { grid-template-columns: 1fr; }
+}
 @media (max-width: 860px) {
-  .kpi-band { grid-template-columns: repeat(2, 1fr); }
+  .kpi-band, .kpi-band.v2 { grid-template-columns: repeat(2, 1fr); }
   .row-2, .fx-grid, .insight-grid, .fresh-body { grid-template-columns: 1fr; }
   .app-header { flex-wrap: wrap; }
   .sum-chips { display: none; }

@@ -91,6 +91,26 @@ def _prev_month(year: int, month: int) -> tuple[int, int]:
     return (year - 1, 12) if month == 1 else (year, month - 1)
 
 
+# How far back the pending list reaches by default (audit L4, 2026-07-26). The forecaster is
+# stateless and walks the WHOLE transaction ledger, so importing several years of TW history
+# used to drop dozens of un-actioned months into the inbox at once, each needing an individual
+# 略過 to clear. Twelve months is one rebate cycle's worth of memory; anything older is still
+# detectable and confirmable, just behind an explicit 「顯示更早」 (and its count is always
+# reported, so nothing is silently dropped).
+_WINDOW_MONTHS = 12
+WINDOW_MONTHS = _WINDOW_MONTHS  # public alias for the API payload / UI copy
+
+
+def _months_before(month: str, now: datetime) -> int:
+    """How many whole calendar months *month* sits before *now*'s month (0 = this month)."""
+    my, mm = int(month[:4]), int(month[5:7])
+    return (now.year - my) * 12 + (now.month - mm)
+
+
+def _in_window(month: str, now: datetime) -> bool:
+    return _months_before(month, now) <= _WINDOW_MONTHS
+
+
 def _is_pending(month: str, now: datetime) -> bool:
     """A trade month is PENDING once the clock has advanced past it (1st of the next month).
 
@@ -260,26 +280,48 @@ def _aggregate(conn: sqlite3.Connection) -> list[PendingRebate]:
 
 
 def detect(
-    conn: sqlite3.Connection, *, now: datetime, include_skipped: bool = False
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    include_skipped: bool = False,
+    include_older: bool = False,
 ) -> list[PendingRebate]:
     """The pending (confirmable) rebate list — pure read, self-healing (no rows stored).
 
     Keeps only aggregated months that are (a) PENDING (past the following month's 1st),
     (b) not suppressed by a confirmed rebate movement (dual-keyed — see
-    :func:`_confirmed_months`), and (c) not skipped (unless ``include_skipped``, used by
-    :func:`list_skipped` to reconstruct detail). Current / not-yet-due months are NOT here
-    — they are the accruing forecast (see :func:`detect_accruing`).
+    :func:`_confirmed_months`), (c) not skipped (unless ``include_skipped``, used by
+    :func:`list_skipped` to reconstruct detail), and (d) within the last
+    ``_WINDOW_MONTHS`` months unless ``include_older`` (audit L4). Current / not-yet-due
+    months are NOT here — they are the accruing forecast (see :func:`detect_accruing`).
+
+    ``include_older=True`` is what the 「顯示更早」 view and the CONFIRM endpoint pass: a
+    month the user chose to reveal must remain confirmable, or the window would turn into a
+    silent cap on what can be booked.
     """
     skips: set[tuple[str, str]] = set() if include_skipped else _skips(conn)
     confirmed = _confirmed_months(conn)
     out = [
         p for p in _aggregate(conn)
         if _is_pending(p.month, now)
+        and (include_older or _in_window(p.month, now))
         and (p.account_id, p.month) not in skips
         and (p.account_id, p.month) not in confirmed
     ]
     out.sort(key=lambda p: (p.month, p.account_id), reverse=True)
     return out
+
+
+def older_pending_count(conn: sqlite3.Connection, *, now: datetime) -> int:
+    """How many pending months fall OUTSIDE the default window — never silently dropped.
+
+    The inbox reports this so a bounded list can never read as "nothing left to confirm".
+    """
+    inside = {(p.account_id, p.month) for p in detect(conn, now=now)}
+    return len([
+        p for p in detect(conn, now=now, include_older=True)
+        if (p.account_id, p.month) not in inside
+    ])
 
 
 def detect_accruing(conn: sqlite3.Connection, *, now: datetime) -> list[PendingRebate]:

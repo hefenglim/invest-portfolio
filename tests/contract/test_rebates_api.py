@@ -44,8 +44,15 @@ def test_list_shape_and_decimal_strings(
 ) -> None:
     _seed_may_trade(golden_db)
     body = api_client.get("/api/rebates").json()
-    # owner #1 added the accruing field (current / not-yet-due forecast) to the envelope.
-    assert set(body.keys()) == {"rows", "total_count", "accruing", "skipped"}
+    # owner #1 added the accruing field (current / not-yet-due forecast) to the envelope;
+    # audit L4 (2026-07-26) added the windowing pair: `older_count` (pending months outside
+    # the default 12-month view — always reported so the bound is never silent) and
+    # `window_months` (the bound itself, for the UI copy).
+    assert set(body.keys()) == {
+        "rows", "total_count", "accruing", "skipped", "older_count", "window_months",
+    }
+    assert body["window_months"] == 12
+    assert body["older_count"] == 0  # the seeded trade is inside the window
     hit = next(r for r in body["rows"] if r["account_id"] == _TW and r["month"] == "2026-05")
     assert hit["account_name"] == "TW Broker"
     assert hit["trade_count"] == 1

@@ -85,6 +85,12 @@ def build_tax_package_zip(
     for r in book.realized.rows:
         if r.sell_date.year != year:
             continue
+        # CAPITAL GAINS ONLY. A post-close cash dividend also rides in `realized.rows`
+        # (kind="dividend", audit H2) so it reaches 總報酬, but for tax it is INCOME and is
+        # already reported on the dividends sheet below, straight from the dividend ledger.
+        # Without this filter the same payout would appear on both sheets.
+        if r.kind != "sale":
+            continue
         rate = _rate_on(conn, r.sell_date, r.quote_ccy, reporting)
         reporting_realized = "" if rate is None else str(r.realized * rate)
         realized_rows.append([

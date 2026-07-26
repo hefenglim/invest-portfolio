@@ -21,7 +21,7 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.wire import decimal_str
 
 _COLUMNS = [
-    "account_id", "symbol", "quote_ccy", "sell_date", "shares_sold",
+    "account_id", "symbol", "quote_ccy", "kind", "sell_date", "shares_sold",
     "proceeds_net", "original_cost_removed", "adjusted_cost_removed", "realized",
 ]
 
@@ -32,8 +32,10 @@ def build_realized_csv(
     data = build_dashboard(conn, now=now, reporting=reporting)
     rows: list[list[str]] = []
     for r in data.realized.rows:
+        # `kind` distinguishes a sale from a post-close cash dividend (audit H2): both are
+        # realized, but only the former is a capital gain. Self-describing for reconciliation.
         rows.append([
-            r.account_id, r.symbol, r.quote_ccy.value, r.sell_date.isoformat(),
+            r.account_id, r.symbol, r.quote_ccy.value, r.kind, r.sell_date.isoformat(),
             decimal_str(r.shares_sold), decimal_str(r.proceeds_net),
             decimal_str(r.original_cost_removed), decimal_str(r.adjusted_cost_removed),
             decimal_str(r.realized),

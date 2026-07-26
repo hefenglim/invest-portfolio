@@ -1,7 +1,7 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.4`（2026-07-22）
-> **程式碼基線**：`v0.1.20 + Batch B（Moomoo 合併）`
+> **版本**：`v1.5`（2026-07-26）
+> **程式碼基線**：`v0.1.24`（全站稽核修正）
 > **仲裁狀態**：**已由 owner 正式簽署（2026-07-15）**，自版本 **v0.1.19** 起正式生效為站上任何
 > 「金額爭議」的**唯一仲裁標準**（arbitration standard）。
 > **語言例外**：本文件採**繁體中文正文 + 英文技術識別字**（欄位／資料表／函式名），為一份 owner
@@ -379,7 +379,8 @@ $$\text{original\_removed} = \text{original\_total}\times\text{frac},\quad \text
 
 ### 5.1 已實現損益（Realized P&L）
 
-於每筆**賣出**產生一列 `RealizedRow`（`cost_basis.py`）：
+於每筆**賣出**產生一列 `RealizedRow`（`cost_basis.py`，`kind="sale"`；另有一種
+`kind="dividend"` 之已實現列，見 §6.3b）：
 
 $$\text{proceeds\_net} = \text{quantity}\times\text{price} - \text{fees} - \text{tax}$$
 
@@ -470,6 +471,38 @@ $$\text{reinvest\_shares} = \frac{\text{net}}{\text{reinvest\_price}}\quad(\text
 驗證錨點：`ledger.div.net moomoo_my|1155`；`holding.dividend_portion moomoo_my/1155 = 306.25`
 （注意：因該部位在股利後仍有賣出，`dividend_portion` 會隨賣出**比例移除**，故不等於累計股利總額——
 交叉參見 §4.1 比例移除、§5.1）。
+
+### 6.3b 清倉後入帳之現金股利（`CASH` / `NET`）— 列為已實現收益
+
+**規則（2026-07-26 稽核 H2；適用 TW `CASH` 與 MY `NET`）**：現金股利入帳日若落在該
+`(account, symbol)` 部位**已歸零之後**（TW／MY 除息在前、發放在後，期間賣光為常態），
+則**已無成本可沖減**，其淨額改記為一列**已實現**（`RealizedRow`，`kind="dividend"`）：
+
+$$\text{realized} = \text{proceeds\_net} = \text{net},\qquad
+\text{shares\_sold} = \text{original\_removed} = \text{adjusted\_removed} = 0$$
+
+$$\text{sell\_date} = \text{股利入帳日}$$
+
+**判定僅看事件當下之股數**（同日序：期初 0 → 買 1 → 賣 2 → 股利 3）：
+
+| 情形 | 入帳當下股數 | 處理 |
+| --- | ---: | --- |
+| 持有中配息 | > 0 | `adjusted_total −= net`（§6.1／§6.3，不變） |
+| 部分賣出後配息 | > 0 | 同上，作用於剩餘部位（不變） |
+| **清倉後配息** | **= 0** | **記一列已實現（`kind="dividend"`）** |
+| 清倉後又買回、再配息 | > 0 | 沖減**新**部位成本（非特例） |
+
+**不重複計算（invariant I4 維持）**：兩條路徑互斥——沖減成本或記為已實現，恰好一次。
+`dividends` 帳本本身（股利總覽）與 XIRR 現金流（§7.2）本就各自計入該筆，修正後三者一致。
+
+**稅務區隔**：`kind="dividend"` 之列**非資本利得**。年度稅務包之
+`realized_gains_{year}.csv` 僅取 `kind == "sale"`；該筆股利已由 `dividends_{year}.csv`
+自股利帳本輸出（`export/tax.py`），故不重複申報。
+
+**驗證錨點**：`moomoo_my/5225` 買 200@6.00（2026-05-04）→ 賣 200@6.50（2026-05-20，部位歸零）
+→ `NET` 股利 120（2026-06-16）→ 該筆進入 `realized.by_currency[MYR]`
+（`scripts/stress_audit/run_phase1.py`「Found-bug op #3」；hermetic 迴歸見
+`tests/portfolio/test_post_close_dividend.py`）。
 
 ### 6.4 配股（`STOCK`）與顯示用回本進度
 
@@ -1025,6 +1058,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.2` | 2026-07-15 | **owner 正式簽署為仲裁標準，自 v0.1.19 起生效**（去除「待 owner 確認」草稿狀態、版號脫離 -draft）。併入 owner 四項裁定：① 新增英文鏡像 `docs/accounting-formula-manual.en.md`（供 AI／agent 讀取之工作副本；本繁中文件為仲裁正本，每次 zh 變更須於同一 change set 內重生鏡像）；② 本次啟用（本列）；③ §11.1 再平衡裁定 canonical 日期定為 **2026-07-13**（發版紀錄之 07-14 僅為出貨日）；④ §3 費率誠實聲明：owner 完整費表已在案（→ `docs/reference/broker-fee-schedules-2026-07.md`），於 fee-engine-v2 升級時取代種子費率，升級前 §3 記述現行引擎所計並列明已知分歧（sec_fee 0.0000278→0.0000206、TAF/CAT/平台/交收費未建模、MY 費表結構不同、TW 群益 2.3 折先收後退＋捨入分歧），並於 §12.4 增設費用爭議註記；⑤ §7.3／§12.5 邊界裁定為定案（權重／報酬率維持於仲裁範圍內）。基線不變。 |
 | `v1.3` | 2026-07-15 | **fee-engine v2 上線**（owner sign-off；§3 全面改寫）。① **TW 捨入 FE-D3**：fee/tax 由 四捨五入 改為**無條件捨去（ROUND_DOWN）至整數 NT$**，min NT$20 於 floor 之後比較（群益 142.5→142；當沖 tax 例 11→10）；② **US 規費 v2**：Schwab／Moomoo US 佣金 $0/平台 $0.99、SELL 加 SEC `0.0000206`+TAF `0.000195`（cap $9.79）、交收 `0.003/股`（cap 1%）、CAT `0.000003/股`——各成分分捨入後相加；③ **MY v2**：佣金 `0.03%`（min RM0.01）+平台 RM3+清算（cap RM1,000）+**SST 8%**；印花改為 `ceil(金額/1000)×RM1`（正股 cap RM1,000、**ETF 免徵**）；④ **FE-D2 US 印花**：US 交易之 MY 印花以 MYR 計、USD 記帳（`stamp_fx` 由呼叫端解析，缺匯率→0+soft issue）；⑤ **FE-D1 折讓款**：新增 §3.6 forecast `⌊fee×0.77⌋`（**非金額之記錄**，永不入 `compute_fees`；inbox/確認為 Wave B）；⑥ snapshot 帶 `engine="v2"`，**逐列費制**（舊列以舊快照裁定、永不重算）。費率一律置於 config。§3 範例驗證錨點更新為 fee-engine v2 壓測 phase1（`fee_engine.*` 80/80）。同 change set 重生英文鏡像。基線不變。 |
 | `v1.4` | 2026-07-22 | **Batch B（Moomoo 合併）修訂**（基線 `v0.1.20 + Batch B`）。① **帳戶模型**：合併前的兩個 per-market Moomoo 帳戶（legacy ids 見 `data_ingestion/moomoo_merge.py`）併為單一雙市場帳戶 `moomoo_my`（settlement USD／funding MYR；規則綁 (帳戶, 市場)：US→(`moomoo_us`,`drip_us`)、MY→(`moomoo_my`,`cash`)，載於 `account_market_rules`）——§2 帳戶表 4→3 列、invariant I6 由「綁帳戶」改為「綁 (帳戶, 市場)」、§3.3／§3.4／§6.2／§6.3／§8／§9 之帳戶標籤與 `scope` 錨點全面 re-anchor 至 `moomoo_my`（市場由 symbol 帶出）。② **全錨點重新對帳**：壓測套件已重生為合併後拓樸（1,060 斷言、66 ops、1,060/1,060 通過、0 fail；spot USD/MYR 4.5→**4.6**、含一筆 Schwab USD→TWD 回換）。就此當前實跑更新所有場景依賴之終值：§7.1 總報酬 514,752.85→**516,336.55**（realized 186,333.50／unrealized 330,003.05）、§8.2 realized FX 0→**−2,375**（Schwab 回換）、§8.3 未實現 FX rollup −31,830.94→**−11,757.48**（`moomoo_my` 因 spot 4.6≠avg 4.5 現貢獻正值）、§9.2 現金池全面更新且 MYR 池改為單一直接錨定之 `moomoo_my|MYR = 123,201.91`、§5.1 TSLA proceeds/realized 5,199.86/199.86→**5,199.88/199.88**（SEC fee 0.14→0.12）；修正既存筆誤 E5（NVDA fee 1.41→5.89）、E6（1155 fee/tax 10.45/9.50→9.40/10.00）。③ **錨點穩健化**：波動之 `id=NN`（逐版重編）自 §12.1 fee 例移除、保留穩定之 check+scope；場景不再觸發之 `negative_cash`（舊 op47）改記為單元測試錨定（§9.3／E16）；賣超錨點改以 `guard.oversell_blocks` scope 記述。④ 驗證基礎行、§7.2 harness 計數（1,006→1,060）、§6.5 計數（966→1,060）同步更新。同 change set 重生英文鏡像。**無任何公式或會計定義變更——純為 (帳戶, 市場) 綁定 relabel + 錨點重新對帳。** |
+| `v1.5` | 2026-07-26 | **清倉後入帳之現金股利改列已實現收益**（稽核 H2，owner 裁定 2026-07-26；基線 `v0.1.24`）。新增 **§6.3b**：CASH/NET 股利若入帳當下該 `(account, symbol)` 部位股數已為 0，已無成本可沖減，改記一列 `RealizedRow(kind="dividend")`（`realized = proceeds_net = net`；shares_sold／original_removed／adjusted_removed 皆 0；`sell_date` = 入帳日）。修正前該筆被 0 股部位吸收後隨部位一併丟棄，導致**股利總覽與 XIRR 有計入、總報酬沒有**的三方不一致；修正後恰好計入一次，**invariant I4 維持**。§5.1 同步標明 `RealizedRow` 現有 `kind: "sale" | "dividend"` 兩種。**稅務區隔**：年度稅務包 `realized_gains_{year}.csv` 僅取 `kind == "sale"`，該筆已由 `dividends_{year}.csv` 自股利帳本輸出，不重複申報。驗證錨點：`moomoo_my/5225` 買 200@6.00 → 賣 200@6.50（歸零）→ NET 股利 120 進入 `realized.by_currency[MYR]`（run_phase1「Found-bug op #3」；壓測 ops 66→**69**、斷言 1,060→**1,088**、fail=0）；hermetic 迴歸 `tests/portfolio/test_post_close_dividend.py`（5 例，含「清倉後買回再配息」仍走沖減成本）。**對既有真實帳本的影響：已清倉標的的歷史總報酬會上升**（原本漏計之股利現在計入）。同 change set 重生英文鏡像。除本條外無其他公式變更。 |
 
 ### 12.4 如何仲裁一個爭議金額
 

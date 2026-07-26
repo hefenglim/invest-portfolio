@@ -251,10 +251,10 @@
       }
       const ccy = br.ccy;
       r.tdAmt.textContent = f.money(br.amount, ccy) + ' ' + ccy;
-      /* fee + tax are separate Decimal strings; show their combined cost (display only,
-         the backend already computed both — Number() here is presentation, not money math). */
-      const feeTax = Number(br.fee) + Number(br.tax);
-      r.tdFee.textContent = f.money(feeTax, ccy);
+      /* 費稅 is the backend's Decimal `fee_tax` (= fee + tax, summed server-side). The
+         frontend never adds the two component strings — that is float money math over exact
+         Decimal values, which the locked invariant forbids. Audit L1, 2026-07-26. */
+      r.tdFee.textContent = f.money(br.fee_tax, ccy);
       r.tdNew.textContent = f.pct(br.new_weight);
       r.tdNew.classList.toggle('sign-up', Number(br.new_weight) > CAP);
       /* prefer the backend's COMBINED current weight once the preview resolves */

@@ -346,6 +346,12 @@ def compute_rebalance(
             "ccy": quote_ccy.value,
             "fee": total_fee,
             "tax": total_tax,
+            # Combined transaction cost, summed HERE in Decimal (audit L1, 2026-07-26). The
+            # UI shows one 費稅 cell; without this field it had to do Number(fee)+Number(tax),
+            # i.e. float arithmetic over exact values — the locked invariant forbids the
+            # frontend computing money, regardless of whether a given pair happens to be
+            # float-safe. Same sum the summary's total_fees_reporting already uses.
+            "fee_tax": total_fee + total_tax,
             "new_weight": new_weight,
             "accounts": accounts_field,
             "legs": [lg.wire() for lg in legs],

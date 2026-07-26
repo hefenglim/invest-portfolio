@@ -105,12 +105,17 @@ def _account_wire(h: HoldingRow) -> dict[str, Any]:
         "market_price": _dstr_or_none(h.market_price),
         "market_value": _dstr_or_none(h.market_value),
         "unrealized_pnl": _dstr_or_none(h.unrealized_pnl),
+        "unrealized_pct": _dstr_or_none(h.unrealized_pct),
         "capital_gain": _dstr_or_none(h.capital_gain),
         "weight": _dstr_or_none(h.weight),
         "price_stale": h.price_stale,
         "price_as_of": h.price_as_of.isoformat() if h.price_as_of is not None else None,
         "quote_ccy": h.quote_ccy.value,
         "oversold": h.oversold,
+        # 已回本: cumulative cash dividends have fully repaid the original cost, so the
+        # adjusted basis has gone <= 0 (legal per domain-ledger.md). Decided HERE with an
+        # exact Decimal comparison so the UI never threshold-tests a Decimal string.
+        "fully_recovered": h.adjusted_cost_total <= _ZERO,
     }
 
 
@@ -149,6 +154,14 @@ def _aggregate_position(
     original_avg = original_total / total_shares if total_shares != _ZERO else _ZERO
     adjusted_avg = adjusted_total / total_shares if total_shares != _ZERO else _ZERO
     payback = dividend_portion / original_total if original_total != _ZERO else _ZERO
+    # Aggregate unrealized % on the SAME basis as the per-holding figure (audit H1):
+    # Σ unrealized / Σ original cost. Server-side Decimal; the drawer only prints it.
+    unrealized_sum = _sum(ur) if ur else None
+    unrealized_pct = (
+        unrealized_sum / original_total
+        if unrealized_sum is not None and original_total != _ZERO
+        else None
+    )
 
     return {
         "account_count": len(rows),
@@ -166,7 +179,8 @@ def _aggregate_position(
         "payback_ratio": decimal_str(payback),
         "market_price": _dstr_or_none(src.market_price),
         "market_value": decimal_str(_sum(mv)) if mv else None,
-        "unrealized_pnl": decimal_str(_sum(ur)) if ur else None,
+        "unrealized_pnl": decimal_str(unrealized_sum) if unrealized_sum is not None else None,
+        "unrealized_pct": _dstr_or_none(unrealized_pct),
         "capital_gain": decimal_str(_sum(cg)) if cg else None,
         # weight is a dimensionless ratio; summing the per-account weights server-side
         # (Σ mv_i/total) gives the aggregate share of portfolio value. Still done here, not
@@ -175,6 +189,8 @@ def _aggregate_position(
         "price_stale": src.price_stale,
         "price_as_of": src.price_as_of.isoformat() if src.price_as_of is not None else None,
         "oversold": any(h.oversold for h in rows),
+        # 已回本 across the aggregated position (see _account_wire).
+        "fully_recovered": adjusted_total <= _ZERO,
     }
 
 
@@ -427,4 +443,5 @@ def _realized_wire(r: RealizedRow) -> dict[str, str]:
         "original_cost_removed": decimal_str(r.original_cost_removed),
         "adjusted_cost_removed": decimal_str(r.adjusted_cost_removed),
         "realized": decimal_str(r.realized),
+        "kind": r.kind,  # "sale" | "dividend" (post-close payout, audit H2)
     }

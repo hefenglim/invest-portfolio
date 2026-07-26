@@ -24,6 +24,7 @@ from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.wire import parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
+from portfolio_dash.data_ingestion.dividend_model import check_amounts
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.markets import MARKET_ZH, account_market
@@ -604,9 +605,14 @@ def edit_dividend(
     if div_type not in _DIV_TYPES:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知股利類型 {body.type}", field="type"))
-    if body.gross < 0 or body.withhold < 0 or body.net < 0:
+    # The SAME conservation gate the CSV/manual import path applies (audit M5): this endpoint
+    # used to check only "not negative" and then store gross/withhold/net verbatim, so an edit
+    # could leave a row where 預扣+淨額 exceeds 總額 — and since only `net` reaches the ledger,
+    # the discrepancy was invisible afterwards.
+    amount_issue = check_amounts(body.gross, body.withhold, body.net)
+    if amount_issue is not None:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "股利金額不可為負", field="gross"))
+            "validation_error", amount_issue, field="net"))
     edited = existing.model_copy(update={
         "account_id": body.account_id, "symbol": body.symbol, "date": body.date,
         "type": div_type, "gross": body.gross, "withholding": body.withhold,

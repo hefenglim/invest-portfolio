@@ -121,9 +121,34 @@
     $('#m-fee').addEventListener('input', schedulePreview);
     $('#m-tax').addEventListener('input', schedulePreview);
     $('#m-confirm').addEventListener('click', commitManual);
+    $('#m-clear').addEventListener('click', clearManual);
     initManualPicker();   // #8: grouped 已持有／未持有 代號 picker (replaces the free-text datalist)
     schedulePreview();
   }
+  /* 「清除」 (audit M3, 2026-07-26): the button existed in the markup since the form was
+     built but was never wired — clicking it did nothing at all. Reset the ENTRY fields to a
+     pristine form: symbol/shares/price/fee/tax cleared, side back to 買進, date back to
+     today, 當沖 unchecked, both fee/tax overrides released (so the auto-computed values
+     return), picker closed. The ACCOUNT is deliberately KEPT — a user entering several
+     trades stays in one account, and the select has no empty option. schedulePreview() then
+     re-renders the neutral pristine state with 確認寫入 disabled (runManualPreview's
+     empty-form branch), so the preview never keeps stale rows. */
+  function clearManual() {
+    ['m-symbol', 'm-shares', 'm-price', 'm-fee', 'm-tax'].forEach((id) => {
+      const n = $('#' + id);
+      if (n) n.value = '';
+    });
+    const dt = $('#m-daytrade');
+    if (dt) dt.checked = false;
+    applyOverrideState('fee', false);
+    applyOverrideState('tax', false);
+    $('#m-date').value = TODAY;
+    if (manualPicker) manualPicker.close();
+    setSide('buy');            // also calls schedulePreview()
+    $('#m-symbol').focus();
+    if (window.toast) window.toast('已清除表單', 'ok');
+  }
+
   function setSide(s) {
     m.side = s;
     $('#m-side-buy').classList.toggle('active', s === 'buy');

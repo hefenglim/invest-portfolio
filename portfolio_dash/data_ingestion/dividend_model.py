@@ -16,6 +16,40 @@ class DividendAmounts(BaseModel):
 
 
 _US_WITHHOLDING = Decimal("0.30")
+_ZERO = Decimal("0")
+
+
+def check_amounts(gross: Decimal, withholding: Decimal, net: Decimal) -> str | None:
+    """Reject IMPOSSIBLE dividend amount combinations. Returns a zh message, or None.
+
+    The ONE shared gate for every write path (CSV/manual import preview AND the ledger edit
+    endpoint) — audit M5, 2026-07-26. It used to exist on neither: the edit endpoint checked
+    only "not negative" and stored the three numbers verbatim, so a row could claim a 100
+    gross, a 30 withholding and a 50 net, with the missing 20 silently gone (only ``net``
+    reaches the ledger).
+
+    What it does NOT do is demand ``gross - withholding == net``. That identity belongs to the
+    US DRIP model alone, not to dividends in general: a TW cash dividend legitimately nets
+    less than gross through deductions this app DOES NOT MODEL (二代健保補充保費, 匯費), and a
+    US payout can carry an ADR fee. Rejecting those would push the user to falsify the gross.
+    The real invariant is conservation: a payout can never DELIVER more than it declared.
+
+    To be unambiguous, because the wording above has been misread once: **no levy other than
+    the US 30% DRIP withholding is computed anywhere in this codebase.** 二代健保補充保費 is
+    named here only as an EXAMPLE of a legal gross/net gap the gate must tolerate — there is
+    no rate, threshold or field for it in ``FEE_RULES`` or in the dividend model (owner
+    decision 2026-07-26: out of scope; fees/taxes stop at 手續費 + 證交稅). For a TW cash
+    dividend the user types the net actually received and that number is what reaches the
+    ledger; the gap is simply unexplained, not itemised.
+    """
+    if gross < _ZERO or withholding < _ZERO or net < _ZERO:
+        return "股利金額不可為負"
+    if withholding + net > gross:
+        return (
+            f"股利金額不自洽：預扣 {withholding} + 淨額 {net} 大於總額 {gross}"
+            "（淨額與預扣的合計不可超過股利總額）"
+        )
+    return None
 
 
 def apply_dividend_model(

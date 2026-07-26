@@ -82,9 +82,15 @@
       }
       return value;
     };
-    const nilBadge = (label, reason) => {
-      const b = el('span', 'badge badge-stale-mini', reason || '資料不足');
-      b.title = reason || '資料不足';
+    /* Unavailable-figure badge. The VISIBLE text is a short zh label; the (often long,
+       English, technical) backend reason rides in the tooltip and is shown in full in the
+       資料新鮮度 panel, where there is room. Rendering the raw reason here used to give the
+       XIRR card a 348px nowrap label inside a ~150px card — clipped on every screen and a
+       page-overflow source below 1280px (audit M1). */
+    const nilBadge = (label, reason, short) => {
+      const text = short || '資料不足';
+      const b = el('span', 'badge badge-stale-mini', text);
+      b.title = reason || text;
       label.appendChild(b);
       return label;
     };
@@ -93,7 +99,7 @@
     {
       const card = el('div', 'kpi-card kpi-hero');
       const label = el('div', 'kpi-label', '總市值');
-      if (nil(k && k.total_market_value)) nilBadge(label, '匯率資料不足');
+      if (nil(k && k.total_market_value)) nilBadge(label, '匯率資料不足', '匯率不足');
       card.appendChild(label);
       const value = mkValue(k && k.total_market_value, (v) => f.money(v, ccy), false);
       if (!nil(k && k.total_market_value)) value.appendChild(el('span', 'kpi-unit', ' ' + ccy));
@@ -128,6 +134,7 @@
       const card = el('div', 'kpi-card kpi-hero');
       const label = el('div', 'kpi-label', '年化報酬 (XIRR)');
       const xirrNil = nil(k && k.xirr);
+      /* short badge, full reason in the tooltip (the 資料新鮮度 panel prints it in full). */
       if (xirrNil) nilBadge(label, (D.freshness && D.freshness.xirr_unavailable_reason) || '資料不足');
       /* Short-window confidence hint: XIRR annualizes, so a sub-year observation window
          makes the figure volatile. window_days is a plain count (not money) — safe to
@@ -713,15 +720,13 @@
       b2.appendChild(el('span', 'fx-rate-label', '現時匯率'));
       b2.appendChild(el('span', 'fx-rate-val', f.rate(a.current_spot)));
       rates.appendChild(b2);
-      if (a.avg_rate !== null && a.current_spot !== null &&
-          a.avg_rate !== undefined && a.current_spot !== undefined) {
-        /* Rate delta (現時 − 平均取得). Rates are formally NOT money (see
-           data-and-pricing.md), so this display-only subtraction is not the money-of-record
-           invariant breach the combined-unrealized fix addresses; there is no server-side
-           rate-delta field, and adding one would be over-reach. Left intentionally. */
-        const delta = a.current_spot - a.avg_rate;
-        rates.appendChild(el('span', 'fx-delta ' + f.signClass(delta),
-          f.signedNum(delta, a.current_spot < 10 ? 4 : 2)));
+      /* Rate delta (現時 − 平均取得) is SERVER-computed (`spot_delta`, audit L2 2026-07-26 —
+         supersedes the earlier "left intentionally" note). Rates are formally not money, but
+         subtracting two Decimal STRINGS in JS relies on implicit coercion and yields a silent
+         NaN if either side is ever non-numeric; the server has both values exactly. */
+      if (a.spot_delta !== null && a.spot_delta !== undefined) {
+        rates.appendChild(el('span', 'fx-delta ' + f.signClass(a.spot_delta),
+          f.signedNum(a.spot_delta, Number(a.current_spot) < 10 ? 4 : 2)));
       }
       card.appendChild(rates);
 
@@ -750,10 +755,23 @@
           vv.textContent = (isSigned ? f.signed : f.money)(v, ccy) + ' ' + ccy;
           if (isSigned) vv.classList.add(f.signClass(v));
         }
+        /* 外幣現金 flagged when the reconstructed pool is negative (server decides —
+           `cash_basis_incomplete`), because the 未實現匯損益（現金）leg then marks a balance
+           that does not exist. Audit M4. */
+        if (k === '外幣現金' && a.cash_basis_incomplete) {
+          vv.classList.add('fx-flagged');
+          vv.title = '外幣現金池為負：出入金可能未完整登錄';
+        }
         st.appendChild(vv);
         stats.appendChild(st);
       });
       card.appendChild(stats);
+      if (a.cash_basis_incomplete) {
+        card.appendChild(el('div', 'fx-note',
+          '⚠ 外幣現金為負 — 此帳戶的外幣入金可能未完整登錄；'
+          + '未實現匯損益（現金）是以該負值計算，歸因僅供參考。'
+          + '補登入金／換匯紀錄後此提示會自動消失。'));
+      }
       grid.appendChild(card);
     });
 
@@ -794,13 +812,22 @@
         if (window.openSymbolDrawer) window.openSymbolDrawer(r.symbol);
       });
       tdSym.appendChild(cell);
+      /* A post-close cash dividend is realized INCOME, not a sale (audit H2). Mark it, and
+         show 賣出股數 / 調整成本移除 as 不適用 rather than a misleading 0. */
+      const isDiv = r.kind === 'dividend';
+      if (isDiv) {
+        const chip = el('span', 'rz-kind', '股利');
+        chip.title = '清倉後入帳的現金股利 — 已無成本可沖減，列為已實現收益';
+        tdSym.appendChild(chip);
+      }
       tr.appendChild(tdSym);
       tr.appendChild(el('td', 'col-text', acctZh(r.account_id)));
-      tr.appendChild(el('td', 'num', f.num(r.shares_sold)));
+      tr.appendChild(el('td', 'num', isDiv ? f.NULL_GLYPH : f.num(r.shares_sold)));
       const tdProceeds = el('td', 'num', f.money(r.proceeds_net, r.quote_ccy));
       tdProceeds.appendChild(el('span', 'kpi-unit', ' ' + r.quote_ccy));
       tr.appendChild(tdProceeds);
-      tr.appendChild(el('td', 'num', f.money(r.adjusted_cost_removed, r.quote_ccy)));
+      tr.appendChild(el('td', 'num',
+        isDiv ? f.NULL_GLYPH : f.money(r.adjusted_cost_removed, r.quote_ccy)));
       tr.appendChild(el('td', 'num ' + f.signClass(r.realized), f.signed(r.realized, r.quote_ccy)));
       tbody.appendChild(tr);
     });

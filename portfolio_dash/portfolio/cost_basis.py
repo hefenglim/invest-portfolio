@@ -130,7 +130,36 @@ def build_book(
                     f"dividend for unknown position {key} (no prior buy/opening inventory)"
                 )
             if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
-                existing.adjusted_total -= ev.net
+                if existing.shares == _ZERO:
+                    # AUDIT H2 (2026-07-26) — the position is already CLOSED when this cash
+                    # dividend lands. TW/MY pay weeks after the ex-date, so being entitled on
+                    # the ex-date and flat by the payment date is ordinary, not exotic.
+                    #
+                    # Reducing `adjusted_total` here would be a write into a zero-share
+                    # position that the holdings loop below drops (`shares == 0 -> continue`),
+                    # so the payout silently disappeared from 總報酬 / 已實現 / 未實現 while
+                    # 股利總覽 (which walks the dividend ledger directly) and the XIRR cashflow
+                    # series both still counted it — one payout, three disagreeing answers.
+                    #
+                    # Book it as REALIZED INCOME instead: it is money received that can no
+                    # longer be attributed to a cost basis. Still exactly ONCE (the cost path
+                    # is skipped, not doubled), so the no-double-counting invariant holds.
+                    realized_rows.append(
+                        RealizedRow(
+                            account_id=ev.account_id,
+                            symbol=ev.symbol,
+                            quote_ccy=existing.quote_ccy,
+                            sell_date=ev.date,
+                            shares_sold=_ZERO,
+                            proceeds_net=ev.net,
+                            original_cost_removed=_ZERO,
+                            adjusted_cost_removed=_ZERO,
+                            realized=ev.net,
+                            kind="dividend",
+                        )
+                    )
+                else:
+                    existing.adjusted_total -= ev.net
             else:  # DRIP / STOCK add shares at zero cost
                 if ev.reinvest_shares is None:
                     # Fail loud: a DRIP/stock dividend without share count would

@@ -23,6 +23,48 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **An audit finding's SYMPTOM and its ROOT CAUSE do not deserve the same confidence
+  (2026-07-26):** the full-site audit measured every symptom on a running instance
+  (a 1,257px page scroll width, a −1399.07% rendered percentage, a 593px overflow, a
+  missing validation gate) and every one of those held up. But FOUR of its root causes,
+  inferred by reading code, were wrong — and following them would have produced two
+  non-fixes and one regression:
+  - `.topbar` overflow blamed on flex `min-width:auto`; the real cause was a
+    `.topbar { flex-wrap: nowrap }` declared LATER in the file, winning on order at equal
+    specificity. Adding `min-width: 0` changed nothing (verified by reading computed style).
+  - KPI clipping blamed on the same; the real cause was `.kpi-band.v2` (two classes)
+    out-specifying `@media { .kpi-band }` — media queries add no specificity — so two
+    breakpoints were DEAD for that band.
+  - The 資料中心 overflow blamed on a missing table scroll container; the table already had
+    one. The cause was a global `.panel-sub { white-space: nowrap }` applied to a body
+    PARAGRAPH, where `overflow: hidden` is inert because the span is inline.
+  - The dividend gate proposed as `gross − withholding == net`; that identity is the US DRIP
+    model's only — TW 二代健保補充保費 / 匯費 and US ADR fees legitimately make net < gross
+    without any withholding, so the rule would have rejected real rows.
+  The two unreliable classes are specific and predictable: **CSS cascade resolution** (which
+  declaration actually wins is not knowable by reading — only computed style answers it) and
+  **domain-rule reality** (a legitimate exception leaves no trace in the code). Rules:
+  (1) an audit finding states 症狀 as a MEASUREMENT and 根因 as 已驗證 or 推測待驗 — never
+  both at one confidence; (2) before implementing a CSS fix, read the COMPUTED value of the
+  property you intend to change, and re-read it after — the first M1 attempt looked right in
+  the diff and did nothing; (3) before tightening a domain invariant, enumerate the legal
+  exceptions from the market rules, not from the code; (4) when the implementation contradicts
+  the audit, the correction goes in the CHANGELOG entry for that version — a one-off report is
+  not in anyone's loop.
+
+- **A test pinned to a release-windowed identifier rots on a schedule (2026-07-26):** both
+  what's-new e2e flows located their subject by `data-wn-key="0.1.17:market-risk-alerts"`,
+  with a comment claiming the key was "version-proof". The ✦ panel renders only the SIX most
+  recent versions, so shipping v0.1.23 pushed v0.1.17 out of the window and the locator began
+  timing out — the pair had been red since the previous release and nobody noticed, because a
+  ship that runs a "regression subset" never sees it. Rules: (a) never pin a test to an
+  identifier the product WINDOWS or PAGINATES — discover the subject from the live payload and
+  assert the behaviour; (b) a comment asserting "future-proof" is a claim, so check what
+  actually makes it age; (c) attribute a suspicious failure BEFORE debugging it — `git stash`
+  and re-run on the clean tree (the first stash silently no-opped here and briefly implied the
+  failure was mine; verify `git stash list` is non-empty and the tree is clean before trusting
+  the result).
+
 - **Subagents stall waiting on their own background tasks (2026-07-22):** three
   Batch-B agents stopped mid-verification "waiting for the monitor/background sweep"
   — a subagent's background children can never re-invoke it, so the agent ends and

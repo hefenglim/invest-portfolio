@@ -319,10 +319,28 @@
     });
   }
 
-  async function boot() {
+  /* Older-months notice (audit L4): the pending list is windowed to the last N months so a
+     multi-year import does not dump dozens of un-actioned rows at once. The server ALWAYS
+     reports how many months sit outside the window, so the bounded list can never read as an
+     empty backlog — the notice below states the count and reveals them on demand. */
+  function renderOlderNotice(resp, showingOlder) {
+    const n = (resp && resp.older_count) || 0;
+    if (!n || showingOlder) return;
+    const note = el('div', 'inbox-note');
+    note.appendChild(document.createTextNode(
+      '另有 ' + n + ' 個更早的月份尚未確認（預設只列出最近 '
+      + ((resp && resp.window_months) || 12) + ' 個月）　'));
+    const link = el('button', 'btn-link', '顯示更早');
+    link.type = 'button';
+    link.addEventListener('click', () => { boot(true); });
+    note.appendChild(link);
+    list.appendChild(note);
+  }
+
+  async function boot(showOlder) {
     let resp;
     try {
-      resp = await window.pdApi.get('/api/rebates');
+      resp = await window.pdApi.get('/api/rebates', showOlder ? { older: 1 } : undefined);
     } catch (err) {
       render([]);
       renderAccruing([]);
@@ -333,6 +351,7 @@
       return;
     }
     render((resp && resp.rows) || []);
+    renderOlderNotice(resp, !!showOlder);
     renderAccruing((resp && resp.accruing) || []);
     renderSkipped((resp && resp.skipped) || []);
   }

@@ -438,17 +438,24 @@
       if (sub) d.appendChild(el('span', 's', sub));
       return d;
     };
-    /* unrealized % vs adjusted cost: both are Decimal STRINGS; coerce locally for the
-       ratio (a derived display percentage), guarding a zero/empty denominator. */
-    const adjTotalN = Number(h.adjusted_cost_total);
-    const pnlPct = (h.unrealized_pnl != null && adjTotalN)
-      ? f.signedPct(Number(h.unrealized_pnl) / adjTotalN) : null;
+    /* 未實現% is SERVER-computed (`unrealized_pct` = 未實現 ÷ ORIGINAL cost — the same basis
+       as 回本進度 and the KPI 累計報酬率, so every percentage in this drawer reads on ONE
+       basis, now stated in the sub-label). The frontend must NOT derive it: the previous
+       client-side divide used ADJUSTED cost, which is legally <= 0 once cumulative cash
+       dividends exceed cost (domain-ledger.md) and therefore silently FLIPPED the sign —
+       a +223,473 gain was rendered as −1399.07%. Audit H1, 2026-07-26. */
+    const pnlPct = h.unrealized_pct == null
+      ? null : f.signedPct(h.unrealized_pct) + '・vs 原始成本';
     grid.appendChild(stat('股數', f.num(h.shares)));
     grid.appendChild(stat('市值', h.market_value === null ? f.NULL_GLYPH : f.money(h.market_value, h.quote_ccy), h.market_value === null ? '缺價' : h.quote_ccy));
     grid.appendChild(stat('未實現損益', h.unrealized_pnl === null ? f.NULL_GLYPH : f.signed(h.unrealized_pnl, h.quote_ccy), pnlPct, f.signClass(h.unrealized_pnl)));
     grid.appendChild(stat('權重', h.weight === null ? f.NULL_GLYPH : f.pct(h.weight), '報告幣別市值'));
     grid.appendChild(stat('原始均價', f.price(h.original_avg, h.quote_ccy), '總成本 ' + f.money(h.original_cost_total, h.quote_ccy)));
-    grid.appendChild(stat('調整均價', f.price(h.adjusted_avg, h.quote_ccy), '配息沖減後'));
+    /* 已回本 (server flag `fully_recovered`, exact Decimal comparison): the adjusted basis
+       has gone <= 0, so a NEGATIVE 調整均價 is correct — say so instead of leaving the user
+       to wonder why an average price is negative (audit H1). */
+    grid.appendChild(stat('調整均價', f.price(h.adjusted_avg, h.quote_ccy),
+      h.fully_recovered ? '已回本・配息已完全沖減成本' : '配息沖減後'));
     grid.appendChild(stat('累計配息', f.money(h.dividend_portion, h.quote_ccy), h.quote_ccy));
     grid.appendChild(stat('回本進度', f.pct(h.payback_ratio), '配息 / 原始成本'));
     sec.appendChild(grid);
@@ -690,10 +697,21 @@
     const tbody = el('tbody');
     rows.forEach((r) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'col-text', acctZh(r.account_id)));
-      tr.appendChild(el('td', 'num', f.num(r.shares_sold)));
+      /* kind="dividend": a cash dividend that landed AFTER this position closed — realized
+         income with no cost to remove (audit H2). Mark it and show the sale-only columns as
+         不適用 rather than a misleading 0. */
+      const isDiv = r.kind === 'dividend';
+      const tdAcct = el('td', 'col-text', acctZh(r.account_id));
+      if (isDiv) {
+        const chip = el('span', 'rz-kind', '股利');
+        chip.title = '清倉後入帳的現金股利 — 已無成本可沖減，列為已實現收益';
+        tdAcct.appendChild(chip);
+      }
+      tr.appendChild(tdAcct);
+      tr.appendChild(el('td', 'num', isDiv ? f.NULL_GLYPH : f.num(r.shares_sold)));
       tr.appendChild(el('td', 'num', f.money(r.proceeds_net, r.quote_ccy)));
-      tr.appendChild(el('td', 'num', f.money(r.adjusted_cost_removed, r.quote_ccy)));
+      tr.appendChild(el('td', 'num',
+        isDiv ? f.NULL_GLYPH : f.money(r.adjusted_cost_removed, r.quote_ccy)));
       tr.appendChild(el('td', 'num ' + f.signClass(r.realized), f.signed(r.realized, r.quote_ccy)));
       tbody.appendChild(tr);
     });

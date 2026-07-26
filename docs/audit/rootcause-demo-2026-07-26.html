@@ -1,0 +1,632 @@
+<meta charset="utf-8">
+<title>四處根因分歧 · 前後機制演示</title>
+<style>
+  :root{
+    --ink:#0e1116; --panel:#161b22; --panel-2:#1c222b; --line:#262e39;
+    --text:#e6e9ee; --text-2:#aab3c0; --text-3:#78838f;
+    --accent:#5aa2f5; --accent-soft:#5aa2f51f;
+    --hi:#e2564d; --md:#d99a35; --ok:#3fa672;
+    --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --ink:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --line:#dfe3ea;
+           --text:#161b22; --text-2:#4d5764; --text-3:#79838f; --accent-soft:#5aa2f514; }
+  }
+  :root[data-theme="dark"]{ --ink:#0e1116; --panel:#161b22; --panel-2:#1c222b; --line:#262e39;
+    --text:#e6e9ee; --text-2:#aab3c0; --text-3:#78838f; --accent-soft:#5aa2f51f; }
+  :root[data-theme="light"]{ --ink:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --line:#dfe3ea;
+    --text:#161b22; --text-2:#4d5764; --text-3:#79838f; --accent-soft:#5aa2f514; }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);
+       line-height:1.65;font-size:15px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 20px 96px}
+  h1,h2,h3{text-wrap:balance;line-height:1.25;margin:0}
+  code,.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+  header.top{padding:54px 0 26px;border-bottom:1px solid var(--line);margin-bottom:14px}
+  .eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;
+           color:var(--text-3);margin-bottom:13px}
+  h1{font-size:31px;font-weight:650;letter-spacing:-.02em}
+  .sub{color:var(--text-2);margin-top:12px;max-width:66ch}
+
+  .shape{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+         border-radius:0 10px 10px 0;padding:16px 18px;margin:26px 0 8px}
+  .shape b{color:var(--text)}
+
+  section{margin:44px 0 0;scroll-margin-top:16px}
+  h2{font-size:20px;font-weight:620;margin-bottom:4px;display:flex;align-items:baseline;gap:10px;
+     flex-wrap:wrap}
+  h2 .n{font-family:var(--mono);font-size:12px;color:var(--text-3);letter-spacing:.1em}
+  .lede{color:var(--text-2);margin:6px 0 18px;max-width:72ch}
+
+  .vs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+  @media(max-width:720px){.vs{grid-template-columns:1fr}}
+  .vsbox{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:13px 15px}
+  .vsbox h4{margin:0 0 7px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+  .vsbox.guess{border-color:#e2564d55} .vsbox.guess h4{color:var(--hi)}
+  .vsbox.truth{border-color:#3fa67255} .vsbox.truth h4{color:var(--ok)}
+  .vsbox p{margin:0;font-size:14px;color:var(--text-2)}
+
+  pre{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:11px 13px;
+      overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;margin:8px 0}
+  pre .del{color:var(--hi)} pre .add{color:var(--ok)} pre .cm{color:var(--text-3)}
+  pre .win{background:#e2564d26;border-radius:3px;padding:0 3px}
+
+  .lab{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:16px 0}
+  .lab h3{font-size:15px;margin-bottom:3px}
+  .lab .dsub{color:var(--text-3);font-size:12.5px;margin-bottom:13px}
+  .modes{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .modes button{background:var(--panel-2);border:1px solid var(--line);color:var(--text-2);
+      border-radius:7px;padding:8px 13px;font-size:13px;cursor:pointer;font-family:var(--sans);
+      text-align:left;line-height:1.35}
+  .modes button small{display:block;font-size:11px;color:var(--text-3);margin-top:2px}
+  .modes button:hover{border-color:var(--accent)}
+  .modes button.on{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+  .modes button.on.bad{border-color:var(--hi);background:#e2564d14}
+  .modes button.on.good{border-color:var(--ok);background:#3fa67214}
+
+  .sizer{display:flex;align-items:center;gap:12px;margin:10px 0 6px;flex-wrap:wrap}
+  .sizer input[type=range]{flex:1;min-width:180px;accent-color:var(--accent)}
+  .sizer .w{font-family:var(--mono);font-size:12.5px;color:var(--text-2);white-space:nowrap}
+
+  .stage{border:1px dashed var(--line);border-radius:8px;overflow:hidden;background:#0b0e12;
+         padding:8px;overflow-x:auto}
+  iframe{border:0;display:block;background:#0e1116;height:132px;transition:width .1s}
+
+  .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:12px}
+  .ro{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:9px 11px}
+  .ro .k{font-size:11px;color:var(--text-3)}
+  .ro .v{font-family:var(--mono);font-size:15px;font-weight:600;margin-top:2px}
+  .ro.bad{border-color:var(--hi)} .ro.bad .v{color:var(--hi)}
+  .ro.good{border-color:var(--ok)} .ro.good .v{color:var(--ok)}
+  .verdict{margin-top:12px;padding:11px 13px;border-radius:7px;font-size:13.5px;
+           border:1px solid var(--line);background:var(--panel-2)}
+  .verdict.bad{border-color:#e2564d66;background:#e2564d12}
+  .verdict.good{border-color:#3fa67266;background:#3fa67212}
+
+  .tw{overflow-x:auto;margin:12px 0}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px}
+  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line)}
+  th{font-size:11.5px;letter-spacing:.06em;color:var(--text-3);text-transform:uppercase;font-weight:600}
+  td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .bad{color:var(--hi)} .good{color:var(--ok)} .warn{color:var(--md)} .dim{color:var(--text-3)}
+
+  .ctrl{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:11px;margin:12px 0}
+  .ctrl label{display:block;font-size:11.5px;color:var(--text-3);margin-bottom:4px}
+  .ctrl input{width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+      border-radius:6px;padding:7px 9px;font-family:var(--mono);font-size:13px}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:4px;
+        border:1px solid var(--line)}
+  .pill.pass{color:var(--ok);border-color:#3fa67255;background:#3fa67216}
+  .pill.rej{color:var(--hi);border-color:#e2564d55;background:#e2564d16}
+  .note{font-size:12.5px;color:var(--text-3);margin-top:11px;padding-top:11px;border-top:1px dashed var(--line)}
+  .toc{position:sticky;top:0;background:var(--ink);border-bottom:1px solid var(--line);
+       padding:9px 0;z-index:20}
+  .toc-in{max-width:1040px;margin:0 auto;padding:0 20px;display:flex;gap:6px;overflow-x:auto}
+  .toc a{font-size:12.5px;color:var(--text-2);text-decoration:none;padding:4px 9px;border-radius:5px;white-space:nowrap}
+  .toc a:hover{background:var(--panel);color:var(--accent)}
+  footer{margin-top:54px;padding-top:20px;border-top:1px solid var(--line);color:var(--text-3);font-size:12.5px}
+</style>
+
+<nav class="toc"><div class="toc-in">
+  <a href="#d1">① topbar 順序勝出</a><a href="#d2">② KPI 特異性</a>
+  <a href="#d3">③ 段落 nowrap</a><a href="#d4">④ 股利規則</a><a href="#end">總結</a>
+</div></nav>
+
+<div class="wrap">
+
+<header class="top">
+  <div class="eyebrow">portfolio-dash · root-cause divergence demo</div>
+  <h1>四處根因分歧 —— 前後機制演示</h1>
+  <p class="sub">稽核報告推測的根因，有四處在實作時被證實是錯的。這份文件讓你<strong>親手驗證</strong>：
+  前三個是真實的 CSS 級聯問題，放在頁內的 <strong>iframe 沙盒</strong>裡跑<strong>真實的瀏覽器級聯</strong>
+  ——不是截圖、不是模擬——你可以切換「原報告建議 / 實際修法」，看 computed style 當場改變。
+  第四個是領域規則，附可輸入的雙規則對照器。</p>
+</header>
+
+<div class="shape">
+  <b>四處的共同形狀：症狀量對了，根因猜錯了。</b>
+  每一條發現的<strong>症狀</strong>都是在跑著的實例上量出來的（1257px 的頁寬、−1399.07% 的百分比、
+  593px 的溢出、缺少的檢核），全部成立。錯的都是<strong>根因</strong>——那是讀程式碼推出來的。
+  而且錯的地方不隨機：<strong>CSS 級聯</strong>（哪條宣告真的勝出，讀碼看不出來）與
+  <strong>領域規則的現實例外</strong>（合法的例外在程式碼裡不留痕跡）。
+</div>
+
+<!-- ==================================================== DEMO 1 -->
+<section id="d1">
+  <h2><span class="n">①</span>topbar：同特異性下「後面的贏」</h2>
+  <div class="vs">
+    <div class="vsbox guess"><h4>原報告推測</h4>
+      <p>flex 子項的 <code>min-width</code> 解析為 <code>auto</code>，所以拒絕收縮。
+      建議：加 <code>min-width: 0</code>。</p></div>
+    <div class="vsbox truth"><h4>實測根因</h4>
+      <p>檔案<strong>後段</strong>另有一條 <code>.topbar { flex-wrap: nowrap }</code>。
+      與基礎規則<strong>同特異性</strong>，靠<strong>出現順序</strong>勝出。
+      不論加不加 <code>min-width: 0</code>，都不會換行。</p></div>
+  </div>
+
+  <pre><span class="cm">/* styles.css 第 253 行附近 —— 基礎規則 */</span>
+.topbar { display:flex; align-items:center; gap:14px; <span class="add">flex-wrap: wrap;</span> }
+<span class="add">.topbar &gt; * { min-width: 0; }</span>              <span class="cm">← 原報告建議加的這行</span>
+
+<span class="cm">/* …中間隔了 1,400 行… styles.css 第 1714 行「標籤防折行」段 */</span>
+<span class="win">.topbar { flex-wrap: nowrap; }</span>            <span class="cm">← 同特異性 (0,1,0)，但在後面 → 它贏</span></pre>
+
+  <div class="lab">
+    <h3>實驗：切換三種狀態，看 <code>getComputedStyle(topbar).flex-wrap</code></h3>
+    <div class="dsub">下面是真的 iframe，跑真的級聯。左右拖動可改變它的視窗寬度。</div>
+    <div class="modes" id="d1-modes">
+      <button data-m="0" class="on bad">現況（壞）<small>基礎 wrap ＋ 後段 nowrap</small></button>
+      <button data-m="1">只照原報告建議<small>再加 min-width: 0</small></button>
+      <button data-m="2">實際修法<small>移除後段 nowrap</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="d1-w">560</b> px</span>
+      <input type="range" id="d1-range" min="320" max="900" step="10" value="560">
+    </div>
+    <div class="stage"><iframe id="d1-frame" title="topbar demo"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="d1-ro-wrap"><div class="k">computed flex-wrap</div><div class="v" id="d1-wrap">—</div></div>
+      <div class="ro" id="d1-ro-mw"><div class="k">computed min-width（第一個子項）</div><div class="v" id="d1-mw">—</div></div>
+      <div class="ro" id="d1-ro-sw"><div class="k">document scrollWidth</div><div class="v" id="d1-sw">—</div></div>
+      <div class="ro" id="d1-ro-clip"><div class="k">被壓到看不清的控制項</div><div class="v" id="d1-clip">—</div></div>
+    </div>
+    <div class="verdict" id="d1-verdict">—</div>
+    <div class="note">這正是我第一次改 M1 的經過：diff 看起來完全正確，量 computed style
+      <strong>仍然是 <code>nowrap</code></strong>，頁面照樣溢出。真正有效的一步是把後段那條刪掉。</div>
+  </div>
+</section>
+
+<!-- ==================================================== DEMO 2 -->
+<section id="d2">
+  <h2><span class="n">②</span>KPI 帶：媒體查詢不增加特異性</h2>
+  <div class="vs">
+    <div class="vsbox guess"><h4>原報告推測</h4>
+      <p>與 topbar 同一個原因，flex／grid 壓縮所致。</p></div>
+    <div class="vsbox truth"><h4>實測根因</h4>
+      <p><code>.kpi-band.v2</code> 是<strong>兩個 class</strong>（0,2,0），
+      <code>@media { .kpi-band }</code> 只有<strong>一個</strong>（0,1,0）——
+      <strong>媒體查詢本身不貢獻特異性</strong>。所以那個斷點對 v2 帶<strong>完全失效</strong>，
+      761–1280px 一路維持 5 欄。</p></div>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>選擇器</th><th class="n">特異性</th><th>在斷點內誰勝出</th></tr></thead>
+    <tbody>
+      <tr><td><code>.kpi-band.v2</code>（第 1095 行）</td><td class="n">(0,<b>2</b>,0)</td>
+          <td class="bad">勝出 → 維持 5 個固定欄</td></tr>
+      <tr><td><code>@media (max-width:1280px) { .kpi-band }</code></td><td class="n">(0,<b>1</b>,0)</td>
+          <td class="dim">被壓過 → 這個斷點形同不存在</td></tr>
+      <tr><td><code>@media (max-width:760px) { .kpi-band, .kpi-band.v2 }</code></td><td class="n">(0,2,0)</td>
+          <td class="good">有寫 v2 → 行動版一直是好的（所以只有中間寬度壞掉）</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="lab">
+    <h3>實驗：同一個斷點，只差有沒有寫 <code>.v2</code></h3>
+    <div class="dsub">演示用 <code>620px</code> 代表真實的 <code>1280px</code> 斷點，機制完全相同。
+      拉到 620 以下觀察。</div>
+    <div class="modes" id="d2-modes">
+      <button data-m="0" class="on bad">現況（壞）<small>斷點只寫 .kpi-band</small></button>
+      <button data-m="1">實際修法<small>斷點補上 .kpi-band.v2</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="d2-w">560</b> px</span>
+      <input type="range" id="d2-range" min="360" max="820" step="10" value="560">
+    </div>
+    <div class="stage"><iframe id="d2-frame" title="kpi band demo" style="height:118px"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="d2-ro-cols"><div class="k">computed grid-template-columns</div><div class="v" id="d2-cols">—</div></div>
+      <div class="ro"><div class="k">每張卡片寬</div><div class="v" id="d2-card">—</div></div>
+      <div class="ro" id="d2-ro-clip"><div class="k">內容被裁掉的卡片數</div><div class="v" id="d2-clip">—</div></div>
+    </div>
+    <div class="verdict" id="d2-verdict">—</div>
+    <div class="note">真實畫面上的後果，就是 XIRR 卡片印出
+      <code>年化報酬 (XIRR)no FX rate sto…</code> 這種被切一半的字。</div>
+  </div>
+</section>
+
+<!-- ==================================================== DEMO 3 -->
+<section id="d3">
+  <h2><span class="n">③</span>資料中心：<code>nowrap</code> 套到正文段落，而 inline 的 <code>overflow</code> 是無效的</h2>
+  <div class="vs">
+    <div class="vsbox guess"><h4>原報告推測</h4>
+      <p>表格缺少水平捲動容器。</p></div>
+    <div class="vsbox truth"><h4>實測根因</h4>
+      <p>表格<strong>本來就有</strong>正確的容器。撐破頁面的是全域
+      <code>.panel-sub { white-space: nowrap }</code> 套到了<strong>正文段落</strong>；
+      而該 <code>&lt;span&gt;</code> 是 <strong>inline</strong>，
+      <code>overflow: hidden</code> 對非替換 inline 元素<strong>無效</strong>，
+      連省略號都沒生效，於是變成一條 584px 不可折行的長線。</p></div>
+  </div>
+
+  <pre><span class="cm">/* 這條規則是為「面板標題列」寫的，那裡它是 flex 項目，裁一行是預期行為 */</span>
+.panel-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+<span class="cm">/* 但同一個 class 也用在正文： */</span>
+&lt;div class="set-body"&gt;&lt;span class="panel-sub"&gt;本頁為唯讀統計。未來將於此設定…&lt;/span&gt;&lt;/div&gt;
+<span class="cm">   ↑ inline span → overflow:hidden 無效 → 不裁、不換行 → 直接把容器撐開</span></pre>
+
+  <div class="lab">
+    <h3>實驗：同一段文字，兩種規則</h3>
+    <div class="dsub">注意「省略號有沒有出現」——這是 inline 元素忽略 overflow 的直接證據。</div>
+    <div class="modes" id="d3-modes">
+      <button data-m="0" class="on bad">現況（壞）<small>.panel-sub 全域 nowrap</small></button>
+      <button data-m="1">實際修法<small>nowrap 限縮到 .panel-head 內</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="d3-w">420</b> px</span>
+      <input type="range" id="d3-range" min="320" max="760" step="10" value="420">
+    </div>
+    <div class="stage"><iframe id="d3-frame" title="panel-sub demo" style="height:190px"></iframe></div>
+    <div class="readout">
+      <div class="ro"><div class="k">span 的 computed display</div><div class="v" id="d3-disp">—</div></div>
+      <div class="ro"><div class="k">computed white-space</div><div class="v" id="d3-ws">—</div></div>
+      <div class="ro" id="d3-ro-sw"><div class="k">document scrollWidth</div><div class="v" id="d3-sw">—</div></div>
+      <div class="ro"><div class="k">標題列的裁切（本來就對）</div><div class="v" id="d3-head">—</div></div>
+    </div>
+    <div class="verdict" id="d3-verdict">—</div>
+    <div class="note">若照原報告去動表格的捲動容器，這個溢出會<strong>原封不動</strong>——
+      因為問題根本不在表格。</div>
+  </div>
+</section>
+
+<!-- ==================================================== DEMO 4 -->
+<section id="d4">
+  <h2><span class="n">④</span>股利檢核：那條等式只是美股 DRIP 的，不是通則</h2>
+  <div class="vs">
+    <div class="vsbox guess"><h4>原報告建議</h4>
+      <p><code>gross − withholding == net</code>，不符即拒絕。</p></div>
+    <div class="vsbox truth"><h4>實測問題</h4>
+      <p>台股<strong>二代健保補充保費</strong>與匯費、美股 <strong>ADR fee</strong> 都會讓
+      net &lt; gross 而<strong>不屬於 withholding</strong>。這條規則會拒絕真實資料，
+      逼使用者去竄改 gross。實際採用<strong>守恆式</strong>：
+      <code>預扣 + 淨額 ≤ 總額</code>——一筆配息不可能「發出」比宣告更多的錢。</p></div>
+  </div>
+
+  <div class="lab">
+    <h3>實驗：同一批真實案例，兩條規則的判定</h3>
+    <div class="dsub">紅底列＝原建議會<strong>誤殺</strong>的合法資料。</div>
+    <div class="tw"><table id="d4-table">
+      <thead><tr><th>情境</th><th class="n">總額</th><th class="n">預扣</th><th class="n">淨額</th>
+        <th>原建議 <code>g−w==n</code></th><th>實際採用 <code>w+n ≤ g</code></th><th>應該是</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+
+    <h3 style="margin-top:20px">自己試一組</h3>
+    <div class="ctrl">
+      <div><label>總額 gross</label><input type="number" id="d4-g" value="1000" step="1"></div>
+      <div><label>預扣 withholding</label><input type="number" id="d4-w" value="0" step="1"></div>
+      <div><label>淨額 net</label><input type="number" id="d4-n" value="978" step="1"></div>
+    </div>
+    <div class="readout">
+      <div class="ro" id="d4-ro-old"><div class="k">原建議 g − w == n</div><div class="v" id="d4-old">—</div></div>
+      <div class="ro" id="d4-ro-new"><div class="k">實際採用 w + n ≤ g</div><div class="v" id="d4-new">—</div></div>
+      <div class="ro"><div class="k">差額（未被建模的扣項）</div><div class="v" id="d4-gap">—</div></div>
+    </div>
+    <div class="verdict" id="d4-verdict">—</div>
+    <div class="note">守恆式擋得住真正不可能的組合（預扣＋淨額超過總額、淨額大於總額、負數），
+      同時放行所有「淨額少於總額」的合法情形——差額就是未被建模的扣項，那是資訊，不是錯誤。
+      <br><br><b>釐清（2026-07-26 owner 決議）：本系統<u>不計算</u>二代健保補充保費。</b>
+      上表把它列出來，只是為了說明「這條驗證規則必須容許哪些合法情形」——
+      台股費率明細只有<b>手續費與證交稅</b>，股利側只有美股 DRIP 的 30% 預扣有建模。
+      台股現金股利由你直接填實收淨額，差額不具名、不拆解。</div>
+  </div>
+</section>
+
+<!-- ==================================================== END -->
+<section id="end">
+  <h2><span class="n">⑤</span>一句話總結與防重演</h2>
+  <div class="tw"><table>
+    <thead><tr><th>案例</th><th>照原建議實作的後果</th></tr></thead>
+    <tbody>
+      <tr><td>① topbar</td><td class="bad">完全無效——後段那條 nowrap 仍然勝出</td></tr>
+      <tr><td>② KPI 帶</td><td class="bad">完全無效——斷點被特異性壓過，卡片照樣擠成 150px</td></tr>
+      <tr><td>③ 資料中心</td><td class="bad">改錯地方——表格容器本來就對，溢出原封不動</td></tr>
+      <tr><td>④ 股利檢核</td><td class="bad">產生迴歸——誤殺二代健保／ADR fee 的合法資料</td></tr>
+    </tbody>
+  </table></div>
+
+  <p style="margin-top:18px">防重演的做法已經落地：</p>
+  <ul>
+    <li><strong>稽核報告改標信心度</strong>：每條發現拆成
+      <code>症狀（量測）</code> 與 <code>根因（已驗證／推測待驗）</code>，
+      你在核准前就知道哪幾項可能變形。</li>
+    <li><strong><code>LESSONS_LEARNED.md</code> 已寫入一條「類別」教訓</strong>（不是四條個案）：
+      靜態閱讀在 <em>CSS 級聯</em> 與 <em>領域規則現實</em> 兩處系統性不可靠；
+      改 CSS 前後都要讀 computed value；收緊領域不變量前要從市場規則列舉合法例外。</li>
+    <li><strong>出貨時寫進 CHANGELOG</strong>：一小節「修法與稽核推測不同之處」，
+      因為你每次發版都會看 CHANGELOG，不會再回頭讀一次性的報告。</li>
+    <li><strong>程式碼現場註解</strong>（已完成）：例如被移除的那條 nowrap 原位置留了
+      「Do NOT re-add a nowrap here」。</li>
+  </ul>
+</section>
+
+<footer>
+  portfolio-dash · 四處根因分歧機制演示 · 2026-07-26 · 前三例於頁內 iframe 執行真實 CSS 級聯，非模擬。
+</footer>
+</div>
+
+<script>
+(function(){
+  'use strict';
+  const $ = (s) => document.querySelector(s);
+
+  /* ---------- shared: build an iframe doc that measures itself and posts up ---------- */
+  function frameDoc(css, body, probe){
+    return '<!doctype html><meta charset="utf-8"><style>'
+      + 'html,body{margin:0;background:#0e1116;color:#e6e9ee;'
+      + 'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","PingFang TC",sans-serif;'
+      + 'font-size:13px}' + css + '</style>' + body
+      + '<script>(function(){function m(){try{parent.postMessage(' + probe + ',"*")}catch(e){}}'
+      + 'window.addEventListener("resize",m);new ResizeObserver(m).observe(document.body);'
+      + 'requestAnimationFrame(function(){m();setTimeout(m,60)});}())<\/script>';
+  }
+  const inbox = {};
+  window.addEventListener('message', function(e){
+    const d = e.data;
+    if (d && d.id && inbox[d.id]) inbox[d.id](d);
+  });
+
+  /* ================= DEMO 1 — order wins at equal specificity ================= */
+  const D1_ITEMS = ['早安，Auditor','報告幣別 TWD','資料新鮮','⚠','AI 未啟用','⌕ 搜尋標的',
+                    '✦','☾ 深色','⟳ 重新整理','AU'];
+  function d1css(mode){
+    let css = '.topbar{display:flex;align-items:center;gap:8px;padding:9px 10px;'
+      + 'border-bottom:1px solid #262e39;flex-wrap:wrap;row-gap:6px}'
+      + '.topbar>*{background:#161b22;border:1px solid #262e39;border-radius:5px;'
+      + 'padding:4px 8px;white-space:nowrap;font-size:11.5px;color:#aab3c0}'
+      + '.spacer{flex:1;background:none;border:none;padding:0}';
+    if (mode >= 1) css += '\n.topbar>*{min-width:0}';   /* 原報告的建議 */
+    if (mode <= 1) css += '\n.topbar{flex-wrap:nowrap}'; /* 後段那條，順序勝出 */
+    return css;
+  }
+  function d1render(mode){
+    const body = '<div class="topbar" id="tb">'
+      + D1_ITEMS.map((t,i) => (i===1 ? '<span class="spacer"></span>' : '') + '<span>'+t+'</span>').join('')
+      + '</div>';
+    const probe = '{id:"d1",wrap:getComputedStyle(document.getElementById("tb")).flexWrap,'
+      + 'mw:getComputedStyle(document.getElementById("tb").children[0]).minWidth,'
+      + 'sw:document.scrollingElement.scrollWidth,cw:document.scrollingElement.clientWidth,'
+      + 'clip:Array.from(document.getElementById("tb").children)'
+      + '.filter(function(x){return x.scrollWidth>x.clientWidth+1}).length}';
+    $('#d1-frame').srcdoc = frameDoc(d1css(mode), body, probe);
+  }
+  inbox.d1 = function(d){
+    $('#d1-wrap').textContent = d.wrap;
+    $('#d1-mw').textContent = d.mw;
+    $('#d1-sw').textContent = d.sw + ' px';
+    $('#d1-clip').textContent = d.clip + ' 個';
+    const over = d.sw > d.cw + 1;
+    $('#d1-ro-wrap').className = 'ro ' + (d.wrap === 'nowrap' ? 'bad' : 'good');
+    $('#d1-ro-sw').className = 'ro ' + (over ? 'bad' : 'good');
+    $('#d1-ro-clip').className = 'ro ' + (d.clip ? 'bad' : 'good');
+    const v = $('#d1-verdict');
+    if (d.wrap === 'nowrap' && d1mode === 1){
+      v.className = 'verdict bad';
+      v.innerHTML = '<b>min-width: 0 確實生效了（上面顯示 0px），但 flex-wrap 仍然是 nowrap。</b>'
+        + '要修的機制<b>從頭到尾沒被觸碰</b>——後段那條 <code>.topbar{flex-wrap:nowrap}</code> 還在。'
+        + (over
+            ? '頁面照樣溢出 ' + (d.sw - d.cw) + 'px。'
+            : '這個寬度下頁面剛好沒溢出，但代價是 <b>' + d.clip + ' 個控制項被壓到內容看不清</b>'
+              + '（把滑桿再往左拉，溢出就會回來）。');
+    } else if (d.wrap === 'nowrap'){
+      v.className = 'verdict bad';
+      v.innerHTML = over
+        ? '<b>現況：整份文件被撐到 '+d.sw+'px，超出 '+(d.sw-d.cw)+'px。</b>右側控制項被推出畫面外。'
+        : '<b>現況：nowrap 生效中。</b>再把寬度拉窄一點就會溢出。';
+    } else {
+      v.className = 'verdict good';
+      v.innerHTML = '<b>移除後段那條之後，flex-wrap 終於是 wrap</b>——控制項改為換行，'
+        + '文件寬度 '+d.sw+'px ≤ 可用 '+d.cw+'px，<b>任何寬度都不會再撐破頁面</b>。';
+    }
+  };
+  let d1mode = 0;
+  $('#d1-modes').addEventListener('click', function(e){
+    const b = e.target.closest('button'); if (!b) return;
+    d1mode = +b.dataset.m;
+    Array.from(this.children).forEach(function(x){
+      x.className = (x === b) ? ('on ' + (d1mode === 2 ? 'good' : 'bad')) : '';
+    });
+    d1render(d1mode);
+  });
+  $('#d1-range').addEventListener('input', function(){
+    $('#d1-frame').style.width = this.value + 'px';
+    $('#d1-w').textContent = this.value;
+  });
+  $('#d1-frame').style.width = '560px';
+  d1render(0);
+
+  /* ================= DEMO 2 — media queries add no specificity ================= */
+  const D2_CARDS = [['總市值','5,933,032'],['總報酬','+3,941,317'],
+                    ['年化報酬 (XIRR)','資料不足'],['損益（TWD）','+3,941,317'],
+                    ['換匯損益（歸因拆分）','+1,862']];
+  function d2css(mode){
+    return '.band{display:grid;grid-template-columns:repeat(8,1fr);gap:8px;padding:9px}'
+      + '.band.v2{grid-template-columns:1.15fr 1.3fr 1.05fr 1.25fr 1.25fr}'
+      + '.c{background:#161b22;border:1px solid #262e39;border-radius:7px;padding:8px 9px;'
+      + 'overflow:hidden}'
+      + '.c .l{font-size:10.5px;color:#78838f;white-space:nowrap}'
+      + '.c .v{font-size:15px;font-weight:700;white-space:nowrap;margin-top:3px;'
+      + 'font-family:ui-monospace,Consolas,monospace}'
+      + '@media (max-width:620px){' + (mode === 1 ? '.band,.band.v2' : '.band')
+      + '{grid-template-columns:repeat(4,1fr)}}';
+  }
+  function d2render(mode){
+    const body = '<div class="band v2" id="bd">'
+      + D2_CARDS.map(c => '<div class="c"><div class="l">'+c[0]+'</div><div class="v">'+c[1]+'</div></div>').join('')
+      + '</div>';
+    const probe = '{id:"d2",cols:getComputedStyle(document.getElementById("bd")).gridTemplateColumns,'
+      + 'card:Math.round(document.querySelector(".c").getBoundingClientRect().width),'
+      + 'clip:Array.from(document.querySelectorAll(".c")).filter(function(c){'
+      + 'return Array.from(c.children).some(function(x){return x.scrollWidth>x.clientWidth+1})}).length}';
+    $('#d2-frame').srcdoc = frameDoc(d2css(mode), body, probe);
+  }
+  inbox.d2 = function(d){
+    const n = d.cols.split(' ').filter(Boolean).length;
+    $('#d2-cols').textContent = n + ' 欄';
+    $('#d2-cols').title = d.cols;
+    $('#d2-card').textContent = d.card + ' px';
+    $('#d2-clip').textContent = d.clip + ' 張';
+    $('#d2-ro-cols').className = 'ro ' + (n >= 5 && +$('#d2-range').value <= 620 ? 'bad' : 'good');
+    $('#d2-ro-clip').className = 'ro ' + (d.clip ? 'bad' : 'good');
+    const narrow = +$('#d2-range').value <= 620;
+    const v = $('#d2-verdict');
+    if (!narrow){
+      v.className = 'verdict';
+      v.innerHTML = '目前寬於斷點（620px），兩種寫法都是 5 欄——'
+        + '<b>問題只在斷點以下才現形</b>。把滑桿拉到 620 以下。';
+    } else if (n >= 5){
+      v.className = 'verdict bad';
+      v.innerHTML = '<b>斷點已經進入，但欄數仍是 '+n+'。</b>'
+        + '<code>@media{.kpi-band}</code>(0,1,0) 被 <code>.kpi-band.v2</code>(0,2,0) 壓過，'
+        + '這個斷點形同不存在——卡片被擠到 '+d.card+'px，'
+        + (d.clip ? '<b>'+d.clip+' 張卡片的文字被裁掉</b>。' : '再窄一點文字就會被裁。');
+    } else {
+      v.className = 'verdict good';
+      v.innerHTML = '<b>斷點補上 <code>.kpi-band.v2</code> 後生效：'+n+' 欄</b>，'
+        + '卡片 '+d.card+'px，被裁的卡片 '+d.clip+' 張。第 5 張自然折到第二列。';
+    }
+  };
+  $('#d2-modes').addEventListener('click', function(e){
+    const b = e.target.closest('button'); if (!b) return;
+    const m = +b.dataset.m;
+    Array.from(this.children).forEach(function(x){
+      x.className = (x === b) ? ('on ' + (m === 1 ? 'good' : 'bad')) : '';
+    });
+    d2render(m);
+  });
+  $('#d2-range').addEventListener('input', function(){
+    $('#d2-frame').style.width = this.value + 'px';
+    $('#d2-w').textContent = this.value;
+  });
+  $('#d2-frame').style.width = '560px';
+  d2render(0);
+
+  /* ================= DEMO 3 — nowrap on body copy; inline ignores overflow ========= */
+  const D3_TEXT = '本頁為唯讀統計。未來將於此設定各資料表的保留期限與自動清理策略；'
+                + '目前所有歷史完整保留，不做任何自動清理。';
+  function d3css(mode){
+    let css = '.panel{background:#161b22;border:1px solid #262e39;border-radius:8px;margin:9px}'
+      + '.panel-head{display:flex;align-items:baseline;gap:10px;padding:9px 11px 0;flex-wrap:wrap}'
+      + '.panel-title{font-size:12px;font-weight:700;margin:0;white-space:nowrap}'
+      + '.set-body{padding:7px 11px 11px}'
+      + '.panel-sub{color:#78838f;font-size:11.5px;'
+      + 'overflow:hidden;text-overflow:ellipsis;min-width:0}';
+    css += (mode === 0)
+      ? '\n.panel-sub{white-space:nowrap}'                      /* 全域 — 壞 */
+      : '\n.panel-head .panel-sub{white-space:nowrap}';         /* 限縮到標題列 — 修好 */
+    return css;
+  }
+  function d3render(mode){
+    const body = '<div class="panel"><div class="panel-head">'
+      + '<h2 class="panel-title">資料保留策略</h2>'
+      + '<span class="panel-sub" id="hs">未來規劃・這行很長，在標題列裡本來就該被裁成一行</span>'
+      + '</div><div class="set-body"><span class="panel-sub" id="bs">' + D3_TEXT + '</span></div></div>';
+    const probe = '{id:"d3",disp:getComputedStyle(document.getElementById("bs")).display,'
+      + 'ws:getComputedStyle(document.getElementById("bs")).whiteSpace,'
+      + 'sw:document.scrollingElement.scrollWidth,cw:document.scrollingElement.clientWidth,'
+      + 'headClipped:(function(h){return h.scrollWidth>h.clientWidth+1})(document.getElementById("hs")),'
+      + 'bodyW:Math.round(document.getElementById("bs").getBoundingClientRect().width)}';
+    $('#d3-frame').srcdoc = frameDoc(d3css(mode), body, probe);
+  }
+  inbox.d3 = function(d){
+    $('#d3-disp').textContent = d.disp;
+    $('#d3-ws').textContent = d.ws;
+    $('#d3-sw').textContent = d.sw + ' px';
+    $('#d3-head').textContent = d.headClipped ? '有裁切（正確）' : '未裁切';
+    const over = d.sw > d.cw + 1;
+    $('#d3-ro-sw').className = 'ro ' + (over ? 'bad' : 'good');
+    const v = $('#d3-verdict');
+    if (d.ws === 'nowrap'){
+      v.className = 'verdict bad';
+      v.innerHTML = '<b>正文那個 span 是 <code>' + d.disp + '</code>（inline）。</b>'
+        + 'CSS 規定：<code>overflow</code> 對非替換的 inline 元素<b>無效</b>——'
+        + '所以既沒有裁切、也沒有省略號，整段變成一條 ' + d.bodyW + 'px 的長線，'
+        + (over ? '把文件撐到 <b>' + d.sw + 'px</b>（超出 ' + (d.sw - d.cw) + 'px）。'
+                : '再窄一點就會撐破容器。');
+    } else {
+      v.className = 'verdict good';
+      v.innerHTML = '<b>nowrap 限縮到 <code>.panel-head</code> 之後：</b>'
+        + '正文正常換行，文件寬 ' + d.sw + 'px ≤ 可用 ' + d.cw + 'px；'
+        + '而標題列那一行<b>仍然照舊被裁成一行</b>（上面「標題列的裁切」顯示「'
+        + (d.headClipped ? '有裁切' : '未裁切') + '」）——原本的設計意圖完整保留。';
+    }
+  };
+  $('#d3-modes').addEventListener('click', function(e){
+    const b = e.target.closest('button'); if (!b) return;
+    const m = +b.dataset.m;
+    Array.from(this.children).forEach(function(x){
+      x.className = (x === b) ? ('on ' + (m === 1 ? 'good' : 'bad')) : '';
+    });
+    d3render(m);
+  });
+  $('#d3-range').addEventListener('input', function(){
+    $('#d3-frame').style.width = this.value + 'px';
+    $('#d3-w').textContent = this.value;
+  });
+  $('#d3-frame').style.width = '420px';
+  d3render(0);
+
+  /* ================= DEMO 4 — the dividend rule ================= */
+  const D4_CASES = [
+    ['台股現金股利（單純）', 1000, 0, 1000, true],
+    ['台股：扣二代健保補充保費 2.11%', 1000, 0, 978, true],
+    ['台股：扣匯費／手續費', 6000, 0, 5978, true],
+    ['美股 DRIP（30% 預扣，恰好相等）', 100, 30, 70, true],
+    ['美股：DRIP 再扣 ADR fee', 100, 30, 68, true],
+    ['馬股單層淨額', 300, 0, 300, true],
+    ['不自洽：預扣 + 淨額 > 總額', 100, 30, 90, false],
+    ['不可能：淨額 > 總額', 100, 0, 120, false],
+    ['負數', -5, 0, 0, false]
+  ];
+  const oldRule = (g, w, n) => (g - w) === n;
+  const newRule = (g, w, n) => !(g < 0 || w < 0 || n < 0) && (w + n) <= g;
+  function pill(ok){ return '<span class="pill ' + (ok ? 'pass' : 'rej') + '">'
+    + (ok ? '通過' : '拒絕') + '</span>'; }
+  (function d4table(){
+    const tb = $('#d4-table').querySelector('tbody');
+    tb.innerHTML = D4_CASES.map(function(c){
+      const [label, g, w, n, legit] = c;
+      const o = oldRule(g, w, n), x = newRule(g, w, n);
+      const wrong = legit && !o;                      // the proposed rule kills a legal row
+      return '<tr' + (wrong ? ' style="background:#e2564d14"' : '') + '>'
+        + '<td>' + label + (wrong ? ' <b class="bad">← 誤殺</b>' : '') + '</td>'
+        + '<td class="n">' + g + '</td><td class="n">' + w + '</td><td class="n">' + n + '</td>'
+        + '<td>' + pill(o) + '</td><td>' + pill(x) + '</td>'
+        + '<td class="' + (legit ? 'good' : 'bad') + '">' + (legit ? '合法' : '應拒絕') + '</td></tr>';
+    }).join('');
+  })();
+  function d4calc(){
+    const g = +$('#d4-g').value, w = +$('#d4-w').value, n = +$('#d4-n').value;
+    const o = oldRule(g, w, n), x = newRule(g, w, n);
+    $('#d4-old').textContent = o ? '通過' : '拒絕';
+    $('#d4-new').textContent = x ? '通過' : '拒絕';
+    $('#d4-gap').textContent = (g - w - n).toLocaleString('en-US');
+    $('#d4-ro-old').className = 'ro ' + (o ? 'good' : 'bad');
+    $('#d4-ro-new').className = 'ro ' + (x ? 'good' : 'bad');
+    const v = $('#d4-verdict');
+    if (!o && x){
+      v.className = 'verdict bad';
+      v.innerHTML = '<b>兩條規則判定不同：原建議會拒絕，守恆式放行。</b>'
+        + '差額 ' + (g - w - n) + ' 是未被建模的扣項（二代健保／匯費／ADR fee）——'
+        + '這是<b>資訊，不是錯誤</b>。若採用原建議，這筆合法資料會被擋下。';
+    } else if (o && !x){
+      v.className = 'verdict bad';
+      v.innerHTML = '<b>不可能的組合。</b>兩條規則都應拒絕。';
+    } else if (!x){
+      v.className = 'verdict good';
+      v.innerHTML = '<b>守恆式正確擋下：</b>預扣 + 淨額 超過總額，或出現負數——'
+        + '一筆配息不可能發出比宣告更多的錢。';
+    } else {
+      v.className = 'verdict good';
+      v.innerHTML = '<b>兩條規則一致放行</b>（恰好 gross − withholding == net 的情形，'
+        + '也就是美股 DRIP 的標準形狀）。';
+    }
+  }
+  ['d4-g','d4-w','d4-n'].forEach(id => $('#' + id).addEventListener('input', d4calc));
+  d4calc();
+})();
+</script>
