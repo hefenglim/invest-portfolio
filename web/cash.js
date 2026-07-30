@@ -91,6 +91,7 @@
      is: syncMovementCcy() runs early inside initForms() and reaches prefillAcq(), so a `let`
      declared further down initForms would sit in its temporal dead zone at that call. */
   let acqPrefillSeq = 0;
+  let acqPrefillMsg = '';   // same reason: renderAcqHint() is reachable from that early call
   let booted = false;  // FU-D25: gate pd-cash-tab re-renders until the first boot() populated D
   /* FU-D43c estimate state — MODULE scope, not initForms: syncFxCcy() calls
      resetEstimate() early in initForms(), and `let` declarations further down initForms
@@ -551,14 +552,31 @@
     const fAcq = el('input', 'input'); fAcq.type = 'number'; fAcq.step = '0.01';
     fAcq.value = m.acq_home_amount || '';
     const acqHint = el('div', 'cfx-balance');
+    /* The stored authority is the AMOUNT, so editing 金額 alone silently rescales the
+       implied acquisition rate (1,000 USD/32,388 TWD edited to 2,000 USD becomes 16.194).
+       Recompute and show that rate off BOTH fields so the change is never invisible —
+       input-side what-if on the user's own entry, never a stored figure. */
     const updAcqHint = () => {
-      acqHint.textContent = fAcq.value.trim()
-        ? '留白代表「取得成本未知」：金額照樣計入餘額，但不列入匯損益並會被標示。'
-          + (m.acq_rate ? '（目前換算匯率 ' + f.rate(m.acq_rate) + '）' : '')
-        : '目前未登錄取得成本 — 此筆不列入加權平均，帳戶的匯損益會標示缺口。';
+      const cost = fAcq.value.trim(), qty = fAmt.value.trim();
+      if (!cost) {
+        acqHint.textContent = '未登錄取得成本 — 此筆不列入加權平均，帳戶的匯損益會標示缺口。';
+        acqHint.className = 'cfx-balance warn';
+        return;
+      }
+      const rate = (Number(qty) > 0 && Number(cost) > 0)
+        ? (Number(cost) / Number(qty)).toFixed(4) : null;
+      acqHint.className = 'cfx-balance';
+      acqHint.textContent = (rate
+        ? '換算後 1 ' + m.ccy + ' = ' + rate + ' ' + editHome
+          + (m.acq_rate && rate !== Number(m.acq_rate).toFixed(4)
+             ? '（原為 ' + Number(m.acq_rate).toFixed(4) + '）' : '')
+          + '　·　'
+        : '')
+        + '此欄只記錄取得成本，不扣款；清空即代表「成本未知」。';
     };
     updAcqHint();
     fAcq.addEventListener('input', updAcqHint);
+    fAmt.addEventListener('input', updAcqHint);
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal');
     const head = el('div', 'modal-head');
@@ -816,7 +834,12 @@
       if (!field) return;
       const show = isForeignMovement();
       field.hidden = !show;
-      if (!show) { $('#cm-acq').value = ''; $('#cm-acq-hint').textContent = ''; return; }
+      if (!show) {
+        $('#cm-acq').value = '';
+        acqPrefillMsg = '';
+        $('#cm-acq-hint').textContent = '';
+        return;
+      }
       prefillAcq();
     }
     async function prefillAcq() {
@@ -832,18 +855,39 @@
         if (r.available) {
           $('#cm-acq-mode').value = 'rate';
           $('#cm-acq').value = r.rate;
-          hint.textContent = '參考值：' + on + ' 收盤 1 ' + ccy + ' = ' + f.rate(r.rate)
-            + ' ' + r.home_ccy + '（實際換匯價可能不同，可直接修改）';
+          acqPrefillMsg = '參考值：' + on + ' 收盤 1 ' + ccy + ' = ' + f.rate(r.rate)
+            + ' ' + r.home_ccy + '（市場中價，你的實際取得價可能不同，可直接修改）';
         } else {
           $('#cm-acq').value = '';
-          hint.textContent = r.reason + '（留白也可送出：金額照樣計入餘額，'
+          acqPrefillMsg = r.reason + '（留白也可送出：金額照樣計入餘額，'
             + '但不列入匯損益計算並會被標示）';
         }
+        renderAcqHint();
       } catch (err) {
         if (seq !== acqPrefillSeq) return;
-        hint.textContent = '無法取得參考匯率，請手動輸入（可留白）';
+        acqPrefillMsg = '無法取得參考匯率，請手動輸入（可留白）';
+        renderAcqHint();
       }
     }
+
+    /* When the cost is entered as an AMOUNT, changing 金額 silently changes the implied
+       acquisition rate — so show that rate live and let the user see it move. Input-side
+       what-if on the user's OWN entry, exactly like updImplied() in the FX form below; it
+       is a display aid and never a stored figure. */
+    function renderAcqHint() {
+      var parts = acqPrefillMsg ? [acqPrefillMsg] : [];
+      var amt = $('#cm-amount').value.trim(), cost = $('#cm-acq').value.trim();
+      if ($('#cm-acq-mode').value === 'amount' && amt && cost
+          && Number(amt) > 0 && Number(cost) > 0) {
+        parts.push('換算後 1 ' + $('#cm-ccy').value + ' = '
+          + (Number(cost) / Number(amt)).toFixed(4) + ' '
+          + (fundingCcyOf($('#cm-account').value) || ''));
+      }
+      $('#cm-acq-hint').textContent = parts.join('　·　');
+    }
+    $('#cm-acq').addEventListener('input', renderAcqHint);
+    $('#cm-acq-mode').addEventListener('change', renderAcqHint);
+    $('#cm-amount').addEventListener('input', renderAcqHint);
     // The account select is covered by syncMovementCcy above; binding it here too would
     // fire a second, redundant prefill request for every account switch.
     ['#cm-ccy', '#cm-date'].forEach((sel) => {

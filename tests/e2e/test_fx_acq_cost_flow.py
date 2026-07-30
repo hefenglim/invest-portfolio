@@ -87,6 +87,27 @@ def test_acq_cost_field_is_conditional_and_degrades_without_a_rate(
         " return n && n.textContent.includes('參考值'); }")
     rate = page.input_value("#cm-acq")
     assert rate and rate != "0"
+
+    # The stored authority is the AMOUNT, so entering the cost that way makes 金額 change
+    # the implied rate. It must be shown live, or a quantity edit silently rescales the
+    # basis (1,000 USD / 32,388 TWD edited to 2,000 USD would become 16.194).
+    page.fill("#cm-amount", "1000")
+    page.select_option("#cm-acq-mode", "amount")
+    page.fill("#cm-acq", "32388")
+    page.wait_for_function(
+        "() => { const n = document.querySelector('#cm-acq-hint');"
+        " return n && n.textContent.includes('32.3880'); }")
+    page.fill("#cm-amount", "2000")
+    page.wait_for_function(
+        "() => { const n = document.querySelector('#cm-acq-hint');"
+        " return n && n.textContent.includes('16.1940'); }")
+    # A permanent warning must say the field does NOT debit the home pool, so an internal
+    # conversion is never recorded as a deposit (which would overstate net worth).
+    warn = page.locator(".cm-acq-warn").inner_text()
+    assert "不會從本帳戶的資金幣別扣款" in warn and "換匯中心" in warn, warn
+
+    page.select_option("#cm-acq-mode", "rate")
+    page.fill("#cm-acq", rate)
     page.fill("#cm-amount", "1000")
     page.click("#cm-confirm")
     page.wait_for_function(
