@@ -444,3 +444,25 @@ prevents recurrence.
   **bare** (`mypy`, and ruff over the tracked source roots) so the repo config — the same
   thing CI and `/ship-version` read — defines the verdict; a path argument is a debugging
   aid, never the verdict.
+
+- **2026-07-30 — a scenario whose premise is a hard-coded constant will silently MUTATE an
+  accumulating environment once that premise expires.** The stress scenario's oversell probe
+  sold a fixed 100 shares expecting a 422 block, with the comment "NOT force-written, demo
+  stays clean". On the accumulating test site an earlier run had left a larger net position,
+  so 100 was no longer an oversell: the app correctly accepted it, and the "guard test" wrote
+  a back-dated sell that permanently destroyed that symbol's cost basis (average 6,100 USD
+  vs a 379 market price). The check reported a failure, which read as an app regression when
+  the real event was the fixture writing bad data. Rule: in an environment that accumulates,
+  every destructive-path probe must derive its quantity/premise from the state the app
+  reports AT RUN TIME (here: `held + 1`), and skip itself when the premise cannot be
+  established — never assert a fixed constant against a moving baseline.
+
+- **2026-07-30 — an oracle agreeing with the app proves CONSISTENCY, not VALIDITY.** After
+  the bad row above, the independent replay and the app agreed to the last digit on a
+  position whose average cost was off by a factor of 16, because both faithfully replayed
+  the same impossible transaction. Reconciliation can only catch computation errors; it is
+  blind to a defective INPUT CONTROL. Rule: pair every reconciliation with plausibility
+  assertions the ledger cannot satisfy when an impossible row got in (average cost within a
+  sane band of market price; a position that never goes negative at ANY date; sale proceeds
+  in cash always matched by a realized row), and treat "all reconciled" as a statement about
+  arithmetic only.

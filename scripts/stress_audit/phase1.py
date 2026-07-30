@@ -360,6 +360,9 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         _reconcile_kpis(ev, res, dash, prices, sp, phase)
         _reconcile_xirr(ev, res, dash, facts, prices, sp, phase)
 
+    # ---- E2. Ledger INTEGRITY (validity, not arithmetic — see oracle layer 4) ----
+    _reconcile_integrity(ev, res, facts, phase)
+
     # ---- F. Ledger APIs row-by-row (raw facts) ----
     _reconcile_ledger_api(ev, api, facts, phase)
 
@@ -415,6 +418,30 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         exp = run
         got = app_bal.get(key, O.ZERO)
         ev.check("cash.statement.terminal", "|".join(key), exp, got, phase)
+
+
+# (account, symbol) pairs this scenario oversells ON PURPOSE with ack=True (run_phase1
+# proves the guard blocks it unacked first). A user-acknowledged oversell is a recorded
+# decision, not a control failure — see domain-ledger.md.
+ACKED_OVERSELLS = {("tw_broker", "0050")}
+
+
+def _reconcile_integrity(ev, res, facts, phase):
+    """Ledger VALIDITY, orthogonal to every other assertion in this file.
+
+    Everything else compares the app against the oracle: it proves both replayed the same
+    rows the same way, and is therefore blind to a row that should never have been accepted.
+    Measured on 2026-07-30: a back-dated oversell reconciled perfectly while carrying an
+    average cost 10-16x the market price, because `build_book` drops an oversold position's
+    basis and a LATER buy clears the `oversold` flag. These two checks stay red until the
+    impossible row is gone.
+    """
+    findings = O.integrity_findings(facts, res.realized_rows, acked=ACKED_OVERSELLS)
+    for check, scope in findings:
+        ev.check(check, scope, "clean", "VIOLATION", phase)
+    if not findings:
+        ev.check("ledger.integrity", "no negative position / orphan sell", "clean", "clean",
+                 phase)
 
 
 def _reconcile_fx(ev, res, dash, facts, prices, sp, phase, valuation):

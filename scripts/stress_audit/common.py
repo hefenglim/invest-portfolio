@@ -416,10 +416,28 @@ def load_facts_from_api(api: Api) -> O.Facts:
             orig_avg=dec(r["avg"]), orig_total=dec(r["total"]),
             build_date=date.fromisoformat(r["date"])))
     for r in _page(api, "/api/cash", key_rows="movements"):
+        # acq_home_amount MUST be carried here too, not only in the sqlite loader — phase 2
+        # builds its facts from the API, so omitting it made the oracle treat every foreign
+        # deposit as basis-unknown and report false fx.avg_rate / fx.covered_ratio failures.
+        _acq = r.get("acq_home_amount")
         f.cash.append(O.CashFact(
             id=r["id"], account_id=r["account_id"], d=date.fromisoformat(r["date"]),
-            kind=str(r["kind"]).upper(), ccy=r["ccy"], amount=dec(r["amount"])))
+            kind=str(r["kind"]).upper(), ccy=r["ccy"], amount=dec(r["amount"]),
+            acq_home_amount=None if _acq is None else dec(_acq)))
     return f
+
+
+def read_effective_fee_rules(api: Api) -> dict[str, dict[str, str]]:
+    """Live EFFECTIVE fee rules per rule set (seed defaults + DB overrides).
+
+    The oracle used to assume ``config_seed.FEE_RULES``, so any instance carrying a
+    settings override (the demo has ``discount`` overridden to 0.23) produced false
+    fee_engine failures. Read what the app will actually charge.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for rs in api.get("/api/fee-rules").json().get("rule_sets", []):
+        out[rs["name"]] = {fld["key"]: fld["effective"] for fld in rs["fields"]}
+    return out
 
 
 def read_fee_tax_from_api(api: Api, txn_id: int) -> tuple[Decimal, Decimal] | None:

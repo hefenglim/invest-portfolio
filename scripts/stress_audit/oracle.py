@@ -93,6 +93,46 @@ FEE_RULES = {
                       stamp_cap_stock=D("1000"), stamp_cap_etf=D("0"), ccy="MYR"),
 }
 
+# Map an /api/fee-rules field key onto this table's parameter name. Only keys listed here
+# are overlayable; anything else in the payload is ignored on purpose.
+_EFFECTIVE_KEYS = {
+    "brokerage": "brokerage", "discount": "discount", "min_fee": "min_fee",
+    "tax_normal": "tax_normal", "tax_etf": "tax_etf", "tax_daytrade": "tax_daytrade",
+    "commission_rate": "commission_rate", "commission_min": "commission_min",
+    "platform_fee": "platform", "settlement_per_share": "settlement_per_share",
+    "settlement_cap_rate": "settlement_cap_rate", "cat_per_share": "cat_per_share",
+    "sec_rate": "sec_rate", "sec_min": "sec_min", "taf_per_share": "taf_per_share",
+    "taf_min": "taf_min", "taf_cap": "taf_cap", "clearing_rate": "clearing_rate",
+    "clearing_cap": "clearing_cap", "sst_rate": "sst_rate",
+    "stamp_unit": "stamp_unit", "stamp_per_unit": "stamp_per_unit",
+    "stamp_cap_stock": "stamp_cap_stock", "stamp_cap_etf": "stamp_cap_etf",
+}
+
+
+def apply_effective_rules(effective: dict[str, dict[str, str]]) -> list[str]:
+    """Overlay the instance's EFFECTIVE fee-rule RATES onto this table; return the diffs.
+
+    Independence is preserved: only numeric PARAMETERS move, never the formulas in
+    :func:`fee_tax` (`markets-and-fees.md`: rates live in config, logic does not). Without
+    this the oracle asserts the seed defaults, so a live instance carrying a settings
+    override — the demo has ``discount`` overridden to 0.23 — fails on every TW trade for
+    a reason that is configuration, not a defect.
+    """
+    diffs: list[str] = []
+    for name, fields in effective.items():
+        target = FEE_RULES.get(name)
+        if target is None:
+            continue
+        for key, val in fields.items():
+            param = _EFFECTIVE_KEYS.get(key)
+            if param is None or param not in target or val is None:
+                continue
+            new = D(str(val))
+            if target[param] != new:
+                diffs.append(f"{name}.{param}: seed {target[param]} -> effective {new}")
+                target[param] = new
+    return diffs
+
 CASH_DIVIDEND_TYPES = {"CASH", "NET"}  # domain-ledger.md: TW cash + MY single-tier net
 
 
@@ -722,3 +762,66 @@ def xirr_solve(dates: list[date], amounts: list[float]) -> Decimal | None:
         else:
             lo, flo = mid, fm
     return Decimal(repr((lo + hi) / 2.0))
+
+
+# ===================================================================================
+# LAYER 4 — LEDGER INTEGRITY (validity, not arithmetic)
+# ===================================================================================
+def integrity_findings(
+    facts: Facts, realized_rows: list, *, acked: set[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """Assertions a RECONCILIATION cannot make (lesson 2026-07-30).
+
+    Replaying the same rows two ways proves the app and this oracle agree; it says nothing
+    about whether an impossible row got in. These checks are the ones a defective INPUT
+    CONTROL cannot satisfy, so they stay even when every figure reconciles:
+
+    * ``position.never_negative`` — a position must not be negative at ANY date, not merely
+      at the end. ``build_book`` drops the cost basis of an oversold position and emits no
+      realized row; a LATER buy restores a positive net position and clears the ``oversold``
+      flag, so the damage becomes permanent AND invisible. Measured live: a back-dated sell
+      left an average cost 10-16x the market price with no flag anywhere.
+    * ``sell.has_realized_row`` — every SELL must produce a realized row. Cash receives the
+      proceeds either way, so a missing row is an unbalanced entry.
+
+    ``acked`` lists the (account, symbol) pairs the SCENARIO deliberately oversold with a
+    user acknowledgement. domain-ledger.md permits an acked oversell (it is a recorded
+    user decision, and the resulting holding stays flagged), so those are excluded — the
+    detector targets a negative position that NOBODY confirmed, which is the case a
+    non-date-aware guard lets through.
+
+    Returns ``[(check, scope)]`` for each violation; empty means clean.
+    """
+    ok = acked or set()
+    out: list[tuple[str, str]] = []
+
+    events: dict[tuple[str, str], list[tuple[date, int, Decimal]]] = defaultdict(list)
+    for o in facts.openings:
+        events[(o.account_id, o.symbol)].append((o.build_date, 0, o.shares))
+    for t in facts.txs:
+        q = t.qty if t.side.upper() == "BUY" else -t.qty
+        events[(t.account_id, t.symbol)].append(
+            (t.trade_date, 1 if t.side.upper() == "BUY" else 2, q))
+    for dv in facts.divs:
+        if dv.reinvest_shares:
+            events[(dv.account_id, dv.symbol)].append((dv.d, 3, dv.reinvest_shares))
+    for (aid, sym), evs in events.items():
+        if (aid, sym) in ok:
+            continue
+        run = ZERO
+        for d, _phase_i, delta in sorted(evs, key=lambda x: (x[0], x[1])):
+            run += delta
+            if run < ZERO:
+                out.append(("position.never_negative",
+                            f"{aid}/{sym} nets {run} on {d.isoformat()}"))
+                break
+
+    sold = {(t.account_id, t.symbol, t.trade_date)
+            for t in facts.txs if t.side.upper() == "SELL"}
+    booked = {(r.account_id, r.symbol, r.sell_date) for r in realized_rows
+              if getattr(r, "kind", "sale") == "sale"}
+    for key in sorted(sold - booked):
+        if (key[0], key[1]) in ok:
+            continue      # an acked oversell legitimately emits no realized row
+        out.append(("sell.has_realized_row", f"{key[0]}/{key[1]} sold {key[2].isoformat()}"))
+    return out

@@ -216,6 +216,10 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
     app_hold = snap["reported_hold"]
     app_bal = snap["reported_cash"]
 
+    # ledger INTEGRITY first — a violation here invalidates every figure below it
+    for check, scope in O.integrity_findings(snap["facts"], res.realized_rows):
+        ev.check(check, scope, "clean", "VIOLATION", phase)
+
     # holdings cost basis (ALL holdings)
     ev.check("holdings.keyset", label,
              sorted("|".join(k) for k in res.holdings),

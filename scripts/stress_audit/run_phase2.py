@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from decimal import Decimal as D
 
 import common as C
+import oracle as O
 import phase2 as P2
 from phase2 import Ops2, delta_asserts, reconcile_abs, snapshot
 
@@ -73,10 +75,27 @@ def run(ev: C.Evidence, api: C.Api, ui):
     # ---- sells + boundary + correction ----
     op.trade("schwab", "MSFT", "sell", "2026-05-15", 4, 415, via_ui=True)         # partial
     op.trade("tw_broker", "3008", "sell", "2026-06-01", 200, 620)                 # partial (API)
-    # oversell attempt -> 422 block (verify guard; NOT force-written, demo stays clean)
-    r = op.trade("schwab", "TSLA", "sell", "2026-06-10", 100, 260, expect=422, fee_check=False)
-    ev.check("guard.oversell_blocks", "schwab/TSLA sell 100>held",
-             "422", str(r.get("status")), "phase2")
+    # oversell attempt -> 422 block (verify guard; NOT force-written, demo stays clean).
+    # ACCUMULATION-SAFE (2026-07-30): the quantity is derived from the position the app
+    # reports RIGHT NOW, not hard-coded. On the accumulating demo a fixed 100 stopped being
+    # an oversell once earlier runs left a larger net position — the guard then legitimately
+    # allowed it and the "guard test" WROTE a back-dated sell that wrecked the symbol's cost
+    # basis. A scenario that mutates the ledger when its premise no longer holds is not a
+    # test; derive the premise from live state so the op is either a real oversell or skipped.
+    held_tsla = None
+    for h in api.get("/api/input/holdings", account="schwab").json().get("held", []):
+        if h.get("symbol") == "TSLA":
+            held_tsla = D(str(h.get("shares") or "0"))
+            break
+    if held_tsla is None:
+        ev.op("phase2", "API", "guard.oversell_skipped", {"symbol": "TSLA"},
+              {"reason": "schwab holds no TSLA — nothing to oversell"})
+    else:
+        qty = held_tsla + D("1")          # guaranteed to exceed the net position
+        r = op.trade("schwab", "TSLA", "sell", "2026-06-10", qty, 260,
+                     expect=422, fee_check=False)
+        ev.check("guard.oversell_blocks", f"schwab/TSLA sell {qty}>held {held_tsla}",
+                 "422", str(r.get("status")), "phase2")
     # correction: edit the MSFT 5@410 buy -> 5@412 (price fix; explicit fee/tax given)
     msft_buy_id = None
     for r2 in api.get("/api/ledgers/transactions", limit=500).json().get("rows", []):
@@ -119,6 +138,10 @@ def main():
     ev = C.Evidence(oplog=C.EVIDENCE / "oplog_phase2.jsonl",
                     assertions=C.EVIDENCE / "assertions_phase2.jsonl", reset=True)
     api = C.Api(args.base_url, verify=False)
+    # Assert what the instance will ACTUALLY charge: seed defaults + its settings overrides.
+    # Only rates move; fee_tax's formulas stay independently derived.
+    for diff in O.apply_effective_rules(C.read_effective_fee_rules(api)):
+        print(f"[phase2] effective fee rule differs from seed — {diff}")
     ui = None
     try:
         if not args.no_ui:
