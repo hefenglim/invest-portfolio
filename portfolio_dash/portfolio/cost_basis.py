@@ -42,6 +42,9 @@ class _Position:
     # anywhere (measured 2026-07-30: average 6,100 against a 379 market price). Once true,
     # this stays true.
     ever_oversold: bool = False
+    # A dividend arrived while the short was open — skipped, never booked (see the dividend
+    # branch). Surfaced so the position is visibly 待釐清 instead of quietly incomplete.
+    unbookable_dividend: bool = False
 
 
 def build_book(
@@ -209,6 +212,24 @@ def build_book(
                 raise ValueError(
                     f"dividend for unknown position {key} (no prior buy/opening inventory)"
                 )
+            if existing.short_shares > _ZERO:
+                # A dividend landing on an OPEN SHORT is not representable. A short seller
+                # PAYS the dividend in lieu, and there is no debit row for that — while the
+                # branches below would (a) book the recorded positive net as realized INCOME,
+                # because an open short also has `shares == 0` in the long lot, or (b) add
+                # DRIP/STOCK shares straight to the long lot, breaking the long/short
+                # exclusivity the whole replay depends on (a 10-share DRIP against a 10-share
+                # short nets to zero, and the position — with its proceeds — vanishes from
+                # the report entirely). Both are money-of-record errors, so: fail loud on the
+                # strict path, and on the dashboard path skip the event and flag the position
+                # rather than crash (the same posture as the oversell degradation).
+                if not allow_oversell:
+                    raise ValueError(
+                        f"dividend for {key} while a short position is open — a short pays "
+                        "the dividend in lieu; record it as a cash movement, not a dividend"
+                    )
+                existing.unbookable_dividend = True
+                continue
             if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
                 if existing.shares == _ZERO:
                     # AUDIT H2 (2026-07-26) — the position is already CLOSED when this cash
@@ -282,6 +303,7 @@ def build_book(
                 # basis the oversell discarded).
                 oversold=pos.ever_oversold or pos.shares < _ZERO,
                 short_open=pos.short_shares > _ZERO,
+                unbookable_dividend=pos.unbookable_dividend,
             )
         )
 

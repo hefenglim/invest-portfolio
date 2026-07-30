@@ -154,7 +154,30 @@ accounting applies **only** to a sell the user explicitly declared, never to an 
   `unrealized = (price − avg) × shares` profits when the price falls — every existing
   formula works unchanged on the signed quantity. Flagged `short_open`, which the UI renders
   **differently from `oversold`**: one is a real priced position, the other an unresolved
-  data problem.
+  data problem. Any **ratio** over the basis must divide by `abs(cost_total)`: the basis is
+  negative, so the bare ratio flips sign and shows a profitable short as a loss (the audit-H1
+  trap from the other direction). `fully_recovered` (已回本) must be gated on `not short_open`
+  for the same reason. The trend / net-worth series **includes** an open short — its negative
+  market value is a liability; excluding it while cash still holds the proceeds counts the
+  two halves of one trade asymmetrically.
+- **A dividend landing on an open short is NOT representable.** A short seller pays the
+  dividend in lieu and this ledger has no debit row for that. Booking the recorded (positive)
+  net as income, or adding DRIP/STOCK shares to the long lot, are both money-of-record
+  errors — the latter also breaks long/short exclusivity, and a DRIP equal to the short nets
+  the position to zero so the holding and its proceeds vanish from the report. Therefore:
+  **raise** on the strict path, and on the dashboard path skip the event and flag the
+  position `unbookable_dividend` (待釐清), never book it. Record such a payment as a cash
+  movement instead.
+- **`gross_invested` excludes short capital** (owner-accepted limitation): covering a short
+  is funded by the proceeds already received, so a cover does not add to the denominator and
+  the proceeds do not reduce it. Consequence: a currency whose only activity is a short has
+  `gross = 0`, so its simple return `rate` is `None` even with realized profit — XIRR remains
+  the rigorous metric. In a mixed portfolio the short's P&L rides the long position's
+  denominator.
+- **Known interpretive limits** (not defects): XIRR over a *pure* short round trip reports a
+  borrowing rate (the flow pattern is a loan: proceeds in, cover out), and allocation weights
+  use a net-exposure convention that can exceed 100% or sign-flip when the portfolio is net
+  short. Both are honest readings of a degenerate input, not miscalculations.
 - Modes: 試算 = compute, no write · 報告/更新/績效 = full report + live-price fetch ·
   重算 = rebuild all stats from ledgers.
 - Live price unobtainable → label clearly; **never guess**.

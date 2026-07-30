@@ -50,6 +50,9 @@ class HoldingRow(BaseModel):
     # every valuation formula works on the signed quantity. The UI must label the two
     # differently — one is a position, the other is an unresolved data problem.
     short_open: bool = False
+    # A dividend row landed while this position was short; it was NOT booked (a short
+    # pays the dividend in lieu). The position's figures are incomplete by that payout.
+    unbookable_dividend: bool = False
     # Unrealized return rate for THIS holding, server-computed (audit H1, 2026-07-26):
     # ``unrealized_pnl / original_cost_total``. The denominator is deliberately the ORIGINAL
     # invested cost — the same basis as ``KpiSummary.total_return_rate`` (domain-ledger.md:

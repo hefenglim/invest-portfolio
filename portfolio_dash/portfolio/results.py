@@ -38,6 +38,10 @@ class Holding(BaseModel):
     # meaningful — unlike `oversold`, this is a real, priced position, not an unresolved
     # data problem. Covering it books realized P&L at the covering buy's per-share cost.
     short_open: bool = False
+    # A dividend row landed while this position was short. It was NOT booked (a short pays
+    # the dividend in lieu — see cost_basis.build_book), so the position's figures are
+    # incomplete by exactly that payout and the consumer must say so.
+    unbookable_dividend: bool = False
 
 
 class RealizedRow(BaseModel):

@@ -408,6 +408,10 @@
         tr.classList.add('row-stale');
         tr.title = '賣超：賣出數量超過持股，部位為負、損益待釐清'
           + '（請補記期初庫存或遺漏的買進）';
+      } else if (h.unbookable_dividend) {
+        tr.classList.add('row-stale');
+        tr.title = '放空期間有股利紀錄：放空方需支付股利，此筆未列入計算，'
+          + '本列數字少計該筆金額（請改以現金收支登錄）';
       } else if (h.short_open) {
         tr.title = '放空中：已宣告的放空部位，成本基礎為賣出時收到的價款；'
           + '買回時以買回價結算損益';
@@ -424,6 +428,10 @@
         const ob = el('span', 'badge badge-missing', '賣超');
         ob.title = '賣出數量超過持股，部位為負、損益待釐清';
         cell.appendChild(ob);
+      } else if (h.unbookable_dividend) {
+        const db = el('span', 'badge badge-missing', '股利待釐清');
+        db.title = '放空期間出現股利紀錄，未列入計算（放空方需支付股利）';
+        cell.appendChild(db);
       } else if (h.short_open) {
         const sb = el('span', 'badge badge-short', '放空中');
         sb.title = '已宣告的放空部位；成本基礎為賣出價款，買回時結算損益';

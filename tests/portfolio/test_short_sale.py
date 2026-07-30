@@ -11,11 +11,12 @@ from decimal import Decimal
 import pytest
 
 from portfolio_dash.portfolio.cost_basis import OversellError, build_book
+from portfolio_dash.portfolio.pnl import value_holdings
 from portfolio_dash.portfolio.results import Book
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.enums import Side
-from portfolio_dash.shared.models.ledger import Transaction
+from portfolio_dash.shared.models.enums import DividendType, Side
+from portfolio_dash.shared.models.ledger import Dividend, Transaction
 
 TSLA = Instrument(symbol="TSLA", market=Market.US, quote_ccy=Currency.USD,
                   sector="Auto", name="Tesla")
@@ -124,3 +125,53 @@ def test_ordinary_ledger_is_byte_identical_to_the_pre_short_engine() -> None:
     assert held.shares == D("6")
     assert held.short_open is False and held.oversold is False
     assert [r.kind for r in book.realized.rows] == ["sale"]
+
+
+# --- Fable-5 audit remediation (F1-F5, 2026-07-31) -------------------------------------
+
+
+def _div(kind: DividendType, net: str, d: date, shares: str | None = None) -> Dividend:
+    return Dividend(account_id="schwab", symbol="TSLA", date=d, type=kind, gross=D(net),
+                    withholding=D("0"), net=D(net),
+                    reinvest_shares=None if shares is None else D(shares),
+                    reinvest_price=None if shares is None else D("100"))
+
+
+def test_F1_cash_dividend_during_a_short_is_never_booked_as_income() -> None:
+    """A short seller PAYS the dividend in lieu. The audit-H2 post-close branch fires on
+    `shares == 0`, which is also an open short's long lot — it credited the payout."""
+    txs = [_tx(Side.SELL, "10", "260", date(2026, 6, 10), short=True)]
+    book = build_book(txs, [_div(DividendType.CASH, "50", date(2026, 6, 20))], [], INSTR,
+                      allow_oversell=True)
+    assert book.realized.rows == []
+    held = book.holdings[0]
+    assert held.shares == D("-10") and held.original_avg == D("260")
+    assert held.unbookable_dividend is True
+
+
+def test_F2_drip_during_a_short_never_adds_long_shares() -> None:
+    """The killer case: a DRIP equal to the short netted the position to zero, and the
+    holding — with its −2,600 of proceeds — disappeared from the report entirely."""
+    txs = [_tx(Side.SELL, "10", "260", date(2026, 6, 10), short=True)]
+    book = build_book(txs, [_div(DividendType.DRIP, "0", date(2026, 6, 20), shares="10")],
+                      [], INSTR, allow_oversell=True)
+    assert len(book.holdings) == 1, "the short must not vanish"
+    held = book.holdings[0]
+    assert held.shares == D("-10")
+    assert held.original_cost_total == D("-2600")
+    assert held.short_open is True and held.unbookable_dividend is True
+
+
+def test_F1_F2_strict_path_fails_loud() -> None:
+    txs = [_tx(Side.SELL, "10", "260", date(2026, 6, 10), short=True)]
+    with pytest.raises(ValueError, match="short position is open"):
+        build_book(txs, [_div(DividendType.CASH, "50", date(2026, 6, 20))], [], INSTR)
+
+
+def test_F3_unrealized_pct_keeps_its_sign_on_a_short() -> None:
+    """`unrealized_pnl / original_cost_total` with a NEGATIVE basis renders a profitable
+    short as a loss — the audit-H1 flip arriving from the other direction."""
+    txs = [_tx(Side.SELL, "10", "260", date(2026, 6, 10), short=True)]
+    held = value_holdings(_book(txs).holdings, {"TSLA": D("250")})[0]
+    assert held.unrealized_pnl == D("100")                      # price fell -> profit
+    assert held.unrealized_pnl / abs(held.original_cost_total) > 0

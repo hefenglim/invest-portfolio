@@ -407,9 +407,13 @@ def build_dashboard(
         # (audit H1). Basis = original invested cost — see HoldingRow.unrealized_pct for why
         # adjusted cost is both inconsistent with the KPI definition and unsafe (it may be
         # <= 0, which flips the ratio's sign on a fully-recovered position).
+        # A SHORT carries a NEGATIVE basis (the proceeds received), which would flip this
+        # ratio's sign and render a profitable short as a loss — the very negative-denominator
+        # trap the note above warns about, arriving from the other direction. Divide by the
+        # MAGNITUDE of the capital at risk: the numerator already carries the correct sign.
         unrealized_pct: Decimal | None = None
         if h.unrealized_pnl is not None and h.original_cost_total != _ZERO:
-            unrealized_pct = h.unrealized_pnl / h.original_cost_total
+            unrealized_pct = h.unrealized_pnl / abs(h.original_cost_total)
         data = h.model_dump()
         data.update(
             account_name=acct.name, name=inst.name, market=inst.market,
