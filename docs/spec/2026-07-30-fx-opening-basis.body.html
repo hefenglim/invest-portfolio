@@ -1,0 +1,419 @@
+<section id="s1">
+  <h2><span class="n">01</span>問題與目標</h2>
+
+  <div class="vs">
+    <div class="vsbox after" style="grid-column:1/-1"><h4>v2 · 2026-07-30 會計審查後修訂（owner 認可）</h4>
+      <p><b>F1</b> 儲存<b>家幣成本金額</b>而非匯率（原設計違反本專案「平均值不得作為權威」的規則）。
+        <b>F2</b> 明確定義流出的分攤方式為<b>比例法</b>（原設計未定義；直覺的相減法會再生負基數）。
+        <b>F3</b> 成本基礎不完整時，<b>現金與股票兩條腿一起降級</b>（原設計只降級現金腿，
+        而股票腿的誤差其實更大）。另補記 <b>N1</b> 外幣出金不認列已實現匯損益、
+        <b>N2</b> 補填成本會回頭重算歷史顯示值。<br>
+        期初取得匯率裁決：<b>31.3587</b>（2026-01-05 收盤，owner sign-off 2026-07-30）。</p></div>
+  </div>
+
+  <p class="lede">同一個帳戶的同一筆美金，畫面上有兩個數字：<b>各帳戶現金</b>顯示
+    <span class="num">101,587.90 USD</span>，<b>換匯損益</b>的「外幣現金」卻顯示
+    <span class="num">1,587.90 USD</span>。兩者都不是算錯——它們是兩套定義；真正的問題是
+    <strong>後者的基數本身少了整整 100,000 USD</strong>，而那 100,000 是你當初設定的
+    <strong>期初資金</strong>。系統有「期初庫存（股票）」，卻<strong>沒有「期初外幣資金」</strong>
+    這個概念，這筆錢在匯率池裡無處安放。</p>
+
+  <div class="vs">
+    <div class="vsbox before"><h4>資金視角 — <code>portfolio/cash.py::cash_balances</code></h4>
+      <p>入金／出金／期初 ± 換匯 ± 買賣收付 ＋ 現金股利。<br>
+        回答「這個帳戶現在有多少現金」，驅動透支防呆。<b>含 <code>cash_movements</code></b>。</p></div>
+    <div class="vsbox after"><h4>匯率曝險視角 — <code>forex/pools.py::foreign_cash_balance</code></h4>
+      <p>換匯 ± 外幣買賣 ＋ 外幣現金股利。<br>
+        回答「有多少外幣曝險、成本基礎是多少」，驅動換匯損益。
+        <b>完全不讀 <code>cash_movements</code></b>。</p></div>
+  </div>
+
+  <p>兩者刻意不同，是有原因的：換匯損益需要成本基礎，而直接匯入的美金沒有台幣取得成本，
+    硬塞進池子就得<strong>捏造一個匯率</strong>。<code>pools.py</code> 的模組註解（audit C9）
+    早就寫下了這個分歧。缺的不是這個判斷，<strong>缺的是「期初外幣資金」這個資料結構</strong>。</p>
+
+  <h3>量測到的兩個狀態——同一個缺口，兩種面貌</h3>
+  <p>製作這份文件的過程中，線上實例的帳本在 33 分鐘內被新增了一筆換匯（2026-07-30，
+    <span class="num">+6,188.00 USD</span>）。這個巧合把問題的第二層當場暴露出來：</p>
+  <div class="tw"><table>
+    <thead><tr><th>　</th><th>狀態 A · 你截圖時 00:04</th><th>狀態 B · 引擎快照 00:37</th></tr></thead>
+    <tbody>
+      <tr><td>匯率池外幣現金</td><td class="n">−4,600.10 USD</td><td class="n">+1,587.90 USD</td></tr>
+      <tr><td>各帳戶現金（正確餘額）</td><td class="n">95,399.90 USD</td><td class="n">101,587.90 USD</td></tr>
+      <tr class="hl"><td><b>缺口</b></td><td class="n"><b>100,000.00 USD</b></td><td class="n"><b>100,000.00 USD</b></td></tr>
+      <tr><td>平均取得匯率</td><td class="n">32.2210</td><td class="n">32.2307</td></tr>
+      <tr><td>未實現匯損益（合計）</td><td class="n">+7,488 TWD</td><td class="n">+7,321 TWD</td></tr>
+      <tr><td><b>畫面上的警示</b></td><td class="bad"><b>有出現</b></td><td class="bad"><b>消失了</b></td></tr>
+    </tbody></table></div>
+  <p class="note">誤差一模一樣是 100,000 USD，但因為池子從負轉正，現行的警示條件
+    <code>cash_basis_incomplete = foreign_cash &lt; 0</code> 就不再成立——
+    <strong>錯誤沒有變小，只是變安靜了</strong>。這不是推論，是兩次實測的引擎輸出。</p>
+
+  <h3>目標</h3>
+  <ol>
+    <li>讓外幣的<strong>期初資金／入金</strong>可以帶著家幣成本進入匯率池，使
+      <b>匯率池餘額 = 資金視角餘額</b>，兩個視角可互相對帳。</li>
+    <li>沒有成本基礎時<strong>不猜、不填 0</strong>：金額計入餘額，但依<strong>覆蓋率</strong>
+      按比例排除於匯損益基數之外——<b>現金腿與股票腿一併處理</b>，並明確標示缺口。</li>
+    <li>警示從<strong>症狀偵測</strong>（池子為負）改為<strong>成因偵測</strong>（有外幣資金流
+      未具成本基礎），消除上表狀態 B 那種靜默失真。</li>
+  </ol>
+  <p class="note">正式站現況：<code>cash_movements</code> 目前 <b>0 筆</b>（唯讀查證），
+    所以今天完全不受影響——但你一登錄真實期初資金就會重現。這是預防性修法，不是救火。</p>
+</section>
+
+<section id="s2">
+  <h2><span class="n">02</span>現況 vs 提案：匯率池的重算</h2>
+  <div class="vs">
+    <div class="vsbox before"><h4>現況公式</h4>
+      <p><code>foreign_cash_balance(transactions, dividends, conversions, …)</code><br>
+        三個來源：換匯、外幣買賣、外幣現金股利。<br>
+        <code>average_acquisition_rate(conversions, …)</code> 只認 home→foreign 的換匯。</p></div>
+    <div class="vsbox after"><h4>提案公式</h4>
+      <p>多一個來源：<b>帶有 <code>acq_home_amount</code>（家幣成本）的外幣資金流</b>
+        （DEPOSIT／OPENING 為 ＋、WITHDRAW 為 −）。<br>
+        加權平均同步納入該筆的家幣成本。<b>沒有家幣成本的一律不進加權平均</b>。</p></div>
+  </div>
+
+  <h3>F1 · 存的是「家幣成本金額」，不是匯率</h3>
+  <p>期初那筆存的是 <b>3,135,870 TWD</b>（= 100,000 × 31.3587），不是 <code>31.3587</code>。三個理由：</p>
+  <ul>
+    <li><code>data-and-pricing.md</code> 明文「平均成本永不以四捨五入後的值作為權威；
+      存 total ＋ 數量，讀取時再除」——存匯率正是被禁止的那個模式。</li>
+    <li><code>fx_conversions</code> 存的是 <code>from_amount</code>／<code>to_amount</code>
+      兩個<b>金額</b>，匯率是導出的。同一個匯率池的成本基礎，不該一半用金額、一半用匯率。</li>
+    <li>加權平均的分子要的就是家幣總額——存金額零誤差；存 6 dp 匯率在大額時有殘差，
+      而且還得額外約定「家幣／外幣」的方向。存金額沒有方向歧義。</li>
+  </ul>
+  <p class="note">登錄介面照樣可以讓你<b>輸入匯率</b>（送出前換算成金額），
+    面板顯示的取得匯率一律 <code>家幣成本 ÷ 外幣數</code> 讀取時算。</p>
+
+  <p>下面這個實驗不是示意圖：它用<strong>真實帳本的 22 列</strong>（唯讀取自
+    <code>/api/cash/statement?account=schwab&amp;ccy=USD</code>），在你的瀏覽器裡以
+    BigInt 定點運算<strong>當場重算</strong>兩套公式。頁尾的自我校驗把「現況」模式的每個結果
+    與 <code>/api/dashboard</code> 的引擎輸出逐項比對——包含 28 位精度的平均取得匯率。</p>
+
+  <div class="lab">
+    <h3>實驗一：把期初資金納入匯率池，數字會怎麼變</h3>
+    <div class="dsub">滑桿改變 2026-07-30 那筆換匯的金額（維持該列的隱含匯率），
+      用來觀察缺口在任何情境下都固定為 100,000 USD。</div>
+    <div class="modes" id="lab1-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況（壞）<small>期初資金不進池</small></button>
+      <button data-m="1" data-tone="good">提案<small>期初帶 3,135,870 TWD 成本進池</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">2026-07-30 換匯金額 <b id="lab1-sv">6,188.00</b> USD</span>
+      <input type="range" id="lab1-range" min="0" max="12000" step="1" value="6188">
+    </div>
+    <div class="readout">
+      <div class="ro" id="lab1-ro-a"><div class="k">平均取得匯率</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-b"><div class="k">匯率池外幣現金</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-c"><div class="k">各帳戶現金（正確）</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-d"><div class="k">缺口</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-e"><div class="k">未實現匯損益（合計）</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab1-verdict">—</div>
+    <div class="note">注意「未實現匯損益（股票）」也一起變了——期初那 100,000 USD 的取得匯率
+      （31.3587）低於後來換匯的均價，沒有納入時整條平均線被往上拉。
+      <strong>錯的不只是現金那一行，是整個帳戶的匯率歸因。</strong></div>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>以引擎快照 00:37 為基準</th><th class="n">現況</th><th class="n">提案</th><th class="n">差異</th></tr></thead>
+    <tbody>
+      <tr><td>平均取得匯率</td><td class="n">32.2307</td><td class="n">31.6976</td><td class="n">−0.5331</td></tr>
+      <tr><td>匯率池外幣現金</td><td class="n">1,587.90</td><td class="n">101,587.90</td><td class="n">+100,000.00</td></tr>
+      <tr><td>未實現匯損益（現金）</td><td class="n">+143</td><td class="n">+63,331</td><td class="n">+63,188</td></tr>
+      <tr><td>未實現匯損益（股票）</td><td class="n">+7,178</td><td class="n">+49,537</td><td class="n">+42,359</td></tr>
+      <tr class="hl"><td><b>未實現匯損益（合計）TWD</b></td><td class="n"><b>+7,321</b></td><td class="n"><b>+112,868</b></td><td class="n"><b>+105,547</b></td></tr>
+    </tbody></table></div>
+  <p class="note">影響範圍僅限<strong>換匯損益面板</strong>與 KPI <code>fx_unrealized</code>。
+    已逐一驗證：<code>dashboard.py</code> 把 <code>fx_unrealized</code> 放在獨立欄位，
+    <b>沒有</b>加進 <code>total_return</code> / <code>unrealized_total</code> / XIRR；
+    <code>networth.py</code> 只用資金視角 ＋ <code>convert</code>，完全不碰
+    <code>unrealized_fx_*</code>。CLAUDE.md 不變式 6「換匯損益只是歸因、不加總」完好。</p>
+</section>
+
+<section id="s3">
+  <h2><span class="n">03</span>F2 · 沒有成本基礎時，流出從哪個桶扣</h2>
+  <p class="lede">把外幣資金流拆成「有成本基礎」與「無成本基礎」兩個數，只講了一半——
+    <strong>還必須定義買股票、出金把錢從哪個桶扣</strong>。這不是學術問題：
+    <code>未實現匯損益（現金）= 有基礎的基數 × (spot − avg)</code>，答案完全取決於它。</p>
+
+  <div class="vs">
+    <div class="vsbox before"><h4>相減法（直覺，但錯）</h4>
+      <p><code>有基礎 = 總餘額 − 無基礎取得額</code><br>
+        隱含「無基礎的錢最後才花」的 LIFO 假設，與加權平均法矛盾。
+        <b>餘額一跌破無基礎金額就變負數</b>——反號的假數字回來了，這次修法等於白做。</p></div>
+    <div class="vsbox after"><h4>比例法（採用）</h4>
+      <p><code>覆蓋率 = 有基礎取得額 ÷ 總取得額</code><br>
+        <code>有基礎 = 總餘額 × 覆蓋率</code><br>
+        現金是可替代物，加權平均本來就不追蹤批次，流出按比例扣。
+        <b>任何餘額下都不會為負</b>；全部都有成本時覆蓋率 = 100%，這行不會啟動。</p></div>
+  </div>
+
+  <div class="lab">
+    <h3>實驗二：相減法在餘額跌破 100,000 時翻負——比例法不會</h3>
+    <div class="dsub">情境：期初那 100,000 USD <b>沒有</b>填成本（降級情境）。
+      滑桿模擬買進股票後剩下的現金餘額。</div>
+    <div class="modes" id="lab4-modes">
+      <button data-m="0" data-tone="bad" class="on bad">相減法<small>總餘額 − 無基礎額</small></button>
+      <button data-m="1" data-tone="good">比例法<small>總餘額 × 覆蓋率</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">外幣現金餘額 <b id="lab4-sv">101,587.90</b> USD</span>
+      <input type="range" id="lab4-range" min="0" max="200000" step="0.01" value="101587.90">
+    </div>
+    <div class="readout">
+      <div class="ro" id="lab4-ro-a"><div class="k">總餘額（資金視角）</div><div class="v">—</div></div>
+      <div class="ro" id="lab4-ro-b"><div class="k">判定為「有成本基礎」</div><div class="v">—</div></div>
+      <div class="ro" id="lab4-ro-c"><div class="k">未實現匯損益（現金）</div><div class="v">—</div></div>
+      <div class="ro" id="lab4-ro-d"><div class="k">基數是否為負</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab4-verdict">—</div>
+    <div class="note">把滑桿拉到 100,000 以下，相減法立刻出現負基數。
+      這正是本次修法要根除的那個病灶——如果分攤規則沒定義好，它會從另一個入口長回來。</div>
+  </div>
+
+  <h3>F3 · 股票腿也被污染，不能只降級現金腿</h3>
+  <p><code>未實現匯損益（股票）= 外幣股票市值 × (spot − avg)</code> 用的是<strong>同一個 avg</strong>，
+    而 avg 本身就是從不完整的母體算出來的。實測：股票腿差
+    <b>+42,359 TWD</b>（+7,178 → +49,537），<strong>比現金腿的誤差還大</strong>。</p>
+  <p>因此<b>覆蓋率一律套用在整個外幣曝險上</b>——現金與股票都是同一個可替代資金池支應的：</p>
+  <pre><span class="cm"># 一個比率，兩條腿共用；全部有成本時 covered_ratio = 1，數值與今天相同</span>
+covered_ratio        = acq_with / (acq_with + acq_none)
+unrealized_fx_cash   = foreign_cash_total  * covered_ratio * (spot - avg_rate)
+unrealized_fx_stocks = foreign_stock_value * covered_ratio * (spot - avg_rate)
+fx_basis_gap         = foreign_cash_total  * (1 - covered_ratio)</pre>
+</section>
+
+<section id="s4">
+  <h2><span class="n">04</span>警示：症狀偵測 vs 成因偵測</h2>
+  <p class="lede">現行旗標是 <code>cash_basis_incomplete = foreign_cash &lt; 0</code>
+    （<code>fx_pnl.py:107</code>）。它抓的是<strong>症狀</strong>——池子被買進拉成負數；
+    可是缺口只要小於換匯總額，池子就是正的，警示不出現，數字照樣是錯的。
+    今天 00:37 的線上實例正好落在這個區間。</p>
+  <p>下面的面板是<strong>真的 iframe，真的 DOM</strong>：警示出不出現由渲染結果量測回報，
+    不是我寫在文字裡。</p>
+
+  <div class="lab">
+    <h3>實驗三：把滑桿拉過 4,600.10，警示就消失了——誤差卻沒變</h3>
+    <div class="dsub">左右拖動滑桿改變 2026-07-30 那筆換匯的金額。
+      「警示是否出現」這一格的值，是從下方 iframe 的 DOM 量回來的。</div>
+    <div class="modes" id="lab2-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況警示規則<small>foreign_cash &lt; 0</small></button>
+      <button data-m="1" data-tone="good">提案警示規則<small>covered_ratio &lt; 1</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">2026-07-30 換匯金額 <b id="lab2-sv">6,188.00</b> USD</span>
+      <input type="range" id="lab2-range" min="0" max="12000" step="1" value="6188">
+    </div>
+    <div class="stage"><iframe id="lab2-frame" title="換匯損益面板"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="lab2-ro-a"><div class="k">面板顯示的外幣現金</div><div class="v">—</div></div>
+      <div class="ro" id="lab2-ro-b"><div class="k">警示（量測自 DOM）</div><div class="v">—</div></div>
+      <div class="ro" id="lab2-ro-c"><div class="k">此刻的實際誤差</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab2-verdict">—</div>
+    <div class="note">兩處文案一併修掉：<b>(1)</b> 現行提示說「補登<b>入金</b>／換匯紀錄後此提示會自動消失」，
+      但那筆入金<strong>早就登錄了</strong>（2026-01-05, 100,000 USD）——補登入金並不會餵進匯率池，
+      照字面做不會消失。<b>(2)</b> 依 F3，警示必須說明<b>平均取得匯率本身</b>是以不完整的母體計算，
+      所以受影響的是現金與股票<b>兩條腿</b>，不只是現金。</div>
+  </div>
+
+  <div class="vs">
+    <div class="vsbox after" style="grid-column:1/-1"><h4>實作時的修正（2026-07-30，v2 之後）</h4>
+      <p>規格原本寫「警示條件 = <code>fx_basis_gap ≠ 0</code>」。實作時發現這條規則<b>有同一個病灶</b>：
+        <code>fx_basis_gap</code> 是<b>金額</b>（餘額 × 未覆蓋比例），當池子被買光、餘額為 0 時它也是 0——
+        警示會消失，可是 <code>covered_ratio</code> 仍然 &lt; 1，<b>股票腿還在被縮放</b>。
+        那正是「靠症狀判斷會靜默」的翻版。<br>
+        因此後端改以<b>成因布林值</b> <code>fx_basis_incomplete</code>（= <code>covered_ratio &lt; 1</code>）
+        作為警示條件，<code>fx_basis_gap</code> 降為「有金額時順帶說出缺口多少」的細節。
+        <code>tests/forex/test_fx_pnl.py</code> 的
+        <code>test_gap_flag_survives_an_<wbr>EMPTY_pool</code> 釘住這個情形。</p></div>
+  </div>
+  <p class="note">附帶的收緊（零成本）：修法後 <code>foreign_cash_total</code> = 資金視角餘額，
+    而資金視角的出金是<b>硬性擋住</b>的（<code>_withdraw_guard</code>，
+    <code>ack_negative</code> 不能繞過）。因此「池子為負」從<b>預期狀態</b>變成
+    <b>不該發生的狀態</b>——負值旗標保留為第二個獨立訊號，但意義升級為異常警報。</p>
+</section>
+
+<section id="s5">
+  <h2><span class="n">05</span>登錄時怎麼問、查不到匯率怎麼辦</h2>
+  <p class="lede">缺口的成因不是「使用者忘了填」，而是<strong>根本沒有欄位可填</strong>。
+    提案在資金管理的登錄表單加一個<strong>條件顯示</strong>的「取得成本」欄：
+    只在<b>幣別 ≠ 該帳戶的資金幣別</b>時出現，可用匯率或家幣金額輸入，
+    預帶當日收盤匯率作<b>參考值</b>，可改、可留白。</p>
+  <p>這裡有一個實測到的硬限制：<strong>正式站的 <code>fx_rates</code> 目前只回溯到
+    2026-07-01</strong>（共 21 天；demo 有 2021 年起的回填）。所以「自動帶入當日匯率」
+    對早期日期會查不到，<b>手動輸入不是備案，是必要路徑</b>。</p>
+
+  <div class="lab">
+    <h3>實驗四：欄位何時出現、帶什麼值、查不到時怎麼降級</h3>
+    <div class="dsub">改變任一下拉選單即時重算。匯率表取自兩個實例的 <code>fx_rates</code>
+      唯讀查詢，不是虛構的資料。</div>
+    <div class="modes" id="lab3-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況<small>沒有取得成本欄位</small></button>
+      <button data-m="1" data-tone="good">提案<small>條件顯示 + 可降級</small></button>
+    </div>
+    <div class="ctrl">
+      <div><label>帳戶</label><select id="lab3-acct">
+        <option value="schwab">嘉信 Schwab（資金幣別 TWD）</option>
+        <option value="moomoo_my">Moomoo MY（資金幣別 MYR）</option>
+        <option value="tw_broker">台股券商（資金幣別 TWD）</option>
+      </select></div>
+      <div><label>入金幣別</label><select id="lab3-ccy">
+        <option value="USD">USD</option><option value="TWD">TWD</option>
+        <option value="MYR">MYR</option>
+      </select></div>
+      <div><label>日期</label><select id="lab3-date">
+        <option value="2026-01-05">2026-01-05（期初）</option>
+        <option value="2026-03-02">2026-03-02</option>
+        <option value="2026-06-01">2026-06-01</option>
+        <option value="2026-07-23">2026-07-23</option>
+      </select></div>
+      <div><label>匯率資料源</label><select id="lab3-src">
+        <option value="demo">demo（2021 起回填）</option>
+        <option value="prod">prod 現況（僅 2026-07-01 起）</option>
+      </select></div>
+      <div><label>金額</label><select id="lab3-amt">
+        <option value="100000">100,000</option><option value="50000">50,000</option>
+        <option value="10000">10,000</option>
+      </select></div>
+    </div>
+    <div class="readout">
+      <div class="ro" id="lab3-ro-a"><div class="k">這是外幣資金流嗎</div><div class="v">—</div></div>
+      <div class="ro" id="lab3-ro-b"><div class="k">取得成本欄位</div><div class="v">—</div></div>
+      <div class="ro" id="lab3-ro-c"><div class="k">自動帶入的參考值</div><div class="v">—</div></div>
+      <div class="ro" id="lab3-ro-d"><div class="k">寫入帳本的家幣成本</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab3-verdict">—</div>
+    <div class="note">把「匯率資料源」切到 <b>prod 現況</b>、日期選 <b>2026-01-05</b>，
+      就能看到查無匯率時的降級行為——這正是你的正式站今天的實際狀態。
+      預帶值一律標示為<b>參考值</b>：券商換匯的實際成交價不等於市場中價，
+      預帶得太安靜會讓錯的數字被默默接受。</div>
+  </div>
+</section>
+
+<section id="s6">
+  <h2><span class="n">06</span>邊界、例外與明確不做的事</h2>
+  <h3>必須放行的合法情形（收緊任何規則前先確認這些不被誤殺）</h3>
+  <div class="tw"><table>
+    <thead><tr><th>情形</th><th>正確行為</th></tr></thead>
+    <tbody>
+      <tr><td>本幣入金（幣別 = 資金幣別）</td><td>不出現取得成本欄位，行為與今天完全相同</td></tr>
+      <tr><td>外幣<b>出金</b>（WITHDRAW）</td><td>減少匯率池餘額；<b>不</b>認列已實現匯損益（見 N1）</td></tr>
+      <tr><td>外幣現金股利</td><td>維持現行處理（已計入池），本次不改</td></tr>
+      <tr><td>外幣 → 本幣回換</td><td>維持現行 realized FX 計算，以加權平均取得匯率為成本</td></tr>
+      <tr><td>取得成本留白</td><td>計入餘額，依覆蓋率<b>按比例</b>排除於兩條腿的基數之外，並標記缺口</td></tr>
+      <tr><td>該帳戶完全沒有換匯、只有外幣入金</td><td>加權平均由入金單獨決定；不得因「沒有 conversions」而回傳 None</td></tr>
+      <tr><td>完全沒有任何有成本的取得（<code>acq_with = 0</code>）</td>
+        <td><code>avg_rate</code> 維持 None，兩條腿皆 None；覆蓋率不套用（不得除以零）</td></tr>
+      <tr><td>完全沒有任何取得（分母為 0）</td><td>覆蓋率定義為 1，缺口 0（餘額本來就是 0）</td></tr>
+      <tr><td>股票的期初庫存 <code>opening_inventory</code></td><td>不受本次改動影響</td></tr>
+    </tbody></table></div>
+
+  <h3>必須明文記載的兩個限制</h3>
+  <div class="vs">
+    <div class="vsbox before"><h4>N1 · 外幣出金不認列已實現匯損益</h4>
+      <p>修法後外幣 WITHDRAW 會減少匯率池曝險，但 realized FX 只從
+        <code>fx_conversions</code> 的 foreign→home 產生。加權平均下這是自洽的
+        （平均匯率不因處分而變，剩餘曝險 × avg 仍成立），但
+        <b>若那筆提領實際上換回了本幣，正確登錄方式是一筆換匯紀錄，不是出金</b>。</p></div>
+    <div class="vsbox after"><h4>N2 · 補填成本會回頭重算歷史顯示值</h4>
+      <p>所有報表都從帳本重算（重算模式），不是存檔。所以補上 2026-01-05 的取得成本後，
+        <b>過去的已實現匯損益也會跟著重算</b>。這是設計意圖
+        （<code>original_cost</code> 不被覆寫、報表從帳本重建）。
+        demo 目前 <code>realized_fx = 0</code>（無回換），今天沒有實際影響。</p></div>
+  </div>
+
+  <h3>明確不做</h3>
+  <ul>
+    <li><b>不改</b> XIRR、總報酬、<code>unrealized_total</code> 的定義或數值——
+      本次只動換匯損益歸因與 <code>fx_unrealized</code>。</li>
+    <li><b>不回溯改寫</b>既有資料列。既有列 <code>acq_home_amount</code> 為 NULL，
+      匯率池數值與升級前<strong>完全相同</strong>（差別只在會被新警示標出來）。</li>
+    <li><b>不自動猜匯率</b>。查不到當日匯率就留白，不用前後日內插、不用當前 spot 代替。</li>
+    <li><b>不</b>引入任何「匯兌收益」加總項——不變式 6：換匯損益是歸因分解，永不加總。</li>
+    <li><b>不</b>做 FX 的分批成本（FIFO lots）。維持加權平均，與股票成本法一致。</li>
+    <li><b>不</b>加 <code>acq_source</code>（manual／spot）欄位。欄位值是使用者親眼看過才送出的，
+      多存一欄的效益不足以抵過複雜度——如日後有稽核需求再議。</li>
+    <li><b>不</b>動 <code>opening_inventory</code>（股票期初庫存）的任何邏輯。</li>
+  </ul>
+</section>
+
+<section id="s7">
+  <h2><span class="n">07</span>影響範圍與遷移</h2>
+  <div class="tw"><table>
+    <thead><tr><th>層</th><th>檔案</th><th>改動</th></tr></thead>
+    <tbody>
+      <tr><td>schema</td><td><code>data_ingestion/schema.py</code></td>
+        <td><code>cash_movements</code> 新增可空欄 <code>acq_home_amount TEXT</code>；冪等 migration</td></tr>
+      <tr><td>計算</td><td><code>forex/pools.py</code></td>
+        <td><code>foreign_cash_balance</code> 讀 movements；
+          <code>average_acquisition_rate</code> 納入有成本的資金流；新增 <code>covered_ratio</code></td></tr>
+      <tr><td>計算</td><td><code>forex/fx_pnl.py</code></td>
+        <td>兩條腿的基數同乘 <code>covered_ratio</code>；
+          <code>cash_basis_incomplete</code> → <code>fx_basis_gap</code>（成因），負值另立旗標</td></tr>
+      <tr><td>模型</td><td><code>forex/results.py</code></td>
+        <td><code>AccountFXResult</code> 新增 <code>covered_ratio</code> /
+          <code>fx_basis_gap</code> / <code>foreign_cash_negative</code></td></tr>
+      <tr><td>編排</td><td><code>portfolio/dashboard.py</code></td>
+        <td>把 <code>cash_movements</code> 傳進 <code>compute_fx_summary</code></td></tr>
+      <tr><td>API</td><td><code>api/routers/cash.py</code></td>
+        <td><code>MovementBody</code> 接受取得成本（匯率或金額擇一），驗證後存金額</td></tr>
+      <tr><td>前端</td><td><code>web/cash.js</code></td>
+        <td>條件顯示的取得成本欄 + 當日匯率預帶（標示參考值）+ 查無時留白</td></tr>
+      <tr><td>前端</td><td><code>web/app.js</code></td>
+        <td>面板顯示缺口金額與覆蓋率；改寫誤導的警示文案（涵蓋兩條腿）</td></tr>
+      <tr><td>測試</td><td><code>tests/forex/</code>、<code>tests/contract/</code>、
+        <code>tests/golden/dashboard_full.json</code>、<code>scripts/stress_audit/</code></td>
+        <td>新單元測試＋契約／黃金負載更新＋oracle 對齊</td></tr>
+    </tbody></table></div>
+
+  <h3>遷移策略</h3>
+  <pre><span class="cm"># 既有列一律 NULL —— 行為與升級前逐位相同（covered_ratio = 1）</span>
+ALTER TABLE cash_movements ADD COLUMN acq_home_amount TEXT;
+
+<span class="cm"># demo 的那筆期初資金，由 owner 在資金管理補上（不由程式代填）</span>
+<span class="cm">#   2026-01-05 · schwab · USD 100,000</span>
+<span class="cm">#   acq_home_amount = 3135870      (= 100,000 x 31.3587)</span>
+<span class="cm">#   同時把 kind 由 DEPOSIT 改為 OPENING（純標籤；實測不參與任何計算分支）</span></pre>
+  <p class="note">正式站今天 <code>cash_movements</code> 為 0 筆，遷移是純粹的加欄位，
+    沒有資料要轉換、沒有數字會變動。demo 站則會在補上取得成本後，
+    換匯損益面板由 +7,321 TWD 變成 +112,868 TWD。</p>
+</section>
+
+<section id="s8">
+  <h2><span class="n">08</span>驗收條件</h2>
+  <div class="tw"><table>
+    <thead><tr><th>#</th><th>可觀察的驗收條件</th><th>怎麼驗</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>所有外幣資金流都具備家幣成本時，<b>匯率池餘額 = 資金視角餘額</b>，
+        缺口為 0、覆蓋率為 1</td><td>pytest（forex 單元）＋ 本頁實驗一切到「提案」</td></tr>
+      <tr><td>2</td><td><b>F1</b>：帳本存的是家幣<b>金額</b>；面板顯示的取得匯率為
+        <code>金額 ÷ 外幣數</code> 讀取時計算，未落地任何四捨五入後的平均值</td>
+        <td>pytest ＋ schema 檢視</td></tr>
+      <tr><td>3</td><td><b>F2</b>：取得成本留白時採<b>比例法</b>；
+        任何餘額下「有基礎的基數」<b>都不為負</b>（含餘額 &lt; 無基礎取得額的情形）</td>
+        <td>pytest 邊界案例（餘額 0／50,000／200,000）＋ 本頁實驗二</td></tr>
+      <tr><td>4</td><td><b>F3</b>：覆蓋率 &lt; 1 時，<b>現金腿與股票腿同時</b>依覆蓋率縮放並標示</td>
+        <td>pytest（比對兩條腿的縮放）</td></tr>
+      <tr><td>5</td><td>池子為<b>正</b>但存在缺口時，<code>fx_basis_gap</code> 仍為 true
+        （回歸今天 00:37 的靜默案例）</td><td>pytest 回歸測試（以本頁狀態 B 的數字建 fixture）</td></tr>
+      <tr><td>6</td><td>幣別 = 資金幣別時不出現取得成本欄位，登錄行為與今天相同</td>
+        <td>Playwright e2e</td></tr>
+      <tr><td>7</td><td>查無當日匯率時欄位留白且<b>仍可送出</b>，不得填 0 或以 spot 代替</td>
+        <td>Playwright e2e（日期選 2026-01-05、資料源 prod）</td></tr>
+      <tr><td>8</td><td>既有列（<code>acq_home_amount</code> NULL）的匯率池數值與升級前<b>逐位相同</b></td>
+        <td>golden payload 差異只在新欄位</td></tr>
+      <tr><td>9</td><td>XIRR／總報酬／<code>unrealized_total</code> 不因本次改動變動</td>
+        <td><code>/stress-audit</code> fail=0 ＋ golden 比對</td></tr>
+      <tr><td>10</td><td>N1／N2 兩個限制寫入 <code>domain-ledger.md</code> 與面板說明</td>
+        <td>文件檢視</td></tr>
+      <tr><td>11</td><td>型別與風格 gate 全綠</td>
+        <td><code>mypy --strict</code>、<code>ruff</code>、完整 <code>pytest</code></td></tr>
+    </tbody></table></div>
+  <p class="note"><b>owner 已於 2026-07-30 確認 F1／F2／F3 修正，並裁決期初取得匯率為
+    31.3587（家幣成本 3,135,870 TWD）。本節即為驗收清單，實作開始。</b></p>
+</section>

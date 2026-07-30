@@ -52,15 +52,17 @@ from portfolio_dash.portfolio.cash import (
     pool_lines,
     running_min,
 )
-from portfolio_dash.pricing.store import get_fx
+from portfolio_dash.pricing.store import get_fx, get_fx_on
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account
+from portfolio_dash.shared.money import quantize_amount
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
 _ZERO = Decimal("0")
+_ONE = Decimal("1")
 # REBATE (退款／折讓): a deposit-like CREDIT booked by the rebate inbox confirm (FE-D1). It is
 # an actual cash refund of record — NOT the forecast estimate — and never touches cost/P&L.
 _KINDS = {"DEPOSIT", "WITHDRAW", "OPENING", "REBATE"}
@@ -257,6 +259,16 @@ def cash_overview(
                     if m.account_id in accounts else m.account_id,
                     "kind": m.kind.lower(), "ccy": m.ccy.value,
                     "amount": decimal_str(m.amount), "note": m.note,
+                    # Acquisition cost of a foreign credit (spec F1): the AMOUNT is the
+                    # stored authority; the rate is derived HERE so the frontend never
+                    # divides two Decimal strings to show it.
+                    "acq_home_amount": (None if m.acq_home_amount is None
+                                        else decimal_str(m.acq_home_amount)),
+                    "acq_home_ccy": (None if m.acq_home_amount is None
+                                     else accounts[m.account_id].funding_ccy.value
+                                     if m.account_id in accounts else None),
+                    "acq_rate": (None if m.acq_home_amount is None or m.amount == _ZERO
+                                 else decimal_str(m.acq_home_amount / m.amount)),
                 }
                 for m in page
             ],
@@ -351,6 +363,46 @@ class MovementBody(BaseModel):
     amount: Decimal
     note: str | None = None
     ack_negative: bool = False
+    # Acquisition cost of a FOREIGN-currency credit (spec 2026-07-30 F1). Supply EITHER
+    # the home-currency amount OR the rate — the rate is a convenience for the form and is
+    # converted here; only the AMOUNT is ever persisted. Omit both when the rate is genuinely
+    # unknown: the movement then funds the pool but stays out of the weighted average
+    # (never guessed) and is disclosed via ``fx_basis_gap``.
+    acq_home_amount: Decimal | None = None
+    acq_rate: Decimal | None = None
+
+
+def _acq_home_amount(acct: Account, body: MovementBody) -> Decimal | None | JSONResponse:
+    """Resolve the movement's home-currency acquisition cost, or an error response.
+
+    None (both inputs omitted) is the legitimate "cost unknown" case, not an error.
+    """
+    if body.acq_home_amount is None and body.acq_rate is None:
+        return None
+    if body.acq_home_amount is not None and body.acq_rate is not None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "取得成本請擇一填寫（家幣金額 或 匯率）",
+            field="acq_home_amount"))
+    if body.ccy == acct.funding_ccy:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error",
+            f"取得成本僅適用外幣資金流（本帳戶資金幣別為 {acct.funding_ccy.value}）",
+            field="acq_home_amount"))
+    if body.kind.strip().upper() == "WITHDRAW":
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "出金是處分，不帶取得成本", field="acq_home_amount"))
+    if body.acq_home_amount is not None:
+        if body.acq_home_amount <= _ZERO:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", "取得成本必須大於 0", field="acq_home_amount"))
+        return quantize_amount(body.acq_home_amount, acct.funding_ccy)
+    rate = body.acq_rate
+    if rate is None or rate <= _ZERO:  # `is None` unreachable; narrows for mypy
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "取得匯率必須大於 0", field="acq_rate"))
+    # Rate in, AMOUNT stored: an average must never be the stored authority
+    # (`data-and-pricing.md`), and the displayed rate is recomputed on read.
+    return quantize_amount(body.amount * rate, acct.funding_ccy)
 
 
 def _movement_guard(
@@ -391,16 +443,19 @@ def add_movement(
     if bad is not None:
         return bad
     kind = body.kind.strip().upper()
+    acct = _accounts(conn)[body.account_id]  # exists (checked in _movement_guard)
+    acq = _acq_home_amount(acct, body)
+    if isinstance(acq, JSONResponse):
+        return acq
     if kind == "WITHDRAW":
         # FU-D43a: HARD block — ``ack_negative`` no longer bypasses a withdrawal that the
         # pool cannot cover (deposit/opening/rebate credits need no balance guard on POST).
-        acct = _accounts(conn)[body.account_id]  # exists (checked in _movement_guard)
         blocked = _withdraw_guard(conn, body, acct)
         if blocked is not None:
             return blocked
     move_id = insert_cash_movement(
         conn, account_id=body.account_id, move_date=body.date, kind=kind,
-        ccy=body.ccy, amount=body.amount, note=body.note)
+        ccy=body.ccy, amount=body.amount, note=body.note, acq_home_amount=acq)
     return {"id": move_id}
 
 
@@ -433,11 +488,14 @@ def edit_movement(
     if bad is not None:
         return bad
     kind = body.kind.strip().upper()
+    acct = _accounts(conn)[body.account_id]  # exists (checked in _movement_guard)
+    acq = _acq_home_amount(acct, body)
+    if isinstance(acq, JSONResponse):
+        return acq
     if kind == "WITHDRAW":
         # FU-D43a: the edited withdraw is HARD-guarded on its target pool, with the
         # balance computed EXCLUDING this row's own prior effect (self-exclusion) —
         # no ack override for what the withdraw itself consumes.
-        acct = _accounts(conn)[body.account_id]  # exists (checked in _movement_guard)
         blocked = _withdraw_guard(conn, body, acct, exclude_id=move_id)
         if blocked is not None:
             return blocked
@@ -461,7 +519,8 @@ def edit_movement(
                 return _negative_response(account_id, ccy, low)
     update_cash_movement(
         conn, move_id, account_id=body.account_id, move_date=body.date,
-        kind=kind, ccy=body.ccy, amount=body.amount, note=body.note)
+        kind=kind, ccy=body.ccy, amount=body.amount, note=body.note,
+        acq_home_amount=acq)
     return {"ok": True, "id": move_id}
 
 
@@ -552,6 +611,44 @@ def _cap_rate(rate: Decimal) -> Decimal:
     if isinstance(exp, int) and exp < -_RATE_MAX_DP:
         return rate.quantize(Decimal(1).scaleb(-_RATE_MAX_DP), rounding=ROUND_HALF_UP)
     return rate
+
+
+@router.get("/cash/acq-rate")
+def cash_acq_rate(
+    account_id: str = Query(...),
+    ccy: Currency = Query(...),
+    on: date = Query(...),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Point-in-time foreign->home rate to PRE-FILL the 取得成本 field (spec 2026-07-30).
+
+    A REFERENCE value only: a broker's actual conversion rate is not the market mid, so the
+    form labels it as such and the user may overwrite it. ``available: false`` (with a zh
+    reason) whenever nothing is stored on or before that date — the field then stays blank
+    and the user types the rate. Never interpolated, never substituted with today's spot;
+    prod's fx_rates only reach back to 2026-07-01, so this path is routine, not an edge case.
+    """
+    acct = _accounts(conn).get(account_id)
+    if acct is None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"帳戶 {account_id} 不存在", field="account_id"))
+    home = acct.funding_ccy
+    if ccy == home:
+        return {"available": False, "reason": "本幣入金不需要取得成本",
+                "rate": None, "as_of": None, "home_ccy": home.value}
+    direct = get_fx_on(conn, ccy, home, on=on)
+    if direct is not None:
+        rate, as_of = _cap_rate(direct.rate), direct.as_of
+    else:
+        inv = get_fx_on(conn, home, ccy, on=on)
+        if inv is None or inv.rate == _ZERO:
+            return {"available": False,
+                    "reason": f"查無 {on.isoformat()} 或之前的 {ccy.value}/{home.value} 匯率，"
+                              f"請手動輸入取得匯率",
+                    "rate": None, "as_of": None, "home_ccy": home.value}
+        rate, as_of = _cap_rate(_ONE / inv.rate), inv.as_of
+    return {"available": True, "reason": None, "rate": decimal_str(rate),
+            "as_of": as_of.isoformat(), "home_ccy": home.value}
 
 
 @router.get("/cash/fx-estimate")

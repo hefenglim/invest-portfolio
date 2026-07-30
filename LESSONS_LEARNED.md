@@ -403,3 +403,44 @@ prevents recurrence.
   primary key and lock the anchor fields (kind/date) of a booked rebate movement
   (frontend + backend guard). Rule: anything that prevents a double-write must hinge on
   data the user cannot silently edit.
+
+- **2026-07-29 — "the site is down" is two different faults; diagnose the ingress layer
+  separately from the app, and trust only the AUTHORITATIVE DNS answer.** The test site
+  was unreachable from the internet while prod was fine. Every app-level signal was
+  green — the service had been `active (running)` for 20 h, `127.0.0.1:<port>/api/health`
+  returned the expected version, and the tunnel daemon's own `serve status` printed
+  "Funnel on". The real fault was one layer up: the ingress provider's control plane had
+  **stopped publishing the public DNS record** for that node (authoritative NS returned
+  NXDOMAIN with the `aa` flag, while the sibling node kept its A records). Two traps:
+  (a) the local `serve status` reports the node's *intent*, not what the control plane
+  actually accepted — it says "on" even when the name no longer resolves; (b) a client-side
+  lookup can't distinguish a withdrawn record from a cached negative answer, so query the
+  authoritative nameserver directly (`dig … @<auth-ns>`) before concluding anything.
+  Fix was to force re-advertisement (`serve reset` + re-apply), not to restart or reinstall
+  the app. Rule: when a service is healthy on localhost but dead from outside, walk the
+  path outward — app → local port → tunnel/proxy intent → *published* DNS → TLS — and stop
+  at the first layer whose **externally observable** state disagrees with its local state.
+
+- **2026-07-30 — a full-replace PUT plus a new optional column is a silent data-loss bug,
+  not a display gap.** Adding `cash_movements.acq_home_amount` and wiring it into the POST
+  looked complete; the movement EDIT dialog still sent the old field set, and PUT is a full
+  replace — so editing an unrelated field (a note) NULLed a recorded cost basis with no
+  error, no warning, and no way to notice. Nothing in the type system or the tests pointed
+  at it; it surfaced only by asking "who else writes this row?". Rule: when a column is
+  added, enumerate every WRITE surface (POST, PUT, importers, merge/relabel jobs, seeders)
+  before calling it done, and pin the round-trip with a test that edits a DIFFERENT field
+  and asserts the new one survived. Corollary from the same change: a flag derived from an
+  AMOUNT (`gap != 0`) goes quiet whenever the amount collapses to zero for an unrelated
+  reason — the pool being empty — while the underlying condition is still true; derive
+  disclosure flags from the CAUSE (a ratio, a count) and use the amount only as detail.
+
+- **2026-07-30 — let the project config decide a gate's scope; hand-picking paths breaks it
+  in BOTH directions.** Running `mypy --strict portfolio_dash scripts tests` reported 243
+  errors and looked like a catastrophic regression; every one came from
+  `scripts/stress_audit`, which `pyproject.toml`'s `files = [...]` deliberately excludes
+  (it is an untyped independent oracle). The mirror of the 2026-07-20 lesson, where a
+  too-NARROW hand-picked scope hid real errors. `ruff check .` has the same failure mode:
+  it lints untracked tooling that is not part of the shipped source. Rule: run the gates
+  **bare** (`mypy`, and ruff over the tracked source roots) so the repo config — the same
+  thing CI and `/ship-version` read — defines the verdict; a path argument is a debugging
+  aid, never the verdict.

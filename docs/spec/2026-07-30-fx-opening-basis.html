@@ -1,0 +1,1392 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>外幣期初資金的成本基礎 — 規格 demo v2</title>
+<style>
+/* demo-cycle report kit — the design language of docs/audit/*.html, extracted.
+   Dark-first, light via prefers-color-scheme + an explicit [data-theme] override so a
+   printed/shared copy is readable either way. Dense, data-first, tabular numerals. */
+
+:root{
+  --ink:#0e1116; --panel:#161b22; --panel-2:#1c222b; --line:#262e39;
+  --text:#e6e9ee; --text-2:#aab3c0; --text-3:#78838f;
+  --accent:#5aa2f5; --accent-soft:#5aa2f51f;
+  --hi:#e2564d; --md:#d99a35; --ok:#3fa672;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+}
+@media (prefers-color-scheme: light){
+  :root{ --ink:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --line:#dfe3ea;
+         --text:#161b22; --text-2:#4d5764; --text-3:#79838f; --accent-soft:#5aa2f514; }
+}
+:root[data-theme="dark"]{ --ink:#0e1116; --panel:#161b22; --panel-2:#1c222b; --line:#262e39;
+  --text:#e6e9ee; --text-2:#aab3c0; --text-3:#78838f; --accent-soft:#5aa2f51f; }
+:root[data-theme="light"]{ --ink:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --line:#dfe3ea;
+  --text:#161b22; --text-2:#4d5764; --text-3:#79838f; --accent-soft:#5aa2f514; }
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);
+     line-height:1.65;font-size:15px;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1040px;margin:0 auto;padding:0 20px 96px}
+h1,h2,h3,h4{text-wrap:balance;line-height:1.25;margin:0}
+code,.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+a{color:var(--accent)}
+
+header.top{padding:54px 0 26px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;
+         color:var(--text-3);margin-bottom:13px}
+h1{font-size:31px;font-weight:650;letter-spacing:-.02em}
+.sub{color:var(--text-2);margin-top:12px;max-width:66ch}
+
+.shape{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+       border-radius:0 10px 10px 0;padding:16px 18px;margin:26px 0 8px}
+.shape b{color:var(--text)}
+
+section{margin:44px 0 0;scroll-margin-top:52px}
+h2{font-size:20px;font-weight:620;margin-bottom:4px;display:flex;align-items:baseline;gap:10px;
+   flex-wrap:wrap}
+h2 .n{font-family:var(--mono);font-size:12px;color:var(--text-3);letter-spacing:.1em}
+h3{font-size:15px;margin:20px 0 3px}
+.lede{color:var(--text-2);margin:6px 0 18px;max-width:72ch}
+
+/* before / after — the spine of every demo in this kit */
+.vs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+@media(max-width:720px){.vs{grid-template-columns:1fr}}
+.vsbox{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:13px 15px}
+.vsbox h4{margin:0 0 7px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.vsbox.before{border-color:#e2564d55} .vsbox.before h4{color:var(--hi)}
+.vsbox.after{border-color:#3fa67255}  .vsbox.after  h4{color:var(--ok)}
+.vsbox p{margin:0;font-size:14px;color:var(--text-2)}
+
+pre{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:11px 13px;
+    overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;margin:8px 0}
+pre .del{color:var(--hi)} pre .add{color:var(--ok)} pre .cm{color:var(--text-3)}
+pre .win{background:#e2564d26;border-radius:3px;padding:0 3px}
+
+/* the interactive lab: mode switch + width slider + live sandbox + measured readout */
+.lab{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:16px 0}
+.lab .dsub{color:var(--text-3);font-size:12.5px;margin-bottom:13px}
+.modes{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.modes button{background:var(--panel-2);border:1px solid var(--line);color:var(--text-2);
+    border-radius:7px;padding:8px 13px;font-size:13px;cursor:pointer;font-family:var(--sans);
+    text-align:left;line-height:1.35}
+.modes button small{display:block;font-size:11px;color:var(--text-3);margin-top:2px}
+.modes button:hover{border-color:var(--accent)}
+.modes button.on{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+.modes button.on.bad{border-color:var(--hi);background:#e2564d14}
+.modes button.on.good{border-color:var(--ok);background:#3fa67214}
+
+.sizer{display:flex;align-items:center;gap:12px;margin:10px 0 6px;flex-wrap:wrap}
+.sizer input[type=range]{flex:1;min-width:180px;accent-color:var(--accent)}
+.sizer .w{font-family:var(--mono);font-size:12.5px;color:var(--text-2);white-space:nowrap}
+
+.stage{border:1px dashed var(--line);border-radius:8px;overflow:hidden;background:#0b0e12;
+       padding:8px;overflow-x:auto}
+/* These two overrides MUST stay directly below the base rule. Both are (0,1,0) — a
+   media query adds no specificity — so at equal specificity the LATER rule wins. Moved
+   up into the token block at the top of this file, they silently stop working. This is
+   divergence ① of the 2026-07-26 root-cause demo, reproduced inside its own toolkit. */
+@media (prefers-color-scheme: light){ .stage{background:#e9ecf1} }
+:root[data-theme="light"] .stage{background:#e9ecf1}
+:root[data-theme="dark"]  .stage{background:#0b0e12}
+iframe{border:0;display:block;background:#0e1116;height:150px;transition:width .1s}
+
+.readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:12px}
+.ro{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:9px 11px}
+.ro .k{font-size:11px;color:var(--text-3)}
+.ro .v{font-family:var(--mono);font-size:15px;font-weight:600;margin-top:2px;
+       font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ro.bad{border-color:var(--hi)}  .ro.bad .v{color:var(--hi)}
+.ro.good{border-color:var(--ok)} .ro.good .v{color:var(--ok)}
+.verdict{margin-top:12px;padding:11px 13px;border-radius:7px;font-size:13.5px;
+         border:1px solid var(--line);background:var(--panel-2)}
+.verdict.bad{border-color:#e2564d66;background:#e2564d12}
+.verdict.good{border-color:#3fa67266;background:#3fa67212}
+
+.ctrl{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:11px;margin:12px 0}
+.ctrl label{display:block;font-size:11.5px;color:var(--text-3);margin-bottom:4px}
+.ctrl input,.ctrl select{width:100%;background:var(--panel-2);border:1px solid var(--line);
+    color:var(--text);border-radius:6px;padding:7px 9px;font-family:var(--mono);font-size:13px}
+
+/* tables — always inside .tw so a wide table scrolls itself instead of the page */
+.tw{overflow-x:auto;margin:12px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px}
+th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11.5px;letter-spacing:.06em;color:var(--text-3);text-transform:uppercase;font-weight:600}
+td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+tr.hl td{background:#e2564d0f}
+.bad{color:var(--hi)} .good{color:var(--ok)} .warn{color:var(--md)} .dim{color:var(--text-3)}
+
+.pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:4px;
+      border:1px solid var(--line);white-space:nowrap}
+.pill.pass{color:var(--ok);border-color:#3fa67255;background:#3fa67216}
+.pill.rej{color:var(--hi);border-color:#e2564d55;background:#e2564d16}
+.pill.warn{color:var(--md);border-color:#d99a3555;background:#d99a3516}
+.sev{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid}
+.sev.h{color:var(--hi);border-color:#e2564d66;background:#e2564d16}
+.sev.m{color:var(--md);border-color:#d99a3566;background:#d99a3516}
+.sev.l{color:var(--text-2);border-color:var(--line);background:var(--panel-2)}
+
+.note{font-size:12.5px;color:var(--text-3);margin-top:11px;padding-top:11px;
+      border-top:1px dashed var(--line)}
+img.shot{max-width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:8px;
+         margin:10px 0}
+
+.toc{position:sticky;top:0;background:var(--ink);border-bottom:1px solid var(--line);
+     padding:9px 0;z-index:20}
+.toc-in{max-width:1040px;margin:0 auto;padding:0 20px;display:flex;gap:6px;overflow-x:auto}
+.toc a{font-size:12.5px;color:var(--text-2);text-decoration:none;padding:4px 9px;border-radius:5px;
+       white-space:nowrap}
+.toc a:hover{background:var(--panel);color:var(--accent)}
+
+/* self-check strip: every offline reimplementation must prove itself against the real
+   engine's numbers, in the report, in front of the reader. */
+#pd-selfcheck{margin:14px 0}
+#pd-selfcheck .hd{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+#pd-selfcheck .hd b{font-size:13px}
+#pd-selfcheck .sum{font-family:var(--mono);font-size:12px;color:var(--text-3)}
+footer{margin-top:54px;padding-top:20px;border-top:1px solid var(--line);color:var(--text-3);
+       font-size:12.5px}
+
+</style>
+
+<nav class="toc"><div class="toc-in">
+  <a href="#s1">問題與目標</a>
+  <a href="#s2">現況 vs 提案：匯率池的重算</a>
+  <a href="#s3">F2 · 沒有成本基礎時，流出從哪個桶扣</a>
+  <a href="#s4">警示：症狀偵測 vs 成因偵測</a>
+  <a href="#s5">登錄時怎麼問、查不到匯率怎麼辦</a>
+  <a href="#s6">邊界、例外與明確不做的事</a>
+  <a href="#s7">影響範圍與遷移</a>
+  <a href="#s8">驗收條件</a>
+  <a href="#selfcheck">✓ 自我校驗</a>
+</div></nav>
+
+<div class="wrap">
+
+<header class="top">
+  <div class="eyebrow">portfolio-dash · feature proposal · spec by demo</div>
+  <h1>外幣期初資金的成本基礎 — 規格 demo v2</h1>
+  <p class="sub">這份文件用可操作的 demo 定義規格。文字描述容易各自解讀，demo 不會：你看到的行為就是要實作的行為。</p>
+</header>
+
+<div class="shape">
+  <b>怎麼讀這份文件：</b>每一節先給<strong>現況</strong>與<strong>提案</strong>的並排對照，再給一個<strong>真的能操作的 demo</strong>。規格以 demo 為準，文字只是註解。你在 demo 上點過、認可了，才進入實作。
+</div>
+
+<section id="s1">
+  <h2><span class="n">01</span>問題與目標</h2>
+
+  <div class="vs">
+    <div class="vsbox after" style="grid-column:1/-1"><h4>v2 · 2026-07-30 會計審查後修訂（owner 認可）</h4>
+      <p><b>F1</b> 儲存<b>家幣成本金額</b>而非匯率（原設計違反本專案「平均值不得作為權威」的規則）。
+        <b>F2</b> 明確定義流出的分攤方式為<b>比例法</b>（原設計未定義；直覺的相減法會再生負基數）。
+        <b>F3</b> 成本基礎不完整時，<b>現金與股票兩條腿一起降級</b>（原設計只降級現金腿，
+        而股票腿的誤差其實更大）。另補記 <b>N1</b> 外幣出金不認列已實現匯損益、
+        <b>N2</b> 補填成本會回頭重算歷史顯示值。<br>
+        期初取得匯率裁決：<b>31.3587</b>（2026-01-05 收盤，owner sign-off 2026-07-30）。</p></div>
+  </div>
+
+  <p class="lede">同一個帳戶的同一筆美金，畫面上有兩個數字：<b>各帳戶現金</b>顯示
+    <span class="num">101,587.90 USD</span>，<b>換匯損益</b>的「外幣現金」卻顯示
+    <span class="num">1,587.90 USD</span>。兩者都不是算錯——它們是兩套定義；真正的問題是
+    <strong>後者的基數本身少了整整 100,000 USD</strong>，而那 100,000 是你當初設定的
+    <strong>期初資金</strong>。系統有「期初庫存（股票）」，卻<strong>沒有「期初外幣資金」</strong>
+    這個概念，這筆錢在匯率池裡無處安放。</p>
+
+  <div class="vs">
+    <div class="vsbox before"><h4>資金視角 — <code>portfolio/cash.py::cash_balances</code></h4>
+      <p>入金／出金／期初 ± 換匯 ± 買賣收付 ＋ 現金股利。<br>
+        回答「這個帳戶現在有多少現金」，驅動透支防呆。<b>含 <code>cash_movements</code></b>。</p></div>
+    <div class="vsbox after"><h4>匯率曝險視角 — <code>forex/pools.py::foreign_cash_balance</code></h4>
+      <p>換匯 ± 外幣買賣 ＋ 外幣現金股利。<br>
+        回答「有多少外幣曝險、成本基礎是多少」，驅動換匯損益。
+        <b>完全不讀 <code>cash_movements</code></b>。</p></div>
+  </div>
+
+  <p>兩者刻意不同，是有原因的：換匯損益需要成本基礎，而直接匯入的美金沒有台幣取得成本，
+    硬塞進池子就得<strong>捏造一個匯率</strong>。<code>pools.py</code> 的模組註解（audit C9）
+    早就寫下了這個分歧。缺的不是這個判斷，<strong>缺的是「期初外幣資金」這個資料結構</strong>。</p>
+
+  <h3>量測到的兩個狀態——同一個缺口，兩種面貌</h3>
+  <p>製作這份文件的過程中，線上實例的帳本在 33 分鐘內被新增了一筆換匯（2026-07-30，
+    <span class="num">+6,188.00 USD</span>）。這個巧合把問題的第二層當場暴露出來：</p>
+  <div class="tw"><table>
+    <thead><tr><th>　</th><th>狀態 A · 你截圖時 00:04</th><th>狀態 B · 引擎快照 00:37</th></tr></thead>
+    <tbody>
+      <tr><td>匯率池外幣現金</td><td class="n">−4,600.10 USD</td><td class="n">+1,587.90 USD</td></tr>
+      <tr><td>各帳戶現金（正確餘額）</td><td class="n">95,399.90 USD</td><td class="n">101,587.90 USD</td></tr>
+      <tr class="hl"><td><b>缺口</b></td><td class="n"><b>100,000.00 USD</b></td><td class="n"><b>100,000.00 USD</b></td></tr>
+      <tr><td>平均取得匯率</td><td class="n">32.2210</td><td class="n">32.2307</td></tr>
+      <tr><td>未實現匯損益（合計）</td><td class="n">+7,488 TWD</td><td class="n">+7,321 TWD</td></tr>
+      <tr><td><b>畫面上的警示</b></td><td class="bad"><b>有出現</b></td><td class="bad"><b>消失了</b></td></tr>
+    </tbody></table></div>
+  <p class="note">誤差一模一樣是 100,000 USD，但因為池子從負轉正，現行的警示條件
+    <code>cash_basis_incomplete = foreign_cash &lt; 0</code> 就不再成立——
+    <strong>錯誤沒有變小，只是變安靜了</strong>。這不是推論，是兩次實測的引擎輸出。</p>
+
+  <h3>目標</h3>
+  <ol>
+    <li>讓外幣的<strong>期初資金／入金</strong>可以帶著家幣成本進入匯率池，使
+      <b>匯率池餘額 = 資金視角餘額</b>，兩個視角可互相對帳。</li>
+    <li>沒有成本基礎時<strong>不猜、不填 0</strong>：金額計入餘額，但依<strong>覆蓋率</strong>
+      按比例排除於匯損益基數之外——<b>現金腿與股票腿一併處理</b>，並明確標示缺口。</li>
+    <li>警示從<strong>症狀偵測</strong>（池子為負）改為<strong>成因偵測</strong>（有外幣資金流
+      未具成本基礎），消除上表狀態 B 那種靜默失真。</li>
+  </ol>
+  <p class="note">正式站現況：<code>cash_movements</code> 目前 <b>0 筆</b>（唯讀查證），
+    所以今天完全不受影響——但你一登錄真實期初資金就會重現。這是預防性修法，不是救火。</p>
+</section>
+
+<section id="s2">
+  <h2><span class="n">02</span>現況 vs 提案：匯率池的重算</h2>
+  <div class="vs">
+    <div class="vsbox before"><h4>現況公式</h4>
+      <p><code>foreign_cash_balance(transactions, dividends, conversions, …)</code><br>
+        三個來源：換匯、外幣買賣、外幣現金股利。<br>
+        <code>average_acquisition_rate(conversions, …)</code> 只認 home→foreign 的換匯。</p></div>
+    <div class="vsbox after"><h4>提案公式</h4>
+      <p>多一個來源：<b>帶有 <code>acq_home_amount</code>（家幣成本）的外幣資金流</b>
+        （DEPOSIT／OPENING 為 ＋、WITHDRAW 為 −）。<br>
+        加權平均同步納入該筆的家幣成本。<b>沒有家幣成本的一律不進加權平均</b>。</p></div>
+  </div>
+
+  <h3>F1 · 存的是「家幣成本金額」，不是匯率</h3>
+  <p>期初那筆存的是 <b>3,135,870 TWD</b>（= 100,000 × 31.3587），不是 <code>31.3587</code>。三個理由：</p>
+  <ul>
+    <li><code>data-and-pricing.md</code> 明文「平均成本永不以四捨五入後的值作為權威；
+      存 total ＋ 數量，讀取時再除」——存匯率正是被禁止的那個模式。</li>
+    <li><code>fx_conversions</code> 存的是 <code>from_amount</code>／<code>to_amount</code>
+      兩個<b>金額</b>，匯率是導出的。同一個匯率池的成本基礎，不該一半用金額、一半用匯率。</li>
+    <li>加權平均的分子要的就是家幣總額——存金額零誤差；存 6 dp 匯率在大額時有殘差，
+      而且還得額外約定「家幣／外幣」的方向。存金額沒有方向歧義。</li>
+  </ul>
+  <p class="note">登錄介面照樣可以讓你<b>輸入匯率</b>（送出前換算成金額），
+    面板顯示的取得匯率一律 <code>家幣成本 ÷ 外幣數</code> 讀取時算。</p>
+
+  <p>下面這個實驗不是示意圖：它用<strong>真實帳本的 22 列</strong>（唯讀取自
+    <code>/api/cash/statement?account=schwab&amp;ccy=USD</code>），在你的瀏覽器裡以
+    BigInt 定點運算<strong>當場重算</strong>兩套公式。頁尾的自我校驗把「現況」模式的每個結果
+    與 <code>/api/dashboard</code> 的引擎輸出逐項比對——包含 28 位精度的平均取得匯率。</p>
+
+  <div class="lab">
+    <h3>實驗一：把期初資金納入匯率池，數字會怎麼變</h3>
+    <div class="dsub">滑桿改變 2026-07-30 那筆換匯的金額（維持該列的隱含匯率），
+      用來觀察缺口在任何情境下都固定為 100,000 USD。</div>
+    <div class="modes" id="lab1-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況（壞）<small>期初資金不進池</small></button>
+      <button data-m="1" data-tone="good">提案<small>期初帶 3,135,870 TWD 成本進池</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">2026-07-30 換匯金額 <b id="lab1-sv">6,188.00</b> USD</span>
+      <input type="range" id="lab1-range" min="0" max="12000" step="1" value="6188">
+    </div>
+    <div class="readout">
+      <div class="ro" id="lab1-ro-a"><div class="k">平均取得匯率</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-b"><div class="k">匯率池外幣現金</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-c"><div class="k">各帳戶現金（正確）</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-d"><div class="k">缺口</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-e"><div class="k">未實現匯損益（合計）</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab1-verdict">—</div>
+    <div class="note">注意「未實現匯損益（股票）」也一起變了——期初那 100,000 USD 的取得匯率
+      （31.3587）低於後來換匯的均價，沒有納入時整條平均線被往上拉。
+      <strong>錯的不只是現金那一行，是整個帳戶的匯率歸因。</strong></div>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>以引擎快照 00:37 為基準</th><th class="n">現況</th><th class="n">提案</th><th class="n">差異</th></tr></thead>
+    <tbody>
+      <tr><td>平均取得匯率</td><td class="n">32.2307</td><td class="n">31.6976</td><td class="n">−0.5331</td></tr>
+      <tr><td>匯率池外幣現金</td><td class="n">1,587.90</td><td class="n">101,587.90</td><td class="n">+100,000.00</td></tr>
+      <tr><td>未實現匯損益（現金）</td><td class="n">+143</td><td class="n">+63,331</td><td class="n">+63,188</td></tr>
+      <tr><td>未實現匯損益（股票）</td><td class="n">+7,178</td><td class="n">+49,537</td><td class="n">+42,359</td></tr>
+      <tr class="hl"><td><b>未實現匯損益（合計）TWD</b></td><td class="n"><b>+7,321</b></td><td class="n"><b>+112,868</b></td><td class="n"><b>+105,547</b></td></tr>
+    </tbody></table></div>
+  <p class="note">影響範圍僅限<strong>換匯損益面板</strong>與 KPI <code>fx_unrealized</code>。
+    已逐一驗證：<code>dashboard.py</code> 把 <code>fx_unrealized</code> 放在獨立欄位，
+    <b>沒有</b>加進 <code>total_return</code> / <code>unrealized_total</code> / XIRR；
+    <code>networth.py</code> 只用資金視角 ＋ <code>convert</code>，完全不碰
+    <code>unrealized_fx_*</code>。CLAUDE.md 不變式 6「換匯損益只是歸因、不加總」完好。</p>
+</section>
+
+<section id="s3">
+  <h2><span class="n">03</span>F2 · 沒有成本基礎時，流出從哪個桶扣</h2>
+  <p class="lede">把外幣資金流拆成「有成本基礎」與「無成本基礎」兩個數，只講了一半——
+    <strong>還必須定義買股票、出金把錢從哪個桶扣</strong>。這不是學術問題：
+    <code>未實現匯損益（現金）= 有基礎的基數 × (spot − avg)</code>，答案完全取決於它。</p>
+
+  <div class="vs">
+    <div class="vsbox before"><h4>相減法（直覺，但錯）</h4>
+      <p><code>有基礎 = 總餘額 − 無基礎取得額</code><br>
+        隱含「無基礎的錢最後才花」的 LIFO 假設，與加權平均法矛盾。
+        <b>餘額一跌破無基礎金額就變負數</b>——反號的假數字回來了，這次修法等於白做。</p></div>
+    <div class="vsbox after"><h4>比例法（採用）</h4>
+      <p><code>覆蓋率 = 有基礎取得額 ÷ 總取得額</code><br>
+        <code>有基礎 = 總餘額 × 覆蓋率</code><br>
+        現金是可替代物，加權平均本來就不追蹤批次，流出按比例扣。
+        <b>任何餘額下都不會為負</b>；全部都有成本時覆蓋率 = 100%，這行不會啟動。</p></div>
+  </div>
+
+  <div class="lab">
+    <h3>實驗二：相減法在餘額跌破 100,000 時翻負——比例法不會</h3>
+    <div class="dsub">情境：期初那 100,000 USD <b>沒有</b>填成本（降級情境）。
+      滑桿模擬買進股票後剩下的現金餘額。</div>
+    <div class="modes" id="lab4-modes">
+      <button data-m="0" data-tone="bad" class="on bad">相減法<small>總餘額 − 無基礎額</small></button>
+      <button data-m="1" data-tone="good">比例法<small>總餘額 × 覆蓋率</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">外幣現金餘額 <b id="lab4-sv">101,587.90</b> USD</span>
+      <input type="range" id="lab4-range" min="0" max="200000" step="0.01" value="101587.90">
+    </div>
+    <div class="readout">
+      <div class="ro" id="lab4-ro-a"><div class="k">總餘額（資金視角）</div><div class="v">—</div></div>
+      <div class="ro" id="lab4-ro-b"><div class="k">判定為「有成本基礎」</div><div class="v">—</div></div>
+      <div class="ro" id="lab4-ro-c"><div class="k">未實現匯損益（現金）</div><div class="v">—</div></div>
+      <div class="ro" id="lab4-ro-d"><div class="k">基數是否為負</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab4-verdict">—</div>
+    <div class="note">把滑桿拉到 100,000 以下，相減法立刻出現負基數。
+      這正是本次修法要根除的那個病灶——如果分攤規則沒定義好，它會從另一個入口長回來。</div>
+  </div>
+
+  <h3>F3 · 股票腿也被污染，不能只降級現金腿</h3>
+  <p><code>未實現匯損益（股票）= 外幣股票市值 × (spot − avg)</code> 用的是<strong>同一個 avg</strong>，
+    而 avg 本身就是從不完整的母體算出來的。實測：股票腿差
+    <b>+42,359 TWD</b>（+7,178 → +49,537），<strong>比現金腿的誤差還大</strong>。</p>
+  <p>因此<b>覆蓋率一律套用在整個外幣曝險上</b>——現金與股票都是同一個可替代資金池支應的：</p>
+  <pre><span class="cm"># 一個比率，兩條腿共用；全部有成本時 covered_ratio = 1，數值與今天相同</span>
+covered_ratio        = acq_with / (acq_with + acq_none)
+unrealized_fx_cash   = foreign_cash_total  * covered_ratio * (spot - avg_rate)
+unrealized_fx_stocks = foreign_stock_value * covered_ratio * (spot - avg_rate)
+fx_basis_gap         = foreign_cash_total  * (1 - covered_ratio)</pre>
+</section>
+
+<section id="s4">
+  <h2><span class="n">04</span>警示：症狀偵測 vs 成因偵測</h2>
+  <p class="lede">現行旗標是 <code>cash_basis_incomplete = foreign_cash &lt; 0</code>
+    （<code>fx_pnl.py:107</code>）。它抓的是<strong>症狀</strong>——池子被買進拉成負數；
+    可是缺口只要小於換匯總額，池子就是正的，警示不出現，數字照樣是錯的。
+    今天 00:37 的線上實例正好落在這個區間。</p>
+  <p>下面的面板是<strong>真的 iframe，真的 DOM</strong>：警示出不出現由渲染結果量測回報，
+    不是我寫在文字裡。</p>
+
+  <div class="lab">
+    <h3>實驗三：把滑桿拉過 4,600.10，警示就消失了——誤差卻沒變</h3>
+    <div class="dsub">左右拖動滑桿改變 2026-07-30 那筆換匯的金額。
+      「警示是否出現」這一格的值，是從下方 iframe 的 DOM 量回來的。</div>
+    <div class="modes" id="lab2-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況警示規則<small>foreign_cash &lt; 0</small></button>
+      <button data-m="1" data-tone="good">提案警示規則<small>covered_ratio &lt; 1</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">2026-07-30 換匯金額 <b id="lab2-sv">6,188.00</b> USD</span>
+      <input type="range" id="lab2-range" min="0" max="12000" step="1" value="6188">
+    </div>
+    <div class="stage"><iframe id="lab2-frame" title="換匯損益面板"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="lab2-ro-a"><div class="k">面板顯示的外幣現金</div><div class="v">—</div></div>
+      <div class="ro" id="lab2-ro-b"><div class="k">警示（量測自 DOM）</div><div class="v">—</div></div>
+      <div class="ro" id="lab2-ro-c"><div class="k">此刻的實際誤差</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab2-verdict">—</div>
+    <div class="note">兩處文案一併修掉：<b>(1)</b> 現行提示說「補登<b>入金</b>／換匯紀錄後此提示會自動消失」，
+      但那筆入金<strong>早就登錄了</strong>（2026-01-05, 100,000 USD）——補登入金並不會餵進匯率池，
+      照字面做不會消失。<b>(2)</b> 依 F3，警示必須說明<b>平均取得匯率本身</b>是以不完整的母體計算，
+      所以受影響的是現金與股票<b>兩條腿</b>，不只是現金。</div>
+  </div>
+
+  <div class="vs">
+    <div class="vsbox after" style="grid-column:1/-1"><h4>實作時的修正（2026-07-30，v2 之後）</h4>
+      <p>規格原本寫「警示條件 = <code>fx_basis_gap ≠ 0</code>」。實作時發現這條規則<b>有同一個病灶</b>：
+        <code>fx_basis_gap</code> 是<b>金額</b>（餘額 × 未覆蓋比例），當池子被買光、餘額為 0 時它也是 0——
+        警示會消失，可是 <code>covered_ratio</code> 仍然 &lt; 1，<b>股票腿還在被縮放</b>。
+        那正是「靠症狀判斷會靜默」的翻版。<br>
+        因此後端改以<b>成因布林值</b> <code>fx_basis_incomplete</code>（= <code>covered_ratio &lt; 1</code>）
+        作為警示條件，<code>fx_basis_gap</code> 降為「有金額時順帶說出缺口多少」的細節。
+        <code>tests/forex/test_fx_pnl.py</code> 的
+        <code>test_gap_flag_survives_an_<wbr>EMPTY_pool</code> 釘住這個情形。</p></div>
+  </div>
+  <p class="note">附帶的收緊（零成本）：修法後 <code>foreign_cash_total</code> = 資金視角餘額，
+    而資金視角的出金是<b>硬性擋住</b>的（<code>_withdraw_guard</code>，
+    <code>ack_negative</code> 不能繞過）。因此「池子為負」從<b>預期狀態</b>變成
+    <b>不該發生的狀態</b>——負值旗標保留為第二個獨立訊號，但意義升級為異常警報。</p>
+</section>
+
+<section id="s5">
+  <h2><span class="n">05</span>登錄時怎麼問、查不到匯率怎麼辦</h2>
+  <p class="lede">缺口的成因不是「使用者忘了填」，而是<strong>根本沒有欄位可填</strong>。
+    提案在資金管理的登錄表單加一個<strong>條件顯示</strong>的「取得成本」欄：
+    只在<b>幣別 ≠ 該帳戶的資金幣別</b>時出現，可用匯率或家幣金額輸入，
+    預帶當日收盤匯率作<b>參考值</b>，可改、可留白。</p>
+  <p>這裡有一個實測到的硬限制：<strong>正式站的 <code>fx_rates</code> 目前只回溯到
+    2026-07-01</strong>（共 21 天；demo 有 2021 年起的回填）。所以「自動帶入當日匯率」
+    對早期日期會查不到，<b>手動輸入不是備案，是必要路徑</b>。</p>
+
+  <div class="lab">
+    <h3>實驗四：欄位何時出現、帶什麼值、查不到時怎麼降級</h3>
+    <div class="dsub">改變任一下拉選單即時重算。匯率表取自兩個實例的 <code>fx_rates</code>
+      唯讀查詢，不是虛構的資料。</div>
+    <div class="modes" id="lab3-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況<small>沒有取得成本欄位</small></button>
+      <button data-m="1" data-tone="good">提案<small>條件顯示 + 可降級</small></button>
+    </div>
+    <div class="ctrl">
+      <div><label>帳戶</label><select id="lab3-acct">
+        <option value="schwab">嘉信 Schwab（資金幣別 TWD）</option>
+        <option value="moomoo_my">Moomoo MY（資金幣別 MYR）</option>
+        <option value="tw_broker">台股券商（資金幣別 TWD）</option>
+      </select></div>
+      <div><label>入金幣別</label><select id="lab3-ccy">
+        <option value="USD">USD</option><option value="TWD">TWD</option>
+        <option value="MYR">MYR</option>
+      </select></div>
+      <div><label>日期</label><select id="lab3-date">
+        <option value="2026-01-05">2026-01-05（期初）</option>
+        <option value="2026-03-02">2026-03-02</option>
+        <option value="2026-06-01">2026-06-01</option>
+        <option value="2026-07-23">2026-07-23</option>
+      </select></div>
+      <div><label>匯率資料源</label><select id="lab3-src">
+        <option value="demo">demo（2021 起回填）</option>
+        <option value="prod">prod 現況（僅 2026-07-01 起）</option>
+      </select></div>
+      <div><label>金額</label><select id="lab3-amt">
+        <option value="100000">100,000</option><option value="50000">50,000</option>
+        <option value="10000">10,000</option>
+      </select></div>
+    </div>
+    <div class="readout">
+      <div class="ro" id="lab3-ro-a"><div class="k">這是外幣資金流嗎</div><div class="v">—</div></div>
+      <div class="ro" id="lab3-ro-b"><div class="k">取得成本欄位</div><div class="v">—</div></div>
+      <div class="ro" id="lab3-ro-c"><div class="k">自動帶入的參考值</div><div class="v">—</div></div>
+      <div class="ro" id="lab3-ro-d"><div class="k">寫入帳本的家幣成本</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab3-verdict">—</div>
+    <div class="note">把「匯率資料源」切到 <b>prod 現況</b>、日期選 <b>2026-01-05</b>，
+      就能看到查無匯率時的降級行為——這正是你的正式站今天的實際狀態。
+      預帶值一律標示為<b>參考值</b>：券商換匯的實際成交價不等於市場中價，
+      預帶得太安靜會讓錯的數字被默默接受。</div>
+  </div>
+</section>
+
+<section id="s6">
+  <h2><span class="n">06</span>邊界、例外與明確不做的事</h2>
+  <h3>必須放行的合法情形（收緊任何規則前先確認這些不被誤殺）</h3>
+  <div class="tw"><table>
+    <thead><tr><th>情形</th><th>正確行為</th></tr></thead>
+    <tbody>
+      <tr><td>本幣入金（幣別 = 資金幣別）</td><td>不出現取得成本欄位，行為與今天完全相同</td></tr>
+      <tr><td>外幣<b>出金</b>（WITHDRAW）</td><td>減少匯率池餘額；<b>不</b>認列已實現匯損益（見 N1）</td></tr>
+      <tr><td>外幣現金股利</td><td>維持現行處理（已計入池），本次不改</td></tr>
+      <tr><td>外幣 → 本幣回換</td><td>維持現行 realized FX 計算，以加權平均取得匯率為成本</td></tr>
+      <tr><td>取得成本留白</td><td>計入餘額，依覆蓋率<b>按比例</b>排除於兩條腿的基數之外，並標記缺口</td></tr>
+      <tr><td>該帳戶完全沒有換匯、只有外幣入金</td><td>加權平均由入金單獨決定；不得因「沒有 conversions」而回傳 None</td></tr>
+      <tr><td>完全沒有任何有成本的取得（<code>acq_with = 0</code>）</td>
+        <td><code>avg_rate</code> 維持 None，兩條腿皆 None；覆蓋率不套用（不得除以零）</td></tr>
+      <tr><td>完全沒有任何取得（分母為 0）</td><td>覆蓋率定義為 1，缺口 0（餘額本來就是 0）</td></tr>
+      <tr><td>股票的期初庫存 <code>opening_inventory</code></td><td>不受本次改動影響</td></tr>
+    </tbody></table></div>
+
+  <h3>必須明文記載的兩個限制</h3>
+  <div class="vs">
+    <div class="vsbox before"><h4>N1 · 外幣出金不認列已實現匯損益</h4>
+      <p>修法後外幣 WITHDRAW 會減少匯率池曝險，但 realized FX 只從
+        <code>fx_conversions</code> 的 foreign→home 產生。加權平均下這是自洽的
+        （平均匯率不因處分而變，剩餘曝險 × avg 仍成立），但
+        <b>若那筆提領實際上換回了本幣，正確登錄方式是一筆換匯紀錄，不是出金</b>。</p></div>
+    <div class="vsbox after"><h4>N2 · 補填成本會回頭重算歷史顯示值</h4>
+      <p>所有報表都從帳本重算（重算模式），不是存檔。所以補上 2026-01-05 的取得成本後，
+        <b>過去的已實現匯損益也會跟著重算</b>。這是設計意圖
+        （<code>original_cost</code> 不被覆寫、報表從帳本重建）。
+        demo 目前 <code>realized_fx = 0</code>（無回換），今天沒有實際影響。</p></div>
+  </div>
+
+  <h3>明確不做</h3>
+  <ul>
+    <li><b>不改</b> XIRR、總報酬、<code>unrealized_total</code> 的定義或數值——
+      本次只動換匯損益歸因與 <code>fx_unrealized</code>。</li>
+    <li><b>不回溯改寫</b>既有資料列。既有列 <code>acq_home_amount</code> 為 NULL，
+      匯率池數值與升級前<strong>完全相同</strong>（差別只在會被新警示標出來）。</li>
+    <li><b>不自動猜匯率</b>。查不到當日匯率就留白，不用前後日內插、不用當前 spot 代替。</li>
+    <li><b>不</b>引入任何「匯兌收益」加總項——不變式 6：換匯損益是歸因分解，永不加總。</li>
+    <li><b>不</b>做 FX 的分批成本（FIFO lots）。維持加權平均，與股票成本法一致。</li>
+    <li><b>不</b>加 <code>acq_source</code>（manual／spot）欄位。欄位值是使用者親眼看過才送出的，
+      多存一欄的效益不足以抵過複雜度——如日後有稽核需求再議。</li>
+    <li><b>不</b>動 <code>opening_inventory</code>（股票期初庫存）的任何邏輯。</li>
+  </ul>
+</section>
+
+<section id="s7">
+  <h2><span class="n">07</span>影響範圍與遷移</h2>
+  <div class="tw"><table>
+    <thead><tr><th>層</th><th>檔案</th><th>改動</th></tr></thead>
+    <tbody>
+      <tr><td>schema</td><td><code>data_ingestion/schema.py</code></td>
+        <td><code>cash_movements</code> 新增可空欄 <code>acq_home_amount TEXT</code>；冪等 migration</td></tr>
+      <tr><td>計算</td><td><code>forex/pools.py</code></td>
+        <td><code>foreign_cash_balance</code> 讀 movements；
+          <code>average_acquisition_rate</code> 納入有成本的資金流；新增 <code>covered_ratio</code></td></tr>
+      <tr><td>計算</td><td><code>forex/fx_pnl.py</code></td>
+        <td>兩條腿的基數同乘 <code>covered_ratio</code>；
+          <code>cash_basis_incomplete</code> → <code>fx_basis_gap</code>（成因），負值另立旗標</td></tr>
+      <tr><td>模型</td><td><code>forex/results.py</code></td>
+        <td><code>AccountFXResult</code> 新增 <code>covered_ratio</code> /
+          <code>fx_basis_gap</code> / <code>foreign_cash_negative</code></td></tr>
+      <tr><td>編排</td><td><code>portfolio/dashboard.py</code></td>
+        <td>把 <code>cash_movements</code> 傳進 <code>compute_fx_summary</code></td></tr>
+      <tr><td>API</td><td><code>api/routers/cash.py</code></td>
+        <td><code>MovementBody</code> 接受取得成本（匯率或金額擇一），驗證後存金額</td></tr>
+      <tr><td>前端</td><td><code>web/cash.js</code></td>
+        <td>條件顯示的取得成本欄 + 當日匯率預帶（標示參考值）+ 查無時留白</td></tr>
+      <tr><td>前端</td><td><code>web/app.js</code></td>
+        <td>面板顯示缺口金額與覆蓋率；改寫誤導的警示文案（涵蓋兩條腿）</td></tr>
+      <tr><td>測試</td><td><code>tests/forex/</code>、<code>tests/contract/</code>、
+        <code>tests/golden/dashboard_full.json</code>、<code>scripts/stress_audit/</code></td>
+        <td>新單元測試＋契約／黃金負載更新＋oracle 對齊</td></tr>
+    </tbody></table></div>
+
+  <h3>遷移策略</h3>
+  <pre><span class="cm"># 既有列一律 NULL —— 行為與升級前逐位相同（covered_ratio = 1）</span>
+ALTER TABLE cash_movements ADD COLUMN acq_home_amount TEXT;
+
+<span class="cm"># demo 的那筆期初資金，由 owner 在資金管理補上（不由程式代填）</span>
+<span class="cm">#   2026-01-05 · schwab · USD 100,000</span>
+<span class="cm">#   acq_home_amount = 3135870      (= 100,000 x 31.3587)</span>
+<span class="cm">#   同時把 kind 由 DEPOSIT 改為 OPENING（純標籤；實測不參與任何計算分支）</span></pre>
+  <p class="note">正式站今天 <code>cash_movements</code> 為 0 筆，遷移是純粹的加欄位，
+    沒有資料要轉換、沒有數字會變動。demo 站則會在補上取得成本後，
+    換匯損益面板由 +7,321 TWD 變成 +112,868 TWD。</p>
+</section>
+
+<section id="s8">
+  <h2><span class="n">08</span>驗收條件</h2>
+  <div class="tw"><table>
+    <thead><tr><th>#</th><th>可觀察的驗收條件</th><th>怎麼驗</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>所有外幣資金流都具備家幣成本時，<b>匯率池餘額 = 資金視角餘額</b>，
+        缺口為 0、覆蓋率為 1</td><td>pytest（forex 單元）＋ 本頁實驗一切到「提案」</td></tr>
+      <tr><td>2</td><td><b>F1</b>：帳本存的是家幣<b>金額</b>；面板顯示的取得匯率為
+        <code>金額 ÷ 外幣數</code> 讀取時計算，未落地任何四捨五入後的平均值</td>
+        <td>pytest ＋ schema 檢視</td></tr>
+      <tr><td>3</td><td><b>F2</b>：取得成本留白時採<b>比例法</b>；
+        任何餘額下「有基礎的基數」<b>都不為負</b>（含餘額 &lt; 無基礎取得額的情形）</td>
+        <td>pytest 邊界案例（餘額 0／50,000／200,000）＋ 本頁實驗二</td></tr>
+      <tr><td>4</td><td><b>F3</b>：覆蓋率 &lt; 1 時，<b>現金腿與股票腿同時</b>依覆蓋率縮放並標示</td>
+        <td>pytest（比對兩條腿的縮放）</td></tr>
+      <tr><td>5</td><td>池子為<b>正</b>但存在缺口時，<code>fx_basis_gap</code> 仍為 true
+        （回歸今天 00:37 的靜默案例）</td><td>pytest 回歸測試（以本頁狀態 B 的數字建 fixture）</td></tr>
+      <tr><td>6</td><td>幣別 = 資金幣別時不出現取得成本欄位，登錄行為與今天相同</td>
+        <td>Playwright e2e</td></tr>
+      <tr><td>7</td><td>查無當日匯率時欄位留白且<b>仍可送出</b>，不得填 0 或以 spot 代替</td>
+        <td>Playwright e2e（日期選 2026-01-05、資料源 prod）</td></tr>
+      <tr><td>8</td><td>既有列（<code>acq_home_amount</code> NULL）的匯率池數值與升級前<b>逐位相同</b></td>
+        <td>golden payload 差異只在新欄位</td></tr>
+      <tr><td>9</td><td>XIRR／總報酬／<code>unrealized_total</code> 不因本次改動變動</td>
+        <td><code>/stress-audit</code> fail=0 ＋ golden 比對</td></tr>
+      <tr><td>10</td><td>N1／N2 兩個限制寫入 <code>domain-ledger.md</code> 與面板說明</td>
+        <td>文件檢視</td></tr>
+      <tr><td>11</td><td>型別與風格 gate 全綠</td>
+        <td><code>mypy --strict</code>、<code>ruff</code>、完整 <code>pytest</code></td></tr>
+    </tbody></table></div>
+  <p class="note"><b>owner 已於 2026-07-30 確認 F1／F2／F3 修正，並裁決期初取得匯率為
+    31.3587（家幣成本 3,135,870 TWD）。本節即為驗收清單，實作開始。</b></p>
+</section>
+
+
+<section id="selfcheck">
+  <h2><span class="n">✓</span>自我校驗</h2>
+  <p class="lede">本頁任何「離線重算」的數字，都在這裡與<strong>真實引擎</strong>的輸出逐項比對。
+    這張表由頁面自己跑出來，不是抄的；有任何一項 FAIL，這份報告的結論就不該被採信。</p>
+  <div id="pd-selfcheck"></div>
+</section>
+
+<footer>
+  portfolio-dash · feature proposal · spec by demo · 2026-07-30 · 頁內 demo 於 iframe 執行真實機制，非模擬。
+</footer>
+</div>
+
+<script>
+/* ---- inlined from web/format.js: the APP's own exact Decimal-string formatter. A demo must format money the way the app does, or it is demonstrating something else. ---- */
+/* portfolio-dash — formatting helpers.
+   ALL number/date formatting lives here so the later Jinja2/backend
+   integration can swap these server-side cleanly.
+
+   EXACT DECIMAL FORMATTING (audit L5, 2026-07-26)
+   -----------------------------------------------
+   Every money value arrives from the API as a canonical Decimal STRING. These helpers used
+   to render it with `Number(v).toLocaleString(...)`, i.e. they round in binary float. That
+   is wrong in two ways that matter here:
+
+   1. A value already quantized by the backend must survive display BYTE-FOR-BYTE. Fees and
+      taxes are quantized by the fee engine using the ACCOUNT'S OWN rounding mode — TW fee
+      and 證交稅 are 無條件捨去 (ROUND_DOWN to integer NT$, 財政部 FE-D3: 群益 142.5 -> 142),
+      while US/MY components are ROUND_HALF_UP to the cent. The display layer must never
+      re-round those with a mode of its own; formatting at the same scale must be identity.
+      With exact string arithmetic it provably is.
+   2. For values that are NOT pre-quantized (unrealized P&L, market value, ratios), the
+      rounding must match what the backend would do — `Decimal.quantize(ROUND_HALF_UP)`.
+      Float rounding disagrees at the .xx5 boundary (`0.145` is stored as
+      0.1449999999999999900…, so float yields 0.14 where Decimal yields 0.15).
+
+   So the arithmetic below is done on the DIGIT STRING: split on the point, round half-up by
+   inspecting the first dropped digit, carry with a string increment. No float is involved
+   anywhere in the money path. `Number()` survives only as a fallback for a non-plain-decimal
+   input (scientific notation), which the wire never carries.
+
+   NOTE ON THE FLOOR RULE: this module deliberately does NOT implement 無條件捨去. Floor is a
+   property of the TW fee/tax ENGINE (`data_ingestion/fees.py`, driven by each rule set's
+   `rounding` field), not of presentation — those values reach the frontend already floored
+   to integer NT$, and formatting them at TWD's 0 dp reproduces them exactly. A display-side
+   floor would be wrong for every OTHER TWD amount (proceeds, P&L, market value), which the
+   backend quantizes ROUND_HALF_UP. */
+window.fmt = (function () {
+  const CCY_DP = { TWD: 0, USD: 2, MYR: 2 };
+  const NULL_GLYPH = '—'; // em-dash
+  const MINUS = '−';      // U+2212 minus sign
+  const PLAIN_DECIMAL = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
+
+  /* null/undefined only — deliberately NOT '' , so this refactor changes no caller's
+     behaviour (an empty string still falls through to the numeric fallback as before). */
+  function isNil(v) { return v === null || v === undefined; }
+
+  /** Increment a pure digit string by one, carrying left ("199" -> "200"). */
+  function _inc(digits) {
+    let i = digits.length - 1;
+    const out = digits.split('');
+    while (i >= 0) {
+      if (out[i] === '9') { out[i] = '0'; i -= 1; } else { out[i] = String(+out[i] + 1); break; }
+    }
+    return i < 0 ? '1' + out.join('') : out.join('');
+  }
+
+  /** Thousands separators on a pure integer-digit string. */
+  function _group(intDigits) {
+    return intDigits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  /** Sign of a plain decimal string: -1 / 0 / 1 (exact — no coercion). */
+  function _sign(s) {
+    if (!/[1-9]/.test(s)) return 0;          // all zeros (with or without a point)
+    return s.charAt(0) === '-' ? -1 : 1;
+  }
+
+  /** Absolute value of a plain decimal string (drops the sign character only). */
+  function _abs(s) { return s.replace(/^[+-]/, ''); }
+
+  /** Multiply a plain decimal string by 100 by SHIFTING the point (exact). */
+  function _x100(s) {
+    const sign = s.charAt(0) === '-' ? '-' : '';
+    let body = _abs(s);
+    let [i, f] = body.indexOf('.') === -1 ? [body, ''] : body.split('.');
+    while (f.length < 2) f += '0';
+    i = (i + f.slice(0, 2)).replace(/^0+(?=\d)/, '');
+    f = f.slice(2);
+    return sign + i + (f ? '.' + f : '');
+  }
+
+  /** Round a plain decimal string to `dp` places, HALF-UP, exactly. Returns
+      {sign, int, frac} with `int` ungrouped digits and `frac` exactly `dp` digits. */
+  function _round(s, dp) {
+    const neg = s.charAt(0) === '-';
+    const body = _abs(s);
+    let [i, f] = body.indexOf('.') === -1 ? [body, ''] : body.split('.');
+    if (i === '') i = '0';
+    if (f.length <= dp) {
+      while (f.length < dp) f += '0';
+    } else {
+      const keep = f.slice(0, dp);
+      const roundUp = f.charAt(dp) >= '5';
+      let joined = i + keep;
+      if (roundUp) joined = _inc(joined);
+      // the carry may have grown the integer part by one digit
+      const intLen = joined.length - dp;
+      i = joined.slice(0, intLen) || '0';
+      f = dp ? joined.slice(intLen) : '';
+    }
+    i = i.replace(/^0+(?=\d)/, '');
+    return { neg: neg, int: i, frac: f };
+  }
+
+  /** Plain number with thousands separators (exact; see the module note). */
+  function num(v, dp) {
+    if (isNil(v)) return NULL_GLYPH;
+    dp = dp === undefined ? 0 : dp;
+    const s = String(v).trim();
+    if (!PLAIN_DECIMAL.test(s)) {
+      // Not a plain decimal (e.g. scientific notation) — the wire never carries this, but
+      // degrade to the float path rather than rendering nothing.
+      const n = Number(v);
+      if (!isFinite(n)) return NULL_GLYPH;
+      return n.toLocaleString('en-US', {
+        minimumFractionDigits: dp, maximumFractionDigits: dp
+      });
+    }
+    const r = _round(s, dp);
+    const body = _group(r.int) + (dp ? '.' + r.frac : '');
+    // "-0" / "-0.00" is noise, not information — a rounded-away negative reads as zero.
+    if (r.neg && /[1-9]/.test(r.int + r.frac)) return '-' + body;
+    return body;
+  }
+
+  /** Amount in a given currency: TWD 0 dp, USD/MYR 2 dp. */
+  function money(v, ccy) {
+    if (isNil(v)) return NULL_GLYPH;
+    const dp = CCY_DP[ccy] !== undefined ? CCY_DP[ccy] : 0;
+    return num(v, dp);
+  }
+
+  /** Per-share price: MY quotes need 3 dp, others 2 dp. */
+  function price(v, ccy) {
+    if (isNil(v)) return NULL_GLYPH;
+    return num(v, ccy === 'MYR' ? 3 : 2);
+  }
+
+  /** Signed amount: explicit + for gains, U+2212 for losses. */
+  function signed(v, ccy) {
+    if (isNil(v)) return NULL_GLYPH;
+    const s = String(v).trim();
+    const sign = PLAIN_DECIMAL.test(s) ? _sign(s) : (Number(v) > 0 ? 1 : Number(v) < 0 ? -1 : 0);
+    const body = money(PLAIN_DECIMAL.test(s) ? _abs(s) : Math.abs(Number(v)), ccy);
+    if (sign > 0) return '+' + body;
+    if (sign < 0) return MINUS + body;
+    return body;
+  }
+
+  /** Signed plain number with fixed dp (for rates/deltas). */
+  function signedNum(v, dp) {
+    if (isNil(v)) return NULL_GLYPH;
+    const s = String(v).trim();
+    const sign = PLAIN_DECIMAL.test(s) ? _sign(s) : (Number(v) > 0 ? 1 : Number(v) < 0 ? -1 : 0);
+    const body = num(PLAIN_DECIMAL.test(s) ? _abs(s) : Math.abs(Number(v)), dp);
+    if (sign > 0) return '+' + body;
+    if (sign < 0) return MINUS + body;
+    return body;
+  }
+
+  /** Ratio -> percentage with 2 dp: 0.2147 -> "21.47%". */
+  function pct(v) {
+    if (isNil(v)) return NULL_GLYPH;
+    const s = String(v).trim();
+    if (!PLAIN_DECIMAL.test(s)) return (Number(v) * 100).toFixed(2) + '%';
+    return num(_x100(s), 2) + '%';
+  }
+
+  /** Signed percentage. */
+  function signedPct(v) {
+    if (isNil(v)) return NULL_GLYPH;
+    const s = String(v).trim();
+    if (!PLAIN_DECIMAL.test(s)) {
+      const n = Number(v);
+      const b = (Math.abs(n) * 100).toFixed(2) + '%';
+      return n > 0 ? '+' + b : n < 0 ? MINUS + b : b;
+    }
+    const sign = _sign(s);
+    const body = num(_x100(_abs(s)), 2) + '%';
+    if (sign > 0) return '+' + body;
+    if (sign < 0) return MINUS + body;
+    return body;
+  }
+
+  /** FX rate, 2–4 dp depending on magnitude. */
+  function rate(v) {
+    if (isNil(v)) return NULL_GLYPH;
+    return num(v, Number(v) < 10 ? 4 : 2);
+  }
+
+  /** ISO date/datetime -> YYYY-MM-DD. */
+  function date(iso) {
+    if (isNil(iso)) return NULL_GLYPH;
+    return String(iso).slice(0, 10);
+  }
+
+  /** ISO datetime -> YYYY-MM-DD HH:mm (string is already Asia/Taipei). */
+  function datetime(iso) {
+    if (isNil(iso)) return NULL_GLYPH;
+    const s = String(iso);
+    return s.slice(0, 10) + ' ' + s.slice(11, 16);
+  }
+
+  /** CSS class for P&L sign — Taiwan convention: red = gain, green = loss. */
+  function signClass(v) {
+    if (isNil(v)) return 'sign-nil';
+    const s = String(v).trim();
+    const sign = PLAIN_DECIMAL.test(s) ? _sign(s) : (Number(v) > 0 ? 1 : Number(v) < 0 ? -1 : 0);
+    if (sign > 0) return 'sign-up';
+    if (sign < 0) return 'sign-down';
+    return 'sign-flat';
+  }
+
+  /** Unified AI attribution line for every LLM-generated surface (2026-07-07):
+      "haiku-4.5 · token 1,234 · $0.1234". Segments degrade independently —
+      legacy rows without token counts omit the token segment; cost "0" still shows. */
+  function aiAttrib(model, tokensIn, tokensOut, costUsd) {
+    const parts = [];
+    if (model) parts.push(String(model));
+    const tokens = (Number(tokensIn) || 0) + (Number(tokensOut) || 0);
+    if (tokens > 0) parts.push('token ' + num(tokens, 0));
+    if (!isNil(costUsd)) parts.push('$' + num(costUsd, 4));
+    return parts.join(' · ');
+  }
+
+  return { num, money, price, signed, signedNum, pct, signedPct, rate, date, datetime,
+           signClass, aiAttrib, NULL_GLYPH };
+})();
+
+/* demo-cycle report kit — the interactive-demo harness.
+ *
+ * Every claim in a demo-cycle report is either MEASURED in front of the reader or
+ * CHECKED against the real engine in front of the reader. This file is what makes both
+ * cheap enough that there is no excuse to write prose instead.
+ *
+ *   PD.sandbox(frame, {css, html, probe})  live iframe running the REAL cascade;
+ *                                          `probe` is measured inside and posted back
+ *   PD.modes(el, cb)                       before/after switch
+ *   PD.sizer(range, frame, label)          viewport-width slider for a sandbox
+ *   PD.check(name, pass, detail)           self-check registry -> window.__demoCycleChecks
+ *   PD.checkPanel(el)                      renders the self-check strip
+ *   PD.ro(el, value, state)                write one readout tile
+ *   PD.verdict(el, state, html)            write the verdict line
+ *
+ * Money rule (CLAUDE.md invariant 3): never compute currency with JS floats. Either
+ * print a Decimal STRING the backend produced, or — if a lab must recompute — do it in
+ * integer minor units and PD.check() the result against a real-engine figure.
+ */
+window.PD = (function () {
+  'use strict';
+
+  const $ = (s, root) => (root || document).querySelector(s);
+  const $$ = (s, root) => Array.from((root || document).querySelectorAll(s));
+
+  /* ---------------------------------------------------------------- sandbox */
+
+  const inbox = {};
+  let seq = 0;
+  window.addEventListener('message', function (e) {
+    const d = e.data;
+    if (d && d.__pd && inbox[d.__pd]) inbox[d.__pd](d);
+  });
+
+  /**
+   * Render `html` + `css` inside `frame` as a real document, and evaluate `probe`
+   * (a JS object-literal expression) inside it on load/resize/mutation, posting the
+   * result to `onData`. The point is that the browser resolves the cascade, not us.
+   */
+  function sandbox(frame, opts) {
+    const id = opts.id || ('pd' + (++seq));
+    if (opts.onData) inbox[id] = opts.onData;
+    const base = 'html,body{margin:0;background:#0e1116;color:#e6e9ee;font-size:13px;' +
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","PingFang TC",sans-serif}';
+    const probe = opts.probe
+      ? '(function(){function m(){try{var d=' + opts.probe +
+        ';d.__pd=' + JSON.stringify(id) + ';parent.postMessage(d,"*")}catch(e){}}' +
+        'addEventListener("resize",m);new ResizeObserver(m).observe(document.body);' +
+        'requestAnimationFrame(function(){m();setTimeout(m,60)})})()'
+      : '';
+    frame.srcdoc = '<!doctype html><meta charset="utf-8"><style>' + base +
+      (opts.css || '') + '</style>' + (opts.html || '') +
+      (probe ? '<scr' + 'ipt>' + probe + '</scr' + 'ipt>' : '');
+    return id;
+  }
+
+  /* ------------------------------------------------------------ mode switch */
+
+  /** Wire a `.modes` button row. `cb(mode)` fires on click and once immediately. */
+  function modes(el, cb) {
+    el.addEventListener('click', function (e) {
+      const b = e.target.closest('button');
+      if (!b) return;
+      const m = +b.dataset.m;
+      $$('button', el).forEach(function (x) {
+        x.className = (x === b) ? ('on ' + (x.dataset.tone || '')) : '';
+      });
+      cb(m);
+    });
+    const first = $('button', el);
+    if (first) cb(+first.dataset.m || 0);
+  }
+
+  /** Width slider driving a sandbox frame. Reports the width the DEMO runs at. */
+  function sizer(range, frame, label) {
+    function apply() {
+      frame.style.width = range.value + 'px';
+      if (label) label.textContent = range.value;
+    }
+    range.addEventListener('input', apply);
+    apply();
+  }
+
+  /* ------------------------------------------------------------- readouts */
+
+  function ro(el, value, state) {
+    if (!el) return;
+    const v = el.classList.contains('v') ? el : $('.v', el);
+    if (v) v.textContent = value;
+    const tile = el.closest ? (el.closest('.ro') || el) : el;
+    if (state) tile.className = 'ro ' + state;
+  }
+
+  function verdict(el, state, html) {
+    if (!el) return;
+    el.className = 'verdict' + (state ? ' ' + state : '');
+    el.innerHTML = html;
+  }
+
+  /* ----------------------------------------------------------- self-checks */
+
+  const checks = [];
+  window.__demoCycleChecks = checks;
+
+  /**
+   * Record a self-check. Use it whenever a lab reimplements app logic offline:
+   * the expected value must come from the REAL engine (an /api response, a pytest
+   * fixture, a stress-audit oracle line), pasted in as a constant.
+   * verify_report.py fails the report if any check is false.
+   */
+  function check(name, pass, detail) {
+    checks.push({ name: name, pass: !!pass, detail: detail == null ? '' : String(detail) });
+    if (checkPanelEl) renderChecks();
+    return !!pass;
+  }
+
+  /** Convenience: assert an offline computation equals the real engine's string. */
+  function checkEq(name, actual, expected, detail) {
+    const a = String(actual), e = String(expected);
+    return check(name, a === e, (detail ? detail + ' — ' : '') + 'got ' + a + ', engine says ' + e);
+  }
+
+  let checkPanelEl = null;
+  function checkPanel(el) {
+    checkPanelEl = el;
+    renderChecks();
+  }
+  function renderChecks() {
+    const pass = checks.filter(c => c.pass).length;
+    const rows = checks.map(c =>
+      '<tr><td>' + (c.pass ? '<span class="pill pass">PASS</span>' : '<span class="pill rej">FAIL</span>') +
+      '</td><td>' + esc(c.name) + '</td><td class="dim">' + esc(c.detail) + '</td></tr>').join('');
+    checkPanelEl.innerHTML =
+      '<div class="hd"><b>自我校驗 — 本頁離線重算 vs 真實引擎</b>' +
+      '<span class="sum">' + pass + '/' + checks.length + ' pass</span></div>' +
+      '<div class="tw"><table><thead><tr><th>結果</th><th>檢查</th><th>細節</th></tr></thead>' +
+      '<tbody>' + (rows || '<tr><td colspan="3" class="dim">no checks registered</td></tr>') +
+      '</tbody></table></div>';
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  /* --------------------------------------------------------------- numbers */
+
+  /** Thousands separators for a Decimal STRING, without ever touching Number. */
+  function group(decStr) {
+    const s = String(decStr).trim();
+    const m = /^(-?)(\d+)(\.\d+)?$/.exec(s);
+    if (!m) return s;
+    return m[1] + m[2].replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (m[3] || '');
+  }
+
+  /* ------------------------------------------------------------------ misc */
+
+  // Sticky-TOC scroll spy: no dependency, keeps a long report navigable.
+  function tocSpy() {
+    const links = $$('.toc a');
+    if (!links.length) return;
+    const map = links.map(a => ({ a: a, el: $(a.getAttribute('href')) })).filter(x => x.el);
+    function upd() {
+      let cur = map[0];
+      for (const m of map) if (m.el.getBoundingClientRect().top < 90) cur = m;
+      map.forEach(m => m.a.style.color = (m === cur ? 'var(--accent)' : ''));
+    }
+    addEventListener('scroll', upd, { passive: true });
+    upd();
+  }
+  if (document.readyState !== 'loading') tocSpy();
+  else addEventListener('DOMContentLoaded', tocSpy);
+
+  return { $: $, $$: $$, sandbox, modes, sizer, ro, verdict, check, checkEq, checkPanel,
+           group, esc };
+})();
+
+</script>
+<script>
+/* =============================================================================
+ * 外幣期初資金的成本基礎 — 規格 demo
+ *
+ * 本頁所有數字都是在你的瀏覽器裡「當場算出來的」，用的是 BigInt 定點運算
+ * （CLAUDE.md 不變式 3：金額永不經過 JS float），資料則是<測試站>實例
+ * 於 2026-07-30T00:37:55+08:00 的真實帳本列（唯讀取自 /api/cash/statement）。
+ * 「現況」模式的每一個結果，都在頁尾與 /api/dashboard 的引擎輸出逐項比對。
+ * ========================================================================== */
+
+/* ---------------- 精確十進位（BigInt 定點，scale = 20） ---------------- */
+var SC = 20, ONE = 100000000000000000000n;
+
+function dec(s) {
+  s = String(s).trim();
+  var neg = s.charAt(0) === '-';
+  if (neg || s.charAt(0) === '+') s = s.slice(1);
+  var p = s.split('.'), i = p[0] || '0';
+  var f = (p[1] || '') + '00000000000000000000';
+  var v = BigInt(i) * ONE + BigInt(f.slice(0, SC));
+  return neg ? -v : v;
+}
+function mul(a, b) { return a * b / ONE; }
+function dv(a, b) { return a * ONE / b; }
+/** 四捨五入（half away from zero，與 Decimal ROUND_HALF_UP 同義）到 dp 位。 */
+function fixed(x, dp) {
+  var neg = x < 0n, v = neg ? -x : x;
+  var p = 10n ** BigInt(SC - dp), q = v / p, r = v % p;
+  if (r * 2n >= p) q += 1n;
+  var s = q.toString();
+  while (s.length <= dp) s = '0' + s;
+  var out = dp ? s.slice(0, s.length - dp) + '.' + s.slice(s.length - dp) : s;
+  return (neg && q !== 0n ? '-' : '') + out;
+}
+/** 把引擎回傳的高精度 Decimal 字串收斂到 dp 位，全程字串／整數運算。 */
+function rnd(str, dp) { return fixed(dec(str), dp); }
+
+/* ---------------- 帳本：嘉信 Schwab 的 USD 池，22 列真實資料 ---------------- */
+/* [日期, 類型, USD 金額, fx_in 的 TWD 對價 / 其他為代號] */
+var ROWS = [
+  ['2026-01-05', 'deposit', '100000', '期初資金'],
+  ['2026-01-12', 'fx_in', '6875', '220000'],
+  ['2026-01-15', 'buy', '-6750', 'AAPL'],
+  ['2026-01-15', 'buy', '-4000.00', 'MSFT'],
+  ['2026-01-15', 'buy', '-4000.00', 'MSFT'],
+  ['2026-02-20', 'buy', '-2060.00', 'MSFT'],
+  ['2026-03-01', 'buy', '-1250.00', 'TSLA'],
+  ['2026-03-03', 'buy', '-2800', 'NVDA'],
+  ['2026-03-20', 'sell', '1299.96', 'TSLA'],
+  ['2026-04-01', 'buy', '-720.00', 'TSLA'],
+  ['2026-05-15', 'sell', '1659.95', 'MSFT'],
+  ['2026-07-02', 'fx_in', '2000', '64000'],
+  ['2026-07-03', 'fx_in', '1000', '32000'],
+  ['2026-07-03', 'fx_in', '1000', '32000'],
+  ['2026-07-19', 'fx_in', '6330', '201000'],
+  ['2026-07-19', 'fx_in', '3088.88', '100000'],
+  ['2026-07-20', 'fx_in', '168', '5000'],
+  ['2026-07-21', 'fx_in', '21474.11', '695000'],
+  ['2026-07-21', 'fx_in', '15449.00', '500000'],
+  ['2026-07-23', 'buy', '-6765', 'AAPL'],
+  ['2026-07-23', 'buy', '-36600', 'TSLA'],
+  ['2026-07-30', 'fx_in', '6188.00', '200000']
+];
+var LAST = '2026-07-30', LAST_F = dec('6188.00'), LAST_H = dec('200000');
+
+/* 引擎輸出（/api/dashboard → fx.by_account.schwab，原字串未經加工） */
+var ENG = {
+  avg_rate: '32.23066903098312663915917751',
+  current_spot: '32.320999',
+  foreign_cash: '1587.90',
+  foreign_stock_value: '79462.19545664206642066420664',
+  unrealized_fx_cash: '143.4349578018932096791420319',
+  unrealized_fx_stocks: '7177.817653611213001018425768',
+  unrealized_fx_total: '7321.252611413106210697567800',
+  cash_basis_incomplete: false,
+  funds_view: '101587.90'          /* /api/cash → balances[schwab/USD].amount */
+};
+var SPOT = dec(ENG.current_spot), STOCK = dec(ENG.foreign_stock_value);
+var OPEN_AMT = dec('100000'), OPEN_RATE = dec('31.3587');   /* 2026-01-05 收盤 USD/TWD */
+
+/* ---------------- 匯率池重算：現況公式 vs 提案公式 ----------------
+ * 現況 = portfolio_dash/forex/pools.py::foreign_cash_balance
+ *        只認 換匯 + 外幣買賣 + 外幣現金股利，完全不讀 cash_movements。
+ * 提案 = 同上，再加「具備取得匯率的外幣資金流」。
+ */
+function calc(withOpening, lastF) {
+  var convF = 0n, convH = 0n, cash = 0n, dep = 0n;
+  for (var i = 0; i < ROWS.length; i++) {
+    var r = ROWS[i], d = dec(r[2]);
+    if (r[1] === 'fx_in') {
+      if (r[0] === LAST) {
+        var f = (lastF === null || lastF === undefined) ? LAST_F : lastF;
+        convF += f; convH += f * LAST_H / LAST_F; cash += f;   /* 維持該列的隱含匯率 */
+      } else { convF += d; convH += dec(r[3]); cash += d; }
+    } else if (r[1] === 'buy' || r[1] === 'sell') { cash += d; }
+    else { dep += d; }
+  }
+  var pool = cash, funds = cash + dep;
+  if (withOpening) { pool = funds; convF += OPEN_AMT; convH += mul(OPEN_AMT, OPEN_RATE); }
+  var avg = dv(convH, convF), delta = SPOT - avg;
+  var uc = mul(pool, delta), us = mul(STOCK, delta);
+  return { avg: avg, delta: delta, pool: pool, funds: funds, gap: funds - pool,
+           uc: uc, us: us, ut: uc + us };
+}
+
+/* =========================== 實驗一：匯率池重算 =========================== */
+(function () {
+  var mode = 0, slider = PD.$('#lab1-range'), out = PD.$('#lab1-sv');
+  function render() {
+    var f = dec(slider.value), c = calc(mode === 1, f);
+    out.textContent = PD.group(fixed(f, 2));
+    /* 4 dp（不是 app 面板的 2 dp）—— 本報告的重點之一就是這個匯率被拉高了 0.53，
+       2 dp 會把差異藏起來。值仍走 app 自己的 fmt.num，只是指定小數位。 */
+    PD.ro(PD.$('#lab1-ro-a'), fmt.num(fixed(c.avg, 4), 4), mode === 1 ? 'good' : 'bad');
+    PD.ro(PD.$('#lab1-ro-b'), fmt.money(fixed(c.pool, 2), 'USD'),
+          c.gap === 0n ? 'good' : 'bad');
+    PD.ro(PD.$('#lab1-ro-c'), fmt.money(fixed(c.funds, 2), 'USD'), 'good');
+    PD.ro(PD.$('#lab1-ro-d'), fmt.money(fixed(c.gap, 2), 'USD'),
+          c.gap === 0n ? 'good' : 'bad');
+    PD.ro(PD.$('#lab1-ro-e'), fmt.signed(fixed(c.ut, 2), 'TWD'), mode === 1 ? 'good' : 'bad');
+    if (mode === 0) {
+      PD.verdict(PD.$('#lab1-verdict'), 'bad',
+        '<b>現況：匯率池少了 ' + fmt.money(fixed(c.gap, 2), 'USD') + ' USD。</b>' +
+        '平均取得匯率被推到 ' + fmt.num(fixed(c.avg, 4), 4) + '（期初那筆較低的取得成本沒有進來），' +
+        '所以連「未實現匯損益（股票）」都一起失真——錯的不只是現金那一行。');
+    } else {
+      PD.verdict(PD.$('#lab1-verdict'), 'good',
+        '<b>提案：匯率池 = 資金視角 = ' + fmt.money(fixed(c.pool, 2), 'USD') + ' USD，誤差歸零。</b>' +
+        '平均取得匯率降到 ' + fmt.num(fixed(c.avg, 4), 4) + '，未實現匯損益（合計）為 ' +
+        fmt.signed(fixed(c.ut, 2), 'TWD') + ' TWD。兩個視角從此可以互相對帳。');
+    }
+  }
+  slider.addEventListener('input', render);
+  PD.modes(PD.$('#lab1-modes'), function (m) { mode = m; render(); });
+})();
+
+/* ==================== 實驗二：警示是症狀偵測還是成因偵測 ==================== */
+(function () {
+  var mode = 0, slider = PD.$('#lab2-range'), out = PD.$('#lab2-sv');
+  var frame = PD.$('#lab2-frame'), cur = null;
+
+  var CSS = '.p{padding:12px 14px;font-size:12.5px}' +
+    '.h{font-weight:700;font-size:13px;margin-bottom:9px;color:#e6e9ee}' +
+    '.r{display:flex;justify-content:space-between;gap:10px;padding:5px 0;' +
+    'border-bottom:1px dashed #262e39;color:#aab3c0}' +
+    '.r b{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:500;color:#e6e9ee}' +
+    '.up{color:#e2564d}.dn{color:#3fa66a}' +
+    '#w{margin-top:11px;padding:9px 11px;border-left:3px solid #c8952a;' +
+    'background:#c8952a1f;color:#d8c48d;font-size:11.5px;line-height:1.65}';
+
+  function panel(c, warn) {
+    var h = '<div class="p"><div class="h">換匯損益 · 嘉信 Schwab　USD → TWD</div>' +
+      row('平均取得匯率 → 現時匯率',
+          fmt.rate(fixed(c.avg, 6)) + ' → ' + fmt.rate(ENG.current_spot), '') +
+      row('外幣現金', fmt.money(fixed(c.pool, 2), 'USD') + ' USD', '', 'c') +
+      row('外幣股票市值', fmt.money(ENG.foreign_stock_value, 'USD') + ' USD', '') +
+      row('未實現匯損益（現金）', fmt.signed(fixed(c.uc, 2), 'TWD') + ' TWD',
+          c.uc < 0n ? 'dn' : 'up') +
+      row('未實現匯損益（股票）', fmt.signed(fixed(c.us, 2), 'TWD') + ' TWD',
+          c.us < 0n ? 'dn' : 'up') +
+      row('未實現匯損益（合計）', fmt.signed(fixed(c.ut, 2), 'TWD') + ' TWD',
+          c.ut < 0n ? 'dn' : 'up');
+    if (warn) h += '<div id="w">' + warn + '</div>';
+    return h + '</div>';
+  }
+  function row(k, v, cls, id) {
+    return '<div class="r"><span>' + k + '</span><b' + (id ? ' id="' + id + '"' : '') +
+           (cls ? ' class="' + cls + '"' : '') + '>' + v + '</b></div>';
+  }
+
+  function render() {
+    var f = dec(slider.value);
+    out.textContent = PD.group(fixed(f, 2));
+    cur = calc(false, f);
+    var warn = null;
+    if (mode === 0) {
+      /* 現況：AccountFXResult.cash_basis_incomplete = foreign_cash < 0 —— 只看症狀 */
+      if (cur.pool < 0n) {
+        warn = '⚠ 外幣現金為負 — 此帳戶的外幣入金可能未完整登錄；未實現匯損益（現金）' +
+               '是以該負值計算，歸因僅供參考。補登入金／換匯紀錄後此提示會自動消失。';
+      }
+    } else {
+      /* 提案：看成因 —— 有外幣資金流未具取得成本（實作為 covered_ratio < 1；
+         規格原本寫的 fx_basis_gap ≠ 0 在池子被買光時也會歸零，見 §04 的實作修正）。 */
+      if (cur.gap !== 0n) {
+        warn = '⚠ 匯率成本基礎不完整 — 本帳戶有 ' + fmt.money(fixed(cur.gap, 2), 'USD') +
+               ' USD 的外幣資金流沒有取得成本，未納入匯率池；帳上實際餘額為 ' +
+               fmt.money(fixed(cur.funds, 2), 'USD') + ' USD。上方的「平均取得匯率」' +
+               '本身即以不完整的母體計算，因此<b>現金與股票兩條腿都受影響</b>，' +
+               '不只是現金。請至資金管理補上取得成本。';
+      }
+    }
+    PD.sandbox(frame, { id: 'lab2', css: CSS, html: panel(cur, warn), onData: onData,
+      probe: '{warn:document.getElementById("w")?1:0,' +
+             'cash:(document.getElementById("c")||{}).textContent||"",' +
+             'rows:document.querySelectorAll(".r").length}' });
+  }
+
+  function onData(d) {
+    var shown = d.warn === 1;
+    PD.ro(PD.$('#lab2-ro-a'), d.cash + ' USD', cur.pool < 0n ? 'bad' : '');
+    PD.ro(PD.$('#lab2-ro-b'), shown ? '有出現' : '沒有出現', shown ? 'good' : 'bad');
+    PD.ro(PD.$('#lab2-ro-c'), fmt.money(fixed(cur.gap, 2), 'USD') + ' USD',
+          cur.gap === 0n ? 'good' : 'bad');
+    if (mode === 0) {
+      PD.verdict(PD.$('#lab2-verdict'), shown ? '' : 'bad', shown
+        ? '<b>現況：此刻池子是負的，所以警示有出現。</b>但把滑桿往右拉過 ' +
+          '4,600.10 USD，池子轉正、警示立刻消失——而右邊那個「誤差」讀數' +
+          '完全沒有變。警示追的是症狀，不是成因。'
+        : '<b>現況：警示消失了，可是誤差仍然是 ' + fmt.money(fixed(cur.gap, 2), 'USD') +
+          ' USD。</b>畫面上沒有任何提示，數字卻是錯的——這正是 2026-07-30 00:37 ' +
+          '線上實例的真實狀態（那筆 +6,188 USD 換匯把池子推正了）。');
+    } else {
+      PD.verdict(PD.$('#lab2-verdict'), 'good', shown
+        ? '<b>提案：不論池子正負，只要有「沒有取得匯率的外幣資金流」就一直警示，' +
+          '而且直接說出缺口金額與正確餘額。</b>滑桿怎麼拉都不會靜默。'
+        : '<b>提案：此情境下沒有缺口，因此不警示——這是正確的沉默。</b>');
+    }
+  }
+
+  slider.addEventListener('input', render);
+  PD.modes(PD.$('#lab2-modes'), function (m) { mode = m; render(); });
+})();
+
+/* ============ 實驗二（F2）：相減法 vs 比例法，流出從哪個桶扣 ============
+ * 情境：期初那 100,000 USD 沒有填成本。有基礎的取得額只有換匯的 63,572.99，
+ * 家幣成本 2,049,000 TWD。相減法在餘額跌破 100,000 時會給出負基數——
+ * 也就是這次修法要根除的那個反號假數字，從另一個入口長回來。
+ */
+(function () {
+  var mode = 0, slider = PD.$('#lab4-range'), out = PD.$('#lab4-sv');
+  var A_WITH = dec('63572.99'), H_WITH = dec('2049000'), A_NONE = dec('100000');
+  var AVG = dv(H_WITH, A_WITH), DELTA = SPOT - AVG;
+  var RATIO = dv(A_WITH, A_WITH + A_NONE);
+
+  function render() {
+    var B = dec(slider.value);
+    out.textContent = PD.group(fixed(B, 2));
+    var wb = (mode === 0) ? (B - A_NONE) : mul(B, RATIO);
+    var uc = mul(wb, DELTA), neg = wb < 0n;
+    PD.ro(PD.$('#lab4-ro-a'), fmt.money(fixed(B, 2), 'USD') + ' USD', 'good');
+    PD.ro(PD.$('#lab4-ro-b'), fmt.money(fixed(wb, 2), 'USD') + ' USD', neg ? 'bad' : 'good');
+    PD.ro(PD.$('#lab4-ro-c'), fmt.signed(fixed(uc, 2), 'TWD') + ' TWD', neg ? 'bad' : 'good');
+    PD.ro(PD.$('#lab4-ro-d'), neg ? '是 — 反號假數字回來了' : '否', neg ? 'bad' : 'good');
+    if (mode === 0) {
+      PD.verdict(PD.$('#lab4-verdict'), neg ? 'bad' : '', neg
+        ? '<b>相減法給出負基數 ' + fmt.money(fixed(wb, 2), 'USD') + ' USD。</b>' +
+          '帳上明明有 ' + fmt.money(fixed(B, 2), 'USD') + ' USD，卻用一個負數去乘匯差——' +
+          '這正是本次修法要消滅的那個錯誤，只是換了個入口。'
+        : '<b>此刻餘額高於無基礎金額，相減法碰巧是正的。</b>把滑桿拉到 100,000 以下，' +
+          '它立刻翻負——一個公式的正確性取決於餘額大小，而不是取決於帳務邏輯，就是錯的公式。');
+    } else {
+      PD.verdict(PD.$('#lab4-verdict'), 'good',
+        '<b>比例法：覆蓋率 ' + fmt.num(fixed(mul(RATIO, dec('100')), 2), 2) +
+        '%，基數 = 餘額 × 覆蓋率 = ' + fmt.money(fixed(wb, 2), 'USD') + ' USD。</b>' +
+        '現金是可替代物，流出按比例扣，任何餘額下都不會為負。' +
+        '若期初那筆補上成本，覆蓋率變 100%，這條路徑就完全不會啟動。');
+    }
+  }
+  slider.addEventListener('input', render);
+  PD.modes(PD.$('#lab4-modes'), function (m) { mode = m; render(); });
+})();
+
+/* ==================== 實驗四：登錄時的取得成本與降級路徑 ==================== */
+(function () {
+  var mode = 0;
+  var ACCT = { schwab: { name: '嘉信 Schwab', home: 'TWD' },
+               moomoo_my: { name: 'Moomoo MY', home: 'MYR' },
+               tw_broker: { name: '台股券商', home: 'TWD' } };
+  /* 取自兩個實例的 fx_rates（唯讀查詢）。prod 目前只有 2026-07-01 之後的資料。 */
+  var RATES = {
+    'USD/TWD': { '2026-01-05': '31.358700', '2026-02-02': '31.583000',
+                 '2026-03-02': '31.375', '2026-04-01': '31.937901',
+                 '2026-05-01': '31.569000', '2026-06-01': '31.412901',
+                 '2026-07-01': '31.834400', '2026-07-23': '32.320999' },
+    'USD/MYR': { '2026-01-05': '4.051500', '2026-02-02': '3.939500',
+                 '2026-03-02': '3.888800', '2026-04-01': '4.046500',
+                 '2026-05-01': '3.967500', '2026-06-01': '3.968000',
+                 '2026-07-01': '4.082200', '2026-07-23': '4.087000' }
+  };
+  var PROD_FROM = '2026-07-01';   /* 實測：prod fx_rates 最早 2026-07-01（共 21 天） */
+
+  var els = ['acct', 'ccy', 'date', 'src', 'amt'].map(function (k) {
+    return PD.$('#lab3-' + k);
+  });
+
+  function render() {
+    var acct = ACCT[els[0].value], ccy = els[1].value, day = els[2].value;
+    var prodOnly = els[3].value === 'prod', amt = els[4].value || '0';
+    var foreign = ccy !== acct.home;
+    var pair = ccy + '/' + acct.home;
+    var have = foreign && RATES[pair] && RATES[pair][day];
+    if (prodOnly && day < PROD_FROM) have = null;
+
+    var field, rate, into;
+    if (mode === 0) {
+      field = '不存在';
+      rate = '—（現況沒有這個欄位）';
+      into = foreign ? '0（外幣資金流完全不進池）' : '不適用（本幣）';
+    } else if (!foreign) {
+      field = '不出現（本幣入金）';
+      rate = '不適用';
+      into = '不適用——本幣資金流本來就不是匯率曝險';
+    } else {
+      field = '出現';
+      rate = have ? ('參考值 ' + fmt.rate(have) + '（' + day + ' 收盤，可改）')
+                  : '查無 ' + day + ' 的 ' + pair + ' 匯率 → 欄位留白，請手動輸入';
+      /* F1：帳本存的是家幣金額，不是匯率；顯示用的匯率一律讀取時再除回來。 */
+      into = have
+        ? fmt.money(fixed(mul(dec(amt), dec(have)), 2), acct.home) + ' ' + acct.home +
+          '（= ' + PD.group(amt) + ' × ' + fmt.rate(have) + '，存金額不存匯率）'
+        : '若留白：計入餘額，依覆蓋率按比例排除於兩條腿之外，並標記缺口';
+    }
+    PD.ro(PD.$('#lab3-ro-a'), foreign ? '是（' + ccy + ' ≠ 資金幣別 ' + acct.home + '）'
+                                      : '否（' + ccy + ' = 資金幣別）', foreign ? '' : 'good');
+    PD.ro(PD.$('#lab3-ro-b'), field, mode === 0 && foreign ? 'bad' : 'good');
+    PD.ro(PD.$('#lab3-ro-c'), rate, (mode === 1 && foreign && !have) ? 'bad' : '');
+    PD.ro(PD.$('#lab3-ro-d'), into, mode === 0 && foreign ? 'bad' : 'good');
+
+    if (mode === 0) {
+      PD.verdict(PD.$('#lab3-verdict'), foreign ? 'bad' : '', foreign
+        ? '<b>現況：登錄一筆外幣入金，系統不會問你取得匯率，也沒有地方能記。</b>' +
+          '這筆錢因此永遠進不了匯率池——不是使用者忘了填，是根本沒有欄位可填。'
+        : '<b>現況：本幣入金沒有問題。</b>把幣別改成該帳戶的外幣，缺口才會出現。');
+    } else {
+      PD.verdict(PD.$('#lab3-verdict'), have || !foreign ? 'good' : '', !foreign
+        ? '<b>提案：本幣入金維持原樣，不多問一個欄位。</b>'
+        : (have
+          ? '<b>提案：欄位只在幣別 ≠ 資金幣別時出現，並預帶當日匯率，你可以改。</b>' +
+            '確認後這筆錢就帶著成本基礎進入匯率池。'
+          : '<b>提案：查無當日匯率時不猜、不填 0，欄位留白讓你手動輸入。</b>' +
+            '留白也可以送出——金額照樣計入餘額，只是標記為「無成本基礎」並排除於' +
+            '匯損益之外。正式站的 fx_rates 目前只回溯到 ' + PROD_FROM +
+            '，所以這條降級路徑是必要的，不是防禦性設計。'));
+    }
+  }
+  els.forEach(function (e) { e.addEventListener('input', render); });
+  PD.modes(PD.$('#lab3-modes'), function (m) { mode = m; render(); });
+})();
+
+/* ======================= 自我校驗：離線重算 vs 真實引擎 ======================= */
+var CUR = calc(false, null), PROP = calc(true, null), SHOT = calc(false, 0n);
+
+PD.checkEq('現況・匯率池外幣現金', fixed(CUR.pool, 2), rnd(ENG.foreign_cash, 2),
+           '/api/dashboard → fx.by_account.schwab.foreign_cash');
+PD.checkEq('現況・平均取得匯率（8 dp）', fixed(CUR.avg, 8), rnd(ENG.avg_rate, 8),
+           '引擎原值 ' + ENG.avg_rate);
+PD.checkEq('現況・未實現匯損益（現金）', fixed(CUR.uc, 2), rnd(ENG.unrealized_fx_cash, 2),
+           '引擎原值 ' + ENG.unrealized_fx_cash);
+PD.checkEq('現況・未實現匯損益（股票）', fixed(CUR.us, 2), rnd(ENG.unrealized_fx_stocks, 2),
+           '引擎原值 ' + ENG.unrealized_fx_stocks);
+PD.checkEq('現況・未實現匯損益（合計）', fixed(CUR.ut, 2), rnd(ENG.unrealized_fx_total, 2),
+           '引擎原值 ' + ENG.unrealized_fx_total);
+PD.checkEq('提案・匯率池 = 資金視角餘額', fixed(PROP.pool, 2), rnd(ENG.funds_view, 2),
+           '跨端點對帳：/api/cash → balances[schwab/USD].amount。兩個視角相等，' +
+           '正是本提案要達成的結果');
+PD.checkEq('截圖當下（扣掉 2026-07-30 那筆換匯）的匯率池', fixed(SHOT.pool, 2), '-4600.10',
+           '引擎值來自 owner 於 2026-07-30 00:04 的畫面截圖，並由 /api/cash/statement ' +
+           '的帳本列重算複驗');
+PD.check('現況旗標 cash_basis_incomplete 與池子正負一致',
+         (CUR.pool < 0n) === ENG.cash_basis_incomplete,
+         '池子 ' + fixed(CUR.pool, 2) + ' → 旗標應為 ' + (CUR.pool < 0n) +
+         '，引擎回報 ' + ENG.cash_basis_incomplete + '（＝警示此刻不會顯示）');
+PD.checkEq('金額格式化走 app 自己的 web/format.js', fmt.money('101587.90', 'USD'),
+           '101,587.90', 'Decimal 字串進、字串出，全程未經 JS float');
+
+/* F2 的兩個性質檢查（提案規則的性質，非與引擎比對——提案尚未實作） */
+(function () {
+  var A_WITH = dec('63572.99'), A_NONE = dec('100000'), B = dec('50000');
+  var ratio = dv(A_WITH, A_WITH + A_NONE);
+  PD.check('F2・比例法在餘額 50,000（低於無基礎額）仍不為負', mul(B, ratio) >= 0n,
+           '比例法基數 = ' + fixed(mul(B, ratio), 2) + ' USD');
+  PD.check('F2・相減法在同一情境確實翻負（所以不採用）', (B - A_NONE) < 0n,
+           '相減法基數 = ' + fixed(B - A_NONE, 2) + ' USD —— 反號假數字');
+})();
+
+PD.checkPanel(PD.$('#pd-selfcheck'));
+
+</script>

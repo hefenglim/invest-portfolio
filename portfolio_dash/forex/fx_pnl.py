@@ -1,9 +1,9 @@
 """Realized + unrealized FX P&L per account, and the reporting-currency rollup."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 
-from portfolio_dash.forex.pools import average_acquisition_rate, foreign_cash_balance
+from portfolio_dash.forex.pools import MovementRow, acquisition_basis, foreign_cash_balance
 from portfolio_dash.forex.results import AccountFXResult, FxRealizedRow, FXSummary
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
@@ -11,6 +11,7 @@ from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.ledger import Dividend, FXConversion, Transaction
 
 _ZERO = Decimal("0")
+_ONE = Decimal("1")
 SpotRate = Callable[[Currency, Currency], Decimal]
 
 
@@ -62,29 +63,42 @@ def compute_account_fx(
     conversions: list[FXConversion],
     instruments: dict[str, Instrument],
     spot: Decimal | None,
+    movements: Sequence[MovementRow] | None = None,
 ) -> AccountFXResult:
     """FX P&L for one account (ledgers already scoped to it).
 
     ``foreign_stock_value`` is the current market value of equity holdings in the
     foreign currency (supplied by the portfolio core).
     ``spot`` is the current foreign->home exchange rate (None if unavailable).
+    ``movements`` are the account's cash movements; foreign-currency ones now fund the
+    pool and (when they carry ``acq_home_amount``) its cost basis — spec 2026-07-30.
 
-    Unrealized figures are None when avg_rate is None (no conversions) or spot is None.
+    Unrealized figures are None when avg_rate is None (no basis at all) or spot is None.
     Realized figures are None when avg_rate is None; zero if no reconversions occurred.
     """
     home = account.funding_ccy
-    avg_rate = average_acquisition_rate(conversions, home, foreign)
-    foreign_cash = foreign_cash_balance(transactions, dividends, conversions, instruments, foreign)
+    basis = acquisition_basis(conversions, movements or [], home, foreign)
+    avg_rate = basis.avg_rate
+    ratio = basis.covered_ratio
+    foreign_cash = foreign_cash_balance(
+        transactions, dividends, conversions, instruments, foreign, movements=movements)
     realized = _realized_fx(conversions, home, foreign, avg_rate)
 
+    # F2/F3: one ratio, applied to the WHOLE foreign exposure. Cash is fungible, so an
+    # outflow draws proportionally from the basis-known and basis-unknown parts; and the
+    # stock leg is scaled too because ``avg_rate`` itself came from the covered population.
+    # ``ratio == _ONE`` skips the multiply so a fully-covered pool (every ledger written
+    # before this spec) yields Decimals byte-identical to the previous engine.
     unreal_total: Decimal | None
     if avg_rate is None or spot is None:
         unreal_stocks: Decimal | None = None
         unreal_cash: Decimal | None = None
         unreal_total = None
     else:
-        unreal_stocks = foreign_stock_value * (spot - avg_rate)
-        unreal_cash = foreign_cash * (spot - avg_rate)
+        cash_base = foreign_cash if ratio == _ONE else foreign_cash * ratio
+        stock_base = foreign_stock_value if ratio == _ONE else foreign_stock_value * ratio
+        unreal_stocks = stock_base * (spot - avg_rate)
+        unreal_cash = cash_base * (spot - avg_rate)
         # Combined unrealized FX computed with Decimal at the source, so the wire carries
         # the sum as a Decimal string and the frontend never re-adds the two components.
         # None whenever either component is None (they are always both-or-neither here).
@@ -104,7 +118,10 @@ def compute_account_fx(
         unrealized_fx_total=unreal_total,
         # Derived-on-the-server display values (the frontend computes neither).
         spot_delta=(spot - avg_rate if spot is not None and avg_rate is not None else None),
-        cash_basis_incomplete=foreign_cash < _ZERO,
+        covered_ratio=ratio,
+        fx_basis_gap=(_ZERO if ratio == _ONE else foreign_cash * (_ONE - ratio)),
+        fx_basis_incomplete=ratio != _ONE,
+        foreign_cash_negative=foreign_cash < _ZERO,
     )
 
 
@@ -117,6 +134,7 @@ def compute_fx_summary(
     foreign_exposure: dict[str, tuple[Currency, Decimal]],
     current_spot: SpotRate,
     reporting: Currency,
+    movements: Sequence[MovementRow] | None = None,
 ) -> FXSummary:
     """FX P&L for every FX-exposed account + reporting rollup.
 
@@ -138,12 +156,13 @@ def compute_fx_summary(
         txs = [t for t in transactions if t.account_id == account_id]
         divs = [d for d in dividends if d.account_id == account_id]
         convs = [c for c in fx_conversions if c.account_id == account_id]
+        moves = [m for m in (movements or []) if m.account_id == account_id]
         try:
             spot: Decimal | None = current_spot(foreign, home)
         except KeyError:
             spot = None
         result = compute_account_fx(
-            account, foreign, stock_value, txs, divs, convs, instruments, spot
+            account, foreign, stock_value, txs, divs, convs, instruments, spot, moves
         )
         by_account[account_id] = result
         # home==reporting short-circuits to the identity rate so the rollup can't be broken

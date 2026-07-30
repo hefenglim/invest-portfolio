@@ -960,10 +960,15 @@ class StoredCashMovement(BaseModel):
     id: int
     account_id: str
     date: date
-    kind: str  # DEPOSIT | WITHDRAW
+    kind: str  # DEPOSIT | WITHDRAW | OPENING | REBATE
     ccy: Currency
     amount: Decimal
     note: str | None = None
+    # HOME-currency cost of this FOREIGN-currency movement (spec 2026-07-30 F1). Set only
+    # when ``ccy`` differs from the account's funding currency; None means "no cost basis
+    # known", which keeps the amount OUT of the FX pool's weighted average (never guessed).
+    # An AMOUNT, not a rate — see the migration note in schema.py.
+    acq_home_amount: Decimal | None = None
 
 
 def insert_cash_movement(
@@ -975,11 +980,14 @@ def insert_cash_movement(
     ccy: Currency,
     amount: Decimal,
     note: str | None = None,
+    acq_home_amount: Decimal | None = None,
 ) -> int:
     cur = conn.execute(
-        "INSERT INTO cash_movements (account_id, date, kind, ccy, amount, note) "
-        "VALUES (?,?,?,?,?,?)",
-        (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note),
+        "INSERT INTO cash_movements "
+        "(account_id, date, kind, ccy, amount, note, acq_home_amount) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note,
+         None if acq_home_amount is None else to_db(acq_home_amount)),
     )
     conn.commit()
     return int(cur.lastrowid or 0)
@@ -994,7 +1002,7 @@ def list_cash_movements(
         where = " WHERE account_id=?"
         params = [account_id]
     rows = conn.execute(
-        f"SELECT id, account_id, date, kind, ccy, amount, note "
+        f"SELECT id, account_id, date, kind, ccy, amount, note, acq_home_amount "
         f"FROM cash_movements{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
@@ -1003,6 +1011,8 @@ def list_cash_movements(
             id=r["id"], account_id=r["account_id"],
             date=date.fromisoformat(r["date"]), kind=r["kind"],
             ccy=Currency(r["ccy"]), amount=from_db(r["amount"]), note=r["note"],
+            acq_home_amount=(None if r["acq_home_amount"] is None
+                             else from_db(r["acq_home_amount"])),
         )
         for r in rows
     ]
@@ -1027,12 +1037,13 @@ def update_cash_movement(
     ccy: Currency,
     amount: Decimal,
     note: str | None = None,
+    acq_home_amount: Decimal | None = None,
 ) -> bool:
     cur = conn.execute(
         "UPDATE cash_movements SET account_id=?, date=?, kind=?, ccy=?, amount=?, "
-        "note=? WHERE id=?",
+        "note=?, acq_home_amount=? WHERE id=?",
         (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note,
-         move_id),
+         None if acq_home_amount is None else to_db(acq_home_amount), move_id),
     )
     conn.commit()
     return cur.rowcount > 0

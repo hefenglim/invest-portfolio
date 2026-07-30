@@ -76,6 +76,33 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
 - Each foreign-currency pool (per account) carries a **home-currency cost basis** =
   weighted-average acquisition rate. Schwab USD pool anchored in **TWD**; Moomoo USD
   pool anchored in **MYR**.
+- **Foreign cash movements are part of the pool (spec 2026-07-30, owner sign-off).** A
+  deposit/opening/rebate **in a currency other than the account's funding currency** funds
+  the pool and may carry `cash_movements.acq_home_amount` — the home-currency cost of that
+  foreign amount. Consequences:
+  - **Store the AMOUNT, never the rate** (F1). A rate is an average, and `data-and-pricing.md`
+    forbids storing an average as the authority; `fx_conversions` likewise stores two
+    amounts. The displayed acquisition rate is `acq_home_amount / amount`, computed on read.
+  - **No cost recorded → the amount still funds the balance, but never the average** — a
+    rate is never guessed, interpolated, or substituted with the current spot.
+  - **`covered_ratio` = basis-known acquisitions / all acquisitions** (F2). Outflows are
+    absorbed **pro rata** — cash is fungible and weighted-average tracks no lots. Never
+    "balance − unbased amount": that goes negative once the balance drops below the unbased
+    amount, which is the reversed-sign figure this rule exists to prevent.
+  - **The ratio scales the WHOLE foreign exposure — cash *and* stocks** (F3), because
+    `avg_rate` itself is derived from the covered population. Degrading only the cash leg
+    leaves the larger error unflagged.
+  - Sale proceeds and foreign cash dividends are **not** unbased acquisitions; they keep
+    inheriting the pool average, so a ledger with no foreign movements has `covered_ratio`
+    exactly 1 and is numerically unchanged by this rule.
+- **N1 — a foreign WITHDRAW recognises no realized FX.** It reduces the pool's exposure;
+  under weighted average a disposal changes neither the average nor the coverage, so the
+  remaining exposure stays self-consistent. If the money was actually converted back to the
+  home currency, the correct entry is an **fx_conversion**, not a withdrawal.
+- **N2 — filling in an acquisition cost later re-computes history.** All reports rebuild
+  from the ledgers (重算), nothing is snapshotted, so adding `acq_home_amount` to an old
+  opening also changes previously displayed realized/unrealized FX. That is intended
+  (`original_cost` is still never overwritten), but it is a visible change, not a no-op.
 - **Realized FX P&L** on reconversion (foreign→home) = home received − (home cost of
   the foreign amount sold, at the pool's weighted-avg rate).
 - **Unrealized FX P&L** = remaining foreign exposure marked to current spot vs. the

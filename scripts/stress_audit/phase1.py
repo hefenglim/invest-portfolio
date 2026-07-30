@@ -430,6 +430,16 @@ def _reconcile_fx(ev, res, dash, facts, prices, sp, phase, valuation):
             acc = fx["by_account"][aid]
             ev.check("fx.avg_rate", aid, exp_avg, acc.get("avg_rate"), phase)
             ev.check("fx.realized", aid, exp_real, acc.get("realized_fx"), phase)
+            # spec 2026-07-30: the pool now includes foreign cash movements, so it must
+            # equal the funds view; covered_ratio/gap disclose the basis-unknown part.
+            exp_cash = res.fx_foreign_cash.get(aid, O.ZERO)
+            exp_ratio = res.fx_covered_ratio.get(aid, O.ONE)
+            ev.check("fx.foreign_cash", aid, exp_cash, acc.get("foreign_cash"), phase)
+            ev.check("fx.covered_ratio", aid, exp_ratio, acc.get("covered_ratio"), phase)
+            ev.check("fx.basis_gap", aid, exp_cash * (O.ONE - exp_ratio),
+                     acc.get("fx_basis_gap"), phase)
+            ev.check("fx.pool_equals_funds", aid, exp_cash,
+                     res.cash.get((aid, settle), O.ZERO), phase)
     # reporting realized fx rollup
     if fx is not None:
         exp_roll = O.ZERO
@@ -468,7 +478,10 @@ def _reconcile_fx_unrealized(ev, res, kpis, facts, prices, sp, phase):
             if acct == aid and h.quote_ccy == settle and h.shares > O.ZERO and sym in prices:
                 stock_val += prices[sym] * h.shares
         fcash = res.fx_foreign_cash.get(aid, O.ZERO)
-        unreal_home = (stock_val + fcash) * (spot - avg)
+        # spec 2026-07-30 F2/F3: one coverage ratio scales the WHOLE foreign exposure
+        # (cash AND stocks), because avg came from the basis-known population only.
+        ratio = res.fx_covered_ratio.get(aid, O.ONE)
+        unreal_home = (stock_val + fcash) * ratio * (spot - avg)
         to_rep = O.ONE if funding == REPORTING else sp.rate(funding, REPORTING)
         exp += unreal_home * to_rep
     ev.check("fx.reporting_unrealized", "rollup", exp, kpis.get("fx_unrealized"), phase)

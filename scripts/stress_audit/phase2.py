@@ -267,6 +267,12 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
             acc = fx["by_account"][aid]
             ev.check("fx.avg_rate", aid, res.fx_avg_rate.get(aid), acc.get("avg_rate"), phase)
             ev.check("fx.realized", aid, res.fx_realized.get(aid), acc.get("realized_fx"), phase)
+            # This phase deposits USD straight into the TWD-funded schwab account
+            # (run_phase2.py) — the exact case the 2026-07-30 spec is about.
+            ev.check("fx.foreign_cash", aid, res.fx_foreign_cash.get(aid, O.ZERO),
+                     acc.get("foreign_cash"), phase)
+            ev.check("fx.covered_ratio", aid, res.fx_covered_ratio.get(aid, O.ONE),
+                     acc.get("covered_ratio"), phase)
 
     # exports (CSV): cost basis + realized, absolute
     _exports(ev, api, res, phase)

@@ -218,6 +218,10 @@ def build_dashboard(
     ]
     instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
+    # Cash movements feed BOTH the FX pool (step 5 — a foreign deposit/opening now funds the
+    # pool and carries its cost basis, spec 2026-07-30) and the net-worth cash series (9b).
+    # Loaded once here so the two views can never read different rows.
+    cash_movements = list_cash_movements(conn)
 
     # 1b. Unregistered-symbol guard (2026-07-02): a ledger row whose symbol has no
     # Instrument row has no quote currency — it cannot be booked, valued, or priced.
@@ -337,7 +341,8 @@ def build_dashboard(
     fx_summary: FXSummary | None
     try:
         fx_summary = compute_fx_summary(accounts, instruments, txs, divs, convs,
-                                        exposure, resolver.rate, reporting)
+                                        exposure, resolver.rate, reporting,
+                                        cash_movements)
     except KeyError:
         fx_summary = None
 
@@ -442,7 +447,6 @@ def build_dashboard(
             # /api/cash view uses (unregistered symbols skipped inside cash_balances,
             # exactly as there), converted at carry-forward FX per day. Display-only
             # attribution — no money-of-record path is touched.
-            cash_movements = list_cash_movements(conn)
             cash_txs = list_transactions(conn)
             cash_divs = list_dividends(conn)
             cash_convs = list_fx_conversions(conn)

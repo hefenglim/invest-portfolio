@@ -399,7 +399,10 @@
         "unrealized_fx_cash": "-0.0",
         "unrealized_fx_total": "-425.0",
         "spot_delta": "-0.1",
-        "cash_basis_incomplete": false
+        "covered_ratio": "1",
+        "fx_basis_gap": "0",
+        "fx_basis_incomplete": false,
+        "foreign_cash_negative": false
       },
       "schwab": {
         "account_id": "schwab",
@@ -414,7 +417,10 @@
         "unrealized_fx_cash": "-21100",
         "unrealized_fx_total": "13520.0",
         "spot_delta": "1",
-        "cash_basis_incomplete": true
+        "covered_ratio": "1",
+        "fx_basis_gap": "0",
+        "fx_basis_incomplete": false,
+        "foreign_cash_negative": true
       }
     },
     "reporting_currency": "TWD",

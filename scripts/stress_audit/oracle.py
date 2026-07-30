@@ -279,9 +279,11 @@ class CashFact:
     id: int
     account_id: str
     d: date
-    kind: str          # DEPOSIT | WITHDRAW
+    kind: str          # DEPOSIT | WITHDRAW | OPENING | REBATE
     ccy: str
     amount: Decimal
+    # Home-ccy cost of a FOREIGN credit (spec 2026-07-30). None = cost unknown.
+    acq_home_amount: Decimal | None = None
 
 
 @dataclass
@@ -353,6 +355,8 @@ class OracleResult:
     fx_avg_rate: dict[str, Decimal | None]
     fx_realized: dict[str, Decimal | None]
     fx_foreign_cash: dict[str, Decimal]
+    # Basis-known share of the pool (spec F2); 1 when every foreign funding flow has a cost.
+    fx_covered_ratio: dict[str, Decimal]
 
 
 _PHASE = {"open": 0, "buy": 1, "sell": 2, "div": 3}
@@ -449,10 +453,10 @@ def replay(facts: Facts) -> OracleResult:
         realized_by_ccy[rr.quote_ccy] += rr.realized
 
     cash = _cash_balances(facts)
-    fx_avg, fx_real, fx_fcash = _fx_pools(facts)
+    fx_avg, fx_real, fx_fcash, fx_cov = _fx_pools(facts)
 
     return OracleResult(holdings, realized_rows, dict(realized_by_ccy), cash,
-                        fx_avg, fx_real, fx_fcash)
+                        fx_avg, fx_real, fx_fcash, fx_cov)
 
 
 def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
@@ -486,27 +490,45 @@ def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
 def _fx_pools(facts: Facts):
     """Per-account FX pool (domain-ledger.md / forex module semantics).
 
-    avg_rate = sum(home from_amt) / sum(foreign to_amt) over home->foreign conversions.
+    avg_rate = sum(home cost) / sum(foreign acquired) over home->foreign conversions AND
+    foreign cash CREDITS that carry an acq_home_amount (spec 2026-07-30 F1).
     realized_fx = sum over foreign->home reconversions of (home_received - foreign_sold*avg_rate).
-    foreign_cash = conversions +/- ; +sale net ; -buy allin ; +CASH dividend net (foreign).
+    foreign_cash = conversions +/- ; +sale net ; -buy allin ; +CASH dividend net (foreign)
+                   ; +/- foreign cash movements (credit/WITHDRAW).
+    covered_ratio = basis-known acquisitions / all acquisitions (F2); exactly 1 when nothing
+                   is unbased. It scales BOTH unrealized legs (F3) — see phase1's reconcile.
     Only accounts with settlement_ccy != funding_ccy are FX-exposed.
     """
     avg: dict[str, Decimal | None] = {}
     realized: dict[str, Decimal | None] = {}
     fcash: dict[str, Decimal] = {}
+    covered: dict[str, Decimal] = {}
     for aid, (_rule, settle, funding) in ACCOUNTS.items():
         if settle == funding:
             continue
         home, foreign = funding, settle
         convs = [c for c in facts.fxs if c.account_id == aid]
+        moves = [m for m in facts.cash if m.account_id == aid and m.ccy == foreign]
         tot_home = ZERO
         tot_foreign = ZERO
+        unbased = ZERO
         for c in convs:
             if c.from_ccy == home and c.to_ccy == foreign:
                 tot_home += c.from_amt
                 tot_foreign += c.to_amt
+        for m in moves:
+            if m.kind.upper() == "WITHDRAW":
+                continue          # a disposal changes neither the average nor the coverage
+            if m.acq_home_amount is None:
+                unbased += m.amount
+            else:
+                tot_home += m.acq_home_amount
+                tot_foreign += m.amount
         a = (tot_home / tot_foreign) if tot_foreign != ZERO else None
         avg[aid] = a
+        covered[aid] = (ONE if unbased == ZERO
+                        else (tot_foreign / (tot_foreign + unbased)
+                              if tot_foreign + unbased > ZERO else ONE))
         if a is None:
             realized[aid] = None
         else:
@@ -536,8 +558,10 @@ def _fx_pools(facts: Facts):
                 continue
             if dv.type == "CASH" and facts.instruments[dv.symbol].quote_ccy == foreign:
                 cash += dv.net
+        for m in moves:
+            cash += -m.amount if m.kind.upper() == "WITHDRAW" else m.amount
         fcash[aid] = cash
-    return avg, realized, fcash
+    return avg, realized, fcash, covered
 
 
 # ---- convenience roll-ups for KPI reconciliation ----------------------------------

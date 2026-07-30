@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
+    list_cash_movements,
     list_dividends,
     list_fx_conversions,
     list_instruments,
@@ -76,6 +77,7 @@ def build_tax_package_zip(
     convs = [FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
                           from_amount=s.from_amount, to_ccy=s.to_ccy,
                           to_amount=s.to_amount) for s in list_fx_conversions(conn)]
+    moves = list_cash_movements(conn)
     instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
     book = build_book(txs, divs, opening, instruments)
@@ -120,7 +122,11 @@ def build_tax_package_zip(
             continue
         home, foreign = acct.funding_ccy, acct.settlement_ccy
         acct_convs = [c for c in convs if c.account_id == acct.account_id]
-        avg = average_acquisition_rate(acct_convs, home, foreign)
+        # Same weighted average the dashboard uses — foreign cash movements that carry a
+        # home cost are part of the basis (spec 2026-07-30). Reading a different average
+        # here would make the tax package disagree with 換匯損益 on the same reconversion.
+        acct_moves = [m for m in moves if m.account_id == acct.account_id]
+        avg = average_acquisition_rate(acct_convs, home, foreign, movements=acct_moves)
         for fr in realized_fx_rows(acct_convs, home, foreign, avg):
             if fr.date.year != year:
                 continue

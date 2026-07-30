@@ -342,9 +342,11 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
                 orig_total=_total,
                 build_date=date.fromisoformat(r["build_date"])))
         for r in conn.execute("SELECT * FROM cash_movements ORDER BY date, id"):
+            _acq = r["acq_home_amount"]
             f.cash.append(O.CashFact(
                 id=r["id"], account_id=r["account_id"], d=date.fromisoformat(r["date"]),
-                kind=r["kind"], ccy=r["ccy"], amount=dec(r["amount"])))
+                kind=r["kind"], ccy=r["ccy"], amount=dec(r["amount"]),
+                acq_home_amount=None if _acq is None else dec(_acq)))
         return f
     finally:
         conn.close()
