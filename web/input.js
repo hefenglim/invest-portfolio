@@ -116,6 +116,8 @@
     });
     const mdt = $('#m-daytrade');
     if (mdt) mdt.addEventListener('change', schedulePreview);
+    const msh = $('#m-short');
+    if (msh) msh.addEventListener('change', schedulePreview);
     $('#m-fee-pencil').addEventListener('click', () => toggleOverride('fee'));
     $('#m-tax-pencil').addEventListener('click', () => toggleOverride('tax'));
     $('#m-fee').addEventListener('input', schedulePreview);
@@ -140,6 +142,8 @@
     });
     const dt = $('#m-daytrade');
     if (dt) dt.checked = false;
+    const sc = $('#m-short');
+    if (sc) sc.checked = false;
     applyOverrideState('fee', false);
     applyOverrideState('tax', false);
     $('#m-date').value = TODAY;
@@ -155,6 +159,11 @@
     $('#m-side-buy').classList.toggle('buy-on', s === 'buy');
     $('#m-side-sell').classList.toggle('active', s === 'sell');
     $('#m-side-sell').classList.toggle('sell-on', s === 'sell');
+    // 放空 only exists on the sell side; leaving a stale tick on a buy would silently
+    // send short_sale=true and exempt the row from the 賣超 guard.
+    const sl = $('#m-short-line'), sc = $('#m-short');
+    if (sl) sl.hidden = s !== 'sell';
+    if (sc && s !== 'sell') sc.checked = false;
     schedulePreview();
   }
 
@@ -196,6 +205,8 @@
     };
     const dt = $('#m-daytrade');
     if (dt && dt.checked) body.daytrade = true;
+    const sc = $('#m-short');
+    if (sc && sc.checked && m.side === 'sell') body.short_sale = true;
     if (m.feeOverride) {
       const fv = $('#m-fee').value.trim();
       if (fv !== '') body.fee_override = fv;

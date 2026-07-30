@@ -12,7 +12,7 @@ rule for dividend detection.
 """
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from portfolio_dash.shared.models.enums import Side
@@ -58,6 +58,20 @@ def current_shares(conn: sqlite3.Connection, account_id: str, symbol: str) -> De
     Returns ``Decimal("0")`` for no position.
     """
     return _shares_until(conn, account_id, symbol, None)
+
+
+def shares_through(
+    conn: sqlite3.Connection, account_id: str, symbol: str, *, on: date
+) -> Decimal:
+    """Shares held at the CLOSE of *on* — events dated on or before it count.
+
+    The sell-guard rule (2026-07-31): a sell must be covered by the position that exists at
+    its own trade date. ``current_shares`` answers the net across ALL dates and therefore
+    counts LATER buys, so a back-dated sell that oversells on its own day slips through it —
+    the cash ledger has had the equivalent date-aware check (``running_min``) since audit C3.
+    Same-day buys DO count, so an intraday round trip stays legal.
+    """
+    return _shares_until(conn, account_id, symbol, on + timedelta(days=1))
 
 
 def shares_on(

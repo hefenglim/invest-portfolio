@@ -120,7 +120,41 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
 - Opening inventory is **not** a trade flow, but carries a **build date** + original
   cost total (needed for XIRR).
 - **Sell qty > holdings → block direct deduction; require user confirmation** (input
-  error vs. short sale).
+  error vs. short sale). The check is **DATE-AWARE** (2026-07-31): the covering position is
+  the one that exists **on the sell's own trade date** (`holdings.shares_through`), not the
+  net across all dates. A net-only check let a back-dated sell through whenever a LATER buy
+  covered it — and the replay then discarded that symbol's cost basis permanently. Mirrors
+  the cash ledger's `running_min` guard (audit C3).
+- **賣超 (undeclared oversell) is STICKY.** An acked oversell discards the position's cost
+  basis and emits no realized row (待釐清). A later buy nets the position positive again but
+  does **not** restore the discarded basis, so the flag must not be cleared by one either —
+  it is raised on "was ever negative", not on the final sign.
+
+### Declared short sale (owner ruling 2026-07-31, spec option C)
+
+The earlier "NOT short-position accounting" stance is **narrowed, not reversed**: short
+accounting applies **only** to a sell the user explicitly declared, never to an oversell.
+
+- A transaction carries `short_sale` (default **false**). Only a declared sell may exceed
+  holdings without the 賣超 guard. It is never inferred — the system cannot distinguish a
+  genuine short from a missing buy, and auto-applying short accounting would turn a
+  data-entry slip into a plausible-looking realized loss (the dangerous failure mode: a
+  wrong number that looks right).
+- **Replay (weighted average, no lot tracking — consistent with the equity cost method):**
+  a declared sell first sells the LONG lot (ordinary realized P&L), then opens/extends a
+  SHORT lot holding the **net proceeds received**. A buy first **covers** the short, then
+  adds to the long. Long and short are therefore mutually exclusive by construction, so a
+  position is long / flat / short and carries ONE signed quantity.
+- **Cover P&L (the owner's rule):** realized = `(short weighted-avg sale price − the
+  covering buy's all-in per-share cost) × shares covered`, dated the **cover** date, and the
+  leftover shares start their long life at that same per-share cost. Emitted as a realized
+  row with `kind="short_cover"` — a capital gain/loss, so it belongs in the tax package.
+- **Presentation:** an open short reports `shares < 0` with the proceeds as its (negative)
+  basis, so `avg = total/shares` is the average sale price and
+  `unrealized = (price − avg) × shares` profits when the price falls — every existing
+  formula works unchanged on the signed quantity. Flagged `short_open`, which the UI renders
+  **differently from `oversold`**: one is a real priced position, the other an unresolved
+  data problem.
 - Modes: 試算 = compute, no write · 報告/更新/績效 = full report + live-price fetch ·
   重算 = rebuild all stats from ledgers.
 - Live price unobtainable → label clearly; **never guess**.

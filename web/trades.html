@@ -105,6 +105,12 @@
                 <label class="hint daytrade-line" for="m-daytrade" title="台股當日沖銷賣出：證交稅 0.15%">
                   <input type="checkbox" id="m-daytrade"> 當沖（賣出稅 0.15%）
                 </label>
+                <!-- 放空 is DECLARED, never inferred: only a flagged sell may exceed
+                     holdings. Hidden on 買進; see input.js setSide(). -->
+                <label class="hint daytrade-line" id="m-short-line" for="m-short" hidden="hidden"
+                       title="我沒有這些股票，是借券賣出（放空）。買回時以買回價結算損益">
+                  <input type="checkbox" id="m-short"> 放空（賣出股數可超過持股）
+                </label>
               </div>
               <div class="field">
                 <label for="m-date">交易日期</label>

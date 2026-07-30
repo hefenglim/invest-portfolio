@@ -118,6 +118,30 @@
     if (rs.updated_at) sum.appendChild(el('span', 'fee-updated', fmtUpdated(rs.updated_at)));
     det.appendChild(sum);
 
+    /* Server-detected setting CONFLICTS (2026-07-31). Non-blocking on purpose: the
+       combination is legal, just almost never what the owner means. The plain-language
+       text and the one-click resolutions come from the API, so this page never has to
+       restate an accounting rule it does not own. */
+    (rs.conflicts || []).forEach((c) => {
+      const box = el('div', 'fee-conflict');
+      box.appendChild(el('div', 'fee-conflict-title', '⚠ ' + c.title));
+      const body = el('div', 'fee-conflict-body');
+      body.textContent = c.plain;   // pre-line CSS keeps the authored line breaks
+      box.appendChild(body);
+      const acts = el('div', 'fee-conflict-acts');
+      (c.options || []).forEach((opt) => {
+        const b = el('button', 'btn btn-sm', opt.label);
+        b.type = 'button';
+        b.addEventListener('click', () => applyConflictFix(rs.name, opt));
+        acts.appendChild(b);
+      });
+      const keep = el('span', 'fee-conflict-keep',
+        '（若你的券商真的兩段都做，維持現狀即可，此提示會持續顯示）');
+      acts.appendChild(keep);
+      box.appendChild(acts);
+      det.appendChild(box);
+    });
+
     const rows = el('div', 'fee-rows');
     const shown = FIELDS_BY_MARKET[rs.market] || rs.fields.map((f) => f.key);
     const byKey = {}; rs.fields.forEach((f) => { byKey[f.key] = f; });
@@ -144,6 +168,15 @@
     save.addEventListener('click', () => saveSet(rs.name, byKey));
     reset.addEventListener('click', () => resetSet(rs.name));
     return det;
+  }
+
+  async function applyConflictFix(name, opt) {
+    try {
+      replaceCard(await window.pdApi.put('/api/fee-rules/' + name, { overrides: opt.set }));
+      if (window.toast) window.toast('已套用', 'ok', opt.label);
+    } catch (err) {
+      if (window.toast) window.toast((err && err.message) || '套用失敗', 'fail');
+    }
   }
 
   let SETS = [];

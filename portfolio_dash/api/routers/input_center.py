@@ -248,6 +248,10 @@ class ManualBody(BaseModel):
     fee_override: Decimal | None = Field(default=None, ge=0)
     tax_override: Decimal | None = Field(default=None, ge=0)
     daytrade: bool = False  # TW same-day round trip → 0.15% sell tax (persisted, MED-1)
+    # DECLARED short sale (2026-07-31). Only a flagged sell may exceed holdings; the
+    # replay opens a short lot whose basis is the proceeds received, and the next buy
+    # covers it at that buy's per-share cost. Never inferred from an oversell.
+    short_sale: bool = False
     note: str | None = None
     ack_oversell: bool = False  # used by commit (Task 3)
     # Batch B (F05): explicit target market for an UNREGISTERED symbol on a MERGED
@@ -264,7 +268,7 @@ def _txn_input(body: ManualBody) -> TxnInput:
         account_id=body.account_id, symbol=body.symbol, side=parse_side(body.side),
         quantity=body.shares, price=body.price, trade_date=body.date,
         fee=body.fee_override, tax=body.tax_override, daytrade=body.daytrade,
-        note=body.note,
+        short_sale=body.short_sale, note=body.note,
     )
 
 

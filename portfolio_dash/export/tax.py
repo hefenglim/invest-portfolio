@@ -66,7 +66,8 @@ def build_tax_package_zip(
     """
     txs = [Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                        quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                       trade_date=s.trade_date) for s in list_transactions(conn)]
+                       trade_date=s.trade_date,
+                       short_sale=s.short_sale) for s in list_transactions(conn)]
     divs = [Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
                      type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
                      net=s.net, reinvest_shares=s.reinvest_shares,
@@ -91,7 +92,9 @@ def build_tax_package_zip(
         # (kind="dividend", audit H2) so it reaches 總報酬, but for tax it is INCOME and is
         # already reported on the dividends sheet below, straight from the dividend ledger.
         # Without this filter the same payout would appear on both sheets.
-        if r.kind != "sale":
+        # A short COVER (2026-07-31) is a capital gain/loss like any sale and belongs here;
+        # it has no dividend-ledger counterpart, so excluding it would simply lose it.
+        if r.kind not in ("sale", "short_cover"):
             continue
         rate = _rate_on(conn, r.sell_date, r.quote_ccy, reporting)
         reporting_realized = "" if rate is None else str(r.realized * rate)

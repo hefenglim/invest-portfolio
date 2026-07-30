@@ -130,7 +130,8 @@ def compute_whatif(
     txs = [
         Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                     quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date)
+                    trade_date=s.trade_date,
+                    short_sale=s.short_sale)
         for s in list_transactions(conn)
     ]
     divs = [

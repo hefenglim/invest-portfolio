@@ -100,6 +100,9 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # Backend plumbing only this wave; additive, so an existing DB migrates in untouched.
     _add_column_if_missing(conn, "instruments", "industry", "TEXT")
     _add_column_if_missing(conn, "transactions", "daytrade", "INTEGER NOT NULL DEFAULT 0")
+    # short_sale (2026-07-31): a DECLARED short sale. Default 0, so every pre-existing row
+    # keeps its exact meaning and the replay is unchanged for them.
+    _add_column_if_missing(conn, "transactions", "short_sale", "INTEGER NOT NULL DEFAULT 0")
     # acq_home_amount (spec 2026-07-30 F1): the HOME-currency cost of a FOREIGN-currency cash
     # movement, so an opening/deposit of foreign cash can carry a cost basis into the FX pool
     # (forex/pools.py). Stores the AMOUNT, never the rate — the rate is an average and

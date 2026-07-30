@@ -401,10 +401,16 @@
         tr.title = h.market_price === null || h.market_price === undefined
           ? '缺價 — 此列數字不可信' : '價格過期 — 損益以舊價計算';
       }
+      /* Two different negative-share states, and they must never look alike:
+         `oversold` is an unresolved DATA problem (basis discarded, 待釐清), while
+         `short_open` is a real declared short with a real basis and real P&L. */
       if (h.oversold) {
         tr.classList.add('row-stale');
         tr.title = '賣超：賣出數量超過持股，部位為負、損益待釐清'
           + '（請補記期初庫存或遺漏的買進）';
+      } else if (h.short_open) {
+        tr.title = '放空中：已宣告的放空部位，成本基礎為賣出時收到的價款；'
+          + '買回時以買回價結算損益';
       }
 
       /* 代號 + 名稱 + board badge — 點擊開啟個股詳情 */
@@ -418,6 +424,10 @@
         const ob = el('span', 'badge badge-missing', '賣超');
         ob.title = '賣出數量超過持股，部位為負、損益待釐清';
         cell.appendChild(ob);
+      } else if (h.short_open) {
+        const sb = el('span', 'badge badge-short', '放空中');
+        sb.title = '已宣告的放空部位；成本基礎為賣出價款，買回時結算損益';
+        cell.appendChild(sb);
       }
       cell.addEventListener('click', () => {
         if (window.openSymbolDrawer) window.openSymbolDrawer(h.symbol);

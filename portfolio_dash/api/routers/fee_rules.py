@@ -38,6 +38,56 @@ def _field_value(rs: FeeRuleSet, key: str) -> str | None:
     return str(val)  # rounding literal ("floor" / "half_up")
 
 
+_ONE = Decimal("1")
+_ZERO = Decimal("0")
+
+
+def _conflicts(rs: FeeRuleSet) -> list[dict[str, Any]]:
+    """Settings that are individually legal but describe the SAME benefit twice.
+
+    ``discount`` and ``rebate_rate`` are two ways to record one broker discount: charge less
+    now, or charge full and refund later (FE-D1, the 群益 先收後退 model). Turning BOTH on
+    applies it twice — and because fees are part of cost basis, that quietly understates
+    every affected position. Measured on the test site 2026-07-30: a TW trade whose full
+    commission is 869 was charged 199 AND forecast a 153 refund, i.e. a net 46 instead of the
+    intended 200.
+
+    This is a WARNING, never a block: a broker really could do both, and only the owner
+    knows. The response carries the plain-language explanation so the UI never has to
+    invent one, and the owner can either accept it knowingly or revert.
+    """
+    out: list[dict[str, Any]] = []
+    discount = getattr(rs, "discount", None)
+    rebate = getattr(rs, "rebate_rate", None)
+    if (isinstance(discount, Decimal) and isinstance(rebate, Decimal)
+            and discount < _ONE and rebate > _ZERO):
+        # 100 -> charged 100*discount -> refunded that * rebate -> what is actually paid.
+        charged = (Decimal("100") * discount).quantize(Decimal("0.01"))
+        refund = (charged * rebate).quantize(Decimal("0.01"))
+        out.append({
+            "fields": ["discount", "rebate_rate"],
+            "title": "折扣被算了兩次",
+            "plain": (
+                "把手續費想成餐廳的兩種折扣寫法，兩種都是「打完折你付一樣的錢」：\n"
+                "　A 結帳直接打折 —— 原價 100 元，收你 "
+                f"{decimal_str(charged)} 元。（這是「折扣率」）\n"
+                "　B 先付全額、下個月退 —— 原價 100 元先收 100 元，次月退你回來。"
+                "（這是「折讓款比例」）\n"
+                "你的券商只會用其中一種。現在兩種同時開著，變成："
+                f"結帳先收 {decimal_str(charged)} 元，下個月又退 {decimal_str(refund)} 元，"
+                f"最後只付了 {decimal_str(charged - refund)} 元 —— 同一個折扣打了兩次。\n"
+                "手續費會算進持股成本，所以這會讓成本偏低、報酬率看起來偏高。"
+            ),
+            "options": [
+                {"label": "券商是「先收全額、次月退款」（群益屬此）",
+                 "set": {"discount": "1"}},
+                {"label": "券商是「結帳當下就打折」（沒有退款）",
+                 "set": {"rebate_rate": "0"}},
+            ],
+        })
+    return out
+
+
 def _rule_set_wire(conn: sqlite3.Connection, name: str) -> dict[str, Any]:
     base = FEE_RULES[name]
     effective = get_fee_rule_set(name, conn)
@@ -57,6 +107,10 @@ def _rule_set_wire(conn: sqlite3.Connection, name: str) -> dict[str, Any]:
         "market": base.market.value,
         "updated_at": overlay.updated_at if overlay is not None else None,
         "fields": fields,
+        # Non-blocking: a setting the owner may knowingly keep. Computed from the EFFECTIVE
+        # values, so it appears on GET too — an override made before this check existed is
+        # surfaced the next time the page is opened, not only when it is edited.
+        "conflicts": _conflicts(effective),
     }
 
 

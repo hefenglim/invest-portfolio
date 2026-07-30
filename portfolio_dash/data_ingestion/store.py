@@ -356,6 +356,7 @@ class StoredTransaction(BaseModel):
     fee_rule_snapshot: dict[str, str] = Field(default_factory=dict)
     note: str | None = None
     daytrade: bool = False
+    short_sale: bool = False
 
 
 def insert_transaction(
@@ -372,6 +373,7 @@ def insert_transaction(
     fee_rule_snapshot: dict[str, str] | None = None,
     note: str | None = None,
     daytrade: bool = False,
+    short_sale: bool = False,
     commit: bool = True,
 ) -> int:
     """Insert a transaction row and return its new primary-key id.
@@ -382,8 +384,8 @@ def insert_transaction(
     """
     cur = conn.execute(
         """INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax,
-               trade_date, fee_rule_snapshot, note, daytrade)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               trade_date, fee_rule_snapshot, note, daytrade, short_sale)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             account_id,
             symbol,
@@ -396,6 +398,7 @@ def insert_transaction(
             json.dumps(fee_rule_snapshot or {}),
             note,
             1 if daytrade else 0,
+            1 if short_sale else 0,
         ),
     )
     _unarchive_on_booking(conn, symbol)  # held => not archived (FU-D13)
@@ -727,7 +730,7 @@ def list_transactions(
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         f"SELECT id, account_id, symbol, side, quantity, price, fees, tax, trade_date, "
-        f"fee_rule_snapshot, note, daytrade FROM transactions{where} "
+        f"fee_rule_snapshot, note, daytrade, short_sale FROM transactions{where} "
         f"ORDER BY trade_date ASC, id ASC",
         params,
     ).fetchall()
@@ -745,6 +748,7 @@ def list_transactions(
             fee_rule_snapshot=json.loads(r["fee_rule_snapshot"] or "{}"),
             note=r["note"],
             daytrade=bool(r["daytrade"]),
+            short_sale=bool(r["short_sale"]),
         )
         for r in rows
     ]

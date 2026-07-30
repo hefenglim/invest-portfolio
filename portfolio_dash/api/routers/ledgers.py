@@ -240,7 +240,8 @@ def _to_models(
     t_models = [
         Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                     quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date)
+                    trade_date=s.trade_date,
+                    short_sale=s.short_sale)
         for s in s_txs if s.symbol in instruments
     ]
     d_models = [
