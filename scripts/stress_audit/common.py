@@ -42,6 +42,14 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]           # scripts/stress_audit -> scripts -> <repo root>
 PY = Path(sys.executable)             # run with the repo .venv python (documented above)
 
+# Declared-short note marker (2026-07-31). GET /api/ledgers/transactions does NOT expose the
+# stored ``short_sale`` flag (a reported disclosure gap: the flag changes the row's accounting
+# yet is write-only on the wire), so an API-facts oracle cannot know which sell was declared.
+# The harness therefore stamps ITS OWN declared-short rows with this marker in ``note`` (a
+# stored, read-back ledger fact) and the API loader recovers the flag from it. The DB loader
+# (phase 1) reads the real column; if the app ever exposes the field, it takes precedence.
+SHORT_MARKER = "[stress:short_sale]"
+
 EVIDENCE = HERE / "evidence"
 EVIDENCE.mkdir(parents=True, exist_ok=True)
 OPLOG = EVIDENCE / "oplog.jsonl"
@@ -317,7 +325,8 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
                 id=r["id"], account_id=r["account_id"], symbol=r["symbol"],
                 side=r["side"], qty=dec(r["quantity"]), price=dec(r["price"]),
                 fee=dec(r["fees"]), tax=dec(r["tax"]),
-                trade_date=date.fromisoformat(r["trade_date"])))
+                trade_date=date.fromisoformat(r["trade_date"]),
+                short_sale=bool(r["short_sale"]) if "short_sale" in r.keys() else False))
         for r in conn.execute("SELECT * FROM dividends ORDER BY date, id"):
             f.divs.append(O.DivFact(
                 id=r["id"], account_id=r["account_id"], symbol=r["symbol"],
@@ -388,11 +397,14 @@ def load_facts_from_api(api: Api) -> O.Facts:
     for r in _page(api, "/api/ledgers/transactions"):
         if r["symbol"] not in known:
             continue
+        # short_sale is NOT on this wire (disclosure gap, reported); recover the harness's
+        # own declared-short rows from the stored note marker. A future app field wins.
+        short = bool(r.get("short_sale")) or (SHORT_MARKER in (r.get("note") or ""))
         f.txs.append(O.TxFact(
             id=r["id"], account_id=r["account_id"], symbol=r["symbol"],
             side=str(r["side"]).upper(), qty=dec(r["shares"]), price=dec(r["price"]),
             fee=dec(r["fee"]), tax=dec(r["tax"]),
-            trade_date=date.fromisoformat(r["date"])))
+            trade_date=date.fromisoformat(r["date"]), short_sale=short))
     for r in _page(api, "/api/ledgers/dividends"):
         if r["symbol"] not in known:
             continue

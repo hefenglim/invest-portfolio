@@ -10,7 +10,11 @@ from decimal import Decimal
 
 import pytest
 
-from portfolio_dash.portfolio.cost_basis import OversellError, build_book
+from portfolio_dash.portfolio.cost_basis import (
+    OversellError,
+    UnbookableLedgerError,
+    build_book,
+)
 from portfolio_dash.portfolio.pnl import value_holdings
 from portfolio_dash.portfolio.results import Book
 from portfolio_dash.shared.enums import Currency, Market
@@ -163,9 +167,15 @@ def test_F2_drip_during_a_short_never_adds_long_shares() -> None:
 
 
 def test_F1_F2_strict_path_fails_loud() -> None:
+    """A dedicated exception type, and it SUBCLASSES ValueError on purpose: the call sites
+    that already degrade on `except (ValueError, KeyError)` keep working untouched, while
+    the strict sites (重算 / what-if / tax export) catch it precisely and answer 422 instead
+    of letting it escape as a 500 (found by the 2026-07-31 phase-2 audit)."""
     txs = [_tx(Side.SELL, "10", "260", date(2026, 6, 10), short=True)]
-    with pytest.raises(ValueError, match="short position is open"):
+    with pytest.raises(UnbookableLedgerError, match="放空部位") as exc:
         build_book(txs, [_div(DividendType.CASH, "50", date(2026, 6, 20))], [], INSTR)
+    assert isinstance(exc.value, ValueError)
+    assert "2026-06-20" in str(exc.value)      # names the offending row's date
 
 
 def test_F3_unrealized_pct_keeps_its_sign_on_a_short() -> None:

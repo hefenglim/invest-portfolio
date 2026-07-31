@@ -120,6 +120,11 @@ def transactions(
             "fee": decimal_str(t.fees), "tax": decimal_str(t.tax),
             "total": decimal_str(total), "ccy": ccys.get(t.symbol, ""),
             "fee_snapshot": (t.fee_rule_snapshot or None), "note": t.note,
+            # short_sale changes how the replay books this row, so the public read
+            # surface must carry it — otherwise the ledger cannot be rebuilt from the
+            # ledger (domain-ledger.md) and the trades page cannot tell a declared
+            # short from an ordinary sell.
+            "short_sale": t.short_sale,
         })
     return _page(out, limit, offset)
 

@@ -29,6 +29,9 @@ NEW_INSTRUMENTS = [
     ("TSLA", "US", "USD", "Tesla", "Auto", False),
     ("3008", "TW", "TWD", "LARGAN", "Optics", False),
     ("5225", "MY", "MYR", "IHH Healthcare", "Healthcare", False),
+    # Declared-short lifecycle symbol (2026-07-31): short -> dividend-on-short (removed) ->
+    # covered FLAT, so it never appears in baseline holdings even on an accumulating demo.
+    ("2609", "TW", "TWD", "Yang Ming", "Shipping", False),
 ]
 
 # symbol -> market, so the fee check can route the merged dual-market moomoo_my's per-market rule
@@ -101,9 +104,15 @@ class Ops2:
 
     # ---- money flows ----
     def trade(self, account_id, symbol, side, d, shares, price, *, via_ui=False,
-              ack=False, expect=201, fee_check=True, is_etf=False):
+              ack=False, expect=201, fee_check=True, is_etf=False, short=False):
         body = {"account_id": account_id, "symbol": symbol, "side": side, "date": d,
                 "shares": str(shares), "price": str(price), "ack_oversell": ack}
+        if short:
+            # Declared short + the harness note marker: the transactions READ endpoint does
+            # not expose short_sale (reported gap), so the API-facts oracle recovers the
+            # flag from this stored, read-back note (common.SHORT_MARKER).
+            body["short_sale"] = True
+            body["note"] = C.SHORT_MARKER
         if via_ui and self.ui is not None:
             before = self._tx_total()
             self.ui.manual_trade(account_id, symbol, side, d, shares, price)
@@ -122,9 +131,16 @@ class Ops2:
                 self._fee_check(txn_id, account_id, side, shares, price, symbol, is_etf)
         return resp
 
-    def cash_move(self, account_id, kind, ccy, d, amount, *, via_ui=False, ack=False):
+    def cash_move(self, account_id, kind, ccy, d, amount, *, via_ui=False, ack=False,
+                  acq_home_amount=None, acq_rate=None):
         body = {"account_id": account_id, "date": d, "kind": kind, "ccy": ccy,
                 "amount": str(amount), "ack_negative": ack}
+        # FX cost basis of a FOREIGN credit (spec 2026-07-30 F1): the harness passes the
+        # AMOUNT (the stored authority) or, to exercise the form convenience, the rate.
+        if acq_home_amount is not None:
+            body["acq_home_amount"] = str(acq_home_amount)
+        if acq_rate is not None:
+            body["acq_rate"] = str(acq_rate)
         if via_ui and self.ui is not None:
             before = self._cash_total()
             self.ui.cash_move(account_id, kind, ccy, d, amount)
@@ -165,6 +181,30 @@ class Ops2:
         self.ev.op(self.phase, "UI", f"dividend.{model}",
                    {"account": account_id, "symbol": symbol, "date": d, "gross": str(gross)},
                    resp)
+        return resp
+
+    def dividend_csv(self, account_id, symbol, d, dtype, gross):
+        """Record a dividend through the CSV import door (the non-UI write seam)."""
+        cols = "account,symbol,date,type,gross,withholding,net,reinvest_shares,reinvest_price"
+        csv_text = cols + f"\n{account_id},{symbol},{d},{dtype},{gross},,,,\n"
+        r = self.api.post("/api/import/commit",
+                          {"kind": "dividends", "csv_text": csv_text, "ack_warnings": True})
+        resp = {"status": r.status_code, "json": _j(r)}
+        self.ev.op(self.phase, "API", f"dividend.{dtype}",
+                   {"account": account_id, "symbol": symbol, "date": d, "gross": str(gross)},
+                   resp)
+        return resp
+
+    def find_dividend_id(self, account_id, symbol, d):
+        rows = self.api.get("/api/ledgers/dividends", limit=500).json().get("rows", [])
+        cand = [r["id"] for r in rows if r["account_id"] == account_id
+                and r["symbol"] == symbol and r["date"] == d]
+        return max(cand, default=None)
+
+    def delete_dividend(self, div_id):
+        r = self.api.delete(f"/api/ledgers/dividends/{div_id}")
+        resp = {"status": r.status_code, "json": _j(r)}
+        self.ev.op(self.phase, "API", "delete.dividend", {"id": div_id}, resp)
         return resp
 
     def edit_tx(self, txn_id, account_id, symbol, side, d, shares, price, fee, tax, *, ack=False):
@@ -235,13 +275,24 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
         ev.check("holding.adjusted_total", sc, h.adjusted_total, a["adjusted_cost_total"], phase)
         ev.check("holding.original_avg", sc, h.original_avg, a["original_avg"], phase)
         ev.check("holding.adjusted_avg", sc, h.adjusted_avg, a["adjusted_avg"], phase)
-        # per-holding valuation self-consistency vs the demo's OWN market_price
+        # Flags: sticky 賣超 vs declared short vs skipped (unbookable) dividend.
+        ev.check("holding.oversold", sc, h.oversold, a.get("oversold"), phase)
+        ev.check("holding.short_open", sc, h.short_open, a.get("short_open"), phase)
+        ev.check("holding.unbookable_dividend", sc, h.unbookable_dividend,
+                 a.get("unbookable_dividend"), phase)
+        # per-holding valuation self-consistency vs the demo's OWN market_price, on the
+        # SIGNED quantity (an open short is a real priced position; only 賣超 is 待釐清).
         mp = a.get("market_price")
-        if mp is not None and h.shares > O.ZERO:
+        if mp is not None and h.shares != O.ZERO and not h.oversold:
             mp = dec(mp)
             ev.check("holding.market_value", sc, mp * h.shares, a.get("market_value"), phase)
-            ev.check("holding.unrealized_pnl", sc, (mp - h.adjusted_avg) * h.shares,
-                     a.get("unrealized_pnl"), phase)
+            unreal = (mp - h.adjusted_avg) * h.shares
+            ev.check("holding.unrealized_pnl", sc, unreal, a.get("unrealized_pnl"), phase)
+            # Remediation #2: percentage over the MAGNITUDE of the basis — a short's basis
+            # is negative and the bare ratio would flip a profitable short into a loss.
+            if h.original_total != O.ZERO:
+                ev.check("holding.unrealized_pct", sc, unreal / abs(h.original_total),
+                         a.get("unrealized_pct"), phase)
 
     # cash pools + statement terminal
     for pool in sorted(set(res.cash) | set(app_bal)):
@@ -261,6 +312,8 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
         ev.check("realized.adjusted_removed", sc, rr.adjusted_cost_removed,
                  a["adjusted_cost_removed"], phase)
         ev.check("realized.realized", sc, rr.realized, a["realized"], phase)
+        # sale vs dividend-income vs short_cover — the tax package routes on this.
+        ev.check("realized.kind", sc, rr.kind, a.get("kind"), phase)
 
     # FX pool per account (native; only when the demo surfaces it)
     fx = dash.get("fx")
@@ -269,14 +322,46 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
             if settle == funding or aid not in fx["by_account"]:
                 continue
             acc = fx["by_account"][aid]
-            ev.check("fx.avg_rate", aid, res.fx_avg_rate.get(aid), acc.get("avg_rate"), phase)
+            exp_avg = res.fx_avg_rate.get(aid)
+            exp_cash = res.fx_foreign_cash.get(aid, O.ZERO)
+            exp_ratio = res.fx_covered_ratio.get(aid, O.ONE)
+            ev.check("fx.avg_rate", aid, exp_avg, acc.get("avg_rate"), phase)
             ev.check("fx.realized", aid, res.fx_realized.get(aid), acc.get("realized_fx"), phase)
             # This phase deposits USD straight into the TWD-funded schwab account
             # (run_phase2.py) — the exact case the 2026-07-30 spec is about.
-            ev.check("fx.foreign_cash", aid, res.fx_foreign_cash.get(aid, O.ZERO),
-                     acc.get("foreign_cash"), phase)
-            ev.check("fx.covered_ratio", aid, res.fx_covered_ratio.get(aid, O.ONE),
-                     acc.get("covered_ratio"), phase)
+            ev.check("fx.foreign_cash", aid, exp_cash, acc.get("foreign_cash"), phase)
+            ev.check("fx.covered_ratio", aid, exp_ratio, acc.get("covered_ratio"), phase)
+            # spec F2: the gap is an AMOUNT (foreign_cash × uncovered fraction) and the
+            # CAUSE flag is the ratio, so the alarm cannot go silent on a positive pool.
+            ev.check("fx.basis_gap", aid,
+                     O.ZERO if exp_ratio == O.ONE else exp_cash * (O.ONE - exp_ratio),
+                     acc.get("fx_basis_gap"), phase)
+            ev.check("fx.basis_incomplete", aid, exp_ratio != O.ONE,
+                     acc.get("fx_basis_incomplete"), phase)
+            ev.check("fx.foreign_cash_negative", aid, exp_cash < O.ZERO,
+                     acc.get("foreign_cash_negative"), phase)
+            # The FX pool and the funds view are equal BY CONSTRUCTION since 2026-07-30.
+            ev.check("fx.pool_equals_funds", aid, exp_cash,
+                     res.cash.get((aid, settle), O.ZERO), phase)
+            # F3 self-consistency against the demo's OWN spot + stock value: ONE ratio
+            # scales BOTH unrealized legs (cash and stocks), composed exactly as the spec
+            # prescribes (scaled base × (spot − avg); total = stocks + cash).
+            spot = acc.get("current_spot")
+            if spot is not None and exp_avg is not None:
+                spot = dec(spot)
+                stock_val = dec(acc.get("foreign_stock_value") or "0")
+                cash_base = exp_cash if exp_ratio == O.ONE else exp_cash * exp_ratio
+                stock_base = stock_val if exp_ratio == O.ONE else stock_val * exp_ratio
+                un_cash = cash_base * (spot - exp_avg)
+                un_stocks = stock_base * (spot - exp_avg)
+                ev.check("fx.unrealized_cash", aid, un_cash,
+                         acc.get("unrealized_fx_cash"), phase)
+                ev.check("fx.unrealized_stocks", aid, un_stocks,
+                         acc.get("unrealized_fx_stocks"), phase)
+                ev.check("fx.unrealized_total", aid, un_stocks + un_cash,
+                         acc.get("unrealized_fx_total"), phase)
+                ev.check("fx.spot_delta", aid, spot - exp_avg,
+                         acc.get("spot_delta"), phase)
 
     # exports (CSV): cost basis + realized, absolute
     _exports(ev, api, res, phase)
@@ -290,7 +375,9 @@ def _cash_statement(ev, facts, app_bal, phase):
         lines.setdefault(key, []).append(delta)
 
     for m in facts.cash:
-        add((m.account_id, m.ccy), m.amount if m.kind == "DEPOSIT" else -m.amount)
+        # WITHDRAW is the only debit; DEPOSIT / OPENING / REBATE credit (audit C4).
+        add((m.account_id, m.ccy),
+            -m.amount if m.kind.upper() == "WITHDRAW" else m.amount)
     for c in facts.fxs:
         add((c.account_id, c.from_ccy), -c.from_amt)
         add((c.account_id, c.to_ccy), c.to_amt)

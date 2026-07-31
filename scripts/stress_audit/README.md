@@ -95,23 +95,38 @@ XIRR) are out of phase-2 scope; every native-currency figure is still reconciled
 
 A run is only green when **all** of these hold (exact Decimal unless noted):
 
-- **Per-stock cost basis** — for every `(account, symbol)` holding: `shares`,
-  `original_cost_total`, `adjusted_cost_total`, `original_avg`, `adjusted_avg`,
-  `dividend_portion`, and (when valued) `market_value`, `unrealized_pnl`, `capital_gain`.
+- **Per-stock cost basis** — for every `(account, symbol)` holding: `shares` (SIGNED —
+  an open declared short is negative), `original_cost_total`, `adjusted_cost_total`,
+  `original_avg`, `adjusted_avg`, `dividend_portion`, the three state flags
+  (`oversold` / `short_open` / `unbookable_dividend`), and (when valued) `market_value`,
+  `unrealized_pnl`, `capital_gain`, `unrealized_pct` (÷ `abs(basis)` — sign-safe on a
+  short's negative basis).
 - **Per-(account, currency) cash pool** — every pool balance, **and** the reconstructed
   running-balance **statement terminal** (deposits/withdrawals + trade settlements + FX
   legs + cash dividends) equals the app's reported balance.
-- **Realized P&L rows** — count, `proceeds_net`, `adjusted_cost_removed`,
-  `original_cost_removed`, `realized`, in order.
+- **Realized P&L rows** — count, `kind` (`sale` / `dividend` / `short_cover`),
+  `proceeds_net`, `adjusted_cost_removed`, `original_cost_removed`, `realized`, in order.
+  The oracle's declared-short model (long-lot-first sell, cover-at-buy-cost, cover-dated
+  realization) is derived independently from `domain-ledger.md`.
 - **Fee engine** — expected fee/tax per trade, including the **TW ETF sell** (registry
   `is_etf` → 0.1%) and **TW daytrade sell** (`daytrade` flag → 0.15%) rate branches.
-- **FX pool** — per FX-exposed account `avg_rate` + `realized_fx`, and the reporting
-  rollups `fx_realized` / `fx_unrealized`.
+- **FX pool** — per FX-exposed account `avg_rate` + `realized_fx` + `foreign_cash` +
+  **cost-basis coverage** (`covered_ratio`, `fx_basis_gap`, `fx_basis_incomplete`,
+  `foreign_cash_negative`, pool == funds view, one-ratio scaling of BOTH unrealized
+  legs), and the reporting rollups `fx_realized` / `fx_unrealized`.
 - **Blended KPIs** — `realized_total`, `unrealized_total`, `total_market_value`,
   `total_return`, and **`xirr`** (the one tolerance check).
 - **Ledger + export + report parity** — every raw ledger row, CSV export figure, and
   rendered report number matches.
-- **Guards** — oversell blocks with 422; duplicate rows are accepted as distinct.
+- **Guards** — oversell blocks with 422, **date-aware** (a back-dated sell covered only
+  by a later buy is blocked, naming the date); an UNDECLARED sell past the position is
+  never treated as a short; a dividend on an open short is never booked (skip + flag);
+  the `acq_home_amount` field rejects withdraw / home-ccy / amount+rate misuse;
+  `discount<1` together with `rebate_rate>0` raises the fee-rule conflict warning;
+  duplicate rows are accepted as distinct.
+- **Ledger integrity** (validity, not arithmetic) — the LONG lot is never negative at any
+  date (declared shorts replay through the two-lot model), and every undeclared sell has
+  a realized row.
 
 ## Credibility-scoring rubric
 

@@ -37,6 +37,9 @@ INSTRUMENTS = [
     ("TSLA", "US", "USD", "Tesla", "Auto", False),      # watchlist -> later bought
     ("5225", "MY", "MYR", "IHH Healthcare", "Healthcare", False),  # watchlist, stays
     ("0800EA", "MY", "MYR", "TradePlus MY ETF", "ETF", True),  # MY ETF -> stamp EXEMPT (v2)
+    # Declared-short lifecycle symbol (2026-07-31): opened short -> dividend-on-short ->
+    # covered flat. Dedicated so no other op can satisfy or disturb the short path.
+    ("2609", "TW", "TWD", "Yang Ming", "Shipping", False),
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
@@ -45,6 +48,9 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     # 5225 joined the ledger with the audit-H2 op (buy -> sell-all -> post-close dividend).
     # It ends FLAT, so this price only completes its history series; no holding reads it.
     "5225": D("6.40"),
+    # 2609 is priced so the OPEN-short checkpoint values the negative position for real
+    # (market_value / unrealized on signed shares); it too ends FLAT before final.
+    "2609": D("96"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
@@ -156,10 +162,17 @@ class Ops:
                       tax, got_tax, self.phase)
 
     def trade(self, account_id, symbol, side, d, shares, price, *, ack=False,
-              via_ui=False, expect_status=201, fee_check=True, daytrade=False):
+              via_ui=False, expect_status=201, fee_check=True, daytrade=False,
+              short=False):
         body = {"account_id": account_id, "symbol": symbol, "side": side,
                 "date": d, "shares": str(shares), "price": str(price),
                 "ack_oversell": ack, "daytrade": daytrade}
+        if short:
+            # Declared short sale + the harness note marker (see common.SHORT_MARKER):
+            # the marker is how the API-facts loader recovers the flag, since the
+            # transactions read endpoint does not expose it.
+            body["short_sale"] = True
+            body["note"] = C.SHORT_MARKER
         if via_ui and self.ui is not None:
             before = self._tx_total()
             self.ui.manual_trade(account_id, symbol, side, d, shares, price)
@@ -297,6 +310,10 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     res = O.replay(facts)
     sp = spots()
     prices = dict(PRICES)
+    # Any negative-share position (賣超 OR an open declared short) gates the blended
+    # KPI/XIRR comparison off at this checkpoint: the app computes them differently in
+    # that state (oversold -> not computable; short -> negative terminal value) and the
+    # scenario always closes the short before the final full-KPI reconcile.
     oversold = any(h.shares < O.ZERO for h in res.holdings.values())
 
     dash = api.get("/api/dashboard").json()
@@ -318,13 +335,26 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         ev.check("holding.original_avg", sc, h.original_avg, a["original_avg"], phase)
         ev.check("holding.adjusted_avg", sc, h.adjusted_avg, a["adjusted_avg"], phase)
         ev.check("holding.dividend_portion", sc, h.dividend_portion, a["dividend_portion"], phase)
-        if valuation and h.shares > O.ZERO and key[1] in prices:
+        # Flags: 賣超 (sticky) vs declared short vs skipped dividend — three distinct states
+        # the UI renders differently; the oracle derives each independently.
+        ev.check("holding.oversold", sc, h.oversold, a["oversold"], phase)
+        ev.check("holding.short_open", sc, h.short_open, a["short_open"], phase)
+        ev.check("holding.unbookable_dividend", sc, h.unbookable_dividend,
+                 a["unbookable_dividend"], phase)
+        # Valuation on the SIGNED quantity: an open short (negative shares) is a real
+        # priced position (2026-07-31) — only an oversold row has 待釐清 (null) values.
+        if valuation and h.shares != O.ZERO and not h.oversold and key[1] in prices:
             p = prices[key[1]]
             ev.check("holding.market_value", sc, p * h.shares, a["market_value"], phase)
-            ev.check("holding.unrealized_pnl", sc, (p - h.adjusted_avg) * h.shares,
-                     a["unrealized_pnl"], phase)
+            unreal = (p - h.adjusted_avg) * h.shares
+            ev.check("holding.unrealized_pnl", sc, unreal, a["unrealized_pnl"], phase)
             ev.check("holding.capital_gain", sc, (p - h.original_avg) * h.shares,
                      a["capital_gain"], phase)
+            # Remediation #2 (2026-07-31): ratios over a short's NEGATIVE basis divide by
+            # abs() — the bare ratio flips sign and shows a profitable short as a loss.
+            if h.original_total != O.ZERO:
+                ev.check("holding.unrealized_pct", sc, unreal / abs(h.original_total),
+                         a.get("unrealized_pct"), phase)
 
     # ---- B. Realized rows (dashboard + CSV) ----
     app_real = dash["realized"]["rows"]
@@ -340,6 +370,8 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         ev.check("realized.original_removed", sc, rr.original_cost_removed,
                  a["original_cost_removed"], phase)
         ev.check("realized.realized", sc, rr.realized, a["realized"], phase)
+        # sale vs dividend-income vs short_cover — the tax package routes on this.
+        ev.check("realized.kind", sc, rr.kind, a.get("kind"), phase)
 
     # ---- C. Cash pools + running-balance statement ----
     cash = api.get("/api/cash", limit=500).json()
@@ -392,8 +424,9 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         lines.setdefault(key, []).append((d, seq, label, delta))
 
     for m in facts.cash:
+        # WITHDRAW is the only debit; DEPOSIT / OPENING / REBATE credit (audit C4).
         add((m.account_id, m.ccy), m.d, (0, m.id), f"{m.kind}",
-            m.amount if m.kind == "DEPOSIT" else -m.amount)
+            -m.amount if m.kind.upper() == "WITHDRAW" else m.amount)
     for c in facts.fxs:
         add((c.account_id, c.from_ccy), c.d, (1, c.id), "FX_OUT", -c.from_amt)
         add((c.account_id, c.to_ccy), c.d, (1, c.id), "FX_IN", c.to_amt)

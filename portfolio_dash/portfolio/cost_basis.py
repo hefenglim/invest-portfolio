@@ -18,6 +18,16 @@ class OversellError(Exception):
     """A sell quantity exceeds held shares (input error vs short sale — require confirm)."""
 
 
+class UnbookableLedgerError(ValueError):
+    """The ledger contains an event this model cannot book honestly.
+
+    Subclasses ``ValueError`` on purpose: the call sites that already degrade on
+    ``except (ValueError, KeyError)`` keep behaving exactly as before, while the STRICT
+    sites (重算 / what-if / tax export) can catch this precisely and answer 4xx instead of
+    letting it escape as a 500 — the never-500-at-every-build_book-call-site rule.
+    """
+
+
 @dataclass
 class _Position:
     """One (account, symbol) position during the replay.
@@ -224,9 +234,10 @@ def build_book(
                 # strict path, and on the dashboard path skip the event and flag the position
                 # rather than crash (the same posture as the oversell degradation).
                 if not allow_oversell:
-                    raise ValueError(
-                        f"dividend for {key} while a short position is open — a short pays "
-                        "the dividend in lieu; record it as a cash movement, not a dividend"
+                    raise UnbookableLedgerError(
+                        f"{ev.symbol}（{ev.account_id}）於 {ev.date.isoformat()} 有股利紀錄，"
+                        "但該時點是放空部位 — 放空方需支付股利，本系統無此借方分錄。"
+                        "請刪除該筆股利，或改以現金收支登錄。"
                     )
                 existing.unbookable_dividend = True
                 continue

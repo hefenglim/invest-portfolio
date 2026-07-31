@@ -16,7 +16,11 @@ from portfolio_dash.data_ingestion.store import (
     list_opening,
     list_transactions,
 )
-from portfolio_dash.portfolio.cost_basis import OversellError, build_book
+from portfolio_dash.portfolio.cost_basis import (
+    OversellError,
+    UnbookableLedgerError,
+    build_book,
+)
 from portfolio_dash.scheduler.jobs import backfill_history_all, run_job
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
@@ -108,4 +112,10 @@ def recompute(
         build_book(txs, divs, opening, instruments)
     except OversellError as exc:
         return JSONResponse(status_code=422, content=error_body("oversell", str(exc)))
+    except UnbookableLedgerError as exc:
+        # never-500 at EVERY build_book call site: the strict replay refuses an event it
+        # cannot book honestly (e.g. a dividend inside an open-short window), and 重算
+        # must say so rather than return an internal error.
+        return JSONResponse(status_code=422, content=error_body(
+            "unbookable_ledger", str(exc)))
     return {"as_of": now.isoformat(), "rebuilt": True}
