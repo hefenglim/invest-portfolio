@@ -60,6 +60,11 @@ release, not a deferred chore.
 Concrete host paths / URLs / ports / systemd units / backup locations live in the
 git-ignored `docs/human_noted/` note. **Never write real host details into this file.**
 
+**Run every remote command through `scripts/vm_exec.py`** (`--action "why" --cmd "…"`, add
+`--write` when it changes state). It executes via `gcloud` *and* appends the entry to the
+append-only VM operation log in one step, so the deploy trail cannot drift from what actually
+happened — which is exactly what it did before this was automated.
+
 10. **Cut the version.** Merge to `main`, tag `vX.Y.Z`, push both. Prod and demo are
     deployed from the **tag**, never from a branch.
 11. **Back up every DB you are about to touch — demo included.** Prod's ledger is
@@ -84,8 +89,10 @@ git-ignored `docs/human_noted/` note. **Never write real host details into this 
     from the control plane while the node was online, the key valid, and the service healthy —
     every page was `000` from outside and nothing on the box showed it. Re-register the funnel
     per the host note. **The release is not complete until this check passes for both sites.**
-15. **Close the loop.** Both sites report the same `version` / `commit` / `release`. Record
-    the deploy (date, tag, backup filenames) in the host note's operation log.
+15. **Close the loop.** Both sites report the same `version` / `commit` / `release`. The
+    per-command entries are already in the operation log (step 10's wrapper wrote them);
+    append one release summary — tag, both backup filenames, both verifications, the
+    reachability result.
 
 ## Part C — abort protocol: data first, diagnosis second
 

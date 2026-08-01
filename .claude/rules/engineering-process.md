@@ -112,6 +112,14 @@ tooling on the box that serves prod.
 - Concrete host paths, URLs, ports, systemd units, and Tailscale node names for BOTH instances
   live in the git-ignored `docs/human_noted/` deployment note — **never commit real host
   details** (public docs use placeholders).
+- **Every operation against the VM is logged — run it through `scripts/vm_exec.py`, not
+  `gcloud` directly.** The operation log (`docs/human_noted/vm-operation-log.md`, git-ignored,
+  append-only) is the VM's audit trail, and read-only inspections count. Owner directive
+  2026-08-01, after the log went silent for 15 released versions and the v0.1.25 deploy issued
+  five remote commands but recorded one narrative summary: a rule that depends on remembering
+  is not a control, so the wrapper writes the entry as part of running the command. Use
+  `--log-only` to record an operation performed some other way (console action, human-run
+  command) rather than leaving a hole. Corrections are **new entries**; never rewrite the log.
 
 ## `ship-version` checklist
 
