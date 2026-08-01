@@ -87,6 +87,11 @@
   let D = { balances: [], movements: [], negative_pools: [] };
   let accounts = [];  // from /api/input/context (id, name, ccy, settlement_ccy, funding_ccy)
   let cmKind = 'deposit';
+  /* 取得成本 prefill race token — MODULE scope for the SAME reason the estimate state below
+     is: syncMovementCcy() runs early inside initForms() and reaches prefillAcq(), so a `let`
+     declared further down initForms would sit in its temporal dead zone at that call. */
+  let acqPrefillSeq = 0;
+  let acqPrefillMsg = '';   // same reason: renderAcqHint() is reachable from that early call
   let booted = false;  // FU-D25: gate pd-cash-tab re-renders until the first boot() populated D
   /* FU-D43c estimate state — MODULE scope, not initForms: syncFxCcy() calls
      resetEstimate() early in initForms(), and `let` declarations further down initForms
@@ -433,6 +438,13 @@
     return false;
   }
 
+  /* The account's HOME currency — the one an acquisition cost is denominated in. A
+     movement whose ccy differs from this is foreign exposure and needs a cost basis. */
+  function fundingCcyOf(accountId) {
+    const a = accounts.find((x) => x.id === accountId);
+    return (a && a.funding_ccy) || '';
+  }
+
   /* ---- C2: constrain a ccy <select> to the account's {交割幣, 資金幣} ---- */
   function ccyOptions(accountId) {
     const a = accounts.find((x) => x.id === accountId);
@@ -530,6 +542,41 @@
     fAmt.value = m.amount;
     const fNote = el('input', 'input'); fNote.value = m.note || '';
     if (isRebate) fNote.disabled = true;
+    /* spec 2026-07-30: the acquisition cost MUST appear in the edit dialog. The PUT is a
+       full replace, so a dialog that omitted this field would silently NULL a recorded
+       cost basis on any unrelated edit (note/amount) — a data loss, not a display bug.
+       Pre-filled with the STORED home AMOUNT (the authority, F1) so a round-trip is
+       lossless; clearing the box is the deliberate way to drop the basis. */
+    const editHome = fundingCcyOf(m.account_id);
+    const editForeign = !!editHome && m.ccy !== editHome && m.kind !== 'withdraw';
+    const fAcq = el('input', 'input'); fAcq.type = 'number'; fAcq.step = '0.01';
+    fAcq.value = m.acq_home_amount || '';
+    const acqHint = el('div', 'cfx-balance');
+    /* The stored authority is the AMOUNT, so editing 金額 alone silently rescales the
+       implied acquisition rate (1,000 USD/32,388 TWD edited to 2,000 USD becomes 16.194).
+       Recompute and show that rate off BOTH fields so the change is never invisible —
+       input-side what-if on the user's own entry, never a stored figure. */
+    const updAcqHint = () => {
+      const cost = fAcq.value.trim(), qty = fAmt.value.trim();
+      if (!cost) {
+        acqHint.textContent = '未登錄取得成本 — 此筆不列入加權平均，帳戶的匯損益會標示缺口。';
+        acqHint.className = 'cfx-balance warn';
+        return;
+      }
+      const rate = (Number(qty) > 0 && Number(cost) > 0)
+        ? (Number(cost) / Number(qty)).toFixed(4) : null;
+      acqHint.className = 'cfx-balance';
+      acqHint.textContent = (rate
+        ? '換算後 1 ' + m.ccy + ' = ' + rate + ' ' + editHome
+          + (m.acq_rate && rate !== Number(m.acq_rate).toFixed(4)
+             ? '（原為 ' + Number(m.acq_rate).toFixed(4) + '）' : '')
+          + '　·　'
+        : '')
+        + '此欄只記錄取得成本，不扣款；清空即代表「成本未知」。';
+    };
+    updAcqHint();
+    fAcq.addEventListener('input', updAcqHint);
+    fAmt.addEventListener('input', updAcqHint);
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal');
     const head = el('div', 'modal-head');
@@ -538,10 +585,13 @@
     head.appendChild(close);
     modal.appendChild(head);
     const body = el('div', 'modal-body');
-    [['日期', fDate], ['方向', fKind], ['金額', fAmt], ['備註', fNote]].forEach(([label, node]) => {
+    const fields = [['日期', fDate], ['方向', fKind], ['金額', fAmt], ['備註', fNote]];
+    if (editForeign) fields.push(['取得成本（' + editHome + '）', fAcq]);
+    fields.forEach(([label, node]) => {
       const w = el('div', 'field');
       w.appendChild(el('label', null, label));
       w.appendChild(node);
+      if (node === fAcq) w.appendChild(acqHint);
       body.appendChild(w);
     });
     if (isRebate) {
@@ -562,15 +612,22 @@
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
     ok.addEventListener('click', async () => {
       dismiss();
-      const send = async (ack) => api.put('/api/cash/movements/' + m.id, {
-        account_id: m.account_id,
-        // rebate rows re-send the ORIGINAL kind/note/date (locked) — only the amount changes.
-        date: isRebate ? m.date : fDate.value,
-        kind: isRebate ? 'rebate' : fKind.value,
-        ccy: m.ccy, amount: fAmt.value,
-        note: isRebate ? m.note : (fNote.value.trim() || null),
-        ack_negative: ack,
-      });
+      const send = async (ack) => {
+        const payload = {
+          account_id: m.account_id,
+          // rebate rows re-send the ORIGINAL kind/note/date (locked) — only the amount changes.
+          date: isRebate ? m.date : fDate.value,
+          kind: isRebate ? 'rebate' : fKind.value,
+          ccy: m.ccy, amount: fAmt.value,
+          note: isRebate ? m.note : (fNote.value.trim() || null),
+          ack_negative: ack,
+        };
+        // Switching the row to 出金 makes it a disposal — the cost basis no longer applies.
+        if (editForeign && payload.kind !== 'withdraw' && fAcq.value.trim()) {
+          payload.acq_home_amount = fAcq.value.trim();
+        }
+        return api.put('/api/cash/movements/' + m.id, payload);
+      };
       try {
         await send(false);
         if (window.toast) window.toast('已更新', 'ok', '資金紀錄 #' + m.id);
@@ -716,6 +773,10 @@
     const syncMovementCcy = () => {
       fillCcySelect($('#cm-ccy'), $('#cm-account').value);
       updCmBalance();  // FU-D43a: refresh the 賬戶現金 ceiling for the new account/ccy
+      // fillCcySelect writes the <select> programmatically, which fires NO change event —
+      // without this call the 取得成本 field would stay hidden on load and after an account
+      // switch, i.e. exactly when a foreign default is selected for the user.
+      syncAcqField();
     };
     $('#cm-account').addEventListener('change', syncMovementCcy);
     $('#cm-ccy').addEventListener('change', updCmBalance);
@@ -754,7 +815,85 @@
       $('#cm-kind-out').classList.toggle('active', k === 'withdraw');
       if (openBtn) openBtn.classList.toggle('active', k === 'opening');
       updCmBalance();  // FU-D43a: the ceiling line exists only while kind=出金
+      syncAcqField();  // 出金 is a disposal — it carries no acquisition cost
     }
+
+    /* ---- spec 2026-07-30: 取得成本 for a FOREIGN credit -------------------------------
+       The field exists only when the movement's currency differs from the ACCOUNT's
+       資金幣別 — that is precisely the case where the FX pool needs a cost basis and, until
+       this release, had nowhere to put one. The pre-filled rate is a REFERENCE (a broker's
+       conversion is not the market mid) and is always overwritable; when nothing is stored
+       on or before that date the field stays BLANK rather than guessing, and a blank is a
+       legal submission. Only the resolved home-currency AMOUNT is persisted (F1). */
+    function isForeignMovement() {
+      const home = fundingCcyOf($('#cm-account').value);
+      return !!home && $('#cm-ccy').value !== home && cmKind !== 'withdraw';
+    }
+    function syncAcqField() {
+      const field = $('#cm-acq-field');
+      if (!field) return;
+      const show = isForeignMovement();
+      field.hidden = !show;
+      if (!show) {
+        $('#cm-acq').value = '';
+        acqPrefillMsg = '';
+        $('#cm-acq-hint').textContent = '';
+        return;
+      }
+      prefillAcq();
+    }
+    async function prefillAcq() {
+      const hint = $('#cm-acq-hint');
+      const seq = ++acqPrefillSeq;
+      const account = $('#cm-account').value, ccy = $('#cm-ccy').value;
+      const on = $('#cm-date').value;
+      if (!account || !ccy || !on) return;
+      hint.textContent = '查詢當日匯率…';
+      try {
+        const r = await api.get('/api/cash/acq-rate', { account_id: account, ccy: ccy, on: on });
+        if (seq !== acqPrefillSeq) return;  // a later change already superseded this one
+        if (r.available) {
+          $('#cm-acq-mode').value = 'rate';
+          $('#cm-acq').value = r.rate;
+          acqPrefillMsg = '參考值：' + on + ' 收盤 1 ' + ccy + ' = ' + f.rate(r.rate)
+            + ' ' + r.home_ccy + '（市場中價，你的實際取得價可能不同，可直接修改）';
+        } else {
+          $('#cm-acq').value = '';
+          acqPrefillMsg = r.reason + '（留白也可送出：金額照樣計入餘額，'
+            + '但不列入匯損益計算並會被標示）';
+        }
+        renderAcqHint();
+      } catch (err) {
+        if (seq !== acqPrefillSeq) return;
+        acqPrefillMsg = '無法取得參考匯率，請手動輸入（可留白）';
+        renderAcqHint();
+      }
+    }
+
+    /* When the cost is entered as an AMOUNT, changing 金額 silently changes the implied
+       acquisition rate — so show that rate live and let the user see it move. Input-side
+       what-if on the user's OWN entry, exactly like updImplied() in the FX form below; it
+       is a display aid and never a stored figure. */
+    function renderAcqHint() {
+      var parts = acqPrefillMsg ? [acqPrefillMsg] : [];
+      var amt = $('#cm-amount').value.trim(), cost = $('#cm-acq').value.trim();
+      if ($('#cm-acq-mode').value === 'amount' && amt && cost
+          && Number(amt) > 0 && Number(cost) > 0) {
+        parts.push('換算後 1 ' + $('#cm-ccy').value + ' = '
+          + (Number(cost) / Number(amt)).toFixed(4) + ' '
+          + (fundingCcyOf($('#cm-account').value) || ''));
+      }
+      $('#cm-acq-hint').textContent = parts.join('　·　');
+    }
+    $('#cm-acq').addEventListener('input', renderAcqHint);
+    $('#cm-acq-mode').addEventListener('change', renderAcqHint);
+    $('#cm-amount').addEventListener('input', renderAcqHint);
+    // The account select is covered by syncMovementCcy above; binding it here too would
+    // fire a second, redundant prefill request for every account switch.
+    ['#cm-ccy', '#cm-date'].forEach((sel) => {
+      const e = $(sel);
+      if (e) e.addEventListener('change', syncAcqField);
+    });
 
     /* FU-D43b: clicking a ceiling FIGURE fills the amount field with the full raw
        balance (delegated to the line so the re-rendered span needs no re-binding). */
@@ -783,14 +922,22 @@
       if (!amount) { if (window.toast) window.toast('請輸入金額', 'fail'); return; }
       const restore = window.pdBusy ? window.pdBusy($('#cm-confirm'), '寫入中…') : () => {};
       try {
-        await api.post('/api/cash/movements', {
+        const payload = {
           account_id: $('#cm-account').value, date: $('#cm-date').value, kind: cmKind,
           ccy: $('#cm-ccy').value, amount: amount,
           note: $('#cm-note').value.trim() || null,
-        });
+        };
+        /* 取得成本 is optional even when the field is shown — blank means "cost unknown",
+           which the backend records faithfully instead of inventing a rate. */
+        const acq = isForeignMovement() ? $('#cm-acq').value.trim() : '';
+        if (acq) {
+          if ($('#cm-acq-mode').value === 'amount') payload.acq_home_amount = acq;
+          else payload.acq_rate = acq;
+        }
+        await api.post('/api/cash/movements', payload);
         restore();
         if (window.toast) window.toast('寫入成功', 'ok', (KIND_LABEL[cmKind] || '') + ' ' + amount);
-        $('#cm-amount').value = ''; $('#cm-note').value = '';
+        $('#cm-amount').value = ''; $('#cm-note').value = ''; $('#cm-acq').value = '';
         await boot();
       } catch (err) {
         restore();

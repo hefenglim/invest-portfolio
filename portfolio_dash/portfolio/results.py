@@ -27,11 +27,21 @@ class Holding(BaseModel):
     unrealized_pnl: Decimal | None = None
     capital_gain: Decimal | None = None
     price_stale: bool = False
-    # 賣超/oversold: net shares went negative (a sell exceeded holdings, written after an
-    # acked oversell). Cost basis + P&L are 待釐清 (not computed — see cost_basis.build_book);
-    # the position is excluded from portfolio aggregates and flagged for the user to fix
-    # (e.g. record the missing opening inventory / buy). Lightweight: NOT short accounting.
+    # 賣超/oversold: an UNDECLARED sell exceeded holdings (written after an acked oversell).
+    # Cost basis + P&L are 待釐清 (discarded — see cost_basis.build_book); the position is
+    # excluded from portfolio aggregates and flagged for the user to fix (e.g. record the
+    # missing opening inventory / buy). STICKY since 2026-07-31: the discarded basis is not
+    # restored by a later buy, so the warning must not be cleared by one either.
     oversold: bool = False
+    # A DECLARED short (`short_sale` on the sell) that is still open. ``shares`` is negative
+    # and the cost fields hold the proceeds received, so avg/market_value/unrealized are all
+    # meaningful — unlike `oversold`, this is a real, priced position, not an unresolved
+    # data problem. Covering it books realized P&L at the covering buy's per-share cost.
+    short_open: bool = False
+    # A dividend row landed while this position was short. It was NOT booked (a short pays
+    # the dividend in lieu — see cost_basis.build_book), so the position's figures are
+    # incomplete by exactly that payout and the consumer must say so.
+    unbookable_dividend: bool = False
 
 
 class RealizedRow(BaseModel):
@@ -63,7 +73,11 @@ class RealizedRow(BaseModel):
     original_cost_removed: Decimal
     adjusted_cost_removed: Decimal
     realized: Decimal
-    kind: Literal["sale", "dividend"] = "sale"
+    # "short_cover" (2026-07-31): a declared short bought back. The proceeds were received
+    # on the SELL date but the gain only realizes when the position is covered, so the row is
+    # dated the COVER date — `proceeds_net` is the short's weighted-average sale value and
+    # `*_cost_removed` is what the covering buy actually cost, all-in.
+    kind: Literal["sale", "dividend", "short_cover"] = "sale"
 
 
 class RealizedPnL(BaseModel):

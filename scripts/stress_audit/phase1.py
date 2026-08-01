@@ -37,6 +37,9 @@ INSTRUMENTS = [
     ("TSLA", "US", "USD", "Tesla", "Auto", False),      # watchlist -> later bought
     ("5225", "MY", "MYR", "IHH Healthcare", "Healthcare", False),  # watchlist, stays
     ("0800EA", "MY", "MYR", "TradePlus MY ETF", "ETF", True),  # MY ETF -> stamp EXEMPT (v2)
+    # Declared-short lifecycle symbol (2026-07-31): opened short -> dividend-on-short ->
+    # covered flat. Dedicated so no other op can satisfy or disturb the short path.
+    ("2609", "TW", "TWD", "Yang Ming", "Shipping", False),
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
@@ -45,6 +48,9 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     # 5225 joined the ledger with the audit-H2 op (buy -> sell-all -> post-close dividend).
     # It ends FLAT, so this price only completes its history series; no holding reads it.
     "5225": D("6.40"),
+    # 2609 is priced so the OPEN-short checkpoint values the negative position for real
+    # (market_value / unrealized on signed shares); it too ends FLAT before final.
+    "2609": D("96"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
@@ -156,10 +162,17 @@ class Ops:
                       tax, got_tax, self.phase)
 
     def trade(self, account_id, symbol, side, d, shares, price, *, ack=False,
-              via_ui=False, expect_status=201, fee_check=True, daytrade=False):
+              via_ui=False, expect_status=201, fee_check=True, daytrade=False,
+              short=False):
         body = {"account_id": account_id, "symbol": symbol, "side": side,
                 "date": d, "shares": str(shares), "price": str(price),
                 "ack_oversell": ack, "daytrade": daytrade}
+        if short:
+            # Declared short sale + the harness note marker (see common.SHORT_MARKER):
+            # the marker is how the API-facts loader recovers the flag, since the
+            # transactions read endpoint does not expose it.
+            body["short_sale"] = True
+            body["note"] = C.SHORT_MARKER
         if via_ui and self.ui is not None:
             before = self._tx_total()
             self.ui.manual_trade(account_id, symbol, side, d, shares, price)
@@ -297,6 +310,10 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     res = O.replay(facts)
     sp = spots()
     prices = dict(PRICES)
+    # Any negative-share position (賣超 OR an open declared short) gates the blended
+    # KPI/XIRR comparison off at this checkpoint: the app computes them differently in
+    # that state (oversold -> not computable; short -> negative terminal value) and the
+    # scenario always closes the short before the final full-KPI reconcile.
     oversold = any(h.shares < O.ZERO for h in res.holdings.values())
 
     dash = api.get("/api/dashboard").json()
@@ -318,13 +335,26 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         ev.check("holding.original_avg", sc, h.original_avg, a["original_avg"], phase)
         ev.check("holding.adjusted_avg", sc, h.adjusted_avg, a["adjusted_avg"], phase)
         ev.check("holding.dividend_portion", sc, h.dividend_portion, a["dividend_portion"], phase)
-        if valuation and h.shares > O.ZERO and key[1] in prices:
+        # Flags: 賣超 (sticky) vs declared short vs skipped dividend — three distinct states
+        # the UI renders differently; the oracle derives each independently.
+        ev.check("holding.oversold", sc, h.oversold, a["oversold"], phase)
+        ev.check("holding.short_open", sc, h.short_open, a["short_open"], phase)
+        ev.check("holding.unbookable_dividend", sc, h.unbookable_dividend,
+                 a["unbookable_dividend"], phase)
+        # Valuation on the SIGNED quantity: an open short (negative shares) is a real
+        # priced position (2026-07-31) — only an oversold row has 待釐清 (null) values.
+        if valuation and h.shares != O.ZERO and not h.oversold and key[1] in prices:
             p = prices[key[1]]
             ev.check("holding.market_value", sc, p * h.shares, a["market_value"], phase)
-            ev.check("holding.unrealized_pnl", sc, (p - h.adjusted_avg) * h.shares,
-                     a["unrealized_pnl"], phase)
+            unreal = (p - h.adjusted_avg) * h.shares
+            ev.check("holding.unrealized_pnl", sc, unreal, a["unrealized_pnl"], phase)
             ev.check("holding.capital_gain", sc, (p - h.original_avg) * h.shares,
                      a["capital_gain"], phase)
+            # Remediation #2 (2026-07-31): ratios over a short's NEGATIVE basis divide by
+            # abs() — the bare ratio flips sign and shows a profitable short as a loss.
+            if h.original_total != O.ZERO:
+                ev.check("holding.unrealized_pct", sc, unreal / abs(h.original_total),
+                         a.get("unrealized_pct"), phase)
 
     # ---- B. Realized rows (dashboard + CSV) ----
     app_real = dash["realized"]["rows"]
@@ -340,6 +370,8 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         ev.check("realized.original_removed", sc, rr.original_cost_removed,
                  a["original_cost_removed"], phase)
         ev.check("realized.realized", sc, rr.realized, a["realized"], phase)
+        # sale vs dividend-income vs short_cover — the tax package routes on this.
+        ev.check("realized.kind", sc, rr.kind, a.get("kind"), phase)
 
     # ---- C. Cash pools + running-balance statement ----
     cash = api.get("/api/cash", limit=500).json()
@@ -359,6 +391,9 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     if valuation and not oversold:
         _reconcile_kpis(ev, res, dash, prices, sp, phase)
         _reconcile_xirr(ev, res, dash, facts, prices, sp, phase)
+
+    # ---- E2. Ledger INTEGRITY (validity, not arithmetic — see oracle layer 4) ----
+    _reconcile_integrity(ev, res, facts, phase)
 
     # ---- F. Ledger APIs row-by-row (raw facts) ----
     _reconcile_ledger_api(ev, api, facts, phase)
@@ -389,8 +424,9 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         lines.setdefault(key, []).append((d, seq, label, delta))
 
     for m in facts.cash:
+        # WITHDRAW is the only debit; DEPOSIT / OPENING / REBATE credit (audit C4).
         add((m.account_id, m.ccy), m.d, (0, m.id), f"{m.kind}",
-            m.amount if m.kind == "DEPOSIT" else -m.amount)
+            -m.amount if m.kind.upper() == "WITHDRAW" else m.amount)
     for c in facts.fxs:
         add((c.account_id, c.from_ccy), c.d, (1, c.id), "FX_OUT", -c.from_amt)
         add((c.account_id, c.to_ccy), c.d, (1, c.id), "FX_IN", c.to_amt)
@@ -417,6 +453,30 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         ev.check("cash.statement.terminal", "|".join(key), exp, got, phase)
 
 
+# (account, symbol) pairs this scenario oversells ON PURPOSE with ack=True (run_phase1
+# proves the guard blocks it unacked first). A user-acknowledged oversell is a recorded
+# decision, not a control failure — see domain-ledger.md.
+ACKED_OVERSELLS = {("tw_broker", "0050")}
+
+
+def _reconcile_integrity(ev, res, facts, phase):
+    """Ledger VALIDITY, orthogonal to every other assertion in this file.
+
+    Everything else compares the app against the oracle: it proves both replayed the same
+    rows the same way, and is therefore blind to a row that should never have been accepted.
+    Measured on 2026-07-30: a back-dated oversell reconciled perfectly while carrying an
+    average cost 10-16x the market price, because `build_book` drops an oversold position's
+    basis and a LATER buy clears the `oversold` flag. These two checks stay red until the
+    impossible row is gone.
+    """
+    findings = O.integrity_findings(facts, res.realized_rows, acked=ACKED_OVERSELLS)
+    for check, scope in findings:
+        ev.check(check, scope, "clean", "VIOLATION", phase)
+    if not findings:
+        ev.check("ledger.integrity", "no negative position / orphan sell", "clean", "clean",
+                 phase)
+
+
 def _reconcile_fx(ev, res, dash, facts, prices, sp, phase, valuation):
     fx = dash.get("fx")
     kpis = dash["kpis"]
@@ -430,6 +490,16 @@ def _reconcile_fx(ev, res, dash, facts, prices, sp, phase, valuation):
             acc = fx["by_account"][aid]
             ev.check("fx.avg_rate", aid, exp_avg, acc.get("avg_rate"), phase)
             ev.check("fx.realized", aid, exp_real, acc.get("realized_fx"), phase)
+            # spec 2026-07-30: the pool now includes foreign cash movements, so it must
+            # equal the funds view; covered_ratio/gap disclose the basis-unknown part.
+            exp_cash = res.fx_foreign_cash.get(aid, O.ZERO)
+            exp_ratio = res.fx_covered_ratio.get(aid, O.ONE)
+            ev.check("fx.foreign_cash", aid, exp_cash, acc.get("foreign_cash"), phase)
+            ev.check("fx.covered_ratio", aid, exp_ratio, acc.get("covered_ratio"), phase)
+            ev.check("fx.basis_gap", aid, exp_cash * (O.ONE - exp_ratio),
+                     acc.get("fx_basis_gap"), phase)
+            ev.check("fx.pool_equals_funds", aid, exp_cash,
+                     res.cash.get((aid, settle), O.ZERO), phase)
     # reporting realized fx rollup
     if fx is not None:
         exp_roll = O.ZERO
@@ -468,7 +538,10 @@ def _reconcile_fx_unrealized(ev, res, kpis, facts, prices, sp, phase):
             if acct == aid and h.quote_ccy == settle and h.shares > O.ZERO and sym in prices:
                 stock_val += prices[sym] * h.shares
         fcash = res.fx_foreign_cash.get(aid, O.ZERO)
-        unreal_home = (stock_val + fcash) * (spot - avg)
+        # spec 2026-07-30 F2/F3: one coverage ratio scales the WHOLE foreign exposure
+        # (cash AND stocks), because avg came from the basis-known population only.
+        ratio = res.fx_covered_ratio.get(aid, O.ONE)
+        unreal_home = (stock_val + fcash) * ratio * (spot - avg)
         to_rep = O.ONE if funding == REPORTING else sp.rate(funding, REPORTING)
         exp += unreal_home * to_rep
     ev.check("fx.reporting_unrealized", "rollup", exp, kpis.get("fx_unrealized"), phase)

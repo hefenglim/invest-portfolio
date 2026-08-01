@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 
 import common as C
 import phase1 as P1
-from phase1 import Ops, reconcile
+from phase1 import Ops, _json, reconcile
 
 
 def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
@@ -151,6 +152,53 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("DTB", "tw_broker", "2330", "2026-06-27", 100, 700)                # same-day buy
     op.trade("tw_broker", "2330", "sell", "2026-06-27", 100, 720, daytrade=True)  # manual flag
     op.daytrade_csv("tw_broker", "2330", "2026-06-28", 100, 705, 725)      # CSV daytrade column
+
+    # ---- Declared-short lifecycle (2026-07-31) + date-aware 賣超 guard ----
+    # (a) BACK-DATED sell: schwab/MSFT is well covered TODAY, but on 2026-01-01 (before
+    #     its first buy, 2026-01-20) it held nothing — the date-aware guard must 422 and
+    #     NAME the short date (a net-only check would have let this through).
+    r = op.trade("schwab", "MSFT", "sell", "2026-01-01", 5, 400,
+                 expect_status=422, fee_check=False)
+    ev.check("guard.backdated_sell_blocks", "schwab/MSFT sell 5@2026-01-01 (buys are later)",
+             "422", str(r.get("status")), "phase1")
+    _issues = ((r.get("json") or {}).get("error") or {}).get("issues") or []
+    _txt = " ".join(str(i.get("text", "")) for i in _issues)
+    ev.check("guard.backdated_names_date", "422 message names the sell's own date",
+             True, "2026-01-01" in _txt, "phase1")
+    # (b) an UNDECLARED sell on an empty position stays blocked — short is never inferred.
+    r = op.trade("tw_broker", "2609", "sell", "2026-06-29", 2000, 100,
+                 expect_status=422, fee_check=False)
+    ev.check("guard.short_needs_declaration", "tw_broker/2609 undeclared sell, empty position",
+             "422", str(r.get("status")), "phase1")
+    # (c) DECLARED short open: sells past zero with no ack; fee/tax book like any TW sell.
+    op.trade("tw_broker", "2609", "sell", "2026-06-29", 2000, 100, short=True)
+    # (d) a dividend recorded while the short is open — the app must NOT book it
+    #     (skip + flag on the dashboard path); the oracle mirrors the skip.
+    op.dividend("tw_broker", "2609", "2026-06-30", "CASH", 3000)
+    reconcile(ev, api, db_path, "short_open", valuation=True)
+    # (e) STRICT path probe (op-logged, no assertion): 重算 replays without allow_oversell,
+    #     where the dividend-on-short is specified to raise. A 5xx here is an app finding
+    #     (never-500 rule) — recorded in the oplog for the report.
+    rr = api.post("/api/actions/recompute", {})
+    ev.op("phase1", "API", "probe.recompute_strict_short_dividend", {},
+          {"status": rr.status_code, "json": _json(rr)},
+          note="expected a 4xx degradation; see report if 5xx")
+    # (f) user-resolution flow: remove the unbookable dividend row, then cover the short.
+    _c = sqlite3.connect(str(db_path))
+    try:
+        _row = _c.execute("SELECT id FROM dividends WHERE account_id=? AND symbol=?",
+                          ("tw_broker", "2609")).fetchone()
+    finally:
+        _c.close()
+    rd = api.delete(f"/api/ledgers/dividends/{_row[0]}")
+    ev.op("phase1", "API", "delete.dividend", {"id": _row[0]},
+          {"status": rd.status_code, "json": _json(rd)}, note="remove unbookable dividend")
+    ev.check("short.unbookable_dividend_removable", "delete the skipped dividend row",
+             "200", str(rd.status_code), "phase1")
+    # (g) partial cover then full cover -> realized short_cover rows dated the cover days;
+    #     the position ends FLAT so the final KPI/XIRR reconcile runs at full strength.
+    buy("SC1", "tw_broker", "2609", "2026-07-01", 800, 95)
+    buy("SC2", "tw_broker", "2609", "2026-07-06", 1200, 98)
 
     reconcile(ev, api, db_path, "final", valuation=True, reports=True)
 

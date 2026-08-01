@@ -76,6 +76,33 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
 - Each foreign-currency pool (per account) carries a **home-currency cost basis** =
   weighted-average acquisition rate. Schwab USD pool anchored in **TWD**; Moomoo USD
   pool anchored in **MYR**.
+- **Foreign cash movements are part of the pool (spec 2026-07-30, owner sign-off).** A
+  deposit/opening/rebate **in a currency other than the account's funding currency** funds
+  the pool and may carry `cash_movements.acq_home_amount` — the home-currency cost of that
+  foreign amount. Consequences:
+  - **Store the AMOUNT, never the rate** (F1). A rate is an average, and `data-and-pricing.md`
+    forbids storing an average as the authority; `fx_conversions` likewise stores two
+    amounts. The displayed acquisition rate is `acq_home_amount / amount`, computed on read.
+  - **No cost recorded → the amount still funds the balance, but never the average** — a
+    rate is never guessed, interpolated, or substituted with the current spot.
+  - **`covered_ratio` = basis-known acquisitions / all acquisitions** (F2). Outflows are
+    absorbed **pro rata** — cash is fungible and weighted-average tracks no lots. Never
+    "balance − unbased amount": that goes negative once the balance drops below the unbased
+    amount, which is the reversed-sign figure this rule exists to prevent.
+  - **The ratio scales the WHOLE foreign exposure — cash *and* stocks** (F3), because
+    `avg_rate` itself is derived from the covered population. Degrading only the cash leg
+    leaves the larger error unflagged.
+  - Sale proceeds and foreign cash dividends are **not** unbased acquisitions; they keep
+    inheriting the pool average, so a ledger with no foreign movements has `covered_ratio`
+    exactly 1 and is numerically unchanged by this rule.
+- **N1 — a foreign WITHDRAW recognises no realized FX.** It reduces the pool's exposure;
+  under weighted average a disposal changes neither the average nor the coverage, so the
+  remaining exposure stays self-consistent. If the money was actually converted back to the
+  home currency, the correct entry is an **fx_conversion**, not a withdrawal.
+- **N2 — filling in an acquisition cost later re-computes history.** All reports rebuild
+  from the ledgers (重算), nothing is snapshotted, so adding `acq_home_amount` to an old
+  opening also changes previously displayed realized/unrealized FX. That is intended
+  (`original_cost` is still never overwritten), but it is a visible change, not a no-op.
 - **Realized FX P&L** on reconversion (foreign→home) = home received − (home cost of
   the foreign amount sold, at the pool's weighted-avg rate).
 - **Unrealized FX P&L** = remaining foreign exposure marked to current spot vs. the
@@ -93,7 +120,64 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
 - Opening inventory is **not** a trade flow, but carries a **build date** + original
   cost total (needed for XIRR).
 - **Sell qty > holdings → block direct deduction; require user confirmation** (input
-  error vs. short sale).
+  error vs. short sale). The check is **DATE-AWARE** (2026-07-31): the covering position is
+  the one that exists **on the sell's own trade date** (`holdings.shares_through`), not the
+  net across all dates. A net-only check let a back-dated sell through whenever a LATER buy
+  covered it — and the replay then discarded that symbol's cost basis permanently. Mirrors
+  the cash ledger's `running_min` guard (audit C3).
+- **賣超 (undeclared oversell) is STICKY.** An acked oversell discards the position's cost
+  basis and emits no realized row (待釐清). A later buy nets the position positive again but
+  does **not** restore the discarded basis, so the flag must not be cleared by one either —
+  it is raised on "was ever negative", not on the final sign.
+
+### Declared short sale (owner ruling 2026-07-31, spec option C)
+
+The earlier "NOT short-position accounting" stance is **narrowed, not reversed**: short
+accounting applies **only** to a sell the user explicitly declared, never to an oversell.
+
+- A transaction carries `short_sale` (default **false**). Only a declared sell may exceed
+  holdings without the 賣超 guard. It is never inferred — the system cannot distinguish a
+  genuine short from a missing buy, and auto-applying short accounting would turn a
+  data-entry slip into a plausible-looking realized loss (the dangerous failure mode: a
+  wrong number that looks right).
+- **Replay (weighted average, no lot tracking — consistent with the equity cost method):**
+  a declared sell first sells the LONG lot (ordinary realized P&L), then opens/extends a
+  SHORT lot holding the **net proceeds received**. A buy first **covers** the short, then
+  adds to the long. Long and short are therefore mutually exclusive by construction, so a
+  position is long / flat / short and carries ONE signed quantity.
+- **Cover P&L (the owner's rule):** realized = `(short weighted-avg sale price − the
+  covering buy's all-in per-share cost) × shares covered`, dated the **cover** date, and the
+  leftover shares start their long life at that same per-share cost. Emitted as a realized
+  row with `kind="short_cover"` — a capital gain/loss, so it belongs in the tax package.
+- **Presentation:** an open short reports `shares < 0` with the proceeds as its (negative)
+  basis, so `avg = total/shares` is the average sale price and
+  `unrealized = (price − avg) × shares` profits when the price falls — every existing
+  formula works unchanged on the signed quantity. Flagged `short_open`, which the UI renders
+  **differently from `oversold`**: one is a real priced position, the other an unresolved
+  data problem. Any **ratio** over the basis must divide by `abs(cost_total)`: the basis is
+  negative, so the bare ratio flips sign and shows a profitable short as a loss (the audit-H1
+  trap from the other direction). `fully_recovered` (已回本) must be gated on `not short_open`
+  for the same reason. The trend / net-worth series **includes** an open short — its negative
+  market value is a liability; excluding it while cash still holds the proceeds counts the
+  two halves of one trade asymmetrically.
+- **A dividend landing on an open short is NOT representable.** A short seller pays the
+  dividend in lieu and this ledger has no debit row for that. Booking the recorded (positive)
+  net as income, or adding DRIP/STOCK shares to the long lot, are both money-of-record
+  errors — the latter also breaks long/short exclusivity, and a DRIP equal to the short nets
+  the position to zero so the holding and its proceeds vanish from the report. Therefore:
+  **raise** on the strict path, and on the dashboard path skip the event and flag the
+  position `unbookable_dividend` (待釐清), never book it. Record such a payment as a cash
+  movement instead.
+- **`gross_invested` excludes short capital** (owner-accepted limitation): covering a short
+  is funded by the proceeds already received, so a cover does not add to the denominator and
+  the proceeds do not reduce it. Consequence: a currency whose only activity is a short has
+  `gross = 0`, so its simple return `rate` is `None` even with realized profit — XIRR remains
+  the rigorous metric. In a mixed portfolio the short's P&L rides the long position's
+  denominator.
+- **Known interpretive limits** (not defects): XIRR over a *pure* short round trip reports a
+  borrowing rate (the flow pattern is a loan: proceeds in, cover out), and allocation weights
+  use a net-exposure convention that can exceed 100% or sign-flip when the portfolio is net
+  short. Both are honest readings of a degenerate input, not miscalculations.
 - Modes: 試算 = compute, no write · 報告/更新/績效 = full report + live-price fetch ·
   重算 = rebuild all stats from ledgers.
 - Live price unobtainable → label clearly; **never guess**.

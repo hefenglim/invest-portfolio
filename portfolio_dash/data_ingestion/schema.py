@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS cash_movements (
     account_id TEXT NOT NULL, date TEXT NOT NULL,
     kind TEXT NOT NULL,
     ccy TEXT NOT NULL, amount TEXT NOT NULL,
-    note TEXT
+    note TEXT,
+    acq_home_amount TEXT
 );
 CREATE TABLE IF NOT EXISTS ledger_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +100,16 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # Backend plumbing only this wave; additive, so an existing DB migrates in untouched.
     _add_column_if_missing(conn, "instruments", "industry", "TEXT")
     _add_column_if_missing(conn, "transactions", "daytrade", "INTEGER NOT NULL DEFAULT 0")
+    # short_sale (2026-07-31): a DECLARED short sale. Default 0, so every pre-existing row
+    # keeps its exact meaning and the replay is unchanged for them.
+    _add_column_if_missing(conn, "transactions", "short_sale", "INTEGER NOT NULL DEFAULT 0")
+    # acq_home_amount (spec 2026-07-30 F1): the HOME-currency cost of a FOREIGN-currency cash
+    # movement, so an opening/deposit of foreign cash can carry a cost basis into the FX pool
+    # (forex/pools.py). Stores the AMOUNT, never the rate — the rate is an average and
+    # `data-and-pricing.md` forbids storing an average as the authority; `fx_conversions`
+    # likewise stores two amounts. NULL on every pre-existing row, and a NULL row behaves
+    # exactly as before the migration (it just no longer counts as covered).
+    _add_column_if_missing(conn, "cash_movements", "acq_home_amount", "TEXT")
     # original_avg_cost drop (A6, 2026-07-21): the stored rounded average is retired — cost
     # basis / XIRR key off original_cost_total only, and the average is computed on read. A
     # legacy DB carried a NOT NULL original_avg_cost column that upsert_opening no longer fills,

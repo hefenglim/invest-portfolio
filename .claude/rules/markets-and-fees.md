@@ -31,6 +31,15 @@ the structures below are the schema; exact rates are filled/verified at setup.
   **FORECAST-ONLY** — it NEVER enters cost basis, P&L, or `compute_fees`; it is surfaced
   as a preview hint + a pending-confirmation inbox item, booked as a cash credit only when
   the owner confirms the actual refund (`rebate_rate` lives in config for the forecaster).
+- ⚠ **`discount` and `rebate_rate` express the SAME broker benefit two different ways** —
+  charge less now, or charge full and refund later. Setting `discount < 1` **and**
+  `rebate_rate > 0` applies it twice, and since fees are part of `original_total` that
+  quietly understates cost basis (measured on the test site 2026-07-30: a full commission of
+  869 was charged as 199 and still forecast a 153 refund → net 46 instead of 200). The two
+  coherent configurations are **charge-first** (`discount=1`, `rebate_rate=0.77` — the seed
+  default, 群益) or **discount-at-settlement** (`discount<1`, `rebate_rate=0`). The fee-rule
+  API reports this as a **non-blocking** `conflicts` entry with a plain-language explanation
+  and one-click resolutions: a broker really could do both, so it informs, never blocks.
 
 ### US — NYSE / NASDAQ
 - **Lot:** 1 share (fractional shares deferred).

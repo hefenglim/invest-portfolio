@@ -120,6 +120,11 @@ def transactions(
             "fee": decimal_str(t.fees), "tax": decimal_str(t.tax),
             "total": decimal_str(total), "ccy": ccys.get(t.symbol, ""),
             "fee_snapshot": (t.fee_rule_snapshot or None), "note": t.note,
+            # short_sale changes how the replay books this row, so the public read
+            # surface must carry it — otherwise the ledger cannot be rebuilt from the
+            # ledger (domain-ledger.md) and the trades page cannot tell a declared
+            # short from an ordinary sell.
+            "short_sale": t.short_sale,
         })
     return _page(out, limit, offset)
 
@@ -240,7 +245,8 @@ def _to_models(
     t_models = [
         Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                     quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date)
+                    trade_date=s.trade_date,
+                    short_sale=s.short_sale)
         for s in s_txs if s.symbol in instruments
     ]
     d_models = [

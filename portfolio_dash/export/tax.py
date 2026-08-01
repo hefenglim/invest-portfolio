@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
+    list_cash_movements,
     list_dividends,
     list_fx_conversions,
     list_instruments,
@@ -65,7 +66,8 @@ def build_tax_package_zip(
     """
     txs = [Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                        quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                       trade_date=s.trade_date) for s in list_transactions(conn)]
+                       trade_date=s.trade_date,
+                       short_sale=s.short_sale) for s in list_transactions(conn)]
     divs = [Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
                      type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
                      net=s.net, reinvest_shares=s.reinvest_shares,
@@ -76,6 +78,7 @@ def build_tax_package_zip(
     convs = [FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
                           from_amount=s.from_amount, to_ccy=s.to_ccy,
                           to_amount=s.to_amount) for s in list_fx_conversions(conn)]
+    moves = list_cash_movements(conn)
     instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
     book = build_book(txs, divs, opening, instruments)
@@ -89,7 +92,9 @@ def build_tax_package_zip(
         # (kind="dividend", audit H2) so it reaches 總報酬, but for tax it is INCOME and is
         # already reported on the dividends sheet below, straight from the dividend ledger.
         # Without this filter the same payout would appear on both sheets.
-        if r.kind != "sale":
+        # A short COVER (2026-07-31) is a capital gain/loss like any sale and belongs here;
+        # it has no dividend-ledger counterpart, so excluding it would simply lose it.
+        if r.kind not in ("sale", "short_cover"):
             continue
         rate = _rate_on(conn, r.sell_date, r.quote_ccy, reporting)
         reporting_realized = "" if rate is None else str(r.realized * rate)
@@ -120,7 +125,11 @@ def build_tax_package_zip(
             continue
         home, foreign = acct.funding_ccy, acct.settlement_ccy
         acct_convs = [c for c in convs if c.account_id == acct.account_id]
-        avg = average_acquisition_rate(acct_convs, home, foreign)
+        # Same weighted average the dashboard uses — foreign cash movements that carry a
+        # home cost are part of the basis (spec 2026-07-30). Reading a different average
+        # here would make the tax package disagree with 換匯損益 on the same reconversion.
+        acct_moves = [m for m in moves if m.account_id == acct.account_id]
+        avg = average_acquisition_rate(acct_convs, home, foreign, movements=acct_moves)
         for fr in realized_fx_rows(acct_convs, home, foreign, avg):
             if fr.date.year != year:
                 continue

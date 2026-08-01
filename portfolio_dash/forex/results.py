@@ -12,9 +12,9 @@ class AccountFXResult(BaseModel):
     """Per-account FX P&L. Money figures (realized/unrealized) are in ``home_ccy``;
     ``foreign_cash`` and ``foreign_stock_value`` are in ``foreign_ccy``.
 
-    ``foreign_cash`` may be negative — net foreign drawn beyond the tracked conversions
-    (e.g. an untracked funding path or sale proceeds). A negative balance is a signal the
-    consumer should flag rather than render an FX figure on directly.
+    ``foreign_cash`` is the FULL foreign cash balance (it equals the funds view for the same
+    pool since the 2026-07-30 spec). ``covered_ratio`` says how much of it carries a known
+    acquisition cost; the unrealized legs are computed on the covered portion only.
     """
 
     account_id: str
@@ -40,13 +40,29 @@ class AccountFXResult(BaseModel):
     # wire: the UI used to subtract two Decimal STRINGS via JS coercion, which yields a silent
     # NaN the moment either side is non-numeric. None when either rate is unavailable.
     spot_delta: Decimal | None = None
-    # True when ``foreign_cash`` is NEGATIVE — the reconstructed foreign pool has been drawn
-    # below zero, which means funding reached the account by a path this ledger does not
-    # track (a direct foreign deposit that was never recorded). The unrealized FX figures are
-    # still computed exactly as specified, but their CASH leg is then marking a balance that
-    # does not exist, so the consumer MUST flag it rather than present the number bare
-    # (audit M4; the ``foreign_cash`` docstring above has always asked for this).
-    cash_basis_incomplete: bool = False
+    # --- cost-basis coverage (spec 2026-07-30 F2/F3) ---------------------------------
+    # Fraction of the pool whose acquisition cost is known. Exactly 1 when every foreign
+    # funding flow carries a cost, which is the case for every ledger written before this
+    # spec — so the unrealized legs below are then byte-identical to the previous engine.
+    covered_ratio: Decimal = Decimal("1")
+    # Foreign-currency amount that carries NO acquisition cost = foreign_cash * (1 - ratio).
+    # NON-ZERO is the CAUSE-side alarm that replaced the old ``cash_basis_incomplete``
+    # symptom flag: the old one only fired while the pool happened to be negative, so a
+    # deposit smaller than the tracked conversions corrupted both legs in SILENCE (measured
+    # live on 2026-07-30 — the pool crossed from -4,600.10 to +1,587.90 and the warning
+    # vanished while the error stayed at 100,000 USD).
+    fx_basis_gap: Decimal = Decimal("0")
+    # The CAUSE-side boolean: some foreign funding has no acquisition cost. Consumers must
+    # flag on THIS, not on ``fx_basis_gap != 0`` — the gap is an amount, so it collapses to
+    # zero when the pool happens to be empty while ``covered_ratio`` (and therefore the
+    # SCALED stock leg) is still incomplete. Flagging on the amount would go quiet exactly
+    # like the negative-balance flag it replaced.
+    fx_basis_incomplete: bool = False
+    # True when ``foreign_cash`` is NEGATIVE. Kept as an INDEPENDENT second signal, but its
+    # meaning changed: now that movements are counted, this equals the funds-view balance,
+    # and withdrawals below zero are hard-blocked (``_withdraw_guard``). A negative pool is
+    # therefore no longer an expected state — it means the ledger itself is inconsistent.
+    foreign_cash_negative: bool = False
 
 
 class FxRealizedRow(BaseModel):

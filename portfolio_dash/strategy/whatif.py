@@ -22,7 +22,7 @@ from portfolio_dash.data_ingestion.store import (
     list_opening,
     list_transactions,
 )
-from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.enums import Currency, Market
@@ -130,7 +130,8 @@ def compute_whatif(
     txs = [
         Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                     quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date)
+                    trade_date=s.trade_date,
+                    short_sale=s.short_sale)
         for s in list_transactions(conn)
     ]
     divs = [
@@ -147,7 +148,11 @@ def compute_whatif(
         for s in list_opening(conn)
     ]
     instruments = {i.symbol: i for i in list_instruments(conn)}
-    book = build_book(txs, divs, opening, instruments)
+    try:
+        book = build_book(txs, divs, opening, instruments)
+    except UnbookableLedgerError as exc:
+        # An un-bookable ledger is a user-fixable data problem, not a server fault.
+        raise WhatIfError(str(exc)) from exc
 
     # 2. Resolve account (explicit wins; else most-shares; else cannot infer -> 400).
     resolved = account_id or _most_shares_account(book.holdings, symbol)

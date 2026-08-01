@@ -126,9 +126,14 @@ def daily_value_series(
         for h in book.holdings:
             if h.shares == _ZERO:
                 continue
-            if h.shares < _ZERO:
-                incomplete = True  # 賣超 day — value undefined (待釐清)
+            if h.oversold or h.unbookable_dividend:
+                incomplete = True  # 賣超 / 待釐清 day — value undefined
                 continue
+            # A DECLARED short is NOT excluded (2026-07-31 ruling): it is a real priced
+            # position and its NEGATIVE market value is a liability the series must carry.
+            # Dropping it (the old `shares < 0` test) overstated both the trend and net worth
+            # by the short's full market value while cash still held the proceeds — the two
+            # halves of one trade counted asymmetrically.
             price = _at_or_before(price_history.get(h.symbol, []), day)
             if price is None:
                 incomplete = True

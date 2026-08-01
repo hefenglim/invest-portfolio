@@ -548,6 +548,15 @@ button.is-busy {
   line-height: 15px;
   padding: 0 5px;
 }
+/* 放空中 — a DECLARED short that is still open. Amber, not red: unlike 賣超 (a data
+   problem) this is a legitimate position with a real basis, so it informs rather than warns. */
+.badge-short {
+  color: var(--amber);
+  border-color: rgba(200, 149, 42, 0.45);
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 5px;
+}
 /* Muted mini badge — e.g. XIRR short-window confidence hint (FU-D26.7). Inherits the
    base .badge neutral panel/border tokens (theme-aware); text-3 keeps it low-key. */
 .badge-window-mini {

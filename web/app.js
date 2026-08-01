@@ -401,10 +401,20 @@
         tr.title = h.market_price === null || h.market_price === undefined
           ? '缺價 — 此列數字不可信' : '價格過期 — 損益以舊價計算';
       }
+      /* Two different negative-share states, and they must never look alike:
+         `oversold` is an unresolved DATA problem (basis discarded, 待釐清), while
+         `short_open` is a real declared short with a real basis and real P&L. */
       if (h.oversold) {
         tr.classList.add('row-stale');
         tr.title = '賣超：賣出數量超過持股，部位為負、損益待釐清'
           + '（請補記期初庫存或遺漏的買進）';
+      } else if (h.unbookable_dividend) {
+        tr.classList.add('row-stale');
+        tr.title = '放空期間有股利紀錄：放空方需支付股利，此筆未列入計算，'
+          + '本列數字少計該筆金額（請改以現金收支登錄）';
+      } else if (h.short_open) {
+        tr.title = '放空中：已宣告的放空部位，成本基礎為賣出時收到的價款；'
+          + '買回時以買回價結算損益';
       }
 
       /* 代號 + 名稱 + board badge — 點擊開啟個股詳情 */
@@ -418,6 +428,14 @@
         const ob = el('span', 'badge badge-missing', '賣超');
         ob.title = '賣出數量超過持股，部位為負、損益待釐清';
         cell.appendChild(ob);
+      } else if (h.unbookable_dividend) {
+        const db = el('span', 'badge badge-missing', '股利待釐清');
+        db.title = '放空期間出現股利紀錄，未列入計算（放空方需支付股利）';
+        cell.appendChild(db);
+      } else if (h.short_open) {
+        const sb = el('span', 'badge badge-short', '放空中');
+        sb.title = '已宣告的放空部位；成本基礎為賣出價款，買回時結算損益';
+        cell.appendChild(sb);
       }
       cell.addEventListener('click', () => {
         if (window.openSymbolDrawer) window.openSymbolDrawer(h.symbol);
@@ -731,6 +749,12 @@
       card.appendChild(rates);
 
       const stats = el('div', 'fx-stats');
+      /* Flag on the server's CAUSE boolean, never on `fx_basis_gap != 0`: the gap is an
+         amount and collapses to zero on an empty pool, while covered_ratio (and the scaled
+         stock leg) can still be incomplete. `gapAmt` only decides whether the amount is
+         worth naming in the note — tested on the STRING via signClass, no JS coercion. */
+      const hasGap = !!a.fx_basis_incomplete;
+      const gapAmt = a.fx_basis_gap != null && f.signClass(a.fx_basis_gap) !== 'sign-flat';
       /* 未實現匯損益（合計）is server-computed (unrealized_fx_total, Decimal string =
          stocks + cash, null when either is null). The frontend only DISPLAYS it — it must
          NEVER re-sum the two component strings in JS (that is float money math over exact
@@ -755,22 +779,50 @@
           vv.textContent = (isSigned ? f.signed : f.money)(v, ccy) + ' ' + ccy;
           if (isSigned) vv.classList.add(f.signClass(v));
         }
-        /* 外幣現金 flagged when the reconstructed pool is negative (server decides —
-           `cash_basis_incomplete`), because the 未實現匯損益（現金）leg then marks a balance
-           that does not exist. Audit M4. */
-        if (k === '外幣現金' && a.cash_basis_incomplete) {
+        /* Two INDEPENDENT server-decided flags (spec 2026-07-30):
+           - `fx_basis_gap` (CAUSE) — some foreign funding carries no acquisition cost, so
+             `avg_rate` came from an incomplete population and BOTH unrealized legs are
+             scaled by `covered_ratio`. Fires whether or not the pool is negative; the old
+             symptom-only flag went silent the moment the pool crossed back above zero.
+           - `foreign_cash_negative` (SYMPTOM) — the pool itself is below zero. Now that
+             movements are counted this equals the funds view, so it means the ledger is
+             inconsistent, not merely incomplete. */
+        if (k === '外幣現金' && (hasGap || a.foreign_cash_negative)) {
           vv.classList.add('fx-flagged');
-          vv.title = '外幣現金池為負：出入金可能未完整登錄';
+          vv.title = hasGap ? '部分外幣資金流沒有取得成本，未計入匯損益基數'
+                            : '外幣現金池為負：帳本不一致';
+        }
+        if (hasGap && (k === '未實現匯損益（股票）' || k === '未實現匯損益（現金）'
+                       || k === '未實現匯損益（合計）')) {
+          vv.classList.add('fx-flagged');
+          vv.title = '成本基礎不完整：本欄以覆蓋率縮放後計算';
+        }
+        /* 已實現 is NOT scaled — a reconversion really happened and its home proceeds are
+           an actual amount. But its COST side uses the same incomplete avg_rate, so the
+           figure is still only as good as the basis; flag it rather than imply otherwise. */
+        if (hasGap && k === '已實現匯損益') {
+          vv.classList.add('fx-flagged');
+          vv.title = '成本基礎不完整：本欄的成本側用的是同一個不完整的平均取得匯率';
         }
         st.appendChild(vv);
         stats.appendChild(st);
       });
       card.appendChild(stats);
-      if (a.cash_basis_incomplete) {
+      if (hasGap) {
         card.appendChild(el('div', 'fx-note',
-          '⚠ 外幣現金為負 — 此帳戶的外幣入金可能未完整登錄；'
-          + '未實現匯損益（現金）是以該負值計算，歸因僅供參考。'
-          + '補登入金／換匯紀錄後此提示會自動消失。'));
+          '⚠ 匯率成本基礎不完整 — 本帳戶'
+          + (gapAmt ? '有 ' + f.money(a.fx_basis_gap, a.foreign_ccy) + ' ' + a.foreign_ccy
+                      + ' 的外幣資金流' : '的部分外幣資金流')
+          + '沒有取得成本，未納入加權平均。'
+          + '「平均取得匯率」因此是以不完整的母體計算：未實現匯損益的'
+          + '「股票」與「現金」兩條腿都已依覆蓋率 ' + f.pct(a.covered_ratio)
+          + ' 縮放後呈現，已實現匯損益的成本側也用同一個不完整的均價。'
+          + '請至資金管理為該筆入金／期初資金補上取得成本。'));
+      }
+      if (a.foreign_cash_negative) {
+        card.appendChild(el('div', 'fx-note',
+          '⚠ 外幣現金為負 — 帳上不可能出現負現金，代表此帳戶的帳本不一致'
+          + '（漏記入金／換匯，或有回溯編輯）。請至資金管理核對該幣別的流水。'));
       }
       grid.appendChild(card);
     });

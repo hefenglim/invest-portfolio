@@ -174,6 +174,7 @@ def enter_transaction(
             fee_rule_snapshot=snapshot,
             note=inp.note,
             daytrade=inp.daytrade,
+            short_sale=inp.short_sale,
         )
         draft.written = True
     return draft

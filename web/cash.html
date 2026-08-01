@@ -8,10 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.24"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.24"></link>
-<link rel="stylesheet" href="trades.css?v=0.1.24"></link>
-<link rel="stylesheet" href="input.css?v=0.1.24"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.25"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.25"></link>
+<link rel="stylesheet" href="trades.css?v=0.1.25"></link>
+<link rel="stylesheet" href="input.css?v=0.1.25"></link>
 <style>
   /* FU-D25: 資金管理 tab bar (own inline block, mirrors settings' .set-tabbar pattern;
      MUST NOT reuse .set-* — settings.html/css belong to a parallel wave). */
@@ -79,6 +79,10 @@
   .cfx-amt-err { font-size: 10.5px; color: var(--amber); font-weight: 700; margin-top: 3px; }
   /* FU-D43b: the balance FIGURE is a max-fill affordance (dotted underline + pointer +
      title 「點擊帶入全額」); theme-aware via currentColor — works in both themes. */
+  .cm-acq-warn { color: var(--amber); }
+  .cm-acq-row { display: flex; gap: 6px; }
+  .cm-acq-row .select { flex: 0 0 auto; width: auto; }
+  .cm-acq-row .input { flex: 1 1 auto; min-width: 0; }
   .cfx-balance .can-fill { cursor: pointer; text-decoration: underline dotted currentColor; text-underline-offset: 2px; }
   .cfx-balance .can-fill:hover { color: var(--text); }
   /* FU-D43c: server-computed FX estimate caption + the 重新試算 re-run affordance. */
@@ -183,6 +187,22 @@
           <!-- FU-D43a: 出金 shows the pool's 賬戶現金 (the withdraw ceiling) + live oversell error -->
           <div class="cfx-balance" id="cm-balance"></div>
           <div class="cfx-amt-err" id="cm-amt-err" hidden="hidden"></div>
+        </div>
+        <!-- spec 2026-07-30: acquisition cost of a FOREIGN credit. Shown only when the
+             currency differs from the account's 資金幣別; blank is allowed (the amount then
+             funds the pool but stays out of the weighted average, and is disclosed). -->
+        <div class="field" id="cm-acq-field" hidden="hidden">
+          <label for="cm-acq">取得成本（外幣入金）</label>
+          <div class="cm-acq-row">
+            <select class="select" id="cm-acq-mode">
+              <option value="rate">匯率</option>
+              <option value="amount">家幣金額</option>
+            </select>
+            <input class="input" id="cm-acq" type="number" step="0.000001" min="0"></input>
+          </div>
+          <div class="cfx-balance cm-acq-warn">⚠ 此欄只記錄這筆外幣的家幣取得成本，<b>不會從本帳戶的資金幣別扣款</b>。
+            若這筆外幣是由本帳戶的資金幣別換來的，請改用「換匯中心」登錄——那才會同時扣款。</div>
+          <div class="cfx-balance" id="cm-acq-hint"></div>
         </div>
         <div class="field">
           <label for="cm-note">備註（選）</label>
@@ -302,12 +322,12 @@
 </div>
 </div>
 
-<script src="api.js?v=0.1.24"></script>
-<script src="shell.js?v=0.1.24"></script>
-<script src="format.js?v=0.1.24"></script>
-<script src="pager.js?v=0.1.24"></script>
-<script src="alerts.js?v=0.1.24"></script>
-<script src="cash.js?v=0.1.24"></script>
+<script src="api.js?v=0.1.25"></script>
+<script src="shell.js?v=0.1.25"></script>
+<script src="format.js?v=0.1.25"></script>
+<script src="pager.js?v=0.1.25"></script>
+<script src="alerts.js?v=0.1.25"></script>
+<script src="cash.js?v=0.1.25"></script>
 <script>
 (function () {
   /* FU-D25 tab switching (mirrors settings' showSettingsTab): active toggling +

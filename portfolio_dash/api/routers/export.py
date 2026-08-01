@@ -35,6 +35,7 @@ from portfolio_dash.export.rebalance_report import build_rebalance_report_html
 from portfolio_dash.export.symbol_detail import build_symbol_detail_csv
 from portfolio_dash.export.tax import build_tax_package_zip
 from portfolio_dash.export.usage import build_job_runs_csv, build_llm_usage_csv
+from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError
 from portfolio_dash.shared.enums import Currency, Market
 
 router = APIRouter()
@@ -231,9 +232,14 @@ def export_tax_package(
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:
-    return _respond(
-        build_tax_package_zip(conn, now=now, year=body.year, reporting=reporting)
-    )
+    # never-500 at every build_book call site: an un-bookable ledger (a dividend inside
+    # an open-short window) is a user-fixable data problem, not an internal error.
+    try:
+        art = build_tax_package_zip(conn, now=now, year=body.year, reporting=reporting)
+    except UnbookableLedgerError as exc:
+        return JSONResponse(status_code=422, content=error_body(
+            "unbookable_ledger", str(exc)))
+    return _respond(art)
 
 
 class CashStatementBody(BaseModel):

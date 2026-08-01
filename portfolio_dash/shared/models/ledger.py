@@ -21,6 +21,12 @@ class Transaction(BaseModel):
     fees: Money
     tax: Money
     trade_date: date
+    # DECLARED short sale (2026-07-31, spec option C). Off by default and settable only as a
+    # deliberate per-transaction choice, because the system cannot tell a genuine short from
+    # a missing buy — and auto-treating every oversell as a short would turn a data-entry
+    # slip into a plausible-looking realized loss. Only a flagged sell may exceed holdings
+    # without the 賣超 guard; the position it opens is covered by the next buy(s).
+    short_sale: bool = False
 
 
 class Dividend(BaseModel):

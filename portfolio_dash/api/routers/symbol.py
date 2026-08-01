@@ -112,10 +112,15 @@ def _account_wire(h: HoldingRow) -> dict[str, Any]:
         "price_as_of": h.price_as_of.isoformat() if h.price_as_of is not None else None,
         "quote_ccy": h.quote_ccy.value,
         "oversold": h.oversold,
+        "short_open": h.short_open,
+        "unbookable_dividend": h.unbookable_dividend,
         # 已回本: cumulative cash dividends have fully repaid the original cost, so the
         # adjusted basis has gone <= 0 (legal per domain-ledger.md). Decided HERE with an
         # exact Decimal comparison so the UI never threshold-tests a Decimal string.
-        "fully_recovered": h.adjusted_cost_total <= _ZERO,
+        # The `not short_open` gate is load-bearing: a short's basis is NEGATIVE by
+        # construction, so the bare <= 0 test labelled every open short
+        # 「配息已完全沖減成本」 without a single dividend having been paid.
+        "fully_recovered": h.adjusted_cost_total <= _ZERO and not h.short_open,
     }
 
 
@@ -157,8 +162,10 @@ def _aggregate_position(
     # Aggregate unrealized % on the SAME basis as the per-holding figure (audit H1):
     # Σ unrealized / Σ original cost. Server-side Decimal; the drawer only prints it.
     unrealized_sum = _sum(ur) if ur else None
+    # abs(): a short's basis is negative (proceeds received) and would flip the sign, showing
+    # a profitable short as a loss. Same guard as the per-holding figure in dashboard.py.
     unrealized_pct = (
-        unrealized_sum / original_total
+        unrealized_sum / abs(original_total)
         if unrealized_sum is not None and original_total != _ZERO
         else None
     )
@@ -189,8 +196,11 @@ def _aggregate_position(
         "price_stale": src.price_stale,
         "price_as_of": src.price_as_of.isoformat() if src.price_as_of is not None else None,
         "oversold": any(h.oversold for h in rows),
+        "short_open": any(h.short_open for h in rows),
+        "unbookable_dividend": any(h.unbookable_dividend for h in rows),
         # 已回本 across the aggregated position (see _account_wire).
-        "fully_recovered": adjusted_total <= _ZERO,
+        "fully_recovered": (adjusted_total <= _ZERO
+                            and not any(h.short_open for h in rows)),
     }
 
 
@@ -273,7 +283,8 @@ def symbol_detail(
     sym_txs = [
         Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                     quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date)
+                    trade_date=s.trade_date,
+                    short_sale=s.short_sale)
         for s in list_transactions(conn) if s.symbol == symbol
     ]
     sym_opening = [

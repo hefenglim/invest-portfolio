@@ -195,7 +195,8 @@ def build_dashboard(
     txs = [
         Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                     quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date)
+                    trade_date=s.trade_date,
+                    short_sale=s.short_sale)
         for s in list_transactions(conn)
     ]
     divs = [
@@ -218,6 +219,10 @@ def build_dashboard(
     ]
     instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
+    # Cash movements feed BOTH the FX pool (step 5 — a foreign deposit/opening now funds the
+    # pool and carries its cost basis, spec 2026-07-30) and the net-worth cash series (9b).
+    # Loaded once here so the two views can never read different rows.
+    cash_movements = list_cash_movements(conn)
 
     # 1b. Unregistered-symbol guard (2026-07-02): a ledger row whose symbol has no
     # Instrument row has no quote currency — it cannot be booked, valued, or priced.
@@ -337,7 +342,8 @@ def build_dashboard(
     fx_summary: FXSummary | None
     try:
         fx_summary = compute_fx_summary(accounts, instruments, txs, divs, convs,
-                                        exposure, resolver.rate, reporting)
+                                        exposure, resolver.rate, reporting,
+                                        cash_movements)
     except KeyError:
         fx_summary = None
 
@@ -401,9 +407,13 @@ def build_dashboard(
         # (audit H1). Basis = original invested cost — see HoldingRow.unrealized_pct for why
         # adjusted cost is both inconsistent with the KPI definition and unsafe (it may be
         # <= 0, which flips the ratio's sign on a fully-recovered position).
+        # A SHORT carries a NEGATIVE basis (the proceeds received), which would flip this
+        # ratio's sign and render a profitable short as a loss — the very negative-denominator
+        # trap the note above warns about, arriving from the other direction. Divide by the
+        # MAGNITUDE of the capital at risk: the numerator already carries the correct sign.
         unrealized_pct: Decimal | None = None
         if h.unrealized_pnl is not None and h.original_cost_total != _ZERO:
-            unrealized_pct = h.unrealized_pnl / h.original_cost_total
+            unrealized_pct = h.unrealized_pnl / abs(h.original_cost_total)
         data = h.model_dump()
         data.update(
             account_name=acct.name, name=inst.name, market=inst.market,
@@ -442,7 +452,6 @@ def build_dashboard(
             # /api/cash view uses (unregistered symbols skipped inside cash_balances,
             # exactly as there), converted at carry-forward FX per day. Display-only
             # attribution — no money-of-record path is touched.
-            cash_movements = list_cash_movements(conn)
             cash_txs = list_transactions(conn)
             cash_divs = list_dividends(conn)
             cash_convs = list_fx_conversions(conn)

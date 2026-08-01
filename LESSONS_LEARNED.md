@@ -403,3 +403,90 @@ prevents recurrence.
   primary key and lock the anchor fields (kind/date) of a booked rebate movement
   (frontend + backend guard). Rule: anything that prevents a double-write must hinge on
   data the user cannot silently edit.
+
+- **2026-07-29 — "the site is down" is two different faults; diagnose the ingress layer
+  separately from the app, and trust only the AUTHORITATIVE DNS answer.** The test site
+  was unreachable from the internet while prod was fine. Every app-level signal was
+  green — the service had been `active (running)` for 20 h, `127.0.0.1:<port>/api/health`
+  returned the expected version, and the tunnel daemon's own `serve status` printed
+  "Funnel on". The real fault was one layer up: the ingress provider's control plane had
+  **stopped publishing the public DNS record** for that node (authoritative NS returned
+  NXDOMAIN with the `aa` flag, while the sibling node kept its A records). Two traps:
+  (a) the local `serve status` reports the node's *intent*, not what the control plane
+  actually accepted — it says "on" even when the name no longer resolves; (b) a client-side
+  lookup can't distinguish a withdrawn record from a cached negative answer, so query the
+  authoritative nameserver directly (`dig … @<auth-ns>`) before concluding anything.
+  Fix was to force re-advertisement (`serve reset` + re-apply), not to restart or reinstall
+  the app. Rule: when a service is healthy on localhost but dead from outside, walk the
+  path outward — app → local port → tunnel/proxy intent → *published* DNS → TLS — and stop
+  at the first layer whose **externally observable** state disagrees with its local state.
+
+- **2026-07-30 — a full-replace PUT plus a new optional column is a silent data-loss bug,
+  not a display gap.** Adding `cash_movements.acq_home_amount` and wiring it into the POST
+  looked complete; the movement EDIT dialog still sent the old field set, and PUT is a full
+  replace — so editing an unrelated field (a note) NULLed a recorded cost basis with no
+  error, no warning, and no way to notice. Nothing in the type system or the tests pointed
+  at it; it surfaced only by asking "who else writes this row?". Rule: when a column is
+  added, enumerate every WRITE surface (POST, PUT, importers, merge/relabel jobs, seeders)
+  before calling it done, and pin the round-trip with a test that edits a DIFFERENT field
+  and asserts the new one survived. Corollary from the same change: a flag derived from an
+  AMOUNT (`gap != 0`) goes quiet whenever the amount collapses to zero for an unrelated
+  reason — the pool being empty — while the underlying condition is still true; derive
+  disclosure flags from the CAUSE (a ratio, a count) and use the amount only as detail.
+
+- **2026-07-30 — let the project config decide a gate's scope; hand-picking paths breaks it
+  in BOTH directions.** Running `mypy --strict portfolio_dash scripts tests` reported 243
+  errors and looked like a catastrophic regression; every one came from
+  `scripts/stress_audit`, which `pyproject.toml`'s `files = [...]` deliberately excludes
+  (it is an untyped independent oracle). The mirror of the 2026-07-20 lesson, where a
+  too-NARROW hand-picked scope hid real errors. `ruff check .` has the same failure mode:
+  it lints untracked tooling that is not part of the shipped source. Rule: run the gates
+  **bare** (`mypy`, and ruff over the tracked source roots) so the repo config — the same
+  thing CI and `/ship-version` read — defines the verdict; a path argument is a debugging
+  aid, never the verdict.
+
+- **2026-07-30 — a scenario whose premise is a hard-coded constant will silently MUTATE an
+  accumulating environment once that premise expires.** The stress scenario's oversell probe
+  sold a fixed 100 shares expecting a 422 block, with the comment "NOT force-written, demo
+  stays clean". On the accumulating test site an earlier run had left a larger net position,
+  so 100 was no longer an oversell: the app correctly accepted it, and the "guard test" wrote
+  a back-dated sell that permanently destroyed that symbol's cost basis (average 6,100 USD
+  vs a 379 market price). The check reported a failure, which read as an app regression when
+  the real event was the fixture writing bad data. Rule: in an environment that accumulates,
+  every destructive-path probe must derive its quantity/premise from the state the app
+  reports AT RUN TIME (here: `held + 1`), and skip itself when the premise cannot be
+  established — never assert a fixed constant against a moving baseline.
+
+- **2026-07-30 — an oracle agreeing with the app proves CONSISTENCY, not VALIDITY.** After
+  the bad row above, the independent replay and the app agreed to the last digit on a
+  position whose average cost was off by a factor of 16, because both faithfully replayed
+  the same impossible transaction. Reconciliation can only catch computation errors; it is
+  blind to a defective INPUT CONTROL. Rule: pair every reconciliation with plausibility
+  assertions the ledger cannot satisfy when an impossible row got in (average cost within a
+  sane band of market price; a position that never goes negative at ANY date; sale proceeds
+  in cash always matched by a realized row), and treat "all reconciled" as a statement about
+  arithmetic only.
+
+- **2026-08-01 — a fix for a money bug is itself a change that needs auditing; two
+  independent passes each caught a defect the FIX introduced, and both times the type
+  checker and the reconciliation were green.** Round 1: making the FX pool admit foreign
+  deposits was arithmetically right, but five consumers assumed a positive basis — a
+  dividend during a short booked as income, a DRIP that made a position vanish, a profitable
+  short shown as a loss, every short badged 已回本, and the trend dropping the liability
+  while cash kept the proceeds. Round 2: raising on the newly-unbookable case was right, but
+  three STRICT `build_book` call sites (重算 / what-if / tax export) caught only
+  `OversellError`, so a user-reachable button returned 500. Neither round was visible to
+  mypy (it cannot know an `except` clause is missing one of two types) or to reconciliation
+  (both engine and oracle replayed the same rows identically). Rule: after fixing a
+  money-of-record calculation, enumerate the CONSUMERS of every value whose domain you
+  widened (can it now be negative? zero? raise?) and re-audit — the fix is a change like any
+  other, and "the tests that were green before are still green" is not evidence about it.
+
+- **2026-08-01 — subclass a new exception from the one the codebase already degrades on.**
+  Adding `UnbookableLedgerError(ValueError)` rather than a bare `Exception` meant every call
+  site that already wrote `except (ValueError, KeyError)` kept its exact behaviour, while the
+  strict sites could catch the new type precisely and answer 4xx. A sibling of `Exception`
+  would have silently bypassed those existing guards and turned a graceful degradation into a
+  500 in places nobody edited. Rule: when introducing an exception into an established
+  hierarchy, pick the base class from what existing handlers ALREADY catch, so the blast
+  radius of the new type is exactly the sites you intend to change.

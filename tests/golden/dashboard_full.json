@@ -38,6 +38,8 @@
       "price_as_of": "2026-06-09",
       "weight": "0.4084459821679291618518260088",
       "oversold": false,
+      "short_open": false,
+      "unbookable_dividend": false,
       "unrealized_pct": "0.1960784313725490196078431373",
       "spark_30d": [
         "600"
@@ -67,6 +69,8 @@
       "price_as_of": "2026-06-09",
       "weight": "0.1034729821492087210024625889",
       "oversold": false,
+      "short_open": false,
+      "unbookable_dividend": false,
       "unrealized_pct": "0.05555555555555555555555555556",
       "spark_30d": [
         "38"
@@ -96,6 +100,8 @@
       "price_as_of": "2026-06-09",
       "weight": "0.04118496986859952382005912256",
       "oversold": false,
+      "short_open": false,
+      "unbookable_dividend": false,
       "unrealized_pct": "0.21000000000000000000000",
       "spark_30d": [
         "110"
@@ -125,6 +131,8 @@
       "price_as_of": null,
       "weight": null,
       "oversold": false,
+      "short_open": false,
+      "unbookable_dividend": false,
       "unrealized_pct": null,
       "spark_30d": []
     },
@@ -152,6 +160,8 @@
       "price_as_of": "2026-06-09",
       "weight": "0.3280638128772807027993866503",
       "oversold": false,
+      "short_open": false,
+      "unbookable_dividend": false,
       "unrealized_pct": "0.2",
       "spark_30d": [
         "300"
@@ -181,6 +191,8 @@
       "price_as_of": "2026-06-06",
       "weight": "0.04901351786015149942221912106",
       "oversold": false,
+      "short_open": false,
+      "unbookable_dividend": false,
       "unrealized_pct": "0.125",
       "spark_30d": [
         "450"
@@ -210,6 +222,8 @@
       "price_as_of": "2026-06-09",
       "weight": "0.02352819043113175276083956072",
       "oversold": false,
+      "short_open": false,
+      "unbookable_dividend": false,
       "unrealized_pct": "0.1194444444444444444444444444",
       "spark_30d": [
         "9.875"
@@ -239,6 +253,8 @@
       "price_as_of": "2026-06-09",
       "weight": "0.04629054464569863834320694767",
       "oversold": false,
+      "short_open": false,
+      "unbookable_dividend": false,
       "unrealized_pct": "0.4406779661016949152542372881",
       "spark_30d": [
         "170"
@@ -399,7 +415,10 @@
         "unrealized_fx_cash": "-0.0",
         "unrealized_fx_total": "-425.0",
         "spot_delta": "-0.1",
-        "cash_basis_incomplete": false
+        "covered_ratio": "1",
+        "fx_basis_gap": "0",
+        "fx_basis_incomplete": false,
+        "foreign_cash_negative": false
       },
       "schwab": {
         "account_id": "schwab",
@@ -414,7 +433,10 @@
         "unrealized_fx_cash": "-21100",
         "unrealized_fx_total": "13520.0",
         "spot_delta": "1",
-        "cash_basis_incomplete": true
+        "covered_ratio": "1",
+        "fx_basis_gap": "0",
+        "fx_basis_incomplete": false,
+        "foreign_cash_negative": true
       }
     },
     "reporting_currency": "TWD",

@@ -470,3 +470,123 @@ def test_movements_pagination(api_client: TestClient) -> None:
     full = api_client.get("/api/cash", params={"limit": 2, "offset": 4}).json()
     assert len(full["movements"]["rows"]) == 1
     assert full["balances"]  # balance cards intact on any page
+
+
+# --- spec 2026-07-30: acquisition cost on a foreign cash movement -----------------------
+
+
+def test_foreign_deposit_stores_the_home_AMOUNT_and_derives_the_rate(
+    api_client: TestClient,
+) -> None:
+    """F1: a rate may be TYPED, but only the home-currency amount is persisted; the
+    displayed rate is derived on read (never a stored rounded average)."""
+    r = api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000", "acq_rate": "31.3587"})
+    assert r.status_code == 201, r.text
+    row = next(m for m in api_client.get("/api/cash").json()["movements"]["rows"]
+               if m["id"] == r.json()["id"])
+    assert row["acq_home_amount"] == "3135870"     # 100,000 x 31.3587, TWD is 0 dp
+    assert row["acq_home_ccy"] == "TWD"
+    assert row["acq_rate"] == "31.3587"            # derived back, not stored
+
+
+def test_foreign_deposit_accepts_the_home_amount_directly(api_client: TestClient) -> None:
+    r = api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000", "acq_home_amount": "3135870"})
+    assert r.status_code == 201, r.text
+
+
+def test_acquisition_cost_is_optional_blank_is_legal(api_client: TestClient) -> None:
+    """Omitting it is the honest 'cost unknown' path — never a guessed rate."""
+    r = api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000"})
+    assert r.status_code == 201, r.text
+    row = next(m for m in api_client.get("/api/cash").json()["movements"]["rows"]
+               if m["id"] == r.json()["id"])
+    assert row["acq_home_amount"] is None and row["acq_rate"] is None
+
+
+def test_acquisition_cost_rejected_on_home_currency_and_on_withdraw(
+    api_client: TestClient,
+) -> None:
+    home = api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "deposit",
+        "ccy": "TWD", "amount": "100000", "acq_rate": "31.3587"})
+    assert home.status_code == 400 and home.json()["error"]["code"] == "validation_error"
+    api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000", "acq_rate": "31.3587"})
+    out = api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-02-05", "kind": "withdraw",
+        "ccy": "USD", "amount": "1000", "acq_rate": "31.3587"})
+    assert out.status_code == 400 and out.json()["error"]["code"] == "validation_error"
+
+
+def test_acquisition_cost_rejects_both_forms_at_once_and_non_positive(
+    api_client: TestClient,
+) -> None:
+    both = api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000",
+        "acq_rate": "31.3587", "acq_home_amount": "3135870"})
+    assert both.status_code == 400
+    zero = api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000", "acq_rate": "0"})
+    assert zero.status_code == 400
+
+
+def test_acq_rate_lookup_degrades_instead_of_guessing(api_client: TestClient) -> None:
+    """Acceptance 7: no stored rate on/before that date -> available:false with a reason.
+    It must NEVER fall back to today's spot (prod's fx_rates start 2026-07-01)."""
+    old = api_client.get("/api/cash/acq-rate", params={
+        "account_id": "schwab", "ccy": "USD", "on": "2001-01-01"}).json()
+    assert old["available"] is False and old["rate"] is None and old["reason"]
+    home = api_client.get("/api/cash/acq-rate", params={
+        "account_id": "schwab", "ccy": "TWD", "on": "2026-06-11"}).json()
+    assert home["available"] is False        # home currency needs no cost
+
+
+def test_edit_round_trip_preserves_the_recorded_acquisition_cost(
+    api_client: TestClient,
+) -> None:
+    """PUT is a full replace, so an edit that omits the cost WIPES it. The dialog now
+    re-sends the stored home amount; this pins the API half of that contract."""
+    created = api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000", "acq_rate": "31.3587"})
+    mid = created.json()["id"]
+    kept = api_client.put(f"/api/cash/movements/{mid}", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000", "note": "改備註",
+        "acq_home_amount": "3135870"})
+    assert kept.status_code == 200, kept.text
+    row = next(m for m in api_client.get("/api/cash").json()["movements"]["rows"]
+               if m["id"] == mid)
+    assert row["acq_home_amount"] == "3135870" and row["note"] == "改備註"
+    # Clearing it is the deliberate way to drop the basis back to "unknown".
+    api_client.put(f"/api/cash/movements/{mid}", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000"})
+    row2 = next(m for m in api_client.get("/api/cash").json()["movements"]["rows"]
+                if m["id"] == mid)
+    assert row2["acq_home_amount"] is None
+
+
+def test_dashboard_flags_the_gap_and_scales_both_legs(api_client: TestClient) -> None:
+    """End-to-end acceptance 3/4/5: an UNRATED foreign opening keeps the pool positive,
+    yet the cause-side flag fires and both unrealized legs shrink by covered_ratio."""
+    before = api_client.get("/api/dashboard").json()["fx"]["by_account"]["schwab"]
+    assert before["covered_ratio"] == "1" and before["fx_basis_gap"] == "0"
+    api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "opening",
+        "ccy": "USD", "amount": "100000"})
+    after = api_client.get("/api/dashboard").json()["fx"]["by_account"]["schwab"]
+    assert after["foreign_cash_negative"] is False        # pool is POSITIVE...
+    assert Decimal(after["fx_basis_gap"]) != 0            # ...and still flagged
+    assert Decimal(after["covered_ratio"]) < 1
+    assert abs(Decimal(after["unrealized_fx_stocks"])) \
+        < abs(Decimal(before["unrealized_fx_stocks"]))    # F3: the stock leg scales too

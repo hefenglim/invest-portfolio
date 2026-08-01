@@ -11,6 +11,7 @@ import argparse
 import sys
 
 import common as C
+import oracle as O
 from phase2 import Ops2, reconcile_abs, snapshot
 
 DEMO_PLACEHOLDER = "https://invest-demo.example.ts.net"
@@ -27,6 +28,9 @@ def main():
     ev = C.Evidence(oplog=C.EVIDENCE / "oplog_phase2.jsonl",
                     assertions=C.EVIDENCE / "assertions_phase2.jsonl", reset=False)
     api = C.Api(args.base_url, verify=False)
+    # Same rate overlay as run_phase2 — this runner asserts fees too.
+    for diff in O.apply_effective_rules(C.read_effective_fee_rules(api)):
+        print(f"[phase2-inbox] effective fee rule differs from seed — {diff}")
     import ui as UI
     ui = UI.UiDriver(args.base_url)
     ui.start()

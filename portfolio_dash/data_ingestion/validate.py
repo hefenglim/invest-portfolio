@@ -20,7 +20,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.holdings import current_shares, shares_through
 from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets
 from portfolio_dash.data_ingestion.store import get_instrument
@@ -45,6 +45,9 @@ class TxnInput(BaseModel):
     tax: Decimal | None = None
     daytrade: bool = False
     is_etf: bool = False
+    # Declared short sale (2026-07-31): exempts the sell from the 賣超 guard and opens a
+    # short lot in the replay. Deliberate per-transaction choice; never inferred.
+    short_sale: bool = False
     note: str | None = None
 
 
@@ -149,15 +152,29 @@ def validate_transaction(
                 )
             )
 
-    # --- sell must not exceed current holdings (soft) ---
-    if inp.side is Side.SELL and inp.quantity > 0:
+    # --- sell must not exceed holdings (soft) ---
+    # A DECLARED short sale (spec 2026-07-31 option C) is exempt: exceeding the position is
+    # the whole point, the intent is recorded on the row, and the replay opens a short lot
+    # with a real cost basis instead of discarding one.
+    if inp.side is Side.SELL and inp.quantity > 0 and not getattr(inp, "short_sale", False):
         held = current_shares(conn, inp.account_id, inp.symbol)
-        if inp.quantity > held:
+        # DATE-AWARE (2026-07-31): the position that must cover the sell is the one that
+        # exists on its OWN trade date. `current_shares` nets across all dates, so a
+        # back-dated sell covered only by a LATER buy passed silently — and the replay then
+        # discarded the symbol's cost basis for good. The cash ledger has had the equivalent
+        # running-balance check since audit C3; this closes the same hole on the share side.
+        held_then = shares_through(conn, inp.account_id, inp.symbol, on=inp.trade_date)
+        if inp.quantity > held_then or inp.quantity > held:
+            if inp.quantity > held_then and inp.quantity <= held:
+                msg = (f"sell {inp.quantity} > held {held_then} on {inp.trade_date.isoformat()}"
+                       f" (目前淨額 {held}，但那一天只有 {held_then})")
+            else:
+                msg = f"sell {inp.quantity} > held {held}"
             issues.append(
                 Issue(
                     kind="sell_exceeds_holdings",
                     needs_confirm=True,
-                    message=f"sell {inp.quantity} > held {held}",
+                    message=msg,
                 )
             )
 

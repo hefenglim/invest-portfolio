@@ -66,6 +66,63 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.25 (FX cost basis for foreign cash + declared short sale) --------------------
+    Feature(
+        version="0.1.25",
+        id="fx-acq-cost",
+        title="外幣入金可登錄「取得成本」，換匯損益不再少算",
+        desc="以美金直接入金（期初資金、境外收入）的那筆錢，過去無法登錄它的台幣成本，"
+        "所以完全進不了匯率池——「各帳戶現金」與「換匯損益的外幣現金」會差一大截，"
+        "而且差額愈小反而愈不會示警；現在登錄外幣入金時可填取得匯率或台幣金額，兩個數字就對得起來了",
+        href="cash.html",
+        area="資金管理 → 出金入金",
+        target="#cm-acq-field",
+    ),
+    Feature(
+        version="0.1.25",
+        id="fx-basis-coverage",
+        title="成本基礎不完整時會明講，而且股票那一欄也會標示",
+        desc="若有外幣資金流沒有取得成本，系統會直接說缺多少、覆蓋率多少，"
+        "並依比例縮放「未實現匯損益」的現金與股票兩條腿——因為平均取得匯率本身就是用不完整的資料算的，"
+        "只標現金那一行會漏掉誤差更大的股票那一行",
+        href="index.html",
+        area="儀表板 → 換匯損益",
+        target="#fx-grid",
+    ),
+    Feature(
+        version="0.1.25",
+        id="declared-short-sale",
+        title="新增「放空」登錄：買回時以買回價結算損益",
+        desc="賣出時可勾選「放空」，股數才允許超過持股；買回時以買回的每股成本結算獲利，"
+        "剩下的股數以該成本為起點，未平倉的放空會以負股數顯示並標「放空中」。"
+        "沒有勾選的賣超一律照擋——系統分不出「真放空」與「漏記買進」，自動猜會把打字錯誤變成一筆假虧損",
+        href="trades.html",
+        area="交易帳本 → 手動登錄",
+        target="#m-short-line",
+    ),
+    Feature(
+        version="0.1.25",
+        id="backdated-oversell-guard",
+        title="回溯日期的賣出會被擋下（以當天實際持股判斷）",
+        desc="以前只看「全期間淨持股」，所以把賣出日期填在買進之前也會通過，"
+        "而那會讓該標的的成本基礎永久損毀（曾出現均價 6,100 對市價 379 卻毫無提示）；"
+        "現在改看交易當天的持股，訊息也會直接告訴你那一天只有幾股",
+        href="trades.html",
+        area="交易帳本 → 手動登錄",
+        target="#m-short-line",
+    ),
+    Feature(
+        version="0.1.25",
+        id="fee-discount-conflict",
+        title="費率設定：折扣被算兩次時會提醒你",
+        desc="「折扣率」與「折讓款比例」是同一個券商優惠的兩種寫法"
+        "（結帳直接打折 vs 先收全額次月退），"
+        "兩個同時開會讓手續費只剩應有的四分之一、連帶壓低持股成本；"
+        "現在會用生活化的例子說明並提供兩個一鍵還原選項，但不會擋你——真的兩段都做的話維持現狀即可",
+        href="settings.html",
+        area="系統設定 → 費率規則",
+        target="#fee-rules-wrap",
+    ),
     # --- v0.1.24 (full-site audit remediation: H1/H2 + M1-M5 + L1-L6) ----------------------
     Feature(
         version="0.1.24",
@@ -1074,6 +1131,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.25": "2026-08-01",
     "0.1.24": "2026-07-26",
     "0.1.23": "2026-07-24",
     "0.1.22": "2026-07-22",

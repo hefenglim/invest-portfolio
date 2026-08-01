@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.24"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.24"></link>
-<link rel="stylesheet" href="input.css?v=0.1.24"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.25"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.25"></link>
+<link rel="stylesheet" href="input.css?v=0.1.25"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   /* settings tab bar */
@@ -119,6 +119,14 @@
   .fee-revert { font-size:10px;padding:1px 7px;color:var(--text-3);background:transparent;border:1px solid var(--border-soft);border-radius:var(--radius-sm);cursor:pointer; }
   .fee-revert:hover { color:var(--accent);border-color:var(--accent); }
   .fee-revert[hidden] { display:none; }
+  /* Setting-conflict notice: informational amber, NOT an error — the combination is legal,
+     just almost certainly unintended. pre-line keeps the API's authored line breaks. */
+  .fee-conflict { margin:10px var(--pad);padding:11px 13px;border-left:3px solid var(--amber);
+    background:rgba(200,149,42,0.10);border-radius:0 6px 6px 0; }
+  .fee-conflict-title { color:var(--amber);font-weight:700;font-size:13px;margin-bottom:6px; }
+  .fee-conflict-body { color:var(--text-2);font-size:12.5px;line-height:1.75;white-space:pre-line; }
+  .fee-conflict-acts { display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px; }
+  .fee-conflict-keep { color:var(--text-3);font-size:11.5px; }
   .fee-foot { display:flex;align-items:center;gap:10px;padding:10px var(--pad) 12px;border-top:1px solid var(--border-soft); }
   .fee-foot .spacer { flex:1; }
   .gen-rows { padding:12px var(--pad) 14px;display:flex;flex-direction:column; }
@@ -586,23 +594,23 @@
   </div>
 </div>
 
-<script src="api.js?v=0.1.24"></script>
-<script src="shell.js?v=0.1.24"></script>
-<script src="format.js?v=0.1.24"></script>
-<script src="pager.js?v=0.1.24"></script>
-<script src="export.js?v=0.1.24"></script>
-<script src="alerts.js?v=0.1.24"></script>
-<script src="vars.js?v=0.1.24"></script>
-<script src="settings-llm.js?v=0.1.24"></script>
-<script src="settings-prompts.js?v=0.1.24"></script>
-<script src="settings-scheduler.js?v=0.1.24"></script>
-<script src="settings-datasources.js?v=0.1.24"></script>
-<script src="settings-alerts.js?v=0.1.24"></script>
-<script src="settings-notify.js?v=0.1.24"></script>
-<script src="settings-digest.js?v=0.1.24"></script>
-<script src="settings-users.js?v=0.1.24"></script>
-<script src="settings-fees.js?v=0.1.24"></script>
-<script src="settings-prefs.js?v=0.1.24"></script>
+<script src="api.js?v=0.1.25"></script>
+<script src="shell.js?v=0.1.25"></script>
+<script src="format.js?v=0.1.25"></script>
+<script src="pager.js?v=0.1.25"></script>
+<script src="export.js?v=0.1.25"></script>
+<script src="alerts.js?v=0.1.25"></script>
+<script src="vars.js?v=0.1.25"></script>
+<script src="settings-llm.js?v=0.1.25"></script>
+<script src="settings-prompts.js?v=0.1.25"></script>
+<script src="settings-scheduler.js?v=0.1.25"></script>
+<script src="settings-datasources.js?v=0.1.25"></script>
+<script src="settings-alerts.js?v=0.1.25"></script>
+<script src="settings-notify.js?v=0.1.25"></script>
+<script src="settings-digest.js?v=0.1.25"></script>
+<script src="settings-users.js?v=0.1.25"></script>
+<script src="settings-fees.js?v=0.1.25"></script>
+<script src="settings-prefs.js?v=0.1.25"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs）→ reconciliation channel
    (POST /api/export/llm-usage / /api/export/job-runs; empty body -> full history).
