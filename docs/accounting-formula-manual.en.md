@@ -11,8 +11,8 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.5` (2026-07-26)
-> **Code baseline**: `v0.1.24` (full-site audit remediation)
+> **Version**: `v1.6` (2026-08-01)
+> **Code baseline**: `v0.1.25` (FX cost basis + declared short sale)
 > **Arbitration status**: **Formally signed off by the owner (2026-07-15)**; effective
 > as the site's single **arbitration standard** for any money dispute **from version
 > v0.1.19 onward**.
@@ -447,9 +447,85 @@ Final position (matches `build_book` output digit for digit):
 > holding.original_avg / holding.adjusted_avg / holding.dividend_portion /
 > holding.shares`, `scope = tw_broker|0050` (phase1 final snapshot).
 
+### 4.3 Declared Short Sale (owner ruling 2026-07-31)
+
+The earlier "**NOT** short-position accounting" stance is **narrowed, not reversed**: short
+accounting applies **only** to a sell the user explicitly declared, never to an oversell. A
+transaction carries `short_sale` (default **false**); **only** a declared sell may exceed
+holdings, and an undeclared oversell still follows the 賣超 path of §5.3. The flag is
+**never inferred** — the system cannot distinguish a genuine short from a missing buy, and
+auto-applying short accounting to every oversell would turn one typo into a
+**plausible-looking realized loss** (more dangerous than the absurd number it replaced).
+
+**Replay (weighted average, no lot tracking — consistent with the equity cost method)**
+
+A declared sell first exhausts the **long** lot (emitting an ordinary realized row), then the
+remainder opens/extends a **short** lot holding the **net proceeds received**:
+
+$$\text{short\_proceeds} \mathrel{+}= \frac{q\times p - \text{fee} - \text{tax}}{q}\times q_{\text{short}},\qquad
+\text{short\_avg} = \frac{\text{short\_proceeds}}{\text{short\_shares}}$$
+
+A buy **covers** the short first, then adds the remainder to the long lot. Long and short are
+therefore **mutually exclusive** (a sell consumes the long first, a buy the short first), so a
+position is always long / flat / short and carries **one signed quantity**.
+
+**Cover P&L (the owner's rule: settle the gain at the buy-back's per-share cost; the leftover
+shares start from that cost)**
+
+$$c_{\text{cover}} = \frac{q\times p + \text{fee} + \text{tax}}{q}\qquad
+\text{realized} = (\text{short\_avg} - c_{\text{cover}})\times q_{\text{covered}}$$
+
+The realized row carries `kind = "short_cover"` and is dated the **cover date** (not the sell
+date); the leftover shares begin their long life at $c_{\text{cover}}$. An open short is
+presented with `shares < 0` and **negative** cost fields (the proceeds received), so
+`avg = total/shares` is the **average sale price**, `market_value = price × shares` is the
+negative exposure, and `unrealized = (price − avg) × shares` is **positive when the price
+falls** — every existing valuation formula works unchanged on the signed quantity. Any
+**ratio** over the basis must divide by `abs(cost_total)` (a negative denominator flips the
+sign and shows a profitable short as a loss); `fully_recovered` (已回本) must be gated on
+`not short_open` (a short's basis is negative by construction).
+
+**Verified worked example — `tw_broker/2609` (phase1 scenario)**
+
+| Step | Detail | Result |
+| --- | --- | ---: |
+| Undeclared sell (empty position) | — | **422** blocked (anchor `guard.short_needs_declaration`) |
+| Declared sell 2,000 @100 | fee **285**, tax **600** | net proceeds 200,000−285−600 = **199,115** |
+| Open state | `shares = −2,000`, `original_total = −199,115` | `short_avg` = 199,115/2,000 = **99.5575** |
+| Market value (price 96) | −192,000 | `unrealized = +7,115`, `unrealized_pct = +0.035733…` (**positive**) |
+| Cover ① buy 800 @95 | fee 108 → all-in 76,108, `c=95.135` | realized = (99.5575−95.135)×800 = **3,538** |
+| Cover ② buy 1,200 @98 | fee 167 → all-in 117,767, `c=98.13916̄` | realized = **1,701.999999999999999999999996** |
+
+Cover ② is the **repeating-decimal** case: `117,767/1,200` does not terminate, so the result
+carries a 28-digit tail — **deliberately not rounded**, consistent with §1.3's "quantize only
+at settlement/display".
+
+> **Verification anchors**: `holding.shares / holding.original_total / holding.original_avg /
+> holding.market_value / holding.unrealized_pnl / holding.unrealized_pct / holding.short_open`,
+> `scope = tw_broker|2609`; `realized.realized / realized.proceeds_net / realized.kind`,
+> `scope = tw_broker/2609@2026-07-01 #16` (3,538) and `tw_broker/2609@2026-07-06 #17`
+> (1,701.999…996); `fee_engine.fee/tax scope = tw_broker/2609 sell 2000@100 id=46`.
+
+**A dividend during an open short is unbookable.** A short seller **pays** the dividend
+(payment in lieu) and this ledger has no debit row for it. Booking the recorded (positive) net
+as income, or adding DRIP/stock shares straight to the long lot, are **both money errors** —
+the latter also breaks long/short exclusivity (a DRIP equal to the short nets the position to
+zero, and the holding together with its proceeds vanishes from the report). Therefore: the
+strict path **raises `UnbookableLedgerError`** (a `ValueError` subclass, so existing degrading
+call sites are unaffected), and the dashboard path **skips the event and flags
+`unbookable_dividend` (待釐清)**, never booking it. Record such a payment as a cash movement
+instead. Anchors: `holding.unbookable_dividend scope = tw_broker|2609`,
+`short.unbookable_dividend_removable`.
+
+**Known limitations (ruled, not defects)**: `gross_invested` **excludes** short capital (a
+cover is funded by proceeds already received), so a currency whose only activity is a short
+has a `None` simple return rate (XIRR remains the rigorous metric); XIRR over a pure short
+round trip reports a **borrowing rate** (the flow pattern is a loan); allocation weights use a
+net-exposure convention that sign-flips when the portfolio is net short.
+
 > **Implementation**: `portfolio/cost_basis.py::build_book`, `_Position`; holding result
 > `portfolio/results.py::Holding`.
-> **Basis**: `.claude/rules/domain-ledger.md` (Cost basis).
+> **Basis**: `.claude/rules/domain-ledger.md` (Cost basis; Declared short sale 2026-07-31).
 
 ---
 
@@ -951,10 +1027,30 @@ weighted-average acquisition rate**. The Schwab USD pool is anchored in **TWD**;
 
 ### 8.1 Weighted-Average Acquisition Rate (home per foreign)
 
-Implementation: `forex/pools.py::average_acquisition_rate`. Only `home → foreign`
-conversions count:
+Implementation: `forex/pools.py::average_acquisition_rate` / `acquisition_basis`. There are
+**two** acquisition sources (spec 2026-07-30): `home → foreign` conversions, and **foreign
+cash INFLOWS that carry an `acq_home_amount`** (`cash_movements` DEPOSIT/OPENING/REBATE;
+WITHDRAW is a disposal and is not an acquisition):
 
-$$\text{avg\_rate} = \frac{\sum \text{from\_amount}\ (\text{home})}{\sum \text{to\_amount}\ (\text{foreign})}\quad(\text{無此類換匯則 None})$$
+$$\text{avg\_rate} = \frac{\sum \text{from\_amount}\ (\text{home}) + \sum \text{acq\_home\_amount}}{\sum \text{to\_amount}\ (\text{foreign}) + \sum \text{amount}_{\text{with basis}}}\quad(\text{None when no acquisition carries a cost})$$
+
+**Store the AMOUNT, not the rate.** `acq_home_amount` is a **home-currency amount**: a rate is
+an average, and §1.3 forbids an average as the stored authority (`fx_conversions` likewise
+stores two amounts). The displayed acquisition rate is always `acq_home_amount / amount`,
+computed on read.
+
+**Covered ratio.** A foreign inflow **without** a cost basis has an unknown rate that is
+**never guessed**. Cash is fungible and weighted average tracks no lots, so outflows are
+absorbed **pro rata**:
+
+$$\text{covered\_ratio} = \frac{\sum \text{amount}_{\text{with basis}}}{\sum \text{amount}_{\text{with basis}} + \sum \text{amount}_{\text{no basis}}}\quad(\text{the literal } 1 \text{ when nothing is unbased})$$
+
+It must **not** be "total balance − unbased amount": that expression goes **negative** as soon
+as the balance drops below the unbased amount, recreating the reversed-sign figure this design
+removes. When the ratio is exactly 1 the caller **skips the multiply**, so a fully covered
+ledger is **byte-identical** to the pre-spec engine.
+Anchors: `fx.covered_ratio scope = schwab / moomoo_my` (both **1** in phase1);
+`fx.basis_gap` (both **0**).
 
 **Verified examples**
 
@@ -988,14 +1084,26 @@ scenario evolves by phase).
 Implementation: `forex/fx_pnl.py::compute_account_fx`. Let `spot = the current foreign→home
 rate`:
 
-$$\text{unreal\_stocks} = \text{foreign\_stock\_value}\times(\text{spot} - \text{avg\_rate})$$
+$$\text{unreal\_stocks} = \text{foreign\_stock\_value}\times\text{covered\_ratio}\times(\text{spot} - \text{avg\_rate})$$
 
-$$\text{unreal\_cash} = \text{foreign\_cash}\times(\text{spot} - \text{avg\_rate})$$
+$$\text{unreal\_cash} = \text{foreign\_cash}\times\text{covered\_ratio}\times(\text{spot} - \text{avg\_rate})$$
 
-where `foreign_cash` is the foreign balance from the **FX-exposure perspective** (rebuilt
-from conversions + foreign buys/sells + foreign cash dividends; **different from §9's
-operating cash pool**, see the C9 note in the `forex/pools.py` file header). `avg_rate is
-None` or `spot is None` → unrealized = `None`.
+**One ratio applies to the WHOLE foreign exposure (both the cash and the stock leg)**:
+`avg_rate` itself comes from the with-basis population, so scaling only the cash leg would
+leave the **larger** error — the stock leg — unflagged (measured: +42,359 TWD). When
+`covered_ratio < 1`, `fx_basis_incomplete = true` and
+`fx_basis_gap = foreign_cash × (1 − covered_ratio)`, and BOTH legs are flagged. Realized FX is
+not scaled (the proceeds really were received), but its cost side uses the same incomplete
+average, so it is flagged too.
+
+where `foreign_cash` is the foreign balance from the **FX-exposure perspective**. Since spec
+2026-07-30 it **also counts foreign cash inflows/outflows**, so for the same
+(account, foreign ccy) it now **equals §9's operating cash pool** (the two diverged
+deliberately before — see audit C9); the remaining difference is only the **cost basis**: an
+inflow without `acq_home_amount` counts toward the balance but not toward the weighted
+average. `avg_rate is None` or `spot is None` → unrealized = `None`.
+Anchors: `fx.foreign_cash scope = schwab` (**25,800**) / `moomoo_my` (**−11,244.14**);
+`fx.pool_equals_funds` (phase2).
 
 **Verified example (`phase1:final`; spot USD/TWD = 32.5, USD/MYR = 4.6, MYR/TWD = 7.2)**
 
@@ -1369,6 +1477,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.3` | 2026-07-15 | **fee-engine v2 shipped** (owner sign-off; §3 fully rewritten). ① **TW rounding FE-D3**: fee/tax switch from round-half-up to **unconditional floor (ROUND_DOWN) to integer NT$**, with the min-NT$20 compared after the floor (群益 142.5→142; day-trade tax example 11→10); ② **US regulatory v2**: Schwab / Moomoo US commission $0 / platform $0.99, SELL adds SEC `0.0000206` + TAF `0.000195` (cap $9.79), settlement `0.003/share` (cap 1%), CAT `0.000003/share` — each component rounded then summed; ③ **MY v2**: commission `0.03%` (min RM0.01) + platform RM3 + clearing (cap RM1,000) + **SST 8%**; stamp becomes `ceil(amount/1000)×RM1` (stock cap RM1,000, **ETF exempt**); ④ **FE-D2 US stamp**: the MY stamp on US trades is computed in MYR, booked in USD (`stamp_fx` resolved by the caller; no rate → 0 + soft issue); ⑤ **FE-D1 rebate**: new §3.6 forecast `⌊fee×0.77⌋` (**not a number of record**, never in `compute_fees`; inbox/confirm is Wave B); ⑥ the snapshot carries `engine="v2"`, a **per-row regime** (old rows arbitrated under their old snapshot, never recomputed). All rates live in config. §3 example anchors updated to fee-engine v2 stress phase1 (`fee_engine.*` 80/80). Mirror regenerated in the same change set. Baseline unchanged. |
 | `v1.4` | 2026-07-22 | **Batch B (Moomoo merge) revision** (baseline `v0.1.20 + Batch B`). ① **Account model**: the two former per-market Moomoo accounts (legacy ids documented in `data_ingestion/moomoo_merge.py`) are merged into ONE dual-market account `moomoo_my` (settlement USD / funding MYR; rules bind per (account, market): US→(`moomoo_us`,`drip_us`), MY→(`moomoo_my`,`cash`), held in `account_market_rules`) — §2 account table 4→3 rows, invariant I6 changed from "bind to account" to "bind to (account, market)", and the account labels + `scope` anchors in §3.3/§3.4/§6.2/§6.3/§8/§9 re-anchored onto `moomoo_my` (market carried by the symbol). ② **Full anchor re-reconciliation**: the stress suite was regenerated to the post-merge topology (1,060 assertions, 66 ops, 1,060/1,060 passing, 0 fail; spot USD/MYR 4.5→**4.6**, plus one Schwab USD→TWD reconversion). Scenario-dependent terminal values updated to this current run: §7.1 total return 514,752.85→**516,336.55** (realized 186,333.50 / unrealized 330,003.05), §8.2 realized FX 0→**−2,375** (Schwab reconversion), §8.3 unrealized FX rollup −31,830.94→**−11,757.48** (`moomoo_my` now contributes a positive leg because spot 4.6≠avg 4.5), §9.2 cash pools fully updated with the MYR pool now a single directly-anchored `moomoo_my|MYR = 123,201.91`, §5.1 TSLA proceeds/realized 5,199.86/199.86→**5,199.88/199.88** (SEC fee 0.14→0.12); fixed pre-existing typos E5 (NVDA fee 1.41→5.89) and E6 (1155 fee/tax 10.45/9.50→9.40/10.00). ③ **Anchor robustness**: the volatile `id=NN` (renumbered per release) removed from the §12.1 fee examples, keeping the stable check+scope; the `negative_cash` example (former op47) — no longer triggered by the scenario — is re-anchored to unit tests (§9.3/E16); the oversell anchor is stated via the `guard.oversell_blocks` scope. ④ Verification-basis line, §7.2 harness count (1,006→1,060), §6.5 count (966→1,060) updated. Mirror regenerated in the same change set. **No formula or accounting-definition change — purely a (account, market) binding relabel + anchor re-reconciliation.** |
 | `v1.5` | 2026-07-26 | **A cash dividend paid after the position closed is booked as realized income** (audit H2, owner ruling 2026-07-26; baseline `v0.1.24`). New **§6.3b**: when a CASH/NET dividend lands while its `(account, symbol)` position is already at zero shares there is no cost basis left to reduce, so it becomes one `RealizedRow(kind="dividend")` (`realized = proceeds_net = net`; shares_sold / original_removed / adjusted_removed all 0; `sell_date` = the payment date). Before the fix the payout was absorbed by the zero-share position and discarded with it, so the dividend overview and the XIRR cashflows counted it while total return did not — three figures, three answers. It is now counted exactly once and **invariant I4 holds**. §5.1 notes that `RealizedRow` now carries `kind: "sale" | "dividend"`. **Tax separation**: the annual package's `realized_gains_{year}.csv` takes `kind == "sale"` only — the payout is already reported by `dividends_{year}.csv` from the dividend ledger, so it is never filed twice. Verification anchor: `moomoo_my/5225` buy 200@6.00 → sell 200@6.50 (position → 0) → NET dividend 120 enters `realized.by_currency[MYR]` (run_phase1 "Found-bug op #3"; stress ops 66→**69**, assertions 1,060→**1,088**, fail=0); hermetic regression `tests/portfolio/test_post_close_dividend.py` (5 cases, including closed → re-bought → paid, which still reduces cost). **Effect on a real ledger: the historical total return of already-closed symbols RISES** (previously dropped payouts now count). Mirror regenerated in the same change set. No other formula changed. |
+| `v1.6` | 2026-08-01 | **Cost basis for foreign cash inflows + the declared short sale** (owner rulings 2026-07-30 / 07-31; baseline `v0.1.25`). ① **§8.1/§8.3 rewritten**: acquisitions widen from "conversions only" to "conversions **+** foreign cash inflows carrying `acq_home_amount`"; the **AMOUNT is stored, never the rate** (a rate is an average and §1.3 forbids an average as the authority; the displayed rate is computed on read). New **`covered_ratio`** (with-basis acquisitions / all acquisitions) absorbs outflows **pro rata** — "total balance − unbased amount" is forbidden (it goes negative once the balance drops below the unbased amount, recreating the reversed-sign figure). The ratio scales **both** the cash and the stock leg (`avg_rate` itself comes from the with-basis population; scaling only cash left the LARGER error — the stock leg, +42,359 TWD measured — unflagged). When the ratio is the literal 1 the caller skips the multiply, so a fully covered ledger is **byte-identical** to the pre-spec engine. `foreign_cash` now counts foreign cash inflows/outflows too, so for the same (account, foreign ccy) it **equals §9's operating cash pool** (they diverged deliberately before, audit C9); only the cost basis still differs. ② **New §4.3, declared short sale**: `short_sale` (default false, **never inferred**); a declared sell exhausts the long lot then opens a short lot holding the net proceeds, a buy covers first then adds to the long, long and short are mutually exclusive so a position is **one signed quantity**; cover P&L is `(short_avg − the covering buy's all-in per-share cost) × covered`, dated the **cover date**, `kind="short_cover"` (it reaches the tax capital-gains sheet). Ratios must divide by `abs(cost_total)` and `fully_recovered` is gated on `not short_open` (a short's basis is negative by construction). **A dividend during an open short is unbookable** (the short pays it; strict path raises `UnbookableLedgerError`, the dashboard skips and flags `unbookable_dividend`). Ruled limitations: `gross_invested` excludes short capital, a pure short XIRR reports a borrowing rate, weights use a net-exposure convention. ③ **The 賣超 guard is now DATE-AWARE** (`shares_through(trade_date)`, mirroring cash's `running_min`) and `oversold` is **sticky** (a later buy does not clear it, because it does not restore the discarded basis). Anchors: the full `tw_broker/2609` short lifecycle (see the §4.3 table) and `fx.covered_ratio/basis_gap/foreign_cash`; stress ops 69→**77**, assertions 1,088→**1,806**, fail=0; phase 2 (live demo) 1,192 assertions fail=0. Mirror regenerated in the same change set. |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

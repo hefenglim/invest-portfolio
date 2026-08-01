@@ -1,7 +1,7 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.5`（2026-07-26）
-> **程式碼基線**：`v0.1.24`（全站稽核修正）
+> **版本**：`v1.6`（2026-08-01）
+> **程式碼基線**：`v0.1.25`（外幣成本基礎 + 宣告式賣空）
 > **仲裁狀態**：**已由 owner 正式簽署（2026-07-15）**，自版本 **v0.1.19** 起正式生效為站上任何
 > 「金額爭議」的**唯一仲裁標準**（arbitration standard）。
 > **語言例外**：本文件採**繁體中文正文 + 英文技術識別字**（欄位／資料表／函式名），為一份 owner
@@ -370,8 +370,68 @@ $$\text{original\_removed} = \text{original\_total}\times\text{frac},\quad \text
 > holding.adjusted_avg / holding.dividend_portion / holding.shares`，`scope = tw_broker|0050`（phase1
 > 最終快照）。
 
+### 4.3 宣告式賣空（declared short sale，owner ruling 2026-07-31）
+
+先前的「**不做**放空部位會計」立場被**收窄**、非推翻：放空會計**僅**適用於使用者**明示宣告**的
+賣出，永不適用於賣超。交易列帶 `short_sale`（預設 **false**）；**只有**宣告過的賣出可超過持股，
+未宣告的賣超仍由 §5.3 之 賣超 路徑處理。旗標**永不由系統推斷** — 系統無法分辨「真放空」與
+「漏記買進」，若對每筆賣超自動套用放空會計，一次打字錯誤就會變成一筆**看似合理的已實現虧損**
+（比原本荒謬的數字更危險）。
+
+**重播（加權平均，不追蹤批次，與股票成本法一致）**
+
+宣告賣出：先出清**長倉**（產生一般已實現列），餘量開／擴**空倉**，空倉持有的是**收到的淨價款**：
+
+$$\text{short\_proceeds} \mathrel{+}= \frac{q\times p - \text{fee} - \text{tax}}{q}\times q_{\text{short}},\qquad
+\text{short\_avg} = \frac{\text{short\_proceeds}}{\text{short\_shares}}$$
+
+買進：先**回補**空倉，再將餘量計入長倉。長倉與空倉因此**互斥**（賣先吃長倉、買先吃空倉），
+故一個部位恆為 多／平／空 三態之一，以**單一帶號股數**表達。
+
+**回補損益（owner 規則：買回的每股成本結算獲利，剩下的股數以本次成本為起點）**
+
+$$c_{\text{cover}} = \frac{q\times p + \text{fee} + \text{tax}}{q}\qquad
+\text{realized} = (\text{short\_avg} - c_{\text{cover}})\times q_{\text{covered}}$$
+
+已實現列 `kind = "short_cover"`，**記在回補日**（非賣出日）；剩餘股數以 $c_{\text{cover}}$ 起算長倉。
+未平倉空倉之呈現：`shares < 0`、成本欄位為**負**（收到的價款），故 `avg = total/shares` 即**放空均價**、
+`market_value = price × shares` 為負曝險、`unrealized = (price − avg) × shares` 在**跌價時為正**——
+既有估值公式在帶號股數下**完全不需修改**。任何**比率**須除以 `abs(cost_total)`（分母為負會翻號，
+使獲利的放空顯示為虧損）；`fully_recovered`（已回本）須以 `not short_open` 設閘（放空基礎恆為負）。
+
+**已驗證工作範例 — `tw_broker/2609`（phase1 場景）**
+
+| 步驟 | 明細 | 結果 |
+| --- | --- | ---: |
+| 未宣告賣出（空部位） | — | **422** 阻擋（錨點 `guard.short_needs_declaration`） |
+| 宣告賣出 2,000 @100 | fee **285**、tax **600** | 淨價款 200,000−285−600 = **199,115** |
+| 開倉狀態 | `shares = −2,000`、`original_total = −199,115` | `short_avg` = 199,115/2,000 = **99.5575** |
+| 市值（price 96） | −192,000 | `unrealized = +7,115`、`unrealized_pct = +0.035733…`（**正號**） |
+| 回補① 買 800 @95 | fee 108 → all-in 76,108，`c=95.135` | realized = (99.5575−95.135)×800 = **3,538** |
+| 回補② 買 1,200 @98 | fee 167 → all-in 117,767，`c=98.13916̄` | realized = **1,701.999999999999999999999996** |
+
+回補②為**循環小數**案例：`117,767/1,200` 不終止，故結果帶 28 位尾數——**刻意不四捨五入**，
+與 §1.3 之「僅於結算／顯示量化」一致。
+
+> **驗證錨點**：`holding.shares / holding.original_total / holding.original_avg /
+> holding.market_value / holding.unrealized_pnl / holding.unrealized_pct / holding.short_open`，
+> `scope = tw_broker|2609`；`realized.realized / realized.proceeds_net / realized.kind`，
+> `scope = tw_broker/2609@2026-07-01 #16`（3,538）與 `tw_broker/2609@2026-07-06 #17`
+> （1,701.999…996）；`fee_engine.fee/tax scope = tw_broker/2609 sell 2000@100 id=46`。
+
+**放空期間之股利：不可入帳。** 放空方需**支付**股利（payment in lieu），本帳本無此借方分錄。
+將已登錄之（正值）淨額列為收益，或將 DRIP／配股股數直接加入長倉，**兩者皆為金額錯誤**——後者
+另會破壞長／空互斥（一筆等量 DRIP 會使部位淨為 0，持股列連同其價款一併從報表消失）。故：
+嚴格路徑 **raise `UnbookableLedgerError`**（`ValueError` 子類，使既有降級點不受影響），儀表板路徑
+**跳過該事件並標記 `unbookable_dividend`（待釐清）**，永不入帳。該筆請改以現金收支登錄。
+錨點：`holding.unbookable_dividend scope = tw_broker|2609`、`short.unbookable_dividend_removable`。
+
+**已知限制（非缺陷，已裁決）**：`gross_invested` **不含**放空資金（回補由已收價款支應），故純放空
+幣別之簡易報酬率為 `None`（XIRR 仍為嚴謹指標）；純放空來回之 XIRR 反映**融資利率**（現金流形態
+即為一筆貸款）；配置權重採淨曝險慣例，淨空頭時會翻號。
+
 > **實作位置**：`portfolio/cost_basis.py::build_book`、`_Position`；持倉結果 `portfolio/results.py::Holding`。
-> **依據**：`.claude/rules/domain-ledger.md`（Cost basis）。
+> **依據**：`.claude/rules/domain-ledger.md`（Cost basis；Declared short sale 2026-07-31）。
 
 ---
 
@@ -718,9 +778,23 @@ to_amount` → 隱含匯率 `implied_rate = from_amount / to_amount`（**本位�
 
 ### 8.1 加權平均取得匯率（home per foreign）
 
-實作：`forex/pools.py::average_acquisition_rate`。僅計 `home → foreign` 方向之換匯：
+實作：`forex/pools.py::average_acquisition_rate` / `acquisition_basis`。取得來源有**兩類**
+（spec 2026-07-30）：`home → foreign` 換匯，以及**帶有 `acq_home_amount` 的外幣現金流入**
+（`cash_movements` 之 DEPOSIT／OPENING／REBATE；WITHDRAW 為處分，不入取得）：
 
-$$\text{avg\_rate} = \frac{\sum \text{from\_amount}\ (\text{home})}{\sum \text{to\_amount}\ (\text{foreign})}\quad(\text{無此類換匯則 None})$$
+$$\text{avg\_rate} = \frac{\sum \text{from\_amount}\ (\text{home}) + \sum \text{acq\_home\_amount}}{\sum \text{to\_amount}\ (\text{foreign}) + \sum \text{amount}_{\text{有成本}}}\quad(\text{無任何有成本取得則 None})$$
+
+**存金額，不存匯率。** `acq_home_amount` 是**家幣金額**：匯率是平均值，而 §1.3 明訂平均值不得作為
+權威（`fx_conversions` 同樣存兩個金額）；顯示用取得匯率一律 `acq_home_amount / amount` 讀取時計算。
+
+**覆蓋率（covered_ratio）。** 外幣流入若**無**成本基礎，其匯率未知且**永不臆測**。現金為可替代物、
+加權平均不追蹤批次，故流出按**比例**分攤：
+
+$$\text{covered\_ratio} = \frac{\sum \text{amount}_{\text{有成本}}}{\sum \text{amount}_{\text{有成本}} + \sum \text{amount}_{\text{無成本}}}\quad(\text{無「無成本」項時恆為字面 } 1)$$
+
+**不可**用「總餘額 − 無成本額」：該式在餘額跌破無成本額時**變負**，等同重新製造反號假數字。
+覆蓋率恆為 1 時呼叫端**跳過乘法**，故完整覆蓋之帳本與本規格前之引擎**逐位元相同**。
+錨點：`fx.covered_ratio scope = schwab / moomoo_my`（phase1 均 **1**）、`fx.basis_gap`（均 **0**）。
 
 **已驗證範例**
 
@@ -748,12 +822,21 @@ $$\text{realized\_fx} = \text{home\_received} - \text{foreign\_sold}\times\text{
 
 實作：`forex/fx_pnl.py::compute_account_fx`。令 `spot = 當前 foreign→home` 匯率：
 
-$$\text{unreal\_stocks} = \text{foreign\_stock\_value}\times(\text{spot} - \text{avg\_rate})$$
+$$\text{unreal\_stocks} = \text{foreign\_stock\_value}\times\text{covered\_ratio}\times(\text{spot} - \text{avg\_rate})$$
 
-$$\text{unreal\_cash} = \text{foreign\_cash}\times(\text{spot} - \text{avg\_rate})$$
+$$\text{unreal\_cash} = \text{foreign\_cash}\times\text{covered\_ratio}\times(\text{spot} - \text{avg\_rate})$$
 
-其中 `foreign_cash` 為 **FX 曝險視角**之外幣餘額（由換匯 + 外幣買賣 + 外幣現金股利重建；**與 §9 營運現金池
-不同**，見 `forex/pools.py` 檔頭 C9 說明）。`avg_rate is None` 或 `spot is None` → unrealized = `None`。
+**同一個比率套在整個外幣曝險上（現金與股票兩條腿）**：`avg_rate` 本身即出自「有成本」母體，
+只縮放現金腿會讓**誤差較大的股票腿**不被標示（實測差 +42,359 TWD）。`covered_ratio < 1` 時
+`fx_basis_incomplete = true`、`fx_basis_gap = foreign_cash × (1 − covered_ratio)`，兩條腿一併標示；
+已實現匯損益不縮放（價款是真實收到的金額），但其成本側用的是同一個不完整均價，故一併標示。
+
+其中 `foreign_cash` 為 **FX 曝險視角**之外幣餘額。自 spec 2026-07-30 起它**亦計入外幣現金流入／流出**，
+因此對同一 (account, foreign ccy) **恆等於 §9 之營運現金池**（先前兩者刻意分歧，見 audit C9）；
+差異僅存於**成本基礎**：無 `acq_home_amount` 之流入計入餘額但不入加權平均。
+`avg_rate is None` 或 `spot is None` → unrealized = `None`。
+錨點：`fx.foreign_cash scope = schwab`（**25,800**）／`moomoo_my`（**−11,244.14**）、
+`fx.pool_equals_funds`（phase2）。
 
 **已驗證範例（`phase1:final`；spot USD/TWD = 32.5、USD/MYR = 4.6、MYR/TWD = 7.2）**
 
@@ -1059,6 +1142,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.3` | 2026-07-15 | **fee-engine v2 上線**（owner sign-off；§3 全面改寫）。① **TW 捨入 FE-D3**：fee/tax 由 四捨五入 改為**無條件捨去（ROUND_DOWN）至整數 NT$**，min NT$20 於 floor 之後比較（群益 142.5→142；當沖 tax 例 11→10）；② **US 規費 v2**：Schwab／Moomoo US 佣金 $0/平台 $0.99、SELL 加 SEC `0.0000206`+TAF `0.000195`（cap $9.79）、交收 `0.003/股`（cap 1%）、CAT `0.000003/股`——各成分分捨入後相加；③ **MY v2**：佣金 `0.03%`（min RM0.01）+平台 RM3+清算（cap RM1,000）+**SST 8%**；印花改為 `ceil(金額/1000)×RM1`（正股 cap RM1,000、**ETF 免徵**）；④ **FE-D2 US 印花**：US 交易之 MY 印花以 MYR 計、USD 記帳（`stamp_fx` 由呼叫端解析，缺匯率→0+soft issue）；⑤ **FE-D1 折讓款**：新增 §3.6 forecast `⌊fee×0.77⌋`（**非金額之記錄**，永不入 `compute_fees`；inbox/確認為 Wave B）；⑥ snapshot 帶 `engine="v2"`，**逐列費制**（舊列以舊快照裁定、永不重算）。費率一律置於 config。§3 範例驗證錨點更新為 fee-engine v2 壓測 phase1（`fee_engine.*` 80/80）。同 change set 重生英文鏡像。基線不變。 |
 | `v1.4` | 2026-07-22 | **Batch B（Moomoo 合併）修訂**（基線 `v0.1.20 + Batch B`）。① **帳戶模型**：合併前的兩個 per-market Moomoo 帳戶（legacy ids 見 `data_ingestion/moomoo_merge.py`）併為單一雙市場帳戶 `moomoo_my`（settlement USD／funding MYR；規則綁 (帳戶, 市場)：US→(`moomoo_us`,`drip_us`)、MY→(`moomoo_my`,`cash`)，載於 `account_market_rules`）——§2 帳戶表 4→3 列、invariant I6 由「綁帳戶」改為「綁 (帳戶, 市場)」、§3.3／§3.4／§6.2／§6.3／§8／§9 之帳戶標籤與 `scope` 錨點全面 re-anchor 至 `moomoo_my`（市場由 symbol 帶出）。② **全錨點重新對帳**：壓測套件已重生為合併後拓樸（1,060 斷言、66 ops、1,060/1,060 通過、0 fail；spot USD/MYR 4.5→**4.6**、含一筆 Schwab USD→TWD 回換）。就此當前實跑更新所有場景依賴之終值：§7.1 總報酬 514,752.85→**516,336.55**（realized 186,333.50／unrealized 330,003.05）、§8.2 realized FX 0→**−2,375**（Schwab 回換）、§8.3 未實現 FX rollup −31,830.94→**−11,757.48**（`moomoo_my` 因 spot 4.6≠avg 4.5 現貢獻正值）、§9.2 現金池全面更新且 MYR 池改為單一直接錨定之 `moomoo_my|MYR = 123,201.91`、§5.1 TSLA proceeds/realized 5,199.86/199.86→**5,199.88/199.88**（SEC fee 0.14→0.12）；修正既存筆誤 E5（NVDA fee 1.41→5.89）、E6（1155 fee/tax 10.45/9.50→9.40/10.00）。③ **錨點穩健化**：波動之 `id=NN`（逐版重編）自 §12.1 fee 例移除、保留穩定之 check+scope；場景不再觸發之 `negative_cash`（舊 op47）改記為單元測試錨定（§9.3／E16）；賣超錨點改以 `guard.oversell_blocks` scope 記述。④ 驗證基礎行、§7.2 harness 計數（1,006→1,060）、§6.5 計數（966→1,060）同步更新。同 change set 重生英文鏡像。**無任何公式或會計定義變更——純為 (帳戶, 市場) 綁定 relabel + 錨點重新對帳。** |
 | `v1.5` | 2026-07-26 | **清倉後入帳之現金股利改列已實現收益**（稽核 H2，owner 裁定 2026-07-26；基線 `v0.1.24`）。新增 **§6.3b**：CASH/NET 股利若入帳當下該 `(account, symbol)` 部位股數已為 0，已無成本可沖減，改記一列 `RealizedRow(kind="dividend")`（`realized = proceeds_net = net`；shares_sold／original_removed／adjusted_removed 皆 0；`sell_date` = 入帳日）。修正前該筆被 0 股部位吸收後隨部位一併丟棄，導致**股利總覽與 XIRR 有計入、總報酬沒有**的三方不一致；修正後恰好計入一次，**invariant I4 維持**。§5.1 同步標明 `RealizedRow` 現有 `kind: "sale" | "dividend"` 兩種。**稅務區隔**：年度稅務包 `realized_gains_{year}.csv` 僅取 `kind == "sale"`，該筆已由 `dividends_{year}.csv` 自股利帳本輸出，不重複申報。驗證錨點：`moomoo_my/5225` 買 200@6.00 → 賣 200@6.50（歸零）→ NET 股利 120 進入 `realized.by_currency[MYR]`（run_phase1「Found-bug op #3」；壓測 ops 66→**69**、斷言 1,060→**1,088**、fail=0）；hermetic 迴歸 `tests/portfolio/test_post_close_dividend.py`（5 例，含「清倉後買回再配息」仍走沖減成本）。**對既有真實帳本的影響：已清倉標的的歷史總報酬會上升**（原本漏計之股利現在計入）。同 change set 重生英文鏡像。除本條外無其他公式變更。 |
+| `v1.6` | 2026-08-01 | **外幣現金流入之成本基礎 + 宣告式賣空**（owner 裁定 2026-07-30／07-31；基線 `v0.1.25`）。① **§8.1／§8.3 改寫**：取得來源由「僅換匯」擴為「換匯 **+** 帶 `acq_home_amount` 之外幣現金流入」；**存家幣金額、不存匯率**（匯率是平均值，§1.3 禁止其為權威；顯示用匯率讀取時計算）。新增 **`covered_ratio`**（有成本取得 ÷ 全部取得），流出**按比例**分攤——禁用「總餘額 − 無成本額」（餘額跌破時翻負，等同重製反號假數字）；該比率**同時**縮放現金與股票**兩條腿**（`avg_rate` 本身出自有成本母體，只縮放現金腿會漏標誤差更大的股票腿，實測差 +42,359 TWD）。`covered_ratio` 恆為字面 1 時呼叫端跳過乘法，故完整覆蓋之帳本**與本版前逐位元相同**。`foreign_cash` 現亦計入外幣現金流入／流出，故對同一 (account, foreign ccy) **恆等於 §9 營運現金池**（先前刻意分歧，audit C9），差異僅存於成本基礎。② **新增 §4.3 宣告式賣空**：`short_sale`（預設 false，**永不推斷**）；宣告賣出先出清長倉再開空倉（持有淨價款），買進先回補再入長倉，長／空互斥故部位以**單一帶號股數**表達；回補損益 `(short_avg − 買回每股全額成本) × 回補股數`，記於**回補日**，`kind="short_cover"`（進稅務資本利得表）。比率須除 `abs(cost_total)`、`fully_recovered` 須以 `not short_open` 設閘（放空基礎恆為負）。**放空期間之股利不可入帳**（放空方需支付；嚴格路徑 raise `UnbookableLedgerError`，儀表板路徑跳過並標記 `unbookable_dividend`）。已裁決之限制：`gross_invested` 不含放空資金、純放空 XIRR 反映融資利率、權重採淨曝險慣例。③ **賣超防呆改為日期感知**（`shares_through(交易日)`，對稱於現金之 `running_min`）、`oversold` 改為**黏性**（後續買進不清除，因被丟棄的成本基礎不會回來）。驗證錨點：`tw_broker/2609` 完整放空生命週期（見 §4.3 表）、`fx.covered_ratio/basis_gap/foreign_cash`；壓測 ops 69→**77**、斷言 1,088→**1,806**、fail=0，phase 2（線上 demo）1,192 斷言 fail=0。同 change set 重生英文鏡像。 |
 
 ### 12.4 如何仲裁一個爭議金額
 

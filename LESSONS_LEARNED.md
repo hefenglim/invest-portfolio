@@ -466,3 +466,27 @@ prevents recurrence.
   sane band of market price; a position that never goes negative at ANY date; sale proceeds
   in cash always matched by a realized row), and treat "all reconciled" as a statement about
   arithmetic only.
+
+- **2026-08-01 — a fix for a money bug is itself a change that needs auditing; two
+  independent passes each caught a defect the FIX introduced, and both times the type
+  checker and the reconciliation were green.** Round 1: making the FX pool admit foreign
+  deposits was arithmetically right, but five consumers assumed a positive basis — a
+  dividend during a short booked as income, a DRIP that made a position vanish, a profitable
+  short shown as a loss, every short badged 已回本, and the trend dropping the liability
+  while cash kept the proceeds. Round 2: raising on the newly-unbookable case was right, but
+  three STRICT `build_book` call sites (重算 / what-if / tax export) caught only
+  `OversellError`, so a user-reachable button returned 500. Neither round was visible to
+  mypy (it cannot know an `except` clause is missing one of two types) or to reconciliation
+  (both engine and oracle replayed the same rows identically). Rule: after fixing a
+  money-of-record calculation, enumerate the CONSUMERS of every value whose domain you
+  widened (can it now be negative? zero? raise?) and re-audit — the fix is a change like any
+  other, and "the tests that were green before are still green" is not evidence about it.
+
+- **2026-08-01 — subclass a new exception from the one the codebase already degrades on.**
+  Adding `UnbookableLedgerError(ValueError)` rather than a bare `Exception` meant every call
+  site that already wrote `except (ValueError, KeyError)` kept its exact behaviour, while the
+  strict sites could catch the new type precisely and answer 4xx. A sibling of `Exception`
+  would have silently bypassed those existing guards and turned a graceful degradation into a
+  500 in places nobody edited. Rule: when introducing an exception into an established
+  hierarchy, pick the base class from what existing handlers ALREADY catch, so the blast
+  radius of the new type is exactly the sites you intend to change.

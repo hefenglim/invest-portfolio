@@ -50,6 +50,137 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.25] - 2026-08-01
+
+Two owner-approved accounting rulings, each triggered by a real question about a real number,
+plus the remediation of eight defects that three independent audit passes turned up — five in
+the feature as first built, three in the fix for those five.
+
+**How this version started.** The owner asked why 各帳戶現金 showed 101,587.90 USD while
+換匯損益 showed 1,587.90 for the same account. Neither figure was miscalculated: they are two
+definitions, and the FX one was missing 100,000 USD of opening capital because the FX pool had
+no way to represent a foreign-currency deposit. Measured twice, 33 minutes apart, the pool
+crossed from −4,600.10 to +1,587.90 and the old `foreign_cash < 0` warning went silent while
+the error stayed at exactly 100,000 USD.
+
+### Added
+
+- **FX cost basis for foreign cash movements** (owner ruling 2026-07-30; spec
+  `docs/spec/2026-07-30-fx-opening-basis.html`). `cash_movements.acq_home_amount` records the
+  HOME-currency cost of a foreign deposit/opening, so it can fund the FX pool and carry a
+  basis. Three design points the owner's accounting review settled:
+  - **F1 — the AMOUNT is stored, never the rate.** A rate is an average, and
+    `data-and-pricing.md` forbids storing an average as the authority; `fx_conversions`
+    likewise stores two amounts. The form still accepts a rate and converts it on the way in.
+  - **F2 — `covered_ratio`** = basis-known acquisitions / all acquisitions, with outflows
+    absorbed **pro rata**. The intuitive `balance − unbased` shortcut goes negative once the
+    balance drops below the unbased amount, recreating the reversed-sign figure this change
+    exists to remove.
+  - **F3 — the ratio scales the WHOLE foreign exposure, cash AND stocks**, because `avg_rate`
+    itself comes from the covered population. Degrading only the cash leg left the larger
+    error unflagged (+42,359 TWD on the demo ledger).
+  - `GET /api/cash/acq-rate` pre-fills the stored close as a REFERENCE and stays blank when no
+    rate exists on or before that date — prod's `fx_rates` only reach back to 2026-07-01, so
+    manual entry is a routine path, not a fallback.
+- **Declared short sale** (owner ruling 2026-07-31). `transactions.short_sale`, default false,
+  offered only on the sell side. Only a declared sell may exceed holdings. The flag is never
+  inferred: the system cannot tell a genuine short from a missing buy, and auto-applying short
+  accounting to every oversell would turn a typo into a plausible-looking realized loss — a
+  wrong number that looks right, which is worse than the absurd one it replaced. Per the
+  owner's rule (買回的每股成本結算獲利，剩下的股數以本次成本為起點): a declared sell exhausts
+  the long lot then opens a short lot holding the net proceeds; a buy covers first at that
+  buy's all-in per-share cost, realizing `(short avg − cover cost) × covered` dated the COVER
+  date (`kind="short_cover"`, reaching the tax capital-gains sheet); the remainder starts long
+  at that same cost. Long and short are mutually exclusive, so a position is one signed
+  quantity and every existing valuation formula works unchanged.
+- **Fee-rule conflict warning.** `discount` and `rebate_rate` express the same broker benefit
+  two ways — charge less now, or charge full and refund later (FE-D1). Both on applies it
+  twice, and since fees are part of `original_total` that quietly understates cost basis
+  (measured on the test site: a full 869 commission charged as 199 AND forecasting a 153 refund
+  → net 46 instead of 200). `/api/fee-rules` reports a non-blocking `conflicts` entry computed
+  from the EFFECTIVE values, with a plain-language explanation and one-click resolutions. It
+  warns, never blocks — a broker really could do both, and only the owner knows.
+
+### Changed
+
+- **The 賣超 guard is DATE-AWARE.** `validate.py` checked `current_shares()`, the net across
+  ALL dates, so a back-dated sell covered only by a LATER buy never even asked for
+  acknowledgement — and the replay then discarded that symbol's cost basis permanently. It now
+  also checks `holdings.shares_through(trade_date)` and names the date in the message. The cash
+  ledger has had the equivalent `running_min` guard since audit C3; this closes the same hole
+  on the share side.
+- **`Holding.oversold` is STICKY.** It was `shares < 0` read at the END of the replay, so a
+  later buy netted the position positive and cleared the warning while the discarded basis
+  stayed gone. Measured on the demo: average cost 6,100 against a 379 market price,
+  `oversold: false`, XIRR still computing, and 26,000 USD of proceeds absent from realized P&L.
+- **Trend and net worth include a declared short.** They excluded any holding with
+  `shares < 0`, which predated the ruling; cash kept the +proceeds while the −liability was
+  dropped, so both series overstated by the short's full market value.
+- **Ratios over a short's basis divide by `abs()`**, and `fully_recovered` (已回本) is gated on
+  `not short_open` — a short's basis is negative by construction, so the bare tests rendered a
+  profitable short as a −3.85% loss and badged every open short 「配息已完全沖減成本」.
+- **`export/tax.py` reads the same weighted average** the dashboard does, so the tax package
+  cannot disagree with 換匯損益 on the same reconversion.
+- `GET /api/ledgers/transactions` exposes `short_sale`: the flag changes how a row is booked,
+  so omitting it meant the book could not be rebuilt from the ledger.
+
+### Fixed
+
+- **A dividend landing on an open short is no longer booked as income.** The audit-H2
+  post-close branch keys on `shares == 0`, which is ALSO an open short's long lot — it credited
+  a payout the short seller actually PAYS. A DRIP/stock dividend was worse: it added shares
+  straight to the long lot, and one equal to the short netted the position to zero, so the
+  holding AND its proceeds vanished from the report with no realized row. Now: raise
+  `UnbookableLedgerError` on the strict path, skip and flag `unbookable_dividend` on the
+  dashboard path, never book it.
+- **`UnbookableLedgerError` subclasses `ValueError`** so the call sites that already degrade on
+  `except (ValueError, KeyError)` are untouched, while the three STRICT sites —
+  `actions.recompute`, `strategy/whatif`, `export/tax` — catch it precisely and answer 422 with
+  an actionable zh message instead of letting it escape as a 500. That regression was
+  introduced by the fix above and caught by the phase-2 audit; the whatif and tax sites had
+  never handled the module's pre-existing ValueErrors either.
+- The 取得成本 field's hint said 「實際換匯價可能不同」, which reads as if it records a
+  CONVERSION. It does not: a foreign deposit credits the pool and debits nothing, so recording
+  an internal conversion that way overstates the home pool and double-counts net worth. A
+  permanent amber note now says so and points internal conversions at 換匯中心.
+- Editing 金額 alone silently rescaled the implied acquisition rate (1,000 USD / 32,388 TWD
+  edited to 2,000 USD became 16.194). Both the entry form and the edit dialog now show that
+  rate live, computed off both fields.
+- The movement EDIT dialog omitted the acquisition-cost field while PUT is a full replace, so
+  editing a note NULLed a recorded cost basis — data loss, not a display gap.
+
+### Tooling
+
+- `scripts/stress_audit`: the independent oracle gained a declared-short model **derived from
+  `domain-ledger.md`, not from `cost_basis.py`** (that independence is what makes agreement
+  meaningful), the unbookable-dividend rule, and a permanent **integrity layer**
+  (`position.never_negative`, `sell.has_realized_row`, with an `acked` allowlist) — the part a
+  reconciliation is blind to. It also reads the instance's EFFECTIVE fee rules instead of the
+  seed defaults, and prints any divergence.
+- Every destructive-path probe now derives its premise from live state at run time. A
+  hard-coded oversell quantity had gone stale on the accumulating demo, so the app correctly
+  accepted it and the "guard test" WROTE a back-dated sell that destroyed a symbol's cost basis.
+- Stress coverage: phase 1 ops 69→**77**, assertions 1,088→**1,806**; phase 2 (live demo)
+  **1,192** assertions. Both fail=0.
+- `docs/accounting-formula-manual.md` → **v1.6** (new §4.3 declared short sale with the full
+  `tw_broker/2609` worked example; §8.1/§8.3 rewritten for `acq_home_amount` + `covered_ratio`),
+  English mirror regenerated in the same change set.
+
+### Notes
+
+- **Backward compatible, and proven so.** `acq_home_amount` is NULL and `short_sale` is 0 on
+  every pre-existing row; `covered_ratio` is the literal `Decimal("1")` and the caller skips
+  the multiply. The golden-payload diff across this whole version is field additions only —
+  **zero money values changed**.
+- **Invariant 6 intact**: `fx_unrealized` remains a separate KPI, never summed into
+  `total_return` / `unrealized_total` / XIRR, and `networth.py` never reads it.
+- Accepted limitations, documented in `domain-ledger.md` rather than fixed: `gross_invested`
+  excludes short capital (a cover is funded by proceeds already received); XIRR over a PURE
+  short round trip reports a borrowing rate (the flow pattern is a loan); allocation weights use
+  a net-exposure convention that sign-flips when net short; a same-day buy-before-sell merges an
+  intended intraday short into the long lot (total P&L conserved, attribution differs); and
+  `cash_balances` still credits an unbookable on-short dividend, which the flag discloses.
+
 ## [v0.1.24] - 2026-07-26
 
 Remediation of the 2026-07-25 full-site audit: 2 high / 5 medium / 6 low findings, plus
