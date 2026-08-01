@@ -71,9 +71,21 @@ on the test site never touches prod:
    things the hermetic suite deliberately cannot see. The test instance's scheduler is
    disabled, so its data stays deterministic between verifications.
 4. Fix → repeat until everything is green.
-5. **Promote only when green:** merge to `main`, cut a version + tag (`/ship-version`),
-   deploy **that tag** to prod, then `verify_live.py <prod-url> --expect-version vX.Y.Z`.
+5. **Promote only when green — as a queue, demo first (owner directive 2026-08-01):** merge
+   to `main`, cut a version + tag (`/ship-version`), then deploy **that tag** to the **test
+   site first**, verify it, and only then to prod. Both instances end the release on the SAME
+   tag; two sites on different commits is an unfinished release. Verify each with
+   `verify_live.py <url> --expect-version X.Y.Z` (bare version), and verify **external
+   reachability** of each public URL from outside the host — a healthy `127.0.0.1` port says
+   nothing about whether the site is reachable (2026-07-29: the demo funnel's DNS registration
+   vanished from the control plane while the node was online and the service healthy).
    Prod only ever moves forward to a validated tag — experiments never reach it.
+6. **Abort protocol — data first, diagnosis second.** Any anomaly stops the sequence on the
+   spot; never roll forward through it. Establish that user data (**prod above all**) is
+   intact and recoverable *before* investigating; if it is at risk, restoring from the
+   pre-deploy backup outranks understanding the bug. Re-pinning prod to the previous released
+   tag is always a safe action. Then diagnose, fix on a branch, and re-run the whole
+   checklist. Full sequence + priority order: `/ship-version` Part B/C.
 
 **Gate placement (decided 2026-07-02, human sign-off):** do NOT run the full suite or
 mypy on the host — measured on the `e2-micro`: pytest ~25 min (identical verdict to the
@@ -86,8 +98,13 @@ provider adapters), run a *targeted* on-site subset — e.g. `pytest tests/prici
 tooling on the box that serves prod.
 
 **Invariants (never violate):**
-- Prod runs a released **tag**; the test site tracks a branch / WIP commits. Never point prod at
-  an untested branch.
+- Prod runs a released **tag**; the test site tracks a branch / WIP commits **between** releases
+  and is moved onto the tag as part of shipping one. Never point prod at an untested branch.
+- **Back up the DB of every instance you are about to deploy to — the test site included.** Its
+  synthetic ledger is the accumulating stress-test corpus (owner ruling 2026-07-31: test data is
+  kept, not reset); re-seeding it silently destroys coverage built up over releases.
+- **Never deploy prod while the test site is red**, and never deploy prod without a fresh prod
+  backup taken in that same session.
 - Test data is **synthetic** (`scripts/seed_demo.py`). NEVER copy real data into the test set;
   NEVER point the test `DB_PATH` at the prod data folder.
 - Keep prod and the test site **physically separate** (checkout + venv + data folder) so a
@@ -105,7 +122,10 @@ tooling on the box that serves prod.
    delivery date.
 5. `LESSONS_LEARNED.md` updated if anything was learned the hard way.
 6. Self-review pass complete.
-7. Conversational summary to the human in **Traditional Chinese**; all artifacts in
+7. **Staged deploy:** back up both DBs → tag to the **test site**, verified → then the same
+   tag to **prod**, verified → **external reachability of both public URLs** → both sites on
+   the same tag. Abort on any anomaly, data first (`/ship-version` Part B/C).
+8. Conversational summary to the human in **Traditional Chinese**; all artifacts in
    **English**.
 
 ## `resume-dev` (session start)

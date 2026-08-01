@@ -1,11 +1,15 @@
 ---
 name: ship-version
-description: "Run the pre-delivery checklist before shipping a version of portfolio-dash. Use this when a unit of work is complete and about to be delivered or committed as a version: it verifies tests, type-checking, CHANGELOG integrity (including the grep-c structural check), lessons captured, and a self-review pass. Invoke with /ship-version before declaring any version done."
+description: "Run the pre-delivery checklist and the staged deploy before shipping a version of portfolio-dash. Use this when a unit of work is complete and about to be delivered or committed as a version: it verifies tests, type-checking, CHANGELOG integrity (including the grep-c structural check), lessons captured, a self-review pass, and then deploys the tag to the demo site first and prod second, leaving both sites on the same tag. Invoke with /ship-version before declaring any version done."
 ---
 
 # Ship Version
 
-Do not declare a version done until every item passes. Stop and fix on any failure.
+Two parts, in order: the **quality gates** (1–9) decide whether the version may exist, and
+the **staged deploy** decides whether it reaches users. Do not declare a version done until
+every item passes. Stop and fix on any failure.
+
+## Part A — quality gates
 
 1. **Tests green** — run `pytest`; all pass.
 2. **Types clean** — run `mypy --strict`; zero errors. Treat a type error as a build
@@ -46,5 +50,66 @@ Do not declare a version done until every item passes. Stop and fix on any failu
    regenerate `docs/accounting-formula-manual.en.md` in the same change. See
    the `/stress-audit` skill.
 
-Report a concise pass/fail summary per item, then the version tag and one-line
-description.
+## Part B — staged deploy (demo → prod → aligned)
+
+The two sites are a **queue, not a fork**. The same tag reaches the demo site first, is
+verified there, and only then reaches prod. **The version is not shipped until BOTH sites
+run that tag** — ending a session with the two on different commits is an unfinished
+release, not a deferred chore.
+
+Concrete host paths / URLs / ports / systemd units / backup locations live in the
+git-ignored `docs/human_noted/` note. **Never write real host details into this file.**
+
+10. **Cut the version.** Merge to `main`, tag `vX.Y.Z`, push both. Prod and demo are
+    deployed from the **tag**, never from a branch.
+11. **Back up every DB you are about to touch — demo included.** Prod's ledger is
+    irreplaceable; demo's synthetic ledger is the accumulating stress-test corpus, and
+    re-seeding it silently destroys coverage that took releases to build.
+12. **Deploy the tag to the DEMO site.** Then verify, in this order:
+    - the service is `active` and `/api/health` reports the expected `version` **and**
+      `release: vX.Y.Z` (a stale `release: unreleased` means the checkout is still on a branch);
+    - `scripts/verify_live.py <demo-url> --expect-version X.Y.Z` → **ALL PASS**
+      (pass the version **bare**, no `v` prefix);
+    - the accumulated demo data survived — compare row counts before/after (transactions,
+      cash movements, holdings). A migration must extend the schema, never reseed or drop;
+    - any flow this version changed, clicked through in a real browser.
+13. **Only if demo is completely clean, deploy the same tag to PROD.** Same verification,
+    plus: state how many existing rows the migration actually touched (usually **0** — say
+    the number, do not assume it), and confirm the auth gate still answers 401 on the
+    protected routes.
+14. **External reachability — from outside, for BOTH sites.** Each public URL must resolve
+    to an A record **and** answer HTTP 200 over HTTPS from the dev machine.
+    A green `curl 127.0.0.1:<port>/api/health` on the host proves the *app*; it proves
+    nothing about the *site*. On 2026-07-29 the demo node's funnel DNS registration vanished
+    from the control plane while the node was online, the key valid, and the service healthy —
+    every page was `000` from outside and nothing on the box showed it. Re-register the funnel
+    per the host note. **The release is not complete until this check passes for both sites.**
+15. **Close the loop.** Both sites report the same `version` / `commit` / `release`. Record
+    the deploy (date, tag, backup filenames) in the host note's operation log.
+
+## Part C — abort protocol: data first, diagnosis second
+
+Any anomaly at any step **stops the sequence immediately**. Do not try the next step to see
+if it clears, do not roll forward through it, do not retry the deploy hoping it was transient.
+
+Priority order — this order is the point:
+
+1. **User data, prod above all else.** Before diagnosing anything, establish that the ledger
+   is intact and recoverable: is the service still writing? does the pre-deploy backup exist
+   and open? do row counts / a reconciliation run match the pre-deploy snapshot? An unshipped
+   version costs nothing; a corrupted ledger is permanent.
+2. **If data is at risk, restoring it outranks understanding the bug.** Stop the service,
+   restore from the backup taken at step 11, verify the restore, *then* investigate.
+3. **Prod may always move backwards to a validated tag.** Re-pinning prod to the previous
+   released tag is a safe action and never needs deliberation; leaving prod on an unverified
+   state does.
+4. **Only once the data is proven safe:** investigate — journal, service logs, the diff,
+   reproduce it on the demo site (which is what the demo site exists for).
+5. Fix on a branch and **re-run the whole checklist from item 1.** A partially deployed
+   version is never "finished later".
+
+Never: skip the demo stage because the change looks small; deploy prod while demo is red;
+deploy prod without a fresh prod backup; leave the two sites on different tags.
+
+Report a concise pass/fail summary per item, then the version tag, a one-line description,
+and the final deploy state of **both** sites including the external-reachability check.
