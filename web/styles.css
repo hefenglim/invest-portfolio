@@ -1869,7 +1869,11 @@ details.freshness > summary > span:not(.sum-chips) {
   /* --- overflow stragglers found by the 390px probe --- */
   .segmented { flex-wrap: wrap; }              /* 5-tab bars wrap instead of pushing */
   .ccyret-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .ds-section { overflow-x: auto; -webkit-overflow-scrolling: touch; } /* 資料源清單表 */
+  /* `.ds-section` used to scroll here. Removed 2026-08-02: the table now sits in a
+     `.table-wrap`, and leaving both would nest two horizontal scrollers inside each other.
+     Scrolling only below 760px was also the bug — the table overflowed the DOCUMENT at every
+     width from 761px to ~1,435px, where this rule's condition is false and nothing else
+     declared overflow-x. */
   .freshness summary { flex-wrap: wrap; }      /* 折分/新鮮度標頭 chips 換行 */
   .freshness summary .chips { flex-wrap: wrap; }
   .kpi-card { min-width: 0; overflow: hidden; }   /* 2-col KPIs clip, never push */

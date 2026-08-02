@@ -91,7 +91,12 @@
       const tbody = el('tbody');
       groups[type].forEach((s) => tbody.appendChild(renderSourceRow(s)));
       table.appendChild(tbody);
-      sec.appendChild(table);
+      // The table is ~1,200px wide, so it needs its own scroll container at EVERY width —
+      // not just on phones. `.table-wrap` is the app's existing one (detail.js, rebalance.js);
+      // wrapping the table rather than scrolling `.ds-section` keeps the section heading put.
+      const tableWrap = el('div', 'table-wrap');
+      tableWrap.appendChild(table);
+      sec.appendChild(tableWrap);
       wrap.appendChild(sec);
     });
   }

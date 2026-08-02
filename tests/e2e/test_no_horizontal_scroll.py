@@ -23,10 +23,21 @@ The widths are the measured boundaries, not round numbers:
 import pytest
 from playwright.sync_api import Page
 
+from tests.conftest import _seed_golden
+from tests.e2e.conftest import FlowServerFactory
+
 _SWEEP_WIDTHS = (1440, 1280, 1100, 900, 768, 390)
 _ALL_PAGES = (
     "index.html", "trades.html", "ledger.html", "cash.html", "instruments.html",
     "insights.html", "data-center.html", "dividend-inbox.html", "settings.html",
+    # Added 2026-08-02. The guard never failed — it simply did not look here, and BOTH
+    # defects found by the whole-site sweep were on pages missing from this list:
+    # settings-datasources (table overflowed the document from 761px to ~1,435px, 30 days)
+    # and pipeline-hub (card head could not wrap at 390px, 50 days). A guard that covers
+    # half the site reports green for the half nobody changed.
+    "input.html", "news.html", "pipeline-hub.html", "settings-accounts.html",
+    "settings-datasources.html", "settings-llm.html", "settings-prompts.html",
+    "settings-scheduler.html",
 )
 
 _MEASURE = """
@@ -73,11 +84,16 @@ def test_dashboard_never_scrolls_sideways(
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize("width", (900, 390))
+@pytest.mark.parametrize("width", (900, 768, 390))
 def test_every_page_never_scrolls_sideways(
     live_server: str, browser_page: Page, width: int
 ) -> None:
-    """Every shipped page at the two widths that used to break (tablet gap + phone)."""
+    """Every shipped page at the widths that have actually broken.
+
+    768 was added 2026-08-02 and is not redundant with 900: the 資料來源 fallback grid was
+    pinned to three ~205px columns by an inline style, which fits 885px and does not fit
+    753px. A sweep that samples only 900 and 390 steps over the defect exactly.
+    """
     for path in _ALL_PAGES:
         _assert_no_h_scroll(browser_page, live_server, path, width)
 
@@ -104,3 +120,37 @@ def test_topbar_stays_single_row_on_common_laptops(
             f"topbar wrapped to a second row at {width}px (height={height}px); "
             f"the <=1365px label-trim tier should keep it single-row here"
         )
+
+
+@pytest.mark.e2e
+def test_pipeline_hub_task_card_never_pushes_the_page_sideways(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """A page whose defect only exists once it HAS data needs the test to create that data.
+
+    洞察管線 renders an empty state until an insight task exists, and neither the golden
+    fixture nor `scripts/seed_demo.py` creates one — so the sweep above walks this page while
+    it is blank and reports green. The live demo, which accumulated three tasks through the
+    UI, overflowed 50px at 390px the whole time (`.pp-card-head` had no `flex-wrap`, so seven
+    children could not fit a 301px card). That is the SECOND time richer live data caught a
+    phone overflow the local seed could not (see LESSONS_LEARNED, v0.1.24).
+
+    A task at `level=fail` is deliberate: it renders the extra 為什麼沒跑？ button, which is
+    the widest the head ever gets, so this asserts the worst case rather than a lucky one.
+    """
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    created = page.request.post(f"{base}/api/insight-tasks",
+                                data={"name": "持倉週報", "scope": "portfolio",
+                                      "enabled": True})
+    assert created.ok, created.text()
+
+    page.set_viewport_size({"width": 390, "height": 900})
+    page.goto(f"{base}/pipeline-hub.html", wait_until="networkidle")
+    page.wait_for_selector(".pp-card-head", state="attached")   # the card must really exist
+    page.wait_for_timeout(400)
+    m = page.evaluate(_MEASURE)
+    assert m["sw"] <= m["cw"] + 1, (
+        f"pipeline-hub.html @ 390px scrolls horizontally with one task card: "
+        f"scrollWidth={m['sw']} > clientWidth={m['cw']}. Widest offenders: {m['widest']}"
+    )

@@ -150,6 +150,13 @@
   .fb-name { flex:1; }
   .fb-hint { font-size:10px;color:var(--text-3); }
   @media(max-width:1100px){.roles-grid{grid-template-columns:repeat(2,1fr)}.acct-grid{grid-template-columns:repeat(2,1fr)}.fallback-grid{grid-template-columns:repeat(2,1fr)}}
+  /* 2026-08-02: the 3-market grid used to carry `style="grid-template-columns:repeat(3,1fr)"`
+     inline, which outranks every selector above — the @media(max-width:1100px) 2-column rule
+     could never apply, so three ~205px cards were forced into a 515px box and pushed the
+     document 48px sideways at 768px. Only the <=760px `1fr !important` in styles.css was
+     strong enough to win, which is why phones looked fine and tablets did not. Column count
+     now follows available width instead of a hard-coded 3. */
+  #market-order-wrap { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); }
 
   /* E1: alert rules */
   .ar-list { display:flex;flex-direction:column;padding:6px var(--pad) 14px; }
@@ -438,7 +445,7 @@
         <h2 class="panel-title">市場報價抓取順位</h2>
         <span class="panel-sub">抓報價時依此順序詢問來源，第一個成功即採用；順位改了就是真的改（排程與手動更新都走這條鏈）。來源的健康狀態與金鑰見上方清單</span>
       </div>
-      <div class="fallback-grid" id="market-order-wrap" style="grid-template-columns: repeat(3, 1fr);"></div>
+      <div class="fallback-grid" id="market-order-wrap"></div>
     </section>
   </div>
 
