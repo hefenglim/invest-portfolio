@@ -504,3 +504,19 @@ prevents recurrence.
   `echo <payload> | base64 -d | bash`, so nothing but `[A-Za-z0-9+/=]` is ever parsed by a
   shell other than the remote one. Rule: when a command crosses a `.cmd`/`.bat` shim, do not
   try to quote your way out — remove the metacharacters from the command line entirely.
+
+- **2026-08-02 — a gate that goes quiet reads exactly like a gate that passed; twice in one
+  session, two different mechanisms.** (a) `pyproject.toml`'s `addopts` already carries `-q`,
+  so passing `-q` again on the command line makes `-qq`, and pytest at that level **drops the
+  final `N passed` summary line entirely**. Two full 25-minute runs produced no verdict line
+  and sent me hunting an `Exception ignored in: BaseEventLoop.__del__` teardown traceback that
+  was pre-existing, harmless (Python explicitly ignores GC-time exceptions; exit code stayed 0)
+  and completely unrelated. Check `addopts` before adding verbosity flags — and read the
+  process **exit code**, which no verbosity setting can suppress. (b) PowerShell's `*>`
+  redirection writes **UTF-16LE**; `grep`/`Select-String` from Git Bash then match nothing
+  because every character is separated by a NUL byte. A layout probe that had actually found
+  68 clean results was reported as "0 overflows" from a log the grep could not read at all —
+  the same string of characters as a genuine pass. Decode explicitly (`raw.decode("utf-16")`
+  when the BOM is `\xff\xfe`) or write UTF-8. **Rule for both: before believing a zero, prove
+  the measurement ran** — count the probes, assert the denominator, read the exit code. A
+  count of findings is only meaningful next to a count of things examined.
