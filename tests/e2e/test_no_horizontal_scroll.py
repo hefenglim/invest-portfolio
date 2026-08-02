@@ -37,8 +37,8 @@ _ALL_PAGES = (
     # half the site reports green for the half nobody changed.
     "input.html", "news.html", "pipeline-hub.html", "settings-accounts.html",
     "settings-datasources.html", "settings-llm.html", "settings-prompts.html",
-    "settings-scheduler.html",
-)
+    "settings-scheduler.html", "login.html",
+)   # this is now every shipped page — keep it that way when adding one.
 
 _MEASURE = """
 () => {
