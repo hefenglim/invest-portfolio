@@ -490,3 +490,17 @@ prevents recurrence.
   500 in places nobody edited. Rule: when introducing an exception into an established
   hierarchy, pick the base class from what existing handlers ALREADY catch, so the blast
   radius of the new type is exactly the sites you intend to change.
+
+- **2026-08-02 — on Windows, `gcloud` is a *batch file*, so cmd.exe re-parses your remote
+  command and eats its shell operators.** `scripts/vm_exec.py` ran fine for several remote
+  commands containing `&&` and `|`, then failed on one containing
+  `|| echo "(unset -> default 90 days)" ... | cut -f1` with the *local* Windows error
+  `'cut' is not recognized as an internal or external command`. Mechanism: `subprocess`
+  quotes the whole `--command=…` argument, but `gcloud` resolves to `gcloud.cmd`, so cmd.exe
+  parses the line — and the **embedded double quotes close cmd's quoting context**, exposing
+  the following `|`, `||` and `>` (inside `->`!) as cmd operators. The earlier commands
+  survived only because their quotes happened to leave no metacharacter outside a quoted
+  span; it was luck, not correctness. Fix: base64-encode the remote script and send
+  `echo <payload> | base64 -d | bash`, so nothing but `[A-Za-z0-9+/=]` is ever parsed by a
+  shell other than the remote one. Rule: when a command crosses a `.cmd`/`.bat` shim, do not
+  try to quote your way out — remove the metacharacters from the command line entirely.

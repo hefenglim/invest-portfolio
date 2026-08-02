@@ -4,7 +4,42 @@ A wrong entry number silently overwrites the sequence's meaning, and a leaked cr
 cannot be un-written — both are failures you would only notice long after the fact.
 """
 
-from scripts.vm_exec import next_entry_number, redact, render_entry, truncate
+import base64
+import re
+
+import pytest
+
+from scripts.vm_exec import (
+    ConfigError,
+    encode_remote,
+    next_entry_number,
+    redact,
+    render_entry,
+    truncate,
+)
+
+
+def test_encoded_command_line_carries_no_shell_metacharacters() -> None:
+    """cmd.exe re-parses the argument (Windows gcloud is a .cmd), so operators must not
+    survive on the command line: `|| echo "(unset -> default)"` once split there and cmd
+    tried to run `cut` locally."""
+    arg = encode_remote('echo "$(git config --get gc.x || echo "(unset -> 90 days)")" | cut -c1')
+    payload = arg.removeprefix("echo ").split(" ", 1)[0]
+    assert re.fullmatch(r"[A-Za-z0-9+/=]+", payload)
+    assert arg == f"echo {payload} | base64 -d | bash"
+
+
+def test_encoded_payload_round_trips_to_the_original_command() -> None:
+    cmd = 'ls -la && echo "done > here" || true'
+    payload = encode_remote(cmd).removeprefix("echo ").split(" ", 1)[0]
+    script = base64.b64decode(payload).decode("utf-8")
+    assert script.endswith(cmd + "\n")
+    assert "date -u" in script          # the server-side timestamp rides inside the payload
+
+
+def test_oversized_command_is_refused_not_truncated() -> None:
+    with pytest.raises(ConfigError, match="too long"):
+        encode_remote("x" * 9000)
 
 
 def test_entry_number_continues_the_sequence() -> None:

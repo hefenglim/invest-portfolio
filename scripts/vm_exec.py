@@ -24,6 +24,7 @@ by the human), so the trail stays complete without pretending this script execut
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -45,6 +46,9 @@ _ENTRY_RE = re.compile(r"^### (\d+)\.", re.MULTILINE)
 # (how it ended); the middle of a long dump is the least informative part.
 _HEAD_CHARS = 1800
 _TAIL_CHARS = 600
+
+# Windows caps a command line near 8 KB; fail loudly rather than truncate a remote script.
+_MAX_PAYLOAD = 6000
 
 # A remote command may incidentally print a secret (an env dump, a config cat). The log is
 # git-ignored, but "git-ignored" is not "safe to write secrets into" — redact at the seam.
@@ -128,6 +132,26 @@ def append_entry(entry: str) -> None:
         fh.write(entry)
 
 
+def encode_remote(command: str) -> str:
+    """Wrap the remote script so that only base64 characters ride on the command line.
+
+    On Windows `gcloud` IS `gcloud.cmd`, so the argument is re-parsed by cmd.exe on its way
+    through — and cmd acts on `|`, `&&`, `||` and `>` the moment an embedded double quote
+    closes its quoting context. A command containing `|| echo "(unset -> default)"` was split
+    there and cmd tried to run `cut` locally. Encoding leaves only [A-Za-z0-9+/=] to be
+    parsed by anything other than the remote shell.
+
+    The server-side UTC timestamp rides along inside the payload, so it costs no extra round
+    trip and cannot drift from the local clock.
+    """
+    script = f'printf "{_TS_MARKER}%s\\n" "$(date -u +%Y-%m-%d\\ %H:%M)"\n{command}\n'
+    payload = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    if len(payload) > _MAX_PAYLOAD:
+        raise ConfigError(f"remote command too long ({len(payload)} b64 chars > "
+                          f"{_MAX_PAYLOAD}); put it in a script on the host instead.")
+    return f"echo {payload} | base64 -d | bash"
+
+
 def run_remote(cfg: VMConfig, command: str) -> tuple[str, str, int, float]:
     """Return (server-UTC timestamp, combined output, exit code, wall seconds).
 
@@ -140,9 +164,8 @@ def run_remote(cfg: VMConfig, command: str) -> tuple[str, str, int, float]:
     if gcloud is None:
         raise ConfigError("`gcloud` is not on PATH — install the Google Cloud SDK or run "
                           "with --log-only.")
-    stamped = f'printf "{_TS_MARKER}%s\\n" "$(date -u +%Y-%m-%d\\ %H:%M)"; {command}'
     argv = [gcloud, "compute", "ssh", cfg.instance, f"--zone={cfg.zone}", "--quiet",
-            f"--command={stamped}", *cfg.ssh_flags]
+            f"--command={encode_remote(command)}", *cfg.ssh_flags]
     started = time.monotonic()
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
     elapsed = time.monotonic() - started
