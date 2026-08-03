@@ -69,10 +69,16 @@ happened — which is exactly what it did before this was automated.
     deployed from the **tag**, never from a branch.
 11. **Back up every DB you are about to touch — demo included.** Prod's ledger is
     irreplaceable; demo's synthetic ledger is the accumulating stress-test corpus, and
-    re-seeding it silently destroys coverage that took releases to build.
+    re-seeding it silently destroys coverage that took releases to build. **Then open each
+    backup and check it** (`PRAGMA integrity_check` + a row count) — a backup nobody has read
+    is not a backup. The host has no `sqlite3` CLI; use the instance's own venv python.
 12. **Deploy the tag to the DEMO site.** Then verify, in this order:
     - the service is `active` and `/api/health` reports the expected `version` **and**
-      `release: vX.Y.Z` (a stale `release: unreleased` means the checkout is still on a branch);
+      `release: vX.Y.Z` (a stale `release: unreleased` means the checkout is still on a branch).
+      **Poll for health; never `sleep <n>` and read once** — boot time varies with the
+      instance and the change (measured 2026-08-04: prod took **40 s**, and a fixed 28 s wait
+      returned an empty body that looks exactly like a failed deploy). Loop up to ~2 minutes,
+      and only then treat silence as a fault and read the journal;
     - `scripts/verify_live.py <demo-url> --expect-version X.Y.Z` → **ALL PASS**
       (pass the version **bare**, no `v` prefix);
     - the accumulated demo data survived — compare row counts before/after (transactions,
