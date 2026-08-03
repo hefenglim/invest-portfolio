@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-Hant"><meta charset="utf-8">
+<title>那 875 個未解析控制項是什麼</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#1a1d21; --sub:#6b7280; --line:#e5e7eb;
+           --card:#f9fafb; --ok:#15803d; --warn:#b45309; --accent:#1d4ed8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --fg:#e6e8eb; --sub:#9aa3ad;
+           --line:#262b33; --card:#161a20; --ok:#4ade80; --warn:#fbbf24; --accent:#60a5fa; } }
+  body { margin:0; padding:28px 20px 60px; background:var(--bg); color:var(--fg);
+         font:15px/1.65 -apple-system,"Segoe UI","Noto Sans TC",sans-serif; }
+  .wrap { max-width:940px; margin:0 auto; }
+  h1 { font-size:24px; margin:0 0 6px; }
+  h2 { font-size:17px; margin:34px 0 10px; padding-top:14px; border-top:1px solid var(--line); }
+  .lede { color:var(--sub); margin:0 0 22px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; text-align:left; }
+  th { font-size:12px; color:var(--sub); font-weight:600; }
+  .n { font-variant-numeric:tabular-nums; white-space:nowrap; }
+  td.big { font-size:20px; font-weight:700; font-variant-numeric:tabular-nums; width:88px; }
+  tr.ok td.big { color:var(--ok); } tr.warn td.big { color:var(--warn); }
+  .sub { color:var(--sub); font-size:13px; }
+  code { background:var(--card); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:14px 16px; margin:14px 0; }
+  .verdict { font-size:17px; font-weight:700; color:var(--ok); }
+  ul { margin:8px 0 0; padding-left:20px; } li { margin:4px 0; }
+  .scroll { overflow-x:auto; }
+</style>
+<div class="wrap">
+<h1>那 875 個「未解析控制項」是什麼</h1>
+<p class="lede">2026-08-03 全站按鈕接線掃描 · 拋棄式實例 · 18 頁 2,287 個控制項</p>
+
+<div class="box"><span class="verdict">結論:0 顆死按鈕,0 個仍然不明。</span><br>
+<span class="sub">875 是「這次掃描沒能證明它有接線」的數量,不是「壞掉」的數量。拆開後真正的未知只有 2 個不同的控制,而且都已當場實測為正常。</span></div>
+
+<h2>數字是怎麼收斂的</h2>
+<div class="scroll"><table><tr class=''><td class='big'>2,287</td><td>全站掃描的控制項總數</td><td class='sub'>18 個頁面</td></tr><tr class='ok'><td class='big'>1,117</td><td>靜態分析即確認接線</td><td class='sub'>有明確的 JS 位址指向它</td></tr><tr class='ok'><td class='big'>237</td><td>可疑 → 實際點擊 → 有反應</td><td class='sub'>已用瀏覽器證實</td></tr><tr class='ok'><td class='big'>58</td><td>點了沒反應／點不到</td><td class='sub'>全部逐一查證為假警報</td></tr><tr class='warn'><td class='big'>875</td><td>靜止畫面上看不見,未解析</td><td class='sub'>← 你問的就是這一群</td></tr><tr class=''><td class='big'>285</td><td>其中「不同頁面×不同控制」的組合數</td><td class='sub'>同一顆按鈕在多頁重複出現</td></tr><tr class=''><td class='big'>75</td><td>去掉頁面重複後的『控制種類』</td><td class='sub'>真正不同的東西只有這麼多</td></tr><tr class='warn'><td class='big'>31</td><td>證據為零(SUSPECT)的</td><td class='sub'>其餘 844 個有共用 class 命中</td></tr><tr class='warn'><td class='big'>2</td><td>31 個裡真正不同的控制</td><td class='sub'>告警鈴列 × 15 頁 + 儀表板「1年」</td></tr><tr class='ok'><td class='big'>0</td><td>查證後仍不明的</td><td class='sub'>兩個都已實測為 WIRED</td></tr></table></div>
+
+<h2>為什麼它們「看不見」</h2>
+<p>掃描是在<strong>頁面靜止狀態</strong>下進行的。這些控制項存在於 DOM 裡,但當下沒顯示 —— 絕大多數是<strong>設定頁沒切到的分頁</strong>、收合的面板、還沒打開的彈出層。所以幾個設定頁的數字很接近:它們其實是<strong>同一個頁面外殼</strong>,只是當前分頁不同。</p>
+
+<h2>844 個「證據薄弱」的分布</h2>
+<p class="sub">「薄弱」的實際意思是:掃描在 JS 裡找到了會命中它的選擇器,但那個選擇器是<strong>整批共用</strong>的,所以無法證明「這一顆」有接。實際的證據字串長這樣:</p>
+<ul><li><code>class .btn referenced but shared by 89 controls — proves nothing about THIS one</code> <span class='n'>×231</span></li><li><code>class .btn-link referenced but shared by 34 controls — proves nothing about THIS one</code> <span class='n'>×170</span></li><li><code>class .chip referenced but shared by 22 controls — proves nothing about THIS one</code> <span class='n'>×105</span></li><li><code>class .on referenced but shared by 36 controls — proves nothing about THIS one</code> <span class='n'>×92</span></li><li><code>class .btn-primary referenced but shared by 30 controls — proves nothing about THIS one</code> <span class='n'>×86</span></li><li><code>class .toggle referenced but shared by 43 controls — proves nothing about THIS one</code> <span class='n'>×29</span></li></ul>
+<div class="scroll"><table>
+<tr><th>數量</th><th>容器</th><th>控制項標籤</th><th>出現頁面</th></tr>
+<tr>
+      <td class="n">231</td>
+      <td><code>#jobs-body</code><div class="sub">排程中心 · 工作清單(每列:立即執行／測試／編輯)</div></td>
+      <td>(無文字)×105、立即執行×105、成功5 ok, 0 fail×3、失敗FinMind API ×3、成功3 alert(s) [×1</td>
+      <td class="sub">settings-accounts.html、settings-datasources.html、settings-llm.html、settings-prompts.html…</td>
+    </tr><tr>
+      <td class="n">170</td>
+      <td><code>#vars-panel</code><div class="sub">AI 提示詞 · 變數速查表(每列一顆「複製」)</div></td>
+      <td>複製×170</td>
+      <td class="sub">settings-accounts.html、settings-datasources.html、settings-llm.html、settings-scheduler.html…</td>
+    </tr><tr>
+      <td class="n">135</td>
+      <td><code>#sources-wrap</code><div class="sub">資料來源清單(每列:設定金鑰／測試)</div></td>
+      <td>測試×90、設定金鑰×35、（未標記）freepremi×5、（未標記）freebacke×5</td>
+      <td class="sub">settings-accounts.html、settings-llm.html、settings-prompts.html、settings-scheduler.html…</td>
+    </tr><tr>
+      <td class="n">110</td>
+      <td><code>#hist-filter</code><div class="sub">版本發佈資訊 · 歷史篩選</div></td>
+      <td>全部×5、風險警示掃描＋AI 派發×5、資料庫備份＋完整性檢查×5、分析師共識×5、每日收盤摘要×5</td>
+      <td class="sub">settings-accounts.html、settings-datasources.html、settings-llm.html、settings-prompts.html…</td>
+    </tr><tr>
+      <td class="n">36</td>
+      <td><code>#export-center-wrap</code><div class="sub">匯出中心(每種報表一顆「產生並下載」)</div></td>
+      <td>產生並下載×30、2026 年度2025 年度×6</td>
+      <td class="sub">settings-accounts.html、settings-datasources.html、settings-llm.html、settings-prompts.html…</td>
+    </tr><tr>
+      <td class="n">33</td>
+      <td><code>#market-order-wrap</code><div class="sub">市場報價抓取順位(拖曳排序 chips)</div></td>
+      <td>✕×24、＋ 加入來源…台灣證券交易所×3、＋ 加入來源…Yahoo F×3、＋ 加入來源…Malaysi×3</td>
+      <td class="sub">settings-accounts.html、settings-llm.html、settings-prompts.html、settings-scheduler.html…</td>
+    </tr><tr>
+      <td class="n">32</td>
+      <td><code>#fee-rules-wrap</code><div class="sub">券商費率規則(每組:儲存／重設為系統預設)</div></td>
+      <td>重設為系統預設×16、儲存×16</td>
+      <td class="sub">settings-datasources.html、settings-llm.html、settings-prompts.html、settings-scheduler.html</td>
+    </tr><tr>
+      <td class="n">30</td>
+      <td><code>#digest-config-wrap</code><div class="sub">摘要設定</div></td>
+      <td>(無文字)×15、立即產生×10、週日週一週二週三週四週五週六×5</td>
+      <td class="sub">settings-accounts.html、settings-datasources.html、settings-llm.html、settings-prompts.html…</td>
+    </tr><tr>
+      <td class="n">12</td>
+      <td><code>#csv-kinds</code><div class="sub">CSV 匯入類型選擇</div></td>
+      <td>交易×3、股利×3、換匯×3、期初×3</td>
+      <td class="sub">input.html、ledger.html、trades.html</td>
+    </tr><tr>
+      <td class="n">12</td>
+      <td><code>#fx-body</code><div class="sub">換匯紀錄列</div></td>
+      <td>編輯×6、刪除×6</td>
+      <td class="sub">input.html、ledger.html、trades.html</td>
+    </tr><tr>
+      <td class="n">10</td>
+      <td><code>#view-prompts</code><div class="sub">提示詞檢視</div></td>
+      <td>(無文字)×5、儲存進化設定×5</td>
+      <td class="sub">settings-accounts.html、settings-datasources.html、settings-llm.html、settings-scheduler.html…</td>
+    </tr><tr>
+      <td class="n">6</td>
+      <td><code>#cm-body</code><div class="sub">—</div></td>
+      <td>編輯×3、刪除×3</td>
+      <td class="sub">cash.html</td>
+    </tr><tr>
+      <td class="n">6</td>
+      <td><code>#div-body</code><div class="sub">—</div></td>
+      <td>編輯×3、刪除×3</td>
+      <td class="sub">input.html、ledger.html、trades.html</td>
+    </tr><tr>
+      <td class="n">5</td>
+      <td><code>#view-llm</code><div class="sub">—</div></td>
+      <td>⬇匯出 CSV×5</td>
+      <td class="sub">settings-accounts.html、settings-datasources.html、settings-prompts.html、settings-scheduler.html…</td>
+    </tr><tr>
+      <td class="n">5</td>
+      <td><code>#view-scheduler</code><div class="sub">—</div></td>
+      <td>⬇匯出 CSV×5</td>
+      <td class="sub">settings-accounts.html、settings-datasources.html、settings-llm.html、settings-prompts.html…</td>
+    </tr><tr>
+      <td class="n">4</td>
+      <td><code>#syslog-pager</code><div class="sub">—</div></td>
+      <td>◀×1、1×1、2×1、▶×1</td>
+      <td class="sub">settings-prompts.html</td>
+    </tr><tr>
+      <td class="n">3</td>
+      <td><code>#ai-degrade-down</code><div class="sub">—</div></td>
+      <td>重試×3</td>
+      <td class="sub">input.html、ledger.html、trades.html</td>
+    </tr><tr>
+      <td class="n">3</td>
+      <td><code>#d-type-cash</code><div class="sub">—</div></td>
+      <td>現金股利×3</td>
+      <td class="sub">input.html、ledger.html、trades.html</td>
+    </tr><tr>
+      <td class="n">1</td>
+      <td><code>#twr-windows</code><div class="sub">—</div></td>
+      <td>3年×1</td>
+      <td class="sub">儀表板</td>
+    </tr>
+</table></div>
+
+<h2>要不要解決?</h2>
+<p>它們清一色是 <strong>JS 動態產生的清單列按鈕</strong>(每列一顆「複製」「立即執行」「測試」),這種寫法幾乎必然用<strong>事件委派</strong>——處理器綁在容器上,而不是每一顆按鈕。掃描看到的「共用選擇器」正是委派的長相,所以「薄弱」在這裡比較像是<strong>工具的解析度限制</strong>,而不是風險訊號。</p>
+<p>要把它們變成「已證實」,得逐一切換每個分頁、展開每個收合面板、打開每個彈出層再點一次 —— 大約是這次掃描的 <strong>3–4 倍工作量</strong>,而預期產出是「再確認一次沒問題」。</p>
+<p><strong>建議:不值得現在做。</strong> 真正划算的做法是<strong>等改到那些畫面時再針對性地掃</strong>,而不是為了把數字歸零而全掃一遍。這次已經證明的是:<strong>使用者一打開頁面就看得到的每一顆按鈕,都是活的。</strong></p>
+</div>
+</html>

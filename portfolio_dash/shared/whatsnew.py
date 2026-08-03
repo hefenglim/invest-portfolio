@@ -66,6 +66,29 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.26 (whole-site layout sweep) ------------------------------------------------
+    Feature(
+        version="0.1.26",
+        id="datasources-no-sideways-scroll",
+        title="資料來源頁在平板與未最大化的視窗不再被推歪",
+        desc="來源清單那張表過去會把整頁撐寬，在 761～1435px 之間（平板、小筆電、"
+        "任何沒有拉滿的瀏覽器視窗）整個畫面可以左右拖動；只有全螢幕才剛好看不出來。"
+        "現在表格在自己的框裡橫向捲動，頁面本身不再移位。下方「市場報價抓取順位」"
+        "也改成依視窗寬度自動排欄，不再固定三欄擠成一團",
+        href="settings.html#datasources",
+        area="系統設定 → 資料來源",
+        target="#market-order-wrap",
+    ),
+    Feature(
+        version="0.1.26",
+        id="pipeline-card-wraps-on-phone",
+        title="洞察管線的任務卡在手機上會自動換行",
+        desc="任務卡的標題列擠了名稱、範圍、狀態和三顆按鈕，在手機寬度塞不下就直接頂出畫面 50px；"
+        "現在放不下時會自動折到第二行",
+        href="pipeline-hub.html",
+        area="洞察管線 → 任務卡",
+        target="#pp-list",
+    ),
     # --- v0.1.25 (FX cost basis for foreign cash + declared short sale) --------------------
     Feature(
         version="0.1.25",
@@ -1131,6 +1154,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.26": "2026-08-03",
     "0.1.25": "2026-08-01",
     "0.1.24": "2026-07-26",
     "0.1.23": "2026-07-24",
