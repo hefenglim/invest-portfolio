@@ -50,6 +50,71 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.26] - 2026-08-03
+
+Whole-site layout and control sweep. Three page-level horizontal overflows fixed, plus the
+two independent reasons the existing guard never saw any of them. No money-of-record change.
+
+### Fixed
+- **資料來源: the source table pushed the DOCUMENT sideways from 761px to ~1,435px**
+  (+648px at 768px, +159px at 1257px). `.ds-section { overflow-x: auto }` existed ONLY inside
+  `@media (max-width: 760px)`; above that the condition is false and no other author rule
+  declares `overflow-x`, so it computed `visible` and the ~1,200px table set the document
+  width. 1440px was wide enough to hide it, which is why it survived 30 days. The table now
+  sits in `.table-wrap` — the scroll container the rest of the app already uses — and the
+  mobile-only rule is removed, because keeping both would nest two horizontal scrollers.
+- **資料來源: the 市場報價抓取順位 grid overflowed 48px at 768px** — a SECOND defect that the
+  table's larger overflow had been masking; it only appeared once the first was fixed.
+  `settings.html` carried `style="grid-template-columns: repeat(3, 1fr)"` **inline**, which
+  outranks every selector, so the `@media (max-width: 1100px)` two-column rule in the same
+  file had never once applied. Only `styles.css`'s `1fr !important` at <=760px could beat it —
+  exactly why phones looked correct and tablets did not. Column count now follows available
+  width via `repeat(auto-fit, minmax(210px, 1fr))`.
+- **洞察管線: the task card head pushed the page 50px sideways at 390px.**
+  `.pp-card-head` is `display: flex` with no `flex-wrap` declared anywhere, so it took the UA
+  default `nowrap` and seven children could not fit a 301px card. Wrapping is declared
+  globally rather than under a media query: whether the row fits depends on the task NAME's
+  length as much as the viewport, and wrap is inert whenever it does fit.
+
+### Changed
+- **The layout guard now sweeps all 18 shipped pages at 900/768/390** (was 9 pages at
+  900/390). Both broken pages were among the 8 it never looked at, and 768 is not redundant
+  with 900: the fallback grid fits 885px and does not fit 753px, so the old sweep stepped over
+  that defect exactly.
+- **A new guard test creates its own data.** 洞察管線 renders an empty state until an insight
+  task exists, and neither the golden fixture nor `scripts/seed_demo.py` creates one — so the
+  sweep walked a blank page and reported green while the live demo, with three tasks added
+  through the UI, overflowed for 50 days. The test now creates a task through the app's own
+  API on an isolated `flow_server`, deliberately at `level=fail` so the extra 為什麼沒跑？
+  button renders and the assertion covers the widest the head ever gets.
+
+### Added
+- `scripts/vm_exec.py` — runs a command on the deployment VM **and** appends the entry to the
+  append-only VM operation log in one step, so the audit trail cannot drift from what actually
+  happened. Server-side UTC timestamps, secret redaction at the write seam, and `--log-only`
+  for operations performed elsewhere. Host identity comes from git-ignored config, never from
+  this repository.
+- `docs/audit/2026-08-03-button-wiring-sweep.html` — the button-wiring sweep result:
+  2,287 controls across 18 pages, **zero dead controls**. Records what remains unproven and
+  why it is not worth proving yet (see below).
+
+### Process
+- **Shipping is now staged across both live instances** (owner directive 2026-08-01): back up
+  both DBs -> deploy the tag to the test site -> verify -> the same tag to prod -> verify ->
+  **external reachability of both public URLs** -> both sites end on the same tag. Any anomaly
+  stops the sequence, and user data (prod above all) is proven intact before the bug is
+  investigated. See `/ship-version` Part B/C and `.claude/rules/engineering-process.md`.
+
+### Known / deliberately deferred
+- **844 controls carry only `weak` wiring evidence** (a shared class selector matched, which
+  proves nothing about any individual control). They are JS-rendered list rows — 複製 x170,
+  立即執行 x105, 測試 x90, 設定金鑰 x35 — inside `#jobs-body`, `#vars-panel`, `#sources-wrap`
+  and `#hist-filter`, and such lists bind handlers by delegation on the container, which is
+  precisely what "shared selector" looks like. Proving them individually means switching every
+  tab, expanding every collapsed panel and opening every modal: roughly 3-4x the sweep's cost
+  for an expected result of "still fine". **Owner decision 2026-08-03: not now** — sweep those
+  surfaces when work touches them. Everything visible at rest is proven wired.
+
 ## [v0.1.25] - 2026-08-01
 
 Two owner-approved accounting rulings, each triggered by a real question about a real number,

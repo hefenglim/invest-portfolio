@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.25"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.25"></link>
-<link rel="stylesheet" href="input.css?v=0.1.25"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.26"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.26"></link>
+<link rel="stylesheet" href="input.css?v=0.1.26"></link>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   /* settings tab bar */
@@ -150,6 +150,13 @@
   .fb-name { flex:1; }
   .fb-hint { font-size:10px;color:var(--text-3); }
   @media(max-width:1100px){.roles-grid{grid-template-columns:repeat(2,1fr)}.acct-grid{grid-template-columns:repeat(2,1fr)}.fallback-grid{grid-template-columns:repeat(2,1fr)}}
+  /* 2026-08-02: the 3-market grid used to carry `style="grid-template-columns:repeat(3,1fr)"`
+     inline, which outranks every selector above — the @media(max-width:1100px) 2-column rule
+     could never apply, so three ~205px cards were forced into a 515px box and pushed the
+     document 48px sideways at 768px. Only the <=760px `1fr !important` in styles.css was
+     strong enough to win, which is why phones looked fine and tablets did not. Column count
+     now follows available width instead of a hard-coded 3. */
+  #market-order-wrap { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); }
 
   /* E1: alert rules */
   .ar-list { display:flex;flex-direction:column;padding:6px var(--pad) 14px; }
@@ -438,7 +445,7 @@
         <h2 class="panel-title">市場報價抓取順位</h2>
         <span class="panel-sub">抓報價時依此順序詢問來源，第一個成功即採用；順位改了就是真的改（排程與手動更新都走這條鏈）。來源的健康狀態與金鑰見上方清單</span>
       </div>
-      <div class="fallback-grid" id="market-order-wrap" style="grid-template-columns: repeat(3, 1fr);"></div>
+      <div class="fallback-grid" id="market-order-wrap"></div>
     </section>
   </div>
 
@@ -594,23 +601,23 @@
   </div>
 </div>
 
-<script src="api.js?v=0.1.25"></script>
-<script src="shell.js?v=0.1.25"></script>
-<script src="format.js?v=0.1.25"></script>
-<script src="pager.js?v=0.1.25"></script>
-<script src="export.js?v=0.1.25"></script>
-<script src="alerts.js?v=0.1.25"></script>
-<script src="vars.js?v=0.1.25"></script>
-<script src="settings-llm.js?v=0.1.25"></script>
-<script src="settings-prompts.js?v=0.1.25"></script>
-<script src="settings-scheduler.js?v=0.1.25"></script>
-<script src="settings-datasources.js?v=0.1.25"></script>
-<script src="settings-alerts.js?v=0.1.25"></script>
-<script src="settings-notify.js?v=0.1.25"></script>
-<script src="settings-digest.js?v=0.1.25"></script>
-<script src="settings-users.js?v=0.1.25"></script>
-<script src="settings-fees.js?v=0.1.25"></script>
-<script src="settings-prefs.js?v=0.1.25"></script>
+<script src="api.js?v=0.1.26"></script>
+<script src="shell.js?v=0.1.26"></script>
+<script src="format.js?v=0.1.26"></script>
+<script src="pager.js?v=0.1.26"></script>
+<script src="export.js?v=0.1.26"></script>
+<script src="alerts.js?v=0.1.26"></script>
+<script src="vars.js?v=0.1.26"></script>
+<script src="settings-llm.js?v=0.1.26"></script>
+<script src="settings-prompts.js?v=0.1.26"></script>
+<script src="settings-scheduler.js?v=0.1.26"></script>
+<script src="settings-datasources.js?v=0.1.26"></script>
+<script src="settings-alerts.js?v=0.1.26"></script>
+<script src="settings-notify.js?v=0.1.26"></script>
+<script src="settings-digest.js?v=0.1.26"></script>
+<script src="settings-users.js?v=0.1.26"></script>
+<script src="settings-fees.js?v=0.1.26"></script>
+<script src="settings-prefs.js?v=0.1.26"></script>
 <script>
 /* glue: CSV exports for audit tables（llm_usage / job_runs）→ reconciliation channel
    (POST /api/export/llm-usage / /api/export/job-runs; empty body -> full history).
