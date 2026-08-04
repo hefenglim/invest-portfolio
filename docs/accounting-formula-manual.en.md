@@ -851,8 +851,42 @@ equal zero.
 > table above can be rebuilt from the verified `ledger.tx.total` and
 > `holding.market_value`).
 
+#### 7.2.1 Observation-window floor: below 30 days the figure is not annualized (owner ruling 2026-08-05)
+
+XIRR **annualizes**, so its exponent is `365 / window_days` and a short window amplifies
+violently. For a position whose book gain is `+131.7%` (cost 1,001,425 → value 2,320,000):
+
+| `window_days` | annualized XIRR | digits |
+| ---: | ---: | ---: |
+| 1 | `1.5 × 10^133` | 136 |
+| 14 | `325,589,627,815%` | 12 |
+| **30** | `2,749,353%` | 7 |
+| 90 | `2,918%` | 4 |
+| 365 | `132%` | 3 |
+
+Every value above is the arithmetic working **correctly** on a degenerate input — it is
+simply not readable as a return rate. Therefore:
+
+- **When `window_days < 30`, `kpis.xirr` is `null`**, and
+  `freshness.xirr_unavailable_reason` states 「觀察期 N 天・不足以年化（需 ≥30 天）」.
+  The boundary is **inclusive**: 30 days still annualizes, 29 days does not.
+- **What is withheld is the annualization, never the return.** `total_return_rate` (§7.1)
+  is untouched and stays on the wire, carrying the same information un-annualized, so the
+  KPI band is never left blank.
+- `xirr_window_days` is reported in **every** case, including when the rate is `None`;
+  the existing short-window hint still applies over 30–365 days.
+- **The calculation itself is unchanged**: `returns.py::xirr_reporting` builds and solves
+  the same cashflow series, and the stress-audit oracle's anchors are unaffected. This
+  section governs a **presentation threshold**, not the formula.
+- **Origin**: found 2026-08-05 on a freshly reset instance — after the first trade was
+  entered, `window_days = 1` made the dashboard render a 136-digit value as the headline
+  return and pushed the layout 1,915px sideways. Implemented at
+  `portfolio/dashboard.py::_XIRR_MIN_WINDOW_DAYS`; regression in
+  `tests/contract/test_xirr_short_window.py` (both sides of the 30/29 boundary).
+
 > **Implementation**: `portfolio/returns.py` (`total_return`, `xirr_reporting`),
-> `portfolio/results.py` (`ReturnSummary`, `CurrencyReturn`).
+> `portfolio/results.py` (`ReturnSummary`, `CurrencyReturn`),
+> `portfolio/dashboard.py` (the §7.2.1 presentation threshold).
 > **Basis**: `.claude/rules/domain-ledger.md` (Total return; XIRR cashflow signs),
 > `.claude/rules/data-and-pricing.md` (Returns & FX P&L).
 

@@ -74,6 +74,17 @@ _ONE = Decimal("1")
 # History reads start here: stored prices may predate the first ledger event.
 _EPOCH = date(1900, 1, 1)
 
+# XIRR annualizes, so the exponent is 365/window: on a window of N days a book gain of
+# +131.7% reports 2,749,353% at N=30, 3.3e11% at N=14 and 1.5e133 at N=1. That is the
+# arithmetic working correctly on a degenerate input, but it is not a return rate anyone
+# can read — and a 136-digit value also pushed the dashboard 1,915px sideways (found on a
+# freshly reset instance carrying exactly one same-week trade, 2026-08-05).
+# Owner ruling 2026-08-05: below this window the annualized figure is NOT shown; the KPI
+# band still carries `total_return_rate`, which is the same information without the
+# annualization, so nothing is hidden — only the misleading extrapolation is withheld.
+# 30-365 days keeps the existing 短窗參考 badge.
+_XIRR_MIN_WINDOW_DAYS = 30
+
 
 class RateResolver:
     """Current-FX lookup: identity -> direct pair -> inverted pair -> KeyError.
@@ -311,6 +322,13 @@ def build_dashboard(
                                      price_map, resolver.rate, as_of, reporting)
             xirr_value = outcome.rate
             xirr_window_days = outcome.window_days
+            if (xirr_value is not None and xirr_window_days is not None
+                    and xirr_window_days < _XIRR_MIN_WINDOW_DAYS):
+                # Withhold the annualization, not the return: `total_return_rate` is
+                # unaffected and still on the wire. `window_days` is reported either way.
+                xirr_value = None
+                xirr_reason = (f"觀察期 {xirr_window_days} 天・不足以年化"
+                               f"(需 ≥{_XIRR_MIN_WINDOW_DAYS} 天)")
         except KeyError as exc:
             xirr_reason = str(exc).strip("'\"")
     if xirr_value is None and xirr_reason is None:

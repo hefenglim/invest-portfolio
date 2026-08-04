@@ -679,8 +679,36 @@ XIRR 即對上述 `(dates, amounts)` 序列求使 NPV=0 之年化率 r。
 > （合併後拓樸 phase-1 實跑 **1,060/1,060** 斷言全過；`kpi.xirr` `phase1:final ≈ 0.4092`）。現金流建構規則仍以 `returns.py::xirr_reporting` 為
 > 裁定準據（上表逐項可由已驗證的 `ledger.tx.total` 與 `holding.market_value` 重建）。
 
+#### 7.2.1 觀察期下限：短於 30 天不年化（業主裁決 2026-08-05）
+
+XIRR 為**年化**指標,其指數為 `365 / window_days`,故觀察期愈短、放大愈劇烈。以一筆帳面
+`+131.7%` 的部位為例（成本 1,001,425 → 市值 2,320,000）：
+
+| `window_days` | 年化 XIRR | 位數 |
+| ---: | ---: | ---: |
+| 1 | `1.5 × 10^133` | 136 |
+| 14 | `325,589,627,815%` | 12 |
+| **30** | `2,749,353%` | 7 |
+| 90 | `2,918%` | 4 |
+| 365 | `132%` | 3 |
+
+上述數值皆為**算式的正確結果**,只是對退化輸入而言不具可讀性。故：
+
+- **`window_days < 30` 時,`kpis.xirr` 回 `null`**,並於 `freshness.xirr_unavailable_reason`
+  載明「觀察期 N 天・不足以年化（需 ≥30 天）」。邊界為**閉區間**：30 天**仍**年化,29 天不年化。
+- **被withheld 的是「年化」這個動作,不是報酬本身**：`total_return_rate`（§7.1）不受影響、
+  仍在 wire 上,呈現同一筆資訊的未年化形式,故 KPI 區塊不會留白。
+- `xirr_window_days` **在任何情況下都照常回報**（含 rate 為 `None` 時）,30–365 天維持既有的
+  「短窗參考」提示。
+- **計算式本身未改**：`returns.py::xirr_reporting` 的現金流建構與求解完全不變,壓測 oracle
+  的錨定值亦不受影響；本節規範的是**呈現層的揭露門檻**。
+- **緣由**：2026-08-05 於全新重置的實例上發現 —— 首日輸入第一筆交易後,`window_days = 1`
+  使儀表板將 136 位數之值渲染為頭條報酬率,並把版面推寬 1,915px。實作位置
+  `portfolio/dashboard.py::_XIRR_MIN_WINDOW_DAYS`；回歸 `tests/contract/test_xirr_short_window.py`
+  （含 30／29 兩側邊界）。
+
 > **實作位置**：`portfolio/returns.py`（`total_return`、`xirr_reporting`）、`portfolio/results.py`
-> （`ReturnSummary`、`CurrencyReturn`）。
+> （`ReturnSummary`、`CurrencyReturn`）、`portfolio/dashboard.py`（§7.2.1 呈現門檻）。
 > **依據**：`.claude/rules/domain-ledger.md`（Total return；XIRR cashflow signs）、`.claude/rules/data-and-pricing.md`（Returns & FX P&L）。
 
 ### 7.3 配置權重、產業配置、幣別視圖與報告幣估值

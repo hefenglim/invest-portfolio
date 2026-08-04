@@ -636,6 +636,14 @@ button.is-busy {
   font-weight: 600;
   letter-spacing: -0.01em;
   white-space: nowrap;
+  /* `nowrap` alone let ANY over-long value set the document width: a 136-digit XIRR on a
+     one-day-old ledger pushed the dashboard to 3,355px at a 1,440px viewport (2026-08-05).
+     The number itself is fixed upstream, but a KPI cell must never be able to do this —
+     it clips instead, whatever lands in it. `min-width: 0` is what actually lets the flex
+     item shrink; without it the other two properties have nothing to clip against. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .kpi-unit {
   font-size: 10px;
