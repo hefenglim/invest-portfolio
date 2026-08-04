@@ -57,7 +57,7 @@ def register_instrument(
             Issue(
                 kind="board_unresolved",
                 needs_confirm=True,
-                message=f"could not resolve TW board for {instrument.symbol!r}; set it manually",
+                message=f"無法判定 {instrument.symbol} 的上市／上櫃別 — 請手動指定",
             )
         )
 

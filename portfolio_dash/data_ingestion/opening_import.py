@@ -83,7 +83,7 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
         settle_ccy: str | None = acct_row["settlement_ccy"] if acct_row is not None else None
         if acct_row is None:
             issues.append(
-                Issue(kind="unknown_account", message=f"unknown account {account_id}")
+                Issue(kind="unknown_account", message=f"帳戶 {account_id} 不存在")
             )
 
         # --- resolve the authoritative total (money of record) ---
@@ -126,7 +126,7 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
         # --- validate shares positive ---
         if shares <= 0:
             issues.append(
-                Issue(kind="non_positive_shares", message="shares must be > 0")
+                Issue(kind="non_positive_shares", message="股數必須大於 0")
             )
 
         # --- warn if symbol cannot be resolved (soft — needs confirm) ---
@@ -135,7 +135,7 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
                 Issue(
                     kind="symbol_unresolved",
                     needs_confirm=True,
-                    message=f"unresolved {symbol}",
+                    message=f"未註冊標的 {symbol} — 請先至「標的管理」註冊",
                 )
             )
 

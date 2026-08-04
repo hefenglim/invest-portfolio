@@ -111,16 +111,16 @@ def validate_transaction(
     ).fetchone()
     if acc is None:
         issues.append(
-            Issue(kind="unknown_account", message=f"unknown account {inp.account_id!r}")
+            Issue(kind="unknown_account", message=f"帳戶 {inp.account_id} 不存在")
         )
 
     # --- quantity and price must be positive, and within a sane bound (M4) ---
     if inp.quantity <= 0:
-        issues.append(Issue(kind="non_positive_quantity", message="quantity must be > 0"))
+        issues.append(Issue(kind="non_positive_quantity", message="股數必須大於 0"))
     elif inp.quantity > _MAX_MAGNITUDE:
         issues.append(Issue(kind="amount_too_large", message="股數過大,無法處理"))
     if inp.price <= 0:
-        issues.append(Issue(kind="non_positive_price", message="price must be > 0"))
+        issues.append(Issue(kind="non_positive_price", message="價格必須大於 0"))
     elif inp.price > _MAX_MAGNITUDE:
         issues.append(Issue(kind="amount_too_large", message="價格過大,無法處理"))
 

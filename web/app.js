@@ -393,6 +393,19 @@
     const rows = sortedFilteredHoldings();
     const maxWeight = Math.max(...D.holdings.map((h) => h.weight || 0));
     const maxPayback = Math.max(...D.holdings.map((h) => h.payback_ratio || 0));
+    /* Mini-bar fill width, clamped to 0..100.
+
+       `.mini-bar .fill` declares NO width (styles.css) — as a block it spans the whole
+       track — so an INVALID inline width is not clamped by the browser, it is DISCARDED,
+       and the element falls back to a full bar. An open short has a negative weight by
+       construction (net-exposure convention, domain-ledger.md), so `width: -2.29%` was
+       dropped and a −2.29% position rendered a 100% bar — visually identical to the 99.33%
+       holding right above it, while its own label said −2.29%. Measured 2026-08-05.
+       The label carries the sign; the bar only ever claims magnitude, never more. */
+    const barWidth = (value, max) => {
+      const pct = max ? (value / max) * 100 : 0;
+      return (Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0) + '%';
+    };
 
     rows.forEach((h) => {
       const tr = el('tr');
@@ -483,15 +496,25 @@
       }
       tr.appendChild(tdMv);
 
-      /* 未實現損益 value + % vs adjusted cost */
+      /* 未實現損益 value + %, both SERVER-computed.
+
+         The drawer was moved onto `unrealized_pct` by audit H1 (2026-07-26); this table
+         kept its own `unrealized_pnl / adjusted_cost_total` divide and so kept the bug the
+         drawer's comment describes. Two ways it lies, both legal states, not edge cases:
+         a fully-recovered holding has adjusted cost <= 0 (domain-ledger.md: dividends may
+         push it below zero, never floored) and an open SHORT carries a negative basis by
+         construction. Either flips the ratio's sign. Measured 2026-08-05 on a one-short
+         ledger: −75.98 USD of unrealized LOSS rendered as "+3.17%", in the same cell.
+         `unrealized_pct` divides by abs(ORIGINAL cost) — the same basis as 回本進度 and the
+         KPI 累計報酬率 — so the whole page now reads on one basis, and CLAUDE.md's "the
+         frontend never computes money or returns" holds here too. */
       const tdPnl = el('td', 'num ' + f.signClass(h.unrealized_pnl));
       if (h.unrealized_pnl === null || h.unrealized_pnl === undefined) {
         tdPnl.textContent = f.NULL_GLYPH;
       } else {
         tdPnl.appendChild(el('span', null, f.signed(h.unrealized_pnl, h.quote_ccy)));
-        if (h.adjusted_cost_total) {
-          tdPnl.appendChild(el('span', 'subpct',
-            f.signedPct(h.unrealized_pnl / h.adjusted_cost_total)));
+        if (h.unrealized_pct !== null && h.unrealized_pct !== undefined) {
+          tdPnl.appendChild(el('span', 'subpct', f.signedPct(h.unrealized_pct)));
         }
       }
       tr.appendChild(tdPnl);
@@ -505,7 +528,7 @@
         const wrap = el('span', 'mini-bar');
         const track = el('span', 'track');
         const fill = el('span', 'fill payback');
-        fill.style.width = (maxPayback ? (h.payback_ratio / maxPayback) * 100 : 0) + '%';
+        fill.style.width = barWidth(h.payback_ratio, maxPayback);
         track.appendChild(fill);
         wrap.appendChild(track);
         wrap.appendChild(el('span', null, f.pct(h.payback_ratio)));
@@ -522,7 +545,7 @@
         const wrap = el('span', 'mini-bar');
         const track = el('span', 'track');
         const fill = el('span', 'fill');
-        fill.style.width = (maxWeight ? (h.weight / maxWeight) * 100 : 0) + '%';
+        fill.style.width = barWidth(h.weight, maxWeight);
         track.appendChild(fill);
         wrap.appendChild(track);
         wrap.appendChild(el('span', null, f.pct(h.weight)));

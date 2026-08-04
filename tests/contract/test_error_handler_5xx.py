@@ -48,7 +48,10 @@ def test_unhandled_exception_returns_internal_error_envelope_and_logs_traceback(
     assert r.status_code == 500
     body = r.json()
     assert body["error"]["code"] == "internal_error"
-    assert body["error"]["message"] == "internal error"
+    # zh-TW since 2026-08-05: this envelope is READ BY THE OWNER in a toast, so it follows
+    # the same rule as every other user-facing message. It stays generic — the point of the
+    # catch-all is that it says nothing specific, in any language.
+    assert body["error"]["message"] == "系統發生未預期的錯誤，請稍後再試"
     # The synthetic detail must NOT leak into the response body.
     assert "synthetic dashboard failure" not in r.text
 

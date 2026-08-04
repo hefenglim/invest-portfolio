@@ -1646,7 +1646,7 @@
       "00919"
     ],
     "missing_fx": [],
-    "xirr_unavailable_reason": "not computable (missing current price, no sign change, or non-convergence)",
+    "xirr_unavailable_reason": "無法計算（缺少現價、現金流無正負變化，或迭代未收斂）",
     "trend_unavailable_reason": null,
     "unregistered_symbols": [],
     "last_backup_at": null

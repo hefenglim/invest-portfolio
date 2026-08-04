@@ -154,3 +154,42 @@ def test_pipeline_hub_task_card_never_pushes_the_page_sideways(
         f"pipeline-hub.html @ 390px scrolls horizontally with one task card: "
         f"scrollWidth={m['sw']} > clientWidth={m['cw']}. Widest offenders: {m['widest']}"
     )
+
+
+@pytest.mark.e2e
+def test_a_kpi_cell_clips_an_over_long_value_instead_of_widening_the_page(
+    live_server: str, browser_page: Page
+) -> None:
+    """Defence in depth for the 2026-08-05 finding, deliberately independent of its cause.
+
+    A 136-digit XIRR (a 1-day window annualized) was rendered into `.kpi-value`, which had
+    `white-space: nowrap` and NO overflow rule — so the value set the document width and the
+    dashboard scrolled 1,915px sideways at a 1,440px viewport. The number is now suppressed
+    upstream, which would make a test written against XIRR pass for the wrong reason; this
+    one injects the long string directly, so it keeps failing if the CSS defence is removed
+    no matter what produced the value.
+    """
+    browser_page.set_viewport_size({"width": 1440, "height": 900})
+    browser_page.goto(f"{live_server}/index.html", wait_until="networkidle")
+    browser_page.wait_for_timeout(600)
+    injected = browser_page.evaluate(
+        "() => { const n = document.querySelector('.kpi-value');"
+        " if (!n) return false; n.textContent = '+' + '1,234,'.repeat(30) + '000';"
+        " return true; }"
+    )
+    assert injected, "no .kpi-value on the dashboard — the selector moved"
+    browser_page.wait_for_timeout(300)
+
+    m = browser_page.evaluate(_MEASURE)
+    assert m["sw"] <= m["cw"] + 1, (
+        f"an over-long KPI value widened the document: scrollWidth={m['sw']} > "
+        f"clientWidth={m['cw']}. Offenders: {m['widest']}"
+    )
+    cell = browser_page.evaluate(
+        "() => { const n = document.querySelector('.kpi-value');"
+        " return [n.scrollWidth, n.clientWidth]; }"
+    )
+    assert cell[0] > cell[1], (
+        f"the cell did not actually clip ({cell}) — the assertion above would then pass "
+        f"even with the defence removed"
+    )

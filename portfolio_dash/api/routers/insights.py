@@ -186,7 +186,7 @@ def _r1_error_response(tokens: list[str]) -> JSONResponse:
         status_code=422,
         content=error_body(
             "validation_error",
-            "insight type scope conflicts with a strategy's per-symbol variable",
+            "洞察類型的適用範圍與策略的個股變數衝突",
             issues=issues,
         ),
     )

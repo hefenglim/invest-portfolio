@@ -292,10 +292,10 @@ def _single_model_response(
 def create_model(body: ModelBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
     if not body.alias:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "alias is required", field="alias"))
+            "validation_error", "請輸入模型代號（alias）", field="alias"))
     if get_model(conn, body.alias) is not None:
         return JSONResponse(status_code=409, content=error_body(
-            "duplicate_alias", f"alias '{body.alias}' already exists", field="alias"))
+            "duplicate_alias", f"模型代號 {body.alias} 已存在", field="alias"))
     model = ModelConfig(
         id=body.alias,
         model_alias=body.alias,
@@ -324,7 +324,7 @@ def update_model(
     existing = get_model(conn, alias)
     if existing is None:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"model '{alias}' not found", field="alias"))
+            "not_found", f"模型 {alias} 不存在", field="alias"))
     # PUT is a subset update; alias is immutable (path wins). Unset fields keep value.
     updated = existing.model_copy(update={
         "provider": existing.provider if body.provider is None else body.provider,
@@ -355,7 +355,7 @@ def update_model(
 def remove_model(alias: str, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
     if get_model(conn, alias) is None:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"model '{alias}' not found", field="alias"))
+            "not_found", f"模型 {alias} 不存在", field="alias"))
     bound = roles_using_model(conn, alias)
     if bound:
         return JSONResponse(status_code=422, content=error_body(
@@ -413,7 +413,7 @@ def test_model(alias: str, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
     model = get_model(conn, alias)
     if model is None:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"model '{alias}' not found", field="alias"))
+            "not_found", f"模型 {alias} 不存在", field="alias"))
     started = time.monotonic()
     try:
         resp = llm.litellm.completion(

@@ -64,17 +64,17 @@ def build_fx_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
             is None
         ):
             issues.append(
-                Issue(kind="unknown_account", message=f"unknown account {account_id!r}")
+                Issue(kind="unknown_account", message=f"帳戶 {account_id} 不存在")
             )
 
         # --- validate amounts positive (hard) ---
         if from_amount <= 0:
             issues.append(
-                Issue(kind="non_positive_amount", message="from_amount must be > 0")
+                Issue(kind="non_positive_amount", message="換出金額必須大於 0")
             )
         if to_amount <= 0:
             issues.append(
-                Issue(kind="non_positive_amount", message="to_amount must be > 0")
+                Issue(kind="non_positive_amount", message="換入金額必須大於 0")
             )
 
         # --- validate currencies differ (hard) ---
@@ -82,7 +82,7 @@ def build_fx_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
             issues.append(
                 Issue(
                     kind="same_currency",
-                    message=f"from_ccy and to_ccy must differ (both {from_ccy.value})",
+                    message=f"換出與換入幣別不可相同（皆為 {from_ccy.value}）",
                 )
             )
 
