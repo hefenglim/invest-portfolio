@@ -50,6 +50,83 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+## [v0.1.27] - 2026-08-05
+
+The **0 → 1 sweep**: climb a fresh ledger one row at a time and measure at every rung. Every
+fixture in this repo starts with history and the demo site carries 62 transactions across
+months, so the states between "nothing" and "a working portfolio" had never been observed —
+and a page that renders correctly at 0 rows and at 14 can still be wrong at exactly 1. That
+is the state the owner enters on day one, on a prod instance whose ledger is currently empty.
+
+Coverage: 21 rungs × (60 GET endpoints + 18 pages × 2 widths) = **1,260 endpoint calls and
+756 page loads**, plus 54 read-only POSTs (every export/report builder) at both the empty and
+the 1-of-each state. Zero 5xx, zero console errors, zero overflow, zero vertical clipping.
+Everything below was found in what those pages *displayed*, not in whether they rendered.
+**No money-of-record calculation changed** — every figure discussed here was already correct
+on the wire.
+
+### Fixed
+- **A losing short position was displayed as a gain.** `web/app.js` still derived the
+  holdings table's percentage client-side as `unrealized_pnl / adjusted_cost_total`. A short's
+  basis is the proceeds received, i.e. negative by construction, so the ratio inverted:
+  −75.98 USD of unrealized **loss** rendered as **`+3.17%`**, in the same cell as the loss.
+  Audit H1 (2026-07-26) had already added the server-computed `unrealized_pct` — which divides
+  by `abs(original_cost_total)` and carries the comment explaining why — and moved the *drawer*
+  onto it; the main table was missed and kept the old divide for eleven days. The same divide
+  was also wrong for a **long**: adjusted cost is legally ≤ 0 once cumulative dividends exceed
+  cost (`domain-ledger.md`), which is the ordinary 已回本 case, and it divided by zero outright
+  on a position built entirely from $0-cost DRIP shares.
+  - *Visible change:* the holdings table's 未實現% is now on **original** cost, the same basis
+    as 回本進度, the drawer, and the KPI 累計報酬率 — so the whole page reads on one basis. For a
+    holding with dividends the figure shifts slightly (golden 2330: 133.42% → 132.42%).
+- **A negative weight drew a full bar.** `.mini-bar .fill` declares no width, so as a block it
+  fills its track; an *invalid* inline `width: -2.29%` is **discarded** by the CSSOM rather than
+  clamped, and the element fell back to 100%. A net-short row therefore drew a bar
+  indistinguishable from the largest holding while its own label read −2.29% (−176.80% on the
+  golden fixture). Bar widths are now clamped to 0–100%; the label carries the sign, the bar
+  only ever claims magnitude.
+- **21 user-facing messages were English.** They are rendered verbatim — `web/input.js` puts
+  `issue.text` and `row.reason` straight into the cell — so a first-time user, for whom every
+  symbol is unregistered, met `unresolved 2330`, `quantity must be > 0`, `unknown account`,
+  `from_ccy and to_ccy must differ`, and `no ledger events` (the last one on the owner's own
+  production dashboard, which has no ledger yet). Not a decision but drift: inside a single
+  `validate_transaction` call, `"quantity must be > 0"` sat four lines from `"股數過大,無法處理"`.
+  All 21 are now zh-TW, reusing the app's established wordings (`帳戶 {id} 不存在`,
+  `未註冊標的 {symbol} — 請先至「標的管理」註冊`).
+- **Four job-run reason codes rendered as raw identifiers.** `web/pipeline.js` maps a reason
+  through `SKIP_REASONS[code] || code`, so an unmapped code does not fail loudly — it prints
+  itself. The `*_mid_run` codes (`budget_exhausted_mid_run` and the three `LLMError` kinds) had
+  never been added, so a run that stopped part-way showed the owner an English identifier.
+
+### Added
+- **`tests/architecture/test_user_messages_are_zh_tw.py`** — every `Issue(message=…)`,
+  `error_body(…)`, `*_reason` assignment, and (in `portfolio/dashboard.py`, which puts
+  `str(exc)` on the wire) `raise KeyError(…)` must contain Chinese. Resolves module constants,
+  so an f-string whose Chinese lives in a constant is not a false positive; exempts
+  snake_case **codes**, which are deliberately English and are covered by the check below
+  instead of by an allowlist that would need editing every release.
+- **`tests/contract/test_skip_reason_coverage.py`** — every reason code the backend can emit
+  has a Chinese label in the frontend, with the `*_mid_run` set expanded from the `LLMError`
+  subclasses so a new subclass is caught the day it is added.
+- **`tests/contract/test_frontend_never_computes_money.py`** — enforces the CLAUDE.md locked
+  decision "the frontend never computes money or returns", which had been unguarded since
+  2026-06-13. The money-field list is derived from the Pydantic wire models, not hard-coded.
+  Run against the pre-fix tree it reports exactly the three real violations.
+- **`tests/e2e/test_short_position_display.py`** — a *losing* short (both the right and the
+  wrong formula agree in sign on a winning one) asserted from the rendered cell, not the
+  payload; the payload was already correct, which is precisely why nothing caught this.
+
+### Changed
+- XIRR is no longer annualized over a window too short to annualize (owner ruling, < 30 days),
+  and `.kpi-value` clips rather than letting any over-long value set the document width. Both
+  were found on a freshly reset instance carrying one same-week trade, where a +131.7% book
+  gain reported a 134-digit XIRR and pushed the dashboard 1,915px sideways.
+- **Golden payload** (`tests/golden/dashboard_full.json`, the documented JSON contract)
+  regenerated for the one field whose text changed: `freshness.xirr_unavailable_reason`.
+  The contract diff is a single line and **no number moved** — which, together with stress
+  audit phase 1 at an unchanged `77 ops / 1,806 assertions / fail=0`, is the evidence for
+  "no money-of-record calculation changed".
+
 ## [v0.1.26] - 2026-08-03
 
 Whole-site layout and control sweep. Three page-level horizontal overflows fixed, plus the

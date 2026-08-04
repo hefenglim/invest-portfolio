@@ -115,7 +115,9 @@ class RateResolver:
             self.reads[key] = self._read(base, quote)
         read = self.reads[key]
         if read is None:
-            raise KeyError(f"no FX rate stored for {base.value}/{quote.value}")
+            # Surfaces VERBATIM as freshness.xirr_unavailable_reason, which the XIRR KPI
+            # badge renders (web/app.js) — so it is a user-facing string, not log text.
+            raise KeyError(f"尚無 {base.value}/{quote.value} 匯率資料")
         return read.rate
 
 
@@ -305,9 +307,10 @@ def build_dashboard(
         inverse = get_fx_on(conn, quote, base, on=d)
         if inverse is not None:
             return _ONE / inverse.rate
+        # Same: rendered in the XIRR badge. Keeps the pair + the date, because those two
+        # facts are what tell the owner which rate to backfill.
         raise KeyError(
-            f"no FX rate stored on or before {d.isoformat()} "
-            f"for {base.value}/{quote.value}"
+            f"查無 {d.isoformat()}(含)之前的 {base.value}/{quote.value} 匯率"
         )
 
     xirr_value: Decimal | None = None
@@ -315,7 +318,7 @@ def build_dashboard(
     xirr_reason: str | None = None
     if has_oversold:
         # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
-        xirr_reason = "ledger has an oversold (賣超) position — 待釐清"
+        xirr_reason = "帳本中有賣超部位待釐清 — 無法計算 XIRR"
     else:
         try:
             outcome = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
@@ -332,8 +335,7 @@ def build_dashboard(
         except KeyError as exc:
             xirr_reason = str(exc).strip("'\"")
     if xirr_value is None and xirr_reason is None:
-        xirr_reason = ("not computable (missing current price, no sign change, "
-                       "or non-convergence)")
+        xirr_reason = "無法計算（缺少現價、現金流無正負變化，或迭代未收斂）"
 
     # 5. FX P&L — settlement != funding accounts; cold-start KeyError -> None.
     # The exposure figure is the market value of equity holdings quoted in the account's
@@ -463,7 +465,7 @@ def build_dashboard(
         trend = daily_value_series(txs, divs, opening, instruments, price_history,
                                    fx_history, reporting, end=as_of)
         if not trend.available:
-            trend_reason = "missing FX history for a ledger flow date"
+            trend_reason = "帳本中有交易日期缺少匯率資料"
         else:
             # 9b. Total net worth (FU-D29 / deferred C8): compose the UNCHANGED trend
             # with a daily cash series. Cash is read from the SAME Stored rows the 資金管理
@@ -491,7 +493,7 @@ def build_dashboard(
             trend = compose_net_worth(trend, cash_by_date)
     else:
         trend = TrendSeries(points=[], reporting_currency=reporting, available=False)
-        trend_reason = "no ledger events"
+        trend_reason = "尚無任何帳本紀錄"
 
     # 10. KPIs — blended; None whenever the blend cannot be formed honestly.
     total_return_blended: Decimal | None = None

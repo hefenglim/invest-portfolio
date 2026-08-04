@@ -69,4 +69,5 @@ def register_error_handlers(app: FastAPI) -> None:
         # a generic envelope WITHOUT leaking the exception detail into the response body.
         logger.exception("unhandled error: %s", exc)
         return JSONResponse(status_code=500,
-                            content=error_body("internal_error", "internal error"))
+                            content=error_body("internal_error",
+                                               "系統發生未預期的錯誤，請稍後再試"))

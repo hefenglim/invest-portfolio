@@ -66,6 +66,61 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.27 (the 0 -> 1 sweep) -------------------------------------------------------
+    Feature(
+        version="0.1.27",
+        id="short-position-percent-sign",
+        title="放空部位的報酬率不再顯示成相反的正負號",
+        desc="持股表的「未實現%」過去是用瀏覽器自己算的，除以的是「調整後成本」。"
+        "放空部位的成本本來就是負的（那是收到的價金），一除下去正負號就翻過來——"
+        "一筆虧損 75.98 美元的放空，百分比顯示成「+3.17%」，跟同一格裡的虧損金額互相矛盾。"
+        "同樣的問題也會發生在配息已經把成本沖到 0 以下的「已回本」持股上。"
+        "現在這個百分比一律由後端計算（除以原始成本的絕對值），"
+        "跟回本進度、明細抽屜、以及 KPI 的累計報酬率同一個基準。"
+        "有配息的持股數字會略有變動，那是基準統一後的正確值",
+        href="index.html",
+        area="總覽 → 持股明細",
+        target="#holdings-table",
+    ),
+    Feature(
+        version="0.1.27",
+        id="negative-weight-bar",
+        title="負權重不再畫成滿格的長條",
+        desc="淨放空的持股權重是負數，而負數寬度是無效的 CSS，瀏覽器不是把它壓成 0 而是直接丟掉，"
+        "結果長條退回預設的滿格——一筆 −2.29% 的部位，畫出來跟最大持股一模一樣長。"
+        "現在長條一律限制在 0～100%，方向由旁邊的數字表示",
+        href="index.html",
+        area="總覽 → 持股明細",
+        target="#holdings-table",
+    ),
+    Feature(
+        version="0.1.27",
+        id="messages-all-zh",
+        title="輸入與匯入的錯誤訊息全部改為中文",
+        desc="有 21 條訊息一直是英文，而且畫面是原字照印：第一次使用的人（每一檔標的都還沒註冊）"
+        "會看到「unresolved 2330」「quantity must be > 0」「unknown account」這種訊息，"
+        "其中「no ledger events」更是空帳本時總覽頁上就會出現的那一行。"
+        "現在全部改成中文，並沿用系統既有的用語與指引"
+        "（例如「未註冊標的 2330 — 請先至「標的管理」註冊」）。"
+        "另外洞察管線中途停止時顯示的英文代碼，也改成看得懂的說明",
+        # trades.html, not input.html: the latter is a meta-refresh shim (FM6) and the
+        # arrival flash would be spent on the redirect rather than on the target.
+        href="trades.html",
+        area="交易輸入 → 檢核訊息",
+        target="#m-confirm",
+    ),
+    Feature(
+        version="0.1.27",
+        id="xirr-short-window",
+        title="觀察期太短時不再顯示誇張的年化報酬",
+        desc="XIRR 會把報酬年化，所以觀察期愈短、數字被放得愈大：剛輸入第一筆交易時，"
+        "一筆 +131.7% 的帳面獲利會被年化成 134 位數的天文數字，還把整個畫面往右撐開近 2,000px。"
+        "現在觀察期不足 30 天就不顯示年化數字（改列出天數與原因）；"
+        "「累計報酬率」不受影響，那才是短期間該看的數字",
+        href="index.html",
+        area="總覽 → KPI 年化報酬 (XIRR)",
+        target="#kpi-band",
+    ),
     # --- v0.1.26 (whole-site layout sweep) ------------------------------------------------
     Feature(
         version="0.1.26",
@@ -1154,6 +1209,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.27": "2026-08-05",
     "0.1.26": "2026-08-03",
     "0.1.25": "2026-08-01",
     "0.1.24": "2026-07-26",

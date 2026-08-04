@@ -584,7 +584,7 @@ def test_prompt(
         return JSONResponse(
             status_code=422,
             content=error_body(
-                "validation_error", "prompt references invalid tokens", issues=issues
+                "validation_error", "提示詞中含有無效的變數符號", issues=issues
             ),
         )
     ctx = _build_context(conn, payload, now, reporting)

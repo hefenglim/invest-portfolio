@@ -102,7 +102,7 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
         )
         if not account_known:
             issues.append(
-                Issue(kind="unknown_account", message=f"unknown account {account_id!r}")
+                Issue(kind="unknown_account", message=f"帳戶 {account_id} 不存在")
             )
 
         # --- resolve the symbol once: soft unresolved warning + type/market coherence ---
@@ -114,7 +114,7 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
                 Issue(
                     kind="symbol_unresolved",
                     needs_confirm=True,
-                    message=f"unresolved {symbol}",
+                    message=f"未註冊標的 {symbol} — 請先至「標的管理」註冊",
                 )
             )
         elif res.instrument is not None and account_known:

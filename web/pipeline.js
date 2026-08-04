@@ -65,7 +65,16 @@
     R6_quota: 'LLM 額度耗盡',
     R7_rule_not_matched: '預警規則未命中 / 防抖期內',
     master_missing: '未設定 AI 大師模型 — 校正暫停',
-    unknown_insight_type: '未知的洞察任務'
+    unknown_insight_type: '未知的洞察任務',
+    /* A run that STOPPED PART-WAY (status 'partial', cards already produced are kept).
+       These come from generate.py's `${exc.kind}_mid_run`, and until 2026-08-05 none of
+       them were mapped — the fallback below prints the raw code, so the owner saw
+       'budget_exhausted_mid_run' on screen. tests/contract/test_skip_reason_coverage.py
+       now fails if the backend gains a code that is missing here. */
+    budget_exhausted_mid_run: 'LLM 額度用罄 — 已產出的卡片保留，其餘中止',
+    llm_unavailable_mid_run: 'LLM 供應商異常或回覆無法解析 — 已產出的卡片保留',
+    ai_not_activated_mid_run: 'AI 未啟用（該角色沒有可用模型）— 已產出的卡片保留',
+    llm_error_mid_run: 'LLM 呼叫失敗 — 已產出的卡片保留，其餘中止'
   };
   window.ppSkipReason = function (code) { return SKIP_REASONS[code] || code || '未知原因'; };
 

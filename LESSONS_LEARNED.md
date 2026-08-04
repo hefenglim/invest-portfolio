@@ -520,3 +520,46 @@ prevents recurrence.
   when the BOM is `\xff\xfe`) or write UTF-8. **Rule for both: before believing a zero, prove
   the measurement ran** — count the probes, assert the denominator, read the exit code. A
   count of findings is only meaningful next to a count of things examined.
+
+- **2026-08-05 — a remediation applied at one call site is not applied.** Audit H1
+  (2026-07-26) diagnosed a percentage that flipped sign when its denominator went negative,
+  added a server-computed `unrealized_pct` with `abs()` in the denominator, wrote a careful
+  comment explaining the trap, and moved the **drawer** onto it. The **holdings table** kept
+  its own `unrealized_pnl / adjusted_cost_total` divide and therefore kept the bug — for
+  eleven days, three feet from a comment describing it exactly. Nothing caught it because the
+  API payload was already correct: contract tests read the payload, the layout guard reads
+  geometry, and neither reads what the cell says. Rule: when a fix replaces a *derivation*,
+  grep for the derivation, not for the symptom — the second call site is the default, not the
+  exception. And when the fix is "the server now computes this", the regression test has to
+  assert on the **rendered** value, because the payload was never the thing that was wrong.
+
+- **2026-08-05 — an invalid CSS value is discarded, not clamped, and the element silently
+  falls back to its stylesheet rule.** `fill.style.width = '-2.29%'` does not produce a
+  zero-width bar; the CSSOM rejects the declaration outright, leaving `style.width` empty, so
+  `.mini-bar .fill` — which declares no width and is `display: block` — filled its entire
+  track. A −2.29% weight drew a bar identical to the 99.33% holding. The lie is worse than a
+  crash: it is the most visually salient element in the cell and it claims the opposite of the
+  number printed beside it. Rule: any computed CSS length must be clamped in JS to a range the
+  property accepts. Never rely on the browser to sanitise it, and never write a fallback rule
+  that is a *plausible* value (a full bar) when the honest fallback is an empty one.
+
+- **2026-08-05 — the states between "empty" and "populated" are the ones no fixture covers.**
+  Every fixture in this repo starts with history; the demo site carries 62 transactions across
+  months. So 0 rows and N rows were both well tested, and **exactly 1** was not — which is
+  precisely where a divide-by-zero, an `index [0]`, a single-point chart, or an annualization
+  over a one-day window lives. Climbing a fresh ledger one row at a time (21 rungs, four
+  independent detectors per rung) found four display defects that 2,700 passing tests, a
+  whole-site layout sweep and a 2,287-control wiring sweep had all missed. Rule: when a system
+  is tested at zero and at scale, test the transition — and note that the transition is not a
+  contrived edge case, it is *literally* the first hour of every real user's experience.
+
+- **2026-08-05 — write the check, not the corrections.** Twenty-one English strings, four
+  unmapped reason codes and three JS money-divides were each individually trivial to fix and
+  would each have come back: the codebase had *already* converged on Chinese messages (every
+  test asserting on `.message` asserts on Chinese) and *already* locked "the frontend never
+  computes money" in CLAUDE.md — neither rule was enforced by anything. Three guards now
+  enforce them, each derived from a live source (the Pydantic wire models, the `LLMError`
+  subclasses, the module's own constants) so it cannot go stale, and each proven to FAIL on
+  the pre-fix tree before being trusted. Rule: when a fix list is long and boring, the finding
+  is the missing control, not the items — and an allowlist that needs a new entry every
+  release is the same missing control wearing a disguise.
