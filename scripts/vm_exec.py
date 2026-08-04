@@ -167,10 +167,20 @@ def run_remote(cfg: VMConfig, command: str) -> tuple[str, str, int, float]:
     argv = [gcloud, "compute", "ssh", cfg.instance, f"--zone={cfg.zone}", "--quiet",
             f"--command={encode_remote(command)}", *cfg.ssh_flags]
     started = time.monotonic()
-    proc = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
+    # Decode EXPLICITLY as UTF-8 with errors="replace". `text=True` alone decodes with the
+    # locale codec, which on Windows is cp1252: a single byte the remote emitted that cp1252
+    # cannot map (any zh-TW output, a `lsof` path, a JSON body) raised UnicodeDecodeError
+    # inside subprocess's reader thread, `proc.stdout` came back None, and this function
+    # crashed on `None + str` — BEFORE the log entry was written. So the one failure mode
+    # this wrapper exists to prevent (an operation that ran but was never recorded) was
+    # reachable through its own output handling. 2026-08-05, mid-deploy.
+    proc = subprocess.run(argv, capture_output=True, check=False,  # noqa: S603
+                          encoding="utf-8", errors="replace")
     elapsed = time.monotonic() - started
 
-    output = proc.stdout + (f"\n[stderr]\n{proc.stderr}" if proc.stderr.strip() else "")
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    output = stdout + (f"\n[stderr]\n{stderr}" if stderr.strip() else "")
     when = "(server time unavailable)"
     for line in output.splitlines():
         if line.startswith(_TS_MARKER):
