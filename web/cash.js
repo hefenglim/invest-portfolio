@@ -274,7 +274,7 @@
     if (r.kind === 'buy' || r.kind === 'sell') {
       const verb = r.kind === 'buy' ? '買入' : '賣出';
       const nm = r.name ? r.name + '（' + r.symbol + '）' : (r.symbol || '');
-      return verb + ' ' + nm + ' ' + f.num(r.qty, 0) + ' 股 @ ' + f.price(r.price, ccy) +
+      return verb + ' ' + nm + ' ' + f.shares(r.qty) + ' 股 @ ' + f.price(r.price, ccy) +
         '（費 ' + f.money(r.fee, ccy) + '・稅 ' + f.money(r.tax, ccy) + '）';
     }
     if (r.kind === 'dividend') {

@@ -458,7 +458,7 @@
 
       tr.appendChild(el('td', 'col-text', MARKET_ZH[h.market] || h.market));
       tr.appendChild(el('td', 'col-text', acctZh(h.account_id)));
-      tr.appendChild(el('td', 'num', f.num(h.shares)));
+      tr.appendChild(el('td', 'num', f.shares(h.shares)));
       tr.appendChild(el('td', 'num', f.price(h.original_avg, h.quote_ccy)));
       tr.appendChild(el('td', 'num', f.price(h.adjusted_avg, h.quote_ccy)));
 
@@ -897,7 +897,7 @@
       }
       tr.appendChild(tdSym);
       tr.appendChild(el('td', 'col-text', acctZh(r.account_id)));
-      tr.appendChild(el('td', 'num', isDiv ? f.NULL_GLYPH : f.num(r.shares_sold)));
+      tr.appendChild(el('td', 'num', isDiv ? f.NULL_GLYPH : f.shares(r.shares_sold)));
       const tdProceeds = el('td', 'num', f.money(r.proceeds_net, r.quote_ccy));
       tdProceeds.appendChild(el('span', 'kpi-unit', ' ' + r.quote_ccy));
       tr.appendChild(tdProceeds);

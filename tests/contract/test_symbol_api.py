@@ -258,6 +258,98 @@ def test_symbol_detail_position_single_account(api_client: TestClient) -> None:
     assert len(body["position_accounts"]) == 1
 
 
+# --- share-reconciliation tolerance (owner ruling 2026-08-06) ------------------------
+#
+# The three reinvest_shares below are the EXACT values measured on the demo site's AAPL on
+# 2026-08-05, where the drawer footer rendered "期初 0 ＋買 95 −賣 0 ＋配股/DRIP 0 ＝ 部位摘要
+# 95 股 ⚠ 對帳不一致" — a visually perfect equation next to a red flag. They are `net / price`
+# quotients that do not terminate, so each carries ~28 significant digits.
+_DRIP_SCHWAB_FEB = Decimal("0.01988201878960017478697837011")
+_DRIP_MOOMOO_MAY = Decimal("0.006457564575645756457564575646")
+_DRIP_SCHWAB_MAY = Decimal("0.01937269372693726937269372694")
+
+
+def _seed_drip_association_noise(conn: sqlite3.Connection) -> None:
+    """AAPL bought in two accounts, then three DRIP reinvests of non-terminating share counts.
+
+    `_reconcile` sums the three tiny quotients together FIRST and adds 95 once; `build_book`
+    folds each one into a ~60-share running position. Decimal at the default 28-digit context
+    is not associative across that magnitude gap, so the two orders disagree in the 26th
+    decimal place — on a ledger that is entirely consistent.
+    """
+    seed_accounts(conn)
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=Currency.USD,
+                                       sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("60"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    insert_transaction(conn, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("35"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 12))
+    for acct, when, shares in (("schwab", date(2026, 2, 9), _DRIP_SCHWAB_FEB),
+                               ("moomoo_my", date(2026, 5, 11), _DRIP_MOOMOO_MAY),
+                               ("schwab", date(2026, 5, 11), _DRIP_SCHWAB_MAY)):
+        insert_dividend(conn, account_id=acct, symbol="AAPL", div_date=when,
+                        div_type="DRIP", gross=Decimal("3"), withholding=Decimal("0.9"),
+                        net=Decimal("2.1"), reinvest_shares=shares,
+                        reinvest_price=Decimal("105.63"))
+    upsert_prices(conn, [
+        PriceRow(instrument="AAPL", market=Market.US, as_of=date(2026, 6, 9),
+                 close=Decimal("120"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    upsert_fx(conn, [
+        FxRow(base=Currency.USD, quote=Currency.TWD, as_of=date(2026, 6, 9),
+              rate=Decimal("33"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    conn.commit()
+
+
+def test_reconcile_tolerates_decimal_association_noise(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """A consistent ledger must NOT be flagged 對帳不一致 over sub-1e-6 share arithmetic."""
+    client = dashboard_client_factory(_seed_drip_association_noise)
+    rec = client.get("/api/symbol/AAPL/detail").json()["activity_reconcile"]["total"]
+
+    gap = Decimal(rec["net_shares"]) - Decimal(rec["book_shares"])
+    # DETECTION POWER: assert the fixture actually exercises the tolerance. If the two sides
+    # ever agree exactly, this test would pass trivially under `==` and prove nothing.
+    assert gap != 0, "fixture no longer reproduces the association-order gap"
+    assert abs(gap) < Decimal("0.000001")
+    # ... and that the gap is exactly what the wire reports, so the drawer can name it.
+    assert Decimal(rec["diff_shares"]) == gap
+    assert rec["balances"] is True
+    assert Decimal(rec["buy_shares"]) == Decimal("95")
+    # Per-account footers get the same treatment (the drawer's account filter uses them).
+    for per in client.get("/api/symbol/AAPL/detail").json()[
+            "activity_reconcile"]["by_account"].values():
+        assert per["balances"] is True
+
+
+def _seed_unregistered_symbol_break(conn: sqlite3.Connection) -> None:
+    """A ledger row whose symbol has no Instrument: build_dashboard excludes it from the book
+    (dashboard.py 1b) while the raw-ledger activity list still shows it — a REAL 95-share
+    reconciliation break the flag must keep catching."""
+    seed_accounts(conn)
+    insert_transaction(conn, account_id="schwab", symbol="ZZTOP", side=Side.BUY,
+                       quantity=Decimal("95"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    conn.commit()
+
+
+def test_reconcile_tolerance_does_not_mask_a_real_break(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """The 1e-6 tolerance absorbs arithmetic noise ONLY — a genuine gap still flags."""
+    client = dashboard_client_factory(_seed_unregistered_symbol_break)
+    rec = client.get("/api/symbol/ZZTOP/detail").json()["activity_reconcile"]["total"]
+
+    assert Decimal(rec["buy_shares"]) == Decimal("95")
+    assert Decimal(rec["book_shares"]) == Decimal("0")
+    assert rec["balances"] is False
+    assert Decimal(rec["diff_shares"]) == Decimal("95")
+
+
 def test_symbol_detail_position_null_for_unheld(api_client: TestClient) -> None:
     body = api_client.get("/api/symbol/ZZZZ/detail").json()
     assert body["position"] is None

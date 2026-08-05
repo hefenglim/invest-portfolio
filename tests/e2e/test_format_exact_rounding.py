@@ -52,6 +52,23 @@ _CASES: list[tuple[str, str, object, str]] = [
     # --- prices: MY needs 3 dp ---------------------------------------------------
     ("price", "10.005", "MYR", "10.005"),
     ("price", "600.0855", "TWD", "600.09"),
+    # --- share COUNTS: 6 dp, trailing zeros trimmed (owner ruling 2026-08-06) -----
+    # `num` defaults to 0 dp, which silently erased fractional DRIP/STOCK reinvest shares
+    # (`net / price`, an unrounded quotient) everywhere shares were displayed.
+    ("shares", "95", None, "95"),                     # ordinary whole-share ledger stays clean
+    ("shares", "1200", None, "1,200"),                # thousands separator survives the trim
+    ("shares", "10", None, "10"),                     # the no-dot guard: NOT "1"
+    ("shares", "100", None, "100"),
+    ("shares", "0", None, "0"),
+    ("shares", "1000.000000", None, "1,000"),         # trailing zeros trimmed, group kept
+    ("shares", "0.5", None, "0.5"),                   # a plain half share
+    ("shares", "0.045000", None, "0.045"),            # inner zeros kept, trailing trimmed
+    ("shares", "-25", None, "-25"),                   # an open declared short is negative
+    # the exact demo-site DRIP quotients that rendered as "0" at the old 0 dp
+    ("shares", "0.01988201878960017478697837011", None, "0.019882"),
+    ("shares", "95.04571227709218320061723668", None, "95.045712"),
+    # below the 6-dp cut-off the whole value legitimately reads as zero
+    ("shares", "0.0000001", None, "0"),
 ]
 
 

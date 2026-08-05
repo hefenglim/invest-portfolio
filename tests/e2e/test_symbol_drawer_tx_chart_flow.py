@@ -335,3 +335,83 @@ def test_symbol_drawer_multi_account_position(
     assert not console_errors and not page_errors, (
         f"multi-account position: console={console_errors!r} page={page_errors!r}"
     )
+
+
+# --- fractional DRIP shares in the reconciliation footer (owner ruling 2026-08-06) ----
+
+def _seed_fractional_drip(conn: sqlite3.Connection) -> None:
+    """AAPL in two accounts + three DRIP reinvests whose share counts are non-terminating
+    `net / price` quotients — the demo-site shape measured 2026-08-05."""
+    seed_accounts(conn)
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=Currency.USD,
+                                       sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("60"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    insert_transaction(conn, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("35"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 12))
+    for acct, when, shares in (
+        ("schwab", date(2026, 2, 9), Decimal("0.01988201878960017478697837011")),
+        ("moomoo_my", date(2026, 5, 11), Decimal("0.006457564575645756457564575646")),
+        ("schwab", date(2026, 5, 11), Decimal("0.01937269372693726937269372694")),
+    ):
+        insert_dividend(conn, account_id=acct, symbol="AAPL", div_date=when,
+                        div_type="DRIP", gross=Decimal("3"), withholding=Decimal("0.9"),
+                        net=Decimal("2.1"), reinvest_shares=shares,
+                        reinvest_price=Decimal("105.63"))
+    upsert_prices(conn, [
+        PriceRow(instrument="AAPL", market=Market.US, as_of=date(2026, 6, 9),
+                 close=Decimal("120"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    _base_fx(conn)
+    conn.commit()
+
+
+@pytest.mark.e2e
+def test_symbol_drawer_reconcile_footer_shows_fractional_shares(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """The footer must SHOW the fraction it is reconciling, and must not cry wolf over it.
+
+    Measured on the demo site 2026-08-05, this exact ledger rendered
+    「期初 0 ＋買 95 −賣 0 ＋配股/DRIP 0 ＝ 部位摘要 95 股 ⚠ 對帳不一致」 — every term rounded
+    to 0 dp, so the equation read as perfectly balanced right next to a red flag. Two defects
+    in one line: an exact `==` on Decimals summed in different orders (they disagreed in the
+    26th decimal place), and a proof rendered at a precision that could not show it.
+    """
+    base = flow_server(_seed_fractional_drip)
+    page = fresh_page
+    console_errors, page_errors = _collect_errors(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    with page.expect_response("**/api/symbol/AAPL/detail") as resp_info:
+        page.evaluate("() => window.pdOpenSymbol('AAPL')")
+    assert resp_info.value.status == 200, f"detail status {resp_info.value.status}"
+
+    page.wait_for_selector(".sd-tx-section .sd-tx-reconcile")
+    foot = page.locator(".sd-tx-section .sd-tx-reconcile")
+
+    # The ledger IS consistent — the 1E-26 association gap must not be reported as a break.
+    expect(foot).to_contain_text("✓ 對帳一致")
+    expect(foot).not_to_contain_text("差額")
+
+    # Whole-share terms stay clean (trailing zeros trimmed) ...
+    expect(foot).to_contain_text("期初 0 ＋買 95 −賣 0")
+    # ... while the DRIP term and the book now SHOW their fraction at 6 dp.
+    expect(foot).to_contain_text("＋配股/DRIP 0.045712")
+    expect(foot).to_contain_text("部位摘要 95.045712 股")
+
+    # The footer proves 交易明細 ＝ 部位摘要, so BOTH sides it points at must agree with it —
+    # a footer reading 95.045712 beside a 股數 stat reading 95 has not closed the proof.
+    drawer = page.locator(".sd-drawer")
+    expect(drawer.locator(".sd-stat").filter(has_text="股數").locator(".v")).to_have_text(
+        "95.045712")
+    # ... and the activity row for the DRIP itself shows its share count, not "0".
+    tx_rows = page.locator(".sd-tx-section table.data tbody tr")
+    expect(tx_rows.filter(has_text="DRIP").first).to_contain_text("0.019882")
+
+    assert not console_errors and not page_errors, (
+        f"reconcile footer: console={console_errors!r} page={page_errors!r}"
+    )

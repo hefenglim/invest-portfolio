@@ -181,7 +181,7 @@
         const chips = el('div', 'rb-acct-chips');
         g.holdings.forEach((h) => {
           chips.appendChild(el('span', 'rb-acct-chip',
-            h.account_name + ' ' + f.num(h.shares) + '股'));
+            h.account_name + ' ' + f.shares(h.shares) + '股'));
         });
         cell.appendChild(chips);
       }
@@ -239,7 +239,7 @@
           line.appendChild(el('span', 'dir-chip ' + (lg.side === 'buy' ? 'dir-buy' : 'dir-sell'),
             lg.side === 'buy' ? '買' : '賣'));
           line.appendChild(document.createTextNode(
-            ' ' + f.num(lg.shares) + ' 股 @ ' + lg.account_name));
+            ' ' + f.shares(lg.shares) + ' 股 @ ' + lg.account_name));
           if (lg.odd_lot) line.appendChild(el('span', 'rb-oddlot', '（零股）'));
           r.tdAct.appendChild(line);
         });
@@ -247,7 +247,7 @@
         /* aggregate fallback (no per-leg detail returned): show side + total shares */
         r.tdAct.appendChild(el('span', 'dir-chip ' + (br.side === 'buy' ? 'dir-buy' : 'dir-sell'),
           br.side === 'buy' ? '買' : '賣'));
-        r.tdAct.appendChild(document.createTextNode(' ' + f.num(br.shares) + ' 股'));
+        r.tdAct.appendChild(document.createTextNode(' ' + f.shares(br.shares) + ' 股'));
       }
       const ccy = br.ccy;
       r.tdAmt.textContent = f.money(br.amount, ccy) + ' ' + ccy;
