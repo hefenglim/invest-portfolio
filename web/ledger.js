@@ -411,7 +411,7 @@
       const tdSide = el('td', 'col-text');
       tdSide.appendChild(dirChip(t.side));
       tr.appendChild(tdSide);
-      tr.appendChild(el('td', 'num', f.num(t.shares)));
+      tr.appendChild(el('td', 'num', f.shares(t.shares)));
       tr.appendChild(el('td', 'num', f.price(t.price, t.ccy)));
       tr.appendChild(el('td', 'num', f.money(t.fee, t.ccy)));
       tr.appendChild(el('td', 'num', f.money(t.tax, t.ccy)));
@@ -482,7 +482,7 @@
       tr.appendChild(mkAmt(d.net));
       const tdRe = el('td', 'num');
       if (d.reinvest_shares === null) { tdRe.textContent = f.NULL_GLYPH; tdRe.classList.add('sign-nil'); }
-      else tdRe.textContent = f.num(d.reinvest_shares, 4) + ' 股 @ ' + f.price(d.reinvest_price, d.ccy);
+      else tdRe.textContent = f.shares(d.reinvest_shares) + ' 股 @ ' + f.price(d.reinvest_price, d.ccy);
       tr.appendChild(tdRe);
       tr.appendChild(actionsCell(
         () => editDiv(d),
@@ -519,7 +519,7 @@
       const tr = el('tr');
       tr.appendChild(el('td', 'col-text', o.account));
       tr.appendChild(symCell(o.symbol));
-      tr.appendChild(el('td', 'num', f.num(o.shares)));
+      tr.appendChild(el('td', 'num', f.shares(o.shares)));
       tr.appendChild(el('td', 'num', f.price(o.avg, o.ccy)));
       tr.appendChild(el('td', 'num', f.money(o.total, o.ccy) + ' ' + o.ccy));
       tr.appendChild(el('td', 'num', f.date(o.date)));

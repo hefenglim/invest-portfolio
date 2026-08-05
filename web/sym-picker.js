@@ -102,9 +102,10 @@
       const effectiveQuery = () => (queryActive ? (input.value || '').trim() : '');
 
       /* ---- row + group rendering ---------------------------------------------------- */
+      /* f.shares already shows a fraction only when there is one (6 dp, trailing zeros
+         trimmed), so the old "4 dp if it has a dot" branch here is now the formatter's job. */
       function rowShares(sharesRaw) {
-        return (sharesRaw != null && String(sharesRaw).indexOf('.') >= 0)
-          ? f.num(sharesRaw, 4) : f.num(sharesRaw);
+        return f.shares(sharesRaw);
       }
       function rowEl(row) {
         const b = el('button', null, null);

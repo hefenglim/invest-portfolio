@@ -9,6 +9,31 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+### Fixed
+- **Symbol drawer reported 對帳不一致 on a fully consistent ledger.** `activity_reconcile`
+  compared the ledger flow with the book using an exact `==` between two Decimal sums built in
+  DIFFERENT orders — `_reconcile` adds the reinvest shares to each other first, `build_book`
+  folds each into a large running position. DRIP/STOCK reinvest shares are `net / price`
+  quotients that do not terminate, so at the default 28-digit context the two orders disagree in
+  the last digit (measured on the demo site 2026-08-05: **1E-26 shares** on AAPL). `balances` is
+  now a DIFFERENCE test against `_SHARE_EPS` = `0.000001` (owner ruling 2026-08-06: share counts
+  are ignored past the 6th decimal). Deliberately NOT quantize-then-compare: truncating both
+  sides to 6 dp preserves the same bug class, since two values 1E-27 apart can straddle the 6-dp
+  boundary and truncate to different results.
+- **`GET /api/symbol/{symbol}/detail` → `activity_reconcile.{total,by_account}` now carries
+  `diff_shares`** (the exact signed `net − book` gap, full precision on the wire). The drawer
+  footer names it when the flag is red — a reported break without its size is unactionable.
+- **Share counts are no longer rendered at 0 dp.** New `f.shares()` in `web/format.js` (up to
+  6 dp, trailing zeros trimmed) is the single definition for every share display. The footer
+  whose job is to prove 期初＋買−賣＋配股/DRIP ＝ 部位摘要 was printing a real 0.045712-share
+  DRIP reinvest as `0`, so the equation read as perfectly balanced beside its own ⚠ — and a REAL
+  sub-0.5-share break would have printed the same way. Four precisions previously coexisted for
+  the same quantity (0 dp, 2 dp, 4 dp, and two hand-rolled "4 dp when fractional" branches)
+  across the dashboard, drawer, ledger, inbox, rebalance and symbol picker; all 36 call sites
+  now route through `f.shares`.
+- No money-of-record change: `reinvest_shares` storage precision is untouched (capping it would
+  move share counts and therefore average cost, market value, unrealized P&L, weights and XIRR).
+
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
   (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a

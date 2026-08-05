@@ -374,7 +374,7 @@
         markPoints.push({ coord: [t.date, closeOn(t.date)], name: '期初',
           symbol: 'diamond', symbolSize: 9, itemStyle: { color: cssVar('--series-gray') },
           label: { show: false },
-          value: '期初 ' + f.num(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
+          value: '期初 ' + f.shares(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
         return;
       }
       const isBuy = t.side === 'buy';
@@ -384,9 +384,9 @@
         symbolOffset: [0, isBuy ? '50%' : '-50%'],
         itemStyle: { color: isBuy ? GREEN : RED },
         label: { show: showTradeLabels, position: isBuy ? 'bottom' : 'top',
-          formatter: (isBuy ? '買' : '賣') + f.num(t.shares),
+          formatter: (isBuy ? '買' : '賣') + f.shares(t.shares),
           color: isBuy ? GREEN : RED, fontSize: 10, fontWeight: 'bold' },
-        value: (isBuy ? '買 ' : '賣 ') + f.num(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
+        value: (isBuy ? '買 ' : '賣 ') + f.shares(t.shares) + ' 股 @ ' + f.price(t.price, quoteCcy) });
     });
     chart.setOption({
       animation: false,
@@ -446,7 +446,7 @@
        a +223,473 gain was rendered as −1399.07%. Audit H1, 2026-07-26. */
     const pnlPct = h.unrealized_pct == null
       ? null : f.signedPct(h.unrealized_pct) + '・vs 原始成本';
-    grid.appendChild(stat('股數', f.num(h.shares)));
+    grid.appendChild(stat('股數', f.shares(h.shares)));
     grid.appendChild(stat('市值', h.market_value === null ? f.NULL_GLYPH : f.money(h.market_value, h.quote_ccy), h.market_value === null ? '缺價' : h.quote_ccy));
     grid.appendChild(stat('未實現損益', h.unrealized_pnl === null ? f.NULL_GLYPH : f.signed(h.unrealized_pnl, h.quote_ccy), pnlPct, f.signClass(h.unrealized_pnl)));
     grid.appendChild(stat('權重', h.weight === null ? f.NULL_GLYPH : f.pct(h.weight), '報告幣別市值'));
@@ -475,7 +475,7 @@
     accts.forEach((a) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'col-text', acctZh(a.account_id)));
-      tr.appendChild(el('td', 'num', f.num(a.shares)));
+      tr.appendChild(el('td', 'num', f.shares(a.shares)));
       tr.appendChild(el('td', 'num', a.market_value == null ? f.NULL_GLYPH : f.money(a.market_value, a.quote_ccy)));
       tr.appendChild(el('td', 'num ' + f.signClass(a.unrealized_pnl), a.unrealized_pnl == null ? f.NULL_GLYPH : f.signed(a.unrealized_pnl, a.quote_ccy)));
       tr.appendChild(el('td', 'num', f.price(a.original_avg, a.quote_ccy)));
@@ -674,7 +674,7 @@
       tr.appendChild(tdType);
       tr.appendChild(el('td', 'num', d.gross == null ? f.NULL_GLYPH : f.money(d.gross, d.ccy)));
       tr.appendChild(el('td', 'num', f.money(d.net, d.ccy)));
-      tr.appendChild(el('td', 'num', d.reinvest_shares ? f.num(d.reinvest_shares, 4) + ' 股 @ ' + f.price(d.reinvest_price, d.ccy) : f.NULL_GLYPH));
+      tr.appendChild(el('td', 'num', d.reinvest_shares ? f.shares(d.reinvest_shares) + ' 股 @ ' + f.price(d.reinvest_price, d.ccy) : f.NULL_GLYPH));
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
@@ -708,7 +708,7 @@
         tdAcct.appendChild(chip);
       }
       tr.appendChild(tdAcct);
-      tr.appendChild(el('td', 'num', isDiv ? f.NULL_GLYPH : f.num(r.shares_sold)));
+      tr.appendChild(el('td', 'num', isDiv ? f.NULL_GLYPH : f.shares(r.shares_sold)));
       tr.appendChild(el('td', 'num', f.money(r.proceeds_net, r.quote_ccy)));
       tr.appendChild(el('td', 'num',
         isDiv ? f.NULL_GLYPH : f.money(r.adjusted_cost_removed, r.quote_ccy)));
@@ -821,7 +821,7 @@
         const tdSide = el('td', 'col-text');
         tdSide.appendChild(sideChip(t.side));
         tr.appendChild(tdSide);
-        tr.appendChild(el('td', 'num', f.num(t.shares)));
+        tr.appendChild(el('td', 'num', f.shares(t.shares)));
         /* opening/配股 may carry no price/fee/tax → em-dash (never fabricate a 0). */
         tr.appendChild(el('td', 'num', t.price == null ? f.NULL_GLYPH : f.price(t.price, t.ccy)));
         tr.appendChild(el('td', 'num', t.fee == null ? f.NULL_GLYPH : f.money(t.fee, t.ccy)));
@@ -844,17 +844,25 @@
         ? (reconcile.by_account && reconcile.by_account[filterAcct])
         : reconcile.total;
       if (!rec) return;
-      const parts = ['期初 ' + f.num(rec.opening_shares),
-        '＋買 ' + f.num(rec.buy_shares), '−賣 ' + f.num(rec.sell_shares)];
-      if (Number(rec.reinvest_shares) !== 0) {
-        parts.push('＋配股/DRIP ' + f.num(rec.reinvest_shares));
+      const parts = ['期初 ' + f.shares(rec.opening_shares),
+        '＋買 ' + f.shares(rec.buy_shares), '−賣 ' + f.shares(rec.sell_shares)];
+      /* Show the 配股/DRIP term only when it is non-zero AND still non-zero once rendered —
+         otherwise the equation grows a "＋配股/DRIP 0" term that explains nothing (which is
+         exactly how the 2026-08-05 report read). */
+      if (Number(rec.reinvest_shares) !== 0 && f.shares(rec.reinvest_shares) !== '0') {
+        parts.push('＋配股/DRIP ' + f.shares(rec.reinvest_shares));
       }
       footHost.appendChild(el('span', null,
-        parts.join(' ') + ' ＝ 部位摘要 ' + f.num(rec.book_shares) + ' 股'));
+        parts.join(' ') + ' ＝ 部位摘要 ' + f.shares(rec.book_shares) + ' 股'));
       const badge = el('span', null, rec.balances ? ' ✓ 對帳一致' : ' ⚠ 對帳不一致');
       badge.style.cssText = 'margin-left:8px;font-weight:700;color:'
         + (rec.balances ? cssVar('--down') : cssVar('--up'));
       footHost.appendChild(badge);
+      /* Name the gap. A red flag without its size tells the owner nothing they can act on;
+         `diff_shares` is the server's exact signed figure (net − 部位摘要). */
+      if (!rec.balances && rec.diff_shares != null) {
+        footHost.appendChild(el('span', null, '（差額 ' + f.shares(rec.diff_shares) + ' 股）'));
+      }
     }
 
     function showPage(offset) {
@@ -1011,7 +1019,7 @@
       const newShares = mode === 'sell' ? r.remaining_shares : r.new_shares;
       const newOrigAvg = mode === 'sell' ? r.old_original_avg : r.new_original_avg;
       const newAdjAvg = mode === 'sell' ? r.old_adjusted_avg : r.new_adjusted_avg;
-      result.appendChild(pair('持股', f.num(r.old_shares), f.num(newShares)));
+      result.appendChild(pair('持股', f.shares(r.old_shares), f.shares(newShares)));
       result.appendChild(pair('原始均價', f.price(r.old_original_avg, ccy), f.price(newOrigAvg, ccy)));
       result.appendChild(pair('調整均價', f.price(r.old_adjusted_avg, ccy), f.price(newAdjAvg, ccy)));
       result.appendChild(pair('權重', f.pct(r.old_weight), f.pct(r.new_weight)));
@@ -1024,7 +1032,7 @@
         result.appendChild(kv('淨收款', f.money(r.proceeds_net, ccy) + ' ' + ccy));
         result.appendChild(kv('調整成本移除', f.money(r.adjusted_cost_removed, ccy)));
         result.appendChild(kv('已實現損益', f.signed(r.realized, ccy) + ' ' + ccy, f.signClass(r.realized)));
-        result.appendChild(kv('剩餘股數', f.num(r.remaining_shares)));
+        result.appendChild(kv('剩餘股數', f.shares(r.remaining_shares)));
         result.appendChild(kv('剩餘市值', f.money(r.remaining_market_value, ccy) + ' ' + ccy));
       } else {
         result.appendChild(kv('總成本（含費稅）', f.money(r.total_cost, ccy) + ' ' + ccy));

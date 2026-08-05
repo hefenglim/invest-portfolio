@@ -563,3 +563,37 @@ prevents recurrence.
   the pre-fix tree before being trusted. Rule: when a fix list is long and boring, the finding
   is the missing control, not the items — and an allowlist that needs a new entry every
   release is the same missing control wearing a disguise.
+
+- **2026-08-06 — an exact `==` between two sums of the same Decimals is a bug when the
+  summation ORDERS differ.** The symbol drawer's reconciliation footer flagged 對帳不一致 on a
+  perfectly consistent demo ledger. `_reconcile` computed `95 + (a+b+c)`; `build_book` computed
+  `((95+a)+c) + (35+b)` — the same three DRIP reinvest shares, which are `net / price`
+  quotients carrying ~28 significant digits. At the default 28-digit context, adding a tiny
+  value to a large running total truncates the tail on *every* addition, so the two orders
+  disagreed in the 26th decimal place. Decimal is exact per operation, **not associative across
+  a magnitude gap**. Rule: compare quantities derived by different paths with a
+  **difference test** against a domain tolerance, never `==`. And not quantize-then-compare
+  either — truncating both sides to 6 dp preserves the same bug class, because two values 1E-27
+  apart can still straddle the 6-dp boundary and truncate to different results (demonstrated
+  before choosing the fix).
+
+- **2026-08-06 — a proof rendered at a precision that cannot show what it proves is not a
+  proof.** The same footer printed 「期初 0 ＋買 95 −賣 0 ＋配股/DRIP 0 ＝ 部位摘要 95 股」 beside
+  its own ⚠, because every term went through `f.num`, whose default is **0 dp**. The equation
+  looked perfect and the flag looked insane. The dangerous direction is the mirror image: a
+  REAL sub-0.5-share break would also have printed as a balanced equation. Worse, the fix
+  exposed a second-order rule — raising the drawer's precision alone would have made 部位摘要
+  read 95.045712 in the footer and 95 in the stat three lines above it. Rule: a display
+  precision is a property of the QUANTITY (shares: 6 dp, trimmed), not of the widget; put it in
+  one formatter (`f.shares`) and route every surface through it. Before this there were four
+  precisions for the same number (0 dp, 2 dp, 4 dp, and two hand-rolled "4 dp if it has a
+  fraction" branches) across the dashboard, drawer, ledger, inbox and picker.
+
+- **2026-08-06 — `kill -0 <pid>` from Git Bash cannot see a native Windows process.** A monitor
+  watching the full pytest run reported "PYTEST EXITED" while the run was still going: MSYS
+  `kill` resolves its own PID namespace, so the liveness probe returned false immediately.
+  Meanwhile the real suite had genuinely stalled — six orphaned `uvicorn` processes from
+  sessions six days earlier were still holding ports, and the e2e fixtures waited on them
+  forever. Two rules: check Windows process liveness with `Get-Process`, not `kill -0`; and
+  before blaming a slow suite, list the stray servers (`Get-CimInstance Win32_Process`) — a
+  previous session's "instances stopped" claim is not evidence they stopped.

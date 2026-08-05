@@ -222,19 +222,19 @@
         let sub;
         if (r.kind === 'stock') {
           sub = '除息日 ' + f.date(r.ex_date) + '・股票股利 ' + r.per_share +
-            ' 元（面額制）・除權時持有 ' + f.num(r.shares_held) + ' 股 → 預估配得 ' +
-            f.num(r.est_reinvest_shares, 2) + ' 股（$0 成本）';
+            ' 元（面額制）・除權時持有 ' + f.shares(r.shares_held) + ' 股 → 預估配得 ' +
+            f.shares(r.est_reinvest_shares) + ' 股（$0 成本）';
         } else if (r.kind === 'drip') {
           sub = '除息日 ' + f.date(r.ex_date) + '・每股 ' + f.price(r.per_share, r.ccy) +
-            '・持有 ' + f.num(r.shares_held) + ' 股 → Gross ' +
+            '・持有 ' + f.shares(r.shares_held) + ' 股 → Gross ' +
             f.money(r.est_gross, r.ccy) + '・預扣 30% → Net ' + f.money(r.est_net, r.ccy) +
             (r.est_reinvest_price != null
-              ? '・估再投資 ' + f.num(r.est_reinvest_shares, 4) + ' 股 @ ' +
+              ? '・估再投資 ' + f.shares(r.est_reinvest_shares) + ' 股 @ ' +
                 f.price(r.est_reinvest_price, r.ccy) + '（估值，入帳後可編輯）'
               : '');
         } else {
           sub = '除息日 ' + f.date(r.ex_date) + '・每股 ' + f.price(r.per_share, r.ccy) +
-            '・除息時持有 ' + f.num(r.shares_held) + ' 股 → 預估現金股利 ' +
+            '・除息時持有 ' + f.shares(r.shares_held) + ' 股 → 預估現金股利 ' +
             f.money(r.est_gross, r.ccy) + ' ' + r.ccy;
         }
         main.appendChild(el('span', 'inbox-sub', sub));

@@ -119,6 +119,30 @@ window.fmt = (function () {
     return body;
   }
 
+  /** Share COUNT: up to 6 dp, trailing zeros trimmed (owner ruling 2026-08-06).
+   *
+   * Shares are NOT money and must not inherit `num`'s 0-dp default. A DRIP/STOCK reinvest is
+   * `net / price` — an unrounded quotient — so at 0 dp a real 0.0457-share reinvest rendered
+   * as "0", and the symbol drawer's reconciliation footer printed "期初 0 ＋買 95 −賣 0 ＋配股/
+   * DRIP 0 ＝ 部位摘要 95 股" beside a ⚠ 對帳不一致 it had no way to explain (measured on the
+   * demo site 2026-08-05). It cut the dangerous way too: a REAL sub-0.5-share break also
+   * printed as a perfectly balanced equation.
+   *
+   * ONE definition for every surface. Before this there were four (0 dp, 2 dp, 4 dp, and two
+   * hand-rolled "4 dp if it has a fraction" branches), so the same position's share count
+   * disagreed between the dashboard table, the drawer, the ledger and the picker.
+   *
+   * 6 dp matches the server's `_SHARE_EPS` reconciliation tolerance, so a share gap the
+   * backend flags can never round away to "0" on screen. The trim keeps an ordinary
+   * whole-share ledger reading "95", not "95.000000"; the no-dot guard is load-bearing —
+   * without it "10" would lose its trailing zero and render as "1".
+   */
+  function shares(v) {
+    const s = num(v, 6);
+    if (s === NULL_GLYPH) return s;
+    return s.indexOf('.') < 0 ? s : s.replace(/\.?0+$/, '');
+  }
+
   /** Amount in a given currency: TWD 0 dp, USD/MYR 2 dp. */
   function money(v, ccy) {
     if (isNil(v)) return NULL_GLYPH;
@@ -219,6 +243,6 @@ window.fmt = (function () {
     return parts.join(' · ');
   }
 
-  return { num, money, price, signed, signedNum, pct, signedPct, rate, date, datetime,
+  return { num, shares, money, price, signed, signedNum, pct, signedPct, rate, date, datetime,
            signClass, aiAttrib, NULL_GLYPH };
 })();

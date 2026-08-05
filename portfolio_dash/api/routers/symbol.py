@@ -58,6 +58,21 @@ router = APIRouter()
 
 _ZERO = Decimal("0")
 
+# Share-reconciliation tolerance (owner ruling 2026-08-06): ignore anything past the 6th
+# decimal place of a SHARE COUNT. DRIP/STOCK reinvest shares are stored as `net / price`, a
+# non-terminating quotient carrying ~28 significant digits, and the two sides of the identity
+# below sum them in DIFFERENT orders — `_reconcile` adds the small values to each other first,
+# `build_book` folds each one into a ~95-share running total. Decimal arithmetic at the default
+# 28-digit context is not associative across that gap, so the two orders legitimately disagree
+# in the last digit (measured 2026-08-05 on demo AAPL: 1E-26 shares) and an EXACT `==` reported
+# 對帳不一致 on a perfectly consistent ledger.
+#
+# This is a DIFFERENCE test, not quantize-then-compare: truncating both sides to 6 dp keeps the
+# same bug class, because two values 1E-27 apart can still straddle a 6-dp boundary and truncate
+# to different results. A real reconciliation break (an unregistered symbol excluded from the
+# book, a dividend skipped on an open short, a 賣超) is orders of magnitude larger than this.
+_SHARE_EPS = Decimal("0.000001")
+
 # Wire-format dividend type: lowercase. STOCK -> "stock" (配股), the rest map directly.
 _DIV_TYPE_WIRE = {
     DividendType.CASH: "cash",
@@ -214,7 +229,8 @@ def _reconcile(
 
     ``book_shares`` is the authoritative holding share count (``build_dashboard``); the other
     buckets are raw-ledger share sums. ``balances`` is True when the ledger flow reproduces the
-    book — the visible proof 交易明細 reconciles with 部位摘要 (owner #2a, Fable F1). Shares are
+    book to within ``_SHARE_EPS`` — the visible proof 交易明細 reconciles with 部位摘要 (owner
+    #2a, Fable F1); ``diff_shares`` carries the exact signed gap either way. Shares are
     quantities, not money, but the totals are still computed here so the drawer footer renders
     server values under ONE definition rather than re-summing rows in the browser.
     """
@@ -228,6 +244,7 @@ def _reconcile(
     ])
     book_sh = _sum([h.shares for h in holdings])
     net = opening_sh + buy_sh - sell_sh + reinvest_sh
+    diff = net - book_sh
     return {
         "opening_shares": decimal_str(opening_sh),
         "buy_shares": decimal_str(buy_sh),
@@ -235,7 +252,11 @@ def _reconcile(
         "reinvest_shares": decimal_str(reinvest_sh),
         "net_shares": decimal_str(net),
         "book_shares": decimal_str(book_sh),
-        "balances": net == book_sh,
+        # Exact on the wire (full precision, as everywhere else); the tolerance lives in the
+        # FLAG, and the drawer names this figure when the flag is red — a footer that reports a
+        # break without its size is unactionable.
+        "diff_shares": decimal_str(diff),
+        "balances": abs(diff) < _SHARE_EPS,
     }
 
 

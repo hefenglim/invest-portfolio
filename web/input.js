@@ -298,7 +298,7 @@
     };
     /* fractional shares (DRIP $0-cost adds) show up to 4 dp; whole counts stay integer —
        a STRING shape check on the wire value, not arithmetic. */
-    const sharesTxt = held.shares.indexOf('.') >= 0 ? f.num(held.shares, 4) : f.num(held.shares);
+    const sharesTxt = f.shares(held.shares);
     sharesHint.appendChild(fillBtn('可賣 ' + sharesTxt + ' 股', '#m-shares', held.shares));
     if (held.adjusted_avg != null) {
       priceHint.hidden = false;
@@ -600,13 +600,13 @@
          those pairs show old == old; a fresh BUY has null old_* → old renders as「—」. */
       const pp = preview.position_preview;
       if (pp && pp.kind === 'sell') {
-        pcPair('持股', f.num(pp.old_shares), f.num(pp.remain_shares));
+        pcPair('持股', f.shares(pp.old_shares), f.shares(pp.remain_shares));
         pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.old_original_avg, ccy));
         pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.old_adjusted_avg, ccy));
         pcRow('調整成本移除', f.money(pp.cost_removed, ccy) + ' ' + ccy);
         pcRow('已實現損益', f.signed(pp.realized_pnl, ccy) + ' ' + ccy, f.signClass(pp.realized_pnl));
       } else if (pp && pp.kind === 'buy') {
-        pcPair('持股', f.num(pp.old_shares), f.num(pp.new_shares));
+        pcPair('持股', f.shares(pp.old_shares), f.shares(pp.new_shares));
         pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.new_original_avg, ccy));
         pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.new_adjusted_avg, ccy));
       }
@@ -929,7 +929,7 @@
       tr.appendChild(el('td', 'col-text num', symbol));
       const it = inst(symbol);
       const ccy = it ? it.ccy : '';
-      tr.appendChild(el('td', 'num', f.num(d.quantity !== undefined ? d.quantity : d.shares)));
+      tr.appendChild(el('td', 'num', f.shares(d.quantity !== undefined ? d.quantity : d.shares)));
       tr.appendChild(el('td', 'num', f.price(d.price, ccy)));   // Decimal string -> fmt
       const st = ST[r.status] || ST.ok;
       tr.appendChild(el('td', 'col-text ' + st[1], st[0]));
@@ -1328,7 +1328,7 @@
       cell.appendChild(el('span', 'sym-name', it ? it.name : ''));
       tdSym.appendChild(cell);
       tr.appendChild(tdSym);
-      tr.appendChild(el('td', 'num', f.num(d.quantity !== undefined ? d.quantity : d.shares)));
+      tr.appendChild(el('td', 'num', f.shares(d.quantity !== undefined ? d.quantity : d.shares)));
       tr.appendChild(el('td', 'num', f.price(d.price, ccy)));        // Decimal string -> fmt
       tr.appendChild(el('td', 'num', d.fee !== undefined ? f.money(d.fee, ccy) : f.NULL_GLYPH));
       tr.appendChild(el('td', 'num', d.tax !== undefined ? f.money(d.tax, ccy) : f.NULL_GLYPH));
