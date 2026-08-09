@@ -1,0 +1,144 @@
+/* demo-cycle report kit — the design language of docs/audit/*.html, extracted.
+   Dark-first, light via prefers-color-scheme + an explicit [data-theme] override so a
+   printed/shared copy is readable either way. Dense, data-first, tabular numerals. */
+
+:root{
+  --ink:#0e1116; --panel:#161b22; --panel-2:#1c222b; --line:#262e39;
+  --text:#e6e9ee; --text-2:#aab3c0; --text-3:#78838f;
+  --accent:#5aa2f5; --accent-soft:#5aa2f51f;
+  --hi:#e2564d; --md:#d99a35; --ok:#3fa672;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+}
+@media (prefers-color-scheme: light){
+  :root{ --ink:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --line:#dfe3ea;
+         --text:#161b22; --text-2:#4d5764; --text-3:#79838f; --accent-soft:#5aa2f514; }
+}
+:root[data-theme="dark"]{ --ink:#0e1116; --panel:#161b22; --panel-2:#1c222b; --line:#262e39;
+  --text:#e6e9ee; --text-2:#aab3c0; --text-3:#78838f; --accent-soft:#5aa2f51f; }
+:root[data-theme="light"]{ --ink:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --line:#dfe3ea;
+  --text:#161b22; --text-2:#4d5764; --text-3:#79838f; --accent-soft:#5aa2f514; }
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);
+     line-height:1.65;font-size:15px;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1040px;margin:0 auto;padding:0 20px 96px}
+h1,h2,h3,h4{text-wrap:balance;line-height:1.25;margin:0}
+code,.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+a{color:var(--accent)}
+
+header.top{padding:54px 0 26px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;
+         color:var(--text-3);margin-bottom:13px}
+h1{font-size:31px;font-weight:650;letter-spacing:-.02em}
+.sub{color:var(--text-2);margin-top:12px;max-width:66ch}
+
+.shape{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+       border-radius:0 10px 10px 0;padding:16px 18px;margin:26px 0 8px}
+.shape b{color:var(--text)}
+
+section{margin:44px 0 0;scroll-margin-top:52px}
+h2{font-size:20px;font-weight:620;margin-bottom:4px;display:flex;align-items:baseline;gap:10px;
+   flex-wrap:wrap}
+h2 .n{font-family:var(--mono);font-size:12px;color:var(--text-3);letter-spacing:.1em}
+h3{font-size:15px;margin:20px 0 3px}
+.lede{color:var(--text-2);margin:6px 0 18px;max-width:72ch}
+
+/* before / after — the spine of every demo in this kit */
+.vs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+@media(max-width:720px){.vs{grid-template-columns:1fr}}
+.vsbox{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:13px 15px}
+.vsbox h4{margin:0 0 7px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.vsbox.before{border-color:#e2564d55} .vsbox.before h4{color:var(--hi)}
+.vsbox.after{border-color:#3fa67255}  .vsbox.after  h4{color:var(--ok)}
+.vsbox p{margin:0;font-size:14px;color:var(--text-2)}
+
+pre{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:11px 13px;
+    overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;margin:8px 0}
+pre .del{color:var(--hi)} pre .add{color:var(--ok)} pre .cm{color:var(--text-3)}
+pre .win{background:#e2564d26;border-radius:3px;padding:0 3px}
+
+/* the interactive lab: mode switch + width slider + live sandbox + measured readout */
+.lab{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:16px 0}
+.lab .dsub{color:var(--text-3);font-size:12.5px;margin-bottom:13px}
+.modes{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.modes button{background:var(--panel-2);border:1px solid var(--line);color:var(--text-2);
+    border-radius:7px;padding:8px 13px;font-size:13px;cursor:pointer;font-family:var(--sans);
+    text-align:left;line-height:1.35}
+.modes button small{display:block;font-size:11px;color:var(--text-3);margin-top:2px}
+.modes button:hover{border-color:var(--accent)}
+.modes button.on{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+.modes button.on.bad{border-color:var(--hi);background:#e2564d14}
+.modes button.on.good{border-color:var(--ok);background:#3fa67214}
+
+.sizer{display:flex;align-items:center;gap:12px;margin:10px 0 6px;flex-wrap:wrap}
+.sizer input[type=range]{flex:1;min-width:180px;accent-color:var(--accent)}
+.sizer .w{font-family:var(--mono);font-size:12.5px;color:var(--text-2);white-space:nowrap}
+
+.stage{border:1px dashed var(--line);border-radius:8px;overflow:hidden;background:#0b0e12;
+       padding:8px;overflow-x:auto}
+/* These two overrides MUST stay directly below the base rule. Both are (0,1,0) — a
+   media query adds no specificity — so at equal specificity the LATER rule wins. Moved
+   up into the token block at the top of this file, they silently stop working. This is
+   divergence ① of the 2026-07-26 root-cause demo, reproduced inside its own toolkit. */
+@media (prefers-color-scheme: light){ .stage{background:#e9ecf1} }
+:root[data-theme="light"] .stage{background:#e9ecf1}
+:root[data-theme="dark"]  .stage{background:#0b0e12}
+iframe{border:0;display:block;background:#0e1116;height:150px;transition:width .1s}
+
+.readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:12px}
+.ro{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:9px 11px}
+.ro .k{font-size:11px;color:var(--text-3)}
+.ro .v{font-family:var(--mono);font-size:15px;font-weight:600;margin-top:2px;
+       font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ro.bad{border-color:var(--hi)}  .ro.bad .v{color:var(--hi)}
+.ro.good{border-color:var(--ok)} .ro.good .v{color:var(--ok)}
+.verdict{margin-top:12px;padding:11px 13px;border-radius:7px;font-size:13.5px;
+         border:1px solid var(--line);background:var(--panel-2)}
+.verdict.bad{border-color:#e2564d66;background:#e2564d12}
+.verdict.good{border-color:#3fa67266;background:#3fa67212}
+
+.ctrl{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:11px;margin:12px 0}
+.ctrl label{display:block;font-size:11.5px;color:var(--text-3);margin-bottom:4px}
+.ctrl input,.ctrl select{width:100%;background:var(--panel-2);border:1px solid var(--line);
+    color:var(--text);border-radius:6px;padding:7px 9px;font-family:var(--mono);font-size:13px}
+
+/* tables — always inside .tw so a wide table scrolls itself instead of the page */
+.tw{overflow-x:auto;margin:12px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px}
+th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11.5px;letter-spacing:.06em;color:var(--text-3);text-transform:uppercase;font-weight:600}
+td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+tr.hl td{background:#e2564d0f}
+.bad{color:var(--hi)} .good{color:var(--ok)} .warn{color:var(--md)} .dim{color:var(--text-3)}
+
+.pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:4px;
+      border:1px solid var(--line);white-space:nowrap}
+.pill.pass{color:var(--ok);border-color:#3fa67255;background:#3fa67216}
+.pill.rej{color:var(--hi);border-color:#e2564d55;background:#e2564d16}
+.pill.warn{color:var(--md);border-color:#d99a3555;background:#d99a3516}
+.sev{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid}
+.sev.h{color:var(--hi);border-color:#e2564d66;background:#e2564d16}
+.sev.m{color:var(--md);border-color:#d99a3566;background:#d99a3516}
+.sev.l{color:var(--text-2);border-color:var(--line);background:var(--panel-2)}
+
+.note{font-size:12.5px;color:var(--text-3);margin-top:11px;padding-top:11px;
+      border-top:1px dashed var(--line)}
+img.shot{max-width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:8px;
+         margin:10px 0}
+
+.toc{position:sticky;top:0;background:var(--ink);border-bottom:1px solid var(--line);
+     padding:9px 0;z-index:20}
+.toc-in{max-width:1040px;margin:0 auto;padding:0 20px;display:flex;gap:6px;overflow-x:auto}
+.toc a{font-size:12.5px;color:var(--text-2);text-decoration:none;padding:4px 9px;border-radius:5px;
+       white-space:nowrap}
+.toc a:hover{background:var(--panel);color:var(--accent)}
+
+/* self-check strip: every offline reimplementation must prove itself against the real
+   engine's numbers, in the report, in front of the reader. */
+#pd-selfcheck{margin:14px 0}
+#pd-selfcheck .hd{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+#pd-selfcheck .hd b{font-size:13px}
+#pd-selfcheck .sum{font-family:var(--mono);font-size:12px;color:var(--text-3)}
+footer{margin-top:54px;padding-top:20px;border-top:1px solid var(--line);color:var(--text-3);
+       font-size:12.5px}
