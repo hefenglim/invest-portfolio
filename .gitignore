@@ -54,3 +54,20 @@ Thumbs.db
 
 # --- Node (only if any frontend tooling is ever added) ---
 node_modules/
+
+# --- Working-tree scratch: untracked-but-not-ignored, i.e. one `git add -A` from
+#     being committed. Same class as the sample-trade-data incident above; these had
+#     accumulated across releases with nothing but discipline keeping them out.
+.playwright-mcp/
+invest-temp-noted.txt
+ntfy_topic_tmp.txt
+tpl.json
+
+# --- Design-handoff byproducts: the export tree itself IS tracked (69 files); these
+#     two are tool-generated artifacts of it, not source.
+docs/design-handoff/ai-portfolio-watcher/project/uploads/
+docs/design-handoff/ai-portfolio-watcher/project/.thumbnail
+
+# NOT ignored, deliberately: .claude/skills/demo-cycle/. The other three skills are
+# tracked and CLAUDE.md lists .claude/skills/ as a repository artifact, so that one is
+# an asset that has simply never been committed — ignoring it would bury it for good.
