@@ -1,8 +1,10 @@
 # Spec — Corporate actions (SPLIT / EXCHANGE / SPINOFF)
 
-**Status:** All owner decisions D1–D21 **approved** (§8). Awaiting the owner's final read-through;
-per `engineering-process.md` (spec-first), **no implementation has begun** — `portfolio_dash/` is
-untouched. §10 is the implementation brief.
+**Status:** All owner decisions D1–D29 **approved** (§8). **Implementation in progress** on
+`feat/corporate-actions` (owner ruling 2026-08-09: the branch is NOT merged into `main` until the
+whole feature is done, so it stays abandonable — which also retires **D26**, W0's separate
+release). Delivered: **W0** LedgerBundle + ledger registry · **W1** the ratio algebra ·
+**W2** the ledger, CRUD and validation. §10 is the implementation brief.
 
 **Revision log**
 
@@ -17,6 +19,7 @@ untouched. §10 is the implementation brief.
 | 2026-08-09 | **Three prior claims measured and CORRECTED** — §3.1(ii)'s worked example was arithmetically wrong, §7.1's detection-power companion test was unsatisfiable as written, and the trap ranking in §10.4 was aimed at the weaker of the two ratio defects. See §3.1(ii) |
 | 2026-08-09 | **Grill round 2 — owner approved all seven, folded in as D22–D28.** D18's EXCHANGE clause **withdrawn** (folding it in revealed it would corrupt the price history of any already-held merger destination); the `holdings.py` walker specified (§6.2); identifier refusal keyed on registration rather than string shape; demo-site corpus (§7.7) and the owner-run acceptance script (§10.5) added; W0 promoted to its own release |
 | 2026-08-09 | **Both round-2 deviations resolved — no open items.** D22: "reject or warn" was a false dichotomy; `validate.py` already has a THIRD tier (`needs_confirm`, the 賣超 tier) and E23 takes it, with a four-part condition that fires on the identifier signature and stays silent on ordinary mergers, plus a one-click convert-to-SPLIT. D23: the omitted cycle check is confirmed, and the two details that made the termination argument load-bearing are now normative — the recursion's **strictly-before** date bound (the inclusive form hangs) and the depth cap's **degrade-not-raise** behaviour on read paths (`corporate_delta` reaches an API route). Both outcomes are stronger than either originally-offered option |
+| 2026-08-09 | **W2 implementation revised E15 (D29).** The duplicate action is now a HARD rejection checked BEFORE E12, not a soft warning. Found by W2's own test: soft would apply the ratio twice (3-for-1 → 9-for-1), and as specified the warning was **unreachable**, since an exact duplicate is by construction the same-date intersecting pair E12 already rejects — the same "the ⚠ provably never fires" defect the E13 note exists to correct, recurring one row later. Also recorded: **D26 is retired** — the branch stays unmerged by owner ruling, so W0 does not ship as its own release |
 **Priority:** P0 — the only *blocking* gap found by the 2026-08-06 broker-import assessment
 (`docs/spec/2026-08-06-broker-import-backlog.md`).
 **Scope of this version:** a complete, self-contained feature — ledger table, replay semantics,
@@ -533,7 +536,7 @@ Every row below gets a test. "strict" = `allow_oversell=False` (重算 / what-if
 | E12 | Two actions, same date, same account, **symbol sets intersecting** | **Rejected at validation (D15)** — see the E12 note. The earlier `id` ASC tie-break was insertion order masquerading as economic order, and the two orders produce different money. The combined "reverse split + rename" seen in real data is ONE `EXCHANGE` row, not two, so nothing legitimate is blocked | — |
 | E13 | Same symbol held in **two accounts** | **All-or-nothing (D13).** Positions are keyed `(account, symbol)`, so N rows are required — and a partial application is **rejected at validation**, not warned about. See the E13 note: the ⚠ the earlier version promised provably never fires | — |
 | E14 | A sell **back-dated before** the action, entered after | Handled by the date-aware guard — *provided* `shares_through` applies corporate actions (§6.2). This is the integration point most likely to be missed | — |
-| E15 | Duplicate identical action entered twice | No DB constraint; the entry form warns on an exact `(account, date, kind, from, to, ratio)` match already present | — |
+| **E15** | Duplicate identical action entered twice | **REJECTED at validation (D29, revised 2026-08-09 during W2)** — hard, and checked **before E12**, with its own message. No DB constraint; the check is an exact `(account, date, kind, from, to, ratio)` match against the stored ledger. See the E15 note | — |
 | E16 | Editing / deleting an action **re-computes history** | Intended (`domain-ledger.md` N2). Captured in `ledger_audit` like every other ledger edit | — |
 | E17 | **Stored price basis vs the action** | See §5.1 (rewritten) — canonical as-traded basis, un-adjust at the write seam, `fetched_at`-discriminated correction, carry-forward gap guard | — |
 | **E18** | **EXCHANGE / SPINOFF whose `to_symbol` position holds an OPEN SHORT** (review B3) | `UnbookableLedgerError` | skip + flag |
@@ -618,6 +621,33 @@ from transactions, dividends and openings only; a corporate-action row referenci
 outside `instruments` would then reach `build_book`, whose `quote_ccy()` raises `KeyError` — a 500,
 and a different exception type from every other degradation path. The action ledger must join that
 skip-set on **both** its symbols.
+
+#### E15 — the duplicate is HARD, and it must be checked BEFORE E12 (D29, 2026-08-09)
+
+Written during W2, when the implementation's own test failed. The original row said "the entry
+form warns", i.e. a soft `needs_confirm` issue. **Two separate defects, and the second is the
+familiar one:**
+
+1. **Soft is the wrong tier here.** The stated reasoning — re-entering is plausible — is true for
+   a *transaction*: you really can buy the same stock twice in one day at one price, so the
+   duplicate guard has to be acknowledgeable. A corporate action is not a transaction, it is an
+   **event**, and an event happens once per `(account, symbol, date)`. There is no ledger in which
+   two identical 3-for-1 rows on one day are both correct. Acknowledging the warning applies the
+   ratio **twice** — a 3-for-1 becomes a 9-for-1 — which is the same silent share-count corruption
+   D15 rejects same-date ordering to prevent, arrived at from the other direction.
+
+2. **As specified it could never fire.** An exact duplicate is, by construction, a same-date
+   same-account pair whose symbol sets intersect — that is E12's condition, exactly. E12 is a hard
+   rejection and would swallow every duplicate before E15 was reached, so the warning this row
+   promised was unreachable. **That is the identical defect §5's E13 note was itself rewritten to
+   remove** ("the ⚠ the earlier version promised provably never fires"), reappearing one row later
+   and surviving two review rounds and a grill. Recorded here rather than quietly fixed, because
+   the recurrence is the interesting part: a promised warning is not a check until something
+   proves it fires.
+
+E12's message is about **ambiguous ordering**, which does not apply to two identical rows — they
+have no order problem, they have a doubling problem — so the duplicate needs its own text, not
+E12's. Hence: check first, reject hard, say "this would apply the ratio twice".
 
 #### E12 — same-date ordering is REJECTED, not tie-broken (D15)
 
@@ -1719,6 +1749,7 @@ recommendation. No decision remains open; the table is retained as the decision 
 | **D26** *(round 2)* | **W0 (`LedgerBundle` + registry refactor)** — its own version, or bundled? | **Its own version, deployed and verified on the demo site before W1.** Turns "no number moved" into an observable fact on a real accumulated ledger. Its stated gate (the golden dashboard payload) does not cover `export/tax.py` or `strategy/whatif.py`, both of which it edits |
 | **D27** *(round 2)* | **§10.5's acceptance run** — who, when, and is failure blocking? | **Owner-run, on their own machine, after W10 and before `/ship-version`; failure is BLOCKING.** Delivered as `scripts/verify_corporate_actions.py` — the script is committed, the data and the output are not. A gate that depends on remembering is not a gate |
 | **D28** *(round 2)* | **Door 1 vs D13's all-accounts rule** | **Write all N rows, and show all N accounts before the owner commits.** The action really did happen in every account at once; but a repair that quietly reaches past the account the owner was looking at is the same class of surprise as the silent basis loss door 1 exists to prevent |
+| **D29** *(found during W2, 2026-08-09 — implementation, not review)* | **E15's duplicate action** — soft warning as specified, or hard? | **Hard, and checked BEFORE E12.** Two defects. (a) Soft is the wrong tier: a duplicate *transaction* is plausible, a duplicate *event* is not, and acknowledging it applies the ratio twice — a 3-for-1 becomes a 9-for-1. (b) As specified it was **unreachable**: an exact duplicate is by construction a same-date intersecting pair, so E12's hard rejection swallowed every one. That is the same "the ⚠ provably never fires" defect the E13 note was rewritten to remove, recurring one row later and surviving two review rounds plus a grill. Found by the test, not by reading. See the E15 note in §5 |
 
 ---
 
