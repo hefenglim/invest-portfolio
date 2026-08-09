@@ -52,6 +52,23 @@ CREATE TABLE IF NOT EXISTS cash_movements (
     note TEXT,
     acq_home_amount TEXT
 );
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  TEXT NOT NULL,
+    date        TEXT NOT NULL,          -- effective date (ISO)
+    kind        TEXT NOT NULL,          -- SPLIT | EXCHANGE | SPINOFF
+    from_symbol TEXT NOT NULL,
+    to_symbol   TEXT NOT NULL,          -- == from_symbol for SPLIT (enforced: E20)
+    -- The ratio is a RATIONAL, stored as its two terms — NEVER as one decimal. A decimal
+    -- ratio is a rounded quotient, and data-and-pricing.md forbids storing a rounded
+    -- quotient as the authority. BOTH terms are positive INTEGERS (D14): "Decimal > 0" was
+    -- not enough — it let 0.2857 in through the CSV importer and the API, which recreates
+    -- the 賣超 cascade this feature exists to prevent. Enforced at validation (E6/E6a).
+    ratio_to    TEXT NOT NULL,          -- positive integer: shares received
+    ratio_from  TEXT NOT NULL,          -- positive integer: shares surrendered
+    cost_carry  TEXT,                   -- Decimal in [0,1]; SPINOFF only, NULL otherwise
+    note        TEXT
+);
 CREATE TABLE IF NOT EXISTS ledger_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     table_name TEXT NOT NULL,

@@ -15,6 +15,7 @@ hold no matter which path a transaction arrives on:
 """
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 
@@ -23,7 +24,14 @@ from pydantic import BaseModel
 from portfolio_dash.data_ingestion.holdings import current_shares, shares_through
 from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets
-from portfolio_dash.data_ingestion.store import get_instrument
+from portfolio_dash.data_ingestion.store import (
+    get_instrument,
+    list_corporate_actions,
+    load_ledger_bundle,
+)
+from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.results import Book
+from portfolio_dash.shared.corporate_actions import CorporateActionKind, is_ratio_term
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import from_db
 
@@ -198,6 +206,279 @@ def validate_transaction(
             )
         )
 
+    return issues
+
+
+class CorporateActionInput(BaseModel):
+    """User-supplied corporate action, BEFORE it is trusted.
+
+    Deliberately permissive where :class:`CorporateAction` is strict: ``kind`` is a plain
+    string and the ratio terms are unconstrained Decimals. That is the whole point — a
+    non-integer ratio has to reach this function to be REJECTED with a zh message. A model
+    that refused to construct would turn the owner's typo into a 500 or an English
+    pydantic error, which is the opposite of the intent.
+    """
+
+    account_id: str
+    date: date
+    kind: str
+    from_symbol: str
+    to_symbol: str
+    ratio_to: Decimal
+    ratio_from: Decimal
+    cost_carry: Decimal | None = None
+    note: str | None = None
+
+
+def _accounts_holding_on(
+    conn: sqlite3.Connection, symbol: str, on: date
+) -> set[str]:
+    """Accounts with a NON-ZERO position in *symbol* on *on* (E13's N)."""
+    rows = conn.execute(
+        "SELECT DISTINCT account_id FROM ("
+        "  SELECT account_id FROM transactions WHERE symbol=? AND trade_date<=?"
+        "  UNION SELECT account_id FROM opening_inventory WHERE symbol=? AND build_date<=?"
+        ")",
+        (symbol, on.isoformat(), symbol, on.isoformat()),
+    ).fetchall()
+    held: set[str] = set()
+    for r in rows:
+        account_id = str(r[0])
+        if shares_through(conn, account_id, symbol, on=on) != 0:
+            held.add(account_id)
+    return held
+
+
+def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge row, flat by design
+    conn: sqlite3.Connection,
+    inp: CorporateActionInput,
+    *,
+    batch: Sequence[CorporateActionInput] = (),
+    book: Book | None = None,
+) -> list[Issue]:
+    """Validate one corporate action against the ledger (spec §5 edge matrix).
+
+    *batch* is every row being committed together, INCLUDING *inp* — E12 and E13 are
+    batch-level rules, and a per-row check that cannot see its siblings would reject a
+    correct multi-account entry and accept a partial one.
+
+    *book* is the replayed :class:`Book`, passed in so a batch replays ONCE rather than
+    per row (the same reason :class:`ActionIndex` is built per batch). Computed here when
+    omitted.
+
+    Hard issues (``needs_confirm=False``) make the row uncommittable; soft issues
+    (``needs_confirm=True``) block until acknowledged and then commit — the 賣超 tier.
+    """
+    issues: list[Issue] = []
+    add = issues.append
+
+    # --- kind must be one of the three (structural; everything below reads it) ---
+    try:
+        kind = CorporateActionKind(inp.kind.strip().upper())
+    except ValueError:
+        add(Issue(kind="unknown_action_kind",
+                  message=f"未知的公司行動類型 {inp.kind}(僅支援 分割 / 換股 / 分拆)"))
+        return issues
+
+    if conn.execute("SELECT 1 FROM accounts WHERE account_id=?",
+                    (inp.account_id,)).fetchone() is None:
+        add(Issue(kind="unknown_account", message=f"帳戶 {inp.account_id} 不存在"))
+
+    # --- E6 / E6a (D14): both ratio terms are POSITIVE INTEGERS ---
+    # Not "Decimal > 0": that admits 0.2857, a rounded quotient, which shorts a 2-for-7 of
+    # 700 shares to 199.9900 — and the later sell of 200 trips the 賣超 guard, whose
+    # acknowledgement discards the position's cost basis permanently. ratio_from == 0 would
+    # additionally divide by zero INSIDE the replay, i.e. a 500 on the dashboard path.
+    for label, term in (("換得股數", inp.ratio_to), ("換出股數", inp.ratio_from)):
+        if not is_ratio_term(term):
+            add(Issue(kind="ratio_not_positive_integer",
+                      message=(f"{label} 必須是正整數,目前是 {term}。"
+                               "公司行動的比例請填兩個整數(例如 3 換 1、1 換 20、2 換 7),"
+                               "不要填算好的小數 — 小數會讓股數短少,之後賣出時會被誤判為賣超")))
+
+    # --- E20: to_symbol vs from_symbol coherence, per kind ---
+    same_symbol = inp.from_symbol == inp.to_symbol
+    if kind is CorporateActionKind.SPLIT and not same_symbol:
+        add(Issue(kind="split_symbol_mismatch",
+                  message=f"分割的標的必須相同({inp.from_symbol} → {inp.to_symbol});"
+                          "若標的有變更,請改用「換股」"))
+    if kind is not CorporateActionKind.SPLIT and same_symbol:
+        zh = "換股" if kind is CorporateActionKind.EXCHANGE else "分拆"
+        add(Issue(kind="self_referential_action",
+                  message=f"{zh}的來源與目的標的不可相同({inp.from_symbol});"
+                          "若只是股數變動,請改用「分割」"))
+
+    # --- E8 / E9: cost_carry ---
+    if kind is CorporateActionKind.SPINOFF:
+        if inp.cost_carry is None:
+            add(Issue(kind="missing_cost_carry",
+                      message="分拆必須填寫成本分攤比例(母公司移轉給子公司的成本佔比)"))
+        elif not (Decimal("0") <= inp.cost_carry <= Decimal("1")):
+            add(Issue(kind="cost_carry_out_of_range",
+                      message=f"成本分攤比例必須介於 0 與 1 之間,目前是 {inp.cost_carry}"))
+        elif inp.cost_carry == Decimal("1"):
+            # E9 soft — and the text must name the DISPLAY consequence, not just the basis.
+            add(Issue(kind="cost_carry_all", needs_confirm=True,
+                      message=("成本分攤比例為 1:母公司的成本會全部移轉給子公司,"
+                               "母公司帳上成本歸零。連帶影響回本進度 — 真正收過股利的母公司"
+                               "會顯示 0.00%,而從未配息的子公司會顯示母公司原本的進度,"
+                               "甚至可能標示「已回本」。確定要這樣登錄嗎?")))
+    elif inp.cost_carry is not None:
+        add(Issue(kind="cost_carry_not_applicable",
+                  message=f"成本分攤比例僅適用於分拆,{inp.kind} 不需填寫"))
+
+    # --- E7: a no-op SPLIT (soft; ratio == 1 on an EXCHANGE is the ordinary rename) ---
+    if kind is CorporateActionKind.SPLIT and inp.ratio_to == inp.ratio_from:
+        add(Issue(kind="split_ratio_one", needs_confirm=True,
+                  message="分割比例為 1 比 1,這筆不會改變任何股數。確定要登錄嗎?"))
+
+    # --- E10 / D19: BOTH symbols must be REGISTERED. Keyed on registration, a database
+    # fact — never on the shape of the string. A regex for "looks like a broker identifier"
+    # eventually rejects a legitimate ticker and locks the owner out of their own ledger.
+    from_inst = get_instrument(conn, inp.from_symbol)
+    to_inst = get_instrument(conn, inp.to_symbol)
+    for label, symbol, inst in (("來源", inp.from_symbol, from_inst),
+                                ("目的", inp.to_symbol, to_inst)):
+        if inst is None:
+            add(Issue(kind="unregistered_symbol",
+                      message=(f"{label}標的 {symbol} 尚未註冊。請先到「標的管理」註冊;"
+                               "若這是券商對帳單上的內部代碼(而非交易代號),"
+                               "請改填該證券真正的代號")))
+
+    # --- E11: quote currency must match; carrying a basis across currencies would need an
+    # action-date FX rate, and inventing one corrupts the basis ---
+    if (from_inst is not None and to_inst is not None
+            and from_inst.quote_ccy is not to_inst.quote_ccy):
+        add(Issue(kind="quote_ccy_mismatch",
+                  message=(f"{inp.from_symbol} 以 {from_inst.quote_ccy.value} 計價,"
+                           f"{inp.to_symbol} 以 {to_inst.quote_ccy.value} 計價 — "
+                           "跨幣別的成本移轉需要當日匯率,本系統不會自行假設")))
+
+    # --- E1a: the source position must exist ON THE ACTION DATE ---
+    # The corporate-action analogue of the date-aware sell guard. Without it a stranded row
+    # reaches build_book, which has no try/except at dashboard.py — a 500.
+    if from_inst is not None and shares_through(
+        conn, inp.account_id, inp.from_symbol, on=inp.date
+    ) == 0:
+        add(Issue(kind="no_position_on_action_date",
+                  message=(f"{inp.account_id} 在 {inp.date.isoformat()} 沒有 "
+                           f"{inp.from_symbol} 的持倉,無法套用公司行動。"
+                           "請先補登該日之前的買進或期初庫存")))
+
+    stored = list_corporate_actions(conn)
+    siblings = [b for b in batch if b is not inp]
+
+    # --- E15, HARDENED (deviation from the spec's "soft warning", 2026-08-09): an EXACT
+    # duplicate of a stored row. The spec made this soft on the reasoning that "re-entering
+    # is plausible" — true for a transaction (you really can buy the same stock twice in a
+    # day at the same price), false for a corporate action, which is an EVENT: a 3-for-1
+    # happens once per (account, symbol, date). Acknowledging a soft warning here would
+    # apply the ratio twice and turn a 3-for-1 into a 9-for-1.
+    #
+    # It must also be checked BEFORE E12, and with its own message. An exact duplicate is
+    # by construction a same-date intersecting pair, so E12 would swallow every one of them
+    # and E15 could never fire — the same "the ⚠ provably never fires" defect E13 was
+    # rewritten to remove. E12's message is about ambiguous ORDER, which is not what is
+    # wrong here: two identical rows have no order problem, they have a doubling problem.
+    duplicate = any(
+        s.account_id == inp.account_id and s.date == inp.date and s.kind == kind.value
+        and s.from_symbol == inp.from_symbol and s.to_symbol == inp.to_symbol
+        and (s.ratio_to, s.ratio_from) == (inp.ratio_to, inp.ratio_from)
+        for s in stored
+    )
+    if duplicate:
+        add(Issue(kind="duplicate_action",
+                  message=(f"{inp.from_symbol} 在 {inp.date.isoformat()} 的這筆公司行動"
+                           "已經登錄過了。公司行動是事件,同一天只會發生一次 — "
+                           "再登錄一次會把比例套用兩次(3 比 1 會變成 9 比 1)。"
+                           "若要修改,請編輯原本那一筆")))
+
+    # --- E12 (D15): two same-date actions on the same account whose symbol sets intersect.
+    # Rejected, not tie-broken: `id` ASC is the order the owner happened to TYPE, and the
+    # two orders produce a 3x difference in share count while the conservation test stays
+    # green on both. The remedy is ONE row (a reverse split + rename is one EXCHANGE), or
+    # dating the steps apart.
+    mine = {inp.from_symbol, inp.to_symbol}
+    same_day: list[tuple[str, str]] = [
+        (s.from_symbol, s.to_symbol) for s in stored
+        if s.account_id == inp.account_id and s.date == inp.date
+    ] + [
+        (b.from_symbol, b.to_symbol) for b in siblings
+        if b.account_id == inp.account_id and b.date == inp.date
+    ]
+    for other in same_day:
+        if duplicate:
+            break  # already rejected above, with the accurate reason
+        if mine & set(other):
+            add(Issue(kind="same_date_action_conflict",
+                      message=(f"{inp.date.isoformat()} 已有另一筆涉及 "
+                               f"{'、'.join(sorted(mine & set(other)))} 的公司行動。"
+                               "同一天、同一標的的兩筆行動,先後順序會改變股數與成本,"
+                               "而系統無從得知正確順序 — 請合併成一筆,或把日期分開")))
+            break
+
+    # --- Conflicting ratios on one (symbol, date): the same event entered twice with
+    # different terms. One of them is wrong and the replay would apply BOTH.
+    for s in stored:
+        if (s.from_symbol == inp.from_symbol and s.date == inp.date
+                and s.kind == kind.value
+                and (s.ratio_to, s.ratio_from) != (inp.ratio_to, inp.ratio_from)):
+            add(Issue(kind="conflicting_ratio",
+                      message=(f"{inp.from_symbol} 在 {inp.date.isoformat()} 已登錄過比例 "
+                               f"{s.ratio_to} 比 {s.ratio_from},與本次的 "
+                               f"{inp.ratio_to} 比 {inp.ratio_from} 不一致。"
+                               "同一個事件只會有一個比例,請先確認正確的那一個")))
+            break
+
+    # --- E13 (D13): ALL-OR-NOTHING across accounts ---
+    # Positions are keyed (account, symbol), so N holding accounts need N rows. A partial
+    # application is REJECTED, not warned about: the drawer's reconciliation cannot see it
+    # (an account with no action row has corporate_delta 0, so its footer prints ✓), while
+    # `prices` has no account_id so the price correction is global — the un-actioned account
+    # then holds pre-action shares against post-action prices, and nothing computes that
+    # relationship.
+    if from_inst is not None:
+        holders = _accounts_holding_on(conn, inp.from_symbol, inp.date)
+        covered = {b.account_id for b in batch} | {inp.account_id} | {
+            s.account_id for s in stored
+            if s.from_symbol == inp.from_symbol and s.date == inp.date
+            and s.kind == kind.value
+        }
+        missing = holders - covered
+        if missing:
+            add(Issue(kind="incomplete_account_coverage",
+                      message=(f"{inp.from_symbol} 在 {inp.date.isoformat()} 還有 "
+                               f"{'、'.join(sorted(missing))} 也持有,公司行動必須對每個持有"
+                               "的帳戶都登錄一筆。只登錄一部分的話,未登錄的帳戶會用行動前的"
+                               "股數搭配行動後的價格,市值會錯,而且畫面上不會有任何警示")))
+
+    # --- E22 (D16) / E18 / E3 / E5: replay-derived states of the two positions ---
+    if book is None:
+        book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    by_key = {(h.account_id, h.symbol): h for h in book.holdings}
+    source = by_key.get((inp.account_id, inp.from_symbol))
+    dest = by_key.get((inp.account_id, inp.to_symbol))
+
+    if source is not None and source.oversold:
+        add(Issue(kind="oversold_source",
+                  message=(f"{inp.from_symbol} 目前是賣超(待釐清)部位,成本基礎已被捨棄,"
+                           "無法套用公司行動。請先補登缺少的買進或期初庫存")))
+    if kind is not CorporateActionKind.SPLIT and source is not None and source.short_open:
+        add(Issue(kind="short_source",
+                  message=(f"{inp.from_symbol} 目前有未回補的放空部位,換股／分拆沒有"
+                           "可誠實記錄的分錄。請先回補後再登錄")))
+    if kind is not CorporateActionKind.SPLIT and dest is not None and not same_symbol:
+        if dest.oversold:
+            add(Issue(kind="oversold_destination",
+                      message=(f"目的標的 {inp.to_symbol} 目前是賣超(待釐清)部位。"
+                               "把成本移轉過去會讓已被捨棄的成本基礎「復活」,"
+                               "算出一個看起來正常、實際上沒有依據的均價。"
+                               "請先處理該部位的賣超")))
+        if dest.short_open:
+            add(Issue(kind="short_destination",
+                      message=(f"目的標的 {inp.to_symbol} 目前有未回補的放空部位。"
+                               "多頭與空頭部位在本系統是互斥的,移轉過去會讓兩者混在一起,"
+                               "均價將失去意義。請先回補後再登錄")))
     return issues
 
 

@@ -31,11 +31,19 @@ def _text(conn: sqlite3.Connection, *, kind: str, frm: str | None = None,
     return art.content[3:].decode("utf-8")
 
 
-def test_kinds_map_covers_the_four_tabs() -> None:
-    assert set(LEDGER_KINDS) == {"transactions", "dividends", "fx", "opening"}
+def test_kinds_map_covers_every_exportable_ledger() -> None:
+    """Derived from shared/ledger_registry.py — this map is no longer hand-maintained.
+
+    `actions` (corporate actions) joined on 2026-08-06 by adding ONE registry line, which
+    is what put it in the export zip and gave it a CSV tab key at the same time. Its
+    ledger-page TAB is W7's entry-surface work; the router accepting the kind is not the
+    same thing as the page offering it, and nothing breaks in between.
+    """
+    assert set(LEDGER_KINDS) == {"transactions", "dividends", "fx", "opening", "actions"}
     assert LEDGER_KINDS["transactions"] == ("transactions", "trade_date")
     assert LEDGER_KINDS["fx"] == ("fx_conversions", "date")
     assert LEDGER_KINDS["opening"] == ("opening_inventory", "build_date")
+    assert LEDGER_KINDS["actions"] == ("corporate_actions", "date")
 
 
 def test_transactions_header_is_raw_db_columns() -> None:

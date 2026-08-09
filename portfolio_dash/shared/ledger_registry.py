@@ -56,6 +56,10 @@ LEDGER_TABLES: tuple[LedgerTable, ...] = (
     LedgerTable("fx_conversions", "換匯帳本", "date", "fx", "update"),
     LedgerTable("opening_inventory", "期初庫存", "build_date", "opening", "keyed"),
     LedgerTable("cash_movements", "資金收支", "date", None, "update"),
+    # The 6th ledger (spec 2026-08-06). This ONE line is the whole registration: db-stats,
+    # the export zip + its CSV tab, the Moomoo account merge and merge_reconcile.py all
+    # derive from here. Surrogate PK, no account-scoped UNIQUE -> "update".
+    LedgerTable("corporate_actions", "公司行動", "date", "actions", "update"),
 )
 
 TABLE_NAMES: tuple[str, ...] = tuple(t.table for t in LEDGER_TABLES)

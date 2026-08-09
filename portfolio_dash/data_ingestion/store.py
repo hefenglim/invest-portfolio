@@ -8,6 +8,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from pydantic import BaseModel, Field
 
+from portfolio_dash.shared.corporate_actions import CorporateAction, CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument, MarketRule
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -760,12 +761,188 @@ def list_transactions(
     ]
 
 
+class StoredCorporateAction(BaseModel):
+    """Pydantic model for a persisted corporate_actions row.
+
+    The ratio terms and ``cost_carry`` are Decimals here but are NOT validated as ratio
+    terms — that is :class:`CorporateAction`'s job, applied when the row is turned into a
+    domain model. Keeping the stored shape permissive means a hand-edited or legacy row
+    surfaces through the ledger page and the audit trail instead of making every read raise.
+    """
+
+    id: int
+    account_id: str
+    date: date
+    kind: str
+    from_symbol: str
+    to_symbol: str
+    ratio_to: Decimal
+    ratio_from: Decimal
+    cost_carry: Decimal | None = None
+    note: str | None = None
+
+
+def insert_corporate_action(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    action_date: date,
+    kind: CorporateActionKind,
+    from_symbol: str,
+    to_symbol: str,
+    ratio_to: Decimal,
+    ratio_from: Decimal,
+    cost_carry: Decimal | None = None,
+    note: str | None = None,
+    commit: bool = True,
+) -> int:
+    """Insert a corporate_actions row and return its new primary-key id.
+
+    Pass ``commit=False`` to defer the commit to the caller (batch atomicity), matching
+    every other ledger insert.
+    """
+    cur = conn.execute(
+        """INSERT INTO corporate_actions (account_id, date, kind, from_symbol, to_symbol,
+               ratio_to, ratio_from, cost_carry, note) VALUES (?,?,?,?,?,?,?,?,?)""",
+        (
+            account_id,
+            action_date.isoformat(),
+            kind.value,
+            from_symbol,
+            to_symbol,
+            to_db(ratio_to),
+            to_db(ratio_from),
+            None if cost_carry is None else to_db(cost_carry),
+            note,
+        ),
+    )
+    if commit:
+        conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def list_corporate_actions(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str | None = None,
+    symbol: str | None = None,
+) -> list[StoredCorporateAction]:
+    """Return corporate_actions rows ordered by date ASC, id ASC.
+
+    Optionally filter by *account_id* and/or *symbol* (matching EITHER end of the action —
+    a symbol's history includes the actions that created it as well as those that consumed
+    it). **Every** consumer loads through here; no module writes its own SELECT.
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    if account_id is not None:
+        clauses.append("account_id=?")
+        params.append(account_id)
+    if symbol is not None:
+        clauses.append("(from_symbol=? OR to_symbol=?)")
+        params.extend([symbol, symbol])
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT id, account_id, date, kind, from_symbol, to_symbol, ratio_to, ratio_from, "
+        f"cost_carry, note FROM corporate_actions{where} ORDER BY date ASC, id ASC",
+        params,
+    ).fetchall()
+    return [
+        StoredCorporateAction(
+            id=r["id"],
+            account_id=r["account_id"],
+            date=date.fromisoformat(r["date"]),
+            kind=r["kind"],
+            from_symbol=r["from_symbol"],
+            to_symbol=r["to_symbol"],
+            ratio_to=from_db(r["ratio_to"]),
+            ratio_from=from_db(r["ratio_from"]),
+            cost_carry=None if r["cost_carry"] is None else from_db(r["cost_carry"]),
+            note=r["note"],
+        )
+        for r in rows
+    ]
+
+
+def get_corporate_action(
+    conn: sqlite3.Connection, action_id: int
+) -> StoredCorporateAction | None:
+    """Return one corporate action by id, or None."""
+    for a in list_corporate_actions(conn):
+        if a.id == action_id:
+            return a
+    return None
+
+
+_CA_CAPTURE = (
+    "SELECT id, account_id, date, kind, from_symbol, to_symbol, ratio_to, ratio_from, "
+    "cost_carry, note FROM corporate_actions WHERE id=?"
+)
+
+
+def update_corporate_action(
+    conn: sqlite3.Connection,
+    action_id: int,
+    *,
+    account_id: str,
+    action_date: date,
+    kind: CorporateActionKind,
+    from_symbol: str,
+    to_symbol: str,
+    ratio_to: Decimal,
+    ratio_from: Decimal,
+    cost_carry: Decimal | None = None,
+    note: str | None = None,
+) -> bool:
+    """Update one corporate action in place; audit the pre-mutation row. False if absent.
+
+    Editing an action RE-COMPUTES history (E16 / domain-ledger N2) — nothing is snapshotted,
+    so a previously displayed share count and every figure derived from it will change. That
+    is intended and is why the before-image goes to ``ledger_audit`` like every other ledger
+    correction.
+    """
+    before = _capture(conn, _CA_CAPTURE, (action_id,))
+    if before is None:
+        return False
+    _write_audit(conn, "corporate_actions", str(action_id), "update", before)
+    conn.execute(
+        """UPDATE corporate_actions SET account_id=?, date=?, kind=?, from_symbol=?,
+               to_symbol=?, ratio_to=?, ratio_from=?, cost_carry=?, note=? WHERE id=?""",
+        (
+            account_id,
+            action_date.isoformat(),
+            kind.value,
+            from_symbol,
+            to_symbol,
+            to_db(ratio_to),
+            to_db(ratio_from),
+            None if cost_carry is None else to_db(cost_carry),
+            note,
+            action_id,
+        ),
+    )
+    conn.commit()
+    return True
+
+
+def delete_corporate_action(conn: sqlite3.Connection, action_id: int) -> bool:
+    """Delete one corporate action; audit the pre-deletion row. False if absent."""
+    before = _capture(conn, _CA_CAPTURE, (action_id,))
+    if before is None:
+        return False
+    _write_audit(conn, "corporate_actions", str(action_id), "delete", before)
+    conn.execute("DELETE FROM corporate_actions WHERE id=?", (action_id,))
+    conn.commit()
+    return True
+
+
 def load_ledger_bundle(
     conn: sqlite3.Connection,
     *,
     transactions: list[StoredTransaction] | None = None,
     dividends: list[StoredDividend] | None = None,
     opening: list[StoredOpening] | None = None,
+    actions: list[StoredCorporateAction] | None = None,
 ) -> LedgerBundle:
     """Load every ledger a replay reads as ONE bundle (``Stored*`` rows -> ledger models).
 
@@ -784,6 +961,7 @@ def load_ledger_bundle(
     s_txs = transactions if transactions is not None else list_transactions(conn)
     s_divs = dividends if dividends is not None else list_dividends(conn)
     s_open = opening if opening is not None else list_opening(conn)
+    s_acts = actions if actions is not None else list_corporate_actions(conn)
     return LedgerBundle(
         transactions=[
             Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
@@ -803,6 +981,14 @@ def load_ledger_bundle(
                              original_cost_total=s.original_cost_total,
                              build_date=s.build_date)
             for s in s_open
+        ],
+        actions=[
+            CorporateAction(account_id=s.account_id, date=s.date,
+                            kind=CorporateActionKind(s.kind),
+                            from_symbol=s.from_symbol, to_symbol=s.to_symbol,
+                            ratio_to=s.ratio_to, ratio_from=s.ratio_from,
+                            cost_carry=s.cost_carry, note=s.note)
+            for s in s_acts
         ],
         instruments={i.symbol: i for i in list_instruments(conn)},
     )

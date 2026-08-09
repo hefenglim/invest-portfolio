@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
+from portfolio_dash.shared.corporate_actions import CorporateAction
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -85,7 +86,8 @@ class LedgerBundle:
     ledger meant editing eight signatures — and *forgetting* one of them is silent. With
     the bundle, a new ledger is one field here plus one line in
     :func:`~portfolio_dash.data_ingestion.store.load_ledger_bundle`; nothing downstream
-    changes shape. (The corporate-action ledger is the next field to land.)
+    changes shape. ``actions`` is that promise being kept: it landed as one field, and no
+    call site changed shape to receive it.
 
     A dataclass, not a ``BaseModel``: Pydantic would re-validate and copy every row on
     construction, and :meth:`through` builds one bundle per day of the trend replay.
@@ -97,6 +99,7 @@ class LedgerBundle:
     dividends: list[Dividend] = field(default_factory=list)
     opening: list[OpeningInventory] = field(default_factory=list)
     instruments: dict[str, Instrument] = field(default_factory=dict)
+    actions: list[CorporateAction] = field(default_factory=list)
 
     def through(self, day: date) -> "LedgerBundle":
         """Everything dated on-or-before *day*, over the daily trend replay's date columns.
@@ -110,6 +113,7 @@ class LedgerBundle:
             transactions=[t for t in self.transactions if t.trade_date <= day],
             dividends=[d for d in self.dividends if d.date <= day],
             opening=[o for o in self.opening if o.build_date <= day],
+            actions=[a for a in self.actions if a.date <= day],
         )
 
     @property
@@ -120,10 +124,17 @@ class LedgerBundle:
         Callers decide what to do about it — the dashboard drops the rows and reports the
         symbols, 重算 refuses outright — but the SET is computed here, once, over every
         ledger the bundle carries.
+
+        An action contributes **both** its symbols (E21): the skip-set used to be built
+        from three ledgers, and an action row referencing a deleted instrument would then
+        reach ``build_book``, whose ``quote_ccy()`` raises ``KeyError`` — a 500, and a
+        different exception type from every other degradation path.
         """
         used = ({t.symbol for t in self.transactions}
                 | {d.symbol for d in self.dividends}
-                | {o.symbol for o in self.opening})
+                | {o.symbol for o in self.opening}
+                | {a.from_symbol for a in self.actions}
+                | {a.to_symbol for a in self.actions})
         return sorted(used - self.instruments.keys())
 
     def without_unregistered(self) -> "LedgerBundle":
@@ -134,4 +145,8 @@ class LedgerBundle:
             transactions=[t for t in self.transactions if t.symbol in known],
             dividends=[d for d in self.dividends if d.symbol in known],
             opening=[o for o in self.opening if o.symbol in known],
+            # BOTH symbols must be known: an action half of whose pair is unregistered
+            # cannot be booked either way round.
+            actions=[a for a in self.actions
+                     if a.from_symbol in known and a.to_symbol in known],
         )
