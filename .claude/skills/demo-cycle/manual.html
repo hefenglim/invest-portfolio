@@ -1,0 +1,1330 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>/demo-cycle 使用手冊</title>
+<style>
+/* demo-cycle report kit — the design language of docs/audit/*.html, extracted.
+   Dark-first, light via prefers-color-scheme + an explicit [data-theme] override so a
+   printed/shared copy is readable either way. Dense, data-first, tabular numerals. */
+
+:root{
+  --ink:#0e1116; --panel:#161b22; --panel-2:#1c222b; --line:#262e39;
+  --text:#e6e9ee; --text-2:#aab3c0; --text-3:#78838f;
+  --accent:#5aa2f5; --accent-soft:#5aa2f51f;
+  --hi:#e2564d; --md:#d99a35; --ok:#3fa672;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+}
+@media (prefers-color-scheme: light){
+  :root{ --ink:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --line:#dfe3ea;
+         --text:#161b22; --text-2:#4d5764; --text-3:#79838f; --accent-soft:#5aa2f514; }
+}
+:root[data-theme="dark"]{ --ink:#0e1116; --panel:#161b22; --panel-2:#1c222b; --line:#262e39;
+  --text:#e6e9ee; --text-2:#aab3c0; --text-3:#78838f; --accent-soft:#5aa2f51f; }
+:root[data-theme="light"]{ --ink:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --line:#dfe3ea;
+  --text:#161b22; --text-2:#4d5764; --text-3:#79838f; --accent-soft:#5aa2f514; }
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);
+     line-height:1.65;font-size:15px;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1040px;margin:0 auto;padding:0 20px 96px}
+h1,h2,h3,h4{text-wrap:balance;line-height:1.25;margin:0}
+code,.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+a{color:var(--accent)}
+
+header.top{padding:54px 0 26px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;
+         color:var(--text-3);margin-bottom:13px}
+h1{font-size:31px;font-weight:650;letter-spacing:-.02em}
+.sub{color:var(--text-2);margin-top:12px;max-width:66ch}
+
+.shape{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+       border-radius:0 10px 10px 0;padding:16px 18px;margin:26px 0 8px}
+.shape b{color:var(--text)}
+
+section{margin:44px 0 0;scroll-margin-top:52px}
+h2{font-size:20px;font-weight:620;margin-bottom:4px;display:flex;align-items:baseline;gap:10px;
+   flex-wrap:wrap}
+h2 .n{font-family:var(--mono);font-size:12px;color:var(--text-3);letter-spacing:.1em}
+h3{font-size:15px;margin:20px 0 3px}
+.lede{color:var(--text-2);margin:6px 0 18px;max-width:72ch}
+
+/* before / after — the spine of every demo in this kit */
+.vs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+@media(max-width:720px){.vs{grid-template-columns:1fr}}
+.vsbox{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:13px 15px}
+.vsbox h4{margin:0 0 7px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.vsbox.before{border-color:#e2564d55} .vsbox.before h4{color:var(--hi)}
+.vsbox.after{border-color:#3fa67255}  .vsbox.after  h4{color:var(--ok)}
+.vsbox p{margin:0;font-size:14px;color:var(--text-2)}
+
+pre{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:11px 13px;
+    overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;margin:8px 0}
+pre .del{color:var(--hi)} pre .add{color:var(--ok)} pre .cm{color:var(--text-3)}
+pre .win{background:#e2564d26;border-radius:3px;padding:0 3px}
+
+/* the interactive lab: mode switch + width slider + live sandbox + measured readout */
+.lab{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:16px 0}
+.lab .dsub{color:var(--text-3);font-size:12.5px;margin-bottom:13px}
+.modes{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.modes button{background:var(--panel-2);border:1px solid var(--line);color:var(--text-2);
+    border-radius:7px;padding:8px 13px;font-size:13px;cursor:pointer;font-family:var(--sans);
+    text-align:left;line-height:1.35}
+.modes button small{display:block;font-size:11px;color:var(--text-3);margin-top:2px}
+.modes button:hover{border-color:var(--accent)}
+.modes button.on{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+.modes button.on.bad{border-color:var(--hi);background:#e2564d14}
+.modes button.on.good{border-color:var(--ok);background:#3fa67214}
+
+.sizer{display:flex;align-items:center;gap:12px;margin:10px 0 6px;flex-wrap:wrap}
+.sizer input[type=range]{flex:1;min-width:180px;accent-color:var(--accent)}
+.sizer .w{font-family:var(--mono);font-size:12.5px;color:var(--text-2);white-space:nowrap}
+
+.stage{border:1px dashed var(--line);border-radius:8px;overflow:hidden;background:#0b0e12;
+       padding:8px;overflow-x:auto}
+/* These two overrides MUST stay directly below the base rule. Both are (0,1,0) — a
+   media query adds no specificity — so at equal specificity the LATER rule wins. Moved
+   up into the token block at the top of this file, they silently stop working. This is
+   divergence ① of the 2026-07-26 root-cause demo, reproduced inside its own toolkit. */
+@media (prefers-color-scheme: light){ .stage{background:#e9ecf1} }
+:root[data-theme="light"] .stage{background:#e9ecf1}
+:root[data-theme="dark"]  .stage{background:#0b0e12}
+iframe{border:0;display:block;background:#0e1116;height:150px;transition:width .1s}
+
+.readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:12px}
+.ro{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:9px 11px}
+.ro .k{font-size:11px;color:var(--text-3)}
+.ro .v{font-family:var(--mono);font-size:15px;font-weight:600;margin-top:2px;
+       font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ro.bad{border-color:var(--hi)}  .ro.bad .v{color:var(--hi)}
+.ro.good{border-color:var(--ok)} .ro.good .v{color:var(--ok)}
+.verdict{margin-top:12px;padding:11px 13px;border-radius:7px;font-size:13.5px;
+         border:1px solid var(--line);background:var(--panel-2)}
+.verdict.bad{border-color:#e2564d66;background:#e2564d12}
+.verdict.good{border-color:#3fa67266;background:#3fa67212}
+
+.ctrl{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:11px;margin:12px 0}
+.ctrl label{display:block;font-size:11.5px;color:var(--text-3);margin-bottom:4px}
+.ctrl input,.ctrl select{width:100%;background:var(--panel-2);border:1px solid var(--line);
+    color:var(--text);border-radius:6px;padding:7px 9px;font-family:var(--mono);font-size:13px}
+
+/* tables — always inside .tw so a wide table scrolls itself instead of the page */
+.tw{overflow-x:auto;margin:12px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px}
+th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11.5px;letter-spacing:.06em;color:var(--text-3);text-transform:uppercase;font-weight:600}
+td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+tr.hl td{background:#e2564d0f}
+.bad{color:var(--hi)} .good{color:var(--ok)} .warn{color:var(--md)} .dim{color:var(--text-3)}
+
+.pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:4px;
+      border:1px solid var(--line);white-space:nowrap}
+.pill.pass{color:var(--ok);border-color:#3fa67255;background:#3fa67216}
+.pill.rej{color:var(--hi);border-color:#e2564d55;background:#e2564d16}
+.pill.warn{color:var(--md);border-color:#d99a3555;background:#d99a3516}
+.sev{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid}
+.sev.h{color:var(--hi);border-color:#e2564d66;background:#e2564d16}
+.sev.m{color:var(--md);border-color:#d99a3566;background:#d99a3516}
+.sev.l{color:var(--text-2);border-color:var(--line);background:var(--panel-2)}
+
+.note{font-size:12.5px;color:var(--text-3);margin-top:11px;padding-top:11px;
+      border-top:1px dashed var(--line)}
+img.shot{max-width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:8px;
+         margin:10px 0}
+
+.toc{position:sticky;top:0;background:var(--ink);border-bottom:1px solid var(--line);
+     padding:9px 0;z-index:20}
+.toc-in{max-width:1040px;margin:0 auto;padding:0 20px;display:flex;gap:6px;overflow-x:auto}
+.toc a{font-size:12.5px;color:var(--text-2);text-decoration:none;padding:4px 9px;border-radius:5px;
+       white-space:nowrap}
+.toc a:hover{background:var(--panel);color:var(--accent)}
+
+/* self-check strip: every offline reimplementation must prove itself against the real
+   engine's numbers, in the report, in front of the reader. */
+#pd-selfcheck{margin:14px 0}
+#pd-selfcheck .hd{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+#pd-selfcheck .hd b{font-size:13px}
+#pd-selfcheck .sum{font-family:var(--mono);font-size:12px;color:var(--text-3)}
+footer{margin-top:54px;padding-top:20px;border-top:1px solid var(--line);color:var(--text-3);
+       font-size:12.5px}
+
+</style>
+
+<nav class="toc"><div class="toc-in">
+  <a href="#m1">這是什麼・什麼時候用</a>
+  <a href="#m2">四階段與產物</a>
+  <a href="#m3">開工前置：模型閘與可丟棄實例</a>
+  <a href="#m4">工具一 css：讀碼讀不出來的那件事</a>
+  <a href="#m5">工具二 wiring：每顆按鈕真的接到東西了嗎</a>
+  <a href="#m6">工具三 layout：溢出、裁字、console 錯誤</a>
+  <a href="#m7">寫報告：kit API 與六條硬規則</a>
+  <a href="#m8">使用技巧</a>
+  <a href="#m9">疑難排解與速查</a>
+  <a href="#selfcheck">✓ 自我校驗</a>
+</div></nav>
+
+<div class="wrap">
+
+<header class="top">
+  <div class="eyebrow">portfolio-dash · user manual</div>
+  <h1>/demo-cycle 使用手冊</h1>
+  <p class="sub">完整使用手冊：四階段流程、三支量測工具、報告 kit API、使用技巧與誤判清單。</p>
+</header>
+
+<div class="shape">
+  <b>怎麼讀這份文件：</b>每一節都附一個<strong>可以動手玩的 demo</strong>。看不懂就直接玩那個 demo，文字是註解。
+</div>
+
+<section id="m1">
+  <h2><span class="n">01</span>這是什麼・什麼時候用</h2>
+  <p class="lede"><code>/demo-cycle</code> 是 portfolio-dash 的「以 demo 為規格」開發迴圈。
+    它的每一個階段都只產出<strong>一份可以點的自足 HTML</strong>：主張要嘛<strong>當場量給你看</strong>，
+    要嘛<strong>當場跟真引擎對帳給你看</strong>，不靠文字斷言。</p>
+
+  <div class="vs">
+    <div class="vsbox before"><h4>沒有這套流程時</h4>
+      <p>規格寫成文字 → 你我各自解讀 → 做出來不是你要的 →
+        回頭吵「當初講的是什麼意思」。稽核也一樣：讀程式碼推出根因，
+        <strong>症狀對、根因錯</strong>，照著改等於白改。</p></div>
+    <div class="vsbox after"><h4>有這套流程時</h4>
+      <p>規格是一個<strong>你點得動的 demo</strong>，前後可切換；稽核的每條發現都附
+        <strong>在跑著的實例上量到的數字</strong>，根因標明「已驗證」或「推測待驗」。
+        你在核准前就知道哪幾項可能變形。</p></div>
+  </div>
+
+  <div class="shape">
+    <b>它為什麼存在：</b>2026-07-25 的全站稽核，13 條發現的<strong>症狀全對</strong>，
+    但有 <strong>4 條的根因是錯的</strong>——因為那 4 條是「讀程式碼推出來的」。
+    照原建議實作，2 條完全無效、1 條改錯地方、1 條會產生迴歸。
+    <code>probe_live.py</code> 就是這件事的修正：<strong>去量，不要猜</strong>。
+  </div>
+
+  <div class="lab">
+    <h3>先決定：你現在該跑哪個階段？</h3>
+    <div class="dsub">選一個最接近你處境的情境，下面會給出階段與第一條指令。</div>
+    <div class="modes" id="pick-modes">
+      <button data-m="0" class="on">我想加一個新功能<small>還沒開始寫</small></button>
+      <button data-m="1">整站健檢<small>不確定哪裡壞了</small></button>
+      <button data-m="2">我看到某個地方怪怪的<small>單點異常</small></button>
+      <button data-m="3">修好了，要交付<small>需要證據</small></button>
+      <button data-m="4">修的時候發現稽核猜錯了<small>機制跟報告不一樣</small></button>
+    </div>
+    <div class="verdict" id="pick-verdict">—</div>
+    <pre id="pick-cmd" class="dim">—</pre>
+    <div class="note">四個階段可以單獨跑。<code>audit → fix → rootcause</code> 是最常見的串接；
+      <strong>沒有分歧就不要生 rootcause 報告</strong>，改在 fix 報告裡寫「無分歧」——
+      那一節空著本身就是資訊。</div>
+  </div>
+</section>
+
+<section id="m2">
+  <h2><span class="n">02</span>四階段與產物</h2>
+  <div class="tw"><table>
+    <thead><tr><th>階段</th><th>回答什麼</th><th>產物（進 git）</th><th>結束條件</th></tr></thead>
+    <tbody>
+      <tr><td><code>propose</code></td><td>要不要做、到底做成什麼</td>
+          <td><code>docs/spec/&lt;date&gt;-&lt;slug&gt;.html</code></td>
+          <td class="good">你在 demo 上確認 → 驗收表成為規格</td></tr>
+      <tr><td><code>audit</code></td><td>全站哪裡壞了</td>
+          <td><code>docs/audit/&lt;date&gt;-&lt;slug&gt;.html</code></td>
+          <td>H/M/L 分級，每條附量測＋根因信心度</td></tr>
+      <tr><td><code>fix</code></td><td>真的修好了嗎、證據在哪</td>
+          <td><code>docs/audit/&lt;date&gt;-&lt;slug&gt;.html</code></td>
+          <td>每項都有證據；gate 全綠</td></tr>
+      <tr><td><code>rootcause</code></td><td>修法哪裡跟稽核的猜測分歧</td>
+          <td><code>docs/audit/&lt;date&gt;-&lt;slug&gt;.html</code></td>
+          <td class="dim">沒分歧就不產出</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">產物落點是 2026-07-27 的決定：<strong>提案分開放 <code>docs/spec/</code></strong>，
+    稽核／修正／根因沿用既有的 <code>docs/audit/</code>。全部進 git，變成可回溯的規格史。</p>
+</section>
+
+<section id="m3">
+  <h2><span class="n">03</span>開工前置：模型閘與可丟棄實例</h2>
+
+  <h3>① 模型閘</h3>
+  <p class="lede">你的長期指示是<strong>審查者＝Opus 5、最高推理</strong>。skill 不能自己換模型，
+    所以每個階段開頭要先報當前模型與推理等級；不是 Opus 5 / xhigh 就請你 <code>/model</code> 切換。
+    <strong>不要用較低階模型跑完再叫它稽核。</strong></p>
+  <div class="tw"><table>
+    <thead><tr><th>情境</th><th>做法</th></tr></thead>
+    <tbody>
+      <tr><td>一般稽核</td><td>主 session 依序跑完各面向（預設）</td></tr>
+      <tr><td>你明確加了 <code>--fanout</code></td>
+          <td>每個稽核面向派一個 subagent，帶 <code>model:</code> 覆寫，最後彙整</td></tr>
+      <tr><td>你沒說</td><td class="bad">不要 fan out。平行分派要花你的 token，那是你的決定</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>② 起一個可丟棄的實例</h3>
+  <p class="lede"><strong>絕不對 prod 探測，也不要用你的工作資料庫。</strong>
+    <code>scripts/seed_demo.py</code> 全部是虛構資料，而且會拒絕重複灌。</p>
+  <pre><span class="cm"># PowerShell，從 repo 根目錄</span>
+$w = "$env:TEMP\dc"; New-Item -ItemType Directory -Force $w | Out-Null
+$env:DB_PATH = "$w\probe.db"; $env:PD_DISABLE_SCHEDULER = "1"; $env:PYTHONIOENCODING = "utf-8"
+.\.venv\Scripts\python.exe scripts\seed_demo.py
+
+$p = Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory (Get-Location) `
+  -FilePath ".\.venv\Scripts\python.exe" `
+  -ArgumentList "-m","uvicorn","portfolio_dash.api.app:create_app","--factory","--host","127.0.0.1","--port","8477" `
+  -RedirectStandardOutput "$w\uvicorn.out.log" -RedirectStandardError "$w\uvicorn.err.log"
+$p.Id | Set-Content "$w\uvicorn.pid"
+
+<span class="cm"># 一定要輪詢——首次開機要 bootstrap DB，寫死 Start-Sleep 3 會拿到 connection refused</span>
+for ($i=0; $i -lt 40; $i++) {
+  try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8477/api/health).Content; break }
+  catch { Start-Sleep -Milliseconds 500 }
+}</pre>
+  <p class="note">收工：<code>Stop-Process -Id (Get-Content "$w\uvicorn.pid") -Force</code>。
+    要用 <strong>detached 的 Start-Process</strong>，不要用 harness 的背景工作——
+    長時間工作會被中途砍掉（<code>LESSONS_LEARNED.md</code> 2026-07-24）。</p>
+</section>
+
+<section id="m4">
+  <h2><span class="n">04</span>工具一 <code>css</code>：讀碼讀不出來的那件事</h2>
+  <p class="lede">CSS 到底哪一條宣告勝出，<strong>讀檔案是問不出答案的</strong>。
+    兩個機制專門騙人：同特異性時<strong>後面的贏</strong>，以及
+    <strong><code>@media</code> 不貢獻任何特異性</strong>。
+    v0.1.24 的 M1、M2 兩條根因就是栽在這裡。</p>
+
+  <pre>.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\probe_live.py css `
+    http://127.0.0.1:8477 --selector ".kpi-band" --prop grid-template-columns --width 1257</pre>
+
+  <p>它會印出<strong>所有命中的宣告</strong>（依原始碼順序）、各自的特異性、
+    當前寬度下 <code>@media</code> 條件是否成立、誰真的勝出，並在踩到陷阱時直接點名。
+    下面是這條指令在本機的<strong>真實輸出節錄</strong>：</p>
+  <pre>   (0,1,0) #0   .kpi-band  =&gt;  repeat(8, 1fr)
+   (0,2,0) #1   .kpi-band.v2  =&gt;  1.15fr 1.3fr 1.05fr 1.25fr 1.25fr
+   (0,1,0) #2   .kpi-band  @media (max-width: 1280px)  =&gt;  repeat(4, 1fr)
+<span class="win">-&gt; (0,2,0) #3   .kpi-band.v2  @media (max-width: 1280px)  =&gt;  repeat(4, 1fr)</span>
+ x (0,1,0) #8   .kpi-band  @media (max-width: 760px)  =&gt;  1fr 1fr   <span class="cm">(condition false at this width)</span>
+
+  WINNER: .kpi-band.v2 @media (max-width: 1280px) -&gt; repeat(4, 1fr)</pre>
+
+  <div class="lab">
+    <h3>實驗：同一段 CSS，三種寫法，看 <code>getComputedStyle</code> 當場改變</h3>
+    <div class="dsub">下面是真的 iframe，跑真的瀏覽器級聯——不是模擬。
+      「斷點」用 620px 代表真實的 1280px，機制完全相同。把滑桿拉到 620 以下觀察。</div>
+    <div class="modes" id="css-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況（壞）<small>斷點只寫 .band，被 .band.v2 壓過</small></button>
+      <button data-m="1" data-tone="bad">照「加 min-width:0」的建議<small>加了也沒用</small></button>
+      <button data-m="2" data-tone="good">實際修法<small>斷點補上 .band.v2</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="css-w">560</b> px</span>
+      <input type="range" id="css-range" min="360" max="820" step="10" value="560">
+    </div>
+    <div class="stage"><iframe id="css-frame" title="cascade demo" style="height:120px"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="css-ro-cols"><div class="k">computed grid-template-columns</div><div class="v">—</div></div>
+      <div class="ro" id="css-ro-card"><div class="k">每張卡片寬</div><div class="v">—</div></div>
+      <div class="ro" id="css-ro-clip"><div class="k">內容被裁掉的卡片數</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="css-verdict">—</div>
+    <div class="note">真實畫面上的後果就是 KPI 卡印出
+      <code>年化報酬 (XIRR)no FX rate sto…</code> 這種被切一半的字。
+      <strong>模式 ① 的存在是重點</strong>：它示範一個「看起來完全正確的 diff」如何完全無效——
+      因為要修的機制從頭到尾沒被碰到。</div>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>工具講的話</th><th>意思</th><th>你該做什麼</th></tr></thead>
+    <tbody>
+      <tr><td><code>loses on SOURCE ORDER</code></td>
+          <td>同特異性，靠出現順序輸掉</td>
+          <td class="good">改那條<strong>勝出</strong>的（移除或收窄），改輸家沒有用</td></tr>
+      <tr><td><code>media queries add NO specificity</code></td>
+          <td>斷點被無條件規則壓過，形同不存在</td>
+          <td class="good">把斷點的選擇器<strong>提升到同等或更高</strong>（補上 <code>.v2</code>）</td></tr>
+      <tr><td><code>condition false at this width</code></td>
+          <td>該規則此刻根本沒參賽</td>
+          <td class="dim">別把它算進推理；換個 <code>--width</code> 再量</td></tr>
+      <tr><td><code>computed != winning declaration</code></td>
+          <td>簡寫／繼承／動畫介入了</td>
+          <td class="good">以 <code>computed</code> 為準</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="m5">
+  <h2><span class="n">05</span>工具二 <code>wiring</code>：每顆按鈕真的接到東西了嗎</h2>
+  <p class="lede">先靜態分級成 <span class="pill pass">wired</span>
+    <span class="pill warn">weak</span> <span class="pill rej">SUSPECT</span>，
+    再用 <code>--click</code> 把線索變成判決。
+    <strong>靜態分析只能說「沒有東西指向它」，永遠不能說「它沒作用」。</strong></p>
+
+  <pre>.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\probe_live.py wiring `
+    http://127.0.0.1:8477 --pages "/ledger.html" <span class="add">--click</span>
+
+<span class="cm"># 本機真實輸出（節錄）</span>
+/ledger.html: 84 controls (52 visible) — 27 wired, 19 weak, 6 SUSPECT
+  clicking 25 lead(s), fresh page each (MUTATES STATE)…
+    ok  tab-csv        4 DOM mutation(s)
+    ok  chip active    4 request(s) e.g. transactions?limit=50&amp;offset=0; 28 DOM mutation(s)
+  <span class="del">DEAD? tab-manual     nothing happened</span></pre>
+
+  <div class="lab">
+    <h3>實驗：判定器——把控制項的特徵餵進去，看它會被分到哪一級</h3>
+    <div class="dsub">這裡跑的是 <code>probe_live.py</code> 的<strong>真實分級規則</strong>
+      （下方自我校驗會拿它跟工具在本機的實際輸出對帳）。調整看看判定怎麼變。</div>
+    <div class="ctrl">
+      <div><label>有 inline onclick</label>
+        <select id="w-inline"><option value="0">否</option><option value="1">是</option></select></div>
+      <div><label>是真連結 / form submit</label>
+        <select id="w-link"><option value="0">否</option><option value="1">是</option></select></div>
+      <div><label>id 的字面出現在 JS</label>
+        <select id="w-id"><option value="none">沒有 id</option>
+          <option value="no">有 id，但 JS 找不到字面</option>
+          <option value="yes">有 id 且 JS 有引用</option></select></div>
+      <div><label>data-* 被 dispatch（值≥3 字）</label>
+        <select id="w-data"><option value="0">否</option><option value="1">是</option></select></div>
+      <div><label>class 有被 JS 提到</label>
+        <select id="w-cls"><option value="0">否</option><option value="1">是</option></select></div>
+      <div><label>該 class 在頁面上共用數</label>
+        <input type="number" id="w-freq" value="4" min="0" step="1"></div>
+      <div><label>--click 的結果</label>
+        <select id="w-click"><option value="skip">未測</option>
+          <option value="yes">有反應</option><option value="no">nothing happened</option></select></div>
+    </div>
+    <div class="readout">
+      <div class="ro" id="w-ro-v"><div class="k">靜態判定</div><div class="v">—</div></div>
+      <div class="ro" id="w-ro-e"><div class="k">採信的證據</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="w-verdict">—</div>
+    <div class="note"><strong>為什麼 class 要看共用數：</strong><code>.btn</code> 被 21 個控制項穿著，
+      JS 裡出現 <code>'.btn'</code> 只證明這個 class 有人用，<strong>完全不證明「這一顆」有作用</strong>；
+      而 <code>.sb-collapse</code> 只有 1 個控制項穿，那就認得出它。</div>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>誤判類型</th><th>為什麼</th><th>怎麼辦</th></tr></thead>
+    <tbody>
+      <tr><td>組合出來的選擇器</td>
+          <td>本專案用 <code>$('#tab-' + t)</code> 綁分頁，字面 <code>'tab-csv'</code> 根本不存在</td>
+          <td class="good">預期會是 SUSPECT；用 <code>--click</code> 判決</td></tr>
+      <tr><td>本來就啟用的分頁／開關</td>
+          <td><code>tab-manual</code> 是預設分頁，點下去 class 沒變 → 0 mutation</td>
+          <td class="good">先切到別的分頁再點一次，才能下結論</td></tr>
+      <tr><td>程式動態建立的元素</td>
+          <td><code>el('button','sb-collapse')</code>，class 以裸字串出現而非選擇器</td>
+          <td class="good">共用數 ≤2 時工具會採信；否則 <code>--click</code></td></tr>
+      <tr><td>執行期寫入的 dataset</td>
+          <td><code>el.dataset.seen='1'</code> 會讓每顆按鈕都像被 dispatch</td>
+          <td class="dim">工具已忽略 &lt;3 字的值；知道有這回事就好</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note"><strong><code>--click</code> 會改變狀態</strong>——只能對可丟棄的實例跑，
+    絕不對 prod 或你的真實帳本。</p>
+</section>
+
+<section id="m6">
+  <h2><span class="n">06</span>工具三 <code>layout</code>：溢出、裁字、console 錯誤</h2>
+  <p class="lede">逐頁 × 逐寬度量：文件被撐寬多少、誰撐的、哪些文字被裁掉、有沒有 console 錯誤，
+    順便存全頁截圖。關鍵在它<strong>會區分「真的溢出」與「表格在 <code>overflow-x:auto</code> 裡合法捲動」</strong>
+    ——v0.1.24 的 M 級發現就卡在這個分辨上。</p>
+
+  <pre>.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\probe_live.py layout `
+    http://127.0.0.1:8477 --pages "/,/data-center.html,/ledger.html" --widths 390,1257 --out $w\probe
+
+<span class="cm"># 本機真實輸出（節錄）</span>
+ok  /data-center.html   390px  doc=375  vw=390  +0px  offenders=0 clipped=1 errors=0
+    ~~ clipped 368&gt;333 span.panel-sub  ws=nowrap disp=block <span class="add">ellipsis=yes</span>  '唯讀 — 各資料表筆數…'</pre>
+  <p><code>ellipsis=yes</code> 是關鍵欄位：有省略號代表<strong>那是刻意的單行裁切</strong>，不是 bug；
+    沒有省略號而又 <code>nowrap</code>，才是 M2 那種「正文段落被當成標題列裁」的真問題。</p>
+
+  <div class="lab">
+    <h3>實驗：一張寬表格，有沒有捲動容器的差別</h3>
+    <div class="dsub">左右拉，看 <code>document.scrollWidth</code> 與「撐破頁面的元素」數量。</div>
+    <div class="modes" id="lay-modes">
+      <button data-m="0" data-tone="bad" class="on bad">沒有捲動容器<small>表格直接撐破頁面</small></button>
+      <button data-m="1" data-tone="good">包在 .tw 裡<small>overflow-x:auto</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="lay-w">420</b> px</span>
+      <input type="range" id="lay-range" min="320" max="820" step="10" value="420">
+    </div>
+    <div class="stage"><iframe id="lay-frame" title="layout demo" style="height:150px"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="lay-ro-sw"><div class="k">document scrollWidth</div><div class="v">—</div></div>
+      <div class="ro" id="lay-ro-off"><div class="k">撐破頁面的元素（工具會報）</div><div class="v">—</div></div>
+      <div class="ro" id="lay-ro-leg"><div class="k">合法捲動的容器（工具不報）</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lay-verdict">—</div>
+    <div class="note">兩種狀態下「表格都比視窗寬」。差別是<strong>誰在捲</strong>：
+      模式 ② 是表格自己捲，頁面不動——這正是工具用
+      <code>overflowX: auto|scroll</code> 的祖先來排除誤報的判準。</div>
+  </div>
+</section>
+
+<section id="m7">
+  <h2><span class="n">07</span>寫報告：kit API 與六條硬規則</h2>
+
+  <pre>.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\new_report.py `
+    --kind spec --slug drip-preview --title "DRIP 預覽 — 規格 demo"
+<span class="cm"># 編輯骨架裡的待填處（骨架附一個「已經跑得起來」的 lab，改它，不要從零拼）</span>
+.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\verify_report.py `
+    docs\spec\2026-07-27-drip-preview.html --shots $w\shots</pre>
+
+  <div class="tw"><table>
+    <thead><tr><th>API</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>PD.sandbox(frame, {css, html, probe, onData})</code></td>
+          <td>把 css/html 塞進 iframe 跑<strong>真實級聯</strong>；<code>probe</code> 是在 iframe 內求值的物件字面，結果 post 回來</td></tr>
+      <tr><td><code>PD.modes(el, cb)</code></td><td>前／後切換鈕列，載入時也會呼叫一次</td></tr>
+      <tr><td><code>PD.sizer(range, frame, label)</code></td><td>寬度滑桿</td></tr>
+      <tr><td><code>PD.ro(el, value, state)</code></td><td>寫一格量測值（<code>good</code>/<code>bad</code> 上色）</td></tr>
+      <tr><td><code>PD.verdict(el, state, html)</code></td><td>寫結論行</td></tr>
+      <tr><td><code>PD.check(name, pass, detail)</code><br><code>PD.checkEq(name, mine, engine)</code></td>
+          <td><strong>自我校驗</strong>：離線重算 vs 真引擎。<code>verify_report.py</code> 會因為任一項 FAIL 而擋下報告</td></tr>
+      <tr><td><code>PD.group('1234567.89')</code></td><td>Decimal <strong>字串</strong>加千分位，全程不碰 <code>Number</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>六條硬規則</h3>
+  <div class="tw"><table>
+    <thead><tr><th>#</th><th>規則</th><th>為什麼</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><strong>真機制，不是圖片</strong>：CSS 問題進 iframe 讓瀏覽器解級聯；行為問題跑 app 自己的 JS</td>
+          <td>截圖只能當佐證。你要能<strong>親手推翻它</strong>，這份 demo 才有說服力</td></tr>
+      <tr><td>2</td><td><strong>前後都要有，而且可切換</strong></td><td>你要能來回切，看量測數字跟著變</td></tr>
+      <tr><td>3</td><td><strong>離線重算一定要自我校驗</strong>，期望值取自真引擎（<code>/api/*</code> 回應、pytest fixture、stress-audit oracle）</td>
+          <td>不然 demo 只是在示範「我自己寫的另一套算法」</td></tr>
+      <tr><td>4</td><td><strong>金額永遠不是 JS float</strong>（CLAUDE.md 不變量 3）</td>
+          <td>印後端的 Decimal 字串，或用整數最小單位算再校驗</td></tr>
+      <tr><td>5</td><td><strong>verdict 要同時看模式和量測</strong></td>
+          <td class="bad">只看量測的話，剛好沒觸發缺陷的寬度會讓「現況」宣布成功</td></tr>
+      <tr><td>6</td><td><strong>單一檔案</strong>；真的裝不下才用資料夾，並在報告裡說明理由</td>
+          <td>報告會被離線開啟、轉寄、幾個月後再看</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="lab">
+    <h3>實驗：規則 5 的陷阱——一個會說謊的 verdict</h3>
+    <div class="dsub">同一個「現況（壞）」狀態，只差 verdict 的判斷式怎麼寫。拖動滑桿到 480 以上。</div>
+    <div class="modes" id="v-modes">
+      <button data-m="0" data-tone="bad" class="on bad">verdict 只看量測<small>錯誤寫法</small></button>
+      <button data-m="1" data-tone="good">verdict 看模式＋量測<small>正確寫法</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="v-w">380</b> px</span>
+      <input type="range" id="v-range" min="320" max="700" step="10" value="380">
+    </div>
+    <div class="stage"><iframe id="v-frame" title="verdict trap" style="height:96px"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="v-ro-clip"><div class="k">被裁切的元素</div><div class="v">—</div></div>
+      <div class="ro" id="v-ro-mode"><div class="k">demo 目前的模式</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="v-verdict">—</div>
+    <div class="note">拉寬之後缺陷不再觸發，錯誤寫法就會在「現況」模式下宣布
+      <strong>「修法後：任何寬度都不再裁切」</strong>——這是我在做這套 kit 時<strong>真的寫出來的 bug</strong>，
+      骨架已經修好，但你自己寫新 lab 時還是會遇到。</div>
+  </div>
+</section>
+
+<section id="m8">
+  <h2><span class="n">08</span>使用技巧</h2>
+
+  <h3>流程上的</h3>
+  <div class="tw"><table>
+    <thead><tr><th>技巧</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td><strong>先量，再寫字</strong></td>
+          <td>任何一條發現在進報告之前，先有一行 <code>probe_live</code> 的輸出。
+              沒量到的就標<strong>推測待驗</strong>，不要混進已驗證的裡面</td></tr>
+      <tr><td><strong>症狀與根因分兩層寫</strong></td>
+          <td>症狀是量測（幾乎不會錯），根因是推論（會錯）。分開寫，你核准時才知道風險在哪</td></tr>
+      <tr><td><strong>金額別自己重算</strong></td>
+          <td>成本、損益、費稅、股利、匯兌、XIRR 交給 <code>/stress-audit</code>，
+              在報告裡引用它的 <code>fail=0</code>。這裡重算等於多一套會漂移的帳</td></tr>
+      <tr><td><strong>通過項目也要寫</strong></td>
+          <td>只列問題的報告會扭曲系統的實際狀態</td></tr>
+      <tr><td><strong>一次只改一件事，改完立刻 verify</strong></td>
+          <td><code>verify_report.py</code> 很快；把它當 gate 用，不要累積十個改動再一起驗</td></tr>
+      <tr><td><strong>分歧要往三個地方寫</strong></td>
+          <td>報告（當次）、<code>CHANGELOG.md</code>（你每次發版都會看）、
+              <code>LESSONS_LEARNED.md</code>（只在它是一「類」錯誤時，不是每個個案都寫）</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>操作上的</h3>
+  <div class="tw"><table>
+    <thead><tr><th>技巧</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td><strong>用 PowerShell，不要用 Git Bash</strong></td>
+          <td class="bad">MSYS 會把開頭是 <code>/</code> 的參數改寫成 Windows 路徑，
+              <code>--pages /</code> 會變成 <code>/C:/Program Files/Git/</code> 而<strong>安靜地探測錯的網址</strong>。
+              非用不可時加 <code>MSYS_NO_PATHCONV=1</code></td></tr>
+      <tr><td><strong>一定要 <code>PYTHONIOENCODING=utf-8</code></strong></td>
+          <td>否則繁體中文走預設 cp1252 主控台會 <code>UnicodeEncodeError</code> 中斷</td></tr>
+      <tr><td><strong>先量 1257px，再量 390px</strong></td>
+          <td>1257 是你實際回報過的視窗寬；中間寬度的斷點失效只在那附近看得到</td></tr>
+      <tr><td><strong><code>--click</code> 之前先確認是可丟棄實例</strong></td>
+          <td>它會真的按下去。看到 <code>DEAD?</code> 先想「是不是本來就啟用的分頁」</td></tr>
+      <tr><td><strong>報告要能離線開</strong></td>
+          <td>圖片轉 base64、CSS/JS 內嵌。<code>verify_report.py</code> 會擋下任何
+              <code>http(s)://</code> 外部資源</td></tr>
+      <tr><td><strong>demo 的 <code>probe</code> 求值式要寫短</strong></td>
+          <td>它在 iframe 裡丟出的例外<strong>是被吞掉的</strong>（刻意設計）。
+              量測沒出來時，先把 probe 拆簡單再驗</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>建立新工具時</h3>
+  <div class="shape">
+    <b>偵測力要先證明，再相信。</b>
+    <code>wiring</code> 一開始信心滿滿地回報「全站 0 個死按鈕」——直到拿一個
+    <strong>植入兩顆死按鈕的 fixture</strong> 去跑，才發現它把 <code>*.html</code> 也讀進乾草堆，
+    每顆按鈕都匹配到自己的 <code>id="…"</code>，<strong>6/6 全判 wired</strong>。
+    任何掃描型工具，先做一個「答案已知」的 fixture 再說。
+  </div>
+</section>
+
+<section id="m9">
+  <h2><span class="n">09</span>疑難排解與速查</h2>
+  <div class="tw"><table>
+    <thead><tr><th>症狀</th><th>處理</th></tr></thead>
+    <tbody>
+      <tr><td><code>UnicodeEncodeError: 'charmap'</code></td><td><code>$env:PYTHONIOENCODING="utf-8"</code></td></tr>
+      <tr><td>探測到 <code>/C:/Program Files/Git/</code></td><td>改用 PowerShell</td></tr>
+      <tr><td><code>selector matched nothing</code></td><td>那個元素是載入後才由 JS 產生；換頁面路徑，或改量一個靜止時就存在的選擇器</td></tr>
+      <tr><td>verify：<em>readout never measured</em></td><td>lab 的 <code>probe</code> 在 iframe 裡丟例外了（被吞）。拆簡單再驗</td></tr>
+      <tr><td>verify：<em>external asset reference</em></td><td>內嵌它。報告必須離線可開</td></tr>
+      <tr><td>uvicorn 起來就掛</td><td>看 <code>$w\uvicorn.err.log</code>；多半是連接埠被占用或 <code>DB_PATH</code> 寫不進去</td></tr>
+      <tr><td>健康檢查 connection refused</td><td>要輪詢，首次開機要 bootstrap DB，比你猜的久</td></tr>
+      <tr><td>每顆按鈕都 wired</td><td>乾草堆錯了。先用死按鈕 fixture 驗過再相信結果</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>速查</h3>
+  <pre><span class="cm"># 量測</span>
+probe_live.py layout &lt;url&gt; --pages "/,/x.html" --widths 390,1257 --out DIR
+probe_live.py css    &lt;url&gt; --selector ".x" --prop flex-wrap --width 1257
+probe_live.py wiring &lt;url&gt; --pages "/x.html" [--click] [--out J.json]
+
+<span class="cm"># 報告</span>
+new_report.py    --kind spec|audit|fix|rootcause --slug S --title T
+new_report.py    --kind manual --body B.html --demo-js D.js --out M.html   <span class="cm"># 自撰內文</span>
+verify_report.py REPORT.html [--shots DIR] [--allow-todo]
+
+<span class="cm"># 收尾</span>
+/stress-audit          <span class="cm"># 動到金額計算就一定要跑</span>
+/ship-version          <span class="cm"># 出貨前檢查清單</span></pre>
+  <p class="note">完整規範在 <code>.claude/skills/demo-cycle/SKILL.md</code>；
+    這份手冊由 <code>manual.body.html</code> + <code>manual.demo.js</code> 產生，可重新生成。</p>
+</section>
+
+
+<section id="selfcheck">
+  <h2><span class="n">✓</span>自我校驗</h2>
+  <p class="lede">本頁任何「離線重算」的數字，都在這裡與<strong>真實引擎</strong>的輸出逐項比對。
+    這張表由頁面自己跑出來，不是抄的；有任何一項 FAIL，這份報告的結論就不該被採信。</p>
+  <div id="pd-selfcheck"></div>
+</section>
+
+<footer>
+  portfolio-dash · user manual · 2026-07-29 · 頁內 demo 於 iframe 執行真實機制，非模擬。
+</footer>
+</div>
+
+<script>
+/* ---- inlined from web/format.js: the APP's own exact Decimal-string formatter. A demo must format money the way the app does, or it is demonstrating something else. ---- */
+/* portfolio-dash — formatting helpers.
+   ALL number/date formatting lives here so the later Jinja2/backend
+   integration can swap these server-side cleanly.
+
+   EXACT DECIMAL FORMATTING (audit L5, 2026-07-26)
+   -----------------------------------------------
+   Every money value arrives from the API as a canonical Decimal STRING. These helpers used
+   to render it with `Number(v).toLocaleString(...)`, i.e. they round in binary float. That
+   is wrong in two ways that matter here:
+
+   1. A value already quantized by the backend must survive display BYTE-FOR-BYTE. Fees and
+      taxes are quantized by the fee engine using the ACCOUNT'S OWN rounding mode — TW fee
+      and 證交稅 are 無條件捨去 (ROUND_DOWN to integer NT$, 財政部 FE-D3: 群益 142.5 -> 142),
+      while US/MY components are ROUND_HALF_UP to the cent. The display layer must never
+      re-round those with a mode of its own; formatting at the same scale must be identity.
+      With exact string arithmetic it provably is.
+   2. For values that are NOT pre-quantized (unrealized P&L, market value, ratios), the
+      rounding must match what the backend would do — `Decimal.quantize(ROUND_HALF_UP)`.
+      Float rounding disagrees at the .xx5 boundary (`0.145` is stored as
+      0.1449999999999999900…, so float yields 0.14 where Decimal yields 0.15).
+
+   So the arithmetic below is done on the DIGIT STRING: split on the point, round half-up by
+   inspecting the first dropped digit, carry with a string increment. No float is involved
+   anywhere in the money path. `Number()` survives only as a fallback for a non-plain-decimal
+   input (scientific notation), which the wire never carries.
+
+   NOTE ON THE FLOOR RULE: this module deliberately does NOT implement 無條件捨去. Floor is a
+   property of the TW fee/tax ENGINE (`data_ingestion/fees.py`, driven by each rule set's
+   `rounding` field), not of presentation — those values reach the frontend already floored
+   to integer NT$, and formatting them at TWD's 0 dp reproduces them exactly. A display-side
+   floor would be wrong for every OTHER TWD amount (proceeds, P&L, market value), which the
+   backend quantizes ROUND_HALF_UP. */
+window.fmt = (function () {
+  const CCY_DP = { TWD: 0, USD: 2, MYR: 2 };
+  const NULL_GLYPH = '—'; // em-dash
+  const MINUS = '−';      // U+2212 minus sign
+  const PLAIN_DECIMAL = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
+
+  /* null/undefined only — deliberately NOT '' , so this refactor changes no caller's
+     behaviour (an empty string still falls through to the numeric fallback as before). */
+  function isNil(v) { return v === null || v === undefined; }
+
+  /** Increment a pure digit string by one, carrying left ("199" -> "200"). */
+  function _inc(digits) {
+    let i = digits.length - 1;
+    const out = digits.split('');
+    while (i >= 0) {
+      if (out[i] === '9') { out[i] = '0'; i -= 1; } else { out[i] = String(+out[i] + 1); break; }
+    }
+    return i < 0 ? '1' + out.join('') : out.join('');
+  }
+
+  /** Thousands separators on a pure integer-digit string. */
+  function _group(intDigits) {
+    return intDigits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  /** Sign of a plain decimal string: -1 / 0 / 1 (exact — no coercion). */
+  function _sign(s) {
+    if (!/[1-9]/.test(s)) return 0;          // all zeros (with or without a point)
+    return s.charAt(0) === '-' ? -1 : 1;
+  }
+
+  /** Absolute value of a plain decimal string (drops the sign character only). */
+  function _abs(s) { return s.replace(/^[+-]/, ''); }
+
+  /** Multiply a plain decimal string by 100 by SHIFTING the point (exact). */
+  function _x100(s) {
+    const sign = s.charAt(0) === '-' ? '-' : '';
+    let body = _abs(s);
+    let [i, f] = body.indexOf('.') === -1 ? [body, ''] : body.split('.');
+    while (f.length < 2) f += '0';
+    i = (i + f.slice(0, 2)).replace(/^0+(?=\d)/, '');
+    f = f.slice(2);
+    return sign + i + (f ? '.' + f : '');
+  }
+
+  /** Round a plain decimal string to `dp` places, HALF-UP, exactly. Returns
+      {sign, int, frac} with `int` ungrouped digits and `frac` exactly `dp` digits. */
+  function _round(s, dp) {
+    const neg = s.charAt(0) === '-';
+    const body = _abs(s);
+    let [i, f] = body.indexOf('.') === -1 ? [body, ''] : body.split('.');
+    if (i === '') i = '0';
+    if (f.length <= dp) {
+      while (f.length < dp) f += '0';
+    } else {
+      const keep = f.slice(0, dp);
+      const roundUp = f.charAt(dp) >= '5';
+      let joined = i + keep;
+      if (roundUp) joined = _inc(joined);
+      // the carry may have grown the integer part by one digit
+      const intLen = joined.length - dp;
+      i = joined.slice(0, intLen) || '0';
+      f = dp ? joined.slice(intLen) : '';
+    }
+    i = i.replace(/^0+(?=\d)/, '');
+    return { neg: neg, int: i, frac: f };
+  }
+
+  /** Plain number with thousands separators (exact; see the module note). */
+  function num(v, dp) {
+    if (isNil(v)) return NULL_GLYPH;
+    dp = dp === undefined ? 0 : dp;
+    const s = String(v).trim();
+    if (!PLAIN_DECIMAL.test(s)) {
+      // Not a plain decimal (e.g. scientific notation) — the wire never carries this, but
+      // degrade to the float path rather than rendering nothing.
+      const n = Number(v);
+      if (!isFinite(n)) return NULL_GLYPH;
+      return n.toLocaleString('en-US', {
+        minimumFractionDigits: dp, maximumFractionDigits: dp
+      });
+    }
+    const r = _round(s, dp);
+    const body = _group(r.int) + (dp ? '.' + r.frac : '');
+    // "-0" / "-0.00" is noise, not information — a rounded-away negative reads as zero.
+    if (r.neg && /[1-9]/.test(r.int + r.frac)) return '-' + body;
+    return body;
+  }
+
+  /** Amount in a given currency: TWD 0 dp, USD/MYR 2 dp. */
+  function money(v, ccy) {
+    if (isNil(v)) return NULL_GLYPH;
+    const dp = CCY_DP[ccy] !== undefined ? CCY_DP[ccy] : 0;
+    return num(v, dp);
+  }
+
+  /** Per-share price: MY quotes need 3 dp, others 2 dp. */
+  function price(v, ccy) {
+    if (isNil(v)) return NULL_GLYPH;
+    return num(v, ccy === 'MYR' ? 3 : 2);
+  }
+
+  /** Signed amount: explicit + for gains, U+2212 for losses. */
+  function signed(v, ccy) {
+    if (isNil(v)) return NULL_GLYPH;
+    const s = String(v).trim();
+    const sign = PLAIN_DECIMAL.test(s) ? _sign(s) : (Number(v) > 0 ? 1 : Number(v) < 0 ? -1 : 0);
+    const body = money(PLAIN_DECIMAL.test(s) ? _abs(s) : Math.abs(Number(v)), ccy);
+    if (sign > 0) return '+' + body;
+    if (sign < 0) return MINUS + body;
+    return body;
+  }
+
+  /** Signed plain number with fixed dp (for rates/deltas). */
+  function signedNum(v, dp) {
+    if (isNil(v)) return NULL_GLYPH;
+    const s = String(v).trim();
+    const sign = PLAIN_DECIMAL.test(s) ? _sign(s) : (Number(v) > 0 ? 1 : Number(v) < 0 ? -1 : 0);
+    const body = num(PLAIN_DECIMAL.test(s) ? _abs(s) : Math.abs(Number(v)), dp);
+    if (sign > 0) return '+' + body;
+    if (sign < 0) return MINUS + body;
+    return body;
+  }
+
+  /** Ratio -> percentage with 2 dp: 0.2147 -> "21.47%". */
+  function pct(v) {
+    if (isNil(v)) return NULL_GLYPH;
+    const s = String(v).trim();
+    if (!PLAIN_DECIMAL.test(s)) return (Number(v) * 100).toFixed(2) + '%';
+    return num(_x100(s), 2) + '%';
+  }
+
+  /** Signed percentage. */
+  function signedPct(v) {
+    if (isNil(v)) return NULL_GLYPH;
+    const s = String(v).trim();
+    if (!PLAIN_DECIMAL.test(s)) {
+      const n = Number(v);
+      const b = (Math.abs(n) * 100).toFixed(2) + '%';
+      return n > 0 ? '+' + b : n < 0 ? MINUS + b : b;
+    }
+    const sign = _sign(s);
+    const body = num(_x100(_abs(s)), 2) + '%';
+    if (sign > 0) return '+' + body;
+    if (sign < 0) return MINUS + body;
+    return body;
+  }
+
+  /** FX rate, 2–4 dp depending on magnitude. */
+  function rate(v) {
+    if (isNil(v)) return NULL_GLYPH;
+    return num(v, Number(v) < 10 ? 4 : 2);
+  }
+
+  /** ISO date/datetime -> YYYY-MM-DD. */
+  function date(iso) {
+    if (isNil(iso)) return NULL_GLYPH;
+    return String(iso).slice(0, 10);
+  }
+
+  /** ISO datetime -> YYYY-MM-DD HH:mm (string is already Asia/Taipei). */
+  function datetime(iso) {
+    if (isNil(iso)) return NULL_GLYPH;
+    const s = String(iso);
+    return s.slice(0, 10) + ' ' + s.slice(11, 16);
+  }
+
+  /** CSS class for P&L sign — Taiwan convention: red = gain, green = loss. */
+  function signClass(v) {
+    if (isNil(v)) return 'sign-nil';
+    const s = String(v).trim();
+    const sign = PLAIN_DECIMAL.test(s) ? _sign(s) : (Number(v) > 0 ? 1 : Number(v) < 0 ? -1 : 0);
+    if (sign > 0) return 'sign-up';
+    if (sign < 0) return 'sign-down';
+    return 'sign-flat';
+  }
+
+  /** Unified AI attribution line for every LLM-generated surface (2026-07-07):
+      "haiku-4.5 · token 1,234 · $0.1234". Segments degrade independently —
+      legacy rows without token counts omit the token segment; cost "0" still shows. */
+  function aiAttrib(model, tokensIn, tokensOut, costUsd) {
+    const parts = [];
+    if (model) parts.push(String(model));
+    const tokens = (Number(tokensIn) || 0) + (Number(tokensOut) || 0);
+    if (tokens > 0) parts.push('token ' + num(tokens, 0));
+    if (!isNil(costUsd)) parts.push('$' + num(costUsd, 4));
+    return parts.join(' · ');
+  }
+
+  return { num, money, price, signed, signedNum, pct, signedPct, rate, date, datetime,
+           signClass, aiAttrib, NULL_GLYPH };
+})();
+
+/* demo-cycle report kit — the interactive-demo harness.
+ *
+ * Every claim in a demo-cycle report is either MEASURED in front of the reader or
+ * CHECKED against the real engine in front of the reader. This file is what makes both
+ * cheap enough that there is no excuse to write prose instead.
+ *
+ *   PD.sandbox(frame, {css, html, probe})  live iframe running the REAL cascade;
+ *                                          `probe` is measured inside and posted back
+ *   PD.modes(el, cb)                       before/after switch
+ *   PD.sizer(range, frame, label)          viewport-width slider for a sandbox
+ *   PD.check(name, pass, detail)           self-check registry -> window.__demoCycleChecks
+ *   PD.checkPanel(el)                      renders the self-check strip
+ *   PD.ro(el, value, state)                write one readout tile
+ *   PD.verdict(el, state, html)            write the verdict line
+ *
+ * Money rule (CLAUDE.md invariant 3): never compute currency with JS floats. Either
+ * print a Decimal STRING the backend produced, or — if a lab must recompute — do it in
+ * integer minor units and PD.check() the result against a real-engine figure.
+ */
+window.PD = (function () {
+  'use strict';
+
+  const $ = (s, root) => (root || document).querySelector(s);
+  const $$ = (s, root) => Array.from((root || document).querySelectorAll(s));
+
+  /* ---------------------------------------------------------------- sandbox */
+
+  const inbox = {};
+  let seq = 0;
+  window.addEventListener('message', function (e) {
+    const d = e.data;
+    if (d && d.__pd && inbox[d.__pd]) inbox[d.__pd](d);
+  });
+
+  /**
+   * Render `html` + `css` inside `frame` as a real document, and evaluate `probe`
+   * (a JS object-literal expression) inside it on load/resize/mutation, posting the
+   * result to `onData`. The point is that the browser resolves the cascade, not us.
+   */
+  function sandbox(frame, opts) {
+    const id = opts.id || ('pd' + (++seq));
+    if (opts.onData) inbox[id] = opts.onData;
+    const base = 'html,body{margin:0;background:#0e1116;color:#e6e9ee;font-size:13px;' +
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","PingFang TC",sans-serif}';
+    const probe = opts.probe
+      ? '(function(){function m(){try{var d=' + opts.probe +
+        ';d.__pd=' + JSON.stringify(id) + ';parent.postMessage(d,"*")}catch(e){}}' +
+        'addEventListener("resize",m);new ResizeObserver(m).observe(document.body);' +
+        'requestAnimationFrame(function(){m();setTimeout(m,60)})})()'
+      : '';
+    frame.srcdoc = '<!doctype html><meta charset="utf-8"><style>' + base +
+      (opts.css || '') + '</style>' + (opts.html || '') +
+      (probe ? '<scr' + 'ipt>' + probe + '</scr' + 'ipt>' : '');
+    return id;
+  }
+
+  /* ------------------------------------------------------------ mode switch */
+
+  /** Wire a `.modes` button row. `cb(mode)` fires on click and once immediately. */
+  function modes(el, cb) {
+    el.addEventListener('click', function (e) {
+      const b = e.target.closest('button');
+      if (!b) return;
+      const m = +b.dataset.m;
+      $$('button', el).forEach(function (x) {
+        x.className = (x === b) ? ('on ' + (x.dataset.tone || '')) : '';
+      });
+      cb(m);
+    });
+    const first = $('button', el);
+    if (first) cb(+first.dataset.m || 0);
+  }
+
+  /** Width slider driving a sandbox frame. Reports the width the DEMO runs at. */
+  function sizer(range, frame, label) {
+    function apply() {
+      frame.style.width = range.value + 'px';
+      if (label) label.textContent = range.value;
+    }
+    range.addEventListener('input', apply);
+    apply();
+  }
+
+  /* ------------------------------------------------------------- readouts */
+
+  function ro(el, value, state) {
+    if (!el) return;
+    const v = el.classList.contains('v') ? el : $('.v', el);
+    if (v) v.textContent = value;
+    const tile = el.closest ? (el.closest('.ro') || el) : el;
+    if (state) tile.className = 'ro ' + state;
+  }
+
+  function verdict(el, state, html) {
+    if (!el) return;
+    el.className = 'verdict' + (state ? ' ' + state : '');
+    el.innerHTML = html;
+  }
+
+  /* ----------------------------------------------------------- self-checks */
+
+  const checks = [];
+  window.__demoCycleChecks = checks;
+
+  /**
+   * Record a self-check. Use it whenever a lab reimplements app logic offline:
+   * the expected value must come from the REAL engine (an /api response, a pytest
+   * fixture, a stress-audit oracle line), pasted in as a constant.
+   * verify_report.py fails the report if any check is false.
+   */
+  function check(name, pass, detail) {
+    checks.push({ name: name, pass: !!pass, detail: detail == null ? '' : String(detail) });
+    if (checkPanelEl) renderChecks();
+    return !!pass;
+  }
+
+  /** Convenience: assert an offline computation equals the real engine's string. */
+  function checkEq(name, actual, expected, detail) {
+    const a = String(actual), e = String(expected);
+    return check(name, a === e, (detail ? detail + ' — ' : '') + 'got ' + a + ', engine says ' + e);
+  }
+
+  let checkPanelEl = null;
+  function checkPanel(el) {
+    checkPanelEl = el;
+    renderChecks();
+  }
+  function renderChecks() {
+    const pass = checks.filter(c => c.pass).length;
+    const rows = checks.map(c =>
+      '<tr><td>' + (c.pass ? '<span class="pill pass">PASS</span>' : '<span class="pill rej">FAIL</span>') +
+      '</td><td>' + esc(c.name) + '</td><td class="dim">' + esc(c.detail) + '</td></tr>').join('');
+    checkPanelEl.innerHTML =
+      '<div class="hd"><b>自我校驗 — 本頁離線重算 vs 真實引擎</b>' +
+      '<span class="sum">' + pass + '/' + checks.length + ' pass</span></div>' +
+      '<div class="tw"><table><thead><tr><th>結果</th><th>檢查</th><th>細節</th></tr></thead>' +
+      '<tbody>' + (rows || '<tr><td colspan="3" class="dim">no checks registered</td></tr>') +
+      '</tbody></table></div>';
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  /* --------------------------------------------------------------- numbers */
+
+  /** Thousands separators for a Decimal STRING, without ever touching Number. */
+  function group(decStr) {
+    const s = String(decStr).trim();
+    const m = /^(-?)(\d+)(\.\d+)?$/.exec(s);
+    if (!m) return s;
+    return m[1] + m[2].replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (m[3] || '');
+  }
+
+  /* ------------------------------------------------------------------ misc */
+
+  // Sticky-TOC scroll spy: no dependency, keeps a long report navigable.
+  function tocSpy() {
+    const links = $$('.toc a');
+    if (!links.length) return;
+    const map = links.map(a => ({ a: a, el: $(a.getAttribute('href')) })).filter(x => x.el);
+    function upd() {
+      let cur = map[0];
+      for (const m of map) if (m.el.getBoundingClientRect().top < 90) cur = m;
+      map.forEach(m => m.a.style.color = (m === cur ? 'var(--accent)' : ''));
+    }
+    addEventListener('scroll', upd, { passive: true });
+    upd();
+  }
+  if (document.readyState !== 'loading') tocSpy();
+  else addEventListener('DOMContentLoaded', tocSpy);
+
+  return { $: $, $$: $$, sandbox, modes, sizer, ro, verdict, check, checkEq, checkPanel,
+           group, esc };
+})();
+
+</script>
+<script>
+/* manual.demo.js — the live parts of the /demo-cycle manual.
+ *
+ * Everything here either runs a real browser mechanism in a sandbox, or reproduces a
+ * shipped tool's real logic and then proves that reproduction against output the tool
+ * actually printed on this machine (see the self-check strip at the bottom of the page).
+ */
+(function () {
+  'use strict';
+  var $ = PD.$;
+
+  /* ================= 01 · which phase should I run ================= */
+
+  var PICK = [
+    { v: 'good', t: '<b>跑 <code>propose</code>。</b>先把提案做成可點的 demo，你確認之後才進實作——'
+        + '這一步就是為了避免文字規格的認知誤差。',
+      c: 'new_report.py --kind spec --slug <你的功能> --title "<標題> — 規格 demo"\n'
+        + '# 產物：docs/spec/<date>-<slug>.html  →  你在 demo 上確認  →  驗收表成為規格' },
+    { v: 'good', t: '<b>跑 <code>audit</code>。</b>先起一個可丟棄實例，三支探針各跑一輪，'
+        + '再把量到的東西寫成分級報告。金額那一塊交給 <code>/stress-audit</code>。',
+      c: '# 1) 起可丟棄實例（見 03 節）\n'
+        + '# 2) 量測\nprobe_live.py layout <url> --pages "/,/ledger.html" --widths 390,1257 --out DIR\n'
+        + 'probe_live.py wiring <url> --pages "/ledger.html" --click\n'
+        + '# 3) /stress-audit  →  引用它的 fail=0\n'
+        + '# 4) new_report.py --kind audit --slug full-site --title "..."' },
+    { v: '', t: '<b>先量那一個點，不要開全站稽核。</b>用 <code>css</code> 問「哪條規則真的勝出」、'
+        + '用 <code>wiring --click</code> 問「這顆按鈕到底有沒有反應」。'
+        + '確認是真問題之後，再決定要不要做成 <code>fix</code> 報告。',
+      c: 'probe_live.py css    <url> --selector "<出問題的選擇器>" --prop <屬性> --width 1257\n'
+        + 'probe_live.py wiring <url> --pages "<那一頁>" --click\n'
+        + '# 量到了再寫報告；量不到就先別下結論' },
+    { v: 'good', t: '<b>跑 <code>fix</code>。</b>每一項都要附證據：gate 輸出、前後量測、可操作的對照 demo。'
+        + '沒有證據的項目一律標未完成。',
+      c: 'new_report.py --kind fix --slug audit-remediation --title "稽核修正報告"\n'
+        + '# 證據來源：pytest / mypy --strict / ruff / stress-audit / probe_live 前後對照\n'
+        + '# 收尾：/ship-version' },
+    { v: '', t: '<b>跑 <code>rootcause</code>。</b>把「原推測 vs 實測」並排，中間放一個能親手切換的 demo。'
+        + '同時寫進 CHANGELOG；如果它是一「類」錯誤而不只是個案，才寫 LESSONS_LEARNED。',
+      c: 'new_report.py --kind rootcause --slug divergence --title "根因分歧 — 前後機制演示"\n'
+        + '# 沒有分歧就不要產這份報告，改在 fix 報告裡寫「無分歧」' }
+  ];
+  PD.modes($('#pick-modes'), function (m) {
+    var p = PICK[m];
+    PD.verdict($('#pick-verdict'), p.v, p.t);
+    var pre = $('#pick-cmd');
+    pre.className = '';
+    pre.textContent = p.c;
+  });
+
+  /* ================= 04 · the cascade is only knowable by measuring ================= */
+
+  var CARDS = [['總市值', '5,933,032'], ['總報酬', '+3,941,317'],
+               ['年化報酬 (XIRR)', '資料不足'], ['損益（TWD）', '+3,941,317'],
+               ['換匯損益（歸因拆分）', '+1,862']];
+  var cssMode = 0;
+
+  function cssCss(m) {
+    var s = '.band{display:grid;grid-template-columns:repeat(8,1fr);gap:8px;padding:9px}'
+      + '.band.v2{grid-template-columns:1.15fr 1.3fr 1.05fr 1.25fr 1.25fr}'
+      + '.c{background:#161b22;border:1px solid #262e39;border-radius:7px;padding:8px 9px;'
+      + 'overflow:hidden}'
+      + '.c .l{font-size:10.5px;color:#78838f;white-space:nowrap}'
+      + '.c .v{font-size:15px;font-weight:700;white-space:nowrap;margin-top:3px;'
+      + 'font-family:ui-monospace,Consolas,monospace}';
+    if (m === 1) s += '.band>*{min-width:0}';          // 原報告的建議：加了也沒用
+    // 斷點：只有模式 2 把 .v2 寫進去，特異性才追得上無條件的 .band.v2
+    s += '@media (max-width:620px){' + (m === 2 ? '.band,.band.v2' : '.band')
+      + '{grid-template-columns:repeat(2,1fr)}}';
+    return s;
+  }
+  var CSS_PROBE = '{cols:getComputedStyle(document.getElementById("bd")).gridTemplateColumns,'
+    + 'card:Math.round(document.getElementById("bd").children[0].getBoundingClientRect().width),'
+    + 'clip:Array.from(document.getElementById("bd").children)'
+    + '.filter(function(x){return Array.from(x.children).some('
+    + 'function(y){return y.scrollWidth>y.clientWidth+1})}).length}';
+
+  function cssRender(m) {
+    cssMode = m;
+    PD.sandbox($('#css-frame'), {
+      id: 'css', css: cssCss(m), probe: CSS_PROBE, onData: cssData,
+      html: '<div class="band v2" id="bd">' + CARDS.map(function (c) {
+        return '<div class="c"><div class="l">' + c[0] + '</div><div class="v">' + c[1] + '</div></div>';
+      }).join('') + '</div>'
+    });
+  }
+  function cssData(d) {
+    var n = d.cols.split(/\s+/).length;
+    PD.ro($('#css-ro-cols'), n + ' 欄 · ' + d.cols.slice(0, 34), n > 2 ? 'bad' : 'good');
+    PD.ro($('#css-ro-card'), d.card + ' px', d.card < 150 ? 'bad' : 'good');
+    PD.ro($('#css-ro-clip'), d.clip + ' 張', d.clip ? 'bad' : 'good');
+    var narrow = document.getElementById('css-range').value <= 620;
+    if (cssMode === 2) {
+      PD.verdict($('#css-verdict'), d.clip ? 'bad' : 'good', d.clip
+        ? '<b>還是壞的？</b>把滑桿拉到 620 以下再看——斷點只在那之後才參賽。'
+        : '<b>斷點補上 <code>.band.v2</code> 之後，特異性追平（0,2,0），靠出現順序勝出 →'
+          + ' 真的變成 2 欄。</b>');
+    } else if (!narrow) {
+      PD.verdict($('#css-verdict'), '', '<b>目前寬度在斷點之上，三種寫法本來就一樣。</b>'
+        + '把滑桿拉到 <b>620px 以下</b>，差別才會出現。');
+    } else {
+      PD.verdict($('#css-verdict'), 'bad', cssMode === 1
+        ? '<b><code>min-width: 0</code> 確實生效了，但欄數完全沒變。</b>'
+          + '要修的機制（斷點的特異性）<b>從頭到尾沒被觸碰</b>——'
+          + '這就是「diff 看起來完全正確，卻毫無作用」的長相。'
+        : '<b>斷點形同不存在：</b><code>@media { .band }</code> 是 (0,1,0)，'
+          + '而無條件的 <code>.band.v2</code> 是 (0,2,0)。'
+          + '<b>媒體查詢本身不貢獻特異性</b>，所以它被壓過，卡片擠成 '
+          + d.card + 'px、' + d.clip + ' 張的內容被裁掉。');
+    }
+  }
+  PD.modes($('#css-modes'), cssRender);
+  PD.sizer($('#css-range'), $('#css-frame'), $('#css-w'));
+  document.getElementById('css-range').addEventListener('input', function () {
+    cssData.last && cssData.last();
+  });
+
+  /* ================= 05 · the wiring verdict ladder ================= */
+
+  /* The shipped rule from probe_live.py::cmd_wiring, reproduced. The self-checks at the
+     bottom of this page hold it against verdicts the tool actually printed. */
+  function classify(c) {
+    var strong = [], weak = [];
+    if (c.inline) strong.push('inline onclick');
+    if (c.link) strong.push('真連結 / form submit');
+    if (c.idState === 'yes') strong.push('id 字面出現在 JS');
+    if (c.dataDispatch) strong.push('data-* 被 dispatch');
+    if (c.clsRef) {
+      if (c.clsFreq <= 2) strong.push('class 被引用，且只有 ' + c.clsFreq + ' 個控制項穿它');
+      else weak.push('class 被引用，但 ' + c.clsFreq + ' 個控制項共用 → 證明不了這一顆');
+    }
+    return { verdict: strong.length ? 'wired' : (weak.length ? 'weak' : 'SUSPECT'),
+             evidence: strong.concat(weak) };
+  }
+
+  function wRead() {
+    return {
+      inline: $('#w-inline').value === '1',
+      link: $('#w-link').value === '1',
+      idState: $('#w-id').value,
+      dataDispatch: $('#w-data').value === '1',
+      clsRef: $('#w-cls').value === '1',
+      clsFreq: parseInt($('#w-freq').value, 10) || 0,
+      click: $('#w-click').value
+    };
+  }
+  function wRender() {
+    var c = wRead(), r = classify(c);
+    var tone = r.verdict === 'wired' ? 'good' : (r.verdict === 'SUSPECT' ? 'bad' : '');
+    PD.ro($('#w-ro-v'), r.verdict, tone);
+    PD.ro($('#w-ro-e'), r.evidence.length ? r.evidence.length + ' 項' : '無', tone);
+    var html = '<b>靜態判定：' + r.verdict + '</b><br>'
+      + (r.evidence.length ? '證據：' + r.evidence.map(PD.esc).join('；') : '沒有任何程式碼指向它。');
+    if (r.verdict === 'wired') {
+      html += '<br>→ 不必再點。<code>--click</code> 只處理 weak / SUSPECT。';
+    } else if (c.click === 'skip') {
+      html += '<br>→ <b>這只是線索，不是判決。</b>加 <code>--click</code> 讓它在乾淨頁面上被點一次。';
+    } else if (c.click === 'yes') {
+      html += '<br>→ <b>點下去有反應，結案：它是活的。</b>'
+        + '靜態抓不到通常是因為選擇器是組合出來的（<code>$(\'#tab-\' + t)</code>）。';
+    } else {
+      html += '<br>→ <b class="bad">DEAD? 點下去什麼也沒發生。</b>'
+        + '報告前先確認它<b>不是本來就啟用的分頁／開關</b>——那種情況點了本來就不會變。';
+    }
+    PD.verdict($('#w-verdict'), c.click === 'no' && r.verdict !== 'wired' ? 'bad' : tone, html);
+  }
+  ['#w-inline', '#w-link', '#w-id', '#w-data', '#w-cls', '#w-freq', '#w-click']
+    .forEach(function (s) {
+      $(s).addEventListener('input', wRender);
+      $(s).addEventListener('change', wRender);
+    });
+  wRender();
+
+  /* ================= 06 · overflow vs a table scrolling legitimately ================= */
+
+  var ROWS = [['2330', '台積電', '1,000', '612.50', '612,500'],
+              ['2303', '聯電', '5,000', '48.35', '241,750'],
+              ['AAPL', 'Apple Inc.', '30', '212.40', '6,372.00']];
+  function layCss(m) {
+    return '.tw{margin:8px}' + (m === 1 ? '.tw{overflow-x:auto}' : '')
+      + 'table{border-collapse:collapse;min-width:560px;font-size:11px}'
+      + 'th,td{border-bottom:1px solid #262e39;padding:5px 8px;white-space:nowrap;text-align:left}'
+      + 'th{color:#78838f;font-weight:600}';
+  }
+  var LAY_PROBE = '{sw:document.scrollingElement.scrollWidth,'
+    + 'cw:document.scrollingElement.clientWidth,'
+    + 'off:Array.from(document.querySelectorAll("body *")).filter(function(x){'
+    + 'var r=x.getBoundingClientRect();if(!r.width&&!r.height)return false;'
+    + 'for(var p=x.parentElement;p;p=p.parentElement){var o=getComputedStyle(p).overflowX;'
+    + 'if(o==="auto"||o==="scroll")return false}'
+    + 'return r.right>document.scrollingElement.clientWidth+1}).length,'
+    + 'leg:Array.from(document.querySelectorAll("*")).filter(function(x){'
+    + 'var o=getComputedStyle(x).overflowX;'
+    + 'return (o==="auto"||o==="scroll")&&x.scrollWidth>x.clientWidth+1}).length}';
+
+  var layMode = 0;
+  function layRender(m) {
+    layMode = m;
+    PD.sandbox($('#lay-frame'), {
+      id: 'lay', css: layCss(m), probe: LAY_PROBE, onData: layData,
+      html: '<div class="tw"><table><thead><tr><th>代號</th><th>名稱</th><th>股數</th>'
+        + '<th>均價</th><th>成本</th></tr></thead><tbody>'
+        + ROWS.map(function (r) {
+          return '<tr>' + r.map(function (c) { return '<td>' + c + '</td>'; }).join('') + '</tr>';
+        }).join('') + '</tbody></table></div>'
+    });
+  }
+  function layData(d) {
+    var over = d.sw > d.cw + 1;
+    PD.ro($('#lay-ro-sw'), d.sw + ' px（可用 ' + d.cw + '）', over ? 'bad' : 'good');
+    PD.ro($('#lay-ro-off'), d.off + ' 個', d.off ? 'bad' : 'good');
+    PD.ro($('#lay-ro-leg'), d.leg + ' 個', 'good');
+    PD.verdict($('#lay-verdict'), over ? 'bad' : 'good', over
+      ? '<b>整份文件被撐到 ' + d.sw + 'px，超出 ' + (d.sw - d.cw) + 'px。</b>'
+        + '工具會把這 ' + d.off + ' 個元素列進 <code>offenders</code>——這是真問題。'
+      : '<b>表格一樣比視窗寬，但頁面沒有被撐開。</b>'
+        + '捲動發生在 <code>.tw</code> 裡（工具數到 ' + d.leg + ' 個合法捲動容器），'
+        + '<code>offenders</code> 是 0——<b>這不是缺陷，工具不會報它</b>。');
+  }
+  PD.modes($('#lay-modes'), layRender);
+  PD.sizer($('#lay-range'), $('#lay-frame'), $('#lay-w'));
+
+  /* ================= 07 · the lying verdict ================= */
+
+  var vMode = 0, vLast = null;
+  PD.sandbox($('#v-frame'), {
+    id: 'vtrap',
+    css: '.sub{padding:10px;color:#78838f;font-size:12px;'
+       + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    html: '<div class="sub"><span id="s">近 12 個月實收・歷年分佈・年度預估・除息日曆（已計入報酬）</span></div>',
+    probe: '{clip:Array.from(document.querySelectorAll("*"))'
+         + '.filter(function(x){return x.scrollWidth>x.clientWidth+1}).length}',
+    onData: function (d) { vLast = d; vRender(); }
+  });
+  function vRender() {
+    if (!vLast) return;
+    var broken = vLast.clip > 0;
+    PD.ro($('#v-ro-clip'), vLast.clip + ' 個', broken ? 'bad' : 'good');
+    PD.ro($('#v-ro-mode'), '現況（壞）', 'bad');
+    if (vMode === 0) {
+      // 錯誤寫法：verdict 只看量測
+      PD.verdict($('#v-verdict'), broken ? 'bad' : 'good', broken
+        ? '<b>現況：內容被裁切。</b>（這次剛好說對了）'
+        : '<b class="bad">「修法後：任何寬度都不再裁切或撐破。」</b><br>'
+          + '——demo 還停在<b>現況（壞）</b>模式，什麼都沒修，'
+          + 'verdict 卻宣布修好了。只因為這個寬度剛好沒觸發缺陷。');
+    } else {
+      PD.verdict($('#v-verdict'), broken ? 'bad' : '', broken
+        ? '<b>現況：在這個寬度下被裁切。</b>'
+        : '<b>現況：這個寬度剛好沒觸發。</b>把滑桿往左拉，缺陷就會出現——'
+          + '這正是為什麼 demo 要能調寬度，而不是一張截圖。');
+    }
+  }
+  PD.modes($('#v-modes'), function (m) { vMode = m; vRender(); });
+  PD.sizer($('#v-range'), $('#v-frame'), $('#v-w'));
+
+  /* ================= self-checks =================
+     The manual teaches two rule engines. Both are re-implementations, so both must be
+     held against what the SHIPPED tools actually printed on this machine (2026-07-27,
+     recorded verbatim in the session that built the skill). If any of these go red, the
+     manual is teaching something the tool no longer does. */
+
+  var CASES = [
+    { n: 'fixture #btn-alive', c: { idState: 'yes', clsRef: true, clsFreq: 4 }, want: 'wired' },
+    { n: 'fixture #btn-dead（植入的死按鈕）', c: { idState: 'no', clsRef: true, clsFreq: 4 }, want: 'weak' },
+    { n: 'fixture 只有 class 的死按鈕', c: { idState: 'none', clsRef: true, clsFreq: 4 }, want: 'weak' },
+    { n: 'fixture data-action=refresh-all', c: { idState: 'none', dataDispatch: true, clsRef: true, clsFreq: 4 }, want: 'wired' },
+    { n: 'fixture <a href="other.html">', c: { idState: 'none', link: true }, want: 'wired' },
+    { n: '真站 /ledger.html #tab-csv（組合選擇器）', c: { idState: 'no' }, want: 'SUSPECT' },
+    { n: '真站 /data-center.html .btn-refresh', c: { idState: 'none', clsRef: true, clsFreq: 4 }, want: 'weak' }
+  ];
+  CASES.forEach(function (t) {
+    PD.checkEq('wiring 判定器 · ' + t.n, classify(t.c).verdict, t.want,
+               'probe_live.py wiring 在本機的實際輸出');
+  });
+
+  /* The specificity numbers the css section teaches, against the tool's printed values. */
+  function spec(sel) {
+    var s = sel.replace(/\((?:[^()]|\([^()]*\))*\)/g, ' ');
+    return [(s.match(/#[\w-]+/g) || []).length,
+            (s.match(/\.[\w-]+/g) || []).length + (s.match(/\[[^\]]+\]/g) || []).length
+              + (s.match(/:(?!:)[\w-]+/g) || []).length,
+            (s.match(/(^|[\s>+~])[a-zA-Z][\w-]*/g) || []).length
+              + (s.match(/::[\w-]+/g) || []).length].join(',');
+  }
+  PD.checkEq('特異性 · .kpi-band', spec('.kpi-band'), '0,1,0', 'probe_live css 印出 (0,1,0)');
+  PD.checkEq('特異性 · .kpi-band.v2', spec('.kpi-band.v2'), '0,2,0', 'probe_live css 印出 (0,2,0)');
+  PD.checkEq('特異性 · .topbar', spec('.topbar'), '0,1,0', 'probe_live css 印出 (0,1,0)');
+
+  /* Money formatting never goes through Number (CLAUDE.md invariant 3). */
+  PD.checkEq('Decimal 字串千分位（不經 float）', PD.group('5933032.50'), '5,933,032.50',
+             'web/format.js 的精確字串格式化語意');
+  PD.checkEq('負數也不經 float', PD.group('-1399.07'), '-1,399.07', '同上');
+
+  PD.checkPanel($('#pd-selfcheck'));
+})();
+
+</script>

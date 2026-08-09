@@ -1,0 +1,438 @@
+<section id="m1">
+  <h2><span class="n">01</span>這是什麼・什麼時候用</h2>
+  <p class="lede"><code>/demo-cycle</code> 是 portfolio-dash 的「以 demo 為規格」開發迴圈。
+    它的每一個階段都只產出<strong>一份可以點的自足 HTML</strong>：主張要嘛<strong>當場量給你看</strong>，
+    要嘛<strong>當場跟真引擎對帳給你看</strong>，不靠文字斷言。</p>
+
+  <div class="vs">
+    <div class="vsbox before"><h4>沒有這套流程時</h4>
+      <p>規格寫成文字 → 你我各自解讀 → 做出來不是你要的 →
+        回頭吵「當初講的是什麼意思」。稽核也一樣：讀程式碼推出根因，
+        <strong>症狀對、根因錯</strong>，照著改等於白改。</p></div>
+    <div class="vsbox after"><h4>有這套流程時</h4>
+      <p>規格是一個<strong>你點得動的 demo</strong>，前後可切換；稽核的每條發現都附
+        <strong>在跑著的實例上量到的數字</strong>，根因標明「已驗證」或「推測待驗」。
+        你在核准前就知道哪幾項可能變形。</p></div>
+  </div>
+
+  <div class="shape">
+    <b>它為什麼存在：</b>2026-07-25 的全站稽核，13 條發現的<strong>症狀全對</strong>，
+    但有 <strong>4 條的根因是錯的</strong>——因為那 4 條是「讀程式碼推出來的」。
+    照原建議實作，2 條完全無效、1 條改錯地方、1 條會產生迴歸。
+    <code>probe_live.py</code> 就是這件事的修正：<strong>去量，不要猜</strong>。
+  </div>
+
+  <div class="lab">
+    <h3>先決定：你現在該跑哪個階段？</h3>
+    <div class="dsub">選一個最接近你處境的情境，下面會給出階段與第一條指令。</div>
+    <div class="modes" id="pick-modes">
+      <button data-m="0" class="on">我想加一個新功能<small>還沒開始寫</small></button>
+      <button data-m="1">整站健檢<small>不確定哪裡壞了</small></button>
+      <button data-m="2">我看到某個地方怪怪的<small>單點異常</small></button>
+      <button data-m="3">修好了，要交付<small>需要證據</small></button>
+      <button data-m="4">修的時候發現稽核猜錯了<small>機制跟報告不一樣</small></button>
+    </div>
+    <div class="verdict" id="pick-verdict">—</div>
+    <pre id="pick-cmd" class="dim">—</pre>
+    <div class="note">四個階段可以單獨跑。<code>audit → fix → rootcause</code> 是最常見的串接；
+      <strong>沒有分歧就不要生 rootcause 報告</strong>，改在 fix 報告裡寫「無分歧」——
+      那一節空著本身就是資訊。</div>
+  </div>
+</section>
+
+<section id="m2">
+  <h2><span class="n">02</span>四階段與產物</h2>
+  <div class="tw"><table>
+    <thead><tr><th>階段</th><th>回答什麼</th><th>產物（進 git）</th><th>結束條件</th></tr></thead>
+    <tbody>
+      <tr><td><code>propose</code></td><td>要不要做、到底做成什麼</td>
+          <td><code>docs/spec/&lt;date&gt;-&lt;slug&gt;.html</code></td>
+          <td class="good">你在 demo 上確認 → 驗收表成為規格</td></tr>
+      <tr><td><code>audit</code></td><td>全站哪裡壞了</td>
+          <td><code>docs/audit/&lt;date&gt;-&lt;slug&gt;.html</code></td>
+          <td>H/M/L 分級，每條附量測＋根因信心度</td></tr>
+      <tr><td><code>fix</code></td><td>真的修好了嗎、證據在哪</td>
+          <td><code>docs/audit/&lt;date&gt;-&lt;slug&gt;.html</code></td>
+          <td>每項都有證據；gate 全綠</td></tr>
+      <tr><td><code>rootcause</code></td><td>修法哪裡跟稽核的猜測分歧</td>
+          <td><code>docs/audit/&lt;date&gt;-&lt;slug&gt;.html</code></td>
+          <td class="dim">沒分歧就不產出</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">產物落點是 2026-07-27 的決定：<strong>提案分開放 <code>docs/spec/</code></strong>，
+    稽核／修正／根因沿用既有的 <code>docs/audit/</code>。全部進 git，變成可回溯的規格史。</p>
+</section>
+
+<section id="m3">
+  <h2><span class="n">03</span>開工前置：模型閘與可丟棄實例</h2>
+
+  <h3>① 模型閘</h3>
+  <p class="lede">你的長期指示是<strong>審查者＝Opus 5、最高推理</strong>。skill 不能自己換模型，
+    所以每個階段開頭要先報當前模型與推理等級；不是 Opus 5 / xhigh 就請你 <code>/model</code> 切換。
+    <strong>不要用較低階模型跑完再叫它稽核。</strong></p>
+  <div class="tw"><table>
+    <thead><tr><th>情境</th><th>做法</th></tr></thead>
+    <tbody>
+      <tr><td>一般稽核</td><td>主 session 依序跑完各面向（預設）</td></tr>
+      <tr><td>你明確加了 <code>--fanout</code></td>
+          <td>每個稽核面向派一個 subagent，帶 <code>model:</code> 覆寫，最後彙整</td></tr>
+      <tr><td>你沒說</td><td class="bad">不要 fan out。平行分派要花你的 token，那是你的決定</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>② 起一個可丟棄的實例</h3>
+  <p class="lede"><strong>絕不對 prod 探測，也不要用你的工作資料庫。</strong>
+    <code>scripts/seed_demo.py</code> 全部是虛構資料，而且會拒絕重複灌。</p>
+  <pre><span class="cm"># PowerShell，從 repo 根目錄</span>
+$w = "$env:TEMP\dc"; New-Item -ItemType Directory -Force $w | Out-Null
+$env:DB_PATH = "$w\probe.db"; $env:PD_DISABLE_SCHEDULER = "1"; $env:PYTHONIOENCODING = "utf-8"
+.\.venv\Scripts\python.exe scripts\seed_demo.py
+
+$p = Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory (Get-Location) `
+  -FilePath ".\.venv\Scripts\python.exe" `
+  -ArgumentList "-m","uvicorn","portfolio_dash.api.app:create_app","--factory","--host","127.0.0.1","--port","8477" `
+  -RedirectStandardOutput "$w\uvicorn.out.log" -RedirectStandardError "$w\uvicorn.err.log"
+$p.Id | Set-Content "$w\uvicorn.pid"
+
+<span class="cm"># 一定要輪詢——首次開機要 bootstrap DB，寫死 Start-Sleep 3 會拿到 connection refused</span>
+for ($i=0; $i -lt 40; $i++) {
+  try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8477/api/health).Content; break }
+  catch { Start-Sleep -Milliseconds 500 }
+}</pre>
+  <p class="note">收工：<code>Stop-Process -Id (Get-Content "$w\uvicorn.pid") -Force</code>。
+    要用 <strong>detached 的 Start-Process</strong>，不要用 harness 的背景工作——
+    長時間工作會被中途砍掉（<code>LESSONS_LEARNED.md</code> 2026-07-24）。</p>
+</section>
+
+<section id="m4">
+  <h2><span class="n">04</span>工具一 <code>css</code>：讀碼讀不出來的那件事</h2>
+  <p class="lede">CSS 到底哪一條宣告勝出，<strong>讀檔案是問不出答案的</strong>。
+    兩個機制專門騙人：同特異性時<strong>後面的贏</strong>，以及
+    <strong><code>@media</code> 不貢獻任何特異性</strong>。
+    v0.1.24 的 M1、M2 兩條根因就是栽在這裡。</p>
+
+  <pre>.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\probe_live.py css `
+    http://127.0.0.1:8477 --selector ".kpi-band" --prop grid-template-columns --width 1257</pre>
+
+  <p>它會印出<strong>所有命中的宣告</strong>（依原始碼順序）、各自的特異性、
+    當前寬度下 <code>@media</code> 條件是否成立、誰真的勝出，並在踩到陷阱時直接點名。
+    下面是這條指令在本機的<strong>真實輸出節錄</strong>：</p>
+  <pre>   (0,1,0) #0   .kpi-band  =&gt;  repeat(8, 1fr)
+   (0,2,0) #1   .kpi-band.v2  =&gt;  1.15fr 1.3fr 1.05fr 1.25fr 1.25fr
+   (0,1,0) #2   .kpi-band  @media (max-width: 1280px)  =&gt;  repeat(4, 1fr)
+<span class="win">-&gt; (0,2,0) #3   .kpi-band.v2  @media (max-width: 1280px)  =&gt;  repeat(4, 1fr)</span>
+ x (0,1,0) #8   .kpi-band  @media (max-width: 760px)  =&gt;  1fr 1fr   <span class="cm">(condition false at this width)</span>
+
+  WINNER: .kpi-band.v2 @media (max-width: 1280px) -&gt; repeat(4, 1fr)</pre>
+
+  <div class="lab">
+    <h3>實驗：同一段 CSS，三種寫法，看 <code>getComputedStyle</code> 當場改變</h3>
+    <div class="dsub">下面是真的 iframe，跑真的瀏覽器級聯——不是模擬。
+      「斷點」用 620px 代表真實的 1280px，機制完全相同。把滑桿拉到 620 以下觀察。</div>
+    <div class="modes" id="css-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況（壞）<small>斷點只寫 .band，被 .band.v2 壓過</small></button>
+      <button data-m="1" data-tone="bad">照「加 min-width:0」的建議<small>加了也沒用</small></button>
+      <button data-m="2" data-tone="good">實際修法<small>斷點補上 .band.v2</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="css-w">560</b> px</span>
+      <input type="range" id="css-range" min="360" max="820" step="10" value="560">
+    </div>
+    <div class="stage"><iframe id="css-frame" title="cascade demo" style="height:120px"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="css-ro-cols"><div class="k">computed grid-template-columns</div><div class="v">—</div></div>
+      <div class="ro" id="css-ro-card"><div class="k">每張卡片寬</div><div class="v">—</div></div>
+      <div class="ro" id="css-ro-clip"><div class="k">內容被裁掉的卡片數</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="css-verdict">—</div>
+    <div class="note">真實畫面上的後果就是 KPI 卡印出
+      <code>年化報酬 (XIRR)no FX rate sto…</code> 這種被切一半的字。
+      <strong>模式 ① 的存在是重點</strong>：它示範一個「看起來完全正確的 diff」如何完全無效——
+      因為要修的機制從頭到尾沒被碰到。</div>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>工具講的話</th><th>意思</th><th>你該做什麼</th></tr></thead>
+    <tbody>
+      <tr><td><code>loses on SOURCE ORDER</code></td>
+          <td>同特異性，靠出現順序輸掉</td>
+          <td class="good">改那條<strong>勝出</strong>的（移除或收窄），改輸家沒有用</td></tr>
+      <tr><td><code>media queries add NO specificity</code></td>
+          <td>斷點被無條件規則壓過，形同不存在</td>
+          <td class="good">把斷點的選擇器<strong>提升到同等或更高</strong>（補上 <code>.v2</code>）</td></tr>
+      <tr><td><code>condition false at this width</code></td>
+          <td>該規則此刻根本沒參賽</td>
+          <td class="dim">別把它算進推理；換個 <code>--width</code> 再量</td></tr>
+      <tr><td><code>computed != winning declaration</code></td>
+          <td>簡寫／繼承／動畫介入了</td>
+          <td class="good">以 <code>computed</code> 為準</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="m5">
+  <h2><span class="n">05</span>工具二 <code>wiring</code>：每顆按鈕真的接到東西了嗎</h2>
+  <p class="lede">先靜態分級成 <span class="pill pass">wired</span>
+    <span class="pill warn">weak</span> <span class="pill rej">SUSPECT</span>，
+    再用 <code>--click</code> 把線索變成判決。
+    <strong>靜態分析只能說「沒有東西指向它」，永遠不能說「它沒作用」。</strong></p>
+
+  <pre>.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\probe_live.py wiring `
+    http://127.0.0.1:8477 --pages "/ledger.html" <span class="add">--click</span>
+
+<span class="cm"># 本機真實輸出（節錄）</span>
+/ledger.html: 84 controls (52 visible) — 27 wired, 19 weak, 6 SUSPECT
+  clicking 25 lead(s), fresh page each (MUTATES STATE)…
+    ok  tab-csv        4 DOM mutation(s)
+    ok  chip active    4 request(s) e.g. transactions?limit=50&amp;offset=0; 28 DOM mutation(s)
+  <span class="del">DEAD? tab-manual     nothing happened</span></pre>
+
+  <div class="lab">
+    <h3>實驗：判定器——把控制項的特徵餵進去，看它會被分到哪一級</h3>
+    <div class="dsub">這裡跑的是 <code>probe_live.py</code> 的<strong>真實分級規則</strong>
+      （下方自我校驗會拿它跟工具在本機的實際輸出對帳）。調整看看判定怎麼變。</div>
+    <div class="ctrl">
+      <div><label>有 inline onclick</label>
+        <select id="w-inline"><option value="0">否</option><option value="1">是</option></select></div>
+      <div><label>是真連結 / form submit</label>
+        <select id="w-link"><option value="0">否</option><option value="1">是</option></select></div>
+      <div><label>id 的字面出現在 JS</label>
+        <select id="w-id"><option value="none">沒有 id</option>
+          <option value="no">有 id，但 JS 找不到字面</option>
+          <option value="yes">有 id 且 JS 有引用</option></select></div>
+      <div><label>data-* 被 dispatch（值≥3 字）</label>
+        <select id="w-data"><option value="0">否</option><option value="1">是</option></select></div>
+      <div><label>class 有被 JS 提到</label>
+        <select id="w-cls"><option value="0">否</option><option value="1">是</option></select></div>
+      <div><label>該 class 在頁面上共用數</label>
+        <input type="number" id="w-freq" value="4" min="0" step="1"></div>
+      <div><label>--click 的結果</label>
+        <select id="w-click"><option value="skip">未測</option>
+          <option value="yes">有反應</option><option value="no">nothing happened</option></select></div>
+    </div>
+    <div class="readout">
+      <div class="ro" id="w-ro-v"><div class="k">靜態判定</div><div class="v">—</div></div>
+      <div class="ro" id="w-ro-e"><div class="k">採信的證據</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="w-verdict">—</div>
+    <div class="note"><strong>為什麼 class 要看共用數：</strong><code>.btn</code> 被 21 個控制項穿著，
+      JS 裡出現 <code>'.btn'</code> 只證明這個 class 有人用，<strong>完全不證明「這一顆」有作用</strong>；
+      而 <code>.sb-collapse</code> 只有 1 個控制項穿，那就認得出它。</div>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>誤判類型</th><th>為什麼</th><th>怎麼辦</th></tr></thead>
+    <tbody>
+      <tr><td>組合出來的選擇器</td>
+          <td>本專案用 <code>$('#tab-' + t)</code> 綁分頁，字面 <code>'tab-csv'</code> 根本不存在</td>
+          <td class="good">預期會是 SUSPECT；用 <code>--click</code> 判決</td></tr>
+      <tr><td>本來就啟用的分頁／開關</td>
+          <td><code>tab-manual</code> 是預設分頁，點下去 class 沒變 → 0 mutation</td>
+          <td class="good">先切到別的分頁再點一次，才能下結論</td></tr>
+      <tr><td>程式動態建立的元素</td>
+          <td><code>el('button','sb-collapse')</code>，class 以裸字串出現而非選擇器</td>
+          <td class="good">共用數 ≤2 時工具會採信；否則 <code>--click</code></td></tr>
+      <tr><td>執行期寫入的 dataset</td>
+          <td><code>el.dataset.seen='1'</code> 會讓每顆按鈕都像被 dispatch</td>
+          <td class="dim">工具已忽略 &lt;3 字的值；知道有這回事就好</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note"><strong><code>--click</code> 會改變狀態</strong>——只能對可丟棄的實例跑，
+    絕不對 prod 或你的真實帳本。</p>
+</section>
+
+<section id="m6">
+  <h2><span class="n">06</span>工具三 <code>layout</code>：溢出、裁字、console 錯誤</h2>
+  <p class="lede">逐頁 × 逐寬度量：文件被撐寬多少、誰撐的、哪些文字被裁掉、有沒有 console 錯誤，
+    順便存全頁截圖。關鍵在它<strong>會區分「真的溢出」與「表格在 <code>overflow-x:auto</code> 裡合法捲動」</strong>
+    ——v0.1.24 的 M 級發現就卡在這個分辨上。</p>
+
+  <pre>.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\probe_live.py layout `
+    http://127.0.0.1:8477 --pages "/,/data-center.html,/ledger.html" --widths 390,1257 --out $w\probe
+
+<span class="cm"># 本機真實輸出（節錄）</span>
+ok  /data-center.html   390px  doc=375  vw=390  +0px  offenders=0 clipped=1 errors=0
+    ~~ clipped 368&gt;333 span.panel-sub  ws=nowrap disp=block <span class="add">ellipsis=yes</span>  '唯讀 — 各資料表筆數…'</pre>
+  <p><code>ellipsis=yes</code> 是關鍵欄位：有省略號代表<strong>那是刻意的單行裁切</strong>，不是 bug；
+    沒有省略號而又 <code>nowrap</code>，才是 M2 那種「正文段落被當成標題列裁」的真問題。</p>
+
+  <div class="lab">
+    <h3>實驗：一張寬表格，有沒有捲動容器的差別</h3>
+    <div class="dsub">左右拉，看 <code>document.scrollWidth</code> 與「撐破頁面的元素」數量。</div>
+    <div class="modes" id="lay-modes">
+      <button data-m="0" data-tone="bad" class="on bad">沒有捲動容器<small>表格直接撐破頁面</small></button>
+      <button data-m="1" data-tone="good">包在 .tw 裡<small>overflow-x:auto</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="lay-w">420</b> px</span>
+      <input type="range" id="lay-range" min="320" max="820" step="10" value="420">
+    </div>
+    <div class="stage"><iframe id="lay-frame" title="layout demo" style="height:150px"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="lay-ro-sw"><div class="k">document scrollWidth</div><div class="v">—</div></div>
+      <div class="ro" id="lay-ro-off"><div class="k">撐破頁面的元素（工具會報）</div><div class="v">—</div></div>
+      <div class="ro" id="lay-ro-leg"><div class="k">合法捲動的容器（工具不報）</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lay-verdict">—</div>
+    <div class="note">兩種狀態下「表格都比視窗寬」。差別是<strong>誰在捲</strong>：
+      模式 ② 是表格自己捲，頁面不動——這正是工具用
+      <code>overflowX: auto|scroll</code> 的祖先來排除誤報的判準。</div>
+  </div>
+</section>
+
+<section id="m7">
+  <h2><span class="n">07</span>寫報告：kit API 與六條硬規則</h2>
+
+  <pre>.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\new_report.py `
+    --kind spec --slug drip-preview --title "DRIP 預覽 — 規格 demo"
+<span class="cm"># 編輯骨架裡的待填處（骨架附一個「已經跑得起來」的 lab，改它，不要從零拼）</span>
+.\.venv\Scripts\python.exe .claude\skills\demo-cycle\tools\verify_report.py `
+    docs\spec\2026-07-27-drip-preview.html --shots $w\shots</pre>
+
+  <div class="tw"><table>
+    <thead><tr><th>API</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>PD.sandbox(frame, {css, html, probe, onData})</code></td>
+          <td>把 css/html 塞進 iframe 跑<strong>真實級聯</strong>；<code>probe</code> 是在 iframe 內求值的物件字面，結果 post 回來</td></tr>
+      <tr><td><code>PD.modes(el, cb)</code></td><td>前／後切換鈕列，載入時也會呼叫一次</td></tr>
+      <tr><td><code>PD.sizer(range, frame, label)</code></td><td>寬度滑桿</td></tr>
+      <tr><td><code>PD.ro(el, value, state)</code></td><td>寫一格量測值（<code>good</code>/<code>bad</code> 上色）</td></tr>
+      <tr><td><code>PD.verdict(el, state, html)</code></td><td>寫結論行</td></tr>
+      <tr><td><code>PD.check(name, pass, detail)</code><br><code>PD.checkEq(name, mine, engine)</code></td>
+          <td><strong>自我校驗</strong>：離線重算 vs 真引擎。<code>verify_report.py</code> 會因為任一項 FAIL 而擋下報告</td></tr>
+      <tr><td><code>PD.group('1234567.89')</code></td><td>Decimal <strong>字串</strong>加千分位，全程不碰 <code>Number</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>六條硬規則</h3>
+  <div class="tw"><table>
+    <thead><tr><th>#</th><th>規則</th><th>為什麼</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><strong>真機制，不是圖片</strong>：CSS 問題進 iframe 讓瀏覽器解級聯；行為問題跑 app 自己的 JS</td>
+          <td>截圖只能當佐證。你要能<strong>親手推翻它</strong>，這份 demo 才有說服力</td></tr>
+      <tr><td>2</td><td><strong>前後都要有，而且可切換</strong></td><td>你要能來回切，看量測數字跟著變</td></tr>
+      <tr><td>3</td><td><strong>離線重算一定要自我校驗</strong>，期望值取自真引擎（<code>/api/*</code> 回應、pytest fixture、stress-audit oracle）</td>
+          <td>不然 demo 只是在示範「我自己寫的另一套算法」</td></tr>
+      <tr><td>4</td><td><strong>金額永遠不是 JS float</strong>（CLAUDE.md 不變量 3）</td>
+          <td>印後端的 Decimal 字串，或用整數最小單位算再校驗</td></tr>
+      <tr><td>5</td><td><strong>verdict 要同時看模式和量測</strong></td>
+          <td class="bad">只看量測的話，剛好沒觸發缺陷的寬度會讓「現況」宣布成功</td></tr>
+      <tr><td>6</td><td><strong>單一檔案</strong>；真的裝不下才用資料夾，並在報告裡說明理由</td>
+          <td>報告會被離線開啟、轉寄、幾個月後再看</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="lab">
+    <h3>實驗：規則 5 的陷阱——一個會說謊的 verdict</h3>
+    <div class="dsub">同一個「現況（壞）」狀態，只差 verdict 的判斷式怎麼寫。拖動滑桿到 480 以上。</div>
+    <div class="modes" id="v-modes">
+      <button data-m="0" data-tone="bad" class="on bad">verdict 只看量測<small>錯誤寫法</small></button>
+      <button data-m="1" data-tone="good">verdict 看模式＋量測<small>正確寫法</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="v-w">380</b> px</span>
+      <input type="range" id="v-range" min="320" max="700" step="10" value="380">
+    </div>
+    <div class="stage"><iframe id="v-frame" title="verdict trap" style="height:96px"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="v-ro-clip"><div class="k">被裁切的元素</div><div class="v">—</div></div>
+      <div class="ro" id="v-ro-mode"><div class="k">demo 目前的模式</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="v-verdict">—</div>
+    <div class="note">拉寬之後缺陷不再觸發，錯誤寫法就會在「現況」模式下宣布
+      <strong>「修法後：任何寬度都不再裁切」</strong>——這是我在做這套 kit 時<strong>真的寫出來的 bug</strong>，
+      骨架已經修好，但你自己寫新 lab 時還是會遇到。</div>
+  </div>
+</section>
+
+<section id="m8">
+  <h2><span class="n">08</span>使用技巧</h2>
+
+  <h3>流程上的</h3>
+  <div class="tw"><table>
+    <thead><tr><th>技巧</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td><strong>先量，再寫字</strong></td>
+          <td>任何一條發現在進報告之前，先有一行 <code>probe_live</code> 的輸出。
+              沒量到的就標<strong>推測待驗</strong>，不要混進已驗證的裡面</td></tr>
+      <tr><td><strong>症狀與根因分兩層寫</strong></td>
+          <td>症狀是量測（幾乎不會錯），根因是推論（會錯）。分開寫，你核准時才知道風險在哪</td></tr>
+      <tr><td><strong>金額別自己重算</strong></td>
+          <td>成本、損益、費稅、股利、匯兌、XIRR 交給 <code>/stress-audit</code>，
+              在報告裡引用它的 <code>fail=0</code>。這裡重算等於多一套會漂移的帳</td></tr>
+      <tr><td><strong>通過項目也要寫</strong></td>
+          <td>只列問題的報告會扭曲系統的實際狀態</td></tr>
+      <tr><td><strong>一次只改一件事，改完立刻 verify</strong></td>
+          <td><code>verify_report.py</code> 很快；把它當 gate 用，不要累積十個改動再一起驗</td></tr>
+      <tr><td><strong>分歧要往三個地方寫</strong></td>
+          <td>報告（當次）、<code>CHANGELOG.md</code>（你每次發版都會看）、
+              <code>LESSONS_LEARNED.md</code>（只在它是一「類」錯誤時，不是每個個案都寫）</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>操作上的</h3>
+  <div class="tw"><table>
+    <thead><tr><th>技巧</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td><strong>用 PowerShell，不要用 Git Bash</strong></td>
+          <td class="bad">MSYS 會把開頭是 <code>/</code> 的參數改寫成 Windows 路徑，
+              <code>--pages /</code> 會變成 <code>/C:/Program Files/Git/</code> 而<strong>安靜地探測錯的網址</strong>。
+              非用不可時加 <code>MSYS_NO_PATHCONV=1</code></td></tr>
+      <tr><td><strong>一定要 <code>PYTHONIOENCODING=utf-8</code></strong></td>
+          <td>否則繁體中文走預設 cp1252 主控台會 <code>UnicodeEncodeError</code> 中斷</td></tr>
+      <tr><td><strong>先量 1257px，再量 390px</strong></td>
+          <td>1257 是你實際回報過的視窗寬；中間寬度的斷點失效只在那附近看得到</td></tr>
+      <tr><td><strong><code>--click</code> 之前先確認是可丟棄實例</strong></td>
+          <td>它會真的按下去。看到 <code>DEAD?</code> 先想「是不是本來就啟用的分頁」</td></tr>
+      <tr><td><strong>報告要能離線開</strong></td>
+          <td>圖片轉 base64、CSS/JS 內嵌。<code>verify_report.py</code> 會擋下任何
+              <code>http(s)://</code> 外部資源</td></tr>
+      <tr><td><strong>demo 的 <code>probe</code> 求值式要寫短</strong></td>
+          <td>它在 iframe 裡丟出的例外<strong>是被吞掉的</strong>（刻意設計）。
+              量測沒出來時，先把 probe 拆簡單再驗</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>建立新工具時</h3>
+  <div class="shape">
+    <b>偵測力要先證明，再相信。</b>
+    <code>wiring</code> 一開始信心滿滿地回報「全站 0 個死按鈕」——直到拿一個
+    <strong>植入兩顆死按鈕的 fixture</strong> 去跑，才發現它把 <code>*.html</code> 也讀進乾草堆，
+    每顆按鈕都匹配到自己的 <code>id="…"</code>，<strong>6/6 全判 wired</strong>。
+    任何掃描型工具，先做一個「答案已知」的 fixture 再說。
+  </div>
+</section>
+
+<section id="m9">
+  <h2><span class="n">09</span>疑難排解與速查</h2>
+  <div class="tw"><table>
+    <thead><tr><th>症狀</th><th>處理</th></tr></thead>
+    <tbody>
+      <tr><td><code>UnicodeEncodeError: 'charmap'</code></td><td><code>$env:PYTHONIOENCODING="utf-8"</code></td></tr>
+      <tr><td>探測到 <code>/C:/Program Files/Git/</code></td><td>改用 PowerShell</td></tr>
+      <tr><td><code>selector matched nothing</code></td><td>那個元素是載入後才由 JS 產生；換頁面路徑，或改量一個靜止時就存在的選擇器</td></tr>
+      <tr><td>verify：<em>readout never measured</em></td><td>lab 的 <code>probe</code> 在 iframe 裡丟例外了（被吞）。拆簡單再驗</td></tr>
+      <tr><td>verify：<em>external asset reference</em></td><td>內嵌它。報告必須離線可開</td></tr>
+      <tr><td>uvicorn 起來就掛</td><td>看 <code>$w\uvicorn.err.log</code>；多半是連接埠被占用或 <code>DB_PATH</code> 寫不進去</td></tr>
+      <tr><td>健康檢查 connection refused</td><td>要輪詢，首次開機要 bootstrap DB，比你猜的久</td></tr>
+      <tr><td>每顆按鈕都 wired</td><td>乾草堆錯了。先用死按鈕 fixture 驗過再相信結果</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>速查</h3>
+  <pre><span class="cm"># 量測</span>
+probe_live.py layout &lt;url&gt; --pages "/,/x.html" --widths 390,1257 --out DIR
+probe_live.py css    &lt;url&gt; --selector ".x" --prop flex-wrap --width 1257
+probe_live.py wiring &lt;url&gt; --pages "/x.html" [--click] [--out J.json]
+
+<span class="cm"># 報告</span>
+new_report.py    --kind spec|audit|fix|rootcause --slug S --title T
+new_report.py    --kind manual --body B.html --demo-js D.js --out M.html   <span class="cm"># 自撰內文</span>
+verify_report.py REPORT.html [--shots DIR] [--allow-todo]
+
+<span class="cm"># 收尾</span>
+/stress-audit          <span class="cm"># 動到金額計算就一定要跑</span>
+/ship-version          <span class="cm"># 出貨前檢查清單</span></pre>
+  <p class="note">完整規範在 <code>.claude/skills/demo-cycle/SKILL.md</code>；
+    這份手冊由 <code>manual.body.html</code> + <code>manual.demo.js</code> 產生，可重新生成。</p>
+</section>
