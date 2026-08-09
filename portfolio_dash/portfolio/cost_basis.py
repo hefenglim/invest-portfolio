@@ -1,12 +1,19 @@
 """Chronological ledger replay → open holdings (cost basis) + realized P&L."""
 
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
 from portfolio_dash.portfolio.results import Book, Holding, RealizedPnL, RealizedRow
+from portfolio_dash.shared.corporate_actions import (
+    CorporateAction,
+    CorporateActionKind,
+    apply_ratio,
+)
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import (
     Dividend,
@@ -59,6 +66,150 @@ class _Position:
     # A dividend arrived while the short was open — skipped, never booked (see the dividend
     # branch). Surfaced so the position is visibly 待釐清 instead of quietly incomplete.
     unbookable_dividend: bool = False
+    # A corporate action targeting this position could not be booked and was SKIPPED on the
+    # dashboard path (E1a/E2/E3/E5/E18/E22). The shares are then in PRE-action terms against
+    # global post-action prices, so the position is 待釐清 rather than merely stale.
+    unbookable_action: bool = False
+
+
+class _SkipAction(Exception):  # noqa: N818 - control flow, not an error surfaced to a caller
+    """The dashboard path's counterpart to raising: skip this event, flag the position."""
+
+
+def _reject(
+    message: str, position: _Position | None, *, allow_oversell: bool
+) -> None:
+    """Refuse an action: raise on the strict path, skip + flag on the dashboard path.
+
+    Never-500 (E1a): ``portfolio/dashboard.py`` calls ``build_book`` with NO try/except, so
+    a stranded or incoherent action row would take the whole dashboard down. Every rejection
+    below therefore degrades exactly like the oversell and dividend-on-short paths already
+    do — the position becomes visibly 待釐清 instead of the page becoming a 500.
+    """
+    if not allow_oversell:
+        raise UnbookableLedgerError(message)
+    if position is not None:
+        position.unbookable_action = True
+    raise _SkipAction
+
+
+def _apply_action(
+    positions: dict[tuple[str, str], _Position],
+    action: CorporateAction,
+    quote_ccy: Callable[[str], Currency],
+    *,
+    allow_oversell: bool,
+) -> None:
+    """Apply one corporate action to the live position map (spec §4.1-§4.4).
+
+    The field transfer is NORMATIVE and complete: `_Position` has eight fields and every one
+    of them has an explicit rule in §4.4, because "the formula didn't mention it" is not a
+    specification. Two of those rules exist only because a review found the omission —
+    zeroing the source's short fields (an `ε` residue survives a full cover and would
+    otherwise contaminate a position a later buy can reopen), and refusing an
+    `ever_oversold` DESTINATION (a discarded basis silently averaged into a real one).
+    """
+    src_key = (action.account_id, action.from_symbol)
+    source = positions.get(src_key)
+    try:
+        # --- E1 / E2: the source must be a live position on this date ---
+        if source is None:
+            _reject(f"{action.from_symbol}（{action.account_id}）於 "
+                    f"{action.date.isoformat()} 沒有持倉,無法套用公司行動 — "
+                    "請確認該日之前的買進或期初庫存是否遺漏",
+                    None, allow_oversell=allow_oversell)
+            return
+        if source.shares == _ZERO and source.short_shares == _ZERO:
+            _reject(f"{action.from_symbol}（{action.account_id}）於 "
+                    f"{action.date.isoformat()} 已無持倉(部位已結清),無法套用公司行動",
+                    source, allow_oversell=allow_oversell)
+
+        # --- E3: an oversold source has no basis left to scale ---
+        if source.ever_oversold:
+            _reject(f"{action.from_symbol}（{action.account_id}）是賣超(待釐清)部位,"
+                    "成本基礎已被捨棄 — 縮放一個未定義的基礎仍是未定義",
+                    source, allow_oversell=allow_oversell)
+
+        if action.kind is CorporateActionKind.SPLIT:
+            # §4.1. Totals untouched, so both averages scale by 1/ratio on read and
+            # payback_ratio is unchanged — a split changes nothing about how much of the
+            # cost has been returned as dividends.
+            # E4: a declared short scales too. You owe more shares and you still received
+            # the same money, so short_proceeds is UNCHANGED and the average sale price
+            # scales correctly.
+            source.shares = apply_ratio(source.shares, action)
+            source.short_shares = apply_ratio(source.short_shares, action)
+            return
+
+        # --- EXCHANGE / SPINOFF share a destination and its guards ---
+        # E5: no honest booking exists for moving an open short to another symbol.
+        if source.short_shares > _ZERO:
+            _reject(f"{action.from_symbol}（{action.account_id}）有未回補的放空部位,"
+                    "換股／分拆沒有可誠實記錄的分錄 — 請先回補",
+                    source, allow_oversell=allow_oversell)
+
+        dst_key = (action.account_id, action.to_symbol)
+        dest = positions.get(dst_key)
+        if dest is not None:
+            # E18: long and short are mutually exclusive BY CONSTRUCTION; `Q.shares +=`
+            # onto a short destination breaks the invariant the whole replay rests on.
+            if dest.short_shares > _ZERO:
+                _reject(f"目的標的 {action.to_symbol}（{action.account_id}）有未回補的"
+                        "放空部位,多空混在一個部位裡會使均價失去意義",
+                        source, allow_oversell=allow_oversell)
+            # E22 (D16): the mirror of E18 one level deeper. E19 stops a FLAG being
+            # laundered; this stops a COST BASIS being restored onto a position whose basis
+            # the sticky 賣超 guard deliberately discarded — which reads as an entirely
+            # ordinary average over shares that have none.
+            if dest.ever_oversold:
+                _reject(f"目的標的 {action.to_symbol}（{action.account_id}）是賣超"
+                        "(待釐清)部位,移轉成本過去會讓已捨棄的成本基礎「復活」,"
+                        "並算出一個看似正常、實際上沒有依據的均價",
+                        source, allow_oversell=allow_oversell)
+        else:
+            dest = positions.setdefault(dst_key, _Position(quote_ccy(action.to_symbol)))
+
+        carried_shares = apply_ratio(source.shares, action)
+        if action.kind is CorporateActionKind.EXCHANGE:
+            # §4.2. The whole position moves. If Q already holds shares the two merge by
+            # weighted average — the sum of the totals over the sum of the shares, exactly
+            # what the method prescribes, so there is no special case.
+            dest.shares += carried_shares
+            dest.original_total += source.original_total
+            dest.adjusted_total += source.adjusted_total
+            dest.unbookable_dividend |= source.unbookable_dividend      # E19
+            dest.unbookable_action |= source.unbookable_action
+            source.shares = _ZERO
+            source.original_total = _ZERO
+            source.adjusted_total = _ZERO
+            # §4.4: zero the short fields even though E5 proved them "already zero". They
+            # are NEARLY zero: a full cover computes `P - (P/S)*S`, and Decimal division is
+            # inexact whenever S does not divide P, so a residue survives. Today it hides
+            # because the emitted shares are 0-0 and the holdings loop drops the position —
+            # but EXCHANGE leaves the source live, and a later buy on the old ticker could
+            # reopen it carrying `-ε` of basis.
+            source.short_shares = _ZERO
+            source.short_proceeds = _ZERO
+            return
+
+        # §4.3 SPINOFF. cost_carry is never guessed; validation rejects a row without it.
+        carry = action.cost_carry if action.cost_carry is not None else _ZERO
+        carved_original = source.original_total * carry
+        carved_adjusted = source.adjusted_total * carry
+        dest.shares += carried_shares
+        dest.original_total += carved_original
+        dest.adjusted_total += carved_adjusted
+        dest.unbookable_dividend |= source.unbookable_dividend          # E19
+        dest.unbookable_action |= source.unbookable_action
+        # `total - carved`, NOT `total * (1 - c)`: algebraically identical, numerically not.
+        # `1 - c` rounds once and `* (1-c)` rounds again, so the two sides can miss §2.1's
+        # conservation law by an ulp. Subtracting exactly what was added makes the law hold
+        # BY CONSTRUCTION rather than by luck.
+        source.original_total -= carved_original
+        source.adjusted_total -= carved_adjusted
+        # source.shares unchanged — the parent keeps its position (§4.3).
+    except _SkipAction:
+        return
 
 
 def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
@@ -68,7 +219,10 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     one signature every replay call site shares, so a new ledger is a field on the bundle
     instead of an edit at eight sites, seven of which fail silently when missed.
 
-    Same-day ordering: opening (0) -> buy (1) -> sell (2) -> dividend (3).
+    Same-day ordering is :class:`EventPriority` — opening, CORPORATE ACTION, buy, sell,
+    dividend. An action is effective at the START of its date: a same-day trade is quoted
+    in post-action terms (post-split price, new ticker), so the action applies first, and
+    opening inventory dated on an action date describes the position as it stood BEFORE.
 
     Oversell (a sell exceeding holdings): by default raise ``OversellError`` (validation
     callers — e.g. the 重算/rebuild action — want to reject it). With ``allow_oversell=True``
@@ -91,15 +245,22 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
 
     events: list[tuple[date, int, str, object]] = []
     for oi in bundle.opening:
-        events.append((oi.build_date, 0, "open", oi))
+        events.append((oi.build_date, EventPriority.OPENING, "open", oi))
     for tx in bundle.transactions:
-        events.append((tx.trade_date, 1 if tx.side is Side.BUY else 2, "tx", tx))
+        events.append((tx.trade_date,
+                       EventPriority.BUY if tx.side is Side.BUY else EventPriority.SELL,
+                       "tx", tx))
     for dv in bundle.dividends:
-        events.append((dv.date, 3, "div", dv))
+        events.append((dv.date, EventPriority.DIVIDEND, "div", dv))
+    for ca in bundle.actions:
+        events.append((ca.date, EventPriority.CORPORATE_ACTION, "action", ca))
     events.sort(key=lambda e: (e[0], e[1]))
 
     for _d, _p, kind, ev in events:
-        if kind == "open":
+        if kind == "action":
+            assert isinstance(ev, CorporateAction)
+            _apply_action(positions, ev, quote_ccy, allow_oversell=allow_oversell)
+        elif kind == "open":
             assert isinstance(ev, OpeningInventory)
             key = (ev.account_id, ev.symbol)
             pos = positions.setdefault(key, _Position(quote_ccy(ev.symbol)))
@@ -316,6 +477,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                 oversold=pos.ever_oversold or pos.shares < _ZERO,
                 short_open=pos.short_shares > _ZERO,
                 unbookable_dividend=pos.unbookable_dividend,
+                unbookable_action=pos.unbookable_action,
             )
         )
 

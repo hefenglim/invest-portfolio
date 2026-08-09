@@ -42,6 +42,12 @@ class Holding(BaseModel):
     # the dividend in lieu — see cost_basis.build_book), so the position's figures are
     # incomplete by exactly that payout and the consumer must say so.
     unbookable_dividend: bool = False
+    # A corporate action could not be applied to this position and was SKIPPED on the
+    # dashboard path (the strict path raises instead). The share count is therefore in
+    # PRE-action terms while prices are global and post-action, so market value and every
+    # figure derived from it are wrong until the ledger is fixed. Same 待釐清 posture as
+    # the two flags above: never silently correct, never a 500 (E1a/E2/E3/E5/E18/E22).
+    unbookable_action: bool = False
 
 
 class RealizedRow(BaseModel):
