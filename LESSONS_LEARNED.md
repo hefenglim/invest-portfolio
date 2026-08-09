@@ -395,6 +395,18 @@ prevents recurrence.
   longer than a couple minutes, use the detached `.cmd` + exit-file + Monitor pattern —
   exit codes are authoritative (ignore the trailing Windows ProactorEventLoop teardown
   noise and the missing pytest summary line).
+  - **2026-08-09 addendum — the exit file is not optional, and this entry was re-learned
+    by skipping it.** `tests/e2e` was launched as a `Bash run_in_background` job first and
+    killed again (this lesson exists precisely for that), then relaunched detached via
+    `Start-Process` — but with only `-RedirectStandardOutput`, no exit file. The run
+    finished cleanly and the summary line raced with process exit, so the log ended at
+    `-- Docs: …` with **no count line at all**: the Monitor's `grep "passed"` never
+    matched and it reported "exited without a pytest summary" on a fully green run. The
+    verdict had to be reconstructed by counting progress characters (131 outcome chars,
+    zero `F`/`E`/`s`). That reconstruction is sound but it is evidence-by-inference on a
+    release gate. Rule: `Start-Process` **plus** `$p.ExitCode | Set-Content <file>`, and
+    make the Monitor watch the exit file — never the summary line, which this entry
+    already warned is unreliable.
 
 - **2026-07-24 — an idempotency/suppression key must be structural, never editable
   free-text.** The 折讓款 inbox suppressed an already-booked month by matching the cash
@@ -597,3 +609,16 @@ prevents recurrence.
   forever. Two rules: check Windows process liveness with `Get-Process`, not `kill -0`; and
   before blaming a slow suite, list the stray servers (`Get-CimInstance Win32_Process`) — a
   previous session's "instances stopped" claim is not evidence they stopped.
+
+- **2026-08-09 — PowerShell's escape character is a BACKTICK, so `\"` does not escape a
+  quote — it ends the string.** A remote command for `vm_exec.py` was written as
+  `--cmd "… c.execute(\"SELECT COUNT(*) FROM \"+t) …"`. Each `\"` closed the PowerShell
+  string, leaving `COUNT(*)` outside it, and PowerShell tried to run `*` as a command:
+  *"The term '*' is not recognized"* — an error that points at the SQL and says nothing
+  about quoting, on a command that would have been valid in bash. The payload crosses
+  three parsers (PowerShell → gcloud/base64 → remote bash), and per-layer escaping is
+  unmaintainable at that depth. Rule: build any multi-line or quote-bearing remote command
+  as a **single-quoted here-string** (`$cmd = @'` … `'@` with the terminator at column 0)
+  and pass it as `--cmd $cmd`. Nothing inside is interpolated or escaped, so the remote
+  shell receives exactly what you wrote — nested `'…'` for awk and `"…"` for `python -c`
+  both survive untouched.
