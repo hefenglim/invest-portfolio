@@ -157,10 +157,8 @@ def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding
     keeps an acked 賣超 book from crashing; oversold holdings carry no meaningful basis and
     are EXCLUDED.
     """
-    t_models, d_models, o_models = _to_models(conn)
-    instruments = {i.symbol: i for i in list_instruments(conn)}
     try:
-        book = build_book(t_models, d_models, o_models, instruments, allow_oversell=True)
+        book = build_book(_to_models(conn), allow_oversell=True)
     except (ValueError, KeyError):
         return None
     return {(h.account_id, h.symbol): h for h in book.holdings if not h.oversold}

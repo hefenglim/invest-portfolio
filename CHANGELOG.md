@@ -34,6 +34,27 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 - No money-of-record change: `reinvest_shares` storage precision is untouched (capping it would
   move share counts and therefore average cost, market value, unrealized P&L, weights and XIRR).
 
+### Changed
+- **`LedgerBundle` — one argument for every ledger replay** (corporate-actions spec W0 / D9;
+  **pure refactor, no behaviour change**). `build_book` and `daily_value_series` took one
+  positional argument per ledger, at eight sites; adding a ledger meant editing all eight, and
+  *missing* one is silent — a book without a ledger still builds. They now take a single
+  `shared.models.ledger.LedgerBundle`, loaded once by `data_ingestion.store.load_ledger_bundle`.
+  The `Stored*` → ledger-model conversion, previously copy-pasted at five sites (dashboard,
+  what-if, tax package, 重算, ledger-edit revalidation), lives only in that loader; the trend
+  replay's per-day cut is `bundle.through(day)`; the unregistered-symbol skip-set is
+  `bundle.unregistered_symbols` / `.without_unregistered()` instead of being rebuilt from three
+  lists at each caller. Verified by the full suite plus a byte-identical
+  `tests/golden/dashboard_full.json` — for a refactor, any moved number is the bug.
+- **`shared/ledger_registry.py` — the ledger table catalogue, declared once.** Four modules
+  enumerated the ledger tables by hand (`db_stats` labels, the export zip + CSV tabs, the Moomoo
+  account merge, `scripts/merge_reconcile.py`), and every failure mode of a missed entry is
+  silent: an account merge orphans rows on the dead account id and the reconciliation still
+  reports PASS. All four now derive from one declaration. A new account-scoped ledger table in
+  `data_ingestion/schema.py` that is not registered fails a named test
+  (`tests/shared/test_ledger_registry.py`), proven to fire by removing `cash_movements` and
+  watching exactly that assertion break.
+
 ### Planned
 - **Corporate actions (SPLIT / EXCHANGE / SPINOFF) — P0, in progress.** A broker-export coverage
   assessment (2026-08-06) found this to be the only *blocking* ingestion gap: a share count that

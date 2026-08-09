@@ -12,11 +12,8 @@ from decimal import Decimal
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
     list_cash_movements,
-    list_dividends,
     list_fx_conversions,
-    list_instruments,
-    list_opening,
-    list_transactions,
+    load_ledger_bundle,
 )
 from portfolio_dash.export.artifact import ExportArtifact, csv_blob, zip_artifact
 from portfolio_dash.forex.fx_pnl import realized_fx_rows
@@ -25,12 +22,7 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.pricing.store import get_fx_on
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.enums import DividendType
-from portfolio_dash.shared.models.ledger import (
-    Dividend,
-    FXConversion,
-    OpeningInventory,
-    Transaction,
-)
+from portfolio_dash.shared.models.ledger import FXConversion
 
 _ONE = Decimal("1")
 _ZERO = Decimal("0")
@@ -64,24 +56,15 @@ def build_tax_package_zip(
     ``now`` is accepted for signature parity with sibling exports (audit logging is the
     router's concern); the package content is year-cut, not as-of ``now``.
     """
-    txs = [Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
-                       quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                       trade_date=s.trade_date,
-                       short_sale=s.short_sale) for s in list_transactions(conn)]
-    divs = [Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
-                     type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
-                     net=s.net, reinvest_shares=s.reinvest_shares,
-                     reinvest_price=s.reinvest_price) for s in list_dividends(conn)]
-    opening = [OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                                original_cost_total=s.original_cost_total,
-                                build_date=s.build_date) for s in list_opening(conn)]
+    bundle = load_ledger_bundle(conn)
+    divs = bundle.dividends
+    instruments = bundle.instruments
     convs = [FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
                           from_amount=s.from_amount, to_ccy=s.to_ccy,
                           to_amount=s.to_amount) for s in list_fx_conversions(conn)]
     moves = list_cash_movements(conn)
-    instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
-    book = build_book(txs, divs, opening, instruments)
+    book = build_book(bundle)
 
     realized_rows: list[list[str]] = []
     realized_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)

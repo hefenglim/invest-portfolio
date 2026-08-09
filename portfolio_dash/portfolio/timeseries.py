@@ -15,9 +15,8 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
-from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
-from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
+from portfolio_dash.shared.models.ledger import LedgerBundle
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -53,10 +52,7 @@ def _fx_at(history: FxHistory, on: date, base: Currency, quote: Currency) -> Dec
 
 
 def daily_value_series(
-    transactions: list[Transaction],
-    dividends: list[Dividend],
-    opening: list[OpeningInventory],
-    instruments: dict[str, Instrument],
+    bundle: LedgerBundle,
     price_history: PriceHistory,
     fx_history: FxHistory,
     reporting: Currency,
@@ -69,16 +65,16 @@ def daily_value_series(
     when any flow date lacks an on-or-before FX rate for its needed pair.
     """
     event_dates = (
-        [t.trade_date for t in transactions]
-        + [d.date for d in dividends]
-        + [o.build_date for o in opening]
+        [t.trade_date for t in bundle.transactions]
+        + [d.date for d in bundle.dividends]
+        + [o.build_date for o in bundle.opening]
     )
     if not event_dates:
         return TrendSeries(points=[], reporting_currency=reporting, available=False)
     start = min(event_dates)
 
     def quote_ccy(symbol: str) -> Currency:
-        inst = instruments.get(symbol)
+        inst = bundle.instruments.get(symbol)
         if inst is None:
             raise KeyError(f"unknown instrument: {symbol}")
         return inst.quote_ccy
@@ -86,15 +82,15 @@ def daily_value_series(
     # Net-invested flow deltas (signs mirror the XIRR conventions, negated):
     # opening +cost, buy +gross(incl. fees+tax), sell -net, cash dividend -net.
     flows: list[tuple[date, Currency, Decimal]] = []
-    for o in opening:
+    for o in bundle.opening:
         flows.append((o.build_date, quote_ccy(o.symbol), o.original_cost_total))
-    for t in transactions:
+    for t in bundle.transactions:
         gross = t.quantity * t.price
         if t.side is Side.BUY:
             flows.append((t.trade_date, quote_ccy(t.symbol), gross + t.fees + t.tax))
         else:
             flows.append((t.trade_date, quote_ccy(t.symbol), -(gross - t.fees - t.tax)))
-    for dv in dividends:
+    for dv in bundle.dividends:
         if dv.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY) — one definition
             flows.append((dv.date, quote_ccy(dv.symbol), -dv.net))
 
@@ -114,13 +110,7 @@ def daily_value_series(
         # dashboard through the trend replay either — mirror the main book's
         # degradation. An oversold (negative-share) day has no honest value, so it
         # marks the point incomplete instead of contributing a fabricated number.
-        book = build_book(
-            [t for t in transactions if t.trade_date <= day],
-            [d for d in dividends if d.date <= day],
-            [o for o in opening if o.build_date <= day],
-            instruments,
-            allow_oversell=True,
-        )
+        book = build_book(bundle.through(day), allow_oversell=True)
         total = _ZERO
         incomplete = False
         for h in book.holdings:

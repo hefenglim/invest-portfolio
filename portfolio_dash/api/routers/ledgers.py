@@ -48,6 +48,7 @@ from portfolio_dash.data_ingestion.store import (
     list_instruments,
     list_opening,
     list_transactions,
+    load_ledger_bundle,
     update_dividend,
     update_fx_conversion,
     update_transaction,
@@ -55,13 +56,8 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType
-from portfolio_dash.shared.models.ledger import (
-    Dividend,
-    OpeningInventory,
-    Transaction,
-)
+from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -216,9 +212,6 @@ def openings(
 # ---------------------------------------------------------------------------
 
 
-_Models = tuple[list[Transaction], list[Dividend], list[OpeningInventory]]
-
-
 class _ReplayBlock(BaseModel):
     """A reason a correction is refused: an ``oversell`` (ack-bypassable) or an
     ``orphan`` (a dividend/opening record stranded by the mutation — hard)."""
@@ -232,70 +225,44 @@ def _to_models(
     txs: list[StoredTransaction] | None = None,
     divs: list[StoredDividend] | None = None,
     opening: list[StoredOpening] | None = None,
-) -> _Models:
-    """Build ledger models from the mutated list(s); unspecified ledgers load from store.
+) -> LedgerBundle:
+    """The replay bundle for the mutated list(s); unspecified ledgers load from store.
 
     Rows whose symbol is unregistered are excluded (same degradation as the dashboard)
     so one legacy bad row cannot block corrections to healthy rows.
     """
-    s_txs = txs if txs is not None else list_transactions(conn)
-    s_divs = divs if divs is not None else list_dividends(conn)
-    s_open = opening if opening is not None else list_opening(conn)
-    instruments = {i.symbol: i for i in list_instruments(conn)}
-    t_models = [
-        Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
-                    quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date,
-                    short_sale=s.short_sale)
-        for s in s_txs if s.symbol in instruments
-    ]
-    d_models = [
-        Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
-                 type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
-                 net=s.net, reinvest_shares=s.reinvest_shares,
-                 reinvest_price=s.reinvest_price)
-        for s in s_divs if s.symbol in instruments
-    ]
-    o_models = [
-        OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_cost_total=s.original_cost_total,
-                         build_date=s.build_date)
-        for s in s_open if s.symbol in instruments
-    ]
-    return t_models, d_models, o_models
+    return load_ledger_bundle(
+        conn, transactions=txs, dividends=divs, opening=opening
+    ).without_unregistered()
 
 
-def _orphan_keys(models: _Models) -> set[tuple[str, str]]:
+def _orphan_keys(bundle: LedgerBundle) -> set[tuple[str, str]]:
     """(account, symbol) dividend keys with NO buy/sell/opening on-or-before the div date.
 
     These are exactly the rows on which ``build_book`` raises ``ValueError`` ('dividend
     for unknown position') — computing the set directly (rather than catching) lets the
     caller scope the block to orphans the mutation INTRODUCES (audit H3)."""
-    t_models, d_models, o_models = models
     orphans: set[tuple[str, str]] = set()
-    for dv in d_models:
+    for dv in bundle.dividends:
         covered = any(
             o.account_id == dv.account_id and o.symbol == dv.symbol
-            and o.build_date <= dv.date for o in o_models
+            and o.build_date <= dv.date for o in bundle.opening
         ) or any(
             t.account_id == dv.account_id and t.symbol == dv.symbol
-            and t.trade_date <= dv.date for t in t_models
+            and t.trade_date <= dv.date for t in bundle.transactions
         )
         if not covered:
             orphans.add((dv.account_id, dv.symbol))
     return orphans
 
 
-def _oversold_shares(
-    models: _Models, instruments: dict[str, Instrument]
-) -> dict[tuple[str, str], Decimal] | None:
+def _oversold_shares(bundle: LedgerBundle) -> dict[tuple[str, str], Decimal] | None:
     """Map of (account, symbol) → negative shares for oversold positions.
 
     ``None`` when the ledger is un-bookable (e.g. a pre-existing orphan) — the caller
     then declines to scope the oversell rather than block an unrelated correction."""
-    t_models, d_models, o_models = models
     try:
-        book = build_book(t_models, d_models, o_models, instruments, allow_oversell=True)
+        book = build_book(bundle, allow_oversell=True)
     except (ValueError, KeyError):
         return None
     return {(h.account_id, h.symbol): h.shares for h in book.holdings if h.oversold}
@@ -312,7 +279,6 @@ def _replay_block(
     introduces — a newly stranded dividend/opening (orphan, hard) or a new/worsened
     oversell (soft). A pre-existing, unrelated oversell/orphan never poisons the
     correction (audit H3 + H8)."""
-    instruments = {i.symbol: i for i in list_instruments(conn)}
     pre = _to_models(conn)
     post = _to_models(conn, txs, divs, opening)
 
@@ -326,8 +292,8 @@ def _replay_block(
             ),
         )
 
-    post_over = _oversold_shares(post, instruments)
-    pre_over_raw = _oversold_shares(pre, instruments)
+    post_over = _oversold_shares(post)
+    pre_over_raw = _oversold_shares(pre)
     if post_over is None:
         # The would-be ledger cannot be replayed (beyond the orphan-dividend case above,
         # e.g. a DRIP dividend stripped of its reinvest shares). Block hard when THIS

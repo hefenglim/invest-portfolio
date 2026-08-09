@@ -10,20 +10,13 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.data_ingestion.store import (
-    list_dividends,
-    list_instruments,
-    list_opening,
-    list_transactions,
-)
+from portfolio_dash.data_ingestion.store import load_ledger_bundle
 from portfolio_dash.portfolio.cost_basis import (
     OversellError,
     UnbookableLedgerError,
     build_book,
 )
 from portfolio_dash.scheduler.jobs import backfill_history_all, run_job
-from portfolio_dash.shared.models.enums import DividendType
-from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
 
 router = APIRouter()
 
@@ -78,38 +71,16 @@ def recompute(
     now: datetime = Depends(get_now),
 ) -> Any:
     """Re-validate the ledgers by replaying them (read-only; append-only honored)."""
-    txs = [
-        Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
-                    quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date,
-                    short_sale=s.short_sale)
-        for s in list_transactions(conn)
-    ]
-    divs = [
-        Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
-                 type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
-                 net=s.net, reinvest_shares=s.reinvest_shares,
-                 reinvest_price=s.reinvest_price)
-        for s in list_dividends(conn)
-    ]
-    opening = [
-        OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_cost_total=s.original_cost_total,
-                         build_date=s.build_date)
-        for s in list_opening(conn)
-    ]
-    instruments = {i.symbol: i for i in list_instruments(conn)}
+    bundle = load_ledger_bundle(conn)
     # Unregistered symbols make the ledger un-bookable (no quote ccy) — report them
     # explicitly instead of letting build_book KeyError into a 500 (2026-07-02).
-    ledger_syms = ({t.symbol for t in txs} | {d.symbol for d in divs}
-                   | {o.symbol for o in opening})
-    unregistered = sorted(ledger_syms - instruments.keys())
+    unregistered = bundle.unregistered_symbols
     if unregistered:
         return JSONResponse(status_code=422, content=error_body(
             "unregistered_symbol",
             f"帳本含未註冊標的：{', '.join(unregistered)} — 請先至「標的管理」註冊後再重算"))
     try:
-        build_book(txs, divs, opening, instruments)
+        build_book(bundle)
     except OversellError as exc:
         return JSONResponse(status_code=422, content=error_body("oversell", str(exc)))
     except UnbookableLedgerError as exc:

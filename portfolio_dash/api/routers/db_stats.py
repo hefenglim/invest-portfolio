@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends
 from portfolio_dash.api.deps import get_conn
 from portfolio_dash.news import store as news_store
 from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.ledger_registry import LEDGER_TABLES
 
 router = APIRouter()
 
@@ -30,15 +31,17 @@ class _TableSpec(NamedTuple):
     date_col: str | None  # MIN(date_col) = oldest record (None -> no date shown)
 
 
-# Hand-maintained registry: name -> zh label, category, oldest-record date column.
+# The 帳本 ledgers come from shared/ledger_registry.py (declaration order preserved), so a
+# new ledger appears here without being remembered here. Everything below them is
+# hand-maintained: name -> zh label, category, oldest-record date column.
 # Category order below (_PORTFOLIO_CATEGORIES) drives the display grouping.
+_LEDGER_SPECS: tuple[_TableSpec, ...] = tuple(
+    _TableSpec(t.table, t.label, "帳本", t.date_col) for t in LEDGER_TABLES
+)
+
 _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     # 帳本 — the permanent sources of truth
-    _TableSpec("transactions", "交易帳本", "帳本", "trade_date"),
-    _TableSpec("dividends", "股利帳本", "帳本", "date"),
-    _TableSpec("fx_conversions", "換匯帳本", "帳本", "date"),
-    _TableSpec("opening_inventory", "期初庫存", "帳本", "build_date"),
-    _TableSpec("cash_movements", "資金收支", "帳本", "date"),
+    *_LEDGER_SPECS,
     _TableSpec("accounts", "帳戶", "帳本", None),
     _TableSpec("instruments", "標的清單", "帳本", None),
     # 市場資料 — fetched quotes / rates / external datasets

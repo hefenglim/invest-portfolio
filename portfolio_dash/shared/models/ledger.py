@@ -1,11 +1,13 @@
 """Source-of-truth ledger models: transactions, dividends, FX, opening inventory."""
 
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel
 
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.types import Money
 
@@ -73,3 +75,63 @@ class OpeningInventory(BaseModel):
         """Original average cost, computed on read (total / shares). Display-only; never the
         authority. Zero shares -> Decimal(0) defensively (a valid opening has shares > 0)."""
         return self.original_cost_total / self.shares if self.shares else Decimal(0)
+
+
+@dataclass(frozen=True)
+class LedgerBundle:
+    """The complete in-memory ledger set one replay reads, passed as ONE argument.
+
+    Every ``build_book`` call site took the same four positional arguments, so adding a
+    ledger meant editing eight signatures — and *forgetting* one of them is silent. With
+    the bundle, a new ledger is one field here plus one line in
+    :func:`~portfolio_dash.data_ingestion.store.load_ledger_bundle`; nothing downstream
+    changes shape. (The corporate-action ledger is the next field to land.)
+
+    A dataclass, not a ``BaseModel``: Pydantic would re-validate and copy every row on
+    construction, and :meth:`through` builds one bundle per day of the trend replay.
+    ``frozen`` guards the reference, not the lists — the replay never mutates them, and
+    the filtering helpers below all return a NEW bundle.
+    """
+
+    transactions: list[Transaction] = field(default_factory=list)
+    dividends: list[Dividend] = field(default_factory=list)
+    opening: list[OpeningInventory] = field(default_factory=list)
+    instruments: dict[str, Instrument] = field(default_factory=dict)
+
+    def through(self, day: date) -> "LedgerBundle":
+        """Everything dated on-or-before *day*, over the daily trend replay's date columns.
+
+        The per-day filter used to be open-coded at the one call site that needs it, which
+        is exactly where a new ledger gets forgotten — silently, because a book missing a
+        ledger still builds.
+        """
+        return replace(
+            self,
+            transactions=[t for t in self.transactions if t.trade_date <= day],
+            dividends=[d for d in self.dividends if d.date <= day],
+            opening=[o for o in self.opening if o.build_date <= day],
+        )
+
+    @property
+    def unregistered_symbols(self) -> list[str]:
+        """Sorted symbols appearing in a ledger with no :class:`Instrument` row.
+
+        Such a row has no quote currency, so it cannot be booked, valued, or priced.
+        Callers decide what to do about it — the dashboard drops the rows and reports the
+        symbols, 重算 refuses outright — but the SET is computed here, once, over every
+        ledger the bundle carries.
+        """
+        used = ({t.symbol for t in self.transactions}
+                | {d.symbol for d in self.dividends}
+                | {o.symbol for o in self.opening})
+        return sorted(used - self.instruments.keys())
+
+    def without_unregistered(self) -> "LedgerBundle":
+        """This bundle minus every row whose symbol has no instrument (graceful degradation)."""
+        known = self.instruments.keys()
+        return replace(
+            self,
+            transactions=[t for t in self.transactions if t.symbol in known],
+            dividends=[d for d in self.dividends if d.symbol in known],
+            opening=[o for o in self.opening if o.symbol in known],
+        )

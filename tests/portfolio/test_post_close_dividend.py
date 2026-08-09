@@ -17,7 +17,7 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import Dividend, Transaction
+from portfolio_dash.shared.models.ledger import Dividend, LedgerBundle, Transaction
 
 _INSTRUMENTS = {
     "0056": Instrument(symbol="0056", market=Market.TW, quote_ccy=Currency.TWD,
@@ -47,12 +47,12 @@ def _cash_div(symbol: str, net: str, day: date,
 
 def test_dividend_after_full_sale_is_realized_income() -> None:
     """Sell everything, then receive the dividend: it must reach realized P&L."""
-    book = build_book(
+    book = build_book(LedgerBundle(
         [_buy("0056", "1000", "40", date(2026, 1, 10)),
          _sell("0056", "1000", "45", date(2026, 6, 1))],
         [_cash_div("0056", "3000", date(2026, 7, 10))],
-        [], _INSTRUMENTS,
-    )
+        instruments=_INSTRUMENTS,
+    ))
     assert not book.holdings  # position is closed
 
     sale = [r for r in book.realized.rows if r.kind == "sale"]
@@ -75,23 +75,23 @@ def test_dividend_after_full_sale_is_realized_income() -> None:
 
 def test_my_net_dividend_after_close_uses_the_same_path() -> None:
     """The MY single-tier NET type is cash-family too — same rule, different market."""
-    book = build_book(
+    book = build_book(LedgerBundle(
         [_buy("1155", "1000", "9", date(2026, 2, 1)),
          _sell("1155", "1000", "10", date(2026, 5, 5))],
         [_cash_div("1155", "250", date(2026, 6, 20), DividendType.NET)],
-        [], _INSTRUMENTS,
-    )
+        instruments=_INSTRUMENTS,
+    ))
     assert book.realized.by_currency[Currency.MYR] == Decimal("1250")  # 1,000 + 250
     assert [r.kind for r in book.realized.rows] == ["sale", "dividend"]
 
 
 def test_dividend_while_still_held_is_unchanged() -> None:
     """The normal path must not move: an in-position dividend reduces adjusted cost only."""
-    book = build_book(
+    book = build_book(LedgerBundle(
         [_buy("0056", "1000", "40", date(2026, 1, 10))],
         [_cash_div("0056", "3000", date(2026, 7, 10))],
-        [], _INSTRUMENTS,
-    )
+        instruments=_INSTRUMENTS,
+    ))
     (holding,) = book.holdings
     assert holding.original_cost_total == Decimal("40000")
     assert holding.adjusted_cost_total == Decimal("37000")   # reduced by the dividend
@@ -101,12 +101,12 @@ def test_dividend_while_still_held_is_unchanged() -> None:
 
 def test_partial_sale_then_dividend_still_reduces_cost() -> None:
     """Only a FULLY closed position takes the realized path; a partial close does not."""
-    book = build_book(
+    book = build_book(LedgerBundle(
         [_buy("0056", "1000", "40", date(2026, 1, 10)),
          _sell("0056", "400", "45", date(2026, 6, 1))],
         [_cash_div("0056", "1800", date(2026, 7, 10))],
-        [], _INSTRUMENTS,
-    )
+        instruments=_INSTRUMENTS,
+    ))
     (holding,) = book.holdings
     assert holding.shares == Decimal("600")
     # 24,000 remaining cost - 1,800 dividend
@@ -118,13 +118,13 @@ def test_dividend_between_two_holding_periods_reduces_cost_of_the_rebuy() -> Non
     """Closed, then re-bought BEFORE the payment date: the position exists again, so the
     payout reduces the new cost basis (it is not income) — the ordering rule, not a
     special case for 'this symbol was once closed'."""
-    book = build_book(
+    book = build_book(LedgerBundle(
         [_buy("0056", "1000", "40", date(2026, 1, 10)),
          _sell("0056", "1000", "45", date(2026, 6, 1)),
          _buy("0056", "500", "44", date(2026, 6, 20))],
         [_cash_div("0056", "1500", date(2026, 7, 10))],
-        [], _INSTRUMENTS,
-    )
+        instruments=_INSTRUMENTS,
+    ))
     (holding,) = book.holdings
     assert holding.adjusted_cost_total == Decimal("20500")   # 22,000 - 1,500
     assert [r.kind for r in book.realized.rows] == ["sale"]  # no dividend row

@@ -20,9 +20,8 @@ from portfolio_dash.data_ingestion.store import (
     list_cash_movements,
     list_dividends,
     list_fx_conversions,
-    list_instruments,
-    list_opening,
     list_transactions,
+    load_ledger_bundle,
 )
 from portfolio_dash.forex.fx_pnl import compute_fx_summary
 from portfolio_dash.forex.results import FXSummary
@@ -61,12 +60,7 @@ from portfolio_dash.pricing.store import (
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import DividendType
-from portfolio_dash.shared.models.ledger import (
-    Dividend,
-    FXConversion,
-    OpeningInventory,
-    Transaction,
-)
+from portfolio_dash.shared.models.ledger import FXConversion
 from portfolio_dash.shared.sectors import canonical_sector
 
 _ZERO = Decimal("0")
@@ -204,33 +198,14 @@ def build_dashboard(
     """Assemble the complete dashboard data model from SQLite (read-only)."""
     as_of = now.date()
 
-    # 1. Ledgers and reference data (Stored* rows -> ledger models).
-    txs = [
-        Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
-                    quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date,
-                    short_sale=s.short_sale)
-        for s in list_transactions(conn)
-    ]
-    divs = [
-        Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
-                 type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
-                 net=s.net, reinvest_shares=s.reinvest_shares,
-                 reinvest_price=s.reinvest_price)
-        for s in list_dividends(conn)
-    ]
+    # 1. Ledgers and reference data. One bundle, one loader (Stored* -> ledger models).
+    bundle = load_ledger_bundle(conn)
+    instruments = bundle.instruments
     convs = [
         FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
                      from_amount=s.from_amount, to_ccy=s.to_ccy, to_amount=s.to_amount)
         for s in list_fx_conversions(conn)
     ]
-    opening = [
-        OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_cost_total=s.original_cost_total,
-                         build_date=s.build_date)
-        for s in list_opening(conn)
-    ]
-    instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
     # Cash movements feed BOTH the FX pool (step 5 — a foreign deposit/opening now funds the
     # pool and carries its cost basis, spec 2026-07-30) and the net-worth cash series (9b).
@@ -244,18 +219,15 @@ def build_dashboard(
     # freshness.unregistered_symbols so the UI can tell the user exactly how to fix it
     # (register the symbol, then the next build includes the rows). Same degradation
     # philosophy as the oversold (賣超) path.
-    ledger_syms = ({t.symbol for t in txs} | {d.symbol for d in divs}
-                   | {o.symbol for o in opening})
-    unregistered = sorted(ledger_syms - instruments.keys())
+    unregistered = bundle.unregistered_symbols
     if unregistered:
-        skip = set(unregistered)
-        txs = [t for t in txs if t.symbol not in skip]
-        divs = [d for d in divs if d.symbol not in skip]
-        opening = [o for o in opening if o.symbol not in skip]
+        bundle = bundle.without_unregistered()
+    # Read-only local views of the (now filtered) bundle, for the steps below.
+    txs, divs, opening = bundle.transactions, bundle.dividends, bundle.opening
 
     # 2. Book and valuation. allow_oversell: an acked oversell must not crash the
     # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
-    book = build_book(txs, divs, opening, instruments, allow_oversell=True)
+    book = build_book(bundle, allow_oversell=True)
     has_oversold = any(h.oversold for h in book.holdings)
     held_symbols = sorted({h.symbol for h in book.holdings})
     price_reads: dict[str, PriceRead | None] = {
@@ -462,8 +434,8 @@ def build_dashboard(
                 rows = get_fx_history(conn, base, quote, _EPOCH, as_of)
                 if rows:
                     fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
-        trend = daily_value_series(txs, divs, opening, instruments, price_history,
-                                   fx_history, reporting, end=as_of)
+        trend = daily_value_series(bundle, price_history, fx_history, reporting,
+                                   end=as_of)
         if not trend.available:
             trend_reason = "帳本中有交易日期缺少匯率資料"
         else:

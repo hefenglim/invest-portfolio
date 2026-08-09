@@ -7,9 +7,13 @@ from decimal import Decimal
 
 from portfolio_dash.portfolio.results import Book, Holding, RealizedPnL, RealizedRow
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
-from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
+from portfolio_dash.shared.models.ledger import (
+    Dividend,
+    LedgerBundle,
+    OpeningInventory,
+    Transaction,
+)
 
 _ZERO = Decimal("0")
 
@@ -57,15 +61,12 @@ class _Position:
     unbookable_dividend: bool = False
 
 
-def build_book(
-    transactions: list[Transaction],
-    dividends: list[Dividend],
-    opening: list[OpeningInventory],
-    instruments: dict[str, Instrument],
-    *,
-    allow_oversell: bool = False,
-) -> Book:
+def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     """Replay the ledger in date order; return open holdings, realized P&L, gross invested.
+
+    Takes the whole :class:`LedgerBundle` rather than one argument per ledger: this is the
+    one signature every replay call site shares, so a new ledger is a field on the bundle
+    instead of an edit at eight sites, seven of which fail silently when missed.
 
     Same-day ordering: opening (0) -> buy (1) -> sell (2) -> dividend (3).
 
@@ -79,7 +80,7 @@ def build_book(
     """
 
     def quote_ccy(symbol: str) -> Currency:
-        inst = instruments.get(symbol)
+        inst = bundle.instruments.get(symbol)
         if inst is None:
             raise KeyError(f"unknown instrument: {symbol}")
         return inst.quote_ccy
@@ -89,11 +90,11 @@ def build_book(
     gross: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
 
     events: list[tuple[date, int, str, object]] = []
-    for oi in opening:
+    for oi in bundle.opening:
         events.append((oi.build_date, 0, "open", oi))
-    for tx in transactions:
+    for tx in bundle.transactions:
         events.append((tx.trade_date, 1 if tx.side is Side.BUY else 2, "tx", tx))
-    for dv in dividends:
+    for dv in bundle.dividends:
         events.append((dv.date, 3, "div", dv))
     events.sort(key=lambda e: (e[0], e[1]))
 

@@ -16,19 +16,13 @@ from decimal import Decimal
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
-from portfolio_dash.data_ingestion.store import (
-    list_dividends,
-    list_instruments,
-    list_opening,
-    list_transactions,
-)
+from portfolio_dash.data_ingestion.store import load_ledger_bundle
 from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
-from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
+from portfolio_dash.shared.models.enums import Side
 
 _ZERO = Decimal("0")
 
@@ -126,30 +120,11 @@ def compute_whatif(
     from portfolio_dash.data_ingestion.fees import compute_fees  # local: avoid cycle risk
     from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 
-    # 1. Ledgers (Stored* rows -> ledger models) — same mapping as build_dashboard step 1.
-    txs = [
-        Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
-                    quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date,
-                    short_sale=s.short_sale)
-        for s in list_transactions(conn)
-    ]
-    divs = [
-        Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
-                 type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
-                 net=s.net, reinvest_shares=s.reinvest_shares,
-                 reinvest_price=s.reinvest_price)
-        for s in list_dividends(conn)
-    ]
-    opening = [
-        OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_cost_total=s.original_cost_total,
-                         build_date=s.build_date)
-        for s in list_opening(conn)
-    ]
-    instruments = {i.symbol: i for i in list_instruments(conn)}
+    # 1. Ledgers — the same bundle build_dashboard step 1 loads.
+    bundle = load_ledger_bundle(conn)
+    instruments = bundle.instruments
     try:
-        book = build_book(txs, divs, opening, instruments)
+        book = build_book(bundle)
     except UnbookableLedgerError as exc:
         # An un-bookable ledger is a user-fixable data problem, not a server fault.
         raise WhatIfError(str(exc)) from exc

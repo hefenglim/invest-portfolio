@@ -10,7 +10,13 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument, MarketRule
-from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.models.enums import DividendType, Side
+from portfolio_dash.shared.models.ledger import (
+    Dividend,
+    LedgerBundle,
+    OpeningInventory,
+    Transaction,
+)
 from portfolio_dash.shared.money import from_db, to_db
 from portfolio_dash.shared.sectors import CANONICAL_KEYS, canonical_sector
 
@@ -752,6 +758,54 @@ def list_transactions(
         )
         for r in rows
     ]
+
+
+def load_ledger_bundle(
+    conn: sqlite3.Connection,
+    *,
+    transactions: list[StoredTransaction] | None = None,
+    dividends: list[StoredDividend] | None = None,
+    opening: list[StoredOpening] | None = None,
+) -> LedgerBundle:
+    """Load every ledger a replay reads as ONE bundle (``Stored*`` rows -> ledger models).
+
+    This conversion was open-coded at five call sites — the dashboard, what-if, the tax
+    package, 重算, and the ledger-edit revalidation — so a new ledger column reached four
+    of them and a new LEDGER reached none. One loader, one bundle, one signature.
+
+    Pass a pre-built ``Stored*`` list to replay a MUTATED ledger (the ledger-edit preview
+    swaps in the would-be rows); anything not passed is read from the store.
+
+    Rows whose symbol has no ``instruments`` entry are KEPT. The bundle exposes them via
+    :attr:`~portfolio_dash.shared.models.ledger.LedgerBundle.unregistered_symbols` and
+    each caller decides — the dashboard drops them and reports, 重算 refuses outright.
+    Filtering here would silently pick one of those answers for everybody.
+    """
+    s_txs = transactions if transactions is not None else list_transactions(conn)
+    s_divs = dividends if dividends is not None else list_dividends(conn)
+    s_open = opening if opening is not None else list_opening(conn)
+    return LedgerBundle(
+        transactions=[
+            Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
+                        quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
+                        trade_date=s.trade_date, short_sale=s.short_sale)
+            for s in s_txs
+        ],
+        dividends=[
+            Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
+                     type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
+                     net=s.net, reinvest_shares=s.reinvest_shares,
+                     reinvest_price=s.reinvest_price)
+            for s in s_divs
+        ],
+        opening=[
+            OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
+                             original_cost_total=s.original_cost_total,
+                             build_date=s.build_date)
+            for s in s_open
+        ],
+        instruments={i.symbol: i for i in list_instruments(conn)},
+    )
 
 
 # ---------------------------------------------------------------------------
