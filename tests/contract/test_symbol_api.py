@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.store import (
+    insert_corporate_action,
     insert_dividend,
     insert_transaction,
     upsert_instrument,
@@ -19,6 +20,7 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.store import upsert_fx, upsert_prices
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
@@ -357,3 +359,65 @@ def test_symbol_detail_position_null_for_unheld(api_client: TestClient) -> None:
     assert body["activity"] == []
     # an empty ledger still reconciles (0 == 0).
     assert body["activity_reconcile"]["total"]["balances"] is True
+
+
+# --- 待釐清: a SKIPPED corporate action reaches the wire (audit F-05) -----------------
+
+
+def _seed_unbookable_action(conn: sqlite3.Connection) -> None:
+    """Flag 2330 (tw_broker, 1,000 sh) with ``unbookable_action`` via rule E18.
+
+    An EXCHANGE whose DESTINATION holds an open declared short has no honest booking, so
+    ``build_book`` skips it on the dashboard path and flags the SOURCE. 2330 therefore stays
+    an ordinary, priced long position that happens to carry a share count nobody can trust —
+    which is precisely the state the wire has to be able to express. Written through the
+    store helpers because there is no API that will accept an incoherent action row (and
+    should not be one); this test is about the READ side.
+    """
+    upsert_instrument(conn, Instrument(symbol="2331", market=Market.TW,
+                                       quote_ccy=Currency.TWD, sector="Semiconductors",
+                                       name="Ghost Semi", board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2331", side=Side.SELL,
+                       quantity=Decimal("100"), price=Decimal("40"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 2, 1), short_sale=True)
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2026, 3, 15),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="2330",
+                            to_symbol="2331", ratio_to=Decimal("1"), ratio_from=Decimal("1"))
+
+
+def test_unbookable_action_reaches_the_dashboard_wire(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """The flag must be on the public read surface, or the UI cannot warn about the row.
+
+    Also asserts the dashboard still answers 200: a rejected action degrades, never 500s.
+    """
+    _seed_unbookable_action(golden_db)
+    r = api_client.get("/api/dashboard")
+    assert r.status_code == 200, r.text
+    h = next(x for x in r.json()["holdings"]
+             if x["symbol"] == "2330" and x["account_id"] == "tw_broker")
+    assert h["unbookable_action"] is True
+    # Distinct from every other 待釐清 state — the UI renders each of them differently.
+    assert h["oversold"] is False and h["short_open"] is False
+    assert h["unbookable_dividend"] is False
+
+
+def test_unbookable_action_reaches_both_drawer_shapes(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """Per-account row AND cross-account aggregate: the drawer reads both, and the
+    aggregate's shares/market value are a SUM, so one tainted account taints the total."""
+    _seed_unbookable_action(golden_db)
+    body = api_client.get("/api/symbol/2330/detail").json()
+
+    accts = body["position_accounts"]
+    assert [a["account_id"] for a in accts] == ["tw_broker"]
+    assert accts[0]["unbookable_action"] is True
+
+    assert body["position"]["unbookable_action"] is True
+    # A clean symbol in the same payload keeps the flag False — the wire is not just
+    # echoing True everywhere.
+    clean = api_client.get("/api/symbol/AAPL/detail").json()
+    assert clean["position"]["unbookable_action"] is False
+    assert all(a["unbookable_action"] is False for a in clean["position_accounts"])

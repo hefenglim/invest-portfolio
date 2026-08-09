@@ -1,7 +1,9 @@
 from datetime import date
 from decimal import Decimal
 
+from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.timeseries import daily_value_series
+from portfolio_dash.shared.corporate_actions import CorporateAction, CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -114,3 +116,55 @@ def test_empty_ledgers_unavailable() -> None:
                                 end=date(2026, 6, 1))
     assert series.available is False
     assert series.points == []
+
+
+def test_skipped_corporate_action_makes_the_day_incomplete() -> None:
+    """A position whose corporate action was SKIPPED must not be valued (audit F-05).
+
+    ``prices`` is a GLOBAL, post-action series while a skipped action leaves ``shares`` in
+    PRE-action terms, so ``price * shares`` is wrong by the whole ratio. Before the flag was
+    wired into the guard the product landed in the trend and the net-worth series as though
+    valid, and unflagged — the exact wrongness the flag was introduced to make visible.
+
+    The ledger below is E18: an EXCHANGE whose DESTINATION holds an open declared short.
+    ``build_book`` refuses it and flags the SOURCE, which stays an ordinary long position —
+    ``oversold`` / ``short_open`` / ``unbookable_dividend`` are all False on it, so nothing
+    but ``unbookable_action`` can be what marks the day.
+    """
+    txs = [
+        _tx(date(2026, 6, 1), Side.BUY, "10", "100", fees="0"),          # AAA long, USD
+        Transaction(account_id="schwab", symbol="BBB", side=Side.SELL,   # BBB short, TWD
+                    quantity=Decimal("5"), price=Decimal("50"),
+                    fees=Decimal("0"), tax=Decimal("0"),
+                    trade_date=date(2026, 6, 1), short_sale=True),
+    ]
+    actions = [CorporateAction(account_id="schwab", date=date(2026, 6, 2),
+                               kind=CorporateActionKind.EXCHANGE,
+                               from_symbol="AAA", to_symbol="BBB",
+                               ratio_to=Decimal("1"), ratio_from=Decimal("1"))]
+    prices = {"AAA": [(date(2026, 6, 1), Decimal("100"))],
+              "BBB": [(date(2026, 6, 1), Decimal("50"))]}
+    fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
+    bundle = LedgerBundle(txs, instruments=INSTRUMENTS, actions=actions)
+
+    # Sanity: the replay really does flag the SOURCE and nothing else about it.
+    flagged = next(h for h in build_book(bundle, allow_oversell=True).holdings
+                   if h.symbol == "AAA")
+    assert flagged.unbookable_action is True
+    assert (flagged.oversold, flagged.short_open, flagged.unbookable_dividend) == (
+        False, False, False)
+    assert flagged.shares == Decimal("10")  # still PRE-action
+
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 2))
+    assert series.available is True
+    day1, day2 = series.points
+
+    # 6/1 — the action is not in scope yet, so the day is ordinary and fully valued:
+    # AAA 10 x 100 USD x 30 = 30,000, plus the short's negative 5 x 50 = -250.
+    assert day1.incomplete is False
+    assert day1.total_value == Decimal("29750")
+
+    # 6/2 — the action was skipped, so AAA's 30,000 must NOT be counted and the day must
+    # SAY so. Only the (unaffected) short remains.
+    assert day2.incomplete is True
+    assert day2.total_value == Decimal("-250")

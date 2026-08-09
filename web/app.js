@@ -416,11 +416,19 @@
       }
       /* Two different negative-share states, and they must never look alike:
          `oversold` is an unresolved DATA problem (basis discarded, 待釐清), while
-         `short_open` is a real declared short with a real basis and real P&L. */
+         `short_open` is a real declared short with a real basis and real P&L.
+         The chain shows ONE state, so it runs in descending severity: a discarded basis,
+         then a wrong SHARE COUNT (unbookable_action — every valued figure is off by the
+         action's ratio), then a missing payout (unbookable_dividend — the share count is
+         right and the row is short by exactly one dividend), then a healthy short. */
       if (h.oversold) {
         tr.classList.add('row-stale');
         tr.title = '賣超：賣出數量超過持股，部位為負、損益待釐清'
           + '（請補記期初庫存或遺漏的買進）';
+      } else if (h.unbookable_action) {
+        tr.classList.add('row-stale');
+        tr.title = '公司行動未套用：股數仍是行動前的數字，價格卻已是行動後的，'
+          + '市值與未實現損益因此失真（請修正該筆公司行動或補齊持倉紀錄）';
       } else if (h.unbookable_dividend) {
         tr.classList.add('row-stale');
         tr.title = '放空期間有股利紀錄：放空方需支付股利，此筆未列入計算，'
@@ -441,6 +449,10 @@
         const ob = el('span', 'badge badge-missing', '賣超');
         ob.title = '賣出數量超過持股，部位為負、損益待釐清';
         cell.appendChild(ob);
+      } else if (h.unbookable_action) {
+        const ab = el('span', 'badge badge-missing', '股數待釐清');
+        ab.title = '公司行動未套用：股數為行動前、價格為行動後，市值與損益失真';
+        cell.appendChild(ab);
       } else if (h.unbookable_dividend) {
         const db = el('span', 'badge badge-missing', '股利待釐清');
         db.title = '放空期間出現股利紀錄，未列入計算（放空方需支付股利）';

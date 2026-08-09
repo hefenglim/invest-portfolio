@@ -368,12 +368,11 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     stored = list_corporate_actions(conn)
     siblings = [b for b in batch if b is not inp]
 
-    # --- E15, HARDENED (deviation from the spec's "soft warning", 2026-08-09): an EXACT
-    # duplicate of a stored row. The spec made this soft on the reasoning that "re-entering
-    # is plausible" — true for a transaction (you really can buy the same stock twice in a
-    # day at the same price), false for a corporate action, which is an EVENT: a 3-for-1
-    # happens once per (account, symbol, date). Acknowledging a soft warning here would
-    # apply the ratio twice and turn a 3-for-1 into a 9-for-1.
+    # --- E15, HARD (D29): an EXACT duplicate of a stored row. Hard rather than a soft
+    # warning, because "re-entering is plausible" is true for a transaction (you really can
+    # buy the same stock twice in a day at the same price) and false for a corporate action,
+    # which is an EVENT: a 3-for-1 happens once per (account, symbol, date). Acknowledging a
+    # soft warning here would apply the ratio twice and turn a 3-for-1 into a 9-for-1.
     #
     # It must also be checked BEFORE E12, and with its own message. An exact duplicate is
     # by construction a same-date intersecting pair, so E12 would swallow every one of them

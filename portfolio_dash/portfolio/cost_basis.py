@@ -102,9 +102,12 @@ def _apply_action(
 ) -> None:
     """Apply one corporate action to the live position map (spec §4.1-§4.4).
 
-    The field transfer is NORMATIVE and complete: `_Position` has eight fields and every one
+    The field transfer is NORMATIVE and complete: `_Position` has nine fields and every one
     of them has an explicit rule in §4.4, because "the formula didn't mention it" is not a
-    specification. Two of those rules exist only because a review found the omission —
+    specification. The count is pinned by a test, because this docstring and §4.4 both fell
+    behind once already — W3 added `unbookable_action` and neither was updated, so the
+    "complete" claim was false for two commits (audit F-37, 2026-08-10). Two of those rules
+    exist only because a review found the omission —
     zeroing the source's short fields (an `ε` residue survives a full cover and would
     otherwise contaminate a position a later buy can reopen), and refusing an
     `ever_oversold` DESTINATION (a discarded basis silently averaged into a real one).

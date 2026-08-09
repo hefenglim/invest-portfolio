@@ -53,6 +53,12 @@ class HoldingRow(BaseModel):
     # A dividend row landed while this position was short; it was NOT booked (a short
     # pays the dividend in lieu). The position's figures are incomplete by that payout.
     unbookable_dividend: bool = False
+    # A corporate action could not be applied and was SKIPPED (see Holding.unbookable_action).
+    # Strictly worse than the flag above: `shares` is in PRE-action terms while `market_price`
+    # is global and already POST-action, so `market_value`, `unrealized_pnl`, `weight` and
+    # `unrealized_pct` are wrong by the action's ratio — not short by one payout. The UI must
+    # therefore say something different about it than it says about a missed dividend.
+    unbookable_action: bool = False
     # Unrealized return rate for THIS holding, server-computed (audit H1, 2026-07-26):
     # ``unrealized_pnl / original_cost_total``. The denominator is deliberately the ORIGINAL
     # invested cost — the same basis as ``KpiSummary.total_return_rate`` (domain-ledger.md:

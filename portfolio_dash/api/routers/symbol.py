@@ -129,6 +129,7 @@ def _account_wire(h: HoldingRow) -> dict[str, Any]:
         "oversold": h.oversold,
         "short_open": h.short_open,
         "unbookable_dividend": h.unbookable_dividend,
+        "unbookable_action": h.unbookable_action,
         # 已回本: cumulative cash dividends have fully repaid the original cost, so the
         # adjusted basis has gone <= 0 (legal per domain-ledger.md). Decided HERE with an
         # exact Decimal comparison so the UI never threshold-tests a Decimal string.
@@ -213,6 +214,10 @@ def _aggregate_position(
         "oversold": any(h.oversold for h in rows),
         "short_open": any(h.short_open for h in rows),
         "unbookable_dividend": any(h.unbookable_dividend for h in rows),
+        # `any`, like the two flags above: the aggregate's shares/market value are a SUM, so
+        # one account's pre-action share count contaminates the total. A per-account row can
+        # still be clean — the drawer shows both, and only the aggregate is poisoned by one.
+        "unbookable_action": any(h.unbookable_action for h in rows),
         # 已回本 across the aggregated position (see _account_wire).
         "fully_recovered": (adjusted_total <= _ZERO
                             and not any(h.short_open for h in rows)),

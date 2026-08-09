@@ -116,7 +116,13 @@ def daily_value_series(
         for h in book.holdings:
             if h.shares == _ZERO:
                 continue
-            if h.oversold or h.unbookable_dividend:
+            # `unbookable_action` belongs here for a STRONGER reason than the other two:
+            # a skipped corporate action leaves `shares` in PRE-action terms while
+            # `price_history` is global and already POST-action, so `price * shares` is
+            # not merely incomplete, it is wrong by the action's whole ratio (a 3-for-1
+            # understates the position threefold). Omitting it let that product into the
+            # trend and net-worth series as though valid, and unflagged.
+            if h.oversold or h.unbookable_dividend or h.unbookable_action:
                 incomplete = True  # 賣超 / 待釐清 day — value undefined
                 continue
             # A DECLARED short is NOT excluded (2026-07-31 ruling): it is a real priced

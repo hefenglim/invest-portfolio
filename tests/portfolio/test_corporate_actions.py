@@ -14,18 +14,25 @@ So the property replays the bundle at ``D-1`` and ``D`` and sums the emitted hol
 the realized rows' removed cost — the closed-form of what the accumulators hold.
 """
 
+import dataclasses
+from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
+from portfolio_dash.portfolio import cost_basis
 from portfolio_dash.portfolio.cost_basis import (
     OversellError,
     UnbookableLedgerError,
     build_book,
 )
 from portfolio_dash.portfolio.results import Book, Holding
-from portfolio_dash.shared.corporate_actions import CorporateAction, CorporateActionKind
+from portfolio_dash.shared.corporate_actions import (
+    CorporateAction,
+    CorporateActionKind,
+    apply_ratio,
+)
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -278,6 +285,64 @@ def test_spinoff_child_inherits_the_parents_payback_ratio_exactly(
     assert child.dividend_portion == D("1200.00")   # never received by the child
 
 
+# ======================================================= §4.4 the NORMATIVE field table
+
+#: Every ``_Position`` field, in declaration order, that §4.4 of
+#: ``docs/spec/2026-08-06-corporate-actions.md`` gives an explicit SPLIT / EXCHANGE / SPINOFF
+#: rule. Updating this tuple without adding the spec row defeats the point of the test below.
+_SPEC_4_4_FIELDS = (
+    "quote_ccy",
+    "shares",
+    "original_total",
+    "adjusted_total",
+    "short_shares",
+    "short_proceeds",
+    "ever_oversold",
+    "unbookable_dividend",
+    "unbookable_action",
+)
+_SPEC_4_4_FIELD_COUNT = len(_SPEC_4_4_FIELDS)
+
+
+def test_every_position_field_has_a_rule_in_the_normative_transfer_table() -> None:
+    """§4.4 is NORMATIVE and nothing could tell when it fell behind. Now something can.
+
+    The table exists because "the formula didn't mention it" is not a specification — so a
+    field with no row is a hole in the spec, not a detail. It had already opened: the section
+    said "seven" fields, listed eight rows, and the class carried nine, because W3 added
+    ``unbookable_action`` and no prose in ``docs/spec/`` mentions it.
+
+    Reading ``dataclasses.fields`` rather than counting a literal is the whole mechanism: a
+    field added to ``_Position`` changes this result, and a test that merely re-stated the
+    number would keep passing.
+    """
+    actual = tuple(f.name for f in dataclasses.fields(cost_basis._Position))
+    added = sorted(set(actual) - set(_SPEC_4_4_FIELDS))
+    dropped = sorted(set(_SPEC_4_4_FIELDS) - set(actual))
+    todo = (
+        "A `_Position` field is not finished until §4.4 describes it. Do BOTH:\n"
+        "  1. edit docs/spec/2026-08-06-corporate-actions.md §4.4 'Complete `_Position` "
+        "field transfer table — NORMATIVE': add/remove the row saying what each of SPLIT / "
+        "EXCHANGE / SPINOFF does to the field, and correct the field COUNT in the sentence "
+        "just above the table;\n"
+        "  2. update `_SPEC_4_4_FIELDS` in this file to match, and add a replay test that "
+        "pins the new transfer rule.\n"
+        "Do not just change the constant — silence is how the last hole opened: "
+        "`unbookable_action` was added by W3 with no §4.4 row and nothing in the repo noticed."
+    )
+    assert len(actual) == _SPEC_4_4_FIELD_COUNT, (
+        f"`_Position` now has {len(actual)} fields; §4.4 is written for "
+        f"{_SPEC_4_4_FIELD_COUNT}. Added: {added or 'none'}. Removed: {dropped or 'none'}.\n"
+        f"{todo}"
+    )
+    assert actual == _SPEC_4_4_FIELDS, (
+        f"`_Position`'s fields changed: {actual} != {_SPEC_4_4_FIELDS} "
+        f"(added {added or 'none'}, removed {dropped or 'none'}; a pure reorder counts too — "
+        "§4.4's rows are read against this order).\n"
+        f"{todo}"
+    )
+
+
 # ===================================================================== §2.1 the LAW
 
 
@@ -292,6 +357,38 @@ def _totals(book: Book) -> tuple[Decimal, Decimal, Decimal]:
     orig += sum((r.original_cost_removed for r in book.realized.rows), D("0"))
     adj += sum((r.adjusted_cost_removed for r in book.realized.rows), D("0"))
     return orig, adj, orig - adj
+
+
+def _assert_conservation(action: CorporateAction) -> None:
+    """§2.1 as executable code: replay one fixed ledger with and without *action* and assert
+    the accumulators and ``gross_invested`` are unchanged.
+
+    Extracted from the parametrized test below so that
+    :func:`test_the_conservation_property_can_actually_fail` can run **the property itself**
+    against a mutated engine instead of a paraphrase of it. A hand-rolled copy of these
+    assertions can quietly drift into checking something weaker and still look green — which
+    is precisely the failure mode that test exists to rule out.
+
+    A dividend is included so adjusted != original and the third sum is non-trivial.
+    """
+    divs = [Dividend(account_id="schwab", symbol="AAA", date=date(2026, 3, 1),
+                     type=DividendType.CASH, gross=D("700"), withholding=D("0"),
+                     net=D("700"))]
+    txs = [_buy("AAA", "700", "10", fees="35"), _buy("BBB", "40", "5")]
+    base = LedgerBundle(txs, divs, [], INSTR)
+    before = _book(base.through(ACTION_DAY - timedelta(days=1)))
+    after = _book(LedgerBundle(txs, divs, [], INSTR, actions=[action]))
+
+    t_after, t_before = _totals(after), _totals(before)
+    # Explicit messages, not bare asserts: the detection-power test below identifies WHICH
+    # half of the law broke by matching on them, and pytest's rewritten output is not a
+    # contract (it disappears under `--assert=plain`).
+    assert t_after == t_before, (
+        f"§2.1 conservation broken by {action.kind}: "
+        f"(Σoriginal, Σadjusted, Σdividend_portion) {t_after} != {t_before}")
+    assert after.gross_invested == before.gross_invested, (
+        f"§2.1 gross_invested moved under {action.kind}: "
+        f"{after.gross_invested} != {before.gross_invested}")
 
 
 @pytest.mark.parametrize(
@@ -313,18 +410,10 @@ def test_conservation_law_holds_across_every_action(action: CorporateAction) -> 
     and gross_invested are unchanged, and Σ(shares x price) is continuous.
 
     The law, not the formulas — this is what must survive a future edit that "tidies" one
-    of them. A dividend is included so adjusted != original and the third sum is non-trivial.
+    of them. That this call can actually go red is not assumed:
+    :func:`test_the_conservation_property_can_actually_fail` mutates the engine and proves it.
     """
-    divs = [Dividend(account_id="schwab", symbol="AAA", date=date(2026, 3, 1),
-                     type=DividendType.CASH, gross=D("700"), withholding=D("0"),
-                     net=D("700"))]
-    txs = [_buy("AAA", "700", "10", fees="35"), _buy("BBB", "40", "5")]
-    base = LedgerBundle(txs, divs, [], INSTR)
-    before = _book(base.through(ACTION_DAY - timedelta(days=1)))
-    after = _book(LedgerBundle(txs, divs, [], INSTR, actions=[action]))
-
-    assert _totals(after) == _totals(before)
-    assert after.gross_invested == before.gross_invested
+    _assert_conservation(action)
 
 
 def test_market_value_is_continuous_across_a_split() -> None:
@@ -361,22 +450,110 @@ def test_market_value_is_continuous_across_a_split() -> None:
         assert v_after == v_before, action.kind
 
 
-def test_the_conservation_property_can_actually_fail() -> None:
+_REAL_APPLY_ACTION = cost_basis._apply_action
+
+
+def _split_that_also_scales_the_totals(
+    positions: dict[tuple[str, str], cost_basis._Position],
+    action: CorporateAction,
+    quote_ccy: Callable[[str], Currency],
+    *,
+    allow_oversell: bool,
+) -> None:
+    """A BROKEN ``_apply_action``: SPLIT re-denominates the totals along with the shares.
+
+    The plausible "tidy-up" — everything about the position moves by the ratio, which *looks*
+    consistent and silently triples the cost basis. Written as a thin wrapper over the real
+    function rather than a copy of it, so the mutant differs from production in exactly one
+    rule and cannot drift as the engine changes.
+
+    Installed by monkeypatch, and only ever on a clean SPLIT: it scales unconditionally, so
+    it would also "apply" to an action the real function rejected and skipped.
+    """
+    _REAL_APPLY_ACTION(positions, action, quote_ccy, allow_oversell=allow_oversell)
+    if action.kind is not CorporateActionKind.SPLIT:
+        return
+    position = positions.get((action.account_id, action.from_symbol))
+    if position is None:
+        return
+    position.original_total = apply_ratio(position.original_total, action)
+    position.adjusted_total = apply_ratio(position.adjusted_total, action)
+
+
+def test_the_conservation_property_can_actually_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """DETECTION POWER. A property test that never fails is decoration.
 
-    Mutate a formula the way a future "tidy-up" plausibly would — have SPLIT scale the
-    totals along with the shares, which *looks* consistent — and assert the law notices.
+    So the mutation is applied to the ENGINE, not to a local: ``_apply_action`` is replaced
+    with :func:`_split_that_also_scales_the_totals`, and then the property itself —
+    :func:`_assert_conservation`, the same call the law test above makes, not a paraphrase
+    of it — must go red.
+
+    The previous version of this test ended with ``assert orig * 3 != orig`` on a local
+    variable. That is arithmetic, not detection: it could not have failed for ANY
+    implementation of ``_apply_action``, correct or broken, so the only real assertion in a
+    test labelled "DETECTION POWER" was the pinned ``orig == 7035`` on the line above it —
+    the exact defect the first line of this docstring names, reproduced inside the test
+    written to prevent it.
+
     (The mutation the spec suggests for this role, `total × (1−c)` in the SPINOFF carve,
     does NOT work: measured over 400,000 pairs it conserves just as exactly as the
     subtraction. Chasing it would have produced a second unsatisfiable test.)
     """
+    action = _act(CorporateActionKind.SPLIT)
+    _assert_conservation(action)                  # green against the real engine
+
+    monkeypatch.setattr(cost_basis, "_apply_action", _split_that_also_scales_the_totals)
+
+    # The mutant is really installed and really is wrong: 7,035 of basis becomes 21,105
+    # while not one cent of new capital entered.
     txs = [_buy("AAA", "700", "10", fees="35")]
-    book = _book(LedgerBundle(txs, instruments=INSTR,
-                              actions=[_act(CorporateActionKind.SPLIT)]))
-    orig, _adj, _div = _totals(book)
-    assert orig == D("7035")
-    mutated = orig * D("3")                       # what "scale the totals too" would give
-    assert mutated != orig, "the property must be able to see a scaled total"
+    mutant = _book(LedgerBundle(txs, instruments=INSTR, actions=[action]))
+    assert _totals(mutant)[0] == D("21105")
+    assert mutant.gross_invested[Currency.USD] == D("7035")
+
+    with pytest.raises(AssertionError) as caught:
+        _assert_conservation(action)
+    assert "§2.1 conservation broken" in str(caught.value), \
+        f"the law failed, but not on the accumulators: {caught.value}"
+
+
+def test_same_date_split_and_exchange_diverge_where_the_law_cannot_see_it() -> None:
+    """E12 / D15, replay half — the fact that makes the validation refusal necessary.
+
+    ``tests/data_ingestion/test_corporate_action_ledger.py::
+    test_same_date_intersecting_actions_are_rejected`` asserts that entry REFUSES two
+    same-date actions that intersect. Its docstring states why, and §7.1 wants that half
+    asserted too rather than described: both rows carry ``EventPriority.CORPORATE_ACTION``
+    and ``events.sort`` is stable, so the replay order is the order the rows were TYPED — the
+    same two rows produce **600** shares or **200**, and §2.1 is green on both because 1,000
+    of basis lands on BBB either way. A conservation law over totals cannot see a share
+    count, so an ambiguity that survives entry is never noticed downstream.
+
+    The strict path refuses one order only, and by accident: exchange-first empties AAA, so
+    the SPLIT then trips E2's "already closed" guard. Split-first is accepted in full. That
+    is not detection of the ambiguity — it is one arrangement of it happening to look ill.
+    """
+    split = _act(CorporateActionKind.SPLIT, to="3", frm="1")
+    exchange = _act(CorporateActionKind.EXCHANGE, to="2", frm="1", to_symbol="BBB")
+    txs = [_buy("AAA", "100", "10")]
+
+    carried: dict[str, Decimal] = {}
+    for name, order in (("split-first", [split, exchange]),
+                        ("exchange-first", [exchange, split])):
+        book = _book(LedgerBundle(txs, instruments=INSTR, actions=order),
+                     allow_oversell=True)
+        dest = _held(book, "BBB")
+        assert dest is not None, name
+        carried[name] = dest.shares
+        assert _totals(book) == (D("1000"), D("1000"), D("0")), \
+            f"{name}: the law is green here — that is the point"
+
+    assert carried == {"split-first": D("600"), "exchange-first": D("200")}
+
+    with pytest.raises(UnbookableLedgerError, match="已無持倉"):
+        _book(LedgerBundle(txs, instruments=INSTR, actions=[exchange, split]))
 
 
 # ===================================================================== §5 edge matrix
@@ -434,12 +611,29 @@ def test_e5_exchange_from_an_open_short() -> None:
 
 
 def test_e18_exchange_into_a_short_destination() -> None:
+    """Both paths, like every sibling guard — and a `match` that can only be E18's message.
+
+    `match="放空"` alone does not prove which guard fired: E5's source-side rejection
+    (「有未回補的放空部位」) contains the same word and sits on the same EXCHANGE path four
+    lines earlier, so a regression that moved this scenario onto E5 would keep the test
+    green. 「目的標的 …均價失去意義」 is E18's alone.
+    """
     bundle = LedgerBundle(
         [_buy("AAA", "10", "5"), _sell("BBB", "10", "30", date(2026, 2, 1), short=True)],
         instruments=INSTR,
         actions=[_act(CorporateActionKind.EXCHANGE, to="1", frm="1", to_symbol="BBB")])
-    with pytest.raises(UnbookableLedgerError, match="放空"):
+    with pytest.raises(UnbookableLedgerError, match="目的標的 BBB.*均價失去意義"):
         _book(bundle)
+
+    book = _book(bundle, allow_oversell=True)      # dashboard path: skip + flag, never a 500
+    source = _held(book, "AAA")
+    assert source is not None and source.unbookable_action
+    assert (source.shares, source.original_cost_total) == (D("10"), D("50")), \
+        "the action was skipped, not half-applied"
+    dest = _held(book, "BBB")
+    assert dest is not None and dest.short_open
+    assert (dest.shares, dest.original_cost_total) == (D("-10"), D("-300")), \
+        "the short keeps its own proceeds as basis — nothing was merged into it"
 
 
 def test_e22_exchange_into_an_oversold_destination_is_refused() -> None:

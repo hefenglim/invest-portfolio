@@ -3,6 +3,12 @@
 **Status:** recorded 2026-08-06, **not started**. P0 (corporate actions) is being built first and
 has its own spec. Each item below is deferred until explicitly picked up.
 
+**Updated 2026-08-10** from the spec-conflict audit (`docs/audit/2026-08-10-spec-conflict-audit.md`).
+The two decisions this backlog was waiting on are now **recorded, not open** — P1b (D35) and P2b
+(D36) — so neither needs re-asking. Two of the backlog's own statements were also corrected: P1a
+rule 3's zero-sum check (F-27, **HIGH** — it could silently delete corporate-action rows) and P3's
+multiplier site list (F-46). No item's status changed; all remain deferred.
+
 **Origin.** A coverage assessment of a real US broker (Charles Schwab) transaction export —
 5 CSVs, ~1,375 rows, 34 distinct broker action types, 2021-01 → 2026-07 — against what this
 codebase can currently ingest. About three quarters of the rows map onto existing entry points
@@ -42,6 +48,17 @@ afterwards is mechanical.
 3. **Suppress paired self-cancelling rows** — internal sub-account journals, the broker-migration
    transfer-out/transfer-in pair, mark-to-market pairs. **Verify each group sums to exactly zero
    before dropping it**; that check is the safety property, not the classification.
+   **NORMATIVE (2026-08-10, audit F-27): the zero-sum check must sum the share QUANTITY as well as
+   the amount — both, not either.** A corporate action is itself a paired out/in row group, and its
+   cash amount is **zero on both legs**: a split moves shares without moving money. An amount-only
+   check therefore passes a 3-for-1 split (`−85` / `+255` shares, `$0` / `$0`) and **drops it
+   silently** — deleting exactly the rows P0 exists to capture, and re-creating the permanent basis
+   loss this whole assessment exists to prevent. Rule 7's hard-error protection does not fire,
+   because rule 3 has already classified the group. Adding the quantity term closes it at no cost:
+   `−85 + 255 = +170 ≠ 0` protects the split, while `−100 + 100 = 0` still drops a genuine journal.
+   This is why rule 3's safety property was under-specified as first written.
+   *(**Derived, not observed.** The converter does not exist and the broker export was out of scope,
+   so this failure mode follows from rule 3's stated mechanism rather than from a reproduction.)*
 4. **Drop cancelled orders together with the original order row they cancel.**
 5. **Dates:** `MM/DD/YYYY` → ISO. Rows carrying a dual `settle as of trade` date resolve to the
    **trade** date (the ledger's `trade_date` is the trade date).
@@ -81,12 +98,26 @@ handles the cash branch with a withholding override, and `check_amounts`
 pane (mirror the TW pane's existing segmented control); make withholding overridable using the
 **existing** pencil-override affordance (`m-fee-pencil`), not a new interaction.
 
-**⚠ OWNER DECISION REQUIRED BEFORE IMPLEMENTING.** A `CASH`-type dividend falls into
-`CASH_DIVIDEND_TYPES` and therefore **reduces `adjusted_total`** — i.e. a US cash dividend would
-lower that position's average cost, exactly as a TW cash dividend does. That is consistent with
-the locked single adjusted-cost accounting model (`domain-ledger.md`), but it is a visible
-semantic choice. If US cash dividends should instead be booked as income without touching cost,
-that is a different accounting model and a `domain-ledger.md` change. **Do not assume; ask.**
+**DECIDED — owner sign-off 2026-08-10 (audit D35): a US CASH dividend DOES reduce `adjusted_total`,
+exactly as a TW/MY cash dividend does.** A `CASH`-type dividend falls into `CASH_DIVIDEND_TYPES`
+(`shared/models/enums.py:26`), so it lowers that position's average cost. This needs **no
+`domain-ledger.md` change** — the locked adjusted-cost model already covers it.
+
+**Why, in one line: the alternative would put two dividend accounting models in one ledger.**
+`CASH_DIVIDEND_TYPES` is a single frozenset driving four consuming sites uniformly —
+`portfolio/cost_basis.py:406`, `portfolio/returns.py:144`, `portfolio/cash.py:118` and `:211`,
+`portfolio/timeseries.py:94`. Booking US cash as income instead would fork that definition by
+market, so 回本進度 and 股利回收率 would mean different things per market **on the same screen** —
+which is precisely what `domain-ledger.md`'s single-definition discipline exists to prevent. This is
+a whole-system consequence, not a preference.
+
+**Coupled consequence — the part that would otherwise have been discovered late.** Under the rejected
+income model, `dividend_portion` would always be 0 for US positions, so **D21** — the SPINOFF child's
+「承接自母公司」 payback-provenance label in `docs/spec/2026-08-06-corporate-actions.md`, already
+approved and scheduled into W7 — would have been unreachable on the only data that has corporate
+actions. The approved decision keeps D21 live.
+
+The **Work** list above is unchanged by this decision and stands as recorded.
 
 ---
 
@@ -104,25 +135,38 @@ rows must be typed in individually.
 **Work:** add a fifth template kind — `account, date, kind, ccy, amount, note, acq_home_amount`.
 Purely additive; touches no calculation.
 
-### P2b — Whether interest/fees enter the return metrics (a DECISION, not an engineering task)
+### P2b — Whether interest/fees enter the return metrics (DECIDED 2026-08-10)
 
 They currently cannot. `portfolio/cash.py:13` states it explicitly — the cash pool "feeds NO
 return metric" — and `xirr_reporting` (`portfolio/returns.py:98`) admits only buys, sells, cash
 dividends, opening inventory and the terminal market value.
 
-**The consistency trap:** deposits are *also* absent from XIRR. Adding interest but not deposits
-yields a metric that includes some cash activity and not the rest, which has no coherent
-interpretation. The three self-consistent options are:
+**The consistency trap that shaped the decision:** deposits are *also* absent from XIRR. Adding
+interest but not deposits yields a metric that includes some cash activity and not the rest, which
+has no coherent interpretation. The three self-consistent options were:
 
-| Option | Meaning |
-| --- | --- |
-| **Keep as is** | XIRR stays a *portfolio* (trade-flow) return; interest lands in the cash pool and net worth only, with a footnote on the report |
-| **Add a second metric** | Keep XIRR untouched; add a whole-account IRR that includes every cash movement, deposits included |
-| **Redefine XIRR** | Requires `domain-ledger.md` sign-off recorded in `CHANGELOG.md`; every historical figure moves |
+| Option | Meaning | Verdict |
+| --- | --- | --- |
+| Keep as is | XIRR stays a *portfolio* (trade-flow) return; interest lands in the cash pool and net worth only, with a footnote on the report | not chosen |
+| **Add a second metric** | **Keep XIRR untouched; add a whole-account IRR that includes every cash movement, deposits included** | **CHOSEN** |
+| Redefine XIRR | Requires `domain-ledger.md` sign-off recorded in `CHANGELOG.md`; every historical figure moves | rejected |
 
-**Recommendation: option 1 or 2.** The amounts involved are trivial relative to the cost of moving
-every historical return figure. Note `portfolio/twr.py` already exists and may be the better home
-for a whole-account view.
+**DECIDED — owner sign-off 2026-08-10 (audit D36): option 2. XIRR is untouched; a whole-account IRR
+is added in the existing `portfolio/twr.py`** — no new module, and `twr.py` is already the home for
+a whole-account view.
+
+**Why not option 3.** Redefining XIRR moves every historical figure, invalidates the accounting
+manual's worked anchors and the stress-audit oracle's expectations, and would have to be re-verified
+against the whole corpus — for amounts this backlog itself calls trivial.
+
+**What option 2 buys beyond the interest/fee rows.** It is purely additive, and it also resolves a
+limitation the corporate-actions spec currently concedes: **D12** books the reorganisation fee as a
+`WITHDRAW` cash movement, while `xirr_reporting` (`portfolio/returns.py:135-146`) builds its flow
+series from `opening` + `transactions` + `dividends` only. The fee is therefore invisible to every
+current return metric. The second metric is where it becomes visible.
+
+**Sequencing consequence for whoever writes the accounting manual (corporate-actions W9):** D12's
+limitation must now be written as **resolved by the whole-account IRR**, not as permanent.
 
 ---
 
@@ -132,7 +176,7 @@ for a whole-account view.
 
 | Gap | Where it bites |
 | --- | --- |
-| **Contract multiplier of 100** | **The real blocker.** `quantity * price` is written inline in `portfolio/cost_basis.py`, `portfolio/cash.py`, `portfolio/returns.py`, `strategy/whatif.py` and `export/tax.py`. A multiplier is not a field to add; it is an assumption to remove from every money formula |
+| **Contract multiplier of 100** | **The real blocker.** Inline `quantity × price` is written out at **28 sites across 13 files** (measured at HEAD; list below). A multiplier is not a field to add; it is an assumption to remove from every money formula |
 | Instrument identity (expiry / strike / right / underlying) | `shared/symbol_format.py:26` — the US pattern `^[A-Z]{1,5}(\.[A-Z])?$` rejects an option symbol; `instruments` has no columns for the contract terms |
 | Expiry-worthless | No event type; closes a position at zero with the full premium realized |
 | Assignment / exercise | Converts to an equity position at the strike. **Needs an owner ruling** |
@@ -141,6 +185,47 @@ for a whole-account view.
 **Direction is NOT a gap.** Sell-to-open / buy-to-close map cleanly onto the existing declared
 short-sale model (option C, 2026-07-31): an STO is a short position holding the proceeds received,
 a BTC is the cover. The multiplier is what blocks reuse, not the sign convention.
+
+### The multiplier site list (corrected 2026-08-10, audit F-46)
+
+The earlier text named five files, and one of them was wrong: **`export/tax.py` has no such site.**
+It consumes pre-computed `RealizedRow` fields; its only multiplication is `r.realized * rate`
+(`export/tax.py:83`), an FX conversion of an already-formed money figure. Of the five named, four
+were real — and **nine more were missing. P3's blocker is larger than first recorded, not smaller.**
+
+Re-measured at `adc3977` by walking the AST for a `Mult` whose one operand is a quantity name
+(`qty` / `quantity` / `shares` / `units`) and whose other is a price name (`price` / `px` / `close`):
+**28 sites across 13 files.**
+
+| Layer | Module | Sites |
+| --- | --- | --- |
+| calc core | `portfolio/cost_basis.py` | 4 |
+| calc core | `portfolio/cash.py` | 4 |
+| calc core | `portfolio/returns.py` | 3 |
+| calc core | `portfolio/timeseries.py` | 2 |
+| calc core | `portfolio/pnl.py` | 1 |
+| calc core | `forex/pools.py` | 2 |
+| strategy | `strategy/whatif.py` | 2 |
+| strategy | `strategy/rebalance.py` | 2 |
+| ingestion | `data_ingestion/fees.py` | 1 |
+| export | `export/ledgers_report.py` | 1 |
+| api | `api/routers/input_center.py` | 3 |
+| api | `api/routers/symbol.py` | 2 |
+| api | `api/routers/ledgers.py` | 1 |
+
+**28 is a floor, not a ceiling.** The same assumption also appears as a *per-share* figure multiplied
+by a share count, which that pattern does not match: `portfolio/pnl.py:47-48` forms unrealized P&L and
+capital gain as `(price − avg) × shares`, and `data_ingestion/opening_import.py` multiplies an average
+cost by a share count. Scope the removal by the assumption, not by the grep.
+
+**P0 does not make this harder — verified negative.** The census is **identical at the merge-base
+`734833b`, at the spec-audit point `f80e462`, and at `adc3977`**: 28 sites, the same per-file
+counts, only line numbers moved (`timeseries.py:145 → :135`, `whatif.py:186 → :161`). `apply_ratio`
+operates on a quantity and never forms money; `split_factor` is prices-only; `_apply_action`
+*transfers* totals rather than re-deriving them from `qty × price`. P3 can be sequenced after P0 at no
+added cost. *(The 2026-08-10 audit reached the same negative independently, counting 24 sites under a
+stricter name match — the absolute count depends on the matcher; the invariance across revisions does
+not.)*
 
 ### Cheap interim worth considering
 
