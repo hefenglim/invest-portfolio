@@ -35,6 +35,14 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   move share counts and therefore average cost, market value, unrealized P&L, weights and XIRR).
 
 ### Planned
+- **Corporate actions (SPLIT / EXCHANGE / SPINOFF) — P0, in progress.** A broker-export coverage
+  assessment (2026-08-06) found this to be the only *blocking* ingestion gap: a share count that
+  changes with no cash cannot be recorded, so the later sells trip the STICKY 賣超 guard and
+  **discard that position's cost basis permanently**. Spec: `docs/spec/2026-08-06-corporate-actions.md`.
+- **Broker-import backlog (P1a converter · P1b US cash dividend · P2 interest/fees · P3 options)**
+  recorded in `docs/spec/2026-08-06-broker-import-backlog.md` — deferred, each with its code
+  reference points and the owner decisions that gate it. P1b and P2b are decision-blocked, not
+  effort-blocked.
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
   (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a
   **user-confirmed** auto-import into the ledger following the account's accounting rules —
