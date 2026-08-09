@@ -9,31 +9,6 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
-### Fixed
-- **Symbol drawer reported 對帳不一致 on a fully consistent ledger.** `activity_reconcile`
-  compared the ledger flow with the book using an exact `==` between two Decimal sums built in
-  DIFFERENT orders — `_reconcile` adds the reinvest shares to each other first, `build_book`
-  folds each into a large running position. DRIP/STOCK reinvest shares are `net / price`
-  quotients that do not terminate, so at the default 28-digit context the two orders disagree in
-  the last digit (measured on the demo site 2026-08-05: **1E-26 shares** on AAPL). `balances` is
-  now a DIFFERENCE test against `_SHARE_EPS` = `0.000001` (owner ruling 2026-08-06: share counts
-  are ignored past the 6th decimal). Deliberately NOT quantize-then-compare: truncating both
-  sides to 6 dp preserves the same bug class, since two values 1E-27 apart can straddle the 6-dp
-  boundary and truncate to different results.
-- **`GET /api/symbol/{symbol}/detail` → `activity_reconcile.{total,by_account}` now carries
-  `diff_shares`** (the exact signed `net − book` gap, full precision on the wire). The drawer
-  footer names it when the flag is red — a reported break without its size is unactionable.
-- **Share counts are no longer rendered at 0 dp.** New `f.shares()` in `web/format.js` (up to
-  6 dp, trailing zeros trimmed) is the single definition for every share display. The footer
-  whose job is to prove 期初＋買−賣＋配股/DRIP ＝ 部位摘要 was printing a real 0.045712-share
-  DRIP reinvest as `0`, so the equation read as perfectly balanced beside its own ⚠ — and a REAL
-  sub-0.5-share break would have printed the same way. Four precisions previously coexisted for
-  the same quantity (0 dp, 2 dp, 4 dp, and two hand-rolled "4 dp when fractional" branches)
-  across the dashboard, drawer, ledger, inbox, rebalance and symbol picker; all 36 call sites
-  now route through `f.shares`.
-- No money-of-record change: `reinvest_shares` storage precision is untouched (capping it would
-  move share counts and therefore average cost, market value, unrealized P&L, weights and XIRR).
-
 ### Planned
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
   (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a
@@ -74,6 +49,52 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   dataset(s) within one deployment. (The current prod/test split is achieved by **separate
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
+
+## [v0.1.28] - 2026-08-09
+
+A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not
+exist, and printed the evidence at a precision too coarse to show why. Both halves are fixed —
+the comparison and the display. Cut on its own, ahead of the corporate-actions work, so its
+deliberate change to how share counts render cannot later be confused with a side effect of that
+refactor.
+
+### Fixed
+- **Symbol drawer reported 對帳不一致 on a fully consistent ledger.** `activity_reconcile`
+  compared the ledger flow with the book using an exact `==` between two Decimal sums built in
+  DIFFERENT orders — `_reconcile` adds the reinvest shares to each other first, `build_book`
+  folds each into a large running position. DRIP/STOCK reinvest shares are `net / price`
+  quotients that do not terminate, so at the default 28-digit context the two orders disagree in
+  the last digit (measured on the demo site 2026-08-05: **1E-26 shares** on AAPL). `balances` is
+  now a DIFFERENCE test against `_SHARE_EPS` = `0.000001` (owner ruling 2026-08-06: share counts
+  are ignored past the 6th decimal). Deliberately NOT quantize-then-compare: truncating both
+  sides to 6 dp preserves the same bug class, since two values 1E-27 apart can straddle the 6-dp
+  boundary and truncate to different results.
+- **`GET /api/symbol/{symbol}/detail` → `activity_reconcile.{total,by_account}` now carries
+  `diff_shares`** (the exact signed `net − book` gap, full precision on the wire). The drawer
+  footer names it when the flag is red — a reported break without its size is unactionable.
+- **Share counts are no longer rendered at 0 dp.** New `f.shares()` in `web/format.js` (up to
+  6 dp, trailing zeros trimmed) is the single definition for every share display. The footer
+  whose job is to prove 期初＋買−賣＋配股/DRIP ＝ 部位摘要 was printing a real 0.045712-share
+  DRIP reinvest as `0`, so the equation read as perfectly balanced beside its own ⚠ — and a REAL
+  sub-0.5-share break would have printed the same way. Four precisions previously coexisted for
+  the same quantity (0 dp, 2 dp, 4 dp, and two hand-rolled "4 dp when fractional" branches)
+  across the dashboard, drawer, ledger, inbox, rebalance and symbol picker; all 36 call sites
+  now route through `f.shares`.
+- No money-of-record change: `reinvest_shares` storage precision is untouched (capping it would
+  move share counts and therefore average cost, market value, unrealized P&L, weights and XIRR).
+  No stress-audit re-run is required for this release for the same reason.
+
+### Tooling
+- **`scripts/vm_exec.py` decodes remote output as UTF-8**, not the Windows locale codec — a
+  remote command whose output contained Traditional Chinese came back mojibake in the operation
+  log, i.e. the audit trail recorded something other than what the VM said.
+- **Working-tree scratch is now git-ignored rather than merely remembered** (`.playwright-mcp/`,
+  `invest-temp-noted.txt`, `ntfy_topic_tmp.txt`, `tpl.json`, and two design-handoff byproducts).
+  These sat untracked-but-not-ignored across releases — one `git add -A` from being published,
+  the same class as the raw broker exports ignored just before them.
+- **`.claude/skills/demo-cycle/` is tracked.** The other three workflow skills already were, and
+  `CLAUDE.md` lists `.claude/skills/` as a repository artifact, so this one was an asset that had
+  simply never been committed.
 
 ## [v0.1.27] - 2026-08-05
 

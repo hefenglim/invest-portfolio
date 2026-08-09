@@ -66,6 +66,33 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.28 (share reconciliation) ---------------------------------------------------
+    Feature(
+        version="0.1.28",
+        id="drawer-reconcile-tolerance",
+        title="標的抽屜不再對一本完全正確的帳本報「對帳不一致」",
+        desc="抽屜底部那行「期初＋買−賣＋配股/DRIP ＝ 部位摘要」是用完全相等去比的，"
+        "但兩邊的股數是以不同順序加總出來的。DRIP 的再投入股數是「淨額 ÷ 價格」，"
+        "多半除不盡，於是兩邊在小數第 26 位就會不一樣——帳本明明沒問題，卻掛著一個 ⚠。"
+        "現在改成比較「差額」，小數第 6 位以後的差異忽略；真的對不起來時，"
+        "會直接把差多少股印出來，而不是只說一句不一致",
+        href="index.html",
+        area="總覽 → 持股明細 → 標的抽屜",
+        target="#holdings-table",
+    ),
+    Feature(
+        version="0.1.28",
+        id="share-display-decimals",
+        title="零股與再投入的小數股數終於看得到了",
+        desc="股數過去在多數地方是無條件顯示到整數位，所以一筆 0.045712 股的 DRIP 再投入印成「0」——"
+        "那行用來證明帳目平衡的算式看起來完美無缺，旁邊卻掛著警告；"
+        "反過來說，一個真的差了不到 0.5 股的破口也會長得一模一樣。"
+        "現在全站（總覽、抽屜、交易帳本、待辦收件匣、再平衡、代號選擇器）"
+        "統一顯示到小數 6 位、尾端的 0 自動省略",
+        href="index.html",
+        area="全站 → 股數顯示",
+        target="#holdings-table",
+    ),
     # --- v0.1.27 (the 0 -> 1 sweep) -------------------------------------------------------
     Feature(
         version="0.1.27",
@@ -1209,6 +1236,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.28": "2026-08-09",
     "0.1.27": "2026-08-05",
     "0.1.26": "2026-08-03",
     "0.1.25": "2026-08-01",
