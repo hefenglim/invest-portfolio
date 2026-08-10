@@ -7,6 +7,7 @@ test that pins what the WRONG form produces. If a future edit makes those two ag
 suite goes red, which is the whole point.
 """
 
+import dataclasses
 from datetime import date
 from decimal import Decimal
 
@@ -187,6 +188,104 @@ def test_index_keeps_distinct_splits_on_the_same_symbol() -> None:
     ])
     assert len(idx.splits_on("AAA")) == 2
     assert split_factor(idx, "AAA", after=date(2026, 1, 1), through=date(2026, 12, 31)) == D("6")
+
+
+def test_split_dedup_keys_on_the_REDUCED_fraction() -> None:
+    """F-10: 「3 比 1」 and 「30 比 10」 are ONE split written two ways.
+
+    The key used to be term-wise, so both survived and ``split_factor`` returned **9** for a
+    3-for-1 — a stored price wrong by a factor of three, on every affected row, looking
+    entirely ordinary. Reachable in practice through F-06, whose guard never fired on the
+    multi-account batch that is D28's mandated entry shape.
+    """
+    idx = ActionIndex.build([
+        _act(account="schwab", to="3", frm="1"),
+        _act(account="moomoo_my", to="30", frm="10"),
+    ])
+    assert len(idx.splits_on("AAA")) == 1
+    assert split_factor(idx, "AAA", after=date(2026, 1, 1), through=date(2026, 12, 31)) == D("3")
+
+
+def test_for_symbol_yields_a_split_exactly_once() -> None:
+    """F-09: E20 forces ``to_symbol == from_symbol``, so a SPLIT is its own source AND dest.
+
+    ``by_source`` and ``by_dest`` are therefore keyed identically for it, and a walker that
+    concatenates the two applies the ratio twice —
+    ``apply_ratio(apply_ratio(100, a), a) == 900`` for a 3-for-1, measured on ``HEAD``.
+    ``for_symbol`` is the accessor that makes the mistake unavailable.
+    """
+    split = _act(to="3", frm="1")
+    idx = ActionIndex.build([split])
+    assert idx.by_source("schwab", "AAA") == (split,)
+    assert idx.by_dest("schwab", "AAA") == (split,)          # the SAME key — this is the trap
+    assert idx.for_symbol("schwab", "AAA") == (split,)       # …and this is the fix
+
+    naive = D("100")
+    for a in idx.by_source("schwab", "AAA") + idx.by_dest("schwab", "AAA"):
+        naive = apply_ratio(naive, a)
+    assert naive == D("900")                                  # what the trap produces
+    walked = D("100")
+    for a in idx.for_symbol("schwab", "AAA"):
+        walked = apply_ratio(walked, a)
+    assert walked == D("300")
+
+
+def test_for_symbol_covers_both_ends_in_date_order() -> None:
+    """An EXCHANGE must appear for its source AND its destination, and be scoped per account."""
+    first = _act(CorporateActionKind.EXCHANGE, to="1", frm="1", day=date(2026, 3, 1),
+                 from_symbol="AAA", to_symbol="BBB")
+    second = _act(to="2", frm="1", day=date(2026, 9, 1), from_symbol="BBB")
+    idx = ActionIndex.build([second, first])
+    assert idx.for_symbol("schwab", "AAA") == (first,)
+    assert idx.for_symbol("schwab", "BBB") == (first, second)   # date-ordered
+    assert idx.for_symbol("moomoo_my", "BBB") == ()
+    assert idx.for_symbol("schwab", "ZZZ") == ()
+
+
+def test_for_symbol_dedup_survives_an_unhashable_model() -> None:
+    """``CorporateAction`` is a Pydantic model and unhashable; a ``set``-based dedup raises."""
+    with pytest.raises(TypeError):
+        {_act()}  # noqa: B018 - the point IS that constructing the set raises
+    assert len(ActionIndex.build([_act()]).for_symbol("schwab", "AAA")) == 1
+
+
+def test_from_stored_converts_and_validates_ledger_rows() -> None:
+    """One owner for the stored-row → domain-model conversion (§6.0)."""
+
+    @dataclasses.dataclass
+    class Row:
+        account_id: str
+        date: date
+        kind: str
+        from_symbol: str
+        to_symbol: str
+        ratio_to: D
+        ratio_from: D
+        cost_carry: D | None = None
+        note: str | None = None
+
+    idx = ActionIndex.from_stored([
+        Row("schwab", DAY, "SPLIT", "AAA", "AAA", D("3"), D("1")),
+    ])
+    assert idx.all[0].kind is CorporateActionKind.SPLIT
+    # A hand-edited row RAISES rather than being silently dropped: omitting a factor gives a
+    # share count wrong by the ratio that looks entirely normal.
+    with pytest.raises((ValidationError, ValueError)):
+        ActionIndex.from_stored([
+            Row("schwab", DAY, "SPLIT", "AAA", "AAA", D("0.2857"), D("1")),
+        ])
+    with pytest.raises(ValueError, match="NOPE"):
+        ActionIndex.from_stored([Row("schwab", DAY, "NOPE", "AAA", "AAA", D("3"), D("1"))])
+
+
+def test_depth_capped_sink_starts_empty_and_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D31's channel: a per-request set on the per-request object, so nobody forgets it."""
+    idx = ActionIndex.build([_act()])
+    assert idx.depth_capped_symbols() == frozenset()
+    idx.note_depth_capped("schwab", "AAA")
+    assert idx.depth_capped_symbols() == frozenset({("schwab", "AAA")})
+    # It is diagnostics, not identity: two indexes over the same ledger stay equal.
+    assert idx == ActionIndex.build([_act()])
 
 
 # --------------------------------------------------------------------- split_factor

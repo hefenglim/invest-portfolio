@@ -13,10 +13,12 @@ module exists to prevent. The only way to apply a ratio to a share count is
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from fractions import Fraction
+from typing import Protocol
 
 from pydantic import BaseModel, model_validator
 
@@ -111,6 +113,41 @@ def apply_ratio(qty: Decimal, action: CorporateAction) -> Decimal:
     return qty * action.ratio_to / action.ratio_from
 
 
+class StoredActionRow(Protocol):
+    """Structural view of a persisted ``corporate_actions`` row.
+
+    A ``Protocol`` rather than an import of ``data_ingestion.store.StoredCorporateAction``,
+    because the dependency only runs one way: ``store`` imports THIS module, so this module
+    can never import ``store``. Structural typing lets :meth:`ActionIndex.from_stored` own
+    the stored-row → domain-model conversion anyway, which is the point — that conversion is
+    currently open-coded in ``store.load_ledger_bundle`` and again in ``scheduler/jobs.py``,
+    and a third copy in ``data_ingestion/holdings.py`` is exactly the drift §6.0's
+    "ONE owner per concept" exists to prevent.
+    """
+
+    account_id: str
+    date: date
+    kind: str
+    from_symbol: str
+    to_symbol: str
+    ratio_to: Decimal
+    ratio_from: Decimal
+    cost_carry: Decimal | None
+    note: str | None
+
+
+def _reduced(action: CorporateAction) -> Fraction:
+    """The ratio as a REDUCED fraction — ``3/1`` and ``30/10`` collapse to one value.
+
+    Term-wise comparison is not equality of ratios, and the difference is not cosmetic: the
+    split dedup key used ``(ratio_to, ratio_from)``, so the same 3-for-1 entered once as
+    ``3/1`` and once as ``30/10`` survived as two entries and :func:`split_factor` returned
+    **9** instead of 3 (audit F-10, reproduced). ``is_ratio_term`` guarantees both terms are
+    positive integral Decimals, so ``int()`` is exact and ``Fraction`` normalises them.
+    """
+    return Fraction(int(action.ratio_to), int(action.ratio_from))
+
+
 @dataclass(frozen=True)
 class ActionIndex:
     """Corporate actions pre-grouped for lookup. Built ONCE per request / validation batch.
@@ -118,41 +155,98 @@ class ActionIndex:
     Not per row: ``validate.py``'s oversell guard runs once per transaction, so a ~1,400-row
     import would otherwise re-read and re-group the whole action ledger ~1,400 times.
 
-    Construct with :meth:`build`; the grouped views are computed once there.
+    Construct with :meth:`build` (domain models) or :meth:`from_stored` (ledger rows); the
+    grouped views are computed once there.
     """
 
     all: tuple[CorporateAction, ...]
     _by_source: dict[tuple[str, str], tuple[CorporateAction, ...]]
     _by_dest: dict[tuple[str, str], tuple[CorporateAction, ...]]
+    _by_symbol: dict[tuple[str, str], tuple[CorporateAction, ...]]
     _splits_by_symbol: dict[str, tuple[CorporateAction, ...]]
+    # The share walker's depth-cap sink (D31). A MUTABLE set on a frozen dataclass, and
+    # deliberately so: D31 says the capped symbol is recorded in a "per-request set", and
+    # this index IS the per-request object D23 rule 2 already requires every caller to
+    # thread. A second object to thread would be a second thing to forget, and forgetting
+    # it loses the 待釐清 flag silently. `compare=False` keeps it out of equality: it is
+    # diagnostics ABOUT a walk, not part of the index's identity.
+    _depth_capped: set[tuple[str, str]] = field(
+        default_factory=set, compare=False, repr=False
+    )
+    # D33's sink, same lifetime and the same reason. Kept SEPARATE from the depth cap
+    # because the two degradations have different causes and need different sentences: one
+    # says "the chain is too long to follow", the other "this action was skipped because the
+    # position was already negative". One bag with a reason code would have been the same
+    # information; two named pairs make the wrong message impossible to emit.
+    _negative_source_skips: set[tuple[str, str]] = field(
+        default_factory=set, compare=False, repr=False
+    )
 
     @classmethod
     def build(cls, actions: Iterable[CorporateAction]) -> "ActionIndex":
         ordered = tuple(sorted(actions, key=lambda a: a.date))  # stable: input order breaks ties
         by_source: dict[tuple[str, str], list[CorporateAction]] = {}
         by_dest: dict[tuple[str, str], list[CorporateAction]] = {}
+        by_symbol: dict[tuple[str, str], list[CorporateAction]] = {}
         splits: dict[str, list[CorporateAction]] = {}
-        seen_split: set[tuple[str, date, Decimal, Decimal]] = set()
+        seen_split: set[tuple[str, date, Fraction]] = set()
         for a in ordered:
             by_source.setdefault((a.account_id, a.from_symbol), []).append(a)
             by_dest.setdefault((a.account_id, a.to_symbol), []).append(a)
+            # A SET of keys, so a SPLIT — whose E20 rule forces `to_symbol == from_symbol`
+            # — is filed ONCE. This is the whole reason `for_symbol` exists; see its
+            # docstring for the 3-for-1 → 900-shares failure it removes.
+            for key in {(a.account_id, a.from_symbol), (a.account_id, a.to_symbol)}:
+                by_symbol.setdefault(key, []).append(a)
             if a.kind is CorporateActionKind.SPLIT:
-                # Deduplicated on (symbol, date, ratio) because the ledger row is PER ACCOUNT
-                # while `prices` is not: a 3-for-1 held in three accounts is three rows and
-                # one price event. Multiplying all three would make it 27-for-1.
-                key = (a.from_symbol, a.date, a.ratio_to, a.ratio_from)
-                if key not in seen_split:
-                    seen_split.add(key)
+                # Deduplicated on (symbol, date, REDUCED ratio) because the ledger row is
+                # PER ACCOUNT while `prices` is not: a 3-for-1 held in three accounts is
+                # three rows and one price event. Multiplying all three would make it
+                # 27-for-1 — and keying on the raw terms let `3/1` and `30/10` through as
+                # two distinct events, which is the same bug wearing a disguise (F-10).
+                split_key = (a.from_symbol, a.date, _reduced(a))
+                if split_key not in seen_split:
+                    seen_split.add(split_key)
                     splits.setdefault(a.from_symbol, []).append(a)
         return cls(
             all=ordered,
             _by_source={k: tuple(v) for k, v in by_source.items()},
             _by_dest={k: tuple(v) for k, v in by_dest.items()},
+            _by_symbol={k: tuple(v) for k, v in by_symbol.items()},
             _splits_by_symbol={k: tuple(v) for k, v in splits.items()},
         )
 
+    @classmethod
+    def from_stored(cls, rows: Iterable[StoredActionRow]) -> "ActionIndex":
+        """Build from persisted ledger rows, converting each to a validated domain model.
+
+        A row too malformed to be a :class:`CorporateAction` (a non-integer ratio term, an
+        unknown ``kind``) RAISES rather than being dropped — the same strictness, for the
+        same reason, as ``store.load_ledger_bundle`` and ``scheduler/jobs.py``: silently
+        omitting a factor produces a share count that is wrong by the ratio and looks
+        entirely normal. Validation makes such a row unreachable except by hand-editing the
+        database, and a hand-edited row already breaks every replay call site.
+        """
+        return cls.build(
+            CorporateAction(
+                account_id=r.account_id,
+                date=r.date,
+                kind=CorporateActionKind(r.kind),
+                from_symbol=r.from_symbol,
+                to_symbol=r.to_symbol,
+                ratio_to=r.ratio_to,
+                ratio_from=r.ratio_from,
+                cost_carry=r.cost_carry,
+                note=r.note,
+            )
+            for r in rows
+        )
+
     def by_source(self, account_id: str, symbol: str) -> tuple[CorporateAction, ...]:
-        """Date-ordered actions this (account, symbol) is the SOURCE of."""
+        """Date-ordered actions this (account, symbol) is the SOURCE of.
+
+        ⚠ **Never merge this with :meth:`by_dest`** — use :meth:`for_symbol`.
+        """
         return self._by_source.get((account_id, symbol), ())
 
     def by_dest(self, account_id: str, symbol: str) -> tuple[CorporateAction, ...]:
@@ -160,12 +254,58 @@ class ActionIndex:
 
         The share-count walker needs this: a destination's history reaches back through
         another symbol entirely, and transitively (a de-SPAC into a ticker later renamed).
+
+        ⚠ **Never merge this with :meth:`by_source`** — use :meth:`for_symbol`.
         """
         return self._by_dest.get((account_id, symbol), ())
+
+    def for_symbol(self, account_id: str, symbol: str) -> tuple[CorporateAction, ...]:
+        """Every action touching this (account, symbol) — either end — date-ordered, ONCE.
+
+        This is the accessor the share walker must use, and it exists because the obvious
+        way to get the same stream is wrong. E20 forces ``to_symbol == from_symbol`` on a
+        SPLIT, so a SPLIT is filed under the SAME key in both :attr:`_by_source` and
+        :attr:`_by_dest`; concatenating the two lists yields it **twice** and the walker
+        applies the ratio twice — ``apply_ratio(apply_ratio(100, a), a)`` is **900** for a
+        3-for-1, measured (audit F-09). De-duplication happens at build time via a set of
+        keys, so there is no per-call dedup to get wrong and no reliance on
+        :class:`CorporateAction` being hashable (it is a Pydantic model, and is not).
+        """
+        return self._by_symbol.get((account_id, symbol), ())
 
     def splits_on(self, symbol: str) -> tuple[CorporateAction, ...]:
         """Date-ordered SPLITs affecting *symbol*'s price series, deduplicated across accounts."""
         return self._splits_by_symbol.get(symbol, ())
+
+    def note_depth_capped(self, account_id: str, symbol: str) -> None:
+        """Record that a share walk for this position hit the depth cap (D31).
+
+        Read paths keep their bare ``Decimal`` return and fall back to the pre-action share
+        count; this is the channel that lets the validation path raise a ``needs_confirm``
+        issue and the display surface a 待釐清 chip, instead of the wrong number passing as
+        trustworthy.
+        """
+        self._depth_capped.add((account_id, symbol))
+
+    def depth_capped_symbols(self) -> frozenset[tuple[str, str]]:
+        """``(account_id, symbol)`` pairs whose walk was cut short since this index was built."""
+        return frozenset(self._depth_capped)
+
+    def note_negative_source_skip(self, account_id: str, symbol: str) -> None:
+        """Record that the share path skipped an action on a negative source (D33).
+
+        The skip itself is the correctness fix — applied unconditionally, the share-only path
+        manufactures a destination the replay never created, with no transaction, no opening
+        and no holding, and therefore **no flag of any kind**. The drawer then renders
+        ``＋公司行動 −100`` under a red 對帳不一致 with nothing to explain it. D33's ruling is
+        "skip **and flag**", and this is the flag's channel: §6.3's reconciliation footer only
+        works when the mismatch comes with its cause attached.
+        """
+        self._negative_source_skips.add((account_id, symbol))
+
+    def negative_source_skips(self) -> frozenset[tuple[str, str]]:
+        """``(account_id, symbol)`` pairs — both ends — of every action skipped under D33."""
+        return frozenset(self._negative_source_skips)
 
 
 def split_factor(

@@ -7,12 +7,13 @@ stub would let all three pass vacuously.
 """
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
 from portfolio_dash.bootstrap import bootstrap_db
+from portfolio_dash.data_ingestion.holdings import MAX_ACTION_DEPTH
 from portfolio_dash.data_ingestion.store import (
     delete_corporate_action,
     get_corporate_action,
@@ -26,8 +27,11 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.data_ingestion.validate import (
     CorporateActionInput,
     Issue,
+    _accounts_holding_on,
     validate_corporate_action,
+    validate_corporate_action_change,
 )
+from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -473,3 +477,203 @@ def test_every_message_is_traditional_chinese(conn: sqlite3.Connection) -> None:
     assert collected
     for msg in collected:
         assert any("一" <= ch <= "鿿" for ch in msg), msg
+
+
+# ================================================================== W4 repairs
+# Four defects the 2026-08-10 spec-conflict audit found in this file's subject, each
+# reproduced against HEAD before the fix. Their common shape: a rule that reads a share
+# count the replay does not agree with, or reads a collection the entry shape never fills.
+
+
+def test_the_second_action_of_a_chain_is_committable(conn: sqlite3.Connection) -> None:
+    """F-08 — the LIVE blocker: the feature could not accept its own motivating data.
+
+    E1a called the action-unaware ``shares_through``, which reads ``opening_inventory`` /
+    ``transactions`` / ``dividends`` for the destination symbol, finds all three empty and
+    returns 0. So every chain was hard-rejected at its SECOND action as 「沒有持倉」 while
+    ``build_book`` handled the same chain correctly. §10.5 defines "done" as accepting a
+    ledger full of exactly these chains.
+    """
+    for acct in ("schwab", "moomoo_my"):
+        insert_corporate_action(conn, account_id=acct, action_date=date(2026, 3, 1),
+                                kind=CorporateActionKind.EXCHANGE, from_symbol="AAA",
+                                to_symbol="BBB", ratio_to=D("1"), ratio_from=D("1"))
+    book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    assert {(h.symbol, h.shares) for h in book.holdings} == {("BBB", D("100"))}
+
+    second = [_inp(account_id=a, from_symbol="BBB", to_symbol="BBB",
+                   date=date(2026, 9, 1), ratio_to=D("2"))
+              for a in ("schwab", "moomoo_my")]
+    assert _kinds(validate_corporate_action(conn, second[0], batch=second)) == set()
+
+
+def test_e1a_still_refuses_an_action_on_a_symbol_never_held(
+    conn: sqlite3.Connection,
+) -> None:
+    """…and the guard must still bite, or the fix above is just a deletion."""
+    stranded = _inp(from_symbol="CCC", to_symbol="CCC")
+    assert "no_position_on_action_date" in _hard(
+        validate_corporate_action(conn, stranded, batch=[stranded]))
+
+
+def test_e13_sees_a_position_acquired_only_by_a_corporate_action(
+    conn: sqlite3.Connection,
+) -> None:
+    """F-07 — the SILENT half: E13's candidate set could not name the account at all.
+
+    The union was ``transactions`` ∪ ``opening_inventory``. A position created purely by an
+    EXCHANGE is in neither, so ``shares_through`` was never even called for it and D13's
+    all-or-nothing rule went quiet exactly where the spec says the state "must not be
+    reachable at all" — a partial application whose drawer footer prints ✓ 對帳一致.
+    """
+    for acct in ("schwab", "moomoo_my"):
+        insert_corporate_action(conn, account_id=acct, action_date=date(2026, 3, 1),
+                                kind=CorporateActionKind.EXCHANGE, from_symbol="AAA",
+                                to_symbol="BBB", ratio_to=D("1"), ratio_from=D("1"))
+    assert _accounts_holding_on(conn, "BBB", date(2026, 9, 1)) == {"schwab", "moomoo_my"}
+
+    schwab_only = _inp(from_symbol="BBB", to_symbol="BBB", date=date(2026, 9, 1))
+    issues = validate_corporate_action(conn, schwab_only, batch=[schwab_only])
+    assert "incomplete_account_coverage" in _hard(issues)
+    assert any("moomoo_my" in i.message for i in issues)
+
+
+def test_conflicting_ratio_guard_fires_on_a_batch_sibling(
+    conn: sqlite3.Connection,
+) -> None:
+    """F-06a — the guard read ``stored`` only, and D28 mandates ONE N-row batch.
+
+    In that entry shape ``stored`` is empty for every row, so the rule **provably never
+    fired on the primary door**. Two rows of one batch disagreeing about the ratio is the
+    single most likely way the conflict actually arrives.
+    """
+    batch = [_inp(account_id="schwab", ratio_to=D("3")),
+             _inp(account_id="moomoo_my", ratio_to=D("2"))]
+    assert "conflicting_ratio" in _hard(validate_corporate_action(conn, batch[0], batch=batch))
+    assert "conflicting_ratio" in _hard(validate_corporate_action(conn, batch[1], batch=batch))
+
+
+def test_the_same_ratio_written_two_ways_is_accepted(conn: sqlite3.Connection) -> None:
+    """F-06b — 「3 比 1」 and 「30 比 10」 are ONE ratio, so a batch mixing the spellings is
+    complete and consistent, not conflicting. Term-wise comparison rejected it."""
+    batch = [_inp(account_id="schwab", ratio_to=D("3"), ratio_from=D("1")),
+             _inp(account_id="moomoo_my", ratio_to=D("30"), ratio_from=D("10"))]
+    assert _kinds(validate_corporate_action(conn, batch[0], batch=batch)) == set()
+    assert _kinds(validate_corporate_action(conn, batch[1], batch=batch)) == set()
+
+
+def test_the_same_ratio_written_two_ways_is_a_duplicate_when_stored(
+    conn: sqlite3.Connection,
+) -> None:
+    """…and once one spelling is stored, the other is the same EVENT — E15, not E12.
+
+    Reaching this state is how F-10 became live: two surviving entries for one split made
+    ``split_factor`` return 9 instead of 3.
+    """
+    insert_corporate_action(conn, account_id="schwab", action_date=ACTION_DAY,
+                            kind=CorporateActionKind.SPLIT, from_symbol="AAA",
+                            to_symbol="AAA", ratio_to=D("3"), ratio_from=D("1"))
+    again = _inp(ratio_to=D("30"), ratio_from=D("10"))
+    assert "duplicate_action" in _hard(validate_corporate_action(conn, again, batch=[again]))
+
+
+def test_a_genuinely_different_ratio_is_still_rejected(conn: sqlite3.Connection) -> None:
+    """The guard must still bite, or the quotient comparison is just a disabling."""
+    insert_corporate_action(conn, account_id="moomoo_my", action_date=ACTION_DAY,
+                            kind=CorporateActionKind.SPLIT, from_symbol="AAA",
+                            to_symbol="AAA", ratio_to=D("3"), ratio_from=D("1"))
+    two_for_one = _inp(ratio_to=D("2"))
+    assert "conflicting_ratio" in _hard(
+        validate_corporate_action(conn, two_for_one, batch=[two_for_one]))
+
+
+# ------------------------------------------------------- F-32: E13 on delete / update
+
+
+def _stored_split_set(conn: sqlite3.Connection) -> list[int]:
+    """The D28 shape: one event, one row per holding account."""
+    return [
+        insert_corporate_action(conn, account_id=acct, action_date=ACTION_DAY,
+                                kind=CorporateActionKind.SPLIT, from_symbol="AAA",
+                                to_symbol="AAA", ratio_to=D("3"), ratio_from=D("1"))
+        for acct in ("schwab", "moomoo_my")
+    ]
+
+
+def test_deleting_one_row_of_a_set_is_refused(conn: sqlite3.Connection) -> None:
+    """F-32 — E13 was enforced at INSERT only, and ``store.py`` has zero references to it.
+
+    ``split_factor``'s dedup key is ``(symbol, date, ratio)`` with **no account**, so
+    deleting one row leaves the GLOBAL price correction standing while that account's shares
+    go uncorrected — and the drawer footer prints ✓ 對帳一致 over the mismatch.
+    """
+    first, _second = _stored_split_set(conn)
+    issues = validate_corporate_action_change(conn, first)
+    assert "partial_action_set_change" in _hard(issues)
+    assert any("moomoo_my" in i.message for i in issues)
+
+
+def test_deleting_a_lone_row_is_allowed(conn: sqlite3.Connection) -> None:
+    action_id = insert_corporate_action(
+        conn, account_id="schwab", action_date=ACTION_DAY,
+        kind=CorporateActionKind.SPLIT, from_symbol="AAA", to_symbol="AAA",
+        ratio_to=D("3"), ratio_from=D("1"))
+    assert validate_corporate_action_change(conn, action_id) == []
+
+
+def test_editing_one_row_off_the_event_is_refused(conn: sqlite3.Connection) -> None:
+    """An UPDATE that moves a row to another date is a DELETE from the set (E16 / N2)."""
+    first, _second = _stored_split_set(conn)
+    moved = _inp(date=date(2026, 7, 1))
+    assert "partial_action_set_change" in _hard(
+        validate_corporate_action_change(conn, first, replacement=moved))
+
+
+def test_editing_one_rows_ratio_out_of_step_is_refused(conn: sqlite3.Connection) -> None:
+    """F-06's conflict recreated from the inside — and the quotient rule applies here too."""
+    first, _second = _stored_split_set(conn)
+    assert "conflicting_ratio" in _hard(
+        validate_corporate_action_change(conn, first, replacement=_inp(ratio_to=D("2"))))
+    assert validate_corporate_action_change(
+        conn, first, replacement=_inp(ratio_to=D("30"), ratio_from=D("10"))) == []
+
+
+def test_changing_an_unknown_action_is_reported_not_crashed(
+    conn: sqlite3.Connection,
+) -> None:
+    assert _hard(validate_corporate_action_change(conn, 9999)) == {"unknown_action"}
+
+
+# --------------------------------------------------------------- D31: the depth cap
+
+
+def test_a_chain_past_the_depth_cap_raises_needs_confirm(conn: sqlite3.Connection) -> None:
+    """D31: not ``Decimal | None`` — the 賣超 tier, blocking until acknowledged.
+
+    The read paths kept the bare ``Decimal`` and fell back to the action-unaware count; the
+    validation path reads the same per-request set and refuses to guess on top of it.
+    """
+    depth = MAX_ACTION_DEPTH + 4
+    for i in range(depth + 1):
+        upsert_instrument(conn, Instrument(symbol=f"C{i}", market=Market.US,
+                                           quote_ccy=Currency.USD, sector="Tech",
+                                           name=f"C{i}"))
+    insert_transaction(conn, account_id="schwab", symbol="C0", side=Side.BUY,
+                       quantity=D("100"), price=D("5"), fees=D("0"), tax=D("0"),
+                       trade_date=BUY_DAY)
+    for i in range(depth):
+        insert_corporate_action(
+            conn, account_id="schwab", action_date=date(2026, 2, 1) + timedelta(days=i),
+            kind=CorporateActionKind.EXCHANGE, from_symbol=f"C{i}", to_symbol=f"C{i + 1}",
+            ratio_to=D("1"), ratio_from=D("1"))
+    tail = f"C{depth}"
+    deep = _inp(from_symbol=tail, to_symbol=tail, date=date(2027, 1, 1))
+    issues = validate_corporate_action(conn, deep, batch=[deep])
+    assert "action_chain_too_deep" in _soft(issues)
+
+
+def test_a_short_chain_raises_no_depth_issue(conn: sqlite3.Connection) -> None:
+    """The cap is insurance, not a limit — it must not fire on a legitimate ledger."""
+    batch = _both_accounts()
+    assert "action_chain_too_deep" not in _kinds(
+        validate_corporate_action(conn, batch[0], batch=batch))

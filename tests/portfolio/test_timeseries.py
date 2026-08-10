@@ -1,5 +1,10 @@
+import inspect
+import sys
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
+from types import FrameType
+from typing import Any
 
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.timeseries import daily_value_series
@@ -22,6 +27,14 @@ INSTRUMENTS = {
                       sector="Tech", name="AAA Corp"),
     "BBB": Instrument(symbol="BBB", market=Market.TW, quote_ccy=TWD,
                       sector="Semis", name="BBB Corp", board="TWSE"),
+}
+
+# A second USD name, so an EXCHANGE below moves a position WITHIN one currency (a
+# cross-currency EXCHANGE would confound the arithmetic these tests are asserting on).
+INSTRUMENTS_USD_PAIR = {
+    **INSTRUMENTS,
+    "CCC": Instrument(symbol="CCC", market=Market.US, quote_ccy=USD,
+                      sector="Tech", name="CCC Corp"),
 }
 
 
@@ -168,3 +181,202 @@ def test_skipped_corporate_action_makes_the_day_incomplete() -> None:
     # SAY so. Only the (unaffected) short remains.
     assert day2.incomplete is True
     assert day2.total_value == Decimal("-250")
+
+
+# --- the two refusals that leave NO holding to flag (audit F-47 / F-49) ---------------
+#
+# `_reject` writes `unbookable_action` onto the SOURCE position. The source is `None` when
+# it never existed, and a ZERO-share position — which the holdings loop drops — when an
+# earlier action already emptied it. So two of the three refusal paths reach the per-holding
+# check with nothing flagged at all, and only `Book.unapplied_actions` sees them. The test
+# above covers the third (the source survives and IS flagged).
+
+
+def test_a_refused_action_with_no_position_to_flag_still_marks_the_day() -> None:
+    """E1 — the source never existed, so NOTHING is flagged, and the total is wrong.
+
+    A split needs one action row per ACCOUNT that holds the symbol. Book it against the
+    wrong account (an ordinary slip) and ``_apply_action`` refuses at E1 with ``source is
+    None`` — there is no position to write ``unbookable_action`` onto, so every holding in
+    the book comes back clean.
+
+    The damage is not hypothetical: ``price_history`` is GLOBAL and already POST-split, so
+    the account that really holds the stock is valued at PRE-split shares against a
+    post-split price. 6/3 below reports 15,000 when the position is worth 30,000 — half the
+    truth, and before this gate it was published ``incomplete=False``.
+    """
+    txs = [_tx(date(2026, 6, 1), Side.BUY, "10", "100", fees="0")]     # schwab holds AAA
+    actions = [CorporateAction(account_id="moomoo_my",                 # ...but not here
+                               date=date(2026, 6, 3),
+                               kind=CorporateActionKind.SPLIT,
+                               from_symbol="AAA", to_symbol="AAA",
+                               ratio_to=Decimal("2"), ratio_from=Decimal("1"))]
+    prices = {"AAA": [(date(2026, 6, 1), Decimal("100")),
+                      (date(2026, 6, 3), Decimal("50"))]}              # post-split price
+    fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
+    bundle = LedgerBundle(txs, instruments=INSTRUMENTS, actions=actions)
+
+    # Sanity: the refusal is recorded on the BOOK and nowhere else. If this ever starts
+    # flagging a holding, the per-holding check below would catch the day on its own and
+    # this test would stop testing what it says it tests.
+    book = build_book(bundle, allow_oversell=True)
+    assert len(book.unapplied_actions) == 1
+    assert [h.symbol for h in book.holdings] == ["AAA"]
+    assert not any(h.unbookable_action or h.oversold or h.unbookable_dividend
+                   or h.short_open for h in book.holdings)
+
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 4))
+    assert series.available is True
+    # DATE SCOPING — the whole reason a book-level flag is safe here: `book` is rebuilt per
+    # day from `bundle.through(day)`, whose `actions` filter is `a.date <= day`, so the
+    # refusal dated 6/3 does NOT reach back and mark 6/1 or 6/2.
+    assert [p.incomplete for p in series.points] == [False, False, True, True]
+    assert series.points[1].total_value == Decimal("30000")   # 6/2, pre-action: correct
+    assert series.points[2].total_value == Decimal("15000")   # 6/3: HALF the truth
+
+
+def test_a_duplicated_action_row_whose_flag_is_dropped_still_marks_the_day() -> None:
+    """E2 — the source is already empty, so its flag is dropped with its carrier.
+
+    The same EXCHANGE entered twice: the first moves AAA→CCC and leaves AAA at zero shares;
+    the second hits ``source.shares == _ZERO`` and is refused. ``_reject`` DOES flag AAA
+    this time — but AAA has no shares left, so ``build_book``'s ``if shares == _ZERO:
+    continue`` drops the holding and the flag goes with it. CCC (which received the
+    position before the flag was set) is clean, so the day looks entirely ordinary.
+    """
+    txs = [_tx(date(2026, 6, 1), Side.BUY, "10", "100", fees="0")]
+    dupe = CorporateAction(account_id="schwab", date=date(2026, 6, 3),
+                           kind=CorporateActionKind.EXCHANGE,
+                           from_symbol="AAA", to_symbol="CCC",
+                           ratio_to=Decimal("1"), ratio_from=Decimal("1"))
+    prices = {"AAA": [(date(2026, 6, 1), Decimal("100"))],
+              "CCC": [(date(2026, 6, 1), Decimal("100"))]}
+    fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
+    bundle = LedgerBundle(txs, instruments=INSTRUMENTS_USD_PAIR, actions=[dupe, dupe])
+
+    book = build_book(bundle, allow_oversell=True)
+    assert len(book.unapplied_actions) == 1
+    assert [h.symbol for h in book.holdings] == ["CCC"]       # AAA dropped at zero shares
+    assert not any(h.unbookable_action or h.oversold or h.unbookable_dividend
+                   or h.short_open for h in book.holdings)
+
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 4))
+    assert series.available is True
+    assert [p.incomplete for p in series.points] == [False, False, True, True]
+    assert [p.total_value for p in series.points] == [Decimal("30000")] * 4
+
+
+def test_a_refused_action_changes_only_the_flag_never_a_number() -> None:
+    """Containment: the gate withholds a CERTIFICATION, it does not restate a total.
+
+    The same ledger with and without the (refused) action row must produce byte-identical
+    ``total_value`` / ``net_invested`` / ``net_worth`` on every single day — the ONLY
+    difference is ``incomplete``. A gate that also moved a number would be a second
+    money-of-record path, which is what D38 invariant 1 exists to prevent.
+    """
+    txs = [_tx(date(2026, 6, 1), Side.BUY, "10", "100", fees="0")]
+    actions = [CorporateAction(account_id="moomoo_my", date=date(2026, 6, 3),
+                               kind=CorporateActionKind.SPLIT,
+                               from_symbol="AAA", to_symbol="AAA",
+                               ratio_to=Decimal("2"), ratio_from=Decimal("1"))]
+    prices = {"AAA": [(date(2026, 6, 1), Decimal("100")),
+                      (date(2026, 6, 3), Decimal("50"))]}
+    fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
+
+    def numbers(acts: list[CorporateAction]) -> list[tuple[Any, ...]]:
+        s = daily_value_series(
+            LedgerBundle(txs, instruments=INSTRUMENTS, actions=acts),
+            prices, fx, TWD, end=date(2026, 6, 4))
+        return [(p.date, p.total_value, p.net_invested, p.net_worth) for p in s.points]
+
+    assert numbers(actions) == numbers([])
+
+    flags = daily_value_series(LedgerBundle(txs, instruments=INSTRUMENTS, actions=actions),
+                               prices, fx, TWD, end=date(2026, 6, 4))
+    clean = daily_value_series(LedgerBundle(txs, instruments=INSTRUMENTS),
+                               prices, fx, TWD, end=date(2026, 6, 4))
+    assert [p.incomplete for p in flags.points] == [False, False, True, True]
+    assert [p.incomplete for p in clean.points] == [False] * 4
+
+
+# --- D38 invariant 1: the new branch must not EXECUTE for an action-free ledger --------
+
+
+_GATE_BODY_MARKER = "無法套用的公司行動"
+# Deliberately just the attribute read, not the whole ``if`` line: the probe must still
+# find the gate after a rewrite (``if not ...``, ``incomplete = bool(...)``) so that such a
+# rewrite FAILS this test instead of silently disarming it.
+_GATE_TEST_MARKER = "book.unapplied_actions"
+
+
+def _line_of(marker: str) -> int:
+    """Absolute line number of the unique ``marker`` line inside ``daily_value_series``.
+
+    Located by source text rather than hard-coded, so the probe survives edits above it —
+    a line-number literal would rot into a test that silently checks the wrong line.
+    """
+    lines, first = inspect.getsourcelines(daily_value_series)
+    hits = [first + i for i, text in enumerate(lines) if marker in text]
+    assert len(hits) == 1, f"expected exactly one {marker!r} line in the source, got {hits}"
+    return hits[0]
+
+
+def _lines_executed(call: Callable[[], object]) -> set[int]:
+    """Line numbers executed inside ``daily_value_series``' OWN code object during *call*."""
+    target = daily_value_series.__code__
+    seen: set[int] = set()
+
+    def _trace(frame: FrameType, event: str, arg: Any) -> Any:
+        if frame.f_code is not target:
+            return None
+        if event == "line":
+            seen.add(frame.f_lineno)
+        return _trace
+
+    previous = sys.gettrace()
+    sys.settrace(_trace)
+    try:
+        call()
+    finally:
+        sys.settrace(previous)
+    return seen
+
+
+def test_the_unapplied_action_branch_never_executes_for_an_action_free_ledger() -> None:
+    """D38 invariant 1, proved structurally rather than by equality of results.
+
+    "Code that does not execute cannot drift; code that computes an equal answer can." So
+    this does not assert that the new gate produces the same numbers — it asserts the gate's
+    BODY is never reached at all when the ledger carries no corporate action, which is the
+    only claim strong enough to guarantee identical behaviour for every future input too.
+
+    The probe is self-proving in both directions, so it cannot pass vacuously:
+      * the gate's CONDITION line must be executed (else the tracer is watching nothing);
+      * the gate's BODY line must NOT be, for an action-free ledger;
+      * and the SAME probe must see that body line when an action IS refused.
+    """
+    txs = [_tx(date(2026, 6, 1), Side.BUY, "10", "100", fees="0")]
+    prices = {"AAA": [(date(2026, 6, 1), Decimal("100"))]}
+    fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
+    clean = LedgerBundle(txs, instruments=INSTRUMENTS)
+    refused = LedgerBundle(
+        txs, instruments=INSTRUMENTS,
+        actions=[CorporateAction(account_id="moomoo_my", date=date(2026, 6, 1),
+                                 kind=CorporateActionKind.SPLIT,
+                                 from_symbol="AAA", to_symbol="AAA",
+                                 ratio_to=Decimal("2"), ratio_from=Decimal("1"))],
+    )
+    end = date(2026, 6, 2)
+    body, condition = _line_of(_GATE_BODY_MARKER), _line_of(_GATE_TEST_MARKER)
+
+    executed = _lines_executed(
+        lambda: daily_value_series(clean, prices, fx, TWD, end=end))
+    assert condition in executed, "the tracer never reached the gate — probe is broken"
+    assert body not in executed, (
+        "the unapplied-action branch RAN for a ledger with no corporate action — "
+        "containment is broken (D38 invariant 1)")
+
+    detonated = _lines_executed(
+        lambda: daily_value_series(refused, prices, fx, TWD, end=end))
+    assert body in detonated, (
+        "the probe cannot see the branch even when it must run — it proves nothing")

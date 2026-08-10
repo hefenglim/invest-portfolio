@@ -148,18 +148,18 @@ def _apply_action(
         # --- E1 / E2: the source must be a live position on this date ---
         if source is None:
             _reject(f"{action.from_symbol}（{action.account_id}）於 "
-                    f"{action.date.isoformat()} 沒有持倉,無法套用公司行動 — "
+                    f"{action.date.isoformat()} 沒有持倉，無法套用公司行動 — "
                     "請確認該日之前的買進或期初庫存是否遺漏",
                     None, action, unapplied, allow_oversell=allow_oversell)
             return
         if source.shares == _ZERO and source.short_shares == _ZERO:
             _reject(f"{action.from_symbol}（{action.account_id}）於 "
-                    f"{action.date.isoformat()} 已無持倉(部位已結清),無法套用公司行動",
+                    f"{action.date.isoformat()} 已無持倉（部位已結清），無法套用公司行動",
                     source, action, unapplied, allow_oversell=allow_oversell)
 
         # --- E3: an oversold source has no basis left to scale ---
         if source.ever_oversold:
-            _reject(f"{action.from_symbol}（{action.account_id}）是賣超(待釐清)部位,"
+            _reject(f"{action.from_symbol}（{action.account_id}）是賣超（待釐清）部位，"
                     "成本基礎已被捨棄 — 縮放一個未定義的基礎仍是未定義",
                     source, action, unapplied, allow_oversell=allow_oversell)
 
@@ -177,7 +177,7 @@ def _apply_action(
         # --- EXCHANGE / SPINOFF share a destination and its guards ---
         # E5: no honest booking exists for moving an open short to another symbol.
         if source.short_shares > _ZERO:
-            _reject(f"{action.from_symbol}（{action.account_id}）有未回補的放空部位,"
+            _reject(f"{action.from_symbol}（{action.account_id}）有未回補的放空部位，"
                     "換股／分拆沒有可誠實記錄的分錄 — 請先回補",
                     source, action, unapplied, allow_oversell=allow_oversell)
 
@@ -188,7 +188,7 @@ def _apply_action(
             # onto a short destination breaks the invariant the whole replay rests on.
             if dest.short_shares > _ZERO:
                 _reject(f"目的標的 {action.to_symbol}（{action.account_id}）有未回補的"
-                        "放空部位,多空混在一個部位裡會使均價失去意義",
+                        "放空部位，多空混在一個部位裡會使均價失去意義",
                         source, action, unapplied, allow_oversell=allow_oversell)
             # E22 (D16): the mirror of E18 one level deeper. E19 stops a FLAG being
             # laundered; this stops a COST BASIS being restored onto a position whose basis
@@ -196,7 +196,7 @@ def _apply_action(
             # ordinary average over shares that have none.
             if dest.ever_oversold:
                 _reject(f"目的標的 {action.to_symbol}（{action.account_id}）是賣超"
-                        "(待釐清)部位,移轉成本過去會讓已捨棄的成本基礎「復活」,"
+                        "（待釐清）部位，移轉成本過去會讓已捨棄的成本基礎「復活」，"
                         "並算出一個看似正常、實際上沒有依據的均價",
                         source, action, unapplied, allow_oversell=allow_oversell)
         else:

@@ -10,10 +10,12 @@ from portfolio_dash.api.instrument_service import QuickRegisterError, QuickRegis
 from portfolio_dash.api.routers import input_center
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.store import (
+    insert_corporate_action,
     insert_dividend,
     insert_transaction,
     upsert_instrument,
 )
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
@@ -665,3 +667,156 @@ def test_position_preview_old_fields_null_for_fresh_position(
     assert pp["old_adjusted_avg"] is None
     # new_* fresh-position math unchanged (fee 142 → all-in 100,142 / 1,000 = 100.142).
     assert pp["new_original_avg"] == "100.142"
+
+
+# ============================================================================
+# 待釐清: a SKIPPED corporate action must not reach the draft preview either
+# ============================================================================
+
+
+def _seed_unbookable_action(conn: sqlite3.Connection) -> None:
+    """Flag the golden 2330 (tw_broker, 1,000 sh) with ``unbookable_action`` via rule E22.
+
+    A SPINOFF whose DESTINATION is a 賣超 (待釐清) position would resurrect a cost basis the
+    sticky oversell guard deliberately discarded, so ``build_book`` refuses it on the
+    dashboard path and flags the SOURCE. 2330 therefore stays an ordinary, priced, held long
+    position that happens to carry a share count nobody can trust — exactly the state the
+    input centre must refuse to quote math against.
+
+    A SPINOFF, specifically, and not the EXCHANGE that ``test_symbol_api`` uses: a spinoff's
+    PARENT keeps its shares, so ``current_shares`` (corporate-action aware since W4) still
+    reports 1,000 and the position stays on the /input/holdings 持有 list where the sell hint
+    lives. Under the EXCHANGE shape the SQL walker moves the shares away — while the replay
+    refuses to — and the position disappears from the hint for an unrelated reason, which
+    would make the assertion below pass without testing anything.
+
+    Written through the store helpers because no API will (or should) accept an incoherent
+    action row; this is a test about the READ side.
+    """
+    upsert_instrument(conn, Instrument(symbol="2331", market=Market.TW,
+                                       quote_ccy=Currency.TWD, sector="Semiconductors",
+                                       name="Ghost Semi", board="TWSE"))
+    # Undeclared oversell → 2331's basis is discarded and the position is STICKY 賣超.
+    insert_transaction(conn, account_id="tw_broker", symbol="2331", side=Side.SELL,
+                       quantity=Decimal("100"), price=Decimal("40"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 2, 1))
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2026, 3, 15),
+                            kind=CorporateActionKind.SPINOFF, from_symbol="2330",
+                            to_symbol="2331", ratio_to=Decimal("1"),
+                            ratio_from=Decimal("10"), cost_carry=Decimal("0.1"))
+    conn.commit()
+
+
+def test_position_preview_hides_a_skipped_corporate_action_on_sell(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The 草稿 SELL preview must not quote realized P&L off a 待釐清 share count.
+
+    2330's EXCHANGE was refused, so its 1,000 shares are in PRE-action terms while the
+    quantity the owner types comes from the broker screen, which is POST-action. The preview
+    divides by ``held.shares``, so the two denominations meet inside ``cost_removed`` and the
+    answer is wrong by the action's whole ratio.
+
+    Measured before the exclusion, on this exact ledger: ``cost_removed 247,500`` and
+    ``realized_pnl 51,173`` — a confident, plausible, wrong number, which is the failure mode
+    this repo treats as the dangerous one.
+    """
+    _seed_unbookable_action(golden_db)
+    b = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "sell",
+        "date": "2026-06-11", "shares": "500", "price": "600"})
+    assert b.status_code == 200, b.text        # never-500: it degrades, it does not raise
+    assert b.json()["position_preview"] is None
+    # The rest of the draft still works — only the position what-if is withheld.
+    assert b.json()["fee"] == "427" and b.json()["account_cash"]["ccy"] == "TWD"
+
+
+def test_position_preview_hides_a_skipped_corporate_action_on_buy(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """...and the BUY side must HIDE, not fall through to fresh-position math.
+
+    Excluding the flagged holding is only half a fix: the BUY branch treats a missing key as
+    "never held" and computes a brand-new position. Measured on this ledger, the exclusion
+    alone turned 2330's preview from ``new_shares 1500`` into ``new_shares 500`` — swapping a
+    wrong number for a *different* wrong number, and precisely the "mis-read an unvaluable
+    book as an empty portfolio" trap ``_holdings_or_none``'s docstring already warns about.
+    """
+    _seed_unbookable_action(golden_db)
+    b = api_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "500", "price": "600"})
+    assert b.status_code == 200, b.text
+    assert b.json()["position_preview"] is None
+
+
+def test_holdings_hint_hides_adjusted_avg_for_a_skipped_corporate_action(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """FU-D44 sell hint: 持有均價 hides for a 待釐清 position, 可賣股數 still serves.
+
+    ``adjusted_avg = adjusted_total / shares`` with the total in post-action money and the
+    shares in pre-action terms is off by the action's whole ratio, so the hint must show
+    nothing rather than a number. ``shares`` comes from ``current_shares`` — a different
+    share path that does not consult the book — and is deliberately left alone here; the two
+    paths' disagreement about corporate actions is W4's to settle, not this seam's.
+    """
+    _seed_unbookable_action(golden_db)
+    r = api_client.get("/api/input/holdings?account=tw_broker")
+    assert r.status_code == 200, r.text
+    held = {h["symbol"]: h for h in r.json()["held"]}
+    assert held["2330"]["shares"] == "1000"
+    assert held["2330"]["adjusted_avg"] is None
+
+
+def test_a_refused_action_elsewhere_leaves_this_symbol_byte_identical(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """D38 invariant 1 at the API surface: a symbol carrying no corporate action is untouched.
+
+    The refused EXCHANGE is booked against 2330 in tw_broker; AAPL in schwab has no action of
+    any kind. Its ENTIRE ``position_preview`` — every field, as the exact strings on the wire
+    — must equal the payload from a ledger with no corporate-action row at all. This is what
+    keeps the blast radius of a defect in the corporate-action flow to the one stock that has
+    one: ``_apply_action`` touches only ``src_key`` and ``dst_key``, and both gates added here
+    are per position, never a portfolio-wide bail-out.
+    """
+    body = {"account_id": "schwab", "symbol": "AAPL", "side": "buy",
+            "date": "2026-06-11", "shares": "5", "price": "130"}
+    clean = api_client.post("/api/input/manual/preview", json=body).json()
+
+    def _seed_both(conn: sqlite3.Connection) -> None:
+        _seed_golden_like(conn)
+        _seed_unbookable_action(conn)
+
+    tainted_client: TestClient = dashboard_client_factory(_seed_both)
+    tainted = tainted_client.post("/api/input/manual/preview", json=body).json()
+
+    assert tainted["position_preview"] == clean["position_preview"]
+    assert tainted["position_preview"] is not None          # not "equal because both null"
+    # ...while the symbol that DOES carry the refused action is the one that hides.
+    assert tainted_client.post("/api/input/manual/preview", json={
+        "account_id": "tw_broker", "symbol": "2330", "side": "buy",
+        "date": "2026-06-11", "shares": "500", "price": "600"}
+    ).json()["position_preview"] is None
+
+
+def _seed_golden_like(conn: sqlite3.Connection) -> None:
+    """The golden ledger's 2330 + AAPL positions, for a factory-built DB."""
+    seed_accounts(conn)
+    upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW,
+                                       quote_ccy=Currency.TWD, sector="Semiconductors",
+                                       name="TSMC", board="TWSE"))
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US,
+                                       quote_ccy=Currency.USD, sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("100"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    insert_dividend(conn, account_id="tw_broker", symbol="2330", div_date=date(2026, 3, 1),
+                    div_type="CASH", gross=Decimal("5000"), withholding=Decimal("0"),
+                    net=Decimal("5000"))
+    conn.commit()

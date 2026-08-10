@@ -65,7 +65,7 @@ from portfolio_dash.data_ingestion.validate import Issue, TxnInput
 from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
-from portfolio_dash.portfolio.results import Holding
+from portfolio_dash.portfolio.results import Book, Holding
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm_config import get_model
 from portfolio_dash.shared.models.enums import Side
@@ -139,6 +139,41 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     }
 
 
+def _unclear(h: Holding) -> bool:
+    """True when a position's own numbers are 待釐清 and no what-if may be quoted on them.
+
+    ONE predicate, two questions, because they must never diverge: "may I use this Holding?"
+    and "is this key missing because it is withheld, or because nothing is held?" A second
+    hand-maintained copy of the flag list is how ``unbookable_action`` reached four consumers
+    and was wired into one.
+
+    * ``oversold`` — negative shares, and the cost basis was deliberately discarded.
+    * ``unbookable_action`` — a corporate action was skipped, so ``shares`` is still in
+      PRE-action terms while ``adjusted_cost_total`` is post-action money. Every figure on
+      this path is ``total / shares`` or ``qty / shares``, so the mismatch lands inside the
+      answer and it is wrong by the action's whole ratio.
+
+    NOT ``unbookable_dividend`` (shares and the share-derived math are right; only the cost
+    is short one payout) and NOT ``short_open`` (a real position with a signed quantity) —
+    the same call ``pnl.py`` documents, made against the same question.
+    """
+    return h.oversold or h.unbookable_action
+
+
+def _book_or_none(conn: sqlite3.Connection) -> Book | None:
+    """The cost-basis replay over the current ledger, or ``None`` when it cannot be booked.
+
+    Never-500 (lesson: degrade at EVERY ``build_book`` call site). Split out of
+    :func:`_holdings_or_none` so :func:`_position_preview` can tell a WITHHELD position from
+    an absent one off the SAME replay — ``Book.holdings`` is the only source that answers
+    both, and asking a second share path instead is how two answers to one question appear.
+    """
+    try:
+        return build_book(_to_models(conn), allow_oversell=True)
+    except (ValueError, KeyError):
+        return None
+
+
 def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding] | None:
     """(account_id, symbol) → open Holding from the VERIFIED cost-basis replay (build_book),
     or ``None`` when the ledger is un-bookable.
@@ -154,14 +189,19 @@ def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding
     (e.g. a legacy orphan dividend → ValueError) returns ``None`` — callers then HIDE the
     position what-if entirely rather than mis-read an unvaluable book as an empty portfolio
     (which would show fresh-position math for an actually-held symbol). ``allow_oversell=True``
-    keeps an acked 賣超 book from crashing; oversold holdings carry no meaningful basis and
-    are EXCLUDED.
+    keeps an acked 賣超 book from crashing; 待釐清 holdings carry no usable basis and are
+    EXCLUDED — see :func:`_unclear` for which flags qualify and why ``unbookable_action`` now
+    does. This is a PER-POSITION exclusion and stays one: every other symbol's hint keeps
+    working (D38 invariant 1 containment).
+
+    ``Book.unapplied_actions`` is deliberately NOT read here; see the note on
+    :func:`_position_preview` for why the two silent refusal paths leave nothing for this
+    seam to withhold.
     """
-    try:
-        book = build_book(_to_models(conn), allow_oversell=True)
-    except (ValueError, KeyError):
+    book = _book_or_none(conn)
+    if book is None:
         return None
-    return {(h.account_id, h.symbol): h for h in book.holdings if not h.oversold}
+    return {(h.account_id, h.symbol): h for h in book.holdings if not _unclear(h)}
 
 
 def _adjusted_avg_by_position(conn: sqlite3.Connection) -> dict[tuple[str, str], Decimal]:
@@ -414,6 +454,31 @@ def _position_preview(
       this trade's ALL-IN cost (gross+fee+tax); not held → fresh-position math (held = 0, both
       averages = all-in / qty). Averages are computed from totals on read, never a stored
       rounded average (domain-ledger.md).
+
+    **Why this seam gates on the FLAG and not on ``Book.unapplied_actions``** (the opposite
+    call from ``pnl.py`` / ``timeseries.py`` / the XIRR gate, so the reason is written down).
+    Those three multiply ``shares`` by a GLOBAL, already-post-action price, so any refusal
+    anywhere makes their number wrong and they must read the book-level record — which sees
+    the two refusals that leave no flagged holding. Nothing here is multiplied by a market
+    price: every figure is arithmetic on the position's OWN totals, so the only question is
+    whether THIS position's totals and share count disagree. That is exactly what
+    ``unbookable_action`` marks, and ``_reject`` sets it on every refusal where a source
+    position exists. The two flagless refusals leave nothing for a book-level gate to
+    withhold: a source that never existed (E1) transferred nothing, and a source already at
+    zero shares (E2, e.g. a duplicated EXCHANGE row) would have transferred nothing either —
+    in both cases every position the preview can read is exactly what the ledger replays to.
+    Reading ``unapplied_actions`` here would therefore blank the sell hint and the draft
+    preview for EVERY symbol in EVERY account over a row that changed none of them: the
+    portfolio-wide bail-out ``pnl.py``'s containment note forbids, and which D38 reserves
+    for XIRR alone (tier 3). These are tier-1 per-symbol figures and stay contained.
+
+    Known residual, and it belongs to W4 rather than here: ``/input/holdings`` derives its
+    ``shares`` (and its 持有/已結清 classification) from ``current_shares``, which is
+    corporate-action AWARE — so it APPLIES an action this replay REFUSED. Measured: with an
+    EXCHANGE refused at E18/E22, ``current_shares`` moves the position to the destination and
+    the symbol drops off the 持有 list entirely, while ``build_book`` still holds the source's
+    1,000 pre-action shares and flags them 待釐清. The two paths disagree about whether the
+    position exists; this seam therefore asks the BOOK and never the share walker.
     """
     inst = next((i for i in list_instruments(conn) if i.symbol == body.symbol), None)
     if inst is None:
@@ -422,10 +487,27 @@ def _position_preview(
     if qty <= _ZERO or body.price <= _ZERO:
         return None
     try:
-        holdings = _holdings_or_none(conn)
-        if holdings is None:  # un-bookable ledger → no trustworthy position math
+        book = _book_or_none(conn)
+        if book is None:  # un-bookable ledger → no trustworthy position math
             return None
-        held = holdings.get((body.account_id, body.symbol))
+        key = (body.account_id, body.symbol)
+        held = next((h for h in book.holdings if (h.account_id, h.symbol) == key), None)
+        if held is not None and _unclear(held):
+            # HELD, but 待釐清 — and this branch is why the exclusion in
+            # :func:`_holdings_or_none` is only HALF a fix. Dropping the key makes the SELL
+            # side hide (it already returns None for "not held"), but the BUY side reads a
+            # missing key as "never held" and falls straight through to fresh-position math:
+            # measured on a 1,000-share position whose corporate action was refused, the
+            # exclusion alone turned ``new_shares 1500`` into ``new_shares 500`` — one wrong
+            # number for a different wrong number, and reproducing "mis-read an unvaluable
+            # book as an empty portfolio" one position at a time. Both sides now withhold,
+            # for the one stated reason.
+            #
+            # Asked of the SAME ``Book`` the math would have come from, never of a second
+            # share path: ``current_shares`` is corporate-action AWARE (W4) while this replay
+            # REFUSED the action, so the two disagree about whether the position exists at
+            # all — the very disagreement this seam must not build a guard on.
+            return None
         if parse_side(body.side) is Side.SELL:
             if held is None:
                 return None

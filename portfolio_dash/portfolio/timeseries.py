@@ -2,9 +2,10 @@
 
 Pure function over in-memory inputs (no DB handle): the combiner bulk-loads price/FX
 history once and passes it in. Valuation uses the carry-forward convention (latest
-stored value on-or-before the day); a day a held symbol has no price at all is
-flagged ``incomplete`` (never guessed). Any ledger flow whose date has no
-on-or-before FX makes the whole series unavailable (consistent with the XIRR rule).
+stored value on-or-before the day); a day a held symbol has no price at all — or on
+which the replay could not apply a corporate action — is flagged ``incomplete``
+(never guessed). Any ledger flow whose date has no on-or-before FX makes the whole
+series unavailable (consistent with the XIRR rule).
 """
 
 from bisect import bisect_right
@@ -113,6 +114,28 @@ def daily_value_series(
         book = build_book(bundle.through(day), allow_oversell=True)
         total = _ZERO
         incomplete = False
+        # Read the BOOK, and BEFORE the holdings loop, because that loop structurally
+        # cannot see two of the three ways a corporate action goes unapplied: `_reject`
+        # writes `unbookable_action` onto the SOURCE position, and the source is `None`
+        # when it never existed (a missing buy) and a ZERO-share position when an earlier
+        # action already emptied it (a duplicated EXCHANGE row) — and a zero-share holding
+        # is dropped by `if h.shares == _ZERO: continue` two lines below, taking the flag
+        # with it. Both refusals therefore reached the per-holding check with NOTHING
+        # flagged, and the day was published `incomplete=False` over shares the replay
+        # knowingly left in pre-action terms. Same blindness the XIRR gate had before
+        # `dashboard.py` was moved onto this same book-level record (audit F-47 / F-49).
+        #
+        # DATE-SCOPED, not retroactive: `book` is rebuilt for each day from
+        # `bundle.through(day)`, whose `actions` filter is `a.date <= day`, so a refusal
+        # dated 6/3 cannot mark 6/2 — the days before the action stay complete.
+        #
+        # CONTAINMENT (D38 invariant 1): this branch is unreachable for a ledger with no
+        # corporate actions. `unapplied_actions` is appended only by `_reject`, reachable
+        # only from `_apply_action`, called only for an "action" event — which exists only
+        # if `bundle.actions` is non-empty. So an action-free ledger takes the pre-existing
+        # path exactly, with no equal-answer computation that could later drift.
+        if book.unapplied_actions:
+            incomplete = True  # 無法套用的公司行動 — 當日估值待釐清
         for h in book.holdings:
             if h.shares == _ZERO:
                 continue
