@@ -44,6 +44,30 @@ def test_no_data_ingestion_import_under_pricing() -> None:
     assert offenders == [], f"pricing imports data_ingestion: {offenders}"
 
 
+def test_pricing_never_learns_corporate_actions_exist() -> None:
+    """D17, W6a: the split factor reaches ``upsert_prices`` as an INJECTED callable.
+
+    ``shared/`` is importable from anywhere, so ``shared.corporate_actions`` would not
+    trip the ``data_ingestion`` guard above — but importing it here would mean
+    ``pricing/`` had grown an opinion about corporate actions, and the ratio lookup it
+    actually needs (the ledger) is one import further and genuinely illegal. The seam
+    holds only while this module knows nothing but "a Decimal multiplies my raw close".
+    The W6a plan says to grep the import block rather than eyeball it; this is the grep.
+    """
+    offenders: list[str] = []
+    for path in _pricing_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").endswith(
+                "shared.corporate_actions"
+            ):
+                offenders.append(f"{path.name}: from {node.module} import ...")
+            if isinstance(node, ast.Import):
+                offenders += [f"{path.name}: import {a.name}" for a in node.names
+                              if a.name.endswith("shared.corporate_actions")]
+    assert offenders == [], f"pricing imports the corporate-action algebra: {offenders}"
+
+
 @pytest.fixture
 def ds_conn() -> Iterator[sqlite3.Connection]:
     c = sqlite3.connect(":memory:")

@@ -27,7 +27,7 @@ from portfolio_dash.portfolio.cost_basis import (
     UnbookableLedgerError,
     build_book,
 )
-from portfolio_dash.portfolio.results import Book, Holding
+from portfolio_dash.portfolio.results import Book, Holding, UnappliedAction
 from portfolio_dash.shared.corporate_actions import (
     CorporateAction,
     CorporateActionKind,
@@ -457,6 +457,7 @@ def _split_that_also_scales_the_totals(
     positions: dict[tuple[str, str], cost_basis._Position],
     action: CorporateAction,
     quote_ccy: Callable[[str], Currency],
+    unapplied: list[UnappliedAction],
     *,
     allow_oversell: bool,
 ) -> None:
@@ -470,7 +471,8 @@ def _split_that_also_scales_the_totals(
     Installed by monkeypatch, and only ever on a clean SPLIT: it scales unconditionally, so
     it would also "apply" to an action the real function rejected and skipped.
     """
-    _REAL_APPLY_ACTION(positions, action, quote_ccy, allow_oversell=allow_oversell)
+    _REAL_APPLY_ACTION(positions, action, quote_ccy, unapplied,
+                       allow_oversell=allow_oversell)
     if action.kind is not CorporateActionKind.SPLIT:
         return
     position = positions.get((action.account_id, action.from_symbol))
@@ -747,3 +749,113 @@ def test_a_transitive_chain_replays_in_date_order() -> None:
     assert final is not None
     assert final.shares == D("150")                 # 100 -> 50 -> 150
     assert final.original_cost_total == D("1000")   # basis carried the whole way
+
+
+# ========================== Book.unapplied_actions (audit F-47 / F-49 / E1) ==========
+
+
+def _only_unapplied(book: Book) -> UnappliedAction:
+    assert len(book.unapplied_actions) == 1, book.unapplied_actions
+    return book.unapplied_actions[0]
+
+
+def test_the_book_records_a_refused_action_even_when_no_holding_can_carry_the_flag() -> None:
+    """The reason the record lives on the BOOK and not on a ``Holding``.
+
+    ``_reject`` writes ``unbookable_action`` onto the SOURCE position, which works only in
+    the first of the three ways an action goes unapplied. In the other two the flag has no
+    carrier, and before this record the dashboard rendered completely clean while an action
+    in the ledger had been silently ignored (audit F-47 + E1, both reproduced against the
+    real engine, 2026-08-10):
+
+    * **flag survives** — an oversold source (E3): the position is emitted and flagged.
+    * **flag is DROPPED** — a same-day EXCHANGE already emptied AAA, so the SPLIT trips E2,
+      flags a zero-share position, and the holdings loop drops it (``shares == 0``). E19 one
+      level up: E19 stops a flag being *transferred away*; nothing stopped it being dropped.
+    * **nothing to flag** — the source never existed (E1); ``_reject`` gets ``None``.
+
+    So the last two assertions are the load-bearing ones: ``flag_visible is False`` while the
+    record is present. A gate written as ``any(h.unbookable_action …)`` is False there.
+    """
+    split = _act(CorporateActionKind.SPLIT, to="3", frm="1")
+    exchange = _act(CorporateActionKind.EXCHANGE, to="2", frm="1", to_symbol="BBB")
+
+    cases: dict[str, tuple[LedgerBundle, bool]] = {
+        # (bundle, does any emitted holding carry the flag?)
+        "flag survives (E3, oversold source)": (
+            LedgerBundle([_buy("AAA", "10", "5"), _sell("AAA", "50", "6", date(2026, 2, 1))],
+                         instruments=INSTR, actions=[split]),
+            True),
+        "flag dropped with its zero-share carrier (E2 after an EXCHANGE)": (
+            LedgerBundle([_buy("AAA", "100", "10")], instruments=INSTR,
+                         actions=[exchange, split]),
+            False),
+        "no position to flag at all (E1)": (
+            LedgerBundle([_buy("BBB", "10", "5")], instruments=INSTR, actions=[split]),
+            False),
+    }
+    for name, (bundle, flag_expected) in cases.items():
+        book = _book(bundle, allow_oversell=True)
+        rec = _only_unapplied(book)
+        # Every field the UI needs to NAME the problem, not merely count it.
+        assert rec.account_id == "schwab", name
+        assert rec.date == ACTION_DAY, name
+        assert rec.kind is CorporateActionKind.SPLIT, name
+        assert (rec.from_symbol, rec.to_symbol) == ("AAA", "AAA"), name
+        assert rec.reason, name
+        assert "AAA" in rec.reason, name
+
+        flag_visible = any(h.unbookable_action for h in book.holdings)
+        assert flag_visible is flag_expected, name
+
+
+def test_the_reason_is_the_same_sentence_the_strict_path_raises() -> None:
+    """One refusal, one explanation — 重算 and the dashboard must not disagree about why."""
+    bundle = LedgerBundle([_buy("BBB", "10", "5")], instruments=INSTR,
+                          actions=[_act(CorporateActionKind.SPLIT)])
+    with pytest.raises(UnbookableLedgerError) as excinfo:
+        _book(bundle)
+    assert _only_unapplied(_book(bundle, allow_oversell=True)).reason == str(excinfo.value)
+
+
+def test_the_strict_path_never_returns_a_book_carrying_unapplied_actions() -> None:
+    """``allow_oversell=False`` raises instead of recording, so a non-empty list is proof
+    the DASHBOARD path degraded. Consumers may rely on that (see the eight call sites)."""
+    clean = LedgerBundle([_buy("AAA", "85", "264.51")], instruments=INSTR,
+                         actions=[_act(CorporateActionKind.SPLIT, to="3", frm="1")])
+    assert _book(clean).unapplied_actions == []
+    assert _book(clean, allow_oversell=True).unapplied_actions == []
+    assert build_book(LedgerBundle()).unapplied_actions == []
+
+
+def test_every_refusal_in_apply_action_reaches_the_record() -> None:
+    """Coverage over the guards, so a NEW guard added with a bare ``raise`` is caught.
+
+    Each row trips a different branch of ``_apply_action``; all six must produce a record,
+    because a guard that refuses silently on the dashboard path is exactly the F-47 shape.
+    """
+    exchange = _act(CorporateActionKind.EXCHANGE, to="2", frm="1", to_symbol="BBB")
+    short_sell = _sell("AAA", "50", "6", date(2026, 2, 1), short=True)
+    bundles = {
+        "E1 no source": LedgerBundle(
+            [_buy("BBB", "10", "5")], instruments=INSTR, actions=[exchange]),
+        "E2 closed source": LedgerBundle(
+            [_buy("AAA", "10", "5"), _sell("AAA", "10", "6", date(2026, 2, 1))],
+            instruments=INSTR, actions=[exchange]),
+        "E3 oversold source": LedgerBundle(
+            [_buy("AAA", "10", "5"), _sell("AAA", "50", "6", date(2026, 2, 1))],
+            instruments=INSTR, actions=[exchange]),
+        "E5 short source": LedgerBundle(
+            [_buy("AAA", "10", "5"), short_sell], instruments=INSTR, actions=[exchange]),
+        "E18 short destination": LedgerBundle(
+            [_buy("AAA", "10", "5"), _sell("BBB", "5", "6", date(2026, 2, 1), short=True)],
+            instruments=INSTR, actions=[exchange]),
+        "E22 oversold destination": LedgerBundle(
+            [_buy("AAA", "10", "5"), _buy("BBB", "5", "5"),
+             _sell("BBB", "50", "6", date(2026, 2, 1))],
+            instruments=INSTR, actions=[exchange]),
+    }
+    for name, bundle in bundles.items():
+        rec = _only_unapplied(_book(bundle, allow_oversell=True))
+        assert (rec.from_symbol, rec.to_symbol) == ("AAA", "BBB"), name
+        assert rec.kind is CorporateActionKind.EXCHANGE, name

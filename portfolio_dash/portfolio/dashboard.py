@@ -45,7 +45,12 @@ from portfolio_dash.portfolio.dashboard_models import (
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.pnl import value_holdings
-from portfolio_dash.portfolio.results import CombinedView, ReturnSummary, SectorAllocation
+from portfolio_dash.portfolio.results import (
+    CombinedView,
+    ReturnSummary,
+    SectorAllocation,
+    UnappliedAction,
+)
 from portfolio_dash.portfolio.returns import total_return, xirr_reporting
 from portfolio_dash.portfolio.timeseries import FxHistory, PriceHistory, daily_value_series
 from portfolio_dash.pricing.results import FxRead, PriceRead
@@ -192,6 +197,35 @@ def _holdings_subtotals(
     return out
 
 
+# How many unapplied actions the XIRR reason names individually before it summarizes.
+_UNAPPLIED_ACTIONS_NAMED = 3
+
+
+def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
+    """The XIRR badge's zh explanation when the book carries unapplied corporate actions.
+
+    Names the ACCOUNT, SYMBOL and DATE of each one (owner requirement 2026-08-10). XIRR is
+    the single figure a skipped action blanks portfolio-wide, so the message has to point at
+    the one ledger row responsible instead of leaving the owner to hunt for it across a
+    multi-account book. Contrast the 賣超 reason at the call site, which says only that *a*
+    position is 待釐清 — a pre-existing shortfall, not a pattern to copy.
+
+    The list is capped rather than unbounded: this string renders inside a KPI badge, and a
+    20-row ledger problem would push the dashboard sideways (the same overflow class as the
+    136-digit XIRR, 2026-08-05). The remainder is counted, never dropped silently.
+    """
+    named = "、".join(
+        f"{a.from_symbol}（{a.account_id}・{a.date.isoformat()}）"
+        for a in unapplied[:_UNAPPLIED_ACTIONS_NAMED]
+    )
+    rest = len(unapplied) - _UNAPPLIED_ACTIONS_NAMED
+    more = f"，另有 {rest} 筆" if rest > 0 else ""
+    return (
+        f"帳本中有 {len(unapplied)} 筆公司行動無法套用（待釐清）：{named}{more}"
+        " — 這些部位的股數仍是行動前的基準，與行動後的現價不同步，無法計算 XIRR"
+    )
+
+
 def build_dashboard(
     conn: sqlite3.Connection, *, now: datetime, reporting: Currency
 ) -> DashboardData:
@@ -229,6 +263,12 @@ def build_dashboard(
     # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
     book = build_book(bundle, allow_oversell=True)
     has_oversold = any(h.oversold for h in book.holdings)
+    # Read off the BOOK, not off the holdings: two of the three ways an action goes
+    # unapplied leave no holding to inspect — an EXCHANGE that already emptied the source
+    # (the flag is dropped with its zero-share carrier), and a source that never existed
+    # (nothing is flagged at all). `any(h.unbookable_action ...)` is False in both, and the
+    # XIRR terminal value is wrong in all three. See Book.unapplied_actions (audit F-47/F-49).
+    unapplied_actions = book.unapplied_actions
     held_symbols = sorted({h.symbol for h in book.holdings})
     price_reads: dict[str, PriceRead | None] = {
         sym: get_latest_price(conn, sym, now=now) for sym in held_symbols
@@ -291,6 +331,27 @@ def build_dashboard(
     if has_oversold:
         # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
         xirr_reason = "帳本中有賣超部位待釐清 — 無法計算 XIRR"
+    elif unapplied_actions:
+        # A skipped corporate action is a DIFFERENT problem from 賣超 and says so: the shares
+        # are positive and look ordinary, but they are in PRE-action terms while every price
+        # is post-action, so `xirr_reporting` — which multiplies `price × h.shares` itself
+        # rather than reading `market_value` — would build its terminal value out of the
+        # wrong quantity and return a confident number (measured before this gate: 0.5301
+        # with no reason given, off a terminal value 94% composed of one such row).
+        #
+        # BLAST RADIUS — deliberate, and the ONE place in this change that is not contained
+        # to the affected symbol (owner requirement 2026-08-10). Everywhere else, one
+        # unapplied action damages exactly one stock: `pnl.py` nulls that position's
+        # market_value and every aggregate simply excludes it while still computing for the
+        # rest. XIRR cannot work that way. It is a SINGLE number over a terminal value that
+        # sums every holding, so one wrong share count makes the sum wrong — and dropping
+        # the position instead would silently report the XIRR of a DIFFERENT portfolio,
+        # which is the same wrong-number-that-looks-right failure by another route. Blanking
+        # the whole figure is therefore correct (and matches the `has_oversold` precedent
+        # directly above), but it is an accepted portfolio-wide cost, not a free one. The
+        # reason string below carries the account, symbol and date precisely so the owner
+        # can go straight to the one row that blanked it.
+        xirr_reason = _unapplied_action_reason(unapplied_actions)
     else:
         try:
             outcome = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
@@ -420,8 +481,16 @@ def build_dashboard(
     # 9. Trend — bulk-load histories, then the pure daily replay.
     trend_reason: str | None = None
     if txs or divs or opening:
+        # BOTH ends of every corporate action (audit F-50): a SPINOFF child appears in no
+        # other ledger, so omitting it loaded no price history for a position the replay
+        # booked CORRECTLY — `daily_value_series` then found no price and marked every day
+        # after the spinoff `incomplete`, flattening the trend. `without_unregistered()`
+        # above guarantees both symbols have an Instrument row, so the `instruments[sym]`
+        # lookup below stays total.
         ledger_symbols = sorted({t.symbol for t in txs} | {d.symbol for d in divs}
-                                | {o.symbol for o in opening})
+                                | {o.symbol for o in opening}
+                                | {a.from_symbol for a in bundle.actions}
+                                | {a.to_symbol for a in bundle.actions})
         price_history: PriceHistory = {
             sym: [(p.as_of, p.value) for p in get_price_history(conn, sym, _EPOCH, as_of)]
             for sym in ledger_symbols

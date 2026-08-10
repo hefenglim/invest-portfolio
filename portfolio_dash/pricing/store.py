@@ -13,12 +13,18 @@ data with a clear staleness indicator, never crash, never fabricate.
 import sqlite3
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Protocol
 
 from portfolio_dash.pricing.results import DividendEvent, FxRead, FxRow, PriceRead, PriceRow
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.money import from_db, to_db
 
 _DEFAULT_MAX_AGE = 4  # days
+_ONE = Decimal(1)
+# The canonical TEXT for "no factor applied" — the ``split_basis`` DDL default, so a row
+# written by this seam for a symbol with no corporate action is indistinguishable from a
+# legacy row the migration defaulted. Materialised once so the two can never diverge.
+_IDENTITY_BASIS = "1"
 
 # Float-noise caps (2026-07-03, human sign-off): float-sourced providers (yfinance
 # et al.) emit binary-float tails ("305.364990234375") that are NOT source
@@ -41,23 +47,121 @@ def _opt(v: Decimal | None) -> str | None:
     return to_db(_cap_dp(v, _PRICE_DP)) if v is not None else None
 
 
-def upsert_prices(conn: sqlite3.Connection, rows: list[PriceRow], *, fetched_at: datetime) -> None:
+class SplitFactorFn(Protocol):
+    """The split factor already folded into a fetched price row, injected (D17).
+
+    ``pricing/`` may not import ``data_ingestion`` (``architecture.md``), and the ratio
+    lookup needs the corporate-action ledger — so the lookup arrives as a callable that
+    the ``api`` / ``scheduler`` layer binds. ``pricing/`` therefore never learns that
+    corporate actions exist; it only knows a number multiplies its raw close.
+
+    **Keyword-only dates, deliberately (F-22).** The window is over TWO dates
+    (``after < action.date <= through``), which the spec's earlier
+    ``Callable[[str, date], Decimal]`` could not express. Naming both at every call site
+    makes the window impossible to misread or to transpose, and mirrors
+    ``shared.corporate_actions.split_factor``'s own signature keyword for keyword.
+    Binding ``through`` in a closure instead was rejected: the caller passes
+    ``fetched_at`` to :func:`upsert_prices` separately, so a closure could silently
+    capture a different timestamp than the one written to the row, and nothing would
+    detect the mismatch. Here the row's own ``fetched_at`` IS the upper bound, by
+    construction.
+    """
+
+    def __call__(self, symbol: str, *, after: date, through: date) -> Decimal: ...
+
+
+def _no_factor(symbol: str, *, after: date, through: date) -> Decimal:
+    """The identity factor — no corporate-action ledger injected, so nothing is applied.
+
+    The default, so every existing caller and test is unchanged and a ledger with no
+    corporate actions stores byte-identically (``Decimal(1)`` serializes to ``"1"``,
+    which is also the column's DDL default).
+    """
+    return _ONE
+
+
+def upsert_prices(
+    conn: sqlite3.Connection,
+    rows: list[PriceRow],
+    *,
+    fetched_at: datetime,
+    factor_of: SplitFactorFn = _no_factor,
+) -> None:
     """Upsert quote rows into ``prices``, keyed on (instrument, as_of_date).
 
     OHLC values are float-noise-capped to 4 dp on the way in (the ONLY price
     write seam, so every provider is covered).
+
+    **The price basis (spec §5.1(b)/(c), D30).** A provider re-states its history after
+    a split, so the close it delivers for a pre-split date is expressed in post-split
+    share terms while the ledger's share count for that date is not. ``factor_of``
+    returns the splits the provider had already folded in when this row was fetched —
+    the window ``(row.as_of, fetched_at]`` — and the row is stored as:
+
+    * ``close_raw``  = the provider's value **exactly as delivered**, un-capped;
+    * ``split_basis`` = the factor applied;
+    * ``close``      = ``close_raw × split_basis``, capped to 4 dp.
+
+    Three consequences worth stating, because each one is a bug that was measured:
+
+    1. **The cap goes LAST, on the product** (F-20). ``_cap_dp(raw, 4) × target``
+       amplifies the cap's error by the factor: ``0.14166666865348816 × 20`` stores
+       2.8340 that way and 2.8333 correctly, and at ``× 3`` it is 0.4251 vs 0.4250 —
+       the sub-RM1 MY case ``data-and-pricing.md`` singles out.
+    2. **``close_raw`` is stored UN-capped**, unlike every other price column. The
+       reconcile (W6b) recomputes ``close := close_raw × target`` from this stored
+       value, so it must be the same input the write used — capping it here would make
+       the first reconcile silently move every price back onto the (1) value.
+       ``data-and-pricing.md`` asks for "full source precision" and says the cap
+       "removes representation noise, not information"; once the close is derived, the
+       source it derives from is the thing that must not lose information.
+    3. ``open`` / ``high`` / ``low`` keep the provider's basis and are **not**
+       multiplied. They have no reader anywhere in the codebase, and multiplying a
+       column with no raw of its own would produce a derived value the reconcile can
+       never restate — the stale-basis bug F-23 describes, made permanent. Their basis
+       is recoverable at any time from ``split_basis`` on the same row. A future reader
+       must add its own ``*_raw`` column and take the factor with it. (Same reasoning
+       §5.1 already applies to ``volume``, which is likewise left untouched.)
+
+    **No factor → the pre-existing code path, structurally** (owner requirement,
+    2026-08-10). The identity case does not multiply by one and rely on the answer
+    coming out the same; it takes the untouched original expression. Code that never
+    runs cannot drift. The concrete trap this closes, measured with this module's own
+    helpers: ``Decimal`` multiplication sums the operands' EXPONENTS, so a factor of
+    ``Decimal("1.0")`` instead of ``Decimal(1)`` rewrites ``1.5`` as ``1.50``, ``600``
+    as ``600.0`` and ``0.005`` as ``0.0050`` — value-preserving, TEXT-changing, and
+    ``_cap_dp`` does not catch it (the cap only fires BELOW 4 dp and never trims). Since
+    Decimals persist as canonical TEXT, that repaints every price row in the database on
+    the next refresh, on symbols with no corporate action at all. ``Decimal("1.0") ==
+    Decimal(1)`` is ``True``, so the comparison below routes such a factor to the safe
+    path too, and the basis is stored as the literal :data:`_IDENTITY_BASIS`.
     """
+    through = fetched_at.date()
+    params: list[tuple[str | None, ...]] = []
+    for r in rows:
+        basis = factor_of(r.instrument, after=r.as_of, through=through)
+        if basis == _ONE:
+            close, stored_basis = to_db(_cap_dp(r.close, _PRICE_DP)), _IDENTITY_BASIS
+        else:
+            # cap LAST, on the product (F-20)
+            close, stored_basis = to_db(_cap_dp(r.close * basis, _PRICE_DP)), to_db(basis)
+        params.append((
+            r.instrument, r.market.value, r.as_of.isoformat(), close,
+            _opt(r.open), _opt(r.high), _opt(r.low), _opt(r.volume), r.source,
+            fetched_at.isoformat(), to_db(r.close), stored_basis,
+        ))
     conn.executemany(
+        # F-23: the basis columns MUST be restated by DO UPDATE. Left out, a re-fetch
+        # writes a new close over a stale basis, and the next reconcile compounds the
+        # error from the wrong starting point — silently, and only on a re-fetch.
         """INSERT INTO prices (instrument, market, as_of_date, close, open, high, low,
-               volume, source, fetched_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+               volume, source, fetched_at, close_raw, split_basis)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(instrument, as_of_date) DO UPDATE SET
                close=excluded.close, open=excluded.open, high=excluded.high, low=excluded.low,
-               volume=excluded.volume, source=excluded.source, fetched_at=excluded.fetched_at""",
-        [(r.instrument, r.market.value, r.as_of.isoformat(), to_db(_cap_dp(r.close, _PRICE_DP)),
-          _opt(r.open), _opt(r.high), _opt(r.low), _opt(r.volume), r.source,
-          fetched_at.isoformat())
-         for r in rows],
+               volume=excluded.volume, source=excluded.source, fetched_at=excluded.fetched_at,
+               close_raw=excluded.close_raw, split_basis=excluded.split_basis""",
+        params,
     )
     conn.commit()
 

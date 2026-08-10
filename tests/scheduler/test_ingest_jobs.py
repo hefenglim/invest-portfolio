@@ -81,16 +81,51 @@ def test_consensus_job_writes_snapshot(
     assert snap is not None and snap.payload["rating_score"] == "1.76"
 
 
-def test_scheduler_jobs_no_data_ingestion_import() -> None:
+# The ONE authorised ``data_ingestion`` import in ``scheduler/jobs.py``.
+#
+# W6a/D17 (corporate-actions spec §5.1, "Consequences for the plan"): the price write
+# seam needs the corporate-action ratio, ``pricing/`` may not import ``data_ingestion``
+# at all, and the two rejected alternatives were worse — option A adds a
+# ``pricing → data_ingestion`` edge that ``architecture.md`` does not have, option B puts
+# ledger SQL in ``shared/``, which holds no I/O and would break §6.0's "no module writes
+# its own SELECT". Option C injects a callable, and this layer is where the ledger and
+# the seam can legally meet.
+#
+# The spec author accepted this edge explicitly ("it is not free, and the implementer
+# should not be surprised by it") but did not know THIS test existed. The guard is
+# therefore NARROWED, not deleted: any other data_ingestion import still fails, so the
+# exception stays one line wide and visible in a diff.
+_AUTHORISED_DATA_INGESTION_IMPORTS = {
+    "from portfolio_dash.data_ingestion.store import list_corporate_actions",
+}
+
+
+def test_scheduler_jobs_no_unauthorised_data_ingestion_import() -> None:
     import inspect
 
     src = inspect.getsource(jobs_mod)
-    # Layering (architecture.md): no IMPORT of data_ingestion (a doc-comment mention is ok).
+    # Layering (architecture.md): no IMPORT of data_ingestion (a doc-comment mention is ok)
+    # beyond the single W6a/D17 exception recorded above.
     import_lines = [
-        ln for ln in src.splitlines()
+        ln.strip() for ln in src.splitlines()
         if ln.lstrip().startswith(("import ", "from ")) and "data_ingestion" in ln
     ]
-    assert not import_lines, f"scheduler/jobs.py must not import data_ingestion: {import_lines}"
+    unauthorised = [ln for ln in import_lines if ln not in _AUTHORISED_DATA_INGESTION_IMPORTS]
+    assert not unauthorised, (
+        f"scheduler/jobs.py must not import data_ingestion: {unauthorised}"
+    )
+
+
+def test_the_authorised_import_is_actually_present() -> None:
+    """The allowlist must not outlive what it authorises.
+
+    An exception nobody uses is an exception nobody notices — it would silently widen
+    the guard for whatever import happens to match it next."""
+    import inspect
+
+    src = inspect.getsource(jobs_mod)
+    lines = {ln.strip() for ln in src.splitlines()}
+    assert _AUTHORISED_DATA_INGESTION_IMPORTS <= lines
 
 
 def test_sentiment_job_writes_snapshot(

@@ -85,7 +85,7 @@ def test_smart_backfill_windows(
     price_calls: list[tuple[list[str], date]] = []
     fx_calls: list[date] = []
 
-    def fake_history(c, registry, instruments, start, *, now):  # type: ignore[no-untyped-def]
+    def fake_history(c, registry, instruments, start, *, now, **_):  # type: ignore[no-untyped-def]
         price_calls.append((sorted(i.symbol for i in instruments), start))
         from portfolio_dash.pricing.results import RefreshSummary
         return RefreshSummary(ok={i.symbol: "stub" for i in instruments}, failed=[],
@@ -121,7 +121,7 @@ def test_explicit_days_keeps_uniform_window(
     conn.commit()
     starts: list[date] = []
 
-    def fake_history(c, registry, instruments, start, *, now):  # type: ignore[no-untyped-def]
+    def fake_history(c, registry, instruments, start, *, now, **_):  # type: ignore[no-untyped-def]
         starts.append(start)
         from portfolio_dash.pricing.results import RefreshSummary
         return RefreshSummary(ok={}, failed=[], fetched_at=now)
@@ -142,7 +142,7 @@ def test_default_window_reads_history_backfill_days(
     conn.commit()
     starts: list[date] = []
 
-    def fake_history(c, registry, instruments, start, *, now):  # type: ignore[no-untyped-def]
+    def fake_history(c, registry, instruments, start, *, now, **_):  # type: ignore[no-untyped-def]
         starts.append(start)
         from portfolio_dash.pricing.results import RefreshSummary
         return RefreshSummary(ok={}, failed=[], fetched_at=now)

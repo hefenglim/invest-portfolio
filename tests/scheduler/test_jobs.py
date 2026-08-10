@@ -34,7 +34,7 @@ def test_quotes_job_passes_market_worklist(
 
     monkeypatch.setattr(jobs_mod, "default_registry", lambda conn=None: "REG")
 
-    def fake_refresh(c, registry, instruments, fx_pairs, *, now):  # type: ignore[no-untyped-def]
+    def fake_refresh(c, registry, instruments, fx_pairs, *, now, **_):  # type: ignore[no-untyped-def]
         captured["registry"] = registry
         captured["symbols"] = [i.symbol for i in instruments]
         captured["fx"] = len(fx_pairs)
@@ -54,7 +54,7 @@ def test_refresh_quotes_for_filters_by_market(
     monkeypatch.setattr(jobs_mod, "default_registry", lambda conn=None: "REG")
     seen: dict[str, object] = {}
 
-    def fake_refresh(c, registry, instruments, fx_pairs, *, now):  # type: ignore[no-untyped-def]
+    def fake_refresh(c, registry, instruments, fx_pairs, *, now, **_):  # type: ignore[no-untyped-def]
         seen["symbols"] = [i.symbol for i in instruments]
         return _Summary()
 

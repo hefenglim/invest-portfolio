@@ -6,7 +6,13 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
-from portfolio_dash.portfolio.results import Book, Holding, RealizedPnL, RealizedRow
+from portfolio_dash.portfolio.results import (
+    Book,
+    Holding,
+    RealizedPnL,
+    RealizedRow,
+    UnappliedAction,
+)
 from portfolio_dash.shared.corporate_actions import (
     CorporateAction,
     CorporateActionKind,
@@ -77,17 +83,40 @@ class _SkipAction(Exception):  # noqa: N818 - control flow, not an error surface
 
 
 def _reject(
-    message: str, position: _Position | None, *, allow_oversell: bool
+    message: str,
+    position: _Position | None,
+    action: CorporateAction,
+    unapplied: list[UnappliedAction],
+    *,
+    allow_oversell: bool,
 ) -> None:
-    """Refuse an action: raise on the strict path, skip + flag on the dashboard path.
+    """Refuse an action: raise on the strict path, skip + record + flag on the dashboard path.
 
     Never-500 (E1a): ``portfolio/dashboard.py`` calls ``build_book`` with NO try/except, so
     a stranded or incoherent action row would take the whole dashboard down. Every rejection
     below therefore degrades exactly like the oversell and dividend-on-short paths already
     do — the position becomes visibly 待釐清 instead of the page becoming a 500.
+
+    The *record* is unconditional and the *flag* is not, because ``position`` is ``None``
+    whenever the source never existed (E1) and is a ZERO-SHARE position the holdings loop
+    drops whenever an earlier action emptied it (E2 after an EXCHANGE). Those two cases were
+    silent for exactly as long as the refusal was expressed only as a flag (audit F-47 / E1,
+    2026-08-10), which is why ``Book.unapplied_actions`` — not the flag — is what the
+    valuation and XIRR gates read. ``message`` is reused verbatim as ``reason`` so the strict
+    and dashboard paths explain the same refusal in the same words.
     """
     if not allow_oversell:
         raise UnbookableLedgerError(message)
+    unapplied.append(
+        UnappliedAction(
+            account_id=action.account_id,
+            date=action.date,
+            kind=action.kind,
+            from_symbol=action.from_symbol,
+            to_symbol=action.to_symbol,
+            reason=message,
+        )
+    )
     if position is not None:
         position.unbookable_action = True
     raise _SkipAction
@@ -97,6 +126,7 @@ def _apply_action(
     positions: dict[tuple[str, str], _Position],
     action: CorporateAction,
     quote_ccy: Callable[[str], Currency],
+    unapplied: list[UnappliedAction],
     *,
     allow_oversell: bool,
 ) -> None:
@@ -120,18 +150,18 @@ def _apply_action(
             _reject(f"{action.from_symbol}（{action.account_id}）於 "
                     f"{action.date.isoformat()} 沒有持倉,無法套用公司行動 — "
                     "請確認該日之前的買進或期初庫存是否遺漏",
-                    None, allow_oversell=allow_oversell)
+                    None, action, unapplied, allow_oversell=allow_oversell)
             return
         if source.shares == _ZERO and source.short_shares == _ZERO:
             _reject(f"{action.from_symbol}（{action.account_id}）於 "
                     f"{action.date.isoformat()} 已無持倉(部位已結清),無法套用公司行動",
-                    source, allow_oversell=allow_oversell)
+                    source, action, unapplied, allow_oversell=allow_oversell)
 
         # --- E3: an oversold source has no basis left to scale ---
         if source.ever_oversold:
             _reject(f"{action.from_symbol}（{action.account_id}）是賣超(待釐清)部位,"
                     "成本基礎已被捨棄 — 縮放一個未定義的基礎仍是未定義",
-                    source, allow_oversell=allow_oversell)
+                    source, action, unapplied, allow_oversell=allow_oversell)
 
         if action.kind is CorporateActionKind.SPLIT:
             # §4.1. Totals untouched, so both averages scale by 1/ratio on read and
@@ -149,7 +179,7 @@ def _apply_action(
         if source.short_shares > _ZERO:
             _reject(f"{action.from_symbol}（{action.account_id}）有未回補的放空部位,"
                     "換股／分拆沒有可誠實記錄的分錄 — 請先回補",
-                    source, allow_oversell=allow_oversell)
+                    source, action, unapplied, allow_oversell=allow_oversell)
 
         dst_key = (action.account_id, action.to_symbol)
         dest = positions.get(dst_key)
@@ -159,7 +189,7 @@ def _apply_action(
             if dest.short_shares > _ZERO:
                 _reject(f"目的標的 {action.to_symbol}（{action.account_id}）有未回補的"
                         "放空部位,多空混在一個部位裡會使均價失去意義",
-                        source, allow_oversell=allow_oversell)
+                        source, action, unapplied, allow_oversell=allow_oversell)
             # E22 (D16): the mirror of E18 one level deeper. E19 stops a FLAG being
             # laundered; this stops a COST BASIS being restored onto a position whose basis
             # the sticky 賣超 guard deliberately discarded — which reads as an entirely
@@ -168,7 +198,7 @@ def _apply_action(
                 _reject(f"目的標的 {action.to_symbol}（{action.account_id}）是賣超"
                         "(待釐清)部位,移轉成本過去會讓已捨棄的成本基礎「復活」,"
                         "並算出一個看似正常、實際上沒有依據的均價",
-                        source, allow_oversell=allow_oversell)
+                        source, action, unapplied, allow_oversell=allow_oversell)
         else:
             dest = positions.setdefault(dst_key, _Position(quote_ccy(action.to_symbol)))
 
@@ -234,6 +264,13 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     resulting holding is flagged ``oversold`` with 待釐清 value (decided 2026-06-18). This
     keeps the dashboard alive after an acked oversell; the user fixes it by recording the
     missing opening inventory / buy. It is NOT short-position accounting.
+
+    A corporate action the replay cannot book behaves the same way — raise on the strict
+    path, skip on the dashboard path — but the record of the skip is on the BOOK
+    (``Book.unapplied_actions``), not only on a holding, because two of the three ways it
+    happens leave no holding behind. See :class:`~portfolio_dash.portfolio.results.
+    UnappliedAction`; consumers must treat a non-empty list as "the share counts in this
+    book are not trustworthy".
     """
 
     def quote_ccy(symbol: str) -> Currency:
@@ -245,6 +282,9 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     positions: dict[tuple[str, str], _Position] = {}
     realized_rows: list[RealizedRow] = []
     gross: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
+    # Book-level, NOT per-position: two of the three ways an action goes unapplied leave no
+    # position to flag (see Book.unapplied_actions). Stays empty on the strict path.
+    unapplied: list[UnappliedAction] = []
 
     events: list[tuple[date, int, str, object]] = []
     for oi in bundle.opening:
@@ -262,7 +302,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     for _d, _p, kind, ev in events:
         if kind == "action":
             assert isinstance(ev, CorporateAction)
-            _apply_action(positions, ev, quote_ccy, allow_oversell=allow_oversell)
+            _apply_action(positions, ev, quote_ccy, unapplied,
+                          allow_oversell=allow_oversell)
         elif kind == "open":
             assert isinstance(ev, OpeningInventory)
             key = (ev.account_id, ev.symbol)
@@ -492,4 +533,5 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
         holdings=holdings,
         realized=RealizedPnL(rows=realized_rows, by_currency=dict(realized_by_ccy)),
         gross_invested=dict(gross),
+        unapplied_actions=unapplied,
     )

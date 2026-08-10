@@ -41,6 +41,7 @@ from portfolio_dash.scheduler.jobs import (
     DEFAULT_BOARD,
     REPORTING_FX_PAIRS,
     refresh_instrument_quote,
+    split_factor_fn,
 )
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import session
@@ -128,7 +129,10 @@ def lookup_instrument(
     registry = default_registry(conn)
     quote_ok = False
     try:
-        summary = refresh_quotes(conn, registry, [ref], REPORTING_FX_PAIRS, now=now)
+        summary = refresh_quotes(
+            conn, registry, [ref], REPORTING_FX_PAIRS, now=now,
+            factor_of=split_factor_fn(conn),
+        )
         quote_ok = sym in summary.ok
     except Exception:  # noqa: BLE001 — a provider crash degrades like "no quote" (typo guard)
         logger.warning("lookup quote fetch crashed for %s", sym, exc_info=True)
@@ -253,7 +257,10 @@ def _gap_backfill_inner(conn: sqlite3.Connection, symbol: str, now: datetime) ->
     # history + dividends degrade internally (failed keys are summarized, never raised);
     # refresh_instrument_quote CAN raise on a provider crash — run it last so a quote
     # failure never skips the history/dividend backfill.
-    refresh_history(conn, registry, [ref], start, now=now)
+    # ``factor_of`` (D17): a restored symbol's backfill re-fetches history the provider
+    # may have re-stated across a split — spec §5.1's own example of how the artifact
+    # enters. ``refresh_instrument_quote`` binds its own inside ``scheduler.jobs``.
+    refresh_history(conn, registry, [ref], start, now=now, factor_of=split_factor_fn(conn))
     refresh_dividends(conn, registry, [ref], now=now)
     refresh_instrument_quote(
         conn, symbol=symbol, market=inst.market, board=inst.board or None, now=now
@@ -353,9 +360,12 @@ def quick_register(
         symbol=sym, market=market, board=resolved_board or DEFAULT_BOARD[market]
     )
     registry = default_registry(conn)
+    factor_of = split_factor_fn(conn)  # D17: bound once, shared by the quote + history legs
     quote_ok = False
     try:
-        summary = refresh_quotes(conn, registry, [ref], REPORTING_FX_PAIRS, now=now)
+        summary = refresh_quotes(
+            conn, registry, [ref], REPORTING_FX_PAIRS, now=now, factor_of=factor_of
+        )
         quote_ok = sym in summary.ok
     except Exception:  # noqa: BLE001 — a provider crash degrades like "no quote"
         logger.warning("quick-register quote fetch crashed for %s", sym, exc_info=True)
@@ -389,7 +399,9 @@ def quick_register(
     if backfill_history:
         try:
             start = (now - timedelta(days=get_settings().history_backfill_days)).date()
-            hist_summary = refresh_history(conn, registry, [ref], start, now=now)
+            hist_summary = refresh_history(
+                conn, registry, [ref], start, now=now, factor_of=factor_of
+            )
             history_points = sym in hist_summary.ok
         except Exception:  # noqa: BLE001 — presentation backfill must not fail the write
             logger.warning("quick-register history backfill failed for %s", sym, exc_info=True)

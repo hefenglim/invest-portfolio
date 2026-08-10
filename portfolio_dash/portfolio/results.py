@@ -4,13 +4,45 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency
 
 
 class Holding(BaseModel):
-    """An open position with cost basis and (once valued) market fields."""
+    """An open position with cost basis and (once valued) market fields.
+
+    **Adding a 待釐清 flag? Read this first — it is the rule, not the neighbouring flag.**
+
+    The system has THREE independent mechanisms for "this position exists but something
+    about it is not trustworthy", and a new flag must be reasoned onto each one separately:
+
+    1. **the display flag itself** — the boolean below, carried to the wire so the UI can
+       name the problem. EVERY flag uses this one.
+    2. **valuation suppression** (``portfolio/pnl.py``) — null ``market_value`` /
+       ``unrealized_pnl`` / ``capital_gain`` so every aggregate that gates on
+       ``market_value is not None`` drops the position automatically.
+    3. **XIRR suppression** (``portfolio/dashboard.py``) — declare the money-weighted
+       return not computable, with a stated reason.
+
+    The deciding question for (2) and (3) is **"are the SHARES right?"**, because
+    ``market_value = price × shares`` and prices are global, current and already reflect
+    every corporate action:
+
+    * ``unbookable_dividend`` — shares are RIGHT; only ``adjusted_cost_total`` is short one
+      payout. Its market value is genuinely correct, so it takes (1) ONLY.
+    * ``oversold`` — shares are negative and the basis was discarded: all three.
+    * ``unbookable_action`` — the shares are in PRE-action terms against a POST-action
+      price, so the market value is wrong by the action's whole ratio: all three. It gets
+      (3) via ``Book.unapplied_actions`` rather than via this flag — see that field for why.
+    * ``short_open`` — NOT a 待釐清 flag at all. A declared short is a real, priced position
+      whose signed quantity every formula already handles; it takes none of the three.
+
+    (Audit F-49, 2026-08-10: ``unbookable_action`` shipped with (1) only, because the brief
+    that produced it said "wire it exactly where ``unbookable_dividend`` is wired". Mirroring
+    a neighbour is how the gap was created — hence this paragraph.)
+    """
 
     account_id: str
     symbol: str
@@ -47,6 +79,8 @@ class Holding(BaseModel):
     # PRE-action terms while prices are global and post-action, so market value and every
     # figure derived from it are wrong until the ledger is fixed. Same 待釐清 posture as
     # the two flags above: never silently correct, never a 500 (E1a/E2/E3/E5/E18/E22).
+    # Mechanisms (1) + (2); mechanism (3) is driven by `Book.unapplied_actions`, which sees
+    # the two cases this flag structurally cannot (see that field).
     unbookable_action: bool = False
 
 
@@ -93,12 +127,56 @@ class RealizedPnL(BaseModel):
     by_currency: dict[Currency, Decimal]
 
 
+class UnappliedAction(BaseModel):
+    """One corporate-action row the replay REFUSED to book, recorded at Book level.
+
+    Not a flag on a Holding, and that is the whole point: a corporate action going unapplied
+    is a property of the REPLAY, and there are three ways it happens, two of which have no
+    surviving position to hang a flag on (audit F-47 + E1, 2026-08-10):
+
+    1. the source survives — ``Holding.unbookable_action`` marks it, and this row as well;
+    2. the source is *already empty* (an EXCHANGE moved it away earlier the same day), so
+       ``cost_basis`` flags a zero-share position that the holdings loop then DROPS — the
+       flag is discarded with its carrier and the skipped action leaves no trace;
+    3. the source never existed at all, so there is nothing to flag anywhere.
+
+    Case 2 is E19's laundering one level up: E19 stops a flag being *transferred away*,
+    nothing stopped it being *dropped*. Cases 2 and 3 both produce a dashboard that looks
+    entirely clean while an action in the ledger was silently ignored.
+
+    Every field exists so the consumer can NAME the problem. A bare count would force the UI
+    to say "something went wrong", and this repo's whole 待釐清 vocabulary is built on saying
+    which row, in which account, on which date, and why — ``reason`` is the same zh sentence
+    the strict path raises, so the two paths explain the refusal identically.
+    """
+
+    account_id: str
+    date: date
+    kind: CorporateActionKind
+    from_symbol: str
+    to_symbol: str
+    reason: str
+
+
 class Book(BaseModel):
     """Output of the ledger replay: open holdings, realized, gross capital deployed."""
 
     holdings: list[Holding]
     realized: RealizedPnL
     gross_invested: dict[Currency, Decimal]
+    # Corporate actions the replay could not apply, in replay (date, then ledger) order.
+    # ALWAYS EMPTY on the strict path (``allow_oversell=False``), which raises instead — so a
+    # non-empty list means the dashboard path degraded and the book is 待釐清.
+    #
+    # Consumers: a non-empty list means the SHARE COUNTS in this book are not trustworthy
+    # (the position kept its pre-action shares while prices are global and post-action), so
+    # anything derived from `shares` — market value, weights, the XIRR terminal value — must
+    # be withheld, not merely annotated. `Holding.unbookable_action` cannot serve as that
+    # gate: cases 2 and 3 above emit no flagged holding at all.
+    #
+    # Default empty so every existing ``build_book`` consumer keeps working unchanged, and
+    # so a directly-constructed ``Book`` (tests, fixtures) still validates.
+    unapplied_actions: list[UnappliedAction] = Field(default_factory=list)
 
 
 class CurrencyReturn(BaseModel):

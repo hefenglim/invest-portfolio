@@ -13,7 +13,13 @@ from datetime import date, datetime
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import RefreshSummary
-from portfolio_dash.pricing.store import upsert_dividend_events, upsert_fx, upsert_prices
+from portfolio_dash.pricing.store import (
+    SplitFactorFn,
+    _no_factor,
+    upsert_dividend_events,
+    upsert_fx,
+    upsert_prices,
+)
 
 
 def refresh_quotes(
@@ -23,17 +29,22 @@ def refresh_quotes(
     fx_pairs: list[FxPair],
     *,
     now: datetime,
+    factor_of: SplitFactorFn = _no_factor,
 ) -> RefreshSummary:
     """Fetch latest quotes + FX via ``registry``, upsert into SQLite, summarize.
 
     Fetch failures degrade gracefully: failed keys are recorded in the summary
     rather than raised, so a partial-provider outage never crashes the refresh
     (`data-and-pricing.md` — never crash the dashboard, never fabricate).
+
+    ``factor_of`` is a **pass-through** to the write seam (D17): this module still
+    imports nothing but ``pricing.*``; the corporate-action lookup is bound by the
+    ``scheduler`` / ``api`` caller. Omitted, it is the identity and nothing changes.
     """
     p_rows, p_sources, p_failed = registry.fetch_quote_latest(instruments)
     f_rows, f_sources, f_failed = registry.fetch_fx(fx_pairs)
     if p_rows:
-        upsert_prices(conn, p_rows, fetched_at=now)
+        upsert_prices(conn, p_rows, fetched_at=now, factor_of=factor_of)
     if f_rows:
         upsert_fx(conn, f_rows, fetched_at=now)
     return RefreshSummary(
@@ -50,6 +61,7 @@ def refresh_history(
     start: date,
     *,
     now: datetime,
+    factor_of: SplitFactorFn = _no_factor,
 ) -> RefreshSummary:
     """Fetch historical daily quotes via ``registry`` from ``start``, upsert, summarize.
 
@@ -57,10 +69,14 @@ def refresh_history(
     `QUOTE_HISTORY` data type — a per-instrument routed fetch over a date range
     rather than a single latest-quote snapshot. Same graceful-degradation contract:
     failed symbols are recorded in the summary, never raised.
+
+    This is the path §5.1 identifies as the artifact's source — backfilling history
+    AFTER a split returns closes the provider has already re-stated — so ``factor_of``
+    matters most here. Pass-through only (D17); see :func:`refresh_quotes`.
     """
     rows, sources, failed = registry.fetch_quote_history(instruments, start)
     if rows:
-        upsert_prices(conn, rows, fetched_at=now)
+        upsert_prices(conn, rows, fetched_at=now, factor_of=factor_of)
     return RefreshSummary(ok=sources, failed=failed, fetched_at=now)
 
 

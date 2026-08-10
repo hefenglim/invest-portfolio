@@ -12,8 +12,10 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
+from portfolio_dash.data_ingestion.store import list_corporate_actions
 from portfolio_dash.llm_insight import alerts_bridge
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.ops import notify_dispatch
@@ -30,14 +32,57 @@ from portfolio_dash.pricing.refresh import (
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import RefreshSummary
+from portfolio_dash.pricing.store import SplitFactorFn
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.corporate_actions import (
+    ActionIndex,
+    CorporateAction,
+    CorporateActionKind,
+    split_factor,
+)
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.strategy.alerts import Alert, compute_alerts
 
 logger = logging.getLogger(__name__)
+
+
+def split_factor_fn(conn: sqlite3.Connection) -> SplitFactorFn:
+    """Bind the corporate-action ledger into the price write seam's factor lookup (D17).
+
+    ``pricing/`` may not import ``data_ingestion`` (``architecture.md``), so the ratio
+    lookup is injected as a callable and THIS layer — which sits above both — is where
+    the two meet. The honest cost, acknowledged in spec §5.1: ``scheduler/`` gains a
+    file-level ``data_ingestion`` import it did not have. It is a legal downward edge
+    (the ``api``/``scheduler`` layer already has others) and cheaper than either
+    rejected alternative: ``pricing → data_ingestion`` has no edge at all, and moving
+    the SELECT into ``shared/`` breaks §6.0's "no module writes its own SELECT".
+
+    Build ONCE per refresh — never per row and never per symbol. :class:`ActionIndex`
+    exists for exactly this: a per-symbol history backfill loop would otherwise re-read
+    and re-group the whole action ledger once per instrument.
+
+    A ledger row too malformed to be a :class:`CorporateAction` (only reachable by hand
+    editing the DB — validation enforces positive integer terms) raises here rather than
+    being dropped: silently omitting a factor stores a price that is wrong by the ratio
+    and looks entirely normal, which is the failure mode this whole feature exists to
+    prevent. Same conversion, same strictness as ``data_ingestion.store.load_bundle``.
+    """
+    index = ActionIndex.build(
+        CorporateAction(
+            account_id=s.account_id, date=s.date, kind=CorporateActionKind(s.kind),
+            from_symbol=s.from_symbol, to_symbol=s.to_symbol, ratio_to=s.ratio_to,
+            ratio_from=s.ratio_from, cost_carry=s.cost_carry, note=s.note,
+        )
+        for s in list_corporate_actions(conn)
+    )
+
+    def factor_of(symbol: str, *, after: date, through: date) -> Decimal:
+        return split_factor(index, symbol, after=after, through=through)
+
+    return factor_of
 
 # 3 consecutive failed runs of an ingest job escalate its source health to "error".
 _FAIL_STREAK_THRESHOLD = 3
@@ -327,7 +372,10 @@ def refresh_quotes_for(
         set_progress(
             progress_job_id, f"擷取 {market.value} 報價＋匯率（{len(instruments)} 檔）"
         )
-    summary = refresh_quotes(conn, default_registry(conn), instruments, fx_pairs, now=now)
+    summary = refresh_quotes(
+        conn, default_registry(conn), instruments, fx_pairs, now=now,
+        factor_of=split_factor_fn(conn),
+    )
     return _summarize(summary)
 
 
@@ -351,6 +399,10 @@ def _refresh_benchmark_history(conn: sqlite3.Connection, start: date, *, now: da
     stable ``prices.instrument`` keys (they are not registered instruments). A benchmark
     fetch failure degrades silently (logged + summarized) so a bad index fetch can never
     fail the daily instrument history job.
+
+    No ``factor_of``: a benchmark is a market INDEX, not a holding — it is never the
+    subject of a corporate action, and it has no ``instruments`` row an action could
+    reference. Injecting would be a provable no-op; omitting it says so.
     """
     try:
         summary = refresh_history(conn, default_registry(conn), benchmark_refs(), start, now=now)
@@ -372,12 +424,13 @@ def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     instruments, _ = build_worklist(conn, None)
     start = (now - timedelta(days=_HISTORY_LOOKBACK_DAYS)).date()
     registry = default_registry(conn)
+    factor_of = split_factor_fn(conn)  # once for the whole sweep, never per symbol
     ok: dict[str, str] = {}
     failed: list[str] = []
     total = len(instruments)
     for i, ref in enumerate(instruments, start=1):
         set_progress("history_daily", f"回補 {ref.symbol} ({i}/{total})")
-        s = refresh_history(conn, registry, [ref], start, now=now)
+        s = refresh_history(conn, registry, [ref], start, now=now, factor_of=factor_of)
         ok.update(s.ok)
         failed.extend(s.failed)
     summary = RefreshSummary(ok=ok, failed=failed, fetched_at=now)
@@ -960,7 +1013,10 @@ def refresh_instrument_quote(
     treats the fetch as best-effort and never fails the registration over it).
     """
     ref = InstrumentRef(symbol=symbol, market=market, board=board or _DEFAULT_BOARD[market])
-    summary = refresh_quotes(conn, default_registry(conn), [ref], _FX_PAIRS, now=now)
+    summary = refresh_quotes(
+        conn, default_registry(conn), [ref], _FX_PAIRS, now=now,
+        factor_of=split_factor_fn(conn),
+    )
     return _summarize(summary)
 
 
@@ -1011,6 +1067,9 @@ def _backfill_benchmarks(
     Uses the shared ``registry`` (no second construction) and the same idempotent history
     path as instruments. A benchmark failure is logged + summarized, never raised, so a bad
     index backfill can never fail the whole-portfolio backfill job.
+
+    No ``factor_of`` — an index is never the subject of a corporate action; see
+    :func:`_refresh_benchmark_history`.
     """
     try:
         summary = refresh_history(conn, registry, benchmark_refs(), start, now=now)
@@ -1040,7 +1099,12 @@ def _backfill_prices_per_symbol(
     ``Registry.fetch_quote_history`` routes per instrument anyway, so single-ref calls
     are behaviorally identical to the old batched call; the loop lives here purely so
     每檔 progress (「回補 {sym} (i/n)」) is honest. Summaries merge into one.
+
+    This is the DEEP backfill — the exact operation spec §5.1 names as the artifact's
+    origin ("import the ledger, then backfill history") — so the factor is bound here,
+    once for the whole run rather than once per symbol.
     """
+    factor_of = split_factor_fn(conn)
     ok: dict[str, str] = {}
     failed: list[str] = []
     done = 0
@@ -1048,7 +1112,7 @@ def _backfill_prices_per_symbol(
         for ref in refs:
             done += 1
             set_progress(_BACKFILL_PROGRESS_ID, f"回補 {ref.symbol} ({done}/{total})")
-            s = refresh_history(conn, registry, [ref], start, now=now)
+            s = refresh_history(conn, registry, [ref], start, now=now, factor_of=factor_of)
             ok.update(s.ok)
             failed.extend(s.failed)
     return RefreshSummary(ok=ok, failed=failed, fetched_at=now)

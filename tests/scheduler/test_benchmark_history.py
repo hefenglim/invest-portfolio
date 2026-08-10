@@ -38,7 +38,7 @@ def test_history_daily_includes_benchmarks(
     _inst(conn, "2330", "TW")
     calls: list[list[str]] = []
 
-    def fake_history(c, registry, instruments, start, *, now):  # type: ignore[no-untyped-def]
+    def fake_history(c, registry, instruments, start, *, now, **_):  # type: ignore[no-untyped-def]
         calls.append(sorted(i.symbol for i in instruments))
         return _fake_summary(instruments)
 
@@ -57,7 +57,7 @@ def test_history_daily_benchmark_failure_degrades_silently(
 ) -> None:
     _inst(conn, "2330", "TW")
 
-    def fake_history(c, registry, instruments, start, *, now):  # type: ignore[no-untyped-def]
+    def fake_history(c, registry, instruments, start, *, now, **_):  # type: ignore[no-untyped-def]
         # Benchmarks route through the SAME function; blow up only for the benchmark call.
         if any(i.symbol in _BENCH for i in instruments):
             raise RuntimeError("boom")
@@ -75,7 +75,7 @@ def test_backfill_all_includes_benchmarks_smart_window(
     _inst(conn, "2330", "TW")
     hist_calls: list[list[str]] = []
 
-    def fake_history(c, registry, instruments, start, *, now):  # type: ignore[no-untyped-def]
+    def fake_history(c, registry, instruments, start, *, now, **_):  # type: ignore[no-untyped-def]
         hist_calls.append(sorted(i.symbol for i in instruments))
         return _fake_summary(instruments)
 
@@ -98,7 +98,7 @@ def test_backfill_all_includes_benchmarks_explicit_days(
     _inst(conn, "2330", "TW")
     hist_calls: list[list[str]] = []
 
-    def fake_history(c, registry, instruments, start, *, now):  # type: ignore[no-untyped-def]
+    def fake_history(c, registry, instruments, start, *, now, **_):  # type: ignore[no-untyped-def]
         hist_calls.append(sorted(i.symbol for i in instruments))
         assert start == date(2026, 5, 4)  # now - 30d, uniform window
         return _fake_summary(instruments)

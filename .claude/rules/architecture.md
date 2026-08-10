@@ -12,9 +12,23 @@ strategy ─┘        │           │             ▲
                    └─►  data_ingestion  ──────┘
 llm_insight ──► portfolio (reads computed results) ──► shared
 scheduler  ──► pricing, llm_insight  (triggers only)
+           ──► data_ingestion  (ONE authorised import — see below)
 ```
 
 - `shared/` depends on nothing internal. Everything may import it.
+- **`scheduler → data_ingestion`: exactly one import is authorised** (owner sign-off 2026-08-10,
+  corporate-actions D39). `scheduler/jobs.py` may import `list_corporate_actions` from
+  `data_ingestion/store.py`, and nothing else, so a scheduled price refresh can build the
+  split-factor callable that `pricing/` needs but may not fetch for itself (D17: `pricing/` must
+  not import anything above `shared/`, so the ratio is **injected**). The guard in
+  `tests/scheduler/test_ingest_jobs.py` was **narrowed, not deleted** — any other `data_ingestion`
+  import in `scheduler/jobs.py` still fails, and a second test asserts the allowlisted line is
+  actually present, because an exception nobody uses is an exception nobody notices.
+  Alternatives rejected: injecting from `api/app.py` (respects the diagram, but a missed
+  registration degrades to a **silently wrong** price basis); a lookup in `shared/` (every edge
+  legal, but a second SQL site for `corporate_actions` — the duplication `shared/ledger_registry.py`
+  exists to remove). This edge is recorded here rather than left implicit in code: an edge that
+  exists in the codebase but not in this diagram is the next audit finding.
 - Lower layers (`shared`, `pricing`, `data_ingestion`) **never import `web_ui`**.
 - The web layer **reads** computed results. It does not compute. No cost-basis or
   return math in routes or templates.
