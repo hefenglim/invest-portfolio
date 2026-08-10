@@ -1,7 +1,7 @@
 # Spec — Corporate actions (SPLIT / EXCHANGE / SPINOFF)
 
-**Status:** All owner decisions D1–D37 **approved** (§8; D30–D37 on 2026-08-10, from the
-spec-conflict audit). **Implementation in progress** on `feat/corporate-actions` (owner ruling
+**Status:** All owner decisions D1–D38 **approved** (§8; D30–D38 on 2026-08-10, from the
+spec-conflict audit and the blast-radius question it prompted — see §8.1). **Implementation in progress** on `feat/corporate-actions` (owner ruling
 2026-08-09: the branch is NOT merged into `main` until the whole feature is done, so it stays
 abandonable — which also retires **D26**, W0's separate release). Delivered: **W0** LedgerBundle +
 ledger registry · **W1** the ratio algebra · **W2** the ledger, CRUD and validation (three soft
@@ -25,6 +25,8 @@ test that defines it instead of restating it.
 | 2026-08-09 | **Both round-2 deviations resolved — no open items.** D22: "reject or warn" was a false dichotomy; `validate.py` already has a THIRD tier (`needs_confirm`, the 賣超 tier) and E23 takes it, with a four-part condition that fires on the identifier signature and stays silent on ordinary mergers, plus a one-click convert-to-SPLIT. D23: the omitted cycle check is confirmed, and the two details that made the termination argument load-bearing are now normative — the recursion's **strictly-before** date bound (the inclusive form hangs) and the depth cap's **degrade-not-raise** behaviour on read paths (`corporate_delta` reaches an API route). Both outcomes are stronger than either originally-offered option |
 | 2026-08-09 | **W2 implementation revised E15 (D29).** The duplicate action is now a HARD rejection checked BEFORE E12, not a soft warning. Found by W2's own test: soft would apply the ratio twice (3-for-1 → 9-for-1), and as specified the warning was **unreachable**, since an exact duplicate is by construction the same-date intersecting pair E12 already rejects — the same "the ⚠ provably never fires" defect the E13 note exists to correct, recurring one row later. Also recorded: **D26 is retired** — the branch stays unmerged by owner ruling, so W0 does not ship as its own release |
 | 2026-08-10 | **Spec-conflict audit folded in** (`docs/audit/2026-08-10-spec-conflict-audit.md`) — **owner approved D30–D37**, each on the audit's stated recommendation: two-column price basis (**D30**), the depth cap keeps its `Decimal` signature and degrades through the existing flag / `needs_confirm` mechanisms (**D31**), a dividend on an EXCHANGE-vacated symbol is refused and flagged — new **E24** (**D32**), the SQL path skips an action on a negative source (**D33**), §9's cash-and-stock recipe **withdrawn** (**D34**), US cash dividends reduce `adjusted_total` (**D35**, recorded in the backlog spec), a whole-account IRR joins XIRR and resolves D12's blind spot (**D36**), and pre-history opening cost totals with `original_cost_total > 0` hard-validated (**D37**). **§10.2 rebuilt** — the section the document calls the implementer's brief was its stalest text: every "Done when" now cites the §7 test that defines it, W6 splits into **W6a/W6b**, and the build order becomes `P0 → decisions → W6a → W4 → W6b → W5 → E23+W7 → W8/W9/W10`. Propagation repairs: E15 into §6.5's hard list before E12 (F-01); ~~D26~~ and ~~D18~~ struck as SUPERSEDED with W0's and W6's rows rewritten and traps #18/#19/#23 corrected (F-02, F-03); D20's §7.1a exception removed with the recipe it existed for (F-04); E10 covers **either** symbol (F-35); §4.4 gains `unbookable_action` and its count corrected to nine (F-37); §2.1's value leg qualified to SPLIT + a third §2.1a blind spot (F-38); §7.1a's impossible `unbookable_dividend` claim deleted (F-39); "identifier-shaped" → "unregistered" (F-41); the ratio products written over the **dedup key** (F-42); §4's preamble re-pointed at the measured defect (F-43); `dashboard.py` anchored on the construct, not the line number (F-44) |
+| 2026-08-10 | **D38 — blast-radius containment (owner question, same day).** Asked whether a symbol with no corporate action can be guaranteed identical to pre-feature `main`, so that a defect in the new flow damages only the triggering stock. Ruled: **no runtime "sandbox mode"** — two maintained paths and an off-configuration is how the aggregate-vs-detail divergence recurred three times and how `mock-data.js` and the four ledger enumerations drifted. Instead **three testable invariants** (§8.1): name and test the containment that already holds structurally, preferring a short-circuit over an equal-answer computation (binds **W4** hardest); accept XIRR's portfolio-wide blanking but make its reason **name the account, symbol and date**; and prove `prices` **byte-identically reversible** on deleting a split. Recorded with it: 重算 and `corporate_delta` are both strictly stronger than a sandbox — one *erases* the damage, the other *displays* it per symbol — and **reversibility is D30's second, independent justification**, since `prices` is the only non-replayable mutation in the feature |
+
 **Priority:** P0 — the only *blocking* gap found by the 2026-08-06 broker-import assessment
 (`docs/spec/2026-08-06-broker-import-backlog.md`).
 **Scope of this version:** a complete, self-contained feature — ledger table, replay semantics,
@@ -2019,6 +2021,51 @@ ways is a net loss, so each answer reuses a mechanism the codebase already has.
 | **D35** *(P1b; not blocking, cheap now)* | **Does a US cash dividend reduce `adjusted_total`?** | **Yes — treat it exactly as TW/MY cash.** *System fit:* `CASH_DIVIDEND_TYPES` drives four sites uniformly; booking US cash as income instead would put **two dividend accounting models in one ledger**, so 回本進度 and 股利回收率 would mean different things per market on the same screen — which is what `domain-ledger.md`'s one-definition discipline exists to prevent. **Recorded in this file only as D21's precondition** (see D21); the decision belongs to `docs/spec/2026-08-06-broker-import-backlog.md`, where it is written up in full |
 | **D36** *(blocks W9's wording only)* | **Does anything besides trades reach the return metrics?** | **Option 2 — leave XIRR untouched, add a whole-account IRR in the existing `portfolio/twr.py`.** *System fit:* `twr.py` already exists as the home for a whole-account view; redefining XIRR would move every historical figure, invalidate the accounting manual's worked anchors and the stress-audit oracle's expectations, and require re-verification against the whole corpus — for amounts the backlog itself calls trivial. Additive instead. **It also resolves D12's conceded blind spot**: the reorganisation fee is booked as a `WITHDRAW`, which XIRR does not see and the account IRR does. §3.3, §7.5 and W9 state the limitation as *resolved*, not permanent |
 | **D37** *(owner INPUT, not a decision — longest lead item)* | **Pre-history opening cost totals**: per-symbol `original_cost_total` for every position whose earliest event in the broker export is a **sell** | **Owner-supplied; nobody else can.** It gates §10.5's blocking acceptance run (D27). ⚠ **The shortcut is refused explicitly:** `opening_import.py` validates only `shares > 0`, so **a cost total of 0 imports cleanly** and permanently zeroes the position's basis **with no 待釐清 flag** — strictly worse than the oversell it appears to fix, because the oversell at least announces itself. **`original_cost_total > 0` therefore becomes a hard validation** in the same change (F-13). That is an asymmetry repair — the file already hard-validates the share count — not a new mechanism |
+| **D38** *(owner question 2026-08-10: "can a symbol with no corporate action be guaranteed identical to pre-feature `main`, so a defect in the new flow damages only the triggering stock?")* | **Blast-radius containment — is a per-symbol "sandbox mode" the right instrument?** | **No mode. Three testable invariants instead — see the note below.** *System fit:* a runtime mode means two code paths, both maintained and both needing tests, and a configuration in which the new code does not run — so the day it is switched on, every untested interaction arrives at once. This codebase has lost that argument three times already: the aggregate-vs-detail divergence recurred **three** times, `mock-data.js` was retired for being a second source of truth, and `shared/ledger_registry.py` exists because four hand-maintained enumerations drifted. **The containment the owner is asking for already holds structurally for three of the four output tiers; what is missing is that it is neither named nor tested.** And two mechanisms already in this design are strictly stronger than a sandbox: **重算** *undoes* a bad action rather than merely confining it (a sandbox limits damage; replay erases it), and **`corporate_delta`** (§6.3) is a per-symbol runtime cross-check between the naive and action-aware paths that **shows** the discrepancy instead of hiding it |
+
+---
+
+### 8.1 D38 — the three containment invariants (owner ruling 2026-08-10)
+
+Sort every output this feature can touch by whether it *can* be contained. The answer differs by
+tier, and pretending otherwise is what a "sandbox mode" would do.
+
+| Tier | Output | Containable? |
+| --- | --- | --- |
+| **1 — per-symbol figures** | cost basis, averages, shares, market value, unrealized, realized rows, the drawer | **Already a sandbox, structurally.** `positions` is a `dict` keyed `(account, symbol)` and `_apply_action` touches exactly `src_key` and `dst_key`. It cannot reach another symbol |
+| **2 — sums over symbols** | KPI band, sector allocation, weights, net worth, the trend series | **Yes, and already implemented.** `pnl.py` nulls the one position's `market_value`, and every aggregate gates on `market_value is not None`, so the total becomes "everything except the 待釐清 one". Smaller, labelled, and **no other symbol's number is wrong** |
+| **3 — indivisible portfolio scalars** | **XIRR** | **No, and it never can be.** One number over one cashflow series and one terminal value. A wrong share count makes the sum wrong, and excluding the position measures a *different portfolio*. Blanking is the only honest option, and it matches the `has_oversold` precedent |
+| **4 — stored prices** | the `prices` table | **The real exposure — see invariant 3.** This is the ONLY place the feature writes outside the ledgers, so 重算 does not cover it |
+
+**Invariant 1 — name and test the containment that already exists.** A property test: for any ledger
+`L` and any symbol `S` carrying no corporate action, `S`'s `Holding` in `build_book(L)` equals `S`'s
+`Holding` in `build_book(L with every action removed)`. Prefer a **structural short-circuit** over an
+equivalent computation wherever a new path is added — an explicit "no actions for this symbol → take
+the pre-existing branch", not "the new code happens to agree". *Code that does not execute cannot
+drift; code that computes an equal answer can.* This binds **W4** above all: `shares_through` becomes
+action-aware for *every* symbol, which makes it the largest blast radius in the remaining plan.
+
+**Invariant 2 — XIRR blanks portfolio-wide, and must name the culprit.** The gate is accepted as the
+one place a single symbol degrades a portfolio-level figure; the cost is now known rather than
+unnoticed, and the code says so at the gate. In exchange, the reason string identifies the **account,
+symbol(s) and date** of the unapplied action — unlike the existing 賣超 reason, which says only that
+*something* is 待釐清. `Book.unapplied_actions` carries all of it. Blanking a number is tolerable;
+blanking it without saying which row to fix is what makes a defect expensive.
+
+**Invariant 3 — `prices` must be provably reversible.** Deleting a SPLIT must return **every affected
+row byte-identical** to its pre-action value — asserted on the stored TEXT, not on `Decimal` equality,
+because `Decimal("1.5") == Decimal("1.50")` is `True` and a value comparison therefore cannot see a
+representation change. Note the related trap, which is exactly the failure this invariant exists to
+catch: `Decimal` multiplication by one is **not** identity in the stored representation — the result's
+exponent is the *sum* of the operands', so `Decimal("1.5") * Decimal("1.0")` is `Decimal("1.50")`. A
+default factor of `Decimal("1.0")` instead of `Decimal(1)` would silently add a decimal place to every
+price row in the database, **on symbols that have no corporate action at all**.
+
+> **This is D30's second, independent justification.** The two-column ruling was made on
+> order-independence (§5.1). Reversibility is the other half: with one column the raw close is
+> overwritten and re-capped on every pass, so **a wrong reconcile would be unrecoverable** — the only
+> non-replayable mutation in the entire feature. With `close := raw × target`, `target → 1` restores
+> exactly, and tier 4 rejoins the 重算 guarantee that covers tiers 1–3.
 
 ---
 
