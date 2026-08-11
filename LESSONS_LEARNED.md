@@ -680,3 +680,13 @@ prevents recurrence.
   into `docs/spec/`. No ticker, amount or position leaked and nothing reached version control —
   but the boundary was crossed by omission, not by disagreement. A prohibition that appears in
   one of N parallel briefs is not a control; it is a coin flip on which agent picks up the task.
+
+- **2026-08-11 — "the baseline run was green" is weak evidence against an intermittent
+  failure, and I used it as if it were strong.** Chasing an e2e failure that hit **2 of 135**
+  browser tests per run — a different pair each time, always "every static asset on the page
+  404s" — I cited the previous full run (2,994 passed, 0 failed) as evidence the session's
+  own changes had introduced it. Do the arithmetic before leaning on that: at ~1.5% per test,
+  `P(zero failures across 135) = 0.985^135 ≈ 13%`. A clean run was **quite likely even if the
+  flake already existed**, so the baseline established almost nothing. Rule: before treating
+  "it passed last time" as a bisect result, compute the probability that it would have passed
+  anyway — for a low-rate intermittent, one green run is a coin flip, not a control.
