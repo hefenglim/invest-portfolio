@@ -647,8 +647,57 @@
     });
     let ackOk = true;
     if (oversell) {
+      /* ===== §6.7 door 1, ON THE ORDINARY PATH (fixed 2026-08-12) =====
+
+         This acknowledgement used to be a bare tick — 「我了解，仍要寫入。」 — and ticking it
+         is what makes the commit carry `ack_oversell: true`, which is what stops the server
+         answering 422 `oversell_unacknowledged`, which is the ONLY thing the three-option
+         dialog below is wired to. So on the path every owner actually walks, the dialog
+         never opened: the box was ticked, the position's cost basis was discarded
+         permanently (the STICKY 賣超 rule), and 補登公司行動 — the repair this whole feature
+         exists to offer, and the one §6.7 lists FIRST because it is the non-destructive
+         reading of the same evidence — was never mentioned.
+
+         So the repair is offered HERE, above the tick and in the same box, phrased as the
+         likely cause rather than as an escape hatch: a sell exceeding holdings is far more
+         often a split/exchange/spin-off nobody recorded than a data-entry error. It stays
+         OPTIONAL and it does not gate anything — a declared short (which never reaches this
+         branch; `short_sale` exempts it in validate.py) and a genuinely intended oversell
+         are still the owner's call, one tick away, exactly as before.
+
+         What the tick now says changed too. It is the most destructive confirmation in the
+         system and it used to describe itself as 「我了解」; it now names the consequence in
+         §6.7's own words, so the two options can be compared before one is taken.
+
+         ⚠ `oversell` is NOT always an oversell. It is `soft.find(sell_exceeds_holdings) ||
+         soft[0]` — the FIRST soft issue of any kind — so `cash_overdraft`, `future_trade_date`
+         and `duplicate_trade` all render through this same box and this same checkbox. Both
+         additions below are therefore gated on the real code: a 補登公司行動 button beside a
+         cash overdraft would be a repair for a problem it cannot touch, and telling the owner
+         that acknowledging a future-dated trade 「歸零成本基礎」 would be simply false. */
+      const isOversell = oversell.code === 'sell_exceeds_holdings';
       const div = el('div', 'issue issue-warn');
       div.appendChild(el('span', null, '⚠'));
+      const col = el('div');
+      col.style.cssText = 'display:flex;flex-direction:column;gap:6px;min-width:0;';
+      col.appendChild(el('span', null, oversell.text));
+      if (isOversell) {
+        /* Accent-weighted, like the same option in the dialog: §6.7 lists it FIRST because
+           it is the recommended reading, and a neutral button next to a tick makes the two
+           look equally advisable. 確認寫入 is disabled while this box is up, so there is no
+           competing live primary on screen. */
+        const fix = el('button', 'btn btn-sm btn-primary',
+          '這是公司行動造成的（分割／換股／分拆）→ 補登公司行動');
+        fix.type = 'button';
+        fix.id = 'm-oversell-fix';
+        fix.style.cssText = 'align-self:flex-start;text-align:left;';
+        fix.addEventListener('click', () => openCorpActionRepair(oversell.text, manualBody()));
+        col.appendChild(fix);
+        const sub = el('span', null,
+          '開啟補登表單，已帶入帳戶、代號與日期範圍；補登後這筆賣出就會通過檢查，成本基礎不會被捨棄');
+        sub.style.cssText = 'font-size:10px;color:var(--text-3);line-height:1.5;';
+        col.appendChild(sub);
+      }
       const lab = el('label');
       const cb = el('input');
       cb.type = 'checkbox';
@@ -656,8 +705,11 @@
       cb.checked = m.acked;
       cb.addEventListener('change', () => { m.acked = cb.checked; renderManual(mPreview, issues, serverOk); });
       lab.appendChild(cb);
-      lab.appendChild(el('span', null, oversell.text + ' 我了解，仍要寫入。'));
-      div.appendChild(lab);
+      lab.appendChild(el('span', null, isOversell
+        ? '確認為賣超，接受成本基礎歸零（待釐清）：這個部位的成本基礎會被永久捨棄，之後再買回也不會還原。'
+        : '我了解，仍要寫入。'));
+      col.appendChild(lab);
+      div.appendChild(col);
       issueBox.appendChild(div);
       ackOk = m.acked;
     } else {
@@ -670,6 +722,30 @@
       issueBox.appendChild(div);
     }
     $('#m-confirm').disabled = !hasServer || hard.length > 0 || !ackOk;
+  }
+
+  /* §6.7 door 1's repair, in ONE implementation (§6.0: one owner per concept).
+
+     TWO surfaces open it and they must prefill identically, or the same problem meets the
+     owner as two different forms: the inline offer inside the preview's 賣超 warning (the
+     ordinary path — the draft has not been sent yet) and the first option of the
+     three-option dialog below (the stale-preview path — the server already refused with
+     422). Both pass the SAME draft body, so both bound the date window by the sell's own
+     trade date: the sell is the evidence that the action had already taken effect, so an
+     action dated after it cannot be the explanation. */
+  function openCorpActionRepair(msg, body) {
+    if (!window.pdCorpActionForm) { window.location.href = 'trades.html'; return; }
+    window.pdCorpActionForm.open({
+      account_id: body.account_id,
+      from_symbol: body.symbol,
+      date: body.date,
+      date_max: body.date,
+      reason: '這筆賣出被判為賣超：' + msg
+        + '。若原因是漏登公司行動，補登後股數就會對上，成本基礎不會被捨棄。',
+      /* Re-preview rather than auto-commit: the repaired draft must come back through the
+         same validation and be pressed by the owner, never written on their behalf. */
+      onSaved: () => { schedulePreview(); }
+    });
   }
 
   /* ===== Door 1 (spec 2026-08-06 §6.7) — the 賣超 dialog gains a THIRD option, FIRST =====
@@ -718,23 +794,11 @@
       opts.appendChild(b);
     };
 
-    /* FIRST, and phrased as the likely cause rather than as an escape hatch. */
+    /* FIRST, and phrased as the likely cause rather than as an escape hatch. Same words and
+       same prefill as the inline offer in the preview — one implementation, two surfaces. */
     option('這是公司行動造成的（分割／換股／分拆）→ 補登公司行動',
       '開啟補登表單，已帶入帳戶、代號與日期範圍；補登後這筆賣出就會通過檢查，成本基礎不會被捨棄',
-      '--accent', () => {
-        if (!window.pdCorpActionForm) { window.location.href = 'trades.html'; return; }
-        window.pdCorpActionForm.open({
-          account_id: body.account_id,
-          from_symbol: body.symbol,
-          /* The action must have happened on or before the sell — the sell is the
-             evidence that it already took effect. */
-          date: body.date,
-          date_max: body.date,
-          reason: '這筆賣出被判為賣超：' + msg
-            + '。若原因是漏登公司行動，補登後股數就會對上，成本基礎不會被捨棄。',
-          onSaved: () => { schedulePreview(); }
-        });
-      });
+      '--accent', () => openCorpActionRepair(msg, body));
     option('確認為賣超，接受成本基礎歸零（待釐清）',
       '這個部位的成本基礎會被永久捨棄，並在儀表板上標示為待釐清；之後再買回也不會還原',
       '--up', async () => {

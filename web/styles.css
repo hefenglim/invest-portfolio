@@ -408,15 +408,46 @@ button.is-busy {
 
 /* ---------- modal (shared) ---------- */
 
+/* The app's overlay ladder, written down 2026-08-12 because a modal was stacked BELOW a
+   drawer that opens modals:
+
+     40  topbar / hint pill        65  topbar popovers (refresh · user · bell)
+     70  symbol drawer (detail.css) · pipeline drawer backdrop   71  pipeline drawer
+   ▸ 72  .modal-backdrop           75  search palette   80  toasts · settings modal
+     300 net-progress bar          390/400 mobile nav backdrop / sidebar
+
+   A modal is the newest and most focused surface, so it goes above the drawers — the drawer
+   is where the owner was, the modal is what they just opened, and §6.7 door 2 opens one from
+   inside the other. At 60 the drawer's own CONTENT intercepted every pointer event over the
+   form: no error, no cue, the click simply did nothing (Playwright named the interceptor as
+   `.sd-tx-reconcile` inside `.sd-backdrop`). Dismissing the drawer as the modal opens was the
+   alternative and is worse — door 2's whole argument is that the repair is offered WHERE THE
+   EVIDENCE IS, and cancelling would then leave the owner on a bare dashboard.
+   It stays BELOW the search palette and toasts, which are the surfaces that may legitimately
+   appear over an open modal. */
 .modal-backdrop {
   position: fixed; inset: 0;
   background: rgba(4, 7, 11, 0.6);
   backdrop-filter: blur(2px);
   display: flex; align-items: center; justify-content: center;
-  z-index: 60;
+  z-index: 72;
 }
+/* The height cap + the scroll live on the BASE rule (2026-08-12), not only in the narrow
+   media query below. `.modal-backdrop` is position:fixed + align-items:center, so a modal
+   taller than the window used to overflow BOTH ends with nothing to scroll: the footer —
+   every dialog's primary action — sat below the fold and could not be pressed at all. It
+   was measured on the tallest modal in the app (補登公司行動, whose §6.7 preview grows one
+   block per holding account): 1,089px tall in a 720px window, top −184.5px, computed
+   `overflow-y: visible` / `max-height: none`. Width was capped for the viewport here from
+   the beginning; height simply never was, and only the ≤760px branch ever noticed.
+   `vh` first, then `dvh` for browsers that have it (the pattern .bell-panel already uses):
+   dvh tracks the iOS dynamic toolbar, and a browser that ignores the second declaration
+   keeps the first rather than nothing. */
 .modal {
   width: 480px; max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1867,6 +1898,9 @@ details.freshness > summary > span:not(.sum-chips) {
   .pencil { min-width: 38px; min-height: 38px; }
 
   /* --- overlays fit the screen --- */
+  /* Width, plus a TIGHTER height cap than the base rule's (mobile browser chrome eats the
+     rest). The scroll itself is no longer this rule's job — the base `.modal` owns it since
+     2026-08-12; `overflow-y` is repeated only so this block reads as a complete override. */
   .modal { width: calc(100vw - 20px); max-height: 88dvh; overflow-y: auto; }
   .toast-host {
     left: 10px; right: 10px; width: auto; max-width: none;

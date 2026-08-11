@@ -763,3 +763,34 @@ prevents recurrence.
   browser contexts stubbed **found a second unstubbed context on its first run**, which is the whole
   argument for writing the control rather than the note. And check the *product* too: the same pages
   ship those CDN tags to prod, where an outage at the chart CDN is not cosmetic.
+
+- **2026-08-12 — sizing an overlay only inside a narrow-width media query is a desktop bug in
+  waiting.** `.modal` capped its **width** for the viewport unconditionally and its **height** only
+  below 760px. The ≤760px branch was the only place anyone ever looked, so the defect shipped on
+  every desktop: a dialog taller than the window overflowed **both** ends of a `position: fixed;
+  align-items: center` backdrop with `overflow-y: visible` and nothing to scroll — measured at
+  1,089px in a 1280×720 window, primary button 184px below the fold, **unsavable**. Rule: when a
+  rule exists to keep something *inside the viewport*, it belongs on the **base** rule; the media
+  query is for *tuning* it, never for introducing it. And verify by reading the computed style back
+  out of a real browser at the widths users actually have — three of this repo's layout fixes have
+  now turned on something the stylesheet did not predict.
+
+- **2026-08-12 — a source-scanning guard proves a string exists, not that a feature runs.** The
+  contract test for E23's one-click repair asserted that every field of the repair appears in
+  `web/corp-action-form.js`. Deleting exactly one line — `col.appendChild(btn)` — un-mounts the
+  button while leaving every string in the file: the contract test stayed **green** and only the
+  browser test went red. The same session had already seen the weaker version of this (a wiring
+  guard that passed with its render branch set to `if (false)`). Both are the same shape: the guard
+  tests the *text* of the implementation, and the thing that can break is the *behaviour*. A
+  source scan is a cheap tripwire for "somebody deleted the feature"; it is not evidence the
+  feature works, and it must not be counted as the coverage for a user-facing path.
+
+- **2026-08-12 — a green test can pin the wrong behaviour, and it reads as reassurance.**
+  `test_e4_oversell_soft_warning_gates_confirm_until_ack` walked the most destructive confirmation
+  in the system — acknowledge an oversell, discard the position's cost basis permanently — and
+  asserted it ends in 201. Every part of that was true, and the test was still the problem: it
+  pinned "tick the box and proceed" as *the* oversell flow at the moment that box was the only
+  thing on offer, so a green E4 read as "the oversell path is fine" and nobody asked why §6.7's
+  primary door never appeared. Rule: for a test over a **destructive** confirmation, assert what
+  the user was **offered** as well as what happened. A test that only checks the outcome cannot
+  tell "the owner chose this" from "the owner had no alternative".

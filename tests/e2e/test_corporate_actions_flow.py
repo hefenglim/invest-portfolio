@@ -13,18 +13,24 @@ chain. A defect anywhere in it reddens a test here and nowhere else.
 
 The three doors of §6.7, each covered:
 
-  door 1  the 賣超 confirm dialog   → ``test_door1_...`` (＋the §1 scenario: a blocked sell)
+  door 1  the 賣超 offer, twice     → the INLINE offer inside the manual preview (the
+                                      ordinary path) and the three-option dialog the
+                                      server's 422 raises (the stale-preview path)
   door 2  the symbol drawer footer  → ``test_door2_...`` (＋its negative control)
   door 3  the 5th ledger tab        → SPLIT / EXCHANGE / SPINOFF, one test each
 
 Plus D13/D28's multi-account preview, E23's one-click convert-to-SPLIT (which had a
-source-scanning contract test but had never been RUN), and the CSV template round trip.
+source-scanning contract test but had never been RUN), §6.7's ✓ unblock line, the CSV
+template round trip, and the window the shared modal has to fit inside.
 
-⚠ **Door 1's dialog is not reachable from the manual form's own preview flow** — see
-``test_door1_...``'s docstring. The dialog is the fallback for a preview/commit
-DISAGREEMENT, and this file produces that disagreement the way a real deployment does: a
-second surface writes to the same ledger while the form's preview sits stale. That is a
-finding about the app, recorded here because the test had to be built around it.
+Door 1 has TWO surfaces because it has two occasions. The inline offer covers the ordinary
+one: the owner's own draft trips the 賣超 guard and the preview says so, so the repair
+belongs beside the acknowledgement, before the destructive choice is taken. The dialog
+covers a preview/commit DISAGREEMENT — the draft previewed clean and the server refused
+anyway — which this file produces the way a real deployment does: a second surface writes to
+the same ledger while the browser's preview sits stale (this app has an API, a CSV importer
+and a scheduler all writing one file). Both open the SAME prefill; ``web/input.js``
+implements it once.
 
 Browser contexts come from the shared ``fresh_page`` fixture, which installs issue #67's
 third-party stub; ``tests/e2e/test_thirdparty_isolation.py`` fails the build if any context
@@ -156,6 +162,21 @@ def _seed_hundred_shares(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _seed_committed_oversell(conn: sqlite3.Connection) -> None:
+    """§1's scenario with the 賣超 ALREADY WRITTEN — where a real owner meets this feature.
+
+    100 shares bought, then 400 sold: an oversell that was accepted (an imported broker
+    history, or an ack that should have been a 補登). The 7-for-1 entered through the form is
+    what legalises it — 100 × 7 = 700 ≥ 400 — so the preview owes the owner §6.7's ✓ line
+    BEFORE they save, and the position must reconcile after.
+    """
+    _seed_hundred_shares(conn)
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.SELL,
+                       quantity=Decimal("400"), price=Decimal("600"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 4, 1))
+    conn.commit()
+
+
 def _seed_thousand_shares(conn: sqlite3.Connection) -> None:
     """1,000 shares in one account — the door-1 and E23 ledgers."""
     seed_accounts(conn)
@@ -269,30 +290,18 @@ def _seed_csv_target(conn: sqlite3.Connection) -> None:
 
 # --------------------------------------------------------------- form driving helpers
 
-def _tall_viewport(page: Page) -> None:
-    """⚠ **A workaround for a shipped layout defect — do not quietly delete this line.**
-
-    ``.modal`` (web/styles.css) gets ``max-height: 88dvh; overflow-y: auto`` ONLY inside the
-    narrow-width media query, and ``.modal-backdrop`` is ``position: fixed`` with
-    ``align-items: center``. So on a DESKTOP-width viewport a modal taller than the window
-    overflows both ends with nothing to scroll — and 補登公司行動 is the tallest modal in the
-    app, because §6.7 mandates an always-on preview that grows one block per holding account.
-
-    Measured 2026-08-12 at the Playwright default 1280×720, driving the SPLIT flow below:
-    modal height 804px, top −42px, 登錄公司行動's bottom edge 41px BELOW the fold, computed
-    ``overflow-y: visible`` / ``max-height: none``. Playwright scrolled, reported "element is
-    outside of the viewport", and timed out — i.e. a real owner on a 720px-tall window cannot
-    save a corporate action at all. Reported, NOT fixed: web/ is outside this task's scope.
-
-    These tests therefore run in a window tall enough for the form, so they measure the
-    corporate-action feature rather than that CSS bug. Reproduce the bug by lowering this.
-    """
-    page.set_viewport_size({"width": 1440, "height": 1200})
-
-
 def _open_ledger_tab(page: Page, base: str) -> None:
-    """Door 3: the 公司行動 tab of the 帳本記錄 section on trades.html."""
-    _tall_viewport(page)
+    """Door 3: the 公司行動 tab of the 帳本記錄 section on trades.html.
+
+    ⚠ **There is deliberately no viewport override here.** These flows ran in a 1440×1200
+    window until 2026-08-12 to work around a shipped layout defect — ``.modal`` had
+    ``max-height``/``overflow-y`` only under ``@media (max-width: 760px)``, so the tallest
+    modal in the app overflowed an ordinary laptop window with nothing to scroll and its save
+    button could not be pressed. The base rule now owns the scroll
+    (``test_the_shared_modal_stays_inside_an_ordinary_laptop_window`` measures it), so every
+    flow below runs at the ordinary 1280×720 default — which makes the whole file a standing
+    guard against that rule being lost again, not just the one test that names it.
+    """
     page.goto(base + "/trades.html", wait_until="load")
     page.wait_for_selector("#m-account option", state="attached")
     page.click("#tab-laction")
@@ -378,6 +387,79 @@ def _open_drawer(page: Page, base: str, symbol: str) -> Locator:
     return page.locator(".sd-tx-section .sd-tx-reconcile")
 
 
+# ====================================================== the window the form has to fit in
+
+
+@pytest.mark.e2e
+def test_the_shared_modal_stays_inside_an_ordinary_laptop_window(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """The save button has to be REACHABLE, at the sizes real windows actually are.
+
+    ``.modal`` is the app's shared dialog. It got ``max-height`` + ``overflow-y: auto`` only
+    inside ``@media (max-width: 760px)``, while ``.modal-backdrop`` is ``position: fixed``
+    with ``align-items: center`` — so on a DESKTOP-width viewport a modal taller than the
+    window overflowed both ends with nothing to scroll. 補登公司行動 is the tallest modal in
+    the app (§6.7 mandates an always-on preview that grows one block per holding account), so
+    it is the one that proves the rule, but the bug was never corporate-action-specific.
+
+    Measured at 1280×720, driving the two-account EXCHANGE below: height **1,089px**, top
+    **−184.5px**, bottom 904.5px, computed ``overflow-y: visible`` / ``max-height: none`` —
+    184px of the dialog, including 登錄公司行動, past the bottom of a screen with nothing to
+    scroll. (The one-account SPLIT flow was 804px / top −42px, so even the smallest version of
+    this form did not fit.) Playwright's own click reported "element is outside of the
+    viewport" and timed out — i.e. the owner could not save. After: 680px / top 20px.
+
+    Asserted on the COMPUTED style of the real element at both sizes, not on the stylesheet:
+    this repo has twice shipped a layout fix that a later equal-specificity rule or an inline
+    style silently out-ranked (LESSONS_LEARNED; the v0.1.26 sweep). ``.ca-modal``'s own
+    injected rule sets ``width``/``max-width`` at the same specificity and later in source
+    order, which is exactly the shape that wins — so the height properties are read back out
+    of the browser. The last clause is the one that matters to the owner: the button is
+    pressed at 1280×720 and the write lands.
+    """
+    base = flow_server(_seed_two_account_position)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.set_viewport_size({"width": 1280, "height": 720})
+    modal = _open_form_from_door3(page, base)
+    _kind_button(modal, 1).click()                          # the 2-account EXCHANGE preview
+    modal.locator(".ca-grid select").select_option("schwab")
+    _symbol_box(modal).fill("AAPL")
+    _date_box(modal).fill(ACTION_DAY.isoformat())
+    _ratio_from(modal).fill("1")
+    _ratio_to(modal).fill("1")
+    with page.expect_response("**/api/ledgers/corporate-actions/preview") as prev:
+        _to_symbol_box(modal).fill("NEWA")
+    assert prev.value.status == 200
+    expect(modal.locator(".ca-acct")).to_have_count(2)      # …the tall one, confirmed
+
+    for width, height in ((1280, 720), (1440, 900)):
+        page.set_viewport_size({"width": width, "height": height})
+        style = modal.evaluate(
+            "n => { const s = getComputedStyle(n);"
+            " const r = n.getBoundingClientRect();"
+            " return {overflow: s.overflowY, maxHeight: s.maxHeight,"
+            "         top: r.top, bottom: r.bottom, height: r.height}; }"
+        )
+        where = f"{width}x{height}: {style}"
+        assert style["overflow"] in ("auto", "scroll"), where
+        assert style["maxHeight"] != "none", where
+        assert style["top"] >= -0.5, where                  # not clipped off the top…
+        assert style["bottom"] <= height + 0.5, where       # …nor past the bottom
+        assert style["height"] > 300, where                 # still a real dialog, not collapsed
+
+    page.set_viewport_size({"width": 1280, "height": 720})
+    with page.expect_response("**/api/ledgers/corporate-actions") as saved:
+        _save_button(modal).click()
+    assert saved.value.status == 201, saved.value.text()
+
+    assert not console_errors and not page_errors, (
+        f"modal fit: console={console_errors!r} page={page_errors!r}"
+    )
+
+
 # ============================================================ door 3 — the 5th ledger tab
 
 
@@ -399,7 +481,6 @@ def test_door3_split_entered_by_hand_unblocks_a_previously_refused_sell(
     console_errors, page_errors = _sink(page)
 
     # --- 1. the sell that cannot be written -------------------------------------------
-    _tall_viewport(page)
     page.goto(base + "/trades.html", wait_until="load")
     page.wait_for_selector("#m-account option", state="attached")
     page.select_option("#m-account", "tw_broker")
@@ -623,28 +704,189 @@ def test_door3_spinoff_carves_the_cost_and_the_child_reconciles_from_nothing(
     )
 
 
-# ================================================================== door 1 — the 賣超 dialog
+# ================================================================== door 1 — the 賣超 offer
+
+
+@pytest.mark.e2e
+def test_door1_the_ordinary_path_offers_the_repair_before_the_basis_is_discarded(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """§6.7 door 1 on the path every owner actually walks — §1's own numbers, end to end.
+
+    Until 2026-08-12 this path had no door at all. ``web/input.js`` rendered its 賣超
+    acknowledgement inline and gated 確認寫入 on it; ticking it makes the commit carry
+    ``ack_oversell: true``, which is exactly what stops the server answering the 422 the
+    three-option dialog is wired to. So the owner ticked a box, the position's cost basis was
+    discarded permanently, and 補登公司行動 — the repair the whole feature exists to offer —
+    was never mentioned. The dialog was reachable only through a preview/commit disagreement
+    (the test below), i.e. never, on the ordinary path.
+
+    The four clauses asserted here are the ones that make the repair real rather than
+    decorative: it is offered BEFORE the tick (§6.7's order), it opens the SAME shared form
+    prefilled from the draft sell with the date window bounded by that sell's own trade date,
+    the sell then comes back legal **with no acknowledgement asked for at all**, and the
+    position that results still carries its original cost. The tick is never touched, which
+    is the whole point — it is the branch that destroys the basis.
+    """
+    base = flow_server(_seed_hundred_shares)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/trades.html", wait_until="load")
+    page.wait_for_selector("#m-account option", state="attached")
+    page.select_option("#m-account", "tw_broker")
+    page.click("#m-side-sell")
+    page.fill("#m-symbol", "2330")
+    page.fill("#m-shares", "400")                         # 400 > 100 held -> 賣超
+    with page.expect_response("**/api/input/manual/preview") as pv:
+        page.fill("#m-price", "600")
+    assert pv.value.status == 200
+    page.wait_for_selector("#m-ack")
+    expect(page.locator("#m-confirm")).to_be_disabled()
+    sell_date = page.input_value("#m-date")
+
+    repair = page.locator("#m-oversell-fix")
+    expect(repair).to_be_visible()
+    assert page.evaluate(
+        "() => { const fix = document.querySelector('#m-oversell-fix');"
+        " const ack = document.querySelector('#m-ack');"
+        " return !!(fix && ack && (fix.compareDocumentPosition(ack)"
+        "   & Node.DOCUMENT_POSITION_FOLLOWING)); }"
+    ), "§6.7 lists 補登公司行動 FIRST"
+
+    repair.click()
+    modal = page.locator(".ca-modal")
+    expect(modal).to_be_visible()
+    expect(modal.locator(".ca-reason")).to_contain_text("賣超")
+    expect(_symbol_box(modal)).to_have_value("2330")           # prefilled from the draft
+    expect(modal.locator(".ca-grid select")).to_have_value("tw_broker")
+    # The sell is the EVIDENCE that the action already took effect, so an action dated after
+    # it cannot be the explanation — the same window the dialog's option opens with.
+    assert _date_box(modal).get_attribute("max") == sell_date
+
+    _date_box(modal).fill(ACTION_DAY.isoformat())
+    _ratio_from(modal).fill("1")
+    with page.expect_response("**/api/ledgers/corporate-actions/preview") as prev:
+        _ratio_to(modal).fill("7")
+    assert prev.value.status == 200
+    after = _cells(_preview_row(modal, 0, 1))
+    assert after[:3] == ["行動後", "2330", "700"], after
+    assert after[4] == "50,000", after
+    expect(modal.locator(".ca-conserve.ok")).to_contain_text("成本不變")
+
+    # Saving re-runs the manual preview through the form's own onSaved hook.
+    with page.expect_response("**/api/input/manual/preview") as pv2:
+        _save_button(modal).click()
+    assert pv2.value.status == 200
+    page.wait_for_function(
+        "() => { const b = document.querySelector('#m-confirm'); return b && !b.disabled; }"
+    )
+    expect(page.locator("#m-ack")).to_have_count(0)            # the 賣超 is GONE, not acked
+    expect(page.locator("#m-oversell-fix")).to_have_count(0)
+
+    # Between the repair and the sell: the shares were re-denominated and the cost did not
+    # move. Asserted HERE rather than after the commit, because a sell legitimately removes
+    # cost pro rata — 50,000 × 3/7 afterwards, which says nothing about the action.
+    repaired = _holding(base, "2330")
+    assert repaired is not None
+    assert Decimal(repaired["shares"]) == Decimal("700")
+    assert Decimal(repaired["original_cost_total"]) == Decimal("50000")
+
+    with page.expect_response("**/api/input/manual/commit") as cm:
+        page.click("#m-confirm")
+    assert cm.value.status == 201, cm.value.text()
+
+    held = _holding(base, "2330")
+    assert held is not None
+    assert Decimal(held["shares"]) == Decimal("300")           # 100 × 7 − 400
+
+    foot = _open_drawer(page, base, "2330")
+    expect(foot).to_contain_text("＋公司行動 600")
+    expect(foot).to_contain_text("部位摘要 300 股")
+    expect(foot).to_contain_text("✓ 對帳一致")
+    expect(page.locator(".sd-tx-section .sd-tx-issue")).to_have_count(0)
+
+    assert not console_errors and not page_errors, (
+        f"door 1 inline: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_the_preview_names_the_oversold_sell_the_action_will_legalise(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """§6.7's ✓ line, on screen — the sentence that had never been asserted anywhere.
+
+    ``✓ 這筆行動會讓 <date> 的 <n> 股賣出通過檢查（目前為賣超）`` is what tells the owner, at
+    the moment they can still check it, that the repair they came for actually works. It was
+    unasserted because it was wrong: ``_unblocked_sells`` read the covering position off a
+    ledger that ALREADY contains the sell it is judging, so it tested ``Q > H − Q`` where the
+    guard it mirrors tests ``Q > H``. In §1's own scenario — 100 shares, an oversold sell of
+    400, a 7-for-1 that really does legalise it — ``400 <= 700 − 400`` is false and the line
+    stayed silent in the exact case it was written for.
+
+    Seeded straight into the ledger rather than typed, because the state under test is one
+    the entry surfaces exist to PREVENT: a 賣超 that was already accepted, which is where a
+    real owner meets this feature (an imported broker history, §1's own subject).
+    """
+    base = flow_server(_seed_committed_oversell)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    modal = _open_form_from_door3(page, base)
+    modal.locator(".ca-grid select").select_option("tw_broker")
+    _symbol_box(modal).fill("2330")
+    _date_box(modal).fill(ACTION_DAY.isoformat())
+    _ratio_from(modal).fill("1")
+    with page.expect_response("**/api/ledgers/corporate-actions/preview") as prev:
+        _ratio_to(modal).fill("7")
+    assert prev.value.status == 200
+
+    unblock = modal.locator(".ca-unblock")
+    expect(unblock).to_have_count(1)
+    expect(unblock).to_contain_text("2026-04-01")
+    expect(unblock).to_contain_text("400 股賣出通過檢查")
+    expect(unblock).to_contain_text("目前為賣超")
+    # ⚠ The conservation verdict on THIS ledger legitimately reads 「成本改變了 0 → 21,429」,
+    # and that is the repair rather than a defect: 行動前 is the CURRENT book, whose basis the
+    # 賣超 discarded (hence 0), and 行動後 is the replay in which the sell is covered, so the
+    # basis survives (50,000 × 3/7 for the 300 shares left). Conservation is asserted on the
+    # clean ledgers elsewhere in this file; what is asserted here is that the form lets the
+    # owner act — a repair offered under a permanently disabled save button is not a repair.
+    expect(_save_button(modal)).to_be_enabled()
+
+    with page.expect_response("**/api/ledgers/corporate-actions") as saved:
+        _save_button(modal).click()
+    assert saved.value.status == 201, saved.value.text()
+
+    held = _holding(base, "2330")
+    assert held is not None
+    assert Decimal(held["shares"]) == Decimal("300")           # 100 × 7 − 400, no longer 賣超
+
+    foot = _open_drawer(page, base, "2330")
+    expect(foot).to_contain_text("＋公司行動 600")
+    expect(foot).to_contain_text("部位摘要 300 股")
+    expect(foot).to_contain_text("✓ 對帳一致")
+
+    assert not console_errors and not page_errors, (
+        f"unblock sentence: console={console_errors!r} page={page_errors!r}"
+    )
 
 
 @pytest.mark.e2e
 def test_door1_oversell_dialog_offers_the_repair_first_and_the_sell_then_lands(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """§6.7 door 1: the most destructive confirmation in the system, as a guided repair.
+    """§6.7 door 1's OTHER occasion: a preview/commit disagreement, as a guided repair.
 
-    ⚠ **How this flow is reached, and why it is not the obvious one.** ``web/input.js``
-    renders its own 賣超 acknowledgement INSIDE the preview (``#m-ack``) and holds 確認寫入
-    disabled until it is ticked — at which point the commit carries ``ack_oversell: true``
-    and the server never answers 422 ``oversell_unacknowledged``. The three-option dialog is
-    wired to that 422 alone, so on the ordinary path it never opens: the owner ticks the box,
-    the basis is discarded, and 補登公司行動 is never offered. (Reported, not fixed — the
-    frontend is outside this task's file scope.)
-
-    The 422 IS reachable, and this test reaches it the way a real deployment would: a second
-    surface writes to the same ledger while the browser's preview sits stale. That is not a
-    contrivance — this app is explicitly a 1–2 user system with an API, a CSV importer and a
-    scheduler all writing the same file, and the dialog exists precisely as the fallback for
-    that disagreement.
+    The test above covers the ordinary path — the owner's own draft trips the guard and the
+    preview offers the repair inline. This one covers the case the inline offer cannot see: a
+    draft that previewed CLEAN and was refused at commit anyway, because a second surface
+    wrote to the same ledger in between. That is not a contrivance — this app is explicitly a
+    1–2 user system with an API, a CSV importer and a scheduler all writing the same file,
+    and the three-option dialog exists precisely as the fallback for that disagreement. It is
+    the only way to reach a 422 ``oversell_unacknowledged`` from the form now that the
+    ordinary path resolves the 賣超 before the commit is sent.
 
     Asserted here: the option ORDER (§6.7 lists 補登公司行動 first, because 確認 discards the
     cost basis permanently), that the repair opens the SAME shared form pre-filled from the
@@ -662,7 +904,6 @@ def test_door1_oversell_dialog_offers_the_repair_first_and_the_sell_then_lands(
     page.on("response", lambda r: refusals.append(f"{r.status} {r.url}") if r.status >= 400
             else None)
 
-    _tall_viewport(page)
     page.goto(base + "/trades.html", wait_until="load")
     page.wait_for_selector("#m-account option", state="attached")
     page.select_option("#m-account", "tw_broker")
@@ -780,7 +1021,6 @@ def test_door2_offers_the_repair_beside_a_red_footer_and_nowhere_else(
     bad: list[str] = []
     page.on("response", lambda r: bad.append(r.url) if r.status >= 500 else None)
 
-    _tall_viewport(page)
     foot = _open_drawer(page, base, "2330")
     expect(foot).to_contain_text("⚠ 對帳不一致")
     door = foot.locator("button", has_text="補登公司行動")
@@ -813,20 +1053,34 @@ def test_door2_offers_the_repair_beside_a_red_footer_and_nowhere_else(
     expect(issue).to_contain_text("請先補登缺少的買進或期初庫存")
     expect(_save_button(modal)).to_be_disabled()
 
-    # ⚠ **The form opens UNDERNEATH the drawer that launched it** — `.modal-backdrop` is
-    # z-index 60 (web/styles.css:416) and `.sd-backdrop` is 70 (web/detail.css:4), so every
-    # control on the form that overlaps the drawer is inert. Measured 2026-08-12: clicking
-    # 取消 fails with "<div class=\"sd-tx-reconcile\"> from <div class=\"sd-backdrop\">
-    # subtree intercepts pointer events", and because the interceptor is the drawer's own
-    # CONTENT (not the bare backdrop, which does close on click) a real owner's click does
-    # nothing at all. Reported, not fixed: web/ is outside this task's scope. Esc — the
-    # recovery a user is forced into — dismisses the drawer, and the SAME button then takes a
-    # real hit-tested click, which is the cleanest proof that stacking is the only thing
-    # wrong with door 2's form.
-    page.keyboard.press("Escape")
-    expect(page.locator(".sd-backdrop")).to_have_count(0)
-    modal.locator(".modal-foot .btn").first.click()       # 取消
+    # **The form sits ABOVE the drawer that launched it, and door 2 leaves the drawer**
+    # **standing** (fixed 2026-08-12). `.modal-backdrop` was z-index 60 against
+    # `.sd-backdrop`'s 70, so every control on the form that overlapped the drawer was inert:
+    # clicking 取消 failed with "<div class=\"sd-tx-reconcile\"> from
+    # <div class=\"sd-backdrop\"> subtree intercepts pointer events", and because the
+    # interceptor is the drawer's own CONTENT (not the bare backdrop, which does close on
+    # click) a real owner's click did nothing at all — no error, no visual cue. This test used
+    # to press Esc first to dismiss the drawer; that workaround is deleted, and the click
+    # below landing WITHOUT it is the assertion. The relation is read out of the browser
+    # rather than off the two stylesheets, because computed order is what hit-testing uses.
+    layers = page.evaluate(
+        "() => ({"
+        " modal: parseInt(getComputedStyle(document.querySelector('.modal-backdrop')).zIndex),"
+        " drawer: parseInt(getComputedStyle(document.querySelector('.sd-backdrop')).zIndex)})")
+    assert layers["modal"] > layers["drawer"], layers
+    expect(page.locator(".sd-backdrop")).to_have_count(1)  # the evidence is still on screen
+    modal.locator(".modal-foot .btn").first.click()        # 取消 — a real hit-tested click
     expect(modal).to_have_count(0)
+    expect(page.locator(".sd-backdrop")).to_have_count(1)  # …and cancelling did not close it
+
+    # Esc obeys the same rule — the surface on TOP consumes it. Before the fix Esc reached the
+    # drawer THROUGH the open form and closed the thing underneath, which is the keyboard
+    # spelling of the same defect.
+    door.click()
+    expect(page.locator(".ca-modal")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator(".ca-modal")).to_have_count(0)
+    expect(page.locator(".sd-backdrop")).to_have_count(1)
 
     # The negative control: a clean position in another account, same drawer, no button.
     clean = _open_drawer(page, base, "AAPL")

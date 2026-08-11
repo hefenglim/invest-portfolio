@@ -358,6 +358,53 @@ def test_preview_says_when_the_action_unblocks_a_failing_sell(
     assert unblocked["date"] == "2026-06-12"
 
 
+def test_preview_does_not_call_a_legal_sell_an_oversell(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The FALSE POSITIVE half of ``_unblocked_sells`` (found 2026-08-12).
+
+    900 of a 1,000-share position is an ordinary, fully covered sell — the 賣超 guard never
+    looked at it. Saying 「這筆行動會讓 … 賣出通過檢查（目前為賣超）」 about it tells the owner
+    their ledger holds a problem it does not, in the one place they came to fix a real one.
+
+    The cause is that the sell is ALREADY in the ledger when this reads it, while
+    ``validate.py`` asks the same question about a row that does not exist yet: the stored
+    count on the sell's own date has the sell subtracted out of it, so the test degenerated
+    from ``Q > H`` to ``Q > H − Q``. Any sell of more than half the position tripped it.
+    """
+    insert_transaction(golden_db, account_id="tw_broker", symbol="2330", side=Side.SELL,
+                       quantity=D("900"), price=D("60"), fees=D("0"), tax=D("0"),
+                       trade_date=date(2026, 6, 12))
+    golden_db.commit()
+    body = api_client.post(f"{_BASE}/preview", json=_body()).json()
+    assert body["unblocks"] == [], body["unblocks"]
+
+
+def test_preview_names_the_oversold_sell_the_action_actually_legalises(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The FALSE NEGATIVE half — §1's own scenario, the case the sentence was written for.
+
+    100 shares, a sell of 400 that really is an oversell, and a 7-for-1 that really does
+    legalise it (100 × 7 = 700 ≥ 400). The same double-subtraction made the second clause
+    ``400 <= 700 − 400`` false, so the ✓ line stayed silent exactly where §6.7 promises it.
+    Both counts are therefore taken as the COVERING position — the sell added back — which
+    is the figure ``validate.py`` calls ``held_then``.
+    """
+    golden_db.execute("DELETE FROM transactions WHERE symbol='2330'")
+    insert_transaction(golden_db, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=D("100"), price=D("500"), fees=D("0"), tax=D("0"),
+                       trade_date=date(2026, 1, 5))
+    insert_transaction(golden_db, account_id="tw_broker", symbol="2330", side=Side.SELL,
+                       quantity=D("400"), price=D("600"), fees=D("0"), tax=D("0"),
+                       trade_date=date(2026, 6, 12))
+    golden_db.commit()
+    body = api_client.post(f"{_BASE}/preview", json=_body(ratio_to="7")).json()
+    (unblocked,) = body["unblocks"]
+    assert (unblocked["symbol"], unblocked["shares"]) == ("2330", "400")
+    assert unblocked["date"] == "2026-06-12"
+
+
 def test_preview_reports_a_spinoffs_two_rows(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:

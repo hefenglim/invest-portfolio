@@ -22,7 +22,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from tests.conftest import _seed_dual_account, _seed_golden
@@ -198,8 +198,26 @@ def test_fee_override_pencil_is_a_true_toggle(
 def test_e4_oversell_soft_warning_gates_confirm_until_ack(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """E4: selling more than held raises a soft warning + ack checkbox; the confirm button
-    stays disabled until the ack is checked, then the write is allowed (201)."""
+    """E4: selling more than held raises a soft warning; the confirm button stays disabled
+    until the owner chooses, and a DELIBERATE oversell is still allowed (201).
+
+    ⚠ **This test asserted the wrong thing until 2026-08-12 — and the 201 was not the wrong
+    part.** It walked the single most destructive confirmation in the system (ticking the box
+    discards the position's cost basis PERMANENTLY under the STICKY 賣超 rule) and pinned that
+    walk as correct while the box was the ONLY thing on offer. Spec §6.7 says this moment
+    must lead with 補登公司行動, because a sell exceeding holdings is far more often a
+    split/exchange/spin-off nobody recorded than a real oversell — and the three-option
+    dialog that implements §6.7 is wired to the server's 422, which ticking this very box is
+    what prevents. So the repair was unreachable on the exact path this test certified, and a
+    green E4 read as "the oversell flow is fine".
+
+    What is asserted now: the repair is offered, FIRST (§6.7's order), and the tick comes
+    after it and says what it costs. The tick still ends in 201, because a declared short or
+    a genuinely intended oversell remains the owner's call — this is the branch that takes
+    it. ``test_corporate_actions_flow.py::
+    test_door1_the_ordinary_path_offers_the_repair_before_the_basis_is_discarded`` takes the
+    other branch and proves the repair actually removes the oversell.
+    """
     base = flow_server(_seed_golden)
     page = fresh_page
     console_errors, page_errors = _sink(page)
@@ -216,6 +234,21 @@ def test_e4_oversell_soft_warning_gates_confirm_until_ack(
     # The oversell soft issue renders an ack checkbox; confirm is gated until it is ticked.
     page.wait_for_selector("#m-ack")
     assert page.locator("#m-confirm").is_disabled()
+
+    # §6.7 door 1, on the path the owner actually walks: the non-destructive reading of the
+    # same evidence is offered BEFORE the destructive one, in the same box.
+    repair = page.locator("#m-oversell-fix")
+    expect(repair).to_be_visible()
+    expect(repair).to_contain_text("補登公司行動")
+    assert page.evaluate(
+        "() => { const fix = document.querySelector('#m-oversell-fix');"
+        " const ack = document.querySelector('#m-ack');"
+        " return !!(fix && ack && (fix.compareDocumentPosition(ack)"
+        "   & Node.DOCUMENT_POSITION_FOLLOWING)); }"
+    ), "§6.7 lists 補登公司行動 FIRST — the tick beside it discards the basis permanently"
+    # …and the tick now names what it costs, so the two can be compared before one is taken.
+    expect(page.locator("#m-issues")).to_contain_text("成本基礎會被永久捨棄")
+
     page.check("#m-ack")
     page.wait_for_function(
         "() => { const b = document.querySelector('#m-confirm'); return b && !b.disabled; }"

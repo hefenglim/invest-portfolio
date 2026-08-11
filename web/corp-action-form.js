@@ -481,7 +481,24 @@
     modal.appendChild(foot);
     backdrop.appendChild(modal);
 
-    const dismiss = () => backdrop.remove();
+    /* Esc closes THIS form and nothing else. The form is stacked above the symbol drawer
+       (door 2 opens it from inside one; see the overlay ladder in styles.css), and the
+       drawer holds its own document-level Escape handler from the moment it opens — so
+       without this, Esc reached THROUGH the open form and closed the surface underneath it,
+       leaving the form floating over a bare dashboard. Registered in the CAPTURE phase so it
+       runs before the drawer's bubble-phase listener regardless of which was bound first,
+       and it stops propagation: the surface on top owns the key, exactly as it owns the
+       pointer. Removed on dismiss, so a closed form never eats another surface's Esc. */
+    function onKey(e) {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      dismiss();
+    }
+    const dismiss = () => {
+      document.removeEventListener('keydown', onKey, true);
+      backdrop.remove();
+    };
+    document.addEventListener('keydown', onKey, true);
     close.addEventListener('click', dismiss);
     cancel.addEventListener('click', dismiss);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });

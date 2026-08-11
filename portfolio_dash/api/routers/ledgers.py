@@ -997,13 +997,40 @@ def _unblocked_sells(
 
     Said BEFORE saving (§6.7), because this is the sentence that tells the owner the repair
     they came for actually works — and door 1 arrives here from exactly such a sell.
+
+    **The sell is already IN the ledger; the guard it mirrors judges a row that is not**
+    (fixed 2026-08-12). ``validate.py``'s ``held_then`` is ``shares_through`` over a ledger
+    that does not yet contain the row being validated, so it tests ``Q > H``. Read here over
+    a ledger that DOES contain it, the same call returns ``H − Q``, and the test degenerated
+    to ``Q > H − Q``: every sell of more than half a position was announced as an oversell
+    (a legal 900-of-1,000 said 「目前為賣超」), while §1's own scenario — 100 shares, an
+    oversold 400, a 7-for-1 that really does legalise it — failed the second clause
+    (``400 <= 700 − 400``) and reported NOTHING, in the exact case the sentence exists for.
+
+    So both counts add the sell back, recovering the **covering position** ``held_then``
+    names. That addition is exact, not an approximation: a SELL contributes ``−quantity`` to
+    ``shares_through`` on its own date, and no corporate action inside that window can see
+    it — every action the walk includes is dated on or before ``trade_date``, and
+    ``EventPriority`` evaluates an action at ``(date, CORPORATE_ACTION)``, strictly before
+    the same day's ``(date, SELL)``. Equivalent readings (``was < 0 <= now``) are deliberately
+    NOT used: this expression has to stay diff-able against the guard it mirrors.
+
+    Scope, stated because it is narrower than the rendered sentence: the guard has a second
+    leg (``inp.quantity > held``, the net across ALL dates via ``current_shares``) which is
+    not mirrored here. Adding it would make ``ledgers.py`` a tenth production call site of
+    the holdings wrappers — a registry ``tests/data_ingestion/test_holdings_containment.py``
+    pins deliberately — and it can only diverge when a LATER sell also oversells, which is a
+    state whose action preview is already ``blocking`` on E3 (成本基礎已被捨棄) with the save
+    button disabled. If that leg is ever wanted, add the call site to the registry with it.
     """
     found: list[dict[str, str]] = []
     for t in list_transactions(conn, symbol=symbol):
         if t.side is not Side.SELL or t.short_sale or t.account_id not in accounts:
             continue
-        was = shares_through(conn, t.account_id, symbol, on=t.trade_date, index=before)
-        now = shares_through(conn, t.account_id, symbol, on=t.trade_date, index=after)
+        held = shares_through(conn, t.account_id, symbol, on=t.trade_date, index=before)
+        held_after = shares_through(conn, t.account_id, symbol, on=t.trade_date, index=after)
+        was = held + t.quantity          # the covering position, as `held_then` means it
+        now = held_after + t.quantity
         if t.quantity > was and t.quantity <= now:
             found.append({"account_id": t.account_id, "symbol": symbol,
                           "date": t.trade_date.isoformat(),

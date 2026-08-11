@@ -87,6 +87,43 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   reason plus the real fix instead of a button that ends in an error.
 
 ### Fixed
+- **The shared modal could not be scrolled at desktop widths, so its primary button was
+  unreachable.** `.modal` carried `max-height` + `overflow-y` **only** inside
+  `@media (max-width: 760px)`, while `.modal-backdrop` is `position: fixed` + `align-items:
+  center` — so any dialog taller than the window overflowed **both** ends with nothing to scroll.
+  Measured on the tallest dialog in the app (補登公司行動, whose preview grows one block per
+  holding account): 1,089px in a 1280×720 window, top −184.5px, computed `overflow-y: visible` /
+  `max-height: none`, 登錄公司行動 184px below the fold — **the owner could not save a corporate
+  action on an ordinary laptop.** The cap now lives on the base rule; the narrow-width rule keeps
+  its tighter mobile value. Not corporate-action-specific: every shared dialog had it. The
+  corporate-action e2e no longer forces a tall window, so all nine flows now measure the feature
+  at 1280×720 and the whole file is a standing guard.
+- **Door 2 opened the repair form underneath the drawer that launched it.** `.modal-backdrop` was
+  z-index 60 against `.sd-backdrop`'s 70, so every control overlapping the drawer was inert — and
+  because the interceptor was the drawer's own *content*, a click produced nothing at all: no
+  error, no cue. Modals now sit at 72, above the drawers and below the search palette and toasts,
+  with the whole overlay ladder written down beside the rule — the bug existed because it was not.
+  Escape follows the same rule (capture-phase, so it no longer reaches through an open form to
+  close the drawer under it). Rejected: dismissing the drawer as the form opens — door 2's whole
+  argument is that the repair is offered *where the evidence is*.
+- **Door 1 — the feature's primary door — was unreachable on the ordinary path.** The manual form
+  renders its own 賣超 acknowledgement inline and gates 確認寫入 on it; ticking it makes the commit
+  carry `ack_oversell: true`, which is exactly what stops the 422 the three-option dialog is wired
+  to. So on the path every owner actually walks, **the owner ticked a box, the position's cost
+  basis was discarded permanently, and 補登公司行動 was never offered.** The repair is now offered
+  inline *above* the tick, through the same prefill the dialog uses so the two cannot drift. The
+  tick remains — a declared short or a deliberate oversell is still the owner's call — but now
+  names its consequence instead of reading 「我了解，仍要寫入」. Both additions are gated on the
+  issue code, because that same box also carries `cash_overdraft`, `future_trade_date` and
+  `duplicate_trade`: ungated, a cash overdraft would have grown a corporate-action repair button.
+- **The corporate-action preview double-counted the sell it was judging.** `_unblocked_sells` read
+  the covering position off a ledger that **already contains** the sell, testing `Q > H − Q` where
+  the guard it mirrors tests `Q > H`. A legal 900-of-1,000 sell was announced as 「目前為賣超」,
+  and in §1's own scenario (100 shares, an oversold 400, a 7-for-1 that legalises it)
+  `400 <= 700 − 400` is false — so 「✓ 這筆行動會讓…賣出通過檢查」 stayed silent in the exact case
+  it exists for. Both counts now add the sell back, which is *exact* rather than approximate
+  because `EventPriority` evaluates a same-day action strictly before a same-day sell. That ✓
+  sentence is asserted for the first time.
 - **A spec'd repair that was never wired.** E23 shipped with the warning only —
   `identifier_change_suspected` appeared nowhere under `web/` or `portfolio_dash/api/`. A contract
   test now asserts every field of the repair is consumed by the shared form, including the branch
