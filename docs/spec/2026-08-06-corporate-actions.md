@@ -1300,6 +1300,37 @@ E23 is the **middle** tier — the same one the 賣超 guard uses, and the close
 meaning: *probably an error, the system cannot be sure, and the owner may legitimately overrule.* A
 passive notice would let the artifact through; the hard tier would block ordinary mergers.
 
+**The repair, and the one condition it has (implemented 2026-08-12).** 「改記為分割」 is **not a
+`kind` flip**: E20 forces the two symbols to collapse into one, and **`to_symbol` survives**. Two
+independent arguments give the same answer — §3.4's normalisation applied after the fact (the
+identifier retires into `note`, never remains a symbol), and, decisively, §5.1's re-expression is
+SPLIT-scoped and applies to the SPLIT's **own** symbol while E23's fourth term says `from_symbol`
+has **no stored prices at all**. A SPLIT on the identifier would therefore re-express an empty
+series and leave `to_symbol`'s prices in pre-split terms: it would repair nothing while looking
+like a repair. The ratio rides across untouched (the rename and the re-denomination are ONE event,
+§3.4) and `cost_carry` is cleared, so the candidate is valid by construction rather than by
+assumption (E8).
+
+**The conversion is well-defined only where the ledger already records the security under the
+TICKER** — D19's "often the ticker itself never changed" case. Where the position sits under the
+*identifier* instead, the converted SPLIT has no source position on its own date and E1a
+hard-rejects it; there the real repair is restating the **transactions** onto the ticker at the
+importer seam, not re-labelling one action row. The preview route therefore **validates the
+candidate — as its complete E13 batch — before offering it**, and otherwise ships `fix_blocked`
+carrying E1a's own message plus that instruction. Offering a control that ends in an error is the
+shape §6.7 already refused when it made the multi-account list read-only.
+
+**Where the repair is NOT offered, and why that is not a dead end.** It is attached to the
+**preview** — the entry path — not to a row already stored. A stored multi-account set cannot be
+converted row by row in any case: the PUT re-validates one row and E13's `partial_action_set_change`
+hard-refuses the partial change, correctly, because the set is one event. The escape already exists
+and is wired: the delete route returns that same 422 and `web/ledger.js` offers **「整組刪除」**
+(`DELETE /ledgers/corporate-actions/set`), after which the event is re-entered as SPLITs through the
+normal door with the one-click available. So a stored set is repairable today; what is missing is
+only a set-level *convert* convenience, which is a backlog item and not a decision. The CSV import
+preview likewise shows E23 without a one-click — correct, because the repair for a CSV row is to fix
+the CSV.
+
 **The condition is narrowed so it fires on the error, not on every merger.** "`to_symbol` has prior
 prices" is true of cases 2 and 3 as well — i.e. of most mergers — and a guard that mostly cries wolf
 trains the owner to click through, so it fails exactly when it matters. The discriminator is the

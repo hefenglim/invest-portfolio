@@ -34,7 +34,25 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   week, which is the failure this release spent an audit correcting, so the detail stays in §8's
   decision table and the commits.
 
+- **E23's one-click convert-to-SPLIT** (spec §5.1 / D22). The `identifier_change_suspected` warning
+  now carries its own repair: the corporate-action preview attaches the exact converted row — a
+  SPLIT on `to_symbol`, the identifier retired into `note` per §3.4, ratio unchanged — and the
+  shared entry form renders it as a one-click that rewrites the form and re-runs the preview. It
+  never writes directly, so the owner reads the resulting shares, the corrected average and
+  成本不變 ✓ before committing. `to_symbol` survives rather than `from_symbol` because a SPLIT on
+  the identifier would re-express an empty price series (E23's own condition is that `from_symbol`
+  has no stored prices) and leave the real security in pre-split terms — a repair that repairs
+  nothing. Where the ledger records the position under the identifier rather than the ticker the
+  converted row would fail E1a, so the API **validates it before offering it** and returns the
+  reason plus the real fix instead of a button that ends in an error.
+
 ### Fixed
+- **A spec'd repair that was never wired.** E23 shipped with the warning only —
+  `identifier_change_suspected` appeared nowhere under `web/` or `portfolio_dash/api/`. A contract
+  test now asserts every field of the repair is consumed by the shared form, including the branch
+  that renders it. An earlier, weaker version of that guard stayed **green** with the branch
+  disabled — every field name was still present in the file — so it was tightened to pin the
+  condition and the handler, and only then went red.
 - **Price SERIES reads are expressed in one share denomination** (spec §5.1(d2), W6c / D42).
   `get_price_history` returns closes **as traded on their own dates**, so a SPLIT inside a read
   window left the older points in a different denomination and every cross-date comparison over
