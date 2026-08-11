@@ -961,8 +961,8 @@ is not a number of record (§12.5 class B), so this is an **accepted and documen
 limitation**, not a defect; the correct future fix is its own `*_raw` column carried with the
 factor.
 
-**(Limitation 2) D12 — the reorganisation fee is invisible to XIRR *by design*, and visible in
-the whole-account IRR (*pending D36*).** The only bookable cash-movement kinds are `DEPOSIT` /
+**(Limitation 2) D12 — the reorganisation fee is invisible to EVERY return metric this system
+has. This is a standing limitation.** The only bookable cash-movement kinds are `DEPOSIT` /
 `WITHDRAW` / `OPENING` / `REBATE` (`api/routers/cash.py::_KINDS`), and only `WITHDRAW` is a
 debit (`portfolio/cash.py::_movement_sign`). **Ruling: book the fee as a `WITHDRAW` with a
 `note`.** The consequences must be stated: it reads in the cash statement as *the owner took
@@ -970,17 +970,21 @@ money out*; it reduces the FX pool's exposure without recognising realized FX (�
 `domain-ledger.md` N1); and `portfolio/returns.py::xirr_reporting` builds its flow series from
 `opening` + `transactions` + `dividends` **only**, so **cash movements never reach XIRR**.
 
-> **This is no longer a permanent blind spot (D36, owner ruling 2026-08-10).** XIRR is
-> **deliberately left untouched** — so every historical figure, every worked anchor in this
-> manual and every stress-audit oracle expectation **stays where it is** — and a
-> **whole-account IRR** is added *additively* in the existing `portfolio/twr.py`, which *does*
-> see a `WITHDRAW`. So the fee is invisible to XIRR **by design** and visible in the second
-> metric.
-> **⚠ Pending D36 (checked in place 2026-08-11): `portfolio/twr.py` currently holds only
-> `twr_index` / `convert_closes` / `build_overlay` and no IRR at all.** Until that metric
-> lands, the reorganisation fee is invisible to **every** current return metric. This
-> paragraph deliberately says "pending D36" rather than stating a permanent limitation,
-> because writing it up as permanent would document a decision the owner has since reversed.
+> **Rewritten 2026-08-11 (D45).** The previous version said this was "no longer a permanent
+> blind spot", on the ground that D36 would add a **whole-account IRR** in `portfolio/twr.py`
+> which *does* see a `WITHDRAW`. **The owner has retired D36 (D45, 2026-08-11) and it was
+> never implemented** — checked in place: `portfolio/twr.py` holds `twr_index` /
+> `convert_closes` / `build_overlay` and no IRR at all. Therefore:
+>
+> **The reorganisation fee is invisible to every return metric this system has, and no
+> resolution is planned.** XIRR's blindness to it is **deliberate** — which is exactly why
+> every historical figure, every worked anchor in this manual and every stress-audit oracle
+> expectation **stays where it is**; D45 moved no number. The fee is visible only where cash
+> movements are visible: the **cash ledger and net worth**.
+>
+> This paragraph deliberately no longer says "pending D36". A manual that promises a fix which
+> never arrives is worse than one that states the blind spot plainly — the reader stops looking
+> for the workaround.
 > The fee also belongs to a whole **class** of items that never reach XIRR (bond/margin
 > interest, interest adjustments, ADR management fees, foreign tax reclaim); that class is
 > the broker-import backlog's scope, and this section does not invent a partial answer for
@@ -1399,14 +1403,14 @@ terminal value can be formed → returns `None` (no partial degradation); no sig
 > hunt it across a multi-account book. Measured anchor: 3 unapplied actions → `kpis.xirr` is
 > `None` (`corp.xirr_blanked_by_unapplied`, `phase1:corp_refused`).
 >
-> **The reorganisation fee (D12 / D36) is invisible to XIRR by design.** The flow series above
-> is built from `opening` + `transactions` + `dividends` **only**, so cash movements
-> (including a reorganisation fee booked as `WITHDRAW`) never reach XIRR; XIRR is
-> **deliberately left untouched** so that every anchored historical figure in this manual
-> stays where it is. The fee surfaces in a **whole-account IRR** instead — **⚠ that metric is
-> not implemented yet (pending D36; `portfolio/twr.py` was checked in place on 2026-08-11 and
-> still holds only the TWR index and the benchmark overlay)**. Full treatment in §4.4.7,
-> limitation 2.
+> **The reorganisation fee (D12) is invisible to XIRR by design — and no second metric sees it
+> either (D45, 2026-08-11).** The flow series above is built from `opening` + `transactions` +
+> `dividends` **only**, so cash movements (including a reorganisation fee booked as `WITHDRAW`)
+> never reach XIRR; XIRR is **deliberately left untouched** so that every anchored historical
+> figure in this manual stays where it is. This paragraph previously said the fee "surfaces in a
+> whole-account IRR instead" — **that metric (D36) was retired by the owner and never
+> implemented**, so the sentence is deleted rather than softened to "pending". It is a
+> **standing limitation**; full treatment in §4.4.7, limitation 2.
 
 **Flow-construction example (`schwab/TSLA`, single-currency USD, each total has an
 anchor)**
@@ -2111,6 +2115,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.5` | 2026-07-26 | **A cash dividend paid after the position closed is booked as realized income** (audit H2, owner ruling 2026-07-26; baseline `v0.1.24`). New **§6.3b**: when a CASH/NET dividend lands while its `(account, symbol)` position is already at zero shares there is no cost basis left to reduce, so it becomes one `RealizedRow(kind="dividend")` (`realized = proceeds_net = net`; shares_sold / original_removed / adjusted_removed all 0; `sell_date` = the payment date). Before the fix the payout was absorbed by the zero-share position and discarded with it, so the dividend overview and the XIRR cashflows counted it while total return did not — three figures, three answers. It is now counted exactly once and **invariant I4 holds**. §5.1 notes that `RealizedRow` now carries `kind: "sale" | "dividend"`. **Tax separation**: the annual package's `realized_gains_{year}.csv` takes `kind == "sale"` only — the payout is already reported by `dividends_{year}.csv` from the dividend ledger, so it is never filed twice. Verification anchor: `moomoo_my/5225` buy 200@6.00 → sell 200@6.50 (position → 0) → NET dividend 120 enters `realized.by_currency[MYR]` (run_phase1 "Found-bug op #3"; stress ops 66→**69**, assertions 1,060→**1,088**, fail=0); hermetic regression `tests/portfolio/test_post_close_dividend.py` (5 cases, including closed → re-bought → paid, which still reduces cost). **Effect on a real ledger: the historical total return of already-closed symbols RISES** (previously dropped payouts now count). Mirror regenerated in the same change set. No other formula changed. |
 | `v1.6` | 2026-08-01 | **Cost basis for foreign cash inflows + the declared short sale** (owner rulings 2026-07-30 / 07-31; baseline `v0.1.25`). ① **§8.1/§8.3 rewritten**: acquisitions widen from "conversions only" to "conversions **+** foreign cash inflows carrying `acq_home_amount`"; the **AMOUNT is stored, never the rate** (a rate is an average and §1.3 forbids an average as the authority; the displayed rate is computed on read). New **`covered_ratio`** (with-basis acquisitions / all acquisitions) absorbs outflows **pro rata** — "total balance − unbased amount" is forbidden (it goes negative once the balance drops below the unbased amount, recreating the reversed-sign figure). The ratio scales **both** the cash and the stock leg (`avg_rate` itself comes from the with-basis population; scaling only cash left the LARGER error — the stock leg, +42,359 TWD measured — unflagged). When the ratio is the literal 1 the caller skips the multiply, so a fully covered ledger is **byte-identical** to the pre-spec engine. `foreign_cash` now counts foreign cash inflows/outflows too, so for the same (account, foreign ccy) it **equals §9's operating cash pool** (they diverged deliberately before, audit C9); only the cost basis still differs. ② **New §4.3, declared short sale**: `short_sale` (default false, **never inferred**); a declared sell exhausts the long lot then opens a short lot holding the net proceeds, a buy covers first then adds to the long, long and short are mutually exclusive so a position is **one signed quantity**; cover P&L is `(short_avg − the covering buy's all-in per-share cost) × covered`, dated the **cover date**, `kind="short_cover"` (it reaches the tax capital-gains sheet). Ratios must divide by `abs(cost_total)` and `fully_recovered` is gated on `not short_open` (a short's basis is negative by construction). **A dividend during an open short is unbookable** (the short pays it; strict path raises `UnbookableLedgerError`, the dashboard skips and flags `unbookable_dividend`). Ruled limitations: `gross_invested` excludes short capital, a pure short XIRR reports a borrowing rate, weights use a net-exposure convention. ③ **The 賣超 guard is now DATE-AWARE** (`shares_through(trade_date)`, mirroring cash's `running_min`) and `oversold` is **sticky** (a later buy does not clear it, because it does not restore the discarded basis). Anchors: the full `tw_broker/2609` short lifecycle (see the §4.3 table) and `fx.covered_ratio/basis_gap/foreign_cash`; stress ops 69→**77**, assertions 1,088→**1,806**, fail=0; phase 2 (live demo) 1,192 assertions fail=0. Mirror regenerated in the same change set. |
 | `v1.7` | 2026-08-11 | **Corporate actions (SPLIT / EXCHANGE / SPINOFF)** (owner decisions D1–D39, spec `docs/spec/2026-08-06-corporate-actions.md`; baseline `v0.1.28 + feat/corporate-actions`). ① **New §4.4**, placed under §4 Cost Basis after §4.3, **renumbering nothing** — the spec's own §7.5 names "§5 Realized/Unrealized P&L" and "§7 Total Return" by their current numbers in the same sentence, and renumbering would invalidate that reference together with every existing §5.1/§7.2-style citation across the repo: the ledger row and the **conservation law** (Σ`original_total` / Σ`adjusted_total` / Σ`dividend_portion` / `gross_invested` all unchanged; the value leg **SPLIT-only**) plus the two deliberate exceptions (cash in lieu = ordinary SELL, reorganisation fee = `WITHDRAW`); **the ratio is two positive integers** and `qty × to ÷ from` is **multiply-first** (measured `210×1/3 = 70` vs `210×(1/3) = 69.999…9`, which `validate.py`'s bare `>` turns into an oversell → STICKY basis discard); **the three formulas and the nine-field `_Position` transfer table are quoted verbatim from spec §4.1–§4.4** (the manual never restates a formula in its own words); D21's provenance label on a spun-off child's payback progress; **six verified worked examples** (§12.1 E18–E24); the **edge matrix E1–E24** (including the oversell / declared-short interactions E3/E4/E5/E18/E22 and E24); the price basis (`close_raw` / `split_basis`, read-time re-expression, **SPLIT-scoped**). ② **§1.4 / §1.1 / §12.4: the permanent ledgers go from four to five** (adding `corporate_actions`) — omitting it from a replay yields an amount that looks normal and is priced on pre-action share counts. ③ **§4.1's same-day priority changes from `0/1/2/3` to `EventPriority`'s `0/10/20/30/40`**, inserting the action between `OPENING` and `BUY`; the **relative order is unchanged**, so a ledger with no action replays byte-identically. ④ **Cross-references**: §5.1 (an action emits no `RealizedRow`), §5.3 (`unbookable_action` as the third honest degradation), §7.1 (`gross_invested` untouched), §7.2 (an action is not a cash flow; an unapplied action blanks XIRR **portfolio-wide** and the reason must name account / symbol / date). ⑤ **Two limitations**: **D11** (`volume` is not un-adjusted) is stated as **standing**; **D12** (the reorganisation fee) is **not** a permanent blind spot — D36 leaves XIRR **deliberately untouched** and adds a **whole-account IRR** in `portfolio/twr.py`; checked in place for this revision, that file still holds no IRR, so it is written up as "**pending D36**". ⑥ **D34: cash-and-stock mergers are a hard exclusion**; the spec's former two-row recipe is withdrawn and **must not appear as a procedure** (`CORPORATE_ACTION(10)` precedes `SELL(30)` → the EXCHANGE zeroes the source → the same-day SELL lands on a zero-share position → STICKY 賣超); the nearest expressible form is recorded as an **unofficial workaround** with its inexactness stated. ⑦ Verification basis updated to the current run (phase-1 **118 ops / 3,791 assertions / 0 fail**; phase 2 **1,192 / 0 fail**), with all 23 `corp.*` corporate-action assertions passing. Mirror regenerated in the same change set. **No existing formula or accounting definition changed other than the above.** |
+| `v1.7a` | 2026-08-11 | **D45 — the owner retired D36 (the whole-account IRR).** §4.4.7 limitation 2 and the §7 XIRR note are both rewritten: the reorganisation fee (D12) was documented as "invisible to XIRR but visible in the whole-account IRR", and that second metric is withdrawn and was never implemented, so D12 reverts to a **standing limitation** — the fee is invisible to every return metric this system has and surfaces only in the cash ledger and net worth. **No figure changed** (XIRR never included cash movements); what changed is the statement of the limitation: promising a fix that never arrives is worse than stating the blind spot plainly |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

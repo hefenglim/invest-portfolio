@@ -87,6 +87,17 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 - `volume` keeps the provider's basis (D39b — it has no `*_raw` column, so a factor on it could
   never be restated or reversed), so the volume-confirmation signal still spans two denominations
   across a split.
+- **D45 — the whole-account IRR (D36) is retired, and D12's blind spot is standing again.** D36 was
+  approved on 2026-08-10 and never implemented; the owner retired it on 2026-08-11. Its only
+  load-bearing consequence was the wording of one limitation, and that wording was wrong in a way
+  worth naming: the accounting manual said the reorganisation fee is "invisible to XIRR by design
+  but visible in the whole-account IRR (pending D36)". With D36 gone, the fee is invisible to
+  **every** return metric this system has, and no resolution is planned. Corrected in five places —
+  spec §3.3, §7.5 and §8, and both manual mirrors (§4.4.7 limitation 2 and the §7 XIRR flow note) —
+  and the sentence is *deleted* rather than softened to "pending", because a manual promising a fix
+  that never arrives is worse than one stating the blind spot plainly: the reader stops looking for
+  the workaround. **No figure moved** — XIRR never included cash movements — so every historical
+  number, worked anchor and oracle expectation is unchanged. Manual → `v1.7a`.
 - **D44 is open:** the owner-entered target band (`target_low` / `target_high`) is *not*
   re-expressed, so after a split a stale band meets a re-expressed price and crosses immediately.
   The system cannot choose between re-expressing it (guessing the owner's intent) and leaving it,
