@@ -24,6 +24,53 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
   `total_cost` + `shares`; compute `average = total_cost / shares` on read
   (see `domain-ledger.md`).
 
+### The stored price basis — as-traded, in two columns (2026-08-10, owner D30)
+
+Same class of rule as the float-noise cap above: a statement about what a stored price
+**means**. A provider re-states its history after a split, so the number it delivers for a
+given date depends on **when it was fetched** — while the ledger's share count for that
+date does not. The stored close therefore fixes one canonical meaning:
+
+> **A stored `close` is the price AS TRADED on its own `as_of_date`** (unadjusted for any
+> later split), so it is always in the same share terms as the ledger's share count on that
+> date.
+
+`prices` carries three related columns to keep that true under an editable action ledger:
+
+| Column | Meaning |
+| --- | --- |
+| `close_raw` | the provider's value **exactly as delivered**, **un-capped** — the only price column exempt from the 4-dp cap, because the close is *derived* from it and the derivation must not compound the cap's error |
+| `split_basis` | the factor applied (canonical TEXT; the identity is the literal `"1"`, which is also the DDL default) |
+| `close` | `cap_4dp(close_raw × split_basis)` — **the cap goes LAST, on the product** |
+
+- **Two operations, one expression.** The write seam (`pricing/store.upsert_prices`, every
+  fetch) and the reconcile (`pricing/reconcile.reconcile_prices`, every SPLIT
+  insert/edit/delete) both compute `close := close_raw × target`, **recomputed from the raw
+  column** — never rescaled in place, never by dividing the old basis back out. One shared
+  helper (`pricing/store.express_close`) so the two cannot drift. Idempotency, reversibility
+  and order-independence then hold by construction: deleting a SPLIT restores every affected
+  row **byte-identically**, which matters because `prices` is the only place this feature
+  writes outside the ledgers and 重算 does not cover it.
+- **Cap last, measured:** `cap(raw) × 20` stores `2.8340` where `cap(raw × 20)` stores
+  `2.8333`; at `×3` it is `0.4251` vs `0.4250` — the sub-RM1 MY tick above.
+- **Only `close` is re-expressed** (D39b). `open` / `high` / `low` keep the provider's basis,
+  like `volume`: they have no `*_raw` of their own, so a factor applied to them could never be
+  restated or reversed. ⚠ A row's `close` and its `open`/`high`/`low` can therefore be on
+  **different bases** — the first candlestick drawn from this table must divide them by
+  `split_basis` first, or add its own raw columns.
+- **The write multiplies; the read divides.** The write window is `(as_of, fetched_at]` —
+  "which splits had the provider already folded in?" — and multiplies them back **out** to
+  recover the as-traded value. The read (`portfolio/price_basis.price_in`) window is
+  `(pd, d]` — "which splits happened between this price's date and the valuation day?" — and
+  **divides**, so a price carried forward across a split meets a share count in the same
+  units. Different windows, not a double application; the as-traded invariant sits between
+  them. The read is never written back, so 重算 stays authoritative.
+- **`Decimal(1)` is not `Decimal("1.0")`.** Multiplication sums exponents, so a
+  non-integral identity factor rewrites `1.5` as `1.50` and `600` as `600.0` —
+  value-preserving, TEXT-changing, invisible to `==`, and it would repaint every price row
+  in the database on symbols with no corporate action at all. Both seams **short-circuit**
+  past the identity rather than computing it.
+
 **Amount precision (per-currency minor unit, applied at settlement):**
 - USD = 2 dp (cent) · TWD = 0 dp (whole NT$; **fee/tax 無條件捨去 — floor, ROUND_DOWN — to
   integer** per 財政部 FE-D3, owner sign-off 2026-07-15; supersedes the earlier 四捨五入) ·

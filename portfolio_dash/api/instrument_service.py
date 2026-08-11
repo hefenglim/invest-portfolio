@@ -5,6 +5,11 @@ into ONE call. Layering: this is api-layer orchestration — it may call
 ``data_ingestion`` (register/store), ``pricing`` (probe/name/refresh), and the
 ``scheduler.jobs`` worklist constants; none of those layers import it back.
 
+It also hosts :func:`reconcile_price_basis` — the application-level entry point for the
+W6b price-basis reconcile — for the same layering reason: it already binds
+``scheduler.jobs.split_factor_fn`` for the quote/history legs, and ``pricing/`` may not
+reach the corporate-action ledger for itself (D17).
+
 The correctness gate: by default a symbol is registrable ONLY when a real quote
 can be fetched for it (``require_quote=True``) — a symbol whose price no source
 can supply is almost always a typo, and admitting it would recreate the
@@ -15,6 +20,7 @@ register endpoint passes it for backward compatibility.
 
 import logging
 import sqlite3
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -30,6 +36,7 @@ from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.bursa_registry import bursa_name
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.names import lookup_name
+from portfolio_dash.pricing.reconcile import reconcile_prices
 from portfolio_dash.pricing.refresh import (
     refresh_dividends,
     refresh_history,
@@ -51,6 +58,33 @@ from portfolio_dash.shared.models.assets import Instrument
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CCY = {Market.TW: Currency.TWD, Market.US: Currency.USD, Market.MY: Currency.MYR}
+
+
+# --- Price-basis reconcile (spec §5.1(c), D30 · W6b) ---------------------------------
+
+
+def reconcile_price_basis(conn: sqlite3.Connection, symbols: Iterable[str]) -> int:
+    """Restate *symbols*' stored closes against the CURRENT action ledger. Rows changed.
+
+    **Call this on any insert / edit / delete of a SPLIT row** (§5.1(c)) — W7's ledger
+    router is the caller that makes it real; today the CRUD in ``data_ingestion/store.py``
+    has no production caller at all (audit F-32). Pass the SPLIT's ``from_symbol`` (which
+    E20 forces to equal its ``to_symbol``). Passing extra symbols is harmless — the
+    reconcile is a no-op for anything with no SPLIT in the ledger — so a router that cannot
+    cheaply tell a SPLIT from an EXCHANGE may simply pass both ends of the edited row.
+
+    **Why the entry point lives here and not in ``data_ingestion/``.** ``pricing/`` may not
+    import anything above ``shared/`` (D17 / trap #12), so the ratio lookup is injected;
+    this module already binds ``split_factor_fn(conn)`` for the quote/history legs and
+    ``api/`` may legally import both ``pricing`` and ``scheduler``. The alternative — a
+    ``data_ingestion → pricing`` import from inside the CRUD — is an edge
+    ``architecture.md``'s diagram does not have, and this feature has already spent one
+    owner decision (D39a) on adding a single documented edge.
+
+    The factor is bound ONCE for the whole call (trap #21): ``split_factor_fn`` reads and
+    groups the entire action ledger, so binding it per symbol would re-read it per symbol.
+    """
+    return reconcile_prices(conn, symbols, factor_of=split_factor_fn(conn))
 
 
 class QuickRegisterError(Exception):

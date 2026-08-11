@@ -80,6 +80,39 @@ def _no_factor(symbol: str, *, after: date, through: date) -> Decimal:
     return _ONE
 
 
+def express_close(raw: Decimal, basis: Decimal) -> tuple[str, str]:
+    """``(close, split_basis)`` as stored TEXT, for a provider close under a split factor.
+
+    **THE one owner of the price-basis expression** (§6.0, "ONE owner per concept").
+    §5.1(c) defines two operations — the write seam on every fetch and W6b's reconcile on
+    every SPLIT insert/edit/delete — and defines them as the *same* restatement,
+    ``close := raw × target``. Two copies of that expression would be two things to keep
+    in step, and their disagreement is invisible to a value assertion: both would store
+    the same *number* and differ only in the stored TEXT, which is precisely what D38
+    invariant 3 forbids.
+
+    Two properties, both load-bearing and both measured:
+
+    * **The cap goes LAST, on the product** (F-20). ``_cap_dp(raw, 4) × basis`` amplifies
+      the cap's own error by the factor: the float tail ``0.14166666865348816`` at ``×20``
+      stores 2.8340 that way and 2.8333 correctly, and at ``×3`` it is 0.4251 vs 0.4250 —
+      the sub-RM1 MY tick ``data-and-pricing.md`` singles out.
+    * **The identity takes the untouched pre-existing expression**, structurally, rather
+      than multiplying by one and trusting the answer (owner requirement 2026-08-10).
+      ``Decimal`` multiplication sums the operands' EXPONENTS, so a factor of
+      ``Decimal("1.0")`` instead of ``Decimal(1)`` rewrites ``1.5`` as ``1.50``, ``600`` as
+      ``600.0`` and ``0.005`` as ``0.0050`` — value-preserving, TEXT-changing, and
+      :func:`_cap_dp` does not catch it (the cap fires only BELOW 4 dp and never trims).
+      Since Decimals persist as canonical TEXT, computing the identity would repaint every
+      price row in the database, on symbols with no corporate action at all.
+      ``Decimal("1.0") == Decimal(1)`` is ``True``, so such a factor routes to the safe
+      path too, and the basis is stored as the literal :data:`_IDENTITY_BASIS`.
+    """
+    if basis == _ONE:
+        return to_db(_cap_dp(raw, _PRICE_DP)), _IDENTITY_BASIS
+    return to_db(_cap_dp(raw * basis, _PRICE_DP)), to_db(basis)
+
+
 def upsert_prices(
     conn: sqlite3.Connection,
     rows: list[PriceRow],
@@ -124,27 +157,17 @@ def upsert_prices(
        §5.1 already applies to ``volume``, which is likewise left untouched.)
 
     **No factor → the pre-existing code path, structurally** (owner requirement,
-    2026-08-10). The identity case does not multiply by one and rely on the answer
-    coming out the same; it takes the untouched original expression. Code that never
-    runs cannot drift. The concrete trap this closes, measured with this module's own
-    helpers: ``Decimal`` multiplication sums the operands' EXPONENTS, so a factor of
-    ``Decimal("1.0")`` instead of ``Decimal(1)`` rewrites ``1.5`` as ``1.50``, ``600``
-    as ``600.0`` and ``0.005`` as ``0.0050`` — value-preserving, TEXT-changing, and
-    ``_cap_dp`` does not catch it (the cap only fires BELOW 4 dp and never trims). Since
-    Decimals persist as canonical TEXT, that repaints every price row in the database on
-    the next refresh, on symbols with no corporate action at all. ``Decimal("1.0") ==
-    Decimal(1)`` is ``True``, so the comparison below routes such a factor to the safe
-    path too, and the basis is stored as the literal :data:`_IDENTITY_BASIS`.
+    2026-08-10), and **the cap applied last, to the product** (F-20). Both live in
+    :func:`express_close`, which W6b's reconcile also calls — see its docstring for the
+    measured traps each one closes. This seam owns only *which* factor applies to a row
+    (the window ``(as_of, fetched_at]``); how a (raw, factor) pair becomes stored TEXT has
+    exactly one owner, so the write and the reconcile cannot drift apart.
     """
     through = fetched_at.date()
     params: list[tuple[str | None, ...]] = []
     for r in rows:
         basis = factor_of(r.instrument, after=r.as_of, through=through)
-        if basis == _ONE:
-            close, stored_basis = to_db(_cap_dp(r.close, _PRICE_DP)), _IDENTITY_BASIS
-        else:
-            # cap LAST, on the product (F-20)
-            close, stored_basis = to_db(_cap_dp(r.close * basis, _PRICE_DP)), to_db(basis)
+        close, stored_basis = express_close(r.close, basis)
         params.append((
             r.instrument, r.market.value, r.as_of.isoformat(), close,
             _opt(r.open), _opt(r.high), _opt(r.low), _opt(r.volume), r.source,

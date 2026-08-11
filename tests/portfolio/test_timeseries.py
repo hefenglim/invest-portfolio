@@ -6,6 +6,9 @@ from decimal import Decimal
 from types import FrameType
 from typing import Any
 
+import pytest
+
+from portfolio_dash.portfolio import timeseries as ts
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.timeseries import daily_value_series
 from portfolio_dash.shared.corporate_actions import CorporateAction, CorporateActionKind
@@ -380,3 +383,136 @@ def test_the_unapplied_action_branch_never_executes_for_an_action_free_ledger() 
         lambda: daily_value_series(refused, prices, fx, TWD, end=end))
     assert body in detonated, (
         "the probe cannot see the branch even when it must run — it proves nothing")
+
+
+# --- §7.1a's value leg: continuity across a SPLIT (spec §5.1(d) · W6b) ----------------
+# A stored close is "as traded on its own date"; the replay's share count is in the
+# valuation day's terms. Between the split and the next price refresh those two units
+# disagree, and the trend multiplies them together. The three tests below are the fix and
+# its two detection-power companions — the spec names both, because the superseded
+# resolution replaced an error of `ratio` with an error of 100%.
+
+_SPLIT_DATE = date(2026, 6, 10)
+_SPLIT_20_FOR_1 = CorporateAction(
+    account_id="schwab", date=_SPLIT_DATE, kind=CorporateActionKind.SPLIT,
+    from_symbol="AAA", to_symbol="AAA", ratio_to=Decimal("20"), ratio_from=Decimal("1"),
+)
+
+
+def _split_fixture() -> tuple[LedgerBundle, dict[str, list[tuple[date, Decimal]]],
+                              dict[tuple[Currency, Currency], list[tuple[date, Decimal]]]]:
+    """10 shares bought at 100 on 6/1, a 20-for-1 on 6/10, and NO post-split price.
+
+    The one price row is dated 6/1, so every day carries it forward — which is exactly the
+    window in which the artifact lives (§5.1(d): `_at_or_before` keeps returning the last
+    pre-split price until the next refresh writes one).
+    """
+    bundle = LedgerBundle([_tx(date(2026, 6, 1), Side.BUY, "10", "100", fees="0")],
+                          instruments=INSTRUMENTS, actions=[_SPLIT_20_FOR_1])
+    prices = {"AAA": [(date(2026, 6, 1), Decimal("100"))]}
+    fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
+    return bundle, prices, fx
+
+
+def _values(series: Any) -> dict[date, Decimal]:
+    return {p.date: p.total_value for p in series.points}
+
+
+def test_net_worth_is_continuous_across_a_split_with_no_post_split_price() -> None:
+    """§7.1a's value leg: `S x p` on 6/9 equals `(S x r) x (p / r)` on 6/10.
+
+    The re-expression is arithmetic on the unit of account, not a guessed price: the same
+    trade, quoted in the new denomination. Continuity is then true by construction, which
+    is §2.1's requirement and the whole point of dividing rather than flagging.
+    """
+    bundle, prices, fx = _split_fixture()
+    # The fixture must actually re-denominate, or the assertion below is vacuous.
+    assert build_book(bundle.through(date(2026, 6, 9))).holdings[0].shares == Decimal("10")
+    assert build_book(bundle.through(_SPLIT_DATE)).holdings[0].shares == Decimal("200")
+
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11))
+    values = _values(series)
+    assert values[date(2026, 6, 9)] == Decimal("30000")     # 10 x 100 x 30
+    assert values[_SPLIT_DATE] == Decimal("30000")          # 200 x 5 x 30
+    assert set(values.values()) == {Decimal("30000")}, "no discontinuity anywhere"
+    # NEVER flagged (trap #8): a re-expressed day is a complete day.
+    assert not any(p.incomplete for p in series.points)
+
+
+def test_without_the_reexpression_the_split_day_is_inflated_by_the_ratio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DETECTION POWER (a) — the original E17 artifact, on the REAL code path.
+
+    `price_in` is neutered to the identity, which is precisely the pre-fix code
+    (`price = _at_or_before(...)`), and the mutation is on the module the loop calls, not
+    on a local variable (F-11). The trend then values 6/10 at post-split shares times a
+    pre-split price: 20x the previous day, from a position whose value did not move.
+    """
+    bundle, prices, fx = _split_fixture()
+    monkeypatch.setattr(
+        ts, "price_in",
+        lambda index, symbol, price, *, priced_on, valued_on: price,
+    )
+    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11)))
+    assert values[date(2026, 6, 9)] == Decimal("30000")
+    assert values[_SPLIT_DATE] == Decimal("600000")
+    assert values[_SPLIT_DATE] == values[date(2026, 6, 9)] * 20
+
+
+def test_marking_the_split_day_incomplete_would_drop_the_whole_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DETECTION POWER (b) — the SUPERSEDED resolution, and why it is worse (trap #8).
+
+    "Mark the day incomplete" is simulated at the real seam: a carried-forward price that
+    predates a split already in effect is treated as unusable, so the lookup returns None.
+    The loop's existing `if price is None: incomplete = True; continue` then omits the
+    HOLDING — and still emits the point. Net worth therefore falls to zero on the split
+    date (a five-figure cliff on a real pre-split position; 95% measured on the 1-for-20 in
+    §5.1(d)), which is an error of 100% replacing an error of `ratio`.
+    """
+    bundle, prices, fx = _split_fixture()
+    real = ts._entry_at_or_before
+
+    def unusable_across_a_split(
+        series: list[tuple[date, Decimal]], on: date
+    ) -> tuple[date, Decimal] | None:
+        entry = real(series, on)
+        if entry is not None and entry[0] < _SPLIT_DATE <= on:
+            return None
+        return entry
+
+    monkeypatch.setattr(ts, "_entry_at_or_before", unusable_across_a_split)
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11))
+    values = _values(series)
+    assert values[date(2026, 6, 9)] == Decimal("30000")
+    assert values[_SPLIT_DATE] == Decimal("0"), "the position vanished, not the day"
+    # The DAY is still published — that is the trap: `incomplete` labels a point that has
+    # already lost the position's entire market value.
+    assert _SPLIT_DATE in values
+    assert next(p for p in series.points if p.date == _SPLIT_DATE).incomplete is True
+
+
+def test_a_post_split_price_makes_the_correction_disappear_by_itself() -> None:
+    """The correction self-cancels once a genuine post-split price is stored (`pd >= a.date`
+    gives the empty product), so nobody has to switch it off. Here 6/10's own price (5, as
+    traded post-split) is used unchanged and the day still values at 30,000."""
+    bundle, prices, fx = _split_fixture()
+    prices["AAA"].append((_SPLIT_DATE, Decimal("5")))
+    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11)))
+    assert values[_SPLIT_DATE] == Decimal("30000")
+
+
+def test_a_reverse_split_is_re_expressed_upwards() -> None:
+    """The 1-for-20 the 95% cliff was measured on: the factor is 1/20, so dividing MULTIPLIES
+    the carried-forward price by 20 while the share count falls to a twentieth."""
+    bundle, prices, fx = _split_fixture()
+    reverse = CorporateAction(
+        account_id="schwab", date=_SPLIT_DATE, kind=CorporateActionKind.SPLIT,
+        from_symbol="AAA", to_symbol="AAA", ratio_to=Decimal("1"), ratio_from=Decimal("20"),
+    )
+    bundle = LedgerBundle(bundle.transactions, instruments=INSTRUMENTS, actions=[reverse])
+    assert build_book(bundle.through(_SPLIT_DATE)).holdings[0].shares == Decimal("0.5")
+    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11)))
+    assert values[_SPLIT_DATE] == Decimal("30000")     # 0.5 x 2000 x 30
