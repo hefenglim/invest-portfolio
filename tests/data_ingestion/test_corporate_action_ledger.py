@@ -32,6 +32,7 @@ from portfolio_dash.data_ingestion.validate import (
     Issue,
     TxnInput,
     _accounts_holding_on,
+    identifier_change_repair,
     validate_corporate_action,
     validate_corporate_action_change,
     validate_transaction,
@@ -827,6 +828,141 @@ def test_a_destination_priced_only_from_the_action_onward_does_not_fire(
     batch = _identifier_exchange()
     assert "identifier_change_suspected" not in _kinds(
         validate_corporate_action(conn, batch[0], batch=batch))
+
+
+# --------------------------------------------------- E23's repair — the convert-to-SPLIT
+# D22 promises the warning "offers a one-click conversion to SPLIT". These tests hold the
+# repair to the standard the warning is held to: it must produce a row
+# ``validate_corporate_action`` would have accepted if it had been typed by hand, it must
+# replay to the position the statement shows, and it must CLEAR the finding — a suggestion
+# that survives its own fix trains the owner to click through the next one.
+
+
+def _identifier_under_the_ticker(conn: sqlite3.Connection) -> list[CorporateActionInput]:
+    """The repairable ledger: the security is recorded under the TICKER, not the identifier.
+
+    D19's own description of the case — "often the ticker itself never changed; only the
+    identifier moved" — so the buys sit under AAA (held in both accounts by the fixture)
+    while the statement names CCC, the broker's internal code, as the source. CCC is
+    registered (a pre-D19 ledger did that, which is why E10 lets the row through) and has
+    no price series, because no provider resolves an identifier.
+    """
+    _price(conn, "AAA", PRICE_DAY)
+    return _both_accounts(kind="EXCHANGE", from_symbol="CCC", to_symbol="AAA",
+                          ratio_to=D("1"), ratio_from=D("20"))
+
+
+def test_the_repair_keeps_the_ticker_and_retires_the_identifier() -> None:
+    """Which symbol survives is the whole decision, and it is ``to_symbol``.
+
+    E20 forbids ``from != to`` on a SPLIT, so a conversion cannot be a ``kind`` flip; it has
+    to collapse two symbols into one. §3.4 normalises an identifier TO ITS TICKER and keeps
+    the identifier in ``note`` for provenance — and E23's own fourth term says the SOURCE
+    has no prices at all, so a SPLIT on it would re-express an empty series and leave the
+    destination's prices in pre-split terms: a repair that repairs nothing.
+    """
+    source = _inp(kind="EXCHANGE", from_symbol="CCC", to_symbol="AAA",
+                  ratio_to=D("1"), ratio_from=D("20"), note="券商對帳單")
+    repaired = identifier_change_repair(source)
+
+    assert repaired is not None
+    assert repaired.kind == "SPLIT"
+    assert repaired.from_symbol == repaired.to_symbol == "AAA"
+    # The identifier change and the re-denomination are ONE event (§3.4), so the ratio is
+    # carried across untouched — losing it would silently drop the share change.
+    assert (repaired.ratio_to, repaired.ratio_from) == (D("1"), D("20"))
+    assert repaired.cost_carry is None          # E8: SPINOFF only
+    assert repaired.account_id == source.account_id and repaired.date == source.date
+    assert "CCC" in (repaired.note or "") and "券商對帳單" in (repaired.note or "")
+
+
+def test_the_repair_declines_anything_that_is_not_the_shape_e23_fires_on() -> None:
+    """It converts identifier changes, not mergers — and never a row E23 never judged.
+
+    The guard is on the CALLER too (the API asks only when the finding fired), but a pure
+    function that would happily "convert" a SPLIT is one refactor away from being called
+    somewhere it should not be.
+    """
+    assert identifier_change_repair(_inp()) is None                       # SPLIT
+    assert identifier_change_repair(
+        _inp(kind="SPINOFF", to_symbol="BBB", cost_carry=D("0.4"))) is None
+    # An EXCHANGE onto itself is E20's rejection, not a conversion candidate.
+    assert identifier_change_repair(_inp(kind="EXCHANGE", to_symbol="AAA")) is None
+
+
+def test_the_converted_row_validates_and_clears_the_warning(
+    conn: sqlite3.Connection,
+) -> None:
+    """The repair, end to end: it validates, and E23 stops firing on the result.
+
+    Both halves matter. A converted row that still warned would be a fix the system keeps
+    complaining about; a row that cleared the warning but failed validation would be a
+    button that ends in an error — §6.7 already refused that shape once, when it made the
+    multi-account list read-only rather than deselectable.
+    """
+    batch = _identifier_under_the_ticker(conn)
+    before = validate_corporate_action(conn, batch[0], batch=batch)
+    assert "identifier_change_suspected" in _soft(before)
+
+    converted = [identifier_change_repair(b) for b in batch]
+    assert all(c is not None for c in converted)
+    rows = [c for c in converted if c is not None]
+    after = validate_corporate_action(conn, rows[0], batch=rows)
+
+    assert "identifier_change_suspected" not in _kinds(after)   # watched it clear
+    assert _hard(after) == set()
+    # E13 is the one that would bite a half-converted event: the ticker is held in BOTH
+    # accounts, so the repair has to be the whole N-row set or none of it.
+    assert _kinds(validate_corporate_action(conn, rows[1], batch=rows)) == set()
+
+
+def test_the_converted_row_replays_to_the_reverse_split(
+    conn: sqlite3.Connection,
+) -> None:
+    """…and the position it produces is the one the statement shows.
+
+    Validation passing is not the claim — D22's claim is that the SAME event recorded as a
+    SPLIT is the repair, so the shares must move by the ratio while the basis does not
+    (§2.1's conservation law is what makes this a re-denomination rather than a trade).
+    """
+    rows = [r for r in (identifier_change_repair(b)
+                        for b in _identifier_under_the_ticker(conn)) if r is not None]
+    for r in rows:
+        insert_corporate_action(
+            conn, account_id=r.account_id, action_date=r.date,
+            kind=CorporateActionKind(r.kind), from_symbol=r.from_symbol,
+            to_symbol=r.to_symbol, ratio_to=r.ratio_to, ratio_from=r.ratio_from,
+            cost_carry=r.cost_carry, note=r.note)
+    book = build_book(load_ledger_bundle(conn))
+
+    held = {(h.account_id, h.symbol): h for h in book.holdings}
+    assert set(held) == {("schwab", "AAA"), ("moomoo_my", "AAA")}
+    for h in held.values():
+        assert h.shares == D("5")                       # 100 ÷ 20
+        assert h.original_cost_total == D("5000")       # 100 × 50, unmoved
+        assert h.original_avg == D("1000")              # the average corrects itself
+
+
+def test_the_repair_is_refused_when_the_ledger_holds_the_SOURCE_symbol(
+    conn: sqlite3.Connection,
+) -> None:
+    """The conversion is only well-defined for a ledger that records the security under the
+    TICKER — and the ledger that does not must be told, not handed a broken row.
+
+    Here the position sits under AAA (the source) and the destination BBB is priced but
+    never held, so converting produces a SPLIT on a symbol with no position: E1a's hard
+    rejection. That is the honest verdict — the real repair is to restate the TRANSACTIONS
+    onto the ticker (the importer seam's job, D19), not to re-label this one row — and it
+    is why the API verifies the converted row before offering the button.
+    """
+    _price(conn, "BBB", PRICE_DAY)
+    batch = _identifier_exchange()
+    assert "identifier_change_suspected" in _soft(
+        validate_corporate_action(conn, batch[0], batch=batch))
+
+    rows = [r for r in (identifier_change_repair(b) for b in batch) if r is not None]
+    refused = validate_corporate_action(conn, rows[0], batch=rows)
+    assert "no_position_on_action_date" in _hard(refused)
 
 
 # ---------------------------------------------------------------------------- D3 (F-18)

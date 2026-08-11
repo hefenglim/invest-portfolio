@@ -19,6 +19,8 @@ Two structural obligations are asserted here rather than assumed:
 import sqlite3
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,6 +40,8 @@ from portfolio_dash.shared.models.enums import Side
 from tests.conftest import GOLDEN_NOW
 
 D = Decimal
+# tests/contract/this_file.py -> parents[2] == worktree root (web/ lives here).
+_WEB = Path(__file__).resolve().parents[2] / "web"
 # Strictly AFTER the golden price date (2026-06-09) and on/before its fetched_at
 # (GOLDEN_NOW = 2026-06-11), so `split_factor`'s (after, through] window covers it and the
 # stored close visibly moves. Outside that window the reconcile is a legitimate no-op and
@@ -378,6 +382,190 @@ def test_preview_reports_the_cash_in_lieu_fraction(
         ratio_to="1", ratio_from="3")).json()
     assert body["fractions"], body
     assert body["fractions"][0]["symbol"] == "2330"
+
+
+# ------------------------------------------------ E23's one-click convert-to-SPLIT (D22)
+# D22 settled E23 as the middle tier *plus* "a one-click conversion to SPLIT". The warning
+# shipped; the repair did not — ``identifier_change_suspected`` appeared nowhere in
+# ``web/`` or ``portfolio_dash/api/``, so the validator raised a finding no surface could
+# act on. These tests hold the wire end of that repair.
+
+
+@pytest.fixture
+def broker_identifier(golden_db: sqlite3.Connection) -> sqlite3.Connection:
+    """A raw broker identifier registered as an instrument — the state E23 exists for.
+
+    D19 says such a string never becomes an instrument; E23 guards the ledgers written
+    BEFORE that rule existed, where E10 passes it because it really is registered. It has
+    no price series, and never will: no provider resolves an identifier (§3.4).
+    """
+    upsert_instrument(golden_db, Instrument(
+        symbol="TWX00001", market=Market.TW, quote_ccy=Currency.TWD, sector="Semis",
+        name="broker internal code", board="TWSE"))
+    golden_db.commit()
+    return golden_db
+
+
+def _identifier_preview(client: TestClient, **over: object) -> dict[str, Any]:
+    body: dict[str, object] = {"kind": "EXCHANGE", "from_symbol": "TWX00001",
+                               "to_symbol": "2330", "ratio_to": "1", "ratio_from": "20"}
+    body.update(over)
+    r = client.post(f"{_BASE}/preview", json=_body(**body))
+    assert r.status_code == 200, r.text
+    payload: dict[str, Any] = r.json()
+    return payload
+
+
+def _finding(preview: dict[str, Any]) -> dict[str, Any]:
+    found = [i for i in preview["issues"]
+             if i["code"] == "identifier_change_suspected"]
+    assert len(found) == 1, preview["issues"]
+    return dict(found[0])
+
+
+def test_the_warning_carries_its_repair(
+    api_client: TestClient, broker_identifier: sqlite3.Connection
+) -> None:
+    """The finding and the one-click travel together, and the row is the SPLIT §3.4 names.
+
+    ``to_symbol`` survives, the identifier is retired into ``note`` for provenance, and the
+    ratio rides across untouched — the identifier change and the re-denomination are ONE
+    event, so dropping the ratio would silently drop the share change.
+    """
+    fix = _finding(_identifier_preview(api_client))["fix"]
+    assert isinstance(fix, dict)
+    body = fix["body"]
+    assert body["kind"] == "SPLIT"
+    assert body["from_symbol"] == body["to_symbol"] == "2330"
+    assert (body["ratio_to"], body["ratio_from"]) == ("1", "20")
+    assert body["cost_carry"] is None
+    assert "TWX00001" in (body["note"] or "")
+    assert "2330" in str(fix["summary"])
+
+
+def test_the_offered_row_previews_clean_and_commits_without_an_acknowledgement(
+    api_client: TestClient, broker_identifier: sqlite3.Connection
+) -> None:
+    """The warning CLEARS when the repair is applied, and the repaired row needs no ack.
+
+    Both assertions are the point of the middle tier. A conversion that still warned would
+    be a fix the system keeps complaining about — and 「我已確認」 on a row with nothing left
+    to confirm is how an owner learns to acknowledge without reading.
+    """
+    fix = _finding(_identifier_preview(api_client))["fix"]
+    assert isinstance(fix, dict)
+    again = api_client.post(f"{_BASE}/preview", json=fix["body"]).json()
+
+    assert [i["code"] for i in again["issues"]] == []
+    assert again["blocking"] is False and again["needs_confirm"] is False
+    assert again["conserved"] is True
+    # 1000 shares 1-for-20 -> 50, on the same basis: §6.7's 成本不變 ✓, made of real numbers.
+    (acct,) = again["accounts"]
+    assert (acct["after"][0]["shares"], acct["after"][0]["cost_total"]) == ("50", "500000")
+
+    r = api_client.post(_BASE, json=fix["body"])
+    assert r.status_code == 201, r.text
+    (stored,) = list_corporate_actions(broker_identifier)
+    assert (stored.kind, stored.from_symbol, stored.to_symbol) == ("SPLIT", "2330", "2330")
+
+
+def test_a_position_left_under_the_retired_symbol_is_named_but_does_not_block(
+    api_client: TestClient, broker_identifier: sqlite3.Connection
+) -> None:
+    """The only ledger where the warning and its repair BOTH apply to a committable row.
+
+    Both symbols hold a position: the EXCHANGE passes E1a (so E23's middle tier really is
+    what stands between it and the ledger) and the converted SPLIT passes it too. What the
+    conversion cannot do is take the identifier's own position with it — that is a
+    pre-existing problem the SPLIT neither creates nor touches — so it is named in full and
+    left to the owner. Silently leaving a holding behind under a symbol nothing can price
+    is the half-answer this feature exists to refuse.
+    """
+    insert_transaction(broker_identifier, account_id="tw_broker", symbol="TWX00001",
+                       side=Side.BUY, quantity=D("500"), price=D("10"), fees=D("0"),
+                       tax=D("0"), trade_date=date(2026, 1, 5))
+    broker_identifier.commit()
+
+    preview = _identifier_preview(api_client)
+    assert preview["blocking"] is False and preview["needs_confirm"] is True
+    fix = _finding(preview)["fix"]
+    assert isinstance(fix, dict)
+    caveat = str(fix["caveat"])
+    assert "TWX00001" in caveat and SPLIT_DAY.isoformat() in caveat
+
+
+def test_the_repair_is_withheld_when_the_ledger_holds_the_SOURCE_symbol(
+    api_client: TestClient, broker_identifier: sqlite3.Connection
+) -> None:
+    """A button that ends in an error is not a repair — so it is not offered.
+
+    When the position sits under the identifier rather than the ticker, converting yields a
+    SPLIT on a symbol with no position (E1a). The finding then carries the reason and what
+    the owner would have to do instead: restate the TRANSACTIONS onto the ticker, which is
+    the importer seam's job (D19), not a re-label of this one row.
+    """
+    upsert_instrument(broker_identifier, Instrument(
+        symbol="2454", market=Market.TW, quote_ccy=Currency.TWD, sector="Semis",
+        name="MediaTek", board="TWSE"))
+    insert_transaction(broker_identifier, account_id="tw_broker", symbol="TWX00001",
+                       side=Side.BUY, quantity=D("1000"), price=D("10"), fees=D("0"),
+                       tax=D("0"), trade_date=date(2026, 1, 5))
+    upsert_prices(broker_identifier, [PriceRow(
+        instrument="2454", market=Market.TW, as_of=date(2026, 6, 9),
+        close=D("900"), source="test")], fetched_at=GOLDEN_NOW)
+    broker_identifier.commit()
+
+    finding = _finding(_identifier_preview(api_client, to_symbol="2454"))
+    assert "fix" not in finding
+    blocked = str(finding["fix_blocked"])
+    assert "無法套用公司行動" in blocked          # E1a's own words, not a paraphrase
+    assert "TWX00001" in blocked and "2454" in blocked
+
+
+def test_an_ordinary_merger_carries_no_repair_at_all(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The offer rides on E23 and nothing else — a fix attached to an unrelated finding
+    would be a one-click that rewrites a row the system never doubted."""
+    upsert_instrument(golden_db, Instrument(
+        symbol="2454", market=Market.TW, quote_ccy=Currency.TWD, sector="Semis",
+        name="MediaTek", board="TWSE"))
+    golden_db.commit()
+    body = api_client.post(f"{_BASE}/preview", json=_body(
+        kind="EXCHANGE", from_symbol="2330", to_symbol="2454",
+        ratio_to="1", ratio_from="20")).json()
+    codes = [i["code"] for i in body["issues"]]
+    assert "identifier_change_suspected" not in codes
+    assert not [i for i in body["issues"] if "fix" in i or "fix_blocked" in i]
+
+
+def test_every_field_of_the_repair_is_consumed_by_the_shared_form(
+    api_client: TestClient, broker_identifier: sqlite3.Connection
+) -> None:
+    """The guard that would have caught this whole task: the API offers, the form consumes.
+
+    E23 shipped with no surface at all, so asserting the payload alone would reproduce the
+    original defect one level up. This reads ``web/corp-action-form.js`` — the ONE form
+    §6.7's three doors share — and requires that every key the API emits is named there,
+    that the branch naming them is reachable, and that the withheld case renders too.
+
+    ⚠ **What a source scan can and cannot prove.** It proves the wiring EXISTS; it cannot
+    prove it runs — measured, not assumed: rewriting the guard's condition to ``if (false)``
+    left every key still present in the file and this test still green. So the reachability
+    half is pinned on the condition and the call themselves, and the click-through belongs
+    to a browser test. Asserting bare key names alone would be the weaker check that missed
+    the mutation.
+    """
+    src = (_WEB / "corp-action-form.js").read_text(encoding="utf-8")
+    fix = _finding(_identifier_preview(api_client))["fix"]
+    assert isinstance(fix, dict)
+    assert set(fix) == {"label", "summary", "body", "caveat"}
+    for key in fix:
+        assert f"fix.{key}" in src, f"the form ignores the repair's `{key}`"
+    assert "if (i.fix && state.applyFix) {" in src   # offered only when the API offers it
+    assert "state.applyFix(i.fix)" in src            # …and clicking it applies THAT body
+    assert "i.fix_blocked" in src                    # the withheld case is not swallowed
+    assert "state.applyFix = applyFix;" in src       # the handler the branch depends on
 
 
 # ------------------------------------------------------------- the CSV import surface

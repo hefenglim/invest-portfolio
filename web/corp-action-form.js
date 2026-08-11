@@ -102,6 +102,10 @@
 .ca-modal .ca-issue-warn { color: var(--amber); background: var(--amber-soft); }
 .ca-modal .ca-issue label { display: flex; gap: 6px; align-items: flex-start;
   color: inherit; font-size: 11px; cursor: pointer; }
+.ca-modal .ca-issue-body { display: flex; flex-direction: column; gap: 5px;
+  min-width: 0; }
+.ca-modal .ca-fix { align-self: flex-start; font-size: 11px; padding: 3px 10px; }
+.ca-modal .ca-fix-note { font-size: 10px; color: var(--text-3); line-height: 1.5; }
 @media (max-width: 640px) {
   .ca-modal .ca-grid { grid-template-columns: 1fr; }
 }`;
@@ -245,7 +249,30 @@
     (data.issues || []).forEach((i) => {
       const box = el('div', 'ca-issue ca-issue-' + (i.sev === 'error' ? 'error' : 'warn'));
       box.appendChild(el('span', null, i.sev === 'error' ? '✕' : '⚠'));
-      box.appendChild(el('span', null, i.text));
+      const col = el('div', 'ca-issue-body');
+      col.appendChild(el('span', null, i.text));
+
+      /* E23's one-click convert-to-SPLIT (D22). The finding CARRIES its repair — the
+         server derived the converted row, validated it against this ledger, and sent the
+         exact body to post; nothing about it is decided here. Rendered as the FIRST
+         option, per D22's own wording, with the existing 「我已確認上述警告」 checkbox
+         below playing 「這確實是併購，繼續存檔」 and 取消 playing itself.
+
+         `fix_blocked` is the same finding when the conversion would NOT validate — most
+         often because the ledger records the position under the source symbol, so the
+         transactions have to be restated first. The reason is shown instead of a button
+         that would end in an error. */
+      if (i.fix && state.applyFix) {
+        const btn = el('button', 'btn ca-fix', i.fix.label || '改記為分割(SPLIT)');
+        btn.type = 'button';
+        btn.addEventListener('click', () => state.applyFix(i.fix));
+        col.appendChild(btn);
+        if (i.fix.summary) col.appendChild(el('span', 'ca-fix-note', i.fix.summary));
+        if (i.fix.caveat) col.appendChild(el('span', 'ca-fix-note', '⚠ ' + i.fix.caveat));
+      } else if (i.fix_blocked) {
+        col.appendChild(el('span', 'ca-fix-note', i.fix_blocked));
+      }
+      box.appendChild(col);
       host.appendChild(box);
     });
     if (data.needs_confirm && !data.blocking) {
@@ -495,6 +522,37 @@
       save.disabled = !p || p.blocking || (p.needs_confirm && !state.acked);
     }
     state.sync = syncSave;
+
+    /* E23 / D22 — apply the server's convert-to-SPLIT to THIS form, then re-preview.
+       Deliberately not a save: the converted row goes back through the same always-on
+       preview and the same validation a hand-typed row gets, so the owner reads the
+       resulting share count, the corrected average and 成本不變 ✓ BEFORE committing. A
+       one-click that wrote straight to the ledger would be the silent repair this whole
+       feature exists to refuse. */
+    function applyFix(fix) {
+      const b = (fix && fix.body) || {};
+      state.kind = b.kind || 'SPLIT';
+      Object.keys(kindBtns).forEach(
+        (x) => kindBtns[x].classList.toggle('active', x === state.kind));
+      if (b.account_id) fAcct.value = b.account_id;
+      if (b.date) fDate.value = b.date;
+      fSym.value = b.from_symbol || '';
+      fToSym.value = b.to_symbol || '';
+      fFrom.value = b.ratio_from || '';
+      fTo.value = b.ratio_to || '';
+      fCarry.value = '';
+      fNote.value = b.note || '';
+      /* The acknowledgement belonged to the EXCHANGE's warning. The converted row is a
+         different row and must earn its own — and the save button stays disabled until
+         its preview comes back, not merely until the click is over. */
+      state.acked = false;
+      state.preview = null;
+      syncSave();
+      applyKind();
+      runPreview();
+      if (window.toast) window.toast('已改記為分割，請確認下方試算', 'ok', fix.summary || '');
+    }
+    state.applyFix = applyFix;
 
     let timer = null;
     function schedule() {

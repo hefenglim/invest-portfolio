@@ -52,6 +52,12 @@ from portfolio_dash.shared.money import from_db
 _MAX_MAGNITUDE = Decimal("1e12")
 _ZERO = Decimal("0")
 
+# E23 (D22). A named constant because the finding and its REPAIR
+# (:func:`identifier_change_repair`) have to stay welded together: the API offers the
+# one-click convert keyed on this string, and a rename that reached only one of the two
+# would leave a warning nothing can fix, or a fix attached to nothing.
+IDENTIFIER_CHANGE_SUSPECTED = "identifier_change_suspected"
+
 
 class TxnInput(BaseModel):
     """Validated input for a single transaction before it is persisted."""
@@ -763,7 +769,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
             and from_inst is not None and to_inst is not None
             and _has_prices(conn, inp.to_symbol, before=inp.date)
             and not _has_prices(conn, inp.from_symbol)):
-        add(Issue(kind="identifier_change_suspected", needs_confirm=True,
+        add(Issue(kind=IDENTIFIER_CHANGE_SUSPECTED, needs_confirm=True,
                   message=(f"{inp.to_symbol} 在 {inp.date.isoformat()} 之前已有價格紀錄，"
                            f"而來源標的 {inp.from_symbol} 完全沒有價格紀錄 — "
                            "這是識別碼、而不是證券的特徵。"
@@ -799,6 +805,65 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     )) is not None:
         add(capped)
     return issues
+
+
+def identifier_change_repair(
+    inp: CorporateActionInput,
+) -> CorporateActionInput | None:
+    """E23's repair (D22): the suspected row rewritten as the SPLIT it probably is.
+
+    ``None`` when *inp* is not the shape E23 fires on, so a caller cannot accidentally
+    "convert" a SPLIT or a SPINOFF. Pure — no I/O, no ledger — which is exactly why it
+    returns a **candidate**, not a committable row: see "what this does NOT check" below.
+
+    **A conversion is not a ``kind`` flip.** E20 requires ``to_symbol == from_symbol`` on a
+    SPLIT, so converting an EXCHANGE ``A → B`` has to collapse two symbols into one, and
+    which one survives is the whole decision.
+
+    **The surviving symbol is ``to_symbol``, and it has to be.** E23 fires on the identifier
+    signature: ``from_symbol`` is a raw broker identifier string that was registered as an
+    instrument before D19 existed, and ``to_symbol`` is the security. §3.4's adopted rule
+    normalises such an identifier **to its ticker**, keeping the identifier in ``note`` for
+    provenance and never as a symbol — this function is that rule applied after the fact,
+    to a row already typed. The mechanical argument is stronger still: the repair's whole
+    value is §5.1's price re-expression, which is SPLIT-scoped and applies to the SPLIT's
+    own symbol, and E23's own fourth term says ``from_symbol`` has **no stored prices at
+    all**. A SPLIT on the identifier would therefore re-express an empty series and leave
+    ``to_symbol``'s prices in pre-split terms — it would repair nothing while looking like
+    a repair, which is the failure mode this whole feature exists to avoid.
+
+    The ratio rides across untouched: the identifier change and the re-denomination are ONE
+    event (§3.4 — "the combined reverse split + rename seen in real data is ONE row"), and
+    the ratio is the re-denomination half. ``cost_carry`` is cleared rather than carried,
+    so the output is valid by construction instead of by assumption (E8: SPINOFF only).
+
+    **What this does NOT check — the caller must.** E1a requires a non-zero position in the
+    SPLIT's source ON the action date, and after the conversion that source is ``to_symbol``.
+    So the conversion is well-defined only for a ledger that already records this security
+    under the ticker (D19's "often the ticker itself never changed" case). A ledger that
+    records it under the identifier needs its TRANSACTIONS restated first — the importer
+    seam's job, not a one-click — and re-validating the returned row is what says so, in
+    E1a's own words. Offer the repair only when the returned row validates: a control that
+    ends in an error is the same class of mistake as §6.7's deselectable account checklist.
+    """
+    if inp.kind.strip().upper() != CorporateActionKind.EXCHANGE.value:
+        return None
+    ticker = inp.to_symbol.strip()
+    retired = inp.from_symbol.strip()
+    if not ticker or not retired or ticker == retired:
+        return None
+    provenance = f"原始來源代號 {retired}(識別碼變更，改記為分割)"
+    return CorporateActionInput(
+        account_id=inp.account_id,
+        date=inp.date,
+        kind=CorporateActionKind.SPLIT.value,
+        from_symbol=ticker,
+        to_symbol=ticker,
+        ratio_to=inp.ratio_to,
+        ratio_from=inp.ratio_from,
+        cost_carry=None,
+        note=f"{inp.note}；{provenance}" if inp.note else provenance,
+    )
 
 
 def validate_corporate_action_change(

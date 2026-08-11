@@ -80,8 +80,10 @@ from portfolio_dash.data_ingestion.store import (
     upsert_opening,
 )
 from portfolio_dash.data_ingestion.validate import (
+    IDENTIFIER_CHANGE_SUSPECTED,
     CorporateActionInput,
     Issue,
+    identifier_change_repair,
     validate_corporate_action,
     validate_corporate_action_change,
     validate_opening_cost,
@@ -1022,6 +1024,122 @@ def _issue_wires(issues: Sequence[Issue]) -> list[dict[str, Any]]:
     return unique
 
 
+def _split_conversion(
+    conn: sqlite3.Connection,
+    source: CorporateActionInput,
+    *,
+    account_id: str,
+    bundle: LedgerBundle,
+    book_cache: dict[date, Book],
+    index: ActionIndex,
+    today: date,
+) -> dict[str, Any]:
+    """D22's one-click convert-to-SPLIT, **verified before it is offered**.
+
+    E23 tells the owner their EXCHANGE looks like an identifier change; this turns that
+    sentence into an action. The row itself is decided by
+    :func:`~data_ingestion.validate.identifier_change_repair` — a pure function beside the
+    check that raises the finding, so "which symbol survives" is stated once, in the
+    module that owns the rule, and not re-derived in a router or in the browser.
+
+    What is added HERE is the half the pure function cannot do: **run the converted row
+    through the same validation a hand-typed row gets**, against this ledger, and attach
+    the repair only when it would actually commit. E1a is the term that bites — after the
+    conversion the SPLIT's source is ``to_symbol``, so the ledger must already record the
+    position under the ticker. When it does not, the finding carries ``fix_blocked``: the
+    reason in the validator's own words plus what the owner would have to do instead.
+    Offering a button that ends in an error is the mistake §6.7 already refused once, when
+    it made the multi-account list read-only rather than deselectable.
+
+    A position still standing under the RETIRED symbol is reported as a caveat, never as a
+    block: the SPLIT neither creates it nor touches it, it is a pre-existing ledger problem,
+    and a repair that quietly leaves a holding behind would be the kind of half-answer this
+    feature exists to refuse. Read through the same action-aware walk E13 and E1a use, so
+    the caveat cannot disagree with the verdict beside it.
+
+    Offered on the ENTRY path only (this preview), which is where E23 is raised and where
+    D22's three options live. A row already stored as an EXCHANGE is repaired through the
+    edit modal's own fields — 類型 → 分割 and 來源代號 → the ticker, which is two edits,
+    not the "delete and re-enter" this exists to avoid — so a second one-click there would
+    be a second surface for a case that already has one. ⚠ That route is single-account:
+    the PUT re-validates ONE row, so E13 refuses a row-by-row change to a multi-account
+    set, and a one-click would be refused for exactly the same reason. Converting a stored
+    N-row set needs a set-level operation, which is an owner decision, not an implementation
+    detail.
+
+    Returns ``{}`` (not the shape E23 fires on), ``{"fix": …}`` or ``{"fix_blocked": …}``.
+    """
+    repaired = identifier_change_repair(source)
+    if repaired is None:
+        return {}
+    converted = ActionBody(
+        account_id=account_id,
+        date=repaired.date,
+        kind=repaired.kind,
+        from_symbol=repaired.from_symbol,
+        to_symbol=repaired.to_symbol,
+        ratio_to=decimal_str(repaired.ratio_to),
+        ratio_from=decimal_str(repaired.ratio_from),
+        cost_carry=None,
+        note=repaired.note,
+    )
+    # The COMPLETE E13 batch for the converted row, not the converted row alone: the ticker
+    # may be held in more accounts than the identifier was, and validating one row of an
+    # N-row event reports E13 against a partial set the form would never post. (*today*
+    # reaches only `not_affected`, which this function discards — it cannot move the
+    # verdict.) A malformed ratio is unreachable here: both terms came back as Decimals.
+    built = _build_batch(conn, converted, index=index, today=today)
+    if isinstance(built, JSONResponse):
+        return {}
+    rows = built.rows
+    issues = [
+        i
+        for row in rows
+        for i in validate_corporate_action(
+            conn, row, batch=rows, bundle=bundle, book_cache=book_cache, index=index)
+    ]
+    ticker, retired = repaired.from_symbol, source.from_symbol.strip()
+    hard = [i for i in issues if not i.needs_confirm]
+    if hard:
+        tail = ""
+        if hard[0].kind == "no_position_on_action_date":
+            tail = (f"　這表示帳本是把這檔證券記在 {retired} 之下。"
+                    f"要改記為分割，必須先把 {retired} 的交易紀錄改成 {ticker}，"
+                    "而不是改這一筆行動。")
+        return {"fix_blocked": f"改記為「分割」後仍無法存檔:{hard[0].message}{tail}"}
+    # Every key here is consumed by the shared form, and a contract test asserts exactly
+    # that: an unread field is a repair half-wired, which is the defect this whole surface
+    # exists to close. The finding's own `code` identifies WHICH repair this is — the
+    # payload does not repeat it.
+    return {"fix": {
+        "label": "改記為分割(SPLIT)",
+        "summary": (f"改為 {ticker} 在 {repaired.date.isoformat()} 的分割，"
+                    f"每 {decimal_str(repaired.ratio_from)} 股 → "
+                    f"{decimal_str(repaired.ratio_to)} 股"),
+        # The exact body the form re-previews and posts. The browser decides nothing about
+        # the converted row; it applies a patch the server derived and already validated.
+        "body": converted.model_dump(mode="json"),
+        "caveat": (f"{retired} 在 {repaired.date.isoformat()} 仍有持倉。"
+                   "改記為分割後這筆行動不會處理它，該筆紀錄請另行確認"
+                   if _holding_accounts(conn, retired, repaired.date, index=index)
+                   else None),
+    }}
+
+
+def _with_fix(wires: list[dict[str, Any]], patch: dict[str, Any]) -> list[dict[str, Any]]:
+    """Attach E23's repair to E23's own wire — the finding carries its fix, or nothing does.
+
+    Only the top-level issue list is patched. The per-account lists are a detail view of
+    the SAME finding (D13 writes one event as N rows, each carrying it), and rendering the
+    one-click N times would offer the same single repair once per account.
+    """
+    if patch:
+        for w in wires:
+            if w.get("code") == IDENTIFIER_CHANGE_SUSPECTED:
+                w.update(patch)
+    return wires
+
+
 def _preview_payload(
     conn: sqlite3.Connection, body: ActionBody, today: date
 ) -> dict[str, Any] | JSONResponse:
@@ -1096,6 +1214,15 @@ def _preview_payload(
 
     inst = get_instrument(conn, body.from_symbol.strip())
     kind = batch.rows[0].kind
+    # E23's repair, computed only when E23 actually fired — the finding and its one-click
+    # travel together, so a warning can never outlive the fix that clears it, and the extra
+    # replay-and-validate it costs is never paid by an ordinary merger, which does not warn.
+    fix = (
+        _split_conversion(conn, batch.rows[0], account_id=body.account_id,
+                          bundle=full_bundle, book_cache=book_cache, index=index,
+                          today=today)
+        if any(i.kind == IDENTIFIER_CHANGE_SUSPECTED for i in issues) else {}
+    )
     return {
         "ccy": inst.quote_ccy.value if inst is not None else "",
         "kind": kind,
@@ -1111,7 +1238,7 @@ def _preview_payload(
         # adjusted is what P&L is computed against. A carve that conserved one and not the
         # other would print 成本不變 ✓ over a moved number.
         "conserved": cost_before == cost_after and adj_before == adj_after,
-        "issues": _issue_wires(issues),
+        "issues": _with_fix(_issue_wires(issues), fix),
         "blocking": any(not i.needs_confirm for i in issues),
         "needs_confirm": any(i.needs_confirm for i in issues),
         "fractions": fractions,
