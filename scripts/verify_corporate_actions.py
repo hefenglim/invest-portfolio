@@ -45,16 +45,17 @@ output are not committed.
   replay) agree. Both existing functions are reused; there is deliberately no third path.
 
 **Exit code** 0 = PASS, 1 = FAIL, 2 = could not run (bad arguments, unreadable input, a ledger
-row that would not load). So it chains. ``FAIL n`` counts FINDINGS — failing tickers plus
-missing corporate-action rows — because a run whose ledger is still short a row has not
-tested the thing being accepted, and calling that PASS is trap #22 arriving through the gate
-written to prevent it.
+row that would not load). So it chains. PASS requires **both** counts to be zero — no failing
+ticker AND no missing corporate-action row — because a run whose ledger is still short a row
+has not tested the thing being accepted, and calling that PASS is trap #22 arriving through
+the gate written to prevent it. The two counts are printed separately rather than summed; see
+the note at the verdict line for why.
 
 **Input formats.** ``--export`` is the project's own canonical ledger CSVs — one file, or a
 directory of them — dispatched by header to the same parsers the app's import route uses
 (``data_ingestion/import_templates.py`` is the single source for the column sets, so a
 parser rename cannot silently desynchronise this script). ``--actions`` is a corporate-action
-CSV — the app's own 5th import kind (``corporate_actions``), read from the same header
+CSV — one of the app's own import kinds (``corporate_actions``), read from the same header
 constant, so one owner-authored file feeds both the app's import door and this run. Both
 arguments go through ``normalize_import_csv``, so annotated template headers and non-ISO date
 columns behave exactly as they do in the app.
@@ -75,7 +76,12 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from portfolio_dash.api.routers.cash import cash_pool_fn
 from portfolio_dash.bootstrap import bootstrap_db
+from portfolio_dash.data_ingestion.cash_import import (
+    build_cash_movement_preview,
+    write_cash_movement_row,
+)
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.csv_import import (
     build_transaction_preview,
@@ -131,15 +137,35 @@ _BOM = "﻿"   # a leading UTF-8 BOM (Excel), tolerated exactly as the app's par
 # so a transaction's entry-time guards see the position they are covered by, and corporate
 # actions come last (they are written separately, below) because E1a rejects an action whose
 # source position does not exist on its date.
-_LOAD_ORDER: tuple[str, ...] = ("openings", "transactions", "dividends", "fx")
+#
+# **`cash` joined on 2026-08-12 with the 6th import kind, and it earns its place by NOT being
+# checked.** None of §10.5's three columns reads a cash movement: they are per-ticker (賣超,
+# `original_total`, share parity) and a movement carries no symbol. It is loaded anyway because
+# the alternative is worse — `--export` accepts "the project's own canonical ledger CSVs", so an
+# owner handing over their whole export directory would otherwise hit
+# 「無法辨識這個 CSV 屬於哪一種帳本」 and the run would abort at exit 2 **on a file irrelevant to
+# what it verifies**. A gate that refuses to start because of an unrelated file is a gate that
+# gets skipped. It is written FIRST because its own withdraw guard is date-ordered and a
+# transaction settlement may draw on a deposit.
+_LOAD_ORDER: tuple[str, ...] = ("cash", "openings", "transactions", "dividends", "fx")
+
+def _cash_builder(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
+    """The cash parser needs its pool arithmetic INJECTED (architecture.md — `data_ingestion`
+    may not import `portfolio`), so it does not fit the two-argument builder signature the
+    other kinds share. Bound here, once per file, exactly as `api/routers/input_center.py`
+    binds it — the probe is a required argument, so this wrapper cannot silently go missing."""
+    return build_cash_movement_preview(conn, csv_text, pool=cash_pool_fn(conn))
+
 
 _BUILDERS: dict[str, Callable[[sqlite3.Connection, str], ImportPreview]] = {
+    "cash": _cash_builder,
     "openings": build_opening_preview,
     "transactions": build_transaction_preview,
     "dividends": build_dividend_preview,
     "fx": build_fx_preview,
 }
 _WRITERS: dict[str, Writer] = {
+    "cash": write_cash_movement_row,
     "openings": write_opening_row,
     "transactions": write_transaction_row,
     "dividends": write_dividend_row,
@@ -267,10 +293,11 @@ def _header_of(text: str) -> list[str]:
 def _detect_kind(header: Sequence[str]) -> str | None:
     """Which ledger a CSV is, from its header alone — or None when it matches none.
 
-    Keyed on the REQUIRED column set of each parser, so the four signatures are disjoint by
+    Keyed on the REQUIRED column set of each parser, so the signatures are disjoint by
     construction (only openings carry ``build_date``, only dividends ``type`` + ``gross``,
-    only fx ``from_ccy``). A guard test feeds each downloadable template back through this
-    function, so a column rename in ``data_ingestion`` cannot leave the dispatcher behind.
+    only fx ``from_ccy``, only cash ``ccy`` + ``amount``). A guard test feeds each
+    downloadable template back through this function, so a column rename in
+    ``data_ingestion`` cannot leave the dispatcher behind.
 
     The **corporate-action** template is deliberately NOT one of them: it is the ``--actions``
     argument, and silently loading it from ``--export`` would apply the ratios without ever
@@ -373,7 +400,7 @@ def _load_export(conn: sqlite3.Connection, files: Sequence[Path]) -> list[str]:
             problems.append(
                 f"{path.name}: 這是公司行動檔，請用 --actions 傳入，不要放進 --export"
                 if _is_action_header(header)
-                else f"{path.name}: 無法辨識這個 CSV 屬於哪一種帳本（欄位與四種匯入範本都不符）")
+                else f"{path.name}: 無法辨識這個 CSV 屬於哪一種帳本（欄位與所有匯入範本都不符）")
             continue
         typed.append((kind, path, text))
     typed.sort(key=lambda item: (_LOAD_ORDER.index(item[0]), item[1].name))
