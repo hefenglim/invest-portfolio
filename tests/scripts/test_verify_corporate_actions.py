@@ -103,10 +103,14 @@ _ACTIONS_INCOMPLETE = (
 
 # Every line the script is allowed to print: a ticker line, the missing-row count, or the
 # verdict. Anything else is a leak until proven otherwise.
-_TICKER_LINE = re.compile(r"^[A-Za-z0-9.\-]+ +· 賣超 (yes|no) +· 成本完整 (yes|no) +"
+# The symbol field is a plain ticker, or a MASKED one (`TSLA ⋯`, or bare `⋯` when even the
+# leading token carries a number). The mask exists because a symbol is a free string and an
+# option contract puts a strike price in it — see `_safe_symbol`. The whitelist must accept
+# the masked form, or the leak test would reject the very output that closes the leak.
+_TICKER_LINE = re.compile(r"^(?:[A-Za-z0-9.\-]+(?: ⋯)?|⋯) +· 賣超 (yes|no) +· 成本完整 (yes|no) +"
                           r"· 股數一致 (yes|no) *$")
 _COUNT_LINE = re.compile(r"^缺少的公司行動筆數（下限） \d+$")
-_VERDICT_LINE = re.compile(r"^(PASS|FAIL \d+)$")
+_VERDICT_LINE = re.compile(r"^(PASS|FAIL — 標的 \d+、缺漏 \d+)$")
 
 
 class RunFn(Protocol):
@@ -162,7 +166,9 @@ def test_missing_action_fails_and_names_the_ticker(run: RunFn) -> None:
     """The FAIL branch: a missing SPLIT trips 賣超 and discards the basis; exit 1."""
     code, lines = run(_ACTIONS_INCOMPLETE)
     assert code == 1
-    assert lines[-1] == "FAIL 3"          # 2 failing tickers + 1 missing row
+    # Reported separately, never summed: the missing row is the CAUSE of the failing tickers,
+    # and the two counts use different denominators (per SYMBOL vs per (account, symbol)).
+    assert lines[-1] == "FAIL — 標的 2、缺漏 1"
     by_symbol = {line.split(" ")[0]: line for line in lines if _TICKER_LINE.match(line)}
     # AAA: the sell is a post-split quantity against a pre-split count.
     assert "賣超 yes" in by_symbol["AAA"] and "成本完整 no" in by_symbol["AAA"]
@@ -193,7 +199,8 @@ def test_a_partial_multi_account_action_cannot_print_pass(run: RunFn) -> None:
     by_symbol = {line.split(" ")[0]: line for line in lines if _TICKER_LINE.match(line)}
     assert "賣超 no" in by_symbol["FFF"] and "股數一致 yes" in by_symbol["FFF"]
     assert lines[-2] == "缺少的公司行動筆數（下限） 1"
-    assert lines[-1] == "FAIL 1"
+    # Zero failing tickers and still a FAIL — the case the PASS criterion exists for.
+    assert lines[-1] == "FAIL — 標的 0、缺漏 1"
     assert code == 1
 
 
@@ -212,11 +219,51 @@ def test_a_rejected_row_counts_as_missing(run: RunFn) -> None:
     code, lines = run(bad_ratio)
     by_symbol = {line.split(" ")[0]: line for line in lines if _TICKER_LINE.match(line)}
     assert "賣超 yes" in by_symbol["AAA"]
-    # 1 rejected row + 2 positions (AAA, CCC) left 賣超 with no action row of their own —
-    # this actions file omits the BBB->CCC exchange entirely, so CCC's sell has nothing to
-    # cover it either. All three populations of the count, in one run.
-    assert lines[-2] == "缺少的公司行動筆數（下限） 3"
+    # 1 rejected row (AAA) + 1 position left 賣超 with no action row of its own (CCC — this
+    # actions file omits the BBB->CCC exchange entirely, so CCC's sell has nothing to cover
+    # it either). AAA is NOT counted a second time: it is excluded from the oversold
+    # population precisely because its row was supplied and rejected. Before 2026-08-11 this
+    # asserted 3, because the exclusion was keyed on the WRITTEN rows and a rejected row is
+    # never written — so it could not fire and AAA was counted twice. See the parity test
+    # below, which pins the property rather than the number.
+    assert lines[-2] == "缺少的公司行動筆數（下限） 2"
     assert code == 1
+
+
+def test_a_rejected_row_and_an_omitted_row_report_the_SAME_missing_count(
+    run: RunFn,
+) -> None:
+    """The property behind the number above — and the reason the old count was wrong.
+
+    A rejected row is never written. So a run that SUPPLIES a bad row and a run that OMITS it
+    entirely leave the ledger in an **identical** state: same tables, same replay, same
+    per-ticker verdicts. A count that reports different totals for two identical ledgers is
+    describing the input file, not the ledger — and it is labelled 「下限」 (a lower bound),
+    which a count that over-reports is not.
+
+    Measured 2026-08-11 on the acceptance corpus: supplied-but-rejected read ``missing 2``
+    where omitted read ``missing 1``, for the same one missing row. Same defect class as D13's
+    「the ⚠ provably never fires」 and E15/D29 — a guard written against a state that cannot
+    occur.
+    """
+    bad = _ACTION_HEADER + "schwab,2024-06-03,SPLIT,AAA,AAA,0.2857,1,,a rounded quotient\n"
+    omitted = _ACTION_HEADER
+    bad_code, bad_lines = run(bad)
+    omit_code, omit_lines = run(omitted)
+
+    def _ticker_lines(lines: list[str]) -> list[str]:
+        return [ln for ln in lines if _TICKER_LINE.match(ln)]
+
+    # The AAA row names a symbol, so `affected` lists it in the bad run and not in the omitted
+    # one. Every ticker the two have in COMMON must read identically — the ledgers are equal.
+    bad_by = {ln.split(" ")[0]: ln for ln in _ticker_lines(bad_lines)}
+    omit_by = {ln.split(" ")[0]: ln for ln in _ticker_lines(omit_lines)}
+    shared = set(bad_by) & set(omit_by)
+    assert shared, "the two runs share no ticker — the fixture no longer exercises this"
+    assert all(bad_by[s] == omit_by[s] for s in shared)
+    assert bad_code == omit_code == 1
+    # …and therefore the same lower bound. This is the assertion that was red before the fix.
+    assert bad_lines[-2] == omit_lines[-2]
 
 
 def test_output_never_leaks_an_amount(run: RunFn) -> None:
@@ -231,6 +278,67 @@ def test_output_never_leaks_an_amount(run: RunFn) -> None:
         # Belt as well as braces: no price, share count or account id from the fixture.
         for secret in ("140", "700", "3200", "schwab", "moomoo_my", "26", "62"):
             assert secret not in blob
+
+
+def test_an_option_contract_symbol_cannot_put_its_strike_on_stdout(run: RunFn) -> None:
+    """The leak the test above could not see, because its fixture had nothing to leak.
+
+    ``test_output_never_leaks_an_amount`` asserts the right thing and its corpus is AAA / BBB
+    / CCC — three symbols that cannot carry an amount, so the assertion was never put under
+    load. The module docstring's privacy argument is about TYPES (no ``Decimal`` reaches
+    stdout) and a *symbol* is a free string: Schwab writes an option as
+    ``TICKER MM/DD/YYYY STRIKE C|P``, and **the strike is an amount**.
+
+    Not contrived: in a real export the contracts sit on the very journal dates the corporate
+    actions do, so an owner recording those actions has such a string as a ``from_symbol`` by
+    construction. And ``affected`` is built from the PARSED inputs before validation, so the
+    string prints even though this row is rejected — which this test also proves by asserting
+    a FAIL rather than a crash.
+    """
+    strike = "987.65"
+    contract = f"WWWW 01/19/2029 {strike} P"
+    actions = (_ACTION_HEADER
+               + f"schwab,2024-06-03,SPLIT,{contract},{contract},7,1,,option contract\n")
+    code, lines = run(actions)
+    blob = "\n".join(lines)
+    assert strike not in blob, f"the strike reached stdout: {blob!r}"
+    assert "987" not in blob and "65" not in blob
+    # Masked, not dropped: the underlying is still named, so the owner can act on it, and the
+    # line still passes the whitelist — a masked line is legitimate output, not an anomaly.
+    assert any(ln.startswith("WWWW ⋯") for ln in lines), blob
+    for line in lines:
+        assert (_TICKER_LINE.match(line) or _COUNT_LINE.match(line)
+                or _VERDICT_LINE.match(line)), f"unrecognised output line: {line!r}"
+    assert code == 1
+
+
+@pytest.mark.parametrize("symbol", ["2330", "0050", "3182", "AAPL", "BRK.B", "BRK-B"])
+def test_a_real_ticker_is_never_masked(symbol: str) -> None:
+    """The false-positive guard, and the reason the rule is not "contains a digit".
+
+    Two of this app's three markets quote NUMERIC tickers — TW ``2330`` / ``0050``, MY
+    ``3182``. A digit-based mask would blank most of the report on a TW or MY ledger while
+    adding nothing on a US one: it would destroy the output it was written to protect. US
+    class shares (``BRK.B``) rule out a dot-based test for the same reason. Whitespace or
+    ``\\d\\.\\d`` is the discriminator that separates a contract string from every ticker
+    shape this app actually serves.
+    """
+    assert script._safe_symbol(symbol) == symbol
+
+
+@pytest.mark.parametrize(
+    ("symbol", "expected"),
+    [("TSLA 01/19/2024 200.00 P", "TSLA ⋯"),   # the measured Schwab contract form
+     ("RKLB 01/21/2022 7.50 P", "RKLB ⋯"),     # …on a real exchange date
+     ("200.00", "⋯"),                          # nothing safe to keep -> keep nothing
+     ("1.50 P", "⋯")],
+)
+def test_masking_keeps_the_underlying_and_drops_the_amount(
+    symbol: str, expected: str
+) -> None:
+    """Masking is a display change, so it must stay maximally informative: keep the leading
+    token when it is itself a valid ticker, and keep nothing when it is not."""
+    assert script._safe_symbol(symbol) == expected
 
 
 def test_oversell_is_reported_even_when_the_position_ends_flat(run: RunFn) -> None:

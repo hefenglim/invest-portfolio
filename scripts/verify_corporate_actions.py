@@ -17,8 +17,18 @@ output are not committed.
 * Exactly one function — :func:`_report_line` — prints per-ticker output, and it accepts a
   symbol and three booleans. There is no code path from a Decimal to stdout. Every other
   printed token is a fixed label, an integer count, or a machine issue *kind* (never an
-  issue *message*: those interpolate quantities). The output is therefore pasteable into a
-  chat session without leaking amounts, share counts or account names.
+  issue *message*: those interpolate quantities).
+* **The type argument above is necessary and was not sufficient** (found 2026-08-11). A
+  *symbol* is a free string, and the owner's broker fills it with an amount: an option
+  contract is ``TICKER MM/DD/YYYY STRIKE C|P``, so ``TSLA 01/19/2024 200.00 P`` puts a strike
+  on stdout with no ``Decimal`` involved. Symbols are therefore masked by
+  :func:`_safe_symbol` before printing — see its docstring for why masking rather than
+  rejecting, and why the test is not "contains a digit" (TW and MY tickers are numeric).
+
+  With that, stdout is pasteable into a chat session without leaking amounts, share counts or
+  account names. **stderr is not**: :func:`_problem` interpolates input FILE NAMES, and a
+  broker's own export filename embeds an account-number fragment. Paste the report, not the
+  whole terminal.
 
 **What it checks, per affected ticker** (§10.5's three columns):
 
@@ -55,6 +65,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import re
 import sqlite3
 import sys
 from collections import defaultdict
@@ -176,6 +187,42 @@ def _yn(value: bool) -> str:
     return "yes" if value else "no"
 
 
+# An equity ticker never contains whitespace, and never a digit-dot-digit run. An OPTION
+# symbol contains both: Schwab writes contracts as ``TICKER MM/DD/YYYY STRIKE C|P``, e.g.
+# ``TSLA 01/19/2024 200.00 P`` — and **the strike is an amount**.
+#
+# The discriminator is deliberately NOT "contains a digit". Two of this project's three
+# markets quote numeric tickers — TW ``2330`` / ``0050``, MY ``3182`` — so a digit rule would
+# mask most of the report on a TW or MY ledger while adding nothing on a US one. It is also
+# not "contains a dot": US class shares are written ``BRK.B``. Whitespace or ``\d\.\d``
+# catches the contract form and nothing that is a real ticker in any market this app serves.
+_NOT_A_TICKER = re.compile(r"\s|\d\.\d")
+
+
+def _safe_symbol(symbol: str) -> str:
+    """A symbol that is safe to print, and the reason this function has to exist.
+
+    The module docstring's privacy argument is about TYPES — no ``Decimal`` reaches stdout —
+    and it was **incomplete**, measured 2026-08-11. :func:`_report_line` prints the *symbol*,
+    and a symbol is a free string that the owner's own broker fills with a strike price. This
+    is not contrived: in a real Schwab export the option contracts appear on the very journal
+    dates the corporate actions do (the same date carries ``TICKER MM/DD/YYYY 7.50 P`` beside
+    the equity), so an owner recording those actions has such a string as a ``from_symbol`` by
+    construction. Worse, ``affected`` in :func:`main` is built from the **parsed** action
+    inputs before any validation runs, so the string prints even for a row that is rejected.
+
+    **Masked, not rejected.** Refusing an option-shaped symbol at the door would drop a row
+    the owner supplied, which changes ``missing_action_rows`` and could turn a FAIL into a
+    PASS — weakening the gate to protect the output. Masking changes only what is printed:
+    every count, verdict and exit code is identical. The leading token is kept because it is
+    the underlying ticker, which is what the owner needs to act on.
+    """
+    if not _NOT_A_TICKER.search(symbol):
+        return symbol
+    head = symbol.split(maxsplit=1)[0] if symbol.split() else ""
+    return f"{head} ⋯" if head and not _NOT_A_TICKER.search(head) else "⋯"
+
+
 def _report_line(symbol: str, oversold: bool, basis_intact: bool, reconciled: bool,
                  width: int) -> None:
     """Print §10.5's one line per affected ticker: a symbol and three yes/no answers.
@@ -184,9 +231,12 @@ def _report_line(symbol: str, oversold: bool, basis_intact: bool, reconciled: bo
     is never given one — no ``Decimal``, no ``Holding``, no account id reaches it. Any future
     "just add the share count so I can see what went wrong" edit has to change this signature
     first, which is the point at which somebody has to justify it.
+
+    The signature is **necessary and not sufficient**: *symbol* is a string, and a string can
+    carry an amount. It is masked by :func:`_safe_symbol` before it reaches this line.
     """
-    print(f"{symbol:<{width}} · 賣超 {_yn(oversold):<3} · 成本完整 {_yn(basis_intact):<3}"
-          f" · 股數一致 {_yn(reconciled):<3}")
+    print(f"{_safe_symbol(symbol):<{width}} · 賣超 {_yn(oversold):<3}"
+          f" · 成本完整 {_yn(basis_intact):<3} · 股數一致 {_yn(reconciled):<3}")
 
 
 def _problem(message: str) -> None:
@@ -396,8 +446,21 @@ def _parse_actions(text: str) -> tuple[list[CorporateActionInput], list[str]]:
 
 
 
-def _write_actions(conn: sqlite3.Connection, inputs: Sequence[CorporateActionInput]) -> int:
-    """Validate and write the supplied actions; return how many were REJECTED.
+def _write_actions(
+    conn: sqlite3.Connection, inputs: Sequence[CorporateActionInput]
+) -> tuple[int, set[tuple[str, str]]]:
+    """Validate and write the supplied actions; return how many were REJECTED **and which**.
+
+    The ``(account_id, symbol)`` keys of the rejected rows — both ends — are returned because
+    :func:`_missing_action_rows` cannot reconstruct them: it builds its "already explained"
+    set from :func:`list_corporate_actions`, i.e. from **written** rows, and a rejected row is
+    by definition never written. Its docstring claimed such a position "is already counted by
+    (1) and is excluded here", and that exclusion **provably never fired** — measured
+    2026-08-11 on the acceptance corpus, where supplying a row with a decimal ratio and
+    omitting it entirely left the ledger in an identical state yet reported ``missing 2``
+    against ``missing 1`` for the same one missing row. Same defect class as D13's 「the ⚠
+    provably never fires」 and E15/D29: a guard written against a state that cannot occur.
+    A count labelled 「下限」 that over-reports is not a lower bound.
 
     Written INCREMENTALLY, in date order, each row validated against the ledger that already
     holds its predecessors. Validating the whole batch against an empty action ledger would
@@ -412,11 +475,14 @@ def _write_actions(conn: sqlite3.Connection, inputs: Sequence[CorporateActionInp
     rejection count part of "rows needed but not found" rather than a separate verdict.
     """
     rejected = 0
+    rejected_keys: set[tuple[str, str]] = set()
     ordered = sorted(inputs, key=lambda a: (a.date, a.from_symbol, a.to_symbol, a.account_id))
     for inp in ordered:
         issues = validate_corporate_action(conn, inp, batch=inputs)
         if any(not issue.needs_confirm for issue in issues):
             rejected += 1
+            rejected_keys.add((inp.account_id, inp.from_symbol))
+            rejected_keys.add((inp.account_id, inp.to_symbol))
             continue
         insert_corporate_action(
             conn,
@@ -430,7 +496,7 @@ def _write_actions(conn: sqlite3.Connection, inputs: Sequence[CorporateActionInp
             cost_carry=inp.cost_carry,
             note=inp.note,
         )
-    return rejected
+    return rejected, rejected_keys
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +580,8 @@ def _ever_negative(conn: sqlite3.Connection, index: ActionIndex) -> set[tuple[st
 
 
 def _analyse(
-    conn: sqlite3.Connection, book: Book, index: ActionIndex, *, rejected: int
+    conn: sqlite3.Connection, book: Book, index: ActionIndex, *, rejected: int,
+    rejected_keys: set[tuple[str, str]],
 ) -> _Analysis:
     """Turn the replayed book into one verdict per symbol, plus the missing-rows count."""
     by_key = {(h.account_id, h.symbol): h for h in book.holdings}
@@ -547,7 +614,8 @@ def _analyse(
     return _Analysis(
         verdicts=verdicts,
         missing_action_rows=_missing_action_rows(
-            conn, book, oversold_positions, rejected=rejected),
+            conn, book, oversold_positions, rejected=rejected,
+            rejected_keys=rejected_keys),
     )
 
 
@@ -557,6 +625,7 @@ def _missing_action_rows(
     oversold_positions: set[tuple[str, str]],
     *,
     rejected: int,
+    rejected_keys: set[tuple[str, str]],
 ) -> int:
     """Corporate-action rows the run NEEDED and the ledger does not contain — a LOWER BOUND.
 
@@ -573,19 +642,30 @@ def _missing_action_rows(
        the table, absent from the replay's effect — again the same thing to every number;
     3. one per position that still trips the undeclared-oversell guard and carries NO stored
        action row of its own. At least one row is missing there — that is the entire premise
-       of §1 — but not how many, so it counts as one. A position whose action WAS supplied
-       and rejected is already counted by (1) and is excluded here, so nothing is
-       double-counted.
+       of §1 — but not how many, so it counts as one.
+
+    **A position whose action was supplied and REJECTED is excluded from (3)**, because (1)
+    already counted it. That exclusion needs ``rejected_keys`` to work, and the reason is the
+    whole of this parameter's justification: ``covered`` below is built from
+    :func:`list_corporate_actions` — the rows actually **written** — and a rejected row is by
+    definition never written, so it can never appear there. Keying the exclusion on ``covered``
+    alone made it **unreachable**, and the count then reported the same one missing row twice.
+    Measured 2026-08-11 on the acceptance corpus: a supplied-but-rejected row (decimal ratio,
+    E6a) and an omitted row leave the ledger **identical** — every per-ticker line is
+    byte-identical between the two runs — yet reported ``missing 2`` against ``missing 1``.
+    See :func:`_write_actions`; the guard now excludes on ``covered | rejected_keys``.
 
     Deliberately NOT counted: a guess at how many rows would fix an oversell. The script
     cannot know whether one SPLIT or a SPLIT and an EXCHANGE is missing, and inventing a
     number is the fabrication ``data-and-pricing.md`` forbids. Hence "lower bound", stated in
     the label and in ``--help``: ``> 0`` means the ledger is incomplete; ``0`` with a FAIL
-    means the replay is what needs looking at.
+    means the replay is what needs looking at. A lower bound that OVER-reports is not a lower
+    bound, which is why the double count was a defect and not a cosmetic imprecision.
     """
     stored = list_corporate_actions(conn)
     covered = {(s.account_id, s.from_symbol) for s in stored}
     covered |= {(s.account_id, s.to_symbol) for s in stored}
+    covered |= rejected_keys
     unexplained = sum(1 for key in oversold_positions if key not in covered)
     return rejected + len(book.unapplied_actions) + unexplained
 
@@ -686,19 +766,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             _problem("無法完成驗證：帳本沒有完整載入，先修正上面的問題再重跑")
             return 2
 
-        rejected = _write_actions(conn, action_inputs)
+        rejected, rejected_keys = _write_actions(conn, action_inputs)
         try:
             book = build_book(load_ledger_bundle(conn), allow_oversell=True)
         except (ValueError, KeyError) as exc:
             _problem(f"重播失敗（{type(exc).__name__}）：帳本裡有這個模型無法記錄的事件")
             return 2
-        analysis = _analyse(conn, book, load_action_index(conn), rejected=rejected)
+        analysis = _analyse(conn, book, load_action_index(conn), rejected=rejected,
+                           rejected_keys=rejected_keys)
     finally:
         conn.close()
 
     affected = {sym for a in action_inputs for sym in (a.from_symbol, a.to_symbol)}
     affected |= {sym for sym, v in analysis.verdicts.items() if not v.ok}
-    width = max((len(s) for s in affected), default=1)
+    # Column width is measured on the MASKED forms, or an option contract's 24-character
+    # string pads every other line to its length and announces on stdout that one was present.
+    width = max((len(_safe_symbol(s)) for s in affected), default=1)
+    masked = sum(1 for s in affected if _safe_symbol(s) != s)
+    if masked:
+        _problem(f"注意：{masked} 個代號不是股票代號（含空白或小數，例如選擇權合約），"
+                 "報表已遮蔽其內容。本功能不處理選擇權公司行動（規格 §範圍）")
     failed = 0
     for symbol in sorted(affected):
         # A symbol named by a supplied action can be absent from every ledger when that action
@@ -709,15 +796,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                      verdict.shares_reconcile, width)
         failed += 0 if verdict.ok else 1
     print(f"缺少的公司行動筆數（下限） {analysis.missing_action_rows}")
-    # `n` counts FINDINGS, not tickers, so a missing row can never print PASS. It is reachable
-    # with every ticker clean — an action rejected at entry, or one the replay refused, leaves
-    # the affected position in PRE-action terms, where BOTH share paths agree and no sell has
-    # yet exposed it. Reporting PASS there would be green having tested none of the feature,
-    # which is trap #22 arriving through the gate written to prevent it. The two lines above
-    # add up to n, so the breakdown is always on screen.
-    findings = failed + analysis.missing_action_rows
-    print("PASS" if findings == 0 else f"FAIL {findings}")
-    return 0 if findings == 0 else 1
+    # The PASS CRITERION is "no failing ticker AND no missing row" — a missing row can never
+    # print PASS. That is reachable with every ticker clean: an action rejected at entry, or
+    # one the replay refused, leaves the affected position in PRE-action terms, where BOTH
+    # share paths agree and no sell has yet exposed it. Green there would be green having
+    # tested none of the feature — trap #22 arriving through the gate written to prevent it.
+    #
+    # The two counts are REPORTED SEPARATELY rather than summed (2026-08-11). The sum was
+    # measured to misrepresent scale in three ways: the missing rows are the CAUSE of the
+    # failing tickers, so a single defect is counted twice (the corpus with every action
+    # removed printed `FAIL 17` for 8 problems); the halves use different denominators —
+    # tickers are per SYMBOL, missing rows per (account, symbol) POSITION, so one split held
+    # in two accounts is 1 ticker and 2 rows; and both numbers are already on the two lines
+    # above, so the sum adds nothing but a bigger number. The criterion is unchanged —
+    # `failed + missing == 0` and `failed == 0 and missing == 0` are the same predicate over
+    # two non-negative counts — so this is a display change, not a gate change.
+    ok = failed == 0 and analysis.missing_action_rows == 0
+    print("PASS" if ok else f"FAIL — 標的 {failed}、缺漏 {analysis.missing_action_rows}")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
