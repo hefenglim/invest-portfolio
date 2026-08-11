@@ -420,6 +420,43 @@
     });
   }
 
+  /* 待釐清 badges for ONE position row (audit F-52: the drawer drew NONE of them — it
+     consumed only `fully_recovered` and `price_stale`, so a symbol whose share count is
+     wrong by a whole corporate-action ratio looked exactly like a healthy one, and §6.3's
+     red reconciliation footer would render with nothing beside it to name the cause).
+
+     Labels, titles and the severity ORDER are deliberately identical to the holdings table
+     in app.js — one vocabulary for one state, so 「股數待釐清」 in the table and in the drawer
+     are provably the same flag. Severity descending: a discarded basis (賣超), then a wrong
+     SHARE COUNT (every valued figure off by the ratio), then a missing payout (the share
+     count is right and the row is short by exactly one dividend), then a healthy declared
+     short — which is a real priced position, NOT a data problem, and must never look like
+     one. Returns [] for a clean position. */
+  function flagBadges(h) {
+    const out = [];
+    const add = (cls, label, title) => {
+      const b = el('span', 'badge ' + cls, label);
+      b.title = title;
+      out.push(b);
+    };
+    if (h.oversold) {
+      add('badge-missing', '賣超',
+        '賣出數量超過持股，部位為負、損益待釐清（請補記期初庫存或遺漏的買進）');
+    } else if (h.unbookable_action) {
+      add('badge-missing', '股數待釐清',
+        '公司行動未套用：股數仍是行動前的數字，價格卻已是行動後的，'
+        + '市值與未實現損益因此失真（請修正該筆公司行動或補齊持倉紀錄）');
+    } else if (h.unbookable_dividend) {
+      add('badge-missing', '股利待釐清',
+        '放空期間有股利紀錄：放空方需支付股利，此筆未列入計算，'
+        + '本列數字少計該筆金額（請改以現金收支登錄）');
+    } else if (h.short_open) {
+      add('badge-short', '放空中',
+        '已宣告的放空部位；成本基礎為賣出價款，買回時結算損益');
+    }
+    return out;
+  }
+
   /* 部位摘要 — the AGGREGATE across accounts is PRIMARY (owner #2c). `h` is detail.position
      (server-computed cross-account Decimal totals); `accts` is the per-account breakdown,
      rendered as a SECONDARY table only when the symbol spans >1 account. The drawer NEVER
@@ -427,8 +464,14 @@
   function statsSection(h, accts) {
     const multi = !!(accts && accts.length > 1);
     const sec = el('div', 'sd-section');
+    const flags = flagBadges(h);
+    const flagHost = flags.length ? el('div', 'sd-pos-flags') : null;
+    if (flagHost) {
+      flagHost.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
+      flags.forEach((b) => flagHost.appendChild(b));
+    }
     sec.appendChild(secHead('部位摘要',
-      multi ? ('原幣金額・' + accts.length + ' 個帳戶合計') : '原幣金額'));
+      multi ? ('原幣金額・' + accts.length + ' 個帳戶合計') : '原幣金額', flagHost));
     const grid = el('div', 'sd-stats');
     const stat = (k, v, sub, signCls) => {
       const d = el('div', 'sd-stat');
@@ -474,7 +517,13 @@
     const tbody = el('tbody');
     accts.forEach((a) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'col-text', acctZh(a.account_id)));
+      const tdAcct = el('td', 'col-text');
+      tdAcct.appendChild(el('span', null, acctZh(a.account_id)));
+      /* Per-account 待釐清 badges: the aggregate above flags with `any(...)`, so ONE tainted
+         account reddens the total while the others are clean. Without the badge here the
+         drawer would say the position is 待釐清 and give no way to see which account. */
+      flagBadges(a).forEach((b) => { b.style.marginLeft = '6px'; tdAcct.appendChild(b); });
+      tr.appendChild(tdAcct);
       tr.appendChild(el('td', 'num', f.shares(a.shares)));
       tr.appendChild(el('td', 'num', a.market_value == null ? f.NULL_GLYPH : f.money(a.market_value, a.quote_ccy)));
       tr.appendChild(el('td', 'num ' + f.signClass(a.unrealized_pnl), a.unrealized_pnl == null ? f.NULL_GLYPH : f.signed(a.unrealized_pnl, a.quote_ccy)));
@@ -751,7 +800,23 @@
     if (s === 'open') return el('span', 'dir-chip', '期初');
     if (s === 'drip') return el('span', 'dir-chip', 'DRIP再投');
     if (s === 'stock') return el('span', 'dir-chip', '配股');
+    if (s === 'action') return el('span', 'dir-chip', '公司行動');
     return el('span', 'dir-chip dir-buy', '買');
+  }
+
+  const ACTION_KIND_ZH = { SPLIT: '拆併股', EXCHANGE: '換股', SPINOFF: '分割' };
+
+  /* One-line description of a corporate-action activity row: what happened, at what ratio,
+     and (when the two ends differ) which symbol it came from or went to. The row carries no
+     share count on purpose — the exact figure is the footer's ＋公司行動 term, computed by the
+     share walker; re-deriving a per-row delta in the browser would be a third implementation
+     of the ratio algebra AND client-side quantity math. */
+  function actionLabel(t) {
+    const kind = ACTION_KIND_ZH[t.kind] || t.kind || '公司行動';
+    const ratio = t.ratio_to + '：' + t.ratio_from;
+    if (t.role === 'self') return kind + ' ' + ratio;                 // SPLIT: in place
+    if (t.role === 'destination') return kind + ' ' + ratio + '（來自 ' + t.from_symbol + '）';
+    return kind + ' ' + ratio + '（移轉至 ' + t.to_symbol + '）';
   }
 
   /* 交易明細 — the UNIFIED, account-tagged activity list (期初 + 買 + 賣 + 配股/DRIP), rendered
@@ -820,7 +885,15 @@
         tr.appendChild(el('td', 'col-text', t.account));
         const tdSide = el('td', 'col-text');
         tdSide.appendChild(sideChip(t.side));
+        if (t.side === 'action') {
+          const lbl = el('span', 'sd-act-label', actionLabel(t));
+          lbl.style.cssText = 'margin-left:6px;color:var(--text-2)';
+          if (t.note) lbl.title = t.note;
+          tdSide.appendChild(lbl);
+        }
         tr.appendChild(tdSide);
+        /* An action row carries `shares: null` (see actionLabel) -> em-dash, never a
+           fabricated 0: f.shares nil-guards, but the intent is stated here. */
         tr.appendChild(el('td', 'num', f.shares(t.shares)));
         /* opening/配股 may carry no price/fee/tax → em-dash (never fabricate a 0). */
         tr.appendChild(el('td', 'num', t.price == null ? f.NULL_GLYPH : f.price(t.price, t.ccy)));
@@ -843,7 +916,9 @@
       const rec = filterAcct
         ? (reconcile.by_account && reconcile.by_account[filterAcct])
         : reconcile.total;
-      if (!rec) return;
+      /* No footer for this filter (a per-account slice the server did not emit) — still show
+         the cause lines: an unexplained absence is the same defect as an unexplained ⚠. */
+      if (!rec) { renderActionIssues(); return; }
       const parts = ['期初 ' + f.shares(rec.opening_shares),
         '＋買 ' + f.shares(rec.buy_shares), '−賣 ' + f.shares(rec.sell_shares)];
       /* Show the 配股/DRIP term only when it is non-zero AND still non-zero once rendered —
@@ -851,6 +926,25 @@
          exactly how the 2026-08-05 report read). */
       if (Number(rec.reinvest_shares) !== 0 && f.shares(rec.reinvest_shares) !== '0') {
         parts.push('＋配股/DRIP ' + f.shares(rec.reinvest_shares));
+      }
+      /* ＋公司行動 (spec §6.3, W5): a corporate action adds shares OUTSIDE the four ledger
+         buckets — no transaction, no opening, no dividend row — so without this term every
+         symbol carrying one reported ⚠ 對帳不一致 while being perfectly consistent. Shown
+         only when non-zero, the same rule as 配股/DRIP above and for the same reason: a
+         「＋公司行動 0」 explains nothing.
+
+         The term is SIGNED by the server — a SPLIT adds shares, an EXCHANGE's source loses
+         its whole position — and the sign is moved into the OPERATOR rather than left on the
+         number, so the equation reads 「−公司行動 40」 like its 「−賣」 neighbour instead of
+         「＋公司行動 -40」. That is a string swap on an already-formatted display value, NOT
+         client-side arithmetic: the magnitude shown is whatever f.shares produced, with its
+         leading ASCII minus (see format.js `num`) taken off. */
+      const corp = rec.corporate_delta_shares;
+      if (corp != null && Number(corp) !== 0 && f.shares(corp) !== '0') {
+        const shown = f.shares(corp);
+        parts.push(shown.charAt(0) === '-'
+          ? '−公司行動 ' + shown.slice(1)
+          : '＋公司行動 ' + shown);
       }
       footHost.appendChild(el('span', null,
         parts.join(' ') + ' ＝ 部位摘要 ' + f.shares(rec.book_shares) + ' 股'));
@@ -863,6 +957,68 @@
       if (!rec.balances && rec.diff_shares != null) {
         footHost.appendChild(el('span', null, '（差額 ' + f.shares(rec.diff_shares) + ' 股）'));
       }
+      renderRepairDoor(!rec.balances);
+      renderActionIssues();
+    }
+
+    /* DOOR 2 (§6.7) — the repair offered where the owner is already looking at the evidence.
+       Doors 1 and 3 are entry surfaces the owner has to go and find; this one appears beside
+       the mismatch itself, which is the whole argument for having three doors rather than one.
+       Shown only on a RED footer: on a green one it is a control with nothing to fix.
+       `pdCorpActionForm` is the shared component doors 1 and 3 use, loaded by index.html —
+       so this is a call, not a fourth implementation of the form. If the script is absent the
+       button simply does not render, because a door that opens onto nothing is worse than no
+       door: the owner would conclude the repair is unavailable rather than that it is broken. */
+    function renderRepairDoor(mismatched) {
+      const form = window.pdCorpActionForm;
+      if (!mismatched || !form || typeof form.open !== 'function') return;
+      const btn = el('button', 'btn-ghost', '補登公司行動');
+      btn.type = 'button';
+      btn.style.cssText = 'margin-left:10px;font-size:12px;padding:2px 8px';
+      btn.addEventListener('click', () => form.open({
+        account_id: filterAcct || '',
+        from_symbol: symbol,
+        reason: '此標的的對帳結果為 ⚠ 對帳不一致',
+        /* Re-open through the shell's own entry point rather than re-rendering in place:
+           the saved action changes `corporate_delta`, the position, the flags AND the
+           prices, so a partial refresh would leave the drawer showing a mix of before and
+           after — the aggregate-vs-detail divergence this repo has already had three times. */
+        onSaved: () => { if (window.pdOpenSymbol) window.pdOpenSymbol(symbol); },
+      }));
+      footHost.appendChild(btn);
+    }
+
+    /* The CAUSE lines that must accompany a red footer (§6.3 / audit F-17). A flagged
+       position SHOULD fail to reconcile — §6.3 rules that "a position whose basis was
+       discarded genuinely does not reconcile; reporting ⚠ 對帳不一致 on it is the correct
+       answer, not a false alarm" — so the drawer never forces it green; it names the reason
+       instead. Three distinct channels, three different sentences (see _action_issues):
+       the replay's refused rows, D31's depth-capped walk, D33's negative-side skip.
+       Rendered whenever non-empty, not only when the footer is red: a depth-capped walk can
+       still balance, and the share count is untrustworthy either way. */
+    function renderActionIssues() {
+      const issues = (detail && detail.action_issues) || null;
+      if (!issues) return;
+      const keep = (r) => !filterAcct || r.account_id === filterAcct;
+      const lines = [];
+      (issues.unapplied || []).filter(keep).forEach((u) => {
+        lines.push('⚠ 公司行動未套用（' + acctZh(u.account_id) + '・' + f.date(u.date) + '・'
+          + (ACTION_KIND_ZH[u.kind] || u.kind) + ' ' + u.from_symbol + '→' + u.to_symbol
+          + '）：' + u.reason);
+      });
+      (issues.depth_capped || []).filter(keep).forEach((d) => {
+        lines.push('⚠ 公司行動鏈過長（' + acctZh(d.account_id)
+          + '）：股數改用未套用行動的舊基準，此列股數待釐清');
+      });
+      (issues.negative_side_skipped || []).filter(keep).forEach((d) => {
+        lines.push('⚠ 公司行動跳過（' + acctZh(d.account_id)
+          + '）：行動當日來源或目標股數為負（放空或賣超），本筆未套用，股數待釐清');
+      });
+      lines.forEach((text) => {
+        const row = el('div', 'sd-tx-issue', text);
+        row.style.cssText = 'margin-top:4px;color:var(--up)';
+        footHost.appendChild(row);
+      });
     }
 
     function showPage(offset) {

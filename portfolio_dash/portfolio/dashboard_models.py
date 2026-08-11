@@ -15,6 +15,7 @@ from portfolio_dash.portfolio.results import (
     RealizedPnL,
     ReturnSummary,
     SectorAllocation,
+    UnappliedAction,
 )
 from portfolio_dash.shared.enums import Currency, Market
 
@@ -245,3 +246,18 @@ class DashboardData(BaseModel):
     # Optional default: build_dashboard always populates it; the default only avoids
     # breaking direct DashboardData constructions that predate spec 05.
     dividend_projection: DividendProjection | None = None
+    # Corporate actions the replay REFUSED to book (``Book.unapplied_actions``), carried
+    # onto the public read surface for W5 / audit F-17.
+    #
+    # It is NOT a duplicate of ``HoldingRow.unbookable_action`` and must not be collapsed
+    # into one: TWO of the three ways an action goes unapplied leave **no surviving
+    # position to flag** (an EXCHANGE that already emptied the source — the flag is dropped
+    # with its zero-share carrier — and a source that never existed at all). See
+    # :class:`UnappliedAction`. §6.3's reconciliation footer turns red on exactly those
+    # cases, and without these rows the drawer would render ⚠ 對帳不一致 with nothing
+    # beside it to name the cause, which is the specific defect D33 exists to prevent.
+    #
+    # Empty by construction on the strict path (``allow_oversell=False`` raises instead), so
+    # a non-empty list always means the dashboard path degraded and the share counts in this
+    # payload are 待釐清.
+    unapplied_actions: list[UnappliedAction] = Field(default_factory=list)

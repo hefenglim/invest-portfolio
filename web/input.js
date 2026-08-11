@@ -672,8 +672,112 @@
     $('#m-confirm').disabled = !hasServer || hard.length > 0 || !ackOk;
   }
 
+  /* ===== Door 1 (spec 2026-08-06 §6.7) — the 賣超 dialog gains a THIRD option, FIRST =====
+
+     This is the moment the corporate-action feature exists for. 確認 discards the position's
+     cost basis PERMANENTLY (the STICKY 賣超 guard), and the most common real cause of a sell
+     exceeding holdings is a split/exchange/spin-off that was never recorded — not a data
+     entry error and not a short. So the destructive confirmation becomes a guided repair,
+     offered at the one moment the owner is already looking at the evidence.
+
+     Deliberately NOT the plain confirmDialog: that widget has one action, and the ordering
+     of the three options is the point (§6.7 lists 補登公司行動 first). Pre-filled with the
+     account, the symbol and a date window bounded by the sell's own trade date. */
+  function oversellDialog(msg, body) {
+    const backdrop = el('div', 'modal-backdrop');
+    const modal = el('div', 'modal');
+    const head = el('div', 'modal-head');
+    head.appendChild(el('h3', 'modal-title', '賣超確認'));
+    const x = el('button', 'modal-close', '✕');
+    x.type = 'button';
+    head.appendChild(x);
+    modal.appendChild(head);
+    const bodyEl = el('div', 'modal-body');
+    bodyEl.appendChild(el('div', null, '⚠ ' + msg));
+    const opts = el('div', 'os-options');
+    const dismiss = () => backdrop.remove();
+
+    opts.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-top:10px;';
+    /* Styled inline rather than in input.css: this dialog is also the shape door 2 will
+       reuse, and index.html does not load input.css — a rule that lives in one page's
+       stylesheet renders the option list unstyled on the page it is added to next. */
+    const option = (label, sub, accent, onPick) => {
+      const b = el('button');
+      b.type = 'button';
+      b.style.cssText = 'text-align:left;display:flex;flex-direction:column;gap:3px;'
+        + 'padding:9px 11px;border-radius:var(--radius-sm);cursor:pointer;'
+        + 'background:var(--panel-2);color:var(--text);border:1px solid '
+        + (accent ? 'var(' + accent + ')' : 'var(--border)') + ';';
+      const l = el('span', null, label);
+      l.style.cssText = 'font-size:12px;' + (accent ? 'color:var(' + accent + ');' : '');
+      const s = el('span', null, sub);
+      s.style.cssText = 'font-size:10px;color:var(--text-3);line-height:1.5;';
+      b.appendChild(l);
+      b.appendChild(s);
+      b.addEventListener('click', () => { dismiss(); onPick(); });
+      opts.appendChild(b);
+    };
+
+    /* FIRST, and phrased as the likely cause rather than as an escape hatch. */
+    option('這是公司行動造成的（分割／換股／分拆）→ 補登公司行動',
+      '開啟補登表單，已帶入帳戶、代號與日期範圍；補登後這筆賣出就會通過檢查，成本基礎不會被捨棄',
+      '--accent', () => {
+        if (!window.pdCorpActionForm) { window.location.href = 'trades.html'; return; }
+        window.pdCorpActionForm.open({
+          account_id: body.account_id,
+          from_symbol: body.symbol,
+          /* The action must have happened on or before the sell — the sell is the
+             evidence that it already took effect. */
+          date: body.date,
+          date_max: body.date,
+          reason: '這筆賣出被判為賣超：' + msg
+            + '。若原因是漏登公司行動，補登後股數就會對上，成本基礎不會被捨棄。',
+          onSaved: () => { schedulePreview(); }
+        });
+      });
+    option('確認為賣超，接受成本基礎歸零（待釐清）',
+      '這個部位的成本基礎會被永久捨棄，並在儀表板上標示為待釐清；之後再買回也不會還原',
+      '--up', async () => {
+        const acked = manualBody();
+        acked.ack_oversell = true;
+        try {
+          onManualWritten(await api.post('/api/input/manual/commit', acked));
+        } catch (e2) {
+          if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail', e2 && e2.code);
+        }
+      });
+    option('取消', '先不要寫入這筆交易', null, () => {});
+    bodyEl.appendChild(opts);
+    modal.appendChild(bodyEl);
+    backdrop.appendChild(modal);
+    x.addEventListener('click', dismiss);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
+    document.body.appendChild(backdrop);
+  }
+
+  /* Follow-up 1 (§6.7 / §3.2): the corporate-action form calls this after a save that
+     produced a fractional share, so the cash-in-lieu SELL is one click away with the
+     fraction pre-filled and the PRICE deliberately blank — the owner reads it off the
+     statement; we never guess a price. */
+  window.pdPrefillManualSell = function (p) {
+    const tab = document.getElementById('tab-manual');
+    if (tab) tab.click();
+    const section = document.getElementById('input-section');
+    if (section) section.classList.add('open');
+    const set = (id, v) => { const n = $('#' + id); if (n && v !== undefined && v !== null) n.value = v; };
+    set('m-account', p.account_id);
+    set('m-symbol', p.symbol);
+    set('m-shares', p.shares);
+    set('m-date', p.date);
+    set('m-price', '');
+    const sellBtn = $('#m-side-sell');
+    if (sellBtn) sellBtn.click();
+    schedulePreview();
+    if (window.toast) window.toast('已帶入零股賣出', 'ok', '請填入實際收到的金額 ÷ 股數作為價格');
+  };
+
   /* Commit the manual transaction. 201 -> success toast + reset draft state; 422
-     oversell_unacknowledged -> confirmDialog -> re-commit with ack_oversell:true;
+     oversell_unacknowledged -> the three-option 賣超 dialog above;
      400 / other PdApiError -> error toast carrying the backend message + code. */
   async function commitManual() {
     const body = manualBody();
@@ -689,22 +793,7 @@
       restore();
       if (err && err.status === 422 && err.code === 'oversell_unacknowledged') {
         const msg = (err.issues && err.issues[0] && err.issues[0].text) || '賣出股數超過持有 — 確認後寫入？';
-        window.confirmDialog({
-          title: '賣超確認',
-          body: msg + '（輸入錯誤還是放空？）',
-          confirmLabel: '我了解，仍要寫入',
-          danger: true,
-          onConfirm: async () => {
-            const acked = manualBody();
-            acked.ack_oversell = true;
-            try {
-              const resp = await api.post('/api/input/manual/commit', acked);
-              onManualWritten(resp);
-            } catch (e2) {
-              if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail', e2 && e2.code);
-            }
-          }
-        });
+        oversellDialog(msg, body);
         return;
       }
       if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
@@ -738,7 +827,12 @@
 
   /* ================= Tab 2 CSV 匯入 ================= */
   /* kind chips map the UI label to the import endpoint `kind`. */
-  const CSV_KINDS = [['交易', 'transactions'], ['股利', 'dividends'], ['換匯', 'fx'], ['期初', 'openings']];
+  /* ⚠ A new kind is registered in SEVEN places (audit F-28); this is one of them, and
+     CSV_HINTS below is another. The backend five are the parser module + its *_COLUMNS
+     constant, TEMPLATE_KINDS / DATE_COLUMN_BY_KIND / OPTIONAL_COLUMNS / _HEADERS / _ROWS
+     in data_ingestion/import_templates.py, and _BUILDERS / _WRITERS in
+     api/routers/input_center.py. Miss this line and the kind exists but is unreachable. */
+  const CSV_KINDS = [['交易', 'transactions'], ['股利', 'dividends'], ['換匯', 'fx'], ['期初', 'openings'], ['公司行動', 'corporate_actions']];
   let csvKind = 'transactions';
   /* FU-D19: the pinned date format (a dateparse format id) once the user resolves an
      ambiguous date column; null = let the backend infer. Reset whenever the CSV text or
@@ -757,6 +851,9 @@
     dividends: '欄位：account・symbol・date(YYYY-MM-DD)・type(CASH/STOCK/DRIP/NET)・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）',
     fx: '欄位：account・date(YYYY-MM-DD)・from_ccy・from_amount・to_ccy・to_amount',
     openings: '欄位：account・symbol・shares・original_cost_total・build_date(YYYY-MM-DD)・original_avg_cost（選填・舊檔相容）',
+    /* 比例一定是「兩個整數欄位」，不是一個算好的小數（§3.1(ii)）：0.2857 這種寫法會讓
+       700 股的 2 換 7 算成 199.99 股，之後賣 200 股會被判成賣超、成本基礎被永久捨棄。 */
+    corporate_actions: '欄位：account・date(YYYY-MM-DD)・kind(SPLIT/EXCHANGE/SPINOFF，也可填 分割/換股/分拆)・from_symbol・to_symbol・ratio_to・ratio_from（兩個整數，不可填小數）・cost_carry（選填・僅分拆）・note（選填）',
   };
 
   function initCsv() {
@@ -1512,6 +1609,7 @@
     dividends: { tab: 'ldiv', body: 'div-body' },
     fx: { tab: 'lfx', body: 'fx-body' },
     openings: { tab: 'lopen', body: 'open-body' },
+    corporate_actions: { tab: 'laction', body: 'action-body' },
   };
 
   /* #10: after the committed ledger's table has refreshed, auto-switch the lower ledger to

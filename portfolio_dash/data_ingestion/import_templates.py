@@ -2,7 +2,8 @@
 
 SINGLE SOURCE OF TRUTH: each kind's header is the column-order constant defined next to that
 kind's parser (:data:`csv_import.TRANSACTION_COLUMNS`, :data:`dividend_import.DIVIDEND_COLUMNS`,
-:data:`fx_import.FX_COLUMNS`, :data:`opening_import.OPENING_COLUMNS`).  A parser column rename
+:data:`fx_import.FX_COLUMNS`, :data:`opening_import.OPENING_COLUMNS`,
+:data:`corporate_action_import.CORPORATE_ACTION_COLUMNS`).  A parser column rename
 that is not mirrored here is caught by the round-trip guard test — the generated template must
 re-parse through the real preview builder (after the import-seam header canonicalization) with
 zero ``parse_error`` rows (tests/contract/test_import_template.py).
@@ -23,12 +24,22 @@ template round-trips whether or not the BOM survives the editor.
 import csv
 import io
 
+from portfolio_dash.data_ingestion.corporate_action_import import CORPORATE_ACTION_COLUMNS
 from portfolio_dash.data_ingestion.csv_import import TRANSACTION_COLUMNS
 from portfolio_dash.data_ingestion.dividend_import import DIVIDEND_COLUMNS
 from portfolio_dash.data_ingestion.fx_import import FX_COLUMNS
 from portfolio_dash.data_ingestion.opening_import import OPENING_COLUMNS
 
-TEMPLATE_KINDS: tuple[str, ...] = ("transactions", "dividends", "fx", "openings")
+# ⚠ A new kind is NOT one edit. Seven registration points (audit F-28), and every one of
+# them fails quietly on its own: the parser module + its ``*_COLUMNS`` constant, then
+# TEMPLATE_KINDS / DATE_COLUMN_BY_KIND / OPTIONAL_COLUMNS / _HEADERS / _ROWS below, then
+# ``api/routers/input_center._BUILDERS`` and ``._WRITERS``, then ``web/input.js``'s
+# CSV_KINDS + CSV_HINTS. Miss the router maps and the kind 400s as "未知 kind"; miss the
+# frontend and it exists but is unreachable; miss DATE_COLUMN_BY_KIND and the import seam
+# raises a KeyError on a date column that is not there.
+TEMPLATE_KINDS: tuple[str, ...] = (
+    "transactions", "dividends", "fx", "openings", "corporate_actions",
+)
 
 # The date column per kind (drives both the header annotation and the router's date
 # normalization). Mirrors each parser's date field: transactions/dividends/fx use ``date``,
@@ -38,6 +49,7 @@ DATE_COLUMN_BY_KIND: dict[str, str] = {
     "dividends": "date",
     "fx": "date",
     "openings": "build_date",
+    "corporate_actions": "date",
 }
 
 # Optional (may-be-blank) columns per kind — mirrors the required set each parser enforces:
@@ -50,6 +62,9 @@ OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     "dividends": frozenset({"withholding", "net", "reinvest_shares", "reinvest_price"}),
     "fx": frozenset(),
     "openings": frozenset({"original_avg_cost"}),
+    # cost_carry is SPINOFF-only (E8 rejects it on the other two kinds); note is free text.
+    # ratio_to / ratio_from are BOTH required — never one `ratio` column (E6a, §3.1(ii)).
+    "corporate_actions": frozenset({"cost_carry", "note"}),
 }
 
 # Example rows align POSITIONALLY with each kind's column constant. Fixed recent ISO dates;
@@ -93,17 +108,35 @@ _OPENING_ROWS: list[list[str]] = [
     ["schwab", "AAPL", "10", "1000", "2026-01-02", "100"],
 ]
 
+_CORPORATE_ACTION_ROWS: list[list[str]] = [
+    # A forward SPLIT: 2330 is held in tw_broker only, so ONE row is the complete entry
+    # (E13 counts holding accounts, not markets). Fully clean against the seeded ledger.
+    ["tw_broker", "2026-06-01", "SPLIT", "2330", "2330", "10", "1", "",
+     "一股分割為十股（10 換 1）"],
+    # An EXCHANGE and a SPINOFF need a DESTINATION symbol, and the seed has no second
+    # same-currency instrument to point at — so these two name placeholders. They are
+    # REJECTED on re-upload with 「目的標的 … 尚未註冊」, which is E10 doing its job (D19:
+    # keyed on registration, a database fact, never on the shape of the string). The shapes
+    # are what the example is for: two integer terms, and cost_carry on the SPINOFF only.
+    ["schwab", "2026-06-02", "EXCHANGE", "AAPL", "NEWCO", "2", "7", "",
+     "併購換股：每 7 股換得 2 股 NEWCO（請改成實際已註冊的代號）"],
+    ["schwab", "2026-06-03", "SPINOFF", "AAPL", "SPINCO", "1", "2", "0.3",
+     "分拆：每 2 股配 1 股 SPINCO，母公司 30% 成本移轉給子公司"],
+]
+
 _HEADERS: dict[str, list[str]] = {
     "transactions": TRANSACTION_COLUMNS,
     "dividends": DIVIDEND_COLUMNS,
     "fx": FX_COLUMNS,
     "openings": OPENING_COLUMNS,
+    "corporate_actions": CORPORATE_ACTION_COLUMNS,
 }
 _ROWS: dict[str, list[list[str]]] = {
     "transactions": _TRANSACTION_ROWS,
     "dividends": _DIVIDEND_ROWS,
     "fx": _FX_ROWS,
     "openings": _OPENING_ROWS,
+    "corporate_actions": _CORPORATE_ACTION_ROWS,
 }
 
 

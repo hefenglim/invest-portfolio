@@ -9,7 +9,11 @@ from decimal import Decimal, InvalidOperation
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.store import upsert_opening
-from portfolio_dash.data_ingestion.validate import Issue, alias_import_account
+from portfolio_dash.data_ingestion.validate import (
+    Issue,
+    alias_import_account,
+    validate_opening_cost,
+)
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.money import MINOR_UNITS
 
@@ -45,6 +49,11 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
     ``opening_total_derived`` issue is raised. When BOTH are present and they disagree beyond
     ``max(1 minor unit, 0.5% * total)``, a soft ``opening_cost_mismatch`` issue is raised; the
     authoritative ``original_cost_total`` is stored regardless (never the rounded average).
+
+    F-13 (D37): the RESOLVED total must be **> 0**, a HARD ``non_positive_opening_cost``
+    issue — see :func:`~portfolio_dash.data_ingestion.validate.validate_opening_cost`. This
+    is the door the single-row 期初 form uses too (``web/input.js`` posts a one-row CSV), so
+    the manual path is covered by the same check.
     """
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))  # tolerate a leading BOM
     rows: list[PreviewRow] = []
@@ -128,6 +137,14 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
             issues.append(
                 Issue(kind="non_positive_shares", message="股數必須大於 0")
             )
+
+        # --- F-13 (D37): the RESOLVED total must be positive — HARD ---
+        # Placed after the resolution above, not next to the parse, because the legacy
+        # derivation reaches a zero total without ever naming one: `original_avg_cost = 0`
+        # yields `avg * shares == 0` and would otherwise import carrying nothing but the SOFT
+        # `opening_total_derived` notice. One check, both paths.
+        if (bad_cost := validate_opening_cost(total)) is not None:
+            issues.append(bad_cost)
 
         # --- warn if symbol cannot be resolved (soft — needs confirm) ---
         if resolve(conn, symbol).status is ResolutionStatus.NEEDS_AI:

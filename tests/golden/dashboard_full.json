@@ -1665,6 +1665,7 @@
     "by_currency": {},
     "basis": "declared_only"
   },
+  "unapplied_actions": [],
   "llm_quota": {
     "remaining_usd": "0",
     "ai_active": false

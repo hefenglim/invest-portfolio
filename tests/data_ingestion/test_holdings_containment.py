@@ -70,11 +70,25 @@ ACCTS = ("schwab", "moomoo_my")
 EXPECTED_CALL_SITES = {
     ("portfolio_dash/api/dividend_inbox.py", "shares_on"),
     ("portfolio_dash/api/routers/input_center.py", "current_shares"),
+    # W5 (spec §6.3): the symbol drawer's `corporate_delta` — `shares_action_aware −
+    # shares_naive`, this being the action-aware half. Containment holds for it the same
+    # structural way as for the other eight: an action-free symbol short-circuits inside
+    # `_shares_at`, the walk does not run, and the delta is an exact `Decimal("0")`, so the
+    # reconciliation footer of every un-actioned symbol is byte-identical to pre-feature.
+    ("portfolio_dash/api/routers/symbol.py", "current_shares"),
     ("portfolio_dash/api/routers/instruments.py", "current_shares"),
     ("portfolio_dash/api/routers/strategy.py", "current_shares"),
     ("portfolio_dash/api/signals_service.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "shares_through"),
+    # W7 (spec §6.7): the corporate-action form builds E13's COMPLETE batch itself, so it
+    # has to answer the same question E13 asks — which accounts hold this symbol on the
+    # action date — and it must answer it the SAME way, or the form would submit a batch
+    # its own validator rejects. Two uses, one wrapper: `_holding_accounts` (the batch) and
+    # `_unblocked_sells` (does the action clear a currently-failing sell?). Containment is
+    # unchanged and structural: an action-free symbol short-circuits inside `_shares_at`,
+    # the walk never runs, and both answers are byte-identical to pre-feature.
+    ("portfolio_dash/api/routers/ledgers.py", "shares_through"),
 }
 
 

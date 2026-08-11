@@ -289,6 +289,10 @@
         <button type="button" id="tab-ldiv">股利</button>
         <button type="button" id="tab-lfx">換匯</button>
         <button type="button" id="tab-lopen">期初庫存</button>
+        <!-- The 5th ledger (spec 2026-08-06 §6.7 door 3). Deliberately here rather than as
+             a 6th tab on the input pane above: that pane is high-frequency capture, this
+             section is low-frequency corrective record-keeping. -->
+        <button type="button" id="tab-laction">公司行動</button>
       </div>
     </div>
     <div class="filter-bar" id="ledger-filters"></div>
@@ -331,6 +335,18 @@
       </table></div>
       <div id="lopen-pager" hidden="hidden"></div>
     </div>
+    <div class="mode-pane" id="pane-laction">
+      <div class="filter-bar" style="gap: 8px;">
+        <button class="btn btn-primary btn-sm" id="action-add" type="button"
+                title="補登分割／換股／分拆，並自動套用到所有持有此標的的帳戶">＋補登公司行動</button>
+        <span class="hint">分割／換股／分拆會改變股數而不改變成本；一筆行動會同時登錄到所有持有該標的的帳戶。</span>
+      </div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>日期</th><th class="col-text">帳戶</th><th class="col-text">類型</th><th class="col-text">來源代號</th><th class="col-text">目的代號</th><th class="col-text">比例</th><th>成本分攤</th><th class="col-text">備註</th><th></th></tr></thead>
+        <tbody id="action-body"></tbody>
+      </table></div>
+      <div id="laction-pager" hidden="hidden"></div>
+    </div>
     <div class="append-note">帳本更正為顯式操作：編輯／刪除前會以全帳本重播檢核（賣超與孤兒紀錄防呆），更正前的原值會寫入稽核軌跡留存。點擊交易列展開費率規則快照。</div>
   </section>
 
@@ -347,6 +363,7 @@
 <script src="alerts.js?v=0.1.28"></script>
 <script src="inst-quickadd.js?v=0.1.28"></script>
 <script src="sym-picker.js?v=0.1.28"></script>
+<script src="corp-action-form.js?v=0.1.28"></script>
 <script src="input.js?v=0.1.28"></script>
 <script src="ledger.js?v=0.1.28"></script>
 <script>
@@ -356,7 +373,7 @@ document.getElementById('input-toggle').addEventListener('click', function (e) {
   document.getElementById('input-section').classList.toggle('open');
 });
 /* glue: ledger tabs */
-const LEDGER_TABS = ['tx','ldiv','lfx','lopen'];
+const LEDGER_TABS = ['tx','ldiv','lfx','lopen','laction'];
 LEDGER_TABS.forEach(function(t) {
   var btn = document.getElementById('tab-' + t);
   if (!btn) return;
@@ -377,7 +394,11 @@ document.getElementById('tab-tx').click();
 (function () {
   var slot = document.getElementById('ledger-export-slot');
   if (!slot || !window.pdApi) return;
-  var KIND = { tx: 'transactions', ldiv: 'dividends', lfx: 'fx', lopen: 'opening' };
+  /* Tab -> export kind. The keys are shared/ledger_registry.py's `export_kind` values,
+     which is also what /api/export/ledger validates against — a 5th tab that is not here
+     silently exports the transactions ledger under the corporate-action tab. */
+  var KIND = { tx: 'transactions', ldiv: 'dividends', lfx: 'fx', lopen: 'opening',
+               laction: 'actions' };
   var btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn btn-sm btn-export';

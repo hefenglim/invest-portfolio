@@ -1,4 +1,4 @@
-"""Four ledgers: reads (spec 11) + explicit row corrections (edit/delete, 2026-07-02).
+"""Five ledgers: reads (spec 11) + explicit row corrections (edit/delete, 2026-07-02).
 
 Reads are thin over store.list_*. Corrections stay within the "append-only in
 spirit" rule: they are EXPLICIT user actions via PUT/DELETE (never silent
@@ -9,58 +9,94 @@ the dashboard degrades an acked oversold book to a flagged 賣超 holding).
 
 Side/DividendType serialize lowercase (SR #1); Currency stays uppercase. The `total`
 sign + `implied_rate` are presentation-level derived fields over stored ledger values.
+
+**The 5th ledger — corporate actions (W7, spec §6.7 door 3).** It is deliberately here and
+not on the input page: the input page is high-frequency capture, the ledger page is
+low-frequency corrective record-keeping. Three things distinguish it from the other four
+and all three are audit findings, not preferences:
+
+* **Every write goes through ``validate_corporate_action`` with the FULL batch** (F-40).
+  Before W7 that function had zero production callers, so every §5 rejection existed only
+  in tests. E12/E13 are batch-level rules; a per-row call rejects a correct multi-account
+  entry and accepts a partial one.
+* **Delete and update RE-VALIDATE** through ``validate_corporate_action_change`` (F-32).
+  ``split_factor``'s dedup key is ``(symbol, date, ratio)`` with no account, so removing
+  one row of an N-account set leaves the GLOBAL price correction standing while that
+  account's share count goes uncorrected — and the drawer footer prints ✓ 對帳一致 over it.
+* **Every SPLIT write runs the price reconcile** (§5.1(c)) on the same connection, after
+  the CRUD commits — both ends on a symbol-change edit.
 """
 
 import sqlite3
-from datetime import date
-from decimal import Decimal
+from collections.abc import Iterable, Sequence
+from datetime import date, datetime
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from portfolio_dash.api.deps import get_conn
+from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.api.wire import parse_side
+from portfolio_dash.api.instrument_service import reconcile_price_basis
+from portfolio_dash.api.wire import issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import check_amounts
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
+from portfolio_dash.data_ingestion.holdings import load_action_index, shares_through
 from portfolio_dash.data_ingestion.markets import MARKET_ZH, account_market
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
+    StoredCorporateAction,
     StoredDividend,
     StoredOpening,
     StoredTransaction,
+    delete_corporate_action,
     delete_dividend,
     delete_fx_conversion,
     delete_opening,
     delete_transaction,
+    get_corporate_action,
     get_dividend,
     get_fx_conversion,
     get_instrument,
     get_opening,
     get_transaction,
+    insert_corporate_action,
     list_accounts,
+    list_corporate_actions,
     list_dividends,
     list_fx_conversions,
     list_instruments,
     list_opening,
     list_transactions,
     load_ledger_bundle,
+    update_corporate_action,
     update_dividend,
     update_fx_conversion,
     update_transaction,
     upsert_opening,
 )
+from portfolio_dash.data_ingestion.validate import (
+    CorporateActionInput,
+    Issue,
+    validate_corporate_action,
+    validate_corporate_action_change,
+    validate_opening_cost,
+)
 from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.results import Book, Holding
+from portfolio_dash.shared.corporate_actions import ActionIndex, CorporateActionKind
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.models.enums import DividendType
+from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
+
+_ZERO = Decimal("0")
 
 
 def _names(conn: sqlite3.Connection) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
@@ -700,9 +736,18 @@ def edit_opening(
     else:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "請提供原始總成本", field="total"))
-    if body.shares <= 0 or total < 0:
+    if body.shares <= 0:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "股數必須大於 0、原始總成本不可為負", field="shares"))
+            "validation_error", "股數必須大於 0", field="shares"))
+    # F-13 (D37): the total must be POSITIVE, not merely non-negative. This route already
+    # refused a negative one, which is exactly what made zero look deliberate rather than
+    # missed — and an edit to 0 is the shortcut D37 forbids, arriving through the door the
+    # owner reaches for when the real figure cannot be found. Same rule, same message as the
+    # import door (validate.validate_opening_cost); a rule enforced at one of several write
+    # doors is how E13 came to be insert-only.
+    if (bad_cost := validate_opening_cost(total)) is not None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", bad_cost.message, field="total"))
     edited = existing.model_copy(update={
         "shares": body.shares,
         "original_cost_total": total, "build_date": body.date,
@@ -736,3 +781,584 @@ def remove_opening(
         return blocked
     delete_opening(conn, account_id, symbol)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# The 5th ledger — corporate actions (W7, spec §6.5 + §6.7)
+# ---------------------------------------------------------------------------
+
+_KIND_ZH = {"SPLIT": "分割", "EXCHANGE": "換股", "SPINOFF": "分拆"}
+# Accepted on the wire so the form can post what the owner picked in their own words;
+# the stored value is always the enum. Mirrors corporate_action_import._KIND_ALIASES —
+# the CSV door and the form door must not disagree about what 「分割」 means.
+_KIND_ALIASES = {"分割": "SPLIT", "股票分割": "SPLIT", "換股": "EXCHANGE", "分拆": "SPINOFF"}
+
+
+def reconcile_split_prices(conn: sqlite3.Connection, symbols: Iterable[str]) -> int:
+    """Run the §5.1(c) price-basis reconcile for *symbols*; returns rows restated.
+
+    **Call on any insert / edit / delete of a corporate-action row**, after the CRUD has
+    committed, on the same connection. Passing a non-SPLIT symbol is a provable no-op
+    (``split_factor`` is SPLIT-scoped), which is why an edit may simply pass both ends of
+    the row rather than discriminating — and why the OLD ``from_symbol`` must be included
+    when an edit moves the action, or that symbol keeps a basis from an action which no
+    longer references it.
+
+    A database with no ``prices`` table (a ledger-only DB: the CSV/AI parse paths and most
+    unit tests) has nothing to restate, so this degrades to 0 rather than raising an
+    ``OperationalError`` out of a write path. Same table probe, same reason, as
+    ``validate._has_prices``.
+    """
+    wanted = sorted({s for s in symbols if s})
+    if not wanted:
+        return 0
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prices'"
+    ).fetchone() is None:
+        return 0
+    return reconcile_price_basis(conn, wanted)
+
+
+class ActionBody(BaseModel):
+    """One corporate action as the form posts it.
+
+    The ratio terms and ``cost_carry`` ride as **strings**, not Decimals: pydantic would
+    reject a malformed one with an English message from its own validator, and D14's
+    rejection has to be the zh one E6/E6a owns. Same reason
+    :class:`~data_ingestion.validate.CorporateActionInput` is deliberately permissive.
+    """
+
+    account_id: str
+    date: date
+    kind: str
+    from_symbol: str
+    to_symbol: str
+    ratio_to: str
+    ratio_from: str
+    cost_carry: str | None = None
+    note: str | None = None
+    ack_warnings: bool = False
+
+
+def _num(raw: str | None, label: str) -> Decimal | None | JSONResponse:
+    """A wire string -> Decimal, or a zh 400. ``None``/blank -> ``None`` (optional field)."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return Decimal(raw.strip())
+    except InvalidOperation:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"{label} 必須是數字（目前是「{raw}」）", field=label))
+
+
+def _action_input(body: ActionBody, account_id: str) -> CorporateActionInput | JSONResponse:
+    """Build the validator input for ONE account of the batch."""
+    to_term = _num(body.ratio_to, "ratio_to")
+    if isinstance(to_term, JSONResponse):
+        return to_term
+    from_term = _num(body.ratio_from, "ratio_from")
+    if isinstance(from_term, JSONResponse):
+        return from_term
+    carry = _num(body.cost_carry, "cost_carry")
+    if isinstance(carry, JSONResponse):
+        return carry
+    if to_term is None or from_term is None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "請填寫比例的兩個整數（換出股數與換得股數）",
+            field="ratio_from"))
+    raw_kind = body.kind.strip()
+    return CorporateActionInput(
+        account_id=account_id,
+        date=body.date,
+        kind=_KIND_ALIASES.get(raw_kind, raw_kind.upper()),
+        from_symbol=body.from_symbol.strip(),
+        to_symbol=body.to_symbol.strip(),
+        ratio_to=to_term,
+        ratio_from=from_term,
+        cost_carry=carry,
+        note=(body.note.strip() if body.note else None) or None,
+    )
+
+
+def _holding_accounts(
+    conn: sqlite3.Connection, symbol: str, on: date, *, index: ActionIndex
+) -> list[str]:
+    """Every account with a NON-ZERO position in *symbol* on *on* — E13's N.
+
+    Enumerating all accounts (there are three or four) and filtering on the action-aware
+    ``shares_through`` yields the SAME set as ``validate._accounts_holding_on``'s ledger
+    union filtered the same way — a superset of candidates, identical filter — while using
+    only the public share-walk API. It must agree with E13, or the form would build a batch
+    the validator then rejects.
+    """
+    return [
+        a.account_id for a in list_accounts(conn)
+        if shares_through(conn, a.account_id, symbol, on=on, index=index) != _ZERO
+    ]
+
+
+def _later_holders(
+    conn: sqlite3.Connection, symbol: str, on: date, *, covered: set[str],
+    index: ActionIndex, today: date
+) -> list[str]:
+    """Accounts holding *symbol* LATER but not on *on* — §6.7's 「不受影響」 line.
+
+    Naming them is not clutter: it is how the owner can tell the system read their ledger
+    rather than merely applied a rule to the account they happened to be looking at.
+    """
+    return [
+        a.account_id for a in list_accounts(conn)
+        if a.account_id not in covered
+        and shares_through(conn, a.account_id, symbol, on=today, index=index) != _ZERO
+    ]
+
+
+class _ActionBatch(BaseModel):
+    """The N rows one submitted action becomes (D13/D28), plus who it does not reach."""
+
+    rows: list[CorporateActionInput]
+    accounts: list[str]
+    not_affected: list[str]
+
+
+def _build_batch(
+    conn: sqlite3.Connection, body: ActionBody, *, index: ActionIndex, today: date
+) -> _ActionBatch | JSONResponse:
+    """One submitted action -> the COMPLETE E13 batch. Never a partial one.
+
+    D13's all-accounts rule is met by construction here rather than by asking the owner to
+    submit N rows: the partial state is what D13 exists to forbid, so a door that can
+    express it is a door that will eventually be used to create it. The submitting account
+    is always included even when it holds nothing on the date — E1a then rejects the row
+    with the accurate reason instead of the batch quietly dropping it.
+    """
+    symbol = body.from_symbol.strip()
+    holders = _holding_accounts(conn, symbol, body.date, index=index)
+    accounts = sorted({*holders, body.account_id})
+    rows: list[CorporateActionInput] = []
+    for account_id in accounts:
+        built = _action_input(body, account_id)
+        if isinstance(built, JSONResponse):
+            return built
+        rows.append(built)
+    return _ActionBatch(
+        rows=rows, accounts=accounts,
+        not_affected=_later_holders(
+            conn, symbol, body.date, covered=set(accounts), index=index, today=today),
+    )
+
+
+def _stored_from(inp: CorporateActionInput, row_id: int) -> StoredCorporateAction:
+    """A candidate row in stored shape, for the would-be replay. Negative id = not real."""
+    return StoredCorporateAction(
+        id=row_id, account_id=inp.account_id, date=inp.date, kind=inp.kind,
+        from_symbol=inp.from_symbol, to_symbol=inp.to_symbol,
+        ratio_to=inp.ratio_to, ratio_from=inp.ratio_from,
+        cost_carry=inp.cost_carry, note=inp.note,
+    )
+
+
+def _position_wire(h: Holding | None, symbol: str) -> dict[str, Any]:
+    """One before/after line. ``None`` (the EXCHANGE-emptied source, which ``build_book``
+    drops at zero shares) renders as a real zero row, not as a missing one."""
+    if h is None:
+        return {"symbol": symbol, "shares": "0", "avg": "0", "cost_total": "0",
+                "adjusted_avg": "0", "adjusted_cost_total": "0"}
+    return {
+        "symbol": h.symbol,
+        "shares": decimal_str(h.shares),
+        "avg": decimal_str(h.original_avg),
+        "cost_total": decimal_str(h.original_cost_total),
+        "adjusted_avg": decimal_str(h.adjusted_avg),
+        "adjusted_cost_total": decimal_str(h.adjusted_cost_total),
+    }
+
+
+def _by_key(book: Book) -> dict[tuple[str, str], Holding]:
+    return {(h.account_id, h.symbol): h for h in book.holdings}
+
+
+def _fraction_of(shares: Decimal) -> Decimal:
+    """The part of a post-action share count the broker pays out in cash (§3.2)."""
+    return shares - shares.to_integral_value(rounding=ROUND_DOWN)
+
+
+def _unblocked_sells(
+    conn: sqlite3.Connection,
+    *,
+    accounts: Sequence[str],
+    symbol: str,
+    before: ActionIndex,
+    after: ActionIndex,
+) -> list[dict[str, str]]:
+    """Sells that currently fail the date-aware 賣超 guard and would pass with the action.
+
+    Said BEFORE saving (§6.7), because this is the sentence that tells the owner the repair
+    they came for actually works — and door 1 arrives here from exactly such a sell.
+    """
+    found: list[dict[str, str]] = []
+    for t in list_transactions(conn, symbol=symbol):
+        if t.side is not Side.SELL or t.short_sale or t.account_id not in accounts:
+            continue
+        was = shares_through(conn, t.account_id, symbol, on=t.trade_date, index=before)
+        now = shares_through(conn, t.account_id, symbol, on=t.trade_date, index=after)
+        if t.quantity > was and t.quantity <= now:
+            found.append({"account_id": t.account_id, "symbol": symbol,
+                          "date": t.trade_date.isoformat(),
+                          "shares": decimal_str(t.quantity)})
+    return found
+
+
+def _issue_wires(issues: Sequence[Issue]) -> list[dict[str, Any]]:
+    """Issue wires, de-duplicated by (code, text) — N accounts repeat the same finding."""
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for i in issues:
+        wire = issue_wire(i)
+        key = (str(wire["code"]), str(wire["text"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(wire)
+    return unique
+
+
+def _preview_payload(
+    conn: sqlite3.Connection, body: ActionBody, today: date
+) -> dict[str, Any] | JSONResponse:
+    """The always-on form preview: the conservation law made visible (§6.7).
+
+    Both sides come from the REAL replay — the current book, and the book with the
+    candidate rows appended. Nothing here re-derives a share count or a cost, so the
+    preview cannot disagree with what saving does; that disagreement is the failure mode
+    §5.1 calls the worst kind (two numbers on one screen).
+    """
+    index = load_action_index(conn)
+    batch = _build_batch(conn, body, index=index, today=today)
+    if isinstance(batch, JSONResponse):
+        return batch
+    stored = list_corporate_actions(conn)
+    candidates = [_stored_from(inp, -(i + 1)) for i, inp in enumerate(batch.rows)]
+    book_cache: dict[date, Book] = {}
+    try:
+        # `full_bundle` is the hoist: validation scopes it PER ACTION DATE itself, because
+        # the four book-derived rejections must not see trades dated after the action they
+        # are judging (2026-08-11). `pre` / `post` stay whole-ledger — they are the
+        # before/after PREVIEW the owner reads, which is a different question.
+        full_bundle = load_ledger_bundle(conn)
+        pre = build_book(full_bundle, allow_oversell=True)
+        post = build_book(
+            load_ledger_bundle(conn, actions=[*stored, *candidates]), allow_oversell=True)
+    except (ValueError, KeyError) as exc:
+        return JSONResponse(status_code=422, content=error_body(
+            "ledger_unbookable",
+            f"目前的帳本無法重播,因此無法試算這筆公司行動({exc})。請先修正帳本紀錄"))
+
+    accts, _names_map, _ccys = _names(conn)
+    issues: list[Issue] = []
+    accounts_wire: list[dict[str, Any]] = []
+    cost_before = cost_after = adj_before = adj_after = _ZERO
+    fractions: list[dict[str, str]] = []
+    pre_map, post_map = _by_key(pre), _by_key(post)
+    symbols = [body.from_symbol.strip()]
+    if body.to_symbol.strip() != body.from_symbol.strip():
+        symbols.append(body.to_symbol.strip())
+
+    for inp in batch.rows:
+        row_issues = validate_corporate_action(
+            conn, inp, batch=batch.rows, bundle=full_bundle,
+            book_cache=book_cache, index=index)
+        issues.extend(row_issues)
+        before_rows = [_position_wire(pre_map.get((inp.account_id, s)), s)
+                       for s in symbols]
+        after_rows = [_position_wire(post_map.get((inp.account_id, s)), s)
+                      for s in symbols]
+        acct_before = sum((Decimal(r["cost_total"]) for r in before_rows), _ZERO)
+        acct_after = sum((Decimal(r["cost_total"]) for r in after_rows), _ZERO)
+        cost_before += acct_before
+        cost_after += acct_after
+        adj_before += sum((Decimal(r["adjusted_cost_total"]) for r in before_rows), _ZERO)
+        adj_after += sum((Decimal(r["adjusted_cost_total"]) for r in after_rows), _ZERO)
+        for r in after_rows:
+            frac = _fraction_of(Decimal(r["shares"]))
+            if frac != _ZERO:
+                fractions.append({"account_id": inp.account_id, "symbol": r["symbol"],
+                                  "shares": decimal_str(frac)})
+        accounts_wire.append({
+            "account_id": inp.account_id,
+            "account": accts.get(inp.account_id, inp.account_id),
+            "before": before_rows,
+            "after": after_rows,
+            "cost_before": decimal_str(acct_before),
+            "cost_after": decimal_str(acct_after),
+            "conserved": acct_before == acct_after,
+            "issues": _issue_wires(row_issues),
+        })
+
+    inst = get_instrument(conn, body.from_symbol.strip())
+    kind = batch.rows[0].kind
+    return {
+        "ccy": inst.quote_ccy.value if inst is not None else "",
+        "kind": kind,
+        "kind_label": _KIND_ZH.get(kind, kind),
+        "accounts": accounts_wire,
+        "not_affected": [{"account_id": a, "account": accts.get(a, a),
+                          "reason": "部位在行動日之後才建立,這筆行動不會套用"}
+                         for a in batch.not_affected],
+        "rows_to_write": len(batch.rows),
+        "cost_before_total": decimal_str(cost_before),
+        "cost_after_total": decimal_str(cost_after),
+        # BOTH basis legs (§2.1): original is the conservation law's own statement, and
+        # adjusted is what P&L is computed against. A carve that conserved one and not the
+        # other would print 成本不變 ✓ over a moved number.
+        "conserved": cost_before == cost_after and adj_before == adj_after,
+        "issues": _issue_wires(issues),
+        "blocking": any(not i.needs_confirm for i in issues),
+        "needs_confirm": any(i.needs_confirm for i in issues),
+        "fractions": fractions,
+        "unpriced_symbols": sorted({
+            body.to_symbol.strip() for i in issues if i.kind == "to_symbol_unpriced"}),
+        "unblocks": _unblocked_sells(
+            conn, accounts=batch.accounts, symbol=body.from_symbol.strip(),
+            before=index, after=ActionIndex.from_stored([*stored, *candidates])),
+    }
+
+
+@router.get("/ledgers/corporate-actions")
+def corporate_actions(
+    account_id: str | None = None, symbol: str | None = None,
+    frm: str | None = Query(None, alias="from"), to: str | None = None,
+    limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    bad = _check_dates(frm, to)
+    if bad is not None:
+        return bad
+    accts, names, ccys = _names(conn)
+    out: list[dict[str, Any]] = []
+    for a in list_corporate_actions(conn, account_id=account_id, symbol=symbol):
+        if not _in_range(a.date, frm, to):
+            continue
+        out.append({
+            "id": a.id, "date": a.date.isoformat(), "account_id": a.account_id,
+            "account": accts.get(a.account_id, a.account_id),
+            # `symbol` (not `from_symbol`) so the page's shared keyword filter and the
+            # symbol-cell renderer work on this table with no per-tab special case.
+            "symbol": a.from_symbol, "name": names.get(a.from_symbol, ""),
+            "to_symbol": a.to_symbol, "to_name": names.get(a.to_symbol, ""),
+            "kind": a.kind, "kind_label": _KIND_ZH.get(a.kind, a.kind),
+            "ratio_to": decimal_str(a.ratio_to),
+            "ratio_from": decimal_str(a.ratio_from),
+            # Rendered server-side in the owner's own phrasing (§6.7) so the two integer
+            # terms never have to be recombined in the browser.
+            "ratio_label": (f"每 {decimal_str(a.ratio_from)} 股 → "
+                            f"{decimal_str(a.ratio_to)} 股"),
+            "cost_carry": (decimal_str(a.cost_carry)
+                           if a.cost_carry is not None else None),
+            "note": a.note, "ccy": ccys.get(a.from_symbol, ""),
+        })
+    return _page(out, limit, offset)
+
+
+@router.post("/ledgers/corporate-actions/preview")
+def preview_corporate_action(
+    body: ActionBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    return _preview_payload(conn, body, now.date())
+
+
+@router.post("/ledgers/corporate-actions", status_code=201)
+def add_corporate_action(
+    body: ActionBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """Write the COMPLETE E13 batch for one submitted action, then reconcile prices.
+
+    F-40's obligation in one place: the batch is validated by
+    ``validate_corporate_action`` **with every sibling row visible**, which is the only way
+    E12/E13 can be right. Hard issues 400 with the issue list; soft ones 422 until
+    ``ack_warnings`` (the 賣超 tier).
+    """
+    index = load_action_index(conn)
+    batch = _build_batch(conn, body, index=index, today=now.date())
+    if isinstance(batch, JSONResponse):
+        return batch
+    book_cache: dict[date, Book] = {}
+    try:
+        full_bundle = load_ledger_bundle(conn)
+        build_book(full_bundle, allow_oversell=True)   # reachability check only
+    except (ValueError, KeyError) as exc:
+        return JSONResponse(status_code=422, content=error_body(
+            "ledger_unbookable",
+            f"目前的帳本無法重播,因此無法登錄公司行動({exc})。請先修正帳本紀錄"))
+    issues: list[Issue] = []
+    for inp in batch.rows:
+        issues.extend(validate_corporate_action(
+            conn, inp, batch=batch.rows, bundle=full_bundle,
+            book_cache=book_cache, index=index))
+    hard = [i for i in issues if not i.needs_confirm]
+    if hard:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", hard[0].message, issues=_issue_wires(issues)))
+    if issues and not body.ack_warnings:
+        return JSONResponse(status_code=422, content=error_body(
+            "warnings_unacknowledged", issues[0].message, issues=_issue_wires(issues)))
+    # ALL-OR-NOTHING. The N rows are one event (D13), so a batch that half-lands is the
+    # partial state E13 exists to forbid, created by the writer instead of by the owner.
+    # Every insert defers its commit and one rollback covers the lot.
+    try:
+        written = [
+            insert_corporate_action(
+                conn, account_id=inp.account_id, action_date=inp.date,
+                kind=CorporateActionKind(inp.kind), from_symbol=inp.from_symbol,
+                to_symbol=inp.to_symbol, ratio_to=inp.ratio_to,
+                ratio_from=inp.ratio_from, cost_carry=inp.cost_carry, note=inp.note,
+                commit=False)
+            for inp in batch.rows
+        ]
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    restated = reconcile_split_prices(
+        conn, {body.from_symbol.strip(), body.to_symbol.strip()})
+    return {"ok": True, "written": len(written), "ids": written,
+            "accounts": batch.accounts, "prices_restated": restated,
+            "unpriced_symbols": sorted({
+                body.to_symbol.strip() for i in issues
+                if i.kind == "to_symbol_unpriced"})}
+
+
+def _change_block(issues: list[Issue]) -> JSONResponse | None:
+    """F-32's refusal, mapped onto the error envelope under its own code."""
+    hard = [i for i in issues if not i.needs_confirm]
+    if not hard:
+        return None
+    return JSONResponse(status_code=422, content=error_body(
+        hard[0].kind, hard[0].message, issues=_issue_wires(issues)))
+
+
+@router.put("/ledgers/corporate-actions/{action_id}")
+def edit_corporate_action(
+    action_id: int, body: ActionBody, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """Edit one row — re-validated on the way OUT (F-32) and IN, then both ends reconciled.
+
+    E16 / domain-ledger N2: an edit RE-COMPUTES history, nothing is snapshotted. The
+    before-image goes to ``ledger_audit`` (the store does that), and the price basis of the
+    OLD symbol has to be restated too — otherwise it keeps a basis from an action that no
+    longer references it.
+    """
+    existing = get_corporate_action(conn, action_id)
+    if existing is None:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"公司行動 #{action_id} 不存在"))
+    replacement = _action_input(body, body.account_id)
+    if isinstance(replacement, JSONResponse):
+        return replacement
+    blocked = _change_block(
+        validate_corporate_action_change(conn, action_id, replacement=replacement))
+    if blocked is not None:
+        return blocked
+    # Re-validate the row's own §5 rules against the ledger WITHOUT it, so an edit that
+    # leaves a field alone is not rejected as a duplicate of itself.
+    siblings = [a for a in list_corporate_actions(conn) if a.id != action_id]
+    index = ActionIndex.from_stored(siblings)
+    try:
+        sibling_bundle = load_ledger_bundle(conn, actions=siblings)
+        build_book(sibling_bundle, allow_oversell=True)   # reachability check only
+    except (ValueError, KeyError) as exc:
+        return JSONResponse(status_code=422, content=error_body(
+            "ledger_unbookable", f"帳本無法重播,無法修改這筆公司行動({exc})"))
+    issues = [
+        i for i in validate_corporate_action(
+            conn, replacement, batch=[replacement], bundle=sibling_bundle,
+            book_cache={}, index=index)
+        # Three rules must be dropped, and E13 must NOT be. `validate_corporate_action`
+        # reads the STORED ledger, which still holds the row being edited — so a no-op
+        # edit matches itself and would be refused as its own duplicate, its own same-date
+        # conflict, and (once the ratio moves) its own conflicting ratio. Those three are
+        # re-checked against the SET by `validate_corporate_action_change` above, the guard
+        # written for the edit path.
+        #
+        # E13 stays, and it is the one that earns its place here: an edit that moves the
+        # row onto a DIFFERENT `from_symbol` is a fresh all-accounts question that the
+        # change guard never asks, and the stored row (carrying the OLD symbol) does not
+        # answer it. Dropping it too would leave the symbol-change edit as an unguarded
+        # door onto exactly the partial state D13 forbids.
+        if i.kind not in {"duplicate_action", "same_date_action_conflict",
+                          "conflicting_ratio"}
+    ]
+    hard = [i for i in issues if not i.needs_confirm]
+    if hard:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", hard[0].message, issues=_issue_wires(issues)))
+    if issues and not body.ack_warnings:
+        return JSONResponse(status_code=422, content=error_body(
+            "warnings_unacknowledged", issues[0].message, issues=_issue_wires(issues)))
+    update_corporate_action(
+        conn, action_id, account_id=replacement.account_id,
+        action_date=replacement.date, kind=CorporateActionKind(replacement.kind),
+        from_symbol=replacement.from_symbol, to_symbol=replacement.to_symbol,
+        ratio_to=replacement.ratio_to, ratio_from=replacement.ratio_from,
+        cost_carry=replacement.cost_carry, note=replacement.note)
+    # BOTH ends of BOTH shapes — the row may have moved symbol, and the ABANDONED one is
+    # the half a symbol-blind reconcile leaves behind holding a basis nothing references.
+    restated = reconcile_split_prices(conn, {
+        existing.from_symbol, existing.to_symbol,
+        replacement.from_symbol, replacement.to_symbol})
+    return {"ok": True, "id": action_id, "prices_restated": restated}
+
+
+@router.delete("/ledgers/corporate-actions/set")
+def remove_corporate_action_set(
+    from_symbol: str,
+    on: str = Query(..., alias="date"),
+    kind: str = Query(...),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Delete a whole ``(from_symbol, date, kind)`` set — the ONLY way to leave one.
+
+    「Leaving the set requires taking the set」 (F-32). Offering this beside the per-row
+    refusal is what keeps that refusal from being a dead end: an owner who really does want
+    the action gone has a correct action available, so the guard informs rather than traps.
+
+    Declared BEFORE the ``/{action_id}`` route: FastAPI matches in declaration order and
+    ``set`` would otherwise be parsed as an int path param (a 400 on the literal path).
+    """
+    wanted = kind.strip().upper()
+    try:
+        action_date = date.fromisoformat(on)
+    except ValueError:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"日期格式無效:{on}", field="date"))
+    rows = [a for a in list_corporate_actions(conn)
+            if a.from_symbol == from_symbol and a.date == action_date
+            and a.kind == wanted]
+    if not rows:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"找不到 {from_symbol} 在 {on} 的{_KIND_ZH.get(wanted, wanted)}"))
+    symbols = {a.from_symbol for a in rows} | {a.to_symbol for a in rows}
+    for a in rows:
+        delete_corporate_action(conn, a.id)
+    restated = reconcile_split_prices(conn, symbols)
+    return {"ok": True, "deleted": len(rows), "prices_restated": restated}
+
+
+@router.delete("/ledgers/corporate-actions/{action_id}")
+def remove_corporate_action(
+    action_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """Delete one row — refused when it belongs to a multi-account set (F-32)."""
+    existing = get_corporate_action(conn, action_id)
+    if existing is None:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"公司行動 #{action_id} 不存在"))
+    blocked = _change_block(validate_corporate_action_change(conn, action_id))
+    if blocked is not None:
+        return blocked
+    delete_corporate_action(conn, action_id)
+    restated = reconcile_split_prices(conn, {existing.from_symbol, existing.to_symbol})
+    return {"ok": True, "id": action_id, "prices_restated": restated}

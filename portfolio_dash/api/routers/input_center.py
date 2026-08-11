@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
-from portfolio_dash.api.routers.ledgers import _to_models
+from portfolio_dash.api.routers.ledgers import _to_models, reconcile_split_prices
 from portfolio_dash.api.wire import (
     account_markets_wire,
     div_model_wire,
@@ -25,6 +25,10 @@ from portfolio_dash.api.wire import (
 )
 from portfolio_dash.data_ingestion.agents import ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
+from portfolio_dash.data_ingestion.corporate_action_import import (
+    build_corporate_action_preview,
+    write_corporate_action_row,
+)
 from portfolio_dash.data_ingestion.csv_import import (
     DateAmbiguity,
     build_transaction_preview,
@@ -710,11 +714,19 @@ def manual_commit(
 _BUILDERS = {
     "transactions": build_transaction_preview, "dividends": build_dividend_preview,
     "fx": build_fx_preview, "openings": build_opening_preview,
+    "corporate_actions": build_corporate_action_preview,
 }
 _WRITERS = {
     "transactions": write_transaction_row, "dividends": write_dividend_row,
     "fx": write_fx_row, "openings": write_opening_row,
+    "corporate_actions": write_corporate_action_row,
 }
+# Kinds whose commit moves the stored price basis and must therefore run the §5.1(c)
+# reconcile afterwards. A SPLIT restates every close of its symbol; leaving it out would
+# leave share counts corrected and prices not (or the reverse on a delete), which is the
+# state the drawer footer cannot see. Passing a non-SPLIT symbol is a provable no-op
+# (``split_factor`` is SPLIT-scoped), so the whole batch's symbols go in.
+_RECONCILING_KINDS = frozenset({"corporate_actions"})
 
 
 def _row_status(row: PreviewRow) -> str:
@@ -831,7 +843,20 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
             "warnings_unacknowledged", "有警告列需確認後才寫入"))
     accept = {r.index for r in preview.rows if not r.has_hard_issue}
     summary = commit_preview(conn, preview, accept=accept, writer=writer)
-    return {"written": len(summary.written), "skipped": len(summary.skipped)}
+    out: dict[str, Any] = {
+        "written": len(summary.written), "skipped": len(summary.skipped)}
+    if body.kind in _RECONCILING_KINDS:
+        # ADDITIVE, and only for the kind that needs it: the other four keep a
+        # byte-identical payload, because a response shape that grows for every caller
+        # when one kind gains a behaviour is how a contract drifts.
+        written_rows = [r for r in preview.rows
+                        if r.index in accept and not r.has_hard_issue]
+        out["prices_restated"] = reconcile_split_prices(
+            conn,
+            {r.payload.get("from_symbol", "") for r in written_rows}
+            | {r.payload.get("to_symbol", "") for r in written_rows},
+        )
+    return out
 
 
 @router.get("/import/template")

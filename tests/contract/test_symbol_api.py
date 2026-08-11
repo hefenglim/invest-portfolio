@@ -5,9 +5,12 @@ to the account holding the most shares (Q1); null for a non-held / watchlist sym
 """
 
 import sqlite3
+from collections.abc import Iterable
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
@@ -20,7 +23,7 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.store import upsert_fx, upsert_prices
-from portfolio_dash.shared.corporate_actions import CorporateActionKind
+from portfolio_dash.shared.corporate_actions import ActionIndex, CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
@@ -421,3 +424,350 @@ def test_unbookable_action_reaches_both_drawer_shapes(
     clean = api_client.get("/api/symbol/AAPL/detail").json()
     assert clean["position"]["unbookable_action"] is False
     assert all(a["unbookable_action"] is False for a in clean["position_accounts"])
+
+
+# --- W5: §6.3's `＋公司行動` reconciliation term (spec §7.3) -------------------------
+#
+# A corporate action adds shares OUTSIDE the four ledger buckets the drawer footer sums
+# (opening / buy / sell / reinvest) — no transaction, no opening, no dividend row. Before
+# the term existed EVERY affected symbol reported ⚠ 對帳不一致 while being perfectly
+# consistent; measured against the demo corpus 2026-08-11: ORBT −60/−40 (two accounts),
+# VRTA −40, VRTB +40, KEMG −1,000 — each of them exactly `shares × (ratio − 1)`.
+#
+# `corporate_delta` is `shares_action_aware − shares_naive`, both from
+# `data_ingestion/holdings.py`, NEITHER of them `build_book` — so the identity stays a
+# cross-check of two INDEPENDENT implementations rather than proving a number equals itself.
+
+
+def _seed_split(conn: sqlite3.Connection, *, account_id: str = "tw_broker",
+                symbol: str = "2330", to: str = "2", frm: str = "1",
+                on: date = date(2026, 3, 15)) -> None:
+    insert_corporate_action(conn, account_id=account_id, action_date=on,
+                            kind=CorporateActionKind.SPLIT, from_symbol=symbol,
+                            to_symbol=symbol, ratio_to=Decimal(to), ratio_from=Decimal(frm))
+
+
+def test_split_symbol_reconciles_with_the_corporate_term(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """§7.3 bullet 1: `balances: true` and `diff_shares == 0` for a symbol carrying an action.
+
+    2330 is 1,000 shares bought once; a 2-for-1 split makes the book 2,000. The four ledger
+    buckets still say 1,000 — that is the whole point — so the identity closes only because
+    the corporate term carries the other 1,000.
+    """
+    _seed_split(golden_db)
+    rec = api_client.get("/api/symbol/2330/detail").json()["activity_reconcile"]["total"]
+    assert rec["book_shares"] == "2000"
+    assert rec["buy_shares"] == "1000"
+    assert rec["corporate_delta_shares"] == "1000"
+    assert Decimal(rec["diff_shares"]) == Decimal("0")
+    assert rec["balances"] is True
+    # net_shares is the WHOLE left-hand side, corporate term included, so the printed
+    # equation sums to the printed total.
+    assert rec["net_shares"] == "2000"
+
+
+def test_a_deliberately_wrong_corporate_delta_makes_the_footer_red(
+    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7.3's DETECTION-POWER half — and it is the half that matters.
+
+    The mutation is applied to the REAL code path the router sources the delta from
+    (`current_shares`, the action-aware term of §6.3's definition), not to a local variable in
+    the test: audit F-11 found the sibling test in `test_corporate_actions.py` ending in a
+    tautology on a local, which is a test that cannot fail. Everything downstream — the
+    subtraction, the identity, the tolerance, the HTTP response — runs unmodified, so a green
+    footer here would mean the footer genuinely cannot detect a wrong corporate term.
+    """
+    from portfolio_dash.data_ingestion.holdings import current_shares as real_current_shares
+
+    _seed_split(golden_db)
+    ok = api_client.get("/api/symbol/2330/detail").json()["activity_reconcile"]["total"]
+    assert ok["balances"] is True, "precondition: the unmutated path reconciles"
+
+    def wrong(conn: sqlite3.Connection, account_id: str, symbol: str,
+              *, index: ActionIndex | None = None) -> Decimal:
+        return real_current_shares(conn, account_id, symbol, index=index) + Decimal("1")
+
+    # Patched by DOTTED PATH, which names the exact binding the production code path reads —
+    # `symbol.py` imported the function, so rebinding the router's own name is what a wrong
+    # `corporate_delta` would actually look like at run time.
+    monkeypatch.setattr("portfolio_dash.api.routers.symbol.current_shares", wrong)
+    bad = api_client.get("/api/symbol/2330/detail").json()["activity_reconcile"]["total"]
+    assert bad["balances"] is False
+    assert Decimal(bad["diff_shares"]) == Decimal("1")
+    assert bad["corporate_delta_shares"] == "1001"
+
+
+def test_multi_account_split_reconciles_in_every_account(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """D13's all-or-nothing shape: one symbol, two accounts, two action rows, two footers.
+
+    The per-account breakdown is what the drawer's account filter renders, so an aggregate
+    that balances while a per-account slice does not would be invisible.
+    """
+    insert_transaction(golden_db, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("40"), price=Decimal("110"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 12))
+    for acct in ("schwab", "moomoo_my"):
+        _seed_split(golden_db, account_id=acct, symbol="AAPL", to="3", frm="1")
+    rec = api_client.get("/api/symbol/AAPL/detail").json()["activity_reconcile"]
+    assert rec["total"]["balances"] is True
+    by = rec["by_account"]
+    assert set(by) == {"schwab", "moomoo_my"}
+    assert all(a["balances"] for a in by.values())
+    # 10 -> 30 and 40 -> 120: the delta is per-account, and the total is their sum.
+    assert by["schwab"]["corporate_delta_shares"] == "20"
+    assert by["moomoo_my"]["corporate_delta_shares"] == "80"
+    assert rec["total"]["corporate_delta_shares"] == "100"
+
+
+def test_exchange_reconciles_on_both_the_emptied_source_and_the_new_destination(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """The kind that breaks the identity in BOTH directions.
+
+    The source keeps its buy row and loses its position (delta negative, book 0); the
+    destination has no ledger row of its own at all and holds the whole position (delta
+    positive, buckets 0). Measured on the demo corpus before this term existed: VRTB +40 and
+    VRTA −40 — one symbol red in each direction, from one action.
+    """
+    upsert_instrument(golden_db, Instrument(symbol="2338", market=Market.TW,
+                                            quote_ccy=Currency.TWD, sector="Semiconductors",
+                                            name="TSMC (renamed)", board="TWSE"))
+    insert_corporate_action(golden_db, account_id="tw_broker", action_date=date(2026, 3, 15),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="2330",
+                            to_symbol="2338", ratio_to=Decimal("1"), ratio_from=Decimal("1"))
+
+    src = api_client.get("/api/symbol/2330/detail").json()["activity_reconcile"]["total"]
+    assert src["buy_shares"] == "1000" and src["book_shares"] == "0"
+    assert src["corporate_delta_shares"] == "-1000"
+    assert src["balances"] is True
+
+    dest = api_client.get("/api/symbol/2338/detail").json()["activity_reconcile"]["total"]
+    assert dest["buy_shares"] == "0" and dest["book_shares"] == "1000"
+    assert dest["corporate_delta_shares"] == "1000"
+    assert dest["balances"] is True
+
+
+def test_a_symbol_whose_whole_life_is_two_actions_still_gets_a_per_account_footer(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """Audit F-45. `MIDC` is created by one EXCHANGE and consumed by the next, so it owns no
+    transaction, no opening and no surviving holding — and `acct_ids` (activity ∪ holdings)
+    was therefore EMPTY, giving an empty per-account breakdown beside an activity list showing
+    two events. The action rows now carry their account into that set.
+    """
+    for sym, name in (("MIDC", "Interim Co"), ("2340", "Final Co")):
+        upsert_instrument(golden_db, Instrument(symbol=sym, market=Market.TW,
+                                                quote_ccy=Currency.TWD,
+                                                sector="Semiconductors",
+                                                name=name, board="TWSE"))
+    insert_corporate_action(golden_db, account_id="tw_broker", action_date=date(2026, 3, 15),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="2330",
+                            to_symbol="MIDC", ratio_to=Decimal("1"), ratio_from=Decimal("1"))
+    insert_corporate_action(golden_db, account_id="tw_broker", action_date=date(2026, 4, 15),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="MIDC",
+                            to_symbol="2340", ratio_to=Decimal("1"), ratio_from=Decimal("1"))
+
+    body = api_client.get("/api/symbol/MIDC/detail").json()
+    assert [(a["kind"], a["role"]) for a in body["activity"]] == [
+        ("EXCHANGE", "destination"), ("EXCHANGE", "source")]
+    assert set(body["activity_reconcile"]["by_account"]) == {"tw_broker"}
+    assert body["activity_reconcile"]["by_account"]["tw_broker"]["balances"] is True
+    # The end of the chain is where the shares actually are — the transitive walk found them
+    # without this router ever loading another symbol's ledger.
+    final = api_client.get("/api/symbol/2340/detail").json()["activity_reconcile"]["total"]
+    assert final["corporate_delta_shares"] == "1000" and final["balances"] is True
+
+
+def test_activity_carries_the_action_rows_between_openings_and_trades(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """The `＋公司行動` term has to be traceable to the events that produced it (§6.3).
+
+    Ordering is the replay's own `EventPriority`: an action is effective at the START of its
+    date, so it sorts AFTER a same-day opening (D3) and BEFORE that day's trades, whose
+    quantities are already quoted in post-action terms.
+    """
+    upsert_opening(golden_db, account_id="tw_broker", symbol="2330",
+                   shares=Decimal("500"), original_cost_total=Decimal("200000"),
+                   build_date=date(2026, 3, 15))
+    insert_transaction(golden_db, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("100"), price=Decimal("500"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 3, 15))
+    _seed_split(golden_db)
+    body = api_client.get("/api/symbol/2330/detail").json()
+    same_day = [a["side"] for a in body["activity"] if a["date"] == "2026-03-15"]
+    assert same_day == ["open", "action", "buy"]
+    act = next(a for a in body["activity"] if a["side"] == "action")
+    assert act["kind"] == "SPLIT" and act["role"] == "self"
+    assert act["ratio_to"] == "2" and act["ratio_from"] == "1"
+    assert act["account_id"] == "tw_broker"
+    # No per-row share delta: re-deriving §4's ratio algebra in a router would be a THIRD
+    # implementation of it, and the only public approximation gets F-18's same-day opening
+    # wrong. The exact figure is the footer's term, sourced from the walker itself.
+    assert act["shares"] is None and act["total"] == "0"
+    assert body["activity_reconcile"]["total"]["balances"] is True
+
+
+def test_exactly_one_action_index_is_built_per_request(
+    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit F-24 — and it is a CORRECTNESS gate, not only a speed one.
+
+    `_reconcile` runs once for the total plus once per account, and each needs the
+    action-aware share count. A per-call index would re-read and re-group the whole action
+    ledger every time (D23 rule 2 / trap #21), AND — the part that silently breaks — each
+    throwaway index would carry its own copy of D31's depth-cap sink and D33's
+    negative-side-skip sink, so the 待釐清 chip would be written to an object nobody reads.
+
+    Counted at `ActionIndex.from_stored`, the ONE constructor that reads ledger rows, so the
+    assertion holds however the router chooses to thread it.
+    """
+    from portfolio_dash.shared import corporate_actions as ca
+
+    insert_transaction(golden_db, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("40"), price=Decimal("110"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 12))
+    for acct in ("schwab", "moomoo_my"):
+        _seed_split(golden_db, account_id=acct, symbol="AAPL", to="3", frm="1")
+
+    calls = 0
+    real = ca.ActionIndex.from_stored
+
+    def counting(rows: Iterable[Any]) -> ActionIndex:
+        nonlocal calls
+        calls += 1
+        return real(rows)
+
+    monkeypatch.setattr(ca.ActionIndex, "from_stored", counting)
+    body = api_client.get("/api/symbol/AAPL/detail").json()
+    # Two accounts -> total + 2 per-account footers = 3 `_reconcile` calls, all served by ONE
+    # index. (Guards the shape, not just the count: a green assertion with 0 would mean the
+    # walk never ran.)
+    assert len(body["activity_reconcile"]["by_account"]) == 2
+    assert calls == 1, f"ActionIndex.from_stored built {calls} times in one request"
+
+
+# --- W5 / audit F-17: a red footer never renders without its cause ------------------
+
+
+def test_a_flagged_position_fails_to_reconcile_and_says_why(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """§6.3: "a position whose basis was discarded genuinely does not reconcile; reporting
+    ⚠ 對帳不一致 on it is the correct answer, not a false alarm."
+
+    E3 STICKY is the whole permitted divergence between the two paths (§7.2): `ever_oversold`
+    outlives the negative share count, so the replay refuses the split while the share-only
+    path — which cannot see basis state — applies it. The footer therefore goes RED, which is
+    correct, and `action_issues.unapplied` is what stops it being an unexplained red: it names
+    the account, the date, the kind and the reason. Note this position is NOT special-cased
+    green anywhere.
+    """
+    upsert_instrument(golden_db, Instrument(symbol="ZOMB", market=Market.TW,
+                                            quote_ccy=Currency.TWD, sector="Semiconductors",
+                                            name="Zombie Co", board="TWSE"))
+    # An UNDECLARED sell with nothing to sell -> 賣超, basis discarded, flag STICKY.
+    insert_transaction(golden_db, account_id="tw_broker", symbol="ZOMB", side=Side.SELL,
+                       quantity=Decimal("100"), price=Decimal("40"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    # A later buy nets it positive again; the flag does NOT clear (2026-07-31 ruling).
+    insert_transaction(golden_db, account_id="tw_broker", symbol="ZOMB", side=Side.BUY,
+                       quantity=Decimal("300"), price=Decimal("40"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 2, 5))
+    _seed_split(golden_db, symbol="ZOMB")
+
+    body = api_client.get("/api/symbol/ZOMB/detail").json()
+    rec = body["activity_reconcile"]["total"]
+    assert rec["balances"] is False, "a discarded basis genuinely does not reconcile"
+    assert rec["book_shares"] == "200"          # the replay refused the split
+    assert rec["corporate_delta_shares"] == "200"  # the share path applied it
+    assert Decimal(rec["diff_shares"]) == Decimal("200")
+
+    unapplied = body["action_issues"]["unapplied"]
+    assert len(unapplied) == 1
+    row = unapplied[0]
+    assert row["account_id"] == "tw_broker" and row["account"]
+    assert row["date"] == "2026-03-15" and row["kind"] == "SPLIT"
+    assert row["from_symbol"] == "ZOMB" and row["to_symbol"] == "ZOMB"
+    assert "賣超" in row["reason"]
+    # And the per-holding flag, which is the OTHER of the three channels.
+    assert body["position"]["unbookable_action"] is True
+    assert body["position"]["oversold"] is True
+
+
+def test_action_issues_is_scoped_to_the_symbol_and_empty_on_a_clean_one(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """The block is ALWAYS present (three empty lists) so the frontend needs no existence
+    check, and it never leaks another symbol's problem into this drawer."""
+    upsert_instrument(golden_db, Instrument(symbol="ZOMB", market=Market.TW,
+                                            quote_ccy=Currency.TWD, sector="Semiconductors",
+                                            name="Zombie Co", board="TWSE"))
+    insert_transaction(golden_db, account_id="tw_broker", symbol="ZOMB", side=Side.SELL,
+                       quantity=Decimal("100"), price=Decimal("40"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_transaction(golden_db, account_id="tw_broker", symbol="ZOMB", side=Side.BUY,
+                       quantity=Decimal("300"), price=Decimal("40"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 2, 5))
+    _seed_split(golden_db, symbol="ZOMB")
+
+    clean = api_client.get("/api/symbol/AAPL/detail").json()["action_issues"]
+    assert clean == {"unapplied": [], "depth_capped": [], "negative_side_skipped": []}
+    dirty = api_client.get("/api/symbol/ZOMB/detail").json()["action_issues"]
+    assert len(dirty["unapplied"]) == 1
+
+
+def test_d33_negative_side_skip_reaches_the_wire(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """D33's "skip AND flag" — the flag half, which had no channel to the wire before W5.
+
+    The share path refuses an EXCHANGE whose destination is an open declared short (E18), so
+    BOTH paths skip it and the footer legitimately reads ✓. That is exactly why the skip has
+    to be visible: a green footer over a position whose share count is frozen pre-action is
+    the "confidently wrong" reading this package exists to prevent. The sink is read off the
+    same per-request `ActionIndex` the walk wrote it into.
+    """
+    _seed_unbookable_action(golden_db)
+    body = api_client.get("/api/symbol/2330/detail").json()
+    skipped = body["action_issues"]["negative_side_skipped"]
+    assert [s["account_id"] for s in skipped] == ["tw_broker"]
+    assert skipped[0]["account"]  # a display name, not a bare id
+    assert body["activity_reconcile"]["total"]["balances"] is True
+    # …and the per-holding 待釐清 flag is still raised, so the drawer has both halves.
+    assert body["position"]["unbookable_action"] is True
+
+
+def test_unapplied_actions_reach_the_dashboard_payload(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """`Book.unapplied_actions` on the public read surface (audit F-17).
+
+    NOT a duplicate of `HoldingRow.unbookable_action`: two of the three refusal shapes leave
+    no surviving position to flag, so the flag is False while an action was silently ignored.
+    This one has a survivor precisely so the two can be compared in a single payload.
+    """
+    upsert_instrument(golden_db, Instrument(symbol="ZOMB", market=Market.TW,
+                                            quote_ccy=Currency.TWD, sector="Semiconductors",
+                                            name="Zombie Co", board="TWSE"))
+    insert_transaction(golden_db, account_id="tw_broker", symbol="ZOMB", side=Side.SELL,
+                       quantity=Decimal("100"), price=Decimal("40"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_transaction(golden_db, account_id="tw_broker", symbol="ZOMB", side=Side.BUY,
+                       quantity=Decimal("300"), price=Decimal("40"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 2, 5))
+    _seed_split(golden_db, symbol="ZOMB")
+
+    r = api_client.get("/api/dashboard")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["unapplied_actions"]) == 1
+    row = body["unapplied_actions"][0]
+    assert row["account_id"] == "tw_broker" and row["kind"] == "SPLIT"
+    assert row["date"] == "2026-03-15" and row["from_symbol"] == "ZOMB"
+    assert "賣超" in row["reason"]

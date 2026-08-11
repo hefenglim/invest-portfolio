@@ -14,6 +14,9 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
+from portfolio_dash.data_ingestion.corporate_action_import import (
+    build_corporate_action_preview,
+)
 from portfolio_dash.data_ingestion.csv_import import (
     build_transaction_preview,
     normalize_import_csv,
@@ -39,6 +42,7 @@ _BUILDERS = {
     "dividends": build_dividend_preview,
     "fx": build_fx_preview,
     "openings": build_opening_preview,
+    "corporate_actions": build_corporate_action_preview,
 }
 
 
@@ -132,6 +136,26 @@ def test_transactions_template_is_fully_clean(template_conn: sqlite3.Connection)
     assert len(preview.rows) == 6
     hard = [(r.index, [i.kind for i in r.issues]) for r in preview.rows if r.has_hard_issue]
     assert not hard, f"unexpected hard-issue rows: {hard}"
+
+
+def test_corporate_action_template_split_row_is_directly_writable(
+    template_conn: sqlite3.Connection
+) -> None:
+    """W7: the SPLIT example is fully clean; the other two are refused for ONE reason.
+
+    The EXCHANGE / SPINOFF examples name placeholder destinations because the seed has no
+    second same-currency instrument to point at. That they are refused is E10 working
+    (D19 — keyed on REGISTRATION, a database fact, never on the shape of the string), and
+    pinning the reason here stops the template from quietly acquiring a second defect
+    behind the one that is expected.
+    """
+    preview = _built("corporate_actions", template_conn,
+                     render_import_template("corporate_actions"))
+    assert len(preview.rows) == 3
+    assert not preview.rows[0].issues, [i.kind for i in preview.rows[0].issues]
+    for row in preview.rows[1:]:
+        assert {i.kind for i in row.issues if not i.needs_confirm} == {
+            "unregistered_symbol"}
 
 
 def test_template_with_bom_prefix_still_parses(template_conn: sqlite3.Connection) -> None:

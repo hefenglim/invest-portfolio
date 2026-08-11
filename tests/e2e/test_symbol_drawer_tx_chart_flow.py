@@ -29,6 +29,7 @@ from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.store import (
+    insert_corporate_action,
     insert_dividend,
     insert_fx_conversion,
     insert_transaction,
@@ -36,6 +37,7 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.store import upsert_fx, upsert_prices
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
@@ -414,4 +416,301 @@ def test_symbol_drawer_reconcile_footer_shows_fractional_shares(
 
     assert not console_errors and not page_errors, (
         f"reconcile footer: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+# --- W5: the ＋公司行動 reconciliation term, in the real drawer ------------------------
+
+
+def _seed_split_position(conn: sqlite3.Connection) -> None:
+    """2330: 1,000 shares, then a 3-for-1 SPLIT. The book holds 3,000; the four ledger
+    buckets the footer sums still say 1,000, so the footer only closes on the new term."""
+    seed_accounts(conn)
+    upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=Currency.TWD,
+                                       sector="Semiconductors", name="TSMC", board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2026, 3, 16),
+                            kind=CorporateActionKind.SPLIT, from_symbol="2330",
+                            to_symbol="2330", ratio_to=Decimal("3"), ratio_from=Decimal("1"),
+                            note="3 股換 1 股拆股")
+    upsert_prices(conn, [
+        PriceRow(instrument="2330", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("200"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    _base_fx(conn)
+    conn.commit()
+
+
+def _seed_unapplied_action(conn: sqlite3.Connection) -> None:
+    """A STICKY 賣超 position carrying a SPLIT the replay REFUSES (E3).
+
+    The share-only path applies the split (it cannot see basis state), the replay does not,
+    so the footer legitimately reads ⚠ 對帳不一致 — §6.3: "a position whose basis was
+    discarded genuinely does not reconcile". The point of the test is that the red footer
+    arrives WITH its cause, which is the state audit F-17 found unrenderable.
+    """
+    seed_accounts(conn)
+    upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW, quote_ccy=Currency.TWD,
+                                       sector="Semiconductors", name="TSMC", board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.SELL,
+                       quantity=Decimal("100"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("300"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 2, 5))
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2026, 3, 16),
+                            kind=CorporateActionKind.SPLIT, from_symbol="2330",
+                            to_symbol="2330", ratio_to=Decimal("2"), ratio_from=Decimal("1"))
+    upsert_prices(conn, [
+        PriceRow(instrument="2330", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("300"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    _base_fx(conn)
+    conn.commit()
+
+
+@pytest.mark.e2e
+def test_symbol_drawer_corporate_action_footer_term(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """§6.3 Presentation, end to end: the footer gains ＋公司行動 and the activity list gains
+    the row that explains it. Before W5 this exact ledger rendered ⚠ 對帳不一致 with a
+    −2,000 gap over a perfectly consistent book."""
+    base = flow_server(_seed_split_position)
+    page = fresh_page
+    console_errors, page_errors = _collect_errors(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    with page.expect_response("**/api/symbol/2330/detail") as resp_info:
+        page.evaluate("() => window.pdOpenSymbol('2330')")
+    assert resp_info.value.status == 200, f"detail status {resp_info.value.status}"
+
+    page.wait_for_selector(".sd-tx-section .sd-tx-reconcile")
+    foot = page.locator(".sd-tx-section .sd-tx-reconcile")
+    expect(foot).to_contain_text("＋買 1,000")
+    expect(foot).to_contain_text("＋公司行動 2,000")
+    expect(foot).to_contain_text("部位摘要 3,000 股")
+    expect(foot).to_contain_text("✓ 對帳一致")
+    # …and no cause line, because there is nothing wrong.
+    expect(page.locator(".sd-tx-section .sd-tx-issue")).to_have_count(0)
+
+    # The action row: its own chip + a human-readable ratio, and an EM-DASH share cell —
+    # the exact figure lives in the footer term, never re-derived per row in the browser.
+    rows = page.locator(".sd-tx-section table.data tbody tr")
+    expect(rows).to_have_count(2)  # the buy + the action
+    act = rows.nth(1)
+    expect(act.locator(".dir-chip")).to_have_text("公司行動")
+    expect(act.locator(".sd-act-label")).to_contain_text("拆併股 3：1")
+    expect(act.locator("td").nth(3)).to_have_text("—")  # 股數 column
+
+    assert not console_errors and not page_errors, (
+        f"corporate-action footer: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+@pytest.mark.e2e
+def test_symbol_drawer_red_footer_arrives_with_its_cause(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """Audit F-17 / F-52 in the browser: a ⚠ 對帳不一致 footer must never render alone.
+
+    Before W5 the drawer consumed only `fully_recovered` and `price_stale`, so a position
+    whose share count is wrong by a whole corporate-action ratio looked identical to a
+    healthy one and the red footer had nothing beside it. Asserts BOTH surviving channels:
+    the 部位摘要 待釐清 badge and the named reason under the footer.
+    """
+    base = flow_server(_seed_unapplied_action)
+    page = fresh_page
+    _, page_errors = _collect_errors(page)
+    # NOT `console_errors`, and the reason is a finding rather than a shortcut: on ANY ledger
+    # containing a 賣超 position, `POST /api/whatif` answers 500 — the drawer's 試算 section
+    # posts on open, so the browser console carries one. Reproduced 2026-08-11 with the
+    # corporate action REMOVED and on a completely clean symbol in another account, so it is
+    # pre-existing and ledger-wide, not caused by (or specific to) corporate actions:
+    # `strategy/whatif.py::compute_whatif` replays with the STRICT `build_book`
+    # (`allow_oversell=False`), which raises `OversellError` — a never-500 violation outside
+    # this package's file scope. Asserted as a SUBSET so this test still fails on any NEW 5xx
+    # and does not turn red the day whatif is fixed.
+    bad: list[str] = []
+    page.on("response", lambda r: bad.append(r.url) if r.status >= 500 else None)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    with page.expect_response("**/api/symbol/2330/detail") as resp_info:
+        page.evaluate("() => window.pdOpenSymbol('2330')")
+    assert resp_info.value.status == 200, f"detail status {resp_info.value.status}"
+
+    page.wait_for_selector(".sd-tx-section .sd-tx-reconcile")
+    foot = page.locator(".sd-tx-section .sd-tx-reconcile")
+    expect(foot).to_contain_text("⚠ 對帳不一致")
+    expect(foot).to_contain_text("差額 200 股")
+    issue = page.locator(".sd-tx-section .sd-tx-issue")
+    expect(issue).to_have_count(1)
+    expect(issue).to_contain_text("公司行動未套用")
+    expect(issue).to_contain_text("賣超")
+
+    # 部位摘要's 待釐清 badge — the flag channel, which the drawer drew for NEITHER
+    # unbookable flag before this change (F-52).
+    badge = page.locator(".sd-pos-flags .badge")
+    expect(badge).to_have_count(1)
+    expect(badge).to_have_text("賣超")
+
+    # The cause line is a full zh sentence — by far the longest string W5 adds to the drawer
+    # — and this repo has shipped three page-level horizontal overflows from exactly this
+    # class of addition (v0.1.26). Checked at 390px, the narrowest guarded width.
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.wait_for_timeout(150)
+    overflow = page.evaluate(
+        "() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
+    assert overflow <= 0, f"drawer overflows by {overflow}px at 390 with the cause line"
+
+    unexpected = [u for u in bad if not u.endswith("/api/whatif")]
+    assert not unexpected and not page_errors, (
+        f"red footer cause: unexpected 5xx={unexpected!r} page={page_errors!r}"
+    )
+
+
+def _seed_d33_skipped_action(conn: sqlite3.Connection) -> None:
+    """An EXCHANGE whose DESTINATION holds an open declared short (E18).
+
+    BOTH paths refuse it — the replay by rule, the share path by D33's `< 0` side test — so
+    the footer legitimately reads a GREEN 對帳一致 over a position whose share count is
+    frozen in pre-action terms against a global post-action price. That is exactly the
+    "confidently wrong" reading this package exists to prevent, so the green footer must
+    still carry the 待釐清 badge and the skip's reason.
+    """
+    seed_accounts(conn)
+    for sym, name in (("2330", "TSMC"), ("2331", "Ghost Semi")):
+        upsert_instrument(conn, Instrument(symbol=sym, market=Market.TW,
+                                           quote_ccy=Currency.TWD, sector="Semiconductors",
+                                           name=name, board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_transaction(conn, account_id="tw_broker", symbol="2331", side=Side.SELL,
+                       quantity=Decimal("100"), price=Decimal("40"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 2, 1),
+                       short_sale=True)
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2026, 3, 16),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="2330",
+                            to_symbol="2331", ratio_to=Decimal("1"), ratio_from=Decimal("1"))
+    upsert_prices(conn, [
+        PriceRow(instrument="2330", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("600"), source="test"),
+        PriceRow(instrument="2331", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("45"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    _base_fx(conn)
+    conn.commit()
+
+
+@pytest.mark.e2e
+def test_symbol_drawer_green_footer_still_shows_the_skipped_action(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """D33's "skip AND flag" half, and audit F-52's `unbookable_action` badge.
+
+    The footer is GREEN here and correctly so — both paths skipped the action — which is
+    precisely why the badge and the reason have to render anyway: the share count in this
+    drawer is pre-action while the price beside it is post-action.
+    """
+    base = flow_server(_seed_d33_skipped_action)
+    page = fresh_page
+    _, page_errors = _collect_errors(page)
+    # The drawer's 試算 posts /api/whatif on open, and on THIS ledger the strict replay
+    # refuses (E18) -> a 400 with the zh explanation, which is correct degradation but still
+    # logs a console line. Filtered by URL rather than suppressed, so any OTHER failing
+    # request still fails the test. (Contrast the 賣超 ledger in the test above, where the
+    # same endpoint answers 500 — a pre-existing never-500 violation: `compute_whatif`
+    # catches `UnbookableLedgerError` but `OversellError` is a separate hierarchy.)
+    bad: list[str] = []
+    page.on("response", lambda r: bad.append(r.url) if r.status >= 400 else None)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    with page.expect_response("**/api/symbol/2330/detail") as resp_info:
+        page.evaluate("() => window.pdOpenSymbol('2330')")
+    assert resp_info.value.status == 200, f"detail status {resp_info.value.status}"
+
+    page.wait_for_selector(".sd-tx-section .sd-tx-reconcile")
+    expect(page.locator(".sd-tx-section .sd-tx-reconcile")).to_contain_text("✓ 對帳一致")
+    # TWO cause lines, from two independent channels, and that is the point of keeping them
+    # separate (see `_action_issues`): the REPLAY refused the row (E18 -> Book.unapplied_
+    # actions) and the SHARE PATH skipped it (D33's `< 0` destination test). One bag with a
+    # reason code would have said "an action was skipped" once and lost half the story.
+    issue = page.locator(".sd-tx-section .sd-tx-issue")
+    expect(issue).to_have_count(2)
+    expect(issue.nth(0)).to_contain_text("公司行動未套用")
+    expect(issue.nth(1)).to_contain_text("公司行動跳過")
+    badge = page.locator(".sd-pos-flags .badge")
+    expect(badge).to_have_count(1)
+    expect(badge).to_have_text("股數待釐清")
+
+    unexpected = [u for u in bad if not u.endswith("/api/whatif")]
+    assert not unexpected and not page_errors, (
+        f"skipped-action badge: unexpected failures={unexpected!r} page={page_errors!r}"
+    )
+
+
+def _seed_exchange_source(conn: sqlite3.Connection) -> None:
+    """VRTB->VRTA in miniature: a rename that EMPTIES its source.
+
+    The source keeps its buy row and ends with zero shares, so its corporate term is
+    NEGATIVE — the case where the ＋ operator would read wrong.
+    """
+    seed_accounts(conn)
+    for sym, name in (("2330", "TSMC"), ("2338", "TSMC (new code)")):
+        upsert_instrument(conn, Instrument(symbol=sym, market=Market.TW,
+                                           quote_ccy=Currency.TWD, sector="Semiconductors",
+                                           name=name, board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2026, 3, 16),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="2330",
+                            to_symbol="2338", ratio_to=Decimal("1"), ratio_from=Decimal("1"),
+                            note="代號變更，股數不變")
+    upsert_prices(conn, [
+        PriceRow(instrument="2338", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("600"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    _base_fx(conn)
+    conn.commit()
+
+
+@pytest.mark.e2e
+def test_symbol_drawer_negative_corporate_term_reads_as_a_minus(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """An EXCHANGE's emptied SOURCE — a closed position that still has history.
+
+    The server signs the term, so the naive render would be 「＋公司行動 -1,000」. The sign
+    belongs in the operator, beside its 「−賣」 neighbour. Measured on the demo corpus before
+    W5: VRTB reported ⚠ 對帳不一致 with diff +40 — the source side of the same one action
+    that reddened its destination.
+    """
+    base = flow_server(_seed_exchange_source)
+    page = fresh_page
+    console_errors, page_errors = _collect_errors(page)
+
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    with page.expect_response("**/api/symbol/2330/detail") as resp_info:
+        page.evaluate("() => window.pdOpenSymbol('2330')")
+    assert resp_info.value.status == 200, f"detail status {resp_info.value.status}"
+
+    page.wait_for_selector(".sd-tx-section .sd-tx-reconcile")
+    foot = page.locator(".sd-tx-section .sd-tx-reconcile")
+    expect(foot).to_contain_text("−公司行動 1,000")
+    expect(foot).not_to_contain_text("＋公司行動")
+    expect(foot).to_contain_text("部位摘要 0 股")
+    expect(foot).to_contain_text("✓ 對帳一致")
+    act = page.locator(".sd-tx-section table.data tbody tr").nth(1)
+    expect(act.locator(".sd-act-label")).to_contain_text("換股 1：1（移轉至 2338）")
+
+    assert not console_errors and not page_errors, (
+        f"negative corporate term: console={console_errors!r} page={page_errors!r}"
     )

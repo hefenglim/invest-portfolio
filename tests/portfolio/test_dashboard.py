@@ -15,13 +15,14 @@ from portfolio_dash.data_ingestion.store import (
     load_ledger_bundle,
     upsert_instrument,
 )
-from portfolio_dash.portfolio import cost_basis, dashboard
+from portfolio_dash.portfolio import cost_basis, dashboard, price_basis
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard import (
     _unapplied_action_reason,
     build_dashboard,
 )
 from portfolio_dash.portfolio.results import UnappliedAction
+from portfolio_dash.portfolio.returns import xirr_reporting
 from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRead, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import (
@@ -568,6 +569,10 @@ def test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches
     * ``pnl.value_holdings``'s new disjunct, checked by asserting that no holding carries
       the flag, which makes ``h.oversold or h.unbookable_action`` identical to the
       pre-change ``h.oversold`` by construction.
+    * ``price_basis.split_factor`` — W6b's read-path re-expression (§5.1(d)), reached from
+      BOTH the ``price_map`` seam and the trend's per-day lookup. ``price_in`` short-circuits
+      on ``index.splits_on(symbol)`` being empty, so with no action in the ledger the
+      arithmetic never runs and ``price_map`` is byte-for-byte the pre-change dict.
 
     ``ledger_symbols`` is observed through the symbols ``get_price_history`` is actually
     asked for: with no actions the two added set comprehensions are empty, so the requested
@@ -585,6 +590,7 @@ def test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches
 
     monkeypatch.setattr(cost_basis, "_reject", _boom)
     monkeypatch.setattr(dashboard, "_unapplied_action_reason", _boom)
+    monkeypatch.setattr(price_basis, "split_factor", _boom)
     monkeypatch.setattr(dashboard, "get_price_history", _spy)
 
     _seed_full(conn)            # the rich fixture: two markets, a dividend, an FX conversion
@@ -613,3 +619,98 @@ def test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches
     assert data.kpis.total_market_value == Decimal("639600")  # 600,000 + 1,200 x 33
     assert data.kpis.xirr is not None
     assert data.freshness.xirr_unavailable_reason is None
+
+
+# --- §5.1(d) at the dashboard's price_map seam (trap #3 · W6b) ------------------------
+
+
+def _seed_split_with_a_stale_price(conn: sqlite3.Connection) -> None:
+    """10 AAPL bought at 100, a 20-for-1 on 6/8, and the newest stored price dated 6/5.
+
+    The price is as traded on 6/5 (100 x pre-split terms); the book's share count on
+    NOW (6/10) is already post-split. That gap is the whole artifact.
+    """
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("100"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    insert_corporate_action(conn, account_id="schwab", action_date=date(2026, 6, 8),
+                            kind=CorporateActionKind.SPLIT, from_symbol="AAPL",
+                            to_symbol="AAPL", ratio_to=Decimal("20"),
+                            ratio_from=Decimal("1"))
+    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
+                                  as_of=date(2026, 6, 5), close=Decimal("120"),
+                                  source="test")], fetched_at=NOW)
+    upsert_fx(conn, [FxRow(base=USD, quote=TWD, as_of=date(2026, 1, 10),
+                           rate=Decimal("32"), source="test")], fetched_at=NOW)
+
+
+def test_a_split_re_expresses_the_price_for_valuation_and_xirr_from_one_seam(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TRAP #3 — the correction belongs at the ``price_map`` assignment, not inside
+    ``value_holdings``.
+
+    ``price_map`` is the ONE dict fed to both ``value_holdings`` and ``xirr_reporting``, and
+    the latter multiplies ``price x h.shares`` itself rather than reading ``market_value``.
+    Correcting only the valuation would leave the XIRR terminal value on the raw price, so
+    market value and XIRR would disagree by the whole ratio — two numbers on one screen.
+    The spy asserts the price XIRR actually received, which is the only way to tell the two
+    placements apart from the outside.
+    """
+    _seed_split_with_a_stale_price(conn)
+    seen: dict[str, Decimal] = {}
+
+    def spy(*args: object, **kwargs: object) -> object:
+        price_map = args[6]  # the price_map positional (see build_dashboard step 4)
+        assert isinstance(price_map, dict)
+        seen.update(price_map)
+        return xirr_reporting(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dashboard, "xirr_reporting", spy)
+    data = build_dashboard(conn, now=NOW, reporting=USD)
+
+    row = next(h for h in data.holdings if h.symbol == "AAPL")
+    assert row.shares == Decimal("200")          # 10 x 20, re-denominated by the replay
+    assert row.market_value == Decimal("1200")   # 200 x (120 / 20) — NOT 200 x 120
+    assert data.kpis.total_market_value == Decimal("1200")
+    # ...and XIRR was handed the SAME corrected price, from the same dict.
+    assert seen == {"AAPL": Decimal("6")}
+
+
+def test_without_the_reexpression_the_dashboard_inflates_by_the_ratio(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DETECTION POWER — the pre-fix behaviour on the REAL code path (F-11).
+
+    ``price_in`` is neutered to the identity, which is exactly the statement this package
+    replaced (``price_map = {sym: pr.value ...}``). Both the holding and the KPI band then
+    report 20x the position's actual worth, and nothing anywhere is flagged — a wrong
+    number that looks entirely right.
+    """
+    _seed_split_with_a_stale_price(conn)
+    monkeypatch.setattr(
+        dashboard, "price_in",
+        lambda index, symbol, price, *, priced_on, valued_on: price,
+    )
+    data = build_dashboard(conn, now=NOW, reporting=USD)
+    row = next(h for h in data.holdings if h.symbol == "AAPL")
+    assert row.market_value == Decimal("24000")   # 200 x 120
+    assert row.unbookable_action is False         # ...and unflagged, which is the danger
+    assert data.freshness.xirr_unavailable_reason is None
+
+
+def test_a_post_split_price_needs_no_correction_at_the_dashboard_either(
+    conn: sqlite3.Connection,
+) -> None:
+    """Self-cancelling: once a genuine post-split row exists, ``pd >= a.date`` empties the
+    window and the stored close is used exactly as it is. Nobody switches the correction
+    off; it stops applying on its own."""
+    _seed_split_with_a_stale_price(conn)
+    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
+                                  as_of=date(2026, 6, 9), close=Decimal("6"),
+                                  source="test")], fetched_at=NOW)
+    data = build_dashboard(conn, now=NOW, reporting=USD)
+    row = next(h for h in data.holdings if h.symbol == "AAPL")
+    assert row.market_value == Decimal("1200")    # 200 x 6, untouched

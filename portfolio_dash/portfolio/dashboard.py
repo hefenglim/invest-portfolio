@@ -45,6 +45,7 @@ from portfolio_dash.portfolio.dashboard_models import (
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.pnl import value_holdings
+from portfolio_dash.portfolio.price_basis import price_in
 from portfolio_dash.portfolio.results import (
     CombinedView,
     ReturnSummary,
@@ -62,6 +63,7 @@ from portfolio_dash.pricing.store import (
     get_latest_price,
     get_price_history,
 )
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import DividendType
@@ -273,7 +275,25 @@ def build_dashboard(
     price_reads: dict[str, PriceRead | None] = {
         sym: get_latest_price(conn, sym, now=now) for sym in held_symbols
     }
-    price_map = {sym: pr.value for sym, pr in price_reads.items() if pr is not None}
+    # §5.1(d), applied HERE and not inside `value_holdings` (trap #3). A stored close is
+    # as traded on its own date, but the book's share count is already in today's terms, so
+    # a price carried forward across a split must be re-expressed — divided by the splits
+    # in `(pr.as_of, as_of]` — before it meets those shares. `price_map` is the ONE dict fed
+    # to BOTH `value_holdings` (below) and `xirr_reporting` (step 4), which multiplies
+    # `price × h.shares` itself rather than reading `market_value`: correcting it inside
+    # `value_holdings` would leave the XIRR terminal value on the raw price and make market
+    # value and XIRR disagree by the whole ratio — two numbers on one screen, the worst
+    # kind of discrepancy. One seam here gives valuation, XIRR, weights, KPIs and net worth
+    # the same corrected price.
+    #
+    # ONE index for the request (trap #21). `price_in` short-circuits structurally on "no
+    # SPLIT for this symbol", so an action-free ledger takes the untouched pre-existing
+    # expression and this dict is byte-for-byte the old one (D38 invariant 1).
+    actions = ActionIndex.build(bundle.actions)
+    price_map = {
+        sym: price_in(actions, sym, pr.value, priced_on=pr.as_of, valued_on=as_of)
+        for sym, pr in price_reads.items() if pr is not None
+    }
     valued = value_holdings(book.holdings, price_map)
 
     resolver = RateResolver(conn, now=now)
@@ -630,4 +650,8 @@ def build_dashboard(
         freshness=freshness,
         insights=[],
         dividend_projection=dividend_projection,
+        # Read off the BOOK (see the `unapplied_actions` assignment above), not off the
+        # holdings: this is the ONLY channel that survives an action whose source position
+        # was emptied or never existed, and §6.3's red footer needs a cause to name.
+        unapplied_actions=unapplied_actions,
     )

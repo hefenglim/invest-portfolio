@@ -8,7 +8,7 @@
   'use strict';
   /* D is set once the four ledgers resolve; render fns read it. Default to empty
      arrays so any pre-boot render (or a fetch failure) degrades to empty tables. */
-  let D = { transactions: [], dividends: [], fx: [], openings: [] };
+  let D = { transactions: [], dividends: [], fx: [], openings: [], actions: [] };
   const f = window.fmt;
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
@@ -21,7 +21,7 @@
   /* ===== tabs =====
      ledger.html 使用 tab-tx/div/fx/open；trades.html 自帶 glue（tab-ldiv 等）。
      僅在獨立帳本頁（無 pane-ldiv）時於此接線，避免誤抓輸入區同名的 #tab-div / #pane-div。 */
-  const TABS = ['tx', 'div', 'fx', 'open'];
+  const TABS = ['tx', 'div', 'fx', 'open', 'action'];
   const ownsTabs = !document.getElementById('pane-ldiv');
   function showTab(t) {
     TABS.forEach((x) => {
@@ -59,6 +59,7 @@
     div: { offset: 0, total: 0 },
     fx: { offset: 0, total: 0 },
     open: { offset: 0, total: 0 },
+    action: { offset: 0, total: 0 },
   };
   const pagers = {};
   let accountList = []; /* [{id, name}] from GET /api/accounts (chip registry) */
@@ -97,6 +98,7 @@
     pageState.div.offset = 0;
     pageState.fx.offset = 0;
     pageState.open.offset = 0;
+    pageState.action.offset = 0;
   }
 
   /* 代號搜尋與日期區間 — keyword filters the page client-side; dates hit the server */
@@ -532,7 +534,151 @@
     });
   }
 
-  function renderAll() { renderTx(); renderDiv(); renderFx(); renderOpen(); }
+  /* ===== 公司行動 (the 5th ledger — spec 2026-08-06 §6.7 door 3) =====
+     Deliberately HERE and not as a 6th tab on the input pane above: the input pane is
+     high-frequency capture (trades, dividends), this section is low-frequency corrective
+     record-keeping, and putting a rare control behind five common ones buries it.
+
+     Every displayed value (股數 / 比例 / 成本分攤) is a SERVER Decimal string rendered via
+     window.fmt or shown verbatim — the two ratio terms are NEVER divided here, which is
+     the whole point of storing them as two integers (§3.1(ii)). `ratio_label` is composed
+     server-side for the same reason. */
+  function editAction(a) {
+    const fDate = inp(a.date, 'date');
+    const fAcc = accountSel(a.account_id);
+    const fFrom = inp(a.symbol);
+    const fTo = inp(a.to_symbol);
+    const fKind = sel([['SPLIT', '分割'], ['EXCHANGE', '換股'], ['SPINOFF', '分拆']], a.kind);
+    const fRatioFrom = inp(a.ratio_from, 'number', '1');
+    const fRatioTo = inp(a.ratio_to, 'number', '1');
+    const fCarry = inp(a.cost_carry === null ? '' : a.cost_carry, 'number', 'any');
+    const fNote = inp(a.note || '');
+    const warn = el('div', 'hint',
+      '⚠ 修改公司行動會重算歷史：股數、均價、報酬率與價格基準都會依新內容重建（原值已存入稽核軌跡）。'
+      + '若這筆行動同時登錄在多個帳戶，代號／日期／類型／比例必須整組一致，否則會被擋下。');
+    editModal('編輯公司行動 #' + a.id + ' — ' + a.symbol, [
+      ['日期', fDate], ['帳戶', fAcc], ['類型', fKind],
+      ['來源代號', fFrom], ['目的代號', fTo],
+      ['每持有（股）', fRatioFrom], ['變成／換得（股）', fRatioTo],
+      ['成本分攤比例（分拆用）', fCarry], ['備註', fNote],
+      ['', warn],
+    ], async (dismiss) => {
+      dismiss();
+      const body = {
+        account_id: fAcc.value, date: fDate.value, kind: fKind.value,
+        from_symbol: fFrom.value.trim(), to_symbol: fTo.value.trim(),
+        ratio_to: fRatioTo.value, ratio_from: fRatioFrom.value,
+        cost_carry: fCarry.value.trim() || null,
+        note: fNote.value.trim() || null, ack_warnings: false,
+      };
+      try {
+        await window.pdApi.put('/api/ledgers/corporate-actions/' + a.id, body);
+        mutationOk('編輯');
+      } catch (err) {
+        if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
+          window.confirmDialog({
+            title: '公司行動警告確認', body: err.message,
+            confirmLabel: '我了解，仍要儲存', danger: true,
+            onConfirm: async () => {
+              body.ack_warnings = true;
+              try {
+                await window.pdApi.put('/api/ledgers/corporate-actions/' + a.id, body);
+                mutationOk('編輯');
+              } catch (e2) { mutationFail(e2, '編輯'); }
+            }
+          });
+          return;
+        }
+        mutationFail(err, '編輯');
+      }
+    });
+  }
+
+  /* F-32: deleting ONE row of a multi-account set is refused server-side, because the
+     price correction is global (split_factor's dedup key carries no account) while the
+     share correction is per account — and the drawer would print ✓ 對帳一致 over the
+     mismatch. The refusal is turned into a guided action here rather than a dead end:
+     the owner who really does want the action gone is offered the WHOLE SET. */
+  function delAction(a) {
+    window.confirmDialog({
+      title: '刪除公司行動',
+      body: '確定刪除 ' + a.symbol + ' 在 ' + a.date + ' 的' + a.kind_label
+        + '？股數、成本與價格基準都會由帳本重建。',
+      confirmLabel: '刪除', danger: true,
+      onConfirm: async () => {
+        try {
+          await window.pdApi.del('/api/ledgers/corporate-actions/' + a.id);
+          mutationOk('刪除');
+        } catch (err) {
+          if (err && err.status === 422 && err.code === 'partial_action_set_change') {
+            window.confirmDialog({
+              title: '這筆行動屬於多帳戶整組紀錄',
+              body: err.message + '　要整組一起刪除嗎？',
+              confirmLabel: '整組刪除', danger: true,
+              onConfirm: async () => {
+                try {
+                  await window.pdApi.del('/api/ledgers/corporate-actions/set'
+                    + '?from_symbol=' + encodeURIComponent(a.symbol)
+                    + '&date=' + encodeURIComponent(a.date)
+                    + '&kind=' + encodeURIComponent(a.kind));
+                  mutationOk('刪除');
+                } catch (e2) { mutationFail(e2, '刪除'); }
+              }
+            });
+            return;
+          }
+          mutationFail(err, '刪除');
+        }
+      }
+    });
+  }
+
+  function renderActions() {
+    const tbody = $('#action-body');
+    if (!tbody) return;
+    tbody.replaceChildren();
+    byKeyword(D.actions).forEach((a) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'num', f.date(a.date)));
+      tr.appendChild(el('td', 'col-text', a.account));
+      tr.appendChild(el('td', 'col-text', a.kind_label));
+      tr.appendChild(symCell(a.symbol, a.name));
+      const tdTo = el('td', 'col-text');
+      if (a.to_symbol && a.to_symbol !== a.symbol) {
+        tdTo.appendChild(symCell(a.to_symbol, a.to_name).firstChild);
+      } else {
+        tdTo.textContent = f.NULL_GLYPH;
+        tdTo.classList.add('sign-nil');
+      }
+      tr.appendChild(tdTo);
+      tr.appendChild(el('td', 'col-text num', a.ratio_label));
+      const tdCarry = el('td', 'num');
+      if (a.cost_carry === null || a.cost_carry === undefined) {
+        tdCarry.textContent = f.NULL_GLYPH;
+        tdCarry.classList.add('sign-nil');
+      } else {
+        tdCarry.textContent = a.cost_carry;   /* a server string; never re-scaled here */
+      }
+      tr.appendChild(tdCarry);
+      tr.appendChild(el('td', 'col-text', a.note || ''));
+      tr.appendChild(actionsCell(() => editAction(a), () => delAction(a)));
+      tbody.appendChild(tr);
+    });
+  }
+
+  /* Door 3's entry point — the ONLY control on this page that CREATES an action. It opens
+     the shared §6.7 form (web/corp-action-form.js); doors 1 and 2 open the same one with a
+     different prefill. */
+  (function initActionAdd() {
+    const btn = document.getElementById('action-add');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      if (!window.pdCorpActionForm) return;
+      window.pdCorpActionForm.open({ onSaved: () => boot() });
+    });
+  })();
+
+  function renderAll() { renderTx(); renderDiv(); renderFx(); renderOpen(); renderActions(); }
 
   /* ===== WPE (2026-07-07): per-ledger server pagination =====
      Each of the four tables fetches its OWN page (limit/offset + total_count from
@@ -590,10 +736,12 @@
     (rows) => { D.fx = rows; }, renderFx);
   const loadOpen = () => loadOne('open', '/api/ledgers/openings',
     (rows) => { D.openings = rows; }, renderOpen);
+  const loadAction = () => loadOne('action', '/api/ledgers/corporate-actions',
+    (rows) => { D.actions = rows; }, renderActions);
 
   async function loadAll() {
     loadFailToasted = false;
-    await Promise.all([loadTx(), loadDiv(), loadFx(), loadOpen()]);
+    await Promise.all([loadTx(), loadDiv(), loadFx(), loadOpen(), loadAction()]);
   }
 
   /* FU-D45: live-refresh seam for the input panes (trades.html). After ANY successful
@@ -611,6 +759,7 @@
       ['div', 'ldiv-pager', loadDiv],
       ['fx', 'lfx-pager', loadFx],
       ['open', 'lopen-pager', loadOpen],
+      ['action', 'laction-pager', loadAction],
     ];
     HOSTS.forEach(([kind, hostId, loader]) => {
       const host = document.getElementById(hostId);
