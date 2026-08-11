@@ -197,3 +197,48 @@ def test_a_caller_supplied_bundle_is_still_honoured(conn: sqlite3.Connection) ->
     inp = _split()
     bundle = load_ledger_bundle(conn)
     assert _hard(validate_corporate_action(conn, inp, batch=[inp], bundle=bundle)) == set()
+
+
+# --- E1a reads the same cut (D41's twin on the SHARE side) --------------------------------
+
+
+def test_a_same_day_sell_does_not_make_e1a_say_no_position(
+    conn: sqlite3.Connection,
+) -> None:
+    """E1a used `shares_through` — the CLOSE of the action date — so a same-day sell counted.
+
+    Measured 2026-08-11: 100 shares, a 7-for-1, and the owner sells exactly 100 on the split
+    date. `shares_through` reads 0 and E1a hard-rejects the split with 「沒有持倉」, while the
+    owner demonstrably holds the 600 that remain. The sale is legal *because* of the action,
+    and the action runs first (`CORPORATE_ACTION` 10 < `SELL` 30).
+
+    This is the same defect as D41 one guard over: the book-derived rejections and the
+    share-derived one disagreed about what "the action date" means, inside one validator.
+    """
+    _buy(conn, "AAA", "100", date(2024, 1, 10))
+    _buy(conn, "AAA", "100", SPLIT_DAY, side=Side.SELL)
+    inp = _split()
+    assert _hard(validate_corporate_action(conn, inp, batch=[inp])) == set()
+
+
+def test_e1a_still_refuses_an_action_on_a_symbol_never_held(
+    conn: sqlite3.Connection,
+) -> None:
+    """…and the guard must still bite, or the fix is a deletion."""
+    inp = _split()          # AAA registered, never bought
+    assert "no_position_on_action_date" in _hard(
+        validate_corporate_action(conn, inp, batch=[inp]))
+
+
+def test_e1a_counts_a_same_day_OPENING_as_pre_action(conn: sqlite3.Connection) -> None:
+    """D3 / F-18, the other end of the same cut: `OPENING = 0 < CORPORATE_ACTION = 10`.
+
+    `shares_on` (strictly before) would miss this and reject a position that exists. Neither
+    neighbour of the action's own cut is correct here, which is why it needed its own
+    accessor rather than reusing one.
+    """
+    upsert_opening(conn, account_id="schwab", symbol="AAA", shares=D("100"),
+                   original_cost_total=D("60000"), build_date=SPLIT_DAY)
+    inp = _split()
+    assert "no_position_on_action_date" not in _hard(
+        validate_corporate_action(conn, inp, batch=[inp]))

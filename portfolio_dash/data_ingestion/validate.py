@@ -25,6 +25,7 @@ from portfolio_dash.data_ingestion.holdings import (
     MAX_ACTION_DEPTH,
     current_shares,
     load_action_index,
+    shares_before_action_on,
     shares_through,
 )
 from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
@@ -553,7 +554,11 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     # `HEAD`: buy ABC 2020 → EXCHANGE ABC→XYZ 2024 → SPLIT XYZ 2025 was hard-rejected as
     # 「沒有持倉」 while `build_book` held 100 XYZ, i.e. the feature could not accept the
     # data §10.5 defines "done" as accepting.
-    if from_inst is not None and shares_through(
+    # The cut is `(date, CORPORATE_ACTION)` — what the action SEES — not the close of the
+    # date (2026-08-11, D41's twin on the share side). `shares_through` counts a same-day
+    # SELL, and selling exactly the pre-split count on the split date then hard-rejected the
+    # split with 「沒有持倉」 while the owner really held the post-split remainder.
+    if from_inst is not None and shares_before_action_on(
         conn, inp.account_id, inp.from_symbol, on=inp.date, index=walk_index
     ) == 0:
         add(Issue(kind="no_position_on_action_date",

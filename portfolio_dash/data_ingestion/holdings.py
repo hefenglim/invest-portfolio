@@ -299,6 +299,7 @@ def _shares_at(
     cut: _Cut,
     naive_before: date | None,
     index: ActionIndex | None,
+    short_circuit: bool = True,
 ) -> Decimal:
     """Action-aware share count, or the pre-existing path when there is nothing to apply.
 
@@ -314,7 +315,7 @@ def _shares_at(
     raise on construction and running all nine call sites.
     """
     resolved = _resolve_index(conn, index)
-    if not resolved.for_symbol(account_id, symbol):
+    if short_circuit and not resolved.for_symbol(account_id, symbol):
         return _shares_until(conn, account_id, symbol, naive_before)
     try:
         return _Walk(conn, resolved).shares(account_id, symbol, cut)
@@ -370,6 +371,46 @@ def shares_through(
         cut=(on + timedelta(days=1), int(EventPriority.OPENING)),
         naive_before=on + timedelta(days=1),
         index=index,
+    )
+
+
+def shares_before_action_on(
+    conn: sqlite3.Connection,
+    account_id: str,
+    symbol: str,
+    *,
+    on: date,
+    index: ActionIndex | None = None,
+) -> Decimal:
+    """Shares as a corporate action dated *on* SEES them — the ``(on, CORPORATE_ACTION)`` cut.
+
+    Neither :func:`shares_through` (the CLOSE of *on*, so a same-day sell counts) nor
+    :func:`shares_on` (strictly before *on*, so a same-day opening does NOT) answers this.
+    ``EventPriority`` puts the action between them: ``OPENING (0) < CORPORATE_ACTION (10) <
+    BUY (20) < SELL (30)``.
+
+    **Both neighbours were measured to be wrong here (2026-08-11).** With `shares_through`,
+    a legitimate 7-for-1 was hard-rejected 「沒有持倉」 because the owner sold exactly their
+    pre-split count on the split date — the sale is legal *after* the action, and the action
+    runs first. With `shares_on`, D3's same-day opening would be invisible and the same
+    rejection would fire on a position that demonstrably exists. This is D41 on the share
+    side of the same function: two guards in one validator disagreeing about what "the
+    action date" means.
+
+    **No short-circuit, deliberately.** `_shares_at`'s structural short-circuit exists so a
+    symbol with no corporate action takes the byte-identical pre-feature path (D38 invariant
+    1). This accessor **has no pre-feature counterpart** — it is a corporate-action-only
+    guard — so there is nothing to preserve byte-identity with, and the naive path cannot
+    express the cut anyway: `_shares_until` applies one `<` bound to all three ledgers,
+    which is precisely F-18's defect. The walk handles an actionless symbol correctly on its
+    own (an empty `for_symbol` just means no deltas to add).
+    """
+    return _shares_at(
+        conn, account_id, symbol,
+        cut=(on, int(EventPriority.CORPORATE_ACTION)),
+        naive_before=on,          # only reachable via the depth-cap degradation below
+        index=index,
+        short_circuit=False,
     )
 
 
