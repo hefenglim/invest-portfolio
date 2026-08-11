@@ -200,7 +200,214 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("SC1", "tw_broker", "2609", "2026-07-01", 800, 95)
     buy("SC2", "tw_broker", "2609", "2026-07-06", 1200, 98)
 
+    run_corporate_actions(ev, api, db_path, op, buy, sell)
+
     reconcile(ev, api, db_path, "final", valuation=True, reports=True)
+
+
+def run_corporate_actions(ev: C.Evidence, api: C.Api, db_path, op: Ops, buy, sell):
+    """SPLIT / EXCHANGE / SPINOFF — spec 2026-08-06 §7.4's required scenario set.
+
+    Placed last so every existing expectation above runs as a CONTROL: the ledger is
+    settled and flat at this point (the declared short is covered), so the corporate-action
+    checkpoint reconciles at full strength — holdings, realized, cash, FX, KPIs and XIRR —
+    and any failure above is attributable to something other than this block.
+
+    Dedicated symbols (CA*), funded by their own TWD deposit. tw_broker is not FX-exposed,
+    so the whole block moves no FX pool.
+
+    §7.4's list, and where each item is: forward split -> sell (CA1) · reverse split ->
+    cash-in-lieu sell (CA2) · exchange into an EXISTING position (CA3 -> CA4) · spinoff ->
+    sell the child (CA7 -> CA8) · split on a dividend-adjusted position, adjusted != original
+    (CA9) and on a DRIP position (CAD) · a 2-for-7 exchange, the §3.1(ii) exactness case
+    (CA5 -> CA6) · rejection paths (E5 on CAX, E2 on CAZ, E1 on CAN).
+    """
+    op.cash_move("tw_broker", "deposit", "TWD", "2026-01-05", 400000)
+
+    # ---- positions the actions will act on (all pre-action, all before any action date) --
+    buy("CA1B", "tw_broker", "CA1", "2026-02-03", 100, 600)     # -> 3-for-1 split
+    buy("CARB", "tw_broker", "CAR", "2026-02-06", 210, 90)      # -> 1-for-3, exactly 70
+    buy("CA2B", "tw_broker", "CA2", "2026-02-05", 705, 30)      # -> 1-for-10 reverse split
+    buy("CA4B", "tw_broker", "CA4", "2026-02-11", 40, 500)      # EXCHANGE DESTINATION,
+    buy("CA3B", "tw_broker", "CA3", "2026-02-12", 100, 200)     #   already held: merge
+    buy("CA5B", "tw_broker", "CA5", "2026-02-17", 700, 40)      # -> 2-for-7 exchange
+    buy("CA7B", "tw_broker", "CA7", "2026-02-19", 400, 250)     # -> spinoff parent
+    buy("CA9B", "tw_broker", "CA9", "2026-02-21", 200, 300)     # -> split, adjusted != orig
+    buy("CADB", "schwab", "CAD", "2026-02-24", 80, 25)          # -> split on DRIP history
+    # CA9 takes a CASH dividend so its adjusted_total diverges from original_total BEFORE
+    # the split: the split must move neither, and dividend_portion / 回本進度 must be
+    # identical either side of it (§4.1). CAD takes a US DRIP, so the split also lands on
+    # a position whose share count already includes zero-cost reinvested shares.
+    op.dividend("tw_broker", "CA9", "2026-03-05", "CASH", 4000)
+    op.dividend("schwab", "CAD", "2026-03-06", "DRIP", 40, reinvest_price=25)
+    # ---- SAME-DAY trades, on an action's own effective date -------------------------
+    # §4: an action is effective at the START of its date, so a same-day trade is quoted
+    # in POST-action terms. Without these two rows the whole EventPriority ordering is
+    # unobservable — every other date in this block has an action alone on it, and a
+    # replay that ran CORPORATE_ACTION after BUY would produce identical numbers.
+    #   sell 40 CA1 @ 205 — a post-SPLIT price and quantity on the split's own date;
+    #   buy 100 CA7 @ 190 — after the SPINOFF, so the child is carved from 400 shares and
+    #   the parent then holds 500. Ordered the other way the child would be 125.
+    sell("CA1SD", "tw_broker", "CA1", "2026-03-02", 40, 205)
+    buy("CA7SD", "tw_broker", "CA7", "2026-03-24", 100, 190)
+
+    # ---- the action rows (spec §3's ledger; ratio as TWO INTEGER TERMS, never a quotient)
+    op.corporate_action("tw_broker", "SPLIT", "2026-03-02", "CA1", "CA1", 3, 1,
+                        note="forward split 3-for-1")
+    op.corporate_action("tw_broker", "SPLIT", "2026-03-14", "CAR", "CAR", 1, 3,
+                        note="1-for-3 of 210 — evaluation order decides the integer")
+    op.corporate_action("tw_broker", "SPLIT", "2026-03-10", "CA2", "CA2", 1, 10,
+                        note="reverse split 1-for-10; fraction paid in cash (§3.2)")
+    op.corporate_action("tw_broker", "EXCHANGE", "2026-03-16", "CA3", "CA4", 1, 2,
+                        note="merger into an already-held destination")
+    op.corporate_action("tw_broker", "EXCHANGE", "2026-03-18", "CA5", "CA6", 2, 7,
+                        note="2-for-7 — the §3.1(ii) exactness case")
+    op.corporate_action("tw_broker", "SPINOFF", "2026-03-24", "CA7", "CA8", 1, 4,
+                        cost_carry="0.30", note="8-K allocation 30% to the child")
+    op.corporate_action("tw_broker", "SPLIT", "2026-04-02", "CA9", "CA9", 2, 1,
+                        note="split on a dividend-adjusted position")
+    op.corporate_action("schwab", "SPLIT", "2026-04-04", "CAD", "CAD", 5, 4,
+                        note="split on a DRIP-grown position")
+
+    res = reconcile(ev, api, db_path, "corp_applied", valuation=True)
+
+    # ---- ABSOLUTE anchors: the app's number vs a hand-computed literal ----------------
+    # Oracle-vs-app agreement proves both replays match; it cannot prove either landed on
+    # the share count the statement says, because a rounded ratio in BOTH agrees at 199.99.
+    # These literals come from the ratio and the pre-action count, nothing else.
+    # 100 x 3 / 1 = 300, then the SAME-DAY sell of 40 (SELL runs after CORPORATE_ACTION).
+    P1.anchor(ev, api, "corp.anchor.split_forward", "tw_broker", "CA1", "shares", "260")
+    P1.anchor(ev, api, "corp.anchor.split_reverse", "tw_broker", "CA2", "shares", "70.5")
+    # 210 x 1 / 3 = EXACTLY 70. Written 210 x (1/3) it is 69.99999999999999999999999999,
+    # and the sell of exactly 70 below then fails validate.py's bare `>` (spec §3.1(ii)(a)).
+    P1.anchor(ev, api, "corp.anchor.split_ratio_exact", "tw_broker", "CAR", "shares", "70")
+    P1.anchor(ev, api, "corp.anchor.exchange_merge", "tw_broker", "CA4", "shares", "90")
+    # 700 x 2 / 7 == exactly 200. Written 700 x (2/7) it is 200.0000000000000000000000000
+    # here but a hair under an integer for 3,530 other measured (shares, to, from) triples,
+    # and THAT is what trips validate.py's bare `>` on the next sell (spec §3.1(ii)).
+    P1.anchor(ev, api, "corp.anchor.exchange_2for7", "tw_broker", "CA6", "shares", "200")
+    # The child is carved from the 400 shares held BEFORE the same-day buy; the parent
+    # then holds 400 + 100. Run CORPORATE_ACTION after BUY and these become 125 and 500.
+    P1.anchor(ev, api, "corp.anchor.spinoff_child", "tw_broker", "CA8", "shares", "100")
+    P1.anchor(ev, api, "corp.anchor.spinoff_parent", "tw_broker", "CA7", "shares", "500")
+    # The parent's basis is `total - carved`, never `total x (1-c)` (§4.3): buy 400 @ 250
+    # = 100,000 + TW fee floor(100000 x 0.001425) = 142  ->  100,142 all-in; the child
+    # carries 30% = 30,042.60 and the parent keeps exactly the remainder, 70,099.40, plus
+    # the same-day buy's all-in 19,000 + floor(19000 x 0.001425)=27  ->  89,126.40.
+    P1.anchor(ev, api, "corp.anchor.spinoff_child_basis", "tw_broker", "CA8",
+              "original_cost_total", "30042.60")
+    P1.anchor(ev, api, "corp.anchor.spinoff_parent_basis", "tw_broker", "CA7",
+              "original_cost_total", "89126.40")
+    # A split moves NEITHER total, so the dividend portion and 回本進度 are untouched: the
+    # 4,000 cash dividend is still exactly 4,000 of the cost recovered after a 2-for-1.
+    P1.anchor(ev, api, "corp.anchor.split_keeps_dividend_portion", "tw_broker", "CA9",
+              "dividend_portion", "4000")
+    P1.anchor(ev, api, "corp.anchor.split_shares_dividend_adj", "tw_broker", "CA9",
+              "shares", "400")
+    ev.check("corp.refusal_codes", "corp_applied", [], [c for c, _ in res.action_refusals],
+             "phase1:corp_applied")
+
+    # ---- dependent trades: the sells that only make sense post-action -----------------
+    # CA1: 50 <= the PRE-split count still unsold, so this one commits regardless of
+    # whether the date-aware guard is action-aware yet; its P&L is still computed against
+    # the POST-split adjusted average (a third of the pre-split one), which is the point.
+    sell("CA1S", "tw_broker", "CA1", "2026-04-03", 50, 210)
+    # CAR: a sell of EXACTLY the post-split count. `validate.py` compares with a bare `>`
+    # and no epsilon, so a share count a hair under 70 — which is what `210 x (1/3)` gives —
+    # rejects this row, the owner acknowledges it, and the STICKY 賣超 guard discards the
+    # cost basis permanently. That is the §1 disaster produced by the arithmetic alone.
+    r = sell("CARS", "tw_broker", "CAR", "2026-05-18", 70, 280)
+    ev.check("corp.sell_exact_ratio_accepted", "tw_broker/CAR sell 70 (== 210 x 1/3)",
+             "201", str(r.get("status")), "phase1:corp")
+    # CA2: the reverse split leaves 70.5 shares. The broker pays cash for the 0.5 and that
+    # is a REAL disposal with real realized P&L, so it is an ORDINARY SELL at the implied
+    # price (§3.2) — never folded into the action row, which must apply the ratio exactly.
+    sell("CA2S", "tw_broker", "CA2", "2026-03-12", "0.5", 300)
+    # CA6/CA8 exist ONLY because of an action, so these two sells prove the date-aware
+    # guard walks the action-aware share path (W4/§6.2, E1a.1). A sell of exactly 200 is
+    # also §3.1(ii)'s named case: it must pass validate.py's bare `>` with no epsilon.
+    r = sell("CA6S", "tw_broker", "CA6", "2026-04-20", 200, 150)
+    ev.check("corp.sell_exact_200_accepted", "tw_broker/CA6 sell 200 (== 700 x 2/7)",
+             "201", str(r.get("status")), "phase1:corp")
+    r = sell("CA8S", "tw_broker", "CA8", "2026-04-28", 60, 320)
+    ev.check("corp.sell_spinoff_child_accepted", "tw_broker/CA8 sell 60 of the child",
+             "201", str(r.get("status")), "phase1:corp")
+    sell("CADS", "schwab", "CAD", "2026-05-06", 40, 22)
+    # PROBE (op-logged, no assertion): a sell that EXCEEDS the pre-split count and is
+    # covered only by the split — the headline case of spec §1. It commits only when the
+    # oversell guard walks the action-aware path; a 422 here is a W4 state report, not a
+    # harness failure, and either outcome reconciles because the oracle replays whatever
+    # actually committed.
+    rp = op.trade("tw_broker", "CA1", "sell", "2026-04-06", 150, 205, fee_check=False)
+    ev.op("phase1", "API", "probe.sell_past_pre_split_count",
+          {"symbol": "CA1", "shares": 150, "pre_split_remaining": 10},
+          {"status": rp.get("status")},
+          note="201 = the date-aware guard is corporate-action aware (W4); 422 = it is not")
+
+    # ---- REJECTION paths: the action is NOT applied (spec §5) -------------------------
+    # E5 — EXCHANGE out of an OPEN DECLARED SHORT. No honest booking exists (precedent:
+    # dividend-on-short), so the event is skipped and the position flagged; the shares stay
+    # in pre-action terms, which is exactly what the flag announces.
+    op.trade("tw_broker", "CAX", "sell", "2026-03-01", 500, 80, short=True)
+    cax_id = op.corporate_action("tw_broker", "EXCHANGE", "2026-03-20", "CAX", "CAY", 1, 1,
+                                 note="E5: refused — source holds an open declared short")
+    # E2 — an action on a CLOSED (0-share, 0-basis) position. Scaling nothing gives
+    # nothing; re-animating it would invent a ghost.
+    buy("CAZB", "tw_broker", "CAZ", "2026-02-26", 50, 100)
+    sell("CAZS", "tw_broker", "CAZ", "2026-03-04", 50, 110)
+    caz_id = op.corporate_action("tw_broker", "SPLIT", "2026-03-26", "CAZ", "CAZ", 2, 1,
+                                 note="E2: refused — position closed before the action date")
+    # E1/E1a — an action whose from_symbol was NEVER held. The dashboard calls build_book
+    # with no try/except, so this row must SKIP, not raise: a 500 here is the never-500
+    # rule breached at a call site the standing rule already covers.
+    can_id = op.corporate_action("tw_broker", "SPLIT", "2026-03-28", "CAN", "CAN", 3, 1,
+                                 note="E1: refused — no position on the action date")
+    ev.check("corp.e1a_dashboard_200", "action on a never-held symbol must not 500",
+             "200", str(api.get("/api/dashboard").status_code), "phase1:corp")
+
+    res = reconcile(ev, api, db_path, "corp_refused", valuation=False)
+    ev.check("corp.refusal_codes", "corp_refused", ["E5", "E2", "E1"],
+             [c for c, _ in res.action_refusals], "phase1:corp_refused")
+    # The refused source keeps its position AND carries the flag; the refusal changed no
+    # money at all, only the disclosure. (Asserted per-holding by reconcile's
+    # holding.unbookable_action / holding.shares comparisons.)
+    P1.anchor(ev, api, "corp.anchor.e5_source_unmoved", "tw_broker", "CAX", "shares",
+              "-500", phase="phase1:corp_refused")
+    P1.anchor(ev, api, "corp.anchor.e5_source_flagged", "tw_broker", "CAX",
+              "unbookable_action", True, phase="phase1:corp_refused")
+
+    # ---- XIRR is blanked PORTFOLIO-WIDE by an unapplied action, and says which row ----
+    # The deliberate blast radius (D38 invariant 2): everywhere else one skipped action
+    # damages exactly one stock, but XIRR is a single figure over a terminal value that
+    # sums every holding, so one pre-action share count makes the whole sum wrong. Two
+    # of the three refusals here have NO surviving position to carry a flag (E2's source
+    # is zero-share and dropped, E1's never existed), so a holdings-level check cannot see
+    # them at all — this assertion is the only one that does.
+    d_ref = api.get("/api/dashboard").json()
+    ev.check("corp.xirr_blanked_by_unapplied", "3 unapplied actions -> xirr is None",
+             None, d_ref["kpis"].get("xirr"), "phase1:corp_refused")
+    _reason = (d_ref.get("freshness") or {}).get("xirr_unavailable_reason") or ""
+    for _sym, _acct, _date in (("CAX", "tw_broker", "2026-03-20"),
+                               ("CAZ", "tw_broker", "2026-03-26"),
+                               ("CAN", "tw_broker", "2026-03-28")):
+        # Naming the account, symbol and date is the requirement — a bare "something is
+        # wrong" would force the owner to hunt the row across a multi-account book.
+        ev.check("corp.xirr_reason_names_row", f"{_acct}/{_sym}@{_date}", True,
+                 (_sym in _reason and _acct in _reason and _date in _reason),
+                 "phase1:corp_refused")
+
+    # ---- resolve, so the final checkpoint reconciles at full strength ------------------
+    # Cover the short, then remove all three rows that could not be applied. Each is an
+    # action that should not have been entered against this ledger (a short source, a
+    # closed position, a symbol never held), so deletion is the owner's real remedy —
+    # the same shape as the unbookable-dividend resolution earlier in this scenario.
+    # E16: deleting an action RE-COMPUTES history, nothing was snapshotted, so the
+    # refusals disappear from the next replay rather than lingering as a stored verdict —
+    # which is what lets the `final` checkpoint compare XIRR at full strength again.
+    buy("CAXC", "tw_broker", "CAX", "2026-05-12", 500, 76)
+    op.delete_corporate_action(cax_id)
+    op.delete_corporate_action(caz_id)
+    op.delete_corporate_action(can_id)
 
 
 def main():

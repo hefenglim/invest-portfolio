@@ -11,8 +11,9 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.6` (2026-08-01)
-> **Code baseline**: `v0.1.25` (FX cost basis + declared short sale)
+> **Version**: `v1.7` (2026-08-11)
+> **Code baseline**: `v0.1.28 + feat/corporate-actions` (corporate actions
+> SPLIT / EXCHANGE / SPINOFF)
 > **Arbitration status**: **Formally signed off by the owner (2026-07-15)**; effective
 > as the site's single **arbitration standard** for any money dispute **from version
 > v0.1.19 onward**.
@@ -29,15 +30,16 @@
 > and the code they cite govern, and the conflict is reported.
 >
 > **Verification basis**: every numeric worked example in this manual is drawn from — or
-> reconciled against — the **post-merge (Batch B) live stress run**: a set of **1,060
-> adversarial reconciliation assertions** (`scripts/stress_audit/evidence/oplog.jsonl` +
-> `scripts/stress_audit/evidence/assertions.jsonl`; phase-1 `--ui` run of **66 ops,
-> 1,060/1,060 passing, 0 fail**). Each numeric example is tagged with its `scope`
-> verification anchor; scenario-dependent terminal values also carry their phase
-> (`phase1:final` etc.). The manual author fabricated no numbers. **Note**: the stress
-> scenario evolves per release (the post-merge scenario differs from the v1.3-basis 966
-> run), so this version has re-reconciled every anchor against the current run above (see
-> §12.3 v1.4).
+> reconciled against — the **resident live stress run**: a set of adversarial
+> reconciliation assertions (`scripts/stress_audit/evidence/oplog.jsonl` +
+> `scripts/stress_audit/evidence/assertions.jsonl`). **Counted in place for v1.7**:
+> phase-1 **118 ops, 3,791/3,791 passing, 0 fail**; phase 2 (live demo) **1,192
+> assertions, 0 fail**. Each numeric example is tagged with its `scope` verification
+> anchor; scenario-dependent terminal values also carry their phase (`phase1:final`,
+> `phase1:corp_applied` etc.). The manual author fabricated no numbers. **Note**: the
+> stress scenario evolves per release (v1.6 was 77 ops / 1,806 assertions; the
+> corporate-action `CA*` scenario joined in this version), so every revision must
+> re-reconcile its anchors against the then-current run (see §12.3).
 
 ---
 
@@ -46,7 +48,7 @@
 1. [General Principles & Precision Rules](#1-general-principles--precision-rules)
 2. [Account / Market / Currency Model](#2-account--market--currency-model)
 3. [Fee & Transaction-Tax Formulas](#3-fee--transaction-tax-formulas)
-4. [Cost Basis (Weighted Average)](#4-cost-basis-weighted-average)
+4. [Cost Basis (Weighted Average, Declared Short Sale, **Corporate Actions**)](#4-cost-basis-weighted-average)
 5. [Realized / Unrealized P&L](#5-realized--unrealized-pl)
 6. [The Three Dividend Models](#6-the-three-dividend-models)
 7. [Total Return & Return Rates (incl. XIRR)](#7-total-return--return-rates-incl-xirr)
@@ -62,7 +64,7 @@
 
 ### 1.1 Arbitration Clause
 
-If any amount displayed on the site is disputed, **replay the four permanent ledgers
+If any amount displayed on the site is disputed, **replay the five permanent ledgers
 line by line through the formulas of the corresponding chapter** (replay / 重算); the
 replayed result is the ruling value. No UI display, cache, or verbal recollection may
 override a ledger replay. The ruling procedure is in
@@ -118,11 +120,23 @@ guaranteeing lossless round-trip `from_db(to_db(x)) == x`.
 
 ### 1.4 Rebuild Principle (Rebuild / 重算)
 
-Four **permanent sources of truth**: `opening_inventory`, `transactions`, `dividends`,
-`fx_conversions`. **All** derived numbers (holdings, cost, realized / unrealized, returns,
-FX P&L, cash balances) are computed on read by **replaying these four in date order**;
-"computed results" are never treated as the source of truth (cache them only if profiling
-shows a need). Arbitration always uses the replay.
+Five **permanent sources of truth**: `opening_inventory`, `transactions`, `dividends`,
+`fx_conversions`, **`corporate_actions` (corporate actions, §4.4)**. **All** derived
+numbers (holdings, cost, realized / unrealized, returns, FX P&L, cash balances) are
+computed on read by **replaying these five in date order**; "computed results" are never
+treated as the source of truth (cache them only if profiling shows a need). Arbitration
+always uses the replay.
+
+> **`corporate_actions` joined as the fifth in 2026-08** (corporate-actions spec §3). It is
+> a **ledger row** like the other four: a corporate action **never** edits an existing
+> transaction row and is **never** an adjustment applied to a computed result; it is a row
+> the replay reads. So "`original_cost` is never overwritten" (I2) still holds — the
+> replay accumulator's `original_total` is zeroed by an EXCHANGE and scaled by a SPINOFF,
+> but the next rebuild reconstructs the same value from the **same unchanged ledger rows**.
+> **Omitting this ledger from a replay yields an amount that looks entirely normal and is
+> priced against pre-action share counts** — the most dangerous failure shape in
+> arbitration. The ledger catalogue's single declaration site is
+> `shared/ledger_registry.py::LEDGER_TABLES`.
 
 > **Implementation**: `shared/money.py`, `shared/fx.py`, `data_ingestion/store.py`,
 > `pricing/store.py`, `portfolio/cost_basis.py`.
@@ -391,10 +405,19 @@ $$\text{original\_avg} = \frac{\text{original\_total}}{\text{shares}}\qquad \tex
 
 ### 4.1 Chronological Replay
 
-`cost_basis.py::build_book` sorts the four ledgers by **(date, same-day priority)** and
-replays row by row. **Same-day priority**:
+`cost_basis.py::build_book` sorts the five ledgers by **(date, same-day priority)** and
+replays row by row. **Same-day priority** (single declaration site
+`shared/ledger_events.py::EventPriority`):
 
-$$\text{opening}(0) \prec \text{buy}(1) \prec \text{sell}(2) \prec \text{dividend}(3)$$
+$$\text{OPENING}(0) \prec \textbf{CORPORATE\_ACTION}(10) \prec \text{BUY}(20) \prec \text{SELL}(30) \prec \text{DIVIDEND}(40)$$
+
+> **The numbers changed from 0/1/2/3 to 0/10/20/30/40 in 2026-08**, inserting the
+> corporate action between opening and buy (§4.4.3 explains *why that position*). The gap
+> of 10 lets a future event type insert **without touching any existing value**, and the
+> priorities are a **named enum** rather than scattered literals, because updating two
+> copies and missing a third produces a **mis-ordered replay that looks correct**. The
+> **relative order is unchanged**, so a ledger with no corporate action replays
+> byte-identically to before.
 
 - **Buy**: `cost = quantity×price + fees + tax`; `shares += quantity`;
   `original_total += cost`; `adjusted_total += cost`.
@@ -527,6 +550,505 @@ net-exposure convention that sign-flips when the portfolio is net short.
 > `portfolio/results.py::Holding`.
 > **Basis**: `.claude/rules/domain-ledger.md` (Cost basis; Declared short sale 2026-07-31).
 
+### 4.4 Corporate Actions (SPLIT / EXCHANGE / SPINOFF)
+
+A corporate action **changes a share count without moving any cash**. The transaction ledger
+cannot express that: `transactions.side` is `BUY` or `SELL` only, and both settle money. The
+consequence is not a missing report line: a 3-for-1 split that cannot be recorded makes
+**every subsequent sell** exceed the recorded holding and trip the oversell guard — and once
+the owner acknowledges it, **STICKY 賣超** (§5.3) **discards that position's cost basis
+permanently**. That guard is correct and must not be weakened; the correct fix is to make the
+share change **recordable**. That is what this section is.
+
+**A corporate action is not income and not a purchase.** It emits **no `RealizedRow`**
+(§5.1), does **not** touch `gross_invested` (§7.1), and is **not an XIRR cash flow** (§7.2) —
+it only re-labels and re-denominates an existing basis.
+
+> **Normative source**: `docs/spec/2026-08-06-corporate-actions.md` (owner decisions D1–D39).
+> The three formulas and the field-transfer table below are **quoted verbatim** from that
+> spec and are deliberately **not restated in this manual's own words**: a paraphrased
+> formula is a second source of truth, and a second source of truth eventually drifts from
+> the first (this project has been burned by exactly that, repeatedly).
+
+#### 4.4.1 The ledger row and the conservation law
+
+**The fifth permanent ledger**, `corporate_actions` (§1.4): `account_id`, `date` (effective
+date), `kind` (`SPLIT` / `EXCHANGE` / `SPINOFF`), `from_symbol`, `to_symbol`, `ratio_to`,
+`ratio_from`, `cost_carry`, `note`.
+
+A corporate action re-labels and re-denominates an **existing** position. It creates and
+destroys nothing. Therefore, at the instant any action applies, **within each quote
+currency** (this is the section's only acceptance criterion):
+
+| Quantity | Across the event | Why |
+| --- | --- | --- |
+| Σ `original_total` (all positions) | **unchanged** | SPLIT untouched; EXCHANGE `−P + P = 0`; SPINOFF `−c·P + c·P = 0` |
+| Σ `adjusted_total` | **unchanged** | same |
+| Σ `dividend_portion` (= Σorig − Σadj) | **unchanged** | follows from the two above |
+| `gross_invested` | **unchanged** | only `opening` and `buy` add to it |
+| Σ `shares × price` | **unchanged (SPLIT only)** | see the qualification below |
+
+**The value leg is SPLIT-only.** Only a split re-denominates **both** the share count and the
+price (§4.4.7, price basis). An EXCHANGE **adds to** its destination rather than
+re-denominating it, and a SPINOFF's child begins its own price series at the action. So an
+exchange into a destination whose series is missing, or quoted in different terms, moves the
+value leg while **all four basis legs stay exactly equal** — a **blind spot of the law, not a
+breach of it** (the basis is conserved). It is handled by D19 (a broker identifier is
+normalised to its ticker at import, so the event is entered as a SPLIT) and by E23 (a
+賣超-tier `needs_confirm` guard on pre-existing suspicious rows, offering a one-click
+conversion to SPLIT).
+
+**The two deliberate exceptions** — both are real economic events, so they must NOT be
+conserved, and both are booked *outside* the action row:
+
+1. **Cash in lieu of a fraction** → an ordinary **SELL** (§4.4.3). Real disposal, real
+   realized P&L.
+2. **A reorganisation fee** → a `WITHDRAW` cash movement (§4.4.7, limitation 2). Real cost.
+
+#### 4.4.2 The ratio is a rational, and the evaluation order is normative
+
+The ratio is stored as **two positive integers** (`ratio_to` / `ratio_from`) and **never as a
+single decimal**. A decimal ratio is a **rounded quotient**, and §1.3 forbids storing a
+rounded quotient as the authority — the same principle as I7 ("the average is never stored;
+it is divided on read"). "3-for-1" is `(to=3, from=1)`; "1-for-10" is `(1, 10)`; "2-for-7" is
+`(2, 7)`.
+
+$$\boxed{\text{new\_shares} = \text{shares} \times \text{ratio\_to} \div \text{ratio\_from}}\qquad(\textbf{multiply first, divide last})$$
+
+**Multiply-first is a correctness requirement, not a style preference.** Measured by this
+manual's author with the project's own interpreter (`.venv/Scripts/python.exe`):
+
+| Expression | multiply first | parenthesised quotient | equal? |
+| --- | ---: | ---: | :---: |
+| `210 × 1 / 3` | **70** | `69.99999999999999999999999999` | ✗ |
+| `3 × 1 / 3` | **1** | `0.9999999999999999999999999999` | ✗ |
+| `935 × 18 / 17` | **990** | `989.9999999999999999999999998` | ✗ |
+| `700 × 2 / 7` | **200** | `200.0000000000000000000000000` | ✓ (equal in this one case) |
+
+`data_ingestion/validate.py` compares a sell against holdings with a **bare `>` and no
+epsilon**. So the `69.999…9` produced by `210 × (1/3)` turns a legitimate "sell all 70
+shares" into an oversell → the owner acknowledges → **STICKY discards the cost basis**: the
+disaster this section exists to prevent, re-created by the evaluation order alone. An
+exhaustive sweep (share counts 1–1,000 × `to` 1–20 × `from` 1–20 = 400,000 pairs) found
+**3,530 pairs that cross an integer boundary**.
+
+**The single implementation exit** is `shared/corporate_actions.py::apply_ratio`. That module
+deliberately exposes **no property returning the quotient** `to / from` — exposing one would
+put a rounded Decimal back within reach of every caller, which is the entire defect it exists
+to prevent.
+
+**Both rules are required.** The evaluation order protects the **arithmetic**; it does
+nothing about the **input**. `ratio_to = 0.2857` satisfies "Decimal > 0", passes both the CSV
+importer and the API, and reproduces the whole cascade — and its magnitude (~5×10⁻⁵) is far
+larger than the evaluation-order defect (~10⁻²⁷), so it **bites at any scale**. Hence
+**both terms must be positive integers**, enforced at validation (E6a).
+
+#### 4.4.3 Effective instant, same-day ordering, cash in lieu
+
+A corporate action is effective at the **start** of its date: a same-day buy or sell trades in
+**post-action** terms (post-split price, new ticker), so the action must apply first. The
+same-day order is in §4.1 (`OPENING(0) ≺ CORPORATE_ACTION(10) ≺ BUY(20) ≺ SELL(30) ≺
+DIVIDEND(40)`). **Opening inventory dated on an action date is treated as pre-action** (it
+describes the position as it stood before) — flagged with a soft warning at entry, because it
+is inherently ambiguous.
+
+**Cash in lieu of a fraction**: a reverse split (and most spin-offs) round to whole shares and
+pay cash for the fraction. That cash is a **real disposal** with real P&L, so it is recorded
+as an **ordinary SELL** at the implied price (`cash received / fractional shares`), **never**
+folded into the action row — whose only job is to apply the ratio **exactly**. Worked example
+in §4.4.5(e).
+
+#### 4.4.4 The three formulas (normative — quoted verbatim from spec §4.1 / §4.2 / §4.3)
+
+`P` is the position for `(account, from_symbol)`, `Q` for `(account, to_symbol)`. Every
+`× ratio` below means `× ratio_to / ratio_from`, **multiply first, divide last** (§4.4.2).
+
+**SPLIT (`from_symbol == to_symbol`)**
+
+```
+P.shares          := P.shares × ratio_to / ratio_from
+P.short_shares    := P.short_shares × ratio_to / ratio_from     # see E4
+P.original_total  := unchanged
+P.adjusted_total  := unchanged
+P.short_proceeds  := unchanged
+```
+
+Neither total moves, so both averages divide by the new share count **on read** (each scales
+by `1/ratio`, I7), and `dividend_portion` / `payback_ratio` (§6.4) are unchanged — a split
+changes nothing about how much of the cost has been returned as dividends. `ratio > 1` is a
+forward split and `ratio < 1` a reverse split; **the same formula covers both**.
+
+**EXCHANGE (the whole position moves to a new symbol)**
+
+```
+carried_shares    := P.shares × ratio_to / ratio_from
+Q.shares          += carried_shares
+Q.original_total  += P.original_total
+Q.adjusted_total  += P.adjusted_total
+Q.unbookable_dividend |= P.unbookable_dividend      # E19
+P.shares          := 0
+P.original_total  := 0
+P.adjusted_total  := 0
+```
+
+Covers a de-SPAC conversion, a merger, and a pure ticker/CUSIP rename (`ratio = 1`). If `Q`
+already holds a position, the two merge by **weighted average** — the sum of the totals over
+the sum of the shares, exactly what the method prescribes, so there is **no special case**.
+`gross_invested` is **not** touched (no new capital entered).
+
+**SPINOFF (the parent keeps its position, a child is created)**
+
+```
+c                 := cost_carry          # fraction of the parent's basis moving to the child
+Q.shares          += P.shares × ratio_to / ratio_from    # child shares per parent share
+Q.original_total  += P.original_total × c
+Q.adjusted_total  += P.adjusted_total × c
+Q.unbookable_dividend |= P.unbookable_dividend           # E19 — the child inherits it too
+P.original_total  := P.original_total − (P.original_total × c)
+P.adjusted_total  := P.adjusted_total − (P.adjusted_total × c)
+P.shares          := unchanged
+```
+
+The parent is written as **`total − carved`, not `total × (1 − c)`**: algebraically identical,
+numerically not — `1 − c` rounds once and `× (1−c)` rounds again. Measured counter-example
+(run in `.venv`): with `total = 3` and `c = 0.6666666666666666666666666667`,
+`total − total×c = 1.000000000000000000000000000` while
+`total × (1−c) = 0.9999999999999999999999999999` (a `1E-28` difference). Subtracting **exactly
+the amount that was added to the child** makes Σ`original_total` conserved **by construction**
+rather than by luck. (In the CA7 example below, with `c = 0.30`, the two forms happen to
+coincide — the rule is about the general case, not about that example.)
+
+`cost_carry` comes from the company's Form 8-K allocation and is **never guessed,
+interpolated or defaulted**; a SPINOFF row without it is rejected at validation (the same
+posture as `acq_home_amount` in the FX pool and `reinvest_shares` on a DRIP). The parent's
+share is **never stored** — it is `1 − c` computed on read, so parent and child sum to exactly
+1 with no rounding leak (the same reason the average is computed on read).
+
+**Complete `_Position` field-transfer table (normative — quoted verbatim from spec §4.4).**
+`_Position` has **nine** fields and every one of them gets an explicit rule, because "the
+formula didn't mention it" is not a specification:
+
+| Field | SPLIT (P) | EXCHANGE: source P → dest Q | SPINOFF: parent P → child Q |
+| --- | --- | --- | --- |
+| `quote_ccy` | unchanged | Q keeps its own; E11 guarantees they match | same |
+| `shares` | `× to / from` | `P := 0`; `Q += P.shares × to / from` | `P` unchanged; `Q += P.shares × to / from` |
+| `original_total` | unchanged | `P := 0`; `Q += P.original_total` | `Q += P.original_total × c`; `P −= (that same amount)` |
+| `adjusted_total` | unchanged | `P := 0`; `Q += P.adjusted_total` | `Q += P.adjusted_total × c`; `P −= (that same amount)` |
+| `short_shares` | `× to / from` (E4) | **`P := 0`** — see below | unchanged (E5 guarantees 0) |
+| `short_proceeds` | unchanged (E4) | **`P := 0`** — see below | unchanged (E5 guarantees 0) |
+| `ever_oversold` | unchanged | **SOURCE** is `False` (E3 rejects). **DESTINATION** must be `False` too — **E22** rejects the action otherwise; nothing is transferred | same (E22 applies to the child's destination as well) |
+| `unbookable_dividend` | unchanged | OR-ed into Q: `Q.unbookable_dividend \|= P.unbookable_dividend` (E19) | same OR into the child (E19); `P` keeps its own |
+| `unbookable_action` | unchanged | OR-ed into Q: `Q.unbookable_action \|= P.unbookable_action` | same OR into the child; `P` keeps its own |
+
+- **EXCHANGE must explicitly zero the two short fields even though E5 proved them "already
+  zero".** They are *nearly* zero, not zero: a full cover computes `P − (P/S)×S`, and Decimal
+  division is inexact whenever `S` does not divide `P`, so a residue `ε` survives. Today it
+  hides (the emitted `shares` is `0 − 0` and the holdings loop drops the position); but
+  EXCHANGE leaves the source position in the map with a **live** meaning, and a later buy on
+  the old ticker could reopen it carrying `−ε` of basis.
+- **`unbookable_action` propagates** for E19's reason: a position carrying a skipped action
+  holds shares in **pre-action terms against post-action prices**, and moving it onto a
+  successor without the flag launders exactly the state the flag exists to announce. Note the
+  asymmetry with `shares` — the flag is OR-ed into the destination and the source **keeps**
+  its own, because on the dashboard path the source may still be a live position.
+
+**The child's payback progress must carry its provenance (D21).** Both totals are scaled by
+the same `c`, so `c` cancels in the ratio:
+
+$$\text{child payback} = \frac{c\,(\text{orig}-\text{adj})}{c\cdot\text{orig}} = \frac{\text{orig}-\text{adj}}{\text{orig}} = \text{exactly the parent's payback}$$
+
+Measured (borrowing CA9's two anchored totals, 60,085 / 56,085, as inputs; **CA9 itself is not
+a spinoff** — this only demonstrates the identity): `c = 0.30` and `c = 0.5831`
+both give `0.06657235582924190729799450778`, identical to the parent's. So a company spun off
+last year, which has never paid a dividend in its existence, renders "6.66% of cost
+recovered". Under weighted average **the number itself is honest** (the basis carried over, so
+the recovery carried with it) — **the label is not**. Rule: where a position's basis
+originates from a SPINOFF carve-out, payback progress renders with its provenance —
+「已回收 X.XX%（承接自 `<parent>`）」 — and `fully_recovered` (已回本, §6.4) carries the same
+suffix. **This is a truth-in-labelling ruling, not a calculation fix: the arithmetic does not
+change.** (`cost_carry == 1` (E9) **migrates** the figure rather than copying it: the parent
+keeps its shares with zero basis, so **the entity that actually collected every dividend**
+reads 0.00% while the child reads the full figure.)
+
+#### 4.4.5 Verified worked examples (each with a verification anchor)
+
+The examples below come from the resident stress run's phase-1 `CA*` scenario
+(`scripts/stress_audit/run_phase1.py::run_corporate_actions`), account `tw_broker` (TWD; fees
+floored to whole NT$ with a NT$20 minimum; sell tax 0.3%, §3.1). Every fee below also carries
+its own `fee_engine.fee` / `fee_engine.tax` anchor, so **no number in these examples was
+fabricated by the manual author**.
+
+**(a) SPLIT — `tw_broker/CA1`, 3-for-1, with a sell on the same date**
+
+| Date | Event | Step |
+| --- | --- | --- |
+| 2026-02-03 | buy 100 @ 600 | notional 60,000; fee `⌊60,000×0.1425%⌋ = ⌊85.5⌋ = 85`; `original_total = adjusted_total = 60,085` |
+| 2026-03-02 | **SPLIT 3-for-1** | `shares = 100 × 3 / 1 = 300`; **both totals unchanged** (60,085); `original_avg = 60,085/300 = 200.2833…` |
+| 2026-03-02 | sell 40 @ 205 | **same day**: `SELL(30)` runs after `CORPORATE_ACTION(10)`, so this trade is in post-action shares and price. fee `max(⌊8,200×0.1425%⌋, 20) = max(11, 20) = 20`; tax `⌊8,200×0.3%⌋ = 24`; `proceeds_net = 8,200 − 20 − 24 = 8,156` |
+| | proportional removal | `frac = 40/300`; `adjusted_removed = 60,085 × 40/300 = 8,011.333333333333333333333331` |
+| | realized | `8,156 − 8,011.3333… = 144.666666666666666666666669` |
+| | final | `shares = 300 − 40 = 260`; `original_total = 52,073.66666666666666666666667` |
+
+> **Anchors**: `corp.anchor.split_forward`, `scope = tw_broker/CA1.shares = 260`
+> (`phase1:anchor`); `export.holdings.shares` / `export.holdings.original_cost_total`,
+> `scope = tw_broker|CA1` (`phase1:corp_applied` = 260 / 52,073.666…67);
+> `realized.proceeds_net` = 8,156, `realized.adjusted_removed` = 8,011.333…331,
+> `realized.realized` = 144.666…669, `realized.kind` = `sale`,
+> `scope = tw_broker/CA1@2026-03-02`; `fee_engine.fee/tax`,
+> `scope = tw_broker/CA1 buy 100@600` (85 / 0) and `tw_broker/CA1 sell 40@205` (20 / 24).
+
+**(b) SPLIT on a dividend-adjusted position — `tw_broker/CA9`, 2-for-1**
+
+| Date | Event | Step |
+| --- | --- | --- |
+| 2026-02-21 | buy 200 @ 300 | fee `⌊85.5⌋ = 85`; `original_total = adjusted_total = 60,085` |
+| 2026-03-05 | cash dividend net 4,000 | `adjusted_total = 60,085 − 4,000 = 56,085` (§6.1 cost reduction); `dividend_portion = 4,000` |
+| 2026-04-02 | **SPLIT 2-for-1** | `shares = 200 × 2 / 1 = 400`; **neither total moves** (60,085 / 56,085) |
+| | on read | `original_avg = 60,085/400 = 150.2125`; `adjusted_avg = 56,085/400 = 140.2125` |
+| | invariants | `dividend_portion` still **4,000**; `payback_ratio = 4,000/60,085 = 0.06657235582924190729799450778`, **identical either side of the split** |
+
+> **Anchors**: `corp.anchor.split_shares_dividend_adj` (`tw_broker/CA9.shares = 400`) and
+> `corp.anchor.split_keeps_dividend_portion` (`tw_broker/CA9.dividend_portion = 4000`), both
+> `phase1:anchor`; `export.holdings.original_cost_total / adjusted_cost_total`,
+> `scope = tw_broker|CA9` = 60,085 / 56,085 (`phase1:corp_applied`); `fee_engine.fee`,
+> `scope = tw_broker/CA9 buy 200@300` = 85.
+
+**(c) EXCHANGE — `tw_broker/CA3 → CA4`, 1-for-2, into a position already held**
+
+| Date | Event | Step |
+| --- | --- | --- |
+| 2026-02-11 | buy CA4 40 @ 500 (**destination already held**) | fee `⌊28.5⌋ = 28`; `CA4.original_total = 20,028` |
+| 2026-02-12 | buy CA3 100 @ 200 | fee `⌊28.5⌋ = 28`; `CA3.original_total = 20,028` |
+| 2026-03-16 | **EXCHANGE 1-for-2** | `carried = 100 × 1 / 2 = 50` |
+| | destination `Q` = CA4 | `shares = 40 + 50 = 90`; `original_total = 20,028 + 20,028 = 40,056`; `original_avg = 40,056/90 = 445.0666…` |
+| | source `P` = CA3 | `shares := 0`, `original_total := 0`, `adjusted_total := 0` |
+| | **conservation** | Σ`original_total`: 40,056 before → 40,056 after ✓ |
+
+> **Anchors**: `corp.anchor.exchange_merge`, `scope = tw_broker/CA4.shares = 90`
+> (`phase1:anchor`); `export.holdings.original_cost_total`, `scope = tw_broker|CA4` =
+> **40,056** (`phase1:corp_applied`, and identical at `corp_refused` / `final`);
+> `fee_engine.fee`, `scope = tw_broker/CA4 buy 40@500` = 28 and
+> `tw_broker/CA3 buy 100@200` = 28.
+
+**(d) SPINOFF — `tw_broker/CA7 → CA8`, 1-for-4, `cost_carry = 0.30`**
+
+| Date | Event | Step |
+| --- | --- | --- |
+| 2026-02-19 | buy CA7 400 @ 250 | notional 100,000; fee `⌊100,000×0.1425%⌋ = ⌊142.5⌋ = 142`; `original_total = 100,142` |
+| 2026-03-24 | **SPINOFF 1-for-4, `c = 0.30`** | child shares `= 400 × 1 / 4 = 100`; child basis `= 100,142 × 0.30 = 30,042.60` |
+| | parent (`total − carved`) | `100,142 − 30,042.60 = 70,099.40` |
+| 2026-03-24 | buy CA7 100 @ 190 (**same day**) | `BUY(20)` runs after `CORPORATE_ACTION(10)`, so the carve used the **pre-action 400 shares**. fee `⌊27.075⌋ = 27`; all-in 19,027 |
+| | parent, final | `shares = 400 + 100 = 500`; `original_total = 70,099.40 + 19,027 = 89,126.40`; `original_avg = 178.2528` |
+| | child, final | `shares = 100`; `original_total = 30,042.60`; `original_avg = 300.426` |
+| | **conservation** | Σ`original_total`: `100,142` → `30,042.60 + 70,099.40 = 100,142.00` ✓ |
+| | **ordering is observable** | had the action run *after* the same-day buy, the child would be `500 × 1/4 = 125` shares (measured) — which is why the same-day order is normative, not a convention |
+
+> **Anchors**: `corp.anchor.spinoff_child` (`tw_broker/CA8.shares = 100`),
+> `corp.anchor.spinoff_parent` (`tw_broker/CA7.shares = 500`),
+> `corp.anchor.spinoff_child_basis` (`tw_broker/CA8.original_cost_total = 30042.60`),
+> `corp.anchor.spinoff_parent_basis` (`tw_broker/CA7.original_cost_total = 89126.40`), all
+> `phase1:anchor`; `fee_engine.fee`, `scope = tw_broker/CA7 buy 400@250` = 142 and
+> `tw_broker/CA7 buy 100@190` = 27.
+
+**(e) Reverse split and cash in lieu — `tw_broker/CA2`, 1-for-10**
+
+| Date | Event | Step |
+| --- | --- | --- |
+| 2026-02-05 | buy 705 @ 30 | fee `max(⌊21,150×0.1425%⌋, 20) = max(30, 20) = 30`; `original_total = 21,180` |
+| 2026-03-10 | **SPLIT 1-for-10** | `shares = 705 × 1 / 10` = **70.5** — the ratio applies **exactly**, nothing is rounded |
+| 2026-03-12 | cash in lieu → **ordinary SELL** 0.5 @ 300 | fee `max(⌊150×0.1425%⌋, 20) = max(0, 20) = 20`; tax `⌊150×0.3%⌋ = 0`; `proceeds_net = 130.0` |
+| | proportional removal | `frac = 0.5/70.5`; `adjusted_removed = 150.2127659574468085106382979` |
+| | realized | `130.0 − 150.2127…9 = −20.2127659574468085106382979` (**a real, negative** realized P&L — dominated here by the NT$20 minimum commission) |
+
+> **Anchors**: `corp.anchor.split_reverse`, `scope = tw_broker/CA2.shares = 70.5`
+> (`phase1:anchor`); `realized.proceeds_net` = 130.0, `realized.adjusted_removed` =
+> 150.212…979, `realized.realized` = −20.212…979, `realized.kind` = `sale`,
+> `scope = tw_broker/CA2@2026-03-12`; `fee_engine.fee/tax`,
+> `scope = tw_broker/CA2 buy 705@30` (30 / 0) and `tw_broker/CA2 sell 0.5@300` (20 / 0).
+
+**(f) What ratio exactness protects — `tw_broker/CAR`, 1-for-3 on 210 shares**
+
+`210 × 1 / 3` = **70** exactly. Written `210 × (1/3)` it is `69.99999999999999999999999999`,
+and `validate.py`'s bare `>` would then **reject** the subsequent "sell all 70 shares". In the
+stress run that sell **commits with 201**.
+
+> **Anchors**: `corp.anchor.split_ratio_exact`, `scope = tw_broker/CAR.shares = 70`
+> (`phase1:anchor`); `corp.sell_exact_ratio_accepted`,
+> `scope = tw_broker/CAR sell 70 (== 210 x 1/3)` = 201 (`phase1:corp`). Same shape:
+> `corp.anchor.exchange_2for7` (`tw_broker/CA6.shares = 200`, i.e. `700 × 2 / 7`) and
+> `corp.sell_exact_200_accepted` = 201.
+
+#### 4.4.6 Edge-case matrix (E1–E24)
+
+"**strict**" = `allow_oversell=False` (rebuild / what-if / tax export); "**dashboard**" =
+`allow_oversell=True`. Every refusal is an `UnbookableLedgerError` (a `ValueError` subclass,
+so existing degrading call sites are unaffected); "skip + flag" means the event is skipped and
+the position marked `unbookable_action` (**待釐清**). This matrix is **not only the happy
+path**: a manual that documents only the happy path is how the owner learns the wrong model.
+
+| # | Situation | Strict path | Dashboard path |
+| --- | --- | --- | --- |
+| E1 | Action on a symbol with **no prior position** | Refused — fabricating a position would invent a $0-cost ghost holding | skip + flag (see E1a) |
+| E1a | The same case on the **dashboard** path | — | **Must skip, must not raise**: `portfolio/dashboard.py` calls `build_book` with **no** try/except, so a raise is a 500 and breaches the standing never-500-at-every-`build_book`-call-site rule. Also requires entry-time validation (the source position must exist **on the action date**) and re-validation when deleting a transaction / opening row that would strand an action |
+| E2 | Action on a **closed (0-share)** position — the predicate is **share-only** | Refused (zh message) | skip the event, flag the position |
+| E3 | Action on an **oversold** position (`ever_oversold`, basis already discarded) | Refused | skip; the 賣超 flag stays. **Scaling an undefined basis produces an undefined result** |
+| E4 | **SPLIT on an open declared short** | Supported: `short_shares × ratio`, `short_proceeds` **unchanged**. You owe more shares and you still received the same money, so the average sale price scales correctly | same |
+| E5 | **EXCHANGE / SPINOFF on an open declared short** | Refused — no honest booking exists (precedent: dividend-on-short, §4.3) | skip + flag |
+| E6 | `ratio_to` / `ratio_from` ≤ 0, non-numeric, or non-finite | Rejected at **validation**, never reaches the replay. `ratio_from == 0` would be a division by zero *inside* the replay, i.e. a dashboard 500 — so this rejection is load-bearing | — |
+| **E6a** | A **non-integer ratio term** (`ratio_to = 0.2857`), from any path | Rejected at **validation** (D14). "The form has two fields" is not a defence: the form constrains the form, while the CSV importer and the API both accepted a decimal and reproduced §4.4.2's cascade in full. A one-column legacy import is a **hard parse error**, never coerced | — |
+| E7 | `ratio == 1` on a **SPLIT** | Soft warning at entry (a no-op row). **SPLIT only** — `ratio == 1` on an EXCHANGE is the ordinary rename case and must NOT warn | — |
+| E8 | `cost_carry` outside `[0,1]`, or absent on a SPINOFF | Rejected at validation | — |
+| E9 | `cost_carry == 1` on a SPINOFF | Soft warning: the parent keeps its shares with **zero** basis — legal but almost always a data error (and it makes the side that actually collected the dividends read 0.00% payback, §4.4.4) | — |
+| E10 | **Either** `from_symbol` **or** `to_symbol` not registered in `instruments` | Rejected at validation; routes to the existing register-first flow, and **never auto-registers to make an action fit** | — |
+| E11 | **Quote currency differs** between the two symbols | Rejected at validation. Carrying a basis across currencies needs an action-date FX rate; inventing one would corrupt the basis | — |
+| E12 | Two actions, same date, same account, **symbol sets intersecting** | **Rejected at validation** (D15), not tie-broken. Ordering by `id` ASC is the order the owner happened to *type* masquerading as economic order, and the two orders **produce different money** (measured: 600 vs 200 shares) — while the conservation law **cannot see it** (Σ is identical both ways). A genuine two-step event is booked as **one** row (a reverse split + rename is one EXCHANGE), or the steps are dated apart | — |
+| E13 | The same symbol held in **two accounts** | **All-or-nothing** (D13). Positions are keyed `(account, symbol)`, so N rows are required and a **partial application is rejected at validation**. The un-actioned account would hold **pre-action share counts** against **post-action prices** (`prices` has no `account_id`, so the price correction is global) with every existing check green — the defect lives *between* the share count and the price, and nothing computes that relationship | — |
+| E14 | A sell **back-dated before** the action, entered afterwards | Handled by the date-aware guard — *provided* `shares_through` applies corporate actions. This is the integration point most likely to be missed | — |
+| **E15** | The identical action entered twice | **Hard rejection at validation** (D29), checked **before E12**, with its own message. An action is an **event**, not a transaction: no ledger has two identical 3-for-1 rows on one day both correct. Acknowledging would apply the ratio **twice** (a 3-for-1 becomes a 9-for-1) | — |
+| E16 | **Editing / deleting** an action **re-computes history** | Intended (§10, `domain-ledger.md` N2). Captured in `ledger_audit` like every other ledger edit | — |
+| E17 | **Stored price basis vs the action** | See §4.4.7 "price basis": canonical as-traded basis, un-adjust at the write seam, `fetched_at`-discriminated correction, read-time re-expression | — |
+| **E18** | **EXCHANGE / SPINOFF whose `to_symbol` position holds an open short** | Refused. `Q.shares +=` breaks the long/short **mutual exclusivity by construction**; the emitted holding would blend a real cost basis with short proceeds, leaving no honest average, and the `abs(cost_total)` ratio rule and the `fully_recovered` gate both mis-fire | skip + flag |
+| **E19** | EXCHANGE / SPINOFF **from a position flagged `unbookable_dividend`** | Allowed — but the flag **propagates** (`Q \|= P`). The action itself is legitimate and blocking it would punish a real corporate event for an unrelated older data problem; without propagation the source is dropped at 0 shares and **an unresolved money-of-record problem is erased by an unrelated event** | same |
+| **E20** | `to_symbol` vs `from_symbol` **coherence per kind** | SPLIT **requires** `to == from`; EXCHANGE and SPINOFF **reject** it. A self-EXCHANGE zeroes the position and re-adds it, silently rescaling shares by `ratio` while masquerading as a rename; a self-SPINOFF carves `c` out of a position and adds it straight back — **double-counting**. All three enforced at validation | — |
+| **E21** | An action referencing a symbol **not registered in `instruments`** (arrives via CSV import or a later instrument deletion, behind E10) | Both of its symbols must join the dashboard's unregistered skip-set, or `quote_ccy()` raises `KeyError` → **500**, a different exception type from every other degradation path | skipped with the rest of that symbol's rows |
+| **E22** | **EXCHANGE / SPINOFF whose `to_symbol` position is flagged `ever_oversold`** | Refused — the mirror of E18 and E19 one level deeper: E19 stops a **flag** being laundered, this stops a **cost basis** being restored onto a position whose basis was deliberately discarded. Measured: before the exchange the position reads 均價 0 / 未實現 +1,890 and nobody believes it; after, it reads 均價 33.33 / 未實現 −660, which looks entirely ordinary | skip + flag |
+| **E23** | **EXCHANGE, `ratio_to != ratio_from`, `to_symbol` HAS prior prices, `from_symbol` has NONE** | **`needs_confirm` — the 賣超 tier**, not a hard rejection and not a passive notice. The four-part condition is the broker-identifier signature: a real merger's source was a listed security and has prices. Offers a one-click conversion to SPLIT. **After acknowledgement the row commits as an EXCHANGE and the value cliff remains** (no price factor is applied to either series); what the acknowledgement buys is that the discontinuity is *recorded and seen* | same |
+| **E24** | **A dividend on a symbol an EXCHANGE moved away** (D32) | Refused, **uniformly on both branches**. EXCHANGE leaves the source in the position map with zeroed fields (§4.4.4, required so a later buy cannot reopen it carrying `−ε`), so neither existing refusal applies and the payment books: CASH/NET books post-close realized income on a dead ticker; DRIP/STOCK does `shares += reinvest_shares` and **resurrects** the position at `avg = 0`, which is delisted so it never prices — and **one unpriced holding blanks the whole portfolio's XIRR indefinitely** | skip the event, flag the position (待釐清); the owner records the payment as a **cash movement** |
+
+> **Implementation-status note (checked in place 2026-08-11; not part of the ruling).** The
+> rows above are the **ruling**; if the code disagrees, §12.4 step 4 makes that a **code
+> defect**. As checked:
+>
+> - **Implemented in the replay** (`cost_basis.py::_apply_action`): E1, E1a (dashboard-path
+>   skip), E2, E3, E4, E5, E18, E19, E22.
+> - **Implemented in the ledger loader**
+>   (`shared/models/ledger.py::unregistered_symbols` / `without_unregistered`): E21 — an
+>   action contributes **both** of its symbols to the unregistered skip-set.
+> - **Implemented in the share walk** (`data_ingestion/holdings.py`): E14 — the date-aware
+>   guard walks the action-aware path.
+> - **Implemented in the price basis**: E17 (`pricing/schema.py`, `pricing/store.py`,
+>   `pricing/reconcile.py`, `portfolio/price_basis.py`).
+> - **Implemented in validation but with no production caller yet**
+>   (`data_ingestion/validate.py::validate_corporate_action`): E6, E6a, E7, E8, E9, E10,
+>   E11, E12, E13, E15, E20, E23 — the entry surfaces are a later work package, so until
+>   they are wired these rejections and warnings **take effect in tests only**.
+> - **Not implemented: E24** (`_Position` today has no marker distinguishing "zeroed by an
+>   action" from "ordinarily closed").
+>
+> This note describes implementation progress and **changes none of the rulings above**.
+
+#### 4.4.7 Price basis, known limitations, and the hard exclusion
+
+**Price basis (E17).** The stored price is authoritative **as traded**. A provider returns
+**already-adjusted** (post-split) closes for dates *before* a split, while the ledger's share
+count for the same date is **not** adjusted — multiply the two and the market value is wrong.
+So `prices` carries the basis in **two columns**: `close_raw` (the provider's value exactly as
+delivered, **un-capped**) and `split_basis` (the factor applied), with
+`close = close_raw × split_basis` **recomputed** at the write seam (the 4 dp cap applied to
+the **product**, §1.3). On read, a price that was **carried forward across a split date** is
+re-expressed into the valuation day's share terms by
+`portfolio/price_basis.py::split_factor`. **The factor is for prices only, never for share
+counts** (share counts go through §4.4.2's two integer terms). The re-expression is
+**SPLIT-scoped**: an EXCHANGE adds to its destination rather than re-denominating it, and
+widening the factor to EXCHANGE would corrupt the price history of any merger destination you
+**already held**.
+
+**(Limitation 1, standing) D11 — `volume` is not un-adjusted.** A price has `close_raw` to
+recover from; `volume` has no corresponding raw column, and the direction of the provider's
+volume adjustment **has not been measured** — guessing one would break the same rule this
+section enforces. So **volume-based signals spanning a split date are not comparable**. Volume
+is not a number of record (§12.5 class B), so this is an **accepted and documented standing
+limitation**, not a defect; the correct future fix is its own `*_raw` column carried with the
+factor.
+
+**(Limitation 2) D12 — the reorganisation fee is invisible to XIRR *by design*, and visible in
+the whole-account IRR (*pending D36*).** The only bookable cash-movement kinds are `DEPOSIT` /
+`WITHDRAW` / `OPENING` / `REBATE` (`api/routers/cash.py::_KINDS`), and only `WITHDRAW` is a
+debit (`portfolio/cash.py::_movement_sign`). **Ruling: book the fee as a `WITHDRAW` with a
+`note`.** The consequences must be stated: it reads in the cash statement as *the owner took
+money out*; it reduces the FX pool's exposure without recognising realized FX (§8,
+`domain-ledger.md` N1); and `portfolio/returns.py::xirr_reporting` builds its flow series from
+`opening` + `transactions` + `dividends` **only**, so **cash movements never reach XIRR**.
+
+> **This is no longer a permanent blind spot (D36, owner ruling 2026-08-10).** XIRR is
+> **deliberately left untouched** — so every historical figure, every worked anchor in this
+> manual and every stress-audit oracle expectation **stays where it is** — and a
+> **whole-account IRR** is added *additively* in the existing `portfolio/twr.py`, which *does*
+> see a `WITHDRAW`. So the fee is invisible to XIRR **by design** and visible in the second
+> metric.
+> **⚠ Pending D36 (checked in place 2026-08-11): `portfolio/twr.py` currently holds only
+> `twr_index` / `convert_closes` / `build_overlay` and no IRR at all.** Until that metric
+> lands, the reorganisation fee is invisible to **every** current return metric. This
+> paragraph deliberately says "pending D36" rather than stating a permanent limitation,
+> because writing it up as permanent would document a decision the owner has since reversed.
+> The fee also belongs to a whole **class** of items that never reach XIRR (bond/margin
+> interest, interest adjustments, ADR management fees, foreign tax reclaim); that class is
+> the broker-import backlog's scope, and this section does not invent a partial answer for
+> one member of it.
+
+**(Hard exclusion, D34) Cash-and-stock mergers.** "Each share of A becomes 0.6 shares of B
+plus US$12.00 cash" — **no fourth action kind is added, and there is no supported way to enter
+one.** This is a **hard exclusion**, and the reason has to be stated, because otherwise it
+looks arbitrary next to the ruling that cash in lieu of a fraction is an ordinary SELL:
+
+- **The two-row recipe the spec carried until 2026-08-10 is withdrawn and must not appear
+  here as a procedure.** It does not execute: `EventPriority` runs `CORPORATE_ACTION(10)`
+  before `SELL(30)`, and the EXCHANGE sets the source's shares to 0, so the same-day SELL
+  lands on a zero-share position — `OversellError` on the strict path and, on the dashboard
+  path, **STICKY 賣超 with the cost basis discarded**: the exact disaster named at the top of
+  this section, produced by following the documentation. Re-ordering the events is not
+  available: "an action is effective at the start of its date, and that day's trades are
+  quoted in post-action terms" is the premise every other formula here rests on.
+- **The corrected ratio is generally not enterable.** Under weighted average the cash leg
+  disposes of `f × N` **shares**, so the EXCHANGE carries only `(1−f) × N` and the published
+  ratio over-delivers. The ratio that is actually correct is `B_received / ((1−f) × N)`, which
+  is generally **not** expressible as two positive integers — which E6a / D14 requires.
+- **Booking the whole event as one EXCHANGE** moves 100% of the basis, leaves the cash booked
+  **nowhere** (not a receipt, not realized P&L, not an XIRR flow), overstates the
+  destination's average, and **passes the conservation law**, because the money simply left
+  the book (§4.4.1's blind spot). The naive treatment is wrong *and* undetectable — which is
+  why the exclusion is stated rather than silent.
+
+> **Unofficial workaround, if the event ever occurs.** EXCHANGE **all** shares to the
+> destination, then SELL the **destination** for the cash consideration (priority 10 then 30,
+> so the ordering works and no guard trips). **It is not normative and must not be cited as
+> normative**: its realized figure differs from the relative-consideration allocation (the
+> disposal is priced at the destination's terms rather than by splitting the basis between the
+> two considerations), so the tax package will report a different gain from the one the
+> registrar's allocation implies. Use it knowing that, or record the event and ask.
+
+> **Verification anchors**: the three formulas and the refusal paths are anchored by phase-1's
+> `CA*` scenario — **13 absolute `corp.anchor.*` anchors** (11 at `phase1:anchor`, 2 at
+> `phase1:corp_refused`), `corp.refusal_codes` (`corp_applied` = `[]`; `corp_refused` =
+> `["E5","E2","E1"]`),
+> `corp.anchor.e5_source_unmoved` (`tw_broker/CAX.shares = −500` — a refused action **changes
+> no money at all**, only the disclosure), `corp.anchor.e5_source_flagged`
+> (`unbookable_action = True`), `corp.e1a_dashboard_200` (an action on a never-held symbol
+> **must not 500**), `corp.xirr_blanked_by_unapplied` (3 unapplied actions → `xirr` is
+> `None`), and `corp.xirr_reason_names_row` (the reason string must name the **account, symbol
+> and date**).
+> **D11 / D12 / D34 currently have no stress anchor** (neither `volume` nor a reorganisation
+> fee is exercised by this scenario, and a cash-and-stock merger is by definition not
+> enterable); the next adversarial round should at minimum add a negative anchor for "a
+> reorganisation-fee `WITHDRAW` does not move XIRR".
+> **Implementation**: `shared/corporate_actions.py` (`CorporateAction`, `apply_ratio`,
+> `split_factor`, `ActionIndex` — the single owner of the ratio algebra),
+> `shared/ledger_events.py::EventPriority`, `shared/ledger_registry.py::LEDGER_TABLES`,
+> `portfolio/cost_basis.py::build_book` (`_apply_action`, `_reject`,
+> `UnbookableLedgerError`, `Book.unapplied_actions`), `portfolio/results.py::UnappliedAction`,
+> `data_ingestion/store.py` (the only SQL),
+> `data_ingestion/validate.py::validate_corporate_action`, `data_ingestion/holdings.py` (the
+> action-aware share path; `shares_naive` stays deliberately **unaware**, because
+> `corporate_delta` is defined as the difference between the two), `pricing/schema.py` +
+> `pricing/store.py` (`close_raw` / `split_basis`), `pricing/reconcile.py` (restating stored
+> closes when the SPLIT ledger changes), `portfolio/price_basis.py` (read-time
+> re-expression).
+> **Basis**: `docs/spec/2026-08-06-corporate-actions.md` (§2 conservation law, §3 data model
+> and ratio, §4 replay semantics and the field-transfer table, §5 edge matrix, §8 decisions
+> D1–D39, §9 exclusions), `.claude/rules/domain-ledger.md` (Cost basis; STICKY 賣超; Declared
+> short sale), `.claude/rules/data-and-pricing.md` (precision; never store a rounded
+> quotient).
+
 ---
 
 ## 5. Realized / Unrealized P&L
@@ -544,6 +1066,20 @@ i.e. **net sale proceeds (after fees and tax) − the sell fraction's
 `adjusted_avg × shares_sold`**. Realized is measured against **adjusted cost** (dividends
 are already folded into cost, so no separate dividend income line → invariant I4, avoiding
 double counting). Cross-currency is aggregated by currency in `RealizedPnL.by_currency`.
+
+> **How corporate actions (§4.4) relate to realized P&L.** A corporate action emits **no
+> `RealizedRow`** of its own — it is not a disposal, not income, not a purchase, only a
+> re-labelling and re-denomination of an existing basis (§4.4.1's conservation law). It does
+> change the realized amount of **every subsequent sell**, because
+> `adjusted_avg = adjusted_total / shares` is divided **on read**: after a split the totals
+> are unchanged and the share count is not, so the average scales by `1/ratio` automatically.
+> **Two real exceptions** do produce realized rows, and both are booked *outside* the action
+> row: **cash in lieu** is an ordinary SELL (§4.4.3; verified example §4.4.5(e),
+> `realized = −20.2127659574468085106382979`), and a **reorganisation fee** is a `WITHDRAW`
+> cash movement (§4.4.7, limitation 2). When arbitrating any post-action realized amount, the
+> `corporate_actions` ledger must be included in the replay (§1.4, §12.4 step 2), or the
+> result is a number that **looks entirely normal and is computed on pre-action share
+> counts**.
 
 **Verified examples**
 
@@ -588,7 +1124,20 @@ Verification anchor: `holding.unrealized_pnl / holding.market_value schwab|TSLA`
     **degrades gracefully** — the position goes net-negative shares, drops its (now
     undefined) cost basis, **produces no realized row**, and the holding is flagged
     `oversold` (**to be clarified**). This is not short-sale accounting.
-  - Fix: enter the missing opening inventory / buy.
+  - Fix: enter the missing opening inventory / buy, **or the missing corporate action**
+    (§4.4) — one unrecorded 3-for-1 split makes every subsequent sell read as an oversell, and
+    賣超 is **STICKY**: a later buy does not bring the discarded basis back.
+- **An unapplied corporate action (`unbookable_action`, 2026-08)**: the third member of the
+  same honest-degradation family. Strict path raises `UnbookableLedgerError`; the dashboard
+  path **skips the event** and flags the position `unbookable_action` (**to be clarified**). A
+  skipped action **changes no money at all**, only the disclosure — the share count stays in
+  **pre-action** terms while the prices it meets are **post-action**, which is why the
+  position is 待釐清 rather than merely stale. The record lives on **`Book.unapplied_actions`
+  (the book)**, not only on a holding, because two of the three ways it happens **leave no
+  holding to flag** (E2's source is zero-share and dropped, E1's never existed). Whenever
+  `unapplied_actions` is non-empty, **the share counts in that book are not trustworthy**:
+  XIRR therefore blanks for the **whole portfolio** (§7.2), and the reason string must name
+  the **account, symbol and date**. The predicate and the full refusal list are in §4.4.6.
 
 > **Verification anchor**: `guard.oversell_blocks`, `scope = tw_broker/0050 sell 200>held 110`
 > (sell 200 > held 110 → 422 `oversell_unacknowledged`). (Stress op numbers are renumbered
@@ -778,6 +1327,15 @@ $$\text{rate}_{ccy} = \frac{\text{total\_return}_{ccy}}{\text{gross\_invested}_{
 > numerator but the cost stays in the denominator → the simple rate **understates**
 > return. So the rate is a secondary glance metric; **XIRR is the rigorous metric**.
 
+> **A corporate action does not move the denominator (§4.4).** `gross_invested` accumulates
+> from `opening` and `buy` only, so **none of the three formulas touches it**: no new capital
+> entered, and counting an action as invested capital would be a fabricated double count. Nor
+> does it move the numerator — the action emits no realized row (§5.1) and does not change
+> total unrealized (the totals are unchanged, the share count is not, and the average scales
+> on read). So **a corporate action does not change `total_return`; it only changes how that
+> return is distributed across tickers** — which is exactly what §4.4.1's conservation law
+> asserts.
+
 **Verified rollup (reporting = TWD, spot USD/TWD = 32.5, MYR/TWD = 7.2; `phase1:final`)**
 
 | KPI | Value (TWD) | Verification anchor |
@@ -827,6 +1385,28 @@ value at the **current spot**. Cash-flow signs:
 **Degradation (all-or-nothing)**: if any held symbol is missing a current price → no
 terminal value can be formed → returns `None` (no partial degradation); no sign change
 (e.g. all outflows) or a non-finite result also returns `None`.
+
+> **Corporate actions and XIRR (§4.4).** A corporate action is **not a cash flow**: it has no
+> row in the table above, because it moves no money. It reaches XIRR only through the
+> **terminal market value** row (the share count changed), which is the correct economics.
+>
+> **But one *unapplied* action blanks XIRR for the whole portfolio**
+> (`unbookable_action` / `Book.unapplied_actions`, §5.3). This is a **deliberate blast
+> radius**: everywhere else a skipped action damages exactly one stock, but XIRR is a
+> **single figure** whose terminal value sums **every** holding, so one pre-action share count
+> makes the whole sum wrong. The degradation **must name the row** — the reason string carries
+> the account, symbol and date (anchor `corp.xirr_reason_names_row`) — or the owner has to
+> hunt it across a multi-account book. Measured anchor: 3 unapplied actions → `kpis.xirr` is
+> `None` (`corp.xirr_blanked_by_unapplied`, `phase1:corp_refused`).
+>
+> **The reorganisation fee (D12 / D36) is invisible to XIRR by design.** The flow series above
+> is built from `opening` + `transactions` + `dividends` **only**, so cash movements
+> (including a reorganisation fee booked as `WITHDRAW`) never reach XIRR; XIRR is
+> **deliberately left untouched** so that every anchored historical figure in this manual
+> stays where it is. The fee surfaces in a **whole-account IRR** instead — **⚠ that metric is
+> not implemented yet (pending D36; `portfolio/twr.py` was checked in place on 2026-08-11 and
+> still holds only the TWR index and the benchmark overlay)**. Full treatment in §4.4.7,
+> limitation 2.
 
 **Flow-construction example (`schwab/TSLA`, single-currency USD, each total has an
 anchor)**
@@ -1313,7 +1893,8 @@ state, but the historical prior values are always auditable and recoverable.
 
 - **Simulate (試算)**: compute, **no write**.
 - **Report / update / performance**: full report + live price fetch.
-- **Rebuild (重算)**: **fully rebuild** all statistics from the four ledgers (see §1.4).
+- **Rebuild (重算)**: **fully rebuild** all statistics from the five ledgers (see §1.4;
+  including `corporate_actions`, §4.4).
 
 ### 10.5 Verified Correction Examples
 
@@ -1445,6 +2026,9 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 
 ### 12.1 Worked-Example Index (each with a verification anchor)
 
+> **Numbering note**: the `E#` here are **worked-example** numbers. They are a separate
+> sequence from the `E#` of §4.4.6's edge-case matrix and do not correspond to them.
+
 | # | Example | Section | Verification anchor (`scope`) |
 | --- | --- | --- | --- |
 | E1 | TW fee/tax (2330 buy 1,000@600 → fee 855) | §3.1 | `fee_engine.fee tw_broker/2330 buy 1000@600` |
@@ -1464,6 +2048,13 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E15 | Cash-pool terminal (tw_broker TWD 1,089,099) | §9.2 | `cash.balance tw_broker|TWD` (`phase1:final`) |
 | E16 | Negative-pool guard (`negative_cash` hard guard; not triggered in the current scenario, behaviour anchored by unit tests) | §9.3 | unit `_negative_response` / `_pool_min` |
 | E17 | Oversell block (422 `oversell_unacknowledged`) | §5.3 / §10.5 | `guard.oversell_blocks` (`tw_broker/0050 sell 200>held 110`) |
+| E18 | **SPLIT** (CA1 3-for-1 + same-day sell → 260 shares; realized 144.666…669) | §4.4.5(a) | `corp.anchor.split_forward`; `realized.realized tw_broker/CA1@2026-03-02` |
+| E19 | **SPLIT leaves the dividend portion alone** (CA9 2-for-1 → 400 shares; `dividend_portion` 4,000 unchanged) | §4.4.5(b) | `corp.anchor.split_shares_dividend_adj`; `corp.anchor.split_keeps_dividend_portion` |
+| E20 | **EXCHANGE** (CA3→CA4 1-for-2 into a held position → 90 shares / 40,056) | §4.4.5(c) | `corp.anchor.exchange_merge`; `export.holdings.original_cost_total tw_broker\|CA4` |
+| E21 | **SPINOFF** (CA7→CA8 1-for-4, `c=0.30` → child 100 shares / 30,042.60; parent 500 shares / 89,126.40) | §4.4.5(d) | `corp.anchor.spinoff_child_basis`; `corp.anchor.spinoff_parent_basis` |
+| E22 | **Reverse split + cash in lieu** (CA2 1-for-10 → 70.5 shares; the 0.5-share ordinary sell realizes −20.2127…979) | §4.4.5(e) | `corp.anchor.split_reverse`; `realized.realized tw_broker/CA2@2026-03-12` |
+| E23 | **Ratio exactness** (CAR `210 × 1 / 3 = 70`; the sell of all 70 commits with 201) | §4.4.5(f) | `corp.anchor.split_ratio_exact`; `corp.sell_exact_ratio_accepted` |
+| E24 | **Degradation of an unapplied action** (CAX shares −500 unmoved, flag True; XIRR blanks portfolio-wide and the reason names the row) | §4.4.6 / §5.3 / §7.2 | `corp.anchor.e5_source_unmoved`; `corp.anchor.e5_source_flagged`; `corp.xirr_blanked_by_unapplied`; `corp.xirr_reason_names_row` |
 
 ### 12.2 Glossary (Chinese term ↔ English identifier)
 
@@ -1500,6 +2091,13 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 配股面額換股常數 (stock-dividend par-value conversion constant) | `TW_STOCK_PAR = 10` | §6.5 |
 | 再平衡週轉／費用／預估餘額 (rebalance turnover / fees / projected balance) | `turnover_reporting` / `total_fees_reporting` / `cash_after` | §11.4 |
 | 試算後新均價 (post-simulation new average) | `new_original_avg` / `new_adjusted_avg` | §11.5 |
+| 公司行動 (corporate action, ledger) | `corporate_actions` / `CorporateAction` | §4.4 |
+| 分割／換股／分拆 (split / exchange / spinoff) | `SPLIT` / `EXCHANGE` / `SPINOFF` (`CorporateActionKind`) | §4.4.4 |
+| 比例 (ratio, two positive integers) | `ratio_to` / `ratio_from` (sole application exit `apply_ratio`) | §4.4.2 |
+| 分拆基礎移轉比例 (spinoff basis carve fraction) | `cost_carry` | §4.4.4 |
+| 同日優先序 (same-day priority) | `EventPriority` (`OPENING`/`CORPORATE_ACTION`/`BUY`/`SELL`/`DIVIDEND`) | §4.1 / §4.4.3 |
+| 未能套用之公司行動 (unapplied corporate action) | `unbookable_action` / `UnappliedAction` / `Book.unapplied_actions` | §4.4.6 / §5.3 |
+| 行情原值／分割基礎 (raw close / split basis) | `close_raw` / `split_basis` (the two-column price basis) | §4.4.7 |
 
 ### 12.3 Version History
 
@@ -1512,29 +2110,34 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.4` | 2026-07-22 | **Batch B (Moomoo merge) revision** (baseline `v0.1.20 + Batch B`). ① **Account model**: the two former per-market Moomoo accounts (legacy ids documented in `data_ingestion/moomoo_merge.py`) are merged into ONE dual-market account `moomoo_my` (settlement USD / funding MYR; rules bind per (account, market): US→(`moomoo_us`,`drip_us`), MY→(`moomoo_my`,`cash`), held in `account_market_rules`) — §2 account table 4→3 rows, invariant I6 changed from "bind to account" to "bind to (account, market)", and the account labels + `scope` anchors in §3.3/§3.4/§6.2/§6.3/§8/§9 re-anchored onto `moomoo_my` (market carried by the symbol). ② **Full anchor re-reconciliation**: the stress suite was regenerated to the post-merge topology (1,060 assertions, 66 ops, 1,060/1,060 passing, 0 fail; spot USD/MYR 4.5→**4.6**, plus one Schwab USD→TWD reconversion). Scenario-dependent terminal values updated to this current run: §7.1 total return 514,752.85→**516,336.55** (realized 186,333.50 / unrealized 330,003.05), §8.2 realized FX 0→**−2,375** (Schwab reconversion), §8.3 unrealized FX rollup −31,830.94→**−11,757.48** (`moomoo_my` now contributes a positive leg because spot 4.6≠avg 4.5), §9.2 cash pools fully updated with the MYR pool now a single directly-anchored `moomoo_my|MYR = 123,201.91`, §5.1 TSLA proceeds/realized 5,199.86/199.86→**5,199.88/199.88** (SEC fee 0.14→0.12); fixed pre-existing typos E5 (NVDA fee 1.41→5.89) and E6 (1155 fee/tax 10.45/9.50→9.40/10.00). ③ **Anchor robustness**: the volatile `id=NN` (renumbered per release) removed from the §12.1 fee examples, keeping the stable check+scope; the `negative_cash` example (former op47) — no longer triggered by the scenario — is re-anchored to unit tests (§9.3/E16); the oversell anchor is stated via the `guard.oversell_blocks` scope. ④ Verification-basis line, §7.2 harness count (1,006→1,060), §6.5 count (966→1,060) updated. Mirror regenerated in the same change set. **No formula or accounting-definition change — purely a (account, market) binding relabel + anchor re-reconciliation.** |
 | `v1.5` | 2026-07-26 | **A cash dividend paid after the position closed is booked as realized income** (audit H2, owner ruling 2026-07-26; baseline `v0.1.24`). New **§6.3b**: when a CASH/NET dividend lands while its `(account, symbol)` position is already at zero shares there is no cost basis left to reduce, so it becomes one `RealizedRow(kind="dividend")` (`realized = proceeds_net = net`; shares_sold / original_removed / adjusted_removed all 0; `sell_date` = the payment date). Before the fix the payout was absorbed by the zero-share position and discarded with it, so the dividend overview and the XIRR cashflows counted it while total return did not — three figures, three answers. It is now counted exactly once and **invariant I4 holds**. §5.1 notes that `RealizedRow` now carries `kind: "sale" | "dividend"`. **Tax separation**: the annual package's `realized_gains_{year}.csv` takes `kind == "sale"` only — the payout is already reported by `dividends_{year}.csv` from the dividend ledger, so it is never filed twice. Verification anchor: `moomoo_my/5225` buy 200@6.00 → sell 200@6.50 (position → 0) → NET dividend 120 enters `realized.by_currency[MYR]` (run_phase1 "Found-bug op #3"; stress ops 66→**69**, assertions 1,060→**1,088**, fail=0); hermetic regression `tests/portfolio/test_post_close_dividend.py` (5 cases, including closed → re-bought → paid, which still reduces cost). **Effect on a real ledger: the historical total return of already-closed symbols RISES** (previously dropped payouts now count). Mirror regenerated in the same change set. No other formula changed. |
 | `v1.6` | 2026-08-01 | **Cost basis for foreign cash inflows + the declared short sale** (owner rulings 2026-07-30 / 07-31; baseline `v0.1.25`). ① **§8.1/§8.3 rewritten**: acquisitions widen from "conversions only" to "conversions **+** foreign cash inflows carrying `acq_home_amount`"; the **AMOUNT is stored, never the rate** (a rate is an average and §1.3 forbids an average as the authority; the displayed rate is computed on read). New **`covered_ratio`** (with-basis acquisitions / all acquisitions) absorbs outflows **pro rata** — "total balance − unbased amount" is forbidden (it goes negative once the balance drops below the unbased amount, recreating the reversed-sign figure). The ratio scales **both** the cash and the stock leg (`avg_rate` itself comes from the with-basis population; scaling only cash left the LARGER error — the stock leg, +42,359 TWD measured — unflagged). When the ratio is the literal 1 the caller skips the multiply, so a fully covered ledger is **byte-identical** to the pre-spec engine. `foreign_cash` now counts foreign cash inflows/outflows too, so for the same (account, foreign ccy) it **equals §9's operating cash pool** (they diverged deliberately before, audit C9); only the cost basis still differs. ② **New §4.3, declared short sale**: `short_sale` (default false, **never inferred**); a declared sell exhausts the long lot then opens a short lot holding the net proceeds, a buy covers first then adds to the long, long and short are mutually exclusive so a position is **one signed quantity**; cover P&L is `(short_avg − the covering buy's all-in per-share cost) × covered`, dated the **cover date**, `kind="short_cover"` (it reaches the tax capital-gains sheet). Ratios must divide by `abs(cost_total)` and `fully_recovered` is gated on `not short_open` (a short's basis is negative by construction). **A dividend during an open short is unbookable** (the short pays it; strict path raises `UnbookableLedgerError`, the dashboard skips and flags `unbookable_dividend`). Ruled limitations: `gross_invested` excludes short capital, a pure short XIRR reports a borrowing rate, weights use a net-exposure convention. ③ **The 賣超 guard is now DATE-AWARE** (`shares_through(trade_date)`, mirroring cash's `running_min`) and `oversold` is **sticky** (a later buy does not clear it, because it does not restore the discarded basis). Anchors: the full `tw_broker/2609` short lifecycle (see the §4.3 table) and `fx.covered_ratio/basis_gap/foreign_cash`; stress ops 69→**77**, assertions 1,088→**1,806**, fail=0; phase 2 (live demo) 1,192 assertions fail=0. Mirror regenerated in the same change set. |
+| `v1.7` | 2026-08-11 | **Corporate actions (SPLIT / EXCHANGE / SPINOFF)** (owner decisions D1–D39, spec `docs/spec/2026-08-06-corporate-actions.md`; baseline `v0.1.28 + feat/corporate-actions`). ① **New §4.4**, placed under §4 Cost Basis after §4.3, **renumbering nothing** — the spec's own §7.5 names "§5 Realized/Unrealized P&L" and "§7 Total Return" by their current numbers in the same sentence, and renumbering would invalidate that reference together with every existing §5.1/§7.2-style citation across the repo: the ledger row and the **conservation law** (Σ`original_total` / Σ`adjusted_total` / Σ`dividend_portion` / `gross_invested` all unchanged; the value leg **SPLIT-only**) plus the two deliberate exceptions (cash in lieu = ordinary SELL, reorganisation fee = `WITHDRAW`); **the ratio is two positive integers** and `qty × to ÷ from` is **multiply-first** (measured `210×1/3 = 70` vs `210×(1/3) = 69.999…9`, which `validate.py`'s bare `>` turns into an oversell → STICKY basis discard); **the three formulas and the nine-field `_Position` transfer table are quoted verbatim from spec §4.1–§4.4** (the manual never restates a formula in its own words); D21's provenance label on a spun-off child's payback progress; **six verified worked examples** (§12.1 E18–E24); the **edge matrix E1–E24** (including the oversell / declared-short interactions E3/E4/E5/E18/E22 and E24); the price basis (`close_raw` / `split_basis`, read-time re-expression, **SPLIT-scoped**). ② **§1.4 / §1.1 / §12.4: the permanent ledgers go from four to five** (adding `corporate_actions`) — omitting it from a replay yields an amount that looks normal and is priced on pre-action share counts. ③ **§4.1's same-day priority changes from `0/1/2/3` to `EventPriority`'s `0/10/20/30/40`**, inserting the action between `OPENING` and `BUY`; the **relative order is unchanged**, so a ledger with no action replays byte-identically. ④ **Cross-references**: §5.1 (an action emits no `RealizedRow`), §5.3 (`unbookable_action` as the third honest degradation), §7.1 (`gross_invested` untouched), §7.2 (an action is not a cash flow; an unapplied action blanks XIRR **portfolio-wide** and the reason must name account / symbol / date). ⑤ **Two limitations**: **D11** (`volume` is not un-adjusted) is stated as **standing**; **D12** (the reorganisation fee) is **not** a permanent blind spot — D36 leaves XIRR **deliberately untouched** and adds a **whole-account IRR** in `portfolio/twr.py`; checked in place for this revision, that file still holds no IRR, so it is written up as "**pending D36**". ⑥ **D34: cash-and-stock mergers are a hard exclusion**; the spec's former two-row recipe is withdrawn and **must not appear as a procedure** (`CORPORATE_ACTION(10)` precedes `SELL(30)` → the EXCHANGE zeroes the source → the same-day SELL lands on a zero-share position → STICKY 賣超); the nearest expressible form is recorded as an **unofficial workaround** with its inexactness stated. ⑦ Verification basis updated to the current run (phase-1 **118 ops / 3,791 assertions / 0 fail**; phase 2 **1,192 / 0 fail**), with all 23 `corp.*` corporate-action assertions passing. Mirror regenerated in the same change set. **No existing formula or accounting definition changed other than the above.** |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 
 Given an amount "displayed as X on the site but believed to be Y":
 
 1. **Locate the amount type** → the corresponding section: fee/tax §3; holding cost /
-   average §4; realized §5.1; unrealized / capital gain §5.2; dividends §6;
+   average §4; **corporate actions (split / exchange / spinoff) §4.4**;
+   realized §5.1; unrealized / capital gain §5.2; dividends §6;
    **dividend-detection estimate §6.5**; total return / return rate (incl. blended) §7.1;
    XIRR §7.2; **allocation weight / sector / currency view / reporting-currency valuation /
    tax realized §7.3**; **dividend-income summary / annual projection §7.4**; **net-value
    and invested trend §7.5**; FX P&L §8; cash balance §9; rebalance §11 (**rollup §11.4;
    What-if §11.5**). If the number is none of the above → check §12.5 whether it is
    out-of-scope class B / C (technical indicator, alert threshold, LLM budget).
-2. **Pull the relevant ledger rows** (the four permanent ledgers):
+2. **Pull the relevant ledger rows** (the five permanent ledgers):
    - fee/tax, cost, realized, unrealized → `transactions` (that account×symbol, **sorted
-     by `trade_date`**) + `dividends` + `opening_inventory`.
+     by `trade_date`**) + `dividends` + `opening_inventory` + **`corporate_actions` (that
+     account; take rows where the symbol appears as `from_symbol` **or** `to_symbol` — an
+     exchange carries a basis in from **another** ticker)**.
    - FX P&L → that account's `fx_conversions` + `fx_rates` (current spot).
    - cash → `cash_movements` + `fx_conversions` + that pool's `transactions` + cash
      dividends.
 3. **Replay step by step per that section's formula** (rebuild). Be sure to apply: the
-   same-day priority open≺buy≺sell≺dividend (§4.1), the sell **proportional removal**, the
-   dividend model (§6), and the precision rules (§1.3, store full precision, quantize only
-   at settlement / display).
+   same-day priority `OPENING(0) ≺ CORPORATE_ACTION(10) ≺ BUY(20) ≺ SELL(30) ≺
+   DIVIDEND(40)` (§4.1), the sell **proportional removal**, the dividend model (§6), **the
+   three corporate-action formulas and their multiply-first ratio (§4.4.2 / §4.4.4)**, and
+   the precision rules (§1.3, store full precision, quantize only at settlement / display).
 4. **Compare**: replayed value = ruling value. If it disagrees with the code output → a
    code bug (report it); if it disagrees with this manual's formula → a manual defect
    (report and update).

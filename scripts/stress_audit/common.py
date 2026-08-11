@@ -223,10 +223,28 @@ class LocalServer:
             [str(PY), "-m", "uvicorn", "portfolio_dash.api.app:create_app",
              "--factory", "--host", "127.0.0.1", "--port", str(self.port)],
             cwd=str(REPO_ROOT), env=env, stdout=fh, stderr=fh)
-        self._wait_ready()
+        try:
+            self._wait_ready()
+        except BaseException:
+            # Never leave a stray uvicorn behind on a failed start: it keeps the log file
+            # open, so the NEXT run dies with a PermissionError while unlinking it and the
+            # real cause (a slow boot) is hidden behind an unrelated traceback.
+            self.stop()
+            raise
         return self.base_url
 
-    def _wait_ready(self, timeout: float = 60.0) -> None:
+    def _wait_ready(self, timeout: float | None = None) -> None:
+        """Poll /api/health until the spawned app answers.
+
+        Default 240s, overridable with ``PD_STRESS_BOOT_TIMEOUT``. The old 60s was tuned
+        on a fast machine and is NOT a safety property — nothing is asserted about boot
+        time, and the app's import graph alone takes ~40-95s on a cold/slow checkout
+        (measured 96.6s here). A too-tight limit reports "server not ready" for a server
+        that is merely still importing, which reads as a broken harness rather than a slow
+        one; raise it rather than debugging the app.
+        """
+        if timeout is None:
+            timeout = float(os.environ.get("PD_STRESS_BOOT_TIMEOUT", "240"))
         deadline = time.monotonic() + timeout
         url = self.base_url + "/api/health"
         while time.monotonic() < deadline:
@@ -239,7 +257,7 @@ class LocalServer:
             except Exception:
                 pass
             time.sleep(0.25)
-        raise TimeoutError(f"server not ready; see {self.log}")
+        raise TimeoutError(f"server not ready after {timeout:.0f}s; see {self.log}")
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -286,6 +304,55 @@ def seed_price(db_path: Path, symbol: str, market: str, close: Decimal,
         upsert_prices(conn, [PriceRow(instrument=symbol, market=Market(market),
                                       as_of=as_of, close=close, source=source)],
                       fetched_at=datetime.now())
+    finally:
+        conn.close()
+
+
+def write_corporate_action(db_path: Path, account_id: str, action_date: str, kind: str,
+                           from_symbol: str, to_symbol: str, ratio_to: int, ratio_from: int,
+                           cost_carry: str | None = None, note: str | None = None) -> int:
+    """Write ONE corporate_actions row and return its id (spec §3's table).
+
+    Why the DB and not an API call: the entry surfaces are **W7**, which has not been
+    built — there is no ``POST /api/ledgers/corporate-actions``. This is therefore a
+    SETUP/fixture write through the app's own insert (exactly like ``seed_instrument``
+    uses ``upsert_instrument``), not the calculation under test. The reconciliation still
+    reads the row back from SQLite as a raw fact and computes every consequence in the
+    oracle, so the accounting remains independently verified.
+
+    Switch this to the API the moment W7 lands: an entry surface that is never exercised
+    end-to-end is how the ETF-sell and daytrade tax bugs survived — the engine supported
+    it and no entry path passed it (LESSONS_LEARNED, 2026-07-15).
+
+    The ratio is passed as TWO INTEGERS on purpose (D14). ``int`` in the signature, not
+    ``Decimal``: a helper that accepts ``0.2857`` lets the harness create the very row
+    validation exists to reject, and the oracle would then be asserting a state the app
+    is specified never to hold.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.data_ingestion.store import insert_corporate_action
+    from portfolio_dash.shared.corporate_actions import CorporateActionKind
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return insert_corporate_action(
+            conn, account_id=account_id, action_date=date.fromisoformat(action_date),
+            kind=CorporateActionKind(kind), from_symbol=from_symbol, to_symbol=to_symbol,
+            ratio_to=Decimal(ratio_to), ratio_from=Decimal(ratio_from),
+            cost_carry=None if cost_carry is None else Decimal(cost_carry), note=note)
+    finally:
+        conn.close()
+
+
+def delete_corporate_action_row(db_path: Path, action_id: int) -> bool:
+    """Delete one corporate action (E16: editing/deleting re-computes history)."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.data_ingestion.store import delete_corporate_action
+    conn = sqlite3.connect(str(db_path))
+    # row_factory is required: the store captures the pre-mutation row into ledger_audit
+    # via dict(row), which needs sqlite3.Row rather than a plain tuple.
+    conn.row_factory = sqlite3.Row
+    try:
+        return delete_corporate_action(conn, action_id)
     finally:
         conn.close()
 
@@ -356,9 +423,29 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
                 id=r["id"], account_id=r["account_id"], d=date.fromisoformat(r["date"]),
                 kind=r["kind"], ccy=r["ccy"], amount=dec(r["amount"]),
                 acq_home_amount=None if _acq is None else dec(_acq)))
+        # Corporate actions: read the TWO RATIO TERMS as stored, never a quotient. The
+        # oracle combines them itself (oracle.ratio_shares); reading a pre-divided ratio
+        # here would import the very rounding the two-term storage exists to prevent.
+        if _table_exists(conn, "corporate_actions"):
+            for r in conn.execute("SELECT * FROM corporate_actions ORDER BY date, id"):
+                _cc = r["cost_carry"]
+                f.actions.append(O.CorpFact(
+                    id=r["id"], account_id=r["account_id"],
+                    d=date.fromisoformat(r["date"]), kind=str(r["kind"]).upper(),
+                    from_symbol=r["from_symbol"], to_symbol=r["to_symbol"],
+                    ratio_to=dec(r["ratio_to"]), ratio_from=dec(r["ratio_from"]),
+                    cost_carry=None if _cc is None else dec(_cc), note=r["note"]))
         return f
     finally:
         conn.close()
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """True when *name* is a table in this DB (the corporate_actions migration is new;
+    a pre-migration DB must load as 'no actions', not as a crash)."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+    return row is not None
 
 
 def _page(api: Api, path: str, key_rows: str = "rows") -> list[dict]:
@@ -386,6 +473,14 @@ def load_facts_from_api(api: Api) -> O.Facts:
 
     Same independence posture as the DB loader: these endpoints return stored rows
     (facts), and the oracle computes the derived state itself.
+
+    CORPORATE ACTIONS ARE NOT LOADED HERE — there is no public read endpoint for the
+    ``corporate_actions`` ledger yet (spec W7 owns the entry surfaces). Phase 2 therefore
+    replays a remote ledger as if it had no actions, which is correct only while the demo
+    corpus has none. **When W7/D25 land, this loader must read them**, or a phase-2 run
+    against a seeded demo will report holdings failures whose cause is a missing input,
+    not a defect. Recorded here rather than in a plan, because a silent omission in a
+    fact loader is indistinguishable from a bug in the app.
     """
     f = O.Facts()
     insts = api.get("/api/instruments").json().get("list", [])

@@ -115,6 +115,30 @@ def main() -> int:
         check("instruments", ok,
               f"HTTP {st}, n={len(insts.get('list', [])) if isinstance(insts, dict) else '?'}")
 
+    # 3b. Corporate-action reconciliation (spec §6.3 / W5), on the demo corpus's
+    # multi-account 3-for-1 SPLIT. Deliberately withheld until W5: the ＋公司行動 term is
+    # what closes the identity, so adding this check any earlier would have reddened BOTH
+    # sites for a ledger that is in fact perfectly consistent (measured 2026-08-11 against
+    # the seeded demo: ORBT reported balances=false with diff −60 / −40 — exactly
+    # `shares × (ratio − 1)`, the corporate delta with no term to carry it).
+    #
+    # ORBT is the one symbol in the corpus held in TWO accounts, so this asserts the
+    # PER-ACCOUNT footers as well as the aggregate: D13's all-or-nothing rule is invisible
+    # in a total that happens to balance. Skipped (not failed) where the corpus is absent —
+    # prod holds the real ledger and has no ORBT.
+    if not protected:
+        st, det = _get(base, "/api/symbol/ORBT/detail")
+        ba = (det.get("activity_reconcile", {}).get("by_account", {})
+              if isinstance(det, dict) else {})
+        if st == 200 and not ba:
+            check("multi-account corporate action (no demo corpus)", True,
+                  "ORBT absent — not a demo instance")
+        else:
+            states = {k: v.get("balances") for k, v in ba.items()}
+            check("multi-account corporate action reconciles",
+                  st == 200 and len(ba) >= 2 and all(ba[k].get("balances") for k in ba),
+                  f"HTTP {st}, per-account balances={states}")
+
     # 4. optional mutating check: on-demand quote refresh end to end.
     if args.refresh:
         if protected:

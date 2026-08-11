@@ -29,6 +29,27 @@ All money is Decimal; no float anywhere — EXCEPT the XIRR scalar solver at the
 which is an inherently numeric root-find (no closed form). That single figure is the
 ONE documented-tolerance comparison in the whole suite (see ``XIRR_TOL``); every other
 assertion is exact-Decimal with no tolerance.
+
+CORPORATE ACTIONS — WHY THIS FILE DUPLICATES THE RATIO ALGEBRA ON PURPOSE
+------------------------------------------------------------------------
+The corporate-action spec (``docs/spec/2026-08-06-corporate-actions.md``) §6.0 states
+"ONE owner per concept" and the app owns it in ``shared/corporate_actions.py`` +
+``shared/ledger_events.py``. **This module is the single deliberate suspension of that
+rule** (spec §7.4), and the reason is written here so a future cleanup pass does not
+"de-duplicate" the oracle back into uselessness:
+
+  * §10.4 trap #11 — "let the oracle import ``shared/corporate_actions.py`` → the oracle
+    checks the implementation against itself and proves nothing."
+  * §10.4 trap #10 — "update two of the three event-priority literals → a silently
+    mis-ordered replay." An oracle that imports ``EventPriority`` cannot see that class
+    of defect at all, because it would inherit the mistake.
+
+So this file carries its OWN two-term rational arithmetic (:func:`ratio_shares`), its OWN
+``EventPriority`` (re-declared from spec §4.4, not imported), and its OWN transcription of
+the §4.4 field-transfer table and the §5 refusal matrix (:func:`_apply_action`). Every
+formula below is derived from the SPEC — §4.1/§4.2/§4.3 for the three kinds, §4.4 for the
+complete field table, §5 for the rejection rows — never from ``portfolio/cost_basis.py``.
+Duplication here is the *mechanism of the check*, not an oversight.
 """
 
 from __future__ import annotations
@@ -37,6 +58,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal
+from enum import IntEnum
 
 D = Decimal
 ZERO = D("0")
@@ -340,6 +362,30 @@ class Instrument:
 
 
 @dataclass
+class CorpFact:
+    """One ``corporate_actions`` ledger row, as stored (spec §3).
+
+    ``ratio_to`` / ``ratio_from`` are the TWO TERMS of a rational, never a quotient: a
+    decimal ratio is a rounded quotient and `data-and-pricing.md` forbids storing one as
+    the authority (spec §3.1(ii)). They are read back exactly as written and are combined
+    only inside :func:`ratio_shares`. ``cost_carry`` is a single Decimal because an 8-K
+    publishes an allocation PERCENTAGE, which is already exact as a decimal; the parent's
+    complement is never stored — it is ``total − carved`` on read (spec §4.3).
+    """
+
+    id: int
+    account_id: str
+    d: date
+    kind: str          # SPLIT | EXCHANGE | SPINOFF
+    from_symbol: str
+    to_symbol: str
+    ratio_to: Decimal
+    ratio_from: Decimal
+    cost_carry: Decimal | None = None
+    note: str | None = None
+
+
+@dataclass
 class Facts:
     txs: list[TxFact] = field(default_factory=list)
     divs: list[DivFact] = field(default_factory=list)
@@ -347,6 +393,7 @@ class Facts:
     openings: list[OpenFact] = field(default_factory=list)
     cash: list[CashFact] = field(default_factory=list)
     instruments: dict[str, Instrument] = field(default_factory=dict)
+    actions: list[CorpFact] = field(default_factory=list)
 
 
 @dataclass
@@ -363,6 +410,11 @@ class Holding:
     oversold: bool = False
     short_open: bool = False
     unbookable_dividend: bool = False
+    # A corporate action could NOT be applied and was skipped (spec §5 dashboard path).
+    # The shares are then in PRE-action terms while the price series is post-action, so
+    # every valued figure on this position is wrong by the ratio — a different failure
+    # from 賣超 (a discarded basis) and from an unbookable dividend (a missing event).
+    unbookable_action: bool = False
 
     @property
     def original_avg(self) -> Decimal:
@@ -410,9 +462,26 @@ class OracleResult:
     fx_foreign_cash: dict[str, Decimal]
     # Basis-known share of the pool (spec F2); 1 when every foreign funding flow has a cost.
     fx_covered_ratio: dict[str, Decimal]
+    # (edge-code, scope) for every corporate action the replay REFUSED to apply — the
+    # oracle's own §5 refusal matrix, surfaced so the evidence trail says WHICH rule fired.
+    action_refusals: list[tuple[str, str]] = field(default_factory=list)
 
 
-_PHASE = {"open": 0, "buy": 1, "sell": 2, "div": 3}
+class EventPriority(IntEnum):
+    """Same-day replay order — the oracle's OWN copy (spec §4.4, trap #10/#11).
+
+    Deliberately NOT imported from ``portfolio_dash.shared.ledger_events``: an oracle that
+    inherits the implementation's ordering cannot detect an error in it, and a mis-ordered
+    replay is the defect this enum exists to prevent (a same-day buy or sell trades in
+    POST-action terms, so the action must apply first). Spaced by 10, transcribed from the
+    spec's normative block.
+    """
+
+    OPENING = 0
+    CORPORATE_ACTION = 10
+    BUY = 20
+    SELL = 30
+    DIVIDEND = 40
 
 
 @dataclass
@@ -434,14 +503,206 @@ class _Pos:
     short_proceeds: Decimal = ZERO     # net proceeds received for them
     ever_oversold: bool = False        # sticky 賣超 ("was ever negative")
     unbookable_dividend: bool = False  # a dividend landed while short — skipped, flagged
+    unbookable_action: bool = False    # a corporate action was refused — skipped, flagged
+
+
+SPLIT, EXCHANGE, SPINOFF = "SPLIT", "EXCHANGE", "SPINOFF"
+_KINDS = {SPLIT, EXCHANGE, SPINOFF}
+
+
+def ratio_shares(qty: Decimal, ratio_to: Decimal, ratio_from: Decimal) -> Decimal:
+    """Apply a two-term rational to a share count — MULTIPLY FIRST, DIVIDE LAST.
+
+    Spec §3.1(ii)(a): ``qty * to / from`` in ONE expression, so the division happens last
+    against a value large enough to absorb it. NOT ``qty * (to / from)`` — the
+    parenthesised quotient rounds to the Decimal context precision before it ever touches
+    the share count, and a 400,000-pair sweep found 3,530 combinations that cross an
+    integer boundary (``3 × 1/3`` is exactly ``1`` here and ``0.999…9`` parenthesised).
+    A share count that lands a hair under an integer trips ``validate.py``'s bare ``>``
+    comparison on the next sell, which is the 賣超 cascade the whole feature exists to
+    prevent. Also NOT a ``split_factor``-style product of quotients (trap #2a): that is
+    the same defect with an unbounded error term.
+
+    This is the oracle's OWN arithmetic. It must never delegate to
+    ``shared/corporate_actions.apply_ratio`` (trap #11).
+    """
+    return qty * ratio_to / ratio_from
+
+
+def _positive_integer(term: Decimal) -> bool:
+    """D14 / E6+E6a: both ratio terms are positive INTEGERS.
+
+    "Decimal > 0" was not enough — ``ratio_to = 0.2857`` satisfies it, passes the CSV
+    importer and the API, and reproduces the cascade at ANY share count (700 × 0.2857 =
+    199.9900). Validation rejects such a row before the replay; the oracle re-checks it so
+    a row that got behind validation is REFUSED here rather than silently applied.
+    """
+    return term > ZERO and term == term.to_integral_value()
+
+
+def _apply_action(positions: dict[tuple[str, str], _Pos], act: CorpFact,
+                  insts: dict[str, Instrument]) -> str | None:
+    """Apply ONE corporate action to the replay state, or REFUSE it.
+
+    Returns ``None`` when applied, else the spec's edge code for the refusal. This is the
+    dashboard path (``allow_oversell=True``): a refusal SKIPS the event and flags the
+    source position ``unbookable_action`` — it never raises, because
+    ``portfolio/dashboard.py`` calls the replay with no ``try``/``except`` and the
+    standing never-500 rule applies at every call site (spec E1a).
+
+    The refusals are refusals. An oracle that silently applied E2/E3/E5/E18/E22 would
+    disagree with the app and invite "fixing" the app to match, so the matrix comes first
+    and the arithmetic second.
+
+    Field transfer follows spec §4.4's NORMATIVE table, every field explicitly:
+
+    ============ ================= =========================== ==========================
+    field        SPLIT (P)         EXCHANGE  P -> Q             SPINOFF  P -> Q
+    ============ ================= =========================== ==========================
+    quote_ccy    unchanged         Q keeps its own (E11)       Q keeps its own (E11)
+    shares       * to / from       P := 0; Q += P.sh*to/from   P unchanged; Q += ...
+    original_tot unchanged         P := 0; Q += P.orig         Q += P.orig*c; P -= same
+    adjusted_tot unchanged         P := 0; Q += P.adj          Q += P.adj*c;  P -= same
+    short_shares * to / from (E4)  **P := 0** (explicit)       unchanged (E5 => 0)
+    short_procee unchanged (E4)    **P := 0** (explicit)       unchanged (E5 => 0)
+    ever_oversld unchanged         nothing transferred (E3/E22 keep both sides False)
+    unbook_divid unchanged         Q |= P (E19)                Q |= P (E19); P keeps its
+    unbook_actio unchanged         Q |= P (F-37)               Q |= P (F-37); P keeps its
+    ============ ================= =========================== ==========================
+
+    Why EXCHANGE zeroes ``short_proceeds``/``short_shares`` explicitly even though E5
+    guarantees they are already zero (§4.4, trap #7): they are *nearly* zero. A full cover
+    computes ``P − (P/S)×S`` and Decimal division is inexact whenever ``S`` does not divide
+    ``P``, so a residue ``ε`` survives. It is invisible today only because the emitted
+    share count is ``0 − 0`` and the holdings loop drops the position — but EXCHANGE leaves
+    the source in the map with a live meaning, and the emitted
+    ``original_total − short_proceeds`` would then subtract ``ε`` from a position a later
+    buy on the old ticker can reopen. Zeroing all three removes the whole class.
+    """
+    src_key = (act.account_id, act.from_symbol)
+    dst_key = (act.account_id, act.to_symbol)
+    src = positions.get(src_key)
+
+    def refuse(code: str) -> str:
+        # Flag the SOURCE: it is the position left holding PRE-action shares against a
+        # post-action price series, which is exactly what the flag announces. The
+        # destination of a refused EXCHANGE/SPINOFF is untouched and self-consistent.
+        if src is not None:
+            src.unbookable_action = True
+        return code
+
+    # -- E21/E10 mirror: an action referencing an unregistered symbol is dropped with the
+    # rest of that symbol's rows (the dashboard's unregistered skip-set), not flagged.
+    if act.from_symbol not in insts or act.to_symbol not in insts:
+        return "E21"
+    # -- validation-tier shape checks (E6/E6a/E8/E11/E20). These are rejected at entry and
+    # must never reach a replay; re-checked here so a row that got behind validation is
+    # refused rather than applied. `ratio_from == 0` would otherwise be a ZeroDivisionError
+    # inside the replay, i.e. a 500 on the dashboard path.
+    if act.kind not in _KINDS:
+        return refuse("E-kind")
+    if not (_positive_integer(act.ratio_to) and _positive_integer(act.ratio_from)):
+        return refuse("E6")
+    if act.kind == SPLIT and act.to_symbol != act.from_symbol:
+        return refuse("E20")
+    if act.kind != SPLIT and act.to_symbol == act.from_symbol:
+        return refuse("E20")
+    if act.kind == SPINOFF and (act.cost_carry is None
+                                or not (ZERO <= act.cost_carry <= ONE)):
+        return refuse("E8")
+    if act.kind != SPLIT and insts[act.from_symbol].quote_ccy != insts[act.to_symbol].quote_ccy:
+        return refuse("E11")
+
+    # -- E1: no prior position. Fabricating one would invent a $0-cost ghost, so nothing
+    # is created and nothing can be flagged (there is no position to carry the flag).
+    if src is None:
+        return "E1"
+    # -- E3 before E2: 賣超 is sticky, so an oversold position that a later buy netted back
+    # to exactly zero is an E3, not a "closed" position. Scaling an undefined basis
+    # produces an undefined result either way; only the reported reason differs.
+    if src.ever_oversold:
+        return refuse("E3")
+    # -- E2: closed (0 shares, 0 basis) — includes an EXCHANGE-vacated source, so a second
+    # action on a moved-away ticker is refused rather than re-animating it.
+    if (src.shares == ZERO and src.short_shares == ZERO
+            and src.original_total == ZERO and src.adjusted_total == ZERO):
+        return refuse("E2")
+    # -- E5: EXCHANGE/SPINOFF on an OPEN declared short has no honest booking (precedent:
+    # dividend-on-short). A SPLIT is supported (E4) and is handled below.
+    if act.kind != SPLIT and src.short_shares > ZERO:
+        return refuse("E5")
+
+    if act.kind == SPLIT:
+        # §4.1 — one position; to_symbol == from_symbol is enforced above.
+        src.shares = ratio_shares(src.shares, act.ratio_to, act.ratio_from)
+        src.short_shares = ratio_shares(src.short_shares, act.ratio_to, act.ratio_from)
+        # original_total / adjusted_total / short_proceeds: UNCHANGED. Both averages
+        # divide by the new share count on read, so they scale by 1/ratio automatically;
+        # dividend_portion and payback_ratio are unchanged, which is correct — a split
+        # changes nothing about how much cost has been returned as dividends.
+        return None
+
+    dst = positions.get(dst_key)
+    # -- E18 / E22: the RECEIVING side. E18 keeps long/short mutually exclusive by
+    # construction; E22 stops a discarded cost basis being restored onto a position whose
+    # basis the STICKY guard deliberately threw away, where it renders as an ordinary
+    # average over shares that have no basis at all.
+    if dst is not None:
+        if dst.short_shares > ZERO:
+            return refuse("E18")
+        if dst.ever_oversold:
+            return refuse("E22")
+    if dst is None:
+        dst = positions.setdefault(
+            dst_key, _Pos(act.account_id, act.to_symbol, insts[act.to_symbol].quote_ccy))
+
+    if act.kind == EXCHANGE:
+        # §4.2 — the whole position moves. If Q already holds, the two merge by weighted
+        # average, which is simply the sum of the totals over the sum of the shares: no
+        # special case, exactly what the weighted-average method prescribes.
+        carried = ratio_shares(src.shares, act.ratio_to, act.ratio_from)
+        dst.shares += carried
+        dst.original_total += src.original_total
+        dst.adjusted_total += src.adjusted_total
+        dst.unbookable_dividend |= src.unbookable_dividend   # E19
+        dst.unbookable_action |= src.unbookable_action       # F-37
+        src.shares = ZERO
+        src.original_total = ZERO
+        src.adjusted_total = ZERO
+        src.short_shares = ZERO      # explicit (trap #7) — E5 says 0, but only NEARLY
+        src.short_proceeds = ZERO    # explicit (trap #7)
+        return None
+
+    # §4.3 SPINOFF — the parent keeps its shares, a child is created.
+    carry = act.cost_carry
+    assert carry is not None      # E8 checked above
+    carved_orig = src.original_total * carry
+    carved_adj = src.adjusted_total * carry
+    dst.shares += ratio_shares(src.shares, act.ratio_to, act.ratio_from)
+    dst.original_total += carved_orig
+    dst.adjusted_total += carved_adj
+    dst.unbookable_dividend |= src.unbookable_dividend       # E19 — the child inherits
+    dst.unbookable_action |= src.unbookable_action           # F-37
+    # The parent is `total − carved`, NOT `total × (1 − c)`: algebraically identical,
+    # numerically not (1−c rounds once and ×(1−c) rounds again), so subtracting the exact
+    # amount added to the child conserves Σ original_total BY CONSTRUCTION (§2.1).
+    src.original_total -= carved_orig
+    src.adjusted_total -= carved_adj
+    # src.shares / short_shares / short_proceeds: unchanged (E5 guarantees the shorts are 0)
+    return None
 
 
 def replay(facts: Facts) -> OracleResult:
     """Replay the ledger facts -> holdings, realized, cash, FX pools.
 
-    Same-day ordering derived from domain-ledger / build_book semantics:
-      opening(0) -> buy(1) -> sell(2) -> dividend(3); ties broken by DB id
-      (insertion order), reproducing the app's stable sort over (date, phase).
+    Same-day ordering derived from domain-ledger semantics + spec §4's normative
+    ``EventPriority`` (this module's OWN copy, see :class:`EventPriority`):
+      opening(0) -> CORPORATE ACTION(10) -> buy(20) -> sell(30) -> dividend(40);
+      ties broken by DB id (insertion order), reproducing a stable sort over
+      (date, priority). An action is effective at the START of its date: a same-day buy
+      or sell trades in post-action terms (post-split price, new ticker), so the action
+      must apply first. Opening inventory dated ON an action date is PRE-action — it
+      describes the position as it stood before — which is why OPENING sorts ahead of it.
 
     Declared-short model — derived INDEPENDENTLY from domain-ledger.md ("Declared short
     sale", owner ruling 2026-07-31), not from the app:
@@ -467,21 +728,32 @@ def replay(facts: Facts) -> OracleResult:
 
     # ------- build the ordered event stream (mirrors build_book event list) -------
     events: list[tuple[date, int, int, str, object]] = []
-    # openings first (phase 0); app orders them by (account, symbol)
+    # openings first (priority 0); app orders them by (account, symbol)
     for i, o in enumerate(sorted(facts.openings, key=lambda x: (x.account_id, x.symbol))):
-        events.append((o.build_date, 0, i, "open", o))
+        events.append((o.build_date, EventPriority.OPENING, i, "open", o))
+    for act in facts.actions:
+        events.append((act.d, EventPriority.CORPORATE_ACTION, act.id, "corp", act))
     for t in facts.txs:
-        events.append((t.trade_date, _PHASE["buy"] if t.side == "BUY" else _PHASE["sell"],
+        events.append((t.trade_date,
+                       EventPriority.BUY if t.side == "BUY" else EventPriority.SELL,
                        t.id, "tx", t))
     for dv in facts.divs:
-        events.append((dv.d, 3, dv.id, "div", dv))
+        events.append((dv.d, EventPriority.DIVIDEND, dv.id, "div", dv))
     events.sort(key=lambda e: (e[0], e[1], e[2]))
 
     positions: dict[tuple[str, str], _Pos] = {}
     realized_rows: list[RealizedRow] = []
+    refusals: list[tuple[str, str]] = []
 
     for _d, _p, _seq, kind, ev in events:
-        if kind == "open":
+        if kind == "corp":
+            assert isinstance(ev, CorpFact)
+            code = _apply_action(positions, ev, insts)
+            if code is not None:
+                refusals.append(
+                    (code, f"{ev.account_id}/{ev.from_symbol}->{ev.to_symbol}"
+                           f" {ev.kind} {ev.ratio_to}-for-{ev.ratio_from} @{ev.d}"))
+        elif kind == "open":
             assert isinstance(ev, OpenFact)
             key = (ev.account_id, ev.symbol)
             pos = positions.setdefault(key, _Pos(ev.account_id, ev.symbol, qccy(ev.symbol)))
@@ -597,7 +869,8 @@ def replay(facts: Facts) -> OracleResult:
             p.adjusted_total - p.short_proceeds,
             oversold=p.ever_oversold or p.shares < ZERO,
             short_open=p.short_shares > ZERO,
-            unbookable_dividend=p.unbookable_dividend)
+            unbookable_dividend=p.unbookable_dividend,
+            unbookable_action=p.unbookable_action)
 
     realized_by_ccy: dict[str, Decimal] = defaultdict(lambda: ZERO)
     for rr in realized_rows:
@@ -607,7 +880,7 @@ def replay(facts: Facts) -> OracleResult:
     fx_avg, fx_real, fx_fcash, fx_cov = _fx_pools(facts)
 
     return OracleResult(holdings, realized_rows, dict(realized_by_ccy), cash,
-                        fx_avg, fx_real, fx_fcash, fx_cov)
+                        fx_avg, fx_real, fx_fcash, fx_cov, refusals)
 
 
 def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
@@ -912,52 +1185,77 @@ def integrity_findings(
     ``sell.has_realized_row``: a pure short-open realizes nothing until covered (the cover
     P&L is verified by the reconciliation's realized-row comparison instead).
 
+    CORPORATE ACTIONS (2026-08-10, spec W8): the walk is action-aware, and it has to be —
+    a 3-for-1 split followed by a sell of the post-split count would otherwise read as a
+    position going negative, which is the FALSE POSITIVE version of the exact defect this
+    check exists to catch. The walk is therefore a single ordered pass over ALL keys (an
+    EXCHANGE moves shares BETWEEN symbols, so a per-symbol walk cannot express it) and it
+    reuses :func:`_apply_action`, so the refusal matrix is stated once. Basis fields stay
+    zero here — this layer tracks share validity only — which is sound because a position
+    with zero shares always has zero basis, so ``_apply_action``'s E2 predicate reaches
+    the same verdict it reaches in the replay.
+
     Returns ``[(check, scope)]`` for each violation; empty means clean.
     """
     ok = acked or set()
     out: list[tuple[str, str]] = []
+    insts = facts.instruments
 
-    events: dict[tuple[str, str], list[tuple[date, int, int, str, Decimal, bool]]] = (
-        defaultdict(list))
-    for i, o in enumerate(facts.openings):
-        events[(o.account_id, o.symbol)].append(
-            (o.build_date, 0, i, "open", o.shares, False))
+    events: list[tuple[date, int, int, str, object]] = []
+    for i, o in enumerate(sorted(facts.openings, key=lambda x: (x.account_id, x.symbol))):
+        events.append((o.build_date, EventPriority.OPENING, i, "open", o))
+    for act in facts.actions:
+        events.append((act.d, EventPriority.CORPORATE_ACTION, act.id, "corp", act))
     for t in facts.txs:
-        is_buy = t.side.upper() == "BUY"
-        events[(t.account_id, t.symbol)].append(
-            (t.trade_date, 1 if is_buy else 2, t.id,
-             "buy" if is_buy else "sell", t.qty, bool(t.short_sale)))
+        events.append((t.trade_date,
+                       EventPriority.BUY if t.side.upper() == "BUY" else EventPriority.SELL,
+                       t.id, "tx", t))
     for dv in facts.divs:
         if dv.reinvest_shares:
-            events[(dv.account_id, dv.symbol)].append(
-                (dv.d, 3, dv.id, "reinvest", dv.reinvest_shares, False))
-    for (aid, sym), evs in events.items():
-        if (aid, sym) in ok:
-            continue
-        long_run = ZERO
-        short_run = ZERO
-        for d, _phase_i, _seq, ekind, qty, declared in sorted(
-                evs, key=lambda x: (x[0], x[1], x[2])):
-            if ekind in ("open",):
-                long_run += qty
-            elif ekind == "buy":
-                cover = min(qty, short_run)
-                short_run -= cover
-                long_run += qty - cover
-            elif ekind == "sell" and declared:
-                from_long = min(qty, long_run if long_run > ZERO else ZERO)
-                long_run -= from_long
-                short_run += qty - from_long
-            elif ekind == "sell":
-                long_run -= qty
-                if long_run < ZERO:
-                    out.append(("position.never_negative",
-                                f"{aid}/{sym} nets {long_run} on {d.isoformat()}"))
-                    break
-            else:  # reinvest shares — skipped while a short is open (unbookable dividend)
-                if short_run > ZERO:
-                    continue
-                long_run += qty
+            events.append((dv.d, EventPriority.DIVIDEND, dv.id, "div", dv))
+    events.sort(key=lambda e: (e[0], e[1], e[2]))
+
+    positions: dict[tuple[str, str], _Pos] = {}
+    reported: set[tuple[str, str]] = set()
+
+    def pos_for(aid: str, sym: str) -> _Pos:
+        inst = insts.get(sym)
+        return positions.setdefault(
+            (aid, sym), _Pos(aid, sym, inst.quote_ccy if inst is not None else ""))
+
+    for d, _prio, _seq, ekind, ev in events:
+        if ekind == "corp":
+            assert isinstance(ev, CorpFact)
+            _apply_action(positions, ev, insts)
+        elif ekind == "open":
+            assert isinstance(ev, OpenFact)
+            pos_for(ev.account_id, ev.symbol).shares += ev.shares
+        elif ekind == "tx":
+            assert isinstance(ev, TxFact)
+            p = pos_for(ev.account_id, ev.symbol)
+            if ev.side.upper() == "BUY":
+                cover = min(ev.qty, p.short_shares)
+                p.short_shares -= cover
+                p.shares += ev.qty - cover
+            elif ev.short_sale:
+                from_long = min(ev.qty, p.shares if p.shares > ZERO else ZERO)
+                p.shares -= from_long
+                p.short_shares += ev.qty - from_long
+            else:
+                p.shares -= ev.qty
+                if p.shares < ZERO:
+                    p.ever_oversold = True     # sticky, exactly as the replay marks it
+                    key = (ev.account_id, ev.symbol)
+                    if key not in ok and key not in reported:
+                        reported.add(key)
+                        out.append(("position.never_negative",
+                                    f"{key[0]}/{key[1]} nets {p.shares} on {d.isoformat()}"))
+        else:  # reinvest shares — skipped while a short is open (unbookable dividend)
+            assert isinstance(ev, DivFact)
+            p = pos_for(ev.account_id, ev.symbol)
+            if p.short_shares > ZERO or ev.reinvest_shares is None:
+                continue
+            p.shares += ev.reinvest_shares
 
     sold = {(t.account_id, t.symbol, t.trade_date)
             for t in facts.txs if t.side.upper() == "SELL" and not t.short_sale}

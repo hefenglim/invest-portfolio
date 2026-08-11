@@ -57,6 +57,19 @@ seeded config as constants — parameters-from-config is allowed; the **logic is
 harness's own**. Because the two implementations never share a code path, they agree only
 when *both* are correct: a bug in the app cannot hide behind a shared helper.
 
+The corporate-action spec's §6.0 says "ONE owner per concept", and **this file is the one
+deliberate suspension of that rule** (§7.4). The ratio algebra, the event-priority enum and
+the §4.4 field table are duplicated here ON PURPOSE; `oracle.py` states the reason in its
+own docstring so a future cleanup pass does not "de-duplicate" the oracle into uselessness.
+
+**Corporate-action entry surfaces are W7 and do not exist yet**, so the scenario writes
+`corporate_actions` rows through the app's own `insert_corporate_action` as a SETUP fixture
+(`common.write_corporate_action`), exactly as instruments and prices are seeded. Move them
+onto the API the moment W7 lands: an entry surface never exercised end-to-end is how the
+ETF-sell and daytrade tax bugs survived. `load_facts_from_api` likewise does **not** read
+actions (no public read endpoint), which is correct only while the demo corpus has none —
+D25 seeds one, so that loader must gain them in the same change.
+
 ### 2. Two independent layers (keep them separate)
 1. **Fee-engine oracle** (`fee_tax`) recomputes expected fee/tax from the rules and
    compares against the app's stored fee/tax.
@@ -97,10 +110,31 @@ A run is only green when **all** of these hold (exact Decimal unless noted):
 
 - **Per-stock cost basis** — for every `(account, symbol)` holding: `shares` (SIGNED —
   an open declared short is negative), `original_cost_total`, `adjusted_cost_total`,
-  `original_avg`, `adjusted_avg`, `dividend_portion`, the three state flags
-  (`oversold` / `short_open` / `unbookable_dividend`), and (when valued) `market_value`,
-  `unrealized_pnl`, `capital_gain`, `unrealized_pct` (÷ `abs(basis)` — sign-safe on a
-  short's negative basis).
+  `original_avg`, `adjusted_avg`, `dividend_portion`, the four state flags
+  (`oversold` / `short_open` / `unbookable_dividend` / `unbookable_action`), and (when
+  valued) `market_value`, `unrealized_pnl`, `capital_gain`, `unrealized_pct`
+  (÷ `abs(basis)` — sign-safe on a short's negative basis).
+- **Corporate actions** (SPLIT / EXCHANGE / SPINOFF — spec `2026-08-06-corporate-actions.md`)
+  — the oracle applies §4.4's complete field-transfer table and the §5 refusal matrix
+  (E1/E2/E3/E5/E18/E22) itself, from the SPEC, with its **own** two-term ratio arithmetic
+  and its **own** `EventPriority`; it must never import `shared/corporate_actions.py` or
+  `shared/ledger_events.py` (§7.4, trap #11 — and trap #10, which an imported enum makes
+  invisible). Three legs, and the third is what the other two cannot do:
+  1. oracle-vs-app on every derived figure (`holding.*`, `realized.*`, cash, KPIs, XIRR);
+  2. `corp.refusal_codes` — WHICH §5 rule fired, so "the oracle skipped and the app
+     applied" is triageable apart from "both applied and disagreed on the arithmetic";
+  3. **`corp.anchor.*` — the app's number against a hand-computed literal.** Agreement
+     between two replays cannot prove either landed on the share count the broker's
+     statement says: a rounded ratio in BOTH agrees at 199.99. Note that `700 × 2/7`
+     cannot discriminate evaluation order (the parenthesised form also lands on 200 at 28
+     digits), so the scenario carries `210 × 1/3` — exactly 70 multiply-first,
+     `69.999…99` parenthesised — and then sells exactly 70, which is the measured 賣超
+     cascade. Same-day trades sit on two action dates, without which the whole event
+     ordering is unobservable.
+  4. `corp.xirr_blanked_by_unapplied` — an unapplied action blanks XIRR **portfolio-wide**
+     (D38 invariant 2) and the reason names the account, symbol and date. Two of the three
+     refusal shapes leave no surviving position to flag, so no holdings-level check can
+     see them at all.
 - **Per-(account, currency) cash pool** — every pool balance, **and** the reconstructed
   running-balance **statement terminal** (deposits/withdrawals + trade settlements + FX
   legs + cash dividends) equals the app's reported balance.

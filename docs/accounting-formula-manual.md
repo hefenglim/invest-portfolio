@@ -1,7 +1,7 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.6`（2026-08-01）
-> **程式碼基線**：`v0.1.25`（外幣成本基礎 + 宣告式賣空）
+> **版本**：`v1.7`（2026-08-11）
+> **程式碼基線**：`v0.1.28 + feat/corporate-actions`（公司行動 SPLIT／EXCHANGE／SPINOFF）
 > **仲裁狀態**：**已由 owner 正式簽署（2026-07-15）**，自版本 **v0.1.19** 起正式生效為站上任何
 > 「金額爭議」的**唯一仲裁標準**（arbitration standard）。
 > **語言例外**：本文件採**繁體中文正文 + 英文技術識別字**（欄位／資料表／函式名），為一份 owner
@@ -12,12 +12,13 @@
 > `data-and-pricing.md` …）仍為本文件所編纂之**工程正本**；本文件與程式碼、規則檔三者若有出入，以
 > 本文件標示之「已驗證」數字與其引用之程式碼為準，並回報衝突。
 >
-> **驗證基礎**：本文件所有帶數字之工作範例，均取自或核對於**合併後拓樸（Batch B）之常駐壓測實跑**——
-> 一組 **1,060 項對抗性對帳斷言**（adversarial reconciliation，`scripts/stress_audit/evidence/oplog.jsonl`
-> ＋ `scripts/stress_audit/evidence/assertions.jsonl`；phase-1 `--ui` 實跑 **66 ops、1,060/1,060 全數通過、
-> 0 fail**）。每一數字範例均標注其 `scope` 驗證錨點；場景依賴之終值另標其 phase（`phase1:final` 等）。手冊
-> 作者未自行捏造任何數字。**注意**：壓測場景會逐版演進（合併後場景與 v1.3-basis 之 966 項run 不同），故本版已
-> 就每一錨點重新對帳至上述當前實跑（見 §12.3 v1.4）。
+> **驗證基礎**：本文件所有帶數字之工作範例，均取自或核對於**常駐壓測實跑**——一組對抗性對帳斷言
+> （adversarial reconciliation，`scripts/stress_audit/evidence/oplog.jsonl` ＋
+> `scripts/stress_audit/evidence/assertions.jsonl`）。**本版（v1.7）就地清點之當前實跑**：phase-1
+> **118 ops、3,791/3,791 全數通過、0 fail**；phase 2（線上 demo）**1,192 斷言、0 fail**。每一數字範例均標注
+> 其 `scope` 驗證錨點；場景依賴之終值另標其 phase（`phase1:final`、`phase1:corp_applied` 等）。手冊作者未
+> 自行捏造任何數字。**注意**：壓測場景會逐版演進（v1.6 為 77 ops／1,806 斷言；公司行動場景 `CA*` 於本版
+> 加入），故每次改版須就當前實跑重新對帳（見 §12.3）。
 
 ---
 
@@ -26,7 +27,7 @@
 1. [總則與精度規範](#1-總則與精度規範)
 2. [帳戶／市場／幣別模型](#2-帳戶市場幣別模型)
 3. [費用與交易稅公式](#3-費用與交易稅公式)
-4. [成本基礎（加權平均）](#4-成本基礎加權平均)
+4. [成本基礎（加權平均、宣告式賣空、**公司行動**）](#4-成本基礎加權平均)
 5. [已實現／未實現損益](#5-已實現未實現損益)
 6. [股息三模型](#6-股息三模型)
 7. [總報酬與報酬率（含 XIRR）](#7-總報酬與報酬率含-xirr)
@@ -42,7 +43,7 @@
 
 ### 1.1 仲裁條款（Arbitration Clause）
 
-站上任一顯示金額若生爭議，**依本手冊對應章節之公式 + 其引用之四本永久帳本（ledgers）逐筆重算**（重算
+站上任一顯示金額若生爭議，**依本手冊對應章節之公式 + 其引用之五本永久帳本（ledgers）逐筆重算**（重算
 ／replay），重算結果即為裁定值。任何 UI 顯示、快取、或口頭記憶皆不得凌駕帳本重算。裁定程序見
 [§12.4 如何仲裁](#124-如何仲裁一個爭議金額)。
 
@@ -92,10 +93,17 @@
 
 ### 1.4 重算原則（Rebuild / 重算）
 
-四本**永久真實來源**：`opening_inventory`（期初庫存）、`transactions`（交易）、`dividends`（股利）、
-`fx_conversions`（換匯）。**所有**衍生數字（持倉、成本、已實現／未實現、報酬、換匯損益、現金餘額）皆
-於讀取時由這四本**按日期順序重播（replay）**算出，不以「算好的結果」作為真實來源（除非量測顯示需
-快取）。裁定時一律以重算為準。
+五本**永久真實來源**：`opening_inventory`（期初庫存）、`transactions`（交易）、`dividends`（股利）、
+`fx_conversions`（換匯）、**`corporate_actions`（公司行動，§4.4）**。**所有**衍生數字（持倉、成本、
+已實現／未實現、報酬、換匯損益、現金餘額）皆於讀取時由這五本**按日期順序重播（replay）**算出，不以
+「算好的結果」作為真實來源（除非量測顯示需快取）。裁定時一律以重算為準。
+
+> **`corporate_actions` 於 2026-08 加入為第五本**（公司行動 spec §3）。它與其他四本同為**帳本列**：
+> 公司行動**永不**編輯既有交易列，也**永不**是套用在算好結果上的調整；它是一列被重播讀入的資料，故
+> 「`original_cost` 永不被覆寫」（I2）仍然成立——重播累加器上的 `original_total` 被 EXCHANGE 歸零、被
+> SPINOFF 縮放，但下一次重算仍由**未改變的同一批帳本列**重建出同樣的值。**遺漏此本帳本重算，會得到
+> 一個「看起來完全正常、卻按行動前股數計價」的錯誤金額**——這正是裁定時最危險的失敗形態。
+> 帳本目錄之唯一宣告處：`shared/ledger_registry.py::LEDGER_TABLES`。
 
 > **實作位置**：`shared/money.py`、`shared/fx.py`、`data_ingestion/store.py`、`pricing/store.py`、
 > `portfolio/cost_basis.py`。
@@ -320,9 +328,15 @@ $$\text{original\_avg} = \frac{\text{original\_total}}{\text{shares}}\qquad \tex
 
 ### 4.1 逐事件重播（chronological replay）
 
-`cost_basis.py::build_book` 將四本帳按 **(日期, 同日優先序)** 排序後逐筆重播。**同日優先序**：
+`cost_basis.py::build_book` 將五本帳按 **(日期, 同日優先序)** 排序後逐筆重播。**同日優先序**（唯一宣告
+處 `shared/ledger_events.py::EventPriority`）：
 
-$$\text{opening}(0) \prec \text{buy}(1) \prec \text{sell}(2) \prec \text{dividend}(3)$$
+$$\text{OPENING}(0) \prec \textbf{CORPORATE\_ACTION}(10) \prec \text{BUY}(20) \prec \text{SELL}(30) \prec \text{DIVIDEND}(40)$$
+
+> **序號自 2026-08 由 0/1/2/3 改為 0/10/20/30/40**，公司行動插入於期初與買進之間（§4.4.3 說明「為何是
+> 這個位置」）。間隔 10 使日後插入新事件型別**不需改動任何既有值**；序號為**具名列舉**而非散落的字面
+> 常數，因為更新兩處而漏掉第三處會產生一個**排序錯誤但看似正常**的重播。**相對順序未變**，故不含公司
+> 行動之帳本，其重播結果與改動前逐位元相同。
 
 - **買入**：`cost = quantity×price + fees + tax`；`shares += quantity`；`original_total += cost`；
   `adjusted_total += cost`。
@@ -433,6 +447,413 @@ $$c_{\text{cover}} = \frac{q\times p + \text{fee} + \text{tax}}{q}\qquad
 > **實作位置**：`portfolio/cost_basis.py::build_book`、`_Position`；持倉結果 `portfolio/results.py::Holding`。
 > **依據**：`.claude/rules/domain-ledger.md`（Cost basis；Declared short sale 2026-07-31）。
 
+### 4.4 公司行動（SPLIT／EXCHANGE／SPINOFF）
+
+公司行動**改變股數而不移動任何現金**。交易帳本原本無法表達這件事：`transactions.side` 只有 `BUY` 與
+`SELL`，兩者都結算金錢。其後果不是少一行報表：一次無法登錄的 3-for-1 分割，會使**其後每一筆賣出**都超過
+帳上持股而被賣超護欄攔下——業主確認後，**STICKY 賣超**（§5.3）會**永久丟棄該部位的成本基礎**。該護欄是
+正確的、不得放寬；正確的修法是讓股數的變動**可被登錄**。本節即為此。
+
+**公司行動不是收入，也不是買進。** 它**不產生任何 `RealizedRow`**（§5.1），**不動 `gross_invested`**
+（§7.1），**不進入 XIRR 現金流**（§7.2）——它只是把既有的基礎重新標記與重新計價。
+
+> **規範來源**：`docs/spec/2026-08-06-corporate-actions.md`（owner 裁定 D1–D39）。本節之三式與欄位移轉表
+> **逐字引用**該規格，**不以本手冊自己的話重述**：一份被改寫的公式就是第二個真實來源，而第二個真實來源
+> 終將與第一個漂移（此專案已多次因此受傷）。
+
+#### 4.4.1 帳本列與守恆律（conservation law）
+
+**第五本永久帳本** `corporate_actions`（§1.4）：`account_id`、`date`（生效日）、`kind`（`SPLIT` /
+`EXCHANGE` / `SPINOFF`）、`from_symbol`、`to_symbol`、`ratio_to`、`ratio_from`、`cost_carry`、`note`。
+
+一筆公司行動只是把**既有部位**重新標記／重新計價，不創造也不銷毀任何東西。故於行動生效之瞬間，**在同一
+報價幣內**（此即本節唯一的驗收標準）：
+
+| 量 | 行動前後 | 備註 |
+| --- | --- | --- |
+| Σ `original_total`（全部部位） | **不變** | SPLIT 不動；EXCHANGE `−P + P = 0`；SPINOFF `−c·P + c·P = 0` |
+| Σ `adjusted_total` | **不變** | 同上 |
+| Σ `dividend_portion`（= Σorig − Σadj） | **不變** | 由上兩列導出 |
+| `gross_invested` | **不變** | 僅 `opening` 與 `buy` 會增加它 |
+| Σ `shares × price` | **不變（僅 SPLIT）** | 見下方限制說明 |
+
+**價值腿僅適用於 SPLIT。** 只有分割會同時重新計價**股數與價格**（§4.4.7 之 E17／價格基礎）；EXCHANGE 是
+**併入**目的部位而非重新計價它，SPINOFF 的子公司則從行動日**開始**自己的價格序列。故一筆換股若目的標的
+的價格序列缺漏或以不同單位報價，**四條基礎腿全部相等而價值腿會跳動**——這是**守恆律的盲點，不是它被違
+反**（基礎確實守恆）。此盲點由 D19（匯入時把券商識別碼正規化為股票代號，使其被記為 SPLIT）與 E23（對
+已存在之可疑列以 賣超 層級的 `needs_confirm` 提醒，並提供一鍵轉為 SPLIT）處理。
+
+**兩個刻意的例外**——兩者皆為真實經濟事件，故**不應**被守恆，且皆記在行動列**之外**：
+
+1. **零股現金（cash in lieu）** → 一筆**普通賣出**（§4.4.3）。真實處分、真實已實現損益。
+2. **重組費（reorganisation fee）** → 一筆 `WITHDRAW` 現金支出（§4.4.7 限制 2）。真實成本。
+
+#### 4.4.2 比例是有理數，且求值順序具規範性
+
+比例以**兩個正整數**儲存（`ratio_to` / `ratio_from`），**永不存成單一小數**。小數比例是**四捨五入後的
+商**，而 §1.3 禁止把四捨五入後的商當作權威值——與 I7「均價永不儲存、一律 on read 相除」同一條原則。
+「3-for-1」= `(to=3, from=1)`；「1-for-10」= `(1, 10)`；「2-for-7」= `(2, 7)`。
+
+$$\boxed{\text{new\_shares} = \text{shares} \times \text{ratio\_to} \div \text{ratio\_from}}\qquad(\textbf{先乘、後除})$$
+
+**先乘後除是正確性要求，不是風格偏好。** 本手冊作者以專案自身的直譯器實測（`.venv/Scripts/python.exe`）：
+
+| 算式 | 先乘後除 | 加括號的商 | 相等？ |
+| --- | ---: | ---: | :---: |
+| `210 × 1 / 3` | **70** | `69.99999999999999999999999999` | ✗ |
+| `3 × 1 / 3` | **1** | `0.9999999999999999999999999999` | ✗ |
+| `935 × 18 / 17` | **990** | `989.9999999999999999999999998` | ✗ |
+| `700 × 2 / 7` | **200** | `200.0000000000000000000000000` | ✓（此例恰好相等） |
+
+`data_ingestion/validate.py` 以**裸 `>`、無 epsilon** 比較賣出量與持股。故 `210 × (1/3)` 得到的
+69.999…9 會使一筆「賣光 70 股」被判為賣超 → 業主確認 → **STICKY 丟棄成本基礎**：本節存在所要防止的災難，
+由算式的求值順序自行重製。窮舉掃描（股數 1–1,000 × `to` 1–20 × `from` 1–20 = 400,000 組）中有 **3,530
+組跨越整數邊界**。
+
+**唯一實作出口**：`shared/corporate_actions.py::apply_ratio`。該模組**刻意不提供**任何回傳商
+（`to / from`）的屬性——暴露一個商，等於把四捨五入後的小數重新放回每個呼叫端手上，那正是它要防止的缺陷。
+
+**兩項規則缺一不可。** 求值順序保護的是**算術**；它對**輸入**毫無作用。`ratio_to = 0.2857` 滿足
+「`Decimal > 0`」、能通過 CSV 匯入與 API，並完整重製上述連鎖反應——且其誤差量級（~5×10⁻⁵）比求值順序
+（~10⁻²⁷）大得多，**在任何規模都會咬人**。故 `ratio_to`／`ratio_from` **兩項皆須為正整數**，於驗證階段
+強制（E6a）。
+
+#### 4.4.3 生效時點、同日優先序、零股現金
+
+公司行動於其生效日的**起始**生效：同日的買賣是以**行動後**的條件報價（分割後價格、新代號），故行動必須
+先套用。同日優先序見 §4.1（`OPENING(0) ≺ CORPORATE_ACTION(10) ≺ BUY(20) ≺ SELL(30) ≺ DIVIDEND(40)`）。
+**同日的期初庫存視為行動前**（它描述的是行動前的部位狀態）——此點在入帳時另發一則軟性提醒，因為它本質
+上是有歧義的。
+
+**零股現金（cash in lieu）**：反向分割與多數分拆會湊整並以現金支付零股。該現金是**真實處分**、有真實
+損益，故記為一筆**普通賣出**（成交價 = 收到現金 ÷ 零股數），**永不**併入行動列——行動列的唯一職責是
+**精確地**套用比例。範例見 §4.4.5(e)。
+
+#### 4.4.4 三式（規範形式，逐字引用規格 §4.1／§4.2／§4.3）
+
+`P` = `(account, from_symbol)` 之部位，`Q` = `(account, to_symbol)`。下列每一個 `× ratio` 都指
+`× ratio_to / ratio_from`，**先乘後除**（§4.4.2）。
+
+**SPLIT（`from_symbol == to_symbol`）**
+
+```
+P.shares          := P.shares × ratio_to / ratio_from
+P.short_shares    := P.short_shares × ratio_to / ratio_from     # see E4
+P.original_total  := unchanged
+P.adjusted_total  := unchanged
+P.short_proceeds  := unchanged
+```
+
+兩個總額皆不動，故兩個均價於**讀取時**自動除以新股數（各按 `1/ratio` 縮放，I7）；`dividend_portion` 與
+`payback_ratio`（§6.4）亦不變——分割本就不改變「成本已被股利回收多少」。`ratio > 1` 為順向分割、
+`ratio < 1` 為反向分割，**同一式涵蓋兩者**。
+
+**EXCHANGE（整個部位移轉到新代號）**
+
+```
+carried_shares    := P.shares × ratio_to / ratio_from
+Q.shares          += carried_shares
+Q.original_total  += P.original_total
+Q.adjusted_total  += P.adjusted_total
+Q.unbookable_dividend |= P.unbookable_dividend      # E19
+P.shares          := 0
+P.original_total  := 0
+P.adjusted_total  := 0
+```
+
+涵蓋 de-SPAC 轉換、併購、以及純代號／CUSIP 更名（`ratio = 1`）。若 `Q` 已持有部位，兩者以**加權平均**
+合併——即總額相加除以股數相加，正是加權平均法本來的規定，**無特例**。`gross_invested` **不動**（無新資金
+進入）。
+
+**SPINOFF（母公司保留部位，子公司誕生）**
+
+```
+c                 := cost_carry          # fraction of the parent's basis moving to the child
+Q.shares          += P.shares × ratio_to / ratio_from    # child shares per parent share
+Q.original_total  += P.original_total × c
+Q.adjusted_total  += P.adjusted_total × c
+Q.unbookable_dividend |= P.unbookable_dividend           # E19 — the child inherits it too
+P.original_total  := P.original_total − (P.original_total × c)
+P.adjusted_total  := P.adjusted_total − (P.adjusted_total × c)
+P.shares          := unchanged
+```
+
+母公司寫成 **`total − carved`，而非 `total × (1 − c)`**：代數上相同，數值上不同——`1 − c` 捨入一次、
+`× (1−c)` 又捨入一次。實測反例（`.venv` 實跑）：`total = 3`、`c = 0.6666666666666666666666666667` 時
+`total − total×c = 1.000000000000000000000000000`，而 `total × (1−c) = 0.9999999999999999999999999999`
+（差 `1E-28`）。**減去恰好加給子公司的那個金額**，使 Σ`original_total` 的守恆**由構造成立**，而非碰巧
+成立。（在下方 CA7 範例的 `c = 0.30` 兩式恰好相同——此規則管的是一般情形，不是這個例子。）
+
+`cost_carry` 來自公司 Form 8-K 的配置比例，**永不臆測、內插或給預設值**；缺此值的 SPINOFF 列於驗證階段
+即被拒（與 FX 池的 `acq_home_amount`、DRIP 的 `reinvest_shares` 同一立場）。母公司的份額**不儲存**，於
+讀取時以 `1 − c` 求得，故母子兩側恰好加總為 1、無捨入外洩（同「均價 on read」之理）。
+
+**完整欄位移轉表（規範，逐字引用規格 §4.4）** — `_Position` 有**九個**欄位，每一個都有明文規則，因為
+「公式沒提到它」不是規格：
+
+| 欄位 | SPLIT (P) | EXCHANGE: source P → dest Q | SPINOFF: parent P → child Q |
+| --- | --- | --- | --- |
+| `quote_ccy` | unchanged | Q keeps its own; E11 guarantees they match | same |
+| `shares` | `× to / from` | `P := 0`; `Q += P.shares × to / from` | `P` unchanged; `Q += P.shares × to / from` |
+| `original_total` | unchanged | `P := 0`; `Q += P.original_total` | `Q += P.original_total × c`; `P −= (that same amount)` |
+| `adjusted_total` | unchanged | `P := 0`; `Q += P.adjusted_total` | `Q += P.adjusted_total × c`; `P −= (that same amount)` |
+| `short_shares` | `× to / from` (E4) | **`P := 0`** — 見下 | unchanged (E5 guarantees 0) |
+| `short_proceeds` | unchanged (E4) | **`P := 0`** — 見下 | unchanged (E5 guarantees 0) |
+| `ever_oversold` | unchanged | **SOURCE** is `False` (E3 rejects). **DESTINATION** must be `False` too — **E22** rejects the action otherwise; nothing is transferred | same (E22 applies to the child's destination as well) |
+| `unbookable_dividend` | unchanged | OR-ed into Q: `Q.unbookable_dividend \|= P.unbookable_dividend` (E19) | same OR into the child (E19); `P` keeps its own |
+| `unbookable_action` | unchanged | OR-ed into Q: `Q.unbookable_action \|= P.unbookable_action` | same OR into the child; `P` keeps its own |
+
+- **EXCHANGE 必須明文歸零兩個放空欄位，即使 E5 已保證它們「是 0」。** 它們是**幾乎** 0、不是 0：全數回補
+  會算 `P − (P/S)×S`，而 `S` 不整除 `P` 時 Decimal 除法不精確，故殘留一個 `ε`。今日它看不見（發出的
+  `shares` 是 `0 − 0`，持倉迴圈直接丟棄該部位）；但 EXCHANGE 會把來源部位以**仍然活著**的語意留在部位
+  表中，日後在舊代號上的一筆買進就會讓它帶著 `−ε` 的基礎復活。
+- **`unbookable_action` 會傳染**，理由與 E19 相同：帶著「被跳過的行動」的部位，其股數處於**行動前的
+  單位**卻對上**行動後的價格**；把它移到後繼標的而不帶旗標，等於洗掉這個旗標存在的目的。注意它與
+  `shares` 的不對稱——旗標 OR 進目的部位，而**來源保留自己的**，因為在儀表板路徑上來源可能仍是活部位。
+
+**子公司的回本進度必須標示來源（D21）。** 兩個總額同乘 `c`，故 `c` 在比值中約分：
+
+$$\text{child payback} = \frac{c\,(\text{orig}-\text{adj})}{c\cdot\text{orig}} = \frac{\text{orig}-\text{adj}}{\text{orig}} = \text{母公司的 payback，完全相同}$$
+
+實測（借用 CA9 已錨定的兩個總額 60,085／56,085 作為輸入；**CA9 本身不是分拆**，此處僅示範該恆等式）：
+`c = 0.30` 與 `c = 0.5831` 皆得
+`0.06657235582924190729799450778`，與母公司**逐位元相同**。於是一家去年才分拆、從未發過股利的子公司會
+顯示「已回收 6.66% 成本」——在加權平均下**數字本身是誠實的**（基礎承接過來，回收也隨之承接），**標籤
+卻不是**。規則：凡部位之基礎源自 SPINOFF carve-out，回本進度須帶來源標示——「已回收 X.XX%（承接自
+`<parent>`）」——`fully_recovered`（已回本，§6.4）同樣帶此標示。**這是標籤裁定，不是計算修正：算式不變。**
+（`cost_carry == 1`（E9）是**遷移**而非複製：母公司保留股數但基礎為零，於是**實際收過所有股利的那一方**
+讀出 0.00%，而子公司讀出全額。）
+
+#### 4.4.5 已驗證工作範例（每例附驗證錨點）
+
+以下範例取自常駐壓測 phase-1 之 `CA*` 場景（`scripts/stress_audit/run_phase1.py::run_corporate_actions`），
+帳戶 `tw_broker`（TWD；費用 floor 至整數、min NT$20；賣出稅 0.3%，§3.1）。每一筆費用另有各自的
+`fee_engine.fee` / `fee_engine.tax` 錨點，故範例中**沒有任何一個數字是手冊作者自行捏造的**。
+
+**(a) SPLIT — `tw_broker/CA1`，3-for-1，且同日有一筆賣出**
+
+| 日期 | 事件 | 逐步 |
+| --- | --- | --- |
+| 2026-02-03 | 買 100 @ 600 | 名目 60,000；fee `⌊60,000×0.1425%⌋ = ⌊85.5⌋ = 85`；`original_total = adjusted_total = 60,085` |
+| 2026-03-02 | **SPLIT 3-for-1** | `shares = 100 × 3 / 1 = 300`；**兩個總額不變**（60,085）；`original_avg = 60,085/300 = 200.2833…` |
+| 2026-03-02 | 賣 40 @ 205 | **同日**：`SELL(30)` 排在 `CORPORATE_ACTION(10)` 之後，故此筆是行動**後**的股數與價格。fee `max(⌊8,200×0.1425%⌋, 20) = max(11, 20) = 20`；tax `⌊8,200×0.3%⌋ = 24`；`proceeds_net = 8,200 − 20 − 24 = 8,156` |
+| | 比例移除 | `frac = 40/300`；`adjusted_removed = 60,085 × 40/300 = 8,011.333333333333333333333331` |
+| | 已實現 | `8,156 − 8,011.3333… = 144.666666666666666666666669` |
+| | 期末 | `shares = 300 − 40 = 260`；`original_total = 52,073.66666666666666666666667` |
+
+> **驗證錨點**：`corp.anchor.split_forward`，`scope = tw_broker/CA1.shares = 260`（`phase1:anchor`）；
+> `export.holdings.shares` / `export.holdings.original_cost_total`，`scope = tw_broker|CA1`
+> （`phase1:corp_applied` = 260 / 52,073.666…67）；`realized.proceeds_net` = 8,156、
+> `realized.adjusted_removed` = 8,011.333…331、`realized.realized` = 144.666…669、`realized.kind` = `sale`，
+> `scope = tw_broker/CA1@2026-03-02`；`fee_engine.fee/tax`，`scope = tw_broker/CA1 buy 100@600`（85 / 0）
+> 與 `tw_broker/CA1 sell 40@205`（20 / 24）。
+
+**(b) SPLIT 落在已被股利調整的部位上 — `tw_broker/CA9`，2-for-1**
+
+| 日期 | 事件 | 逐步 |
+| --- | --- | --- |
+| 2026-02-21 | 買 200 @ 300 | fee `⌊85.5⌋ = 85`；`original_total = adjusted_total = 60,085` |
+| 2026-03-05 | 現金股利 net 4,000 | `adjusted_total = 60,085 − 4,000 = 56,085`（§6.1 降成本）；`dividend_portion = 4,000` |
+| 2026-04-02 | **SPLIT 2-for-1** | `shares = 200 × 2 / 1 = 400`；**兩個總額都不動**（60,085 / 56,085） |
+| | 讀取時 | `original_avg = 60,085/400 = 150.2125`；`adjusted_avg = 56,085/400 = 140.2125` |
+| | 不變量 | `dividend_portion` 仍為 **4,000**；`payback_ratio = 4,000/60,085 = 0.06657235582924190729799450778`，**行動前後完全相同** |
+
+> **驗證錨點**：`corp.anchor.split_shares_dividend_adj`（`tw_broker/CA9.shares = 400`）與
+> `corp.anchor.split_keeps_dividend_portion`（`tw_broker/CA9.dividend_portion = 4000`），皆 `phase1:anchor`；
+> `export.holdings.original_cost_total / adjusted_cost_total`，`scope = tw_broker|CA9` = 60,085 / 56,085
+> （`phase1:corp_applied`）；`fee_engine.fee`，`scope = tw_broker/CA9 buy 200@300` = 85。
+
+**(c) EXCHANGE — `tw_broker/CA3 → CA4`，1-for-2，併入一個已持有的部位**
+
+| 日期 | 事件 | 逐步 |
+| --- | --- | --- |
+| 2026-02-11 | 買 CA4 40 @ 500（**目的標的已持有**） | fee `⌊28.5⌋ = 28`；`CA4.original_total = 20,028` |
+| 2026-02-12 | 買 CA3 100 @ 200 | fee `⌊28.5⌋ = 28`；`CA3.original_total = 20,028` |
+| 2026-03-16 | **EXCHANGE 1-for-2** | `carried = 100 × 1 / 2 = 50` |
+| | 目的 `Q` = CA4 | `shares = 40 + 50 = 90`；`original_total = 20,028 + 20,028 = 40,056`；`original_avg = 40,056/90 = 445.0666…` |
+| | 來源 `P` = CA3 | `shares := 0`、`original_total := 0`、`adjusted_total := 0` |
+| | **守恆** | Σ`original_total`：行動前 40,056 → 行動後 40,056 ✓ |
+
+> **驗證錨點**：`corp.anchor.exchange_merge`，`scope = tw_broker/CA4.shares = 90`（`phase1:anchor`）；
+> `export.holdings.original_cost_total`，`scope = tw_broker|CA4` = **40,056**（`phase1:corp_applied`，且
+> `corp_refused` / `final` 皆同值）；`fee_engine.fee`，`scope = tw_broker/CA4 buy 40@500` = 28 與
+> `tw_broker/CA3 buy 100@200` = 28。
+
+**(d) SPINOFF — `tw_broker/CA7 → CA8`，1-for-4，`cost_carry = 0.30`**
+
+| 日期 | 事件 | 逐步 |
+| --- | --- | --- |
+| 2026-02-19 | 買 CA7 400 @ 250 | 名目 100,000；fee `⌊100,000×0.1425%⌋ = ⌊142.5⌋ = 142`；`original_total = 100,142` |
+| 2026-03-24 | **SPINOFF 1-for-4，`c = 0.30`** | 子公司股數 `= 400 × 1 / 4 = 100`；子公司基礎 `= 100,142 × 0.30 = 30,042.60` |
+| | 母公司（`total − carved`） | `100,142 − 30,042.60 = 70,099.40` |
+| 2026-03-24 | 買 CA7 100 @ 190（**同日**） | `BUY(20)` 排在 `CORPORATE_ACTION(10)` 之後，故 carve 用的是**行動前的 400 股**。fee `⌊27.075⌋ = 27`；all-in 19,027 |
+| | 母公司期末 | `shares = 400 + 100 = 500`；`original_total = 70,099.40 + 19,027 = 89,126.40`；`original_avg = 178.2528` |
+| | 子公司期末 | `shares = 100`；`original_total = 30,042.60`；`original_avg = 300.426` |
+| | **守恆** | Σ`original_total`：`100,142` → `30,042.60 + 70,099.40 = 100,142.00` ✓ |
+| | **順序可觀測** | 若行動排在同日買進**之後**，子公司會是 `500 × 1/4 = 125` 股（實測）——這正是同日優先序為何是規範而非慣例 |
+
+> **驗證錨點**：`corp.anchor.spinoff_child`（`tw_broker/CA8.shares = 100`）、`corp.anchor.spinoff_parent`
+> （`tw_broker/CA7.shares = 500`）、`corp.anchor.spinoff_child_basis`
+> （`tw_broker/CA8.original_cost_total = 30042.60`）、`corp.anchor.spinoff_parent_basis`
+> （`tw_broker/CA7.original_cost_total = 89126.40`），皆 `phase1:anchor`；`fee_engine.fee`，
+> `scope = tw_broker/CA7 buy 400@250` = 142 與 `tw_broker/CA7 buy 100@190` = 27。
+
+**(e) 反向分割與零股現金 — `tw_broker/CA2`，1-for-10**
+
+| 日期 | 事件 | 逐步 |
+| --- | --- | --- |
+| 2026-02-05 | 買 705 @ 30 | fee `max(⌊21,150×0.1425%⌋, 20) = max(30, 20) = 30`；`original_total = 21,180` |
+| 2026-03-10 | **SPLIT 1-for-10** | `shares = 705 × 1 / 10` = **70.5**——比例**精確**套用，**不**湊整 |
+| 2026-03-12 | 零股現金 → **普通賣出** 0.5 @ 300 | fee `max(⌊150×0.1425%⌋, 20) = max(0, 20) = 20`；tax `⌊150×0.3%⌋ = 0`；`proceeds_net = 130.0` |
+| | 比例移除 | `frac = 0.5/70.5`；`adjusted_removed = 150.2127659574468085106382979` |
+| | 已實現 | `130.0 − 150.2127…9 = −20.2127659574468085106382979`（**真實的、負的**已實現損益——此處由 NT$20 最低手續費主導） |
+
+> **驗證錨點**：`corp.anchor.split_reverse`，`scope = tw_broker/CA2.shares = 70.5`（`phase1:anchor`）；
+> `realized.proceeds_net` = 130.0、`realized.adjusted_removed` = 150.212…979、`realized.realized` =
+> −20.212…979、`realized.kind` = `sale`，`scope = tw_broker/CA2@2026-03-12`；`fee_engine.fee/tax`，
+> `scope = tw_broker/CA2 buy 705@30`（30 / 0）與 `tw_broker/CA2 sell 0.5@300`（20 / 0）。
+
+**(f) 比例精確性所守護的東西 — `tw_broker/CAR`，1-for-3 於 210 股**
+
+`210 × 1 / 3` = **70**（精確）。同一筆若寫成 `210 × (1/3)` 會得到 `69.99999999999999999999999999`，
+而 `validate.py` 的裸 `>` 會據此**拒絕**其後一筆「賣光 70 股」的交易。壓測中該筆賣出**成功以 201 提交**。
+
+> **驗證錨點**：`corp.anchor.split_ratio_exact`，`scope = tw_broker/CAR.shares = 70`（`phase1:anchor`）；
+> `corp.sell_exact_ratio_accepted`，`scope = tw_broker/CAR sell 70 (== 210 x 1/3)` = 201（`phase1:corp`）。
+> 同型另一例：`corp.anchor.exchange_2for7`（`tw_broker/CA6.shares = 200`，即 `700 × 2 / 7`）與
+> `corp.sell_exact_200_accepted` = 201。
+
+#### 4.4.6 邊界矩陣（E1–E24）
+
+「**嚴格路徑**」= `allow_oversell=False`（重算／試算／稅務匯出）；「**儀表板路徑**」= `allow_oversell=True`。
+拒絕一律以 `UnbookableLedgerError`（`ValueError` 子類，故既有降級點不受影響）表達；「跳過並標記」
+指跳過該事件並將部位標為 `unbookable_action`（**待釐清**）。此矩陣**不只是快樂路徑**：一份只記錄快樂路徑
+的手冊，正是業主學到錯誤模型的方式。
+
+| # | 情形 | 嚴格路徑 | 儀表板路徑 |
+| --- | --- | --- | --- |
+| E1 | 行動落在**從未持有**的標的 | 拒絕——憑空生一個部位等於發明一筆 $0 成本的幽靈持股 | 跳過 + 標記（見 E1a） |
+| E1a | 同上，於**儀表板**路徑 | — | **必須跳過、不可 raise**：`portfolio/dashboard.py` 呼叫 `build_book` **沒有** try/except，raise 即 500，違反「每一個 `build_book` 呼叫點都不得 500」的既有規則。另含入帳期驗證（來源部位須**於行動日**存在）與刪除交易／期初列時的再驗證 |
+| E2 | 行動落在**已結清（0 股）**的部位——判準**只看股數** | 拒絕（zh 訊息） | 跳過該事件，標記部位 |
+| E3 | 行動落在**賣超**部位（`ever_oversold`，基礎已被丟棄） | 拒絕 | 跳過；賣超旗標保留。**縮放一個未定義的基礎，結果仍未定義** |
+| E4 | **SPLIT 落在未平倉的宣告式空倉** | 支援：`short_shares × ratio`、`short_proceeds` **不變**。欠更多股、但收到的錢一樣多，故放空均價正確地縮放 | 同左 |
+| E5 | **EXCHANGE／SPINOFF 落在未平倉的宣告式空倉** | 拒絕——沒有任何誠實的分錄（先例：放空期間之股利，§4.3） | 跳過 + 標記 |
+| E6 | `ratio_to`／`ratio_from` ≤ 0、非數值、或非有限 | **驗證階段**拒絕，永不進入重播。`ratio_from == 0` 會是重播**內部**的除以零，即儀表板 500，故此拒絕是承重的 | — |
+| **E6a** | **非整數的比例項**（如 `ratio_to = 0.2857`），來自任何路徑 | **驗證階段**拒絕（D14）。「表單有兩個欄位」不算防線：表單只約束表單，CSV 匯入與 API 兩條路都曾接受小數並完整重製 §4.4.2 的連鎖反應。單欄位的舊格式匯入是**硬解析錯誤**，永不強制轉換 | — |
+| E7 | **SPLIT** 的 `ratio == 1` | 入帳時軟性提醒（空操作列）。**僅限 SPLIT**——EXCHANGE 的 `ratio == 1` 是一般的更名，**不得**提醒 | — |
+| E8 | `cost_carry` 不在 `[0,1]`，或 SPINOFF 缺此值 | 驗證階段拒絕 | — |
+| E9 | SPINOFF 的 `cost_carry == 1` | 軟性提醒：母公司保留股數但基礎為**零**——合法，但幾乎必然是資料錯誤（且會使真正收過股利的一方回本進度讀為 0.00%，見 §4.4.4） | — |
+| E10 | `from_symbol` **或** `to_symbol` 未登錄於 `instruments` | 驗證階段拒絕，導向既有的「先登錄」流程，且**永不為了讓行動成立而自動登錄** | — |
+| E11 | 兩個標的的**報價幣不同** | 驗證階段拒絕。跨幣別搬運基礎需要行動日匯率，發明一個就會汙染基礎 | — |
+| E12 | 同日、同帳戶、**標的集合相交**的兩筆行動 | **驗證階段拒絕**（D15），不做 tie-break。以 `id` ASC 排序只是「業主打字的順序」偽裝成經濟順序，而兩種順序**產生不同的金額**（實測 600 股 vs 200 股）；且守恆律**看不見**它（兩者 Σ 皆相同）。真正的兩步事件請記為**一列**（反向分割 + 更名就是一筆 EXCHANGE），或把日期拆開 | — |
+| E13 | 同一標的**存在於兩個帳戶** | **全有或全無**（D13）。部位以 `(account, symbol)` 為鍵，故 N 個帳戶需 N 列；**部分套用於驗證階段拒絕**。未套用的帳戶會拿**行動前的股數**去對上**行動後的價格**（`prices` 無 `account_id`，價格修正是全域的），而所有既有檢查都會是綠燈——缺陷活在股數與價格**之間**，系統沒有任何一處計算這個關係 | — |
+| E14 | 一筆**回溯到行動之前**的賣出，事後才輸入 | 由日期感知護欄處理——**前提是** `shares_through` 會套用公司行動。這是最容易漏掉的整合點 | — |
+| **E15** | **完全相同的行動被輸入兩次** | **驗證階段硬拒絕**（D29），且必須排在 **E12 之前**，並有自己的訊息。行動是**事件**不是交易：沒有任何帳本會讓同一天兩筆相同的 3-for-1 都正確。確認後放行等於**把比例套用兩次**（3-for-1 變 9-for-1） | — |
+| E16 | **編輯／刪除**一筆行動會**重算歷史** | 意圖如此（§10、`domain-ledger.md` N2）。與其他帳本編輯一樣進 `ledger_audit` | — |
+| E17 | **既存價格基礎 vs 行動** | 見 §4.4.7「價格基礎」：以**成交當時**的計價為權威、於寫入接縫還原、以 `fetched_at` 判別修正、讀取時再表述 | — |
+| **E18** | **EXCHANGE／SPINOFF 的 `to_symbol` 持有未平倉空倉** | 拒絕。`Q.shares +=` 會破壞長／空**由構造互斥**的前提，發出的持倉將是「真實成本基礎混著放空價款」，均價失去意義，`abs(cost_total)` 比率與 `fully_recovered` 閘門雙雙失準 | 跳過 + 標記 |
+| **E19** | EXCHANGE／SPINOFF **來源帶有 `unbookable_dividend`** | 允許——但旗標**傳染**（`Q \|= P`）。行動本身是合法的，因為一個無關的舊資料問題而封殺它並不合理；但若不傳染，來源會因 0 股被丟棄，**未解決的金額問題就被一個無關事件抹掉**了 | 同左 |
+| **E20** | `to_symbol` 與 `from_symbol` 的**每種 kind 的一致性** | SPLIT **要求** `to == from`；EXCHANGE 與 SPINOFF **拒絕** `to == from`。自我 EXCHANGE 會歸零再加回、偽裝成更名卻悄悄按 ratio 重新縮放；自我 SPINOFF 會把 `c` 的基礎切出來又加回同一個部位，**重複計算**。三者皆於驗證階段強制 | — |
+| **E21** | 行動引用了**未登錄於 `instruments`** 的標的（經 CSV 匯入或事後刪除標的而繞過 E10） | 其兩個標的都必須加入儀表板的「未登錄跳過集」，否則 `quote_ccy()` 會 `KeyError` → **500**，且例外型別與其他所有降級路徑都不同 | 與該標的的其他列一起被跳過 |
+| **E22** | **EXCHANGE／SPINOFF 的 `to_symbol` 部位帶 `ever_oversold`** | 拒絕——E18 的鏡像、E19 的更深一層：E19 阻止**旗標**被洗掉，這裡阻止**成本基礎**被復活到一個基礎已被刻意丟棄的部位上。實測：行動前讀「均價 0／未實現 +1,890」沒人相信；行動後讀「均價 33.33／未實現 −660」看起來再正常不過 | 跳過 + 標記 |
+| **E23** | **EXCHANGE、`ratio_to != ratio_from`、`to_symbol` 有既往價格、`from_symbol` 完全沒有** | **`needs_confirm`（賣超層級）**，非硬拒絕、也非被動通知。這四項合起來就是「券商識別碼」的簽名：真正的併購，其來源曾是掛牌證券、有價格。提供一鍵轉為 SPLIT。**確認後該列即以 EXCHANGE 入帳、價值斷崖仍在**（不對任一序列套價格因子），確認換到的是「這個不連續被記錄且被看見」，而不是它消失 | 同左 |
+| **E24** | **股利落在已被 EXCHANGE 搬走的標的上**（D32） | 拒絕，**兩條路徑一致**。EXCHANGE 會把來源留在部位表中且欄位歸零（§4.4.4，為了阻止 `−ε` 復活），故「部位存在」且「沒有空倉」兩個既有拒絕都不成立，該筆股利會直接入帳：CASH/NET 會在一個已死代號上記入清倉後已實現收益；DRIP/STOCK 會 `shares += reinvest_shares` **讓部位復活**於 `avg = 0`，而它已下市永遠拿不到價格，**一檔無價持股會讓整個投組的 XIRR 無限期空白** | 跳過該事件，標記部位（待釐清）；該筆請改記為**現金收支** |
+
+> **實作狀態註記（2026-08-11 就地查核，非規則的一部分）**：上列為**裁定規則**；若程式輸出與之不符，
+> 依 §12.4 步驟 4 屬**程式缺陷**。本次查核所見：
+>
+> - **重播已實作**（`cost_basis.py::_apply_action`）：E1、E1a（儀表板路徑跳過）、E2、E3、E4、E5、
+>   E18、E19、E22。
+> - **帳本載入已實作**（`shared/models/ledger.py::unregistered_symbols` / `without_unregistered`）：
+>   E21（行動之**兩個**標的都計入未登錄跳過集）。
+> - **股數走查已實作**（`data_ingestion/holdings.py`）：E14（日期感知護欄走行動感知路徑）。
+> - **價格基礎已實作**：E17（`pricing/schema.py`、`pricing/store.py`、`pricing/reconcile.py`、
+>   `portfolio/price_basis.py`）。
+> - **驗證已實作但尚無生產端呼叫者**（`data_ingestion/validate.py::validate_corporate_action`）：
+>   E6、E6a、E7、E8、E9、E10、E11、E12、E13、E15、E20、E23——入帳表面為後續工作包，在其接上之前
+>   這些拒絕與提醒**只在測試中生效**。
+> - **尚未實作：E24**（`_Position` 目前無區分「被行動歸零」與「一般清倉」的標記）。
+>
+> 此註記僅描述實作進度，**不改變上述任一列的裁定**。
+
+#### 4.4.7 價格基礎、已知限制與硬性排除
+
+**價格基礎（E17）。** 儲存的價格以「**成交當時的計價**」為權威。行情供應商對分割日**之前**的日期回傳的
+是**已還原**（post-split）的收盤價，而帳本對同一日的股數**沒有**被還原——兩者相乘即得到一個錯誤的市值。
+故：`prices` 以兩欄表達基礎——`close_raw`（供應商原樣交付的值，**不截位**）與 `split_basis`（已套用的
+因子），而 `close = close_raw × split_basis` 於寫入接縫**重算**（4 dp cap 套在**乘積**上，§1.3）；讀取
+時，若一個價格是**跨越分割日被沿用**的，再以 `portfolio/price_basis.py::split_factor` 重新表述成估值
+當日的股數單位。**因子只用於價格，永不用於股數**（股數走 §4.4.2 的兩項整數）。此再表述**限定於 SPLIT**：
+EXCHANGE 是併入目的標的而非重新計價它，若把因子擴及 EXCHANGE，會汙染任何一個**已持有**之併購目的標的
+的價格歷史。
+
+**（限制 1，長期有效）D11 — `volume` 不做還原。** 價格有 `close_raw` 可還原，`volume` 沒有對應的原始
+欄位，且供應商對成交量的還原方向**未經量測**——猜一個方向會違反本節所執行的同一條規則。故跨越分割日的
+**量能類訊號不可直接比較**。成交量不是「金額之記錄」（§12.5 class B），故此為**已接受並載明的長期限制**，
+而非缺陷；若日後要處理，正確作法是新增自己的 `*_raw` 欄位並連同因子一起帶走。
+
+**（限制 2）D12 — 重組費對 XIRR 不可見（設計如此）；帳戶層 IRR 會看見它（待 D36 實作）。**
+可登錄的現金收支只有 `DEPOSIT` / `WITHDRAW` / `OPENING` / `REBATE` 四種（`api/routers/cash.py::_KINDS`），
+其中只有 `WITHDRAW` 是借方（`portfolio/cash.py::_movement_sign`）。**裁定：重組費記為一筆 `WITHDRAW`
+並於 `note` 註明。** 其後果須明說：它在現金對帳單上讀起來像「業主提領」；它減少外幣池曝險卻不認列已實現
+換匯（§8、`domain-ledger.md` N1）；而 `portfolio/returns.py::xirr_reporting` 的流量序列**只由**
+`opening` + `transactions` + `dividends` 構成，故**現金收支永遠不會進入 XIRR**。
+
+> **這不是永久盲點（D36，owner 裁定 2026-08-10）。** XIRR **刻意維持不變**——因此每一個歷史數字、
+> 本手冊每一個已錨定的工作範例、以及壓測 oracle 的每一個期望值都**留在原處**；作法是**另加**一個
+> **帳戶層 IRR**（whole-account IRR）於既有的 `portfolio/twr.py`，而它**看得見** `WITHDRAW`。故重組費
+> 是「**對 XIRR 不可見（by design）、於帳戶層 IRR 可見**」。
+> **⚠ 待 D36（2026-08-11 就地查核）：`portfolio/twr.py` 目前只有 `twr_index` / `convert_closes` /
+> `build_overlay` 三個純函式，尚無任何 IRR。** 在該指標落地之前，重組費**在所有現行報酬指標中都看不見**。
+> 本段刻意寫成「待 D36」而非永久限制，因為把它寫成永久盲點，等於記錄一個業主已經推翻的裁定。
+> 此外，重組費屬於一整類「永遠到不了 XIRR」的項目（債券／融資利息、利息調整、ADR 管理費、外國稅退還），
+> 該類別的完整處理屬於券商匯入 backlog 的範圍——本節不為其中單一成員發明一個局部答案。
+
+**（硬性排除，D34）現金＋股票混合併購（cash-and-stock merger）。**「A 的每一股換 0.6 股 B 外加現金
+US$12.00」——**不新增第四種 kind，且沒有任何受支援的輸入方式**。這是**硬性排除**，理由必須寫出來，否則
+它看起來會與「零股現金記為普通賣出」的裁定自相矛盾：
+
+- **舊版規格曾載的「兩列作法」（同一生效日記一筆 SELL + 一筆 EXCHANGE）已於 2026-08-10 撤銷，不得以
+  任何形式作為程序出現在本手冊。** 它**跑不起來**：`EventPriority` 讓 `CORPORATE_ACTION(10)` 先於
+  `SELL(30)`，EXCHANGE 會把來源股數歸零，同日的 SELL 於是落在一個 0 股部位上——嚴格路徑
+  `OversellError`，儀表板路徑 **STICKY 賣超、成本基礎被丟棄**：正是本節開頭所說、這整個功能存在要防止
+  的災難，而且是**照著文件做**做出來的。把事件重新排序不是選項：行動於其日期之**起始**生效、當日交易以
+  行動後條件報價，是本節其餘每一條公式的前提。
+- **正確的比例通常也輸入不進去。** 加權平均下現金腿處分掉 `f × N` **股**，故 EXCHANGE 只帶
+  `(1−f) × N` 股，公告的比例會**超額交付**。真正正確的比例是 `B_received / ((1−f) × N)`，一般**無法**
+  表達為兩個正整數——而 E6a／D14 正是要求它必須是。
+- **若整筆只記成一筆 EXCHANGE**：100% 的基礎被搬走，現金**哪裡都沒記**（不是收款、不是已實現、不是
+  XIRR 流量），目的標的的均價被高估，而**守恆律會通過**——因為那筆錢就是離開了帳本（§4.4.1 的盲點）。
+  即「錯得徹底，且偵測不到」。這就是為什麼它是一條**明載的**排除，而非默默不提。
+
+> **非官方變通（unofficial workaround，若真的遇到）**：把**全部**股數 EXCHANGE 到目的標的，再**賣出
+> 目的標的**以取得現金對價（優先序 10 然後 30，故排序可行、不觸發任何護欄）。**這不是規範作法，也不得
+> 被當成規範作法引用**：它的已實現金額與「按對價相對價值分攤基礎」的結果**不同**（該處分是以目的標的
+> 的條件計價，而非把基礎分攤到兩種對價上），故稅務包所報的損益會與登記機構的配置所隱含的**不一致**。
+> 要用請在知道這一點的前提下用，或先記錄該事件並提出詢問。
+
+> **驗證錨點**：公司行動之三式與拒絕路徑由 phase-1 之 `CA*` 場景錨定——`corp.anchor.*` 共 **13 個絕對
+> 錨點**（11 個於 `phase1:anchor`、2 個於 `phase1:corp_refused`）、
+> `corp.refusal_codes`（`corp_applied` = `[]`；`corp_refused` = `["E5","E2","E1"]`）、
+> `corp.anchor.e5_source_unmoved`（`tw_broker/CAX.shares = −500`，被拒的行動**沒有改變任何金額**，只改變
+> 揭露）、`corp.anchor.e5_source_flagged`（`unbookable_action = True`）、`corp.e1a_dashboard_200`
+> （落在從未持有標的的行動**不得 500**）、`corp.xirr_blanked_by_unapplied`（3 筆未套用的行動 → `xirr`
+> 為 `None`）、`corp.xirr_reason_names_row`（原因字串須指名**帳戶、標的、日期**三者）。
+> **D11 / D12 / D34 三項限制目前無壓測錨點**（`volume` 與重組費皆非本場景所觸及；現金＋股票併購依定義
+> 無法輸入），建議下一輪對抗性對帳時，至少為「重組費 `WITHDRAW` 不影響 XIRR」補一個負向錨點。
+> **實作位置**：`shared/corporate_actions.py`（`CorporateAction`、`apply_ratio`、`split_factor`、
+> `ActionIndex`；比例代數的唯一擁有者）、`shared/ledger_events.py::EventPriority`、
+> `shared/ledger_registry.py::LEDGER_TABLES`、`portfolio/cost_basis.py::build_book`（`_apply_action`、
+> `_reject`、`UnbookableLedgerError`、`Book.unapplied_actions`）、`portfolio/results.py::UnappliedAction`、
+> `data_ingestion/store.py`（唯一的 SQL）、`data_ingestion/validate.py::validate_corporate_action`、
+> `data_ingestion/holdings.py`（行動感知的股數路徑；`shares_naive` 刻意保持**不感知**，因為
+> `corporate_delta` 之定義即為兩者之差）、`pricing/schema.py` + `pricing/store.py`
+> （`close_raw` / `split_basis`）、`pricing/reconcile.py`（SPLIT 帳本變動時重述既存收盤價）、
+> `portfolio/price_basis.py`（讀取時再表述）。
+> **依據**：`docs/spec/2026-08-06-corporate-actions.md`（§2 守恆律、§3 資料模型與比例、§4 重播語意與
+> 欄位移轉表、§5 邊界矩陣、§8 裁定 D1–D39、§9 排除項）、`.claude/rules/domain-ledger.md`（Cost basis；
+> 賣超 STICKY；Declared short sale）、`.claude/rules/data-and-pricing.md`（精度；不得儲存四捨五入後的商）。
+
 ---
 
 ## 5. 已實現／未實現損益
@@ -449,6 +870,15 @@ $$\boxed{\text{realized} = \text{proceeds\_net} - \text{adjusted\_removed}}$$
 即：**淨賣出價款（扣費扣稅後）− 賣出比例對應之 `adjusted_avg × shares_sold`**。已實現以**調整後成本**衡量
 （股利已折入成本，故不另立股利收入行 → invariant I4，避免重複計算）。跨幣別以
 `RealizedPnL.by_currency` 分幣彙總。
+
+> **公司行動（§4.4）與已實現損益的關係。** 公司行動**本身不產生任何 `RealizedRow`**——它不是處分、不是
+> 收入、不是買進，只是把既有基礎重新標記／重新計價（§4.4.1 守恆律）。但它會改變**其後每一筆賣出**的
+> 已實現金額，因為 `adjusted_avg = adjusted_total / shares` 於**讀取時**相除：分割後總額不變而股數變了，
+> 均價即自動按 `1/ratio` 縮放。**兩個真實的例外**確實產生已實現列，且都記在行動列**之外**：**零股現金**
+> 是一筆普通賣出（§4.4.3；已驗證例 §4.4.5(e)，`realized = −20.2127659574468085106382979`），**重組費**
+> 是一筆 `WITHDRAW` 現金支出（§4.4.7 限制 2）。裁定任一「行動之後」的已實現金額時，必須把
+> `corporate_actions` 帳本一併納入重播（§1.4、§12.4 步驟 2），否則會得到一個**看似正常、卻按行動前
+> 股數計算**的數字。
 
 **已驗證範例**
 
@@ -483,7 +913,15 @@ $$\text{capital\_gain} = (\text{price} - \text{original\_avg})\times\text{shares
     `oversell_unacknowledged`**（`需確認賣超`）。
   - 使用者 `ack_oversell=True` 後：儀表板路徑（`allow_oversell=True`）**優雅退化**——部位淨為負股、
     丟棄其（已無定義的）成本基礎、**不產生已實現列**，該持倉標記 `oversold`（**待釐清**）。此非放空會計。
-  - 修復方式：補登遺漏的期初庫存／買入。
+  - 修復方式：補登遺漏的期初庫存／買入，**或補登遺漏的公司行動**（§4.4）——一次未登錄的 3-for-1 分割會
+    使其後每一筆賣出都被判賣超，而 賣超 是**黏性**的：事後補登的買進不會把已丟棄的基礎還回來。
+- **未能套用之公司行動（`unbookable_action`，2026-08）**：與上兩者同族的第三種誠實退化。嚴格路徑
+  `UnbookableLedgerError`；儀表板路徑**跳過該事件**並將部位標記 `unbookable_action`（**待釐清**）。
+  被跳過的行動**沒有改變任何金額**，只改變揭露——股數停在**行動前**的單位，對上的卻是**行動後**的價格，
+  故該部位是「待釐清」而不只是「價格過期」。記錄放在 **`Book.unapplied_actions`（帳本層）**而非只放在
+  持倉上，因為三種發生方式中有兩種**根本不留下任何持倉可標記**（E2 的來源 0 股已被丟棄、E1 的來源從未
+  存在）。凡 `unapplied_actions` 非空，該帳本的**股數即不可信**：XIRR 因此**整個投組**空白（§7.2），
+  且原因字串必須指名**帳戶、標的、日期**。判準與拒絕清單見 §4.4.6。
 
 > **驗證錨點**：`guard.oversell_blocks`，`scope = tw_broker/0050 sell 200>held 110`（賣 200 > 持有 110 → 422
 > `oversell_unacknowledged`）。（壓測 op 序號逐版重編，故此處以穩定的 check + scope 描述，不釘選 run-specific 之 op 編號。）
@@ -624,6 +1062,12 @@ $$\text{rate}_{ccy} = \frac{\text{total\_return}_{ccy}}{\text{gross\_invested}_{
 > **退化註記**：某 `ccy` 的 `gross_invested = 0` 時 `rate = None`；若某持倉現價缺失（stale），其 unrealized
 > 被排除於分子，但成本仍留在分母 → 簡易 rate **會低估**報酬。故 rate 為次要瞥視指標，**XIRR 才是嚴謹指標**。
 
+> **公司行動不動分母（§4.4）。** `gross_invested` 只由 `opening` 與 `buy` 累加，故 SPLIT／EXCHANGE／
+> SPINOFF **三式皆不觸及它**：公司行動沒有新資金進入，把它算成投入會是憑空的重複計算。分子亦然——行動
+> 本身不產生已實現列（§5.1），也不改變未實現的**總額**（總額不變、股數變，均價於讀取時自行縮放）。故
+> **一筆公司行動不改變 `total_return`，只改變它如何被分配到各個代號上**——這正是 §4.4.1 守恆律所斷言
+> 的內容。
+
 **已驗證彙總（reporting = TWD，spot USD/TWD = 32.5、MYR/TWD = 7.2；`phase1:final`）**
 
 | KPI | 值（TWD） | 驗證錨點 |
@@ -661,6 +1105,21 @@ $$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displayst
 
 **退化（all-or-nothing）**：任一持有 symbol 缺現價 → 無法形成終值 → 回 `None`（不部分退化）；無號變
 （例如全為流出，無 sign change）或非有限結果亦回 `None`。
+
+> **公司行動與 XIRR（§4.4）。** 公司行動**不是現金流**：上表沒有它的列，因為它沒有移動任何錢。它只透過
+> **期末市值**那一列影響 XIRR（股數變了），這正確地反映了經濟實質。
+>
+> **但一筆「未能套用」的行動會使 XIRR 整個投組空白**（`unbookable_action`／`Book.unapplied_actions`，
+> §5.3）。這是**刻意的爆炸半徑**：其他每一處，一筆被跳過的行動只損及一檔股票；而 XIRR 是**單一數字**、
+> 其終值加總**每一檔**持股，故一個行動前的股數就讓整個加總失真。**退化必須指名該列**——原因字串帶
+> 帳戶、標的、日期（錨點 `corp.xirr_reason_names_row`）——否則業主得在多帳戶的帳本裡自己找。
+> 實測錨點：3 筆未套用行動 → `kpis.xirr` 為 `None`（`corp.xirr_blanked_by_unapplied`，
+> `phase1:corp_refused`）。
+>
+> **重組費（D12／D36）對 XIRR 不可見，是設計如此。** 上表的流量序列**只由** `opening` + `transactions`
+> + `dividends` 構成，故現金收支（含記為 `WITHDRAW` 的重組費）永遠不會進入 XIRR；XIRR **刻意維持不變**，
+> 使本手冊每一個已錨定的歷史數字都留在原處。該費用改由**帳戶層 IRR** 呈現——**⚠ 該指標尚未實作
+> （待 D36，2026-08-11 查核 `portfolio/twr.py` 仍只有 TWR 指數與基準疊圖）**。完整說明見 §4.4.7 限制 2。
 
 **流量建構範例（`schwab/TSLA`，USD 單幣，各 total 均有錨點）**
 
@@ -1004,7 +1463,7 @@ snapshot**；顯式改寫則保留為 override（snapshot 標 `override: true`�
 
 - **試算（試算）**：計算、**不寫入**。
 - **報告／更新／績效**：完整報表 + 即時抓價。
-- **重算（重算）**：由四本帳本**完全重建**所有統計（見 §1.4）。
+- **重算（重算）**：由五本帳本**完全重建**所有統計（見 §1.4；含 `corporate_actions`，§4.4）。
 
 ### 10.5 已驗證更正範例
 
@@ -1104,6 +1563,9 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 
 ### 12.1 工作範例索引（每例附驗證錨點）
 
+> **編號說明**：本表的 `E#` 是**工作範例編號**，與 §4.4.6 邊界矩陣的 `E#`（**邊界案例**編號）是兩套獨立
+> 的編號，彼此無對應關係。
+
 | # | 範例 | 章節 | 驗證錨點（`scope`） |
 | --- | --- | --- | --- |
 | E1 | TW 費／稅（2330 買 1,000@600 → fee 855） | §3.1 | `fee_engine.fee tw_broker/2330 buy 1000@600` |
@@ -1123,6 +1585,13 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E15 | 現金池期末（tw_broker TWD 1,089,099） | §9.2 | `cash.balance tw_broker|TWD`（`phase1:final`） |
 | E16 | 負池護欄（`negative_cash` 硬護欄；當前場景未觸發，行為由單元測試錨定） | §9.3 | 單元 `_negative_response`／`_pool_min` |
 | E17 | 賣超阻擋（422 `oversell_unacknowledged`） | §5.3／§10.5 | `guard.oversell_blocks`（`tw_broker/0050 sell 200>held 110`） |
+| E18 | **SPLIT**（CA1 3-for-1 + 同日賣出 → 260 股；已實現 144.666…669） | §4.4.5(a) | `corp.anchor.split_forward`；`realized.realized tw_broker/CA1@2026-03-02` |
+| E19 | **SPLIT 不動股利折入部分**（CA9 2-for-1 → 400 股；`dividend_portion` 4,000 不變） | §4.4.5(b) | `corp.anchor.split_shares_dividend_adj`；`corp.anchor.split_keeps_dividend_portion` |
+| E20 | **EXCHANGE**（CA3→CA4 1-for-2 併入已持有 → 90 股／40,056） | §4.4.5(c) | `corp.anchor.exchange_merge`；`export.holdings.original_cost_total tw_broker\|CA4` |
+| E21 | **SPINOFF**（CA7→CA8 1-for-4、`c=0.30` → 子 100 股／30,042.60；母 500 股／89,126.40） | §4.4.5(d) | `corp.anchor.spinoff_child_basis`；`corp.anchor.spinoff_parent_basis` |
+| E22 | **反向分割 + 零股現金**（CA2 1-for-10 → 70.5 股；0.5 股普通賣出 realized −20.2127…979） | §4.4.5(e) | `corp.anchor.split_reverse`；`realized.realized tw_broker/CA2@2026-03-12` |
+| E23 | **比例精確性**（CAR `210 × 1 / 3 = 70`，賣光 70 股得 201） | §4.4.5(f) | `corp.anchor.split_ratio_exact`；`corp.sell_exact_ratio_accepted` |
+| E24 | **未能套用之行動之退化**（CAX 股數 −500 不變、旗標 True；XIRR 全投組空白且原因指名該列） | §4.4.6／§5.3／§7.2 | `corp.anchor.e5_source_unmoved`；`corp.anchor.e5_source_flagged`；`corp.xirr_blanked_by_unapplied`；`corp.xirr_reason_names_row` |
 
 ### 12.2 詞彙表（中文 ↔ 英文欄位）
 
@@ -1159,6 +1628,13 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 配股面額換股常數 | `TW_STOCK_PAR = 10` | §6.5 |
 | 再平衡週轉／費用／預估餘額 | `turnover_reporting` / `total_fees_reporting` / `cash_after` | §11.4 |
 | 試算後新均價 | `new_original_avg` / `new_adjusted_avg` | §11.5 |
+| 公司行動（帳本） | `corporate_actions` / `CorporateAction` | §4.4 |
+| 分割／換股／分拆 | `SPLIT` / `EXCHANGE` / `SPINOFF`（`CorporateActionKind`） | §4.4.4 |
+| 比例（兩個正整數） | `ratio_to` / `ratio_from`（唯一套用出口 `apply_ratio`） | §4.4.2 |
+| 分拆基礎移轉比例 | `cost_carry` | §4.4.4 |
+| 同日優先序 | `EventPriority`（`OPENING`/`CORPORATE_ACTION`/`BUY`/`SELL`/`DIVIDEND`） | §4.1／§4.4.3 |
+| 未能套用之公司行動 | `unbookable_action` / `UnappliedAction` / `Book.unapplied_actions` | §4.4.6／§5.3 |
+| 行情原值／分割基礎 | `close_raw` / `split_basis`（`prices` 兩欄制） | §4.4.7 |
 
 ### 12.3 版本歷史
 
@@ -1171,23 +1647,28 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.4` | 2026-07-22 | **Batch B（Moomoo 合併）修訂**（基線 `v0.1.20 + Batch B`）。① **帳戶模型**：合併前的兩個 per-market Moomoo 帳戶（legacy ids 見 `data_ingestion/moomoo_merge.py`）併為單一雙市場帳戶 `moomoo_my`（settlement USD／funding MYR；規則綁 (帳戶, 市場)：US→(`moomoo_us`,`drip_us`)、MY→(`moomoo_my`,`cash`)，載於 `account_market_rules`）——§2 帳戶表 4→3 列、invariant I6 由「綁帳戶」改為「綁 (帳戶, 市場)」、§3.3／§3.4／§6.2／§6.3／§8／§9 之帳戶標籤與 `scope` 錨點全面 re-anchor 至 `moomoo_my`（市場由 symbol 帶出）。② **全錨點重新對帳**：壓測套件已重生為合併後拓樸（1,060 斷言、66 ops、1,060/1,060 通過、0 fail；spot USD/MYR 4.5→**4.6**、含一筆 Schwab USD→TWD 回換）。就此當前實跑更新所有場景依賴之終值：§7.1 總報酬 514,752.85→**516,336.55**（realized 186,333.50／unrealized 330,003.05）、§8.2 realized FX 0→**−2,375**（Schwab 回換）、§8.3 未實現 FX rollup −31,830.94→**−11,757.48**（`moomoo_my` 因 spot 4.6≠avg 4.5 現貢獻正值）、§9.2 現金池全面更新且 MYR 池改為單一直接錨定之 `moomoo_my|MYR = 123,201.91`、§5.1 TSLA proceeds/realized 5,199.86/199.86→**5,199.88/199.88**（SEC fee 0.14→0.12）；修正既存筆誤 E5（NVDA fee 1.41→5.89）、E6（1155 fee/tax 10.45/9.50→9.40/10.00）。③ **錨點穩健化**：波動之 `id=NN`（逐版重編）自 §12.1 fee 例移除、保留穩定之 check+scope；場景不再觸發之 `negative_cash`（舊 op47）改記為單元測試錨定（§9.3／E16）；賣超錨點改以 `guard.oversell_blocks` scope 記述。④ 驗證基礎行、§7.2 harness 計數（1,006→1,060）、§6.5 計數（966→1,060）同步更新。同 change set 重生英文鏡像。**無任何公式或會計定義變更——純為 (帳戶, 市場) 綁定 relabel + 錨點重新對帳。** |
 | `v1.5` | 2026-07-26 | **清倉後入帳之現金股利改列已實現收益**（稽核 H2，owner 裁定 2026-07-26；基線 `v0.1.24`）。新增 **§6.3b**：CASH/NET 股利若入帳當下該 `(account, symbol)` 部位股數已為 0，已無成本可沖減，改記一列 `RealizedRow(kind="dividend")`（`realized = proceeds_net = net`；shares_sold／original_removed／adjusted_removed 皆 0；`sell_date` = 入帳日）。修正前該筆被 0 股部位吸收後隨部位一併丟棄，導致**股利總覽與 XIRR 有計入、總報酬沒有**的三方不一致；修正後恰好計入一次，**invariant I4 維持**。§5.1 同步標明 `RealizedRow` 現有 `kind: "sale" | "dividend"` 兩種。**稅務區隔**：年度稅務包 `realized_gains_{year}.csv` 僅取 `kind == "sale"`，該筆已由 `dividends_{year}.csv` 自股利帳本輸出，不重複申報。驗證錨點：`moomoo_my/5225` 買 200@6.00 → 賣 200@6.50（歸零）→ NET 股利 120 進入 `realized.by_currency[MYR]`（run_phase1「Found-bug op #3」；壓測 ops 66→**69**、斷言 1,060→**1,088**、fail=0）；hermetic 迴歸 `tests/portfolio/test_post_close_dividend.py`（5 例，含「清倉後買回再配息」仍走沖減成本）。**對既有真實帳本的影響：已清倉標的的歷史總報酬會上升**（原本漏計之股利現在計入）。同 change set 重生英文鏡像。除本條外無其他公式變更。 |
 | `v1.6` | 2026-08-01 | **外幣現金流入之成本基礎 + 宣告式賣空**（owner 裁定 2026-07-30／07-31；基線 `v0.1.25`）。① **§8.1／§8.3 改寫**：取得來源由「僅換匯」擴為「換匯 **+** 帶 `acq_home_amount` 之外幣現金流入」；**存家幣金額、不存匯率**（匯率是平均值，§1.3 禁止其為權威；顯示用匯率讀取時計算）。新增 **`covered_ratio`**（有成本取得 ÷ 全部取得），流出**按比例**分攤——禁用「總餘額 − 無成本額」（餘額跌破時翻負，等同重製反號假數字）；該比率**同時**縮放現金與股票**兩條腿**（`avg_rate` 本身出自有成本母體，只縮放現金腿會漏標誤差更大的股票腿，實測差 +42,359 TWD）。`covered_ratio` 恆為字面 1 時呼叫端跳過乘法，故完整覆蓋之帳本**與本版前逐位元相同**。`foreign_cash` 現亦計入外幣現金流入／流出，故對同一 (account, foreign ccy) **恆等於 §9 營運現金池**（先前刻意分歧，audit C9），差異僅存於成本基礎。② **新增 §4.3 宣告式賣空**：`short_sale`（預設 false，**永不推斷**）；宣告賣出先出清長倉再開空倉（持有淨價款），買進先回補再入長倉，長／空互斥故部位以**單一帶號股數**表達；回補損益 `(short_avg − 買回每股全額成本) × 回補股數`，記於**回補日**，`kind="short_cover"`（進稅務資本利得表）。比率須除 `abs(cost_total)`、`fully_recovered` 須以 `not short_open` 設閘（放空基礎恆為負）。**放空期間之股利不可入帳**（放空方需支付；嚴格路徑 raise `UnbookableLedgerError`，儀表板路徑跳過並標記 `unbookable_dividend`）。已裁決之限制：`gross_invested` 不含放空資金、純放空 XIRR 反映融資利率、權重採淨曝險慣例。③ **賣超防呆改為日期感知**（`shares_through(交易日)`，對稱於現金之 `running_min`）、`oversold` 改為**黏性**（後續買進不清除，因被丟棄的成本基礎不會回來）。驗證錨點：`tw_broker/2609` 完整放空生命週期（見 §4.3 表）、`fx.covered_ratio/basis_gap/foreign_cash`；壓測 ops 69→**77**、斷言 1,088→**1,806**、fail=0，phase 2（線上 demo）1,192 斷言 fail=0。同 change set 重生英文鏡像。 |
+| `v1.7` | 2026-08-11 | **公司行動（SPLIT／EXCHANGE／SPINOFF）**（owner 裁定 D1–D39，規格 `docs/spec/2026-08-06-corporate-actions.md`；基線 `v0.1.28 + feat/corporate-actions`）。① **新增 §4.4**（置於 §4 成本基礎之下、§4.3 之後，**不重新編號任何既有章節**——§7.5 於同一句中以現行編號指稱「§5 已實現／未實現損益」與「§7 總報酬」，重新編號會使該指稱與全庫既有的 §5.1／§7.2 等引用同時失效）：帳本列與**守恆律**（Σ`original_total`／Σ`adjusted_total`／Σ`dividend_portion`／`gross_invested` 皆不變；價值腿**僅** SPLIT）＋兩個刻意例外（零股現金 = 普通賣出、重組費 = `WITHDRAW`）；**比例為兩個正整數**且 `qty × to ÷ from` **先乘後除**（實測 `210×1/3 = 70` vs `210×(1/3) = 69.999…9`，後者會被 `validate.py` 的裸 `>` 判為賣超 → STICKY 丟棄基礎）；**三式與 `_Position` 九欄位移轉表逐字引用規格 §4.1–§4.4**（手冊不以自己的話重述公式）；D21 子公司回本進度須標示承接來源；**六個已驗證工作範例**（§12.1 之 E18–E24）；**邊界矩陣 E1–E24**（含賣超／宣告式賣空之交互 E3/E4/E5/E18/E22 與 E24）；價格基礎（`close_raw` / `split_basis`、讀取時再表述、**僅 SPLIT**）。② **§1.4／§1.1／§12.4：永久帳本由四本改為五本**（新增 `corporate_actions`）——遺漏它重算，會得到一個「看似正常、卻按行動前股數計價」的金額。③ **§4.1 同日優先序由 `0/1/2/3` 改為 `EventPriority` 之 `0/10/20/30/40`**，公司行動插入於 `OPENING` 與 `BUY` 之間；**相對順序未變**，故不含行動之帳本逐位元不變。④ **交叉引用**：§5.1（行動不產生 `RealizedRow`）、§5.3（`unbookable_action` 為第三種誠實退化）、§7.1（不動 `gross_invested`）、§7.2（行動非現金流；未套用之行動使 XIRR **全投組**空白且原因須指名帳戶／標的／日期）。⑤ **兩項限制**：**D11**（`volume` 不做還原）為**長期**限制；**D12**（重組費）**非**永久盲點——D36 裁定 XIRR **刻意不動**、另加**帳戶層 IRR** 於 `portfolio/twr.py`，本版就地查核該檔仍只有 TWR 指數／基準疊圖，故記為「**待 D36**」。⑥ **D34：現金＋股票混合併購為硬性排除**，舊規格的「兩列作法」已撤銷且**不得**作為程序出現（`CORPORATE_ACTION(10)` 先於 `SELL(30)` → EXCHANGE 歸零來源 → 同日 SELL 落在 0 股部位 → STICKY 賣超）；最接近的可表達作法記為**非官方變通**並載明其不精確之處。⑦ 驗證基礎更新為當前實跑（phase-1 **118 ops／3,791 斷言／0 fail**；phase 2 **1,192／0 fail**），公司行動錨點 `corp.*` 共 23 項全數通過。同 change set 重生英文鏡像。**除本條外無任何既有公式或會計定義變更。** |
 
 ### 12.4 如何仲裁一個爭議金額
 
 給定一個「站上顯示為 X，但認為應為 Y」的金額：
 
-1. **定位金額類型** → 對應章節：費／稅 §3；持倉成本／均價 §4；已實現 §5.1；未實現／資本利得 §5.2；
+1. **定位金額類型** → 對應章節：費／稅 §3；持倉成本／均價 §4；**公司行動（分割／換股／分拆）§4.4**；
+   已實現 §5.1；未實現／資本利得 §5.2；
    股利 §6；**配息偵測估算 §6.5**；總報酬／報酬率（含混合率）§7.1；XIRR §7.2；**配置權重／產業／幣別視圖／
    報告幣估值／稅務已實現 §7.3**；**股利收入彙總／年度預估 §7.4**；**淨值與投入趨勢 §7.5**；換匯損益 §8；
    現金餘額 §9；再平衡 §11（**彙總 §11.4；試算 What-if §11.5**）。若該數字非以上任一 → 查 §12.5 是否屬
    仲裁範圍外之 class B／C（技術指標、警示門檻、LLM 額度）。
-2. **取出相關帳本列**（四本永久帳本）：
+2. **取出相關帳本列**（五本永久帳本）：
    - 費／稅、成本、已實現、未實現 → `transactions`（該 account×symbol，**依 `trade_date` 排序**）+
-     `dividends` + `opening_inventory`。
+     `dividends` + `opening_inventory` + **`corporate_actions`（該 account，`from_symbol` **或**
+     `to_symbol` 命中該標的者皆須取出——換股會把基礎從**另一個代號**搬進來）**。
    - 換匯損益 → 該帳戶之 `fx_conversions` + `fx_rates`（當前 spot）。
    - 現金 → `cash_movements` + `fx_conversions` + 該池之 `transactions` + 現金股利。
-3. **依該章節公式逐步重算**（重算）。務必套用：**同日優先序** open≺buy≺sell≺dividend（§4.1）、賣出**比例
-   移除**、股利模型（§6）、精度規範（§1.3，儲存全精度、僅結算／顯示量化）。
+3. **依該章節公式逐步重算**（重算）。務必套用：**同日優先序**
+   `OPENING(0) ≺ CORPORATE_ACTION(10) ≺ BUY(20) ≺ SELL(30) ≺ DIVIDEND(40)`（§4.1）、賣出**比例
+   移除**、股利模型（§6）、**公司行動三式與其比例之「先乘後除」（§4.4.2／§4.4.4）**、精度規範
+   （§1.3，儲存全精度、僅結算／顯示量化）。
 4. **比對**：重算值 = 裁定值。若與程式碼輸出不符 → 為程式碼 bug（提報）；若與本手冊公式不符 → 為手冊
    缺陷（提報並更新）。
 5. **稽核佐證**：若該列曾被更正，查 `ledger_audit`（§10.3）取變更前值還原歷史。

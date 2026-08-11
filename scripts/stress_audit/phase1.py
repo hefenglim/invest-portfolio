@@ -40,6 +40,32 @@ INSTRUMENTS = [
     # Declared-short lifecycle symbol (2026-07-31): opened short -> dividend-on-short ->
     # covered flat. Dedicated so no other op can satisfy or disturb the short path.
     ("2609", "TW", "TWD", "Yang Ming", "Shipping", False),
+    # ---- Corporate actions (spec 2026-08-06, W8). DEDICATED symbols on purpose: every
+    # existing expectation above stays a control, so a failure is attributable to the new
+    # feature rather than to a perturbed fixture. TW/TWD for most of them, because
+    # tw_broker is NOT FX-exposed (settle == funding) — the action block then moves no FX
+    # pool and cannot mask an FX defect. CAD is the one US position, so a real DRIP model
+    # is exercised under a split.
+    ("CA1", "TW", "TWD", "CA Forward Split", "Industrials", False),   # 3-for-1 -> sell
+    # 210 x 1/3: EXACTLY 70 multiply-first, 69.99999999999999999999999999 parenthesised.
+    # The 2-for-7 case cannot discriminate evaluation order (700 x (2/7) also lands on 200
+    # at 28 digits — measured, and the correction §3.1(ii) records), so without this ratio
+    # trap #2 is unobservable in this scenario. A later sell of exactly 70 then trips
+    # validate.py's bare `>` and discards the basis: the cascade, reproduced.
+    ("CAR", "TW", "TWD", "CA Ratio Rounding", "Industrials", False),  # 1-for-3 of 210
+    ("CA2", "TW", "TWD", "CA Reverse Split", "Industrials", False),   # 1-for-10 -> CIL
+    ("CA3", "TW", "TWD", "CA Exchange Source", "Industrials", False),  # -> CA4
+    ("CA4", "TW", "TWD", "CA Exchange Dest", "Industrials", False),   # already held
+    ("CA5", "TW", "TWD", "CA 2-for-7 Source", "Industrials", False),  # -> CA6, exactness
+    ("CA6", "TW", "TWD", "CA 2-for-7 Dest", "Industrials", False),
+    ("CA7", "TW", "TWD", "CA Spinoff Parent", "Industrials", False),
+    ("CA8", "TW", "TWD", "CA Spinoff Child", "Industrials", False),
+    ("CA9", "TW", "TWD", "CA Dividend-Adjusted", "Industrials", False),  # adjusted != orig
+    ("CAD", "US", "USD", "CA DRIP Split", "Technology", False),       # DRIP then split
+    ("CAX", "TW", "TWD", "CA Short Source", "Shipping", False),       # E5 refusal
+    ("CAY", "TW", "TWD", "CA Short Dest", "Shipping", False),
+    ("CAZ", "TW", "TWD", "CA Closed Position", "Industrials", False),  # E2 refusal
+    ("CAN", "TW", "TWD", "CA Never Held", "Industrials", False),      # E1 refusal
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
@@ -51,6 +77,15 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     # 2609 is priced so the OPEN-short checkpoint values the negative position for real
     # (market_value / unrealized on signed shares); it too ends FLAT before final.
     "2609": D("96"),
+    # Corporate-action symbols. Every price is quoted in POST-action terms and dated at
+    # ASOF, which is AFTER every action date in the scenario — so §5.1's price
+    # re-expression (W6b) has nothing to re-denominate and the valuation leg stays a
+    # property of the SHARE count alone. Symbols that end flat (CA3/CA5/CAX/CAZ) are
+    # priced anyway: the row is inert for an unheld position and keeps the fixture uniform.
+    "CA1": D("205"), "CAR": D("280"), "CA2": D("320"), "CA3": D("200"), "CA4": D("480"),
+    "CA5": D("40"), "CA6": D("150"), "CA7": D("190"), "CA8": D("330"),
+    "CA9": D("160"), "CAD": D("21"), "CAX": D("76"), "CAY": D("90"),
+    "CAZ": D("110"), "CAN": D("50"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
@@ -279,6 +314,35 @@ class Ops:
         self.ev.op(self.phase, "API", "edit.transaction", {"id": txn_id, **body}, resp)
         return resp
 
+    def corporate_action(self, account_id, kind, d, from_symbol, to_symbol,
+                         ratio_to, ratio_from, *, cost_carry=None, note=None):
+        """Write ONE corporate_actions row (spec §3) and op-log it.
+
+        Surface is ``DB`` because the entry surfaces are **W7** and do not exist yet —
+        there is no ``POST /api/ledgers/corporate-actions``. The row still goes in through
+        the app's own ``insert_corporate_action``, is read back as a raw ledger fact, and
+        every consequence is computed independently by the oracle. Move this to the API
+        the moment W7 lands (see ``common.write_corporate_action``).
+        """
+        aid = C.write_corporate_action(self.db, account_id, d, kind, from_symbol,
+                                       to_symbol, ratio_to, ratio_from,
+                                       cost_carry=cost_carry, note=note)
+        inputs = {"account_id": account_id, "kind": kind, "date": d,
+                  "from_symbol": from_symbol, "to_symbol": to_symbol,
+                  "ratio_to": ratio_to, "ratio_from": ratio_from,
+                  "cost_carry": cost_carry, "note": note}
+        self.ev.op(self.phase, "DB", f"corporate_action.{kind}", inputs,
+                   {"status": 201, "json": {"action_id": aid}},
+                   note=f"{account_id} {from_symbol}->{to_symbol}")
+        return aid
+
+    def delete_corporate_action(self, action_id):
+        """Delete one corporate action — E16: history RE-COMPUTES, nothing is snapshotted."""
+        ok = C.delete_corporate_action_row(self.db, action_id)
+        self.ev.op(self.phase, "DB", "corporate_action.delete", {"id": action_id},
+                   {"status": 200 if ok else 404, "json": {"deleted": ok}})
+        return ok
+
     def delete_tx(self, txn_id, *, ack=False):
         r = self.api.delete(f"/api/ledgers/transactions/{txn_id}", ack_oversell=str(ack).lower())
         resp = {"status": r.status_code, "json": _json(r)}
@@ -318,6 +382,16 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
 
     dash = api.get("/api/dashboard").json()
 
+    # ---- A0. Corporate actions the oracle REFUSED (spec §5) ----
+    # Op-logged, not asserted here: which rule fired is scenario knowledge, so the
+    # scenario asserts the codes (see run_phase1's corp.refusal_codes). Logging it makes a
+    # holdings mismatch triageable — "the oracle skipped E5 and the app applied it" is a
+    # different bug from "both applied it and disagreed on the arithmetic".
+    if res.action_refusals:
+        ev.op(phase, "ORACLE", "corporate_action.refusals",
+              {"count": len(res.action_refusals)},
+              {"refusals": [f"{c}: {s}" for c, s in res.action_refusals]})
+
     # ---- A. Holdings cost basis (per account+symbol) ----
     app_hold = {(h["account_id"], h["symbol"]): h for h in dash["holdings"]}
     orc_keys = set(res.holdings.keys())
@@ -341,6 +415,11 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         ev.check("holding.short_open", sc, h.short_open, a["short_open"], phase)
         ev.check("holding.unbookable_dividend", sc, h.unbookable_dividend,
                  a["unbookable_dividend"], phase)
+        # A REFUSED corporate action (spec §5 dashboard path): the shares are still in
+        # pre-action terms against a post-action price series. A fourth distinct state,
+        # rendered differently again — never conflate it with 賣超.
+        ev.check("holding.unbookable_action", sc, h.unbookable_action,
+                 a.get("unbookable_action"), phase)
         # Valuation on the SIGNED quantity: an open short (negative shares) is a real
         # priced position (2026-07-31) — only an oversold row has 待釐清 (null) values.
         if valuation and h.shares != O.ZERO and not h.oversold and key[1] in prices:
@@ -406,6 +485,24 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         _reconcile_reports(ev, api, res, prices, sp, phase, valuation)
 
     return res
+
+
+def anchor(ev: C.Evidence, api: C.Api, check: str, account_id: str, symbol: str,
+           field: str, expected, phase="phase1:anchor"):
+    """Assert ONE app-reported holding field against a hand-computed LITERAL.
+
+    The third leg of the corporate-action proof, and the only one that is not a
+    comparison between two replays. ``holding.shares`` proves the app and the oracle agree;
+    it does **not** prove either landed on the integer the broker's statement says, because
+    a rounded ratio in BOTH would agree at 199.99. Spec §3.1(ii) is precisely about that
+    number, so the expected value here is written out by hand from the ratio and the
+    pre-action share count — never derived from the oracle.
+    """
+    rows = api.get("/api/dashboard").json()["holdings"]
+    got = next((h.get(field) for h in rows
+                if h["account_id"] == account_id and h["symbol"] == symbol), None)
+    ev.check(check, f"{account_id}/{symbol}.{field}", expected, got, phase)
+    return got
 
 
 def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
