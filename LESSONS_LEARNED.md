@@ -622,3 +622,61 @@ prevents recurrence.
   and pass it as `--cmd $cmd`. Nothing inside is interpolated or escaped, so the remote
   shell receives exactly what you wrote — nested `'…'` for awk and `"…"` for `python -c`
   both survive untouched.
+
+- **2026-08-11 — "as of when?" is the question a validation reading a REPLAYED state must
+  answer, and the answer is almost never "the end of the ledger".** `validate_corporate_action`
+  replayed the whole ledger, and four hard rejections read it (E3 oversold source, E22 oversold
+  destination, E5/E18 short). On a bulk import the post-action trades are already loaded — that
+  is what a broker export *is* — so the position was **already 賣超 when its own action was
+  validated**, and E3 rejected the split that made those trades legal, advising 「請先補登缺少的
+  買進或期初庫存」: *fabricate a buy instead of recording the split*. Measured on the feature's
+  own headline case (buy 100, 7-for-1, sell 400). This is the **third** occurrence of one shape
+  — a guard evaluated against a state the action itself would fix (F-08's naive share count;
+  D13's ⚠ that provably never fired; now this) — and the third time it survived review, because
+  the **primary** entry door is the one door that cannot exhibit it: at the 賣超 confirm dialog
+  the sell is not committed yet, so the future the guard wrongly reads does not exist. Two
+  rules. **(1)** When a check consumes a replay, the cut is part of the check's specification —
+  write it down beside the rule, not in the caller. **(2)** Take the **inputs**, not the
+  computed state: the parameter changed from `book` to `bundle`, so a caller now *cannot* hand
+  in a wrongly-scoped replay. A hoist that caches the wrong object is worse than no hoist.
+
+- **2026-08-11 — a degradation is per-CALL-SITE and per-EXCEPTION-TYPE; handling one class and
+  leaving its sibling is invisible.** `strategy/whatif.py` caught `UnbookableLedgerError` around
+  `build_book`, but `OversellError` is a **separate hierarchy** (`Exception`, not `ValueError`),
+  so it escaped as a 500 — and the symbol drawer posts 試算 on open, so ONE undeclared oversell
+  anywhere made *every* symbol's drawer 500, across other accounts and other markets. Separately,
+  `store.load_ledger_bundle` raised on a malformed corporate-action row from **above**
+  `build_book`'s graceful path, taking down every page. The 2026-06 lesson said "apply never-500
+  degradation at EVERY `build_book` call site"; both of these obeyed the letter. Extend it: also
+  at every **layer above** it that can raise first, and for every exception type the call can
+  produce — when you add a catch, `grep` the exception hierarchy rather than the one name you
+  came for.
+
+- **2026-08-11 — the third option for an unreadable row is neither "raise" nor "drop".** Three
+  copies of the stored-row → domain-model conversion all raised, each with a docstring correctly
+  arguing against *dropping* ("a silently omitted action leaves a share count wrong by the ratio
+  and looking entirely normal") and then choosing the only worse option. **Record and flag** was
+  already the codebase's answer for "this exists and cannot be trusted" — the row became an
+  `UnappliedAction` with a zh reason, which blanks XIRR with a named cause and marks the position
+  待釐清. No new vocabulary was needed. Corollary: a conversion open-coded three times is three
+  chances for one copy to keep raising after the others learned not to, and the divergence is
+  invisible until a bad row happens to arrive through that particular path — collapse it to one
+  owner while you are there.
+
+- **2026-08-11 — a scenario list is a specification of DETECTION POWER, not of coverage.** The
+  spec's own stress-audit scenario list named a "2-for-7 exchange (the exactness case)" — but
+  `700 × (2/7)` is **exactly 200** at 28 digits, a fact the document had itself measured two days
+  earlier and then left the sentence pointing at. Every other ratio in the list also had a
+  terminating quotient, so an oracle built literally to the list was blind to the rounded-ratio
+  trap the whole feature exists to prevent; and every action in it sat alone on its date, so a
+  mis-ordered event priority produced identical numbers. Found only because the oracle's author
+  mutated the app and watched the list stay green. Rule: **every entry in a scenario list should
+  name the mutation it is the only one to catch** — an entry that names none is decoration.
+
+- **2026-08-11 — put the private-data prohibition in EVERY subagent brief, not only the one that
+  obviously touches it.** One brief carried an explicit 🔒 rule for `sample-trade-data/` /
+  `broker-statements/` / `docs/human_noted/`; a sibling brief said "you may READ anything". The
+  sibling's agent read the real broker export and wrote a 245-line derived-statistics document
+  into `docs/spec/`. No ticker, amount or position leaked and nothing reached version control —
+  but the boundary was crossed by omission, not by disagreement. A prohibition that appears in
+  one of N parallel briefs is not a control; it is a coin flip on which agent picks up the task.

@@ -29,6 +29,17 @@ scheduler  ──► pricing, llm_insight  (triggers only)
   legal, but a second SQL site for `corporate_actions` — the duplication `shared/ledger_registry.py`
   exists to remove). This edge is recorded here rather than left implicit in code: an edge that
   exists in the codebase but not in this diagram is the next audit finding.
+- **A cross-layer read of another module's TABLE is done by direct SQL on the shared connection,
+  not by an import** (established convention, written down 2026-08-11). `pricing/ingest.py`
+  (`tw_universe`, `all_universe`) reads `instruments` — a `data_ingestion` table — straight from
+  SQL and says so in its docstring; `data_ingestion/validate.py::_has_prices` reads `prices` the
+  same way for E23/N3-price. What the layering constrains is the **import graph**: an import
+  couples module *code* and creates a cycle risk, while both modules already hold one connection
+  to one SQLite file. Two obligations come with it, because a direct SELECT is still a real
+  dependency that no import guard can see: **(1)** name the borrowed table in the reading
+  function's docstring, so the coupling is greppable; **(2)** degrade if the table is absent —
+  `bootstrap_db` does not create `prices` (only `pricing.schema.create_tables` does), so a
+  ledger-only database must read as "no rows", never as `OperationalError`.
 - Lower layers (`shared`, `pricing`, `data_ingestion`) **never import `web_ui`**.
 - The web layer **reads** computed results. It does not compute. No cost-basis or
   return math in routes or templates.

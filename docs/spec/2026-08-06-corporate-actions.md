@@ -1,7 +1,11 @@
 # Spec — Corporate actions (SPLIT / EXCHANGE / SPINOFF)
 
-**Status:** All owner decisions D1–D39 **approved** (§8; D30–D39 on 2026-08-10, from the
-spec-conflict audit and the blast-radius question it prompted — see §8.1). **Implementation in progress** on `feat/corporate-actions` (owner ruling
+**Status:** Owner decisions **D1–D39 approved** (§8; D30–D39 on 2026-08-10, from the
+spec-conflict audit and the blast-radius question it prompted — see §8.1). **D40 and D41 were made
+during implementation on 2026-08-11 and await owner ratification** — the same status D29 had: D41
+is a blocker fix with no real alternative (the feature could not accept the data §10.5 defines
+"done" as accepting), D40 **declines** a recommendation, which is the kind the owner most needs to
+see. Both are marked in §8. **Implementation in progress** on `feat/corporate-actions` (owner ruling
 2026-08-09: the branch is NOT merged into `main` until the whole feature is done, so it stays
 abandonable — which also retires **D26**, W0's separate release). Delivered: **W0** LedgerBundle +
 ledger registry · **W1** the ratio algebra · **W2** the ledger, CRUD and validation (three soft
@@ -458,10 +462,21 @@ P.shares          := unchanged
 ```
 
 The parent is written as **`total − carved`, not `total × (1 − c)`**. Algebraically identical,
-numerically not: `1 − c` rounds once and `× (1−c)` rounds again, so the two sides can miss the
-conservation law of §2.1 by an ulp. Subtracting the exact amount that was added to the child makes
-`Σ original_total` conserved **by construction** rather than by luck — the same reason the parent's
-share of the allocation is never stored (§3.1).
+numerically not — **measured 2026-08-11**, rather than asserted as this paragraph used to do:
+
+```
+total = 3,  c = 0.6666666666666666666666666667
+  3 − 3×c        =  1.000000000000000000000000000
+  3 × (1 − c)    =  0.9999999999999999999999999999      delta 1E-28
+```
+
+The earlier text said the two forms "can miss the conservation law of §2.1 by an ulp". The sweep
+that produced the case above found the **parent's own value** differs while the Σ still compared
+equal, because the Decimal context rounded the sum back — so the observable defect is a wrong
+parent basis, and Σ-conservation surviving is the *luck* this rule exists to remove. Subtracting
+exactly the amount added to the child makes the parent the **exact complement** of the child by
+construction, so §2.1 holds without depending on that rounding — the same reason the parent's share
+of the allocation is never stored (§3.1).
 
 Scaling **both** totals by the same factor preserves `dividend_portion` proportionally on each side,
 so the conservation law holds and each side's arithmetic is internally consistent.
@@ -501,15 +516,20 @@ defaulted**. A SPINOFF row without it is rejected at validation — the same pos
 ### 4.4 Complete `_Position` field transfer table — NORMATIVE
 
 The formulas above name only the fields they change, which leaves the rest to inference. `_Position`
-has **nine** fields (`cost_basis.py:52-72`); every one of them gets an explicit rule here, because
-"the formula didn't mention it" is not a specification.
+has **ten** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an explicit
+rule here, because "the formula didn't mention it" is not a specification.
 
-> **Count corrected 2026-08-10 (F-37).** This paragraph said *seven* while the table listed *eight*
-> rows and the class already had *nine* — `unbookable_action`, W3's own output, occurred nowhere in
-> `docs/spec/`. A section whose stated reason for existing is that inference is not a specification
-> cannot be allowed to fall behind the class again, so a **field-count assertion** is being added to
-> the test suite: it fails when `_Position` gains a field this table does not list. Adding a field
-> therefore forces a row here, in the same change.
+> **Count corrected 2026-08-10 (F-37), and the guard has since paid for itself.** This paragraph
+> said *seven* while the table listed *eight* rows and the class already had *nine* —
+> `unbookable_action`, W3's own output, occurred nowhere in `docs/spec/`. A section whose stated
+> reason for existing is that inference is not a specification cannot be allowed to fall behind the
+> class again, so a **field-count assertion** was added to the test suite: it fails when
+> `_Position` gains a field this table does not list.
+>
+> **It fired on 2026-08-11**, the first time a field was added after it landed — E24's `vacated_to`
+> — and refused the change until this row existed. That is the mechanism working exactly as
+> intended, and it is worth recording that it caught a real omission rather than a hypothetical one.
+> Note the assertion also pins field **order**, because the rows here are read against it.
 
 | Field | SPLIT (P) | EXCHANGE: source P → dest Q | SPINOFF: parent P → child Q |
 | --- | --- | --- | --- |
@@ -521,7 +541,8 @@ has **nine** fields (`cost_basis.py:52-72`); every one of them gets an explicit 
 | `short_proceeds` | unchanged (E4) | **`P := 0`** — see below | unchanged (E5 guarantees 0) |
 | `ever_oversold` | unchanged | **SOURCE** is `False` (E3 rejects). **DESTINATION** must be `False` too — **E22** rejects the action otherwise; nothing is transferred | same (E22 applies to the child's destination as well) |
 | `unbookable_dividend` | unchanged | OR-ed into Q: `Q.unbookable_dividend \|= P.unbookable_dividend` (E19) | same OR into the child (E19); `P` keeps its own |
-| `unbookable_action` *(added 2026-08-10)* | unchanged | OR-ed into Q: `Q.unbookable_action \|= P.unbookable_action` (`cost_basis.py:181`) | same OR into the child (`:203`); `P` keeps its own |
+| `unbookable_action` *(added 2026-08-10)* | unchanged | OR-ed into Q: `Q.unbookable_action \|= P.unbookable_action` (the propagation line in the EXCHANGE branch) | same OR into the child (the SPINOFF branch's line); `P` keeps its own |
+| `vacated_to` *(added 2026-08-11, **E24 / D32**)* | unchanged (`None`) | **`P.vacated_to := to_symbol`** — the field's only writer | unchanged (`None`): a SPINOFF does **not** vacate its parent |
 
 **Why the DESTINATION's `ever_oversold` needs its own rule (E22, D16).** The first version of this
 table reasoned only about the source: "E3 rejects the action, so it is `False` here." That covers
@@ -579,7 +600,7 @@ Every row below gets a test. "strict" = `allow_oversell=False` (重算 / what-if
 | # | Situation | Strict path | Dashboard path |
 | --- | --- | --- | --- |
 | E1 | Action on a symbol with **no prior position** | `UnbookableLedgerError` — fabricating a position would invent a $0-cost ghost (mirrors the dividend branch) | **skip + flag** (see E1a) |
-| E2 | Action on a **closed (0-share, 0-basis)** position | `UnbookableLedgerError` with a zh message | skip the event, flag the position |
+| E2 | Action on a **closed (0-share)** position — the predicate is **share-only** (see the E2 note) | `UnbookableLedgerError` with a zh message | skip the event, flag the position |
 | E3 | Action on an **oversold** position (`ever_oversold`, basis already discarded) | `UnbookableLedgerError` | skip; the 賣超 flag stays. Scaling an undefined basis produces an undefined result |
 | E4 | **SPLIT on an open declared short** | Supported: `short_shares × ratio`, `short_proceeds` unchanged. You owe more shares, you still received the same money. Average sale price scales correctly | same |
 | E5 | **EXCHANGE / SPINOFF on an open declared short** | `UnbookableLedgerError` — no honest booking exists (precedent: dividend-on-short) | skip + flag |
@@ -602,7 +623,7 @@ Every row below gets a test. "strict" = `allow_oversell=False` (重算 / what-if
 | **E21** | Action referencing a symbol **not registered in `instruments`** (survives E10 via CSV import or a later instrument deletion) | Its symbols must join the dashboard's unregistered skip-set (`dashboard.py`, now `bundle.unregistered_symbols` / `without_unregistered()` after W0), or `quote_ccy()` raises `KeyError` → **500** | skipped with the rest of that symbol's rows |
 | **E22** | **EXCHANGE / SPINOFF whose `to_symbol` position is flagged `ever_oversold`** (grill D16) | `UnbookableLedgerError` — the mirror of E18, and of E19 one level deeper: E19 stops a flag being laundered, this stops a **cost basis** being restored onto a position whose basis was deliberately discarded. Scaling an undefined basis is undefined; so is averaging into one | skip + flag |
 | **E23** | **EXCHANGE, `ratio_to != ratio_from`, `to_symbol` HAS prior prices, `from_symbol` has NONE** (grill D22) | **`needs_confirm` — the 賣超 tier**, not a hard rejection and not a passive notice. The four-part condition is the identifier signature: a real merger's source was a listed security and has prices. Offers a one-click conversion to SPLIT. See §5.1 "The residual hole" | same |
-| **E24** | **A dividend on a symbol an EXCHANGE moved away** (audit 2026-08-10, **D32**) — after the exchange the source stays in the position map with **zeroed** fields (§4.4, required so a later buy cannot reopen it carrying `−ε`), so `existing is not None` and `short_shares == 0`: neither the closed-position refusal nor the dividend-on-short refusal applies, and the payment books | `UnbookableLedgerError` — **both branches, uniformly**. CASH/NET would book post-close realized income on a dead ticker; DRIP/STOCK does `existing.shares += reinvest_shares` and **resurrects** the position at `avg = 0`, which is delisted so it never gets a price, and one unpriced holding makes `returns.py` return `rate=None` for the **whole portfolio** — the XIRR goes blank indefinitely | skip the event, flag the position (待釐清). The owner records the payment as a **cash movement** |
+| **E24** *(implemented 2026-08-11)* | **A dividend on a symbol an EXCHANGE moved away** (audit 2026-08-10, **D32**) — after the exchange the source stays in the position map with **zeroed** fields (§4.4, required so a later buy cannot reopen it carrying `−ε`), so `existing is not None` and `short_shares == 0`: neither the closed-position refusal nor the dividend-on-short refusal applies, and the payment books | `UnbookableLedgerError` — **both branches, uniformly**. CASH/NET would book post-close realized income on a dead ticker; DRIP/STOCK does `existing.shares += reinvest_shares` and **resurrects** the position at `avg = 0`, which is delisted so it never gets a price, and one unpriced holding makes `returns.py` return `rate=None` for the **whole portfolio** — the XIRR goes blank indefinitely | skip the event, flag the position (待釐清). The owner records the payment as a **cash movement** |
 
 #### E1a — why the dashboard path must SKIP, not raise (review finding N3)
 
@@ -681,6 +702,97 @@ outside `instruments` would then reach `build_book`, whose `quote_ccy()` raises 
 and a different exception type from every other degradation path. The action ledger must join that
 skip-set on **both** its symbols.
 
+#### E2 — the predicate is share-only, and this row used to say otherwise (2026-08-11)
+
+The row read "closed (**0-share, 0-basis**) position"; `cost_basis.py` tests `shares == 0 and
+short_shares == 0` and says nothing about basis. Found by W8's oracle, which implemented the
+*spec* text faithfully and therefore **would have applied an EXCHANGE the app refuses** — on a
+position with zero shares and a non-zero basis, depositing a cost basis with no shares behind it
+onto the destination.
+
+The state is unreachable today (zero shares implies zero basis unless the oversell branch ran, and
+that branch sets `ever_oversold`, which **E3** catches — the app evaluates E2 before E3, the oracle
+E3 before E2, so both refuse, with different reason strings). **The app's predicate is the safer
+one and the spec text moves to match it**, rather than the reverse: adding a basis clause to the
+code would narrow a refusal on the strength of an invariant no test asserts.
+
+Recorded rather than quietly aligned, because the interesting part is *how* it surfaced: an
+independent reimplementation from the prose is the only reader that can catch prose and code
+drifting apart. That is §7.4's actual value, and it paid for itself the first time it ran.
+
+#### E3 / E5 / E18 / E22 are evaluated AT THE ACTION'S OWN DATE (2026-08-11)
+
+These four are the only rejections computed from a replayed `Book`, and until 2026-08-11
+`validate_corporate_action` replayed the **whole** ledger to get it. That made the feature unable
+to accept the data §10.5 defines "done" as accepting — see **trap #24** for the measurement and
+the reason door 1 concealed it.
+
+**Normative:** the validator replays `bundle.before_action_on(inp.date)`. That is the **walker's
+three-bound cut** (F-18 / D3), not `LedgerBundle.through`'s single `<= day`:
+
+```
+opening       <= D        # a same-day opening is PRE-action (EventPriority.OPENING = 0)
+transactions  <  D        # a same-day trade lands AFTER the action (BUY = 20, SELL = 30)
+dividends     <  D
+actions       <  D
+```
+
+`through` is right for the trend replay — *value the world as at the close of `D`* — and wrong
+here — *value the world as the action sees it*. Using it would still replay a same-day sell before
+the split that authorises it, which is exactly what a broker books when it settles a split and a
+sale together.
+
+**Nothing is weakened.** `_apply_action` enforces all four in true chronological order on every
+replay, so a position genuinely oversold *before* the action is still refused when the replay
+reaches it. What changed is only which state the question is asked about.
+
+**Consequence for callers.** The parameter is now the **`LedgerBundle`**, not a pre-replayed
+`Book`: a caller cannot hand in a wrongly-scoped replay because it cannot hand in a replay at all.
+Trap #21's real cost here is **one replay per distinct action date**, not per row — an importer
+hoisting a single book for a whole file is hoisting the wrong object. `book_cache` is the caller's
+`{date: Book}` dict, filled by the validator.
+
+#### E6b — a malformed row ALREADY IN the ledger: recorded, not raised, not dropped (2026-08-11)
+
+E6 rejects a bad ratio term **at entry**. E21 already establishes that rows reach the ledger
+behind entry validation — and until W7 lands, `validate_corporate_action` has **zero production
+callers** (F-40), so nothing enforces E6 at all. What such a row did was measured:
+
+```
+>>> load_ledger_bundle(conn)        # one row with ratio_to = 0.2857
+RAISED: ValidationError
+1 validation error for CorporateAction
+```
+
+**That is a 500 on every page.** All three `StoredCorporateAction → CorporateAction` conversions
+raised, and the one in `store.load_ledger_bundle` sits **above** `build_book`'s graceful refusal
+path — which `portfolio/dashboard.py` calls with **no `try`/`except` by design** (E1a's never-500
+rule). The refusal machinery this document spends §5 specifying was one layer too low to help.
+
+The two obvious repairs are both wrong, and the codebase had already written down why:
+
+| Option | Why not |
+| --- | --- |
+| Keep raising | The dashboard, the drawer, the trend and the scheduled price refresh all die on one bad row. The scheduler case is the worst: a background job's crash reaches the owner only as prices that quietly stopped updating |
+| Drop the row | The old docstrings argued this correctly — a silently omitted action leaves a share count **wrong by the ratio and looking entirely normal**, which is this feature's whole failure mode |
+
+**Resolution — the third option, and it is not a new mechanism.** The loader converts what it can
+and records what it cannot as an `UnreadableAction`; `build_book` turns each into an
+`UnappliedAction` carrying the same zh `reason`. From there everything already built applies
+unchanged: XIRR blanks **portfolio-wide with a named cause** (D38 invariant 2), the named positions
+carry `unbookable_action`, and the strict path still raises — the same split `_reject` makes for
+every other refusal. Not silent, not fatal, no new vocabulary.
+
+Two consequences worth stating:
+
+- **`convert_stored` in `shared/corporate_actions.py` is now the ONE owner** of the stored-row
+  conversion (§6.0). It had been open-coded three times, which is three chances for one copy to
+  keep raising after the others stopped — invisible until a malformed row happened to arrive
+  through that particular path.
+- **`UnappliedAction.kind` widens to `CorporateActionKind | str`**, because one of the refusal
+  reasons *is* an unknown kind. Narrowing it to the enum would make the model unable to describe
+  the row it exists to describe.
+
 #### E15 — the duplicate is HARD, and it must be checked BEFORE E12 (D29, 2026-08-09)
 
 Written during W2, when the implementation's own test failed. The original row said "the entry
@@ -707,6 +819,15 @@ familiar one:**
 E12's message is about **ambiguous ordering**, which does not apply to two identical rows — they
 have no order problem, they have a doubling problem — so the duplicate needs its own text, not
 E12's. Hence: check first, reject hard, say "this would apply the ratio twice".
+
+> **A duplicate EXCHANGE additionally trips E1a (2026-08-11, surfaced by the evaluation-order
+> test).** The stored row has already vacated the source on that date, so the second row's
+> `shares_through` — whose cut is same-day-inclusive for the action itself — finds nothing and
+> E1a fires alongside `duplicate_action`. Both are hard, so the outcome is correct and nothing
+> commits; the cost is that E1a's advice 「請先補登該日之前的買進或期初庫存」 is irrelevant on this
+> path. Left as-is rather than special-cased, but recorded for one reason: **if E1a ever becomes
+> the only rejection here, E15 has stopped firing** — the same unreachability defect this note was
+> written about, and the message would then actively mislead.
 
 #### E12 — same-date ordering is REJECTED, not tie-broken (D15)
 
@@ -1139,7 +1260,7 @@ fires on case 1 and stays silent on cases 2 and 3.
 It offers the repair rather than only complaining, mirroring §6.7's door 1:
 
 ```
-⚠ 這可能是同一檔證券的識別碼變更,而不是併購。
+⚠ 這可能是同一檔證券的識別碼變更(並同時調整股數),而不是併購。
    SYM-B 在此日期前已有價格資料,而來源代號完全沒有價格紀錄 — 這是識別碼、而非證券的特徵。
 
    ▸ 這是識別碼變更 → 改記為分割(SPLIT)      ← 一鍵轉換,預設
@@ -1472,25 +1593,62 @@ with the existing `oversold` / `unbookable_dividend` flag** so the cause is visi
 parity test (§7.2) asserts equality for **unflagged** positions and merely permits divergence on
 flagged ones. No special-casing inside the calculation.
 
-> **One exception, and only one — D33 (owner ruling 2026-08-10).** "Unconditionally" has a failure
-> case: applied to a source whose count is **negative** on the action date, the SQL path manufactures
-> a destination `build_book` never created — a symbol with no transaction, no opening and no holding,
-> and therefore **no flag of any kind** — so the drawer renders `＋公司行動 −100` under a red
-> 對帳不一致 with nothing to explain it. The paragraph above only works when the mismatch comes with
-> its cause attached. **The SQL path therefore skips an action whose source count is `< 0` on the
-> action date, and flags the symbol.**
+> **One exception, and only one — D33 (owner ruling 2026-08-10; grounds corrected 2026-08-10, task
+> #62).** "Unconditionally" has a failure case: applied to an action one of whose **two sides** is
+> **negative** on the action date, the SQL path either manufactures a destination `build_book` never
+> created — a symbol with no transaction, no opening and no holding, and therefore **no flag of any
+> kind** — or blends carried shares into an open short and reports the sum as an ordinary long
+> position. Either way the drawer renders `＋公司行動 −100` under a red 對帳不一致 with nothing to
+> explain it. The paragraph above only works when the mismatch comes with its cause attached. **The
+> SQL path therefore skips an action whose source count OR destination count is `< 0` on the action
+> date, and flags both symbols.**
 >
 > **This does not weaken the independence argument, which is what the unconditional rule protects.**
-> E3's precondition is a **share-domain** condition the share-only path computes from its own data —
-> one comparison, no import. That is exactly what E5 (short state) and E18 (destination short) are
-> not: those would require importing the replay's model into the SQL path and would collapse the two
-> implementations into one, ending the cross-check. Skipping on `< 0` imports nothing.
+> The precondition is a **share-domain** condition the share-only path computes from its own data —
+> one comparison per side, no import.
+>
+> ⚠ **This ruling's original text gave a reason that is false, and the correction is worth stating
+> because the false version reads as more rigorous than the true one.** It said E5 (source short) and
+> E18 (destination short) "would require importing the replay's model into the SQL path". They do not.
+> Long and short are **mutually exclusive by construction** (`_Position`'s own docstring), so a
+> negative signed count *is* an open short. E5 was therefore **already** covered by the `< 0` source
+> test D33 itself ordered — written off as unreachable while being reached — and E18 needed the
+> identical comparison pointed at the other end. What genuinely does require the replay's model is
+> **E3 and E22 in their STICKY form**, where `ever_oversold` outlives the negative count: that is
+> basis state, not share state, and it remains the whole permitted divergence (§7.2, and
+> `test_the_permitted_divergence_is_bounded_and_flagged` measures it).
+>
+> **Scope: EXCHANGE / SPINOFF only.** A SPLIT has no separate destination to manufacture, and **E4
+> deliberately allows a split to re-denominate an open short** — applying the skip there would
+> silently under-report a real position. The fixture that catches that mistake is `III` in §7.2's
+> parity ledger.
 
 #### Presentation
 
 The footer gains a `＋公司行動` term, shown only when non-zero (same rule as `＋配股/DRIP`), and
 `_SHARE_EPS` applies unchanged. The drawer's activity list gains the corporate-action rows so the
 term is traceable to the events that produced it.
+
+> **Three clarifications, all found by building it (2026-08-11).**
+>
+> **The term is SIGNED, and the sign moves into the operator.** An EXCHANGE's source loses its
+> whole position, so the literal reading of the sentence above renders `＋公司行動 -40`. It reads
+> `−公司行動 40`, beside its `−賣` neighbour. That is a string swap on an already-formatted value,
+> **not** client-side arithmetic — `web/` never computes money or quantities.
+>
+> **The action rows carry no share count of their own** (`shares: null`). A per-row delta would be
+> a third implementation of §4's ratio algebra, and its only public approximation (`shares_on` at a
+> `before` cut) gets F-18's same-day opening wrong. The exact figure is the footer's aggregate,
+> from the walker.
+>
+> **F-45's per-account set.** A symbol whose whole life is two actions owns no transaction, no
+> opening and no surviving holding, so its per-account set is taken from **activity ∪ holdings ∪
+> the accounts of its own action rows**. Without the third term the drawer renders an empty
+> per-account breakdown beside an activity list showing two events.
+>
+> **One EXCHANGE reddens TWO symbols.** Measured on the demo corpus: the destination is short by
+> the carried shares and the **emptied source is long by them** — `corporate_delta` −40 and +40.
+> A verification that only checks the destination reports half the repair.
 
 ### 6.4 Table enumerations that will silently omit the new table
 
@@ -1553,6 +1711,22 @@ is silent. The registry turns "remember to add it" into "it is declared once".
   **D3** (opening dated on an action date), and **N3-price** (the `to_symbol` has no stored price →
   the portfolio XIRR goes dark, see §6.6). The **depth-cap** `needs_confirm` of D31 (§6.2) joins
   this set once W4 lands.
+
+  > **Where E13 is observably enforced, and where it cannot be (2026-08-11).** §6.7's form derives
+  > the holder set itself and always submits the **complete** N-row batch (D28), so E13 is satisfied
+  > there **by construction** — the partial state is not expressible through the very door built to
+  > prevent it. The **CSV importer and the API** are therefore the only paths on which E13 can fire,
+  > and its test must live there rather than on the form. Worth stating because a test written
+  > against the form would pass forever without exercising the rule.
+
+  > **D3 is enforced at the ACTION door only (2026-08-11, found while implementing it).**
+  > `data_ingestion/` has no opening-inventory validator at all — the entry points are
+  > `validate_transaction`, `validate_corporate_action` and `validate_corporate_action_change` —
+  > so an **opening row dated onto an existing action's date** is written silently, and only the
+  > next *edit of the action* surfaces the collision. Entering the action after the opening is the
+  > common order and is covered; the reverse is not. Closing it needs a new `validate_opening`
+  > entry point, which is outside W2's scope. Recorded here so it is a **known** gap rather than a
+  > discovered one — the distinction this document exists to maintain.
 
   The three tiers are `validate.py`'s existing ones and are **not** re-invented here: no issue /
   `needs_confirm=True` / `needs_confirm=False`. A finding placed in the wrong tier is a behavioural
@@ -1639,12 +1813,20 @@ basis loss this door exists to prevent.
 The drawer already renders the reconciliation footer (§6.3). When it reads ⚠ 對帳不一致, it offers
 補登公司行動 beside the mismatch, pre-filled from that symbol. Same component, same prefill logic.
 
-#### Door 3 — the ledger page, as a 5th ledger tab
+#### Door 3 — the ledger section of `trades.html`, as a 5th ledger tab
 
-Deliberate entry, editing and deletion live with the other four ledgers on `ledger.html`, **not**
-as a 6th tab on the input page. The input page is high-frequency data capture (trades, dividends);
-the ledger page is low-frequency corrective record-keeping. A corporate action is the latter, and
-putting it on the input page buries a rare control behind five common ones.
+Deliberate entry, editing and deletion live with the other four ledgers in the 帳本記錄 section of
+**`trades.html`**, **not** as a 6th tab on the input pane above it. The input pane is
+high-frequency data capture (trades, dividends); the ledger section is low-frequency corrective
+record-keeping. A corporate action is the latter, and putting it on the input pane buries a rare
+control behind five common ones.
+
+> **File corrected 2026-08-11.** This section and §10.2's W7 row both said `web/ledger.html`. That
+> file has been a **redirect stub since FM6 (2026-07-07)** — it forwards to `trades.html`, which
+> hosts the ledger tab bar, the four panes and the tab/export glue. An implementer following the
+> literal text would have built door 3 into a page nobody loads. W7's real file set is
+> `web/trades.html` + `web/ledger.js` + `web/corp-action-form.js` (new, the shared form component)
+> + one `<script>` tag in `web/index.html`, which is door 2's prerequisite.
 
 #### The form — plain language over jargon
 
@@ -1716,8 +1898,12 @@ When the action would unblock a currently-failing sell, say so **before** saving
    error would arrive after the owner had formed the belief that partial application is legal.
    Accounts whose position opens after the action date are listed separately as *not affected*, so
    the owner can see the system understood their ledger rather than merely obeying a rule.
-3. **The price for a new `to_symbol` (§6.6).** Trigger a quote fetch on save and say so, because
-   otherwise the portfolio XIRR goes dark with no visible cause.
+3. **The price for a new `to_symbol` (§6.6).** On save, if the destination has no stored price,
+   say so **and offer the fetch as one click** (`POST /api/actions/refresh-quotes`) — do **not**
+   fire it inside the write path. *(Reworded 2026-08-11: "trigger a quote fetch on save" makes the
+   ledger write depend on a provider, so it fails for reasons unrelated to the ledger, and the
+   hermetic suite bans sockets.)* The message must say the **whole portfolio's** XIRR goes dark,
+   not just this symbol's — that is the part with no visible cause.
 4. **The reorganisation fee (§3.3).** If the statement carried one, offer the cash-movement entry
    with the D12 caveat shown inline.
 
@@ -1894,6 +2080,17 @@ both verified by something that cannot go red. Therefore:
   (§6.3), which is why D33's `< 0` skip must be flagged rather than silent — an unflagged divergence
   must always be a failure.
 
+**The permitted gap must be enumerated, not left as "divergence permitted" (2026-08-10, task #62).**
+A green §7.2 does not say "the two paths agree"; it says *they agree wherever the replay booked the
+action*, and a reader who cannot see the difference will over-trust it. The refusals fall into three
+groups and the test's docstring states all three:
+
+| Group | Cases | Behaviour |
+| --- | --- | --- |
+| Agree, no rule needed | **E1** (source never existed), **E2** (source already empty) | every delta is computed from a zero source, so the arithmetic already yields 0 |
+| Agree, skipped under D33 | **E3**/**E5** on the source and **E18**/**E22** on the destination, *while the count is actually negative* | one `< 0` comparison per side; long/short exclusivity makes it exact |
+| **DIVERGE** | **E3 / E22 STICKY** — `ever_oversold` outlives the negative count | basis state, not share state. Bounded by `Book.unapplied_actions`, pinned by `test_the_permitted_divergence_is_bounded_and_flagged` |
+
 ### 7.3 Contract tests
 
 - `_reconcile` reports `balances: true` for a symbol carrying a corporate action, and
@@ -1914,14 +2111,39 @@ than by reading the app's code:
   reason is worth stating in the file itself so a future cleanup does not "de-duplicate" it.
 - `run_phase1.py` — a scenario op sequence exercising: forward split → sell; reverse split →
   cash-in-lieu sell; exchange into an existing position; spinoff → sell child; split on a
-  DRIP-adjusted position; a **2-for-7 exchange** (the §3.1(ii) exactness case); and at least one
-  rejection path.
+  DRIP-adjusted position; a **2-for-7 exchange**; and at least one rejection path.
 - Gate: `python scripts/stress_audit/run_all.py --phase 1` → `fail=0`.
+
+> ⚠ **The list above cannot detect traps #2 or #10, and it said it could (2026-08-11, found by
+> W8's implementer while building the oracle).** Two independent blind spots, both of the
+> "unsatisfiable companion test" shape §7.1 already had to correct once:
+>
+> 1. **The 2-for-7 exchange is NOT an exactness case.** This line called it "the §3.1(ii)
+>    exactness case", but `700 × (2/7)` is **exactly 200** at 28 digits — the document measured
+>    that itself in the 2026-08-09 correction and then left this sentence pointing at it. Every
+>    other ratio in the list (3-for-1, 1-for-10, 1-for-4, 5-for-4) likewise has a terminating
+>    quotient, so an oracle built literally to this list is **blind to a rounded ratio** — trap #1
+>    and trap #2, the two the whole feature exists to defend against. **The list must therefore
+>    also carry a ratio whose quotient does not terminate**, e.g. `210 × 1/3` → exactly `70` under
+>    multiply-first, `69.99999999999999999999999999` under `qty × (to/from)`. Keep the 2-for-7: it
+>    is a good *shape* test (an n:m exchange into an existing position), it is simply not the
+>    exactness one.
+> 2. **Every item puts its action alone on its date**, so a replay running `CORPORATE_ACTION`
+>    *after* `BUY` produces identical numbers and **trap #10 is undetectable**. The scenario must
+>    date a buy and a sell **onto** an action date.
+>
+> Both were verified by mutating the app and watching the pre-correction list stay green.
+> Generalisation worth keeping: **a scenario list is a specification of detection power, not of
+> coverage** — every entry should name the mutation it is the only one to catch.
 
 ### 7.5 Accounting manual
 
-`docs/accounting-formula-manual.md` (zh, the authority) gains a new **§ 公司行動** placed after
-§4 成本基礎 and cross-referenced from §5 已實現／未實現損益 and §7 總報酬. It must carry the three
+`docs/accounting-formula-manual.md` (zh, the authority) gains a new **§4.4 公司行動** — a subsection
+at the **end of §4 成本基礎**, *not* a new top-level section (clarified 2026-08-11 while writing it).
+The original wording said "a new § placed after §4", but a top-level section between §4 and §5
+renumbers §5–§12, which invalidates **this very sentence's** references to §5 已實現／未實現損益 and
+§7 總報酬 — and every `§5.1` / `§7.2`-style citation elsewhere in the repo. Cross-referenced from
+§5 已實現／未實現損益 and §7 總報酬. It must carry the three
 formulas of §4, the edge matrix of §5, a worked numeric example per kind, and a verification
 anchor tying each to its oracle scenario. `docs/accounting-formula-manual.en.md` is the
 hand-maintained mirror and is updated in the same change; §12 附錄's table of contents and the
@@ -1957,14 +2179,49 @@ Seed one of each kind, chosen to cover the decisions that only appear at runtime
 
 | Seeded | Covers |
 | --- | --- |
-| A forward SPLIT on a symbol **held in two accounts**, both rows written | D13's all-accounts rule, and §5.1's multi-account price dedup — the 27-for-1 trap only exists for multi-account holders |
-| A SPLIT whose price history spans the action date | §5.1(b)(c)(d): `split_basis`, the reconcile, and net-worth continuity, on a real HTTP round trip |
+| A forward SPLIT on a symbol **held in two accounts, whose price history spans the action date** — both rows written | D13's all-accounts rule, §5.1's multi-account price dedup, and §5.1(b)(c)(d): `split_basis`, the reconcile, and net-worth continuity on a real HTTP round trip |
 | An EXCHANGE (rename, `ratio = 1`) | the §6.3 drawer term and the `＋公司行動` footer |
 | A SPINOFF with `cost_carry` | D21's provenance label on the child's 回本進度 |
+
+**The first two rows used to be separate, and merging them is not tidying (2026-08-11).** The
+factor-per-row defect raises the ratio to the **power of the holder count** — a 3-for-1 in three
+accounts becomes 27-for-1 — so it is observable only where multi-account holding and a spanning
+price series meet **on the same symbol**. Seeded as two symbols, neither half can see it.
+
+**Three implementation requirements, each found by seeding it (2026-08-11):**
+
+1. **The seed passes `factor_of` to `upsert_prices`, and its closes are authored in PROVIDER
+   basis.** `fetched_at` is *now*, i.e. after the action, so `target` for a pre-split row is the
+   ratio. A seed that omits the factor writes `split_basis = '1'` against a non-unit target —
+   violating §5.1(b) the moment it is written — and the first reconcile then multiplies those
+   closes by the ratio a **second** time.
+2. **The corpus uses DEDICATED symbols, never one the demo already prices.** Rows written before
+   their split was known carry `close_raw` = the as-traded close, which is correct for them and
+   wrong for the reconcile: adding a split afterwards makes `target = ratio` for every earlier row
+   and restates months of real closes upward. A symbol whose entire series the seed writes
+   satisfies the invariant identically on a fresh and on an already-seeded database.
+3. **The corpus must live OUTSIDE the double-seed refusal, behind its own guard.** `seed_demo.py`
+   refuses to re-seed an existing transaction ledger, and the live demo was seeded long before this
+   feature — so a corpus inside that refusal never reaches the site the staged deploy verifies.
+   That is trap #22 arriving through the fix for trap #22.
+
+**Ordering constraint (also W7's — see §6.7).** An EXCHANGE / SPINOFF destination must be **priced
+before its action is validated**: N3-price is `needs_confirm`, and one unpriced holding blanks the
+whole portfolio's XIRR. A SPLIT is exempt from that check, which is exactly what lets a split's own
+series be written *after* its action row — the only order in which `factor_of` can see the ratio.
+Any batch importer must sequence **registration → price → action**.
+
+**Known and accepted:** the corpus symbols are fictional, so no provider resolves them and a manual
+更新報價 lists them under `RefreshSummary.failed`. That degrades gracefully by design (last-known
+price + staleness flag) and the demo instance's scheduler is disabled by policy. `archived=True` is
+**not** an escape: `insert_transaction` / `insert_dividend` call `_unarchive_on_booking`, and
+"held ⇒ not archived" is a documented invariant.
 
 Demo data **accumulates and is never reset** (owner ruling 2026-07-31), so this is seeded once and
 keeps paying. `verify_live.py` gains an assertion that the drawer of the multi-account symbol reads
 ✓ 對帳一致 on **both** accounts — the one check that would have caught D13's defect from outside.
+⚠ **That assertion lands with W5, not with the corpus:** it depends on §6.3's `＋公司行動` term, so
+adding it before W5 turns the release gate red on both sites for a reason that is not a defect.
 
 ### 7.8 Gates
 
@@ -2033,7 +2290,7 @@ ways is a net loss, so each answer reuses a mechanism the codebase already has.
 | **D30** *(blocks W6a)* | **The price basis** — one stored column (re-express and divide back out), or two (keep the raw provider close)? | **Two columns.** Keep the raw provider close and define **both** operations as `close := raw × target` (§5.1(c)). The single column is not order-independent *at the stored value*: `_cap_dp` re-applies on every pass and the orders traverse different intermediates — measured, `(1/3)` then `(7/2)` on 0.0013 stores 0.0014 one way and 0.0015 the other, 7.7% apart, and neither equals the one-shot value, while §5.1 claims order-independence and §7.1b tests it. Reconstruction also cannot recover an as-traded price from an already-rounded feed (US 7-for-1: 100.07 → 100.10). With two columns idempotency, reversibility and order-independence hold **by construction**, and detail 1's short-circuit demotes to an optimisation. *System fit:* `data-and-pricing.md` requires storing at full source precision and calls the 4-dp cap "representation noise, not information" — which stops being true once the close is derived and the source is discarded; it also brings `prices` under CLAUDE.md #7, where nothing authoritative is overwritten. Cost: one TEXT column |
 | **D31** *(blocks W4)* | **The depth cap** — what does the walker return when it degrades? | **Not `Decimal \| None`. Split by path** (§6.2). Read paths keep the bare `Decimal` signature and record the capped symbol in a per-request set, surfaced through the same 待釐清 chip path `unbookable_action` uses; the **validation** path reads that set and raises a **`needs_confirm`** issue. *System fit:* the codebase has exactly one vocabulary for "this number exists but is not trustworthy" (`price_stale`, `oversold`, `short_open`, `unbookable_dividend`, `unbookable_action`) and one for "validation must not guess" (`validate.py`'s three tiers). A nullable return would be a **sixth** mechanism, forcing nine call sites to each invent a policy — several of which only want a boolean. Reusing the two existing ones changes no signature and adds no concept |
 | **D32** *(a live defect in W3)* | **A dividend on a symbol an EXCHANGE moved away** — book it, redirect it, or refuse it? | **Refuse and flag, uniformly for both branches** — raise strict, skip + flag on the dashboard path; the owner records the payment as a **cash movement**. New row **E24** in §5, with its note. The state is reachable because §4.2 leaves the source in the map with zeroed fields, so neither the closed-position nor the short refusal applies: CASH/NET books post-close income on a dead ticker, and DRIP/STOCK **resurrects** the position at `avg = 0` — delisted, never priced, and one unpriced holding blanks the **whole portfolio's** XIRR. *System fit:* it is the posture the replay already takes five times (E3, E5, E18, E22, dividend-on-an-open-short), and "record it as a cash movement instead" is `domain-ledger.md`'s existing remedy for the short case. **Narrow scope:** an ordinary sold-out position keeps today's post-close-income behaviour (the 2026-07-26 audit's H2 ruling); only the action-zeroed state changes |
-| **D33** *(blocks W5)* | **§6.3's SQL path applying an action to a negative source** | **Skip the action when the source count is `< 0` on the action date, and flag the symbol** (§6.3). Applied unconditionally it manufactures a destination `build_book` never created — no transaction, no opening, no holding, therefore **no flag** — and the drawer renders `＋公司行動 −100` under a red 對帳不一致 with nothing to explain it. *Why this does not break §6.3's independence argument:* **E3's precondition is a share-domain condition the share-only path computes from its own data** — one comparison, importing nothing. E5 (short state) and E18 (destination short) are not: honouring those would require importing the replay's model and would collapse the two implementations into one, ending the cross-check the footer exists to be |
+| **D33** *(blocks W5)* | **§6.3's SQL path applying an action to a negative side** | **Skip the action when the source count OR the destination count is `< 0` on the action date, and flag both symbols** (§6.3), for EXCHANGE / SPINOFF only (E4 lets a SPLIT re-denominate an open short). Applied unconditionally it either manufactures a destination `build_book` never created — no transaction, no opening, no holding, therefore **no flag** — or blends carried shares into an open short and prints the sum as an ordinary long; the drawer then renders `＋公司行動 −100` under a red 對帳不一致 with nothing to explain it. *Why this does not break §6.3's independence argument:* the precondition is a **share-domain condition the share-only path computes from its own data** — one comparison per side, importing nothing. **Grounds corrected 2026-08-10 (task #62):** this row originally claimed E5 and E18 were out of reach because they would need the replay's model. They are not — long and short are mutually exclusive by construction, so a negative signed count **is** an open short, which means E5 was already covered by the source test and E18 needed the same comparison on the other end. The genuinely out-of-reach case is **E3/E22 STICKY**, where the flag outlives the negative count; that is basis state and stays divergent-but-bounded |
 | **D34** *(blocks W9's manual text)* | **§9's cash-and-stock recipe** — keep it, or withdraw it? | **Withdraw the recipe; cash-and-stock stays a hard exclusion, with the reason stated** (§9). The recipe is unexecutable: `EventPriority` runs CORPORATE_ACTION (10) before SELL (30), the EXCHANGE sets `source.shares = 0`, and the same-day SELL then hits a zero-share position — `OversellError` strict, **STICKY 賣超 with the basis discarded** on the dashboard path: the exact disaster §1 says this feature exists to prevent. Second defect: under weighted average the cash leg disposes of `f × N` shares, so the corrected ratio is `B_received / ((1−f) × N)`, which is generally **not** expressible as two positive integers — which **D14 requires**. §9's stated verification covered only the two degenerate cases where one leg does not exist, neither of which can exhibit either defect. *System fit:* both available repairs dismantle load-bearing rules (widening D14 reintroduces the typed-decimal hazard on 3,530 measured cases; re-ordering the events breaks "an action is effective at the start of its date") for an event the spec records the owner does not have. The nearest expressible form — EXCHANGE all shares, then SELL the **destination** (priority 10 then 30, so the ordering works) — is recorded as an **unofficial workaround with its inexactness stated**, never as a normative recipe |
 | **D35** *(P1b; not blocking, cheap now)* | **Does a US cash dividend reduce `adjusted_total`?** | **Yes — treat it exactly as TW/MY cash.** *System fit:* `CASH_DIVIDEND_TYPES` drives four sites uniformly; booking US cash as income instead would put **two dividend accounting models in one ledger**, so 回本進度 and 股利回收率 would mean different things per market on the same screen — which is what `domain-ledger.md`'s one-definition discipline exists to prevent. **Recorded in this file only as D21's precondition** (see D21); the decision belongs to `docs/spec/2026-08-06-broker-import-backlog.md`, where it is written up in full |
 | **D36** *(blocks W9's wording only)* | **Does anything besides trades reach the return metrics?** | **Option 2 — leave XIRR untouched, add a whole-account IRR in the existing `portfolio/twr.py`.** *System fit:* `twr.py` already exists as the home for a whole-account view; redefining XIRR would move every historical figure, invalidate the accounting manual's worked anchors and the stress-audit oracle's expectations, and require re-verification against the whole corpus — for amounts the backlog itself calls trivial. Additive instead. **It also resolves D12's conceded blind spot**: the reorganisation fee is booked as a `WITHDRAW`, which XIRR does not see and the account IRR does. §3.3, §7.5 and W9 state the limitation as *resolved*, not permanent |
@@ -2041,6 +2298,8 @@ ways is a net loss, so each answer reuses a mechanism the codebase already has.
 | **D38** *(owner question 2026-08-10: "can a symbol with no corporate action be guaranteed identical to pre-feature `main`, so a defect in the new flow damages only the triggering stock?")* | **Blast-radius containment — is a per-symbol "sandbox mode" the right instrument?** | **No mode. Three testable invariants instead — see the note below.** *System fit:* a runtime mode means two code paths, both maintained and both needing tests, and a configuration in which the new code does not run — so the day it is switched on, every untested interaction arrives at once. This codebase has lost that argument three times already: the aggregate-vs-detail divergence recurred **three** times, `mock-data.js` was retired for being a second source of truth, and `shared/ledger_registry.py` exists because four hand-maintained enumerations drifted. **The containment the owner is asking for already holds structurally for three of the four output tiers; what is missing is that it is neither named nor tested.** And two mechanisms already in this design are strictly stronger than a sandbox: **重算** *undoes* a bad action rather than merely confining it (a sandbox limits damage; replay erases it), and **`corporate_delta`** (§6.3) is a per-symbol runtime cross-check between the naive and action-aware paths that **shows** the discrepancy instead of hiding it |
 
 | **D39** *(two W6a implementation findings, owner sign-off 2026-08-10)* | **(a)** `scheduler/jobs.py` needs the corporate-action ratio to build the injected split factor, but an existing test **forbids** it importing `data_ingestion`, citing `architecture.md` — and `jobs.py` keeps a local copy of `_add_column_if_missing` rather than import one. **(b)** §5.1 said "all four **prices** take the same factor", but only `close` has a preserved raw column | **(a) Narrow the guard to a ONE-line allowlist** (`list_corporate_actions`), and **record the edge in `architecture.md`'s diagram**. *System fit:* the rejected alternatives are worse in this codebase's own terms — injecting from `api/app.py` respects the diagram but degrades to a **silently wrong** price basis if registration is ever missed, and a lookup in `shared/` keeps every edge legal at the cost of a **second SQL site** for `corporate_actions`, which is the duplication `shared/ledger_registry.py` exists to remove. A second test asserts the allowlisted line is actually present, because an exception nobody uses is an exception nobody notices. **An edge that exists in code but not in the diagram is the next audit's F-01**, so the diagram moves.<br>**(b) Only `close` is re-expressed** (§5.1 amended). Multiplying `open`/`high`/`low` off a single `close_raw` produces derived values no reconcile can restate — F-23's defect made unfixable, and outside D38's reversibility invariant. Three more `*_raw` columns were rejected: those three have **zero readers**, verified — every `SELECT` against `prices` names its columns and none names them. `split_basis` keeps their basis recoverable, and the schema carries the warning, because a row with a post-split `close` and pre-split `high`/`low` is a landmine for the first candlestick chart |
+| **D40** *(W5, 2026-08-11)* | **F-31 — a cross-account per-share-unit consistency check in the drawer footer** (the grill's second Q1 recommendation, adopted nowhere) | **Declined.** D13 already answered this exact question and chose the **entry gate over the drawer**, on the ground that the footer's ⚠ provably never fires for a partial application. F-32 is now closed at BOTH doors — E13 re-validates on delete and update, wired to HTTP by W7 — so the only remaining entry path is a hand-edited database, which already breaks every replay call site. Implementing it would add a **fourth** implementation of 「which accounts hold this symbol on the action date」 (`validate.py`, the walker, the replay's position map), which is what §6.0's one-owner rule and `shared/ledger_registry.py` both exist to prevent. And a read-time re-validation that disagrees with the write-time gate **accuses the owner of a problem the entry surface says cannot exist**. Trap #13 therefore stays *prevented at entry*, not *detected in the footer* — recorded here rather than left silent, because the audit said declining is only defensible once F-32 closes, and it now has |
+| **D41** *(found by §10.5's acceptance script, 2026-08-11)* | **E3 / E5 / E18 / E22 were evaluated against the WHOLE ledger**, so on a bulk import E3 rejected the very action that resolves the 賣超 | **Replay at the action's own date** — `bundle.before_action_on(inp.date)`, the walker's three-bound cut (F-18 / D3), and the parameter becomes the **bundle**, not a pre-replayed book, so no caller can supply a wrongly-scoped one. See trap #24 and §5's note. *Not a weakening:* `_apply_action` still enforces all four chronologically on every replay. This is a **blocker-class** find: §10.5's acceptance run is defined against exactly the ledger shape that triggered it |
 
 ---
 
@@ -2198,17 +2457,17 @@ P0  →  D30–D37  →  W6a  →  W4  →  W6b  →  W5  →  E23 + W7  →  W8
 | --- | --- | --- | --- | --- | --- |
 | **W0** | `LedgerBundle` + `shared/ledger_registry.py` refactor (D9) | **DONE** | — | `shared/ledger_registry.py` (new), `data_ingestion/store.py`, `portfolio/cost_basis.py`, the 8 call sites, `db_stats.py`, `export/ledgers.py`, `moomoo_merge.py`, `scripts/merge_reconcile.py` | **§7.3** — the golden payload round-trip unchanged (`git diff --exit-code tests/golden/dashboard_full.json`) with the full suite green. Any moved number means the refactor is wrong. **It does NOT ship as its own version** — ~~D26~~ is retired; it rides the single feature release (D7) |
 | **W1** | `shared/corporate_actions.py` + `shared/ledger_events.py` | **DONE** | W0 | both new, no wiring | **§7.1** — the 2-for-7 exactness bullet and its corrected detection-power companion (`3 × 1/3`, `935 × 18/17`); `apply_ratio`, `split_factor`, `ActionIndex`, `EventPriority` unit-tested standalone |
-| **W2** | Ledger: schema, CRUD, validation | **PARTIAL** | W1 | `data_ingestion/schema.py`, `store.py`, `validate.py` | **§7.1's per-rejection bullets** — every §5 rejection raises the expected type with a zh message, in §6.5's stated **evaluation order** (E15 before E12, D29). **Still open:** three of the five soft warnings do not exist — **E23** (F-30: it is the guard D19's residual hole depends on, so it is W2 scope, not W7's), **D3** and **N3-price**. E9's text must name the 回本進度 migration |
+| **W2** | Ledger: schema, CRUD, validation | **DONE** (2026-08-11) | W1 | `data_ingestion/schema.py`, `store.py`, `validate.py` | **§7.1's per-rejection bullets** — every §5 rejection raises the expected type with a zh message, in §6.5's stated **evaluation order** (E15 before E12, D29). The soft set is now **complete**: **E23** (F-30 — the guard D19's residual hole depends on, hence W2 scope, not W7's), **D3** and **N3-price** landed 2026-08-11, each with a fires / does-not-fire pair and a mutation proving the negative case is not vacuous. ⚠ **W2's validation is still unreachable in production** — `validate_corporate_action` has **zero** production callers (F-40). That is W7's obligation, not a W2 gap, but until W7 lands, every rejection and warning in this package exists only in tests |
 | **W3** | Replay in `build_book` | **DONE**, output unwired | W2 | `portfolio/cost_basis.py` | **§7.1a** (conservation, basis legs) + **§7.1's** per-kind and per-edge bullets. The unwired output is P0's F-05 |
 | **P0** | Audit propagation + the two live defects | **this package** | — | this spec, `docs/spec/2026-08-06-broker-import-backlog.md`; then `portfolio/timeseries.py`, `api/dashboard_models.py`, `portfolio/dashboard.py`, `api/routers/symbol.py`, `web/app.js`, `tests/portfolio/test_corporate_actions.py` | **§7.1 — extended by this package**, because a flag with no consumers had no clause: `unbookable_action` is wired exactly where `unbookable_dividend` is wired (six sites, F-05), and a position carrying it marks the trend day `incomplete` instead of contributing `price × pre-action shares` unflagged. Plus **F-11**: the "DETECTION POWER" test must mutate `_apply_action`, not a local variable. No decision is required for any of it |
-| **W6a** | Price basis — schema column, write seam, `factor_of` injection (D8/D10/D11/**D17**/**D30**) | not started | W1, W2 · **D30** | **`pricing/schema.py`** (not `data_ingestion/schema.py` — F-14), `pricing/store.py`, **`pricing/refresh.py`**, **`scheduler/jobs.py`**, **`api/instrument_service.py`** | **§7.1b's final clause** — a symbol with **no** corporate action stores byte-identically, including the new column — plus the write-seam units §5.1 detail 1 now requires: the cap applied **last, to the product** (F-20's ×20 case gives 2.8333, not 2.8340) and the upsert's `DO UPDATE` restating every basis column (F-23). Boot gate: a **fresh** database migrates and starts. `pricing/` still imports nothing but `pricing.*` (D17 — grep the import block, do not eyeball it) |
-| **W4** | `holdings.py` action-aware share path (D23, **D31**) | not started | W2 · **D31** | `data_ingestion/holdings.py`, `data_ingestion/validate.py`, `shared/corporate_actions.py` | **§7.2 in full, including its 2026-08-10 normative clauses** (F-16 — the union enumeration, the internal position map, and the two required fixtures; a `book.holdings` iteration does **not** satisfy it). Plus §6.2's rules — strict per-ledger date bounds · the depth cap degrading per **D31** · one `ActionIndex` per batch · `shares_naive` untouched — and the four `validate.py` repairs F-06/F-07/F-08/F-32. **Re-points W2 (F-33):** E1a.1 and E13 run on the **naive** path until this lands, which is why the second action of a chain is currently uncommittable; this package moves both onto the action-aware path and asserts it |
-| **W6b** | Price basis — reconcile + read-path re-expression (**D30**, ~~D18~~ → **D22**) | not started | W6a | the reconcile entry point (invoked on any insert / edit / delete of a SPLIT row; factors injected per D17), `portfolio/dashboard.py` (the `price_map` assignment — the construct, not a line number), `portfolio/timeseries.py`, `.claude/rules/data-and-pricing.md` | **§7.1b in full** (run twice · edit · delete · either order — under D30 these hold by construction, so a red here means the raw column is not what the close was rebuilt from) and **§7.1a's value leg** with both detection-power companions. Plus **§7.1's byte-identical assertion**: an EXCHANGE with `ratio_to != ratio_from` into a `to_symbol` **you already held** leaves every stored price of that symbol byte-identical before and after the action is entered. *(That clause replaces "net-worth continuity for an EXCHANGE with `ratio != 1` as well as a SPLIT (D18)", which demanded the widened scope trap #16 forbids — F-03.)* |
-| **W5** | Drawer reconciliation (**D33**) | not started | **W4** | `api/routers/symbol.py`, `web/detail.js`, `api/dashboard_models.py`, `portfolio/dashboard.py`, `tests/golden/dashboard_full.json` | **§7.3's first bullet** — `balances: true` with `diff_shares == 0` for a symbol carrying an action, and a deliberately wrong `corporate_delta` makes it false. The flag chips must reach the wire (F-17), or §6.3's red footer renders with nothing to explain it |
-| **W7** | Entry surfaces (§6.7) + the CSV kinds | not started | W2 (incl. E23), W4 | `web/ledger.html`+`ledger.js`, the 賣超 confirm dialog, `web/detail.js`, `api/routers/ledgers.py`, `import_templates.py` **and every other registration point a new CSV kind needs** (F-28) | **§7.6** — each kind entered through the UI produces the asserted position, the `＋公司行動` term and a ✓ 對帳一致 footer, and a previously-blocked sell now validates. Plus D13/D28's multi-account preview and the CSV round-trip header guard. **W7 owns D15's enforcement in practice (F-40):** the importer must call `validate_corporate_action` with the **full batch**, or nothing enforces it |
-| **W8** | Stress-audit oracle | not started | W3 | `scripts/stress_audit/oracle.py`, `run_phase1.py` | **§7.4** — `run_all.py --phase 1` → `fail=0`, with the oracle carrying **its own** ratio arithmetic |
-| **W9** | Accounting manual | not started | W3, W6b · **D36** | `docs/accounting-formula-manual.md` (zh, authority) + `.en.md` mirror | **§7.5** — including its two limitation rules: D11 stated as standing, **D12 stated as resolved by D36** (not as a permanent blind spot), and cash-and-stock documented as a **hard exclusion** per D34 |
-| **W10** | E2E, demo corpus, gates, ship | not started | all · **D37** | `tests/e2e/`, **`scripts/seed_demo.py`**, **`scripts/verify_live.py`**, **`scripts/verify_corporate_actions.py`** (new, §10.5), `CHANGELOG.md`, `shared/whatsnew.py` | **§7.6 + §7.7 + §7.8**, then **§10.5**'s owner-run acceptance script (blocking, and it needs D37's opening cost totals), then `/ship-version` |
+| **W6a** | Price basis — schema column, write seam, `factor_of` injection (D8/D10/D11/**D17**/**D30**) | **DONE** (2026-08-10) | W1, W2 · **D30** | **`pricing/schema.py`** (not `data_ingestion/schema.py` — F-14), `pricing/store.py`, **`pricing/refresh.py`**, **`scheduler/jobs.py`**, **`api/instrument_service.py`** | **§7.1b's final clause** — a symbol with **no** corporate action stores byte-identically, including the new column — plus the write-seam units §5.1 detail 1 now requires: the cap applied **last, to the product** (F-20's ×20 case gives 2.8333, not 2.8340) and the upsert's `DO UPDATE` restating every basis column (F-23). Boot gate: a **fresh** database migrates and starts. `pricing/` still imports nothing but `pricing.*` (D17 — grep the import block, do not eyeball it) |
+| **W4** | `holdings.py` action-aware share path (D23, **D31**) | **DONE** (2026-08-10; D33 widened to the destination side 2026-08-11) | W2 · **D31** | `data_ingestion/holdings.py`, `data_ingestion/validate.py`, `shared/corporate_actions.py` | **§7.2 in full, including its 2026-08-10 normative clauses** (F-16 — the union enumeration, the internal position map, and the two required fixtures; a `book.holdings` iteration does **not** satisfy it). Plus §6.2's rules — strict per-ledger date bounds · the depth cap degrading per **D31** · one `ActionIndex` per batch · `shares_naive` untouched — and the four `validate.py` repairs F-06/F-07/F-08/F-32. **Re-points W2 (F-33):** E1a.1 and E13 run on the **naive** path until this lands, which is why the second action of a chain is currently uncommittable; this package moves both onto the action-aware path and asserts it |
+| **W6b** | Price basis — reconcile + read-path re-expression (**D30**, ~~D18~~ → **D22**) | **DONE** (2026-08-11) | W6a | the reconcile entry point (invoked on any insert / edit / delete of a SPLIT row; factors injected per D17), `portfolio/dashboard.py` (the `price_map` assignment — the construct, not a line number), `portfolio/timeseries.py`, `.claude/rules/data-and-pricing.md` | **§7.1b in full** (run twice · edit · delete · either order — under D30 these hold by construction, so a red here means the raw column is not what the close was rebuilt from) and **§7.1a's value leg** with both detection-power companions. Plus **§7.1's byte-identical assertion**: an EXCHANGE with `ratio_to != ratio_from` into a `to_symbol` **you already held** leaves every stored price of that symbol byte-identical before and after the action is entered. *(That clause replaces "net-worth continuity for an EXCHANGE with `ratio != 1` as well as a SPLIT (D18)", which demanded the widened scope trap #16 forbids — F-03.)* |
+| **W5** | Drawer reconciliation (**D33**) | **DONE** (2026-08-11) | **W4** | `api/routers/symbol.py`, `web/detail.js`, `api/dashboard_models.py`, `portfolio/dashboard.py`, `tests/golden/dashboard_full.json` | **§7.3's first bullet** — `balances: true` with `diff_shares == 0` for a symbol carrying an action, and a deliberately wrong `corporate_delta` makes it false. The flag chips must reach the wire (F-17), or §6.3's red footer renders with nothing to explain it |
+| **W7** | Entry surfaces (§6.7) + the CSV kinds | **DONE** (2026-08-11) — except the **6th** kind (cash movements), deferred with an architectural reason: its withdraw guard needs `portfolio/cash.py`, and `data_ingestion → portfolio` is not an edge. Prerequisite recorded: extract `validate_cash_movement` first, the same move `validate_opening_cost` just made | W2 (incl. E23), W4 | `web/ledger.html`+`ledger.js`, the 賣超 confirm dialog, `web/detail.js`, `api/routers/ledgers.py`, `import_templates.py` **and every other registration point a new CSV kind needs** (F-28) | **§7.6** — each kind entered through the UI produces the asserted position, the `＋公司行動` term and a ✓ 對帳一致 footer, and a previously-blocked sell now validates. Plus D13/D28's multi-account preview and the CSV round-trip header guard. **W7 owns D15's enforcement in practice (F-40):** the importer must call `validate_corporate_action` with the **full batch**, or nothing enforces it |
+| **W8** | Stress-audit oracle | **DONE** (2026-08-11) — `ops=118 pass=3791 fail=0` | W3 | `scripts/stress_audit/oracle.py`, `run_phase1.py` | **§7.4** — `run_all.py --phase 1` → `fail=0`, with the oracle carrying **its own** ratio arithmetic |
+| **W9** | Accounting manual | **DONE** (2026-08-11) — manual v1.7, §4.4, zh + en mirror | W3, W6b · **D36** | `docs/accounting-formula-manual.md` (zh, authority) + `.en.md` mirror | **§7.5** — including its two limitation rules: D11 stated as standing, **D12 stated as resolved by D36** (not as a permanent blind spot), and cash-and-stock documented as a **hard exclusion** per D34 |
+| **W10** | E2E, demo corpus, gates, ship | **PARTIAL** (2026-08-11): demo corpus **done** (§7.7), `verify_corporate_actions.py` **done** (§10.5), `verify_live.py` check **done**, four drawer e2e **done**. Still open: §7.6's full entry-through-the-UI e2e, `CHANGELOG.md`, `shared/whatsnew.py`, and the owner's own §10.5 run (needs D37's cost totals) | all · **D37** | `tests/e2e/`, **`scripts/seed_demo.py`**, **`scripts/verify_live.py`**, **`scripts/verify_corporate_actions.py`** (new, §10.5), `CHANGELOG.md`, `shared/whatsnew.py` | **§7.6 + §7.7 + §7.8**, then **§10.5**'s owner-run acceptance script (blocking, and it needs D37's opening cost totals), then `/ship-version` |
 
 **Dependencies, stated once (F-34).** **W3, W4 and W6a are independent** of each other once W2
 lands. **W6b follows W6a** (it rebuilds closes from the column W6a adds) and **W5 follows W4** — not
@@ -2294,6 +2553,7 @@ ratio defects and did not list the stronger one at all.
 | 22 | ship this feature without seeding the demo site | the staged deploy returns green having exercised **none** of it — `engineering-process.md` verifies the tag on the test site first, and that site's ledger has no corporate actions (D25, §7.7) |
 | 23 | **cut a separate release for the W0 refactor** — *this trap said the exact opposite until 2026-08-10 (F-02)* | the owner ruled 2026-08-09 that `feat/corporate-actions` is **not merged into `main` until the whole feature is done**, so the branch stays abandonable. A W0-only version means merging an unfinished feature and giving that up. ~~D26~~ is retired; W0 rides the single feature release, and "no number moved" is evidenced by §7.3's golden payload plus the demo deploy of that release |
 | 18 | book a cash-and-stock merger as one EXCHANGE | the cash leg booked nowhere at all — and §2.1's conservation law **passes**, because the money left the book (§2.1a). But do not solve it locally either: since D34 the event has **no supported entry form** at all. It is a hard exclusion with a stated reason (§9), not a modelling puzzle to improvise |
+| 24 | evaluate **E3 / E22 / E5 / E18 against the WHOLE ledger** instead of the state at the action's own date | **the feature cannot accept the data §10.5 defines "done" as accepting.** Those four rejections read a replayed `Book`; replayed over the whole ledger they see a future that has not happened yet. On any bulk import the post-action trades are already recorded — that is what a broker export *is* — so the affected position is **already 賣超 when its own action is validated**, and E3 hard-rejects the row that resolves the 賣超, advising 「請先補登缺少的買進或期初庫存」: fabricate a buy instead of recording the split. Measured 2026-08-11 on §1's headline case (buy 100, 7-for-1, sell 400) and on synthetic acceptance fixtures (2 of 5 correct rows rejected). Same class as **F-08** and D13's non-firing ⚠ — a guard evaluated against a state the action itself would fix. It survived review because §6.7's **door 1 cannot exhibit it**: there the sell is not yet committed, so the primary door is the one door that hides it |
 | 19 | **follow §9's old two-row cash-and-stock recipe** (SELL + EXCHANGE on the effective date) | `EventPriority` runs CORPORATE_ACTION (10) before SELL (30), so the EXCHANGE zeroes the source and the same-day SELL lands on a zero-share position: `OversellError` strict, **STICKY 賣超 with the basis discarded** on the dashboard path — the disaster §1 exists to prevent, produced by following the spec. The recipe and D20's §7.1a exception are both **withdrawn** (D34, §9, §2.1). *This trap previously said the opposite: that dating the legs apart was the error.* |
 
 ### 10.5 What "done" means for the whole feature

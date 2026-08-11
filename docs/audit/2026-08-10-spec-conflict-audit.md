@@ -403,8 +403,27 @@ implementation diverging from an owner ruling · **M** = an implementer must gue
 
 | ID | Sev | Location | Finding | Resolution |
 | --- | --- | --- | --- | --- |
-| F-27 | **H** | `backlog:42-44` | P1a rule 3 drops paired self-cancelling rows on a **zero-sum check**. A corporate action is a paired out/in group with **zero cash on both legs**, so it passes the safety check and is silently dropped — re-creating the permanent basis loss P0 exists to prevent. Rule 7's hard-error protection does not fire, because rule 3 classified the group first **(I)** | The check must sum **share quantity as well as amount**: `−85 + 255 ≠ 0` protects the split; `−100 + 100 = 0` still drops a genuine journal. One line, before P1a starts |
-| F-28 | M | `spec:1360-1366`, `:1821` | W7's file list omits four of the seven registration points a 5th CSV kind needs: the parser module is unnamed, and `api/routers/input_center.py:629,633` and `web/input.js:741` are not mentioned **(A)** | Enumerate all seven in W7. P2a's cash kind needs the same seven — doing both in W7 is cheaper than sequentially |
+| F-27 | **H** | `backlog:42-44` | P1a rule 3 drops paired self-cancelling rows on a **zero-sum check**. A corporate action is a paired out/in group with **zero cash on both legs**, so it passes the safety check and is silently dropped — re-creating the permanent basis loss P0 exists to prevent. Rule 7's hard-error protection does not fire, because rule 3 classified the group first **(I)** | ~~The check must sum **share quantity as well as amount**~~ — **this resolution is INSUFFICIENT; corrected 2026-08-11, see below** |
+
+> **F-27's resolution was wrong, and the correction is derivable from the resolution's own text
+> (2026-08-11).** It proposed summing share quantity as well as amount, offering `−85 + 255 ≠ 0` as
+> the protection — a **SPLIT**, whose two legs carry the *same* symbol and *different* quantities.
+> It then noted in the same sentence that `−100 + 100 = 0` "still drops a genuine journal", and did
+> not notice that **a 1-for-1 ticker EXCHANGE has exactly that shape**: `−N` shares of A, `+N`
+> shares of B, no cash on either leg. Summed across symbols it is zero in **both** dimensions, so
+> the strengthened check is arithmetically blind to it and deletes a real corporate action — the
+> precise event P0 exists to preserve.
+>
+> **The real fix is the grouping key, not the arithmetic: group by `(date, symbol)`, never across
+> symbols.** An exchange's two legs then land in *different* groups, and neither sums to zero on
+> its own, so no arithmetic strengthening is needed to save it. The quantity term stays as a second
+> guard, but it is no longer what carries the protection.
+>
+> Recorded here rather than only in the newer companion document because **this register is what an
+> implementer greps for F-27**, and a resolution that reads as settled is worse than an open finding.
+> The mechanism above is verifiable from the shape of the event alone — it needs no access to any
+> export, and none was used to state it here.
+| F-28 | M | `spec:1360-1366`, `:1821` | W7's file list omits four of the seven registration points a 5th CSV kind needs: the parser module is unnamed, and `api/routers/input_center.py:629,633` and `web/input.js:741` are not mentioned **(A)** | Enumerate all seven in W7. P2a's cash kind needs the same seven — doing both in W7 is cheaper than sequentially. **Corrected 2026-08-11 by building it: it is NINE, not seven.** The two this finding also missed are `web/input.js`'s `LEDGER_KIND` map (a missing entry silently skips the post-commit tab switch and row flash) and, for any kind whose commit moves derived state, a reconcile hook at the commit route (`input_center._RECONCILING_KINDS` — without it a CSV-imported SPLIT corrects share counts and leaves prices uncorrected). **Enumerating them in prose is the weaker half of the remedy**; the guard is `tests/contract/test_csv_kind_registration.py`, which parametrizes all nine over `TEMPLATE_KINDS`, including the two frontend points read as source text — the frontend has no module system to import from, and asserting nothing there is what let the first four kinds' points go uncounted |
 | F-29 | M | `validate.py:252-258, :456-457` | The corporate-action preview builder needs two things the other four kinds have no precedent for: `batch=` threaded on every row (or E13 rejects every legitimate multi-account import), and `book` hoisted once (or an N-row import replays the whole ledger N times) **(A)** | State both in W7; the second is trap #21's shape for a different object |
 | F-30 | M | `spec:547`, `:1745` | E23 is in **no work package**: absent from W2's done-when, absent from `validate.py`, and it is the guard for D19's residual hole that P1a depends on **(V)** | Add to W2's scope (the four-part condition) with the one-click convert-to-SPLIT surfaced in W7 |
 | F-31 | M | `spec:1592-1595` (grill Q1) | The grill's second Q1 recommendation — a cross-account **per-share-unit** consistency check in the drawer footer — was adopted nowhere; no occurrence of 單位 in the spec **(A)** | Add it to §6.3's footer, or record in §8 that it was declined. Declining is only defensible once F-32 is closed |
