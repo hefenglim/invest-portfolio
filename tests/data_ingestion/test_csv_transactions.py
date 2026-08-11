@@ -91,3 +91,48 @@ def test_daytrade_csv_column_uses_daytrade_tax_rate(conn: sqlite3.Connection) ->
     # notional 60,000 -> tax 0.0015 * 60000 = 90 (現股 would be 180)
     assert p.rows[0].tax == Decimal("90")
     assert p.rows[0].payload["daytrade"] == "1"  # persisted through the writer (MED-1)
+
+
+def test_short_sale_csv_column_reaches_the_stored_row(conn: sqlite3.Connection) -> None:
+    """A DECLARED short must survive the CSV → preview → writer → ledger path.
+
+    Added 2026-08-11. The engine has carried ``short_sale`` since 2026-07-31 (owner ruling,
+    spec option C) but the canonical CSV had no column for it, so **every imported declared
+    short became an ordinary sell** — which the 賣超 guard flags as an undeclared oversell and
+    which DISCARDS the position's cost basis, stickily. Found by §10.5's acceptance run: the
+    owner's real export contains a declared short, so the acceptance gate reported a failure
+    that had nothing to do with corporate actions, and its 「缺少的公司行動筆數」 hint sent the
+    owner hunting for an action row that does not exist.
+
+    Asserted at the LEDGER, not at the preview: the payload carrying "1" proves the parser
+    read it, and only ``list_transactions`` proves the writer passed it on. A column that
+    parses and is then dropped one call later is the shape this defect already had once.
+    """
+    _setup(conn)
+    csv = (
+        "account,symbol,side,date,shares,price,short_sale\n"
+        "tw_broker,2330,SELL,2026-06-02,1000,600,1\n"
+    )
+    p = build_transaction_preview(conn, csv)
+    assert p.rows[0].payload["short_sale"] == "1"
+    # No 賣超 confirm on a DECLARED short, even though nothing was ever bought.
+    assert "sell_exceeds_holdings" not in {i.kind for i in p.rows[0].issues}
+    write_transaction_row(conn, p.rows[0])
+    assert [t.short_sale for t in list_transactions(conn)] == [True]
+
+
+def test_an_undeclared_sell_is_still_flagged(conn: sqlite3.Connection) -> None:
+    """…and the column must not become a way to silence the guard by omission.
+
+    Same CSV without the flag: the sell exceeds holdings and the confirm-tier issue fires.
+    Without this pair the test above passes just as well against a parser that hard-codes
+    ``short_sale=True``.
+    """
+    _setup(conn)
+    csv = (
+        "account,symbol,side,date,shares,price,short_sale\n"
+        "tw_broker,2330,SELL,2026-06-02,1000,600,\n"
+    )
+    p = build_transaction_preview(conn, csv)
+    assert p.rows[0].payload["short_sale"] == "0"
+    assert "sell_exceeds_holdings" in {i.kind for i in p.rows[0].issues}

@@ -8,8 +8,10 @@ Two guarantees:
    rename that is not mirrored in the template header is caught here.
 """
 
+import re
 import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,10 +26,12 @@ from portfolio_dash.data_ingestion.csv_import import (
 from portfolio_dash.data_ingestion.dividend_import import build_dividend_preview
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview
 from portfolio_dash.data_ingestion.import_templates import (
+    _TRANSACTION_ROWS,
     DATE_COLUMN_BY_KIND,
     TEMPLATE_KINDS,
     annotated_columns,
     render_import_template,
+    template_columns,
 )
 from portfolio_dash.data_ingestion.opening_import import build_opening_preview
 from portfolio_dash.data_ingestion.preview import ImportPreview
@@ -130,10 +134,15 @@ def test_template_roundtrips_through_real_builder(
 
 
 def test_transactions_template_is_fully_clean(template_conn: sqlite3.Connection) -> None:
-    """With every referenced symbol registered, the six example rows carry NO hard issue —
-    the annotated template is directly writable, not just parseable."""
+    """With every referenced symbol registered, EVERY example row carries NO hard issue —
+    the annotated template is directly writable, not just parseable.
+
+    The count is derived from the template's own row constant, not written as a literal: a
+    literal makes adding an example row look like a regression, which is how the number gets
+    "fixed" instead of the row being checked.
+    """
     preview = _built("transactions", template_conn, render_import_template("transactions"))
-    assert len(preview.rows) == 6
+    assert len(preview.rows) == len(_TRANSACTION_ROWS)
     hard = [(r.index, [i.kind for i in r.issues]) for r in preview.rows if r.has_hard_issue]
     assert not hard, f"unexpected hard-issue rows: {hard}"
 
@@ -164,5 +173,51 @@ def test_template_with_bom_prefix_still_parses(template_conn: sqlite3.Connection
     preview = _built(
         "transactions", template_conn, _BOM + render_import_template("transactions")
     )
-    assert len(preview.rows) == 6
+    assert len(preview.rows) == len(_TRANSACTION_ROWS)
     assert "parse_error" not in _issue_kinds(preview)
+
+
+# ---------------------------------------------------------------------------
+# The frontend restates the column set. Two surfaces, one fact -> a drift guard.
+# ---------------------------------------------------------------------------
+
+_WEB = Path(__file__).resolve().parents[2] / "web"
+
+
+def _kind_columns(kind: str) -> list[str]:
+    """Each kind's canonical column list, from the parser constant that owns it."""
+    return list(template_columns(kind))
+
+
+@pytest.mark.parametrize("kind", TEMPLATE_KINDS)
+def test_the_dropzone_hint_names_every_column_the_parser_reads(kind: str) -> None:
+    """``web/input.js``'s ``CSV_HINTS`` is a SECOND statement of the column set.
+
+    Added 2026-08-11, after ``short_sale`` was added to the transactions parser and the hint
+    would have kept telling users the old set. This project has the two-surfaces-one-fact
+    drift already on record (the settings dual-surface class), and a hint that omits a column
+    is worse than no hint: the user believes they have the full header and their file is
+    silently short a field the parser would have accepted.
+
+    The assertion is DIRECTIONAL on purpose — every parser column must appear in the hint,
+    while the hint may carry extra prose (「選填」 markers, the ratio warning, format hints).
+    A set-equality test would fail on the annotations that make the hint useful.
+    """
+    hint_source = (_WEB / "input.js").read_text(encoding="utf-8")
+    match = re.search(rf"^\s*{re.escape(kind)}:\s*'(.*?)',?$", hint_source, re.M)
+    assert match, f"no CSV_HINTS entry for {kind} in web/input.js"
+    hint = match.group(1)
+    missing = [c for c in _kind_columns(kind) if c not in hint]
+    assert not missing, f"{kind}: hint omits {missing}"
+
+
+def test_the_paste_placeholder_is_the_transactions_header() -> None:
+    """``web/trades.html``'s paste box shows a bare comma header — a THIRD statement of it.
+
+    It carries no annotations, so this one can be exact, and exactness is what makes it
+    useful: a user pasting rows in placeholder order gets them in parser order.
+    """
+    html = (_WEB / "trades.html").read_text(encoding="utf-8")
+    expected = ",".join(_kind_columns("transactions"))
+    assert f'placeholder="{expected}"' in html, (
+        f"web/trades.html paste placeholder is not the canonical header: {expected}")

@@ -42,7 +42,7 @@ from portfolio_dash.shared.models.enums import Side
 # re-parses the generated template to prove header ↔ parser stay in lockstep.
 TRANSACTION_COLUMNS: list[str] = [
     "account", "symbol", "side", "date", "shares", "price",
-    "fee", "tax", "daytrade", "note",
+    "fee", "tax", "daytrade", "short_sale", "note",
 ]
 
 # A column-name annotation from the downloadable template — half- or full-width parentheses,
@@ -221,6 +221,7 @@ def txn_preview_row(
         "price": str(inp.price),
         "trade_date": inp.trade_date.isoformat(),
         "daytrade": "1" if inp.daytrade else "0",  # persisted through the writer (MED-1)
+        "short_sale": "1" if inp.short_sale else "0",  # same seam as daytrade
         "note": inp.note or "",
         **{f"snap.{k}": v for k, v in snap.items()},
     }
@@ -247,7 +248,9 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
         csv_text: Full CSV text including a header row.  Required columns:
                   ``account``, ``symbol``, ``side``, ``date``, ``shares``,
                   ``price``.  Optional: ``fee``, ``tax``, ``note``, ``daytrade``
-                  (``1``/``true`` marks a TW same-day round trip → 0.15% sell tax).
+                  (``1``/``true`` marks a TW same-day round trip → 0.15% sell tax),
+                  ``short_sale`` (``1``/``true`` marks a DECLARED short sale — the only
+                  sell allowed to exceed holdings without tripping the 賣超 guard).
 
     Returns:
         :class:`ImportPreview` containing one :class:`PreviewRow` per data row.
@@ -274,6 +277,13 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
                 fee=Decimal(raw["fee"]) if raw.get("fee") else None,
                 tax=Decimal(raw["tax"]) if raw.get("tax") else None,
                 daytrade=raw.get("daytrade", "").lower() in ("1", "true", "y", "yes"),
+                # A DECLARED short sale — the ONLY way a sell may exceed holdings without the
+                # 賣超 guard. Absent, blank or unrecognised means False, and False is the safe
+                # default in both directions: a genuine short mis-imported as an ordinary sell
+                # is loudly flagged 賣超 (待釐清), whereas inferring a short from an oversell
+                # would turn a data-entry slip into a plausible-looking realized loss — the
+                # dangerous failure mode domain-ledger.md names, a wrong number that looks right.
+                short_sale=raw.get("short_sale", "").lower() in ("1", "true", "y", "yes"),
                 note=raw.get("note") or None,
             )
         except (KeyError, ValueError, InvalidOperation) as exc:
@@ -323,5 +333,6 @@ def write_transaction_row(
         fee_rule_snapshot=snapshot,
         note=p["note"] or None,
         daytrade=p.get("daytrade") == "1",
+        short_sale=p.get("short_sale") == "1",
         commit=commit,
     )

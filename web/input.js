@@ -847,7 +847,7 @@
      the REQUIRED `account` column; matches the *_COLUMNS constants in the backend parsers +
      the downloadable 範本; date carries its YYYY-MM-DD hint, optional columns marked 選填). */
   const CSV_HINTS = {
-    transactions: '欄位：account・symbol・side・date(YYYY-MM-DD)・shares・price・fee（選填）・tax（選填）・daytrade（選填）・note（選填）',
+    transactions: '欄位：account・symbol・side・date(YYYY-MM-DD)・shares・price・fee（選填）・tax（選填）・daytrade（選填）・short_sale（選填，1＝宣告放空）・note（選填）',
     dividends: '欄位：account・symbol・date(YYYY-MM-DD)・type(CASH/STOCK/DRIP/NET)・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）',
     fx: '欄位：account・date(YYYY-MM-DD)・from_ccy・from_amount・to_ccy・to_amount',
     openings: '欄位：account・symbol・shares・original_cost_total・build_date(YYYY-MM-DD)・original_avg_cost（選填・舊檔相容）',

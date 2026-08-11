@@ -58,7 +58,15 @@ DATE_COLUMN_BY_KIND: dict[str, str] = {
 # account/symbol/shares/original_cost_total/build_date and treat original_avg_cost as the
 # legacy-optional column (A6). Marked ``(選填)`` in the downloadable template header.
 OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
-    "transactions": frozenset({"fee", "tax", "daytrade", "note"}),
+    # short_sale (2026-08-11): a DECLARED short sale. The engine has carried the flag since
+    # 2026-07-31 (owner ruling, spec option C) but the canonical CSV could not express it, so
+    # an imported declared short became an ORDINARY sell — which the 賣超 guard then flags as
+    # an undeclared oversell and DISCARDS the cost basis for. Found by §10.5's acceptance run,
+    # where the owner's real export contains a declared short: the run reported a failure that
+    # had nothing to do with corporate actions and routed the owner to hunt for a missing
+    # action row that does not exist. It is never inferred (domain-ledger.md: the system cannot
+    # distinguish a genuine short from a missing buy), so an explicit column is the only way in.
+    "transactions": frozenset({"fee", "tax", "daytrade", "short_sale", "note"}),
     "dividends": frozenset({"withholding", "net", "reinvest_shares", "reinvest_price"}),
     "fx": frozenset(),
     "openings": frozenset({"original_avg_cost"}),
@@ -74,18 +82,23 @@ OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
 # column — it comes from the instrument registry (hence the MY-ETF row's note).
 _TRANSACTION_ROWS: list[list[str]] = [
     # TW buy — fee/tax auto-computed (blank -> account fee-rule set fills them).
-    ["tw_broker", "2330", "buy", "2026-07-10", "1000", "612.5", "", "", "", ""],
+    ["tw_broker", "2330", "buy", "2026-07-10", "1000", "612.5", "", "", "", "", ""],
     # TW sell, day-trade (當沖) -> 0.15% sell tax; daytrade flag = 1.
-    ["tw_broker", "2330", "sell", "2026-07-13", "1000", "620", "", "", "1", "當沖"],
+    ["tw_broker", "2330", "sell", "2026-07-13", "1000", "620", "", "", "1", "", "當沖"],
     # Schwab US sell — SEC/TAF regulatory fees auto-computed on the sell side.
-    ["schwab", "AAPL", "sell", "2026-07-13", "5", "210", "", "", "", ""],
+    ["schwab", "AAPL", "sell", "2026-07-13", "5", "210", "", "", "", "", ""],
     # Moomoo MY, US-market buy (settles USD; US fee/dividend rules bound to this market).
-    ["moomoo_my", "AAPL", "buy", "2026-07-14", "3", "205", "", "", "", ""],
+    ["moomoo_my", "AAPL", "buy", "2026-07-14", "3", "205", "", "", "", "", ""],
     # Moomoo MY, MY-market ETF buy — the ETF stamp exemption keys off the registry flag.
-    ["moomoo_my", "0800EA", "buy", "2026-07-14", "100", "1.25", "", "", "",
+    ["moomoo_my", "0800EA", "buy", "2026-07-14", "100", "1.25", "", "", "", "",
      "ETF 以標的登錄為準"],
     # Manual fee + tax override — both columns supplied -> auto-compute skipped for this row.
-    ["tw_broker", "2330", "sell", "2026-07-15", "500", "620", "20", "5", "", "手動覆寫費稅"],
+    ["tw_broker", "2330", "sell", "2026-07-15", "500", "620", "20", "5", "", "",
+     "手動覆寫費稅"],
+    # A DECLARED short sale (short_sale = 1). Without this column the row books as an
+    # ordinary sell, the 賣超 guard flags it and the position's cost basis is DISCARDED —
+    # the exact failure §10.5 surfaced on the owner's real export. Never inferred.
+    ["schwab", "AAPL", "sell", "2026-07-16", "10", "215", "", "", "", "1", "宣告放空"],
 ]
 
 _DIVIDEND_ROWS: list[list[str]] = [
