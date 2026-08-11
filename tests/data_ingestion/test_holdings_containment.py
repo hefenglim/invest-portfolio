@@ -81,6 +81,13 @@ EXPECTED_CALL_SITES = {
     ("portfolio_dash/api/signals_service.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "shares_through"),
+    # E1a (spec §5, 2026-08-11): the ONE accessor that deliberately skips the structural
+    # short-circuit, so unlike the other nine it always walks. Containment is unaffected:
+    # `validate_corporate_action` runs only when an action is being ENTERED, so there is no
+    # action-free ledger on which this can fire, and the function did not exist before this
+    # feature — there is no earlier behaviour to be byte-identical to. See
+    # `test_the_ACTION_door_legitimately_enters_the_walk` for the full argument.
+    ("portfolio_dash/data_ingestion/validate.py", "shares_before_action_on"),
     # W7 (spec §6.7): the corporate-action form builds E13's COMPLETE batch itself, so it
     # has to answer the same question E13 asks — which accounts hold this symbol on the
     # action date — and it must answer it the SAME way, or the form would submit a batch
@@ -199,10 +206,16 @@ def test_the_walker_is_never_constructed_without_a_corporate_action(
             c.close()
 
 
-def test_the_validation_doors_stay_out_of_the_walk(
+def test_the_TRADE_door_stays_out_of_the_walk(
     blank: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Same landmine, driven through the two doors that thread an index themselves."""
+    """Same landmine, driven through the door that runs on EVERY trade.
+
+    This is the load-bearing half of D38 invariant 1 at the validation layer:
+    `validate_transaction` fires on every trade on every ledger, including ledgers that
+    will never hold a corporate action, so the new machinery must not execute there at all.
+    Not "must agree" — must **not run**.
+    """
     insert_transaction(blank, account_id="schwab", symbol="AAA", side=Side.BUY,
                        quantity=D("100"), price=D("10"), fees=D("0"), tax=D("0"),
                        trade_date=date(2026, 1, 5))
@@ -214,6 +227,34 @@ def test_the_validation_doors_stay_out_of_the_walk(
     assert validate_transaction(blank, TxnInput(
         account_id="schwab", symbol="AAA", side=Side.SELL, quantity=D("40"),
         price=D("12"), trade_date=date(2026, 2, 1))) == []
+
+
+def test_the_ACTION_door_legitimately_enters_the_walk(blank: sqlite3.Connection) -> None:
+    """`validate_corporate_action` DOES walk, and that is correct (changed 2026-08-11).
+
+    This assertion used to sit beside the one above, and splitting them is the point rather
+    than an accommodation. The two doors are not alike:
+
+    * `validate_transaction` runs on ledgers that may never hold an action — containment
+      there is about a feature not reaching code it has no business in.
+    * `validate_corporate_action` runs **only when an action is being entered**. An
+      "action-free ledger" here means *the first action ever*, and the walk running at that
+      moment is the feature doing its job, not leaking.
+
+    It became necessary rather than merely permissible when E1a moved onto the action's own
+    cut, `(date, CORPORATE_ACTION)` — the naive path **cannot express that cut**:
+    `_shares_until` applies one `<` bound to all three ledgers, which is F-18's defect, and
+    it is why `shares_before_action_on` skips the short-circuit deliberately.
+
+    D38 invariant 1 is untouched by this. It says a symbol with no corporate action behaves
+    exactly as it did **before this feature existed** — and `validate_corporate_action` did
+    not exist before this feature, so there is no earlier behaviour to preserve. What must
+    stay true is that the *answer* is right, which the tests in
+    `test_action_validated_at_its_own_date.py` pin from both boundary directions.
+    """
+    insert_transaction(blank, account_id="schwab", symbol="AAA", side=Side.BUY,
+                       quantity=D("100"), price=D("10"), fees=D("0"), tax=D("0"),
+                       trade_date=date(2026, 1, 5))
     kinds = {i.kind for i in validate_corporate_action(blank, CorporateActionInput(
         account_id="schwab", date=date(2026, 3, 1), kind="SPLIT", from_symbol="AAA",
         to_symbol="AAA", ratio_to=D("3"), ratio_from=D("1")))}
@@ -223,7 +264,11 @@ def test_the_validation_doors_stay_out_of_the_walk(
 def test_the_call_site_census_is_still_accurate() -> None:
     """Pin WHICH modules reach the three wrappers, so a tenth call site is a visible event."""
     root = Path(__file__).resolve().parents[2] / "portfolio_dash"
-    pattern = re.compile(r"\b(current_shares|shares_through|shares_on)\s*\(")
+    # `shares_before_action_on` FIRST: alternation is ordered, and it must not be shadowed.
+    # It was invisible to this census when it landed (no `\bshares_on` substring inside it),
+    # which would have made the tenth accessor the one nobody had to argue for.
+    pattern = re.compile(
+        r"\b(shares_before_action_on|current_shares|shares_through|shares_on)\s*\(")
     found: set[tuple[str, str]] = set()
     for path in root.rglob("*.py"):
         if path.name == "holdings.py":
