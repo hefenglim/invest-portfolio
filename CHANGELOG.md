@@ -9,6 +9,28 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+### Added
+- **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
+  `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
+  released**). A share count that changes without a trade previously had no representation, so
+  the later sell of a split position tripped the 賣超 guard and **permanently discarded that
+  position's cost basis**. The ledger now records the event, the replay applies the ratio as two
+  positive integers (multiply first, divide last), and the drawer's reconciliation footer gains
+  a `＋公司行動` term so the correction is visible rather than merely applied. Entry lives at
+  three doors — the 賣超 confirm dialog offers 補登公司行動 **first**, the drawer offers it beside
+  a ⚠ 對帳不一致 footer, and the ledger page gains a 5th tab — all sharing one form whose
+  always-on preview states **成本不變 ✓**. Prices carry a `close_raw` / `split_basis` pair so a
+  split's re-expression is idempotent and reversible, and the accounting manual gains
+  **§4.4 公司行動** (zh authority + en mirror) with a worked example and an oracle anchor per
+  formula.
+
+  ⚠ **Not shippable yet**, and the remaining items are deliberate rather than forgotten: §7.6's
+  full enter-through-the-UI e2e, this entry's version heading, `shared/whatsnew.py`, and §10.5's
+  owner-run acceptance script — which needs per-symbol opening cost totals only the owner has
+  (D37). Two decisions made during implementation (**D40**, **D41**) await owner ratification.
+  A single prose summary here would drift from the spec within a week, which is the failure this
+  release spent an audit correcting, so the detail stays in §8's decision table and the commits.
+
 ### Changed
 - **`LedgerBundle` — one argument for every ledger replay** (corporate-actions spec W0 / D9;
   **pure refactor, no behaviour change**). `build_book` and `daily_value_series` took one
