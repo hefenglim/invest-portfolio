@@ -23,9 +23,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData
+from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.technicals import annualized_volatility, week52_position
 from portfolio_dash.pricing import consensus_source, snapshots_store
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
@@ -128,12 +130,25 @@ def assemble(
     held = {h.symbol for h in data.holdings if h.shares > 0}
     end = now.date()
     start = end - timedelta(days=_HISTORY_DAYS)
+    # §5.1(d) / W6c: ONE ActionIndex for the whole assemble, built before the loop and never
+    # inside it (trap #21) — a per-symbol index would re-read the action ledger once per
+    # registered instrument. Every metric below compares closes ACROSS dates (52-week
+    # high/low, 30d/90d vol), so a split inside the 400-day window puts the pre-split points
+    # in a different denomination: a 7-for-1 makes them read 7x higher and the drawdown rule
+    # fires a 52-week-low breach that never happened. `series_in` short-circuits structurally
+    # on "no SPLIT for this symbol", so an action-free ledger reads byte-identically.
+    actions = load_action_index(conn)
 
     metrics: dict[str, SymbolMetric] = {}
     levels: dict[str, TargetLevels] = {}
     for inst in instruments:
         sym = inst.symbol
-        closes = [p.value for p in get_price_history(conn, sym, start, end)]
+        closes = [
+            p.value
+            for p in series_in(
+                actions, sym, get_price_history(conn, sym, start, end), valued_on=end
+            )
+        ]
         w52 = week52_position(closes)
         is_held = sym in held
         metrics[sym] = SymbolMetric(
@@ -148,8 +163,18 @@ def assemble(
         # crosses honestly; None only when NO price exists at all → silent).
         if inst.target_low is not None or inst.target_high is not None:
             latest = get_latest_price(conn, sym, now=now)
+            # Re-expressed into the SAME day as the series above (W6c): mixing a corrected
+            # series with a raw latest price is the trap this package exists to avoid — and
+            # a stale pre-split close compared against a post-split band crosses it by the
+            # whole ratio. ⚠ The BAND itself (`target_low`/`target_high`) is owner-entered
+            # and is NOT re-expressed: it is a configured intent, not a stored quote, so
+            # after a split the owner must re-enter it. Same for a stored alert threshold.
             levels[sym] = TargetLevels(
-                price=latest.value if latest is not None else None,
+                price=(
+                    price_in(actions, sym, latest.value,
+                             priced_on=latest.as_of, valued_on=end)
+                    if latest is not None else None
+                ),
                 target_low=inst.target_low,
                 target_high=inst.target_high,
             )

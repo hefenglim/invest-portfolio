@@ -22,7 +22,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.portfolio.timeseries import FxHistory
 from portfolio_dash.portfolio.twr import build_overlay, convert_closes, twr_index
 from portfolio_dash.pricing.benchmarks import get_benchmark
@@ -101,9 +103,29 @@ def performance_twr(
     )
 
     # Benchmark closes → reporting currency at daily carry-forward FX.
+    #
+    # §5.1(d) / W6c: the overlay REBASES this series to 100 at the window start, so every
+    # point is divided by an earlier point — a split inside the window would show up as a
+    # single-day index cliff of the whole ratio, next to a portfolio line that has none.
+    #
+    # ⚠ KNOWN LIMITATION, and the most likely place to meet it. ``ActionIndex`` is built
+    # from the owner's RECORDED ledger actions, which are per account, and a benchmark is
+    # deliberately NOT a registered instrument (see the module docstring) — nobody holds it,
+    # so nobody records its splits. This call is therefore a structural no-op today: an
+    # index whose real constituent split keeps the provider's own basis. There is no
+    # independent split feed, and inferring one from a price gap is guessing, which
+    # ``domain-ledger.md`` forbids — a heuristic here would silently rewrite market history.
+    # The call is wired anyway because it is correct the moment such an action IS recorded,
+    # and because leaving one series read raw is how the next reader concludes the rule is
+    # optional.
+    actions = load_action_index(conn)
     closes = [
         (p.as_of, p.value)
-        for p in get_price_history(conn, bench.storage_key, _EPOCH, as_of)
+        for p in series_in(
+            actions, bench.storage_key,
+            get_price_history(conn, bench.storage_key, _EPOCH, as_of),
+            valued_on=as_of,
+        )
     ]
     fx_history = _load_fx_history(conn, bench.quote_ccy, reporting, as_of)
     bench_reporting = convert_closes(closes, fx_history, bench.quote_ccy, reporting)

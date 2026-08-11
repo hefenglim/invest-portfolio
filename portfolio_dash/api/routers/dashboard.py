@@ -14,9 +14,11 @@ from fastapi import APIRouter, Depends, Query
 from portfolio_dash.api import alert_inputs, insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.serialize import to_wire
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.llm_insight import composer_store, insights_store
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
@@ -41,10 +43,20 @@ def dashboard(
     payload: dict[str, Any] = to_wire(data.model_dump())
 
     # spark_30d: recent daily closes per held symbol (spec 01 add-on; batch-friendly read).
+    # §5.1(d) / W6c: the sparkline is a shape drawn from points compared to EACH OTHER, and
+    # its last point sits next to `row["market_price"]` — which `build_dashboard` already
+    # re-expressed into `as_of` at the `price_map` seam (W6b). Leaving the series raw would
+    # draw a 7x cliff on the split date beside a price that has no such cliff: two numbers
+    # on one row disagreeing by the ratio. ONE index for the whole request, built outside
+    # the per-holding loop (trap #21).
     end = now.date()
     start = end - timedelta(days=_SPARK_DAYS)
+    actions = load_action_index(conn)
     for row in payload["holdings"]:
-        history = get_price_history(conn, row["symbol"], start, end)
+        sym = row["symbol"]
+        history = series_in(
+            actions, sym, get_price_history(conn, sym, start, end), valued_on=end
+        )
         row["spark_30d"] = [decimal_str(p.value) for p in history]
 
     # Single source of truth (Σ top-ups − Σ usage); never None, $0 when nothing funded.

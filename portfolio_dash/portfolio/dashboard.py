@@ -511,6 +511,11 @@ def build_dashboard(
                                 | {o.symbol for o in opening}
                                 | {a.from_symbol for a in bundle.actions}
                                 | {a.to_symbol for a in bundle.actions})
+        # RAW on purpose (W6c): this is the ONE series read that must NOT be re-expressed
+        # here. Its consumer is `daily_value_series`, which values a DIFFERENT day on every
+        # iteration and therefore applies §5.1(d) itself, per point, at its `_entry_at_or_
+        # before` lookup — with `valued_on=day`, which is exactly the factor a precomputed
+        # re-expression could not know. Correcting it twice would divide by the ratio twice.
         price_history: PriceHistory = {
             sym: [(p.as_of, p.value) for p in get_price_history(conn, sym, _EPOCH, as_of)]
             for sym in ledger_symbols

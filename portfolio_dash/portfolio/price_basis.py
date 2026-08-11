@@ -1,7 +1,10 @@
 """The read rule: re-express a carried-forward price into a valuation day's share terms.
 
-Spec §5.1(d) · W6b. Two call sites — ``portfolio/dashboard.py``'s ``price_map`` assignment
-and ``portfolio/timeseries.py``'s per-day lookup — **one** :func:`split_factor`.
+Spec §5.1(d) · W6b (point reads) · W6c (series reads, D42). :func:`price_in` is the ONE
+owner of the arithmetic; :func:`series_in` is the same rule applied to a whole
+``get_price_history`` result and calls it point by point. Every consumer — the two
+``portfolio/`` point seams and every ``api/`` series read — goes through one
+:func:`split_factor`.
 
 A stored close means *"as traded on its own date"* (``data-and-pricing.md``, and the write
 seam in ``pricing/store.py`` enforces it). The ledger's share count, however, is in the
@@ -39,11 +42,29 @@ improvement. Nothing in this module ever flags a day.
 
 It is a **read-path** transform, never written back to ``prices``, so 重算 stays
 authoritative and the stored basis stays as-traded.
+
+**The honest limitation — a symbol the owner never held is never re-expressed.**
+``ActionIndex`` is built from the *recorded ledger actions*, which are per account. The
+system has **no independent split feed**, so a series for a symbol with no ledger action —
+most importantly a **benchmark** (``api/routers/performance.py`` reads
+``bench.storage_key``, a ticker nobody holds) — keeps the provider's own basis even if the
+real instrument split. That is a known gap, not a bug to route around: inferring a split
+from a price gap would be guessing, which ``domain-ledger.md`` forbids, and a heuristic
+here would silently rewrite market history. The repair is a recorded action, nothing else.
+
+**Only the close is re-expressed** (D39b). ``volume``, and ``open``/``high``/``low``, have
+no ``*_raw`` column of their own, so a factor applied to them could never be restated or
+reversed — they keep the provider's basis and are therefore **discontinuous across a
+split**. A consumer that compares volumes across a split date (the volume-confirmation
+signal) is reading two different denominations; correcting that needs its own raw column,
+not a read-path divide.
 """
 
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 
+from portfolio_dash.pricing.results import PriceRead
 from portfolio_dash.shared.corporate_actions import ActionIndex, split_factor
 
 _ONE = Decimal(1)
@@ -91,3 +112,50 @@ def price_in(
     if factor == _ONE:
         return price
     return price / factor
+
+
+def series_in(
+    index: ActionIndex,
+    symbol: str,
+    points: Sequence[PriceRead],
+    *,
+    valued_on: date,
+) -> list[PriceRead]:
+    """A whole ``get_price_history`` result, every close in ``valued_on``'s share terms.
+
+    W6c (D42). :func:`price_in` fixes a price that meets a *share count* from another day;
+    this fixes a series whose points are compared **to each other**. A stored close is as
+    traded on its own date, so the moment a split falls inside the window the points are in
+    two different denominations — and every series consumer is a comparison: a 52-week
+    high/low, a moving average, a day-change percentage, a rebased index, a chart. A 7-for-1
+    makes every pre-split point read 7x higher, which on the alert path is a **52-week-low
+    breach that fires a real notification**. The defect is not new — a provider that
+    restates its history mid-backfill produced the same discontinuity — but the action
+    ledger is the first thing that can name it, and therefore fix it.
+
+    ``index`` is built **ONCE per request** and threaded in (trap #21). Never one per point
+    and never one per symbol: a multi-year series over a registered universe would otherwise
+    re-read and re-group the whole action ledger thousands of times.
+
+    The same structural short-circuit as :func:`price_in`, and for the same reason (D38
+    invariant 1): with no SPLIT on this symbol the loop below **does not execute** and the
+    caller gets its own rows back untouched, so a defect in the re-expression cannot reach a
+    symbol that has no action. Code that does not run cannot drift.
+
+    Returns *new* :class:`PriceRead` objects — never mutated in place, because these rows
+    come straight from ``pricing.store`` and this is a read-path transform (nothing is ever
+    written back to ``prices``). ``volume`` rides along **unchanged**: see the module
+    docstring on D39b — it has no raw column, so it cannot be restated or reversed.
+    """
+    if not index.splits_on(symbol):
+        return list(points)
+    return [
+        p.model_copy(
+            update={
+                "value": price_in(
+                    index, symbol, p.value, priced_on=p.as_of, valued_on=valued_on
+                )
+            }
+        )
+        for p in points
+    ]

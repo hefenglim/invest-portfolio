@@ -36,6 +36,7 @@ from portfolio_dash.api.routers.prompts import (
     _external_vars,
     _resolve_fx_rates,
 )
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.llm_insight import (
     alerts_bridge,
@@ -56,8 +57,10 @@ from portfolio_dash.llm_insight.gating import GateContext, GateResult
 from portfolio_dash.llm_insight.generate import RunInputs, RunResult, run_insight_type
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData, FreshnessReport
+from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.scheduler.jobs import insight_job_id
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import (
     LLMError,
@@ -141,8 +144,14 @@ def _per_symbol_ctx(
     *,
     now: datetime,
     reporting: Currency,
+    actions: ActionIndex,
 ) -> V.VarContext:
-    """Build a per-symbol VarContext (dashboard + history + external snapshots + fx)."""
+    """Build a per-symbol VarContext (dashboard + history + external snapshots + fx).
+
+    ``actions`` is built ONCE by the caller and threaded in (trap #21) — this function runs
+    once per universe symbol, so building the index here would re-read the action ledger
+    once per card.
+    """
     external_vars = _external_vars(conn, symbol, now=now)
     ctx = V.VarContext(
         data=data,
@@ -158,8 +167,19 @@ def _per_symbol_ctx(
     # trading sessions, but 180 CALENDAR days ≈ 123 sessions — so fetch a longer close
     # series (the backfill already stores 365d) for ctx.closes, while price_history_json
     # keeps only the recent 180d window (then downsampled) to stay token-bounded.
-    long_hist = get_price_history(
-        conn, symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+    # §5.1(d) / W6c: every consumer of this series compares points ACROSS dates — the
+    # 52-week position and MA120 read the whole window, and `price_points` is handed to the
+    # model as a price path. A split inside it puts the pre-split points in a different
+    # denomination, so the model is shown a phantom −86% cliff (7-for-1) and the technical
+    # signals fire on it. Re-expressed into `as_of`, which is also the day `data`'s holding
+    # prices were re-expressed into at the `price_map` seam (W6b) — one denomination for the
+    # whole context. ⚠ `volume` is NOT re-expressed (D39b: it has no raw column).
+    long_hist = series_in(
+        actions, symbol,
+        get_price_history(
+            conn, symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+        ),
+        valued_on=as_of,
     )
     ctx.closes = [p.value for p in long_hist]
     # Volumes aligned 1:1 with closes; fed only when at least one session has volume
@@ -236,11 +256,15 @@ def run_for_id(
 
     var_contexts: dict[str | None, V.VarContext] = {}
     universe_symbols: list[str] = []
+    # ONE ActionIndex for the whole run (trap #21), built here and threaded into every
+    # per-symbol context below.
+    actions = load_action_index(conn)
 
     if it.scope == "per_symbol":
         universe_symbols = _resolve_universe(conn, it, data)
         for sym in universe_symbols:
-            ctx = _per_symbol_ctx(conn, data, sym, now=now, reporting=reporting)
+            ctx = _per_symbol_ctx(conn, data, sym, now=now, reporting=reporting,
+                                  actions=actions)
             var_contexts[sym] = ctx
             # R4: a universe symbol with no price history at all (e.g. a custom-list symbol
             # not in the holdings/prices) is a missing-price anomaly → zero-LLM card.
@@ -259,7 +283,7 @@ def run_for_id(
         target = fired_symbol
         if target is not None:
             var_contexts[target] = _per_symbol_ctx(
-                conn, data, target, now=now, reporting=reporting
+                conn, data, target, now=now, reporting=reporting, actions=actions
             )
         else:
             var_contexts[None] = _portfolio_ctx(conn, data, now=now, reporting=reporting)
@@ -343,20 +367,35 @@ def _maybe_run_shadow(
 # runner (``scheduler.register_evaluation_runner`` at startup — no scheduler→api import).
 
 
-def _price_on_or_after(conn: sqlite3.Connection, symbol: str, on: date) -> Decimal | None:
-    """The first stored close on/after *on* within the lookback window, or None."""
-    series = get_price_history(conn, symbol, on, on + timedelta(days=_EVAL_LOOKBACK_DAYS))
+def _price_on_or_after(
+    conn: sqlite3.Connection, symbol: str, on: date, *,
+    actions: ActionIndex, valued_on: date,
+) -> Decimal | None:
+    """The first stored close on/after *on*, expressed in ``valued_on``'s share terms."""
+    series = series_in(
+        actions, symbol,
+        get_price_history(conn, symbol, on, on + timedelta(days=_EVAL_LOOKBACK_DAYS)),
+        valued_on=valued_on,
+    )
     return series[0].value if series else None
 
 
-def _price_on_or_before(conn: sqlite3.Connection, symbol: str, on: date) -> Decimal | None:
-    """The last stored close on/before *on* within the lookback window, or None."""
-    series = get_price_history(conn, symbol, on - timedelta(days=_EVAL_LOOKBACK_DAYS), on)
+def _price_on_or_before(
+    conn: sqlite3.Connection, symbol: str, on: date, *,
+    actions: ActionIndex, valued_on: date,
+) -> Decimal | None:
+    """The last stored close on/before *on*, expressed in ``valued_on``'s share terms."""
+    series = series_in(
+        actions, symbol,
+        get_price_history(conn, symbol, on - timedelta(days=_EVAL_LOOKBACK_DAYS), on),
+        valued_on=valued_on,
+    )
     return series[-1].value if series else None
 
 
 def _measure_actual(
-    conn: sqlite3.Connection, due: es.DueInsight, prediction: Prediction
+    conn: sqlite3.Connection, due: es.DueInsight, prediction: Prediction,
+    *, actions: ActionIndex,
 ) -> scoring.ActualMeasurement | None:
     """Build the objective measurement for a due insight, or None when unavailable.
 
@@ -370,6 +409,13 @@ def _measure_actual(
     the move from the model's own reference point. LEGACY cards without it fall back to
     the old basis (the first stored close ON/AFTER the create date), so old cards keep
     scoring on the basis they were created under.
+
+    §5.1(d) / W6c — **both legs are expressed in the DUE DATE's share terms.** ``change``
+    divides one date's close by another's, and a split between them is the whole ratio: a
+    7-for-1 scores every open card as a −86% collapse, i.e. a fabricated miss on the model's
+    permanent record. ``price_at_create`` gets the same treatment as a fetched start price
+    (``priced_on=created``, the closest date the stored scalar carries) — re-expressing one
+    leg and not the other would MANUFACTURE the discrepancy this fixes.
     """
     symbol = due.symbol
     if symbol is None:
@@ -379,11 +425,14 @@ def _measure_actual(
     if due_date is None:
         return None
     start_px = (
-        Decimal(due.price_at_create)
+        price_in(actions, symbol, Decimal(due.price_at_create),
+                 priced_on=created, valued_on=due_date)
         if due.price_at_create
-        else _price_on_or_after(conn, symbol, created)
+        else _price_on_or_after(conn, symbol, created,
+                                actions=actions, valued_on=due_date)
     )
-    end_px = _price_on_or_before(conn, symbol, due_date)
+    end_px = _price_on_or_before(conn, symbol, due_date,
+                                 actions=actions, valued_on=due_date)
     if start_px is None or end_px is None or start_px == Decimal("0"):
         return None  # price unavailable/halted → pending_data
     change = (end_px - start_px) / start_px
@@ -397,7 +446,8 @@ def _measure_actual(
 
 
 def _score_one(
-    conn: sqlite3.Connection, due: es.DueInsight, *, master_configured: bool, now: datetime
+    conn: sqlite3.Connection, due: es.DueInsight, *, master_configured: bool, now: datetime,
+    actions: ActionIndex,
 ) -> None:
     """Evaluate one due insight: quant → (master narrative) → miss → write the row.
 
@@ -411,7 +461,7 @@ def _score_one(
     quant_hit: bool | None = None
     actual: scoring.ActualMeasurement | None = None
     if prediction is not None:
-        actual = _measure_actual(conn, due, prediction)
+        actual = _measure_actual(conn, due, prediction, actions=actions)
         quant_hit = scoring.score_quant(prediction, actual)
         if quant_hit is None:
             _defer_or_undetermined(conn, due, now=now)
@@ -522,9 +572,12 @@ def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
     istore.ensure_tables(conn)  # runs the price_at_create migration for legacy DBs (M4)
     master_configured = get_role_model_id(conn, LLMRole.MASTER) is not None
     processed = 0
+    # ONE index for the whole pass (trap #21) — the loop is per due insight.
+    actions = load_action_index(conn)
     for due in es.due_insights(conn, now=now, exclude_type_ids=cs.archived_type_ids(conn)):
         try:
-            _score_one(conn, due, master_configured=master_configured, now=now)
+            _score_one(conn, due, master_configured=master_configured, now=now,
+                       actions=actions)
             processed += 1
         except Exception:  # noqa: BLE001 — one insight failing must not abort the pass
             logger.exception("evaluate_due failed for insight %s", due.insight_id)
@@ -914,6 +967,10 @@ def _missing_prices_for(
 
     Dashboard freshness ``missing_prices`` plus, for per_symbol, any universe symbol with
     NO stored price history at all (a custom-list symbol not in the priced holdings).
+
+    RAW read, deliberately (W6c): this is an EXISTENCE test — no close is read, compared or
+    displayed — and a corporate action changes the denomination of a price, never whether a
+    row is there. Do not "fix" it by routing it through ``series_in``.
     """
     missing = list(data.freshness.missing_prices)
     if scope == "per_symbol":
@@ -927,7 +984,10 @@ def _missing_prices_for(
 
 
 def _has_no_history(conn: sqlite3.Connection, symbol: str, as_of: date) -> bool:
-    """True when a symbol has no stored price within the standard history window."""
+    """True when a symbol has no stored price within the standard history window.
+
+    RAW read (W6c): emptiness only — see :func:`_missing_prices_for`.
+    """
     history = get_price_history(conn, symbol, as_of - timedelta(days=_HISTORY_DAYS), as_of)
     return not history
 
@@ -977,7 +1037,10 @@ def _preview_var_context(
 ) -> V.VarContext:
     """One representative VarContext for the assembled preview (first symbol / portfolio)."""
     if scope == "per_symbol" and universe_symbols:
-        return _per_symbol_ctx(conn, data, universe_symbols[0], now=now, reporting=reporting)
+        # ONE symbol, so one index — built here rather than threaded from the caller, which
+        # has no other use for it (trap #21 is about a per-symbol build inside a loop).
+        return _per_symbol_ctx(conn, data, universe_symbols[0], now=now, reporting=reporting,
+                               actions=load_action_index(conn))
     return _portfolio_ctx(conn, data, now=now, reporting=reporting)
 
 

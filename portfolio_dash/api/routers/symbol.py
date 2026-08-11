@@ -65,6 +65,7 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import HoldingRow
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.portfolio.results import RealizedRow, UnappliedAction
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.corporate_actions import ActionIndex
@@ -528,8 +529,22 @@ def symbol_detail(
     sym_actions = list_corporate_actions(conn, symbol=symbol)
 
     # price_history — STORED prices over [as_of - days, as_of] (read-only; no backfill).
+    #
+    # §5.1(d) / W6c, re-expressed into `as_of` on the SAME `action_index` built above (trap
+    # #21 — never a second one). The drawer draws this line together with horizontal cost
+    # mark-lines at `original_avg` / `adjusted_avg`, and those are `total / shares` over the
+    # replay's ALREADY re-denominated share count: leaving the series as-traded puts the
+    # pre-split part of the line a whole ratio away from its own cost line (a 20-for-1 draws
+    # the cost line at 1/20 of the plotted price). The buy/sell markers are plotted at the
+    # SERIES' close on their date (`closeOn`), so they follow this line automatically;
+    # `trade_events.price` below stays RAW on purpose — it is the historical execution price
+    # paired with the historical share count in the same tooltip ("買 100 股 @ 350"), and
+    # both legs of that pair are as-traded.
     start = as_of.fromordinal(as_of.toordinal() - days)
-    history = get_price_history(conn, symbol, start, as_of)
+    history = series_in(
+        action_index, symbol, get_price_history(conn, symbol, start, as_of),
+        valued_on=as_of,
+    )
     if history:
         last = history[-1]
         price_history: dict[str, Any] = {

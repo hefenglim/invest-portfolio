@@ -28,7 +28,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from portfolio_dash.data_ingestion.holdings import shares_on
+from portfolio_dash.data_ingestion.holdings import load_action_index, shares_on
 from portfolio_dash.data_ingestion.rules_binding import dividend_model_for
 from portfolio_dash.data_ingestion.store import (
     insert_dividend,
@@ -36,12 +36,14 @@ from portfolio_dash.data_ingestion.store import (
     list_dividends,
     list_instruments,
 )
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.refresh import refresh_dividends
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import DividendEvent
 from portfolio_dash.pricing.store import get_dividend_events, get_price_history
 from portfolio_dash.scheduler.jobs import DEFAULT_BOARD, earliest_acquisitions
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.assets import Instrument
 
@@ -207,11 +209,24 @@ def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> s
 
 
 def _price_on_or_before(
-    conn: sqlite3.Connection, symbol: str, target: date
+    conn: sqlite3.Connection, symbol: str, target: date, *, actions: ActionIndex
 ) -> Decimal | None:
-    """Last stored close on-or-before *target* (bounded lookback), or None."""
-    hist = get_price_history(
-        conn, symbol, target - timedelta(days=_PRICE_LOOKBACK_DAYS), target)
+    """Last stored close on-or-before *target* (bounded lookback), or None.
+
+    Expressed in **``target``'s** share terms, not its own date's (§5.1(d) / W6c). This is
+    the DRIP reinvest price, and the caller divides the net dividend by it to get a SHARE
+    COUNT that is booked into the ledger against a position the replay has already
+    re-denominated. A close carried forward from before a split is in pre-split terms, so a
+    7-for-1 would book one seventh of the shares actually reinvested — a money-of-record
+    error, not a display one. Re-expressing is a no-op the moment a genuine post-split close
+    exists (the window ``(pd, target]`` is then empty).
+    """
+    hist = series_in(
+        actions, symbol,
+        get_price_history(
+            conn, symbol, target - timedelta(days=_PRICE_LOOKBACK_DAYS), target),
+        valued_on=target,
+    )
     return hist[-1].value if hist else None
 
 
@@ -228,6 +243,9 @@ def detect(
     acq = earliest_acquisitions(conn)
     skips: set[str] = set() if include_skipped else _skipped(conn)
     today = now.date()
+    # ONE index for the whole detection (trap #21): the loop below is symbol x event x
+    # account, so a per-lookup index would re-read the action ledger on every DRIP row.
+    actions = load_action_index(conn)
 
     # Ledger dividend dates per (account, symbol, family) — the recorded guard.
     ledger_dates: dict[tuple[str, str, str], list[date]] = {}
@@ -292,7 +310,8 @@ def detect(
                             wh = gross * _US_WITHHOLDING
                             net = gross - wh
                             px = _price_on_or_before(
-                                conn, symbol, ev.pay_date or ev.ex_date)
+                                conn, symbol, ev.pay_date or ev.ex_date,
+                                actions=actions)
                             out.append(_mk(
                                 fp, "drip", ev.cash_amount, gross, wh, net,
                                 est_reinvest_price=px,

@@ -292,6 +292,7 @@ def test_rule_signals_feeds_preview_and_generation(api_client: TestClient) -> No
     # shared _external_vars — so a card and its preview see identical rule signals.
     from portfolio_dash.api.insight_service import _per_symbol_ctx
     from portfolio_dash.api.routers.prompts import _external_vars
+    from portfolio_dash.data_ingestion.holdings import load_action_index
     from portfolio_dash.portfolio.dashboard import build_dashboard
     from portfolio_dash.shared.enums import Currency
 
@@ -301,7 +302,8 @@ def test_rule_signals_feeds_preview_and_generation(api_client: TestClient) -> No
     assert "rule_signals_json" in ext
     assert ext["rule_signals_json"].get("unavailable") is not True
     data = build_dashboard(conn, now=GOLDEN_NOW, reporting=Currency.TWD)
-    ctx = _per_symbol_ctx(conn, data, "2330", now=GOLDEN_NOW, reporting=Currency.TWD)
+    ctx = _per_symbol_ctx(conn, data, "2330", now=GOLDEN_NOW, reporting=Currency.TWD,
+                          actions=load_action_index(conn))
     assert "rule_signals_json" in ctx.external_vars
     assert ctx.external_vars["rule_signals_json"]["composite"] is not None
 

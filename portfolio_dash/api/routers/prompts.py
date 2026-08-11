@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from portfolio_dash.api import signals_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import list_dividends
 from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
@@ -36,6 +37,7 @@ from portfolio_dash.news import organizer_prompt as news_organizer_prompt
 from portfolio_dash.news import store as news_store
 from portfolio_dash.portfolio import external_signals as ES
 from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
 from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
@@ -513,8 +515,17 @@ def _build_context(
         # L3 fix: same split as the run path (insight_service._per_symbol_ctx) —
         # ctx.closes gets the LONG series (honest 52w/MA120 technical signals);
         # price_points keeps only the recent window (token-bounded).
-        long_hist = get_price_history(
-            conn, payload.symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+        # §5.1(d) / W6c: re-expressed into `as_of` exactly as the run path does, so the
+        # preview a prompt is authored against is the series the run will render. ONE index
+        # for this single-symbol request (trap #21). ⚠ volume keeps the provider's basis
+        # (D39b).
+        long_hist = series_in(
+            load_action_index(conn), payload.symbol,
+            get_price_history(
+                conn, payload.symbol,
+                as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of,
+            ),
+            valued_on=as_of,
         )
         ctx.symbol = payload.symbol
         ctx.closes = [p.value for p in long_hist]

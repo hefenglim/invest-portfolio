@@ -22,7 +22,7 @@ from portfolio_dash.api.instrument_service import (
     quick_register,
     restore_archived,
 )
-from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.holdings import current_shares, load_action_index
 from portfolio_dash.data_ingestion.store import (
     delete_instrument,
     get_instrument,
@@ -36,9 +36,11 @@ from portfolio_dash.llm_insight.official_templates import (
     AI_INSTRUMENT_RESOLVE_PROMPT,
     AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
 )
+from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.pricing.benchmarks import BENCHMARKS
 from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.llm import complete_structured
 from portfolio_dash.shared.models.assets import Instrument
@@ -67,12 +69,29 @@ def _board_wire(conn: sqlite3.Connection, inst: Instrument) -> str | None:
 
 
 def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
-             now: datetime) -> dict[str, Any]:
+             now: datetime, *, actions: ActionIndex) -> dict[str, Any]:
+    """One watchlist/registry row. ``actions`` is built ONCE by the caller (trap #21).
+
+    §5.1(d) / W6c: ``chg_pct`` divides two closes dated one session apart, so a split
+    between them reports the ratio as a day move (a 7-for-1 as −86% in the watchlist). Both
+    closes AND ``last`` are re-expressed into ``now``'s share terms — the same day the
+    dashboard values its holdings in (W6b) — so the registry's 現價 and the dashboard's
+    price cannot disagree, and the corrected series is never mixed with a raw quote.
+    """
+    valued_on = now.date()
     pr = get_latest_price(conn, inst.symbol, now=now)
-    last = decimal_str(pr.value) if pr is not None else None
+    last = (
+        decimal_str(price_in(actions, inst.symbol, pr.value,
+                             priced_on=pr.as_of, valued_on=valued_on))
+        if pr is not None else None
+    )
     chg_pct: str | None = None
     if pr is not None:
-        hist = get_price_history(conn, inst.symbol, pr.as_of.replace(day=1), pr.as_of)
+        hist = series_in(
+            actions, inst.symbol,
+            get_price_history(conn, inst.symbol, pr.as_of.replace(day=1), pr.as_of),
+            valued_on=valued_on,
+        )
         if len(hist) >= 2 and hist[-2].value != 0:
             chg_pct = decimal_str((hist[-1].value - hist[-2].value) / hist[-2].value)
     return {
@@ -97,7 +116,9 @@ def list_all(
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     account_ids = [a.account_id for a in list_accounts(conn)]
-    items = [_element(conn, inst, account_ids, now) for inst in list_instruments(conn)]
+    actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
+    items = [_element(conn, inst, account_ids, now, actions=actions)
+             for inst in list_instruments(conn)]
     return {"as_of": now.isoformat(), "list": items}
 
 
@@ -495,7 +516,7 @@ def register(
         last_date = last_price_date(conn, sym)  # read BEFORE the backfill runs
         background_tasks.add_task(gap_backfill, sym, now=now)
         account_ids = [a.account_id for a in list_accounts(conn)]
-        elem = _element(conn, saved, account_ids, now)
+        elem = _element(conn, saved, account_ids, now, actions=load_action_index(conn))
         elem["restored"] = True
         elem["last_price_date"] = last_date
         return elem
@@ -518,7 +539,7 @@ def register(
         conn, outcome.instrument, target_high=body.target_high, industry=industry
     )
     account_ids = [a.account_id for a in list_accounts(conn)]
-    return _element(conn, saved, account_ids, now)
+    return _element(conn, saved, account_ids, now, actions=load_action_index(conn))
 
 
 class QuickBody(BaseModel):
@@ -551,7 +572,8 @@ def quick(
         return JSONResponse(status_code=exc.status,
                             content=error_body(exc.code, exc.message))
     account_ids = [a.account_id for a in list_accounts(conn)]
-    elem = _element(conn, outcome.instrument, account_ids, now)
+    elem = _element(conn, outcome.instrument, account_ids, now,
+                    actions=load_action_index(conn))
     elem["board_label"] = (
         _QUICK_BOARD_LABEL.get(outcome.board or "", "板別未解析（暫以 TWSE 抓報價）")
         if body.market is Market.TW
@@ -595,7 +617,7 @@ def update(
     saved = get_instrument(conn, symbol)
     assert saved is not None
     account_ids = [a.account_id for a in list_accounts(conn)]
-    return _element(conn, saved, account_ids, now)
+    return _element(conn, saved, account_ids, now, actions=load_action_index(conn))
 
 
 class ArchiveBody(BaseModel):

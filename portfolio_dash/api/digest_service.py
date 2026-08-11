@@ -25,6 +25,7 @@ from decimal import Decimal
 from typing import Any
 
 from portfolio_dash.api import auth_store
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.llm_insight.official_templates import (
     DIGEST_NOTE_PROMPT_BODY,
     DIGEST_NOTE_PROMPT_VERSION,
@@ -37,6 +38,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     ExDividendItem,
     HoldingRow,
 )
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.enums import Currency
@@ -196,14 +198,24 @@ def _per_symbol_day_change(
     is ``hist[-1]``, whose ``as_of`` is the quote date, ``fetched_at`` the fetch timestamp,
     and ``value`` the close price (FU-D14 tooltip source). Only symbols with a computable pct
     get a metadata entry.
+
+    §5.1(d) / W6c: the pct divides one stored close by another one dated earlier, so a split
+    landing between the two reports the whole ratio as a one-day move (a 7-for-1 as −86%,
+    straight into the digest's 跌幅 movers and into the weighted portfolio move). Both closes
+    are re-expressed into ``now``'s share terms first; the tooltip's close comes from the same
+    re-expressed row, so the number in the tooltip and the number in the pct never disagree.
     """
     start = now.date() - timedelta(days=_DAY_CHANGE_LOOKBACK_DAYS)
     end = now.date()
     out: dict[str, Decimal | None] = {}
     meta: dict[str, tuple[str | None, str | None, str | None]] = {}
     latest_as_of: date | None = None
+    # ONE index for the whole digest, outside the per-symbol loop (trap #21).
+    actions = load_action_index(conn)
     for sym in symbols:
-        hist = get_price_history(conn, sym, start, end)
+        hist = series_in(
+            actions, sym, get_price_history(conn, sym, start, end), valued_on=end
+        )
         pct = _pct_from_last_two([p.value for p in hist])
         out[sym] = pct
         if pct is not None and hist:

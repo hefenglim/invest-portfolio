@@ -19,10 +19,12 @@ import sqlite3
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
-from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.holdings import current_shares, load_action_index
 from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
 from portfolio_dash.llm_insight import alerts_bridge
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import signal_states
 from portfolio_dash.strategy.rules import engine
@@ -83,16 +85,35 @@ def required_calendar_days(params: RulesParams) -> int:
 
 
 def _read_series(
-    conn: sqlite3.Connection, symbol: str, *, now: datetime, params: RulesParams
+    conn: sqlite3.Connection, symbol: str, *, now: datetime, params: RulesParams,
+    actions: ActionIndex,
 ) -> tuple[list[Decimal], list[Decimal | None] | None]:
     """Read the derived-window closes + aligned volumes for ``symbol`` from stored prices.
 
     Volumes are fed only when at least one session carries volume (so the volume-
     confirmation signal stays honestly absent pre-backfill), mirroring ``insight_service``.
+
+    §5.1(d) / W6c — **this is the highest-consequence series read in the app.** Every rule
+    the engine runs compares closes ACROSS dates (12-1 momentum, MA50/MA200 cross, RSI,
+    52-week position, the MA200 trend filter), and a stored close is as traded on its own
+    date. A split inside the ~583-day window therefore puts the older points in a different
+    denomination: a 7-for-1 makes the pre-split year read 7x higher, the 52-week position
+    collapses to 0, and the scan WRITES an ``alert_events`` row that notifies the owner
+    about a breach that never happened. Re-expressed into ``now``'s share terms first.
+
+    ``actions`` is threaded in, never built here (trap #21): both scan loops call this once
+    per registered symbol.
+
+    ⚠ ``volumes`` is deliberately NOT re-expressed — ``volume`` has no raw column (D39b), so
+    a factor on it could never be restated or reversed. The volume-confirmation signal
+    therefore still compares two denominations across a split; that needs its own stored
+    column, not a read-path divide.
     """
     end = now.date()
     start = end - timedelta(days=required_calendar_days(params))
-    history = get_price_history(conn, symbol, start, end)
+    history = series_in(
+        actions, symbol, get_price_history(conn, symbol, start, end), valued_on=end
+    )
     closes: list[Decimal] = [p.value for p in history]
     raw_volumes: list[Decimal | None] = [p.volume for p in history]
     volumes = raw_volumes if any(v is not None for v in raw_volumes) else None
@@ -108,7 +129,8 @@ def evaluate_symbol(
 ) -> SymbolSignals | None:
     """Evaluate one symbol's signals from stored prices (single-symbol drawer path)."""
     resolved = params if params is not None else default_params()
-    closes, volumes = _read_series(conn, symbol, now=now, params=resolved)
+    closes, volumes = _read_series(conn, symbol, now=now, params=resolved,
+                                   actions=load_action_index(conn))
     return engine.evaluate_symbol(closes, volumes, resolved)
 
 
@@ -148,9 +170,11 @@ def evaluate_all(
     evaluation as held ones — the API tags each with its ``held`` flag (P2 batch 3)."""
     params = default_params()
     account_ids = _account_ids(conn)
+    actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
     out: list[tuple[str, SymbolSignals | None, bool]] = []
     for symbol in _registered_symbols(conn):
-        closes, volumes = _read_series(conn, symbol, now=now, params=params)
+        closes, volumes = _read_series(conn, symbol, now=now, params=params,
+                                       actions=actions)
         signals = engine.evaluate_symbol(closes, volumes, params)
         out.append((symbol, signals, _is_held(conn, symbol, account_ids=account_ids)))
     return out
@@ -261,10 +285,12 @@ def scan_signals(conn: sqlite3.Connection, *, now: datetime) -> str:
     stamped = now.isoformat()
 
     symbols = _registered_symbols(conn)
+    actions = load_action_index(conn)  # ONE per scan, outside the loop (trap #21)
     seeded = 0
     recorded = 0
     for symbol in symbols:
-        closes, volumes = _read_series(conn, symbol, now=now, params=params)
+        closes, volumes = _read_series(conn, symbol, now=now, params=params,
+                                       actions=actions)
         signals = engine.evaluate_symbol(closes, volumes, params)
         new_state = signal_states.extract_state(signals)
         stored = signal_states.get_state(conn, symbol)
