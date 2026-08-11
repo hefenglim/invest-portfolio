@@ -25,11 +25,75 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   formula.
 
   ⚠ **Not shippable yet**, and the remaining items are deliberate rather than forgotten: §7.6's
-  full enter-through-the-UI e2e, this entry's version heading, `shared/whatsnew.py`, and §10.5's
-  owner-run acceptance script — which needs per-symbol opening cost totals only the owner has
-  (D37). Two decisions made during implementation (**D40**, **D41**) await owner ratification.
-  A single prose summary here would drift from the spec within a week, which is the failure this
-  release spent an audit correcting, so the detail stays in §8's decision table and the commits.
+  full enter-through-the-UI e2e, this entry's version heading, `shared/whatsnew.py`, the e2e
+  harness flake that stops the suite being called green, and §10.5's owner-run acceptance pass —
+  the script and a simulated corpus now exist (**D43**), but the *real* run needs per-symbol
+  opening cost totals only the owner has (**D37**). **D40 and D41 were ratified by the owner on
+  2026-08-11**; **D42** (W6c in scope) and **D43** are the owner's own rulings; **D44 is the one
+  OPEN decision** — see below. A single prose summary here would drift from the spec within a
+  week, which is the failure this release spent an audit correcting, so the detail stays in §8's
+  decision table and the commits.
+
+### Fixed
+- **Price SERIES reads are expressed in one share denomination** (spec §5.1(d2), W6c / D42).
+  `get_price_history` returns closes **as traded on their own dates**, so a SPLIT inside a read
+  window left the older points in a different denomination and every cross-date comparison over
+  them was wrong by the whole ratio. Twelve `api/` readers now route through the new
+  `portfolio/price_basis.series_in` (which calls the existing `price_in` per point — one owner,
+  no second formula): the technical rule engine (momentum / MA cross / RSI / 52-week / MA200),
+  the market-risk alert feed, the daily digest movers, the DRIP reinvest-price estimate, the
+  insight evaluation window and per-symbol prompt context, the prompt preview, `spark_30d`, the
+  watchlist day-change, the TWR benchmark overlay, and the symbol drawer's price chart. Worst
+  case fixed: a 7-for-1 put a symbol at its 52-week low and **fired a real drawdown notification**
+  for an 86% collapse that never happened.
+- Where such a reader also used a live quote or a stored scalar **in the same computation**
+  (`alert_inputs`'s target-cross price, the watchlist's `last`, `insight_service`'s
+  `price_at_create`), that value is re-expressed into the **same** valuation day. Correcting one
+  leg only would have *manufactured* the discrepancy rather than removed it.
+- **The DRIP inbox's reinvest price is money of record, and was wrong across a split.** It divides
+  the net dividend into a share count that `confirm()` writes to the dividend ledger, so a
+  carried-forward pre-split close booked **one seventh** of the shares actually reinvested on a
+  7-for-1. Now expressed in the pay date's share terms.
+- **The canonical transaction CSV can express a declared short sale** (`short_sale` column). The
+  engine has carried the flag since v0.1.25, but the import template had no column for it, so
+  **every imported declared short became an ordinary sell** — which the 賣超 guard flags as an
+  undeclared oversell and whose cost basis it then discards, stickily. Found by §10.5's acceptance
+  run against a real broker export. The column is optional and never inferred: absent means
+  `false`, because inferring a short from an oversell would turn a data-entry slip into a
+  plausible-looking realized loss.
+- **`scripts/verify_corporate_actions.py` — the acceptance gate's own privacy guarantee was
+  incomplete, and its missing-row count double-counted.** (1) The module argued that no `Decimal`
+  reaches stdout, which is true and insufficient: a *symbol* is a free string and a broker writes
+  option contracts as `TICKER MM/DD/YYYY STRIKE C|P`, so **the strike printed**. Symbols are now
+  masked — masked, not rejected, because dropping a supplied row would change the verdict to
+  protect the output. The mask keys on whitespace or `\d\.\d`, never on "contains a digit": TW
+  (`2330`, `0050`) and MY (`3182`) tickers are numeric and a digit rule would blank most of the
+  report on two of the app's three markets. (2) The count excluded a supplied-but-rejected row
+  from the oversold population by checking the **written** rows — and a rejected row is never
+  written, so the exclusion could never fire and the same missing row was counted twice. (3) The
+  verdict now reports the two counts separately (`FAIL — 標的 n、缺漏 m`) instead of summing them:
+  the missing rows are the *cause* of the failing tickers, and the halves use different
+  denominators (per symbol vs per account×symbol). **The PASS criterion is unchanged.**
+- The transactions CSV column set is stated in three places (the parser constant, `web/input.js`'s
+  dropzone hint, `web/trades.html`'s paste placeholder); the latter two now derive from the first
+  in a contract test, proven by breaking the hint and watching it go red.
+
+### Notes / known limitations
+- `ActionIndex` is built from **recorded ledger actions**, so a symbol nobody holds — notably a
+  **benchmark** — is not re-expressed even if the real instrument split. There is no independent
+  split feed, and inferring one from a price gap is forbidden (`domain-ledger.md`) and would
+  silently rewrite market history; the repair is a recorded action. The discontinuity is left
+  **visible** rather than guessed away.
+- `volume` keeps the provider's basis (D39b — it has no `*_raw` column, so a factor on it could
+  never be restated or reversed), so the volume-confirmation signal still spans two denominations
+  across a split.
+- **D44 is open:** the owner-entered target band (`target_low` / `target_high`) is *not*
+  re-expressed, so after a split a stale band meets a re-expressed price and crosses immediately.
+  The system cannot choose between re-expressing it (guessing the owner's intent) and leaving it,
+  so it is a decision, not a defect to patch silently.
+- A ledger with **no** corporate action reads byte-identically: `series_in` short-circuits
+  structurally rather than computing an equal answer, proved by a `split_factor` landmine driving
+  every re-expressed path (D38 invariant 1).
 
 ### Changed
 - **`LedgerBundle` — one argument for every ledger replay** (corporate-actions spec W0 / D9;

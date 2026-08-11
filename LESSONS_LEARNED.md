@@ -690,3 +690,52 @@ prevents recurrence.
   flake already existed**, so the baseline established almost nothing. Rule: before treating
   "it passed last time" as a bisect result, compute the probability that it would have passed
   anyway — for a low-rate intermittent, one green run is a coin flip, not a control.
+
+- **2026-08-11 — a correct assertion over a corpus that cannot exercise it is not a test.**
+  `tests/scripts/test_verify_corporate_actions.py::test_output_never_leaks_an_amount` whitelists
+  every printed line against three regexes and then greps the output for fixture amounts. The
+  assertion is exactly right. Its fixture is `AAA` / `BBB` / `CCC` — three symbols that
+  **cannot carry an amount** — so the assertion had never been put under load, and the acceptance
+  script shipped with a real leak: it prints the *symbol*, and a broker writes option contracts as
+  `TICKER MM/DD/YYYY STRIKE C|P`, so the strike printed. Same shape as the demo site catching three
+  phone overflows the local seed could not (v0.1.24). Rule: for a **"never emits X"** test, the
+  fixture must contain something that **would** emit X. If you cannot name the row that would fail
+  it, the test is a comment.
+
+- **2026-08-11 — a type-level safety argument is necessary and not sufficient the moment a free
+  string is in the output.** The same script's docstring argued: exactly one function prints
+  per-ticker output, it takes a symbol and three booleans, therefore *"there is no code path from a
+  `Decimal` to stdout"*. True, checkable, and it misses the case completely — a **symbol is a
+  string an external system fills in**. Rule: when a privacy or safety claim is made about types,
+  enumerate every field in the output that is *user- or vendor-controlled text* and ask what the
+  worst thing anyone could put in it is. `str` is not a safe type; it is an unconstrained one.
+
+- **2026-08-11 — a sanitiser calibrated on one market destroys the others.** The obvious fix for
+  the leak above is "strip anything that looks like a number from the symbol". Two of this app's
+  three markets quote **numeric tickers** (TW `2330` / `0050`, MY `3182`), so that rule would blank
+  most of the report on a TW or MY ledger while adding nothing on a US one — and "contains a dot"
+  fails on `BRK.B`. The discriminator has to be a property no real ticker in **any** served market
+  has (here: whitespace, or `\d\.\d`). Rule: before shipping a filter, run it over the identifier
+  shapes of every market/locale the system serves, and write the false-positive cases as tests.
+
+- **2026-08-11 — "already counted elsewhere, so excluded here" needs the exclusion set checked for
+  reachability. Fourth recurrence.** `_missing_action_rows` excluded a supplied-but-**rejected**
+  action from the oversold population by testing membership of `covered`, built from
+  `list_corporate_actions` — the rows actually **written**. A rejected row is never written, so it
+  could never be in `covered`, so the exclusion **provably never fired** and one missing row was
+  counted twice. Identical in shape to D13's 「the ⚠ provably never fires」, E15/D29's unreachable
+  duplicate warning, and F-08's guard read against a state the action itself would fix. Rule:
+  whenever a comment says *"X is already counted by (1) and is excluded here"*, construct an X and
+  assert it is in the exclusion set — and note that a count labelled 「下限」 that over-reports is
+  not a lower bound. **A label is a claim, and claims get tested.**
+
+- **2026-08-11 — an engine capability with no entry path is invisible until real data arrives.**
+  `short_sale` shipped with the declared-short-sale engine on 2026-07-31 (v0.1.25) and the
+  canonical transaction CSV was never given a column for it, so **every imported declared short
+  became an ordinary sell** — flagged as an undeclared oversell, cost basis discarded, stickily.
+  Nothing failed: the manual form had the checkbox, the engine had the flag, the tests exercised
+  the engine directly. It surfaced only when an acceptance run replayed a **real broker export**
+  that happens to contain one. Rule (a sharper form of the P3 「engine-supports-but-entry-never-
+  passes」 lesson): when a ledger field is added, list every write path into that table — manual
+  form, CSV import, broker converter, seed, API — and make the gap explicit if you are not filling
+  it. A field reachable from one of five doors is a field that is wrong four ways.

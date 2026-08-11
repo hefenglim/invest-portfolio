@@ -1,18 +1,26 @@
 # Spec — Corporate actions (SPLIT / EXCHANGE / SPINOFF)
 
-**Status:** Owner decisions **D1–D39 approved** (§8; D30–D39 on 2026-08-10, from the
+**Status:** Owner decisions **D1–D43 approved** (§8; D30–D39 on 2026-08-10, from the
 spec-conflict audit and the blast-radius question it prompted — see §8.1). **D40 and D41 were made
-during implementation on 2026-08-11 and await owner ratification** — the same status D29 had: D41
-is a blocker fix with no real alternative (the feature could not accept the data §10.5 defines
-"done" as accepting), D40 **declines** a recommendation, which is the kind the owner most needs to
-see. Both are marked in §8. **Implementation in progress** on `feat/corporate-actions` (owner ruling
+during implementation on 2026-08-11 and RATIFIED by the owner the same day.** They were escalated
+rather than absorbed because they carry the same status D29 had: D41 is a blocker fix with no real
+alternative (the feature could not accept the data §10.5 defines "done" as accepting), and D40
+**declines** a recommendation, which is the kind the owner most needs to see. Both are marked in §8.
+**Implementation in progress** on `feat/corporate-actions` (owner ruling
 2026-08-09: the branch is NOT merged into `main` until the whole feature is done, so it stays
-abandonable — which also retires **D26**, W0's separate release). Delivered: **W0** LedgerBundle +
-ledger registry · **W1** the ratio algebra · **W2** the ledger, CRUD and validation (three soft
-warnings still open) · **W3** the replay (its `unbookable_action` output is not yet wired).
+abandonable — which also retires **D26**, W0's separate release). Delivered: **W0**–**W9** —
+LedgerBundle + ledger registry · the ratio algebra · the ledger, CRUD and validation (the soft
+set complete, E23/D3/N3-price landed 2026-08-11) · the replay, its `unbookable_action` output
+now wired · the two-column price basis, write seam and read-path re-expression · the
+action-aware share path · drawer reconciliation · entry surfaces and the 5th CSV kind (the
+**6th**, cash movements, deferred with an architectural reason) · the stress-audit oracle ·
+the accounting manual. **W10 is PARTIAL** and **W6c — the series price readers — is IN SCOPE
+for this release** (**D42**, owner 2026-08-11), the read-side completion of W6b, found after W5
+shipped. Per-package status, dependencies and "Done when" are in §10.2; this line is a summary
+and §10.2 is the authority.
 §10 is the implementation brief, **rebuilt 2026-08-10**: the build order is now
-`P0 → decisions → W6a → W4 → W6b → W5 → E23+W7 → W8/W9/W10`, and every "Done when" cites the §7
-test that defines it instead of restating it.
+`P0 → decisions → W6a → W4 → W6b → W5 → E23+W7 → W8/W9 → W6c → W10`, and every "Done when" cites the
+§7 test that defines it instead of restating it.
 
 **Revision log**
 
@@ -30,8 +38,8 @@ test that defines it instead of restating it.
 | 2026-08-09 | **W2 implementation revised E15 (D29).** The duplicate action is now a HARD rejection checked BEFORE E12, not a soft warning. Found by W2's own test: soft would apply the ratio twice (3-for-1 → 9-for-1), and as specified the warning was **unreachable**, since an exact duplicate is by construction the same-date intersecting pair E12 already rejects — the same "the ⚠ provably never fires" defect the E13 note exists to correct, recurring one row later. Also recorded: **D26 is retired** — the branch stays unmerged by owner ruling, so W0 does not ship as its own release |
 | 2026-08-10 | **Spec-conflict audit folded in** (`docs/audit/2026-08-10-spec-conflict-audit.md`) — **owner approved D30–D37**, each on the audit's stated recommendation: two-column price basis (**D30**), the depth cap keeps its `Decimal` signature and degrades through the existing flag / `needs_confirm` mechanisms (**D31**), a dividend on an EXCHANGE-vacated symbol is refused and flagged — new **E24** (**D32**), the SQL path skips an action on a negative source (**D33**), §9's cash-and-stock recipe **withdrawn** (**D34**), US cash dividends reduce `adjusted_total` (**D35**, recorded in the backlog spec), a whole-account IRR joins XIRR and resolves D12's blind spot (**D36**), and pre-history opening cost totals with `original_cost_total > 0` hard-validated (**D37**). **§10.2 rebuilt** — the section the document calls the implementer's brief was its stalest text: every "Done when" now cites the §7 test that defines it, W6 splits into **W6a/W6b**, and the build order becomes `P0 → decisions → W6a → W4 → W6b → W5 → E23+W7 → W8/W9/W10`. Propagation repairs: E15 into §6.5's hard list before E12 (F-01); ~~D26~~ and ~~D18~~ struck as SUPERSEDED with W0's and W6's rows rewritten and traps #18/#19/#23 corrected (F-02, F-03); D20's §7.1a exception removed with the recipe it existed for (F-04); E10 covers **either** symbol (F-35); §4.4 gains `unbookable_action` and its count corrected to nine (F-37); §2.1's value leg qualified to SPLIT + a third §2.1a blind spot (F-38); §7.1a's impossible `unbookable_dividend` claim deleted (F-39); "identifier-shaped" → "unregistered" (F-41); the ratio products written over the **dedup key** (F-42); §4's preamble re-pointed at the measured defect (F-43); `dashboard.py` anchored on the construct, not the line number (F-44) |
 | 2026-08-10 | **D38 — blast-radius containment (owner question, same day).** Asked whether a symbol with no corporate action can be guaranteed identical to pre-feature `main`, so that a defect in the new flow damages only the triggering stock. Ruled: **no runtime "sandbox mode"** — two maintained paths and an off-configuration is how the aggregate-vs-detail divergence recurred three times and how `mock-data.js` and the four ledger enumerations drifted. Instead **three testable invariants** (§8.1): name and test the containment that already holds structurally, preferring a short-circuit over an equal-answer computation (binds **W4** hardest); accept XIRR's portfolio-wide blanking but make its reason **name the account, symbol and date**; and prove `prices` **byte-identically reversible** on deleting a split. Recorded with it: 重算 and `corporate_delta` are both strictly stronger than a sandbox — one *erases* the damage, the other *displays* it per symbol — and **reversibility is D30's second, independent justification**, since `prices` is the only non-replayable mutation in the feature |
-
 | 2026-08-10 | **D39 — two W6a implementation findings, owner sign-off.** (a) The `scheduler → data_ingestion` edge the injected split factor needs was not merely absent but **guarded by a test**; the guard is narrowed to a one-line allowlist and **`.claude/rules/architecture.md`'s dependency diagram now carries the edge** — an edge that exists in code but not in the diagram is the next audit's F-01. (b) §5.1's "all four prices take the same factor" is **reversed**: only `close` is re-expressed, because it is the only price with a preserved raw column, and multiplying `open`/`high`/`low` would put them outside D38's reversibility invariant. Verified zero readers; `split_basis` keeps their basis recoverable and `pricing/schema.py` carries the warning |
+| 2026-08-11 | **Four owner rulings.** **D40 and D41 RATIFIED as made.** The declined F-31 drawer check stays declined — trap #13 is *prevented at entry*, not *detected in the footer*, and a read-time re-validation disagreeing with the write-time gate would accuse the owner of a problem the entry surface says cannot exist. The blocker fix stands: **E3 / E5 / E18 / E22 replay at the action's own date**, so a bulk import no longer hard-rejects the very action that resolves the 賣超 (trap #24). **W6c is IN this release — new D42.** W6b re-expressed the two *point* price reads through `price_in`; the ~10 files under `portfolio_dash/api/` that call `pricing.store.get_price_history` and then compare prices **across dates** — 52-week high/low, moving averages, `chg_pct`, benchmark series, insight evaluation windows, the symbol detail chart — still read the as-traded series raw, so a 7-for-1 reads as an **86% crash**, a 52-week-low alert fires, and a **notification goes out**. Not caused by this feature (the series was already discontinuous at arbitrary fetch boundaries) but this feature makes it systematic and the alert path is user-visible. Same §5.1(d) formula, applied per point with the series' end as the valuation day; §10.2's build order and package table updated. **§10.5's acceptance corpus may be SIMULATED — new D43.** Built by reading the owner's real broker transaction data and reproducing its structure exactly, with the amounts fuzzed to plausible different numbers, so the run exercises the shape it was commissioned for without a real figure ever entering a repository artifact: D27's "the script is committed, the data and the output are not" governs the simulation as it governs the export. The honest limit is recorded with it — a fuzzed corpus proves the feature accepts the **shape**, never that the owner's actual cost basis reconciles, so the real-data run stays the owner's to perform |
 
 **Priority:** P0 — the only *blocking* gap found by the 2026-08-06 broker-import assessment
 (`docs/spec/2026-08-06-broker-import-backlog.md`).
@@ -1197,6 +1205,51 @@ The trend path cannot precompute the same way — its factor depends on the valu
 varies per point — so `timeseries.py` applies it at lookup time. Two call sites, **one**
 `split_factor`, different windows (§6.0's table).
 
+**(d2) The SERIES readers — one denomination per window (W6c, D42, 2026-08-11).**
+
+(d) is the rule for a price that meets a *share count*. The same stored invariant breaks a second
+class of reader: a price that meets **another price from another date**. `pricing.store.
+get_price_history` returns a span of as-traded closes, and every consumer of a span is a comparison
+— a 52-week high/low, a moving average, a day-change percentage, a rebased index, a chart. A SPLIT
+inside the window puts the older points in a different denomination, so the comparison is wrong by
+the whole ratio: a 7-for-1 makes the pre-split year read 7× higher, and on the alert path that is a
+52-week-low breach that **fires a real notification to the owner**. Not newly caused by this feature
+— a provider restating its history mid-backfill produced the same discontinuity — but the feature
+makes it systematic and is the first thing able to *name* the event.
+
+- **One owner.** `portfolio/price_basis.series_in(index, symbol, points, *, valued_on)` sits next to
+  `price_in` and calls it per point (§6.0). No call site reimplements the formula.
+- **Fourteen `api/` sites, three treatments.** Twelve **re-express** into one explicit valuation
+  day; two (`insight_service._missing_prices_for`, `_has_no_history`) stay **raw and commented** —
+  they are existence tests, and an action changes a price's denomination, never whether a row is
+  there. `portfolio/dashboard.py`'s bulk trend load also stays raw **because its consumer already
+  applies (d) per day** with `valued_on=day` — re-expressing here too would divide by the ratio
+  twice.
+- **A re-expressed series must never meet a raw quote.** Where a site mixes a series with a
+  `get_latest_price` (`alert_inputs`'s target-cross feed, the watchlist's `last`) or a stored scalar
+  (`insight_service`'s `price_at_create`), that value is re-expressed into the **same** day.
+  Correcting one leg only would *manufacture* the discrepancy.
+- **The one money-of-record site is the DRIP inbox.** `dividend_inbox._price_on_or_before` is a
+  single point with no price-to-price comparison, so the rule above does not reach it — but the
+  caller divides the net dividend by it and `confirm()` writes the resulting **share count** to the
+  dividend ledger. A pre-split close booked one seventh of the shares actually reinvested. It is
+  re-expressed into the **pay date's** terms.
+- **Containment (D38 invariant 1) is structural.** `series_in` short-circuits on
+  `index.splits_on(symbol)` being empty and returns the caller's own rows, so an action-free ledger
+  never executes the new code — proved with a `split_factor` landmine driving all twelve paths.
+- **Known limitation — no independent split feed.** A symbol nobody holds has no recorded action, so
+  its series is not re-expressed; most importantly a **benchmark** (`routers/performance.py` reads
+  `bench.storage_key`, a ticker nobody holds). Inferring a split from a price gap is forbidden
+  (`domain-ledger.md`) and would silently rewrite market history, so the discontinuity is left
+  **visible**. The repair is a recorded action, nothing else.
+- **`volume` is NOT re-expressed** (D39b): it has no `*_raw` column, so a factor applied to it could
+  never be restated or reversed. The volume-confirmation signal therefore still spans two
+  denominations across a split; that needs its own stored column, not a read-path divide.
+- ⚠ **The owner-entered target BAND is deliberately not re-expressed** — it is a configured intent,
+  not a stored quote, and the system cannot know whether "alert me at 200" survives a 7-for-1 as
+  28.57 or as 200. See §8's **open item** on it: the band is now compared against a re-expressed
+  price, so a split makes a stale band cross immediately.
+
 **Scope: SPLIT only — D18's finding stands, its remedy is D19 (D22, 2026-08-09).**
 
 ```
@@ -2055,6 +2108,32 @@ The price reconcile must be provably re-runnable, because E16 guarantees it will
 > "assert this fails without `split_basis`" is dropped — it asked for a test against an algorithm
 > that will not exist in the codebase, so it could only ever degrade into a comment.
 
+### 7.1c The series-denomination tests (§5.1(d2)) — `tests/api/test_price_basis_series_reads.py`
+
+W6c's anchor, added by W6c itself (§10.2's rule 1 forbids restating a criterion instead of citing
+one, and §7 stated none for the series readers). **30 tests.** The shape is what makes them worth
+keeping, not the count:
+
+- **Every re-expressed site has a PAIRED pre-fix test** asserting what the old code produced — a
+  `−86%` day change, a phantom 52-week low, a scored card marked wrong, a sparkline that disagrees
+  with the price printed beside it. A fix test with no companion cannot distinguish "fixed" from
+  "the fixture never reached the defect", which is precisely how W6c's own leak survived
+  `test_output_never_leaks_an_amount` in the acceptance script (see §10.5).
+- **`test_the_fed_target_price_is_in_the_SAME_denomination_as_the_fed_series`** pins the mixing
+  rule: a corrected series and a raw quote in one computation is a *new* inconsistency, not a
+  half-fix.
+- **`test_drip_reinvest_price_is_expressed_in_the_pay_dates_share_terms`** is the money-of-record
+  one — the booked share count, not a display.
+- **`test_an_action_free_ledger_never_executes_the_new_series_code`** is D38 invariant 1: a
+  `split_factor` landmine driving all twelve re-expressed paths. Verified to go red with the
+  short-circuit removed, and `test_series_in_returns_the_callers_own_rows_when_there_is_no_split`
+  asserts **object identity**, so an equal-answer computation does not satisfy it.
+- **`test_the_trend_bulk_load_stays_raw_because_its_consumer_re_expresses_per_day`** and
+  **`test_the_existence_checks_stay_raw`** pin the three deliberate NON-treatments, so a later
+  reader cannot "finish the job" and divide by the ratio twice.
+- **`test_a_benchmark_with_no_recorded_action_is_NOT_re_expressed_documented_limit`** makes the
+  limitation a *known state* rather than a surprise.
+
 ### 7.2 The parity test (§6.2) — the single most valuable test here
 
 `shares_through` vs `build_book` over a fixture ledger that contains all three kinds, in a
@@ -2238,7 +2317,11 @@ owner reviewed each one as a working demo (`docs/spec/2026-08-09-corporate-actio
 85/85 self-checks, `verify_report.py` PASS) rather than as prose — every one on the stated
 recommendation. D22–D28 were approved in grill round 2 (2026-08-09) and **D29** was found during W2.
 **D30–D37 were approved 2026-08-10**, every one on the stated recommendation of the spec-conflict
-audit (`docs/audit/2026-08-10-spec-conflict-audit.md` §3). No decision remains open; the table is
+audit (`docs/audit/2026-08-10-spec-conflict-audit.md` §3). **D38** and **D39** followed the same day
+(the blast-radius question and W6a's two implementation findings), and **D40–D43 on 2026-08-11**:
+D40 and D41 were made during implementation and ratified as made, while D42 (W6c in scope) and D43
+(the amount-fuzzed acceptance corpus) are the owner's own rulings. **One decision is OPEN — D44**,
+raised by W6c's integration review on 2026-08-11; everything else is settled and the table is
 retained as the decision record.
 
 **A superseded decision keeps its number and its row.** The rendering is `~~Dn~~` with the question
@@ -2285,7 +2368,7 @@ reasoning of a decision that turned out wrong is part of the record.
 a locally reasonable answer that adds a sixth way of doing something the system already does five
 ways is a net loss, so each answer reuses a mechanism the codebase already has.
 
-| # | Question | Recommendation — **all APPROVED 2026-08-10** |
+| # | Question | Recommendation — **all APPROVED** (D30–D39 on 2026-08-10, D40–D43 on 2026-08-11; each row carries its own date) |
 | --- | --- | --- |
 | **D30** *(blocks W6a)* | **The price basis** — one stored column (re-express and divide back out), or two (keep the raw provider close)? | **Two columns.** Keep the raw provider close and define **both** operations as `close := raw × target` (§5.1(c)). The single column is not order-independent *at the stored value*: `_cap_dp` re-applies on every pass and the orders traverse different intermediates — measured, `(1/3)` then `(7/2)` on 0.0013 stores 0.0014 one way and 0.0015 the other, 7.7% apart, and neither equals the one-shot value, while §5.1 claims order-independence and §7.1b tests it. Reconstruction also cannot recover an as-traded price from an already-rounded feed (US 7-for-1: 100.07 → 100.10). With two columns idempotency, reversibility and order-independence hold **by construction**, and detail 1's short-circuit demotes to an optimisation. *System fit:* `data-and-pricing.md` requires storing at full source precision and calls the 4-dp cap "representation noise, not information" — which stops being true once the close is derived and the source is discarded; it also brings `prices` under CLAUDE.md #7, where nothing authoritative is overwritten. Cost: one TEXT column |
 | **D31** *(blocks W4)* | **The depth cap** — what does the walker return when it degrades? | **Not `Decimal \| None`. Split by path** (§6.2). Read paths keep the bare `Decimal` signature and record the capped symbol in a per-request set, surfaced through the same 待釐清 chip path `unbookable_action` uses; the **validation** path reads that set and raises a **`needs_confirm`** issue. *System fit:* the codebase has exactly one vocabulary for "this number exists but is not trustworthy" (`price_stale`, `oversold`, `short_open`, `unbookable_dividend`, `unbookable_action`) and one for "validation must not guess" (`validate.py`'s three tiers). A nullable return would be a **sixth** mechanism, forcing nine call sites to each invent a policy — several of which only want a boolean. Reusing the two existing ones changes no signature and adds no concept |
@@ -2298,8 +2381,11 @@ ways is a net loss, so each answer reuses a mechanism the codebase already has.
 | **D38** *(owner question 2026-08-10: "can a symbol with no corporate action be guaranteed identical to pre-feature `main`, so a defect in the new flow damages only the triggering stock?")* | **Blast-radius containment — is a per-symbol "sandbox mode" the right instrument?** | **No mode. Three testable invariants instead — see the note below.** *System fit:* a runtime mode means two code paths, both maintained and both needing tests, and a configuration in which the new code does not run — so the day it is switched on, every untested interaction arrives at once. This codebase has lost that argument three times already: the aggregate-vs-detail divergence recurred **three** times, `mock-data.js` was retired for being a second source of truth, and `shared/ledger_registry.py` exists because four hand-maintained enumerations drifted. **The containment the owner is asking for already holds structurally for three of the four output tiers; what is missing is that it is neither named nor tested.** And two mechanisms already in this design are strictly stronger than a sandbox: **重算** *undoes* a bad action rather than merely confining it (a sandbox limits damage; replay erases it), and **`corporate_delta`** (§6.3) is a per-symbol runtime cross-check between the naive and action-aware paths that **shows** the discrepancy instead of hiding it |
 
 | **D39** *(two W6a implementation findings, owner sign-off 2026-08-10)* | **(a)** `scheduler/jobs.py` needs the corporate-action ratio to build the injected split factor, but an existing test **forbids** it importing `data_ingestion`, citing `architecture.md` — and `jobs.py` keeps a local copy of `_add_column_if_missing` rather than import one. **(b)** §5.1 said "all four **prices** take the same factor", but only `close` has a preserved raw column | **(a) Narrow the guard to a ONE-line allowlist** (`list_corporate_actions`), and **record the edge in `architecture.md`'s diagram**. *System fit:* the rejected alternatives are worse in this codebase's own terms — injecting from `api/app.py` respects the diagram but degrades to a **silently wrong** price basis if registration is ever missed, and a lookup in `shared/` keeps every edge legal at the cost of a **second SQL site** for `corporate_actions`, which is the duplication `shared/ledger_registry.py` exists to remove. A second test asserts the allowlisted line is actually present, because an exception nobody uses is an exception nobody notices. **An edge that exists in code but not in the diagram is the next audit's F-01**, so the diagram moves.<br>**(b) Only `close` is re-expressed** (§5.1 amended). Multiplying `open`/`high`/`low` off a single `close_raw` produces derived values no reconcile can restate — F-23's defect made unfixable, and outside D38's reversibility invariant. Three more `*_raw` columns were rejected: those three have **zero readers**, verified — every `SELECT` against `prices` names its columns and none names them. `split_basis` keeps their basis recoverable, and the schema carries the warning, because a row with a post-split `close` and pre-split `high`/`low` is a landmine for the first candlestick chart |
-| **D40** *(W5, 2026-08-11)* | **F-31 — a cross-account per-share-unit consistency check in the drawer footer** (the grill's second Q1 recommendation, adopted nowhere) | **Declined.** D13 already answered this exact question and chose the **entry gate over the drawer**, on the ground that the footer's ⚠ provably never fires for a partial application. F-32 is now closed at BOTH doors — E13 re-validates on delete and update, wired to HTTP by W7 — so the only remaining entry path is a hand-edited database, which already breaks every replay call site. Implementing it would add a **fourth** implementation of 「which accounts hold this symbol on the action date」 (`validate.py`, the walker, the replay's position map), which is what §6.0's one-owner rule and `shared/ledger_registry.py` both exist to prevent. And a read-time re-validation that disagrees with the write-time gate **accuses the owner of a problem the entry surface says cannot exist**. Trap #13 therefore stays *prevented at entry*, not *detected in the footer* — recorded here rather than left silent, because the audit said declining is only defensible once F-32 closes, and it now has |
-| **D41** *(found by §10.5's acceptance script, 2026-08-11)* | **E3 / E5 / E18 / E22 were evaluated against the WHOLE ledger**, so on a bulk import E3 rejected the very action that resolves the 賣超 | **Replay at the action's own date** — `bundle.before_action_on(inp.date)`, the walker's three-bound cut (F-18 / D3), and the parameter becomes the **bundle**, not a pre-replayed book, so no caller can supply a wrongly-scoped one. See trap #24 and §5's note. *Not a weakening:* `_apply_action` still enforces all four chronologically on every replay. This is a **blocker-class** find: §10.5's acceptance run is defined against exactly the ledger shape that triggered it |
+| **D40** *(W5, 2026-08-11 — **RATIFIED by the owner 2026-08-11**, as made)* | **F-31 — a cross-account per-share-unit consistency check in the drawer footer** (the grill's second Q1 recommendation, adopted nowhere) | **Declined.** D13 already answered this exact question and chose the **entry gate over the drawer**, on the ground that the footer's ⚠ provably never fires for a partial application. F-32 is now closed at BOTH doors — E13 re-validates on delete and update, wired to HTTP by W7 — so the only remaining entry path is a hand-edited database, which already breaks every replay call site. Implementing it would add a **fourth** implementation of 「which accounts hold this symbol on the action date」 (`validate.py`, the walker, the replay's position map), which is what §6.0's one-owner rule and `shared/ledger_registry.py` both exist to prevent. And a read-time re-validation that disagrees with the write-time gate **accuses the owner of a problem the entry surface says cannot exist**. Trap #13 therefore stays *prevented at entry*, not *detected in the footer* — recorded here rather than left silent, because the audit said declining is only defensible once F-32 closes, and it now has |
+| **D41** *(found by §10.5's acceptance script, 2026-08-11 — **RATIFIED by the owner 2026-08-11**, as made)* | **E3 / E5 / E18 / E22 were evaluated against the WHOLE ledger**, so on a bulk import E3 rejected the very action that resolves the 賣超 | **Replay at the action's own date** — `bundle.before_action_on(inp.date)`, the walker's three-bound cut (F-18 / D3), and the parameter becomes the **bundle**, not a pre-replayed book, so no caller can supply a wrongly-scoped one. See trap #24 and §5's note. *Not a weakening:* `_apply_action` still enforces all four chronologically on every replay. This is a **blocker-class** find: §10.5's acceptance run is defined against exactly the ledger shape that triggered it |
+| **D42** *(owner ruling 2026-08-11)* | **W6c — the SERIES price readers.** W6b re-expressed the two **point** price reads (`portfolio/dashboard.py`'s `price_map`, `portfolio/timeseries.py`'s per-day lookup) through `portfolio/price_basis.py::price_in`. The ~10 files under `portfolio_dash/api/` that call `pricing.store.get_price_history` and then compare prices **across dates** — 52-week high/low, moving averages, `chg_pct`, benchmark series, insight evaluation windows, the symbol detail chart — still read the stored as-traded series raw. Defer to a follow-up release, or fold into this one? | **In this release, as W6c.** Without it those readers see a **discontinuous series at every split date**: a 7-for-1 reads as an **86% crash**, so a 52-week-low alert fires and a **notification goes out to the user**. The discontinuity is not *caused* by this feature — the series was already discontinuous at arbitrary fetch boundaries — but this feature makes it **systematic** (every split date, every affected symbol, deterministically), and the alert path is **user-visible**. That combination is what decides it: a latent inconsistency nobody meets is a backlog item; one this feature schedules into the notification path is this release's. *System fit:* no new concept and no new formula — it is the §5.1(d) read rule that `price_in` already owns, applied **per point** with the series' end as the valuation day, so §6.0's one-owner discipline holds on the read side too rather than acquiring a second re-expression. Scheduled in §10.2 as the read-side completion of W6b; **found after W5 shipped**, which is why it sits late in the build order rather than beside W6b |
+| **D43** *(owner ruling 2026-08-11)* | **§10.5's acceptance corpus.** The blocking acceptance run (D27) needs a ledger of the owner's real shape, but the real export is git-ignored personal financial data and D37's per-symbol cost totals are the programme's longest lead item. May the corpus be **simulated** — built by reading the owner's real broker transaction data — rather than waiting on the real run? | **Yes: a simulation of the owner's real broker transaction data — identical in structure, with the amounts fuzzed to plausible different numbers.** Two constraints are what make this recordable, and both are conditions of the ruling, not caveats on it. **(1) It never enters the repository.** The generated corpus and everything derived from it lives only in **git-ignored paths** and is **never committed**. D27 already states the rule for the real run — 「the script is committed, **the data and the output are not committed**」 — and the same sentence governs the simulation, so no real figure, ticker or account name reaches a repository artifact by either route. **(2) Fuzzing preserves exactly what the run tests.** The acceptance run asserts on **structure**: row kinds, date topology, action shapes, and above all §1's **oversell-resolved-by-a-split** pattern — a buy, a split that cannot be recorded, and a later sell that trips the STICKY 賣超 guard and discards the basis. Fuzzed amounts carry all of that and none of the money, so the run tests the thing it was commissioned to test **without the ledger ever leaving the machine**. ⚠ **The limitation, stated honestly:** fuzzed amounts cannot prove the owner's **actual** cost basis reconciles — only that the feature accepts the **shape**. The real-data run of §10.5 therefore remains the **owner's to perform**, on their own machine, and D27's 「on failure: blocking」 is unchanged by this ruling |
+| **D44** *(OPEN — raised by W6c's integration review, 2026-08-11)* | **The owner-entered target BAND (`instruments.target_low` / `target_high`) is not re-expressed across a SPLIT.** W6c re-expresses the *price* that `target_cross` compares against, so after a 7-for-1 a stale band of 200 meets a price of ~28.6 and the rule crosses **immediately and permanently**. The defect pre-dates W6c — once a genuine post-split close was stored, the raw comparison did the same — but W6c makes it fire from the split date rather than from the next refresh, and this release is the first that knows a split happened. | **Owner decision required.** Three options, and the system cannot choose: **(a) re-express the band** — mechanical, but it *guesses intent*: 「alert me at 200」 may mean 28.57 in new terms (same company, same conviction) or may mean 200 (a genuine target the split does not change), and `domain-ledger.md` forbids guessing money the owner stated; **(b) flag at entry** — recording the SPLIT emits a soft `needs_confirm` naming every symbol whose band predates it, the same tier as E23/D3, so it fires exactly once, at the moment the owner has the context to answer; **(c) leave it** — documented only, and the owner re-enters the band when they notice the alert. *Recommendation:* **(b)**. It is the project's established answer to an ambiguity that only the owner can resolve — never infer, ask once, at entry — and it reuses machinery this feature already has. ⚠ Scope note: (b) is NOT in this release; the ⚠ in §5.1(d2) is the (c) behaviour, shipping now |
 
 ---
 
@@ -2447,11 +2533,16 @@ The four non-negotiables. Every one of them was a defect found by review, not a 
 >    justified below the table, and the reasons are about *where a failure surfaces*, not about
 >    package size.
 
-**Build order (2026-08-10):**
+**Build order (2026-08-10; W6c inserted 2026-08-11, D42):**
 
 ```
-P0  →  D30–D37  →  W6a  →  W4  →  W6b  →  W5  →  E23 + W7  →  W8 / W9 / W10  →  §10.5  →  ship
+P0  →  D30–D37  →  W6a  →  W4  →  W6b  →  W5  →  E23 + W7  →  W8 / W9  →  W6c  →  W10  →  §10.5  →  ship
 ```
+
+> **Why W6c sits there and not next to W6b.** It is the read-side completion of W6b and *logically*
+> belongs beside it — but it was **found after W5 shipped**, once the series readers were enumerated,
+> by which time W6b, W5, W7, W8 and W9 had all landed. The string is a build order, so it records
+> where the work actually happens; the row below carries the dependency (W6b) and the reason.
 
 | # | Package | Status | Blocked by | Files | Done when (§7 clause) |
 | --- | --- | --- | --- | --- | --- |
@@ -2467,6 +2558,7 @@ P0  →  D30–D37  →  W6a  →  W4  →  W6b  →  W5  →  E23 + W7  →  W8
 | **W7** | Entry surfaces (§6.7) + the CSV kinds | **DONE** (2026-08-11) — except the **6th** kind (cash movements), deferred with an architectural reason: its withdraw guard needs `portfolio/cash.py`, and `data_ingestion → portfolio` is not an edge. Prerequisite recorded: extract `validate_cash_movement` first, the same move `validate_opening_cost` just made | W2 (incl. E23), W4 | `web/ledger.html`+`ledger.js`, the 賣超 confirm dialog, `web/detail.js`, `api/routers/ledgers.py`, `import_templates.py` **and every other registration point a new CSV kind needs** (F-28) | **§7.6** — each kind entered through the UI produces the asserted position, the `＋公司行動` term and a ✓ 對帳一致 footer, and a previously-blocked sell now validates. Plus D13/D28's multi-account preview and the CSV round-trip header guard. **W7 owns D15's enforcement in practice (F-40):** the importer must call `validate_corporate_action` with the **full batch**, or nothing enforces it |
 | **W8** | Stress-audit oracle | **DONE** (2026-08-11) — `ops=118 pass=3791 fail=0` | W3 | `scripts/stress_audit/oracle.py`, `run_phase1.py` | **§7.4** — `run_all.py --phase 1` → `fail=0`, with the oracle carrying **its own** ratio arithmetic |
 | **W9** | Accounting manual | **DONE** (2026-08-11) — manual v1.7, §4.4, zh + en mirror | W3, W6b · **D36** | `docs/accounting-formula-manual.md` (zh, authority) + `.en.md` mirror | **§7.5** — including its two limitation rules: D11 stated as standing, **D12 stated as resolved by D36** (not as a permanent blind spot), and cash-and-stock documented as a **hard exclusion** per D34 |
+| **W6c** | Price basis — the **series** readers (**D42**, 2026-08-11) | **DONE** (2026-08-11) | W6b | `portfolio/price_basis.py` (new `series_in`, calling `price_in` per point — one owner), and the 14 `get_price_history` call sites across 10 files under `portfolio_dash/api/`: `signals_service`, `alert_inputs` (+ its `get_latest_price` leg), `digest_service`, `dividend_inbox`, `insight_service` (×5, incl. the stored `price_at_create` scalar), `routers/dashboard`, `routers/instruments` (+ its `last` leg), `routers/performance`, `routers/prompts`, `routers/symbol` | **§7.1c** — 30 tests, every re-expressed site with a PAIRED pre-fix companion, the D38 landmine over all twelve paths, and the three deliberate non-treatments pinned. **Twelve re-express, three stay raw** (two existence checks + the trend bulk load, whose consumer already applies (d) per day). One money-of-record site: the DRIP reinvest price, which `confirm()` divides into a booked share count. Raised **D44 (OPEN)** — the owner-entered target band is not re-expressed |
 | **W10** | E2E, demo corpus, gates, ship | **PARTIAL** (2026-08-11): demo corpus **done** (§7.7), `verify_corporate_actions.py` **done** (§10.5), `verify_live.py` check **done**, four drawer e2e **done**. Still open: §7.6's full entry-through-the-UI e2e, `CHANGELOG.md`, `shared/whatsnew.py`, and the owner's own §10.5 run (needs D37's cost totals) | all · **D37** | `tests/e2e/`, **`scripts/seed_demo.py`**, **`scripts/verify_live.py`**, **`scripts/verify_corporate_actions.py`** (new, §10.5), `CHANGELOG.md`, `shared/whatsnew.py` | **§7.6 + §7.7 + §7.8**, then **§10.5**'s owner-run acceptance script (blocking, and it needs D37's opening cost totals), then `/ship-version` |
 
 **Dependencies, stated once (F-34).** **W3, W4 and W6a are independent** of each other once W2
@@ -2516,6 +2608,12 @@ W6a       pytest tests/pricing  +  boot a FRESH database (the migration's own ga
 W6b       pytest tests/pricing tests/portfolio/test_timeseries.py  →  full pytest
 W7        pytest tests/contract tests/api  →  browser click-through of all three doors
 W8        .venv/Scripts/python scripts/stress_audit/run_all.py --phase 1   → fail=0
+W6c       pytest tests/api/test_price_basis_series_reads.py  →  tests/api tests/unit tests/contract
+          →  full pytest.  Then the containment proof BY HAND: delete `series_in`'s short-circuit
+          and confirm `test_an_action_free_ledger_never_executes_the_new_series_code` goes RED
+          (D38 invariant 1 is a structural claim, and a structural claim you have not seen fail
+          is a comment).  Stress phase 1 as a REGRESSION check only — no oracle change is due,
+          because no formula in `portfolio/` or `forex/` moved (see §7.1c)
 W10       pytest · bare `mypy` · ruff · stress phase 1 · self-review over the diff
 ```
 
