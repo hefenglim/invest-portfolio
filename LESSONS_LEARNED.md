@@ -739,3 +739,27 @@ prevents recurrence.
   passes」 lesson): when a ledger field is added, list every write path into that table — manual
   form, CSV import, broker converter, seed, API — and make the gap explicit if you are not filling
   it. A field reachable from one of five doors is a field that is wrong four ways.
+
+- **2026-08-11 — before theorising about an intermittent failure, diff the failing artifact against
+  a known-good one of the same kind.** A 135-test browser suite reddened ~2 tests per run, always
+  "every asset on the page 404s together". Two sessions chased a port TOCTOU in the harness; the
+  hypothesis survived because it was never *tested* — until a full run came back green while a
+  3,066-test suite hammered the same machine, the opposite of what port pressure predicts. The
+  answer was sitting in the failure text: `a status of 404 ()`, with **empty parentheses**. Our
+  uvicorn is HTTP/1.1 and always writes `404 (Not Found)`; an empty reason phrase can only come
+  from HTTP/2, i.e. an HTTPS third party. One 30-second probe — *"what does a real 404 from our own
+  server print?"* — falsified the whole port hypothesis and named the culprit: Google Fonts subset
+  files, rotated under a stylesheet Google serves `stale-while-revalidate=604800`. Corollary:
+  **a count is a fingerprint.** The recorded "16 assets" matched no page's local asset count (the
+  failing page has 11) but matched its font-subset fan-out exactly. Count the thing before assuming
+  what it is.
+
+- **2026-08-11 — a test suite that loads a CDN has made a third party a gate on your releases.**
+  The e2e assertions said "the app produced zero console errors" while the browser fetched ~30,000
+  files per run from `fonts.gstatic.com` — so Google's cache-rotation schedule was an input to our
+  pass/fail. The fix is to **remove the dependency** (route every non-loopback request offline), not
+  to filter the assertion or add a retry: filtering leaves the traffic in place and every other
+  assertion stays exposed to it. Note the shape of the enforcement — the static guard that keeps
+  browser contexts stubbed **found a second unstubbed context on its first run**, which is the whole
+  argument for writing the control rather than the note. And check the *product* too: the same pages
+  ship those CDN tags to prod, where an outage at the chart CDN is not cosmetic.
