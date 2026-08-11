@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from portfolio_dash.shared.corporate_actions import CorporateAction
+from portfolio_dash.shared.corporate_actions import CorporateAction, UnreadableAction
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -100,6 +100,11 @@ class LedgerBundle:
     opening: list[OpeningInventory] = field(default_factory=list)
     instruments: dict[str, Instrument] = field(default_factory=dict)
     actions: list[CorporateAction] = field(default_factory=list)
+    # Stored action rows the loader could not convert (2026-08-11). NOT a fifth ledger —
+    # it is the same ledger's rejects, carried alongside so `build_book` can turn each into
+    # an `UnappliedAction` instead of the loader raising into a caller that has no
+    # try/except. See `UnreadableAction` for why raising and dropping were both rejected.
+    unreadable_actions: list[UnreadableAction] = field(default_factory=list)
 
     def through(self, day: date) -> "LedgerBundle":
         """Everything dated on-or-before *day*, over the daily trend replay's date columns.
@@ -114,6 +119,40 @@ class LedgerBundle:
             dividends=[d for d in self.dividends if d.date <= day],
             opening=[o for o in self.opening if o.build_date <= day],
             actions=[a for a in self.actions if a.date <= day],
+            unreadable_actions=[u for u in self.unreadable_actions if u.date <= day],
+        )
+
+    def before_action_on(self, day: date) -> "LedgerBundle":
+        """Everything that replays BEFORE a corporate action dated *day* (2026-08-11).
+
+        Three bounds, not one — the same cut ``data_ingestion/holdings.py``'s walker uses,
+        for the same reason (F-18 / D3). ``EventPriority`` orders a day's events
+        ``OPENING (0) → CORPORATE_ACTION (10) → BUY (20) → SELL (30) → DIVIDEND (40)``, so:
+
+        * ``opening <= day`` — a same-day opening is **pre**-action (D3 ruled this);
+        * ``transactions`` / ``dividends`` / ``actions`` ``< day`` — same-day trades and
+          payouts land **after** the action and must not be visible to it.
+
+        :meth:`through` is deliberately NOT this: it is ``<= day`` on all four, which is
+        right for the trend replay (value the world as at the close of *day*) and wrong
+        here (value the world as the action sees it). Using ``through`` would still replay
+        a same-day sell before the split that authorises it — precisely the case a broker
+        books when it settles a split and a sale together.
+
+        Why it exists: four hard rejections — **E3** oversold source, **E22** oversold
+        destination, **E5** short source, **E18** short destination — are evaluated from a
+        replayed book. Read against the WHOLE ledger they see a future that has not
+        happened yet, and on any bulk import the affected position is already 賣超 when its
+        own action is validated, so E3 rejects the row that resolves the 賣超. Measured
+        2026-08-11 on §1's headline case (buy 100, 7-for-1, sell 400).
+        """
+        return replace(
+            self,
+            transactions=[t for t in self.transactions if t.trade_date < day],
+            dividends=[d for d in self.dividends if d.date < day],
+            opening=[o for o in self.opening if o.build_date <= day],
+            actions=[a for a in self.actions if a.date < day],
+            unreadable_actions=[u for u in self.unreadable_actions if u.date < day],
         )
 
     @property

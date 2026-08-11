@@ -300,6 +300,10 @@ _SPEC_4_4_FIELDS = (
     "ever_oversold",
     "unbookable_dividend",
     "unbookable_action",
+    # E24 (D32), 2026-08-11 — added only after §4.4 gained its row, which is what this
+    # assertion is for. Transfer rule: written by EXCHANGE (`P.vacated_to := to_symbol`),
+    # untouched by SPLIT and SPINOFF. Pinned by tests/portfolio/test_dividend_after_exchange.py.
+    "vacated_to",
 )
 _SPEC_4_4_FIELD_COUNT = len(_SPEC_4_4_FIELDS)
 

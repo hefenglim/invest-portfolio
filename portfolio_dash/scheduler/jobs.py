@@ -36,12 +36,7 @@ from portfolio_dash.pricing.store import SplitFactorFn
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
-from portfolio_dash.shared.corporate_actions import (
-    ActionIndex,
-    CorporateAction,
-    CorporateActionKind,
-    split_factor,
-)
+from portfolio_dash.shared.corporate_actions import ActionIndex, split_factor
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.strategy.alerts import Alert, compute_alerts
@@ -64,20 +59,16 @@ def split_factor_fn(conn: sqlite3.Connection) -> SplitFactorFn:
     exists for exactly this: a per-symbol history backfill loop would otherwise re-read
     and re-group the whole action ledger once per instrument.
 
-    A ledger row too malformed to be a :class:`CorporateAction` (only reachable by hand
-    editing the DB — validation enforces positive integer terms) raises here rather than
-    being dropped: silently omitting a factor stores a price that is wrong by the ratio
-    and looks entirely normal, which is the failure mode this whole feature exists to
-    prevent. Same conversion, same strictness as ``data_ingestion.store.load_bundle``.
+    A ledger row too malformed to be a :class:`CorporateAction` contributes **no factor**
+    and is recorded on the index's ``unreadable`` list — it does not raise (changed
+    2026-08-11). This is a scheduled background job: raising here stops the price refresh,
+    and the owner sees that only as prices that quietly stopped updating, which is a worse
+    failure than the one raising was meant to prevent. The wrong price basis such a row
+    leaves behind is not silent either — the SAME row makes ``build_book`` blank the
+    portfolio XIRR with a named reason and mark the position 待釐清. Same conversion
+    (:func:`convert_stored`) and same behaviour as ``store.load_ledger_bundle``.
     """
-    index = ActionIndex.build(
-        CorporateAction(
-            account_id=s.account_id, date=s.date, kind=CorporateActionKind(s.kind),
-            from_symbol=s.from_symbol, to_symbol=s.to_symbol, ratio_to=s.ratio_to,
-            ratio_from=s.ratio_from, cost_carry=s.cost_carry, note=s.note,
-        )
-        for s in list_corporate_actions(conn)
-    )
+    index = ActionIndex.from_stored(list_corporate_actions(conn))
 
     def factor_of(symbol: str, *, after: date, through: date) -> Decimal:
         return split_factor(index, symbol, after=after, through=through)

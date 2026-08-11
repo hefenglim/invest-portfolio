@@ -8,7 +8,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from pydantic import BaseModel, Field
 
-from portfolio_dash.shared.corporate_actions import CorporateAction, CorporateActionKind
+from portfolio_dash.shared.corporate_actions import CorporateActionKind, convert_stored
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument, MarketRule
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -962,6 +962,7 @@ def load_ledger_bundle(
     s_divs = dividends if dividends is not None else list_dividends(conn)
     s_open = opening if opening is not None else list_opening(conn)
     s_acts = actions if actions is not None else list_corporate_actions(conn)
+    good_actions, bad_actions = convert_stored(s_acts)
     return LedgerBundle(
         transactions=[
             Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
@@ -982,14 +983,12 @@ def load_ledger_bundle(
                              build_date=s.build_date)
             for s in s_open
         ],
-        actions=[
-            CorporateAction(account_id=s.account_id, date=s.date,
-                            kind=CorporateActionKind(s.kind),
-                            from_symbol=s.from_symbol, to_symbol=s.to_symbol,
-                            ratio_to=s.ratio_to, ratio_from=s.ratio_from,
-                            cost_carry=s.cost_carry, note=s.note)
-            for s in s_acts
-        ],
+        # `convert_stored` is the ONE owner of this conversion (§6.0). It was open-coded
+        # here and it RAISED — and this function is called by `portfolio/dashboard.py`,
+        # which has no try/except by design, so one malformed row 500'd every page instead
+        # of degrading to 待釐清. Measured 2026-08-11.
+        actions=good_actions,
+        unreadable_actions=bad_actions,
         instruments={i.symbol: i for i in list_instruments(conn)},
     )
 

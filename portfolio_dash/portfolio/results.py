@@ -152,7 +152,12 @@ class UnappliedAction(BaseModel):
 
     account_id: str
     date: date
-    kind: CorporateActionKind
+    # `CorporateActionKind | str`, because one of the refusal reasons IS an unknown kind
+    # (2026-08-11): a stored row the loader could not convert lands here carrying whatever
+    # string the ledger actually holds. Narrowing this to the enum would make the model
+    # refuse to describe exactly the row it exists to describe — and, since this is a
+    # StrEnum, both branches serialise identically on the wire.
+    kind: CorporateActionKind | str
     from_symbol: str
     to_symbol: str
     reason: str

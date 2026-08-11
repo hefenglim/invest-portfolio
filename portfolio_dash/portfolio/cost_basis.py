@@ -76,10 +76,44 @@ class _Position:
     # dashboard path (E1a/E2/E3/E5/E18/E22). The shares are then in PRE-action terms against
     # global post-action prices, so the position is 待釐清 rather than merely stale.
     unbookable_action: bool = False
+    # E24 (D32): the symbol an EXCHANGE moved this position to, in the same account. Set ONLY
+    # by §4.2's zeroing, so it distinguishes "vacated by an action" from "sold down to zero"
+    # — and that distinction is the whole rule. A guard keyed on `shares == 0` instead would
+    # silently revert the 2026-07-26 audit's H2 ruling, which deliberately books a post-close
+    # cash dividend as realized income (TW/MY pay weeks after the ex-date).
+    #
+    # It carries the destination rather than a bare bool because the refusal has to FLAG
+    # something, and this position is about to be dropped by the holdings loop (zero shares —
+    # audit F-47 case 2, where a flag is discarded with its carrier). The successor is the
+    # position the owner still holds and the only one they will look at.
+    vacated_to: str | None = None
 
 
 class _SkipAction(Exception):  # noqa: N818 - control flow, not an error surfaced to a caller
     """The dashboard path's counterpart to raising: skip this event, flag the position."""
+
+
+def _follow_exchange_chain(
+    positions: dict[tuple[str, str], _Position], account_id: str, start: _Position
+) -> _Position:
+    """The live successor of a vacated position — a de-SPAC later renamed is the real case.
+
+    §6.2's own example: the from-side of one action is the to-side of an earlier one, so the
+    lookup is **transitive**. Bounded by the number of positions rather than trusting D15 to
+    have made a cycle unreachable — a walk that cannot terminate is not worth the one line it
+    saves, and this one runs inside the replay's hot loop.
+
+    Falls back to *start* if the chain dead-ends (nothing to flag is better than raising).
+    """
+    seen: set[str] = set()
+    node = start
+    while node.vacated_to is not None and node.vacated_to not in seen:
+        seen.add(node.vacated_to)
+        nxt = positions.get((account_id, node.vacated_to))
+        if nxt is None:
+            break
+        node = nxt
+    return node
 
 
 def _reject(
@@ -223,6 +257,7 @@ def _apply_action(
             # reopen it carrying `-ε` of basis.
             source.short_shares = _ZERO
             source.short_proceeds = _ZERO
+            source.vacated_to = action.to_symbol      # E24 (D32)
             return
 
         # §4.3 SPINOFF. cost_carry is never guessed; validation rejects a row without it.
@@ -285,6 +320,24 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     # Book-level, NOT per-position: two of the three ways an action goes unapplied leave no
     # position to flag (see Book.unapplied_actions). Stays empty on the strict path.
     unapplied: list[UnappliedAction] = []
+
+    # A stored action row the LOADER could not convert (2026-08-11). It never becomes an
+    # event — there is no ratio to apply — but it must not be silent either: a dropped
+    # action leaves a share count wrong by the ratio that looks entirely normal. Recorded
+    # through the same channel every other refusal uses, so the XIRR gate, the drawer and
+    # the strict path all treat it identically without knowing it is a different species.
+    #
+    # Deliberately BEFORE the event loop, so a malformed row is refused even if the ledger
+    # is otherwise empty, and so the strict path raises on it first — an import that cannot
+    # read its own ledger should say so before it says anything else.
+    for bad in bundle.unreadable_actions:
+        if not allow_oversell:
+            raise UnbookableLedgerError(bad.reason)
+        unapplied.append(
+            UnappliedAction(account_id=bad.account_id, date=bad.date,
+                            kind=bad.kind, from_symbol=bad.from_symbol,
+                            to_symbol=bad.to_symbol, reason=bad.reason)
+        )
 
     events: list[tuple[date, int, str, object]] = []
     for oi in bundle.opening:
@@ -447,6 +500,30 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     )
                 existing.unbookable_dividend = True
                 continue
+            if existing.vacated_to is not None:
+                # E24 (D32) — the position was moved away by an EXCHANGE, and §4.2 leaves it
+                # in the map with zeroed fields (required, so a later buy on the old ticker
+                # cannot reopen it carrying −ε). So `existing is not None` and
+                # `short_shares == 0`: NEITHER refusal above applies and the payment books.
+                # Both branches below are money-of-record errors on a dead ticker —
+                #   CASH/NET  → post-close realized income on a symbol that no longer exists;
+                #   DRIP/STOCK → `shares += reinvest_shares` RESURRECTS it at `avg = 0`, and
+                #     a delisted ticker never gets a price, and ONE unpriced holding makes
+                #     `returns.py` return `rate=None` for the WHOLE portfolio.
+                # The second is why this is not cosmetic: the damage is portfolio-wide.
+                # The owner records such a payment as a cash movement instead — the same
+                # remedy `domain-ledger.md` already gives for a dividend on an open short.
+                successor = _follow_exchange_chain(positions, ev.account_id, existing)
+                if not allow_oversell:
+                    raise UnbookableLedgerError(
+                        f"{ev.symbol}（{ev.account_id}）於 {ev.date.isoformat()} 有股利紀錄，"
+                        f"但該部位已於此之前換股為 {existing.vacated_to} — "
+                        "已換出的標的不再有持倉可歸屬這筆配息，"
+                        "記在原標的上會變成一筆已下市代號的已實現收益（或把部位以零成本復活）。"
+                        "請刪除該筆股利，或改以現金收支登錄。"
+                    )
+                successor.unbookable_dividend = True
+                continue
             if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
                 if existing.shares == _ZERO:
                     # AUDIT H2 (2026-07-26) — the position is already CLOSED when this cash
@@ -486,6 +563,15 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                         f"{ev.type} dividend for {key} requires reinvest_shares"
                     )
                 existing.shares += ev.reinvest_shares
+
+    # Flag the positions an unreadable row names, now that the replay has built them. The
+    # RECORD went in before the event loop (a book that cannot read its ledger should say
+    # so first); the FLAG can only go on afterwards, and the two halves are the same split
+    # `_reject` makes for the same reason — some refusals have no position to flag.
+    for bad in bundle.unreadable_actions:
+        for sym in (bad.from_symbol, bad.to_symbol):
+            if (touched := positions.get((bad.account_id, sym))) is not None:
+                touched.unbookable_action = True
 
     holdings: list[Holding] = []
     for (account_id, symbol), pos in positions.items():

@@ -12,8 +12,10 @@ from decimal import Decimal
 
 import pytest
 
+from portfolio_dash.api.wire import issue_wire
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.holdings import MAX_ACTION_DEPTH
+from portfolio_dash.data_ingestion.preview import PreviewRow
 from portfolio_dash.data_ingestion.store import (
     delete_corporate_action,
     get_corporate_action,
@@ -23,15 +25,19 @@ from portfolio_dash.data_ingestion.store import (
     list_ledger_audit,
     load_ledger_bundle,
     upsert_instrument,
+    upsert_opening,
 )
 from portfolio_dash.data_ingestion.validate import (
     CorporateActionInput,
     Issue,
+    TxnInput,
     _accounts_holding_on,
     validate_corporate_action,
     validate_corporate_action_change,
+    validate_transaction,
 )
 from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -382,6 +388,30 @@ def test_partial_multi_account_application_is_rejected(conn: sqlite3.Connection)
     assert any("moomoo_my" in i.message for i in issues)
 
 
+def test_an_unrelated_batch_row_does_not_cover_a_missing_account(
+    conn: sqlite3.Connection,
+) -> None:
+    """The batch half of ``covered`` must be filtered exactly as the stored half is.
+
+    Measured while seeding the demo corpus (2026-08-11): the stored clause filters on
+    ``(from_symbol, date, kind)`` and the batch clause took every ``account_id`` in the
+    batch. So an action on a **different symbol** in the missing account satisfied E13,
+    and a genuinely partial multi-account SPLIT validated clean.
+
+    This is not a hypothetical shape. F-40 requires the importer to call this validator
+    with the FULL batch, and a CSV of corporate actions is by construction multi-symbol —
+    so the guard would go quiet in exactly the state D13 says must be unreachable, on the
+    one path that was added to enforce it.
+    """
+    inp = _inp()
+    unrelated = _inp(account_id="moomoo_my", from_symbol="CCC", to_symbol="CCC")
+    # The SAME object in the batch, so `siblings = [b for b in batch if b is not inp]`
+    # leaves only the unrelated row — E12 cannot fire, and E13 is isolated.
+    issues = validate_corporate_action(conn, inp, batch=[inp, unrelated])
+    assert _hard(issues) == {"incomplete_account_coverage"}
+    assert any("moomoo_my" in i.message for i in issues)
+
+
 def test_an_account_that_bought_after_the_action_is_not_counted(
     conn: sqlite3.Connection,
 ) -> None:
@@ -677,3 +707,231 @@ def test_a_short_chain_raises_no_depth_issue(conn: sqlite3.Connection) -> None:
     batch = _both_accounts()
     assert "action_chain_too_deep" not in _kinds(
         validate_corporate_action(conn, batch[0], batch=batch))
+
+
+# ==================================================== §6.5's soft set — the three missing
+# The set is five: E7 (``split_ratio_one``) and E9 (``cost_carry_all``) shipped with W2;
+# **E23**, **D3** and **N3-price** did not. F-30 puts E23 in W2 rather than W7 because it is
+# the guard D19's residual hole depends on — without it an identifier change entered as an
+# EXCHANGE is committed silently, and §5.1's price scope is SPLIT-only so no reconcile ever
+# corrects it.
+#
+# Every one of the three is tested in BOTH directions. A warning that always fires is noise,
+# noise gets clicked through, and the real one is then missed — which is the failure mode
+# §5.1 rejected the "to_symbol has prior prices" condition for.
+
+PRICE_DAY = date(2026, 1, 5)  # strictly before ACTION_DAY
+
+
+def _pricing(conn: sqlite3.Connection) -> None:
+    """Create the pricing tables — ``bootstrap_db`` does NOT (``api/app.py`` calls both)."""
+    create_pricing_tables(conn)
+
+
+def _price(conn: sqlite3.Connection, symbol: str, on: date, close: str = "10") -> None:
+    """One stored close for *symbol*, written with raw SQL on purpose.
+
+    ``pricing/store.upsert_prices`` is gaining D17's split-factor injection in a parallel
+    wave; a fixture riding that signature would break for reasons unrelated to what it
+    tests. The columns named here are the NOT NULL ones — ``close_raw`` / ``split_basis``
+    are the migration's own concern.
+    """
+    _pricing(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO prices (instrument, market, as_of_date, close, source, "
+        "fetched_at) VALUES (?,?,?,?,?,?)",
+        (symbol, "US", on.isoformat(), close, "test", "2026-06-20T00:00:00+00:00"),
+    )
+    conn.commit()
+
+
+def _identifier_exchange(**over: object) -> list[CorporateActionInput]:
+    """The §5.1 identifier signature: AAA (registered, never priced) → BBB, 1-for-20.
+
+    A raw broker identifier registered as an instrument BEFORE D19 existed, so E10 passes
+    it. The reverse split makes ``ratio_to != ratio_from``; the caller supplies BBB's prices.
+    """
+    base: dict[str, object] = {"kind": "EXCHANGE", "to_symbol": "BBB",
+                               "ratio_to": D("1"), "ratio_from": D("20")}
+    base.update(over)
+    return _both_accounts(**base)
+
+
+# ------------------------------------------------------------------------- E23 (D22)
+
+
+def test_an_identifier_change_entered_as_an_exchange_needs_confirmation(
+    conn: sqlite3.Connection,
+) -> None:
+    """E23 — the residual hole D19 leaves behind, and it is the MIDDLE tier.
+
+    Asserting the text alone would pass equally on a hard rejection, which is the outcome
+    D22 deliberately avoided: the hard tier makes the row uncommittable
+    (``preview.PreviewRow.has_hard_issue``) and would block every ordinary merger. So the
+    tier is asserted through both mechanisms that consume it — the import preview's
+    blocking flag and the API wire's severity.
+    """
+    _price(conn, "BBB", PRICE_DAY)
+    batch = _identifier_exchange()
+    issues = validate_corporate_action(conn, batch[0], batch=batch)
+
+    assert "identifier_change_suspected" in _soft(issues)
+    assert _hard(issues) == set()
+    assert PreviewRow(index=0, raw={}, issues=issues).has_hard_issue is False
+    (wired,) = [issue_wire(i) for i in issues if i.kind == "identifier_change_suspected"]
+    assert wired["sev"] == "warn"
+    # It must OFFER the repair, not merely complain (§6.7 door 1).
+    assert "分割" in wired["text"]
+    # E23 and N3-price are mutually exclusive by construction: one needs prior prices on
+    # the destination, the other needs none at all.
+    assert "to_symbol_unpriced" not in _kinds(issues)
+    # D13/D28 write this event as ONE N-row batch, so EVERY row must carry the warning —
+    # the owner acknowledges it on whichever account's row they are looking at.
+    assert "identifier_change_suspected" in _soft(
+        validate_corporate_action(conn, batch[1], batch=batch))
+
+
+def test_an_ordinary_merger_does_not_fire_the_identifier_guard(
+    conn: sqlite3.Connection,
+) -> None:
+    """The four-part condition exists so this stays silent (§5.1 cases 2 and 3).
+
+    A real merger's source WAS a listed security and has a price series. Firing on
+    "``to_symbol`` has prior prices" alone would warn on most mergers, and a guard that
+    mostly cries wolf trains the owner to click through.
+    """
+    _price(conn, "BBB", PRICE_DAY)
+    _price(conn, "AAA", PRICE_DAY)  # the source is a real security
+    batch = _identifier_exchange()
+    assert "identifier_change_suspected" not in _kinds(
+        validate_corporate_action(conn, batch[0], batch=batch))
+
+
+def test_a_one_for_one_rename_does_not_fire_the_identifier_guard(
+    conn: sqlite3.Connection,
+) -> None:
+    """``ratio_to != ratio_from`` is part of the signature: a plain rename re-denominates
+    nothing, so the destination's price series is already in the right terms."""
+    _price(conn, "BBB", PRICE_DAY)
+    batch = _identifier_exchange(ratio_to=D("1"), ratio_from=D("1"))
+    assert "identifier_change_suspected" not in _kinds(
+        validate_corporate_action(conn, batch[0], batch=batch))
+
+
+def test_a_destination_priced_only_from_the_action_onward_does_not_fire(
+    conn: sqlite3.Connection,
+) -> None:
+    """§5.1 case 3 — you did not hold B, so your position in B begins at the action and its
+    series carries no pre-action rows to be left in the wrong terms."""
+    _price(conn, "BBB", ACTION_DAY)
+    batch = _identifier_exchange()
+    assert "identifier_change_suspected" not in _kinds(
+        validate_corporate_action(conn, batch[0], batch=batch))
+
+
+# ---------------------------------------------------------------------------- D3 (F-18)
+
+
+def test_an_opening_dated_on_the_action_date_warns(conn: sqlite3.Connection) -> None:
+    """D3 — ``EventPriority.OPENING = 0 < CORPORATE_ACTION = 10``, so a same-day opening is
+    PRE-action and the action applies to it. That is the ruling, and it is surprising enough
+    that §6.5 asks for it at entry: an owner who typed post-action share counts into an
+    opening row gets them scaled a second time, silently.
+    """
+    upsert_opening(conn, account_id="schwab", symbol="CCC", shares=D("100"),
+                   original_cost_total=D("1000"), build_date=ACTION_DAY)
+    only = _inp(from_symbol="CCC", to_symbol="CCC")
+    issues = validate_corporate_action(conn, only, batch=[only])
+
+    assert "opening_on_action_date" in _soft(issues)
+    assert _hard(issues) == set()
+    (msg,) = [i.message for i in issues if i.kind == "opening_on_action_date"]
+    assert "期初庫存" in msg and "隔天" in msg
+
+
+def test_an_opening_dated_before_the_action_does_not_warn(
+    conn: sqlite3.Connection,
+) -> None:
+    """The ordinary case — an opening built earlier is unambiguously pre-action."""
+    upsert_opening(conn, account_id="schwab", symbol="CCC", shares=D("100"),
+                   original_cost_total=D("1000"), build_date=BUY_DAY)
+    only = _inp(from_symbol="CCC", to_symbol="CCC")
+    assert "opening_on_action_date" not in _kinds(
+        validate_corporate_action(conn, only, batch=[only]))
+
+
+# ------------------------------------------------------------------- N3-price (§6.6/§6.7)
+
+
+def test_an_exchange_into_an_unpriced_symbol_warns(conn: sqlite3.Connection) -> None:
+    """N3-price — ``returns.py`` is all-or-nothing on the terminal value: ONE held symbol
+    with no price returns ``rate=None`` for the WHOLE portfolio. So entering an EXCHANGE
+    into a never-priced destination blanks the headline XIRR with no visible cause."""
+    batch = _both_accounts(kind="EXCHANGE", to_symbol="BBB", ratio_to=D("1"))
+    issues = validate_corporate_action(conn, batch[0], batch=batch)
+
+    assert "to_symbol_unpriced" in _soft(issues)
+    assert _hard(issues) == set()
+    assert PreviewRow(index=0, raw={}, issues=issues).has_hard_issue is False
+    (msg,) = [i.message for i in issues if i.kind == "to_symbol_unpriced"]
+    assert "XIRR" in msg
+
+
+def test_a_priced_destination_does_not_warn(conn: sqlite3.Connection) -> None:
+    _price(conn, "BBB", PRICE_DAY)
+    batch = _both_accounts(kind="EXCHANGE", to_symbol="BBB", ratio_to=D("1"))
+    assert "to_symbol_unpriced" not in _kinds(
+        validate_corporate_action(conn, batch[0], batch=batch))
+
+
+def test_a_split_never_warns_about_the_destination_price(
+    conn: sqlite3.Connection,
+) -> None:
+    """A SPLIT's destination IS its source (E20), so it creates no new position and cannot
+    be the cause of a dark XIRR — the symbol was already unpriced before the action."""
+    _pricing(conn)  # the table exists; AAA simply has no row in it
+    batch = _both_accounts()
+    assert "to_symbol_unpriced" not in _kinds(
+        validate_corporate_action(conn, batch[0], batch=batch))
+
+
+# ------------------------------------------------------- D29: the order still holds
+
+
+def test_a_soft_warning_does_not_disturb_the_e15_before_e12_order(
+    conn: sqlite3.Connection,
+) -> None:
+    """D29 is normative: E15 must be evaluated BEFORE E12 or it can never fire, because an
+    exact duplicate IS a same-date intersecting pair. Adding soft findings must not change
+    which hard rejection is reported, and a soft finding must not be swallowed by one.
+    """
+    upsert_opening(conn, account_id="schwab", symbol="CCC", shares=D("100"),
+                   original_cost_total=D("1000"), build_date=ACTION_DAY)
+    insert_corporate_action(conn, account_id="schwab", action_date=ACTION_DAY,
+                            kind=CorporateActionKind.SPLIT, from_symbol="CCC",
+                            to_symbol="CCC", ratio_to=D("3"), ratio_from=D("1"))
+    again = _inp(from_symbol="CCC", to_symbol="CCC")
+    issues = validate_corporate_action(conn, again, batch=[again])
+
+    assert _hard(issues) == {"duplicate_action"}       # not same_date_action_conflict
+    assert _soft(issues) == {"opening_on_action_date"}  # and the warning survives it
+
+
+# --------------------------------------------------------- D38 invariant 1: containment
+
+
+def test_the_new_warnings_cannot_fire_without_a_corporate_action(
+    conn: sqlite3.Connection,
+) -> None:
+    """Containment: every triggering CONDITION is present, and an ordinary transaction still
+    sees none of them. All three live in ``validate_corporate_action``, which a ledger with
+    no corporate actions never reaches.
+    """
+    _price(conn, "BBB", PRICE_DAY)
+    upsert_opening(conn, account_id="schwab", symbol="CCC", shares=D("100"),
+                   original_cost_total=D("1000"), build_date=ACTION_DAY)
+    issues = validate_transaction(conn, TxnInput(
+        account_id="schwab", symbol="AAA", side=Side.BUY, quantity=D("10"),
+        price=D("50"), trade_date=ACTION_DAY))
+    assert _kinds(issues) & {"identifier_change_suspected", "opening_on_action_date",
+                             "to_symbol_unpriced"} == set()

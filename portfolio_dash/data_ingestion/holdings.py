@@ -211,25 +211,38 @@ class _Walk:
             # exist). The delta form — new minus old — keeps the caller's `+=` uniform.
             held = self.shares(account_id, symbol, before)
             return apply_ratio(held, action) - held
-        # --- D33 (owner ruling 2026-08-10): skip an action on a NEGATIVE source ---
+        # --- D33 (owner ruling 2026-08-10, widened by task #62): skip an action with a
+        # NEGATIVE SIDE ---
         # The one exception to §6.3's "the share path applies every action unconditionally".
         # Applied to a negative source the walk manufactures a destination the replay never
         # created — no transaction, no opening, no holding, therefore NO FLAG — and §6.3's
         # footer then renders `＋公司行動 −100` under a red 對帳不一致 with nothing to explain
         # it. Skip AND flag: the footer paragraph only works when the cause is attached.
         #
-        # Scoped to EXCHANGE / SPINOFF, which is where D33's stated harm lives (a SPLIT has
-        # no separate destination to manufacture) and where the test is EXACTLY sound. Long
-        # and short are mutually exclusive, so a negative signed count means either an open
-        # declared short (E5) or a currently-oversold position (E3) — both of which the
-        # replay refuses, so the skip can never drop an action the replay would have applied.
-        # Extending it to SPLIT would break **E4**, which deliberately ALLOWS a split to
-        # re-denominate an open short; the fixture that catches that mistake is `III` in
-        # §7.2's parity ledger.
+        # BOTH ends are tested, and that is a correction to D33's stated grounds rather than
+        # an extension of its reach. D33 said honouring E5 (source short) and E18 (destination
+        # short) "would require importing the replay's model". It does not: long and short are
+        # mutually exclusive BY CONSTRUCTION, so a negative signed count IS an open short.
+        # E5 was therefore already covered by the source test D33 itself ordered, and E18 needs
+        # the identical comparison pointed at the other end — one subtraction, zero import, the
+        # two implementations still independent.
+        #
+        # The test is EXACTLY sound on both sides: a negative count is either an open declared
+        # short (E5 source / E18 destination) or a currently-oversold position (E3 source /
+        # E22 destination), and the replay refuses ALL FOUR — so the skip can never drop an
+        # action the replay would have applied. What it still cannot see is E3/E22 in their
+        # STICKY form, where the flag outlives the negative count; that divergence stays, and
+        # `test_the_permitted_divergence_is_bounded_and_flagged` measures it.
+        #
+        # Scoped to EXCHANGE / SPINOFF, which is where the harm lives (a SPLIT has no separate
+        # destination to manufacture). Extending it to SPLIT would break **E4**, which
+        # deliberately ALLOWS a split to re-denominate an open short; the fixture that catches
+        # that mistake is `III` in §7.2's parity ledger.
         src_before = self.shares(account_id, action.from_symbol, before)
-        if src_before < _ZERO:
-            self.index.note_negative_source_skip(account_id, action.from_symbol)
-            self.index.note_negative_source_skip(account_id, action.to_symbol)
+        dest_before = self.shares(account_id, action.to_symbol, before)
+        if src_before < _ZERO or dest_before < _ZERO:
+            self.index.note_negative_side_skip(account_id, action.from_symbol)
+            self.index.note_negative_side_skip(account_id, action.to_symbol)
             return _ZERO
 
         delta = _ZERO

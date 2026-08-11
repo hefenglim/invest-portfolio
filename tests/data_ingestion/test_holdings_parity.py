@@ -24,13 +24,17 @@ action*. The refusals split into three groups, and the split is what the propert
 
 * **E1** (source never existed) and **E2** (source already empty) — **agree, with no rule
   needed.** Every delta is computed from a zero source, so the arithmetic already yields 0.
-* **E3** while the count is negative, and **E5** (an open declared short being EXCHANGEd or
-  SPUN OFF) — **agree, skipped under D33.** Long and short are mutually exclusive, so a
-  negative signed count is *exactly* one of those two states: one comparison, no import.
-* **E3** STICKY-but-now-positive, **E18** (destination short) and **E22** (destination
-  ``ever_oversold``) — **DIVERGE.** Their preconditions are replay state a share-only path
-  cannot see without importing the replay's model, which D33 declined by name because it
-  would collapse the two implementations and end the cross-check §6.3's footer exists to be.
+* **E3** and **E5** on the source, **E18** and **E22** on the destination, *while the count
+  is actually negative* — **agree, skipped under D33.** Long and short are mutually exclusive
+  by construction, so a negative signed count is *exactly* an open short or a live oversell,
+  on whichever end it appears: one comparison per side, no import. D33's own text claimed E5
+  and E18 were out of reach for a share-only path; task #62 measured that they are not, and
+  the destination comparison was added on those corrected grounds.
+* **E3 / E22 in their STICKY form** — the flag outlives the negative count, so the position is
+  positive again and the walk cannot tell. **This is the whole remaining divergence**, and it
+  is the one case that genuinely does need the replay's model: an `ever_oversold` bit is
+  basis state, not share state. Importing it would collapse the two implementations and end
+  the cross-check §6.3's footer exists to be.
 
 Every divergent case leaves a row in ``Book.unapplied_actions``, which is what the ``flagged``
 skip below reads — so the gap is bounded by "the replay said so", never by silence.
@@ -356,8 +360,8 @@ def test_d33_skips_an_exchange_off_a_negative_source_and_flags_it(
     _short_then_exchange(conn)
     index = load_action_index(conn)
     assert current_shares(conn, "schwab", "JJJ", index=index) == D("0")
-    assert ("schwab", "JJJ") in index.negative_source_skips()
-    assert ("schwab", "III") in index.negative_source_skips()
+    assert ("schwab", "JJJ") in index.negative_side_skips()
+    assert ("schwab", "III") in index.negative_side_skips()
 
     # …and the replay agrees: it refused the same action, for its own reason.
     book = build_book(load_ledger_bundle(conn), allow_oversell=True)
@@ -373,7 +377,46 @@ def test_d33_does_not_touch_a_split_on_an_open_short(conn: sqlite3.Connection) -
     """
     index = load_action_index(conn)
     assert current_shares(conn, "schwab", "III", index=index) == D("-40")   # −20, split 2-for-1
-    assert index.negative_source_skips() == frozenset()
+    assert index.negative_side_skips() == frozenset()
+
+
+def test_d33_skips_an_exchange_onto_a_short_destination_and_flags_it(
+    conn: sqlite3.Connection,
+) -> None:
+    """E18 — the destination side of D33's rule, on accurate grounds (task #62).
+
+    D33's original text asserted that honouring E18 "would require importing the replay's
+    model into the SQL path". It does not. Long and short are mutually exclusive **by
+    construction** (``_Position``'s docstring), so a negative signed count IS an open short:
+    the same one comparison D33 already ordered for the source, pointed at the other end.
+
+    Without the destination test the walk carries BBB's 80 shares onto III's open short and
+    reports ``−40 + 80 = 40`` — a plausible long position — where the replay refuses the
+    action outright and leaves III at −40. That is the failure mode this whole rule exists
+    to prevent, arrived at from the receiving side.
+    """
+    insert_corporate_action(conn, account_id="schwab", action_date=date(2026, 7, 1),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="BBB",
+                            to_symbol="III", ratio_to=D("1"), ratio_from=D("1"))
+    conn.commit()
+
+    replayed, flagged = _replay(conn)
+    index = load_action_index(conn)
+
+    # The replay refuses under E18 — its own reason, computed from its own model.
+    assert replayed[("schwab", "III")] == D("-40")
+    assert replayed[("schwab", "BBB")] == D("80")
+
+    # …and the walk now agrees, from the share domain alone.
+    assert current_shares(conn, "schwab", "III", index=index) == D("-40")  # not 40
+    assert current_shares(conn, "schwab", "BBB", index=index) == D("80")   # not 0
+    assert ("schwab", "III") in index.negative_side_skips()
+    assert ("schwab", "BBB") in index.negative_side_skips()
+
+    # Both ends are named by the replay too, so §7.2 would have skipped them either way —
+    # agreement here is the walker being right, not the property being relaxed.
+    assert ("schwab", "III") in flagged and ("schwab", "BBB") in flagged
+    test_parity_over_every_account_symbol(conn)
 
 
 def test_the_permitted_divergence_is_bounded_and_flagged(
@@ -418,7 +461,7 @@ def test_the_permitted_divergence_is_bounded_and_flagged(
     # THE DESTINATION SIDE: the walker moved BBB into KKK, the replay refused (E22).
     assert current_shares(conn, "schwab", "KKK", index=index) == D("100")   # 20 + 80 BBB
     assert replayed[("schwab", "KKK")] == D("20")
-    assert index.negative_source_skips() == frozenset()   # KKK is POSITIVE — D33 cannot see it
+    assert index.negative_side_skips() == frozenset()   # KKK is POSITIVE — D33 cannot see it
 
     # …and it is bounded: both ends are named by the replay, so §7.2 skips them knowingly.
     assert ("schwab", "KKK") in flagged

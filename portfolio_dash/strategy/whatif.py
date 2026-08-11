@@ -17,7 +17,11 @@ from decimal import Decimal
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
 from portfolio_dash.data_ingestion.store import load_ledger_bundle
-from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
+from portfolio_dash.portfolio.cost_basis import (
+    OversellError,
+    UnbookableLedgerError,
+    build_book,
+)
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.enums import Currency, Market
@@ -125,8 +129,17 @@ def compute_whatif(
     instruments = bundle.instruments
     try:
         book = build_book(bundle)
-    except UnbookableLedgerError as exc:
+    except (UnbookableLedgerError, OversellError) as exc:
         # An un-bookable ledger is a user-fixable data problem, not a server fault.
+        #
+        # ⚠ `OversellError` is a SEPARATE hierarchy (`Exception`, not `ValueError`), so the
+        # original one-class catch let it escape as a 500 — and the drawer posts 試算 on
+        # open, so ONE oversold position anywhere in the ledger 500'd EVERY symbol's drawer,
+        # including symbols in other accounts and other markets (found by W5, 2026-08-11,
+        # and reproducible with no corporate action present — this is older than this
+        # feature). `build_book` here is deliberately strict (`allow_oversell` defaults
+        # False) because a 試算 must not quote a price off a book whose basis was discarded;
+        # the fix is to degrade with the reason, not to relax the strictness.
         raise WhatIfError(str(exc)) from exc
 
     # 2. Resolve account (explicit wins; else most-shares; else cannot infer -> 400).

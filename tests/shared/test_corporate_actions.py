@@ -268,14 +268,26 @@ def test_from_stored_converts_and_validates_ledger_rows() -> None:
         Row("schwab", DAY, "SPLIT", "AAA", "AAA", D("3"), D("1")),
     ])
     assert idx.all[0].kind is CorporateActionKind.SPLIT
-    # A hand-edited row RAISES rather than being silently dropped: omitting a factor gives a
-    # share count wrong by the ratio that looks entirely normal.
-    with pytest.raises((ValidationError, ValueError)):
-        ActionIndex.from_stored([
-            Row("schwab", DAY, "SPLIT", "AAA", "AAA", D("0.2857"), D("1")),
-        ])
-    with pytest.raises(ValueError, match="NOPE"):
-        ActionIndex.from_stored([Row("schwab", DAY, "NOPE", "AAA", "AAA", D("3"), D("1"))])
+    assert idx.unreadable == ()
+
+    # CHANGED 2026-08-11 — this used to assert a RAISE, and the raise was measured to 500
+    # the whole dashboard: `store.load_ledger_bundle` calls this conversion and sits above
+    # `build_book`'s graceful path, which `portfolio/dashboard.py` invokes with no
+    # try/except by design. The old comment argued correctly against *dropping* the row and
+    # then chose the only worse option. The row is now RECORDED: not applied, not dropped,
+    # and named on screen through `Book.unapplied_actions` (see tests/portfolio/
+    # test_unreadable_actions.py, which pins the visible half).
+    bad = ActionIndex.from_stored([
+        Row("schwab", DAY, "SPLIT", "AAA", "AAA", D("0.2857"), D("1")),
+        Row("schwab", DAY, "NOPE", "AAA", "AAA", D("3"), D("1")),
+        Row("schwab", DAY, "SPLIT", "BBB", "BBB", D("2"), D("1")),   # readable, unaffected
+    ])
+    assert [a.from_symbol for a in bad.all] == ["BBB"]
+    assert [(u.from_symbol, u.kind) for u in bad.unreadable] == [("AAA", "SPLIT"),
+                                                                 ("AAA", "NOPE")]
+    # The reason names the offending value, or the UI can only say "something went wrong".
+    assert "0.2857" in bad.unreadable[0].reason
+    assert "NOPE" in bad.unreadable[1].reason
 
 
 def test_depth_capped_sink_starts_empty_and_records(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -31,6 +31,7 @@ from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets
 from portfolio_dash.data_ingestion.store import (
     get_instrument,
+    get_opening,
     list_corporate_actions,
     load_ledger_bundle,
 )
@@ -42,11 +43,13 @@ from portfolio_dash.shared.corporate_actions import (
     is_ratio_term,
 )
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.money import from_db
 
 # Overflow guard (audit M4): shares/price above this are rejected as a hard issue so the
 # downstream fee quantize (fees._round) can never overflow the Decimal context into a 500.
 _MAX_MAGNITUDE = Decimal("1e12")
+_ZERO = Decimal("0")
 
 
 class TxnInput(BaseModel):
@@ -137,6 +140,40 @@ def alias_import_account(raw_account: str) -> tuple[str, Issue | None]:
         kind="account_alias",
         needs_confirm=True,
         message=f"帳戶 {raw_account} 已合併為 {resolved},已自動轉換",
+    )
+
+
+def validate_opening_cost(original_cost_total: Decimal) -> Issue | None:
+    """F-13 (D37): an opening's ``original_cost_total`` must be **> 0** — HARD.
+
+    ONE rule, one message, called by every door that writes an ``opening_inventory`` row (the
+    CSV importer — which is also the single-row 期初 form — and the correction route). It
+    lives here rather than in ``store.upsert_opening`` for the reason
+    :func:`validate_corporate_action_change` states: the store's job is persistence, and a
+    rule that exists at one of several write doors is how E13 came to be insert-only.
+
+    **Why hard, and why zero specifically.** The file already hard-validated ``shares > 0``
+    and the correction route already refused a NEGATIVE total; zero sat in the gap between
+    them, and it is the value D37's owner-input problem makes tempting — 「I cannot find what
+    I paid for this, I will put 0 for now」. A zero total imports cleanly and permanently
+    zeroes the position's basis **with no 待釐清 flag**: every return rate divides by it,
+    ``payback_ratio`` reads 0, and nothing on any screen says the number is unfounded. That
+    is strictly worse than the 賣超 it appears to fix, because the oversell at least
+    announces itself. An asymmetry repair, not a new mechanism.
+
+    Returns the :class:`Issue` (``needs_confirm=False``) or ``None`` when the total is fine.
+    """
+    if original_cost_total > _ZERO:
+        return None
+    return Issue(
+        kind="non_positive_opening_cost",
+        message=(
+            f"原始總成本必須大於 0（目前是 {original_cost_total}）。"
+            "期初庫存的成本是這個部位所有報酬率與均價的分母 — 填 0 會讓成本基礎永久歸零，"
+            "而且畫面上不會出現任何「待釐清」標記，看起來完全正常。"
+            "請翻出當初買進的對帳單，填入實際付出的總金額（含手續費與稅）；"
+            "若一時查不到，寧可先不要登錄這一筆期初庫存，也不要填 0。"
+        ),
     )
 
 
@@ -289,6 +326,36 @@ class CorporateActionInput(BaseModel):
     note: str | None = None
 
 
+def _has_prices(
+    conn: sqlite3.Connection, symbol: str, *, before: date | None = None
+) -> bool:
+    """True iff ``prices`` holds a row for *symbol* (dated strictly before *before*).
+
+    **A direct SELECT, not an import.** ``prices`` belongs to ``pricing/`` and
+    ``data_ingestion → pricing`` is not an edge in ``architecture.md``; the same problem is
+    solved the same way from the other side in ``pricing/ingest.py``, which reads holdings
+    and the watchlist straight from SQL rather than importing ``data_ingestion``. Layering
+    constrains the import graph — both modules already share one connection.
+
+    **A missing table reads as "no prices".** ``prices`` is created by
+    ``pricing.schema.create_tables``, which ``bootstrap_db`` does not call, so a ledger-only
+    database (CSV/AI parse paths, most unit tests) has no such table. Degrading to False
+    keeps an ``OperationalError`` out of an import preview; the two callers below then stay
+    silent (E23, which needs prices to EXIST on the destination) or warn (N3-price, which
+    is telling the truth — there is no stored price).
+    """
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prices'"
+    ).fetchone() is None:
+        return False
+    sql = "SELECT 1 FROM prices WHERE instrument=?"
+    params: tuple[str, ...] = (symbol,)
+    if before is not None:
+        sql += " AND as_of_date < ?"
+        params = (symbol, before.isoformat())
+    return conn.execute(sql + " LIMIT 1", params).fetchone() is not None
+
+
 def _accounts_holding_on(
     conn: sqlite3.Connection, symbol: str, on: date, *, index: ActionIndex | None = None
 ) -> set[str]:
@@ -325,12 +392,35 @@ def _accounts_holding_on(
     return held
 
 
+def _book_before(
+    conn: sqlite3.Connection,
+    day: date,
+    *,
+    bundle: LedgerBundle | None,
+    cache: dict[date, Book] | None,
+) -> Book:
+    """The replayed book as a corporate action dated *day* sees it — memoised per date.
+
+    ``allow_oversell=True`` because this is a validation read, not a booking: it must
+    return the degraded book so the caller can inspect the flags, never raise. A raise
+    here would turn a data problem into a 500 on the import preview.
+    """
+    if cache is not None and day in cache:
+        return cache[day]
+    full = bundle if bundle is not None else load_ledger_bundle(conn)
+    book = build_book(full.before_action_on(day), allow_oversell=True)
+    if cache is not None:
+        cache[day] = book
+    return book
+
+
 def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge row, flat by design
     conn: sqlite3.Connection,
     inp: CorporateActionInput,
     *,
     batch: Sequence[CorporateActionInput] = (),
-    book: Book | None = None,
+    bundle: LedgerBundle | None = None,
+    book_cache: dict[date, Book] | None = None,
     index: ActionIndex | None = None,
 ) -> list[Issue]:
     """Validate one corporate action against the ledger (spec §5 edge matrix).
@@ -339,9 +429,28 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     batch-level rules, and a per-row check that cannot see its siblings would reject a
     correct multi-account entry and accept a partial one.
 
-    *book* is the replayed :class:`Book`, passed in so a batch replays ONCE rather than
-    per row (the same reason :class:`ActionIndex` is built per batch). Computed here when
-    omitted.
+    *bundle* is the full :class:`LedgerBundle`, hoisted by the caller so a batch reads the
+    database ONCE. Loaded here when omitted.
+
+    ⚠ **This used to be a ``book`` parameter, and taking a pre-replayed book was the defect
+    (2026-08-11).** Four hard rejections below — **E3** oversold source, **E22** oversold
+    destination, **E5** short source, **E18** short destination — are evaluated from a
+    replayed :class:`Book`, and a book replayed over the WHOLE ledger shows them a future
+    that has not happened yet. On any bulk import the post-action trades are already
+    recorded (that is what a broker export *is*), so the affected position is **already
+    賣超 when its own action is validated**, and E3 hard-rejects the row that resolves the
+    賣超 — advising the owner to fabricate a buy instead of recording the split. Measured
+    on §1's headline case: buy 100, 7-for-1, sell 400.
+
+    The function therefore replays ``bundle.before_action_on(inp.date)`` **itself**. Taking
+    a bundle rather than a book is the point: a caller cannot hand in a wrongly-scoped
+    replay, because it cannot hand in a replay at all. Nothing is weakened — ``_apply_action``
+    still enforces all four in true chronological order on every replay, so a genuinely
+    oversold position is refused when the replay reaches the action.
+
+    *book_cache* is the caller's ``{action_date: Book}`` dict, filled here. Trap #21's real
+    cost for this check is **one replay per distinct action date**, not per row; an importer
+    hoisting a single book for a whole file is hoisting the wrong thing.
 
     *index* is the batch's :class:`ActionIndex`; built here when omitted. Every share query
     below threads it, which is what makes E1a and E13 see the SAME position the replay does.
@@ -452,6 +561,23 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                            f"{inp.from_symbol} 的持倉，無法套用公司行動。"
                            "請先補登該日之前的買進或期初庫存")))
 
+    # --- D3 (soft): an opening dated ON the action date is PRE-action ---
+    # Sits with E1a because both answer "what does the action date mean for the source
+    # position": E1a rejects when nothing is held on it, D3 explains what a same-day opening
+    # does. `EventPriority.OPENING = 0 < CORPORATE_ACTION = 10`, so the opening lands first
+    # and the action applies to it — which is the ruling, not a defect. It is surfaced
+    # because the owner who read the post-action share count off a statement and typed it
+    # into an opening row gets it scaled a SECOND time, and nothing else on screen says so.
+    opening = get_opening(conn, inp.account_id, inp.from_symbol)
+    if opening is not None and opening.build_date == inp.date:
+        add(Issue(kind="opening_on_action_date", needs_confirm=True,
+                  message=(f"{inp.account_id} 在 {inp.date.isoformat()} 有一筆 "
+                           f"{inp.from_symbol} 的期初庫存，與這筆公司行動同一天。"
+                           "同一天的期初庫存會被視為行動之前就已持有，"
+                           f"所以這筆行動會套用到它（{opening.shares} 股會依比例換算）。"
+                           "若您填的股數已經是行動之後的數字，"
+                           "請把期初庫存的建立日期改成行動的隔天，否則會換算兩次")))
+
     stored = list_corporate_actions(conn)
     siblings = [b for b in batch if b is not inp]
 
@@ -544,10 +670,20 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     # relationship.
     if from_inst is not None:
         holders = _accounts_holding_on(conn, inp.from_symbol, inp.date, index=walk_index)
-        covered = {b.account_id for b in batch} | {inp.account_id} | {
+        # ⚠ BOTH halves filter on (from_symbol, date, kind). The batch half did not until
+        # 2026-08-11, and an action on ANOTHER SYMBOL in the missing account satisfied the
+        # rule — a genuinely partial multi-account SPLIT validated clean, measured while
+        # seeding the demo corpus. F-40 makes the importer call this with the FULL batch and
+        # a corporate-action CSV is multi-symbol by construction, so the guard went quiet on
+        # the one path added to enforce it. A filter written once and copied once is how the
+        # two halves came to disagree; they are adjacent now so the next reader sees both.
+        _same_event = (inp.from_symbol, inp.date, kind.value)
+        covered = {inp.account_id} | {
+            b.account_id for b in batch
+            if (b.from_symbol, b.date, b.kind.strip().upper()) == _same_event
+        } | {
             s.account_id for s in stored
-            if s.from_symbol == inp.from_symbol and s.date == inp.date
-            and s.kind == kind.value
+            if (s.from_symbol, s.date, s.kind) == _same_event
         }
         missing = holders - covered
         if missing:
@@ -558,8 +694,11 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                                "股數搭配行動後的價格，市值會錯，而且畫面上不會有任何警示")))
 
     # --- E22 (D16) / E18 / E3 / E5: replay-derived states of the two positions ---
-    if book is None:
-        book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    # Replayed AT THE ACTION'S OWN DATE (see the docstring). `before_action_on` is the
+    # walker's three-bound cut, not `through`'s single `<= day`: a same-day sell sorts
+    # AFTER the action and must stay invisible to it, while a same-day opening sorts
+    # before and must not.
+    book = _book_before(conn, inp.date, bundle=bundle, cache=book_cache)
     by_key = {(h.account_id, h.symbol): h for h in book.holdings}
     source = by_key.get((inp.account_id, inp.from_symbol))
     dest = by_key.get((inp.account_id, inp.to_symbol))
@@ -584,6 +723,66 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                       message=(f"目的標的 {inp.to_symbol} 目前有未回補的放空部位。"
                                "多頭與空頭部位在本系統是互斥的，移轉過去會讓兩者混在一起，"
                                "均價將失去意義。請先回補後再登錄")))
+
+    # --- E23 (D22) + N3-price (§6.6): the two findings that read the PRICE table ---
+    # Grouped, and placed after every hard check, so the evaluation order §6.5 fixes (E15
+    # before E12, D29) is untouched by construction. Neither can suppress or be suppressed:
+    # nothing below returns early, and D29's rule is about REACHABILITY, not list position.
+    #
+    # E23 — the residual hole D19 leaves behind. If a raw broker identifier was REGISTERED
+    # as an instrument before D19 existed, E10 passes and an identifier change plus reverse
+    # split can still be entered as an EXCHANGE — leaving the destination's price series in
+    # pre-split terms with no correction, because §5.1's re-expression scope is SPLIT-only
+    # (widening it to EXCHANGE is trap #16: an EXCHANGE ADDS to its destination, so the
+    # factor would corrupt the whole price history of a symbol you already held).
+    #
+    # The four-part condition is the identifier SIGNATURE, and its discriminator is the
+    # SOURCE: a real merger's from_symbol was a listed security and has a price series; an
+    # identifier never does, because no provider resolves one (D19's own argument, §3.4).
+    # Without that term the guard would also fire on cases 2 and 3 of §5.1's table — i.e. on
+    # most mergers — and a guard that mostly cries wolf trains the owner to click through.
+    #
+    # ⚠ Keyed on REGISTRATION and on stored PRICES, both database facts. Never on the shape
+    # of the string: a regex for "looks like a broker identifier" eventually rejects a
+    # legitimate ticker and locks the owner out of their own ledger (trap #17). Both symbols
+    # must be registered — an unregistered one is E10's hard rejection, which already tells
+    # the identifier story, and repeating it here would be two messages for one problem.
+    #
+    # Middle tier, deliberately (D22): the hard tier makes the row uncommittable
+    # (`preview.PreviewRow.has_hard_issue`) and would block ordinary mergers; a passive
+    # notice would let the artifact through. Acknowledging does NOT repair the discontinuity
+    # — no factor is applied to either series — it makes it recorded and seen. Converting to
+    # a SPLIT is the repair, which is why the message names it.
+    if (kind is CorporateActionKind.EXCHANGE
+            and inp.ratio_to != inp.ratio_from
+            and from_inst is not None and to_inst is not None
+            and _has_prices(conn, inp.to_symbol, before=inp.date)
+            and not _has_prices(conn, inp.from_symbol)):
+        add(Issue(kind="identifier_change_suspected", needs_confirm=True,
+                  message=(f"{inp.to_symbol} 在 {inp.date.isoformat()} 之前已有價格紀錄，"
+                           f"而來源標的 {inp.from_symbol} 完全沒有價格紀錄 — "
+                           "這是識別碼、而不是證券的特徵。"
+                           "這筆可能是同一檔證券換了代號（並同時調整股數），而不是併購。"
+                           f"若是換代號，請改記為「分割」，系統才會把 {inp.to_symbol} "
+                           "行動前的價格一併換算；以換股存檔的話價格不會換算，"
+                           "市值與淨值會在行動當天出現斷層。"
+                           "若這確實是併購，確認後即可繼續存檔")))
+
+    # N3-price — an EXCHANGE / SPINOFF creates a position in a symbol that may never have
+    # been priced, and `returns.py` is all-or-nothing on the terminal value: ONE unpriced
+    # holding returns `rate=None` for the WHOLE portfolio. So the headline XIRR goes dark
+    # with no visible cause until a refresh succeeds (§6.6). Surfaced at entry, where the
+    # cause is still on screen. SPLIT is excluded: its destination IS its source (E20), so
+    # it creates nothing and a dark XIRR would already have been dark before the action.
+    if kind is not CorporateActionKind.SPLIT and to_inst is not None and not _has_prices(
+        conn, inp.to_symbol
+    ):
+        zh_kind = "換股" if kind is CorporateActionKind.EXCHANGE else "分拆"
+        add(Issue(kind="to_symbol_unpriced", needs_confirm=True,
+                  message=(f"{inp.to_symbol} 目前沒有任何價格紀錄。{zh_kind}會產生一筆新的"
+                           "持倉，而只要有一檔持倉沒有價格，整個投資組合的年化報酬率"
+                           "（XIRR）就會顯示不出來，不是只有這一檔。"
+                           "存檔後請執行一次「更新報價」，或等下一次自動更新完成")))
 
     # --- D31: a share walk above hit the corporate-action depth cap ---
     # Last, because the walks it reports on are E1a's and E13's. Soft (賣超 tier): the
