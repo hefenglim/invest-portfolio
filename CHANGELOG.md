@@ -34,6 +34,46 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   week, which is the failure this release spent an audit correcting, so the detail stays in §8's
   decision table and the commits.
 
+- **6th CSV import kind — cash movements (`kind=cash`).** 入金 / 出金 / 期初資金 / 折讓款, with the
+  foreign-credit acquisition cost `acq_home_amount` — the **amount**, never a rate (spec F1: a rate
+  is an average, and a rate *column* would put a rounded average into a file that gets re-read,
+  re-edited and re-imported). Omitting the column was the tempting choice and would have been the
+  wrong one: a bulk import is exactly how a foreign pool gets funded, so every bulk-imported foreign
+  credit would have been permanently basis-less, and `covered_ratio` scales the **whole** foreign
+  exposure including stocks (F3), not just the cash leg. Two soft advisories, both CSV-only because
+  the manual door has no preview seam: a re-imported duplicate (a cash movement has no natural key,
+  so a re-upload books every amount twice silently) and a foreign `WITHDRAW` that is probably an
+  unrecorded 換匯 (N1) — named, never coerced, because a genuine foreign withdrawal is legitimate
+  and the importer cannot tell them apart. The whole file is one batch, or the first import into a
+  fresh ledger would reject every withdrawal it contains.
+
+### Changed
+- **`validate_cash_movement` extracted from `api/routers/cash.py` into `data_ingestion/validate.py`.**
+  `POST`, `PUT`, the rebate-inbox confirm and the new CSV importer now run **one** guard, so the
+  bulk path cannot be weaker than the single-row form. Proven a pure refactor rather than asserted:
+  35 recorded request/response cases plus the resulting ledger and balances reproduce **byte for
+  byte** against the pre-change tree, and that matrix is now a permanent contract test.
+- **Injection is now a stated convention, not a one-off** (`.claude/rules/architecture.md`).
+  `portfolio/cash.py`'s pool arithmetic reaches `data_ingestion` through a required callable bound
+  by `api/routers/cash.py::cash_pool_fn` — D17's shape, one binding per import rather than per row.
+  D39's objection to injection was to an **optional** registration; a required parameter makes a
+  missed binding a build failure instead of a silent loss of the guard.
+- **An undocumented `data_ingestion → portfolio` edge is now authorised and guarded.**
+  `validate.py` and `corporate_action_import.py` import `build_book` / `Book` so the four
+  corporate-action rejections can read a replayed book. Added by W2/W4, it reached 2026-08-12 with
+  no diagram entry and no guard — the exact F-01 class the architecture rules warn about, and it
+  surfaced only because the cash-movement work declined to copy it. Together with the existing
+  `portfolio → data_ingestion` it is a **package-level cycle**, dormant only because
+  `portfolio/cost_basis.py` and `portfolio/results.py` import nothing above `shared/`. Nothing
+  enforced that until now: `tests/architecture/test_layer_edges.py` asserts the allowlist, that the
+  allowlisted imports are actually present, and — the load-bearing one — that those two modules
+  stay leaves.
+- The `tests/contract/test_import_template.py` round-trip guard kept its **own copy** of the five
+  preview builders, so "re-parses through the real preview builder" was quietly untrue. It now
+  imports the production registry.
+- Fixed: the CSV preview table stamped a red 「賣」 chip on every non-transaction row (fx, openings,
+  corporate actions — and would have on cash deposits).
+
 - **E23's one-click convert-to-SPLIT** (spec §5.1 / D22). The `identifier_change_suspected` warning
   now carries its own repair: the corporate-action preview attaches the exact converted row — a
   SPLIT on `to_symbol`, the identifier retired into `note` per §3.4, ratio unchanged — and the

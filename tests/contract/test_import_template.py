@@ -16,15 +16,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from portfolio_dash.data_ingestion.corporate_action_import import (
-    build_corporate_action_preview,
-)
-from portfolio_dash.data_ingestion.csv_import import (
-    build_transaction_preview,
-    normalize_import_csv,
-)
-from portfolio_dash.data_ingestion.dividend_import import build_dividend_preview
-from portfolio_dash.data_ingestion.fx_import import build_fx_preview
+from portfolio_dash.api.routers.input_center import _BUILDERS
+from portfolio_dash.data_ingestion.csv_import import normalize_import_csv
 from portfolio_dash.data_ingestion.import_templates import (
     _TRANSACTION_ROWS,
     DATE_COLUMN_BY_KIND,
@@ -33,7 +26,6 @@ from portfolio_dash.data_ingestion.import_templates import (
     render_import_template,
     template_columns,
 )
-from portfolio_dash.data_ingestion.opening_import import build_opening_preview
 from portfolio_dash.data_ingestion.preview import ImportPreview
 from portfolio_dash.data_ingestion.store import upsert_instrument
 from portfolio_dash.shared.enums import Currency, Market
@@ -41,18 +33,19 @@ from portfolio_dash.shared.models.assets import Instrument
 
 _BOM = "\ufeff"
 
-_BUILDERS = {
-    "transactions": build_transaction_preview,
-    "dividends": build_dividend_preview,
-    "fx": build_fx_preview,
-    "openings": build_opening_preview,
-    "corporate_actions": build_corporate_action_preview,
-}
-
 
 def _built(kind: str, conn: sqlite3.Connection, text: str) -> ImportPreview:
     """Parse *text* the way the runtime does: normalize (canonical headers + ISO dates) at the
-    import seam, then hand the clean CSV to the kind's ISO-only builder."""
+    import seam, then hand the clean CSV to the kind's ISO-only builder.
+
+    The builder comes from the PRODUCTION map (``input_center._BUILDERS``), not from a copy
+    kept here. This file used to restate the five builders, which made it a sixth
+    registration point that the F-28 comment does not list and no guard covers \u2014 and the
+    first kind whose builder needs an injected dependency (``cash``, whose withdraw guard
+    takes its pool arithmetic from ``api/``) proved the cost: the copy would have exercised
+    a builder the runtime never calls, so "re-parses through the real preview builder" would
+    have quietly stopped being true.
+    """
     norm = normalize_import_csv(text, DATE_COLUMN_BY_KIND[kind])
     return _BUILDERS[kind](conn, norm.text)
 

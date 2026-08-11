@@ -20,6 +20,7 @@ discipline.
 """
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -45,6 +46,15 @@ from portfolio_dash.data_ingestion.store import (
     list_transactions,
     update_cash_movement,
 )
+from portfolio_dash.data_ingestion.validate import (
+    CashMovementInput,
+    CashPool,
+    CashPoolFn,
+    Issue,
+    cash_movement_kind,
+    resolve_acq_home_amount,
+    validate_cash_movement,
+)
 from portfolio_dash.portfolio.cash import (
     CashLine,
     account_statement,
@@ -56,16 +66,12 @@ from portfolio_dash.pricing.store import get_fx, get_fx_on
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account
-from portfolio_dash.shared.money import quantize_amount
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
-# REBATE (退款／折讓): a deposit-like CREDIT booked by the rebate inbox confirm (FE-D1). It is
-# an actual cash refund of record — NOT the forecast estimate — and never touches cost/P&L.
-_KINDS = {"DEPOSIT", "WITHDRAW", "OPENING", "REBATE"}
 
 
 def _accounts(conn: sqlite3.Connection) -> dict[str, Account]:
@@ -73,7 +79,14 @@ def _accounts(conn: sqlite3.Connection) -> dict[str, Account]:
 
 
 def _allowed_ccys(account: Account) -> set[Currency]:
-    """The currencies a pool may legitimately hold: settlement + funding (audit C2)."""
+    """The currencies a pool may legitimately hold: settlement + funding (audit C2).
+
+    Now the FX-leg half only: the movement half moved down to
+    :func:`~data_ingestion.validate.validate_cash_movement`, which cannot import this module.
+    The set is restated there, and the two are cross-referenced rather than shared because
+    the only place both layers may import from is ``shared/`` — a two-element set literal is
+    not worth a new home there, but a reader who changes one must find the other.
+    """
     return {account.settlement_ccy, account.funding_ccy}
 
 
@@ -114,6 +127,100 @@ def _pool_min(
     return running_min(lines)
 
 
+def _synthetic(movement: CashMovementInput) -> StoredCashMovement:
+    """A would-be movement as a stored row, so the pool arithmetic sees ONE row type."""
+    return StoredCashMovement(
+        id=0, account_id=movement.account_id, date=movement.date, kind=movement.kind,
+        ccy=movement.ccy, amount=movement.amount, note=movement.note)
+
+
+def cash_pool_fn(conn: sqlite3.Connection) -> CashPoolFn:
+    """Bind ``portfolio/cash.py``'s pool arithmetic for the shared movement guard (D17 shape).
+
+    ``data_ingestion`` may not import ``portfolio`` (``architecture.md`` — the arrow runs the
+    other way, so the reverse would close a package-level cycle), so
+    :func:`~data_ingestion.validate.validate_cash_movement` takes the arithmetic as a callable
+    and THIS layer, which sits above both, is where the two meet. Exactly the resolution D17
+    gives ``pricing/``'s split factor via ``scheduler/jobs.py::split_factor_fn``.
+
+    **Bound ONCE per request/import, never per row.** The ledger reads happen here; the
+    returned closure only re-runs the pure arithmetic over that in-memory snapshot. A 500-row
+    cash CSV would otherwise issue 2,500 SELECTs to answer one question per row (trap #21).
+    That also makes the manual door cheaper than the three separate loads it used to do.
+
+    **The snapshot is taken at bind time, and that is safe by construction.** Every caller
+    validates before it writes, and a preview writes nothing, so no caller can observe rows it
+    has not committed. Would-be rows arrive through ``include`` instead — which is what lets a
+    batch's own funding row count toward a later withdrawal in the same file.
+
+    The two figures are computed by the SAME two expressions the manual door used before the
+    extraction (``cash_balances`` for the balance, ``running_min(pool_lines(...))`` for the
+    dip), so the guard's verdict is unchanged.
+    """
+    movements = list_cash_movements(conn)
+    fx = list_fx_conversions(conn)
+    txns = list_transactions(conn)
+    divs = list_dividends(conn)
+    insts = {i.symbol: i for i in list_instruments(conn)}
+
+    def probe(
+        account_id: str,
+        ccy: Currency,
+        *,
+        include: Sequence[CashMovementInput] = (),
+        exclude_id: int | None = None,
+    ) -> CashPool:
+        rows: list[StoredCashMovement] = [m for m in movements if m.id != exclude_id]
+        rows.extend(_synthetic(m) for m in include)
+        return CashPool(
+            balance=cash_balances(rows, fx, txns, divs, insts).get(
+                (account_id, ccy), _ZERO),
+            low=running_min(
+                pool_lines(account_id, ccy, rows, fx, txns, divs, insts)),
+        )
+
+    return probe
+
+
+# The wire ``field`` for each hard issue :func:`validate_cash_movement` can raise. It lives
+# HERE, not on the Issue, because a form-field name is presentation: the same finding has no
+# field at all in the CSV preview, which shows a row, not an input box.
+_MOVEMENT_ISSUE_FIELD: dict[str, str] = {
+    "unknown_movement_kind": "kind",
+    "non_positive_amount": "amount",
+    "unknown_account": "account_id",
+    "ccy_not_allowed": "ccy",
+    "acq_cost_ambiguous": "acq_home_amount",
+    "acq_cost_home_ccy": "acq_home_amount",
+    "acq_cost_on_withdraw": "acq_home_amount",
+    "acq_cost_not_positive": "acq_home_amount",
+    "acq_rate_not_positive": "acq_rate",
+    "withdraw_insufficient_balance": "amount",
+}
+
+
+def _movement_error(issues: Sequence[Issue]) -> JSONResponse | None:
+    """The first HARD issue as this door's error envelope, or ``None`` when clean.
+
+    400 ``validation_error`` for the structural rejections; 422
+    ``withdraw_insufficient_balance`` for the overdraft guard (FU-D43a — a distinct code
+    because the frontend must NOT offer an ack for it).
+
+    Soft issues are filtered out rather than raised: this door has no preview seam to show an
+    advisory on, so returning one would turn a hint into a rejection. The extracted validator
+    emits none today; the filter is what keeps that true the day it does.
+    """
+    hard = next((i for i in issues if not i.needs_confirm), None)
+    if hard is None:
+        return None
+    field = _MOVEMENT_ISSUE_FIELD.get(hard.kind)
+    if hard.kind == "withdraw_insufficient_balance":
+        return JSONResponse(status_code=422, content=error_body(
+            hard.kind, hard.message, field=field))
+    return JSONResponse(status_code=400, content=error_body(
+        "validation_error", hard.message, field=field))
+
+
 def _negative_response(account_id: str, ccy: Currency, low: Decimal) -> JSONResponse:
     return JSONResponse(status_code=422, content=error_body(
         "negative_cash",
@@ -130,58 +237,6 @@ def _fx_insufficient_response(
         f"換出金額 {decimal_str(requested)} {ccy.value} 超過 {acct.name} 的 "
         f"{ccy.value} 可用餘額 {decimal_str(available)} — 換匯不可透支（不提供融資）",
         field="from_amt"))
-
-
-def _withdraw_insufficient_response(
-    acct: Account, ccy: Currency, available: Decimal, requested: Decimal
-) -> JSONResponse:
-    """FU-D43a HARD block: 出金不可透支 — no ack override (mirrors the FX-center guard)."""
-    return JSONResponse(status_code=422, content=error_body(
-        "withdraw_insufficient_balance",
-        f"出金金額 {decimal_str(requested)} {ccy.value} 超過 {acct.name} 的 "
-        f"{ccy.value} 賬戶現金 {decimal_str(available)} — 出金不可透支"
-        "（請先補登入金或換匯）",
-        field="amount"))
-
-
-def _withdraw_guard(
-    conn: sqlite3.Connection,
-    body: "MovementBody",
-    acct: Account,
-    *,
-    exclude_id: int | None = None,
-) -> JSONResponse | None:
-    """FU-D43a: a withdrawal may NEVER overdraft its pool — HARD 422, no ack override.
-
-    Primary check: the amount must be covered by the pool's CURRENT balance — the same
-    ``cash_balances`` figure the 賬戶現金 line displays, so the frontend hint and the
-    backend authority never disagree; an exact-balance withdrawal (== available) passes.
-    For a PUT edit, ``exclude_id`` strips the edited row's own prior effect from the
-    balance first, so raising a withdraw within the headroom its old amount already
-    consumed is not falsely blocked.
-
-    Date-aware check (audit C3, hardened for withdrawals): a withdraw that INTRODUCES or
-    DEEPENS a below-zero dip in the pool's running timeline (e.g. back-dated before its
-    funding) is blocked too — with the ack override removed, a missed deposit/conversion
-    must be recorded first. A PRE-EXISTING dip this withdraw does not worsen never blocks
-    it (scoped like the ledger-correction replay guard, audit H3).
-    """
-    without = [m for m in list_cash_movements(conn) if m.id != exclude_id]
-    available = _balances(conn, movements=without).get(
-        (body.account_id, body.ccy), _ZERO)
-    if body.amount > available:
-        return _withdraw_insufficient_response(acct, body.ccy, available, body.amount)
-    would_be = [*without, _synthetic_movement(body, "WITHDRAW")]
-    low_after = _pool_min(conn, body.account_id, body.ccy, movements=would_be)
-    low_before = _pool_min(conn, body.account_id, body.ccy, movements=without)
-    if low_after < min(low_before, _ZERO):
-        return JSONResponse(status_code=422, content=error_body(
-            "withdraw_insufficient_balance",
-            f"此筆出金會使 {acct.name} 的 {body.ccy.value} 現金於某時點降至 "
-            f"{decimal_str(low_after)}（出金日早於資金到位）— 出金不可透支，"
-            "請先補登入金或換匯",
-            field="amount"))
-    return None
 
 
 @router.get("/cash")
@@ -358,7 +413,10 @@ def cash_statement(
 class MovementBody(BaseModel):
     account_id: str
     date: date
-    kind: str  # deposit | withdraw | opening
+    # Any case; validated against ``CASH_MOVEMENT_KINDS`` (deposit / withdraw / opening /
+    # rebate — the comment used to list three and had been stale since REBATE was added,
+    # which is why the vocabulary now lives in ONE named constant instead of in prose).
+    kind: str
     ccy: Currency
     amount: Decimal
     note: str | None = None
@@ -372,66 +430,54 @@ class MovementBody(BaseModel):
     acq_rate: Decimal | None = None
 
 
-def _acq_home_amount(acct: Account, body: MovementBody) -> Decimal | None | JSONResponse:
-    """Resolve the movement's home-currency acquisition cost, or an error response.
-
-    None (both inputs omitted) is the legitimate "cost unknown" case, not an error.
-    """
-    if body.acq_home_amount is None and body.acq_rate is None:
-        return None
-    if body.acq_home_amount is not None and body.acq_rate is not None:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "取得成本請擇一填寫（家幣金額 或 匯率）",
-            field="acq_home_amount"))
-    if body.ccy == acct.funding_ccy:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error",
-            f"取得成本僅適用外幣資金流（本帳戶資金幣別為 {acct.funding_ccy.value}）",
-            field="acq_home_amount"))
-    if body.kind.strip().upper() == "WITHDRAW":
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "出金是處分，不帶取得成本", field="acq_home_amount"))
-    if body.acq_home_amount is not None:
-        if body.acq_home_amount <= _ZERO:
-            return JSONResponse(status_code=400, content=error_body(
-                "validation_error", "取得成本必須大於 0", field="acq_home_amount"))
-        return quantize_amount(body.acq_home_amount, acct.funding_ccy)
-    rate = body.acq_rate
-    if rate is None or rate <= _ZERO:  # `is None` unreachable; narrows for mypy
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "取得匯率必須大於 0", field="acq_rate"))
-    # Rate in, AMOUNT stored: an average must never be the stored authority
-    # (`data-and-pricing.md`), and the displayed rate is recomputed on read.
-    return quantize_amount(body.amount * rate, acct.funding_ccy)
-
-
-def _movement_guard(
-    conn: sqlite3.Connection, body: MovementBody
-) -> JSONResponse | None:
-    if body.kind.strip().upper() not in _KINDS:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"未知類型 {body.kind}（deposit / withdraw / opening / rebate）",
-            field="kind"))
-    if body.amount <= _ZERO:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "金額必須大於 0", field="amount"))
-    acct = _accounts(conn).get(body.account_id)
-    if acct is None:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"帳戶 {body.account_id} 不存在", field="account_id"))
-    if body.ccy not in _allowed_ccys(acct):  # audit C2
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error",
-            f"{body.ccy.value} 非此帳戶可用幣別"
-            f"（交割幣 {acct.settlement_ccy.value}／資金幣 {acct.funding_ccy.value}）",
-            field="ccy"))
-    return None
+def _movement_input(body: MovementBody) -> CashMovementInput:
+    """The wire body as the shared validator's input (``ack_negative`` is a door concern)."""
+    return CashMovementInput(
+        account_id=body.account_id, date=body.date, kind=body.kind, ccy=body.ccy,
+        amount=body.amount, note=body.note,
+        acq_home_amount=body.acq_home_amount, acq_rate=body.acq_rate)
 
 
 def _synthetic_movement(body: MovementBody, kind: str) -> StoredCashMovement:
-    return StoredCashMovement(
-        id=0, account_id=body.account_id, date=body.date, kind=kind,
-        ccy=body.ccy, amount=body.amount, note=body.note)
+    """The wire body as a would-be stored row, with an explicit (already-normalized) kind.
+
+    Shaped by :func:`_synthetic` so there is ONE place that turns a not-yet-written movement
+    into a row the pool arithmetic will sign — the sign comes from ``kind == "WITHDRAW"``, and
+    two shaping sites is how one of them ends up passing the un-normalized wire spelling.
+    """
+    return _synthetic(_movement_input(body).model_copy(update={"kind": kind}))
+
+
+def movement_guard(
+    conn: sqlite3.Connection, body: MovementBody, *, exclude_id: int | None = None
+) -> JSONResponse | None:
+    """Run the shared cash-movement guard for one wire body; ``None`` when it is clean.
+
+    The single seam every manual door goes through — POST, PUT, and the rebate inbox's
+    confirm (``api/routers/rebates.py``), which books a REBATE credit and must obey the same
+    kind / amount / account / currency-coherence rules. The CSV door calls
+    :func:`~data_ingestion.validate.validate_cash_movement` directly because it needs the
+    Issues themselves (a preview shows every row, not the first error).
+
+    ``exclude_id`` is the edited row's own id on a PUT (self-exclusion) — see
+    :class:`~data_ingestion.validate.CashPoolFn`.
+    """
+    return _movement_error(validate_cash_movement(
+        conn, _movement_input(body), pool=cash_pool_fn(conn),
+        exclude_id=exclude_id, accounts=_accounts(conn)))
+
+
+def _resolved_acq(conn: sqlite3.Connection, inp: CashMovementInput) -> Decimal | None:
+    """The home-currency acquisition cost to persist, AFTER validation has passed.
+
+    Calls :func:`resolve_acq_home_amount` a second time purely for its VALUE — the issue it
+    can return has already been surfaced by :func:`validate_cash_movement`. The function is
+    pure, so the second call is free; the alternative is a validator that returns a value
+    beside its issues, which would make it the only one of the four with that shape.
+    """
+    account = _accounts(conn)[inp.account_id]  # exists (validation passed)
+    amount, _issue = resolve_acq_home_amount(inp, funding_ccy=account.funding_ccy)
+    return amount
 
 
 @router.post("/cash/movements", status_code=201)
@@ -439,23 +485,17 @@ def add_movement(
     body: MovementBody,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
-    bad = _movement_guard(conn, body)
+    # ONE guard, shared with the CSV door: structural checks, the acquisition-cost rules,
+    # and FU-D43a's HARD withdraw block (``ack_negative`` does NOT bypass it; deposit /
+    # opening / rebate credits need no balance guard on the way in).
+    inp = _movement_input(body)
+    bad = movement_guard(conn, body)
     if bad is not None:
         return bad
-    kind = body.kind.strip().upper()
-    acct = _accounts(conn)[body.account_id]  # exists (checked in _movement_guard)
-    acq = _acq_home_amount(acct, body)
-    if isinstance(acq, JSONResponse):
-        return acq
-    if kind == "WITHDRAW":
-        # FU-D43a: HARD block — ``ack_negative`` no longer bypasses a withdrawal that the
-        # pool cannot cover (deposit/opening/rebate credits need no balance guard on POST).
-        blocked = _withdraw_guard(conn, body, acct)
-        if blocked is not None:
-            return blocked
     move_id = insert_cash_movement(
-        conn, account_id=body.account_id, move_date=body.date, kind=kind,
-        ccy=body.ccy, amount=body.amount, note=body.note, acq_home_amount=acq)
+        conn, account_id=body.account_id, move_date=body.date,
+        kind=cash_movement_kind(body.kind), ccy=body.ccy, amount=body.amount,
+        note=body.note, acq_home_amount=_resolved_acq(conn, inp))
     return {"id": move_id}
 
 
@@ -484,21 +524,16 @@ def edit_movement(
             "validation_error",
             "折讓款的類型與日期已鎖定以避免重複入帳(可修正金額或備註;如需撤銷請刪除此筆)",
             field="kind"))
-    bad = _movement_guard(conn, body)
+    # The SAME shared guard the POST door and the CSV door run, plus ``exclude_id``: the
+    # edited row's own prior effect is stripped from the pool first (self-exclusion), so
+    # raising a withdrawal within the headroom its OLD amount already consumed is not
+    # falsely blocked — and no ack overrides what the withdrawal itself consumes (FU-D43a).
+    inp = _movement_input(body)
+    bad = movement_guard(conn, body, exclude_id=move_id)
     if bad is not None:
         return bad
-    kind = body.kind.strip().upper()
-    acct = _accounts(conn)[body.account_id]  # exists (checked in _movement_guard)
-    acq = _acq_home_amount(acct, body)
-    if isinstance(acq, JSONResponse):
-        return acq
-    if kind == "WITHDRAW":
-        # FU-D43a: the edited withdraw is HARD-guarded on its target pool, with the
-        # balance computed EXCLUDING this row's own prior effect (self-exclusion) —
-        # no ack override for what the withdraw itself consumes.
-        blocked = _withdraw_guard(conn, body, acct, exclude_id=move_id)
-        if blocked is not None:
-            return blocked
+    kind = cash_movement_kind(body.kind)
+    acq = _resolved_acq(conn, inp)
     if not body.ack_negative:
         edited = _synthetic_movement(body, kind)
         would_be = [edited if m.id == move_id else m for m in list_cash_movements(conn)]

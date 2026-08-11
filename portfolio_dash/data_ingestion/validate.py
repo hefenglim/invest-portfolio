@@ -1,7 +1,8 @@
-"""Transaction input validation: structural checks + sell-exceeds-holdings guard.
+"""Ledger input validation: structural checks + the guards every write door shares.
 
-Shared by every write door (manual entry, CSV import, AI input), so the guards below
-hold no matter which path a transaction arrives on:
+Transactions, opening inventory, corporate actions and cash movements each have their
+own entry point below. Shared by every write door (manual entry, CSV import, AI input),
+so the guards hold no matter which path a row arrives on. For transactions:
 
 * account exists; quantity/price positive (structural).
 * sell-exceeds-holdings (soft — needs confirm).
@@ -15,9 +16,10 @@ hold no matter which path a transaction arrives on:
 """
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
+from typing import Protocol
 
 from pydantic import BaseModel
 
@@ -33,6 +35,7 @@ from portfolio_dash.data_ingestion.rules_binding import allowed_markets
 from portfolio_dash.data_ingestion.store import (
     get_instrument,
     get_opening,
+    list_accounts,
     list_corporate_actions,
     load_ledger_bundle,
 )
@@ -43,9 +46,12 @@ from portfolio_dash.shared.corporate_actions import (
     CorporateActionKind,
     is_ratio_term,
 )
+from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.assets import Account
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
-from portfolio_dash.shared.money import from_db
+from portfolio_dash.shared.money import from_db, quantize_amount
+from portfolio_dash.shared.wire import decimal_str
 
 # Overflow guard (audit M4): shares/price above this are rejected as a hard issue so the
 # downstream fee quantize (fees._round) can never overflow the Decimal context into a 500.
@@ -941,6 +947,286 @@ def validate_corporate_action_change(
             ))
             break
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Cash movements (入金 / 出金 / 期初資金 / 折讓款)
+# ---------------------------------------------------------------------------
+# ⚠ ARCHITECTURE — read this before changing how the withdraw guard gets its numbers.
+#
+# The guard needs TWO figures about one (account, ccy) pool: its current balance and the
+# MINIMUM of its date-ordered running balance (audit C3). Both live in ``portfolio/cash.py``,
+# and ``data_ingestion`` may not import ``portfolio`` — the diagram's arrow runs the other
+# way (``portfolio/dashboard.py`` and ``portfolio/dividends.py`` import this package), so a
+# direct import would close a package-level cycle, which is precisely the risk
+# ``architecture.md`` says the import graph exists to constrain.
+#
+# The arithmetic is therefore **injected** as a callable (:class:`CashPoolFn`), bound ONCE
+# per request/import by the layer that sits above both (``api/routers/cash.py::cash_pool_fn``).
+# That is D17's shape exactly: ``pricing/`` may not reach the corporate-action ledger either,
+# so ``scheduler/jobs.py::split_factor_fn`` binds the split factor and hands it down. Same
+# problem, same answer — one resolution in this codebase rather than two.
+#
+# Rejected, on the record:
+#
+# * **A direct SQL read on the shared connection** — the convention ``architecture.md``
+#   records for reading another module's TABLE (``_has_prices`` below is one). It fits a
+#   table read; it does not fit this. A pool balance is not a row: it is movements ± fx
+#   legs ± trade settlements + cash dividends, ordered with a credits-before-debits
+#   tie-break so a same-day funding covers a same-day spend. Re-deriving that here makes
+#   ``data_ingestion`` a SECOND owner of the balance definition — the duplication
+#   ``shared/ledger_registry.py`` exists to remove — and the two copies would disagree the
+#   first time one of them learns about a new flow kind.
+# * **Leaving the guard at the API layer** (where it lives today). Legal, but the CSV door
+#   writes N rows at once, so it would ship with a WEAKER guard than the single-row form.
+#   A silently weaker guard on the bulk path is the worse half of that trade.
+# * **Importing ``portfolio.cash`` directly.** This file already imports
+#   ``portfolio.cost_basis.build_book`` (W2/W4), so there is precedent — but that edge
+#   appears in no diagram, and copying an undocumented back-edge is how the next one comes
+#   to be written. Reported instead of repeated.
+#
+# The injected callable takes NO connection: it closes over one ledger snapshot, so an
+# N-row import pays for the ledger reads once rather than N times (trap #21).
+
+# DEPOSIT / OPENING (期初資金) / REBATE are CREDITS; WITHDRAW is the only debit (audit C4).
+# REBATE (退款／折讓) is the credit the rebate inbox books on confirm (FE-D1): an ACTUAL cash
+# refund of record, never the forecast estimate, and it never touches cost or P&L.
+CASH_MOVEMENT_KINDS: frozenset[str] = frozenset(
+    {"DEPOSIT", "WITHDRAW", "OPENING", "REBATE"}
+)
+
+
+class CashMovementInput(BaseModel):
+    """A user-supplied cash movement, BEFORE it is trusted.
+
+    Deliberately permissive where :class:`~data_ingestion.store.StoredCashMovement` is
+    strict: ``kind`` is a plain string, so an unrecognised one REACHES
+    :func:`validate_cash_movement` and is rejected with a zh message naming what the user
+    actually typed. A model that refused to construct would turn a typo into a 500 or an
+    English pydantic error — the same reasoning :class:`CorporateActionInput` states.
+
+    ``acq_home_amount`` / ``acq_rate`` are the two ways a FOREIGN credit's home-currency
+    cost may arrive (spec 2026-07-30, F1). Supply at most one. Only the AMOUNT is ever
+    persisted: a rate is an average, and an average is never the stored authority
+    (``data-and-pricing.md``); the displayed rate is derived on read.
+    """
+
+    account_id: str
+    date: date
+    kind: str
+    ccy: Currency
+    amount: Decimal
+    note: str | None = None
+    acq_home_amount: Decimal | None = None
+    acq_rate: Decimal | None = None
+
+
+class CashPool(BaseModel):
+    """One (account, ccy) pool, as the withdraw guard needs to see it.
+
+    ``balance`` is the END balance — the same ``cash_balances`` figure the 賬戶現金 line
+    displays, so the frontend hint and the backend authority never disagree. ``low`` is the
+    MINIMUM running balance over the pool's date-ordered timeline (audit C3), which is what
+    catches a withdrawal back-dated before its funding while the end balance still looks fine.
+    """
+
+    balance: Decimal
+    low: Decimal
+
+
+class CashPoolFn(Protocol):
+    """The injected pool arithmetic (see the section note above).
+
+    ``include`` are would-be movement rows added on top of the stored ledger: the row being
+    validated, plus its siblings in the same import batch. ``exclude_id`` strips one stored
+    row's own prior effect first, so raising a withdrawal within the headroom its OLD amount
+    already consumed is not falsely blocked on an edit.
+
+    Implementations MUST bind their ledger snapshot once, outside this call — the guard
+    invokes it twice per withdrawal row.
+    """
+
+    def __call__(
+        self,
+        account_id: str,
+        ccy: Currency,
+        *,
+        include: Sequence[CashMovementInput] = (),
+        exclude_id: int | None = None,
+    ) -> CashPool: ...
+
+
+def cash_movement_kind(raw: str) -> str:
+    """The canonical stored spelling of a movement kind (``' withdraw '`` -> ``WITHDRAW``)."""
+    return raw.strip().upper()
+
+
+def _pool_row(inp: CashMovementInput) -> CashMovementInput:
+    """*inp* as the pool arithmetic must see it: ``kind`` NORMALIZED to upper case.
+
+    ``portfolio/cash.py`` signs a movement by ``kind == "WITHDRAW"``, so a row still
+    carrying the wire's lower-case ``"withdraw"`` would be counted as a CREDIT — the guard
+    would then watch the pool go UP and pass every overdraft it was written to stop.
+    """
+    return inp.model_copy(update={"kind": cash_movement_kind(inp.kind)})
+
+
+def resolve_acq_home_amount(
+    inp: CashMovementInput, *, funding_ccy: Currency
+) -> tuple[Decimal | None, Issue | None]:
+    """The movement's home-currency acquisition cost, or the :class:`Issue` refusing it (F1).
+
+    ``(None, None)`` — both inputs omitted — is the legitimate "cost unknown" case, not an
+    error: the amount still funds the pool but stays OUT of the weighted average, and the
+    dashboard discloses the shortfall through ``covered_ratio`` / ``fx_basis_gap`` (F2/F3).
+    A rate is never guessed, interpolated, or substituted with the current spot.
+
+    A supplied RATE is converted here and then discarded; only the AMOUNT is returned,
+    because an average must never be the stored authority (``data-and-pricing.md``). The
+    result is quantized to the FUNDING currency's minor unit — that is the currency the
+    cost is actually paid in.
+
+    Pure: no connection, no ledger. The caller supplies *funding_ccy* from the account it
+    has already resolved.
+    """
+    if inp.acq_home_amount is None and inp.acq_rate is None:
+        return None, None
+    if inp.acq_home_amount is not None and inp.acq_rate is not None:
+        return None, Issue(
+            kind="acq_cost_ambiguous", message="取得成本請擇一填寫（家幣金額 或 匯率）"
+        )
+    if inp.ccy == funding_ccy:
+        return None, Issue(
+            kind="acq_cost_home_ccy",
+            message=f"取得成本僅適用外幣資金流（本帳戶資金幣別為 {funding_ccy.value}）",
+        )
+    if cash_movement_kind(inp.kind) == "WITHDRAW":
+        return None, Issue(
+            kind="acq_cost_on_withdraw", message="出金是處分，不帶取得成本"
+        )
+    if inp.acq_home_amount is not None:
+        if inp.acq_home_amount <= _ZERO:
+            return None, Issue(
+                kind="acq_cost_not_positive", message="取得成本必須大於 0"
+            )
+        return quantize_amount(inp.acq_home_amount, funding_ccy), None
+    rate = inp.acq_rate
+    if rate is None or rate <= _ZERO:  # `is None` unreachable; narrows for mypy
+        return None, Issue(kind="acq_rate_not_positive", message="取得匯率必須大於 0")
+    return quantize_amount(inp.amount * rate, funding_ccy), None
+
+
+def _withdraw_issues(
+    inp: CashMovementInput,
+    account: Account,
+    *,
+    pool: CashPoolFn,
+    batch: Sequence[CashMovementInput],
+    exclude_id: int | None,
+) -> list[Issue]:
+    """FU-D43a: a withdrawal may NEVER overdraft its pool — HARD, with no ack override.
+
+    Primary check: the amount must be covered by the pool's CURRENT balance, the same
+    ``cash_balances`` figure the 賬戶現金 line displays; an exact-balance withdrawal
+    (== available) passes.
+
+    Date-aware check (audit C3, hardened for withdrawals): a withdrawal that INTRODUCES or
+    DEEPENS a below-zero dip in the running timeline — e.g. back-dated before its funding —
+    is blocked too. A PRE-EXISTING dip it does not worsen never blocks it (scoped like the
+    ledger-correction replay guard, audit H3).
+
+    *batch* is every row committed together, INCLUDING *inp* (the convention
+    :func:`validate_corporate_action` uses). A cash CSV is normally "the deposit that funded
+    the account, then what was spent out of it", so validating each row against the stored
+    ledger alone would reject every withdrawal in the first import into a fresh ledger. The
+    timeline is date-ordered, so file order is irrelevant, and two withdrawals that only
+    JOINTLY overdraft are both caught — each sees the other in its ``include`` set.
+    """
+    siblings = [_pool_row(b) for b in batch if b is not inp]
+    before = pool(inp.account_id, inp.ccy, include=siblings, exclude_id=exclude_id)
+    if inp.amount > before.balance:
+        return [Issue(
+            kind="withdraw_insufficient_balance",
+            message=(f"出金金額 {decimal_str(inp.amount)} {inp.ccy.value} 超過 "
+                     f"{account.name} 的 {inp.ccy.value} 賬戶現金 "
+                     f"{decimal_str(before.balance)} — 出金不可透支"
+                     "（請先補登入金或換匯）"))]
+    after = pool(inp.account_id, inp.ccy,
+                 include=[*siblings, _pool_row(inp)], exclude_id=exclude_id)
+    if after.low < min(before.low, _ZERO):
+        return [Issue(
+            kind="withdraw_insufficient_balance",
+            message=(f"此筆出金會使 {account.name} 的 {inp.ccy.value} 現金於某時點降至 "
+                     f"{decimal_str(after.low)}（出金日早於資金到位）— 出金不可透支，"
+                     "請先補登入金或換匯"))]
+    return []
+
+
+def validate_cash_movement(
+    conn: sqlite3.Connection,
+    inp: CashMovementInput,
+    *,
+    pool: CashPoolFn,
+    batch: Sequence[CashMovementInput] = (),
+    exclude_id: int | None = None,
+    accounts: Mapping[str, Account] | None = None,
+) -> list[Issue]:
+    """Validate ONE cash movement — the guard every write door shares.
+
+    Extracted from ``api/routers/cash.py`` (2026-08-12) for the reason
+    :func:`validate_corporate_action_change` states in its own words: a rule that exists at
+    one of several write doors is how E13 came to be insert-only. The 6th CSV kind was
+    deferred at W7 precisely because this function did not exist yet.
+
+    **The check order is the router's order, and the early returns are the router's early
+    returns.** ``_movement_guard`` returned on its FIRST failure, and the acquisition-cost
+    resolution ran before the withdraw guard; reproducing that exactly is what makes the
+    extraction provably behaviour-preserving instead of merely plausible. It also keeps the
+    later checks from running on inputs they are not defined for — the withdraw guard has no
+    account name to quote and no pool to read once the account is unknown.
+
+    Consequence, accepted deliberately: at most ONE issue comes back per row, so a CSV row
+    with two problems surfaces them one import at a time. Collecting them all is a nicer bulk
+    experience and a behaviour change to the manual door, which this extraction is not.
+
+    *pool* is the injected pool arithmetic — see the section note above for why it is
+    injected and not imported. **It has no default**: a door that forgot to bind it would
+    ship a weaker guard than the form next to it, and the whole point of moving the rule down
+    here is that the two doors cannot diverge.
+
+    *accounts* is the account registry, hoisted by the caller so an N-row import does not
+    re-read it N times (trap #21); loaded here when omitted.
+
+    Returns hard issues only (``needs_confirm=False``). Bulk-only advisories belong to the
+    importer, which has a preview to show them on — see ``cash_import._bulk_only_issues``.
+    """
+    kind = cash_movement_kind(inp.kind)
+    if kind not in CASH_MOVEMENT_KINDS:
+        return [Issue(
+            kind="unknown_movement_kind",
+            message=f"未知類型 {inp.kind}（deposit / withdraw / opening / rebate）")]
+    if inp.amount <= _ZERO:
+        return [Issue(kind="non_positive_amount", message="金額必須大於 0")]
+    known = (accounts if accounts is not None
+             else {a.account_id: a for a in list_accounts(conn)})
+    account = known.get(inp.account_id)
+    if account is None:
+        return [Issue(kind="unknown_account", message=f"帳戶 {inp.account_id} 不存在")]
+    # audit C2: a pool may only hold the account's settlement or funding currency.
+    if inp.ccy not in {account.settlement_ccy, account.funding_ccy}:
+        return [Issue(
+            kind="ccy_not_allowed",
+            message=(f"{inp.ccy.value} 非此帳戶可用幣別"
+                     f"（交割幣 {account.settlement_ccy.value}／資金幣 "
+                     f"{account.funding_ccy.value}）"))]
+    _resolved, acq_issue = resolve_acq_home_amount(inp, funding_ccy=account.funding_ccy)
+    if acq_issue is not None:
+        return [acq_issue]
+    if kind != "WITHDRAW":
+        # Deposit / opening / rebate are CREDITS — no balance guard on the way in.
+        return []
+    return _withdraw_issues(
+        inp, account, pool=pool, batch=batch, exclude_id=exclude_id)
 
 
 def _duplicate_exists(conn: sqlite3.Connection, inp: TxnInput) -> bool:

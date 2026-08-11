@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from portfolio_dash.api import rebates as svc
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.api.routers.cash import MovementBody, _movement_guard
+from portfolio_dash.api.routers.cash import MovementBody, movement_guard
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.rules_binding import rule_sets_for
 from portfolio_dash.data_ingestion.store import insert_cash_movement, list_accounts
@@ -124,7 +124,7 @@ def confirm(
     guard = MovementBody(
         account_id=body.account_id, date=refund_date, kind="rebate",
         ccy=acct.settlement_ccy, amount=body.amount, note=note)
-    bad = _movement_guard(conn, guard)
+    bad = movement_guard(conn, guard)
     if bad is not None:
         return bad
     move_id = insert_cash_movement(

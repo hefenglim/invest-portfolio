@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
+from portfolio_dash.api.routers.cash import cash_pool_fn
 from portfolio_dash.api.routers.ledgers import _to_models, reconcile_split_prices
 from portfolio_dash.api.wire import (
     account_markets_wire,
@@ -24,6 +25,10 @@ from portfolio_dash.api.wire import (
     parse_side,
 )
 from portfolio_dash.data_ingestion.agents import ai_agents_input
+from portfolio_dash.data_ingestion.cash_import import (
+    build_cash_movement_preview,
+    write_cash_movement_row,
+)
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.corporate_action_import import (
     build_corporate_action_preview,
@@ -711,15 +716,35 @@ def manual_commit(
 
 # --- CSV import: preview (12.3) + commit (12.4) shared infrastructure ---
 
+def _cash_builder(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
+    """Bind the pool arithmetic ONCE for the whole file, then build the cash preview.
+
+    The 6th kind is registered through a named wrapper rather than as a bare parser because
+    ``build_cash_movement_preview`` takes its pool probe as a REQUIRED argument. The withdraw
+    guard's two figures live in ``portfolio/cash.py``, which ``data_ingestion`` may not import
+    (``architecture.md``), so the arithmetic is INJECTED here — the layer that sits above both
+    — exactly as ``scheduler/jobs.py::split_factor_fn`` injects the split factor into
+    ``pricing/`` under D17.
+
+    Requiring the argument is the whole design: a registration that forgot to bind it would
+    ship the bulk door with a weaker guard than the single-row form, and this way that is a
+    mypy error rather than a silent overdraft. Binding it HERE (not per row) is D17's other
+    rule — the probe closes over one ledger snapshot, so an N-row file reads the ledgers once.
+    """
+    return build_cash_movement_preview(conn, csv_text, pool=cash_pool_fn(conn))
+
+
 _BUILDERS = {
     "transactions": build_transaction_preview, "dividends": build_dividend_preview,
     "fx": build_fx_preview, "openings": build_opening_preview,
     "corporate_actions": build_corporate_action_preview,
+    "cash": _cash_builder,
 }
 _WRITERS = {
     "transactions": write_transaction_row, "dividends": write_dividend_row,
     "fx": write_fx_row, "openings": write_opening_row,
     "corporate_actions": write_corporate_action_row,
+    "cash": write_cash_movement_row,
 }
 # Kinds whose commit moves the stored price basis and must therefore run the §5.1(c)
 # reconcile afterwards. A SPLIT restates every close of its symbol; leaving it out would

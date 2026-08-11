@@ -3,7 +3,8 @@
 SINGLE SOURCE OF TRUTH: each kind's header is the column-order constant defined next to that
 kind's parser (:data:`csv_import.TRANSACTION_COLUMNS`, :data:`dividend_import.DIVIDEND_COLUMNS`,
 :data:`fx_import.FX_COLUMNS`, :data:`opening_import.OPENING_COLUMNS`,
-:data:`corporate_action_import.CORPORATE_ACTION_COLUMNS`).  A parser column rename
+:data:`corporate_action_import.CORPORATE_ACTION_COLUMNS`,
+:data:`cash_import.CASH_MOVEMENT_COLUMNS`).  A parser column rename
 that is not mirrored here is caught by the round-trip guard test — the generated template must
 re-parse through the real preview builder (after the import-seam header canonicalization) with
 zero ``parse_error`` rows (tests/contract/test_import_template.py).
@@ -24,6 +25,7 @@ template round-trips whether or not the BOM survives the editor.
 import csv
 import io
 
+from portfolio_dash.data_ingestion.cash_import import CASH_MOVEMENT_COLUMNS
 from portfolio_dash.data_ingestion.corporate_action_import import CORPORATE_ACTION_COLUMNS
 from portfolio_dash.data_ingestion.csv_import import TRANSACTION_COLUMNS
 from portfolio_dash.data_ingestion.dividend_import import DIVIDEND_COLUMNS
@@ -37,19 +39,26 @@ from portfolio_dash.data_ingestion.opening_import import OPENING_COLUMNS
 # CSV_KINDS + CSV_HINTS. Miss the router maps and the kind 400s as "未知 kind"; miss the
 # frontend and it exists but is unreachable; miss DATE_COLUMN_BY_KIND and the import seam
 # raises a KeyError on a date column that is not there.
+#
+# ⚠ An EIGHTH point exists for a kind whose builder needs an injected dependency, and
+# ``cash`` is the first one: its ``_BUILDERS`` entry is a named wrapper that BINDS the
+# pool arithmetic (``input_center._cash_builder``), because ``build_cash_movement_preview``
+# takes its probe as a REQUIRED argument. That is the point — see the module docstring of
+# ``data_ingestion/cash_import.py``. Registering the bare parser does not compile.
 TEMPLATE_KINDS: tuple[str, ...] = (
-    "transactions", "dividends", "fx", "openings", "corporate_actions",
+    "transactions", "dividends", "fx", "openings", "corporate_actions", "cash",
 )
 
 # The date column per kind (drives both the header annotation and the router's date
-# normalization). Mirrors each parser's date field: transactions/dividends/fx use ``date``,
-# opening_inventory uses ``build_date``.
+# normalization). Mirrors each parser's date field: transactions/dividends/fx/cash use
+# ``date``, opening_inventory uses ``build_date``.
 DATE_COLUMN_BY_KIND: dict[str, str] = {
     "transactions": "date",
     "dividends": "date",
     "fx": "date",
     "openings": "build_date",
     "corporate_actions": "date",
+    "cash": "date",
 }
 
 # Optional (may-be-blank) columns per kind — mirrors the required set each parser enforces:
@@ -73,6 +82,13 @@ OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     # cost_carry is SPINOFF-only (E8 rejects it on the other two kinds); note is free text.
     # ratio_to / ratio_from are BOTH required — never one `ratio` column (E6a, §3.1(ii)).
     "corporate_actions": frozenset({"cost_carry", "note"}),
+    # acq_home_amount (spec 2026-07-30, F1) is the HOME-currency cost of a FOREIGN credit.
+    # Optional because "I do not know what rate I got" is an honest answer and a guessed
+    # rate is not — the amount then funds the pool but stays out of the weighted average,
+    # and the dashboard discloses that through covered_ratio / fx_basis_gap. Blank on a
+    # home-currency row is not merely optional but REQUIRED: a cost there is rejected.
+    # There is deliberately NO acq_rate column — store the amount, never the rate.
+    "cash": frozenset({"acq_home_amount", "note"}),
 }
 
 # Example rows align POSITIONALLY with each kind's column constant. Fixed recent ISO dates;
@@ -137,12 +153,30 @@ _CORPORATE_ACTION_ROWS: list[list[str]] = [
      "分拆：每 2 股配 1 股 SPINCO，母公司 30% 成本移轉給子公司"],
 ]
 
+_CASH_ROWS: list[list[str]] = [
+    # The set is SELF-FUNDING and dated after the seeded flows on purpose: a withdrawal is
+    # validated against the stored ledger PLUS its siblings in the same file, so the example
+    # must carry the deposit that covers it — which is also what the example is teaching.
+    ["tw_broker", "2026-07-01", "DEPOSIT", "TWD", "600000", "", "初始入金"],
+    # A FOREIGN credit with its home-currency acquisition cost (spec F1). schwab funds in
+    # TWD and settles in USD, so the USD amount's cost is a TWD amount — never a rate.
+    ["schwab", "2026-07-02", "OPENING", "USD", "100000", "3135870", "期初外幣資金"],
+    # The same movement WITHOUT a cost: legal, and the honest entry when the rate is not
+    # known. It funds the pool but stays out of the FX weighted average (covered_ratio < 1).
+    ["moomoo_my", "2026-07-03", "DEPOSIT", "MYR", "5000", "", "取得成本不明時留空,不要猜"],
+    # A withdrawal covered by the first row. 出金 / 入金 / 期初 / 折讓款 are accepted as
+    # kind labels too; REBATE is normally booked by the 折讓款 inbox confirm (FE-D1), not
+    # by hand, so it carries no example row here.
+    ["tw_broker", "2026-07-20", "WITHDRAW", "TWD", "50000", "", "提領"],
+]
+
 _HEADERS: dict[str, list[str]] = {
     "transactions": TRANSACTION_COLUMNS,
     "dividends": DIVIDEND_COLUMNS,
     "fx": FX_COLUMNS,
     "openings": OPENING_COLUMNS,
     "corporate_actions": CORPORATE_ACTION_COLUMNS,
+    "cash": CASH_MOVEMENT_COLUMNS,
 }
 _ROWS: dict[str, list[list[str]]] = {
     "transactions": _TRANSACTION_ROWS,
@@ -150,6 +184,7 @@ _ROWS: dict[str, list[list[str]]] = {
     "fx": _FX_ROWS,
     "openings": _OPENING_ROWS,
     "corporate_actions": _CORPORATE_ACTION_ROWS,
+    "cash": _CASH_ROWS,
 }
 
 

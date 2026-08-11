@@ -831,8 +831,11 @@
      CSV_HINTS below is another. The backend five are the parser module + its *_COLUMNS
      constant, TEMPLATE_KINDS / DATE_COLUMN_BY_KIND / OPTIONAL_COLUMNS / _HEADERS / _ROWS
      in data_ingestion/import_templates.py, and _BUILDERS / _WRITERS in
-     api/routers/input_center.py. Miss this line and the kind exists but is unreachable. */
-  const CSV_KINDS = [['交易', 'transactions'], ['股利', 'dividends'], ['換匯', 'fx'], ['期初', 'openings'], ['公司行動', 'corporate_actions']];
+     api/routers/input_center.py. Miss this line and the kind exists but is unreachable.
+     An EIGHTH point exists for a kind whose parser takes an injected dependency: its
+     _BUILDERS entry must be the named wrapper that BINDS it (`cash` -> _cash_builder), not
+     the bare parser. See data_ingestion/cash_import.py's module docstring. */
+  const CSV_KINDS = [['交易', 'transactions'], ['股利', 'dividends'], ['換匯', 'fx'], ['期初', 'openings'], ['公司行動', 'corporate_actions'], ['資金', 'cash']];
   let csvKind = 'transactions';
   /* FU-D19: the pinned date format (a dateparse format id) once the user resolves an
      ambiguous date column; null = let the backend infer. Reset whenever the CSV text or
@@ -854,6 +857,10 @@
     /* 比例一定是「兩個整數欄位」，不是一個算好的小數（§3.1(ii)）：0.2857 這種寫法會讓
        700 股的 2 換 7 算成 199.99 股，之後賣 200 股會被判成賣超、成本基礎被永久捨棄。 */
     corporate_actions: '欄位：account・date(YYYY-MM-DD)・kind(SPLIT/EXCHANGE/SPINOFF，也可填 分割/換股/分拆)・from_symbol・to_symbol・ratio_to・ratio_from（兩個整數，不可填小數）・cost_carry（選填・僅分拆）・note（選填）',
+    /* 取得成本只收「家幣金額」，不收匯率（spec F1）：匯率是平均值，平均值不可以是帳本的
+       權威來源。外幣入金若不填取得成本，該筆金額仍會計入餘額、但不會進入換匯成本均價，
+       畫面上會以 covered_ratio／匯損缺口揭露 — 寧可留白，也不要猜一個匯率。 */
+    cash: '欄位：account・date(YYYY-MM-DD)・kind(DEPOSIT/WITHDRAW/OPENING/REBATE，也可填 入金/出金/期初/折讓款)・ccy・amount・acq_home_amount（選填・僅外幣入金，填家幣金額不是匯率）・note（選填）',
   };
 
   function initCsv() {
@@ -1017,10 +1024,22 @@
       tr.appendChild(el('td', 'num', '#' + ((r.n || 0) + 1)));
       tr.appendChild(el('td', 'num', f.date(d.trade_date || d.date)));
       tr.appendChild(el('td', 'col-text', d.account_id || d.account || ''));
+      /* The 買/賣 chip is TRANSACTION-shaped, and only a transaction row carries a `side`.
+         Every other kind's payload has none, and `side || ''` is not 'buy', so the chip fell
+         through to its else branch and stamped a red 「賣」 on rows that are not sells at all
+         — an fx conversion, an 期初 row, a corporate action, and now a cash DEPOSIT. A
+         deposit displayed as 賣 is the kind of wrong that looks deliberate. Show the chip
+         only when there IS a side; otherwise show the row's own `kind` (cash movement /
+         corporate action) as plain text, and nothing when the kind has neither. The AI
+         preview's copy below is left alone: that path only ever emits transaction rows. */
       const side = (d.side || '').toString().toLowerCase();
       const tdSide = el('td', 'col-text');
-      tdSide.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
-        side === 'buy' ? '買' : '賣'));
+      if (side) {
+        tdSide.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
+          side === 'buy' ? '買' : '賣'));
+      } else if (d.kind) {
+        tdSide.textContent = d.kind;
+      }
       tr.appendChild(tdSide);
       const symbol = d.symbol || '';
       tr.appendChild(el('td', 'col-text num', symbol));
@@ -1604,6 +1623,14 @@
      re-warms the two panes' selected accounts. */
   /* #10: map an import `kind` to its lower 帳本記錄 tab id + tbody. The import kind `openings`
      (plural) normalizes to the singular `lopen` tab / #open-body table. */
+  /* ⚠ `cash` is ABSENT on purpose, and the absence has to be written down because an
+     unmapped kind degrades SILENTLY (highlightCommitted returns early) — which is
+     indistinguishable from a forgotten registration. This page's lower ledger has five
+     tabs and none of them is 資金收支: cash movements are shown on the 資金 page, not
+     here. There is no tab to switch to, so a mapping would point at a null element.
+     Consequence, and it is a real gap: a cash CSV commits and toasts, but nothing on this
+     page shows the rows that landed. Closing it means adding a 6th ledger tab (trades.html
+     + ledger.js), which is a bigger change than the import kind. */
   const LEDGER_KIND = {
     transactions: { tab: 'tx', body: 'tx-body' },
     dividends: { tab: 'ldiv', body: 'div-body' },

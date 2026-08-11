@@ -1224,7 +1224,13 @@ def insert_cash_movement(
     amount: Decimal,
     note: str | None = None,
     acq_home_amount: Decimal | None = None,
+    commit: bool = True,
 ) -> int:
+    """Insert a cash_movements row and return its new primary-key id.
+
+    Pass ``commit=False`` to defer the commit to the caller (batch-import atomicity, #1).
+    Single-row and manual callers keep the default ``commit=True`` and are unchanged.
+    """
     cur = conn.execute(
         "INSERT INTO cash_movements "
         "(account_id, date, kind, ccy, amount, note, acq_home_amount) "
@@ -1232,7 +1238,8 @@ def insert_cash_movement(
         (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note,
          None if acq_home_amount is None else to_db(acq_home_amount)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return int(cur.lastrowid or 0)
 
 

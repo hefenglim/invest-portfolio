@@ -5,6 +5,15 @@ which fails quietly on its own — miss the router maps and the kind 400s as 「
 miss ``web/input.js`` and it exists but is unreachable, miss ``DATE_COLUMN_BY_KIND`` and
 the import seam raises a ``KeyError`` on a date column that is not there.
 
+An **eighth** point appeared with the 6th kind (2026-08-12): a builder whose parser takes an
+injected dependency must be registered through a WRAPPER that binds it. ``cash``'s withdraw
+guard needs pool arithmetic that lives in ``portfolio/`` and that ``data_ingestion`` may not
+import, so ``build_cash_movement_preview`` requires its probe and
+``input_center._cash_builder`` supplies it. Registering the bare parser there does not even
+type-check — which is the design, not a happy accident — and
+:func:`test_every_registered_builder_is_callable_with_the_seam_signature` is the runtime half
+of that guarantee.
+
 There is deliberately no registry object here (the ``shared/ledger_registry.py`` treatment):
 the seven points want genuinely different information — a parser, a builder, a writer, a
 date column, an optional-column set, example rows, and a zh chip label — and collapsing
@@ -20,6 +29,7 @@ nothing — is what let the previous four kinds' registration points go uncounte
 from __future__ import annotations
 
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -53,6 +63,25 @@ def test_backend_registration_points(kind: str) -> None:
     body = render_import_template(kind).split("\r\n")
     assert body[0] == ",".join(annotated_columns(kind))
     assert len([line for line in body[1:] if line]) >= 1, f"{kind}: no example rows"
+
+
+@pytest.mark.parametrize("kind", TEMPLATE_KINDS)
+def test_every_registered_builder_is_callable_with_the_seam_signature(
+    golden_db: sqlite3.Connection, kind: str
+) -> None:
+    """The 8th point: ``_BUILDERS[kind](conn, csv_text)`` must actually run.
+
+    ``import_preview`` / ``import_commit`` call the map entry with exactly two positional
+    arguments. A parser that requires an injected dependency — ``cash``'s pool arithmetic —
+    therefore has to be registered as a wrapper that binds it, and registering the bare
+    parser raises ``TypeError`` HERE rather than 500-ing on the first upload.
+
+    Header-only input, so this asserts callability, not parsing (the round-trip guard in
+    ``test_import_template.py`` covers the parse, through this same production map).
+    """
+    header = ",".join(template_columns(kind)) + "\n"
+    preview = _BUILDERS[kind](golden_db, header)
+    assert preview.rows == []
 
 
 @pytest.mark.parametrize("kind", TEMPLATE_KINDS)
