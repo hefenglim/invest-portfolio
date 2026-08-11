@@ -22,7 +22,10 @@ Socket exception (the spec-17-sanctioned loopback exception):
   outside pytest_socket entirely; only the parent's probe/poll needs this exception.)
 """
 
+import hashlib
+import json
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -30,12 +33,14 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import BrowserContext, Page, Route, sync_playwright
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.api.auth_store import create_user
@@ -70,6 +75,213 @@ _WORKTREE_ROOT = Path(__file__).resolve().parents[2]
 # (spec-17 §17.7.4).
 _READINESS_TIMEOUT_S = 60.0
 _READINESS_POLL_S = 0.25
+
+# --- diagnostic network log (issue #67) -------------------------------------------
+#
+# OFF unless ``PD_E2E_NETLOG=<dir>`` is set, so a normal gate run is byte-identical to
+# before. When set, every server spawn/terminate (port + pid), every HTTP response with
+# status >= 400 and every failed request is appended to ``<dir>/netlog.jsonl`` tagged
+# with the owning test's nodeid, and each uvicorn's own stdout/stderr (which carries its
+# ACCESS LOG) is copied out of the doomed temp dir. That pair answers the only question
+# that matters about an intermittent 404 storm: did the SERVER see the request and answer
+# 404 (a server/FS problem), or did the browser get a 404 the server never logged (a
+# wrong-listener / third-party problem)?
+_NETLOG_DIR = os.environ.get("PD_E2E_NETLOG")
+_netlog_nodeid = "<session>"
+
+
+def _netlog(event: str, **fields: object) -> None:
+    """Append one JSON line to the diagnostic log. No-op unless PD_E2E_NETLOG is set."""
+    if not _NETLOG_DIR:
+        return
+    try:
+        target = Path(_NETLOG_DIR)
+        target.mkdir(parents=True, exist_ok=True)
+        row = {"t": round(time.time(), 3), "test": _netlog_nodeid, "event": event, **fields}
+        with (target / "netlog.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    except OSError:  # pragma: no cover (diagnostic only — never fail a test on it)
+        pass
+
+
+def _netlog_keep_server_log(stderr_path: Path, port: int, pid: int) -> None:
+    """Copy a uvicorn subprocess log (with its access lines) out before teardown nukes it."""
+    if not _NETLOG_DIR:
+        return
+    try:
+        target = Path(_NETLOG_DIR)
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(stderr_path, target / f"uvicorn-{port}-{pid}.log")
+    except OSError:  # pragma: no cover (diagnostic only)
+        pass
+
+
+def _netlog_watch(page: Page, label: str) -> None:
+    """Attach response/requestfailed listeners that record 4xx/5xx + network failures."""
+    if not _NETLOG_DIR:
+        return
+
+    def _on_response(resp: object) -> None:
+        status = getattr(resp, "status", 0)
+        if status >= 400:
+            _netlog("http_error", page=label, status=status, url=getattr(resp, "url", "?"))
+
+    def _on_requestfailed(req: object) -> None:
+        _netlog("request_failed", page=label, url=getattr(req, "url", "?"),
+                failure=getattr(req, "failure", None))
+
+    page.on("response", _on_response)
+    page.on("requestfailed", _on_requestfailed)
+
+
+# --- third-party isolation (issue #67) --------------------------------------------
+#
+# THE BUG THIS EXISTS TO KILL. Every shipped page pulls its webfont from
+# ``fonts.googleapis.com`` (which fans out to 17-24 ``fonts.gstatic.com`` subset files
+# per page) and ECharts from ``cdn.jsdelivr.net``. Google serves that stylesheet
+# ``Cache-Control: private, max-age=86400, stale-while-revalidate=604800`` and ROTATES the
+# subset filenames underneath it, so a stylesheet that is merely a few hours stale hands
+# out URLs whose files Google has already retired — and then EVERY font subset on the page
+# 404s at once. Our e2e tests assert ZERO browser console errors, so that remote rotation
+# reddened ~2 random tests per full run (~1.5%/test), a different pair every time, with the
+# unmistakable console text ``a status of 404 ()`` — the parentheses are EMPTY because
+# HTTP/2 has no reason phrase, which is how the failure was finally distinguished from our
+# own uvicorn (HTTP/1.1, always ``404 (Not Found)``). Measured 2026-08-11: the exact
+# subset URL a failing run requested still 404s while the CURRENT stylesheet lists a
+# different hash entirely.
+#
+# THE RULE. A browser under test talks to the app under test and to nothing else. A test
+# suite whose verdict depends on a third party's cache-rotation schedule is not a test
+# suite. Fonts are presentational: an EMPTY stylesheet means the page never fans out to
+# gstatic at all, and the pages render in their declared fallback stack. ECharts is
+# functional, so it is fetched ONCE and memoised on disk (``.pytest_cache/``, git-ignored);
+# every later run replays the bytes and touches no network.
+#
+# This is deliberately NOT a retry / timeout widening: nothing here waits for or re-attempts
+# a remote host. The dependency is removed, not made more patient.
+
+_LOCAL_URL_PREFIXES = (
+    "http://127.0.0.1:", "http://localhost:",
+    "https://127.0.0.1:", "https://localhost:",
+)
+_NON_NETWORK_SCHEMES = ("about:", "data:", "blob:", "file:", "chrome:", "devtools:")
+_FONT_HOSTS = frozenset({"fonts.googleapis.com", "fonts.gstatic.com"})
+_CDN_CACHE_DIR = _WORKTREE_ROOT / ".pytest_cache" / "e2e-thirdparty"
+_CDN_FETCH_TIMEOUT_MS = 30_000
+_cdn_memo: dict[str, tuple[str, bytes]] = {}
+# URLs whose one real fetch failed. Remembered so an unreachable CDN costs ONE timeout for
+# the session instead of one per request (a page requests ECharts ~50 times across a run —
+# without this, an offline machine would add ~25 minutes of dead waiting to the suite).
+_cdn_unreachable: set[str] = set()
+
+
+def _is_app_url(url: str) -> bool:
+    """True for the app under test (loopback) and for non-network schemes."""
+    return url.startswith(_LOCAL_URL_PREFIXES) or url.startswith(_NON_NETWORK_SCHEMES)
+
+
+def _cdn_paths(url: str) -> tuple[Path, Path]:
+    key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+    return _CDN_CACHE_DIR / f"{key}.body", _CDN_CACHE_DIR / f"{key}.type"
+
+
+def _cdn_get(url: str) -> tuple[str, bytes] | None:
+    """Memoised third-party body: process memory first, then the on-disk cache."""
+    hit = _cdn_memo.get(url)
+    if hit is not None:
+        return hit
+    body_path, type_path = _cdn_paths(url)
+    try:
+        body = body_path.read_bytes()
+        ctype = type_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    _cdn_memo[url] = (ctype, body)
+    return ctype, body
+
+
+def _cdn_put(url: str, ctype: str, body: bytes) -> None:
+    """Memoise, then publish to disk ATOMICALLY (write-then-replace).
+
+    Two pytest processes can share this cache dir, and a half-written body read as a
+    complete one would be a corrupt ECharts — a far more confusing failure than a miss.
+    """
+    _cdn_memo[url] = (ctype, body)
+    body_path, type_path = _cdn_paths(url)
+    try:
+        _CDN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_body = body_path.with_suffix(f".body.{os.getpid()}.tmp")
+        tmp_type = type_path.with_suffix(f".type.{os.getpid()}.tmp")
+        tmp_body.write_bytes(body)
+        tmp_type.write_text(ctype, encoding="utf-8")
+        os.replace(tmp_body, body_path)
+        os.replace(tmp_type, type_path)
+    except OSError:  # pragma: no cover (cache is an optimisation, never a gate)
+        pass
+
+
+def _third_party_route(route: Route) -> None:
+    """Serve every non-loopback request without touching the network (see the brief above)."""
+    url = route.request.url
+    host = urllib.parse.urlparse(url).netloc
+    if host in _FONT_HOSTS:
+        # Presentational only. An empty stylesheet => zero gstatic subset requests.
+        route.fulfill(status=200, content_type="text/css", body="")
+        return
+    cached = _cdn_get(url)
+    if cached is not None:
+        route.fulfill(status=200, content_type=cached[0], body=cached[1])
+        return
+    if url in _cdn_unreachable:  # already established as unreachable — do not wait again
+        route.fulfill(status=200, content_type="application/javascript", body="")
+        return
+    detail: str
+    try:
+        response = route.fetch(timeout=_CDN_FETCH_TIMEOUT_MS)
+        if response.ok:
+            body = response.body()
+            ctype = response.headers.get("content-type", "application/javascript")
+            _cdn_put(url, ctype, body)
+            _netlog("thirdparty_fetched", url=url, bytes=len(body))
+            route.fulfill(status=200, content_type=ctype, body=body)
+            return
+        detail = f"HTTP {response.status}"
+    except Exception as exc:  # noqa: BLE001 (any driver/network error is the same verdict)
+        detail = repr(exc)[:200]
+    # Never emit a browser-visible error for a third party: that is the whole defect. Serve
+    # an empty 200 and say so loudly in the run's own output instead.
+    _cdn_unreachable.add(url)
+    _netlog("thirdparty_unavailable", url=url, detail=detail)
+    warnings.warn(
+        f"e2e: third-party asset unavailable and not cached ({detail}): {url} — served "
+        f"an empty 200. Anything that needs it (e.g. ECharts) will fail on its own terms.",
+        stacklevel=1,
+    )
+    route.fulfill(status=200, content_type="application/javascript", body="")
+
+
+def install_third_party_stub(context: BrowserContext) -> None:
+    """Route every non-loopback request in `context` through the offline stub.
+
+    CALL THIS ON EVERY BrowserContext an e2e test creates. `tests/e2e/
+    test_thirdparty_isolation.py` fails the build when a browser-context creation in
+    tests/e2e is not paired with this call, because a context that skips it silently
+    re-adds a remote CDN to the suite's pass/fail criteria.
+    """
+    context.route(lambda url: not _is_app_url(url), _third_party_route)
+
+
+@pytest.fixture(autouse=True)
+def _netlog_current_test(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Tag every diagnostic line with the nodeid of the test that produced it."""
+    global _netlog_nodeid
+    _netlog_nodeid = request.node.nodeid
+    _netlog("test_start")
+    try:
+        yield
+    finally:
+        _netlog("test_end")
+        _netlog_nodeid = "<session>"
 
 
 def _assert_loopback_window() -> None:
@@ -207,11 +419,15 @@ def live_server(_e2e_loopback_socket: None) -> Iterator[str]:
         stdout=stderr_file,
         stderr=stderr_file,
     )
+    _netlog("spawn", kind="live_server", port=port, pid=proc.pid)
     try:
         _wait_ready(base_url, proc, stderr_path)
+        _netlog("ready", kind="live_server", port=port, pid=proc.pid)
         yield base_url
     finally:
         stderr_file.close()
+        _netlog_keep_server_log(stderr_path, port, proc.pid)
+        _netlog("terminate", kind="live_server", port=port, pid=proc.pid)
         if proc.poll() is None:
             proc.terminate()
             try:
@@ -236,6 +452,8 @@ def browser_page(_e2e_loopback_socket: None) -> Iterator[Page]:
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page()
+        install_third_party_stub(page.context)  # issue #67 — no third-party network
+        _netlog_watch(page, "browser_page")
         try:
             yield page
         finally:
@@ -335,6 +553,7 @@ def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
     procs: list[subprocess.Popen[bytes]] = []
     handles: list[object] = []
     tmp_dirs: list[Path] = []
+    logs: list[tuple[Path, int, int]] = []  # (stderr_path, port, pid) — diagnostic only
 
     def _make(
         seed: SeedFn,
@@ -378,15 +597,20 @@ def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
                 ],
                 cwd=str(_WORKTREE_ROOT), env=env, stdout=stderr_file, stderr=stderr_file,
             )
+            _netlog("spawn", kind="flow_server", port=port, pid=proc.pid, attempt=_attempt)
             try:
                 _wait_ready(base_url, proc, stderr_path)
             except (RuntimeError, TimeoutError) as exc:
                 last_exc = exc
+                _netlog("spawn_failed", kind="flow_server", port=port, pid=proc.pid,
+                        attempt=_attempt, error=repr(exc)[:400])
                 _terminate(proc)
                 stderr_file.close()
                 continue
+            _netlog("ready", kind="flow_server", port=port, pid=proc.pid)
             procs.append(proc)
             handles.append(stderr_file)
+            logs.append((stderr_path, port, proc.pid))
             return base_url
         assert last_exc is not None
         raise last_exc
@@ -395,7 +619,10 @@ def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
         yield _make
     finally:
         for proc in procs:
+            _netlog("terminate", kind="flow_server", pid=proc.pid)
             _terminate(proc)
+        for stderr_path_kept, port_kept, pid_kept in logs:
+            _netlog_keep_server_log(stderr_path_kept, port_kept, pid_kept)
         for h in handles:
             try:
                 h.close()  # type: ignore[attr-defined]
@@ -421,12 +648,14 @@ def fresh_page(browser_page: Page) -> Iterator[Page]:
     browser = browser_page.context.browser
     assert browser is not None
     context = browser.new_context()
+    install_third_party_stub(context)  # issue #67 — no third-party network
     page = context.new_page()
     # 60s (not Playwright's default 30s): the flow pages wait on a freshly-spawned isolated
     # uvicorn under full-suite load — give expect-polling a realistic ceiling so contention
     # never reddens a logically-correct flow (spec-17 §17.7.4 — ceiling, not sleep/retry).
     page.set_default_timeout(60_000)
     page.set_default_navigation_timeout(60_000)
+    _netlog_watch(page, "fresh_page")
     try:
         yield page
     finally:
