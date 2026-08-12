@@ -24,15 +24,18 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   **§4.4 公司行動** (zh authority + en mirror) with a worked example and an oracle anchor per
   formula.
 
-  ⚠ **Not shippable yet**, and the remaining items are deliberate rather than forgotten: §7.6's
-  full enter-through-the-UI e2e, this entry's version heading, `shared/whatsnew.py`, the e2e
-  harness flake that stops the suite being called green, and §10.5's owner-run acceptance pass —
-  the script and a simulated corpus now exist (**D43**), but the *real* run needs per-symbol
-  opening cost totals only the owner has (**D37**). **D40 and D41 were ratified by the owner on
-  2026-08-11**; **D42** (W6c in scope) and **D43** are the owner's own rulings; **D44 is the one
-  OPEN decision** — see below. A single prose summary here would drift from the spec within a
-  week, which is the failure this release spent an audit correcting, so the detail stays in §8's
-  decision table and the commits.
+  **The feature's code is complete.** §7.6's full enter-through-the-UI e2e landed with the four
+  entry-surface defects it surfaced; the e2e harness flake that stopped the suite being called
+  green was root-caused and fixed; and **D46 (2026-08-12) unblocked §10.5** — the acceptance gate
+  runs against the **simulated** corpus (D43) rather than waiting on the owner's real statements,
+  and it PASSes there while FAILing on a corpus one action row short. What that proves is stated
+  precisely rather than rounded up: the feature **accepts the shape** of the owner's ledger. It
+  does not prove the owner's *actual* cost basis reconciles — only real figures can, and that run
+  is now a post-release verification rather than a gate. Decisions: **D40 and D41 ratified**
+  2026-08-11; **D42** (W6c in scope), **D43** (simulated corpus), **D45** (D36 retired) and
+  **D46** are the owner's own rulings; **D44 is the one OPEN decision** — see below. A single
+  prose summary here would drift from the spec within a week, which is the failure this release
+  spent an audit correcting, so the detail stays in §8's decision table and the commits.
 
 - **6th CSV import kind — cash movements (`kind=cash`).** 入金 / 出金 / 期初資金 / 折讓款, with the
   foreign-credit acquisition cost `acq_home_amount` — the **amount**, never a rate (spec F1: a rate
