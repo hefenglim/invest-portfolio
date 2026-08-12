@@ -344,9 +344,19 @@
   }
 
   function renderTwr(payload) {
-    buildPalette();
     const host = document.getElementById('twr-chart');
     const cap = document.getElementById('twr-caption');
+    /* Reachable with ECharts absent: initAll's degraded branch wires the mode buttons, so a
+       click still runs applyMode -> loadTwr -> here. Name the real problem — letting
+       echarts.init throw into loadTwr's catch would render 「績效比較載入失敗」, which blames
+       the fetch that actually succeeded. */
+    if (!window.echarts) {
+      host.replaceChildren(window.emptyState('圖表元件未載入'));
+      host.style.height = 'auto';
+      if (cap) cap.textContent = '';
+      return;
+    }
+    buildPalette();
     if (twrChart) { twrChart.dispose(); twrChart = null; }
     if (!payload || !payload.available || !payload.points || payload.points.length === 0) {
       host.replaceChildren(window.emptyState((payload && payload.reason) || '尚無績效比較資料'));
@@ -421,7 +431,31 @@
     applyMode(currentMode, false);  // re-apply visibility (and re-render TWR from cache)
   }
 
+  /* The three chart hosts on this page, as one list so the degraded path below cannot drift
+     from what initTrend / initSector / renderTwr actually build into. */
+  const CHART_HOSTS = ['trend-chart', 'twr-chart', 'sector-chart'];
+
   function initAll() {
+    /* ECharts absent — the vendored web/echarts.min.js failed to load (blocked, or a deploy
+       that shipped the HTML without the asset). Degrade LEGIBLY: name the problem in each
+       chart host and STILL wire the controls.
+
+       Before 2026-08-12 this function threw at the first echarts.init(), which aborted it
+       before wireModeOnce() ever ran — so #trend-mode, #twr-windows and #value-ranges
+       rendered normally and carried NO click listeners at all, and every later theme toggle
+       raised an uncaught error. Controls that look alive and silently do nothing are a worse
+       failure than a blank chart, which at least explains itself. The buttons staying alive
+       is the assertion in tests/e2e/test_echarts_selfhosted.py. */
+    if (!window.echarts) {
+      CHART_HOSTS.forEach((id) => {
+        const host = document.getElementById(id);
+        if (!host) return;
+        host.replaceChildren(window.emptyState('圖表元件未載入'));
+        host.style.height = 'auto';   // the hosts carry a fixed 360px; shrink to the notice
+      });
+      wireModeOnce();
+      return;
+    }
     buildPalette();
     initTrend();
     initSector();
@@ -449,7 +483,11 @@
     if (twrChart) twrChart.resize();
   });
   window.addEventListener('pd-theme-change', () => {
-    if (!D) return;  // nothing built yet
+    /* `!D` = the payload has not resolved, so nothing is built. `!window.echarts` = nothing
+       CAN be built: D is assigned but every chart is an empty state, and dispose()/init()
+       below would throw on each toggle (the pre-2026-08-12 behaviour — the `!D` guard alone
+       let this through because D was already set by the time initAll failed). */
+    if (!D || !window.echarts) return;
     charts.forEach((c) => c.dispose());
     charts.length = 0;
     if (twrChart) { twrChart.dispose(); twrChart = null; }

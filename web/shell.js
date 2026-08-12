@@ -140,6 +140,20 @@
   }
   function pdLoadScript(src) {
     return new Promise((resolve, reject) => {
+      /* LOCAL assets only (owner ruling 2026-08-12). Every front-end dependency is vendored
+         into web/ so a CDN outage cannot take a feature down; this refuses a remote copy at
+         RUNTIME rather than relying on tests/contract/test_vendored_assets.py having caught
+         it in source. The static guard is the cheap tripwire; this is the actual rule.
+
+         Rejects a scheme (`https:`, and also `data:`/`javascript:` — not remote, but nothing
+         here should ever load one) and an authority in either slash direction. The backslash
+         half is not paranoia: the URL spec treats `\` as `/` for special schemes, so a bare
+         `\\host/x.js` assigned to .src resolves OFF-ORIGIN, and an `indexOf('://')` test
+         reads it as a harmless relative path. */
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(src) || /^[/\\]{2}/.test(src)) {
+        reject(new Error('refused remote script: ' + src));
+        return;
+      }
       if (pdScriptLoaded(src)) return resolve();
       const s = document.createElement('script');
       s.src = src;
@@ -179,11 +193,20 @@
     if (window.openSymbolDrawer) return Promise.resolve();
     if (pdDrawerPromise) return pdDrawerPromise;
     pdLoadCss('detail.css');
-    const echartsCdn = 'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js';
     /* detail.js fetches its own data via window.pdApi, so ensure the fetch layer + format
-       + echarts are present; it no longer needs mock-data.js / history-mock.js. */
+       + echarts are present; it no longer needs mock-data.js / history-mock.js.
+
+       ECharts is the FOURTH load site and the only one no HTML grep finds: index/insights/
+       settings carry a <head> tag, and this line lazily loads the same library on every OTHER
+       page the first time a symbol drawer opens. It was a jsdelivr URL until 2026-08-12; it is
+       now the vendored web/echarts.min.js, version-stamped through the same ?v= idiom as
+       whatsnew.js above (the ?v= stamper only rewrites HTML, so a JS-injected asset has to
+       stamp itself). The other 15 pages deliberately get NO <head> tag: eager-loading ~1 MB
+       for a drawer most sessions never open would be a permanent regression traded for a
+       rare outage. */
+    const q = _appVersion ? ('?v=' + _appVersion) : '';
     pdDrawerPromise = pdEnsureApi()
-      .then(() => (window.echarts ? null : pdLoadScript(echartsCdn)))
+      .then(() => (window.echarts ? null : pdLoadScript('echarts.min.js' + q)))
       .then(() => (window.fmt ? null : pdLoadScript('format.js')))
       .then(() => pdLoadScript('detail.js'));
     return pdDrawerPromise;

@@ -23,6 +23,39 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **An inventory of a dependency must cover RUNTIME-INJECTED loads, not just markup
+  (2026-08-12):** vendoring ECharts looked like a three-line change — `index.html`,
+  `insights.html`, `settings.html` each carry a `<script src="https://cdn.jsdelivr.net/...">`
+  tag, and `grep` over `web/*.html` returns exactly those three. There was a **fourth** copy:
+  `web/shell.js::pdEnsureDrawer` held `const echartsCdn = '<url>'` and injected a `<script>` at
+  runtime, on **every** page, the first time a symbol drawer opened. No HTML grep finds a URL
+  that lives in a JS string, and the module map's "web/ … + ECharts CDN" line reads as though
+  there were one dependency edge when there were four.
+  It had **zero** test coverage, and the reason is worth remembering because it looks like
+  coverage: seven e2e tests open the symbol drawer, but every one of them reaches it from
+  `/index.html` (including `test_corporate_actions_flow.py::_open_drawer`, which navigates
+  there first), where the `<head>` tag has already set `window.echarts` — so the
+  `window.echarts ? null : pdLoadScript(...)` branch never took the load path in any test that
+  has ever run. **A lazy path is only exercised from a page that does not eagerly satisfy it.**
+  Rules: (1) inventory a front-end dependency by searching `web/*.js` for the loader functions
+  (`pdLoadScript`, `pdLoadCss`, `.src =`) as well as the markup — the guard for this is now
+  `tests/contract/test_vendored_assets.py::test_js_never_injects_a_remote_script`, which
+  requires every loader argument to be a **string literal** so it is knowable from source at
+  all; (2) when a feature has an eager path and a lazy path, the lazy one needs a test that
+  starts somewhere the eager one is absent; (3) a runtime rejection (`pdLoadScript` now refuses
+  any `src` containing `://`) beats a source scan, because it holds for code the scan never
+  read.
+  Two smaller things fell out of the same change, both measured rather than reasoned:
+  **`core.autocrlf=true` silently breaks a byte-pinned artifact** — the committed
+  `web/echarts.min.js` checks out as 1,029,248 bytes with 45 LF→CRLF conversions instead of the
+  pinned 1,029,203, on a file nobody edited, and it still *runs*, so only the digest notices
+  (fix: `.gitattributes` `*.min.js -text`, plus a test that fails if the rule disappears). And
+  **an unavailable chart library is not a blank chart** — `charts.js::initAll` threw at the
+  first `echarts.init()` *before* `wireModeOnce()`, so three button groups rendered normally
+  and carried no click listeners at all. Dead controls that look alive are a worse failure than
+  an empty panel, which at least explains itself; the degraded path must wire the controls
+  **before** it gives up on the drawing.
+
 - **An audit finding's SYMPTOM and its ROOT CAUSE do not deserve the same confidence
   (2026-07-26):** the full-site audit measured every symptom on a running instance
   (a 1,257px page scroll width, a −1399.07% rendered percentage, a 593px overflow, a

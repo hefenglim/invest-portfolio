@@ -1,17 +1,24 @@
 """The e2e browser talks to the app under test and to NOTHING else (issue #67).
 
-Why this file exists. Every shipped page loads its webfont from `fonts.googleapis.com`
-(which fans out to 17-24 `fonts.gstatic.com` subset files) and ECharts from
-`cdn.jsdelivr.net`. Google serves that stylesheet `stale-while-revalidate=604800` and
-rotates the subset filenames underneath it, so a slightly stale stylesheet asks for files
-Google has already retired and EVERY font subset on the page 404s at once. Because the
-suite asserts ZERO browser console errors, that remote rotation reddened ~2 random tests
-per full run — a different pair every time, never reproducible on a targeted re-run.
+Why this file exists. Every shipped page loads its webfont from `fonts.googleapis.com`, which
+fans out to 17-24 `fonts.gstatic.com` subset files. Google serves that stylesheet
+`stale-while-revalidate=604800` and rotates the subset filenames underneath it, so a slightly
+stale stylesheet asks for files Google has already retired and EVERY font subset on the page
+404s at once. Because the suite asserts ZERO browser console errors, that remote rotation
+reddened ~2 random tests per full run — a different pair every time, never reproducible on a
+targeted re-run.
 
 `tests/e2e/conftest.py::install_third_party_stub` removes the dependency. These two tests
-keep it removed: one proves the behaviour (no non-loopback request leaves the browser with
-anything but a 200 stub, and the gstatic fan-out is gone), the other proves the coverage
-(every browser context built in tests/e2e is routed).
+keep it removed: one proves the behaviour, the other proves the coverage (every browser
+context built in tests/e2e is routed).
+
+Tightened 2026-08-12, when ECharts was vendored into `web/echarts.min.js` (owner ruling). The
+page used to load a FUNCTIONAL dependency from `cdn.jsdelivr.net`, which the stub satisfied
+from an on-disk memo of the real bytes; now the only remote host any page may touch at all is
+the webfont's, which the ruling deliberately left in place. So the behavioural test no longer
+just checks that third-party responses are 200s — it enumerates the HOSTS, and the list is
+exactly one. That is what makes a re-added CDN fail here instead of passing quietly against
+an empty stub.
 """
 
 import ast
@@ -21,7 +28,7 @@ from urllib.parse import urlparse
 import pytest
 from playwright.sync_api import ConsoleMessage, Page, Request, Response
 
-from tests.e2e.conftest import _is_app_url
+from tests.e2e.conftest import ALLOWED_REMOTE_HOSTS, _is_app_url
 
 _STUB_CALL = "install_third_party_stub"
 
@@ -30,12 +37,17 @@ _STUB_CALL = "install_third_party_stub"
 def test_page_load_makes_no_unstubbed_third_party_request(
     live_server: str, fresh_page: Page
 ) -> None:
-    """index.html — the heaviest page (webfont + ECharts) — reaches no third party.
+    """index.html — the heaviest page — reaches exactly one remote host, the webfont's.
 
     Asserts the three things the flake needed in order to happen: (a) every non-loopback
     response is a 200 from the stub, so a remote 404 can never reach the console; (b) NO
     request is made to fonts.gstatic.com at all — the empty stylesheet kills the whole
     subset fan-out at its source; (c) zero console errors, the assertion the flake broke.
+
+    And, since 2026-08-12, the stronger form of (a): the SET of non-loopback hosts is exactly
+    `ALLOWED_REMOTE_HOSTS`. A 200 from the stub is not evidence of isolation — the stub
+    answers 200 for everything — so a re-added CDN would have satisfied (a) while quietly
+    re-introducing the dependency. Enumerating hosts is what actually catches that.
     """
     page = fresh_page
     third_party: list[str] = []
@@ -69,6 +81,14 @@ def test_page_load_makes_no_unstubbed_third_party_request(
     assert not gstatic, (
         "the webfont subset fan-out is back — the stylesheet stub is not empty: "
         f"{gstatic[:3]} ({len(gstatic)} requests)"
+    )
+
+    hosts = {urlparse(row.split(" ", 1)[1]).netloc for row in third_party}
+    assert hosts <= ALLOWED_REMOTE_HOSTS, (
+        "/index.html contacted an unexpected remote host: "
+        f"{sorted(hosts - ALLOWED_REMOTE_HOSTS)}. Every functional front-end dependency "
+        "must be vendored into web/ — see docs/reference/vendored-assets.md and "
+        "tests/contract/test_vendored_assets.py."
     )
     assert not console_errors, f"/index.html console errors: {console_errors}"
 

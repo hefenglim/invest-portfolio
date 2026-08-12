@@ -22,7 +22,6 @@ Socket exception (the spec-17-sanctioned loopback exception):
   outside pytest_socket entirely; only the parent's probe/poll needs this exception.)
 """
 
-import hashlib
 import json
 import os
 import shutil
@@ -137,25 +136,30 @@ def _netlog_watch(page: Page, label: str) -> None:
 # --- third-party isolation (issue #67) --------------------------------------------
 #
 # THE BUG THIS EXISTS TO KILL. Every shipped page pulls its webfont from
-# ``fonts.googleapis.com`` (which fans out to 17-24 ``fonts.gstatic.com`` subset files
-# per page) and ECharts from ``cdn.jsdelivr.net``. Google serves that stylesheet
-# ``Cache-Control: private, max-age=86400, stale-while-revalidate=604800`` and ROTATES the
-# subset filenames underneath it, so a stylesheet that is merely a few hours stale hands
-# out URLs whose files Google has already retired — and then EVERY font subset on the page
-# 404s at once. Our e2e tests assert ZERO browser console errors, so that remote rotation
-# reddened ~2 random tests per full run (~1.5%/test), a different pair every time, with the
-# unmistakable console text ``a status of 404 ()`` — the parentheses are EMPTY because
-# HTTP/2 has no reason phrase, which is how the failure was finally distinguished from our
-# own uvicorn (HTTP/1.1, always ``404 (Not Found)``). Measured 2026-08-11: the exact
-# subset URL a failing run requested still 404s while the CURRENT stylesheet lists a
-# different hash entirely.
+# ``fonts.googleapis.com``, which fans out to 17-24 ``fonts.gstatic.com`` subset files per
+# page. Google serves that stylesheet ``Cache-Control: private, max-age=86400,
+# stale-while-revalidate=604800`` and ROTATES the subset filenames underneath it, so a
+# stylesheet that is merely a few hours stale hands out URLs whose files Google has already
+# retired — and then EVERY font subset on the page 404s at once. Our e2e tests assert ZERO
+# browser console errors, so that remote rotation reddened ~2 random tests per full run
+# (~1.5%/test), a different pair every time, with the unmistakable console text ``a status of
+# 404 ()`` — the parentheses are EMPTY because HTTP/2 has no reason phrase, which is how the
+# failure was finally distinguished from our own uvicorn (HTTP/1.1, always ``404 (Not
+# Found)``). Measured 2026-08-11: the exact subset URL a failing run requested still 404s
+# while the CURRENT stylesheet lists a different hash entirely.
 #
 # THE RULE. A browser under test talks to the app under test and to nothing else. A test
-# suite whose verdict depends on a third party's cache-rotation schedule is not a test
-# suite. Fonts are presentational: an EMPTY stylesheet means the page never fans out to
-# gstatic at all, and the pages render in their declared fallback stack. ECharts is
-# functional, so it is fetched ONCE and memoised on disk (``.pytest_cache/``, git-ignored);
-# every later run replays the bytes and touches no network.
+# suite whose verdict depends on a third party's cache-rotation schedule is not a test suite.
+# Fonts are presentational: an EMPTY stylesheet means the page never fans out to gstatic at
+# all, and the pages render in their declared fallback stack.
+#
+# SIMPLIFIED 2026-08-12 (ECharts vendored, owner ruling). This used to also fetch ECharts
+# ONCE from ``cdn.jsdelivr.net`` and memoise the ~1 MB body on disk under ``.pytest_cache/``,
+# with atomic writes, an unreachable-URL memo and a 30s timeout — machinery that existed
+# solely because a FUNCTIONAL dependency lived off-origin. ``web/echarts.min.js`` is now
+# served by the app itself, so there is nothing left to fetch: **this suite now makes ZERO
+# outbound connections, ever.** Anything non-font reaching here is a NEW remote dependency and
+# says so loudly rather than being silently satisfied from a cache.
 #
 # This is deliberately NOT a retry / timeout widening: nothing here waits for or re-attempts
 # a remote host. The dependency is removed, not made more patient.
@@ -166,13 +170,18 @@ _LOCAL_URL_PREFIXES = (
 )
 _NON_NETWORK_SCHEMES = ("about:", "data:", "blob:", "file:", "chrome:", "devtools:")
 _FONT_HOSTS = frozenset({"fonts.googleapis.com", "fonts.gstatic.com"})
-_CDN_CACHE_DIR = _WORKTREE_ROOT / ".pytest_cache" / "e2e-thirdparty"
-_CDN_FETCH_TIMEOUT_MS = 30_000
-_cdn_memo: dict[str, tuple[str, bytes]] = {}
-# URLs whose one real fetch failed. Remembered so an unreachable CDN costs ONE timeout for
-# the session instead of one per request (a page requests ECharts ~50 times across a run —
-# without this, an offline machine would add ~25 minutes of dead waiting to the suite).
-_cdn_unreachable: set[str] = set()
+
+# The hosts a PAGE may legitimately contact — a different set from `_FONT_HOSTS`, which is
+# merely what the stub recognises as a font request. `fonts.gstatic.com` is deliberately NOT
+# here: the stylesheet stub is empty, so the subset fan-out never starts, and a request to
+# gstatic means the stub broke. Imported by the tests that enumerate hosts, so the ruling's one
+# carve-out (owner 2026-08-12: vendor ECharts, leave the webfont remote) has a single home.
+ALLOWED_REMOTE_HOSTS = frozenset({"fonts.googleapis.com"})
+
+# Non-font URLs that were stubbed. Should stay EMPTY: the webfont is the only remote
+# dependency the ruling left in place. Recorded (and warned about once per URL) so a newly
+# introduced CDN is visible in the run output instead of quietly succeeding against a stub.
+_stubbed_third_party: list[str] = []
 
 
 def _is_app_url(url: str) -> bool:
@@ -180,83 +189,26 @@ def _is_app_url(url: str) -> bool:
     return url.startswith(_LOCAL_URL_PREFIXES) or url.startswith(_NON_NETWORK_SCHEMES)
 
 
-def _cdn_paths(url: str) -> tuple[Path, Path]:
-    key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
-    return _CDN_CACHE_DIR / f"{key}.body", _CDN_CACHE_DIR / f"{key}.type"
-
-
-def _cdn_get(url: str) -> tuple[str, bytes] | None:
-    """Memoised third-party body: process memory first, then the on-disk cache."""
-    hit = _cdn_memo.get(url)
-    if hit is not None:
-        return hit
-    body_path, type_path = _cdn_paths(url)
-    try:
-        body = body_path.read_bytes()
-        ctype = type_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    _cdn_memo[url] = (ctype, body)
-    return ctype, body
-
-
-def _cdn_put(url: str, ctype: str, body: bytes) -> None:
-    """Memoise, then publish to disk ATOMICALLY (write-then-replace).
-
-    Two pytest processes can share this cache dir, and a half-written body read as a
-    complete one would be a corrupt ECharts — a far more confusing failure than a miss.
-    """
-    _cdn_memo[url] = (ctype, body)
-    body_path, type_path = _cdn_paths(url)
-    try:
-        _CDN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp_body = body_path.with_suffix(f".body.{os.getpid()}.tmp")
-        tmp_type = type_path.with_suffix(f".type.{os.getpid()}.tmp")
-        tmp_body.write_bytes(body)
-        tmp_type.write_text(ctype, encoding="utf-8")
-        os.replace(tmp_body, body_path)
-        os.replace(tmp_type, type_path)
-    except OSError:  # pragma: no cover (cache is an optimisation, never a gate)
-        pass
-
-
 def _third_party_route(route: Route) -> None:
-    """Serve every non-loopback request without touching the network (see the brief above)."""
+    """Serve every non-loopback request WITHOUT touching the network (see the brief above)."""
     url = route.request.url
     host = urllib.parse.urlparse(url).netloc
     if host in _FONT_HOSTS:
         # Presentational only. An empty stylesheet => zero gstatic subset requests.
         route.fulfill(status=200, content_type="text/css", body="")
         return
-    cached = _cdn_get(url)
-    if cached is not None:
-        route.fulfill(status=200, content_type=cached[0], body=cached[1])
-        return
-    if url in _cdn_unreachable:  # already established as unreachable — do not wait again
-        route.fulfill(status=200, content_type="application/javascript", body="")
-        return
-    detail: str
-    try:
-        response = route.fetch(timeout=_CDN_FETCH_TIMEOUT_MS)
-        if response.ok:
-            body = response.body()
-            ctype = response.headers.get("content-type", "application/javascript")
-            _cdn_put(url, ctype, body)
-            _netlog("thirdparty_fetched", url=url, bytes=len(body))
-            route.fulfill(status=200, content_type=ctype, body=body)
-            return
-        detail = f"HTTP {response.status}"
-    except Exception as exc:  # noqa: BLE001 (any driver/network error is the same verdict)
-        detail = repr(exc)[:200]
-    # Never emit a browser-visible error for a third party: that is the whole defect. Serve
-    # an empty 200 and say so loudly in the run's own output instead.
-    _cdn_unreachable.add(url)
-    _netlog("thirdparty_unavailable", url=url, detail=detail)
-    warnings.warn(
-        f"e2e: third-party asset unavailable and not cached ({detail}): {url} — served "
-        f"an empty 200. Anything that needs it (e.g. ECharts) will fail on its own terms.",
-        stacklevel=1,
-    )
+    if url not in _stubbed_third_party:
+        _stubbed_third_party.append(url)
+        _netlog("thirdparty_stubbed", url=url)
+        # Never emit a browser-visible error for a third party: that is the whole defect.
+        # Serve an empty 200 and say so loudly in the run's own output instead.
+        warnings.warn(
+            f"e2e: a NON-FONT third-party request was stubbed with an empty 200: {url}. "
+            "Every functional front-end dependency is supposed to be VENDORED into web/ — "
+            "see docs/reference/vendored-assets.md. Whatever needed this will now fail on "
+            "its own terms.",
+            stacklevel=1,
+        )
     route.fulfill(status=200, content_type="application/javascript", body="")
 
 

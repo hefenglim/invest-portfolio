@@ -16,13 +16,35 @@ must answer 200. Exit code 0 = all checks passed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests.contract.test_vendored_assets import (  # noqa: E402
+    ECHARTS_FILENAME,
+    ECHARTS_SHA256,
+    ECHARTS_SIZE,
+)
+
 _TIMEOUT_S = 60
+
+
+def _get_bytes(base: str, path: str) -> tuple[int, bytes]:
+    """GET base+path -> (status, raw body). Never raises on HTTP errors."""
+    try:
+        with urllib.request.urlopen(base + path, timeout=_TIMEOUT_S) as r:  # noqa: S310
+            return r.status, bytes(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, bytes(e.read())
+    except (urllib.error.URLError, OSError) as e:
+        print(f"      (transport error: {e!r})")
+        return 0, b""
 
 
 def _get(base: str, path: str) -> tuple[int, Any]:
@@ -93,6 +115,22 @@ def main() -> int:
     # 2. frontend shell served.
     st, _ = _get(base, "/")
     check("frontend /", st == 200, f"HTTP {st}")
+
+    # 2b. The vendored chart library is actually THERE, and is actually the pinned artifact.
+    # This is the ONLY check that proves the offline-resilience property on a DEPLOYED
+    # instance: the hermetic contract test reads the dev machine's working tree, so it stays
+    # green even if the file never reached the host — and the failure that would cause is
+    # silent-ish (every chart on the site degrades to 「圖表元件未載入」 while the API keeps
+    # answering 200). It also catches the line-ending trap: a checkout that rewrote LF -> CRLF
+    # serves a byte-different file that still RUNS, so only the digest notices.
+    st, body = _get_bytes(base, "/" + ECHARTS_FILENAME)
+    digest = hashlib.sha256(body).hexdigest() if body else "-"
+    check(
+        "vendored echarts.min.js",
+        st == 200 and len(body) == ECHARTS_SIZE and digest == ECHARTS_SHA256,
+        f"HTTP {st}, {len(body):,} bytes (want {ECHARTS_SIZE:,}), sha256 {digest[:16]}… "
+        f"(want {ECHARTS_SHA256[:16]}…)",
+    )
 
     # 3. gated data endpoints: 200 (guest) or 401 (protected) are both healthy.
     protected = False

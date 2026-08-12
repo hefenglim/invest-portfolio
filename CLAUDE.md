@@ -25,7 +25,10 @@ in `CHANGELOG.md`.
 - **Web layer (decision (B), 2026-06-13 — supersedes the prior Jinja2+HTMX rule;
   see CHANGELOG):** a **FastAPI JSON API** (`portfolio_dash/api/*`, all routes under
   `/api/*`) serving a **static vanilla-JS frontend** (`web/`, served via `StaticFiles`)
-  + **ECharts** (CDN). Vanilla JS only — **no framework, no bundler, no build step**.
+  + **ECharts, self-hosted** (`web/echarts.min.js` — vendored 2026-08-12, owner ruling, so a
+  CDN outage cannot take the charts down; the **webfont deliberately stays** on Google's CDN.
+  See `docs/reference/vendored-assets.md`). Vanilla JS only — **no framework, no bundler, no
+  build step** (a pre-minified `dist` file copied in is a file copy, not a build step).
   The frontend never computes money or returns; all numbers come from the API as
   Decimal **strings** (`web/api.js` is the single fetch layer). The **spec-17 golden
   payload** (`tests/golden/dashboard_full.json`) is the documented JSON contract, guarded
@@ -72,7 +75,7 @@ portfolio_dash/
   strategy/      # user-defined strategy logic as Python modules (parameterized)
   llm_insight/   # LiteLLM orchestration: portfolio + news -> structured cards (cached)
   api/           # FastAPI JSON API: routers (call core + serialize), no business logic
-  web/           # static vanilla-JS frontend (HTML/CSS/JS + ECharts CDN); served by api/
+  web/           # static vanilla-JS frontend (HTML/CSS/JS + vendored echarts.min.js); by api/
   scheduler/     # APScheduler jobs (pricing refresh, scheduled insight runs)
 ```
 

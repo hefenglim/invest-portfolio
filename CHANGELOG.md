@@ -51,6 +51,60 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   fresh ledger would reject every withdrawal it contains.
 
 ### Changed
+- **ECharts 5.5.0 is now self-hosted** (`web/echarts.min.js`), so a `cdn.jsdelivr.net` outage
+  can no longer take the charts down (owner ruling 2026-08-12). The webfont deliberately stays
+  on Google's CDN: `--font-ui` / `--font-num` already end in a generic family, 9 of 18 pages
+  never request the font at all, and the e2e suite runs the whole app against an EMPTY Google
+  Fonts stylesheet — a font outage is cosmetic and continuously tested, where a chart-library
+  outage is not.
+  - **Four load sites, not three.** `index.html`, `insights.html` and `settings.html` carry a
+    parser-blocking `<head>` tag each; the fourth is a **runtime-injected** copy in
+    `web/shell.js::pdEnsureDrawer`, which lazily loads the library on **every** page when the
+    symbol drawer is first opened and which no HTML grep finds. It had **zero** browser
+    coverage (every drawer e2e reaches the drawer via `/index.html`, where `window.echarts`
+    is already set, so the load branch never ran); `tests/e2e/test_echarts_selfhosted.py` now
+    opens the drawer from `/instruments.html` and covers it.
+  - **Pinned artifact, cross-witnessed.** `scripts/vendor_echarts.py` (stdlib only — no Node,
+    no bundler) downloads the file from **jsdelivr AND unpkg**, requires the two mirrors to be
+    byte-identical, and requires
+    `sha256 = 42f8329d989b6f6539dd2b15bbdf0d82025762ac112fbb60dc57b27d7bcf3946`
+    (1,029,203 bytes) before writing anything. The pin lives in
+    `tests/contract/test_vendored_assets.py` and the script imports it, so there is exactly one
+    machine-readable copy. Apache-2.0; provenance and the upgrade procedure are in
+    `docs/reference/vendored-assets.md`.
+  - **`.gitattributes` is new, and load-bearing.** This repo is developed with
+    `core.autocrlf=true`, and a minified bundle has no NUL bytes, so git classifies it as text
+    and rewrites LF → CRLF on **checkout**. Measured before the fix: the committed file checks
+    out as **1,029,248 bytes** with 45 conversions and a different digest — on a file nobody
+    edited. It still *runs* (JS tolerates CRLF), so nothing but the pin would have noticed, and
+    the pin would have failed on every fresh Windows clone while passing on the Linux host.
+    `*.min.js -text` fixes it in both directions, and a test fails the build if the rule is
+    removed — otherwise the symptom is a size mismatch whose suggested remedy (re-run the
+    vendor script) leads straight into a loop.
+  - **Flat path, not `web/vendor/`.** `scripts/stamp_asset_version.py` and
+    `tests/contract/test_static_cache_discipline.py` share a regex that matches bare relative
+    filenames only (`[A-Za-z0-9._-]+\.(?:js|css)`), so a nested path would be invisible to both
+    the `?v=` stamper and its guard. Flat keeps the asset inside the existing cache discipline
+    instead of carving out an exception for it.
+  - **Accepted cost.** The library is now served by the app: **1,029,203 bytes** on the first
+    load of the three chart pages and on the first drawer open of each other page, instead of
+    from jsdelivr's edge. `_NoCacheStaticFiles` sends `Cache-Control: no-cache`, so subsequent
+    loads revalidate to a 304 rather than re-transferring. The other 15 pages deliberately do
+    **not** get a `<head>` tag: eager-loading 1 MB on `cash.html` for a drawer most sessions
+    never open would trade a rare outage for a permanent regression.
+  - **The dashboard now degrades legibly if the file is ever missing.** `web/charts.js` was the
+    only unguarded consumer, and the failure was worse than blank charts: `initAll()` threw
+    before `wireModeOnce()`, so `#trend-mode` / `#twr-windows` / `#value-ranges` got **no click
+    listeners at all** — dead buttons with no cue — and every later theme toggle raised an
+    uncaught error. It now renders 「圖表元件未載入」 into the chart hosts and wires the controls
+    anyway.
+  - **The browser suite now makes zero outbound connections.** With nothing third-party left to
+    fetch, `tests/e2e/conftest.py`'s memo-cache machinery (`_cdn_get` / `_cdn_put` /
+    `route.fetch`) is deleted: font hosts get an empty 200 stylesheet, anything else gets an
+    empty 200 and is recorded. `test_thirdparty_isolation.py` asserts the only non-loopback host
+    contacted is `fonts.googleapis.com`. `scripts/verify_live.py` checks that
+    `GET /echarts.min.js` returns the pinned size and hash — the only check that proves the
+    offline-resilience property on a **deployed** instance.
 - **`validate_cash_movement` extracted from `api/routers/cash.py` into `data_ingestion/validate.py`.**
   `POST`, `PUT`, the rebate-inbox confirm and the new CSV importer now run **one** guard, so the
   bulk path cannot be weaker than the single-row form. Proven a pure refactor rather than asserted:

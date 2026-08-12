@@ -74,8 +74,10 @@ def test_index_page_smoke(live_server: str, browser_page: Page) -> None:
     (one GET /api/dashboard against the golden DB). This asserts the full async wiring
     renders with ZERO console errors + ZERO uncaught page errors — catching a botched
     async conversion, a Decimal-string `.toFixed` TypeError, sparkline/echarts breakage,
-    or an undefined insight field. ECharts loads from the jsdelivr CDN (the browser
-    subprocess has network); the page must be console-error-clean WITH echarts available.
+    or an undefined insight field. ECharts is served by the app itself from the vendored
+    `web/echarts.min.js` (owner ruling 2026-08-12 — it used to come from the jsdelivr CDN
+    over the browser's real network); the page must be console-error-clean WITH echarts
+    available. The absence case is `tests/e2e/test_echarts_selfhosted.py`.
 
     Waits for a POST-render selector (.kpi-card, produced by renderKpis only after the
     /api/dashboard payload resolves) so the assertion observes the full async render —
