@@ -41,7 +41,12 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final
 
-from portfolio_dash.data_ingestion.broker.ir import EventKind, RawEvent, UnmappedRow
+from portfolio_dash.data_ingestion.broker.ir import (
+    EventKind,
+    RawEvent,
+    UnmappedRow,
+    looks_like_cusip,
+)
 
 #: The broker's own header, in its own order. A file whose header differs is refused rather
 #: than read positionally: a silently mis-mapped column is a wrong ledger, not an error.
@@ -117,8 +122,19 @@ _RULES: tuple[tuple[str, str | None, EventKind], ...] = (
     ("Journaled Shares", "REMOVAL OF OPTION DUE TO EXPIRATION", EventKind.OPT_ADJUST),
 )
 
-_TRAILING_TICKER = re.compile(r"\(([A-Z][A-Z0-9./]{0,7})\)\s*$")
+#: ``... (TICKER)`` at the end of the description, optionally followed by the broker's own
+#: ``@<price>`` suffix — ``TDA TRAN - Bought 10 (TICKER) @4.4400``.
+#:
+#: The ``@price`` tail was added after measuring: without it the ticker in a *trade* narrative
+#: is never recovered, which matters because those are exactly the rows where the ``Symbol``
+#: column holds a CUSIP. Widening it changed the recovered symbol on **zero** of the 83
+#: empty-``Symbol`` rows in the assessed export while resolving 37 of its 40 CUSIP rows, so it
+#: costs nothing on the path it could have disturbed. Still anchored to the end: a ticker
+#: floating in mid-sentence is a guess, and this function's contract is that a miss returns
+#: ``""`` rather than a guess.
+_TRAILING_TICKER = re.compile(r"\(([A-Z][A-Z0-9./]{0,7})\)(?:\s*@\s*[0-9.,]+)?\s*$")
 _DUAL_DATE = " as of "
+
 
 
 def classify(action: str, description: str) -> EventKind | None:
@@ -193,14 +209,27 @@ def recover_symbol(
     — must not be forced to acquire one, so a miss returns ``""`` rather than guessing at
     the first capitalised word.
 
+    ⚠ **A non-empty ``Symbol`` cell is not automatically the answer.** The broker sometimes
+    prints a CUSIP there while the description names the ticker in the same row — measured on
+    a real export: four purchases of one security carry its CUSIP in the column and its ticker
+    at the end of the text. Taking the cell at face value splits ONE position across two symbols,
+    so both cost bases come out wrong and neither is flagged, and the reverse-split leg then
+    reads as an oversell of a security that was never bought. When the cell is a CUSIP and the
+    text names a ticker, the ticker wins.
+
+    A CUSIP with no ticker anywhere in the row (a name change, a reverse split — the statement
+    genuinely identifies the OLD security only that way) is returned unchanged. That is not a
+    failure: it keeps the row visible so the reconciler can ask for an alias, which is exactly
+    what *aliases* is for.
+
     *aliases* maps a CUSIP (or any superseded identifier the statement uses) to the ticker.
     It is supplied by the caller, never hard-coded: those identifiers are the owner's real
     holdings and this file is committed.
     """
     found = (symbol_cell or "").strip()
-    if not found:
+    if not found or looks_like_cusip(found):
         match = _TRAILING_TICKER.search(description or "")
-        found = match.group(1) if match else ""
+        found = match.group(1) if match else found
     return (aliases or {}).get(found, found)
 
 
@@ -262,6 +291,7 @@ def parse(
                 kind=kind,
                 trade_date=trade_date,
                 posted_date=posted_date,
+                broker_symbol=symbol_cell,
                 symbol="" if is_option else recover_symbol(
                     symbol_cell, description, aliases),
                 option_symbol=symbol_cell if is_option else "",

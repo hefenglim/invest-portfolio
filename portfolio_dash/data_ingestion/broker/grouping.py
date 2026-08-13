@@ -13,6 +13,7 @@ was measured against a real export and found to destroy data.
 """
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -25,7 +26,9 @@ from portfolio_dash.data_ingestion.broker.ir import (
     SUPPRESSIBLE_KINDS,
     EventKind,
     RawEvent,
+    looks_like_cusip,
 )
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 
 _ZERO = Decimal(0)
 
@@ -102,6 +105,11 @@ class GroupedImport:
     #: rows of a 1,375-row export without a word, which is the exact failure mode rule 7
     #: and this whole package exist to prevent.
     unrouted: list[RawEvent] = field(default_factory=list)
+    #: Rows absorbed into another event rather than routed on their own — today, interest
+    #: withholding netted into its credit (:func:`net_interest_withholding`). Their money is
+    #: in the ledger, inside the row that absorbed them; they are listed separately so
+    #: :func:`account_for` can still prove every input row landed somewhere.
+    folded: list[RawEvent] = field(default_factory=list)
 
 
 def _share_delta(e: RawEvent) -> Decimal:
@@ -329,6 +337,58 @@ def fold_dividends(events: list[RawEvent]) -> tuple[list[DividendEvent], list[Ra
     return folded, remaining
 
 
+def net_interest_withholding(
+    events: list[RawEvent],
+) -> tuple[list[RawEvent], list[RawEvent]]:
+    """Net a symbol-less withholding row into the interest credit it belongs to.
+
+    Returns ``(rewritten, absorbed)``. *rewritten* is the whole stream with each affected
+    interest credit reduced to its NET amount; *absorbed* is the withholding rows that went
+    into them, kept so conservation stays provable.
+
+    A broker withholds tax on **credit interest** as well as on dividends, and prints it with
+    the same action code and no symbol — measured on a real export: three rows reading
+    ``SCHWAB1 INT 12/30-01/29``, each sitting beside a ``Credit Interest`` row of identical
+    description on the same date. :func:`fold_dividends` cannot take them (it keys on a
+    symbol) and no cash kind means "tax withheld", so before this they fell out of the
+    conversion entirely and the cash balance was short by the tax.
+
+    Recording the **net received** is the ledger's existing convention for a cash distribution
+    it cannot decompose (``domain-ledger.md``, MY cash dividends). Booking the tax as a
+    ``BROKER_FEE`` was the alternative and is rejected: it is not a fee, and it would show up
+    under 券商費用 in every report that breaks costs down.
+
+    Keyed on ``(date, no symbol)`` and requiring exactly one interest credit that day, so an
+    unmatched withholding row is left alone to be reported rather than guessed at.
+    """
+    absorbed: list[RawEvent] = []
+    by_day: dict[date, list[RawEvent]] = defaultdict(list)
+    for e in events:
+        if not e.symbol and not e.option_symbol:
+            by_day[e.trade_date].append(e)
+
+    netted: dict[str, Decimal] = {}
+    for _day, rows in sorted(by_day.items()):
+        credits = [e for e in rows if e.kind is EventKind.INTEREST_INCOME]
+        taxes = [e for e in rows if e.kind is EventKind.WITHHOLDING_TAX]
+        if len(credits) != 1 or not taxes:
+            continue
+        credit = credits[0]
+        withheld = sum((abs(t.amount) for t in taxes), _ZERO)
+        if withheld > credit.amount:
+            continue  # not the shape this handles; leave both for the report
+        netted[credit.ref] = credit.amount - withheld
+        absorbed.extend(taxes)
+
+    absorbed_refs = {e.ref for e in absorbed}
+    rewritten = [
+        e.model_copy(update={"amount": netted[e.ref]}) if e.ref in netted else e
+        for e in events
+        if e.ref not in absorbed_refs
+    ]
+    return rewritten, absorbed
+
+
 def derive_ratio(shares_out: Decimal, shares_in: Decimal) -> tuple[int, int]:
     """``(ratio_to, ratio_from)`` as POSITIVE INTEGERS, from a corporate action's two legs.
 
@@ -367,15 +427,28 @@ def prehistory_shares(events: list[RawEvent]) -> dict[str, Decimal]:
     more than it bought, and nets negative. "Balance goes negative" alone misses a position
     held throughout and never oversold.
 
+    ⚠ **Corporate actions are part of the balance walk, and leaving them out was a measured
+    defect.** Shares also arrive by spinoff, split and exchange, and a walk that counts only
+    trades sees those shares appear from nowhere: the later sell drives the balance negative
+    and the symbol is reported as "held before the window". Measured on a real export, that
+    fabricated SIX opening positions — a spin-off, a 10-for-1 split, two SPAC tickers and two
+    CUSIP-named exchange legs — each of which would have
+    invited the owner to invent an opening cost for shares the file already explains. The
+    action legs print a SIGNED quantity against zero cash, so :func:`_share_delta` reads them
+    correctly without a per-kind sign rule.
+
     ⚠ A **third** case exists that neither detector can see: a position already SHORT before
     the window, whose balance never turns negative and whose first event is a buy. It is
     found only by cross-checking split deltas against the broker's transfer quantities, and
     is deliberately not implemented here — the converter's report says so rather than
-    implying the list is complete.
+    implying the list is complete. (Measured against a hand-built ground truth: this is why
+    the detector's output is not the same SET as the owner's opening-inventory file even
+    when the two happen to have the same COUNT.)
     """
+    walked = _ADDS_SHARES | _REMOVES_SHARES | CORPORATE_ACTION_KINDS
     by_symbol: dict[str, list[RawEvent]] = defaultdict(list)
     for e in events:
-        if e.symbol and (e.kind in _ADDS_SHARES or e.kind in _REMOVES_SHARES):
+        if e.symbol and e.kind in walked:
             by_symbol[e.symbol].append(e)
 
     needed: dict[str, Decimal] = {}
@@ -384,7 +457,12 @@ def prehistory_shares(events: list[RawEvent]) -> dict[str, Decimal]:
         balance = _ZERO
         low = _ZERO
         for e in rows:
-            balance += e.quantity if e.kind in _ADDS_SHARES else -e.quantity
+            if e.kind in _ADDS_SHARES:
+                balance += e.quantity
+            elif e.kind in _REMOVES_SHARES:
+                balance -= e.quantity
+            else:
+                balance += _share_delta(e)
             low = min(low, balance)
         opens_held = rows[0].kind in {EventKind.SELL, EventKind.DRIP_BUY}
         if low < _ZERO:
@@ -394,6 +472,180 @@ def prehistory_shares(events: list[RawEvent]) -> dict[str, Decimal]:
             # 0 marks "a cost is required here" without inventing a quantity to go with it.
             needed[symbol] = _ZERO
     return needed
+
+
+@dataclass(frozen=True)
+class ActionPair:
+    """One corporate action, assembled from the leg(s) the statement printed.
+
+    ``ratio_to`` / ``ratio_from`` are ``None`` when the file does not determine them. That is
+    a real state, not a failure: the converter writes such a row to a worksheet with the two
+    fields blank rather than guessing, because a guessed ratio is D14's rejected decimal in
+    another costume — it replays as a wrong share count that looks right.
+    """
+
+    kind: CorporateActionKind
+    trade_date: date
+    from_symbol: str
+    to_symbol: str
+    ratio_to: int | None
+    ratio_from: int | None
+    refs: tuple[str, ...]
+    #: Why the ratio is missing, when it is. Printed beside the blank fields.
+    needs: str = ""
+
+
+#: How a broker's leg kind maps onto the ledger's three-value vocabulary. A REVERSE split is a
+#: SPLIT whose ratio is less than one; a NAME_CHANGE is an EXCHANGE at 1:1. The ledger has no
+#: separate kinds for either, by design (``shared/corporate_actions.py``).
+_ACTION_FAMILY: dict[EventKind, CorporateActionKind] = {
+    EventKind.SPLIT: CorporateActionKind.SPLIT,
+    EventKind.REVERSE_SPLIT: CorporateActionKind.SPLIT,
+    EventKind.EXCHANGE: CorporateActionKind.EXCHANGE,
+    EventKind.NAME_CHANGE: CorporateActionKind.EXCHANGE,
+    EventKind.SPINOFF: CorporateActionKind.SPINOFF,
+}
+
+
+def pair_actions(
+    events: list[RawEvent], actions: list[RawEvent]
+) -> tuple[list[ActionPair], list[RawEvent]]:
+    """Assemble corporate-action legs into ledger rows. Returns ``(pairs, unpaired)``.
+
+    The statement prints **deltas, never ratios**, and it prints a different number of legs
+    per kind — measured on a real export:
+
+    * **exchange / name change / reverse split** — TWO legs on one date, in DIFFERENT symbols
+      (``-2`` of one ticker against ``+2`` of another; ``-100`` against ``+10`` on a reverse
+      split, where even the CUSIP changes). Paired here, and the ratio follows exactly from the
+      two quantities.
+    * **forward split** — ONE leg, the delta only (``+6`` shares). The ratio is **never derived**
+      and always left blank. ⚠ It looks derivable: replay the file to get the holding the
+      delta applied to and the ratio falls out. That was implemented, measured against the two
+      real one-leg splits, and **removed** — it produced ``4:1`` for one (right) and
+      ``109:24`` for the other (a 3-for-1 split). The wrong one is wrong because that position
+      predates the export, which is the third pre-history case
+      :func:`prehistory_shares` documents as undetectable; the replay cannot know it is
+      incomplete, so it answers confidently either way. A ratio that is right half the time
+      and silent about which half is worse than a blank field: the blank costs the owner one
+      entry, the guess costs a share count that no screen will ever question.
+    * **spin-off** — ONE leg naming the CHILD (``+18`` shares of it). The file never names the
+      parent,
+      so neither the ``from_symbol`` nor the ratio can be recovered. Always left for the owner.
+
+    Cross-symbol pairing is allowed here and refused in :func:`_bucket` for opposite reasons:
+    suppression must never join two symbols because a 1-for-1 exchange nets to zero and would
+    be deleted; pairing must join them because that is what an exchange IS. The safety comes
+    from the pairing being unambiguous — exactly one out-leg and one in-leg of that family on
+    that date — and from anything else being handed back unpaired rather than matched
+    arbitrarily.
+    """
+    pairs: list[ActionPair] = []
+    used: set[str] = set()
+    buckets: dict[tuple[date, CorporateActionKind], list[RawEvent]] = defaultdict(list)
+    for e in actions:
+        family = _ACTION_FAMILY.get(e.kind)
+        if family is not None:
+            buckets[(e.trade_date, family)].append(e)
+
+    for (day, family), legs in sorted(buckets.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        outs = [e for e in legs if _share_delta(e) < _ZERO]
+        ins = [e for e in legs if _share_delta(e) > _ZERO]
+
+        if len(outs) == 1 and len(ins) == 1 and family is not CorporateActionKind.SPINOFF:
+            out, into = outs[0], ins[0]
+            shares_out, shares_in = -_share_delta(out), _share_delta(into)
+            try:
+                to_term, from_term = derive_ratio(shares_out, shares_in)
+            except ValueError:
+                continue
+            used.update({out.ref, into.ref})
+            pairs.append(
+                ActionPair(
+                    kind=family, trade_date=day,
+                    from_symbol=out.symbol, to_symbol=into.symbol,
+                    ratio_to=to_term, ratio_from=from_term,
+                    refs=(out.ref, into.ref),
+                )
+            )
+            continue
+
+        for leg in legs:
+            delta = _share_delta(leg)
+            if family is CorporateActionKind.SPINOFF:
+                used.add(leg.ref)
+                pairs.append(
+                    ActionPair(
+                        kind=family, trade_date=day,
+                        from_symbol="", to_symbol=leg.symbol,
+                        ratio_to=None, ratio_from=None, refs=(leg.ref,),
+                        needs=(
+                            f"the statement names only the child ({leg.symbol}, {delta} "
+                            "shares) — supply the parent symbol and the ratio"
+                        ),
+                    )
+                )
+                continue
+            if family is CorporateActionKind.SPLIT:
+                used.add(leg.ref)
+                pairs.append(
+                    ActionPair(
+                        kind=family, trade_date=day,
+                        from_symbol=leg.symbol, to_symbol=leg.symbol,
+                        ratio_to=None, ratio_from=None, refs=(leg.ref,),
+                        needs=(
+                            f"a one-leg split stating only the delta ({delta} shares) — "
+                            "supply the ratio; it is not derivable from the file"
+                        ),
+                    )
+                )
+
+    unpaired = [e for e in actions if e.ref not in used]
+    return pairs, unpaired
+
+
+def infer_cusip_aliases(
+    events: list[RawEvent],
+) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Learn ``CUSIP -> ticker`` from the export itself. Returns ``(resolved, ambiguous)``.
+
+    A statement can name one security both ways: in a real export 27 rows put its CUSIP in the
+    ``Symbol`` column and its ticker in the text, and one row — the reverse split — names only
+    the CUSIP. Imported verbatim that is TWO instruments, so the position's cost basis
+    splits in half and the split lands on the half that has no shares.
+
+    The mapping is **derived from the file, not guessed**: a CUSIP is resolved only when the
+    rows that do name a ticker all name the SAME one. A CUSIP that maps to two tickers is
+    returned as *ambiguous* and left alone, because that is either a data error or a
+    re-used identifier, and both deserve a human rather than a coin toss.
+
+    Deliberately NOT applied inside :func:`group_events`: a transformation that silently
+    renames securities is one nobody can audit. The caller applies it with
+    :func:`apply_aliases` and prints what it applied.
+
+    Broker-neutral because it reads two fields the adapter already reconciled — the statement's
+    printed ``broker_symbol`` and the ``symbol`` the adapter resolved it to. Re-parsing the
+    description here would put one broker's narrative format in the shared layer.
+    """
+    named: dict[str, set[str]] = defaultdict(set)
+    for e in events:
+        printed = e.broker_symbol.strip()
+        if printed and looks_like_cusip(printed) and e.symbol and e.symbol != printed:
+            named[printed].add(e.symbol)
+
+    resolved = {c: next(iter(t)) for c, t in sorted(named.items()) if len(t) == 1}
+    ambiguous = {c: t for c, t in sorted(named.items()) if len(t) > 1}
+    return resolved, ambiguous
+
+
+def apply_aliases(events: list[RawEvent], aliases: Mapping[str, str]) -> list[RawEvent]:
+    """Rewrite every ``symbol`` through *aliases*. Frozen events, so this copies."""
+    if not aliases:
+        return events
+    return [
+        e.model_copy(update={"symbol": aliases[e.symbol]}) if e.symbol in aliases else e
+        for e in events
+    ]
 
 
 def overlap_duplicates(events: list[RawEvent]) -> list[tuple[RawEvent, RawEvent]]:
@@ -435,7 +687,10 @@ def group_events(events: list[RawEvent]) -> GroupedImport:
     """
     kept, dropped, vetoed = suppress(events)
     dividends, rest = fold_dividends(kept)
-    result = GroupedImport(dividends=dividends, suppressed=dropped, vetoed=vetoed)
+    rest, absorbed = net_interest_withholding(rest)
+    result = GroupedImport(
+        dividends=dividends, suppressed=dropped, vetoed=vetoed, folded=absorbed
+    )
     trade_kinds = {
         EventKind.BUY, EventKind.SELL, EventKind.SELL_SHORT, EventKind.BUY_COVER
     }
@@ -468,6 +723,7 @@ def account_for(events: list[RawEvent], grouped: GroupedImport) -> None:
         *(e.ref for e in grouped.actions),
         *(e.ref for e in grouped.options),
         *(e.ref for e in grouped.unrouted),
+        *(e.ref for e in grouped.folded),
     ]
     expected = {e.ref for e in events}
     got = set(seen)

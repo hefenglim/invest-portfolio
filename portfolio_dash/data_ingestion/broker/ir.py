@@ -17,12 +17,29 @@ alone therefore either deletes 145 tax rows as noise or keeps 126 phantom journa
 events, and no amount of arithmetic recovers the distinction in either direction.
 """
 
+import re
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict
+
+#: A 9-character alphanumeric identifier containing a digit — a CUSIP, never a ticker. A US
+#: ticker is one to five letters (``BRK.B`` is five plus a class suffix); nothing tradeable is
+#: nine characters wide, so the two vocabularies cannot collide. Option contracts never reach
+#: this test — they live in ``RawEvent.option_symbol``.
+_CUSIP = re.compile(r"[0-9A-Z]{9}")
+
+
+def looks_like_cusip(value: str) -> bool:
+    """True for an identifier a statement printed where a ticker belongs.
+
+    Broker-neutral on purpose. A CUSIP is a US securities identifier, not a Schwab quirk, and
+    the reconciler must be able to ask "is this a ticker?" without importing one broker's
+    adapter — the moment it does, the second broker's rules have nowhere to live.
+    """
+    return bool(_CUSIP.fullmatch(value)) and any(c.isdigit() for c in value)
 
 
 class EventKind(StrEnum):
@@ -130,8 +147,16 @@ class RawEvent(BaseModel):
     posted_date: date
 
     #: Equity ticker, or ``""`` for a row that legitimately has none (interest, a wire).
-    #: A row with no symbol must NOT be forced to have one.
+    #: A row with no symbol must NOT be forced to have one. This is the RESOLVED value: an
+    #: adapter may have recovered it from the description when the statement's own column held
+    #: nothing, or held a CUSIP.
     symbol: str = ""
+    #: The statement's ``Symbol`` cell exactly as printed, before any recovery. Kept because
+    #: resolution is lossy in the one direction that matters: once a CUSIP row has been
+    #: rewritten to its ticker, the link between the two identifiers is gone, and the rows the
+    #: file never names cannot be joined back to the ones it does. That link is what
+    #: :func:`grouping.infer_cusip_aliases` learns from.
+    broker_symbol: str = ""
     #: The full option contract string when this is an option leg, else ``""``. Kept out of
     #: ``symbol`` because ``shared/symbol_format.py`` rejects it and it is not an instrument.
     option_symbol: str = ""
