@@ -557,7 +557,13 @@ prevents recurrence.
   and sent me hunting an `Exception ignored in: BaseEventLoop.__del__` teardown traceback that
   was pre-existing, harmless (Python explicitly ignores GC-time exceptions; exit code stayed 0)
   and completely unrelated. Check `addopts` before adding verbosity flags — and read the
-  process **exit code**, which no verbosity setting can suppress. (b) PowerShell's `*>`
+  process **exit code**, which no verbosity setting can suppress.
+  **Recurred 2026-08-13**, in a session that had already read this entry: the `-q` went into the
+  gate script again, and the same `BaseEventLoop.__del__` traceback was sitting in stderr again.
+  A rule you have to remember at the moment of typing is not a control. The durable fix is to
+  stop passing `-q` at all (`addopts` already has it) and, when a run does come back mute, to
+  count the progress characters rather than re-run: `.`/`s`/`F`/`E` in the `[NN%]` lines are the
+  verdict, and they cannot be suppressed either. (b) PowerShell's `*>`
   redirection writes **UTF-16LE**; `grep`/`Select-String` from Git Bash then match nothing
   because every character is separated by a NUL byte. A layout probe that had actually found
   68 clean results was reported as "0 overflows" from a log the grep could not read at all —
@@ -827,3 +833,45 @@ prevents recurrence.
   primary door never appeared. Rule: for a test over a **destructive** confirmation, assert what
   the user was **offered** as well as what happened. A test that only checks the outcome cannot
   tell "the owner chose this" from "the owner had no alternative".
+
+- **2026-08-13 — a two-valued predicate is a silent bug the day a third value exists.** Three
+  places wrote the cash-direction test as *"`WITHDRAW` → debit, everything else → credit"*, which
+  was correct while there were four kinds. Adding `BROKER_FEE` and `INTEREST_EXPENSE` made a fee
+  **increase** the cash balance and count as an unbased foreign-currency acquisition, dragging
+  `covered_ratio` down on a pool that had lost nothing — two wrong numbers, no exception, nothing
+  on screen to notice. The fix was a table keyed by kind, and the reason it needed **two** columns
+  is the real lesson: `INTEREST` is a **credit that is not an acquisition**, so a single boolean
+  could not have expressed it however carefully it was named. Rule: when an enum grows, grep for
+  the places that test it by **inequality to one member** (`!= X`, `not in {X}`, `if kind == X …
+  else`) — those are the sites that compile, pass, and answer wrongly. And when two questions
+  about the same value have ever disagreed for any member, they are two columns, not one flag.
+
+- **2026-08-13 — a check whose two sides come from the same source is not a check.** The broker
+  reconciler's share-conservation gate built its "expected" figure by reading `reinvest_shares`
+  back out of the very `DividendEvent` it was verifying, so the two sides agreed unconditionally:
+  a fold that invented **999 shares** passed. The module's own docstring promised that every
+  blocking check re-measures from the original rows — the promise was written first and violated
+  four functions later. It surfaced only because a hostile fixture was written for a gate that
+  already looked finished. Rule: for any conservation or reconciliation check, name the two
+  sources out loud and confirm they are different **artifacts**, not two reads of one value; then
+  prove it by breaking the thing under test and watching the check go red.
+
+- **2026-08-13 — a derivation that is right half the time, silently, is worse than a blank
+  field.** A forward stock split states only its share delta, and the ratio looks recoverable:
+  replay the file for the holding it applied to and it falls out. Implemented, it returned `4:1`
+  for one real split (correct) and `109:24` for a 3-for-1 (garbage) — because that position
+  predated the export and a replay cannot know it is incomplete. Both answers arrive with the same
+  confidence and no flag. It was removed: the converter now leaves the two ratio columns **empty**
+  and says what it is waiting for. Rule: when a derived money-of-record value depends on data that
+  may be absent, the failure mode to design against is not "no answer" but "**a plausible answer**"
+  — and if the code cannot detect which one it produced, it must not produce either. A blank costs
+  the owner one entry; a wrong share count is questioned by nothing downstream.
+
+- **2026-08-13 — the test that runs the script as a *program* is a different test.** Every
+  in-process test of the new converter passed, including the ones that captured and asserted on
+  its stdout — because pytest hands the process a UTF-8 stream. Run the same script the way its
+  owner runs it (`subprocess`, real console) and it died on its **first printed line** with
+  `UnicodeEncodeError`: Windows still gives a fresh shell the ANSI code page, and every label this
+  project prints is Traditional Chinese. Rule: any script with a human as its interface gets one
+  test that invokes it through `subprocess` with the real interpreter. The in-process tests check
+  what it computes; only that one checks that it **runs**.

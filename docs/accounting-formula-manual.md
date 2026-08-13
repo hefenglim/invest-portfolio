@@ -1,7 +1,8 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.7`（2026-08-11）
-> **程式碼基線**：`v0.1.28 + feat/corporate-actions`（公司行動 SPLIT／EXCHANGE／SPINOFF）
+> **版本**：`v1.8`（2026-08-13）
+> **程式碼基線**：`v0.1.28 + feat/corporate-actions`（公司行動 SPLIT／EXCHANGE／SPINOFF；含
+> 2026-08-13 之**現金收支七種 kind／兩軸表**與**美股現金股利 P1b**）
 > **仲裁狀態**：**已由 owner 正式簽署（2026-07-15）**，自版本 **v0.1.19** 起正式生效為站上任何
 > 「金額爭議」的**唯一仲裁標準**（arbitration standard）。
 > **語言例外**：本文件採**繁體中文正文 + 英文技術識別字**（欄位／資料表／函式名），為一份 owner
@@ -14,8 +15,8 @@
 >
 > **驗證基礎**：本文件所有帶數字之工作範例，均取自或核對於**常駐壓測實跑**——一組對抗性對帳斷言
 > （adversarial reconciliation，`scripts/stress_audit/evidence/oplog.jsonl` ＋
-> `scripts/stress_audit/evidence/assertions.jsonl`）。**本版（v1.7）就地清點之當前實跑**：phase-1
-> **118 ops、3,791/3,791 全數通過、0 fail**；phase 2（線上 demo）**1,192 斷言、0 fail**。每一數字範例均標注
+> `scripts/stress_audit/evidence/assertions.jsonl`）。**v1.8 之當前實跑**：phase-1
+> **122 ops、3,799/3,799 全數通過、0 fail**；phase 2（線上 demo）**1,192 斷言、0 fail**。每一數字範例均標注
 > 其 `scope` 驗證錨點；場景依賴之終值另標其 phase（`phase1:final`、`phase1:corp_applied` 等）。手冊作者未
 > 自行捏造任何數字。**注意**：壓測場景會逐版演進（v1.6 為 77 ops／1,806 斷言；公司行動場景 `CA*` 於本版
 > 加入），故每次改版須就當前實跑重新對帳（見 §12.3）。
@@ -793,11 +794,19 @@ EXCHANGE 是併入目的標的而非重新計價它，若把因子擴及 EXCHANG
 而非缺陷；若日後要處理，正確作法是新增自己的 `*_raw` 欄位並連同因子一起帶走。
 
 **（限制 2）D12 — 重組費對「本系統現有的每一個報酬指標」都不可見。這是一個常設限制。**
-可登錄的現金收支只有 `DEPOSIT` / `WITHDRAW` / `OPENING` / `REBATE` 四種（`api/routers/cash.py::_KINDS`），
-其中只有 `WITHDRAW` 是借方（`portfolio/cash.py::_movement_sign`）。**裁定：重組費記為一筆 `WITHDRAW`
-並於 `note` 註明。** 其後果須明說：它在現金對帳單上讀起來像「業主提領」；它減少外幣池曝險卻不認列已實現
-換匯（§8、`domain-ledger.md` N1）；而 `portfolio/returns.py::xirr_reporting` 的流量序列**只由**
-`opening` + `transactions` + `dividends` 構成，故**現金收支永遠不會進入 XIRR**。
+可登錄的現金收支共**七種**——`DEPOSIT` / `WITHDRAW` / `OPENING` / `REBATE` /
+`INTEREST` / `INTEREST_EXPENSE` / `BROKER_FEE`（`data_ingestion/validate.py::CASH_MOVEMENT_KINDS`
+= `shared/cash_kinds.py::CASH_KIND_VALUES`），其中**三種是借方**：`WITHDRAW`、`INTEREST_EXPENSE`、
+`BROKER_FEE`（`portfolio/cash.py::_movement_sign` → 同一張表；兩軸表見 §9.1.1）。
+（**本段於 2026-08-13 就地更新**：先前寫「只有四種、只有 `WITHDRAW` 是借方」並引用
+`api/routers/cash.py::_KINDS`——該常數已不存在，述詞亦已由 §9.1.1 的表取代。）
+**裁定：重組費記為一筆 `WITHDRAW` 並於 `note` 註明。** 其後果須明說：它在現金對帳單上讀起來像
+「業主提領」；它減少外幣池曝險卻不認列已實現換匯（§8、`domain-ledger.md` N1）；而
+`portfolio/returns.py::xirr_reporting` 的流量序列**只由** `opening` + `transactions` + `dividends`
+構成，故**現金收支永遠不會進入 XIRR**——這一點在 2026-08-13 由業主裁決 **D1 = A** 就三種新 kind
+再次確認並升格為明訂規則（§7.2）。**新增的三種 kind 沒有讓這個盲點變小**：`BROKER_FEE` 也是一筆
+「真實發生、卻對每一個報酬指標不可見」的金額，只是它現在至少能以自己的名字入帳，而不必偽裝成一筆
+提領。
 
 > **本段於 2026-08-11 改寫（D45）。** 先前版本寫的是「這不是永久盲點」，理由是 D36 將另加一個
 > **帳戶層 IRR**（whole-account IRR）於 `portfolio/twr.py`，而該指標**看得見** `WITHDRAW`。
@@ -940,7 +949,9 @@ $$\text{capital\_gain} = (\text{price} - \text{original\_avg})\times\text{shares
 
 實作：`data_ingestion/dividend_model.py::apply_dividend_model`（衍生 withholding／net／reinvest_shares）
 + `cost_basis.py::build_book` 之股利分支。同日優先序中股利排最後（見 §4.1）。
-`CASH_DIVIDEND_TYPES = {CASH, NET}`（TW 現金 + MY 單層淨額共用同一「降成本」定義）。
+`CASH_DIVIDEND_TYPES = {CASH, NET}`（TW 現金 + MY 單層淨額共用同一「降成本」定義；**美股現金派發自
+P1b（2026-08-13）起亦以 `CASH` 入帳並走同一式**，見 §6.2b——本章仍是**三個模型**，只是 `drip_us`
+模型現在同時受理 `DRIP` 與 `CASH` 兩種型別）。
 
 ### 6.1 TW 現金（`CASH`，`tw_broker`）— 降成本
 
@@ -966,7 +977,57 @@ $$\text{reinvest\_shares} = \frac{\text{net}}{\text{reinvest\_price}}\quad(\text
 驗證錨點：`ledger.div.gross/net`（`schwab|MSFT`）、`holding.dividend_portion schwab|MSFT = 0.00`、
 `holding.shares schwab|MSFT`。
 
-`US_WITHHOLDING = 0.30` 適用 Schwab 與 `moomoo_my` 之 US market leg 兩處美股（W-8BEN）。
+`US_WITHHOLDING = 0.30` 適用 Schwab 與 `moomoo_my` 之 US market leg 兩處美股（W-8BEN）。**此 30% 乘積
+只在 `DRIP` 型別上自動推導**；未再投資的美股現金派發見 §6.2b。
+
+### 6.2b 美股現金股利（`CASH` on `drip_us`；P1b，2026-08-13）— 與 TW／MY 現金同式降成本
+
+DRIP 是美股帳戶的**預設機制，不是唯一機制**：真實券商匯出檔的股利列比再投資列多，差額正是**未再投資
+的現金派發**。P1b 於 `dividend_import.py::_MODEL_ALLOWED_TYPES` 將 `CASH` 納入 `drip_us` 的可受理型別
+（`{"DRIP", "CASH"}`），**移除了原本每一列都要人工確認的 `dividend_type_mismatch` 軟阻擋**。
+
+**會計上沒有新規則**（owner 裁定 **D35**，2026-08-10；本節只錨定公式，不重新裁決）：`CASH` 落在
+`CASH_DIVIDEND_TYPES`（`shared/models/enums.py`），故與 §6.1 TW 現金、§6.3 MY 單層淨額**同一式**：
+
+$$\text{net} = \text{gross} - \text{withholding}\qquad
+\text{adjusted\_total} \mathrel{-}= \text{net}$$
+
+若改記為收入行，同一本帳將同時存在**兩套股利會計模型**，`dividend_portion` 與 §6.4 之回本進度／股利
+回收率會在**同一個畫面上**依市場而有不同意義——這正是一定義原則所要防止的。
+
+**預扣由使用者填寫，不由 `gross × 0.30` 推導。** `apply_dividend_model` 依**股利型別**（非帳戶模型）
+分派：`DRIP` 走 §6.2 的 `gross × 0.30`，`CASH` 走**已登錄之預扣**（`withholding` 未填 → **0**，
+`net = gross`）。這是刻意的：券商實扣金額經其自身的分位進位，與 `gross × 0.30` 的乘積**不會逐分相符**；
+把使用者自對帳單抄入的數字覆寫成一個算出來的乘積，等於以推導值取代**金額之記錄**。
+
+**但空白預扣在 `drip_us` 上會被追問（軟性）。** W-8BEN 下的美股派發通常有 30% 預扣；`withholding`
+留白會使 `net = gross`，**過度沖減 `adjusted_total`**，並在該部位存續期間持續低報未實現損益。故
+`drip_us` 帳戶之 `CASH` 列若無 `withholding` → 軟性 `us_cash_dividend_no_withholding`
+（`needs_confirm`，**非**硬阻擋——無預扣之美股派發確實存在，例如資本返還），且**該列仍照它所寫的入帳**
+（`withholding = 0`、`net = gross`）：警告不靜默改數。此追問綁定 **`drip_us` 模型**而非 `CASH` 型別，
+TW 現金股利本就無預扣，不得被追問。
+
+`NET`（MY 單層淨額）在 `drip_us` 上**仍是** `dividend_type_mismatch`（合併雙市場帳戶之防呆，Batch B
+F01）。清倉後入帳之美股現金股利與 TW／MY 同走 **§6.3b**（改記一列 `RealizedRow(kind="dividend")`）——
+該分支判定的是 `CASH_DIVIDEND_TYPES`，不是市場。
+
+> **驗證錨點**：hermetic 迴歸 `tests/data_ingestion/test_dividends.py`——
+> `::test_us_cash_dividend_is_not_a_mismatch`（`schwab/AAPL` `CASH` gross 100／withholding 30 →
+> `net = 70`，且 **issue 為空**）、`::test_us_cash_dividend_without_withholding_asks`（空白預扣 → 軟性
+> `us_cash_dividend_no_withholding`，payload 仍為 `withholding = 0`／`net = 100`）、
+> `::test_tw_cash_dividend_is_not_asked_about_withholding`（TW 現金不被追問）、
+> `::test_csv_dividend_type_market_coherent_has_no_mismatch`（`DRIP` 仍無 mismatch）。
+> **壓測 `scope` 錨點**（2026-08-13 加入場景）：`schwab/AAPL@2026-06-10` 之 `CASH` 股利
+> （gross 25／withholding 7.50），錨定 `holding.dividend_portion scope = schwab|AAPL`（**非零**——
+> 同帳戶之 MSFT DRIP 仍為 0，兩者並存正是本節主張「同一美股部位可在不同季度以兩種型態配息」的證據）
+> 與 `holding.adjusted_total scope = schwab|AAPL`。此前本節只有 hermetic 錨點：「不需要會計變更」
+> 這句話唯有在獨立 oracle 重算該部位並同意之後才算數。
+> **實作位置**：`data_ingestion/dividend_import.py::_MODEL_ALLOWED_TYPES`（`drip_us: {"DRIP","CASH"}`）
+> 與其 `us_cash_dividend_no_withholding` 分支、`data_ingestion/dividend_model.py::apply_dividend_model`
+> （型別分派）、`shared/models/enums.py::CASH_DIVIDEND_TYPES`。
+> **依據**：owner 裁定 **D35**（完整敘述於 `docs/spec/2026-08-06-broker-import-backlog.md`；
+> `docs/spec/2026-08-06-corporate-actions.md` §8 以 D21 之前提記錄之）、`.claude/rules/domain-ledger.md`
+> （Dividend models）。
 
 ### 6.3 MY 現金（`NET`，`moomoo_my` 之 MY market leg）— 單層淨額降成本
 
@@ -977,7 +1038,8 @@ $$\text{reinvest\_shares} = \frac{\text{net}}{\text{reinvest\_price}}\quad(\text
 
 ### 6.3b 清倉後入帳之現金股利（`CASH` / `NET`）— 列為已實現收益
 
-**規則（2026-07-26 稽核 H2；適用 TW `CASH` 與 MY `NET`）**：現金股利入帳日若落在該
+**規則（2026-07-26 稽核 H2；適用 `CASH_DIVIDEND_TYPES` 全部——TW `CASH`、MY `NET`，以及 P1b 起之美股
+`CASH`，見 §6.2b）**：現金股利入帳日若落在該
 `(account, symbol)` 部位**已歸零之後**（TW／MY 除息在前、發放在後，期間賣光為常態），
 則**已無成本可沖減**，其淨額改記為一列**已實現**（`RealizedRow`，`kind="dividend"`）：
 
@@ -1105,6 +1167,7 @@ $$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displayst
 | 賣出 sell | **+** | `+(quantity×price − fees − tax)`，日期 = `trade_date` |
 | 現金股利（TW `CASH` / MY `NET`） | **+** | `+net`，日期 = 股利日 |
 | **DRIP / STOCK** | **中性** | 不計入（非外部現金流；再投資非 − 流出、股利非 + 流入） |
+| **現金收支（`cash_movements` 全部七種 kind）** | **不計入** | **完全不在流量序列中**（見下方 D1=A） |
 | 期初庫存 opening | **−** | `−original_cost_total`，日期 = **`build_date`**（使期初資本被計入） |
 | 期末市值 | **+** | `Σ price×shares`（各持倉），日期 = `as_of` |
 
@@ -1126,6 +1189,26 @@ $$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displayst
 > 的重組費）永遠不會進入 XIRR；XIRR **刻意維持不變**，使本手冊每一個已錨定的歷史數字都留在原處。
 > 先前本段寫著該費用「改由帳戶層 IRR 呈現」——**該指標（D36）已由業主裁定不做且從未實作**，所以那句
 > 話已刪除而非改寫成「待實作」。這是一個**常設限制**，完整說明見 §4.4.7 限制 2。
+
+> **現金收支一律不進 XIRR——包含 2026-08-13 新增的三種（業主裁決 D1 = 選項 A，2026-08-13）。**
+> 現金收支自此有**七種 kind**（§9.1）；新增的 `INTEREST`（利息收入）、`INTEREST_EXPENSE`（融資利息）、
+> `BROKER_FEE`（券商費用）與既有四種**同樣不是 XIRR 流量**。這不是「尚未接上」，而是一條**明訂的規則**：
+>
+> - **理由（D1=A 的裁定內容）**：XIRR 因此維持為一個**純投資報酬**指標，而現金餘額仍逐筆對得上券商
+>   對帳單（§9.2）。被否決的選項 B（把利息／費用計入流量）會**改變本系統每一個歷史 XIRR 的意義**，
+>   需要一份遷移說明；選項 C（記為相關持股的成本調整）當場否決——這些列多數**沒有 symbol**，無所可附。
+> - **落實方式**：`portfolio/returns.py::xirr_reporting` 的函式簽章**根本不接收 `cash_movements`**，
+>   其流量序列只由 `opening` + `transactions` + `dividends` 構成。故本規則不是靠一個過濾條件維持的，
+>   而是靠**沒有那條輸入線**維持的。
+> - **後果（須明說）**：一整類「真實發生、但對報酬指標不可見」的金額——重組費（D12，§4.4.7 限制 2）、
+>   融資利息、券商費用、利息收入——只在**現金帳與淨值**（§9、§7.6）可見。**沒有第二個指標會看見它們**
+>   （D45 已撤銷帳戶層 IRR）。
+> - **沒有任何數字因此改變**：既然這三種 kind 從未進入流量序列，本手冊每一個已錨定的 XIRR 與壓測
+>   oracle 的每一個期望值都留在原處。
+>
+> 驗證錨點：`portfolio/returns.py::xirr_reporting` 之型別簽章（無 `cash_movements` 參數）為結構性錨點；
+> §4.4.7 已載明「重組費 `WITHDRAW` 不影響 XIRR」目前**無**壓測負向錨點，建議下一輪對抗性對帳一併補上
+> 三種新 kind。
 
 **流量建構範例（`schwab/TSLA`，USD 單幣，各 total 均有錨點）**
 
@@ -1273,7 +1356,8 @@ to_amount` → 隱含匯率 `implied_rate = from_amount / to_amount`（**本位�
 
 實作：`forex/pools.py::average_acquisition_rate` / `acquisition_basis`。取得來源有**兩類**
 （spec 2026-07-30）：`home → foreign` 換匯，以及**帶有 `acq_home_amount` 的外幣現金流入**
-（`cash_movements` 之 DEPOSIT／OPENING／REBATE；WITHDRAW 為處分，不入取得）：
+（`cash_movements` 之 `DEPOSIT`／`OPENING`／`REBATE` 三種**取得型** kind；其餘四種皆不入取得，
+判定式為 `shared/cash_kinds.py::is_fx_acquisition`，完整兩軸表見 §9.1）：
 
 $$\text{avg\_rate} = \frac{\sum \text{from\_amount}\ (\text{home}) + \sum \text{acq\_home\_amount}}{\sum \text{to\_amount}\ (\text{foreign}) + \sum \text{amount}_{\text{有成本}}}\quad(\text{無任何有成本取得則 None})$$
 
@@ -1288,6 +1372,38 @@ $$\text{covered\_ratio} = \frac{\sum \text{amount}_{\text{有成本}}}{\sum \tex
 **不可**用「總餘額 − 無成本額」：該式在餘額跌破無成本額時**變負**，等同重新製造反號假數字。
 覆蓋率恆為 1 時呼叫端**跳過乘法**，故完整覆蓋之帳本與本規格前之引擎**逐位元相同**。
 錨點：`fx.covered_ratio scope = schwab / moomoo_my`（phase1 均 **1**）、`fx.basis_gap`（均 **0**）。
+
+**分母只收「取得」，不收「池內孳生」（2026-08-13，第二軸）。** 分母的成員資格由
+`shared/cash_kinds.py` 的 **`fx_acquisition` 軸**單獨決定，**不是**「非借方」的同義詞：
+
+- **`INTEREST`（利息收入）是一筆 credit，卻不是取得。** 它是**在外幣池「裡面」孳生的收益**，與
+  `domain-ledger.md` 已載明的兩種流入同型——「Sale proceeds and foreign cash dividends are not
+  unbased acquisitions; they keep inheriting the pool average」——故它**沿用池的加權平均匯率**，
+  既不入分子也不入分母。反之若把它當成無成本取得，一個**從未換過任何一筆匯**、只是收到利息的
+  USD 帳戶就會回報 `covered_ratio < 1`，並依 F3 把**現金與股票整個外幣曝險**標為基礎不完整——
+  **在每一個真實帳戶上都響的假警報，比不響更糟**。
+- **借方永遠不是取得**（`WITHDRAW`／`INTEREST_EXPENSE`／`BROKER_FEE`）：處分既不改變均價也不改變
+  覆蓋率（N1）。舊的「`kind == "WITHDRAW"` 才是借方」述詞會讓一筆券商費用以**無成本取得**的身分進入
+  分母，把 `covered_ratio` 往下拉。
+- **因此輸入端拒收「利息／費用的取得成本」**：`data_ingestion/validate.py::resolve_acq_home_amount`
+  在非取得型 kind 上回 `acq_cost_not_an_acquisition`（「利息與費用不是外幣取得，不帶取得成本（沿用
+  資金池平均匯率）」）。這個檢查刻意鍵在**取得軸**而非 `== "WITHDRAW"`：`INTEREST` 是 credit，
+  只查 `WITHDRAW` 會讓成本填得進來，而 `forex/pools.py` 隨後**忽略**它——一個被要求、被儲存、卻
+  不影響任何數字的欄位，比一個拒絕更糟。
+
+> **驗證錨點（兩軸；hermetic）**：`tests/shared/test_cash_kinds.py::test_interest_does_not_dilute_the_coverage_ratio`
+> （DEPOSIT 1,000（成本 32,000）+ INTEREST 7 → `covered_ratio = 1`、`acquired_without_basis = 0`）、
+> `::test_a_fee_is_not_an_acquisition`（+ BROKER_FEE 100 → `acquired_with_basis = 1,000`、
+> `acquired_without_basis = 0`）、`::test_an_unbased_deposit_still_dilutes_the_coverage`（F2 未被破壞：
+> 兩筆 1,000、其一無成本 → `covered_ratio = 0.5`）、`::test_foreign_cash_balance_signs_a_fee_as_a_debit`
+> （`forex/pools.py::foreign_cash_balance` 對 BROKER_FEE 100 回 **−100**）。
+> CSV 門的拒收由 `tests/data_ingestion/test_cash_import.py` 之 `acq_cost_not_an_acquisition` 三列
+> （`INTEREST`／`BROKER_FEE`／`INTEREST_EXPENSE`）錨定。
+> **獨立重算**：壓測 oracle 另行寫死一份自己的 `ACQUIRING_KINDS = {DEPOSIT, OPENING, REBATE}`
+> （`scripts/stress_audit/oracle.py`，**刻意不 import 應用程式的表**——共用同一張表的 oracle 不可能
+> 與它相左，而相左正是它的工作）。**phase-1 場景已於 2026-08-13 登錄此三種 kind**（`schwab` 之 USD 池，
+> ops 50–52），故第二軸現有 `scope` 錨點：`fx.covered_ratio scope = schwab` 在收到 `INTEREST` 之後
+> **仍恰為 1**——本節主張的正是這一點，而它現在有實跑證據，不只是單元測試。
 
 **已驗證範例**
 
@@ -1366,8 +1482,7 @@ attribution 拆解（資產損益 vs 換匯損益），絕不是另外加在總�
 
 | 流量 | 對 (account, ccy) 池之 delta |
 | --- | --- |
-| 存入 deposit / 期初資金 opening（cash movement） | **+ amount**（credit） |
-| 提出 withdraw | **− amount**（debit） |
+| 現金收支 cash movement（**七種 kind**，見下方兩軸表） | **± amount**（正負號由 kind 決定） |
 | 換匯 fx（兩腿） | `from_ccy`：**− from_amount**；`to_ccy`：**+ to_amount** |
 | 買入 buy | **− (quantity×price + fees + tax)**（all-in debit，記於 `quote_ccy` 池） |
 | 賣出 sell | **+ (quantity×price − fees − tax)**（淨額 credit） |
@@ -1379,6 +1494,55 @@ attribution 拆解（資產損益 vs 換匯損益），絕不是另外加在總�
 > movement 的 `opening`（期初資金）是**兩個不同概念**。
 
 `symbol` 未註冊之列會被跳過（與儀表板同一退化規則），不使現金視圖崩潰。
+
+#### 9.1.1 現金收支的七種 kind — 一張表、**兩條正交軸**（2026-08-13）
+
+**金額一律以無號值儲存，方向由 kind 決定。** 自 2026-08-13 起共**七種**，由
+`shared/cash_kinds.py` 這**唯一一張表**規範；`portfolio/cash.py::_movement_sign`（現金池）與
+`forex/pools.py::_is_debit`／`acquisition_basis`（換匯損益）兩個**互不 import** 的計算模組都讀它。
+
+| kind | 中文標籤 | `credit`（是否**增加**池餘額） | `fx_acquisition`（是否進 **`covered_ratio` 分母**，§8.1） | delta |
+| --- | --- | :---: | :---: | --- |
+| `DEPOSIT` | 入金 | ✔ | ✔ | **+ amount** |
+| `OPENING` | 期初（期初資金） | ✔ | ✔ | **+ amount** |
+| `REBATE` | 折讓款 | ✔ | ✔ | **+ amount** |
+| `WITHDRAW` | 出金 | ✘ | ✘ | **− amount** |
+| **`INTEREST`** | 利息（收入） | ✔ | **✘** | **+ amount** |
+| **`INTEREST_EXPENSE`** | 融資利息 | ✘ | ✘ | **− amount** |
+| **`BROKER_FEE`** | 券商費用 | ✘ | ✘ | **− amount** |
+
+**為什麼是兩軸，而不是一個布林值。** 舊述詞是「`kind == "WITHDRAW"` 才是借方，其餘皆為 credit
+且皆為取得」——在每一個非提領 kind 都是取得型 credit 的期間裡它是對的，並且會在這件事不再為真的
+那一刻**靜默失敗**。以舊述詞加入 `BROKER_FEE`，一筆券商費用會**增加**現金餘額，**又**以無成本取得
+的身分把 `covered_ratio` 拉低——**兩個錯誤的金額之記錄，而且都不會拋錯**。
+
+- **`INTEREST` 就是證明一個布林值不夠的那一列**：一筆 **credit，卻不是取得**（理由與假警報的代價
+  見 §8.1）。
+- **反向的組合不存在**：借方永遠不是取得（N1），故表中沒有 `credit=✘, fx_acquisition=✔` 的列。
+- **`REBATE` 維持為取得型**：這是它自 spec 2026-07-30 以來的行為，在此改動它會**靜默移動既有帳本的
+  `covered_ratio`**——一個沒有裁決在背後的金額之記錄變更。
+- **三種新 kind 而非兩種**：把融資利息併入 `BROKER_FEE` 在算術上正確，卻會讓**融資利息在每一個畫面
+  上顯示為「券商費用」**。
+- **註冊有兩處**：`shared/cash_kinds.py` 的表，與 `data_ingestion/validate.py::CASH_MOVEMENT_KINDS`
+  （寫入路徑的可接受集合，`= CASH_KIND_VALUES`）。兩者由測試斷言相等，故「只註冊一半」是測試失敗，
+  而不是一個**正負號被靜默寫錯**的池。
+
+> **驗證錨點（hermetic）**：`tests/shared/test_cash_kinds.py`——`::test_every_kind_has_a_spec`、
+> `::test_two_axes_are_independent`（逐 kind 參數化，即上表）、`::test_a_debit_is_never_an_acquisition`、
+> `::test_debit_kinds_set_matches_the_predicate`、`::test_registration_points_agree`（兩處註冊點相等）、
+> `::test_broker_fee_reduces_the_cash_balance`（BROKER_FEE 100 → 池 **−100**；舊述詞下為 **+100**）、
+> `::test_margin_interest_reduces_the_cash_balance`（INTEREST_EXPENSE 40 → **−40**）、
+> `::test_interest_earned_increases_the_cash_balance`（INTEREST 7 → **+7**）。
+> CSV 門之拒收：`tests/data_ingestion/test_cash_import.py` 之三列 `acq_cost_not_an_acquisition`（見 §8.1）。
+> **已知測試缺口（就地清點 2026-08-13）**：`cash_import.py` 的別名表已收錄五個新 zh 標籤
+> （`利息`／`利息收入`／`融資利息`／`利息支出`／`券商費用`），但
+> `::test_zh_kind_labels_are_accepted` **只涵蓋 `入金`／`出金`／`期初資金`／`折讓款` 四個舊標籤**——
+> 新別名目前**無任何測試**，建議補上。
+> **壓測 `scope` 錨點**（2026-08-13 加入）：三筆皆記於 `schwab` 的 **USD** 池（唯一能觀察到第二軸的
+> 位置，因該池背後有兩筆換匯）——`cash.balance scope = schwab|USD` 與
+> `fx.covered_ratio scope = schwab`。oracle 的 `DEBIT_KINDS`／`ACQUIRING_KINDS`
+> （`scripts/stress_audit/oracle.py`）是**獨立於 app 的表**另寫的，故此處的一致並非同一份定義自我確認。
+> **不進報酬指標**：七種 kind **全部**不是 XIRR 流量（業主裁決 **D1 = A**，2026-08-13；見 §7.2）。
 
 ### 9.2 對帳單（running-balance statement）與同日排序
 
@@ -1416,6 +1580,21 @@ balance**（空池為 0）。
 - **交易門之軟警告（soft）**：`api/routers/input_center.py::_cash_overdraft_issue` — **僅當**帳戶已啟用現金
   追蹤（≥1 筆 cash movement）**且**該筆買入會使該標的現金池 < 0 時，附一則**警告 issue（永不硬阻擋）**。
   未追蹤現金的帳戶不會觸發。
+
+**護欄只看 `WITHDRAW`，且刻意不隨新 kind 擴張（2026-08-13）。** §9.1.1 把 `INTEREST_EXPENSE` 與
+`BROKER_FEE` 列為**借方**，但兩者**不進** `running_min` 提領護欄（audit C3），也不觸發 N1 的外幣提領
+提示——兩者仍**只**鍵在 `WITHDRAW`：
+
+- **一筆提領是使用者的「意圖」**，在它被寫入之前擋下一個會透支的意圖，攔的是資料輸入錯誤；
+- **一筆費用或融資利息是「已發生的事實之記錄」**，而**融資帳戶本來就會有負的現金餘額——那正是融資
+  的定義**。擋下它等於拒絕記錄對帳單上確實發生的事。
+- 據此，credit 型的四種（`DEPOSIT`／`OPENING`／`REBATE`／`INTEREST`）進池時**不做任何餘額檢查**
+  （`validate.py`：`kind != "WITHDRAW"` 即直接回空 issue 清單）。
+
+驗證錨點：`tests/data_ingestion/test_cash_import.py::test_credits_need_no_balance_guard`、
+`::test_withdraw_over_balance_is_hard_and_writes_nothing`、
+`::test_backdated_withdraw_before_its_funding_is_blocked`（date-aware）、
+`::test_two_withdrawals_that_only_jointly_overdraft_are_both_caught`。
 
 **範例與現行覆蓋**：`running_min` 硬護欄一旦偵得某池於**某時點**會降至負且未 `ack_negative`，即回 **422
 `negative_cash`**（訊息形如 `此筆會使 … 現金於某時點降至 …`）。合併後拓樸之當前壓測場景**未觸發** `negative_cash`
@@ -1598,6 +1777,8 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E22 | **反向分割 + 零股現金**（CA2 1-for-10 → 70.5 股；0.5 股普通賣出 realized −20.2127…979） | §4.4.5(e) | `corp.anchor.split_reverse`；`realized.realized tw_broker/CA2@2026-03-12` |
 | E23 | **比例精確性**（CAR `210 × 1 / 3 = 70`，賣光 70 股得 201） | §4.4.5(f) | `corp.anchor.split_ratio_exact`；`corp.sell_exact_ratio_accepted` |
 | E24 | **未能套用之行動之退化**（CAX 股數 −500 不變、旗標 True；XIRR 全投組空白且原因指名該列） | §4.4.6／§5.3／§7.2 | `corp.anchor.e5_source_unmoved`；`corp.anchor.e5_source_flagged`；`corp.xirr_blanked_by_unapplied`；`corp.xirr_reason_names_row` |
+| E25 | **現金收支七種 kind／兩軸**（`BROKER_FEE` 100 → 池 **−100**（舊述詞為 +100）；`DEPOSIT` 1,000（成本 32,000）+ `INTEREST` 7 → `covered_ratio` **1**） | §9.1.1／§8.1 | `cash.balance scope = schwab|USD`、`fx.covered_ratio scope = schwab`（phase-1 ops 50–52，2026-08-13 加入）；單元 `tests/shared/test_cash_kinds.py`（`test_broker_fee_reduces_the_cash_balance`／`test_interest_does_not_dilute_the_coverage_ratio`） |
+| E26 | **美股現金股利（P1b）**（`schwab/AAPL` `CASH` gross 100／withholding 30 → `net` **70**、issue 為空；空白預扣 → 軟性追問且仍記 `net = 100`） | §6.2b | `holding.dividend_portion scope = schwab|AAPL`（phase-1，2026-08-13 加入之 `CASH` 股利）；單元 `tests/data_ingestion/test_dividends.py::test_us_cash_dividend_is_not_a_mismatch`／`::test_us_cash_dividend_without_withholding_asks` |
 
 ### 12.2 詞彙表（中文 ↔ 英文欄位）
 
@@ -1621,6 +1802,10 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 稽核前值 | `ledger_audit.before_json` | §10.3 |
 | 期初庫存 | `opening_inventory` | §2／§9.1 |
 | 期初資金（現金移動） | cash movement `opening` | §9.1 |
+| 現金收支種類（七種） | `CashKind` / `CASH_KIND_VALUES` / `CASH_MOVEMENT_KINDS` | §9.1.1 |
+| 借方（減少池餘額）種類 | `DEBIT_KINDS` / `is_debit` / `movement_sign` | §9.1.1 |
+| 外幣取得軸（進 `covered_ratio` 分母） | `fx_acquisition` / `is_fx_acquisition` | §8.1／§9.1.1 |
+| 利息收入／融資利息／券商費用 | `INTEREST` / `INTEREST_EXPENSE` / `BROKER_FEE` | §9.1.1 |
 | 單一持股權重 | `weight` | §7.3 |
 | 產業／市場配置權重 | `sector_weight` / `weights` | §7.3 |
 | 幣別視圖原幣市值 | `by_currency_value` | §7.3 |
@@ -1655,6 +1840,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.6` | 2026-08-01 | **外幣現金流入之成本基礎 + 宣告式賣空**（owner 裁定 2026-07-30／07-31；基線 `v0.1.25`）。① **§8.1／§8.3 改寫**：取得來源由「僅換匯」擴為「換匯 **+** 帶 `acq_home_amount` 之外幣現金流入」；**存家幣金額、不存匯率**（匯率是平均值，§1.3 禁止其為權威；顯示用匯率讀取時計算）。新增 **`covered_ratio`**（有成本取得 ÷ 全部取得），流出**按比例**分攤——禁用「總餘額 − 無成本額」（餘額跌破時翻負，等同重製反號假數字）；該比率**同時**縮放現金與股票**兩條腿**（`avg_rate` 本身出自有成本母體，只縮放現金腿會漏標誤差更大的股票腿，實測差 +42,359 TWD）。`covered_ratio` 恆為字面 1 時呼叫端跳過乘法，故完整覆蓋之帳本**與本版前逐位元相同**。`foreign_cash` 現亦計入外幣現金流入／流出，故對同一 (account, foreign ccy) **恆等於 §9 營運現金池**（先前刻意分歧，audit C9），差異僅存於成本基礎。② **新增 §4.3 宣告式賣空**：`short_sale`（預設 false，**永不推斷**）；宣告賣出先出清長倉再開空倉（持有淨價款），買進先回補再入長倉，長／空互斥故部位以**單一帶號股數**表達；回補損益 `(short_avg − 買回每股全額成本) × 回補股數`，記於**回補日**，`kind="short_cover"`（進稅務資本利得表）。比率須除 `abs(cost_total)`、`fully_recovered` 須以 `not short_open` 設閘（放空基礎恆為負）。**放空期間之股利不可入帳**（放空方需支付；嚴格路徑 raise `UnbookableLedgerError`，儀表板路徑跳過並標記 `unbookable_dividend`）。已裁決之限制：`gross_invested` 不含放空資金、純放空 XIRR 反映融資利率、權重採淨曝險慣例。③ **賣超防呆改為日期感知**（`shares_through(交易日)`，對稱於現金之 `running_min`）、`oversold` 改為**黏性**（後續買進不清除，因被丟棄的成本基礎不會回來）。驗證錨點：`tw_broker/2609` 完整放空生命週期（見 §4.3 表）、`fx.covered_ratio/basis_gap/foreign_cash`；壓測 ops 69→**77**、斷言 1,088→**1,806**、fail=0，phase 2（線上 demo）1,192 斷言 fail=0。同 change set 重生英文鏡像。 |
 | `v1.7` | 2026-08-11 | **公司行動（SPLIT／EXCHANGE／SPINOFF）**（owner 裁定 D1–D39，規格 `docs/spec/2026-08-06-corporate-actions.md`；基線 `v0.1.28 + feat/corporate-actions`）。① **新增 §4.4**（置於 §4 成本基礎之下、§4.3 之後，**不重新編號任何既有章節**——§7.5 於同一句中以現行編號指稱「§5 已實現／未實現損益」與「§7 總報酬」，重新編號會使該指稱與全庫既有的 §5.1／§7.2 等引用同時失效）：帳本列與**守恆律**（Σ`original_total`／Σ`adjusted_total`／Σ`dividend_portion`／`gross_invested` 皆不變；價值腿**僅** SPLIT）＋兩個刻意例外（零股現金 = 普通賣出、重組費 = `WITHDRAW`）；**比例為兩個正整數**且 `qty × to ÷ from` **先乘後除**（實測 `210×1/3 = 70` vs `210×(1/3) = 69.999…9`，後者會被 `validate.py` 的裸 `>` 判為賣超 → STICKY 丟棄基礎）；**三式與 `_Position` 九欄位移轉表逐字引用規格 §4.1–§4.4**（手冊不以自己的話重述公式）；D21 子公司回本進度須標示承接來源；**六個已驗證工作範例**（§12.1 之 E18–E24）；**邊界矩陣 E1–E24**（含賣超／宣告式賣空之交互 E3/E4/E5/E18/E22 與 E24）；價格基礎（`close_raw` / `split_basis`、讀取時再表述、**僅 SPLIT**）。② **§1.4／§1.1／§12.4：永久帳本由四本改為五本**（新增 `corporate_actions`）——遺漏它重算，會得到一個「看似正常、卻按行動前股數計價」的金額。③ **§4.1 同日優先序由 `0/1/2/3` 改為 `EventPriority` 之 `0/10/20/30/40`**，公司行動插入於 `OPENING` 與 `BUY` 之間；**相對順序未變**，故不含行動之帳本逐位元不變。④ **交叉引用**：§5.1（行動不產生 `RealizedRow`）、§5.3（`unbookable_action` 為第三種誠實退化）、§7.1（不動 `gross_invested`）、§7.2（行動非現金流；未套用之行動使 XIRR **全投組**空白且原因須指名帳戶／標的／日期）。⑤ **兩項限制**：**D11**（`volume` 不做還原）為**長期**限制；**D12**（重組費）**非**永久盲點——D36 裁定 XIRR **刻意不動**、另加**帳戶層 IRR** 於 `portfolio/twr.py`，本版就地查核該檔仍只有 TWR 指數／基準疊圖，故記為「**待 D36**」。⑥ **D34：現金＋股票混合併購為硬性排除**，舊規格的「兩列作法」已撤銷且**不得**作為程序出現（`CORPORATE_ACTION(10)` 先於 `SELL(30)` → EXCHANGE 歸零來源 → 同日 SELL 落在 0 股部位 → STICKY 賣超）；最接近的可表達作法記為**非官方變通**並載明其不精確之處。⑦ 驗證基礎更新為當前實跑（phase-1 **118 ops／3,791 斷言／0 fail**；phase 2 **1,192／0 fail**），公司行動錨點 `corp.*` 共 23 項全數通過。同 change set 重生英文鏡像。**除本條外無任何既有公式或會計定義變更。** |
 | `v1.7a` | 2026-08-11 | **D45 — D36（帳戶層 IRR）由業主裁定不做。** §4.4.7 限制 2 與 §7 XIRR 註記皆改寫:重組費（D12）先前被記載為「對 XIRR 不可見、但帳戶層 IRR 會看見」，該第二個指標已撤銷且從未實作，故 D12 回復為**常設限制**——重組費在本系統現有的每一個報酬指標中都看不見，只在現金帳與淨值可見。**沒有任何數字改變**（XIRR 本來就不含現金收支），改的是限制的陳述:承諾一個不會到來的修正，比把盲點講清楚更糟 |
+| `v1.8` | 2026-08-13 | **現金收支七種 kind／兩軸表 + 美股現金股利（P1b）**（業主裁決 **D1 = A**，2026-08-13；D35，2026-08-10）。① **新增 §9.1.1**：現金收支由四種增為**七種**（新增 `INTEREST` 利息、`INTEREST_EXPENSE` 融資利息、`BROKER_FEE` 券商費用），由 `shared/cash_kinds.py` 這唯一一張表以**兩條正交軸**規範——`credit`（是否增加池餘額）與 `fx_acquisition`（是否進 `covered_ratio` 分母）。舊述詞「`kind == "WITHDRAW"` 才是借方、其餘皆為取得型 credit」會讓一筆 `BROKER_FEE` **增加**現金餘額**又**拉低 `covered_ratio`（兩個錯誤的金額之記錄且皆不拋錯）；`INTEREST` 即是證明一個布林值不夠的那一列——**credit 但非取得**。② **§8.1 增訂第二軸之規範**：分母只收取得型 kind，池內孳生之收益（利息，同 sale proceeds 與外幣現金股利）**沿用池均價**；否則一個從未換匯、僅收到利息的 USD 帳戶會回報 `covered_ratio < 1`，並依 F3 把現金與股票整個曝險標為基礎不完整（**在每個真實帳戶上都響的假警報**）。輸入端據此以 `acq_cost_not_an_acquisition` 拒收利息／費用的取得成本。③ **§7.2 增訂明訂規則**：**七種 kind 全部不進 XIRR**（D1=A）——`xirr_reporting` 的簽章根本不收 `cash_movements`，流量序列仍只由 `opening` + `transactions` + `dividends` 構成；被否決的選項 B 會改變每一個歷史 XIRR 的意義，選項 C 因多數列**沒有 symbol** 而當場否決。④ **§9.3 明訂護欄不擴張**：`running_min` 提領護欄與 N1 外幣提領提示仍**只**鍵在 `WITHDRAW`——提領是使用者的**意圖**（值得擋），費用／融資利息是**已發生事實之記錄**，且融資帳戶本來就會有負現金餘額。⑤ **新增 §6.2b**：`drip_us` 模型自 P1b 起同時受理 `DRIP` 與 `CASH`，移除每列的 `dividend_type_mismatch` 軟阻擋；美股現金股利與 TW／MY 同式降成本（**D35**，本節只錨定公式不重新裁決），**預扣由使用者填寫而非 `gross × 0.30`**（券商實扣經其自身分位進位，與乘積不會逐分相符），空白預扣於 `drip_us` 上以軟性 `us_cash_dividend_no_withholding` 追問但**不改數**。§6 前言與 §6.3b 同步標明其適用範圍為 `CASH_DIVIDEND_TYPES` 全體。⑥ **§4.4.7 限制 2 就地更新**：原文「只有四種 kind、只有 `WITHDRAW` 是借方（`api/routers/cash.py::_KINDS`）」已失效（該常數不存在），改引 `CASH_MOVEMENT_KINDS`；D12 之結論**不變**且由 D1=A 再次確認。⑦ 新增 §12.1 之 **E25／E26**、§12.2 四則詞彙。**沒有任何既有數字改變**：三種新 kind 從未進入任何報酬流量序列，`covered_ratio` 恆 1 之帳本仍跳過乘法，故本手冊每一個已錨定的工作範例與壓測 oracle 的每一個期望值都留在原處。⑧ **壓測場景同版補齊**：phase-1 新增 ops 50–52（`schwab` USD 池之 `INTEREST`／`INTEREST_EXPENSE`／`BROKER_FEE`）與一筆 `schwab/AAPL` `CASH` 股利，實跑 **122 ops、3,799/3,799、0 fail**；oracle 之 `DEBIT_KINDS`／`ACQUIRING_KINDS` 係獨立於 app 的表另寫，故一致非自我確認。此前之「只有 hermetic 錨點」狀態已解除。同 change set 重生英文鏡像。 |
 
 ### 12.4 如何仲裁一個爭議金額
 

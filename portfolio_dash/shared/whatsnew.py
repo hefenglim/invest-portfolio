@@ -66,6 +66,59 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.29 (broker import) — NOT YET SHIPPED; hidden until __version__ reaches it ----
+    # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
+    # delivery date and this has not been delivered; it is set at ship time, in the same edit
+    # as the version bump and the CHANGELOG heading.
+    Feature(
+        version="0.1.29",
+        id="schwab-converter",
+        title="券商對帳單可以直接轉成匯入檔了（先支援 Charles Schwab）",
+        desc="以前一筆一筆手動輸入，一份幾年份的對帳單要輸到天亮。現在跑一次轉換器，"
+        "它會把配息的三列合成一筆、把互相抵銷的內部帳列丟掉、把公司行動的兩條腿配成一列，"
+        "產出六種可以直接上傳的匯入檔。它也會拒絕做它做不到的事：對不上的數字會擋下整批"
+        "（不做一半），檔案裡問不出來的資訊（例如只印出股數變化、沒印比例的分割）"
+        "留空白給你填，不會替你猜一個看起來合理的數字",
+        href="trades.html#tab-csv",
+        area="輸入 → CSV 匯入",
+        target="#tab-csv",
+    ),
+    Feature(
+        version="0.1.29",
+        id="cash-kinds-interest-fee",
+        title="現金收支新增「利息」「融資利息」「券商費用」三種",
+        desc="對帳單上的利息收入、融資利息與券商收的雜費，以前沒有地方可以記。"
+        "三種都不列入 XIRR（它們不是投資決策的現金流），"
+        "而且利息雖然是「收到錢」卻不算一筆換匯取得——它是在外幣資金池裡面長出來的，"
+        "沿用池子既有的平均匯率。少了這條，一個從沒換過匯、只是收到利息的美元帳戶"
+        "會被誤標成「成本基礎不完整」",
+        href="cash.html",
+        area="現金 → 新增收支",
+        target="#cm-kind-int",
+    ),
+    Feature(
+        version="0.1.29",
+        id="us-cash-dividend",
+        title="美股也可以記現金股利了，預扣稅金額可以自己改",
+        desc="美股帳戶以前只收 DRIP（股利再投入），但同一檔股票本來就可能這一季配現金、"
+        "下一季再投入，於是每一筆現金配息都被擋下來說型態不符。現在兩種都收。"
+        "預扣稅也從「自動算 30%」改成可以自己填——券商實際扣的金額有它自己的進位方式，"
+        "跟乘出來的數字往往差幾分錢，欄位鎖死反而逼你在別的地方填假數字",
+        href="trades.html#tab-div",
+        area="輸入 → 股利 → 美股",
+        target="#d-drip",
+    ),
+    Feature(
+        version="0.1.29",
+        id="import-provenance",
+        title="同一份檔案重複匯入不會再變成兩筆，也可以整批刪掉",
+        desc="以前不小心把同一個 CSV 上傳兩次，帳本就多一份，而且要一列一列刪回去。"
+        "現在每次匯入都會記下它來自哪個檔案、寫了哪些列：重覆的列直接跳過並告訴你跳了幾筆，"
+        "整批匯入也可以一次撤銷。這是敢對真實對帳單按下匯入的前提",
+        href="trades.html#tab-csv",
+        area="輸入 → CSV 匯入",
+        target="#tab-csv",
+    ),
     # --- v0.1.28 (share reconciliation) ---------------------------------------------------
     Feature(
         version="0.1.28",

@@ -11,9 +11,10 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.7` (2026-08-11)
+> **Version**: `v1.8` (2026-08-13)
 > **Code baseline**: `v0.1.28 + feat/corporate-actions` (corporate actions
-> SPLIT / EXCHANGE / SPINOFF)
+> SPLIT / EXCHANGE / SPINOFF; incl. the 2026-08-13 **seven cash-movement kinds / two-axis
+> table** and the **US cash dividend, P1b**)
 > **Arbitration status**: **Formally signed off by the owner (2026-07-15)**; effective
 > as the site's single **arbitration standard** for any money dispute **from version
 > v0.1.19 onward**.
@@ -32,8 +33,8 @@
 > **Verification basis**: every numeric worked example in this manual is drawn from — or
 > reconciled against — the **resident live stress run**: a set of adversarial
 > reconciliation assertions (`scripts/stress_audit/evidence/oplog.jsonl` +
-> `scripts/stress_audit/evidence/assertions.jsonl`). **Counted in place for v1.7**:
-> phase-1 **118 ops, 3,791/3,791 passing, 0 fail**; phase 2 (live demo) **1,192
+> `scripts/stress_audit/evidence/assertions.jsonl`). **Current run for v1.8**:
+> phase-1 **122 ops, 3,799/3,799 passing, 0 fail**; phase 2 (live demo) **1,192
 > assertions, 0 fail**. Each numeric example is tagged with its `scope` verification
 > anchor; scenario-dependent terminal values also carry their phase (`phase1:final`,
 > `phase1:corp_applied` etc.). The manual author fabricated no numbers. **Note**: the
@@ -962,13 +963,23 @@ limitation**, not a defect; the correct future fix is its own `*_raw` column car
 factor.
 
 **(Limitation 2) D12 — the reorganisation fee is invisible to EVERY return metric this system
-has. This is a standing limitation.** The only bookable cash-movement kinds are `DEPOSIT` /
-`WITHDRAW` / `OPENING` / `REBATE` (`api/routers/cash.py::_KINDS`), and only `WITHDRAW` is a
-debit (`portfolio/cash.py::_movement_sign`). **Ruling: book the fee as a `WITHDRAW` with a
-`note`.** The consequences must be stated: it reads in the cash statement as *the owner took
-money out*; it reduces the FX pool's exposure without recognising realized FX (§8,
-`domain-ledger.md` N1); and `portfolio/returns.py::xirr_reporting` builds its flow series from
-`opening` + `transactions` + `dividends` **only**, so **cash movements never reach XIRR**.
+has. This is a standing limitation.** There are **seven** bookable cash-movement kinds —
+`DEPOSIT` / `WITHDRAW` / `OPENING` / `REBATE` / `INTEREST` / `INTEREST_EXPENSE` /
+`BROKER_FEE` (`data_ingestion/validate.py::CASH_MOVEMENT_KINDS` =
+`shared/cash_kinds.py::CASH_KIND_VALUES`), of which **three are debits**: `WITHDRAW`,
+`INTEREST_EXPENSE`, `BROKER_FEE` (`portfolio/cash.py::_movement_sign` → the same one table;
+two-axis table in §9.1.1). (**Updated in place 2026-08-13**: this used to say "only four
+kinds, and only `WITHDRAW` is a debit", citing `api/routers/cash.py::_KINDS` — that constant
+no longer exists, and the predicate has been replaced by §9.1.1's table.)
+**Ruling: book the fee as a `WITHDRAW` with a `note`.** The consequences must be stated: it
+reads in the cash statement as *the owner took money out*; it reduces the FX pool's exposure
+without recognising realized FX (§8, `domain-ledger.md` N1); and
+`portfolio/returns.py::xirr_reporting` builds its flow series from `opening` + `transactions`
++ `dividends` **only**, so **cash movements never reach XIRR** — reconfirmed and promoted to
+an explicit rule for the three new kinds by owner ruling **D1 = A** on 2026-08-13 (§7.2).
+**The three new kinds do not shrink this blind spot**: a `BROKER_FEE` is likewise an amount
+that really happened and is invisible to every return metric — it can merely now be booked
+under its own name instead of disguised as a withdrawal.
 
 > **Rewritten 2026-08-11 (D45).** The previous version said this was "no longer a permanent
 > blind spot", on the ground that D36 would add a **whole-account IRR** in `portfolio/twr.py`
@@ -1157,7 +1168,10 @@ Verification anchor: `holding.unrealized_pnl / holding.market_value schwab|TSLA`
 Implementation: `data_ingestion/dividend_model.py::apply_dividend_model` (derives
 withholding / net / reinvest_shares) + the dividend branch of `cost_basis.py::build_book`.
 In the same-day priority, dividend sorts last (see §4.1). `CASH_DIVIDEND_TYPES = {CASH,
-NET}` (TW cash + MY single-tier net share the same "cost-reduction" definition).
+NET}` (TW cash + MY single-tier net share the same "cost-reduction" definition; **from P1b
+(2026-08-13) a US cash distribution is also booked as `CASH` and follows the same formula**,
+see §6.2b — this chapter is still **three models**, the `drip_us` model simply now accepts
+both the `DRIP` and the `CASH` type).
 
 ### 6.1 TW Cash (`CASH`, `tw_broker`) — Cost Reduction
 
@@ -1188,7 +1202,73 @@ Verification anchor: `ledger.div.gross/net` (`schwab|MSFT`),
 `holding.dividend_portion schwab|MSFT = 0.00`, `holding.shares schwab|MSFT`.
 
 `US_WITHHOLDING = 0.30` applies to both US-stock legs, Schwab and `moomoo_my`'s US market
-leg (W-8BEN).
+leg (W-8BEN). **That 30% product is derived automatically for the `DRIP` type only**; a US
+cash distribution that was not reinvested is §6.2b.
+
+### 6.2b US Cash Dividend (`CASH` on `drip_us`; P1b, 2026-08-13) — Same Cost-Reduction Formula as TW/MY Cash
+
+DRIP is the US account's **default mechanism, not its only one**: a real broker export
+carries more dividend rows than reinvest rows, and the difference is exactly the
+**distributions that were not reinvested**. P1b admitted `CASH` into `drip_us`'s accepted
+types in `dividend_import.py::_MODEL_ALLOWED_TYPES` (`{"DRIP", "CASH"}`), **removing the
+per-row `dividend_type_mismatch` soft confirmation** that used to stand between a statement
+and the ledger.
+
+**There is no new accounting rule** (owner ruling **D35**, 2026-08-10; this section anchors
+the formula, it does not re-decide it): `CASH` falls into `CASH_DIVIDEND_TYPES`
+(`shared/models/enums.py`), so it follows the **same formula** as §6.1 TW cash and §6.3 MY
+single-tier net:
+
+$$\text{net} = \text{gross} - \text{withholding}\qquad
+\text{adjusted\_total} \mathrel{-}= \text{net}$$
+
+Booking it as an income line instead would put **two dividend accounting models in one
+ledger**, and `dividend_portion` plus §6.4's payback progress / dividend-recovery ratio would
+mean different things per market **on the same screen** — which is exactly what the
+one-definition discipline exists to prevent.
+
+**Withholding is typed by the user, not derived from `gross × 0.30`.**
+`apply_dividend_model` dispatches on the **dividend TYPE**, not on the account's model:
+`DRIP` takes §6.2's `gross × 0.30`, while `CASH` takes **the recorded withholding**
+(blank `withholding` → **0**, `net = gross`). This is deliberate: the broker's actual
+withheld amount goes through its own cent rounding and **will not match the product
+`gross × 0.30` cent for cent**; overwriting a number the user copied off a statement with a
+computed product replaces a **number of record** with a derivation.
+
+**But a blank withholding on `drip_us` is questioned (softly).** A US distribution under
+W-8BEN normally carries 30% withholding; leaving `withholding` blank makes `net = gross`,
+which **over-reduces `adjusted_total`** and under-reports the position's unrealized gain for
+its whole life. So a `CASH` row on a `drip_us` account with no `withholding` raises a soft
+`us_cash_dividend_no_withholding` (`needs_confirm`, **not** a hard block — a
+withholding-free US distribution genuinely exists, e.g. a return of capital), and **the row
+still books what it says it books** (`withholding = 0`, `net = gross`): the warning does not
+silently alter it. The question is bound to the **`drip_us` model**, not to the `CASH` type —
+a TW cash dividend legitimately has none and must not be asked.
+
+`NET` (MY single-tier) on `drip_us` is **still** a `dividend_type_mismatch` (the merged
+dual-market guard, Batch B F01). A US cash dividend paid after the position closed follows
+**§6.3b** exactly as TW/MY does (booked as one `RealizedRow(kind="dividend")`) — that branch
+keys on `CASH_DIVIDEND_TYPES`, not on the market.
+
+> **Verification anchors**: hermetic regressions in
+> `tests/data_ingestion/test_dividends.py` —
+> `::test_us_cash_dividend_is_not_a_mismatch` (`schwab/AAPL` `CASH` gross 100 / withholding
+> 30 → `net = 70`, and **no issues at all**), `::test_us_cash_dividend_without_withholding_asks`
+> (blank withholding → soft `us_cash_dividend_no_withholding`, payload still
+> `withholding = 0` / `net = 100`), `::test_tw_cash_dividend_is_not_asked_about_withholding`
+> (TW cash is not questioned), `::test_csv_dividend_type_market_coherent_has_no_mismatch`
+> (`DRIP` still carries no mismatch).
+> **This section currently has NO stress (`scope`) anchor** — every US dividend in the
+> phase-1 scenario is still a DRIP; the next adversarial reconciliation round should add a
+> `schwab` cash dividend so its `dividend_portion` is anchored.
+> **Implementation**: `data_ingestion/dividend_import.py::_MODEL_ALLOWED_TYPES`
+> (`drip_us: {"DRIP","CASH"}`) and its `us_cash_dividend_no_withholding` branch,
+> `data_ingestion/dividend_model.py::apply_dividend_model` (type dispatch),
+> `shared/models/enums.py::CASH_DIVIDEND_TYPES`.
+> **Basis**: owner ruling **D35** (written up in full in
+> `docs/spec/2026-08-06-broker-import-backlog.md`; recorded in
+> `docs/spec/2026-08-06-corporate-actions.md` §8 as D21's precondition),
+> `.claude/rules/domain-ledger.md` (Dividend models).
 
 ### 6.3 MY Cash (`NET`, `moomoo_my`'s MY market leg) — Single-Tier Net Cost Reduction
 
@@ -1201,7 +1281,8 @@ equal the cumulative dividend total — cross-reference §4.1 proportional remov
 
 ### 6.3b Cash Dividend Paid After the Position Closed (`CASH` / `NET`) — Realized Income
 
-**Rule (audit H2, 2026-07-26; applies to TW `CASH` and MY `NET`)**: when a cash dividend's
+**Rule (audit H2, 2026-07-26; applies to ALL of `CASH_DIVIDEND_TYPES` — TW `CASH`, MY `NET`,
+and from P1b the US `CASH` of §6.2b)**: when a cash dividend's
 payment date falls **after** its `(account, symbol)` position has already reached zero
 shares (TW/MY pay weeks after the ex-date, so selling out in between is ordinary), there is
 **no cost basis left to reduce**, and the net is booked as one **realized** row
@@ -1383,6 +1464,7 @@ value at the **current spot**. Cash-flow signs:
 | sell | **+** | `+(quantity×price − fees − tax)`, date = `trade_date` |
 | cash dividend (TW `CASH` / MY `NET`) | **+** | `+net`, date = dividend date |
 | **DRIP / STOCK** | **neutral** | not included (not an external cash flow; reinvest is not a − outflow, dividend not a + inflow) |
+| **cash movements (all seven `cash_movements` kinds)** | **not included** | **absent from the flow series entirely** (see D1=A below) |
 | opening inventory | **−** | `−original_cost_total`, date = **`build_date`** (so opening capital is counted) |
 | terminal market value | **+** | `Σ price×shares` (each holding), date = `as_of` |
 
@@ -1411,6 +1493,35 @@ terminal value can be formed → returns `None` (no partial degradation); no sig
 > whole-account IRR instead" — **that metric (D36) was retired by the owner and never
 > implemented**, so the sentence is deleted rather than softened to "pending". It is a
 > **standing limitation**; full treatment in §4.4.7, limitation 2.
+
+> **No cash movement enters XIRR — including the three added on 2026-08-13 (owner ruling
+> D1 = option A, 2026-08-13).** There are now **seven** cash-movement kinds (§9.1.1); the new
+> `INTEREST` (interest earned), `INTEREST_EXPENSE` (margin interest) and `BROKER_FEE` are **no
+> more an XIRR flow than the existing four**. This is not "not wired up yet" — it is an
+> **explicit rule**:
+>
+> - **Why (the content of ruling D1=A)**: XIRR stays a **pure investment-return** metric while
+>   the cash balance still reconciles row by row to the broker statement (§9.2). The rejected
+>   option B (include interest/fees as flows) would **change the meaning of every historical
+>   XIRR in this system** and would need a migration note; option C (book them as a cost-basis
+>   adjustment on the related holding) was rejected on sight — most of these rows **have no
+>   symbol**, so there is nothing to attach them to.
+> - **How it is enforced**: `portfolio/returns.py::xirr_reporting` **does not take
+>   `cash_movements` in its signature at all**; its flow series is built from `opening` +
+>   `transactions` + `dividends` only. The rule is therefore held by **the absence of the input
+>   line**, not by a filter condition someone could forget.
+> - **The consequence, stated plainly**: a whole class of amounts that really happened but are
+>   invisible to the return metrics — the reorganisation fee (D12, §4.4.7 limitation 2), margin
+>   interest, broker fees, interest earned — is visible only in the **cash ledger and net
+>   worth** (§9, §7.6). **No second metric sees them** (D45 retired the whole-account IRR).
+> - **No number changes because of this**: since these three kinds never entered the flow
+>   series, every anchored XIRR in this manual and every stress-audit oracle expectation stays
+>   exactly where it is.
+>
+> Verification anchor: the type signature of `portfolio/returns.py::xirr_reporting` (no
+> `cash_movements` parameter) is the structural anchor. §4.4.7 already records that "a
+> reorganisation-fee `WITHDRAW` does not move XIRR" has **no** negative stress anchor; the next
+> adversarial round should add one covering the three new kinds too.
 
 **Flow-construction example (`schwab/TSLA`, single-currency USD, each total has an
 anchor)**
@@ -1647,8 +1758,9 @@ weighted-average acquisition rate**. The Schwab USD pool is anchored in **TWD**;
 
 Implementation: `forex/pools.py::average_acquisition_rate` / `acquisition_basis`. There are
 **two** acquisition sources (spec 2026-07-30): `home → foreign` conversions, and **foreign
-cash INFLOWS that carry an `acq_home_amount`** (`cash_movements` DEPOSIT/OPENING/REBATE;
-WITHDRAW is a disposal and is not an acquisition):
+cash INFLOWS that carry an `acq_home_amount`** (`cash_movements`'s three **acquiring** kinds
+`DEPOSIT` / `OPENING` / `REBATE`; the other four never enter an acquisition — the predicate is
+`shared/cash_kinds.py::is_fx_acquisition`, full two-axis table in §9.1.1):
 
 $$\text{avg\_rate} = \frac{\sum \text{from\_amount}\ (\text{home}) + \sum \text{acq\_home\_amount}}{\sum \text{to\_amount}\ (\text{foreign}) + \sum \text{amount}_{\text{with basis}}}\quad(\text{None when no acquisition carries a cost})$$
 
@@ -1669,6 +1781,52 @@ removes. When the ratio is exactly 1 the caller **skips the multiply**, so a ful
 ledger is **byte-identical** to the pre-spec engine.
 Anchors: `fx.covered_ratio scope = schwab / moomoo_my` (both **1** in phase1);
 `fx.basis_gap` (both **0**).
+
+**The denominator admits ACQUISITIONS only, never income arising inside the pool (2026-08-13,
+the second axis).** Membership of the denominator is decided by the **`fx_acquisition` axis**
+in `shared/cash_kinds.py` alone — it is **not** a synonym for "not a debit":
+
+- **`INTEREST` (interest earned) is a credit that is NOT an acquisition.** It is income
+  arising **inside** the foreign pool, the same shape as the two inflows `domain-ledger.md`
+  already names — *"Sale proceeds and foreign cash dividends are not unbased acquisitions;
+  they keep inheriting the pool average"* — so it **inherits the pool's weighted-average
+  rate** and enters neither numerator nor denominator. Counting it as an unbased acquisition
+  would make a USD account that **never converted a single cent** report `covered_ratio < 1`
+  merely for having earned interest, and flag the **whole** foreign exposure — cash *and*
+  stocks (F3) — as basis-incomplete. **A false alarm on every real account is worse than no
+  alarm.**
+- **A debit is never an acquisition** (`WITHDRAW` / `INTEREST_EXPENSE` / `BROKER_FEE`): a
+  disposal changes neither the average nor the coverage (N1). Under the old
+  `kind == "WITHDRAW"` predicate a broker fee entered the denominator as an **unbased
+  acquisition**, dragging `covered_ratio` down.
+- **The input door therefore rejects an acquisition cost on interest or a fee**:
+  `data_ingestion/validate.py::resolve_acq_home_amount` returns
+  `acq_cost_not_an_acquisition` ("利息與費用不是外幣取得，不帶取得成本（沿用資金池平均匯率）") for
+  any non-acquiring kind. That test is keyed on the **acquisition axis**, not on
+  `== "WITHDRAW"`: `INTEREST` is a credit, so a withdraw-only test would let the cost through
+  and `forex/pools.py` would then **ignore** it — a field the user is asked for, that is
+  stored and affects nothing, is worse than a rejection.
+
+> **Verification anchors (two axes; hermetic)**:
+> `tests/shared/test_cash_kinds.py::test_interest_does_not_dilute_the_coverage_ratio`
+> (DEPOSIT 1,000 with cost 32,000 + INTEREST 7 → `covered_ratio = 1`,
+> `acquired_without_basis = 0`), `::test_a_fee_is_not_an_acquisition` (+ BROKER_FEE 100 →
+> `acquired_with_basis = 1,000`, `acquired_without_basis = 0`),
+> `::test_an_unbased_deposit_still_dilutes_the_coverage` (F2 not broken: two 1,000 deposits,
+> one unbased → `covered_ratio = 0.5`),
+> `::test_foreign_cash_balance_signs_a_fee_as_a_debit`
+> (`forex/pools.py::foreign_cash_balance` returns **−100** for a BROKER_FEE of 100).
+> The CSV door's rejection is anchored by the three `acq_cost_not_an_acquisition` rows
+> (`INTEREST` / `BROKER_FEE` / `INTEREST_EXPENSE`) in
+> `tests/data_ingestion/test_cash_import.py`.
+> **Independent recomputation**: the stress oracle writes out its own
+> `ACQUIRING_KINDS = {DEPOSIT, OPENING, REBATE}` (`scripts/stress_audit/oracle.py`,
+> **deliberately not importing the app's table** — an oracle that shares the implementation's
+> table cannot disagree with it, and disagreeing is the whole job). **However, the phase-1
+> scenario books all three since 2026-08-13** (`schwab`'s USD pool, ops 50-52), so the second
+> axis now has a `scope` anchor: `fx.covered_ratio scope = schwab` is **still exactly 1** after
+> an `INTEREST` credit — which is this section's claim, now carrying run evidence rather than
+> only a unit test.
 
 **Verified examples**
 
@@ -1769,8 +1927,7 @@ see the `cash.py` file header).
 
 | Flow | Delta to the (account, ccy) pool |
 | --- | --- |
-| deposit / opening funding (cash movement) | **+ amount** (credit) |
-| withdraw | **− amount** (debit) |
+| cash movement (**seven kinds**, see the two-axis table below) | **± amount** (the sign comes from the kind) |
 | fx (both legs) | `from_ccy`: **− from_amount**; `to_ccy`: **+ to_amount** |
 | buy | **− (quantity×price + fees + tax)** (all-in debit, booked to the `quote_ccy` pool) |
 | sell | **+ (quantity×price − fees − tax)** (net credit) |
@@ -1785,6 +1942,67 @@ see the `cash.py` file header).
 
 Rows whose `symbol` is not registered are skipped (same degradation rule as the
 dashboard), so the cash view does not crash.
+
+#### 9.1.1 The seven cash-movement kinds — ONE table, TWO orthogonal axes (2026-08-13)
+
+**Amounts are stored unsigned; the direction comes from the kind.** From 2026-08-13 there are
+**seven**, governed by the single table in `shared/cash_kinds.py`; both
+`portfolio/cash.py::_movement_sign` (cash pools) and
+`forex/pools.py::_is_debit` / `acquisition_basis` (FX P&L) — two calculation modules that do
+**not** import each other — read that one table.
+
+| kind | zh label | `credit` (does it **increase** the pool balance?) | `fx_acquisition` (does it enter **`covered_ratio`**'s denominator, §8.1?) | delta |
+| --- | --- | :---: | :---: | --- |
+| `DEPOSIT` | 入金 | ✔ | ✔ | **+ amount** |
+| `OPENING` | 期初 (opening funding) | ✔ | ✔ | **+ amount** |
+| `REBATE` | 折讓款 | ✔ | ✔ | **+ amount** |
+| `WITHDRAW` | 出金 | ✘ | ✘ | **− amount** |
+| **`INTEREST`** | 利息 (interest earned) | ✔ | **✘** | **+ amount** |
+| **`INTEREST_EXPENSE`** | 融資利息 (margin interest) | ✘ | ✘ | **− amount** |
+| **`BROKER_FEE`** | 券商費用 | ✘ | ✘ | **− amount** |
+
+**Why two axes and not one boolean.** The old predicate was "`kind == "WITHDRAW"` is the only
+debit; everything else is an acquiring credit" — correct for as long as every non-withdrawal
+kind was exactly that, and **silently wrong** the moment it stopped being true. Adding
+`BROKER_FEE` under the old predicate makes a broker fee **increase** the cash balance **and**
+count as an unbased foreign acquisition that drags `covered_ratio` down — **two wrong
+money-of-record figures, neither of which raises.**
+
+- **`INTEREST` is the row that proves one boolean was never enough**: a **credit that is not
+  an acquisition** (the reasoning, and the cost of the false alarm, are in §8.1).
+- **The converse combination does not exist**: a debit is never an acquisition (N1), so the
+  table has no `credit=✘, fx_acquisition=✔` row.
+- **`REBATE` stays an acquisition**: that has been its behaviour since the 2026-07-30 spec, and
+  changing it here would **silently move an existing ledger's `covered_ratio`** — a
+  money-of-record change with no decision behind it.
+- **Three new kinds, not two**: folding margin interest into `BROKER_FEE` would be
+  arithmetically right and would display 融資利息 as 「券商費用」 **on every screen**.
+- **Registration happens in two places**: the table in `shared/cash_kinds.py` and
+  `data_ingestion/validate.py::CASH_MOVEMENT_KINDS` (the write path's allowed set,
+  `= CASH_KIND_VALUES`). A test asserts them equal, so a half-registered kind is a test
+  failure rather than a **silently mis-signed pool**.
+
+> **Verification anchors (hermetic)**: `tests/shared/test_cash_kinds.py` —
+> `::test_every_kind_has_a_spec`, `::test_two_axes_are_independent` (parameterized per kind,
+> i.e. the table above), `::test_a_debit_is_never_an_acquisition`,
+> `::test_debit_kinds_set_matches_the_predicate`, `::test_registration_points_agree` (the two
+> registration points are equal), `::test_broker_fee_reduces_the_cash_balance` (BROKER_FEE 100
+> → pool **−100**; under the old predicate it was **+100**),
+> `::test_margin_interest_reduces_the_cash_balance` (INTEREST_EXPENSE 40 → **−40**),
+> `::test_interest_earned_increases_the_cash_balance` (INTEREST 7 → **+7**).
+> CSV-door rejections: the three `acq_cost_not_an_acquisition` rows in
+> `tests/data_ingestion/test_cash_import.py` (see §8.1).
+> **Known test gap (counted in place 2026-08-13)**: `cash_import.py`'s alias map already
+> carries five new zh labels (`利息` / `利息收入` / `融資利息` / `利息支出` / `券商費用`), but
+> `::test_zh_kind_labels_are_accepted` **covers only the four older labels**
+> (`入金` / `出金` / `期初資金` / `折讓款`) — the new aliases have **no test at all**. Recommended
+> to add.
+> **Stress `scope` anchor: none** — the phase-1 scenario books none of these three kinds yet;
+> the oracle already carries its own independent `DEBIT_KINDS` / `ACQUIRING_KINDS`
+> (`scripts/stress_audit/oracle.py`) waiting for the scenario. Recommended for the next
+> adversarial round.
+> **They reach no return metric**: **all seven** kinds are excluded from XIRR (owner ruling
+> **D1 = A**, 2026-08-13; see §7.2).
 
 ### 9.2 Running-Balance Statement and Same-Day Ordering
 
@@ -1832,6 +2050,25 @@ layers:
   has cash tracking enabled (≥1 cash movement) **and** the buy would drive that symbol's
   cash pool < 0, it attaches a **warning issue (never a hard block)**. Accounts not
   tracking cash do not trigger it.
+
+**The guard is keyed on `WITHDRAW` only, and deliberately did NOT expand with the new kinds
+(2026-08-13).** §9.1.1 makes `INTEREST_EXPENSE` and `BROKER_FEE` **debits**, but neither is
+subject to the `running_min` withdrawal guard (audit C3) and neither triggers N1's
+foreign-withdrawal advisory — both remain keyed on `WITHDRAW` **alone**:
+
+- **A withdrawal is the user's *intention***, so blocking one that would overdraw the pool
+  catches a data-entry error before it is booked;
+- **a fee or margin interest is a *recorded fact*, and a margin account legitimately runs a
+  negative cash balance — that is what margin is.** Blocking those would refuse to record what
+  the statement says happened.
+- Accordingly the four credit kinds (`DEPOSIT` / `OPENING` / `REBATE` / `INTEREST`) get **no
+  balance check at all** on the way in (`validate.py`: `kind != "WITHDRAW"` returns an empty
+  issue list immediately).
+
+Verification anchors: `tests/data_ingestion/test_cash_import.py::test_credits_need_no_balance_guard`,
+`::test_withdraw_over_balance_is_hard_and_writes_nothing`,
+`::test_backdated_withdraw_before_its_funding_is_blocked` (date-aware),
+`::test_two_withdrawals_that_only_jointly_overdraft_are_both_caught`.
 
 **Example and current coverage**: once the `running_min` hard guard detects that a pool
 would go negative at **some point** without `ack_negative`, it returns **422 `negative_cash`**
@@ -2059,6 +2296,8 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E22 | **Reverse split + cash in lieu** (CA2 1-for-10 → 70.5 shares; the 0.5-share ordinary sell realizes −20.2127…979) | §4.4.5(e) | `corp.anchor.split_reverse`; `realized.realized tw_broker/CA2@2026-03-12` |
 | E23 | **Ratio exactness** (CAR `210 × 1 / 3 = 70`; the sell of all 70 commits with 201) | §4.4.5(f) | `corp.anchor.split_ratio_exact`; `corp.sell_exact_ratio_accepted` |
 | E24 | **Degradation of an unapplied action** (CAX shares −500 unmoved, flag True; XIRR blanks portfolio-wide and the reason names the row) | §4.4.6 / §5.3 / §7.2 | `corp.anchor.e5_source_unmoved`; `corp.anchor.e5_source_flagged`; `corp.xirr_blanked_by_unapplied`; `corp.xirr_reason_names_row` |
+| E25 | **Seven cash-movement kinds / two axes** (`BROKER_FEE` 100 → pool **−100** (the old predicate gave +100); `DEPOSIT` 1,000 with cost 32,000 + `INTEREST` 7 → `covered_ratio` **1**) | §9.1.1 / §8.1 | `cash.balance scope = schwab|USD`, `fx.covered_ratio scope = schwab` (phase-1 ops 50-52, added 2026-08-13); unit `tests/shared/test_cash_kinds.py` (`test_broker_fee_reduces_the_cash_balance` / `test_interest_does_not_dilute_the_coverage_ratio`) |
+| E26 | **US cash dividend (P1b)** (`schwab/AAPL` `CASH` gross 100 / withholding 30 → `net` **70**, no issues; blank withholding → soft question and it still books `net = 100`) | §6.2b | `holding.dividend_portion scope = schwab|AAPL` (phase-1 `CASH` dividend, added 2026-08-13); unit `tests/data_ingestion/test_dividends.py::test_us_cash_dividend_is_not_a_mismatch` / `::test_us_cash_dividend_without_withholding_asks` |
 
 ### 12.2 Glossary (Chinese term ↔ English identifier)
 
@@ -2082,6 +2321,10 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 稽核前值 (audit before-value) | `ledger_audit.before_json` | §10.3 |
 | 期初庫存 (opening inventory) | `opening_inventory` | §2 / §9.1 |
 | 期初資金（現金移動）(opening funding, cash movement) | cash movement `opening` | §9.1 |
+| 現金收支種類（七種）(cash-movement kinds, seven) | `CashKind` / `CASH_KIND_VALUES` / `CASH_MOVEMENT_KINDS` | §9.1.1 |
+| 借方（減少池餘額）種類 (debit kinds) | `DEBIT_KINDS` / `is_debit` / `movement_sign` | §9.1.1 |
+| 外幣取得軸（進 `covered_ratio` 分母）(FX-acquisition axis) | `fx_acquisition` / `is_fx_acquisition` | §8.1 / §9.1.1 |
+| 利息收入／融資利息／券商費用 (interest earned / margin interest / broker fee) | `INTEREST` / `INTEREST_EXPENSE` / `BROKER_FEE` | §9.1.1 |
 | 單一持股權重 (single-holding weight) | `weight` | §7.3 |
 | 產業／市場配置權重 (sector / market allocation weight) | `sector_weight` / `weights` | §7.3 |
 | 幣別視圖原幣市值 (currency-view native market value) | `by_currency_value` | §7.3 |
@@ -2116,6 +2359,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.6` | 2026-08-01 | **Cost basis for foreign cash inflows + the declared short sale** (owner rulings 2026-07-30 / 07-31; baseline `v0.1.25`). ① **§8.1/§8.3 rewritten**: acquisitions widen from "conversions only" to "conversions **+** foreign cash inflows carrying `acq_home_amount`"; the **AMOUNT is stored, never the rate** (a rate is an average and §1.3 forbids an average as the authority; the displayed rate is computed on read). New **`covered_ratio`** (with-basis acquisitions / all acquisitions) absorbs outflows **pro rata** — "total balance − unbased amount" is forbidden (it goes negative once the balance drops below the unbased amount, recreating the reversed-sign figure). The ratio scales **both** the cash and the stock leg (`avg_rate` itself comes from the with-basis population; scaling only cash left the LARGER error — the stock leg, +42,359 TWD measured — unflagged). When the ratio is the literal 1 the caller skips the multiply, so a fully covered ledger is **byte-identical** to the pre-spec engine. `foreign_cash` now counts foreign cash inflows/outflows too, so for the same (account, foreign ccy) it **equals §9's operating cash pool** (they diverged deliberately before, audit C9); only the cost basis still differs. ② **New §4.3, declared short sale**: `short_sale` (default false, **never inferred**); a declared sell exhausts the long lot then opens a short lot holding the net proceeds, a buy covers first then adds to the long, long and short are mutually exclusive so a position is **one signed quantity**; cover P&L is `(short_avg − the covering buy's all-in per-share cost) × covered`, dated the **cover date**, `kind="short_cover"` (it reaches the tax capital-gains sheet). Ratios must divide by `abs(cost_total)` and `fully_recovered` is gated on `not short_open` (a short's basis is negative by construction). **A dividend during an open short is unbookable** (the short pays it; strict path raises `UnbookableLedgerError`, the dashboard skips and flags `unbookable_dividend`). Ruled limitations: `gross_invested` excludes short capital, a pure short XIRR reports a borrowing rate, weights use a net-exposure convention. ③ **The 賣超 guard is now DATE-AWARE** (`shares_through(trade_date)`, mirroring cash's `running_min`) and `oversold` is **sticky** (a later buy does not clear it, because it does not restore the discarded basis). Anchors: the full `tw_broker/2609` short lifecycle (see the §4.3 table) and `fx.covered_ratio/basis_gap/foreign_cash`; stress ops 69→**77**, assertions 1,088→**1,806**, fail=0; phase 2 (live demo) 1,192 assertions fail=0. Mirror regenerated in the same change set. |
 | `v1.7` | 2026-08-11 | **Corporate actions (SPLIT / EXCHANGE / SPINOFF)** (owner decisions D1–D39, spec `docs/spec/2026-08-06-corporate-actions.md`; baseline `v0.1.28 + feat/corporate-actions`). ① **New §4.4**, placed under §4 Cost Basis after §4.3, **renumbering nothing** — the spec's own §7.5 names "§5 Realized/Unrealized P&L" and "§7 Total Return" by their current numbers in the same sentence, and renumbering would invalidate that reference together with every existing §5.1/§7.2-style citation across the repo: the ledger row and the **conservation law** (Σ`original_total` / Σ`adjusted_total` / Σ`dividend_portion` / `gross_invested` all unchanged; the value leg **SPLIT-only**) plus the two deliberate exceptions (cash in lieu = ordinary SELL, reorganisation fee = `WITHDRAW`); **the ratio is two positive integers** and `qty × to ÷ from` is **multiply-first** (measured `210×1/3 = 70` vs `210×(1/3) = 69.999…9`, which `validate.py`'s bare `>` turns into an oversell → STICKY basis discard); **the three formulas and the nine-field `_Position` transfer table are quoted verbatim from spec §4.1–§4.4** (the manual never restates a formula in its own words); D21's provenance label on a spun-off child's payback progress; **six verified worked examples** (§12.1 E18–E24); the **edge matrix E1–E24** (including the oversell / declared-short interactions E3/E4/E5/E18/E22 and E24); the price basis (`close_raw` / `split_basis`, read-time re-expression, **SPLIT-scoped**). ② **§1.4 / §1.1 / §12.4: the permanent ledgers go from four to five** (adding `corporate_actions`) — omitting it from a replay yields an amount that looks normal and is priced on pre-action share counts. ③ **§4.1's same-day priority changes from `0/1/2/3` to `EventPriority`'s `0/10/20/30/40`**, inserting the action between `OPENING` and `BUY`; the **relative order is unchanged**, so a ledger with no action replays byte-identically. ④ **Cross-references**: §5.1 (an action emits no `RealizedRow`), §5.3 (`unbookable_action` as the third honest degradation), §7.1 (`gross_invested` untouched), §7.2 (an action is not a cash flow; an unapplied action blanks XIRR **portfolio-wide** and the reason must name account / symbol / date). ⑤ **Two limitations**: **D11** (`volume` is not un-adjusted) is stated as **standing**; **D12** (the reorganisation fee) is **not** a permanent blind spot — D36 leaves XIRR **deliberately untouched** and adds a **whole-account IRR** in `portfolio/twr.py`; checked in place for this revision, that file still holds no IRR, so it is written up as "**pending D36**". ⑥ **D34: cash-and-stock mergers are a hard exclusion**; the spec's former two-row recipe is withdrawn and **must not appear as a procedure** (`CORPORATE_ACTION(10)` precedes `SELL(30)` → the EXCHANGE zeroes the source → the same-day SELL lands on a zero-share position → STICKY 賣超); the nearest expressible form is recorded as an **unofficial workaround** with its inexactness stated. ⑦ Verification basis updated to the current run (phase-1 **118 ops / 3,791 assertions / 0 fail**; phase 2 **1,192 / 0 fail**), with all 23 `corp.*` corporate-action assertions passing. Mirror regenerated in the same change set. **No existing formula or accounting definition changed other than the above.** |
 | `v1.7a` | 2026-08-11 | **D45 — the owner retired D36 (the whole-account IRR).** §4.4.7 limitation 2 and the §7 XIRR note are both rewritten: the reorganisation fee (D12) was documented as "invisible to XIRR but visible in the whole-account IRR", and that second metric is withdrawn and was never implemented, so D12 reverts to a **standing limitation** — the fee is invisible to every return metric this system has and surfaces only in the cash ledger and net worth. **No figure changed** (XIRR never included cash movements); what changed is the statement of the limitation: promising a fix that never arrives is worse than stating the blind spot plainly |
+| `v1.8` | 2026-08-13 | **Seven cash-movement kinds / a two-axis table + the US cash dividend (P1b)** (owner ruling **D1 = A**, 2026-08-13; D35, 2026-08-10). ① **New §9.1.1**: cash movements go from four kinds to **seven** (adding `INTEREST`, `INTEREST_EXPENSE`, `BROKER_FEE`), governed by the single table in `shared/cash_kinds.py` on **two orthogonal axes** — `credit` (does it increase the pool balance?) and `fx_acquisition` (does it enter `covered_ratio`'s denominator?). The old predicate — "`kind == \"WITHDRAW\"` is the only debit, everything else is an acquiring credit" — would make a `BROKER_FEE` **increase** the cash balance **and** drag `covered_ratio` down (two wrong money-of-record figures, neither of which raises); `INTEREST` is the row that proves one boolean was never enough — **a credit that is not an acquisition**. ② **§8.1 gains the second axis as a rule**: the denominator admits acquiring kinds only, while income arising inside the pool (interest, like sale proceeds and foreign cash dividends) **inherits the pool average**; otherwise a USD account that never converted a cent would report `covered_ratio < 1` for merely earning interest and would flag the whole cash *and* stock exposure as basis-incomplete under F3 (**a false alarm on every real account**). The input door accordingly rejects an acquisition cost on interest/fees with `acq_cost_not_an_acquisition`. ③ **§7.2 gains an explicit rule**: **all seven kinds are excluded from XIRR** (D1=A) — `xirr_reporting` does not take `cash_movements` in its signature at all, and the flow series is still `opening` + `transactions` + `dividends`. The rejected option B would change the meaning of every historical XIRR; option C was rejected on sight because most of these rows **have no symbol**. ④ **§9.3 records that the guard did NOT expand**: the `running_min` withdrawal guard and N1's foreign-withdrawal advisory remain keyed on `WITHDRAW` **alone** — a withdrawal is the user's **intention** (worth blocking), a fee or margin interest is a **recorded fact**, and a margin account legitimately runs a negative cash balance. ⑤ **New §6.2b**: the `drip_us` model accepts both `DRIP` and `CASH` from P1b, removing the per-row `dividend_type_mismatch` soft block; a US cash dividend reduces `adjusted_total` exactly as TW/MY cash does (**D35** — anchored here, not re-decided), **withholding is typed by the user rather than derived from `gross × 0.30`** (the broker's own cent rounding will not match the product), and a blank withholding on `drip_us` raises the soft `us_cash_dividend_no_withholding` question **without altering the row**. §6's preamble and §6.3b are updated to say their scope is all of `CASH_DIVIDEND_TYPES`. ⑥ **§4.4.7 limitation 2 corrected in place**: it said "only four kinds, only `WITHDRAW` is a debit (`api/routers/cash.py::_KINDS`)" — that constant no longer exists; it now cites `CASH_MOVEMENT_KINDS`. D12's conclusion is **unchanged** and is reconfirmed by D1=A. ⑦ Added §12.1 **E25 / E26** and four §12.2 glossary rows. **No existing figure changed**: the three new kinds never entered any return flow series, and a ledger whose `covered_ratio` is 1 still skips the multiply, so every worked anchor in this manual and every stress-audit oracle expectation stays where it is. ⑧ **The stress scenario was extended in the same version**: phase-1 gains ops 50-52 (`INTEREST` / `INTEREST_EXPENSE` / `BROKER_FEE` on `schwab`'s USD pool) and one `schwab/AAPL` `CASH` dividend; the run is **122 ops, 3,799/3,799, 0 fail**. The oracle's `DEBIT_KINDS` / `ACQUIRING_KINDS` are written independently of the app's table, so the agreement is not one definition confirming itself. The earlier 'hermetic anchors only' status is lifted. Mirror regenerated in the same change set. |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 
