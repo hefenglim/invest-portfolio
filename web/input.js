@@ -1180,13 +1180,30 @@
   function onCsvWritten(resp) {
     const written = resp && resp.written !== undefined ? resp.written : 0;
     const skipped = resp && resp.skipped !== undefined ? resp.skipped : 0;
+    /* Rows the provenance layer recognised as already imported. WITHOUT this line, re-uploading
+       a file the ledger already holds reads 「成功 0 筆・跳過 0 筆」 — technically true and
+       completely uninformative, because a duplicate is neither written nor "skipped" (skipped
+       means the user deselected it). The whole point of import batches is that a second upload
+       is SAFE; a screen that cannot say so leaves the user to conclude the upload failed and
+       try again. */
+    const duplicates = resp && resp.duplicates !== undefined ? resp.duplicates : 0;
+    const dupText = duplicates > 0 ? '・已匯入過 ' + duplicates + ' 筆' : '';
     const banner = $('#csv-result');
     if (banner) {
       banner.hidden = false;
       banner.replaceChildren();
-      banner.appendChild(el('div', null, '✓ 寫入完成：成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆'));
+      banner.appendChild(
+        el('div', null, '✓ 寫入完成：成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆' + dupText)
+      );
+      if (duplicates > 0) {
+        banner.appendChild(
+          el('div', 'panel-sub', '重複的列來自先前的匯入批次，已自動略過，帳本沒有變成兩筆。')
+        );
+      }
     }
-    if (window.toast) window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆');
+    if (window.toast) {
+      window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆' + dupText);
+    }
     /* FU-D45 + #10: refresh always; flash + auto-switch only on FULL success (skipped == 0),
        matching the Batch-A clear-on-success rule (a partial import keeps its paste + banner). */
     afterCommitRefresh(csvKind, skipped === 0);

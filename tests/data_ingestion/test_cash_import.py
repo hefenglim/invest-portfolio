@@ -142,6 +142,28 @@ def test_zh_kind_labels_are_accepted(seeded: sqlite3.Connection) -> None:
         "DEPOSIT", "WITHDRAW", "OPENING", "REBATE"]
 
 
+def test_the_broker_statement_zh_labels_are_accepted(seeded: sqlite3.Connection) -> None:
+    """The three kinds added for the broker importer, in the owner's own words.
+
+    Their aliases went in with the kinds and nothing covered them, so the table above could
+    have been half-populated and every English-spelling test would still have passed. Both
+    spellings of each are here because both are in ``_KIND_ALIASES``, and an alias nobody
+    tests is an alias that quietly stops resolving.
+    """
+    preview = _built(seeded, _HEADER + (
+        "schwab,2026-07-01,利息,USD,12,,\n"
+        "schwab,2026-07-02,利息收入,USD,3,,\n"
+        "schwab,2026-07-03,融資利息,USD,5,,\n"
+        "schwab,2026-07-04,利息支出,USD,2,,\n"
+        "schwab,2026-07-05,券商費用,USD,8,,\n"
+        "schwab,2026-07-06,帳戶費用,USD,1,,\n"))
+    assert _kinds(preview) == []
+    assert [r.payload["kind"] for r in preview.rows] == [
+        "INTEREST", "INTEREST", "INTEREST_EXPENSE", "INTEREST_EXPENSE",
+        "BROKER_FEE", "BROKER_FEE",
+    ]
+
+
 def test_unknown_kind_names_what_was_typed(seeded: sqlite3.Connection) -> None:
     """An unrecognised label passes through the alias map UNCHANGED so the rejection can
     quote it — a map that silently canonicalized would report a kind nobody typed."""

@@ -117,6 +117,26 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     op.fx("schwab", "2026-06-20", "USD", 5000, "TWD", 162000)  # realized FX -2375
     op.cash_move("tw_broker", "withdraw", "TWD", "2026-06-25", 50000)
 
+    # ---- the three broker-statement cash kinds (2026-08-13, P1a/B1) --------------------
+    # Booked in USD on schwab ON PURPOSE: that pool has two FX conversions behind it, so it
+    # is the only place where the SECOND axis is observable. Each of these is a cash movement
+    # that is NOT an acquisition of foreign currency, and the oracle carries its own
+    # ``DEBIT_KINDS`` / ``ACQUIRING_KINDS`` written independently of the app's table.
+    #
+    # What this scenario is here to catch, and what a TWD-only version would miss entirely:
+    #   * a BROKER_FEE or INTEREST_EXPENSE that INCREASES the balance — the old predicate was
+    #     "WITHDRAW vs everything else", so a third debit kind silently credited the pool;
+    #   * an INTEREST credit that DILUTES ``covered_ratio`` — income arising inside the pool
+    #     inherits the pool average (like sale proceeds and foreign cash dividends), so a USD
+    #     account that never left a conversion unbased must still report a ratio of exactly 1
+    #     after being paid interest. Booking it as an unbased acquisition would raise a FALSE
+    #     "basis incomplete" flag over the whole foreign exposure, cash AND stocks (F3).
+    # None of the three enters XIRR (D1=A) — ``xirr_reporting`` does not take cash movements
+    # at all, so that is held by its signature rather than by a filter these rows could slip.
+    op.cash_move("schwab", "interest", "USD", "2026-06-27", "12.34")
+    op.cash_move("schwab", "interest_expense", "USD", "2026-06-28", "5.67")
+    op.cash_move("schwab", "broker_fee", "USD", "2026-06-29", "8.90")
+
     buy("B14", "schwab", "MSFT", "2026-05-05", 20, 410)
     sell("S7", "schwab", "MSFT", "2026-06-05", 10, 420)
     buy("B15", "schwab", "AAPL", "2026-06-15", 30, 210)
@@ -130,6 +150,13 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("B22", "tw_broker", "2330", "2026-04-15", 100, 630)
     buy("B23", "moomoo_my", "NVDA", "2026-05-28", 5, 580)
     op.dividend("schwab", "MSFT", "2026-06-08", "DRIP", 40, reinvest_price=415)
+    # P1b (2026-08-13): the SAME US position pays plain cash in another quarter. Before this
+    # the `drip_us` model accepted only DRIP, so every real US cash payout was rejected row by
+    # row as a `dividend_type_mismatch`. It needs no accounting change — a CASH row is in
+    # `CASH_DIVIDEND_TYPES` and reduces `adjusted_total` like any other (D35) — which is
+    # exactly why it belongs here: the claim "no accounting change" is only worth anything if
+    # an independent oracle recomputes the position and agrees.
+    op.dividend("schwab", "AAPL", "2026-06-10", "CASH", 25, withholding="7.50")
     sell("S8", "tw_broker", "2330", "2026-06-22", 100, 710)
     sell("S9", "schwab", "AAPL", "2026-06-23", 20, 208)
     sell("S10", "moomoo_my", "1155", "2026-06-24", 100, "11.50")
