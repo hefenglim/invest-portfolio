@@ -1,0 +1,480 @@
+"""Fold a ``RawEvent`` stream into domain events. Broker-neutral: written once, for all.
+
+Four transformations live here, and three of them exist because a plausible simpler version
+was measured against a real export and found to destroy data.
+
+1. :func:`suppress` — drop the paired self-cancelling rows. **Classification first,
+   arithmetic as a veto**, keyed on ``(date, symbol)`` and never across symbols.
+2. :func:`fold_dividends` — collapse the broker's 3-row DRIP group into one dividend, with
+   the reinvested share count DERIVED from ``amount / price``.
+3. :func:`derive_ratio` — recover a corporate action's rational ratio from its two legs.
+4. :func:`prehistory_shares` — find the positions that predate the export, by the UNION of
+   two detectors that each miss what the other catches.
+"""
+
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal
+from fractions import Fraction
+
+from portfolio_dash.data_ingestion.broker.ir import (
+    CORPORATE_ACTION_KINDS,
+    LEDGER_KINDS,
+    OPTION_KINDS,
+    SUPPRESSIBLE_KINDS,
+    EventKind,
+    RawEvent,
+)
+
+_ZERO = Decimal(0)
+
+# Kinds that ADD shares to a position, and kinds that remove them — the replay used by the
+# pre-history detector. Deliberately not "sign of quantity": the broker prints an unsigned
+# quantity on some rows and a signed one on others, so the KIND is the reliable direction.
+_ADDS_SHARES = frozenset({EventKind.BUY, EventKind.DRIP_BUY, EventKind.BUY_COVER})
+_REMOVES_SHARES = frozenset({EventKind.SELL, EventKind.SELL_SHORT})
+
+
+@dataclass(frozen=True)
+class SuppressedGroup:
+    """One dropped group, with the evidence for dropping it."""
+
+    key: tuple[date, str]
+    kinds: tuple[EventKind, ...]
+    refs: tuple[str, ...]
+    amount_sum: Decimal
+    quantity_sum: Decimal
+
+
+@dataclass(frozen=True)
+class VetoedGroup:
+    """A group classified as suppressible whose arithmetic REFUSED the drop.
+
+    Not an error and not a silent keep: the rows stay in the stream and the converter's
+    report names them, because "we classified this as noise and the numbers disagree" is
+    the one finding a human has to look at.
+    """
+
+    key: tuple[date, str]
+    kinds: tuple[EventKind, ...]
+    refs: tuple[str, ...]
+    amount_sum: Decimal
+    quantity_sum: Decimal
+    reason: str
+
+
+@dataclass(frozen=True)
+class DividendEvent:
+    """One folded distribution: the payout, its withholding, and any reinvestment."""
+
+    trade_date: date
+    symbol: str
+    gross: Decimal
+    withholding: Decimal
+    reinvest_shares: Decimal | None
+    reinvest_price: Decimal | None
+    refs: tuple[str, ...]
+
+    @property
+    def is_drip(self) -> bool:
+        return self.reinvest_shares is not None
+
+    @property
+    def net(self) -> Decimal:
+        return self.gross - self.withholding
+
+
+@dataclass
+class GroupedImport:
+    """Everything one export becomes, including what it could not become."""
+
+    dividends: list[DividendEvent] = field(default_factory=list)
+    trades: list[RawEvent] = field(default_factory=list)
+    cash: list[RawEvent] = field(default_factory=list)
+    actions: list[RawEvent] = field(default_factory=list)
+    options: list[RawEvent] = field(default_factory=list)
+    suppressed: list[SuppressedGroup] = field(default_factory=list)
+    vetoed: list[VetoedGroup] = field(default_factory=list)
+    #: Rows that survived suppression and belong to no ledger — in practice a vetoed noise
+    #: row whose partner was never found. They are LISTED, never discarded: the first
+    #: version of :func:`group_events` fell off the end of an if/elif chain and lost two
+    #: rows of a 1,375-row export without a word, which is the exact failure mode rule 7
+    #: and this whole package exist to prevent.
+    unrouted: list[RawEvent] = field(default_factory=list)
+
+
+def _share_delta(e: RawEvent) -> Decimal:
+    """The signed share movement of one row, for the zero-sum check.
+
+    The broker signs a row's quantity in only some cases, so the direction is taken from the
+    strongest available evidence rather than from one column:
+
+    * **money moved** — shares go the opposite way to the cash. Money out is shares in. This
+      covers every trade-shaped row including a cancel, whose printed quantity is positive on
+      both legs while its amount is the exact negation.
+    * **no money moved** — a corporate-action or journal leg, where the broker DOES sign the
+      quantity (``-85`` out, ``+255`` in). Take it as printed.
+
+    Reading ``+quantity`` for anything not obviously a buy or a sell was the first version,
+    and it made a ``Cancel Buy`` and its buy sum to ``+200`` instead of ``0`` — vetoing a
+    group that should have been dropped.
+    """
+    if e.amount > _ZERO:
+        return -abs(e.quantity)
+    if e.amount < _ZERO:
+        return abs(e.quantity)
+    return e.quantity
+
+
+def _bucket(events: list[RawEvent]) -> dict[tuple[date, str], list[RawEvent]]:
+    """Group by ``(trade_date, symbol)``.
+
+    ⚠ **Never across symbols.** Measured on a real export: grouping by date alone made the
+    zero-sum rule drop 180 rows, **8 of which were real corporate actions** — three 1-for-1
+    ticker exchanges and their option legs. Grouping by ``(date, symbol)`` dropped 168 rows
+    and destroyed none. A 1-for-1 exchange nets zero in BOTH dimensions (shares out equal
+    shares in, no cash on either leg), so it is arithmetically indistinguishable from an
+    internal journal; the only thing that separates them is that they are not the same
+    security moving, and the key is what encodes that.
+    """
+    out: dict[tuple[date, str], list[RawEvent]] = defaultdict(list)
+    for e in events:
+        out[(e.trade_date, e.symbol or e.option_symbol)].append(e)
+    return dict(out)
+
+
+def suppress(
+    events: list[RawEvent],
+) -> tuple[list[RawEvent], list[SuppressedGroup], list[VetoedGroup]]:
+    """Remove paired self-cancelling rows. Returns ``(kept, dropped, vetoed)``.
+
+    **Classification is primary; arithmetic is the guard, not the decision.** A group may be
+    dropped only if it was first classified as noise by its ``(action, description)`` pair;
+    the zero-sum check then runs as a veto. That ordering is forced, not preferred:
+
+    * *Arithmetic alone cannot decide.* One broker action carries 14 meanings, and its two
+      largest — 145 withholding-tax rows to keep, 126 null journals to drop — are separated
+      only by free text. An amount-keyed rule deletes the tax or keeps the journals.
+    * *Classification alone is not safe.* A rule that drops rows because of what they are
+      called is one typo away from deleting real money, so the sum must still agree.
+
+    The zero-sum check covers **amount AND share quantity**, because a corporate action is
+    itself a paired out/in group whose cash is zero on both legs: an amount-only check
+    passes a 3-for-1 split (−85 / +255 shares, $0 / $0) and drops it silently.
+
+    Two shapes are recognised, both within one ``(date, symbol)`` bucket:
+
+    * the suppressible rows net to zero **among themselves** — an internal journal, an ACAT
+      pair, a mark-to-market round trip;
+    * a suppressible row is the exact **reversal of one kept row** — a ``Cancel Buy`` and the
+      buy it cancels, a ``Reinvestment Adj`` and the DRIP it corrects. Rule 4: the cancelled
+      order goes with its cancel, or the ledger keeps a trade that never happened.
+    """
+    dropped: list[SuppressedGroup] = []
+    vetoed: list[VetoedGroup] = []
+    removed: set[str] = set()          # `file:line` ref of every row leaving the stream
+
+    # --- phase 1: cash-bearing REVERSALS (a cancel, a re-booking) ---------------------
+    #
+    # Matched per SYMBOL across dates, not within one day: a cancel is often dated after the
+    # order it cancels (observed — one of the two real cancel pairs in the assessed export
+    # straddles a date boundary, and a same-day-only rule left it orphaned in the ledger).
+    #
+    # ⚠ Restricted to rows that MOVE CASH, and that restriction is the load-bearing part.
+    # A reversal is recognised by "one row exactly negates another", which on a ZERO-cash
+    # row degenerates: ``0 == -0`` matches everything, so a zero-cash journal would happily
+    # adopt a corporate-action leg as its "partner" and drag a real event out of the ledger
+    # with it. Measured: without this restriction two 1-for-1 ticker exchanges were pulled
+    # into journal groups — the exact destruction ``_bucket``'s key exists to prevent,
+    # arriving by a second route. A zero-cash noise row can only be suppressed in phase 2,
+    # against other noise.
+    by_symbol: dict[str, list[RawEvent]] = defaultdict(list)
+    for e in events:
+        by_symbol[e.symbol or e.option_symbol].append(e)
+
+    for symbol, rows in sorted(by_symbol.items()):
+        for n in rows:
+            if n.kind not in SUPPRESSIBLE_KINDS or n.amount == _ZERO:
+                continue
+            if n.ref in removed:
+                continue
+            partner = next(
+                (
+                    o
+                    for o in rows
+                    if o.ref not in removed
+                    and o.ref != n.ref
+                    and o.kind not in SUPPRESSIBLE_KINDS
+                    and o.amount == -n.amount
+                    and o.quantity == n.quantity
+                ),
+                None,
+            )
+            if partner is None:
+                continue
+            removed.update({n.ref, partner.ref})
+            dropped.append(
+                SuppressedGroup(
+                    key=(n.trade_date, symbol),
+                    kinds=(n.kind, partner.kind),
+                    refs=(n.ref, partner.ref),
+                    amount_sum=_ZERO,
+                    quantity_sum=_ZERO,
+                )
+            )
+
+    # --- phase 2: NOISE-ONLY groups that net to zero among themselves -----------------
+    for key, bucket in sorted(_bucket(events).items()):
+        noise = [
+            e for e in bucket
+            if e.kind in SUPPRESSIBLE_KINDS and e.ref not in removed
+        ]
+        if not noise:
+            continue
+        amount_sum = sum((e.amount for e in noise), _ZERO)
+        quantity_sum = sum((_share_delta(e) for e in noise), _ZERO)
+        refs = tuple(e.ref for e in noise)
+        kinds = tuple(dict.fromkeys(e.kind for e in noise))
+
+        if amount_sum == _ZERO and quantity_sum == _ZERO:
+            removed.update(refs)
+            dropped.append(SuppressedGroup(key, kinds, refs, amount_sum, quantity_sum))
+            continue
+
+        vetoed.append(
+            VetoedGroup(
+                key, kinds, refs, amount_sum, quantity_sum,
+                reason=(
+                    "classified as a self-cancelling group but the legs do not net to zero "
+                    f"(amount {amount_sum}, quantity {quantity_sum}) — kept, not dropped"
+                ),
+            )
+        )
+
+    kept = sorted(
+        (e for e in events if e.ref not in removed),
+        key=lambda e: (e.trade_date, e.line_no),
+    )
+    return kept, dropped, vetoed
+
+
+def derive_reinvest_shares(net: Decimal, price: Decimal) -> Decimal | None:
+    """Shares bought by a reinvestment, from ``|net| / price``.
+
+    ⚠ **The printed quantity is NOT the authority.** Measured on a real export: 125 of 227
+    reinvest rows fail ``quantity x price == amount``, and in every case the printed
+    quantity is exactly ``round(|amount| / price)`` at the 3–4 dp the column displays.
+    Amount and price are what the broker actually asserts; the quantity is a rounded view of
+    them. Trusting it drifts the share count away from the statement, in the same direction,
+    for every reinvestment of a multi-year DRIP history.
+
+    Same principle as ``close_raw`` / ``close`` in ``data-and-pricing.md``: store what the
+    source asserts and derive the rest, rather than storing a derived value twice and
+    letting the copies disagree.
+    """
+    if price <= _ZERO:
+        return None
+    return abs(net) / price
+
+
+def fold_dividends(events: list[RawEvent]) -> tuple[list[DividendEvent], list[RawEvent]]:
+    """Collapse distribution legs into one event per ``(date, symbol)``.
+
+    A US reinvested dividend arrives as three rows — the gross payout, the withholding
+    adjustment, and the reinvest purchase — and the ledger's ``dividends`` table already has
+    exactly the shape they fold into (``gross`` / ``withholding`` / ``reinvest_shares`` /
+    ``reinvest_price``). Returns ``(folded, remaining)``; *remaining* is every event that was
+    not part of a distribution, unchanged and in order.
+    """
+    dist_kinds = {
+        EventKind.DIVIDEND, EventKind.CAPGAIN_DIST,
+        EventKind.WITHHOLDING_TAX, EventKind.DRIP_BUY,
+    }
+    folded: list[DividendEvent] = []
+    remaining = [e for e in events if e.kind not in dist_kinds or not e.symbol]
+
+    buckets: dict[tuple[date, str], list[RawEvent]] = defaultdict(list)
+    for e in events:
+        if e.kind in dist_kinds and e.symbol:
+            buckets[(e.trade_date, e.symbol)].append(e)
+
+    for (day, symbol), rows in sorted(buckets.items()):
+        gross = sum(
+            (r.amount for r in rows
+             if r.kind in {EventKind.DIVIDEND, EventKind.CAPGAIN_DIST}),
+            _ZERO,
+        )
+        # Withholding is printed as a negative cash effect; the ledger stores it positive.
+        withholding = -sum(
+            (r.amount for r in rows if r.kind is EventKind.WITHHOLDING_TAX), _ZERO
+        )
+        reinvests = [r for r in rows if r.kind is EventKind.DRIP_BUY]
+        price = reinvests[0].price if reinvests else None
+        shares = (
+            derive_reinvest_shares(
+                sum((r.amount for r in reinvests), _ZERO), price
+            )
+            if reinvests and price is not None
+            else None
+        )
+        folded.append(
+            DividendEvent(
+                trade_date=day, symbol=symbol,
+                gross=gross, withholding=withholding,
+                reinvest_shares=shares, reinvest_price=price,
+                refs=tuple(r.ref for r in rows),
+            )
+        )
+    return folded, remaining
+
+
+def derive_ratio(shares_out: Decimal, shares_in: Decimal) -> tuple[int, int]:
+    """``(ratio_to, ratio_from)`` as POSITIVE INTEGERS, from a corporate action's two legs.
+
+    The export states the share DELTA, never the ratio, so the ratio is recovered from the
+    legs: 85 out and 255 in is 3-for-1. Both terms must be positive integers — D14 rejects a
+    decimal ratio outright, because a rounded quotient (``0.2857`` for 2-for-7) re-creates
+    the 賣超 cascade the corporate-action feature exists to prevent. ``Fraction`` reduces
+    exactly, so a 1-for-1 ticker exchange comes back as ``(1, 1)`` rather than ``(100, 100)``.
+
+    Raises ``ValueError`` on a leg of zero: a ratio cannot be recovered from it, and
+    inventing one is how a wrong number that looks right gets into a ledger.
+    """
+    if shares_out <= _ZERO or shares_in <= _ZERO:
+        raise ValueError(
+            f"cannot derive a ratio from legs out={shares_out} in={shares_in} "
+            "— both must be positive; supply the ratio explicitly instead"
+        )
+    ratio = Fraction(shares_in) / Fraction(shares_out)
+    return ratio.numerator, ratio.denominator
+
+
+def prehistory_shares(events: list[RawEvent]) -> dict[str, Decimal]:
+    """Symbols whose position predates the export, and how many shares are missing.
+
+    **Two detectors, UNIONED** — each misses what the other catches:
+
+    * *the running balance goes negative* — a **hard** failure if unhandled: the replay trips
+      the sticky 賣超 guard and DISCARDS that position's cost basis permanently. The shares
+      needed are ``-min(balance)``, not the final balance: a back-dated dip that a later buy
+      covers is invisible to a net-only check.
+    * *the first event is a sell or a reinvest* — **soft**: the basis is silently wrong with
+      no alarm at all. A DRIP implies a holding, so a symbol whose history opens with one was
+      already held.
+
+    "First event is a sell" alone is insufficient — observed: a symbol that buys twice, sells
+    more than it bought, and nets negative. "Balance goes negative" alone misses a position
+    held throughout and never oversold.
+
+    ⚠ A **third** case exists that neither detector can see: a position already SHORT before
+    the window, whose balance never turns negative and whose first event is a buy. It is
+    found only by cross-checking split deltas against the broker's transfer quantities, and
+    is deliberately not implemented here — the converter's report says so rather than
+    implying the list is complete.
+    """
+    by_symbol: dict[str, list[RawEvent]] = defaultdict(list)
+    for e in events:
+        if e.symbol and (e.kind in _ADDS_SHARES or e.kind in _REMOVES_SHARES):
+            by_symbol[e.symbol].append(e)
+
+    needed: dict[str, Decimal] = {}
+    for symbol, rows in sorted(by_symbol.items()):
+        rows.sort(key=lambda e: (e.trade_date, e.line_no))
+        balance = _ZERO
+        low = _ZERO
+        for e in rows:
+            balance += e.quantity if e.kind in _ADDS_SHARES else -e.quantity
+            low = min(low, balance)
+        opens_held = rows[0].kind in {EventKind.SELL, EventKind.DRIP_BUY}
+        if low < _ZERO:
+            needed[symbol] = -low
+        elif opens_held:
+            # Held but never oversold: the share count cannot be recovered from the file, so
+            # 0 marks "a cost is required here" without inventing a quantity to go with it.
+            needed[symbol] = _ZERO
+    return needed
+
+
+def overlap_duplicates(events: list[RawEvent]) -> list[tuple[RawEvent, RawEvent]]:
+    """Rows that appear identically in TWO source files — reported, never dropped.
+
+    A broker hands over consecutive exports with **overlapping date windows**, so one event
+    can be printed in both. Suppression cannot see this: the two copies are in different
+    files, are not a self-cancelling pair, and nothing about either row is wrong.
+
+    Reported rather than removed, because the pair is genuinely ambiguous from inside the
+    data — two deposits of the same amount on the same day is a thing that happens. The
+    assessed export contained exactly one such pair and a human confirmed it; that is the
+    right shape for the decision. (The ledger has a second net: B3's import-provenance hash
+    catches a repeat when the two files are imported as separate batches. It does NOT catch
+    it when they are merged into one file first, which is why this exists.)
+    """
+    seen: dict[tuple[date, str, str, Decimal, Decimal], RawEvent] = {}
+    pairs: list[tuple[RawEvent, RawEvent]] = []
+    for e in sorted(events, key=lambda x: (x.source_file, x.line_no)):
+        key = (
+            e.trade_date, e.symbol or e.option_symbol, e.kind.value, e.quantity, e.amount
+        )
+        first = seen.get(key)
+        if first is None:
+            seen[key] = e
+        elif first.source_file != e.source_file:
+            pairs.append((first, e))
+    return pairs
+
+
+def group_events(events: list[RawEvent]) -> GroupedImport:
+    """The whole fold: suppress, then route what survives to its ledger.
+
+    **Every input row lands somewhere** — dropped, folded into a dividend, routed to a
+    ledger, parked as an option, or listed as unrouted. :func:`account_for` asserts it, and
+    the reconciler (B6) runs that assertion as an import gate. A converter that can lose a
+    row quietly is one whose output cannot be trusted to be complete, which is the whole
+    reason the ledger did not already have a broker importer.
+    """
+    kept, dropped, vetoed = suppress(events)
+    dividends, rest = fold_dividends(kept)
+    result = GroupedImport(dividends=dividends, suppressed=dropped, vetoed=vetoed)
+    trade_kinds = {
+        EventKind.BUY, EventKind.SELL, EventKind.SELL_SHORT, EventKind.BUY_COVER
+    }
+    for e in rest:
+        if e.kind in OPTION_KINDS or e.is_option:
+            result.options.append(e)
+        elif e.kind in CORPORATE_ACTION_KINDS:
+            result.actions.append(e)
+        elif e.kind in trade_kinds:
+            result.trades.append(e)
+        elif e.kind in LEDGER_KINDS:
+            result.cash.append(e)
+        else:
+            result.unrouted.append(e)
+    return result
+
+
+def account_for(events: list[RawEvent], grouped: GroupedImport) -> None:
+    """Raise unless every input row is accounted for exactly once.
+
+    Line numbers, not counts: a count can balance while two rows swap places. The check is
+    cheap and it is the difference between "the importer handled 1,375 rows" and "the
+    importer handled 1,375 rows and can prove which ones".
+    """
+    seen: list[str] = [
+        *(r for g in grouped.suppressed for r in g.refs),
+        *(r for d in grouped.dividends for r in d.refs),
+        *(e.ref for e in grouped.trades),
+        *(e.ref for e in grouped.cash),
+        *(e.ref for e in grouped.actions),
+        *(e.ref for e in grouped.options),
+        *(e.ref for e in grouped.unrouted),
+    ]
+    expected = {e.ref for e in events}
+    got = set(seen)
+    if len(seen) != len(got):
+        duplicated = sorted({n for n in seen if seen.count(n) > 1})
+        raise ValueError(f"rows accounted for more than once: {duplicated}")
+    if got != expected:
+        raise ValueError(
+            f"rows lost: {sorted(expected - got)}; rows invented: {sorted(got - expected)}"
+        )
