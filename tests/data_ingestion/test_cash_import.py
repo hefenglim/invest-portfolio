@@ -314,6 +314,12 @@ def test_acquisition_cost_may_be_blank(seeded: sqlite3.Connection) -> None:
     ("moomoo_my,2026-07-01,DEPOSIT,MYR,1000,1000,", "acq_cost_home_ccy"),
     # a withdrawal is a disposal (N1) — it carries no acquisition cost
     ("moomoo_my,2026-07-01,WITHDRAW,USD,10,44,", "acq_cost_on_withdraw"),
+    # Interest is a CREDIT, so the old ``kind == "WITHDRAW"`` test let a cost through on it
+    # — and forex/pools.py then IGNORED that cost, because income arising inside the pool
+    # inherits the pool average. The guard is keyed on the ACQUISITION axis instead.
+    ("moomoo_my,2026-07-01,INTEREST,USD,10,44,", "acq_cost_not_an_acquisition"),
+    ("moomoo_my,2026-07-01,BROKER_FEE,USD,10,44,", "acq_cost_not_an_acquisition"),
+    ("moomoo_my,2026-07-01,INTEREST_EXPENSE,USD,10,44,", "acq_cost_not_an_acquisition"),
     ("moomoo_my,2026-07-01,OPENING,USD,1000,0,", "acq_cost_not_positive"),
     ("moomoo_my,2026-07-01,OPENING,USD,1000,-1,", "acq_cost_not_positive"),
 ])

@@ -375,9 +375,10 @@ def _cash_statement(ev, facts, app_bal, phase):
         lines.setdefault(key, []).append(delta)
 
     for m in facts.cash:
-        # WITHDRAW is the only debit; DEPOSIT / OPENING / REBATE credit (audit C4).
+        # Debits reduce the pool (audit C4); every other kind credits it. The set is
+        # oracle.py's, re-derived there independently of the app's own table.
         add((m.account_id, m.ccy),
-            -m.amount if m.kind.upper() == "WITHDRAW" else m.amount)
+            -m.amount if m.kind.upper() in O.DEBIT_KINDS else m.amount)
     for c in facts.fxs:
         add((c.account_id, c.from_ccy), -c.from_amt)
         add((c.account_id, c.to_ccy), c.to_amt)

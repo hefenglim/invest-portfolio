@@ -77,12 +77,16 @@ def _register(conn: sqlite3.Connection, symbol: str, market: Market, ccy: Curren
 
 
 def test_csv_dividend_type_market_mismatch_needs_confirm(conn: sqlite3.Connection) -> None:
-    # A registered US symbol on schwab (DRIP model) booked as a CASH dividend is a
+    # A registered US symbol on schwab (drip_us) booked with MY's single-tier NET type is a
     # type/market mismatch -> soft needs_confirm (importable only after explicit confirm),
     # never a hard block. This is the merged-account corruption guard (MY cash-as-DRIP etc.).
+    #
+    # The example used to be CASH here. P1b (2026-08-13) ADMITTED CASH on drip_us — a US
+    # payout that is not reinvested is ordinary, not a corruption — so the guard is now
+    # demonstrated with a type that genuinely does not belong to this market's model.
     seed_accounts(conn)
     _register(conn, "AAPL", Market.US, Currency.USD)
-    csv = "account,symbol,date,type,gross\nschwab,AAPL,2026-06-01,CASH,100\n"
+    csv = "account,symbol,date,type,gross\nschwab,AAPL,2026-06-01,NET,100\n"
     p = build_dividend_preview(conn, csv)
     row = p.rows[0]
     mism = [i for i in row.issues if i.kind == "dividend_type_mismatch"]
@@ -90,6 +94,56 @@ def test_csv_dividend_type_market_mismatch_needs_confirm(conn: sqlite3.Connectio
     assert mism[0].needs_confirm is True
     assert mism[0].message == "股利類型與該市場模型不符，請確認"
     assert not row.has_hard_issue  # soft -> importable after confirm
+
+
+# --- P1b (2026-08-13): a US payout that arrives as plain CASH --------------------------
+
+
+def test_us_cash_dividend_is_not_a_mismatch(conn: sqlite3.Connection) -> None:
+    """The friction P1b removes: a US cash dividend used to need a per-row confirmation."""
+    seed_accounts(conn)
+    _register(conn, "AAPL", Market.US, Currency.USD)
+    csv = ("account,symbol,date,type,gross,withholding\n"
+           "schwab,AAPL,2026-06-01,CASH,100,30\n")
+    p = build_dividend_preview(conn, csv)
+    assert [i.kind for i in p.rows[0].issues] == []
+    assert p.rows[0].payload["type"] == "CASH"
+    assert p.rows[0].payload["withholding"] == "30"
+    assert p.rows[0].payload["net"] == "70"
+
+
+def test_us_cash_dividend_without_withholding_asks(conn: sqlite3.Connection) -> None:
+    """``apply_dividend_model`` keys on the dividend TYPE, not on the account's model, so a
+    blank withholding on a CASH row books 0 — right for a TW/MY payout, wrong for a US one
+    under W-8BEN. The consequence is not cosmetic: net would equal gross, over-reducing
+    ``adjusted_total`` and under-reporting the position's unrealized gain for its whole life.
+
+    Soft, not hard: a withholding-free US distribution genuinely exists (return of capital).
+    """
+    seed_accounts(conn)
+    _register(conn, "AAPL", Market.US, Currency.USD)
+    csv = "account,symbol,date,type,gross\nschwab,AAPL,2026-06-01,CASH,100\n"
+    p = build_dividend_preview(conn, csv)
+    row = p.rows[0]
+    ask = [i for i in row.issues if i.kind == "us_cash_dividend_no_withholding"]
+    assert len(ask) == 1
+    assert ask[0].needs_confirm is True
+    assert not row.has_hard_issue
+    # The row still books what it says it books — the warning does not silently alter it.
+    assert row.payload["withholding"] == "0"
+    assert row.payload["net"] == "100"
+
+
+def test_tw_cash_dividend_is_not_asked_about_withholding(
+    conn: sqlite3.Connection,
+) -> None:
+    """The warning is bound to the drip_us model, not to the CASH type: a TW cash dividend
+    legitimately has no withholding and must stay silent."""
+    seed_accounts(conn)
+    _register(conn, "2330", Market.TW, Currency.TWD)
+    csv = "account,symbol,date,type,gross\ntw_broker,2330,2026-06-01,CASH,5000\n"
+    p = build_dividend_preview(conn, csv)
+    assert [i.kind for i in p.rows[0].issues] == []
 
 
 def test_csv_dividend_type_market_coherent_has_no_mismatch(

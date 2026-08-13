@@ -924,7 +924,7 @@
     /* 取得成本只收「家幣金額」，不收匯率（spec F1）：匯率是平均值，平均值不可以是帳本的
        權威來源。外幣入金若不填取得成本，該筆金額仍會計入餘額、但不會進入換匯成本均價，
        畫面上會以 covered_ratio／匯損缺口揭露 — 寧可留白，也不要猜一個匯率。 */
-    cash: '欄位：account・date(YYYY-MM-DD)・kind(DEPOSIT/WITHDRAW/OPENING/REBATE，也可填 入金/出金/期初/折讓款)・ccy・amount・acq_home_amount（選填・僅外幣入金，填家幣金額不是匯率）・note（選填）',
+    cash: '欄位：account・date(YYYY-MM-DD)・kind(DEPOSIT/WITHDRAW/OPENING/REBATE/INTEREST/INTEREST_EXPENSE/BROKER_FEE，也可填 入金/出金/期初/折讓款/利息/融資利息/券商費用)・ccy・amount・acq_home_amount（選填・僅外幣入金與期初，利息費用不適用；填家幣金額不是匯率）・note（選填）',
   };
 
   function initCsv() {
@@ -1785,6 +1785,10 @@
   }
 
   /* ================= Tab 4 股利 ================= */
+  /* P1b: the US pane's type + withholding-override state, published by initDiv so the
+     commit handler and renderDivForm can read it without re-querying the DOM's class
+     attributes (a `.active` class read from two places drifts the moment one is renamed). */
+  let divUsState = null;
   function initDiv() {
     const accSel = $('#d-account');
     ctx.accounts.forEach((a) => {
@@ -1809,6 +1813,65 @@
         ? '台股模式（配股）：以 $0 成本股數入帳，調整均價下降。'
         : '台股模式：現金股利沖減成本（調整均價下降）；配股以 $0 成本股數入帳。';
     }));
+
+    /* ---- P1b: the US pane's DRIP / 現金股利 switch + the withholding override ---------
+       A US payout that is NOT reinvested had no manual door at all before this: the pane
+       showed the reinvest fields and nothing else, so the only way in was a CSV row that
+       then needed a per-row confirmation. Both types keep the 30% W-8BEN default — the
+       withholding applies to the PAYOUT, not to the reinvestment — and both may override
+       it, because a broker's own rounding puts the statement a cent away from gross x 0.30
+       and a readonly field cannot reproduce a statement it must reconcile to. */
+    const usSeg = document.querySelectorAll('#d-drip .segmented button');
+    const usIsCash = () => {
+      const b = document.querySelector('#d-us-cash');
+      return !!(b && b.classList.contains('active'));
+    };
+    usSeg.forEach((b) => b.addEventListener('click', () => {
+      usSeg.forEach((x) => x.classList.toggle('active', x === b));
+      renderUsDivType();
+    }));
+    function renderUsDivType() {
+      const cash = usIsCash();
+      /* 現金股利 moves no shares, so the reinvest pair is not merely blank but absent —
+         a visible field the commit ignores is how a user comes to believe it was recorded. */
+      $('#d-drip-shares-field').hidden = cash;
+      $('#d-drip-price-field').hidden = cash;
+      $('#d-model-note').textContent = cash
+        ? '美股現金股利：預扣 30% 後的淨額沖減成本（調整均價下降），與台股現金股利同一套會計（D35）。'
+        : 'DRIP 模式：預扣 30%，net 將以 $0 成本股數入帳（再投資股數 × 再投資價格僅供對帳）。';
+    }
+    /* The withholding override — the SAME true-toggle the manual trade's fee/tax use
+       (FU-D7), not a new interaction. OFF restores the auto 30%. */
+    let whOverride = false;
+    function applyWhOverride(on) {
+      whOverride = on;
+      const field = $('#d-drip-wh');
+      const pencil = $('#d-drip-wh-pencil');
+      field.readOnly = !on;
+      pencil.setAttribute('aria-pressed', on ? 'true' : 'false');
+      pencil.title = on ? '取消覆寫（回自動 30%）' : '覆寫';
+      $('#d-drip-wh-ovr').hidden = !on;
+      $('#d-drip-wh-label').firstChild.nodeValue = on ? '預扣（已覆寫） ' : '預扣 30%（自動） ';
+      if (!on) recomputeDripAmounts();   // auto value returns
+    }
+    $('#d-drip-wh-pencil').addEventListener('click', () => {
+      applyWhOverride(!whOverride);
+      if (whOverride) $('#d-drip-wh').focus();
+    });
+    /* USER-INPUT estimate only (the value of record is computed by the backend on commit).
+       Bound ONCE here rather than re-assigned on every renderDivForm() call, which is what
+       the old `$('#d-drip-gross').oninput = …` inside renderDivForm did. */
+    function recomputeDripAmounts() {
+      const g = parseFloat($('#d-drip-gross').value) || 0;
+      if (!whOverride) $('#d-drip-wh').value = (g * 0.30).toFixed(2);
+      const wh = parseFloat($('#d-drip-wh').value) || 0;
+      $('#d-drip-net').value = (g - wh).toFixed(2);
+    }
+    $('#d-drip-gross').addEventListener('input', recomputeDripAmounts);
+    $('#d-drip-wh').addEventListener('input', () => { if (whOverride) recomputeDripAmounts(); });
+    divUsState = { isCash: usIsCash, whOverride: () => whOverride,
+      reset: () => { applyWhOverride(false); renderUsDivType(); } };
+    renderUsDivType();
     renderDivForm();
     initDivPicker();
     $('#d-confirm').addEventListener('click', () => {
@@ -1843,8 +1906,16 @@
       } else if (model === 'drip') {
         const gross = $('#d-drip-gross').value.trim();
         if (!gross) { if (window.toast) window.toast('請輸入股利總額', 'fail'); return; }
-        values = [a.id, sym, dte, 'DRIP', gross, '', '',
-          $('#d-drip-shares').value.trim(), $('#d-drip-price').value.trim()];
+        /* The withholding is sent EXPLICITLY on both types, always. ``apply_dividend_model``
+           keys on the dividend TYPE, not on the account's model, so a CASH row with a blank
+           withholding would book 0 — correct for a TW/MY payout, wrong for a US one under
+           W-8BEN. Sending the number makes it a stated ledger fact rather than something
+           inferred from which account it happened to land in. */
+        const wh = $('#d-drip-wh').value.trim();
+        values = divUsState && divUsState.isCash()
+          ? [a.id, sym, dte, 'CASH', gross, wh, '', '', '']
+          : [a.id, sym, dte, 'DRIP', gross, wh, '',
+            $('#d-drip-shares').value.trim(), $('#d-drip-price').value.trim()];
       } else {
         const amt = $('#d-net-amt').value.trim();
         if (!amt) { if (window.toast) window.toast('請輸入淨額', 'fail'); return; }
@@ -1856,6 +1927,9 @@
             'd-drip-shares', 'd-drip-price', 'd-net-amt'].forEach((id) => {
             const n = $('#' + id); if (n) n.value = '';
           });
+          /* Clear the OVERRIDE too, not just the value: a pencil left pressed over an
+             empty field silently sends a blank withholding on the NEXT dividend. */
+          if (divUsState) divUsState.reset();
           /* holdings refresh (STOCK/DRIP can grow shares) now rides afterCommitRefresh
              (FU-D45): the shared cache is dropped + this account re-warmed on success. */
         });
@@ -1882,19 +1956,14 @@
       note.textContent = '台股模式：現金股利沖減成本（調整均價下降）；配股以 $0 成本股數入帳。';
     } else if (model === 'drip') {
       $('#d-drip').hidden = false;
-      note.textContent = 'DRIP 模式：預扣 30%，net 將以 $0 成本股數入帳（再投資股數 × 再投資價格僅供對帳）。';
+      /* The note now depends on the pane's OWN type switch (DRIP vs 現金股利), so it is
+         written by renderUsDivType rather than here — two writers of one string is how the
+         note comes to contradict the form it describes. */
+      if (divUsState) divUsState.reset();
     } else {
       $('#d-net').hidden = false;
       note.textContent = '馬股模式：單一淨額入帳（無預扣層級）。';
     }
-    /* DRIP gross live recompute — USER-INPUT estimate (documented input-side calc;
-       the value of record is computed by the backend on CSV import, not here). */
-    $('#d-drip-gross').oninput = () => {
-      const g = parseFloat($('#d-drip-gross').value) || 0;
-      const wh = g * 0.30;
-      $('#d-drip-wh').value = wh.toFixed(2);
-      $('#d-drip-net').value = (g - wh).toFixed(2);
-    };
   }
 
   /* ---- FU-D35 dividend 代號 picker (owner 需求六) — Wave C: the shared component ----

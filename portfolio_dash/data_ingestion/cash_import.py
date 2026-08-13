@@ -82,6 +82,15 @@ _KIND_ALIASES: dict[str, str] = {
     "折讓": "REBATE",
     "折讓款": "REBATE",
     "退款": "REBATE",
+    # The broker-statement kinds (2026-08-13). A US export states these in English, but the
+    # owner reads a statement in Chinese and hand-edits the template in Excel, so both
+    # spellings are accepted for the same reason 入金 / 出金 are.
+    "利息": "INTEREST",
+    "利息收入": "INTEREST",
+    "融資利息": "INTEREST_EXPENSE",
+    "利息支出": "INTEREST_EXPENSE",
+    "券商費用": "BROKER_FEE",
+    "帳戶費用": "BROKER_FEE",
 }
 
 

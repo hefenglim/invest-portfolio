@@ -6,6 +6,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from portfolio_dash.data_ingestion.provenance import close_batch, stamp_row
 from portfolio_dash.data_ingestion.validate import Issue
 
 
@@ -32,10 +33,35 @@ class ImportPreview(BaseModel):
 
 
 class ImportSummary(BaseModel):
-    """Result of :func:`commit_preview`: which rows were written vs skipped."""
+    """Result of :func:`commit_preview`: which rows were written, skipped, or already here.
+
+    ``duplicates`` is separate from ``skipped`` on purpose. A skip is a REFUSAL (the row has
+    a hard issue, or the caller did not accept it) and needs the user's attention; a
+    duplicate is a row this ledger already holds, which is the correct and uneventful
+    outcome of re-running an import. Folding them together would report a clean re-import as
+    a file full of problems.
+    """
 
     written: list[int] = Field(default_factory=list)
     skipped: list[int] = Field(default_factory=list)
+    duplicates: list[int] = Field(default_factory=list)
+
+
+class BatchContext(BaseModel):
+    """Provenance for one commit — see :mod:`data_ingestion.provenance`.
+
+    ``hashes`` is keyed by :attr:`PreviewRow.index` rather than positional, so it cannot
+    silently mis-align with a preview whose rows are filtered or reordered.
+    """
+
+    kind: str
+    #: ``None`` when this commit will write nothing (every acceptable row is already in the
+    #: ledger). The context is still supplied in that case — it carries the duplicate
+    #: detection — but no batch row is created, because a batch that owns no data would
+    #: claim in the import history that an import happened.
+    batch_id: int | None = None
+    hashes: dict[int, str] = Field(default_factory=dict)
+    already_present: set[str] = Field(default_factory=set)
 
 
 class Writer(Protocol):
@@ -57,6 +83,7 @@ def commit_preview(
     *,
     accept: set[int],
     writer: Writer,
+    provenance: BatchContext | None = None,
 ) -> ImportSummary:
     """Commit accepted rows from a preview, skipping any with hard issues.
 
@@ -80,11 +107,41 @@ def commit_preview(
     """
     summary = ImportSummary()
     try:
+        seen_in_batch: set[str] = set()
         for row in preview.rows:
+            source_hash = provenance.hashes.get(row.index) if provenance else None
+            if source_hash is not None and (
+                source_hash in provenance.already_present  # type: ignore[union-attr]
+                or source_hash in seen_in_batch
+            ):
+                # Already in the ledger, or written earlier in THIS batch. The second case
+                # matters because a preview is re-derived per commit and a caller may
+                # submit overlapping files; without it a within-file repeat would insert
+                # once and then fail the "not already here" property on the next re-run.
+                summary.duplicates.append(row.index)
+                continue
             if row.index in accept and not row.has_hard_issue:
-                summary.written.append(writer(conn, row, commit=False))
+                row_id = writer(conn, row, commit=False)
+                summary.written.append(row_id)
+                if (
+                    provenance is not None
+                    and source_hash is not None
+                    and provenance.batch_id is not None
+                ):
+                    stamp_row(
+                        conn,
+                        kind=provenance.kind,
+                        row_id=row_id,
+                        batch_id=provenance.batch_id,
+                        source_hash=source_hash,
+                    )
+                    seen_in_batch.add(source_hash)
             else:
                 summary.skipped.append(row.index)
+        if provenance is not None and provenance.batch_id is not None:
+            # Inside the SAME transaction as the rows, so a rollback takes the batch record
+            # with it and cannot leave an orphan claiming rows that were never written.
+            close_batch(conn, provenance.batch_id, row_count=len(summary.written))
         conn.commit()
     except Exception:
         conn.rollback()

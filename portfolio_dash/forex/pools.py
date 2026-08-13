@@ -42,6 +42,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol
 
+from portfolio_dash.shared.cash_kinds import is_debit, is_fx_acquisition
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -63,8 +64,14 @@ class MovementRow(Protocol):
 
 
 def _is_debit(kind: str) -> bool:
-    """WITHDRAW is the only debit; DEPOSIT / OPENING / REBATE are credits."""
-    return kind.upper() == "WITHDRAW"
+    """True when *kind* reduces the pool balance.
+
+    Delegates to ``shared/cash_kinds.py``, which this module and ``portfolio/cash.py``
+    now share. It used to read ``kind.upper() == "WITHDRAW"`` — a second, independent copy
+    of the same predicate in a module the first one does not import, so the two could only
+    ever be fixed twice.
+    """
+    return is_debit(kind)
 
 
 @dataclass(frozen=True)
@@ -112,7 +119,15 @@ def acquisition_basis(
     """Split the pool's foreign ACQUISITIONS into basis-known and basis-unknown.
 
     Sources: ``home -> foreign`` conversions (always basis-known — the ledger stores both
-    amounts) and foreign-currency cash CREDITS (basis-known iff ``acq_home_amount`` is set).
+    amounts) and foreign-currency cash movements that ACQUIRE currency (basis-known iff
+    ``acq_home_amount`` is set).
+
+    The movement filter is ``is_fx_acquisition``, not ``not is_debit`` — the two stopped
+    being the same predicate once ``INTEREST`` existed. Interest earned is a CREDIT that is
+    not an acquisition: it arises inside the pool, so it inherits the pool's average exactly
+    as sale proceeds and foreign cash dividends already do (``domain-ledger.md``). Counting
+    it here would report ``covered_ratio < 1`` on a USD account that never converted a cent,
+    flagging the whole foreign exposure — cash *and* stocks, per F3 — as basis-incomplete.
     """
     with_basis = home_cost = without_basis = _ZERO
     for c in conversions:
@@ -120,7 +135,7 @@ def acquisition_basis(
             with_basis += c.to_amount
             home_cost += c.from_amount
     for m in movements:
-        if m.ccy != foreign or _is_debit(m.kind):
+        if m.ccy != foreign or not is_fx_acquisition(m.kind):
             continue
         if m.acq_home_amount is None:
             without_basis += m.amount

@@ -167,10 +167,19 @@
         </div>
         <div class="field">
           <label>方向</label>
+          <!-- The last three arrived with the broker-statement importer (2026-08-13). They
+               are normally IMPORTED, not typed, but a kind the ledger stores with no manual
+               door is the same asymmetry the cash-export follow-up already records — and the
+               edit dialog must offer them regardless, or a no-op edit rewrites an imported
+               row's kind. `.segmented` wraps at narrow widths (styles.css), so six buttons
+               do not overflow the 390px form. -->
           <div class="segmented">
             <button type="button" id="cm-kind-in" class="active">入金</button>
             <button type="button" id="cm-kind-out">出金</button>
             <button type="button" id="cm-kind-open">期初資金</button>
+            <button type="button" id="cm-kind-int">利息</button>
+            <button type="button" id="cm-kind-intexp">融資利息</button>
+            <button type="button" id="cm-kind-fee">券商費用</button>
           </div>
         </div>
         <div class="field">

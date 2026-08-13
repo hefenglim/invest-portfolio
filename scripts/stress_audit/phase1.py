@@ -521,9 +521,10 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         lines.setdefault(key, []).append((d, seq, label, delta))
 
     for m in facts.cash:
-        # WITHDRAW is the only debit; DEPOSIT / OPENING / REBATE credit (audit C4).
+        # Debits reduce the pool (audit C4); every other kind credits it. The set is
+        # oracle.py's, re-derived there independently of the app's own table.
         add((m.account_id, m.ccy), m.d, (0, m.id), f"{m.kind}",
-            -m.amount if m.kind.upper() == "WITHDRAW" else m.amount)
+            -m.amount if m.kind.upper() in O.DEBIT_KINDS else m.amount)
     for c in facts.fxs:
         add((c.account_id, c.from_ccy), c.d, (1, c.id), "FX_OUT", -c.from_amt)
         add((c.account_id, c.to_ccy), c.d, (1, c.id), "FX_IN", c.to_amt)

@@ -69,6 +69,23 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
     cost_carry  TEXT,                   -- Decimal in [0,1]; SPINOFF only, NULL otherwise
     note        TEXT
 );
+-- One row per imported FILE (2026-08-13). The batch is a property of the file, not of the
+-- row: it is created from the uploaded text itself (name + sha256), so an offline broker
+-- converter can emit ordinary template CSVs and provenance still works. Deleting a batch
+-- deletes exactly the rows it wrote, which is what makes trying an import reversible — the
+-- precondition for taking a four-figure broker export onto a real ledger at all.
+-- Rationale, the idempotency key's design, and why opening_inventory is excluded:
+-- data_ingestion/provenance.py.
+CREATE TABLE IF NOT EXISTS import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind          TEXT NOT NULL,     -- the template kind (transactions / dividends / …)
+    broker        TEXT,              -- set by the broker converter path; NULL for a plain CSV
+    source_name   TEXT,              -- the uploaded file's name, when the caller knows it
+    source_sha256 TEXT NOT NULL,     -- digest of the uploaded text
+    imported_at   TEXT NOT NULL,
+    row_count     INTEGER NOT NULL,
+    status        TEXT NOT NULL      -- open | committed
+);
 CREATE TABLE IF NOT EXISTS ledger_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     table_name TEXT NOT NULL,
@@ -127,6 +144,25 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # likewise stores two amounts. NULL on every pre-existing row, and a NULL row behaves
     # exactly as before the migration (it just no longer counts as covered).
     _add_column_if_missing(conn, "cash_movements", "acq_home_amount", "TEXT")
+    # Import provenance (2026-08-13). Additive and nullable on every ledger, so a row that
+    # predates this — or one entered by hand through a form — is unchanged and simply has no
+    # batch. ``opening_inventory`` is deliberately absent: its composite PK makes its writer
+    # an UPSERT, so it is already idempotent and has no surrogate id to stamp. The full
+    # rationale lives in ``data_ingestion/provenance.py``; the table list there
+    # (``TABLE_BY_KIND``) and this loop are asserted equal by tests/data_ingestion.
+    for _ledger in (
+        "transactions", "dividends", "fx_conversions", "cash_movements", "corporate_actions"
+    ):
+        _add_column_if_missing(conn, _ledger, "import_batch_id", "INTEGER")
+        _add_column_if_missing(conn, _ledger, "source_row_hash", "TEXT")
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_ledger}_src_hash "
+            f"ON {_ledger}(source_row_hash)"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_ledger}_batch "
+            f"ON {_ledger}(import_batch_id)"
+        )
     # original_avg_cost drop (A6, 2026-07-21): the stored rounded average is retired — cost
     # basis / XIRR key off original_cost_total only, and the average is computed on read. A
     # legacy DB carried a NOT NULL original_avg_cost column that upsert_opening no longer fills,

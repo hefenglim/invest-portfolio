@@ -340,12 +340,24 @@ class OpenFact:
     build_date: date
 
 
+# The two cash-kind axes, written out INDEPENDENTLY of the app.
+#
+# ``portfolio_dash/shared/cash_kinds.py`` holds the app's table. This oracle deliberately
+# does NOT import it: an oracle that shares the implementation's table cannot disagree with
+# it, and disagreeing is the whole job. These sets are re-derived here from
+# ``domain-ledger.md`` — debits reduce the pool; only FUNDING flows enter the coverage
+# denominator, so interest earned (income arising inside the pool) is a credit that is not
+# an acquisition, exactly as sale proceeds and foreign cash dividends already are.
+DEBIT_KINDS = frozenset({"WITHDRAW", "INTEREST_EXPENSE", "BROKER_FEE"})
+ACQUIRING_KINDS = frozenset({"DEPOSIT", "OPENING", "REBATE"})
+
+
 @dataclass
 class CashFact:
     id: int
     account_id: str
     d: date
-    kind: str          # DEPOSIT | WITHDRAW | OPENING | REBATE
+    kind: str          # see DEBIT_KINDS / ACQUIRING_KINDS above
     ccy: str
     amount: Decimal
     # Home-ccy cost of a FOREIGN credit (spec 2026-07-30). None = cost unknown.
@@ -885,14 +897,14 @@ def replay(facts: Facts) -> OracleResult:
 
 def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
     """Per (account, ccy) pool (portfolio/cash.py semantics, re-derived from rules):
-    WITHDRAW is the ONLY debit — DEPOSIT / OPENING (期初資金) / REBATE are credits
-    (audit C4); -fx.from +fx.to; -buy(qty*p+fee+tax) +sell(qty*p-fee-tax);
+    debits (WITHDRAW / INTEREST_EXPENSE / BROKER_FEE) reduce the pool, every other kind
+    credits it (audit C4); -fx.from +fx.to; -buy(qty*p+fee+tax) +sell(qty*p-fee-tax);
     +cash-family dividend net (CASH/NET). Opening inventory + DRIP/STOCK do not touch cash.
     """
     bal: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
     for m in facts.cash:
         bal[(m.account_id, m.ccy)] += (
-            -m.amount if m.kind.upper() == "WITHDRAW" else m.amount)
+            -m.amount if m.kind.upper() in DEBIT_KINDS else m.amount)
     for c in facts.fxs:
         bal[(c.account_id, c.from_ccy)] -= c.from_amt
         bal[(c.account_id, c.to_ccy)] += c.to_amt
@@ -943,8 +955,11 @@ def _fx_pools(facts: Facts):
                 tot_home += c.from_amt
                 tot_foreign += c.to_amt
         for m in moves:
-            if m.kind.upper() == "WITHDRAW":
-                continue          # a disposal changes neither the average nor the coverage
+            if m.kind.upper() not in ACQUIRING_KINDS:
+                # A disposal changes neither the average nor the coverage (N1); income
+                # arising inside the pool (INTEREST) inherits the average rather than
+                # acquiring at an unknown rate.
+                continue
             if m.acq_home_amount is None:
                 unbased += m.amount
             else:
@@ -985,7 +1000,7 @@ def _fx_pools(facts: Facts):
             if dv.type == "CASH" and facts.instruments[dv.symbol].quote_ccy == foreign:
                 cash += dv.net
         for m in moves:
-            cash += -m.amount if m.kind.upper() == "WITHDRAW" else m.amount
+            cash += -m.amount if m.kind.upper() in DEBIT_KINDS else m.amount
         fcash[aid] = cash
     return avg, realized, fcash, covered
 

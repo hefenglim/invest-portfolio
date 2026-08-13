@@ -168,6 +168,15 @@ _CASH_ROWS: list[list[str]] = [
     # kind labels too; REBATE is normally booked by the 折讓款 inbox confirm (FE-D1), not
     # by hand, so it carries no example row here.
     ["tw_broker", "2026-07-20", "WITHDRAW", "TWD", "50000", "", "提領"],
+    # The broker-statement kinds (2026-08-13). INTEREST is a CREDIT that is NOT an FX
+    # acquisition — income arising inside the pool inherits the pool's average rate, so
+    # acq_home_amount is REJECTED here, exactly as it is on a withdrawal. The other two are
+    # DEBITS; they reduce the pool but are NOT subject to the withdrawal overdraft guard,
+    # because a fee is a recorded fact and a margin account legitimately runs negative.
+    # Directions + FX semantics: portfolio_dash/shared/cash_kinds.py.
+    ["schwab", "2026-07-05", "INTEREST", "USD", "12.34", "", "帳戶利息"],
+    ["schwab", "2026-07-06", "INTEREST_EXPENSE", "USD", "8.01", "", "融資利息"],
+    ["schwab", "2026-07-07", "BROKER_FEE", "USD", "9.79", "", "券商費用"],
 ]
 
 _HEADERS: dict[str, list[str]] = {

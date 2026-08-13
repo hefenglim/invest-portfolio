@@ -39,8 +39,24 @@
 
   const KIND_LABEL = {
     deposit: '入金', withdraw: '出金', opening: '期初資金', rebate: '折讓款',
+    interest: '利息', interest_expense: '融資利息', broker_fee: '券商費用',
     fx_in: '換入', fx_out: '換出', buy: '買入', sell: '賣出', dividend: '股利',
   };
+  /* The two cash-kind axes, mirroring portfolio_dash/shared/cash_kinds.py. Presentation
+     only — every money figure still comes from the API — but BOTH used to be written as
+     `kind === 'withdraw'`, which paints a broker fee with the green inbound chip and offers
+     an 取得成本 field on interest that the FX pool then ignores. The lower-case spelling is
+     the wire's (`portfolio/cash.py` lower-cases the stored kind for the line label). */
+  const DEBIT_KINDS = ['withdraw', 'interest_expense', 'broker_fee'];
+  const ACQUIRING_KINDS = ['deposit', 'opening', 'rebate'];
+  /* Kinds the edit dialog may offer. An imported row's kind MUST appear here or a no-op
+     edit silently rewrites it to the first option — a money-of-record mutation from a
+     dialog the user only opened to fix a note. REBATE is excluded on purpose: its row is
+     locked (see openEdit). */
+  const EDITABLE_KINDS = [
+    ['deposit', '入金'], ['withdraw', '出金'], ['opening', '期初資金'],
+    ['interest', '利息'], ['interest_expense', '融資利息'], ['broker_fee', '券商費用'],
+  ];
   const settlementCcy = (a) => (a && (a.settlement_ccy || a.ccy)) || '';
 
   /* FU-D34: Decimal-safe compare of two numeric STRINGS — the sell amount vs. the pool
@@ -409,7 +425,7 @@
       tr.appendChild(el('td', 'num', f.date(m.date)));
       tr.appendChild(el('td', 'col-text', m.account));
       const tdKind = el('td', 'col-text');
-      const chipCls = m.kind === 'withdraw' ? 'dir-sell' : 'dir-buy';
+      const chipCls = DEBIT_KINDS.indexOf(m.kind) >= 0 ? 'dir-sell' : 'dir-buy';
       tdKind.appendChild(el('span', 'dir-chip ' + chipCls, KIND_LABEL[m.kind] || m.kind));
       tr.appendChild(tdKind);
       tr.appendChild(el('td', 'num', f.money(m.amount, m.ccy) + ' ' + m.ccy));
@@ -532,7 +548,7 @@
       fDate.disabled = true;
     } else {
       fKind = el('select', 'select');
-      [['deposit', '入金'], ['withdraw', '出金'], ['opening', '期初資金']].forEach(([v, label]) => {
+      EDITABLE_KINDS.forEach(([v, label]) => {
         const o = el('option', null, label); o.value = v;
         if (m.kind === v) o.selected = true;
         fKind.appendChild(o);
@@ -548,7 +564,8 @@
        Pre-filled with the STORED home AMOUNT (the authority, F1) so a round-trip is
        lossless; clearing the box is the deliberate way to drop the basis. */
     const editHome = fundingCcyOf(m.account_id);
-    const editForeign = !!editHome && m.ccy !== editHome && m.kind !== 'withdraw';
+    const editForeign = !!editHome && m.ccy !== editHome
+      && ACQUIRING_KINDS.indexOf(m.kind) >= 0;
     const fAcq = el('input', 'input'); fAcq.type = 'number'; fAcq.step = '0.01';
     fAcq.value = m.acq_home_amount || '';
     const acqHint = el('div', 'cfx-balance');
@@ -623,7 +640,7 @@
           ack_negative: ack,
         };
         // Switching the row to 出金 makes it a disposal — the cost basis no longer applies.
-        if (editForeign && payload.kind !== 'withdraw' && fAcq.value.trim()) {
+        if (editForeign && ACQUIRING_KINDS.indexOf(payload.kind) >= 0 && fAcq.value.trim()) {
           payload.acq_home_amount = fAcq.value.trim();
         }
         return api.put('/api/cash/movements/' + m.id, payload);
@@ -805,17 +822,23 @@
     $('#cfx-account').addEventListener('change', syncFxCcy);
     syncFxCcy();
 
-    $('#cm-kind-in').addEventListener('click', () => setKind('deposit'));
-    $('#cm-kind-out').addEventListener('click', () => setKind('withdraw'));
-    const openBtn = $('#cm-kind-open');
-    if (openBtn) openBtn.addEventListener('click', () => setKind('opening'));
+    /* Button id -> stored kind. Table-driven since 2026-08-13: the previous form named each
+       button twice (once to bind, once to toggle `active`), so adding a kind meant editing
+       two places and a half-edit leaves a button that switches the kind without lighting up.
+       Every entry is optional — an older cached page missing a button still boots. */
+    const KIND_BUTTONS = [
+      ['#cm-kind-in', 'deposit'], ['#cm-kind-out', 'withdraw'],
+      ['#cm-kind-open', 'opening'], ['#cm-kind-int', 'interest'],
+      ['#cm-kind-intexp', 'interest_expense'], ['#cm-kind-fee', 'broker_fee'],
+    ].map(([sel, kind]) => [$(sel), kind]).filter(([node]) => !!node);
+    KIND_BUTTONS.forEach(([node, kind]) => {
+      node.addEventListener('click', () => setKind(kind));
+    });
     function setKind(k) {
       cmKind = k;
-      $('#cm-kind-in').classList.toggle('active', k === 'deposit');
-      $('#cm-kind-out').classList.toggle('active', k === 'withdraw');
-      if (openBtn) openBtn.classList.toggle('active', k === 'opening');
+      KIND_BUTTONS.forEach(([node, kind]) => node.classList.toggle('active', k === kind));
       updCmBalance();  // FU-D43a: the ceiling line exists only while kind=出金
-      syncAcqField();  // 出金 is a disposal — it carries no acquisition cost
+      syncAcqField();  // only an ACQUIRING kind carries a home-currency cost
     }
 
     /* ---- spec 2026-07-30: 取得成本 for a FOREIGN credit -------------------------------
@@ -827,7 +850,7 @@
        legal submission. Only the resolved home-currency AMOUNT is persisted (F1). */
     function isForeignMovement() {
       const home = fundingCcyOf($('#cm-account').value);
-      return !!home && $('#cm-ccy').value !== home && cmKind !== 'withdraw';
+      return !!home && $('#cm-ccy').value !== home && ACQUIRING_KINDS.indexOf(cmKind) >= 0;
     }
     function syncAcqField() {
       const field = $('#cm-acq-field');

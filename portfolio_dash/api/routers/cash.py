@@ -193,6 +193,7 @@ _MOVEMENT_ISSUE_FIELD: dict[str, str] = {
     "acq_cost_ambiguous": "acq_home_amount",
     "acq_cost_home_ccy": "acq_home_amount",
     "acq_cost_on_withdraw": "acq_home_amount",
+    "acq_cost_not_an_acquisition": "acq_home_amount",
     "acq_cost_not_positive": "acq_home_amount",
     "acq_rate_not_positive": "acq_rate",
     "withdraw_insufficient_balance": "amount",
@@ -442,8 +443,9 @@ def _synthetic_movement(body: MovementBody, kind: str) -> StoredCashMovement:
     """The wire body as a would-be stored row, with an explicit (already-normalized) kind.
 
     Shaped by :func:`_synthetic` so there is ONE place that turns a not-yet-written movement
-    into a row the pool arithmetic will sign — the sign comes from ``kind == "WITHDRAW"``, and
-    two shaping sites is how one of them ends up passing the un-normalized wire spelling.
+    into a row the pool arithmetic will sign — the sign comes from the kind (via
+    ``shared/cash_kinds.py``), and two shaping sites is how one of them ends up passing the
+    un-normalized wire spelling.
     """
     return _synthetic(_movement_input(body).model_copy(update={"kind": kind}))
 

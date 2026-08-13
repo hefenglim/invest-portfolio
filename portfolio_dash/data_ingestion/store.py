@@ -1203,7 +1203,11 @@ class StoredCashMovement(BaseModel):
     id: int
     account_id: str
     date: date
-    kind: str  # DEPOSIT | WITHDRAW | OPENING | REBATE
+    # The canonical vocabulary + each kind's direction and FX-acquisition semantics live in
+    # ``shared/cash_kinds.py`` (CashKind). Not spelled out here as a literal list: this
+    # comment went stale the moment a kind was added, and a stale comment next to a `str`
+    # field is what makes the next reader believe the set is closed at four.
+    kind: str
     ccy: Currency
     amount: Decimal
     note: str | None = None

@@ -238,12 +238,24 @@
               <div class="field"><label id="d-tw-gross-label" for="d-tw-gross">Gross（總額）</label><input class="input" id="d-tw-gross" type="number"></input></div>
               <div class="field" id="d-tw-net-field"><label for="d-tw-net">Net（淨入帳）</label><input class="input" id="d-tw-net" type="number"></input></div>
             </div></div>
+            <!-- P1b (2026-08-13): a US payout that arrives as PLAIN CASH had no manual door
+                 at all — this pane assumed every US dividend is reinvested. The type switch
+                 mirrors the TW pane's; the 預扣 field gains the SAME pencil override the
+                 manual trade's fee/tax use, because a real broker's withholding differs
+                 from gross x 0.30 by its own rounding and a readonly field cannot
+                 reproduce a statement to the cent. -->
             <div id="d-drip" hidden="hidden"><div class="form-grid" style="margin-top:14px;">
+              <div class="field"><label>類型</label><div class="segmented"><button type="button" id="d-us-drip" class="active">再投資（DRIP）</button><button type="button" id="d-us-cash">現金股利</button></div></div>
               <div class="field"><label for="d-drip-gross">Gross</label><input class="input" id="d-drip-gross" type="number" step="0.01"></input></div>
-              <div class="field"><label for="d-drip-wh">預扣 30%（自動）</label><input class="input" id="d-drip-wh" readonly="readonly"></input></div>
+              <div class="field"><label id="d-drip-wh-label" for="d-drip-wh">預扣 30%（自動） <span class="ovr-chip" id="d-drip-wh-ovr" hidden="hidden">已覆寫</span></label>
+                <div class="fee-line">
+                  <input class="input" id="d-drip-wh" readonly="readonly"></input>
+                  <button class="pencil" id="d-drip-wh-pencil" type="button" title="覆寫" aria-pressed="false" aria-label="覆寫預扣稅">✎</button>
+                </div>
+              </div>
               <div class="field"><label for="d-drip-net">Net（自動）</label><input class="input" id="d-drip-net" readonly="readonly"></input></div>
-              <div class="field"><label for="d-drip-shares">再投資股數</label><input class="input" id="d-drip-shares" type="number" step="0.0001"></input></div>
-              <div class="field"><label for="d-drip-price">再投資價格</label><input class="input" id="d-drip-price" type="number" step="0.01"></input></div>
+              <div class="field" id="d-drip-shares-field"><label for="d-drip-shares">再投資股數</label><input class="input" id="d-drip-shares" type="number" step="0.0001"></input></div>
+              <div class="field" id="d-drip-price-field"><label for="d-drip-price">再投資價格</label><input class="input" id="d-drip-price" type="number" step="0.01"></input></div>
             </div></div>
             <div id="d-net" hidden="hidden"><div class="form-grid" style="margin-top:14px;">
               <div class="field"><label for="d-net-amt">淨額</label><input class="input" id="d-net-amt" type="number" step="0.01"></input></div>

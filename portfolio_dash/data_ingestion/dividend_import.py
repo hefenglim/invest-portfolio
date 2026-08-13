@@ -19,7 +19,18 @@ from portfolio_dash.data_ingestion.validate import Issue, alias_import_account
 # money of record. Dormant for a single-market account whose only model matches its rows.
 _MODEL_ALLOWED_TYPES: dict[str, set[str]] = {
     "cash_cost_reduction": {"CASH", "STOCK"},  # TW: cash cost-reduction (+ optional 配股)
-    "drip_us": {"DRIP"},                        # US Schwab/Moomoo: 30% withholding + reinvest
+    # US Schwab/Moomoo. DRIP is the account's default mechanism, but a US payout that
+    # arrives as PLAIN CASH is ordinary, not exceptional — the owner's real broker export
+    # carries more dividend rows than reinvest rows, and the difference is exactly these.
+    # Admitting CASH here (P1b, 2026-08-13) removes the per-row `dividend_type_mismatch`
+    # confirmation that used to stand between a statement and the ledger.
+    #
+    # It needs NO accounting change: a CASH row falls into ``CASH_DIVIDEND_TYPES``
+    # (``shared/models/enums.py``), so it reduces ``adjusted_total`` exactly as a TW/MY cash
+    # dividend does — owner ruling D35, 2026-08-10. Booking it as income instead would fork
+    # ``CASH_DIVIDEND_TYPES`` by market, and 回本進度 / 股利回收率 would then mean different
+    # things per market ON THE SAME SCREEN.
+    "drip_us": {"DRIP", "CASH"},
     "cash": {"NET"},                            # MY single-tier: net received
 }
 
@@ -130,6 +141,28 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
                         kind="dividend_type_mismatch",
                         needs_confirm=True,
                         message="股利類型與該市場模型不符，請確認",
+                    )
+                )
+            elif (
+                model == "drip_us"
+                and div_type == "CASH"
+                and withholding_override is None
+            ):
+                # P1b's edge. ``apply_dividend_model`` keys on the dividend TYPE, not on the
+                # account's model, so a blank withholding on a CASH row books 0 — right for
+                # a TW/MY payout, wrong for a US one under W-8BEN. The consequence is not
+                # cosmetic: net would equal gross, over-reducing ``adjusted_total`` and
+                # under-reporting the position's unrealized gain for the rest of its life.
+                #
+                # Soft, not hard: a withholding-free US distribution genuinely exists (a
+                # return of capital), so this asks rather than refuses. The manual form
+                # always sends the number, and the broker converter reads it off the
+                # statement, so it fires only on a hand-written row that omitted it.
+                issues.append(
+                    Issue(
+                        kind="us_cash_dividend_no_withholding",
+                        needs_confirm=True,
+                        message="美股現金股利未填預扣稅，將以 0 記錄（淨額=總額），請確認",
                     )
                 )
 

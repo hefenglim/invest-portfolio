@@ -26,6 +26,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol
 
+from portfolio_dash.shared.cash_kinds import movement_sign
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
@@ -73,8 +74,16 @@ class _DivRow(Protocol):
 
 
 def _movement_sign(kind: str) -> Decimal:
-    """WITHDRAW is a debit; DEPOSIT and OPENING (期初資金) are credits (audit C4)."""
-    return Decimal("-1") if kind == "WITHDRAW" else Decimal("1")
+    """The multiplier for an unsigned movement amount (audit C4).
+
+    Delegates to ``shared/cash_kinds.py`` — the ONE table both this module and
+    ``forex/pools.py`` read. This used to be ``kind == "WITHDRAW" -> -1, everything else
+    -> +1``, which was right while every other kind was a credit and failed silently the
+    moment one was not: ``BROKER_FEE`` made a fee ADD money to the pool. Delegating also
+    fixes the case sensitivity the old comparison had (a wire-cased ``"withdraw"`` scored
+    as a credit) that ``validate.py::_pool_row`` had to work around.
+    """
+    return movement_sign(kind)
 
 
 def cash_balances(

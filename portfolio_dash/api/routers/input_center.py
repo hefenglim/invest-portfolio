@@ -60,7 +60,18 @@ from portfolio_dash.data_ingestion.opening_import import (
     build_opening_preview,
     write_opening_row,
 )
-from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, commit_preview
+from portfolio_dash.data_ingestion.preview import (
+    BatchContext,
+    ImportPreview,
+    PreviewRow,
+    commit_preview,
+)
+from portfolio_dash.data_ingestion.provenance import (
+    delete_batch,
+    existing_hashes,
+    open_batch,
+    row_hashes,
+)
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
@@ -841,6 +852,11 @@ class ImportCommitBody(BaseModel):
     csv_text: str
     ack_warnings: bool = False
     date_format: str | None = None  # FU-D19: the chosen format carried through from preview
+    # Provenance (2026-08-13). Optional and purely descriptive: the batch's IDENTITY is the
+    # digest of csv_text, so a caller that omits the name still gets a traceable, reversible
+    # batch — it just cannot be shown which file it came from.
+    source_name: str | None = None
+    broker: str | None = None
 
 
 @router.post("/import/commit")
@@ -867,9 +883,59 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", "有警告列需確認後才寫入"))
     accept = {r.index for r in preview.rows if not r.has_hard_issue}
-    summary = commit_preview(conn, preview, accept=accept, writer=writer)
+    # Provenance. The hashes are derived from the rows' own content, so re-uploading the
+    # same export matches and skips rather than doubling the ledger, and the batch id makes
+    # the whole import removable in one step. The batch INSERT sits inside commit_preview's
+    # transaction, so a rollback takes it with it.
+    hashes = dict(
+        zip(
+            (r.index for r in preview.rows),
+            row_hashes(body.kind, [r.raw for r in preview.rows]),
+            strict=True,
+        )
+    )
+    already = existing_hashes(conn, body.kind, hashes.values())
+    # The batch record is created ONLY if this commit will write something. A refused or
+    # fully-duplicate import leaving an empty batch behind would fill the history with rows
+    # that claim an import happened and own no data — and the list exists to be read.
+    will_write = any(
+        r.index in accept
+        and not r.has_hard_issue
+        and hashes.get(r.index) not in already
+        for r in preview.rows
+    )
+    # ⚠ The context itself is ALWAYS built, even when nothing will be written: it carries
+    # the duplicate detection, so dropping it on a full re-import would write every row a
+    # second time — the exact defect provenance exists to prevent, reintroduced by the
+    # optimisation that skips the batch record. Only the batch ROW is conditional.
+    provenance = BatchContext(
+        kind=body.kind,
+        batch_id=(
+            open_batch(
+                conn, kind=body.kind, csv_text=norm.text,
+                source_name=body.source_name, broker=body.broker,
+            )
+            if will_write
+            else None
+        ),
+        hashes=hashes,
+        already_present=already,
+    )
+    summary = commit_preview(
+        conn, preview, accept=accept, writer=writer, provenance=provenance)
     out: dict[str, Any] = {
         "written": len(summary.written), "skipped": len(summary.skipped)}
+    # ⚠ CONTRACT CHANGE, deliberate and for EVERY kind (2026-08-13): a commit that wrote
+    # anything now also returns its ``import_batch_id``. It is the handle to the undo, and
+    # an undo whose id can only be recovered by listing batches afterwards is one nobody
+    # reaches for at the moment they need it — right after an import that looks wrong.
+    if provenance.batch_id is not None:
+        out["import_batch_id"] = provenance.batch_id
+    if summary.duplicates:
+        # Only when non-empty. A re-import is the case that needs the word: "written 0,
+        # skipped 0" alone reads like nothing happened rather than like the ledger already
+        # held every row.
+        out["duplicates"] = len(summary.duplicates)
     if body.kind in _RECONCILING_KINDS:
         # ADDITIVE, and only for the kind that needs it: the other four keep a
         # byte-identical payload, because a response shape that grows for every caller
@@ -882,6 +948,46 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
             | {r.payload.get("to_symbol", "") for r in written_rows},
         )
     return out
+
+
+@router.get("/import/batches")
+def import_batches(
+    limit: int = 50, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """The import history, newest first — what came in, from which file, and how much of it.
+
+    Read-only and cheap. It exists so the DELETE below is reachable by a human: a batch id
+    that can only be discovered by opening the SQLite file is not an undo anyone will use.
+    """
+    rows = conn.execute(
+        "SELECT id, kind, broker, source_name, source_sha256, imported_at, row_count, status "
+        "FROM import_batches ORDER BY id DESC LIMIT ?",
+        (max(1, min(limit, 500)),),
+    ).fetchall()
+    return {"batches": [dict(r) for r in rows]}
+
+
+@router.delete("/import/batches/{batch_id}")
+def import_batch_delete(
+    batch_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """Undo one import: delete exactly the ledger rows that batch wrote, and the batch.
+
+    This is what makes trying an import on real data a reasonable thing to do. The
+    alternative — restoring a pre-import backup — also discards everything entered since,
+    so without this the safe move is never to attempt the import at all.
+
+    Rows entered by hand, or by a DIFFERENT batch, are untouched: the delete is keyed on
+    ``import_batch_id``, which only this batch's rows carry.
+    """
+    found = conn.execute(
+        "SELECT 1 FROM import_batches WHERE id=?", (batch_id,)
+    ).fetchone()
+    if found is None:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"找不到匯入批次 {batch_id}", field="batch_id"))
+    removed = delete_batch(conn, batch_id)
+    return {"deleted": removed, "import_batch_id": batch_id}
 
 
 @router.get("/import/template")

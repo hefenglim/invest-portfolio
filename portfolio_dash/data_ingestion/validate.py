@@ -41,6 +41,11 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book
+from portfolio_dash.shared.cash_kinds import (
+    CASH_KIND_VALUES,
+    canonical_kind,
+    is_fx_acquisition,
+)
 from portfolio_dash.shared.corporate_actions import (
     ActionIndex,
     CorporateActionKind,
@@ -988,12 +993,17 @@ def validate_corporate_action_change(
 # The injected callable takes NO connection: it closes over one ledger snapshot, so an
 # N-row import pays for the ledger reads once rather than N times (trap #21).
 
-# DEPOSIT / OPENING (期初資金) / REBATE are CREDITS; WITHDRAW is the only debit (audit C4).
-# REBATE (退款／折讓) is the credit the rebate inbox books on confirm (FE-D1): an ACTUAL cash
-# refund of record, never the forecast estimate, and it never touches cost or P&L.
-CASH_MOVEMENT_KINDS: frozenset[str] = frozenset(
-    {"DEPOSIT", "WITHDRAW", "OPENING", "REBATE"}
-)
+# The write-path allowed set. Re-exported from ``shared/cash_kinds.py`` rather than spelled
+# out here, because a kind listed in only one of the two places is exactly the failure this
+# module's own docstrings warn about: listed here but absent from the table gets the table's
+# UNKNOWN fallback sign (a silently mis-signed pool); listed in the table but absent here is
+# simply unreachable. ``tests/shared/test_cash_kinds.py`` asserts the two are equal.
+#
+# Direction and FX-acquisition semantics per kind live in that table — including why
+# REBATE (退款／折讓, the credit the rebate inbox books on confirm, FE-D1) counts as an
+# acquisition while INTEREST does not, and why only WITHDRAW is subject to the overdraft
+# guard below even though BROKER_FEE / INTEREST_EXPENSE are also debits.
+CASH_MOVEMENT_KINDS: frozenset[str] = CASH_KIND_VALUES
 
 
 class CashMovementInput(BaseModel):
@@ -1057,8 +1067,14 @@ class CashPoolFn(Protocol):
 
 
 def cash_movement_kind(raw: str) -> str:
-    """The canonical stored spelling of a movement kind (``' withdraw '`` -> ``WITHDRAW``)."""
-    return raw.strip().upper()
+    """The canonical stored spelling of a movement kind (``' withdraw '`` -> ``WITHDRAW``).
+
+    Delegates to ``shared/cash_kinds.canonical_kind`` so the normalization the calculation
+    layer applies before signing a row is the SAME normalization the write path applies
+    before storing it. Unrecognised input still passes through, so the rejection message
+    can name what was actually typed.
+    """
+    return canonical_kind(raw)
 
 
 def _pool_row(inp: CashMovementInput) -> CashMovementInput:
@@ -1103,6 +1119,18 @@ def resolve_acq_home_amount(
     if cash_movement_kind(inp.kind) == "WITHDRAW":
         return None, Issue(
             kind="acq_cost_on_withdraw", message="出金是處分，不帶取得成本"
+        )
+    if not is_fx_acquisition(inp.kind):
+        # The remaining non-acquiring kinds — interest and fees. This test is keyed on the
+        # ACQUISITION axis rather than on ``== "WITHDRAW"``, because the two stopped
+        # coinciding once INTEREST existed: interest earned is a CREDIT, so a withdraw-only
+        # test lets a cost through on it, and ``forex/pools.py`` then IGNORES that cost —
+        # income arising inside the pool inherits the pool average instead of acquiring at
+        # its own rate. A number the user is asked for, that is stored and never affects
+        # anything, is worse than a rejection: it reads as recorded when it is inert.
+        return None, Issue(
+            kind="acq_cost_not_an_acquisition",
+            message="利息與費用不是外幣取得，不帶取得成本（沿用資金池平均匯率）",
         )
     if inp.acq_home_amount is not None:
         if inp.acq_home_amount <= _ZERO:

@@ -63,6 +63,9 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("job_runs", "排程執行紀錄", "系統記錄", "started_at"),
     _TableSpec("action_log", "系統操作記錄", "系統記錄", "ts"),
     _TableSpec("ledger_audit", "帳本操作稽核", "系統記錄", "at"),
+    # 系統記錄 rather than 帳本: it holds no money of record, only the note of which file
+    # each imported row came from — and it is what the import undo is keyed on.
+    _TableSpec("import_batches", "匯入批次", "系統記錄", "imported_at"),
     _TableSpec("alert_events", "預警事件", "系統記錄", "fired_at"),
     _TableSpec("alert_dispatch_log", "預警派發紀錄", "系統記錄", "dispatched_at"),
     _TableSpec("signal_states", "技術訊號狀態", "系統記錄", "updated_at"),

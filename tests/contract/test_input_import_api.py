@@ -42,7 +42,11 @@ def test_import_commit_writes_ok_rows(api_client: TestClient) -> None:
            "tw_broker,2330,buy,2026-06-02,100,600\n")
     r = api_client.post("/api/import/commit",
                         json={"kind": "transactions", "csv_text": csv, "ack_warnings": False})
-    assert r.status_code == 200 and r.json() == {"written": 1, "skipped": 0}
+    assert r.status_code == 200
+    # ``import_batch_id`` joined the shape with provenance (2026-08-13): it is the handle
+    # to the undo, and an undo whose id must be looked up afterwards is one nobody reaches
+    # for at the moment they need it.
+    assert r.json() == {"written": 1, "skipped": 0, "import_batch_id": 1}
 
 
 def test_import_commit_warn_requires_ack_422(api_client: TestClient) -> None:
@@ -68,7 +72,8 @@ def test_import_commit_hard_row_skipped(api_client: TestClient) -> None:
            "tw_broker,2330,buy,2026-06-02,notanumber,600\n")
     r = api_client.post("/api/import/commit",
                         json={"kind": "transactions", "csv_text": csv, "ack_warnings": True})
-    assert r.status_code == 200 and r.json() == {"written": 1, "skipped": 1}
+    assert r.status_code == 200
+    assert r.json() == {"written": 1, "skipped": 1, "import_batch_id": 1}
 
 
 def test_import_commit_bad_kind_400(api_client: TestClient) -> None:
@@ -151,7 +156,7 @@ def test_commit_with_pinned_date_format_writes(api_client: TestClient) -> None:
                         json={"kind": "transactions", "csv_text": _AMBIG_CSV,
                               "date_format": "dmy", "ack_warnings": False})
     assert r.status_code == 200
-    assert r.json() == {"written": 2, "skipped": 0}
+    assert r.json() == {"written": 2, "skipped": 0, "import_batch_id": 1}
 
 
 def test_unknown_date_format_is_400(api_client: TestClient) -> None:
