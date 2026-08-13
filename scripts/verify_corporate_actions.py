@@ -66,7 +66,6 @@ from __future__ import annotations
 import argparse
 import csv
 import io
-import re
 import sqlite3
 import sys
 from collections import defaultdict
@@ -129,6 +128,14 @@ from portfolio_dash.shared.corporate_actions import ActionIndex, CorporateAction
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+
+# The repo root, so ``scripts.privacy`` resolves when this file is run directly. An editable
+# install puts ``portfolio_dash`` on the path but not ``scripts``, and the owner runs this as
+# ``python scripts/verify_corporate_actions.py`` — which puts ``scripts/`` on the path, not
+# its parent. Same guard as ``verify_live.py``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.privacy import force_utf8_stdio, safe_symbol  # noqa: E402
 
 _ZERO = Decimal("0")
 _BOM = "﻿"   # a leading UTF-8 BOM (Excel), tolerated exactly as the app's parsers do
@@ -195,58 +202,24 @@ _ACTIONS_KIND = "corporate_actions"
 # ---------------------------------------------------------------------------
 
 
-def _force_utf8_output() -> None:
-    """Print zh-TW on a Windows console without a ``UnicodeEncodeError``.
-
-    The owner runs this on their own machine, which is Windows, where a piped/redirected
-    stdout defaults to the ANSI code page (cp1252 here) — and every label this script prints
-    is Traditional Chinese. Without this the run dies inside ``--help``. ``errors="replace"``
-    is the belt: a mangled label is a bad report, a traceback is no report at all.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if callable(reconfigure):
-            reconfigure(encoding="utf-8", errors="replace")
+# Shared with ``schwab_convert.py`` (``scripts/privacy.py``): same owner, same Windows
+# console, same zh-TW labels. The private alias keeps this module's own vocabulary.
+_force_utf8_output = force_utf8_stdio
 
 
 def _yn(value: bool) -> str:
     return "yes" if value else "no"
 
 
-# An equity ticker never contains whitespace, and never a digit-dot-digit run. An OPTION
-# symbol contains both: Schwab writes contracts as ``TICKER MM/DD/YYYY STRIKE C|P``, e.g.
-# ``TSLA 01/19/2024 200.00 P`` — and **the strike is an amount**.
+# The masking rule now lives in ``scripts/privacy.py`` — `schwab_convert.py` prints the same
+# kind of report against the same kind of file, and a privacy control with two copies is one
+# copy short of a leak. The private alias is kept because it is this module's own vocabulary
+# and its tests name it; the implementation is shared, not duplicated.
 #
-# The discriminator is deliberately NOT "contains a digit". Two of this project's three
-# markets quote numeric tickers — TW ``2330`` / ``0050``, MY ``3182`` — so a digit rule would
-# mask most of the report on a TW or MY ledger while adding nothing on a US one. It is also
-# not "contains a dot": US class shares are written ``BRK.B``. Whitespace or ``\d\.\d``
-# catches the contract form and nothing that is a real ticker in any market this app serves.
-_NOT_A_TICKER = re.compile(r"\s|\d\.\d")
-
-
-def _safe_symbol(symbol: str) -> str:
-    """A symbol that is safe to print, and the reason this function has to exist.
-
-    The module docstring's privacy argument is about TYPES — no ``Decimal`` reaches stdout —
-    and it was **incomplete**, measured 2026-08-11. :func:`_report_line` prints the *symbol*,
-    and a symbol is a free string that the owner's own broker fills with a strike price. This
-    is not contrived: in a real Schwab export the option contracts appear on the very journal
-    dates the corporate actions do (the same date carries ``TICKER MM/DD/YYYY 7.50 P`` beside
-    the equity), so an owner recording those actions has such a string as a ``from_symbol`` by
-    construction. Worse, ``affected`` in :func:`main` is built from the **parsed** action
-    inputs before any validation runs, so the string prints even for a row that is rejected.
-
-    **Masked, not rejected.** Refusing an option-shaped symbol at the door would drop a row
-    the owner supplied, which changes ``missing_action_rows`` and could turn a FAIL into a
-    PASS — weakening the gate to protect the output. Masking changes only what is printed:
-    every count, verdict and exit code is identical. The leading token is kept because it is
-    the underlying ticker, which is what the owner needs to act on.
-    """
-    if not _NOT_A_TICKER.search(symbol):
-        return symbol
-    head = symbol.split(maxsplit=1)[0] if symbol.split() else ""
-    return f"{head} ⋯" if head and not _NOT_A_TICKER.search(head) else "⋯"
+# ⚠ ``main`` still builds ``affected`` from the **parsed** action inputs before any validation
+# runs, so a rejected row's symbol reaches stdout too. That is why masking, not rejection, is
+# the right control here: it changes what is printed and nothing else.
+_safe_symbol = safe_symbol
 
 
 def _report_line(symbol: str, oversold: bool, basis_intact: bool, reconciled: bool,
