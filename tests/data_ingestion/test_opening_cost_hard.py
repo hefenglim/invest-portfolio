@@ -62,7 +62,8 @@ def test_csv_non_positive_total_is_hard(conn: sqlite3.Connection, total: str) ->
     assert "non_positive_opening_cost" in _kinds(preview)
     assert preview.rows[0].has_hard_issue
     summary = commit_preview(conn, preview, accept={0}, writer=write_opening_row)
-    assert summary.written == [] and summary.skipped == [0]
+    assert summary.written == [] and summary.skipped == []
+    assert [r.index for r in summary.rejected] == [0]
     assert list_opening(conn) == []
 
 

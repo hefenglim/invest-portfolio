@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.holdings import (
     MAX_ACTION_DEPTH,
+    PendingFlows,
     current_shares,
     load_action_index,
     shares_before_action_on,
@@ -52,6 +53,7 @@ from portfolio_dash.shared.corporate_actions import (
     is_ratio_term,
 )
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.assets import Account
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
@@ -195,12 +197,39 @@ def validate_opening_cost(original_cost_total: Decimal) -> Issue | None:
     )
 
 
+def pending_share_flows(
+    batch: Sequence[TxnInput], *, exclude: TxnInput | None = None
+) -> PendingFlows:
+    """Turn a batch of not-yet-written transactions into :data:`PendingFlows`.
+
+    The convention matches ``validate_cash_movement``: *batch* is every row committed
+    together **including** the one being validated, and the caller names that one as
+    *exclude* so it is not counted against itself.
+
+    A DECLARED short sale contributes its flow like any other sell. Its own row is exempt
+    from the guard, but the shares still leave the position and a LATER sibling sell has to
+    see that they did.
+    """
+    flows: dict[tuple[str, str], list[tuple[date, int, Decimal]]] = {}
+    for other in batch:
+        if other is exclude:
+            continue
+        is_buy = other.side is Side.BUY
+        flows.setdefault((other.account_id, other.symbol), []).append((
+            other.trade_date,
+            int(EventPriority.BUY if is_buy else EventPriority.SELL),
+            other.quantity if is_buy else -other.quantity,
+        ))
+    return flows
+
+
 def validate_transaction(
     conn: sqlite3.Connection,
     inp: TxnInput,
     *,
     today: date | None = None,
     index: ActionIndex | None = None,
+    batch: Sequence[TxnInput] = (),
 ) -> list[Issue]:
     """Run validation checks on *inp* against the current ledger state.
 
@@ -215,6 +244,12 @@ def validate_transaction(
     *index* is one :class:`ActionIndex` shared across a batch (D23 rule 2). This function
     runs ONCE PER ROW of an import, so a 1,375-row CSV re-reads and re-groups the whole
     corporate-action ledger 1,375 times unless the caller threads one in (trap #21).
+
+    *batch* is every row being committed together, INCLUDING *inp* — the convention
+    ``validate_cash_movement`` established. **Only the oversell guard reads it**, and only
+    through the share walker, so a sibling buy dated before a split reaches a later sell
+    already multiplied. Left empty (the default, and every single-row door) the guard
+    behaves exactly as it did: this widens what the check can SEE, never what it permits.
     """
     issues: list[Issue] = []
 
@@ -275,14 +310,22 @@ def validate_transaction(
         # it as the owner's data error. For a symbol with no corporate action this takes the
         # pre-existing branch unchanged (D38 invariant 1).
         walk_index = index if index is not None else load_action_index(conn)
-        held = current_shares(conn, inp.account_id, inp.symbol, index=walk_index)
+        # SIBLING-AWARE (2026-08-14): a CSV whose covering buy is three lines above the sell
+        # used to raise 賣超 on the sell, because both counts read the STORED ledger only.
+        # That is the one guard whose confirmation permanently discards a cost basis, so a
+        # bulk import that raises it spuriously trains the owner to click exactly the button
+        # that must stay frightening. Measured on a synthetic broker export: 7 of 47 rows.
+        pending = pending_share_flows(batch, exclude=inp)
+        held = current_shares(
+            conn, inp.account_id, inp.symbol, index=walk_index, pending=pending)
         # DATE-AWARE (2026-07-31): the position that must cover the sell is the one that
         # exists on its OWN trade date. `current_shares` nets across all dates, so a
         # back-dated sell covered only by a LATER buy passed silently — and the replay then
         # discarded the symbol's cost basis for good. The cash ledger has had the equivalent
         # running-balance check since audit C3; this closes the same hole on the share side.
         held_then = shares_through(
-            conn, inp.account_id, inp.symbol, on=inp.trade_date, index=walk_index
+            conn, inp.account_id, inp.symbol,
+            on=inp.trade_date, index=walk_index, pending=pending,
         )
         if (capped := _depth_cap_issue(walk_index, {inp.symbol})) is not None:
             issues.append(capped)

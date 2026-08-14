@@ -35,15 +35,18 @@ Three things about the shape of the fix, each of which is load-bearing:
 """
 
 import sqlite3
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
+from types import MappingProxyType
 
 from portfolio_dash.data_ingestion.store import list_corporate_actions
 from portfolio_dash.shared.corporate_actions import (
     ActionIndex,
     CorporateAction,
     CorporateActionKind,
+    StoredActionRow,
     apply_ratio,
 )
 from portfolio_dash.shared.ledger_events import EventPriority
@@ -71,9 +74,34 @@ MAX_ACTION_DEPTH = 32
 # strictly BEFORE the cut. ``None`` means "no cut" — every event counts.
 _Cut = tuple[date, int] | None
 
+#: Share-moving rows that are being VALIDATED but are **not in the ledger yet**, keyed by
+#: ``(account_id, symbol)`` and already expressed in the walk's own
+#: ``(date, EventPriority, signed delta)`` vocabulary.
+#:
+#: **Why the walker takes them rather than the caller adjusting the answer.** A validator that
+#: added its siblings to the returned count would be action-UNAWARE about them: a sibling buy
+#: of 100 dated before a 4-for-1 split must meet a later sell as 400, and only the walk knows
+#: that. Adding it outside the walk gets the split-then-sell case — the exact cascade the
+#: corporate-action feature exists to prevent — wrong in the direction that looks reasonable.
+#:
+#: ``cash_import.py`` named this class of failure first ("**The whole file is one batch**"),
+#: and ``validate_cash_movement`` / ``validate_corporate_action`` have taken a ``batch`` since;
+#: the transaction door is the one that never got it (measured 2026-08-12: 7 of 47 rows of a
+#: synthetic broker export raised a 賣超 whose covering buy was three lines above it).
+PendingFlows = Mapping[tuple[str, str], Sequence[tuple[date, int, Decimal]]]
+
+#: A shared empty default. Mutable defaults are a trap and an empty dict literal per call is
+#: garbage; this is read-only by contract and by type.
+_NO_PENDING: PendingFlows = MappingProxyType({})
+
 
 def _shares_until(
-    conn: sqlite3.Connection, account_id: str, symbol: str, before: date | None
+    conn: sqlite3.Connection,
+    account_id: str,
+    symbol: str,
+    before: date | None,
+    *,
+    pending: PendingFlows = _NO_PENDING,
 ) -> Decimal:
     """Net shares from all four share sources, counting events dated < *before*
     (or every event when *before* is None).
@@ -83,6 +111,11 @@ def _shares_until(
     second term of the drawer's reconciliation identity — "improving" it silently changes
     the drawer's footer to always read zero. It is also the pre-existing path D38's
     containment invariant preserves byte-for-byte for every symbol with no corporate action.
+
+    *pending* rows are filtered on the DATE half of their cut only, because that is the
+    filter this function applies to its own three ledgers — a naive path that ordered its
+    pending rows more precisely than its stored ones would be neither the old number nor the
+    new one. The default is empty, so every pre-existing caller is byte-identical.
     """
     cut = before.isoformat() if before is not None else None
     total = _ZERO
@@ -106,6 +139,9 @@ def _shares_until(
         total += q if r["side"] == Side.BUY.value else -q
     for r in conn.execute(div_sql, params):
         total += Decimal(r["reinvest_shares"])
+    for when, _priority, qty in pending.get((account_id, symbol), ()):
+        if before is None or when < before:
+            total += qty
     return total
 
 
@@ -119,14 +155,29 @@ class _DepthCapped(Exception):  # noqa: N818 - control flow inside one walk, nev
     """
 
 
-def load_action_index(conn: sqlite3.Connection) -> ActionIndex:
+def load_action_index(
+    conn: sqlite3.Connection, *, pending: Sequence[StoredActionRow] = ()
+) -> ActionIndex:
     """Read the corporate-action ledger into one :class:`ActionIndex` (D23 rule 2).
 
     Build ONE per validation batch / per request and thread it through every share query.
     The oversell guard runs once per transaction, so a ~1,400-row import would otherwise
     re-read and re-group the whole action ledger ~1,400 times (trap #21).
+
+    *pending* rows are actions **about to be imported** — an importer's own batch, or the
+    action file that accompanies a broker export's trades. They join the stored ones, so a
+    chain resolves inside one file (see ``corporate_action_import`` for the measured
+    failure and for why a row still cannot justify itself). Structural typing: anything
+    with the :class:`StoredActionRow` fields qualifies, which is what lets an unvalidated
+    ``CorporateActionInput`` be offered here without this module importing ``validate``
+    (it cannot — ``validate`` imports this one).
+
+    A pending row too malformed to be a :class:`CorporateAction` excludes itself:
+    ``convert_stored`` files it under :attr:`ActionIndex.unreadable` and the walk never
+    sees it. That is the right outcome — the row is being rejected on its own terms in the
+    same pass, and an invalid ratio must not lend shares to its siblings.
     """
-    return ActionIndex.from_stored(list_corporate_actions(conn))
+    return ActionIndex.from_stored([*list_corporate_actions(conn), *pending])
 
 
 def _resolve_index(conn: sqlite3.Connection, index: ActionIndex | None) -> ActionIndex:
@@ -144,6 +195,7 @@ class _Walk:
 
     conn: sqlite3.Connection
     index: ActionIndex
+    pending: PendingFlows = _NO_PENDING
     _flows: dict[tuple[str, str], tuple[tuple[date, int, Decimal], ...]] = field(
         default_factory=dict
     )
@@ -156,6 +208,11 @@ class _Walk:
         Loaded unbounded and filtered in Python, because the filter is a ``(date, priority)``
         cut and SQL sees only the date half. Cached per position for the duration of the
         walk, so a recursion that revisits a predecessor does not re-query.
+
+        :data:`PendingFlows` rows join the stored ones here, at the bottom, so they are
+        subject to every rule above them: the ``(date, priority)`` cut, the action deltas,
+        and the recursion that resolves a destination from its source's whole history. A
+        pending buy dated before a split therefore reaches a later sell already multiplied.
         """
         cached = self._flows.get((account_id, symbol))
         if cached is not None:
@@ -193,6 +250,7 @@ class _Walk:
                  int(EventPriority.DIVIDEND),
                  Decimal(r["reinvest_shares"]))
             )
+        rows.extend(self.pending.get((account_id, symbol), ()))
         loaded = tuple(rows)
         self._flows[(account_id, symbol)] = loaded
         return loaded
@@ -300,6 +358,7 @@ def _shares_at(
     naive_before: date | None,
     index: ActionIndex | None,
     short_circuit: bool = True,
+    pending: PendingFlows = _NO_PENDING,
 ) -> Decimal:
     """Action-aware share count, or the pre-existing path when there is nothing to apply.
 
@@ -313,12 +372,17 @@ def _shares_at(
     no corporate actions at all the short-circuit therefore fires for every symbol, and
     ``tests/data_ingestion/test_holdings_containment.py`` proves it by making the walker
     raise on construction and running all nine call sites.
+
+    *pending* survives that short-circuit — it is added to the naive branch too. Sibling
+    awareness is not part of the corporate-action feature and must not be contained by its
+    invariant: an ordinary ledger with no action at all still has files whose sell is covered
+    by a buy three lines above it, and that is the common case, not the exotic one.
     """
     resolved = _resolve_index(conn, index)
     if short_circuit and not resolved.for_symbol(account_id, symbol):
-        return _shares_until(conn, account_id, symbol, naive_before)
+        return _shares_until(conn, account_id, symbol, naive_before, pending=pending)
     try:
-        return _Walk(conn, resolved).shares(account_id, symbol, cut)
+        return _Walk(conn, resolved, pending).shares(account_id, symbol, cut)
     except _DepthCapped:
         # D31: read paths keep the bare `Decimal` and degrade to the ACTION-UNAWARE count —
         # a defined, pre-feature number rather than a truncated walk or a fabricated zero
@@ -326,7 +390,7 @@ def _shares_at(
         # The position is recorded on the index so the validation path can raise a
         # `needs_confirm` issue and the display can mark it 待釐清.
         resolved.note_depth_capped(account_id, symbol)
-        return _shares_until(conn, account_id, symbol, naive_before)
+        return _shares_until(conn, account_id, symbol, naive_before, pending=pending)
 
 
 def current_shares(
@@ -335,6 +399,7 @@ def current_shares(
     symbol: str,
     *,
     index: ActionIndex | None = None,
+    pending: PendingFlows = _NO_PENDING,
 ) -> Decimal:
     """Return the net shares currently held for *account_id* / *symbol*.
 
@@ -344,9 +409,13 @@ def current_shares(
     Returns ``Decimal("0")`` for no position.
 
     Pass *index* to reuse one :class:`ActionIndex` across a batch (D23 rule 2); omitted, one
-    is read per call.
+    is read per call. Pass *pending* (:data:`PendingFlows`) to count rows that are being
+    validated alongside this one but are not written yet.
     """
-    return _shares_at(conn, account_id, symbol, cut=None, naive_before=None, index=index)
+    return _shares_at(
+        conn, account_id, symbol,
+        cut=None, naive_before=None, index=index, pending=pending,
+    )
 
 
 def shares_through(
@@ -356,6 +425,7 @@ def shares_through(
     *,
     on: date,
     index: ActionIndex | None = None,
+    pending: PendingFlows = _NO_PENDING,
 ) -> Decimal:
     """Shares held at the CLOSE of *on* — events dated on or before it count.
 
@@ -371,6 +441,7 @@ def shares_through(
         cut=(on + timedelta(days=1), int(EventPriority.OPENING)),
         naive_before=on + timedelta(days=1),
         index=index,
+        pending=pending,
     )
 
 

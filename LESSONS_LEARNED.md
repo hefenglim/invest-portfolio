@@ -23,6 +23,42 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **When one validator serves two doors, check that BOTH doors pass the argument
+  (2026-08-14):** `cash_import.py` fixed sibling-awareness a release earlier and wrote the rule
+  down in its own module docstring — *"The whole file is one batch … the E1a class of failure"* —
+  and `validate_cash_movement` and `validate_corporate_action` both grew a `batch` parameter.
+  `validate_transaction` never did, and nothing noticed, because the parameter's absence is not a
+  type error, a lint, or a failing test: the single-row door (the manual form) is the majority
+  caller and behaves identically either way. The bulk door then raised 賣超 on **7 of 47** rows of
+  a synthetic broker export whose covering buys were three lines above them.
+  Two rules come out of it:
+  **(1)** A fix expressed as a *named class of failure* is a search instruction. When you write
+  one down, grep for every other caller of the same guard **in the same change** — the note in
+  the docstring cost nothing and still did not travel.
+  **(2)** ⚠ **Widen the WALKER, not the answer.** The obvious version adds the pending siblings to
+  the count the validator got back. That version is corporate-action-*unaware* about them, so a
+  sibling buy of 100 dated before a 4-for-1 split meets a later sell of 400 as 100 — reintroducing
+  the split-then-sell cascade through the import door. The pending rows have to enter the same
+  date-ordered replay the stored ones do. Exactly one test fails on the naive version, and it is
+  the one worth writing first.
+
+- **A counter that means two things reports the more comforting one (2026-08-14):**
+  `commit_preview` put rows the caller *deselected* and rows the importer *refused* in the same
+  `skipped` bucket. An import that hard-rejected 3 of 5 corporate actions therefore announced
+  「成功 2 筆・跳過 3 筆」 — every word true, and read by everyone as *I didn't tick three of
+  them*. The ledger was then wrong by a split ratio with nothing on any screen saying so. The
+  giveaway is the sentence you would write to explain the number: if it needs an "or", it is two
+  numbers. Same shape as the `duplicates` split that preceded it, which is why the fix had a
+  convention to copy (`rejected` is additive and present only when non-zero).
+
+- **A failure printer that can crash is a failure printer that hides failures (2026-08-14):**
+  `run_phase1.py`'s summary loop printed each failed check's free-text scope, and many of those
+  are Traditional Chinese, so on a cp1252 console the loop raised `UnicodeEncodeError` — **only
+  on a run that had a failure**, i.e. the one run whose output matters. The `ops=… pass=… fail=1`
+  line had already printed, so it read as a harness bug rather than as the detail going missing.
+  Any code path that only executes when something has gone wrong needs to be exercised
+  deliberately; this one had been latent since the scopes were written.
+
 - **An inventory of a dependency must cover RUNTIME-INJECTED loads, not just markup
   (2026-08-12):** vendoring ECharts looked like a three-line change — `index.html`,
   `insights.html`, `settings.html` each carry a `<script src="https://cdn.jsdelivr.net/...">`

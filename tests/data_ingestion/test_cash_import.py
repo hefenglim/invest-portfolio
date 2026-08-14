@@ -219,7 +219,9 @@ def test_withdraw_over_balance_is_hard_and_writes_nothing(
     assert "1000" in issue.message  # the available balance is stated
     assert preview.rows[0].has_hard_issue
     summary = commit_preview(seeded, preview, accept={0}, writer=write_cash_movement_row)
-    assert summary.written == [] and summary.skipped == [0]
+    # REJECTED, not skipped: the importer refused it (C3, 2026-08-14).
+    assert summary.written == [] and summary.skipped == []
+    assert [r.index for r in summary.rejected] == [0]
     assert len(list_cash_movements(seeded)) == 1  # only the seeded deposit
 
 

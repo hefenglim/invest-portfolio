@@ -11,6 +11,7 @@ import csv
 import io
 import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -19,6 +20,7 @@ from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dateparse import DateCandidate, resolve_date_column
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import (
     ResolutionStatus,
@@ -33,6 +35,7 @@ from portfolio_dash.data_ingestion.validate import (
     alias_import_account,
     validate_transaction,
 )
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.models.enums import Side
 
 # Canonical CSV column order for the transactions import — the SINGLE SOURCE the downloadable
@@ -124,6 +127,9 @@ def txn_preview_row(
     index: int,
     raw: dict[str, str],
     inp: TxnInput,
+    *,
+    batch: Sequence[TxnInput] = (),
+    action_index: ActionIndex | None = None,
 ) -> PreviewRow:
     """Build a :class:`PreviewRow` for a single transaction input.
 
@@ -135,11 +141,17 @@ def txn_preview_row(
         index: Row index (0-based) used to identify the row in the preview.
         raw:   Original raw key/value mapping for display purposes.
         inp:   Parsed and typed transaction input.
+        batch: Every row committed together, INCLUDING *inp* — the oversell guard counts
+               the siblings so a sell covered by a buy earlier in the same file is not
+               flagged 賣超. Empty (the default) is the single-row behaviour.
+        action_index: One :class:`ActionIndex` for the whole file (D23 rule 2 / trap #21).
+               Omitted, ``validate_transaction`` reads one PER ROW.
 
     Returns:
         A fully populated :class:`PreviewRow`.
     """
-    issues: list[Issue] = list(validate_transaction(conn, inp))
+    issues: list[Issue] = list(
+        validate_transaction(conn, inp, index=action_index, batch=batch))
 
     # --- symbol resolution: write the RESOLVED symbol ---
     # EXACT -> rewrite the payload symbol to the registered symbol. NEEDS_AI (every
@@ -236,12 +248,22 @@ def txn_preview_row(
     )
 
 
-def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
+def build_transaction_preview(
+    conn: sqlite3.Connection, csv_text: str, *, pending_actions: ActionIndex | None = None
+) -> ImportPreview:
     """Parse *csv_text* into an :class:`ImportPreview` of transaction rows.
 
     Each row is validated, symbol-resolved, and auto-filled with fee/tax from
     the account's FeeRuleSet (unless the CSV already supplies those columns).
     Rows that fail to parse are captured with a ``parse_error`` issue.
+
+    **The whole file is one batch** — the phrase, and the reasoning, are ``cash_import``'s.
+    Rows are parsed in a FIRST pass so the oversell guard can see every sibling before it
+    judges any single row; without that, a sell whose covering buy is three lines above it
+    is flagged 賣超, and 賣超 is the one confirmation in this system that permanently
+    discards a cost basis. One :class:`ActionIndex` is read for the whole file rather than
+    per row (D23 rule 2 / trap #21): on a 1,375-row export that is 1,374 fewer full reads
+    and regroupings of the corporate-action ledger.
 
     Args:
         conn:     Active SQLite connection (schema in place, accounts seeded).
@@ -251,6 +273,10 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
                   (``1``/``true`` marks a TW same-day round trip → 0.15% sell tax),
                   ``short_sale`` (``1``/``true`` marks a DECLARED short sale — the only
                   sell allowed to exceed holdings without tripping the 賣超 guard).
+        pending_actions: an :class:`ActionIndex` ALREADY widened with corporate actions that
+                  are about to be imported alongside these trades (the broker one-click
+                  flow, so a post-split sell does not demand the 賣超 ack for an action
+                  that arrives seconds later). Omitted, the stored ledger's index is read.
 
     Returns:
         :class:`ImportPreview` containing one :class:`PreviewRow` per data row.
@@ -259,6 +285,9 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
     # download->re-upload (or paste) round-trip must not turn the first header into a BOM+account.
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
     rows: list[PreviewRow] = []
+    #: Pass 1's output: ``(index, raw, parsed-or-None)``. Pass 2 validates each entry
+    #: against ALL of it.
+    parsed: list[tuple[int, dict[str, str], TxnInput | None, Issue | None]] = []
 
     for idx, raw_row in enumerate(reader):
         raw = {k.strip(): (v or "").strip() for k, v in raw_row.items()}
@@ -287,18 +316,24 @@ def build_transaction_preview(conn: sqlite3.Connection, csv_text: str) -> Import
                 note=raw.get("note") or None,
             )
         except (KeyError, ValueError, InvalidOperation) as exc:
-            rows.append(
-                PreviewRow(
-                    index=idx,
-                    raw=raw,
-                    issues=[Issue(kind="parse_error", message=str(exc))],
-                )
-            )
+            parsed.append((idx, raw, None, Issue(kind="parse_error", message=str(exc))))
             continue
 
-        row = txn_preview_row(conn, idx, raw, inp)
-        if alias_issue is not None:
-            row.issues.append(alias_issue)
+        parsed.append((idx, raw, inp, alias_issue))
+
+    # --- pass 2: validate each row against the ledger PLUS its siblings ---
+    # Only rows that PARSED are siblings. An unparseable row has no account, symbol,
+    # quantity or date, so it cannot cover anything; counting it would be inventing a flow
+    # out of a defect. (``cash_import.py:260`` filters the same way, for the same reason.)
+    batch = [parsed_in for _idx, _raw, parsed_in, _issue in parsed if parsed_in is not None]
+    action_index = pending_actions if pending_actions is not None else load_action_index(conn)
+    for idx, raw, row_inp, extra in parsed:
+        if row_inp is None:
+            rows.append(PreviewRow(index=idx, raw=raw, issues=[extra] if extra else []))
+            continue
+        row = txn_preview_row(conn, idx, raw, row_inp, batch=batch, action_index=action_index)
+        if extra is not None:
+            row.issues.append(extra)
         rows.append(row)
 
     return ImportPreview(rows=rows)

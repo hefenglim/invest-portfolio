@@ -1188,26 +1188,53 @@
        try again. */
     const duplicates = resp && resp.duplicates !== undefined ? resp.duplicates : 0;
     const dupText = duplicates > 0 ? '・已匯入過 ' + duplicates + ' 筆' : '';
+    /* Rows the importer REFUSED (a hard issue), as opposed to rows the user deselected.
+       They shared 「跳過」 until 2026-08-14, and the two readings are opposite: 跳過 says
+       "you didn't tick it", 擋下 says "the ledger is now missing this and here is why".
+       The measured cost of the conflation was an import of 5 corporate actions that wrote
+       2, announced 「跳過 3 筆」, and left every share count for those symbols wrong by a
+       split ratio with nothing anywhere saying so. */
+    const rejected = resp && resp.rejected !== undefined ? resp.rejected : 0;
+    const rejText = rejected > 0 ? '・擋下 ' + rejected + ' 筆' : '';
+    const rejRows = (resp && resp.rejected_rows) || [];
     const banner = $('#csv-result');
     if (banner) {
       banner.hidden = false;
       banner.replaceChildren();
       banner.appendChild(
-        el('div', null, '✓ 寫入完成：成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆' + dupText)
+        el('div', null, (rejected > 0 ? '⚠ 寫入完成（有列被擋下）：成功 ' : '✓ 寫入完成：成功 ')
+          + written + ' 筆・跳過 ' + skipped + ' 筆' + rejText + dupText)
       );
       if (duplicates > 0) {
         banner.appendChild(
           el('div', 'panel-sub', '重複的列來自先前的匯入批次，已自動略過，帳本沒有變成兩筆。')
         );
       }
+      if (rejected > 0) {
+        banner.appendChild(el('div', 'panel-sub',
+          '被擋下的列沒有寫入帳本 —— 這不是「你沒有勾選」，是這幾列無法登錄。'
+          + '修正後重新上傳整個檔案即可（已寫入的列會自動略過，不會重複）。'));
+        rejRows.slice(0, 20).forEach(function (r) {
+          banner.appendChild(el('div', 'panel-sub', '第 ' + r.row + ' 列：' + r.message));
+        });
+        if (rejRows.length > 20) {
+          banner.appendChild(el('div', 'panel-sub',
+            '…另有 ' + (rejRows.length - 20) + ' 列，內容相同的問題不再逐列列出。'));
+        }
+      }
     }
     if (window.toast) {
-      window.toast('寫入成功', 'ok', '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆' + dupText);
+      window.toast(rejected > 0 ? '部分列被擋下' : '寫入成功', rejected > 0 ? 'warn' : 'ok',
+        '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆' + rejText + dupText);
     }
-    /* FU-D45 + #10: refresh always; flash + auto-switch only on FULL success (skipped == 0),
-       matching the Batch-A clear-on-success rule (a partial import keeps its paste + banner). */
-    afterCommitRefresh(csvKind, skipped === 0);
-    if (skipped === 0) {
+    /* FU-D45 + #10: refresh always; flash + auto-switch only on FULL success, matching the
+       Batch-A clear-on-success rule (a partial import keeps its paste + banner).
+       ⚠ `rejected` belongs in this test. Splitting it out of `skipped` (2026-08-14) would
+       otherwise have made a file with refused rows look like a clean run and CLEAR the
+       paste box — taking with it the text the owner needs to fix those rows. */
+    const clean = skipped === 0 && rejected === 0;
+    afterCommitRefresh(csvKind, clean);
+    if (clean) {
       /* full success -> clear the input so a second identical commit is impossible. */
       const paste = $('#csv-paste');
       if (paste) paste.value = '';
@@ -1739,6 +1766,12 @@
 
   async function afterCommitRefresh(kind, highlight) {
     Object.keys(acctHoldingsCache).forEach((k) => { delete acctHoldingsCache[k]; });
+    /* The 最近匯入 card (broker-import.js) serves BOTH import modes, so an ordinary CSV
+       commit has to refresh it too — otherwise the undo control goes stale at exactly the
+       moment it is wanted, right after an import that looks wrong. */
+    if (window.pdReloadImportBatches) {
+      try { await window.pdReloadImportBatches(); } catch (e) { /* degrade silently */ }
+    }
     if (window.pdLedgerRefresh) {
       /* AWAIT the in-place table refresh so the flash targets the ACTUAL new row (was a
          fixed-300ms guess wired to #m-confirm). A refresh failure must not break the commit

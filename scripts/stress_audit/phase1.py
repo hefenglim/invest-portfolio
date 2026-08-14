@@ -66,6 +66,14 @@ INSTRUMENTS = [
     ("CAY", "TW", "TWD", "CA Short Dest", "Shipping", False),
     ("CAZ", "TW", "TWD", "CA Closed Position", "Industrials", False),  # E2 refusal
     ("CAN", "TW", "TWD", "CA Never Held", "Industrials", False),      # E1 refusal
+    # ---- Batch import (C1/C2, 2026-08-14). The rest of this scenario enters one row at a
+    # time, which is the ONE shape in which "the whole file is one batch" is unobservable —
+    # a batch of one has no siblings. These three symbols are only ever touched through a
+    # CSV commit carrying MORE THAN ONE row, which is how the owner's broker export arrives
+    # and is the shape both defects lived in.
+    ("CBS", "TW", "TWD", "CB Batch Sibling", "Industrials", False),   # buy+sell, one file
+    ("CCA", "TW", "TWD", "CC Chain Source", "Industrials", False),    # EXCHANGE -> CCB
+    ("CCB", "TW", "TWD", "CC Chain Dest", "Industrials", False),      # …then SPLIT, same file
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
@@ -86,6 +94,9 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     "CA5": D("40"), "CA6": D("150"), "CA7": D("190"), "CA8": D("330"),
     "CA9": D("160"), "CAD": D("21"), "CAX": D("76"), "CAY": D("90"),
     "CAZ": D("110"), "CAN": D("50"),
+    # Batch-import symbols (C1/C2). CCA ends flat (its whole position EXCHANGEs into CCB);
+    # priced anyway, for the same fixture-uniformity reason as CA3/CA5 above.
+    "CBS": D("310"), "CCA": D("120"), "CCB": D("64"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
@@ -251,6 +262,25 @@ class Ops:
             if sid:
                 self._fee_check(sid, account_id, "sell", shares, sell_price, symbol, d,
                                 daytrade=True)
+        return resp
+
+    def import_csv(self, kind, label, header, rows, *, ack=True):
+        """Commit a MULTI-ROW CSV batch through the real import endpoint, and op-log it.
+
+        The rest of this scenario enters one row at a time, which is exactly the shape in
+        which "the whole file is one batch" cannot be observed — a batch of one has no
+        siblings. Both 2026-08-14 defects (C1: a sell covered by a buy in the same file;
+        C2: a corporate-action chain in the same file) only appear above one row.
+
+        ``ack_warnings`` defaults True because the callers below assert on the RESPONSE
+        counts, and the point of the assertion is usually that the warning is *gone*.
+        """
+        csv_text = ",".join(header) + "\n" + "\n".join(",".join(r) for r in rows) + "\n"
+        r = self.api.post("/api/import/commit",
+                          {"kind": kind, "csv_text": csv_text, "ack_warnings": ack})
+        resp = {"status": r.status_code, "json": _json(r)}
+        self.ev.op(self.phase, "CSV", f"import.{label}",
+                   {"kind": kind, "rows": len(rows)}, resp)
         return resp
 
     def cash_move(self, account_id, kind, ccy, d, amount, *, ack=False, via_ui=False,

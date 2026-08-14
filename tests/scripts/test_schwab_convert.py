@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from portfolio_dash.api.routers.input_center import _BUILDERS
+from portfolio_dash.data_ingestion.broker import convert as conv_mod
 from portfolio_dash.data_ingestion.csv_import import normalize_import_csv
 from portfolio_dash.data_ingestion.import_templates import (
     DATE_COLUMN_BY_KIND,
@@ -172,7 +173,7 @@ def test_a_row_seen_in_two_files_is_written_and_marked(converted: Path) -> None:
     """Written, not dropped — two deposits of the same amount on one day is a thing that
     happens. Marked, because the note column is in front of whoever opens the CSV."""
     rows = list(csv.DictReader((converted / "import_cash.csv").open(encoding="utf-8")))
-    marked = [r for r in rows if script._DUPLICATE_MARK in r["note"]]
+    marked = [r for r in rows if conv_mod._DUPLICATE_MARK in r["note"]]
     assert len(marked) == 2
     assert marked[0]["amount"] == marked[1]["amount"]
 
@@ -354,9 +355,9 @@ def test_a_builder_that_drops_a_row_is_caught_and_nothing_is_written(
     events; this proves nothing is lost between those events and the CSVs. Simulated the way it
     would really happen — someone adds a condition to a row builder — because the guard is only
     worth its runtime if it has been watched to fire."""
-    real = script._transaction_rows
+    real = conv_mod._transaction_rows
     monkeypatch.setattr(
-        script, "_transaction_rows",
+        conv_mod, "_transaction_rows",
         lambda grouped, account, suspect: real(grouped, account, suspect)[:-1],
     )
     out = tmp_path / "out"
@@ -375,9 +376,9 @@ def test_a_routed_row_that_reaches_no_output_is_caught(
     """A cash kind with no mapping and no entry in ``_UNCONVERTIBLE`` would otherwise leave the
     ledger short by its amount, with every count in the report still looking plausible. Three
     real rows did exactly this on the first run against a real export."""
-    real = script._cash_rows
+    real = conv_mod._cash_rows
     monkeypatch.setattr(
-        script, "_cash_rows",
+        conv_mod, "_cash_rows",
         lambda grouped, account, currency, suspect: (
             real(grouped, account, currency, suspect)[0][:-1], []
         ),

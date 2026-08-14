@@ -207,11 +207,19 @@ def test_a_converted_schwab_export_imports_through_the_browser(
     _open_csv_tab(page, base)
 
     # 交易 FIRST (see the module docstring): a corporate action is checked against the
-    # position that exists on its own date. Two ⚠ rows, both honest: the ALFA sell is the
-    # preview's known non-sibling-awareness (the covering buy is two rows above it in the
-    # SAME file), and the PREH sell really has no position — its 期初庫存 is the worksheet
-    # the export could not fill in.
-    txns = _import_file(page, "交易", out_dir / "import_transactions.csv", warn_rows=2)
+    # position that exists on its own date.
+    #
+    # ⚠ **ONE** warning, and it used to be two. The second was the ALFA sell, whose covering
+    # buy sits two rows above it in the SAME file — the preview validated every row against
+    # the stored ledger alone, so it raised 賣超 on a position the file itself creates. That
+    # was fixed on 2026-08-14 (C1: the whole file is one batch), and the count dropping here
+    # is the browser-level evidence. It matters more than it looks: 賣超 is the one
+    # confirmation whose acknowledgement permanently discards a cost basis, so every false
+    # one teaches the owner to click the dialog that must stay frightening.
+    #
+    # The survivor is honest — the PREH sell really has no position, because its 期初庫存 is
+    # the worksheet the export cannot fill in.
+    txns = _import_file(page, "交易", out_dir / "import_transactions.csv", warn_rows=1)
     assert txns["written"] == 11 and txns["skipped"] == 0
 
     divs = _import_file(page, "股利", out_dir / "import_dividends.csv", warn_rows=0)

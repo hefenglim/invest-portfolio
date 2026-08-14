@@ -10,7 +10,32 @@ The authority for what is correct is `portfolio_dash/data_ingestion/broker/` and
 
 ---
 
-## The workflow
+## The workflow — in the app (start here)
+
+**輸入 → CSV 匯入 → 來源「券商對帳單」** (`trades.html#tab-csv`).
+
+1. Pick the broker and the account the statement belongs to.
+2. Drop the broker's **raw** export — the file as downloaded, several at once if the history
+   spans them. Nothing needs tidying first.
+3. Read the report. It states the verdict, the row counts per kind, anything it will **not**
+   import (option legs, pre-window positions), and anything it needs **you** to supply — a
+   one-leg split's ratio, a pre-history position's cost. Those appear as fields to fill in,
+   not as a spreadsheet to open.
+4. **全部寫入.** The kinds are committed in dependency order, and each one becomes its own
+   entry in **最近匯入** with a **復原** button beside it.
+
+Nothing is stored server-side: the statement is held in memory for the conversion and the
+CSVs it produces go straight back through the ordinary import path, so the converted rows
+meet every validation a hand-made CSV meets and inherit the same duplicate detection.
+
+If one kind is refused, the run **stops there** and the later kinds are not sent — rows that
+depend on a position must not be written against a position that failed to arrive. Whatever
+was already written is listed with 復原 beside it.
+
+## The workflow — offline (the same conversion, on your own machine)
+
+Use this when you would rather the statement never left the laptop, or when you want the
+report as a file.
 
 ```powershell
 .venv\Scripts\python scripts\schwab_convert.py `
@@ -23,7 +48,18 @@ Neither path has a default and both are required — this reads real financial h
 defaulted path is a path that gets read by accident.
 
 Then: read the report, fill in what it says it cannot know, and upload the CSVs through
-**輸入 → CSV 匯入** (`trades.html#tab-csv`), one kind at a time.
+**輸入 → CSV 匯入 → 來源「標準範本」**, one kind at a time, in the order below.
+
+⚠ **Order matters, and only this route makes you do it by hand:** 期初庫存 → 交易 →
+公司行動 → 股利 → 資金. Actions come *after* trades because an action is checked against the
+position that exists on its own date; the consequence is that a sell which is only legal
+after a split raises 賣超 until the action lands. The in-app route removes that by telling
+the importer which actions are arriving in the same run. **賣超 is the one confirmation that
+permanently discards a cost basis** — if you are clicking through several of them, you are on
+the manual route and the actions have not been uploaded yet.
+
+Both routes call the same code (`data_ingestion/broker/convert.py`); the CLI's output is
+byte-identical to what the endpoint returns.
 
 ### What comes out
 
@@ -42,9 +78,10 @@ a cost of zero both import cleanly and are both silently wrong afterwards.
 
 ## It refuses rather than half-converts
 
-If the reconciler finds a **blocking** issue, **no CSV is written** — only the report. There is
-no flag to import the part that worked. A partial import of a file whose arithmetic contradicts
-itself leaves a ledger nobody can rebuild.
+If the reconciler finds a **blocking** issue, **no CSV is written** — only the report. In the
+app the same rule holds: the response carries no files at all and the 全部寫入 button does not
+appear. There is no flag to import the part that worked. A partial import of a file whose
+arithmetic contradicts itself leaves a ledger nobody can rebuild.
 
 Blocking issues seen on a real export, and what each means:
 
@@ -60,6 +97,20 @@ the export window, a row that appears in two overlapping exports, and rows class
 whose arithmetic disagreed are all listed individually by `file:line` and left for you.
 
 ---
+
+## Taking an import back
+
+Every commit records an **import batch**: which file, which kind, how many rows, when. The
+**最近匯入** card under the CSV pane lists them and **復原** deletes exactly the rows that
+batch wrote — rows entered by hand, and rows from other batches, are untouched.
+
+This is what makes trying an import on real data a reasonable thing to do. The alternative —
+restoring a pre-import backup — also discards everything entered since, so without it the
+safe move would be never to attempt the import at all.
+
+Re-uploading the same file is also safe on its own: each row is hashed from its own content,
+so a second upload matches and skips instead of doubling the ledger. The banner says
+「已匯入過 N 筆」 when that happens, because 「成功 0 筆」 alone reads like a failure.
 
 ## What is safe to paste
 

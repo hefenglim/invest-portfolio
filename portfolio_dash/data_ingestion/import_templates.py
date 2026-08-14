@@ -147,9 +147,17 @@ _CORPORATE_ACTION_ROWS: list[list[str]] = [
     # REJECTED on re-upload with 「目的標的 … 尚未註冊」, which is E10 doing its job (D19:
     # keyed on registration, a database fact, never on the shape of the string). The shapes
     # are what the example is for: two integer terms, and cost_carry on the SPINOFF only.
+    #
+    # ⚠ The two rows use DIFFERENT source positions on purpose (corrected 2026-08-14). Both
+    # were AAPL, and an EXCHANGE moves the WHOLE position off its source (§4.2) — so the
+    # file said "all my AAPL became NEWCO on the 2nd" and then "spin SPINCO out of my AAPL
+    # on the 3rd". A template is teaching material and that pair is not enterable. It read
+    # as valid only because the importer's ActionIndex could not see a row's siblings; the
+    # moment it could (C2, the chained-action fix), the SPINOFF was correctly refused
+    # `no_position_on_action_date`. The example was wrong, not the new verdict.
     ["schwab", "2026-06-02", "EXCHANGE", "AAPL", "NEWCO", "2", "7", "",
      "併購換股：每 7 股換得 2 股 NEWCO（請改成實際已註冊的代號）"],
-    ["schwab", "2026-06-03", "SPINOFF", "AAPL", "SPINCO", "1", "2", "0.3",
+    ["tw_broker", "2026-06-03", "SPINOFF", "2330", "SPINCO", "1", "2", "0.3",
      "分拆：每 2 股配 1 股 SPINCO，母公司 30% 成本移轉給子公司"],
 ]
 

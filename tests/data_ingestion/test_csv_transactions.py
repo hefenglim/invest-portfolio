@@ -48,8 +48,11 @@ def test_commit_writes_only_accepted_non_hard_rows(conn: sqlite3.Connection) -> 
     _setup(conn)
     p = build_transaction_preview(conn, _CSV)
     summary = commit_preview(conn, p, accept={0, 1, 2}, writer=write_transaction_row)
-    # row0 buy written; row1 sell soft-issue accepted -> written; row2 hard -> skipped
-    assert len(summary.written) == 2 and 2 in summary.skipped
+    # row0 buy written; row1 sell soft-issue accepted -> written; row2 hard -> REJECTED
+    # (its own bucket since C3: 「跳過」 means the caller deselected it, not that the
+    # importer refused it, and the two need different sentences on screen).
+    assert len(summary.written) == 2
+    assert [r.index for r in summary.rejected] == [2] and summary.skipped == []
     assert len(list_transactions(conn, account_id="tw_broker")) == 2
 
 

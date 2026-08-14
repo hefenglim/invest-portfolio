@@ -160,6 +160,16 @@
 
       <!-- Tab: CSV -->
       <div class="mode-pane" id="pane-csv">
+        <!-- 來源: 標準範本 (the six canonical kinds) vs 券商對帳單 (raw statement -> converter).
+             A chip row rather than a separate page: the owner is already here when they have a
+             statement to load, and a converter behind its own nav item is a converter nobody
+             finds. The two modes share the pane and swap the block below. -->
+        <div class="sub-chips">
+          <span class="group-label">來源</span>
+          <span id="csv-source" style="display:flex;gap:6px;"></span>
+          <span class="hint" id="csv-source-note"></span>
+        </div>
+        <div id="csv-standard">
         <div class="sub-chips">
           <span class="group-label">資料類型</span>
           <span id="csv-kinds" style="display:flex;gap:6px;"></span>
@@ -194,6 +204,47 @@
         </div>
         <div class="result-banner" id="csv-result" hidden="hidden"></div>
         <div class="import-summary"><span class="spacer"></span><button class="btn btn-primary" id="csv-confirm" type="button">確認寫入勾選列</button></div>
+        </div><!-- /#csv-standard -->
+
+        <!-- 券商對帳單 mode. Built by web/broker-import.js; the raw statement goes to
+             POST /api/broker/convert and the CSVs it returns are committed through the SAME
+             /api/import/* path as a hand-made file, so every validation, the duplicate
+             detection and the undo batch apply unchanged. -->
+        <div id="csv-broker" hidden="hidden">
+          <div class="sub-chips">
+            <span class="group-label">券商</span>
+            <select class="select" id="bk-broker" style="width:auto;max-width:100%;"></select>
+            <span class="group-label" style="margin-left:8px;">匯入到帳戶</span>
+            <select class="select" id="bk-account" style="width:auto;max-width:100%;"></select>
+            <span class="hint" id="bk-note"></span>
+          </div>
+          <div class="dc-grid" style="padding-bottom:0;">
+            <div class="dropzone" id="bk-dropzone">
+              <span class="glyph">⇪</span>
+              <span class="big">拖放券商原始匯出檔，或點擊選取（可多檔）</span>
+              <span class="hint" id="bk-dz-hint">直接使用券商網站下載的交易明細 CSV，不需要先整理格式。檔案只在轉換期間留在記憶體，不會存到伺服器。</span>
+            </div>
+            <div class="field">
+              <label>已選檔案</label>
+              <div id="bk-files" class="hint">尚未選擇</div>
+            </div>
+          </div>
+          <input type="file" id="bk-file-input" accept=".csv,text/csv" multiple="multiple" hidden="hidden"></input>
+          <div id="bk-report"></div>
+          <div class="import-summary">
+            <span class="spacer"></span>
+            <button class="btn" id="bk-clear" type="button">清除</button>
+            <button class="btn btn-primary" id="bk-commit" type="button" disabled="disabled">全部寫入</button>
+          </div>
+        </div>
+
+        <!-- Import history + undo (#83). Visible in BOTH modes: an ordinary CSV import is
+             just as worth taking back, and the endpoint has existed since v0.1.29's
+             provenance work with nothing on any page calling it. -->
+        <div class="panel-sub" style="margin-top:14px;font-weight:600;">最近匯入</div>
+        <div class="table-wrap">
+          <table class="data"><thead><tr><th class="col-text">時間</th><th class="col-text">類型</th><th class="col-text">來源檔</th><th>筆數</th><th></th></tr></thead><tbody id="bk-batches"></tbody></table>
+        </div>
       </div>
 
       <!-- Tab: AI -->
@@ -376,6 +427,7 @@
 <script src="inst-quickadd.js?v=0.1.28"></script>
 <script src="sym-picker.js?v=0.1.28"></script>
 <script src="corp-action-form.js?v=0.1.28"></script>
+<script src="broker-import.js?v=0.1.28"></script>
 <script src="input.js?v=0.1.28"></script>
 <script src="ledger.js?v=0.1.28"></script>
 <script>

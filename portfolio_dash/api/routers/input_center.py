@@ -4,6 +4,7 @@ import base64
 import binascii
 import re
 import sqlite3
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -32,6 +33,7 @@ from portfolio_dash.data_ingestion.cash_import import (
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.corporate_action_import import (
     build_corporate_action_preview,
+    parse_action_batch,
     write_corporate_action_row,
 )
 from portfolio_dash.data_ingestion.csv_import import (
@@ -47,7 +49,7 @@ from portfolio_dash.data_ingestion.dividend_import import (
 )
 from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
-from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.holdings import current_shares, load_action_index
 from portfolio_dash.data_ingestion.import_templates import (
     DATE_COLUMN_BY_KIND,
     TEMPLATE_KINDS,
@@ -745,7 +747,12 @@ def _cash_builder(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     return build_cash_movement_preview(conn, csv_text, pool=cash_pool_fn(conn))
 
 
-_BUILDERS = {
+#: Every kind's preview builder has ONE shape, which is what lets the two import endpoints
+#: stay kind-agnostic. :func:`_resolve_builder` substitutes a widened transactions builder
+#: behind this same signature rather than special-casing the kind at the call sites.
+Builder = Callable[[sqlite3.Connection, str], ImportPreview]
+
+_BUILDERS: dict[str, Builder] = {
     "transactions": build_transaction_preview, "dividends": build_dividend_preview,
     "fx": build_fx_preview, "openings": build_opening_preview,
     "corporate_actions": build_corporate_action_preview,
@@ -824,20 +831,52 @@ def _bad_date_format(date_format: str | None) -> JSONResponse | None:
     return None
 
 
+def _resolve_builder(
+    kind: str, conn: sqlite3.Connection, pending_actions_csv: str | None
+) -> Builder:
+    """The kind's builder, widened when trades arrive WITH the actions that legalise them.
+
+    Only ``transactions`` is affected, and only when the caller supplies the accompanying
+    action file — which today means the broker one-click import, where the converter emits
+    trades and corporate actions from the same statement in one run.
+
+    **Why this exists at all.** The commit order is trades-then-actions and cannot be
+    reversed: a corporate action's own guards need the position to exist, so actions-first
+    rejects them. But a sell that is only legal AFTER a split then meets a share count taken
+    before it, and raises 賣超 — the ONE confirmation in this system whose acknowledgement
+    permanently discards a cost basis (the STICKY rule). The ledger ends up correct either
+    way, because the actions land moments later and every report rebuilds from the ledgers;
+    what is NOT acceptable is teaching the owner to click that particular dialog through a
+    wall of false positives.
+
+    It widens what the guard can SEE, never what it permits: an action that is not really
+    coming simply is not in the file, and a malformed one excludes itself
+    (``load_action_index``).
+    """
+    builder = _BUILDERS[kind]
+    if kind != "transactions" or not pending_actions_csv:
+        return builder
+    index = load_action_index(conn, pending=parse_action_batch(pending_actions_csv))
+    return lambda c, text: build_transaction_preview(c, text, pending_actions=index)
+
+
 class ImportPreviewBody(BaseModel):
     kind: str
     csv_text: str
     date_format: str | None = None  # FU-D19: pin the date parse (from the ambiguity chooser)
+    #: The corporate-action CSV being imported in the SAME run (broker one-click). See
+    #: :func:`_resolve_builder`; ignored for every kind but ``transactions``.
+    pending_actions_csv: str | None = None
 
 
 @router.post("/import/preview")
 def import_preview(body: ImportPreviewBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
-    builder = _BUILDERS.get(body.kind)
-    if builder is None:
+    if body.kind not in _BUILDERS:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
     if (bad := _bad_date_format(body.date_format)) is not None:
         return bad
+    builder = _resolve_builder(body.kind, conn, body.pending_actions_csv)
     # FU-D19: canonicalize headers + resolve the date column to ISO before the ISO-only builder.
     norm = normalize_import_csv(
         body.csv_text, DATE_COLUMN_BY_KIND[body.kind], date_format=body.date_format)
@@ -857,17 +896,20 @@ class ImportCommitBody(BaseModel):
     # batch — it just cannot be shown which file it came from.
     source_name: str | None = None
     broker: str | None = None
+    #: See :class:`ImportPreviewBody`. Carried through from the preview so the commit
+    #: re-derives the SAME verdict — the preview's answer is advisory, this one writes.
+    pending_actions_csv: str | None = None
 
 
 @router.post("/import/commit")
 def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
-    builder = _BUILDERS.get(body.kind)
     writer = _WRITERS.get(body.kind)
-    if builder is None or writer is None:
+    if body.kind not in _BUILDERS or writer is None:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
     if (bad := _bad_date_format(body.date_format)) is not None:
         return bad
+    builder = _resolve_builder(body.kind, conn, body.pending_actions_csv)
     norm = normalize_import_csv(
         body.csv_text, DATE_COLUMN_BY_KIND[body.kind], date_format=body.date_format)
     if norm.ambiguity is not None:
@@ -925,6 +967,21 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
         conn, preview, accept=accept, writer=writer, provenance=provenance)
     out: dict[str, Any] = {
         "written": len(summary.written), "skipped": len(summary.skipped)}
+    if summary.rejected:
+        # ⚠ ADDITIVE and only when non-zero (the ``duplicates`` convention below), so the
+        # four kinds that never reject keep a byte-identical payload.
+        #
+        # This exists because 「跳過」 was doing two jobs. A row the caller deselected and a
+        # row the importer REFUSED both landed in ``skipped``, so an import that dropped 3
+        # of 5 corporate actions announced 「成功 2 筆・跳過 3 筆」 — true, and read by
+        # everyone as "I didn't tick three of them". The ledger was then wrong by a split
+        # ratio with nothing on any screen saying so. The rows carry their reason, because
+        # a count alone tells the owner something went wrong and not what to do about it.
+        out["rejected"] = len(summary.rejected)
+        out["rejected_rows"] = [
+            {"row": r.index + 1, "kind": r.kind, "message": r.message}
+            for r in summary.rejected
+        ]
     # ⚠ CONTRACT CHANGE, deliberate and for EVERY kind (2026-08-13): a commit that wrote
     # anything now also returns its ``import_batch_id``. It is the handle to the undo, and
     # an undo whose id can only be recovered by listing batches afterwards is one nobody

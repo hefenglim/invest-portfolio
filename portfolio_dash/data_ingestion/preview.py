@@ -32,17 +32,40 @@ class ImportPreview(BaseModel):
     rows: list[PreviewRow]
 
 
-class ImportSummary(BaseModel):
-    """Result of :func:`commit_preview`: which rows were written, skipped, or already here.
+class RejectedRow(BaseModel):
+    """A row the importer REFUSED, with the reason it refused it.
 
-    ``duplicates`` is separate from ``skipped`` on purpose. A skip is a REFUSAL (the row has
-    a hard issue, or the caller did not accept it) and needs the user's attention; a
-    duplicate is a row this ledger already holds, which is the correct and uneventful
-    outcome of re-running an import. Folding them together would report a clean re-import as
-    a file full of problems.
+    The message is the row's first hard :class:`Issue`, verbatim. Re-deriving a summary
+    sentence here would be a second wording of a rejection the validator has already
+    phrased for a screen — and the two would disagree the first time one of them changed.
+    """
+
+    index: int
+    kind: str
+    message: str
+
+
+class ImportSummary(BaseModel):
+    """Result of :func:`commit_preview`: what was written, refused, deselected, or already here.
+
+    Four buckets, because each one means something different to the person reading the
+    number and only one of them is a problem:
+
+    * ``written`` — in the ledger now.
+    * ``rejected`` — the importer REFUSED it, because it has a hard issue. **This is the one
+      that needs attention**, and until 2026-08-14 it did not exist: hard-issue rows went
+      into ``skipped`` alongside rows the caller had deselected, so an import that dropped
+      3 of 5 corporate actions reported 「跳過 3 筆」 — which reads as *you didn't tick
+      three*, and the owner's ledger was then wrong by a split ratio with nothing on any
+      screen saying so. Measured on the demo corpus 2026-08-12.
+    * ``skipped`` — the CALLER did not accept it. A deliberate choice, not a failure.
+    * ``duplicates`` — already in this ledger, the correct and uneventful outcome of
+      re-running an import. Folding these into ``skipped`` would report a clean re-import as
+      a file full of problems.
     """
 
     written: list[int] = Field(default_factory=list)
+    rejected: list[RejectedRow] = Field(default_factory=list)
     skipped: list[int] = Field(default_factory=list)
     duplicates: list[int] = Field(default_factory=list)
 
@@ -136,6 +159,12 @@ def commit_preview(
                         source_hash=source_hash,
                     )
                     seen_in_batch.add(source_hash)
+            elif row.has_hard_issue:
+                # REFUSED, and said so. The two reasons a row is not written are not the
+                # same event and must not share a counter (see ImportSummary).
+                hard = next(i for i in row.issues if not i.needs_confirm)
+                summary.rejected.append(
+                    RejectedRow(index=row.index, kind=hard.kind, message=hard.message))
             else:
                 summary.skipped.append(row.index)
         if provenance is not None and provenance.batch_id is not None:

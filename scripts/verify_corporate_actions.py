@@ -391,7 +391,10 @@ def _load_export(conn: sqlite3.Connection, files: Sequence[Path]) -> list[str]:
         summary = commit_preview(
             conn, preview, accept=set(by_index), writer=_WRITERS[kind]
         )
-        for index in summary.skipped:
+        # Both buckets, because this script accepts EVERY row: anything not written is a
+        # problem here, and reading only one of the two would make the gate stop noticing
+        # refusals the moment `commit_preview` learned to name them separately (2026-08-14).
+        for index in [r.index for r in summary.rejected] + summary.skipped:
             kinds = "、".join(sorted({i.kind for i in by_index[index].issues})) or "unknown"
             problems.append(f"{path.name}: 第 {index + 1} 列未寫入（{kinds}）")
     return problems

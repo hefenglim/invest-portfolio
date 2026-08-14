@@ -126,20 +126,27 @@ def test_the_withdraw_guard_gives_THE_SAME_verdict_on_both_doors(
     # ...and acknowledging warnings does NOT write it: the row is HARD, not a warning.
     response = _commit(api_client, _HEADER + "moomoo_my,2026-02-01,WITHDRAW,MYR,1500,,\n",
                        ack=True)
-    assert response.status_code == 200 and response.json() == {"written": 0, "skipped": 1}
+    assert response.status_code == 200
+    body = response.json()
+    # REJECTED, not skipped (2026-08-14): the importer refused it. No `import_batch_id`,
+    # because an import that wrote nothing has nothing to undo.
+    assert body["written"] == 0 and body["skipped"] == 0 and body["rejected"] == 1
+    assert body["rejected_rows"][0]["kind"] == "withdraw_insufficient_balance"
     assert _balance(api_client, "moomoo_my", "MYR") == "1000"  # untouched
 
 
 def test_a_bulk_overdraft_cannot_ride_in_behind_a_clean_row(
     api_client: TestClient,
 ) -> None:
-    """Partial success is the contract: the fundable row writes, the overdraft is skipped."""
+    """Partial success is the contract: the fundable row writes, the overdraft is refused."""
     csv_text = _HEADER + (
         "moomoo_my,2026-01-01,DEPOSIT,MYR,1000,,\n"
         "moomoo_my,2026-02-01,WITHDRAW,MYR,5000,,\n")
     response = _commit(api_client, csv_text)
     assert response.status_code == 200
-    assert response.json() == {"written": 1, "skipped": 1, "import_batch_id": 1}
+    body = response.json()
+    assert body["written"] == 1 and body["skipped"] == 0 and body["rejected"] == 1
+    assert body["rejected_rows"][0]["row"] == 2 and body["import_batch_id"] == 1
     assert _balance(api_client, "moomoo_my", "MYR") == "1000"
 
 

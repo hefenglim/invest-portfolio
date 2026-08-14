@@ -148,6 +148,30 @@ def _payload(inp: CorporateActionInput) -> dict[str, str]:
     return payload
 
 
+def parse_action_batch(csv_text: str) -> list[CorporateActionInput]:
+    """The rows of a corporate-action CSV that PARSE, for use as a pending batch.
+
+    Exists so the widened :func:`~data_ingestion.holdings.load_action_index` has exactly one
+    way to be fed. The broker import door needs it for a different reason than this module
+    does: its TRADES have to be validated against the actions arriving in the same run, or a
+    post-split sell raises 賣超 for an action the owner is importing seconds later — and a
+    賣超 confirmation permanently discards a cost basis.
+
+    Rows that do not parse are dropped rather than reported. They are not this function's to
+    report: whoever imports that file gets the ``parse_error`` on the row itself, in its own
+    preview. Here the question is only "what actions are about to exist", and a row that
+    cannot be read is not one of them.
+    """
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("﻿")))
+    out: list[CorporateActionInput] = []
+    for raw0 in reader:
+        raw = {k.strip(): (v or "").strip() for k, v in raw0.items() if k is not None}
+        inp, _found = _parse_row(raw)
+        if inp is not None:
+            out.append(inp)
+    return out
+
+
 def build_corporate_action_preview(
     conn: sqlite3.Connection, csv_text: str
 ) -> ImportPreview:
@@ -189,7 +213,26 @@ def build_corporate_action_preview(
     # book shows them a future in which the post-action trades have already happened — so
     # E3 rejected the very split that made those trades legal. `book_cache` keeps trap
     # #21's saving: one replay per distinct action DATE, not per row.
-    index: ActionIndex = load_action_index(conn)
+    #
+    # ⚠ The index is STORED + THIS BATCH (2026-08-14). Measured on the demo corpus
+    # 2026-08-12: a SPLIT whose symbol's only shares arrive from an EXCHANGE **earlier in
+    # the same file** was hard-rejected `no_position_on_action_date`, because the sibling
+    # EXCHANGE was not in the index and the share walk therefore reached a position that
+    # did not exist yet. Both of the owner's real chains have that shape (a de-SPAC then a
+    # rename; a de-SPAC then a reverse split), and the failure was invisible: the row
+    # landed in `summary.skipped` and the import reported success having dropped it.
+    #
+    # A batch row cannot justify ITSELF. The walk's cut is
+    # `(action.date, EventPriority.CORPORATE_ACTION)` and it applies only actions sorting
+    # STRICTLY before it, so the row being validated is excluded from its own history by
+    # the ordering rather than by a rule anyone has to remember — and D15/E12 already
+    # forbids two same-date actions whose symbol sets intersect, which is the only case
+    # that could reach the boundary. `test_a_lone_split_onto_an_empty_position_is_still
+    # _rejected` is the paired proof.
+    #
+    # A malformed batch row excludes itself too: `convert_stored` cannot build a
+    # `CorporateAction` from it, so it lands on `unreadable` and never reaches the walk.
+    index: ActionIndex = load_action_index(conn, pending=batch)
     bundle: LedgerBundle | None
     book_cache: dict[date, Book] = {}
     try:

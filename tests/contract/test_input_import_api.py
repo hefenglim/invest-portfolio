@@ -55,25 +55,113 @@ def test_import_commit_warn_requires_ack_422(api_client: TestClient) -> None:
     assert r.status_code == 422 and r.json()["error"]["code"] == "warnings_unacknowledged"
 
 
-def test_import_commit_acked_writes_nonhard_skips_hard(api_client: TestClient) -> None:
+def test_import_commit_acked_writes_nonhard_rejects_hard(api_client: TestClient) -> None:
     # _TXN_CSV rows: ok (write), warn-oversell (write on ack), 23300 unregistered code
-    # (HARD -> skipped, never coerced) => 2 written, 1 skipped
+    # (HARD -> REJECTED, never coerced) => 2 written, 1 rejected, 0 skipped.
+    #
+    # `rejected`, not `skipped` (2026-08-14): the row was REFUSED, and 「跳過」 reads as
+    # "the caller didn't tick it". Asserting `skipped == 0` here is the load-bearing half —
+    # without it the old bucket could quietly keep receiving hard rows as well.
     r = api_client.post("/api/import/commit",
                         json={"kind": "transactions", "csv_text": _TXN_CSV, "ack_warnings": True})
     assert r.status_code == 200
     body = r.json()
-    assert body["written"] == 2 and body["skipped"] == 1
+    assert body["written"] == 2 and body["rejected"] == 1 and body["skipped"] == 0
+    assert body["rejected_rows"][0]["kind"] == "symbol_unresolved"
 
 
-def test_import_commit_hard_row_skipped(api_client: TestClient) -> None:
-    # a malformed row (bad number) -> parse_error (hard) -> skipped; the ok row writes
+def test_import_commit_hard_row_rejected_with_its_reason(api_client: TestClient) -> None:
+    # a malformed row (bad number) -> parse_error (hard) -> REJECTED; the ok row writes
     csv = ("account,symbol,side,date,shares,price\n"
            "tw_broker,2330,buy,2026-06-02,100,600\n"
            "tw_broker,2330,buy,2026-06-02,notanumber,600\n")
     r = api_client.post("/api/import/commit",
                         json={"kind": "transactions", "csv_text": csv, "ack_warnings": True})
     assert r.status_code == 200
-    assert r.json() == {"written": 1, "skipped": 1, "import_batch_id": 1}
+    body = r.json()
+    assert body["written"] == 1 and body["skipped"] == 0 and body["rejected"] == 1
+    # 1-BASED, and it carries the reason: a count alone tells the owner something went
+    # wrong without telling them which row or what to do about it.
+    assert body["rejected_rows"] == [
+        {"row": 2, "kind": "parse_error", "message": body["rejected_rows"][0]["message"]}]
+    assert body["import_batch_id"] == 1
+
+
+_SPLIT_CSV = (
+    "account,date,kind,from_symbol,to_symbol,ratio_to,ratio_from,cost_carry,note\n"
+    "tw_broker,2026-06-05,SPLIT,2330,2330,4,1,,\n"
+)
+#: The golden ledger holds 1,000 shares of 2330. After a 4-for-1 that is 4,000; this sells
+#: 3,600 of them, which is 賣超 unless the split is known about.
+_POST_SPLIT_SELL = (
+    "account,symbol,side,date,shares,price\n"
+    "tw_broker,2330,sell,2026-06-10,3600,150\n"
+)
+
+
+def _oversold_rows(payload: dict[str, object]) -> list[object]:
+    """Preview rows carrying the 賣超 warning.
+
+    Matched on ``reason``, because ``code`` is deliberately narrow — it exists for the one
+    issue the frontend takes an ACTION on (``unregistered_symbol``) and is ``None`` for
+    everything else. The wire simply does not carry an issue kind for a warning.
+    """
+    rows = payload["rows"]
+    assert isinstance(rows, list)
+    return [r for r in rows
+            if r["status"] == "warn" and "held" in (r["reason"] or "")]
+
+
+def test_pending_actions_csv_clears_a_post_split_sell_on_PREVIEW(
+    api_client: TestClient,
+) -> None:
+    """The broker one-click flow imports trades BEFORE the corporate actions (an action's own
+    guards need the position to exist), so a sell that is only legal after a split meets a
+    pre-split count. Telling the preview which actions are coming is what stops it demanding
+    an ack on 賣超 — the one confirmation that permanently discards a cost basis."""
+    without = api_client.post("/api/import/preview", json={
+        "kind": "transactions", "csv_text": _POST_SPLIT_SELL}).json()
+    assert len(_oversold_rows(without)) == 1
+
+    with_split = api_client.post("/api/import/preview", json={
+        "kind": "transactions", "csv_text": _POST_SPLIT_SELL,
+        "pending_actions_csv": _SPLIT_CSV}).json()
+    assert _oversold_rows(with_split) == []
+
+
+def test_pending_actions_csv_is_re_applied_on_COMMIT(api_client: TestClient) -> None:
+    """The commit re-derives the preview, so the field has to ride along or the write path
+    reaches a different verdict than the screen showed — and refuses with
+    ``warnings_unacknowledged`` for a warning the owner was never shown."""
+    refused = api_client.post("/api/import/commit", json={
+        "kind": "transactions", "csv_text": _POST_SPLIT_SELL})
+    assert refused.status_code == 422
+    assert refused.json()["error"]["code"] == "warnings_unacknowledged"
+
+    ok = api_client.post("/api/import/commit", json={
+        "kind": "transactions", "csv_text": _POST_SPLIT_SELL,
+        "pending_actions_csv": _SPLIT_CSV})
+    assert ok.status_code == 200 and ok.json()["written"] == 1
+
+
+def test_pending_actions_csv_is_ignored_by_every_OTHER_kind(api_client: TestClient) -> None:
+    """Scoped to transactions on purpose. The other five kinds validate against a replayed
+    book, not against this walker, and quietly widening their inputs would be a change
+    nobody asked for hiding inside a field named for one flow."""
+    r = api_client.post("/api/import/preview", json={
+        "kind": "fx", "csv_text": "account,date,from_ccy,from_amount,to_ccy,to_amount\n",
+        "pending_actions_csv": _SPLIT_CSV})
+    assert r.status_code == 200 and r.json()["rows"] == []
+
+
+def test_a_clean_commit_carries_NO_rejected_key(api_client: TestClient) -> None:
+    """Additive only when non-zero — the ``duplicates`` convention. A response shape that
+    grows for every caller when one case gains a field is how a contract drifts."""
+    csv = ("account,symbol,side,date,shares,price\n"
+           "tw_broker,2330,buy,2026-06-02,100,600\n")
+    r = api_client.post("/api/import/commit",
+                        json={"kind": "transactions", "csv_text": csv})
+    assert r.json() == {"written": 1, "skipped": 0, "import_batch_id": 1}
 
 
 def test_import_commit_bad_kind_400(api_client: TestClient) -> None:

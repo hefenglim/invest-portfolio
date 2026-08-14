@@ -136,9 +136,66 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   The import banner now **says** when rows were already held. Re-uploading a file the ledger
   already has used to read 「成功 0 筆・跳過 0 筆」 — true, uninformative, and the reading a user
   takes from it is *the upload failed, try again*. A duplicate is neither written nor skipped
-  (skipped means the user deselected it), so it gets its own words. ⚠ **Known gap:** the batch
-  list and the undo exist as API only — nothing in `web/` calls them, so the undo currently
-  needs a console. Covered by e2e through the page's fetch layer, and tracked.
+  (skipped means the user deselected it), so it gets its own words. ~~⚠ Known gap: the batch list
+  and the undo exist as API only.~~ **Closed below.**
+
+- **The broker converter has a door in the app** — 輸入 → CSV 匯入 → 來源「券商對帳單」. Drop the
+  broker's raw export, read one report, press one button. `POST /api/broker/convert` runs the
+  **same** `data_ingestion/broker/convert.py` the CLI runs (the row-building moved out of
+  `scripts/` so there is one implementation and not two that disagree about money), and returns
+  CSV **text** which the page feeds back through the ordinary `/api/import/*` path — so the
+  converted rows meet every validation a hand-made CSV meets, inherit the duplicate detection,
+  and land in the same undoable batches. Nothing is written server-side and nothing is stored; a
+  blocking reconcile issue withholds **every** file rather than shipping them behind a flag.
+  The CLI stays, unchanged and byte-identical, for anyone who would rather the statement never
+  left the laptop. What the file genuinely does not determine — a one-leg split's ratio, a
+  pre-history position's cost — is asked for as **form fields** instead of a `*_TO_COMPLETE.csv`
+  to open in a spreadsheet, with the ratio as two integer boxes (D14: a decimal ratio replays as
+  a wrong share count that looks right). Blank stays blank and the result says which rows were
+  left out.
+
+- **最近匯入, with 復原** — the import-batch list and its undo now exist on the page (they had
+  been API-only). This ships in the same change as the one-click import deliberately: an easy way
+  to load five years of broker history into a ledger, with no way to take it back, is a button
+  nobody should press. Visible for ordinary CSV imports too.
+
+### Fixed
+- **A CSV import now validates each row against the ledger PLUS its own siblings.** Measured on a
+  synthetic broker export 2026-08-12: **7 of 47** transaction rows raised 賣超 whose covering buy
+  was three lines above them in the same file. The numbers end up right if the owner confirms —
+  which is the harm, because 賣超 is the **one** confirmation in this system whose acknowledgement
+  permanently discards a cost basis (the STICKY rule), so every false one trains the owner to
+  click the dialog that must stay frightening. `cash_import.py` had named this class and fixed it
+  a release earlier ("**The whole file is one batch** … the E1a class of failure"); the trade door
+  never got the `batch` argument. ⚠ The fix is in the **share walker**, not in `validate.py`: the
+  obvious version adds the siblings to the returned count and is corporate-action-*unaware* about
+  them, so a sibling buy of 100 before a 4-for-1 split would meet a later sell of 400 as 100 — the
+  split-then-sell cascade the corporate-action feature exists to prevent, reintroduced through the
+  import door. One test fails on that version and only on that version.
+  The same change hoists **one** `ActionIndex` per file instead of building one per row (spec trap
+  #21, live on this door): 1,374 fewer full reads of the action ledger on the owner's export.
+
+- **A corporate-action CHAIN imports in one file, instead of failing silently.** A SPLIT whose
+  shares arrive from an EXCHANGE earlier in the *same* file was hard-rejected
+  `no_position_on_action_date`, because the importer built its `ActionIndex` from stored rows
+  only. **Both of the owner's real chains have that shape** (a de-SPAC then a rename; a de-SPAC
+  then a reverse split). The failure was invisible: the row landed in `skipped` and the import
+  reported success while the share count stayed wrong by the whole ratio. A row still cannot
+  justify **itself** — the walk's cut excludes the action being validated by the ordering rather
+  than by a rule anyone has to remember, and the paired test proves a lone SPLIT onto an empty
+  position is still refused.
+
+- **「跳過」 no longer means two different things.** A row the caller deselected and a row the
+  importer **refused** shared one counter, so an import that dropped 3 of 5 corporate actions
+  announced 「成功 2 筆・跳過 3 筆」 — read by everyone as *I didn't tick three*. `rejected` is now
+  its own bucket and carries each row's own reason verbatim; the banner says 「擋下 N 筆」, explains
+  that this is not a deselection, and stops clearing the paste box on a run that had refusals.
+  Additive and only when non-zero, so the other kinds' payloads are byte-identical.
+
+- **The corporate-action import template no longer contradicts itself.** Its EXCHANGE moved the
+  whole AAPL position out on 2026-06-02 and its SPINOFF then carved cost from AAPL on 06-03 — not
+  an enterable pair. It read as valid only because the importer could not see a row's siblings;
+  the moment it could, the SPINOFF was correctly refused. The example was wrong, not the verdict.
 
 ### Changed
 - **ECharts 5.5.0 is now self-hosted** (`web/echarts.min.js`), so a `cdn.jsdelivr.net` outage

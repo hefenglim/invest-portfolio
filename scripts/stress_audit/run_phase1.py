@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 
 import common as C
 import phase1 as P1
@@ -228,8 +229,107 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("SC2", "tw_broker", "2609", "2026-07-06", 1200, 98)
 
     run_corporate_actions(ev, api, db_path, op, buy, sell)
+    run_batch_import(ev, api, db_path, op)
 
     reconcile(ev, api, db_path, "final", valuation=True, reports=True)
+
+
+def run_batch_import(ev: C.Evidence, api: C.Api, db_path, op: Ops):
+    """A CSV batch is validated against the ledger PLUS its own siblings (C1/C2, 2026-08-14).
+
+    Every other op in this scenario writes ONE row, which is the one shape in which "the
+    whole file is one batch" is unobservable — a batch of one has no siblings. Both defects
+    this block exists for were measured on a synthetic broker export and both are invisible
+    to a single-row door:
+
+    **C1 — a sell covered by a buy in the SAME file.** ``build_transaction_preview``
+    validated each row against the STORED ledger alone, so it raised 賣超 on a position the
+    file itself creates (7 of 47 rows). The numbers end up right if the owner confirms, and
+    that is precisely the harm: 賣超 is the ONE confirmation whose acknowledgement
+    permanently discards a cost basis, so every false one trains the owner to click it.
+
+    **C2 — a corporate-action CHAIN in the same file.** The importer built its
+    ``ActionIndex`` from stored rows only, so a SPLIT whose shares arrive from an EXCHANGE
+    earlier in the same file was hard-rejected ``no_position_on_action_date`` — and
+    ``commit_preview`` reported it as merely 「跳過」, so the import announced success while
+    the share count stayed wrong by the whole ratio. Both of the owner's real chains have
+    this shape.
+
+    The oracle needs no new arithmetic for either: what changed is which ROWS reach the
+    ledger, and it replays whatever is there. That is the point — before C2 the app and the
+    oracle would have DISAGREED on CCB's share count, which is exactly what this harness is
+    for. Placed last so everything above stays a control.
+    """
+    op.cash_move("tw_broker", "deposit", "TWD", "2026-01-05", 200000)
+
+    # ---- C1: buy then sell, ONE file. The sell is covered only by its sibling. ----------
+    sibling_csv = ("account,symbol,side,date,shares,price\n"
+                   "tw_broker,CBS,buy,2026-05-04,300,300\n"
+                   "tw_broker,CBS,sell,2026-05-20,200,320\n")
+    # ⚠ PREVIEW FIRST, on a ledger that does not hold these rows yet. Probing after the
+    # commit measures a re-upload, where both rows raise the M7 `duplicate_trade` warning —
+    # a true statement about a different question, and it made the first version of this
+    # check fail for a reason that had nothing to do with the guard under test.
+    warns = _preview_warnings(api, "transactions", sibling_csv)
+    ev.check("batch.sibling_cover_no_oversell", "buy+sell in one file raises no 賣超",
+             0, len(warns), "phase1:batch")
+    r = op.import_csv(
+        "transactions", "batch_sibling_cover",
+        ["account", "symbol", "side", "date", "shares", "price"],
+        [["tw_broker", "CBS", "buy", "2026-05-04", "300", "300"],
+         ["tw_broker", "CBS", "sell", "2026-05-20", "200", "320"]],
+    )
+    body = r.get("json") or {}
+    # The row count alone would pass even with the guard firing — a 賣超 warning is
+    # confirmable and `ack_warnings=True` writes it anyway. That is what the probe above is
+    # for; this asserts the rows actually landed.
+    ev.check("batch.sibling_cover_writes_both", "both rows of the sibling file are written",
+             2, body.get("written"), "phase1:batch")
+
+    # ---- C2: EXCHANGE then SPLIT on the destination, ONE file --------------------------
+    op.import_csv(
+        "transactions", "batch_chain_position",
+        ["account", "symbol", "side", "date", "shares", "price"],
+        [["tw_broker", "CCA", "buy", "2026-05-05", "400", "120"]],
+    )
+    r = op.import_csv(
+        "corporate_actions", "batch_action_chain",
+        ["account", "date", "kind", "from_symbol", "to_symbol",
+         "ratio_to", "ratio_from", "cost_carry", "note"],
+        [["tw_broker", "2026-05-25", "EXCHANGE", "CCA", "CCB", "1", "1", "", "chain leg 1"],
+         ["tw_broker", "2026-06-05", "SPLIT", "CCB", "CCB", "2", "1", "", "chain leg 2"]],
+    )
+    body = r.get("json") or {}
+    ev.check("batch.action_chain_writes_both", "both legs of an in-file action chain are written",
+             2, body.get("written"), "phase1:batch")
+    # ⚠ The load-bearing one. Before C2 the second leg was REJECTED and reported as
+    # 「跳過」 — `written` alone read 1 and nothing said why. `rejected` is absent when zero
+    # (the `duplicates` convention), so `or 0` is the honest read of a clean response.
+    ev.check("batch.action_chain_nothing_rejected", "no row of the chain is rejected",
+             0, body.get("rejected") or 0, "phase1:batch")
+
+    res = reconcile(ev, api, db_path, "batch_import", valuation=True)
+    # 400 CCA → 1:1 EXCHANGE → 400 CCB → 2-for-1 SPLIT → 800. If the chain's second leg is
+    # dropped the app reports 400 here while the oracle says 800: the disagreement the
+    # reconcile above would surface, pinned to a literal so it is also visible on its own.
+    P1.anchor(ev, api, "batch.anchor.chain_split_applied", "tw_broker", "CCB", "shares", "800")
+    P1.anchor(ev, api, "batch.anchor.sibling_cover_left", "tw_broker", "CBS", "shares", "100")
+    ev.check("batch.refusal_codes", "batch_import", [], [c for c, _ in res.action_refusals],
+             "phase1:batch_import")
+
+
+def _preview_warnings(api: C.Api, kind: str, csv_text: str) -> list[dict]:
+    """Preview-only probe: the rows a commit would ask the owner to confirm.
+
+    Read-only, and it is the ONLY way to see the guard from outside — a committed row that
+    was confirmed looks identical to one that never raised anything.
+    """
+    r = api.post("/api/import/preview", {"kind": kind, "csv_text": csv_text})
+    try:
+        rows = (r.json() or {}).get("rows", [])
+    except Exception:
+        return []
+    return [row for row in rows if row.get("status") == "warn"]
 
 
 def run_corporate_actions(ev: C.Evidence, api: C.Api, db_path, op: Ops, buy, sell):
@@ -479,7 +579,15 @@ def main():
 
     print(f"ops={ev.op_n} pass={ev.n_pass} fail={ev.n_fail}")
     for f in ev.fails[:60]:
-        print("  FAIL", f["check"], "|", f["scope"], "| exp=", f["expected"], "got=", f["actual"])
+        # ``scope`` is free text and many of them are Traditional Chinese, so on a cp1252
+        # console this line RAISED — and only ever on a run that had a failure to report,
+        # which is the one run whose output matters. Encode-safe rather than encoding-
+        # dependent: the summary above still printed, so the crash looked like a harness
+        # bug rather than the failure detail going missing (measured 2026-08-14).
+        line = (f"  FAIL {f['check']} | {f['scope']} | "
+                f"exp= {f['expected']} got= {f['actual']}")
+        print(line.encode(sys.stdout.encoding or "utf-8", "replace")
+                  .decode(sys.stdout.encoding or "utf-8", "replace"))
 
 
 if __name__ == "__main__":
