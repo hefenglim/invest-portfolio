@@ -1191,9 +1191,18 @@ def test_corporate_action_csv_template_round_trips_through_the_browser(
     that survives ``render_import_template`` but not that trip is a template the owner cannot
     actually use.
 
-    The template's own three example rows also pin WHY two of them are refused: their
-    destinations are placeholders, and E10 is keyed on registration (D19), never on the shape
-    of a string. Committing the file writes the one clean row and skips the other two.
+    The template's own three example rows also pin WHERE each is stopped, and after D48a the
+    two placeholder destinations are stopped at DIFFERENT tiers — which is the ruling made
+    visible in the one place the owner actually meets it:
+
+      SPLIT    2330 → 2330    clean, writes
+      EXCHANGE AAPL → NEWCO   HARD ``unregistered_symbol`` (an exchange's destination is an
+                              existing listed security, so register-first still applies)
+      SPINOFF  2330 → SPINCO  SOFT ``spinoff_child_autoregister`` — the child does not exist
+                              until this event, so it commits once acknowledged and is created
+
+    E10 stays keyed on REGISTRATION (D19), never on the shape of a string; what changed is
+    the tier for exactly one kind.
     """
     base = flow_server(_seed_csv_target)
     page = fresh_page
@@ -1231,25 +1240,54 @@ def test_corporate_action_csv_template_round_trips_through_the_browser(
     assert pv.value.status == 200
     page.wait_for_selector("#csv-body tr")
     expect(page.locator("#csv-body tr")).to_have_count(3)
-    expect(page.locator("#csv-counts")).to_have_text("可寫入 1・警告 0・錯誤 2")
-    expect(page.locator("#csv-body tr").nth(1)).to_contain_text("尚未註冊")
+    # D48a moved the SPINOFF row from 錯誤 to 警告 — one hard rejection left, not two.
+    # 可寫入 counts the CLEAN rows only, so it stays 1; the warning row joins it on commit
+    # once acknowledged, which is why `written` below is 2.
+    expect(page.locator("#csv-counts")).to_have_text("可寫入 1・警告 1・錯誤 1")
+    expect(page.locator("#csv-body tr").nth(1)).to_contain_text("尚未註冊")   # the EXCHANGE
+    expect(page.locator("#csv-body tr").nth(2)).to_contain_text("自動建立")   # the SPINOFF
 
+    # A soft row blocks until acknowledged, then commits — the 賣超 tier, unchanged. The CSV
+    # pane asks by POSTing without the ack, taking the 422, and re-committing from a confirm
+    # dialog; so the first response here is the refusal and the second is the write.
+    page.click("#csv-confirm")
+    page.wait_for_selector(".modal-backdrop .modal-foot .btn-primary")
     with page.expect_response("**/api/import/commit") as cm:
-        page.click("#csv-confirm")
+        page.click(".modal-backdrop .modal-foot .btn-primary")
     assert cm.value.status == 200, cm.value.text()
-    assert cm.value.json()["written"] == 1
+    assert cm.value.json()["written"] == 2
+    # …and the acknowledged SPINOFF really did create its child, inheriting TW/TWD from 2330.
+    spinco = [r for r in _get_json(base, "/api/instruments")["list"]
+              if r["symbol"] == "SPINCO"]
+    assert spinco and spinco[0]["ccy"] == "TWD", spinco
 
-    # The template's clean row is a 10-for-1 SPLIT of 2330 in tw_broker.
+    # Two rows land now, in date order: the 10-for-1 SPLIT (06-01) and then the SPINOFF
+    # (06-03, 1-for-2, cost_carry 0.30). So 2330 keeps its 10,000 shares and SEVENTY percent
+    # of the basis, and the auto-created child holds the other thirty on half the shares —
+    # §2.1's conservation law, checked across a symbol that did not exist when the file was
+    # pasted. (Before D48a this assertion read 500,000, because the SPINOFF never committed.)
     held = _holding(base, "2330")
     assert held is not None
     assert Decimal(held["shares"]) == Decimal("10000")
-    assert Decimal(held["original_cost_total"]) == Decimal("500000")
+    assert Decimal(held["original_cost_total"]) == Decimal("350000")
+
+    child = _holding(base, "SPINCO")
+    assert child is not None, "the auto-registered child holds no position"
+    assert Decimal(child["shares"]) == Decimal("5000")            # 10,000 x 1/2
+    assert Decimal(child["original_cost_total"]) == Decimal("150000")
+    assert (Decimal(held["original_cost_total"])
+            + Decimal(child["original_cost_total"])) == Decimal("500000")
 
     foot = _open_drawer(page, base, "2330")
     expect(foot).to_contain_text("＋公司行動 9,000")
     expect(foot).to_contain_text("部位摘要 10,000 股")
     expect(foot).to_contain_text("✓ 對帳一致")
 
-    assert not console_errors and not page_errors, (
-        f"CSV round trip: console={console_errors!r} page={page_errors!r}"
+    # The 422 is DELIBERATE: the CSV pane asks for the acknowledgement by posting without it
+    # and taking the refusal, and Chromium logs every 4xx as a console error. Filtered by
+    # substring rather than by dropping the assertion, which would also stop covering every
+    # other console error this flow could raise.
+    assert not _unexpected(console_errors, "422 (Unprocessable Entity)"), (
+        f"CSV round trip: console={console_errors!r}"
     )
+    assert not page_errors, f"CSV round trip: page={page_errors!r}"

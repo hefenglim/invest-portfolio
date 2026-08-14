@@ -47,8 +47,13 @@ from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.holdings import load_action_index, shares_through
 from portfolio_dash.data_ingestion.markets import MARKET_ZH, account_market
+from portfolio_dash.data_ingestion.register import (
+    autoregister_spinoff_child,
+    spinoff_child_draft,
+)
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
+    MovedBand,
     StoredCorporateAction,
     StoredDividend,
     StoredOpening,
@@ -73,6 +78,8 @@ from portfolio_dash.data_ingestion.store import (
     list_opening,
     list_transactions,
     load_ledger_bundle,
+    move_target_band,
+    pending_band_move,
     update_corporate_action,
     update_dividend,
     update_fx_conversion,
@@ -81,17 +88,22 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.data_ingestion.validate import (
     IDENTIFIER_CHANGE_SUSPECTED,
+    TARGET_BAND_PREDATES_SPLIT,
     CorporateActionInput,
     Issue,
     identifier_change_repair,
+    restated_band,
     validate_corporate_action,
     validate_corporate_action_change,
     validate_opening_cost,
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
+from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.pricing.store import upsert_prices
 from portfolio_dash.shared.corporate_actions import ActionIndex, CorporateActionKind
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
@@ -840,6 +852,10 @@ class ActionBody(BaseModel):
     cost_carry: str | None = None
     note: str | None = None
     ack_warnings: bool = False
+    #: D48b — the SPINOFF child's first price, on the action date. A string for the same
+    #: reason the ratio terms are: a malformed one gets this module's zh rejection, not
+    #: pydantic's English one. Optional; blank means "wait for the next quote refresh".
+    to_symbol_price: str | None = None
 
 
 def _num(raw: str | None, label: str) -> Decimal | None | JSONResponse:
@@ -1153,18 +1169,74 @@ def _split_conversion(
     }}
 
 
-def _with_fix(wires: list[dict[str, Any]], patch: dict[str, Any]) -> list[dict[str, Any]]:
-    """Attach E23's repair to E23's own wire — the finding carries its fix, or nothing does.
+def _with_fix(
+    wires: list[dict[str, Any]], patch: dict[str, Any], *,
+    code: str = IDENTIFIER_CHANGE_SUSPECTED,
+) -> list[dict[str, Any]]:
+    """Attach a finding's repair to that finding's own wire — or nothing carries it.
 
     Only the top-level issue list is patched. The per-account lists are a detail view of
     the SAME finding (D13 writes one event as N rows, each carrying it), and rendering the
     one-click N times would offer the same single repair once per account.
+
+    ``code`` defaults to E23 (D22's convert-to-SPLIT), the case this was written for; D44's
+    band restatement is the second user. Two findings, one attachment rule.
     """
     if patch:
         for w in wires:
-            if w.get("code") == IDENTIFIER_CHANGE_SUSPECTED:
+            if w.get("code") == code:
                 w.update(patch)
     return wires
+
+
+def _band_restatement(
+    conn: sqlite3.Connection, inp: CorporateActionInput
+) -> dict[str, Any]:
+    """D44's one-click: the owner's stale target band, restated across this SPLIT's ratio.
+
+    Computed by :func:`~data_ingestion.validate.restated_band` — the same expression the
+    finding's message quotes — so the number on screen, the number in this payload and the
+    number the button writes are one number. Two of them would be §5.1's "two numbers on
+    one screen", here in the one place the owner is being asked to choose between them.
+
+    **``apply`` is a ready-made body for ``PUT /api/instruments/{symbol}``**, carrying only
+    the legs that are actually set. That endpoint's ``exclude_unset`` is what makes the
+    partial body safe: an absent key is "unchanged", while an explicit null CLEARS the
+    level — so naming only the set legs cannot wipe the other one.
+
+    No verification step, unlike E23's :func:`_split_conversion`. That one had to prove the
+    converted ROW would validate before offering a button that writes to the ledger; this
+    writes an alert threshold on an instrument the owner already owns, through the ordinary
+    edit endpoint, and is undone by typing the old number back. The asymmetry is deliberate:
+    the cost of being wrong here is one wrong alert level, not a discarded cost basis.
+    """
+    inst = get_instrument(conn, inp.from_symbol)
+    if inst is None or inst.target_set_at is None:
+        return {}
+    legs = restated_band(inst, ratio_to=inp.ratio_to, ratio_from=inp.ratio_from)
+    if not legs:
+        return {}
+    return {"restate": {
+        "symbol": inst.symbol,
+        "set_at": inst.target_set_at.isoformat(),
+        "label": f"改為換算後的目標價（{inp.ratio_to} 比 {inp.ratio_from}）",
+        "levels": [{"field": f, "label": lbl,
+                    "current": decimal_str(cur), "restated": decimal_str(new)}
+                   for f, lbl, cur, new in legs],
+        "apply": {f: decimal_str(new) for f, _lbl, _cur, new in legs},
+    }}
+
+
+def _spinoff_child_draft(
+    conn: sqlite3.Connection, inp: CorporateActionInput
+) -> Instrument | None:
+    """The not-yet-registered SPINOFF child, for the preview's in-memory bundle (D48a)."""
+    if inp.kind.strip().upper() != CorporateActionKind.SPINOFF.value:
+        return None
+    if get_instrument(conn, inp.to_symbol) is not None:
+        return None
+    parent = get_instrument(conn, inp.from_symbol)
+    return None if parent is None else spinoff_child_draft(parent, inp.to_symbol)
 
 
 def _preview_payload(
@@ -1191,8 +1263,15 @@ def _preview_payload(
         # before/after PREVIEW the owner reads, which is a different question.
         full_bundle = load_ledger_bundle(conn)
         pre = build_book(full_bundle, allow_oversell=True)
-        post = build_book(
-            load_ledger_bundle(conn, actions=[*stored, *candidates]), allow_oversell=True)
+        post_bundle = load_ledger_bundle(conn, actions=[*stored, *candidates])
+        # D48a: the child does not exist until save, and the replay needs its quote currency
+        # to value the position the SPINOFF creates. Added to the POST bundle IN MEMORY —
+        # previewing must never write, and this runs on every keystroke. Built by the same
+        # inheritance rule the save uses, so the ✓ 成本不變 shown here is computed under the
+        # currency the save will actually assign.
+        if (draft := _spinoff_child_draft(conn, batch.rows[0])) is not None:
+            post_bundle.instruments[draft.symbol] = draft
+        post = build_book(post_bundle, allow_oversell=True)
     except (ValueError, KeyError) as exc:
         return JSONResponse(status_code=422, content=error_body(
             "ledger_unbookable",
@@ -1250,6 +1329,12 @@ def _preview_payload(
                           today=today)
         if any(i.kind == IDENTIFIER_CHANGE_SUSPECTED for i in issues) else {}
     )
+    # D44's restate, on the same terms: computed only when the finding actually fired, so an
+    # ordinary split — which does not warn — never pays for the instrument read.
+    restate = (
+        _band_restatement(conn, batch.rows[0])
+        if any(i.kind == TARGET_BAND_PREDATES_SPLIT for i in issues) else {}
+    )
     return {
         "ccy": inst.quote_ccy.value if inst is not None else "",
         "kind": kind,
@@ -1265,12 +1350,21 @@ def _preview_payload(
         # adjusted is what P&L is computed against. A carve that conserved one and not the
         # other would print 成本不變 ✓ over a moved number.
         "conserved": cost_before == cost_after and adj_before == adj_after,
-        "issues": _with_fix(_issue_wires(issues), fix),
+        "issues": _with_fix(
+            _with_fix(_issue_wires(issues), fix), restate,
+            code=TARGET_BAND_PREDATES_SPLIT),
         "blocking": any(not i.needs_confirm for i in issues),
         "needs_confirm": any(i.needs_confirm for i in issues),
         "fractions": fractions,
         "unpriced_symbols": sorted({
             body.to_symbol.strip() for i in issues if i.kind == "to_symbol_unpriced"}),
+        # D47: said BEFORE saving, for the same reason `unblocks` is — the owner should not
+        # discover that their alert band followed the ticker by noticing it later. Read
+        # through the SAME predicate the commit uses, so the promise cannot outlive the rule.
+        "band_move": _band_moved_wire(
+            pending_band_move(conn, from_symbol=batch.rows[0].from_symbol,
+                              to_symbol=batch.rows[0].to_symbol)
+            if kind.strip().upper() == CorporateActionKind.EXCHANGE.value else None),
         "unblocks": _unblocked_sells(
             conn, accounts=batch.accounts, symbol=body.from_symbol.strip(),
             before=index, after=ActionIndex.from_stored([*stored, *candidates])),
@@ -1347,6 +1441,12 @@ def add_corporate_action(
         return JSONResponse(status_code=422, content=error_body(
             "ledger_unbookable",
             f"目前的帳本無法重播,因此無法登錄公司行動({exc})。請先修正帳本紀錄"))
+    # D48b: the optional child price is refused LOUDLY rather than dropped. A value the
+    # owner typed that silently does not arrive is the failure mode this whole module is
+    # written against — and here it would be invisible, because the field's only effect is
+    # a price row nobody looks at until the XIRR stays dark.
+    if (bad := _child_price_refusal(batch.rows[0].kind, body.to_symbol_price)) is not None:
+        return bad
     issues: list[Issue] = []
     for inp in batch.rows:
         issues.extend(validate_corporate_action(
@@ -1363,6 +1463,14 @@ def add_corporate_action(
     # partial state E13 exists to forbid, created by the writer instead of by the owner.
     # Every insert defers its commit and one rollback covers the lot.
     try:
+        # D48a: created BEFORE the rows that reference it, so nothing between here and the
+        # reconcile reads an action pointing at a symbol the registry does not have — and
+        # INSIDE the same try, with ``commit=False``, so the one rollback below covers it.
+        # An instrument left behind by a failed save would be a phantom the owner never
+        # asked for. Idempotent and self-limiting: it returns None once the child exists.
+        if batch.rows[0].kind.strip().upper() == CorporateActionKind.SPINOFF.value:
+            autoregister_spinoff_child(conn, parent_symbol=batch.rows[0].from_symbol,
+                                       child_symbol=batch.rows[0].to_symbol, commit=False)
         written = [
             insert_corporate_action(
                 conn, account_id=inp.account_id, action_date=inp.date,
@@ -1378,11 +1486,121 @@ def add_corporate_action(
         raise
     restated = reconcile_split_prices(
         conn, {body.from_symbol.strip(), body.to_symbol.strip()})
+    # D47: an EXCHANGE re-keys the position, so the owner's alert band follows the ticker.
+    # After the rows land, never before — a band moved onto a symbol whose action then
+    # failed to commit would be an alert on a security this ledger does not hold.
+    moved = (
+        move_target_band(conn, from_symbol=batch.rows[0].from_symbol,
+                         to_symbol=batch.rows[0].to_symbol)
+        if batch.rows[0].kind.strip().upper() == CorporateActionKind.EXCHANGE.value
+        else None
+    )
+    priced = _seed_child_price(conn, batch.rows[0], body.to_symbol_price, now=now)
     return {"ok": True, "written": len(written), "ids": written,
             "accounts": batch.accounts, "prices_restated": restated,
+            "band_moved": _band_moved_wire(moved),
+            "child_priced": priced,
+            # D48b: a seeded price answers the very warning this field reports, so a symbol
+            # that just got one is no longer unpriced. Leaving it listed would send the owner
+            # to 更新報價 for a price they typed a second ago.
             "unpriced_symbols": sorted({
                 body.to_symbol.strip() for i in issues
-                if i.kind == "to_symbol_unpriced"})}
+                if i.kind == "to_symbol_unpriced"} - ({priced} if priced else set()))}
+
+
+def _child_price_refusal(kind: str, raw: str | None) -> JSONResponse | None:
+    """D48b's entry guard: reject a child price that is unusable or inapplicable.
+
+    Mirrors ``cost_carry_not_applicable`` — a value supplied for the wrong kind is a
+    misunderstanding worth naming, not something to ignore. Returns ``None`` when the field
+    is blank (the ordinary case) or valid.
+
+    Takes *kind* from the BUILT batch rather than from the raw body, so it reads the same
+    normalised value every other check in this request does.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if kind.strip().upper() != CorporateActionKind.SPINOFF.value:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error",
+            f"子公司起始價僅適用於分拆,{kind} 不需填寫",
+            field="to_symbol_price"))
+    try:
+        close = Decimal(text)
+    except InvalidOperation:
+        close = Decimal(0)
+    if close <= 0:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error",
+            f"子公司起始價必須是正數,目前是 {text}",
+            field="to_symbol_price"))
+    return None
+
+
+def _seed_child_price(
+    conn: sqlite3.Connection, inp: CorporateActionInput, raw: str | None, *, now: datetime
+) -> str | None:
+    """D48b: store the SPINOFF child's first price, dated the action day. Returns the symbol
+    priced, or ``None`` when there was nothing to write.
+
+    **Why it is worth a field at all.** ``returns.py`` is all-or-nothing on the terminal
+    value: ONE unpriced holding makes the WHOLE portfolio's XIRR ``None``, not just that
+    symbol's. And a SPINOFF is guaranteed to create an unpriced holding — the child did not
+    exist to be quoted. So between saving the action and the next successful refresh, the
+    headline return goes dark for a reason nothing on the page explains. The owner reading
+    the child's opening price off the same statement can end that in one box.
+
+    **Written through** ``pricing.store.upsert_prices``, from ``api/`` — ``pricing/`` owns
+    every write to ``prices`` (``architecture.md``) and ``data_ingestion`` may not reach in.
+    ``factor_of`` is left at the identity: the row is dated the action day and the child is
+    brand new, so no split can exist between that date and now to un-adjust. That is a
+    derivation from the child's age, not a shortcut.
+
+    **Degrades rather than raises.** ``bootstrap_db`` does not create ``prices`` (only
+    ``pricing.schema.create_tables`` does), so a ledger-only database has no such table —
+    the same condition ``validate._has_prices`` already absorbs. A corporate action must not
+    become unrecordable because an optional convenience has nowhere to go.
+    """
+    text = (raw or "").strip()
+    if not text or inp.kind.strip().upper() != CorporateActionKind.SPINOFF.value:
+        return None
+    try:
+        close = Decimal(text)
+    except InvalidOperation:
+        return None
+    if close <= 0:
+        return None
+    inst = get_instrument(conn, inp.to_symbol)
+    if inst is None:
+        return None
+    try:
+        upsert_prices(
+            conn,
+            [PriceRow(instrument=inst.symbol, market=inst.market, as_of=inp.date,
+                      close=close, source="manual")],
+            fetched_at=now,
+        )
+    except sqlite3.OperationalError:
+        return None
+    return inst.symbol
+
+
+def _band_moved_wire(moved: MovedBand | None) -> dict[str, Any] | None:
+    """D47's outcome on the wire — money as Decimal STRINGS, formatted here rather than by
+    Pydantic's JSON mode, so this payload uses the same canonical form as every other
+    number the frontend receives (``decimal_str``)."""
+    if moved is None:
+        return None
+    return {
+        "from_symbol": moved.from_symbol,
+        "to_symbol": moved.to_symbol,
+        "target_low": (decimal_str(moved.target_low)
+                       if moved.target_low is not None else None),
+        "target_high": (decimal_str(moved.target_high)
+                        if moved.target_high is not None else None),
+        "set_at": moved.set_at.isoformat() if moved.set_at is not None else None,
+    }
 
 
 def _change_block(issues: list[Issue]) -> JSONResponse | None:

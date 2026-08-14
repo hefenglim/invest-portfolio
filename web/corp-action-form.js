@@ -106,6 +106,8 @@
   min-width: 0; }
 .ca-modal .ca-fix { align-self: flex-start; font-size: 11px; padding: 3px 10px; }
 .ca-modal .ca-fix-note { font-size: 10px; color: var(--text-3); line-height: 1.5; }
+/* D44's restate opt-in: an ACTION inside a warning, so it outweighs the notes under it. */
+.ca-modal .ca-restate { font-weight: 600; }
 @media (max-width: 640px) {
   .ca-modal .ca-grid { grid-template-columns: 1fr; }
 }`;
@@ -246,6 +248,19 @@
         + '（目前為賣超）'));
     });
 
+    /* D47: an EXCHANGE re-keys the position, so the owner's price-alert band follows the
+       ticker — values unchanged. Announced, never silent: it edits a setting the owner
+       typed, and finding out later that an alert moved is worse than being told now. */
+    if (data.band_move) {
+      const m = data.band_move;
+      const parts = [];
+      if (m.target_low !== null) parts.push('下限 ' + f().exact(m.target_low));
+      if (m.target_high !== null) parts.push('上限 ' + f().exact(m.target_high));
+      host.appendChild(el('div', 'ca-unblock',
+        '✓ ' + m.from_symbol + ' 的目標價（' + parts.join('、') + '）會一併移到 '
+        + m.to_symbol + '，數值不變'));
+    }
+
     (data.issues || []).forEach((i) => {
       const box = el('div', 'ca-issue ca-issue-' + (i.sev === 'error' ? 'error' : 'warn'));
       box.appendChild(el('span', null, i.sev === 'error' ? '✕' : '⚠'));
@@ -271,6 +286,35 @@
         if (i.fix.caveat) col.appendChild(el('span', 'ca-fix-note', '⚠ ' + i.fix.caveat));
       } else if (i.fix_blocked) {
         col.appendChild(el('span', 'ca-fix-note', i.fix_blocked));
+      }
+
+      /* D44's one-click band restate — a CHECKBOX, and DEFAULT OFF.
+         Default-off IS the ruling. The system computed what "alert me at 200" becomes
+         after a 7-for-1 and shows it, but it will not decide whether the owner meant a
+         view about the company (restate) or about the share price (leave it) — so doing
+         nothing keeps the number they typed. A pre-ticked box would be option (a) wearing
+         option (b)'s clothes.
+
+         Only the WANT is remembered, never the numbers: the payload applied at save time
+         is always the one on the last preview, so editing the ratio after ticking cannot
+         write a level computed from the old one. Values render through fmt.exact, not
+         fmt.price — the latter would round 28.5714 to 28.57 on screen while the ledger
+         received 28.5714. */
+      if (i.restate) {
+        const lab = el('label', 'ca-restate');
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = !!state.restateWanted;
+        cb.addEventListener('change', () => { state.restateWanted = cb.checked; });
+        lab.appendChild(cb);
+        lab.appendChild(el('span', null, ' ' + (i.restate.label || '改為換算後的目標價')));
+        col.appendChild(lab);
+        (i.restate.levels || []).forEach((lv) => {
+          col.appendChild(el('span', 'ca-fix-note',
+            lv.label + '　' + f().exact(lv.current) + ' → ' + f().exact(lv.restated)));
+        });
+        col.appendChild(el('span', 'ca-fix-note',
+          '不勾選就維持原值（存檔後仍可到「觀察清單」隨時修改）。'));
       }
       box.appendChild(col);
       host.appendChild(box);
@@ -338,6 +382,34 @@
           }
         }
       });
+    }
+  }
+
+  /* D44: write the restated target band, but only AFTER the action itself is saved and
+     only if the owner asked. Ordered that way on purpose — the band is a consequence of
+     the split, so a band restated over an action that then failed to commit would be an
+     alert level corrected for an event that is not in the ledger.
+
+     Read off the LIVE preview rather than off anything captured when the box was ticked,
+     so the number written is the number last displayed. Failure is reported and swallowed:
+     the split is recorded either way, and re-raising here would tell the owner their
+     corporate action failed when it did not. */
+  async function applyBandRestate(preview) {
+    const found = ((preview && preview.issues) || []).find((i) => i.restate);
+    if (!found) return;
+    const r = found.restate;
+    try {
+      await api().put('/api/instruments/' + encodeURIComponent(r.symbol), r.apply);
+      if (window.toast) {
+        window.toast('目標價已換算', 'ok',
+          r.symbol + '：' + (r.levels || [])
+            .map((lv) => lv.label + ' ' + f().exact(lv.restated)).join('、'));
+      }
+    } catch (err) {
+      if (window.toast) {
+        window.toast('目標價未更新', 'warn',
+          '公司行動已存檔，但 ' + r.symbol + ' 的目標價沒有改成 —— 請到「觀察清單」手動調整');
+      }
     }
   }
 
@@ -451,6 +523,21 @@
       '公司公告中移轉給子公司的成本佔比（例如 58.31% 就填 0.5831）');
     bodyEl.appendChild(carryField);
 
+    /* --- D48b: the child's first price. SPINOFF only, and worth a box of its own because
+       ONE unpriced holding makes the WHOLE portfolio's XIRR blank (returns.py is
+       all-or-nothing on the terminal value) — and a spin-off is guaranteed to create one.
+       The owner reading the child's opening price off the same statement ends that here
+       instead of waiting for a refresh that may not find a day-one listing. */
+    const fChildPrice = el('input', 'input');
+    fChildPrice.type = 'number';
+    fChildPrice.step = '0.0001';
+    fChildPrice.min = '0';
+    fChildPrice.style.width = '140px';
+    const childPriceField = field('子公司起始價（選填）', fChildPrice,
+      '子公司在行動當天的價格。留空就等下一次報價更新 —— '
+      + '在那之前只要有一檔持股沒有價格，整個投資組合的年化報酬率（XIRR）都會是空白');
+    bodyEl.appendChild(childPriceField);
+
     const fNote = el('input', 'input');
     bodyEl.appendChild(field('備註', fNote));
 
@@ -509,6 +596,7 @@
       const needsTo = state.kind !== 'SPLIT';
       fToSym.hidden = !needsTo;
       carryField.hidden = state.kind !== 'SPINOFF';
+      childPriceField.hidden = state.kind !== 'SPINOFF';
     }
 
     function requestBody() {
@@ -523,6 +611,8 @@
         ratio_to: fTo.value,
         ratio_from: fFrom.value,
         cost_carry: state.kind === 'SPINOFF' ? fCarry.value : null,
+        to_symbol_price:
+          state.kind === 'SPINOFF' ? (fChildPrice.value.trim() || null) : null,
         note: fNote.value.trim() || null
       };
     }
@@ -558,6 +648,7 @@
       fFrom.value = b.ratio_from || '';
       fTo.value = b.ratio_to || '';
       fCarry.value = '';
+      fChildPrice.value = '';   // SPINOFF-only, and the converted row is a SPLIT
       fNote.value = b.note || '';
       /* The acknowledgement belonged to the EXCHANGE's warning. The converted row is a
          different row and must earn its own — and the save button stays disabled until
@@ -604,6 +695,7 @@
     save.addEventListener('click', async () => {
       const body = requestBody();
       body.ack_warnings = !!state.acked;
+      const restatePreview = state.restateWanted ? state.preview : null;
       const restore = window.pdBusy ? window.pdBusy(save, '寫入中…') : () => {};
       try {
         const resp = await api().post('/api/ledgers/corporate-actions', body);
@@ -616,6 +708,7 @@
         }
         await bookReorgFee(body, fFee.value.trim(),
           (state.preview && state.preview.ccy) || '');
+        await applyBandRestate(restatePreview);
         if (window.pdLedgerRefresh) { try { await window.pdLedgerRefresh(); } catch (e) { /* noop */ } }
         if (prefill.onSaved) prefill.onSaved(resp);
         offerFollowUps(resp, state.preview, body);

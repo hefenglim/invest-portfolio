@@ -1,5 +1,6 @@
 """Account and Instrument models."""
 
+from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -45,6 +46,12 @@ class Instrument(BaseModel):
     board: str = ""  # "TWSE" | "TPEx" | ".KL" | "" (US / unresolved)
     target_low: Decimal | None = None  # price-alert floor (spec 10)
     target_high: Decimal | None = None  # price-alert ceiling (FU-D28)
+    # D44: the date the band above was last CHANGED. READ-ONLY on this model — like
+    # ``archived``, the column is owned by one writer (``store.upsert_instrument``, which
+    # derives it by comparing against the stored row), so setting it here has no effect and
+    # no caller has to remember to. None = unknown, which the D44 finding reads as "make no
+    # claim" rather than as "old".
+    target_set_at: date | None = None
     is_etf: bool = False  # single source of truth for ETF (never derive from sector)
     archived: bool = False  # FU-D13: stop-tracking flag; stays registered, off fetch scopes
     industry: str | None = None  # GICS industry (R6): nullable free text, filled by the

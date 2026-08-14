@@ -39,6 +39,27 @@ def from_db(text: str) -> Decimal:
     return Decimal(text)
 
 
+def cap_dp(value: Decimal, places: int) -> Decimal:
+    """Round *value* to at most *places* decimals — **CAP, never pad**.
+
+    The distinction from :func:`quantize_amount` is the whole point and it is a rule of
+    ``data-and-pricing.md``, not a preference: a value already within the cap is returned
+    **unchanged**, so it persists byte-identically. ``quantize`` would pad it — turning a
+    stored ``60`` into ``60.0000`` — and stored TEXT is what D38's reversibility invariant
+    and every golden-payload assertion compare. Equal Decimals with different exponents are
+    ``==`` to Python and different to a byte comparison, which is exactly the class of
+    change that passes its tests and fails its diff.
+
+    One home for three callers that had independently written it: ``pricing/store``'s
+    4 dp/6 dp float-noise caps, ``data_ingestion/store``'s transaction-price cap, and
+    ``shared/corporate_actions.apply_ratio_to_price``.
+    """
+    exp = value.as_tuple().exponent
+    if isinstance(exp, int) and exp < -places:
+        return value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    return value
+
+
 def quantize_amount(
     value: Decimal, currency: Currency, rounding: str = ROUND_HALF_UP
 ) -> Decimal:

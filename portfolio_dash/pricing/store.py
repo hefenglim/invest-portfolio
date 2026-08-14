@@ -12,12 +12,12 @@ data with a clear staleness indicator, never crash, never fabricate.
 
 import sqlite3
 from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import Protocol
 
 from portfolio_dash.pricing.results import DividendEvent, FxRead, FxRow, PriceRead, PriceRow
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.money import from_db, to_db
+from portfolio_dash.shared.money import cap_dp, from_db, to_db
 
 _DEFAULT_MAX_AGE = 4  # days
 _ONE = Decimal(1)
@@ -37,10 +37,7 @@ _FX_DP = 6
 
 def _cap_dp(v: Decimal, places: int) -> Decimal:
     """Round ``v`` to at most ``places`` decimals; values within the cap unchanged."""
-    exp = v.as_tuple().exponent
-    if isinstance(exp, int) and exp < -places:
-        return v.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
-    return v
+    return cap_dp(v, places)
 
 
 def _opt(v: Decimal | None) -> str | None:

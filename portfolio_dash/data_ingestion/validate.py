@@ -50,11 +50,12 @@ from portfolio_dash.shared.cash_kinds import (
 from portfolio_dash.shared.corporate_actions import (
     ActionIndex,
     CorporateActionKind,
+    apply_ratio_to_price,
     is_ratio_term,
 )
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.ledger_events import EventPriority
-from portfolio_dash.shared.models.assets import Account
+from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.money import from_db, quantize_amount
@@ -70,6 +71,16 @@ _ZERO = Decimal("0")
 # one-click convert keyed on this string, and a rename that reached only one of the two
 # would leave a warning nothing can fix, or a fix attached to nothing.
 IDENTIFIER_CHANGE_SUSPECTED = "identifier_change_suspected"
+
+# D44 (owner ruling 2026-08-15). Named for the same reason as E23 above: the form preview
+# attaches the one-click restate keyed on this string, and :func:`restated_band` computes
+# the number the message quotes, so the finding and the number it offers are one change.
+TARGET_BAND_PREDATES_SPLIT = "target_band_predates_split"
+
+# D48a. Named because two writers act on it (``api/routers/ledgers.py`` and
+# ``corporate_action_import.py``) and because it is E10's rejection made soft for exactly
+# one shape — a constant makes that exception greppable rather than a string in three files.
+SPINOFF_CHILD_AUTOREGISTER = "spinoff_child_autoregister"
 
 
 class TxnInput(BaseModel):
@@ -588,9 +599,35 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     # eventually rejects a legitimate ticker and locks the owner out of their own ledger.
     from_inst = get_instrument(conn, inp.from_symbol)
     to_inst = get_instrument(conn, inp.to_symbol)
+    # D48a (owner ruling 2026-08-15): a SPINOFF's destination is a security that did not
+    # exist until this event, so "register it first" asks the owner to pre-create a row for
+    # the thing the action is about to create. It is auto-registered on save instead —
+    # inheriting the parent's market and quote currency, which E11 requires to match anyway,
+    # so it is a derivation and not a guess.
+    #
+    # SOFT, not silent, and that is the whole difference. D19/E10 exists so a broker
+    # identifier off a statement (a CUSIP like ``74347W148``) never becomes an instrument;
+    # silent creation would turn one mistyped box into a permanent phantom symbol that no
+    # provider will ever price. The owner is shown exactly what will be created and agrees.
+    # Narrowed to SPINOFF only: an EXCHANGE's destination is an existing listed security and
+    # keeps E10's hard rejection, and so does every source symbol.
+    autoreg_child = (
+        kind is CorporateActionKind.SPINOFF
+        and to_inst is None
+        and from_inst is not None
+        and not same_symbol
+    )
     for label, symbol, inst in (("來源", inp.from_symbol, from_inst),
                                 ("目的", inp.to_symbol, to_inst)):
-        if inst is None:
+        if inst is None and autoreg_child and symbol == inp.to_symbol:
+            assert from_inst is not None  # implied by autoreg_child
+            add(Issue(kind=SPINOFF_CHILD_AUTOREGISTER, needs_confirm=True,
+                      message=(f"{symbol} 尚未註冊 — 分拆會產生這檔新標的，"
+                               f"存檔時會自動建立（市場 {from_inst.market.value}、"
+                               f"幣別 {from_inst.quote_ccy.value}，沿用 {inp.from_symbol}）。"
+                               "請確認代號無誤：若這是券商對帳單上的內部代碼"
+                               "（而非交易代號），自動建立會產生一檔查不到報價的標的")))
+        elif inst is None:
             add(Issue(kind="unregistered_symbol",
                       message=(f"{label}標的 {symbol} 尚未註冊。請先到「標的管理」註冊;"
                                "若這是券商對帳單上的內部代碼（而非交易代號），"
@@ -839,15 +876,68 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     # with no visible cause until a refresh succeeds (§6.6). Surfaced at entry, where the
     # cause is still on screen. SPLIT is excluded: its destination IS its source (E20), so
     # it creates nothing and a dark XIRR would already have been dark before the action.
-    if kind is not CorporateActionKind.SPLIT and to_inst is not None and not _has_prices(
-        conn, inp.to_symbol
-    ):
+    # ``autoreg_child`` joins the condition (D48a): before it, an unregistered destination
+    # was a hard rejection and could never reach here, and now it can — a symbol that is
+    # about to be created has NO prices by definition, which is precisely what this warns
+    # about. Dropping the term would make the newest source of unpriced holdings the one
+    # case that never warns.
+    if (kind is not CorporateActionKind.SPLIT
+            and (to_inst is not None or autoreg_child)
+            and not _has_prices(conn, inp.to_symbol)):
         zh_kind = "換股" if kind is CorporateActionKind.EXCHANGE else "分拆"
         add(Issue(kind="to_symbol_unpriced", needs_confirm=True,
                   message=(f"{inp.to_symbol} 目前沒有任何價格紀錄。{zh_kind}會產生一筆新的"
                            "持倉，而只要有一檔持倉沒有價格，整個投資組合的年化報酬率"
                            "（XIRR）就會顯示不出來，不是只有這一檔。"
                            "存檔後請執行一次「更新報價」，或等下一次自動更新完成")))
+
+    # --- D44: the owner's target band predates this SPLIT (soft) ---
+    # W6c re-expresses the PRICE that `target_cross` compares; the band is owner-entered and
+    # is deliberately NOT re-expressed (§5.1(d2)), because "alert me at 200" may survive a
+    # 7-for-1 as 28.57 (a view about the company) or as 200 (a view about the share price),
+    # and `domain-ledger.md` forbids guessing money the owner stated. So the two sides of one
+    # comparison end up in different denominations and the rule crosses on the split date —
+    # permanently, and on the NOTIFICATION path (`ops/notify.py`), which is what makes it
+    # worth a finding rather than a docs note.
+    #
+    # Asked ONCE, here, where the owner is literally typing the ratio and is the only moment
+    # they hold both halves of the answer. Raised in the validator rather than in the form's
+    # preview so all three doors get it — the manual form, the CSV kind, and the broker
+    # converter's action rows — which is the asymmetry `architecture.md` calls out for the
+    # cash guard: a bulk door must not ship a weaker guard than the single-row form.
+    #
+    # The `target_set_at` term is the discriminator, and it is doing E23's fourth-term job.
+    # Without it the finding fires on EVERY split of a banded symbol, so importing five years
+    # of broker history — mostly historical splits, against bands set last week — is mostly
+    # false positives, and a guard that mostly cries wolf trains the owner to click through.
+    # NULL means the date is unknowable (a pre-column row): make no claim, stay silent.
+    # Per SYMBOL, not per account — the band lives on `instruments`. D13 writes one event as
+    # N rows so N copies arrive, and `_issue_wires` already collapses them by (code, text),
+    # which is why the message names no account.
+    if (
+        kind is CorporateActionKind.SPLIT
+        and is_ratio_term(inp.ratio_to)
+        and is_ratio_term(inp.ratio_from)
+        and inp.ratio_to != inp.ratio_from  # a 1-for-1 changes nothing (E7 says so already)
+        and from_inst is not None
+        and from_inst.target_set_at is not None
+        and from_inst.target_set_at < inp.date
+    ):
+        legs = restated_band(from_inst, ratio_to=inp.ratio_to, ratio_from=inp.ratio_from)
+        if legs:
+            add(Issue(
+                kind=TARGET_BAND_PREDATES_SPLIT, needs_confirm=True,
+                message=(
+                    f"{inp.from_symbol} 的目標價設定於 "
+                    f"{from_inst.target_set_at.isoformat()}，早於這筆分割。"
+                    "分割後系統比對的股價會依比例換算，但你輸入的目標價不會 — "
+                    f"維持原值的話，它會在 {inp.date.isoformat()} 當天立刻穿越，"
+                    "而且之後每次掃描都會再提醒一次。"
+                    "換算後應為 "
+                    f"{'、'.join(f'{lbl} {cur} → {new}' for _f, lbl, cur, new in legs)}。"
+                    "系統不會替你決定：這個價位若是對公司價值的判斷，就該換算；"
+                    "若是針對股價本身的價位，就該維持原值。"
+                    "存檔後可到「觀察清單」調整")))
 
     # --- D31: a share walk above hit the corporate-action depth cap ---
     # Last, because the walks it reports on are E1a's and E13's. Soft (賣超 tier): the
@@ -859,6 +949,33 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     )) is not None:
         add(capped)
     return issues
+
+
+def restated_band(
+    inst: Instrument, *, ratio_to: Decimal, ratio_from: Decimal
+) -> list[tuple[str, str, Decimal, Decimal]]:
+    """D44's repair: each SET leg of *inst*'s target band, restated across a SPLIT ratio.
+
+    Returns ``(field, zh_label, current, restated)`` per leg, in ``target_low``-then-
+    ``target_high`` order; ``[]`` when no level is set. The ``field`` is the API/model name,
+    so the form preview can key its one-click on it without re-deriving which leg is which.
+
+    Pure, and beside the check that raises the finding, for E23's reason: the number the
+    message quotes and the number the button writes must be **the same expression**, or the
+    owner is shown one value and the ledger receives another. It is a *candidate*, never a
+    write — nothing here decides that the restated level is what the owner meant, which is
+    the entire content of the D44 ruling.
+    """
+    legs: list[tuple[str, str, Decimal, Decimal]] = []
+    for field, label, level in (
+        ("target_low", "目標下限", inst.target_low),
+        ("target_high", "目標上限", inst.target_high),
+    ):
+        if level is not None:
+            legs.append((field, label, level,
+                         apply_ratio_to_price(level, ratio_to=ratio_to,
+                                              ratio_from=ratio_from)))
+    return legs
 
 
 def identifier_change_repair(

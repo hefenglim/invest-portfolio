@@ -4,7 +4,7 @@ import json
 import logging
 import sqlite3
 from datetime import UTC, date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
@@ -18,7 +18,7 @@ from portfolio_dash.shared.models.ledger import (
     OpeningInventory,
     Transaction,
 )
-from portfolio_dash.shared.money import from_db, to_db
+from portfolio_dash.shared.money import cap_dp, from_db, to_db
 from portfolio_dash.shared.sectors import CANONICAL_KEYS, canonical_sector
 
 logger = logging.getLogger(__name__)
@@ -31,10 +31,7 @@ _PRICE_DP = 4
 
 def _cap_price(v: Decimal) -> Decimal:
     """Round *v* to at most 4 decimals; values already within the cap are returned as-is."""
-    exp = v.as_tuple().exponent
-    if isinstance(exp, int) and exp < -_PRICE_DP:
-        return v.quantize(Decimal(1).scaleb(-_PRICE_DP), rounding=ROUND_HALF_UP)
-    return v
+    return cap_dp(v, _PRICE_DP)
 
 
 # ---------------------------------------------------------------------------
@@ -89,28 +86,151 @@ def list_ledger_audit(
     return [dict(r) for r in rows]
 
 
-def upsert_instrument(conn: sqlite3.Connection, inst: Instrument) -> None:
+def upsert_instrument(
+    conn: sqlite3.Connection, inst: Instrument, *, today: date | None = None,
+    commit: bool = True,
+) -> None:
     """Insert or update an instrument row (idempotent). board_status is owned by
-    register_instrument and intentionally not written here (preserved on conflict)."""
+    register_instrument and intentionally not written here (preserved on conflict).
+
+    **``target_set_at`` is owned HERE, and derived rather than passed** (D44). It dates the
+    target band, and the rule is one sentence: *the stamp moves only when the band's value
+    moves*. Deciding that in the SQL — ``IS NOT`` against the stored row, SQLite's null-safe
+    inequality — is what makes it true for every caller at once. The four write paths
+    (``PUT /api/instruments/{symbol}``, ``_apply_extras``, ``quick_register``,
+    ``restore_archived``) all arrive through this one statement, so none of them has to
+    remember the rule, and a fifth added later inherits it. A helper each caller had to
+    invoke would be the registration-point class ``import_templates`` names seven of.
+
+    Consequences worth stating, because they are the reason this is not just a timestamp:
+
+    * **An unrelated edit does not touch it.** Renaming a symbol or filling its industry
+      leaves both band columns identical, the ``CASE`` takes the ``ELSE``, and the stamp
+      keeps its old value. That is the whole point — a stamp that moved on any write would
+      date the row, not the band, and the D44 finding would go permanently silent.
+    * **Clearing the band clears the stamp** (``new_stamp`` is None when neither level is
+      set), so "no band" never carries a date for a band that is not there.
+    * ``inst.target_set_at`` is IGNORED. The model field is read-only (see ``Instrument``);
+      one owner, and this is it.
+    """
+    stamp = (today or datetime.now(UTC).date()).isoformat()
+    low = to_db(inst.target_low) if inst.target_low is not None else None
+    high = to_db(inst.target_high) if inst.target_high is not None else None
+    new_stamp = stamp if (low is not None or high is not None) else None
     conn.execute(
         """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board,
-               target_low, target_high, is_etf, industry)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+               target_low, target_high, is_etf, industry, target_set_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(symbol) DO UPDATE SET
                market=excluded.market, quote_ccy=excluded.quote_ccy,
                sector=excluded.sector, name=excluded.name, board=excluded.board,
                target_low=excluded.target_low, target_high=excluded.target_high,
-               is_etf=excluded.is_etf, industry=excluded.industry""",
+               is_etf=excluded.is_etf, industry=excluded.industry,
+               target_set_at=CASE
+                   WHEN instruments.target_low IS NOT excluded.target_low
+                     OR instruments.target_high IS NOT excluded.target_high
+                   THEN excluded.target_set_at
+                   ELSE instruments.target_set_at
+               END""",
         (
             inst.symbol, inst.market.value, inst.quote_ccy.value,
             inst.sector, inst.name, inst.board,
-            to_db(inst.target_low) if inst.target_low is not None else None,
-            to_db(inst.target_high) if inst.target_high is not None else None,
+            low,
+            high,
             1 if inst.is_etf else 0,
             inst.industry,
+            new_stamp,
         ),
     )
-    conn.commit()
+    # ``commit=False`` lets a caller inside an all-or-nothing batch defer to the batch's
+    # single commit — a mid-batch commit here would leave this row standing after a
+    # rollback took every ledger row it was written for (``preview.commit_preview``).
+    if commit:
+        conn.commit()
+
+
+class MovedBand(BaseModel):
+    """What :func:`move_target_band` moved, for the response that reports it."""
+
+    from_symbol: str
+    to_symbol: str
+    target_low: Decimal | None = None
+    target_high: Decimal | None = None
+    set_at: date | None = None
+
+
+def pending_band_move(
+    conn: sqlite3.Connection, *, from_symbol: str, to_symbol: str
+) -> MovedBand | None:
+    """What :func:`move_target_band` WOULD move, without moving it — the form preview's read.
+
+    The conditions live here and not in the router, so "will it move?" and "move it" can
+    never disagree: the preview that promises the move and the commit that performs it are
+    the same predicate, called twice. A second copy in the router would be a sentence on
+    screen the writer no longer honours — §5.1's two-numbers-on-one-screen failure applied
+    to a promise instead of a figure.
+    """
+    src = get_instrument(conn, from_symbol)
+    dst = get_instrument(conn, to_symbol)
+    if src is None or dst is None or from_symbol == to_symbol:
+        return None
+    if src.target_low is None and src.target_high is None:
+        return None
+    if dst.target_low is not None or dst.target_high is not None:
+        return None
+    return MovedBand(from_symbol=from_symbol, to_symbol=to_symbol,
+                     target_low=src.target_low, target_high=src.target_high,
+                     set_at=src.target_set_at)
+
+
+def move_target_band(
+    conn: sqlite3.Connection, *, from_symbol: str, to_symbol: str,
+    commit: bool = True,
+) -> MovedBand | None:
+    """D47: carry the owner's price-alert band from a retired symbol to its successor.
+
+    Owner ruling 2026-08-15 — 「ticker更換簡單一些可以直接換名字就好，其他都不動」. So the
+    band MOVES and its **values do not change**: an EXCHANGE re-keys a position, it does not
+    re-denominate one (§5.1's price re-expression is SPLIT-scoped), so 200 still means 200.
+
+    **A move, not a copy**, and that is the load-bearing half. ``target_cross`` fires for
+    every REGISTERED symbol carrying a band — held or merely watched — so a band left behind
+    on a symbol the owner no longer owns keeps sending alerts about a ticker that has
+    stopped trading. Clearing the source is what makes this a fix rather than a duplicate.
+
+    **Never overwrites.** A destination that already carries a band carries the owner's own
+    judgement about the destination security, which outranks an inherited one; there is no
+    merge rule that could be right, so the answer is to leave both alone and do nothing.
+
+    ⚠ **The one deliberate second writer of these columns.** Everything else goes through
+    :func:`upsert_instrument`, which DERIVES ``target_set_at`` by comparing values — and
+    that is exactly wrong here: the band's value has not changed, only the row it lives on,
+    so re-deriving would stamp it today and D44's "does this band predate that split?" would
+    answer no for the next split. The date rides across with the value it dates.
+
+    ⚠ **Not reversible.** Deleting the EXCHANGE does not move the band back. The band is a
+    setting rather than money of record — 重算 never covered it — so this is recorded as a
+    limitation the entry surface states, not as a mechanism to build. Returns ``None`` when
+    nothing moved, so a caller can stay silent instead of announcing a no-op.
+    """
+    moving = pending_band_move(conn, from_symbol=from_symbol, to_symbol=to_symbol)
+    if moving is None:
+        return None
+    conn.execute(
+        "UPDATE instruments SET target_low=?, target_high=?, target_set_at=? WHERE symbol=?",
+        (to_db(moving.target_low) if moving.target_low is not None else None,
+         to_db(moving.target_high) if moving.target_high is not None else None,
+         moving.set_at.isoformat() if moving.set_at is not None else None,
+         to_symbol),
+    )
+    conn.execute(
+        "UPDATE instruments SET target_low=NULL, target_high=NULL, target_set_at=NULL "
+        "WHERE symbol=?",
+        (from_symbol,),
+    )
+    if commit:            # see upsert_instrument — the batch owns the transaction
+        conn.commit()
+    return moving
 
 
 def _row_to_instrument(row: sqlite3.Row) -> Instrument:
@@ -123,6 +243,9 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         is_etf=bool(row["is_etf"]),
         archived=bool(row["archived"]),
         industry=row["industry"],
+        target_set_at=(
+            date.fromisoformat(row["target_set_at"]) if row["target_set_at"] else None
+        ),
     )
 
 
@@ -130,7 +253,7 @@ def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, archived, industry FROM instruments WHERE symbol=?",
+        "is_etf, archived, industry, target_set_at FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
     return _row_to_instrument(row) if row is not None else None
@@ -143,7 +266,7 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
     so no money figure is affected by archiving)."""
     rows = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, archived, industry FROM instruments"
+        "is_etf, archived, industry, target_set_at FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
 

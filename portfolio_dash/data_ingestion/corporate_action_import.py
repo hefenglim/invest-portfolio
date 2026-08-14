@@ -34,7 +34,12 @@ from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
-from portfolio_dash.data_ingestion.store import insert_corporate_action, load_ledger_bundle
+from portfolio_dash.data_ingestion.register import autoregister_spinoff_child
+from portfolio_dash.data_ingestion.store import (
+    insert_corporate_action,
+    load_ledger_bundle,
+    move_target_band,
+)
 from portfolio_dash.data_ingestion.validate import (
     CorporateActionInput,
     Issue,
@@ -277,8 +282,23 @@ def write_corporate_action_row(
     the whole batch commits once (all-or-nothing, #1). **The caller must run the price
     reconcile afterwards** (``api.instrument_service.reconcile_price_basis``) — a SPLIT
     moves the stored closes, and the writer has no business reaching into ``pricing/``.
+
+    D47's band move happens HERE rather than at the caller, so the bulk door and the form
+    reach it by the same rule (``architecture.md``'s cash-guard asymmetry). It is idempotent
+    across an N-account set: the first row clears the source, and every row after it finds
+    nothing to move.
     """
     p = row.payload
+    # Both defer their commit to *commit*, i.e. to the batch's single one. Committing here
+    # would defeat ``commit_preview``'s all-or-nothing gate SILENTLY: a later row's failure
+    # rolls back every action, and a band that had already moved — or a child instrument
+    # already created — would survive an event that never happened.
+    if p["kind"] == CorporateActionKind.EXCHANGE.value:
+        move_target_band(conn, from_symbol=p["from_symbol"], to_symbol=p["to_symbol"],
+                         commit=commit)
+    if p["kind"] == CorporateActionKind.SPINOFF.value:
+        autoregister_spinoff_child(conn, parent_symbol=p["from_symbol"],
+                                   child_symbol=p["to_symbol"], commit=commit)
     return insert_corporate_action(
         conn,
         account_id=p["account_id"],

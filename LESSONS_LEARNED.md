@@ -911,3 +911,25 @@ prevents recurrence.
   project prints is Traditional Chinese. Rule: any script with a human as its interface gets one
   test that invokes it through `subprocess` with the real interpreter. The in-process tests check
   what it computes; only that one checks that it **runs**.
+
+- **2026-08-15 — narrowing a hard validation moves work onto every path that PREVIEWS the thing,
+  not just the one that writes it.** D48a downgraded E10's rejection of an unregistered SPINOFF
+  destination to a soft warning, so the row commits and the child is auto-created. Every contract
+  test of the *write* passed immediately. The **preview** 500'd — `ledger_unbookable: unknown
+  instrument: CHILD` — because the always-on before/after replay needs the child's quote currency
+  to value the position the action creates, and previewing must never write. The fix was to hand
+  the preview an **in-memory** draft built by the same inheritance rule the save uses (one function,
+  two callers), never a second copy of that rule: two copies would let the preview print
+  ✓ 成本不變 over a book computed under a different currency than the save assigns. Rule: when a
+  guard stops rejecting something, list every surface that *previously never saw it* — a rejection
+  is also a shield for the code behind it.
+
+- **2026-08-15 — `quantize` and "cap to N dp" are different operations, and the difference is
+  invisible to `==`.** The restated target band came back as `60.0000` where the ledger had `60`.
+  `Decimal("60.0000") == Decimal("60")` is `True`, so no value assertion could see it — but this
+  project persists Decimals as **canonical TEXT**, and stored bytes are what D38's reversibility
+  invariant and every golden payload compare. `pricing/store` and `data_ingestion/store` had each
+  already written the cap-not-pad idiom privately for exactly this reason; the third occurrence is
+  what made it worth one home (`shared/money.cap_dp`). Rule: reach for `quantize` only when padding
+  to a fixed scale is the intent (settlement). For a precision *ceiling*, cap — and if a helper for
+  it already exists twice, the third caller is the signal to move it, not to copy it again.

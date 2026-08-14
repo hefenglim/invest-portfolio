@@ -397,10 +397,45 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   that never arrives is worse than one stating the blind spot plainly: the reader stops looking for
   the workaround. **No figure moved** — XIRR never included cash movements — so every historical
   number, worked anchor and oracle expectation is unchanged. Manual → `v1.7a`.
-- **D44 is open:** the owner-entered target band (`target_low` / `target_high`) is *not*
-  re-expressed, so after a split a stale band meets a re-expressed price and crosses immediately.
-  The system cannot choose between re-expressing it (guessing the owner's intent) and leaving it,
-  so it is a decision, not a defect to patch silently.
+- **D44 — RULED 2026-08-15, option (b): ask once, at entry.** The owner-entered target band
+  (`instruments.target_low` / `target_high`) is still **not** re-expressed across a SPLIT, so a
+  stale band meets a re-expressed price (W6c) and `target_cross` crosses on the split date and
+  every scan after it — on the **notification** path, which is what made this worth a mechanism
+  rather than a docs note. Option (a) was rejected on this codebase's own terms: the band has no
+  `*_raw` column, so an in-place rewrite is the irreversible restatement D39b already refused for
+  `open`/`high`/`low`, and it would still be *guessing* — 「alert me at 600」 may survive a 10-for-1
+  as 60 (a view about the company) or as 600 (a view about the share price). Recording the SPLIT
+  now raises the soft `target_band_predates_split`, **quoting the restated number**, and the form
+  offers it as a checkbox that **defaults to OFF** — doing nothing keeps what the owner typed,
+  which is the (c) behaviour retained as the floor. **New column `instruments.target_set_at`**
+  (nullable, additive) is what makes the finding *precise* rather than noisy: it dates the band, so
+  a historical split imported from years of broker history — against a band set last week — stays
+  silent. Without it the one-click broker import would warn on nearly every action it carries, and
+  「a guard that mostly cries wolf trains the owner to click through」 is E23's own argument. `NULL`
+  (every pre-existing row) means *unknown* and makes no claim.
+- **D47 (new, owner ruling 2026-08-15) — an EXCHANGE carries the target band to the new ticker.**
+  「ticker更換簡單一些可以直接換名字就好，其他都不動」: the band **moves** (source cleared) and
+  its values are **not** restated. A move rather than a copy is the load-bearing half —
+  `target_cross` fires for every *registered* symbol with a band, held or watched, so one left
+  behind keeps alerting about a ticker that has stopped trading. A destination that already carries
+  the owner's own band is never overwritten. Announced in the preview before saving; ⚠ **not
+  reversible** — deleting the EXCHANGE does not move it back, which is stated rather than
+  engineered around, because the band is a setting and 重算 never covered it.
+- **D48 (new, owner ruling 2026-08-15) — a SPINOFF auto-registers its child, and can seed its
+  first price.** E10's hard rejection of an unregistered destination is **narrowed to SPINOFF
+  only**: that symbol does not exist until the very event being recorded, so "register it first"
+  asked the owner to pre-create it. Market and quote currency are **inherited** from the parent
+  (E11 requires them to match, so it is a derivation, not a guess); name and sector stay blank.
+  **Soft, never silent** — D19/E10 exists so a broker CUSIP never becomes an instrument, so the
+  owner is shown exactly what will be created. A source symbol and an EXCHANGE destination both
+  keep the hard rejection. The form also gained an optional **子公司起始價**, written through
+  `pricing.store.upsert_prices` from `api/` (`pricing/` owns every price write): one unpriced
+  holding blanks the **whole** portfolio's XIRR, and a spin-off is guaranteed to create one. A
+  malformed or inapplicable value is **refused**, not dropped.
+- `shared/money.cap_dp` — one home for the cap-not-pad rounding that `pricing/store`,
+  `data_ingestion/store` and now `shared/corporate_actions.apply_ratio_to_price` had each written.
+  Cap-not-pad matters here specifically: `quantize` would store a restated `60` as `60.0000`,
+  equal to Python and different to the byte comparison D38 invariant 3 and every golden payload use.
 - A ledger with **no** corporate action reads byte-identically: `series_in` short-circuits
   structurally rather than computing an equal answer, proved by a `split_factor` landmine driving
   every re-expressed path (D38 invariant 1).

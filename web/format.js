@@ -138,6 +138,18 @@ window.fmt = (function () {
    * without it "10" would lose its trailing zero and render as "1".
    */
   function shares(v) {
+    return exact(v);
+  }
+
+  /** A Decimal string shown AS SENT: grouped, up to 6 dp, trailing zeros stripped.
+
+      For any value where a display rounding would contradict what actually gets stored.
+      `price(v, 'USD')` renders 28.5714 as "28.57" — correct for a quote the owner only
+      reads, and wrong for D44's restated target level, which the owner is deciding whether
+      to SAVE: they would tick a box labelled 28.57 and the ledger would receive 28.5714.
+      Same reason `shares` (which is this function, named for its first caller) never
+      rounded a fractional DRIP share count. */
+  function exact(v) {
     const s = num(v, 6);
     if (s === NULL_GLYPH) return s;
     return s.indexOf('.') < 0 ? s : s.replace(/\.?0+$/, '');
@@ -243,6 +255,6 @@ window.fmt = (function () {
     return parts.join(' · ');
   }
 
-  return { num, shares, money, price, signed, signedNum, pct, signedPct, rate, date, datetime,
-           signClass, aiAttrib, NULL_GLYPH };
+  return { num, shares, exact, money, price, signed, signedNum, pct, signedPct, rate,
+           date, datetime, signClass, aiAttrib, NULL_GLYPH };
 })();

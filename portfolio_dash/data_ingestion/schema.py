@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS instruments (
     is_etf INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
     target_high TEXT,
-    industry TEXT
+    industry TEXT,
+    target_set_at TEXT
 );
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +134,16 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # industry (R6, 2026-07-19): nullable GICS industry, filled by the next wave's AI service.
     # Backend plumbing only this wave; additive, so an existing DB migrates in untouched.
     _add_column_if_missing(conn, "instruments", "industry", "TEXT")
+    # target_set_at (D44, 2026-08-15): the ISO date the target band above was last CHANGED.
+    # Owned end-to-end by store.upsert_instrument, which compares against the stored row —
+    # so it cannot drift from the values it dates. It exists to make one question answerable:
+    # "does this band predate that split?" Without it, the D44 finding has to fire on every
+    # split of every banded symbol, and a bulk broker import of five years of history is
+    # mostly HISTORICAL splits — i.e. mostly false positives, which is the "cries wolf"
+    # failure E23 spent a fourth condition avoiding. NULL (every pre-existing row, and any
+    # symbol whose band nobody has touched since) means UNKNOWN, and the finding stays
+    # silent: no data, no claim.
+    _add_column_if_missing(conn, "instruments", "target_set_at", "TEXT")
     _add_column_if_missing(conn, "transactions", "daytrade", "INTEGER NOT NULL DEFAULT 0")
     # short_sale (2026-07-31): a DECLARED short sale. Default 0, so every pre-existing row
     # keeps its exact meaning and the replay is unchanged for them.

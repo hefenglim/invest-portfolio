@@ -143,21 +143,31 @@ def test_transactions_template_is_fully_clean(template_conn: sqlite3.Connection)
 def test_corporate_action_template_split_row_is_directly_writable(
     template_conn: sqlite3.Connection
 ) -> None:
-    """W7: the SPLIT example is fully clean; the other two are refused for ONE reason.
+    """W7: the SPLIT example is fully clean; the other two are stopped for ONE reason each.
 
-    The EXCHANGE / SPINOFF examples name placeholder destinations because the seed has no
-    second same-currency instrument to point at. That they are refused is E10 working
-    (D19 — keyed on REGISTRATION, a database fact, never on the shape of the string), and
-    pinning the reason here stops the template from quietly acquiring a second defect
-    behind the one that is expected.
+    Both name placeholder destinations because the seed has no second same-currency
+    instrument to point at — and after D48a the two are stopped at DIFFERENT tiers, which is
+    the ruling made visible:
+
+    * **EXCHANGE → NEWCO** stays E10's HARD ``unregistered_symbol``. An exchange's
+      destination is an existing listed security, so "register it first" is still right.
+    * **SPINOFF → SPINCO** is now the SOFT ``spinoff_child_autoregister``: the child does not
+      exist until this event, so the row commits once acknowledged and creates it.
+
+    Pinning both tiers here stops the template from quietly acquiring a second defect behind
+    the expected one, and stops the narrowing from leaking to the kind it was not given for.
     """
     preview = _built("corporate_actions", template_conn,
                      render_import_template("corporate_actions"))
     assert len(preview.rows) == 3
     assert not preview.rows[0].issues, [i.kind for i in preview.rows[0].issues]
-    for row in preview.rows[1:]:
-        assert {i.kind for i in row.issues if not i.needs_confirm} == {
-            "unregistered_symbol"}
+
+    exchange, spinoff = preview.rows[1], preview.rows[2]
+    assert {i.kind for i in exchange.issues if not i.needs_confirm} == {
+        "unregistered_symbol"}
+    assert {i.kind for i in spinoff.issues if not i.needs_confirm} == set()
+    assert "spinoff_child_autoregister" in {
+        i.kind for i in spinoff.issues if i.needs_confirm}
 
 
 def test_template_with_bom_prefix_still_parses(template_conn: sqlite3.Connection) -> None:

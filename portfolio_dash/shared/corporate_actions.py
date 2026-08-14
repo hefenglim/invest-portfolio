@@ -22,8 +22,15 @@ from typing import Protocol
 
 from pydantic import BaseModel, ValidationError, model_validator
 
+from portfolio_dash.shared.money import cap_dp
+
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+# Decimals kept for a PER-SHARE value restated across one action (:func:`apply_ratio_to_price`).
+# 4 dp is the same cap ``pricing/store`` applies to every stored close and covers every market
+# tick (US/TW 2 dp, MY 3 dp) — so a restated level can always be compared exactly against a
+# stored price rather than against something one ulp away from it.
+_PRICE_DP = 4
 
 
 class CorporateActionKind(StrEnum):
@@ -111,6 +118,38 @@ def apply_ratio(qty: Decimal, action: CorporateAction) -> Decimal:
     A 2-for-7 exchange of 700 shares must therefore produce **exactly** ``Decimal("200")``.
     """
     return qty * action.ratio_to / action.ratio_from
+
+
+def apply_ratio_to_price(
+    value: Decimal, *, ratio_to: Decimal, ratio_from: Decimal
+) -> Decimal:
+    """A PER-SHARE value restated across one action: ``value × from / to``, 4 dp.
+
+    The mirror of :func:`apply_ratio`. Shares move by ``to/from``; anything denominated
+    *per share* — a price, an owner-entered target level — moves by its reciprocal, because
+    the two multiply out to the position's unchanged value (§2.1's conservation law seen
+    from the price side). A 7-for-1 turns 200 into 28.5714.
+
+    **Two bare terms, not a** :class:`CorporateAction`, unlike :func:`apply_ratio`. That
+    one is called during a replay, where a validated action is already in hand; this one is
+    called from *validation* and from the form preview, where the row is a candidate that
+    may not be a legal action yet. Demanding the model there would make callers construct
+    one from unvalidated input — precisely what the model's validator exists to stop.
+
+    **It quantizes and :func:`apply_ratio` does not**, and the asymmetry is the point.
+    ``apply_ratio``'s result is a share count that a bare ``>`` compares against a sell, so
+    one ulp short is an oversell and a discarded cost basis — it must stay exact. This
+    result is a **quotient**: ``200 × 1/7`` does not terminate, so *something* rounds it,
+    and the only safe answer is that it rounds ONCE, here. Left unquantized, the number
+    shown to the owner in a message, the number returned in the preview payload and the
+    number actually written would each be free to round differently — the "two numbers on
+    one screen" failure §5.1 names as the worst kind.
+
+    **Not** :func:`split_factor`: that folds a whole *window* of actions into one quotient
+    and is documented PRICES-ONLY-and-rounded. For a single action the two-term form is
+    exact before the final cap, so this is the tighter of the two answers.
+    """
+    return cap_dp(value * ratio_from / ratio_to, _PRICE_DP)
 
 
 class StoredActionRow(Protocol):

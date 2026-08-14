@@ -26,6 +26,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.data_ingestion.store import (
+    get_instrument,
     insert_corporate_action,
     insert_transaction,
     list_corporate_actions,
@@ -653,3 +654,294 @@ def test_the_import_route_commits_a_complete_batch_and_reconciles(
     assert r.json()["written"] == 1
     assert r.json()["prices_restated"] == 1
     assert _closes(golden_db, "2330") == [("6000", "10")]
+
+
+# ------------------------------------------------------- D44: the band restate (one-click)
+
+
+def _band(
+    conn: sqlite3.Connection, symbol: str, *,
+    low: str | None = None, high: str | None = None, on: date,
+) -> None:
+    """Set *symbol*'s alert band as if the owner had entered it on *on*."""
+    inst = get_instrument(conn, symbol)
+    assert inst is not None
+    upsert_instrument(
+        conn,
+        inst.model_copy(update={"target_low": D(low) if low else None,
+                                "target_high": D(high) if high else None}),
+        today=on,
+    )
+
+
+def test_preview_offers_the_restated_band_when_the_finding_fires(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """D44's repair travels on D44's own wire. The owner is being asked to choose between
+    two readings of a number they typed, so the number they would be choosing has to be on
+    screen — a warning that says "your band may be stale" and leaves the arithmetic to them
+    is the "warning nothing can fix" ``validate.py`` already names for E23."""
+    _band(golden_db, "2330", low="600", high="900", on=date(2026, 1, 5))
+    body = api_client.post(f"{_BASE}/preview", json=_body()).json()
+
+    (found,) = [i for i in body["issues"] if i["code"] == "target_band_predates_split"]
+    r = found["restate"]
+    assert r["symbol"] == "2330" and r["set_at"] == "2026-01-05"
+    # 10-for-1: a per-share level goes the other way from the share count.
+    assert [(lv["field"], lv["current"], lv["restated"]) for lv in r["levels"]] == [
+        ("target_low", "600", "60"), ("target_high", "900", "90"),
+    ]
+    # `apply` is a ready-made PUT body — the browser posts it, never assembles it.
+    assert r["apply"] == {"target_low": "60", "target_high": "90"}
+    # …and it is NOT applied by previewing. Choosing is a separate, later act.
+    inst = get_instrument(golden_db, "2330")
+    assert inst is not None and inst.target_low == D("600")
+
+
+def test_preview_carries_no_restate_when_nothing_is_stale(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """No band, no offer — and no instrument read paid for by the ordinary split, which is
+    every split. The finding gates the work, exactly as E23 gates ``_split_conversion``."""
+    body = api_client.post(f"{_BASE}/preview", json=_body()).json()
+    assert [i for i in body["issues"] if i["code"] == "target_band_predates_split"] == []
+    assert all("restate" not in i for i in body["issues"])
+
+
+def test_the_restate_body_is_accepted_by_the_ordinary_instrument_endpoint(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """★ The half a shape assertion cannot prove: that `apply` actually applies.
+
+    The offer is only real if PUT /api/instruments/{symbol} takes it verbatim. Asserting
+    the dict shape and stopping would pass just as happily against a body that endpoint
+    rejects — and the owner would find out by ticking a box that silently does nothing.
+    """
+    _band(golden_db, "2330", low="600", on=date(2026, 1, 5))
+    r = api_client.post(f"{_BASE}/preview", json=_body()).json()
+    (found,) = [i for i in r["issues"] if i["code"] == "target_band_predates_split"]
+
+    resp = api_client.put("/api/instruments/2330", json=found["restate"]["apply"])
+    assert resp.status_code == 200, resp.text
+    inst = get_instrument(golden_db, "2330")
+    assert inst is not None and inst.target_low == D("60")
+    # Only the named leg moved: `exclude_unset` means an absent key is "unchanged", so a
+    # one-legged restate cannot wipe the other level.
+    assert inst.target_high is None
+
+
+def test_only_the_D44_wire_carries_the_restate(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Two findings now attach a repair (E23's fix, D44's restate) through one helper. The
+    risk of one attachment rule is that it attaches to the wrong finding — silently, since
+    both payloads are dicts on an issue wire."""
+    _band(golden_db, "2330", low="600", on=date(2026, 1, 5))
+    body = api_client.post(f"{_BASE}/preview", json=_body(ratio_to="1", ratio_from="1")).json()
+    # A 1-for-1 raises E7 (split_ratio_one) and NOT D44 — so no wire carries a restate.
+    codes = {i["code"] for i in body["issues"]}
+    assert "split_ratio_one" in codes and "target_band_predates_split" not in codes
+    assert all("restate" not in i for i in body["issues"])
+
+
+# ------------------------------------------------ D47: the band follows the ticker
+
+def _newco(conn: sqlite3.Connection) -> None:
+    """A TWD-quoted destination — E11 requires both ends share a quote currency."""
+    upsert_instrument(conn, Instrument(symbol="NEWCO", market=Market.TW,
+                                       quote_ccy=Currency.TWD, sector="Semis",
+                                       name="NewCo", board="TWSE"))
+
+
+def _exchange(**over: object) -> dict[str, object]:
+    return _body(kind="EXCHANGE", to_symbol="NEWCO", ratio_to="1", ratio_from="1", **over)
+
+
+def test_the_preview_promises_the_band_move_before_saving(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Said BEFORE the write, like `unblocks` — the owner should not discover that an alert
+    followed the ticker by noticing it fire on a symbol they never configured."""
+    _newco(golden_db)
+    _band(golden_db, "2330", low="580", high="720", on=date(2026, 1, 5))
+    body = api_client.post(f"{_BASE}/preview", json=_exchange()).json()
+
+    m = body["band_move"]
+    assert m["from_symbol"] == "2330" and m["to_symbol"] == "NEWCO"
+    assert (m["target_low"], m["target_high"]) == ("580", "720")
+    # Previewing changes nothing — it runs on every keystroke.
+    inst = get_instrument(golden_db, "2330")
+    assert inst is not None and inst.target_low == D("580")
+
+
+def test_creating_the_exchange_moves_the_band(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    _newco(golden_db)
+    _band(golden_db, "2330", low="580", on=date(2026, 1, 5))
+    # NEWCO has no stored price, so N3-price warns (soft). Acked, exactly as the form does.
+    r = api_client.post(_BASE, json=_exchange(ack_warnings=True))
+    assert r.status_code == 201, r.text
+    assert r.json()["band_moved"]["to_symbol"] == "NEWCO"
+
+    new = get_instrument(golden_db, "NEWCO")
+    old = get_instrument(golden_db, "2330")
+    assert new is not None and new.target_low == D("580")
+    assert new.target_set_at == date(2026, 1, 5)   # the date rides with the value
+    assert old is not None and old.target_low is None
+
+
+def test_a_SPLIT_never_moves_a_band(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """D47 is about re-keying, D44 about re-denominating. A SPLIT's source and destination
+    are the same symbol (E20), so there is nowhere to move it to — and conflating the two
+    would silently apply the ruling the owner did NOT give for splits."""
+    _band(golden_db, "2330", low="580", on=date(2026, 1, 5))
+    body = api_client.post(f"{_BASE}/preview", json=_body()).json()
+    assert body["band_move"] is None
+    assert api_client.post(_BASE, json=_body(ack_warnings=True)).status_code == 201
+    inst = get_instrument(golden_db, "2330")
+    assert inst is not None and inst.target_low == D("580")
+
+
+def test_the_CSV_door_moves_it_too(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Same rule at the bulk door — the asymmetry `architecture.md` names for the cash
+    guard. It lives in the row writer, so both doors reach it by construction; asserted
+    anyway, because "by construction" is what quietly stops being true."""
+    _newco(golden_db)
+    _band(golden_db, "2330", low="580", on=date(2026, 1, 5))
+    csv_text = ("account,date,kind,from_symbol,to_symbol,ratio_to,ratio_from\n"
+                f"tw_broker,{SPLIT_DAY.isoformat()},EXCHANGE,2330,NEWCO,1,1\n")
+    r = api_client.post("/api/import/commit",
+                        json={"kind": "corporate_actions", "csv_text": csv_text,
+                              "ack_warnings": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["written"] == 1
+    new = get_instrument(golden_db, "NEWCO")
+    assert new is not None and new.target_low == D("580")
+
+
+# ------------------------- D48: the spinoff child (auto-register + its first price)
+
+def _spinoff(**over: object) -> dict[str, object]:
+    """2330 carves off CHILD. cost_carry is required (E8); the child is NOT pre-registered."""
+    return _body(kind="SPINOFF", to_symbol="CHILD", ratio_to="1", ratio_from="2",
+                 cost_carry="0.3", **over)
+
+
+def test_an_unregistered_spinoff_child_is_a_WARNING_not_a_rejection(
+    api_client: TestClient,
+) -> None:
+    """D48a. Before this it was E10's hard reject, which asked the owner to pre-create a row
+    for the security the action is about to create. Soft rather than silent: the message
+    names the market and currency that will be inherited, because D19/E10 exists so a broker
+    identifier off a statement never becomes a permanent phantom instrument."""
+    body = api_client.post(f"{_BASE}/preview", json=_spinoff()).json()
+    (found,) = [i for i in body["issues"] if i["code"] == "spinoff_child_autoregister"]
+    assert "CHILD" in found["text"] and "TW" in found["text"] and "TWD" in found["text"]
+    assert body["blocking"] is False and body["needs_confirm"] is True
+
+
+def test_saving_creates_the_child_inheriting_market_and_currency(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    assert get_instrument(golden_db, "CHILD") is None
+    r = api_client.post(_BASE, json=_spinoff(ack_warnings=True))
+    assert r.status_code == 201, r.text
+
+    child = get_instrument(golden_db, "CHILD")
+    assert child is not None
+    assert (child.market, child.quote_ccy) == (Market.TW, Currency.TWD)   # from the parent
+    # Name and sector are the PARENT's facts, not the child's — left blank, never copied.
+    assert child.name == "" and child.sector == ""
+
+
+def test_an_unregistered_SOURCE_is_still_a_hard_rejection(
+    api_client: TestClient,
+) -> None:
+    """★ The narrowing must not leak. Auto-registration is defensible only for a symbol the
+    action CREATES; a source the ledger has never heard of is a typo or a broker identifier,
+    and creating it would invent a position out of one."""
+    r = api_client.post(_BASE, json=_spinoff(from_symbol="NOPE"))
+    assert r.status_code == 400
+    assert r.json()["error"]["issues"][0]["code"] == "unregistered_symbol"
+
+
+def test_an_unregistered_EXCHANGE_destination_is_still_a_hard_rejection(
+    api_client: TestClient,
+) -> None:
+    """The owner ruled on spin-offs. An EXCHANGE's destination is an existing listed
+    security, so "register it first" remains the right answer there."""
+    r = api_client.post(_BASE, json=_body(kind="EXCHANGE", to_symbol="GHOST",
+                                          ratio_to="1", ratio_from="1"))
+    assert r.status_code == 400
+    assert r.json()["error"]["issues"][0]["code"] == "unregistered_symbol"
+
+
+def test_the_new_child_still_warns_that_it_has_no_price(
+    api_client: TestClient,
+) -> None:
+    """N3-price's condition had to widen with E10's narrowing: an about-to-be-created symbol
+    has no prices BY DEFINITION, so the newest source of unpriced holdings would otherwise
+    have become the one case that never warns. One unpriced holding blanks the WHOLE
+    portfolio's XIRR, not just its own."""
+    codes = {i["code"] for i in
+             api_client.post(f"{_BASE}/preview", json=_spinoff()).json()["issues"]}
+    assert "to_symbol_unpriced" in codes
+
+
+def test_a_supplied_child_price_is_stored_and_clears_the_unpriced_warning(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """D48b, end to end. The response must stop naming the symbol as unpriced — sending the
+    owner to 更新報價 for a price they typed one second ago is the kind of stale instruction
+    that teaches people to ignore the banner."""
+    r = api_client.post(_BASE, json=_spinoff(ack_warnings=True, to_symbol_price="123.5"))
+    assert r.status_code == 201, r.text
+    assert r.json()["child_priced"] == "CHILD"
+    assert r.json()["unpriced_symbols"] == []
+    assert _closes(golden_db, "CHILD") == [("123.5", "1")]   # cap-not-pad, identity basis
+
+
+def test_no_child_price_leaves_the_behaviour_exactly_as_before(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    r = api_client.post(_BASE, json=_spinoff(ack_warnings=True))
+    assert r.status_code == 201
+    assert r.json()["child_priced"] is None
+    assert r.json()["unpriced_symbols"] == ["CHILD"]
+    assert _closes(golden_db, "CHILD") == []
+
+
+def test_a_bad_child_price_is_REFUSED_not_dropped(api_client: TestClient) -> None:
+    """★ A value the owner typed that silently does not arrive is invisible here — the
+    field's only effect is a price row nobody looks at until the XIRR stays blank."""
+    for bad in ("0", "-5", "abc"):
+        r = api_client.post(_BASE, json=_spinoff(ack_warnings=True, to_symbol_price=bad))
+        assert r.status_code == 400, bad
+        assert r.json()["error"]["field"] == "to_symbol_price"
+
+
+def test_a_child_price_on_the_wrong_kind_is_refused(api_client: TestClient) -> None:
+    """Mirrors ``cost_carry_not_applicable``: a value supplied for a kind that has no use
+    for it is a misunderstanding worth naming, not something to ignore."""
+    r = api_client.post(_BASE, json=_body(ack_warnings=True, to_symbol_price="10"))
+    assert r.status_code == 400
+    assert r.json()["error"]["field"] == "to_symbol_price"
+
+
+def test_the_CSV_door_auto_registers_the_child_too(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    csv_text = ("account,date,kind,from_symbol,to_symbol,ratio_to,ratio_from,cost_carry\n"
+                f"tw_broker,{SPLIT_DAY.isoformat()},SPINOFF,2330,CHILD,1,2,0.3\n")
+    r = api_client.post("/api/import/commit",
+                        json={"kind": "corporate_actions", "csv_text": csv_text,
+                              "ack_warnings": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["written"] == 1
+    child = get_instrument(golden_db, "CHILD")
+    assert child is not None and child.quote_ccy is Currency.TWD
