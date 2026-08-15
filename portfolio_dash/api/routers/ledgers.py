@@ -101,7 +101,11 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
-from portfolio_dash.shared.corporate_actions import ActionIndex, CorporateActionKind
+from portfolio_dash.shared.corporate_actions import (
+    KIND_ZH,
+    ActionIndex,
+    CorporateActionKind,
+)
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -801,7 +805,6 @@ def remove_opening(
 # The 5th ledger — corporate actions (W7, spec §6.5 + §6.7)
 # ---------------------------------------------------------------------------
 
-_KIND_ZH = {"SPLIT": "分割", "EXCHANGE": "換股", "SPINOFF": "分拆"}
 # Accepted on the wire so the form can post what the owner picked in their own words;
 # the stored value is always the enum. Mirrors corporate_action_import._KIND_ALIASES —
 # the CSV door and the form door must not disagree about what 「分割」 means.
@@ -1338,7 +1341,7 @@ def _preview_payload(
     return {
         "ccy": inst.quote_ccy.value if inst is not None else "",
         "kind": kind,
-        "kind_label": _KIND_ZH.get(kind, kind),
+        "kind_label": KIND_ZH.get(kind, kind),
         "accounts": accounts_wire,
         "not_affected": [{"account_id": a, "account": accts.get(a, a),
                           "reason": "部位在行動日之後才建立,這筆行動不會套用"}
@@ -1393,7 +1396,7 @@ def corporate_actions(
             # symbol-cell renderer work on this table with no per-tab special case.
             "symbol": a.from_symbol, "name": names.get(a.from_symbol, ""),
             "to_symbol": a.to_symbol, "to_name": names.get(a.to_symbol, ""),
-            "kind": a.kind, "kind_label": _KIND_ZH.get(a.kind, a.kind),
+            "kind": a.kind, "kind_label": KIND_ZH.get(a.kind, a.kind),
             "ratio_to": decimal_str(a.ratio_to),
             "ratio_from": decimal_str(a.ratio_from),
             # Rendered server-side in the owner's own phrasing (§6.7) so the two integer
@@ -1711,7 +1714,7 @@ def remove_corporate_action_set(
             and a.kind == wanted]
     if not rows:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"找不到 {from_symbol} 在 {on} 的{_KIND_ZH.get(wanted, wanted)}"))
+            "not_found", f"找不到 {from_symbol} 在 {on} 的{KIND_ZH.get(wanted, wanted)}"))
     symbols = {a.from_symbol for a in rows} | {a.to_symbol for a in rows}
     for a in rows:
         delete_corporate_action(conn, a.id)

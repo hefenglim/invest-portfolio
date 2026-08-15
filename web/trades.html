@@ -344,7 +344,10 @@
   <section class="panel ledger-section" data-screen-label="帳本記錄">
     <div class="panel-head">
       <h2 class="panel-title">帳本記錄</h2>
-      <span class="panel-sub">所有交易・四帳本・更正以全帳重播檢核，原值留存稽核軌跡</span>
+      <!-- No ledger count here. It said 四帳本 (ledger-count-ok: historical quote) while the
+           tab bar below showed five and the system has six — a number in prose sitting beside
+           the tabs that contradicted it. -->
+      <span class="panel-sub">所有交易・各帳本・更正以全帳重播檢核，原值留存稽核軌跡</span>
       <span class="spacer"></span>
       <span id="ledger-export-slot"></span>
       <div class="segmented">
@@ -503,7 +506,11 @@ document.getElementById('tab-tx').click();
   reportBtn.className = 'btn btn-sm';
   reportBtn.appendChild(Object.assign(document.createElement('span'), { className: 'ico', textContent: '⎙' }));
   reportBtn.appendChild(Object.assign(document.createElement('span'), { textContent: '匯出報告' }));
-  reportBtn.title = '下載帳本報告（可列印 HTML，四帳本＋期初庫存，依目前日期區間）';
+  /* 「四帳本＋期初庫存」 (ledger-count-ok: historical quote) counted five things over a
+     report that had four sections — and
+     期初庫存 was one of the four, so it was counted twice. The report gained its 公司行動
+     section on 2026-08-16; it still excludes 資金收支, which its own page header now says. */
+  reportBtn.title = '下載帳本報告（可列印 HTML，依目前日期區間）';
   reportBtn.addEventListener('click', async function () {
     var restore = window.pdBusy ? window.pdBusy(reportBtn, '產出中…') : function () {};
     try {

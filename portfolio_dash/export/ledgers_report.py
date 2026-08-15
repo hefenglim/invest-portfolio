@@ -1,7 +1,9 @@
 """帳本報告 — a print-optimized, self-contained HTML ledger report over a date range.
 
-Mirrors the four ledger data sources (the same rows the ``/api/ledgers/*`` reads and the
-ledgers CSV zip dump): 交易紀錄 / 股利紀錄 / 換匯紀錄 / 期初庫存. Each section is a
+Mirrors the ledger data sources the zip exports (the same rows ``/api/ledgers/*`` reads):
+交易紀錄 / 股利紀錄 / 換匯紀錄 / 期初庫存 / 公司行動. ``cash_movements`` is **not** here,
+because it is not in the zip either — one absence, stated in the report header rather than
+left for the reader to notice. Each section is a
 chronological table with a per-section count line and — only where they arise naturally
 from the listed columns — simple per-currency ``Decimal`` sums (transaction net cash,
 dividend net, FX converted amounts, opening cost). This builder computes NO new money: it
@@ -19,11 +21,13 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from portfolio_dash.data_ingestion.store import (
+    StoredCorporateAction,
     StoredDividend,
     StoredFxConversion,
     StoredOpening,
     StoredTransaction,
     list_accounts,
+    list_corporate_actions,
     list_dividends,
     list_fx_conversions,
     list_instruments,
@@ -42,6 +46,7 @@ from portfolio_dash.export.report_html import (
     _page_header,
     _version_line,
 )
+from portfolio_dash.shared.corporate_actions import KIND_ZH
 
 _ZERO = Decimal("0")
 _DIV_TYPE_ZH = {"CASH": "現金", "STOCK": "配股", "DRIP": "DRIP", "NET": "淨額"}
@@ -283,9 +288,69 @@ def _openings_section(
     )
 
 
+def _actions_section(
+    actions: list[StoredCorporateAction],
+    accts: dict[str, str],
+    names: dict[str, str],
+    frm: str | None,
+    to: str | None,
+) -> str:
+    """公司行動 — the one section with NO money column, and that is the point.
+
+    A corporate action moves shares without moving cash (spec §2.1), so there is nothing to
+    total: a 「合計」 line here would have to be zero or invented. What the reader needs
+    instead is the ratio **as two terms**, exactly as stored — printing a quotient would put
+    a rounded number on a page whose whole purpose is reconciliation, and the two-term form
+    is what makes 7-for-1 legible as 7-for-1 rather than as 0.142857.
+
+    Added 2026-08-16. Until then this report showed four ledgers out of six and its button
+    called them 「四帳本＋期初庫存」 — five names for four sections, with the one ledger that
+    explains a changed share count missing. A printed ledger that cannot explain why 100
+    shares became 700 is a ledger that does not reconcile.
+    """
+    rows: list[str] = []
+    count = 0
+    for a in sorted(actions, key=lambda x: (x.date, x.id)):
+        if not _in_range(a.date, frm, to):
+            continue
+        count += 1
+        moves = (
+            _sym_cell(a.from_symbol, names.get(a.from_symbol, ""))
+            if a.from_symbol == a.to_symbol
+            else (f'<td class="l">{_esc(a.from_symbol)} → {_esc(a.to_symbol)}</td>')
+        )
+        carry = (
+            f"{_fmt_amount(a.cost_carry * Decimal(100), '')}%"
+            if a.cost_carry is not None else _NULL
+        )
+        rows.append(
+            "<tr>"
+            f'<td class="num">{_esc(a.date.isoformat())}</td>'
+            f'<td class="l">{_esc(accts.get(a.account_id, a.account_id))}</td>'
+            f'<td class="l">{_esc(KIND_ZH.get(a.kind.upper(), a.kind))}</td>'
+            f"{moves}"
+            f'<td class="num">{_fmt_shares(a.ratio_from)} → {_fmt_shares(a.ratio_to)}</td>'
+            f'<td class="num">{_esc(carry)}</td>'
+            f'<td class="l">{_esc(a.note or "")}</td>'
+            "</tr>"
+        )
+    if not rows:
+        return _empty_section("公司行動")
+    head = (
+        '<tr><th>日期</th><th class="l">帳戶</th><th class="l">類型</th>'
+        '<th class="l">代號 / 名稱</th><th>比例（原 → 新）</th>'
+        "<th>成本分攤</th><th class=\"l\">備註</th></tr>"
+    )
+    return _section(
+        "公司行動", count, head, "".join(rows),
+        ["公司行動不移動現金，故本節無金額合計。"],
+    )
+
+
 def _header_html(now: datetime, frm: str | None, to: str | None) -> str:
     gen = now.strftime("%Y-%m-%d %H:%M")
-    nature = "本報告直接呈現帳本原始輸入值；統計數字皆由這些紀錄重算，不由本報告寫入。"
+    nature = ("本報告直接呈現帳本原始輸入值；統計數字皆由這些紀錄重算，不由本報告寫入。"
+              "本報告不含資金收支帳本。")
     meta = [
         f"生成時間 {_esc(gen)}",
         f"期間 {_esc(_range_label(frm, to))}",
@@ -310,6 +375,7 @@ def build_ledgers_report_html(
             _dividends_section(list_dividends(conn), accts, names, ccys, frm, to),
             _fx_section(list_fx_conversions(conn), accts, frm, to),
             _openings_section(list_opening(conn), accts, names, ccys, frm, to),
+            _actions_section(list_corporate_actions(conn), accts, names, frm, to),
             _page_footer("帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。"),
         ]
     )

@@ -161,6 +161,41 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   nobody should press. Visible for ordinary CSV imports too.
 
 ### Fixed
+- **Nine sentences said the app had four ledgers. It has six, and exports five.** The ledger
+  registry removed hand-maintained ledger enumerations from the *code* and never reached the
+  *copy*, so when corporate actions became the 5th ledger the words stayed put: the export
+  centre told the owner they were about to download four CSVs while the route built five; the
+  帳本記錄 panel printed a count beside a tab bar showing more tabs than the count; and the
+  report button read 「四帳本＋期初庫存」, which names five things over a report that had four
+  sections and counts 期初庫存 twice. **A count typed into a sentence is not wrong in any way a
+  type checker, a route test or a golden payload can see** — it is only wrong against a fact
+  stated somewhere else — which is why the fix is structural rather than a set of better
+  numbers: `GET /api/export/ledgers` serves the list from `EXPORT_KINDS` for the one card that
+  genuinely needs it, and every other site stops stating a count. Adding a 7th ledger now
+  updates that sentence with no edit to the frontend at all.
+  - ⚠ **One of the nine was not a count but a wrong claim.** The 重算 dialog said it rebuilt
+    from 「期初庫存、交易、股利、換匯」. `LedgerBundle` has no `fx_conversions` field —
+    `build_book` cannot see the FX ledger — and the one ledger it *does* replay, 公司行動, was
+    missing from the sentence. So the dialog promised a check it never performed, on the ledger
+    a user is most likely to want checked after typing a rate by hand. The copy now names what
+    is actually replayed and says the other two are record-only. **Deliberately not "fixed" by
+    widening the endpoint:** `forex/pools.py` and `portfolio/cash.py` cannot raise, so replaying
+    them would be a verification that can never fail — which is a progress bar, not a check.
+  - The printable 帳本報告 gained its **公司行動** section (it had four sections out of six). It
+    is the one section with no money total, and that is the point: an action moves shares
+    without moving cash, so a 「合計」 line would have to be zero or invented. The ratio prints
+    as **two terms**, because a quotient on a reconciliation page turns 7-for-1 into 0.142857.
+  - `KIND_ZH` moved to `shared/corporate_actions.py` so `export/` could use it without importing
+    `api/`. ⚠ Recorded there, not fixed: `web/detail.js` holds a **third** copy that disagrees —
+    it labels SPINOFF 「分割」, which is the backend's word for SPLIT. Two different kinds under
+    one word, on two screens of the same app.
+  - Two guards, each **watched to fail** before being kept: no file may state a ledger count
+    (`tests/contract/test_ledger_count_not_hardcoded.py`), and the endpoint, the zip's members
+    and the report's section count must all equal the registry
+    (`tests/contract/test_export_ledger_list.py`). The first one found a **ninth** site on its
+    first run — inside `ledger_registry.py` itself, the file whose existence is the argument
+    against counting ledgers by hand. The zip's existing member test could never have caught
+    any of this: it asserts a **subset**, and a subset assertion cannot see an addition.
 - **A CSV import now validates each row against the ledger PLUS its own siblings.** Measured on a
   synthetic broker export 2026-08-12: **7 of 47** transaction rows raised 賣超 whose covering buy
   was three lines above them in the same file. The numbers end up right if the owner confirms —

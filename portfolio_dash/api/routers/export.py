@@ -13,6 +13,7 @@ stays a pure scheduler view.
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
@@ -37,6 +38,7 @@ from portfolio_dash.export.tax import build_tax_package_zip
 from portfolio_dash.export.usage import build_job_runs_csv, build_llm_usage_csv
 from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.ledger_registry import EXPORT_KINDS
 
 router = APIRouter()
 
@@ -107,6 +109,29 @@ def export_holdings(
     market = body.market if body is not None else None
     return _respond(build_holdings_csv(
         conn, now=now, reporting=reporting, account=account, market=market))
+
+
+@router.get("/export/ledgers")
+def list_export_ledgers() -> Any:
+    """Which ledgers the zip below contains — the SAME set, from the same declaration.
+
+    Exists so the export centre can name them without holding its own copy of the list.
+    It held one until 2026-08-16, written as 「四帳本（期初/交易/股利/換匯）」, and it went
+    stale the moment corporate actions joined the zip: the sentence under-reported what the
+    user was about to download, and nothing could have caught it, because a hand-written
+    count is not wrong in any way a test can see.
+
+    Deliberately **not** served off ``/api/db-stats``, which also derives from the registry
+    but lists all SIX ledgers. Filtering ``cash_movements`` out on the client would put
+    "which ledgers are exportable" back in the frontend — the exact knowledge this endpoint
+    exists to keep in one place. ``export_kind is None`` is that answer, and it is a
+    property of the registry row, not of the caller.
+
+    GET beside the POST of the same path is the pairing it looks like: GET says what the
+    artifact would contain, POST builds it.
+    """
+    return {"ledgers": [{"kind": kind, "label": t.label}
+                        for kind, t in EXPORT_KINDS.items()]}
 
 
 @router.post("/export/ledgers")

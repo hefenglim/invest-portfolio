@@ -1,8 +1,8 @@
 """Unit tests for the 帳本報告 HTML builder (export.ledgers_report).
 
 Drives ``build_ledgers_report_html`` directly over the golden seed (2 transactions, 1
-dividend, 1 FX conversion; no opening inventory). The builder mirrors the four ledger data
-sources and only FORMATS stored values + sums listed columns, so the tests assert section
+dividend, 1 FX conversion; no opening inventory). The builder mirrors the exportable ledger
+data sources and only FORMATS stored values + sums listed columns, so the tests assert section
 structure, date-range filtering, per-currency total reconciliation, empty-section rendering,
 XSS escaping, and self-containment.
 """
@@ -15,6 +15,7 @@ from portfolio_dash.data_ingestion.store import upsert_instrument, upsert_openin
 from portfolio_dash.export.artifact import ExportArtifact
 from portfolio_dash.export.ledgers_report import build_ledgers_report_html
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.ledger_registry import EXPORT_KINDS
 from portfolio_dash.shared.models.assets import Instrument
 from tests.conftest import GOLDEN_NOW, _seed_golden, init_golden_base
 
@@ -145,7 +146,7 @@ def test_self_contained_no_external_assets() -> None:
 
 
 def test_empty_range_document_valid() -> None:
-    """A range past every record -> all four sections empty, still a valid document."""
+    """A range past every record -> every section empty, still a valid document."""
     conn = _golden_conn()
     try:
         art = _build(conn, frm="2027-01-01", to="2027-12-31")
@@ -154,5 +155,11 @@ def test_empty_range_document_valid() -> None:
     doc = art.content.decode("utf-8")
     assert doc.lstrip().startswith("<!doctype html>")
     assert "<title>帳本報告</title>" in doc
-    # every section is empty.
-    assert doc.count("本區間無紀錄") == 4
+    # Every section is empty — counted against the REGISTRY, not against a literal.
+    #
+    # This line said ``== 4`` until 2026-08-16 and went red the day the report gained its
+    # 公司行動 section, which is the good outcome: a test that pins a count catches the
+    # change. The bad outcome would have been fixing it to ``== 5``, leaving the next
+    # ledger to break it again. The report is meant to cover the exportable set, so that
+    # is what it is compared against.
+    assert doc.count("本區間無紀錄") == len(EXPORT_KINDS)

@@ -85,6 +85,19 @@ CATALOG: list[Feature] = [
     ),
     Feature(
         version="0.1.29",
+        id="ledger-report-corporate-actions",
+        title="列印用的帳本報告補上「公司行動」一節",
+        desc="以前這份報告只印四本帳，缺的正是唯一能解釋「為什麼 100 股變成 700 股」的那一本，"
+        "所以印出來的帳其實對不起來。現在多一節，比例照帳本原樣印成兩個數字"
+        "（7 → 1，不是 0.142857——對帳的紙上不該出現除完的數）。"
+        "這一節沒有金額合計，因為公司行動不移動現金，硬給一個合計不是零就是編的。"
+        "另外這份報告不含資金收支帳本，頁首會直接寫出來",
+        href="trades.html",
+        area="交易帳本 → 匯出報告",
+        target="#ledger-export-slot",
+    ),
+    Feature(
+        version="0.1.29",
         id="cash-kinds-interest-fee",
         title="現金收支新增「利息」「融資利息」「券商費用」三種",
         desc="對帳單上的利息收入、融資利息與券商收的雜費，以前沒有地方可以記。"

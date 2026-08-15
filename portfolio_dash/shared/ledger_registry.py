@@ -42,8 +42,13 @@ class LedgerTable:
     export_kind: str | None
     """Ledger-page tab key. ``None`` -> not individually exportable and NOT in the zip.
 
-    One field, not two: the "four-ledger zip" is exactly the set of individually
-    exportable ledgers. ``cash_movements`` is deliberately outside both today.
+    One field, not two: the export zip is exactly the set of individually exportable
+    ledgers. ``cash_movements`` is deliberately outside both today.
+
+    ⚠ This sentence named a count until 2026-08-16 — in the very file whose existence is the
+    argument against counting ledgers by hand. It was found by the guard written for the
+    eight sites downstream (``tests/contract/test_ledger_count_not_hardcoded.py``), which is
+    the whole case for having the guard rather than a careful reading.
     """
     account_relabel: AccountRelabel
 

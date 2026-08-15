@@ -448,21 +448,30 @@
             prog.fail('報價更新失敗', (e && e.message) || '請稍後再試');
           });
       }));
-      menu.appendChild(mkOpt('重算（重建統計）', '由四帳本完整重建所有統計 — 較耗時', () => {
+      /* The ledgers named below are the ones `build_book` actually replays — opening,
+         transactions, dividends and corporate actions (`LedgerBundle`). This copy named
+         換匯 instead, and 換匯 is not in the bundle at all: the dialog promised a check
+         it never performed, on the one ledger the user would most want checked after
+         entering a rate by hand. It also omitted 公司行動, which IS replayed.
+         Deliberately not "fixed" by widening the endpoint: `forex/pools.py` and
+         `portfolio/cash.py` cannot raise, so replaying them would be a verification that
+         can never fail — and a verification that cannot fail is a progress bar. */
+      menu.appendChild(mkOpt('重算（重建統計）', '由帳本完整重放驗證 — 較耗時', () => {
         if (window.confirmDialog) {
           window.confirmDialog({
             title: '重算（重建統計）',
-            body: '將由期初庫存、交易、股利、換匯四帳本完整重建所有持倉與報酬統計。帳本本身不會被修改。',
+            body: '將重放期初庫存、交易、股利與公司行動帳本，重建所有持倉與報酬統計。帳本本身不會被修改。'
+                + '換匯與資金收支為純紀錄帳本，不經此路徑驗證。',
             confirmLabel: '開始重算',
             onConfirm: () => {
-              const prog = window.toastProgress('重算中…', '正在由四帳本重建所有統計');
+              const prog = window.toastProgress('重算中…', '正在重放帳本');
               pdEnsureApi()
                 .then((ok) => {
                   if (!ok) throw new Error('API 層載入失敗');
                   return window.pdApi.post('/api/actions/recompute');
                 })
                 .then(() => {
-                  prog.done('重算完成', '四帳本重放驗證通過，正在重新整理…');
+                  prog.done('重算完成', '帳本重放驗證通過，正在重新整理…');
                   setTimeout(() => { window.location.reload(); }, 900);
                 })
                 .catch((e) => {

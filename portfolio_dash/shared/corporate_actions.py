@@ -41,6 +41,18 @@ class CorporateActionKind(StrEnum):
     SPINOFF = "SPINOFF"
 
 
+#: The zh label of each kind — one owner, because the words are not interchangeable.
+#:
+#: Moved here from ``api/routers/ledgers.py`` on 2026-08-16 so the printable 帳本報告 could
+#: use it: ``export/`` may not import ``api/`` (``architecture.md``), and copying three
+#: strings would have been the second copy. ⚠ There is already a THIRD, in
+#: ``web/detail.js``, and it disagrees — it labels SPINOFF 「分割」, which is this table's
+#: word for SPLIT. Two different kinds under one word, on two screens of the same app.
+#: Left alone here deliberately: a frontend label is a separate change with its own
+#: browser check, and silently swapping it would move a word the owner has been reading.
+KIND_ZH: dict[str, str] = {"SPLIT": "分割", "EXCHANGE": "換股", "SPINOFF": "分拆"}
+
+
 def is_ratio_term(value: Decimal) -> bool:
     """A legal ratio term: a **positive integer** (spec §3.1(ii)(b), D14).
 

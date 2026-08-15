@@ -198,9 +198,13 @@ ledger enumeration was updated for corporate actions and none of them for cash:
 - **no ledger tab.** The input page's tab bar has five (交易/股利/換匯/期初庫存/公司行動); the rows
   are therefore unreadable on the page that owns the ledgers;
 - **no AI-input kind.** That door parses trades only;
-- **seven UI strings still say 「四帳本」** — and the exportable set is now **five**, since
-  corporate actions joined it. The strings are wrong in both directions at once: they under-report
-  the zip's contents *and* imply cash is one of the four when it is in neither.
+- ~~**seven UI strings still say 「四帳本」**~~ — **FIXED 2026-08-16**, and it was **nine** across
+  five files, not seven: the ninth was inside `shared/ledger_registry.py` itself and was found by
+  the guard, not by reading. The export centre now names the zip's contents from
+  `GET /api/export/ledgers`, so **when cash movements become exportable that sentence updates
+  itself** — no edit here, which is the reason to close the first gap above before the copy.
+  Everything else stopped stating a count. Guards:
+  `tests/contract/test_ledger_count_not_hardcoded.py` and `test_export_ledger_list.py`.
 
 ### P2b — Whether interest/fees enter the return metrics — **CLOSED: they do not**
 

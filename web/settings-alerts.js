@@ -329,7 +329,14 @@
   const EXPORTS = [
     { group: '對帳與核對', items: [
       { name: '持倉快照 CSV', desc: '目前所有持倉（原始/調整成本、現價、損益、權重），raw Decimal 精度。', backend: true },
-      { name: '全帳本匯出（zip）', desc: '四帳本（期初/交易/股利/換匯）各一份 CSV ＋ 費率規則快照，打包下載。', backend: true },
+      /* `ledgers: true` -> the desc is completed from GET /api/export/ledgers after render.
+         The literal below is the FALLBACK, and it deliberately names nothing: this line read
+         「四帳本（期初/交易/股利/換匯）」 (ledger-count-ok: historical quote) until
+         2026-08-16, and had been wrong since corporate
+         actions joined the zip — it told the owner they were about to download four CSVs when
+         the file held five. A count typed here cannot be checked by anything, so it is not
+         typed here any more. */
+      { name: '全帳本匯出（zip）', desc: '各帳本各一份 CSV ＋ 費率規則快照，打包下載。', backend: true, ledgers: true },
       { name: 'AI 用量明細 CSV', desc: 'llm_usage 全表：每次呼叫的模型、tokens、成本。', backend: true },
       { name: '排程執行記錄 CSV', desc: 'job_runs 全表：時間、狀態、摘要、耗時。', backend: true }
     ]},
@@ -352,7 +359,9 @@
         head.appendChild(el('span', 'ec-name', item.name));
         head.appendChild(el('span', 'ec-glyph', '⬇'));
         card.appendChild(head);
-        card.appendChild(el('p', 'ec-desc', item.desc));
+        const desc = el('p', 'ec-desc', item.desc);
+        if (item.ledgers) desc.dataset.ledgers = '1';
+        card.appendChild(desc);
         const foot = el('div', 'ec-foot');
         if (item.year) {
           const sel = el('select', 'select ec-year');
@@ -383,5 +392,25 @@
     wrap.appendChild(el('div', 'ec-note',
       '提示：各頁面表格右上角的「⬇ 匯出 CSV」可立即匯出目前篩選結果（顯示值精度）。本頁項目為對帳級匯出，數字直接出自後端 Decimal 計算核心，不經前端格式化。'));
   }
+  /* The zip's contents, named by the server that builds it.
+
+     The list is the registry's (`EXPORT_KINDS`), so adding a ledger updates this sentence
+     with no edit here — which is the whole point, because the hand-written version went
+     stale silently and no test could have seen it. On failure the fallback desc stands: a
+     card that says less is better than one that names the wrong ledgers, and this is a
+     settings page, not a number of record. */
+  async function nameExportLedgers() {
+    const node = $('#export-center-wrap .ec-desc[data-ledgers]');
+    if (!node) return;
+    try {
+      const res = await window.pdApi.get('/api/export/ledgers');
+      const names = (res && res.ledgers || []).map((l) => l.label).filter(Boolean);
+      if (names.length) {
+        node.textContent = names.join('・') + ' 各一份 CSV ＋ 費率規則快照，打包下載。';
+      }
+    } catch (e) { /* fallback text stays */ }
+  }
+
   renderExports();
+  nameExportLedgers();
 })();
