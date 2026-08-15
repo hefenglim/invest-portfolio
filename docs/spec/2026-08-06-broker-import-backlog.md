@@ -1,13 +1,30 @@
 # Broker-import capability backlog (P1a / P1b / P2 / P3)
 
-**Status:** recorded 2026-08-06, **not started**. P0 (corporate actions) is being built first and
-has its own spec. Each item below is deferred until explicitly picked up.
+**Status — updated 2026-08-15: three of the five items are BUILT, one is CLOSED, one is untouched.**
+This header said 「recorded 2026-08-06, **not started** … all remain deferred」 until that date. It
+was true when written and false from 2026-08-13, when three of its items landed in one release
+package — which is the failure mode a backlog is most prone to: the file that records what is left
+is the file nobody updates when something stops being left.
+
+| Item | Status |
+| --- | --- |
+| **P1a** — broker-statement converter | **BUILT, unreleased** (2026-08-13). `data_ingestion/broker/` (`ir` · `schwab` · `grouping` · `reconcile` · `registry` · `convert`) + `scripts/schwab_convert.py` + `POST /api/broker/convert` + the import UI. All **seven** transformation rules below are implemented, including F-27's quantity term |
+| **P1b** — US cash dividend | **BUILT, unreleased** (2026-08-13). All three items on its **Work** list |
+| **P2a** — cash-movement CSV kind | **BUILT, unreleased** (2026-08-13), as the **6th** kind — see the note in that section |
+| **P2b** — do interest/fees reach the return metrics? | **CLOSED: they do not, and nothing is planned that would.** Ruled twice; there is nothing here to build |
+| **P3** — options | **NOT STARTED**, unchanged. `assignment` / `exercise` still need an owner ruling before it can begin |
+
+⚠ **"BUILT" is not "released."** All of it sits on `feat/corporate-actions`, unmerged by owner
+ruling; `__version__` is still `0.1.28`, and prod has never run any of it. The distinction is worth
+the line because P0's own spec calls the same state **DONE** — it means "the code is finished", not
+"the owner has it".
 
 **Updated 2026-08-10** from the spec-conflict audit (`docs/audit/2026-08-10-spec-conflict-audit.md`).
-The two decisions this backlog was waiting on are now **recorded, not open** — P1b (D35) and P2b
-(D36) — so neither needs re-asking. Two of the backlog's own statements were also corrected: P1a
-rule 3's zero-sum check (F-27, **HIGH** — it could silently delete corporate-action rows) and P3's
-multiplier site list (F-46). No item's status changed; all remain deferred.
+The two decisions this backlog was waiting on were **recorded, not open** — P1b (D35) and P2b
+(D36, **since retired by D45** — see P2b). Two of the backlog's own statements were also corrected:
+P1a rule 3's zero-sum check (F-27, **HIGH** — it could silently delete corporate-action rows) and
+P3's multiplier site list (F-46). No item's status changed **on that date**; all were still
+deferred then.
 
 **Origin.** A coverage assessment of a real US broker (Charles Schwab) transaction export —
 5 CSVs, ~1,375 rows, 34 distinct broker action types, 2021-01 → 2026-07 — against what this
@@ -35,6 +52,15 @@ the transformation logic where it can be regression-tested against the real file
 broker export never has to reach the server. Promoting it to a `data_ingestion/` broker adapter
 afterwards is mechanical.
 
+> **BUILT 2026-08-13 — and the shape came out inverted from the recommendation above, deliberately.**
+> The logic lives in `data_ingestion/broker/` (`ir` · `schwab` · `grouping` · `reconcile` ·
+> `registry` · `convert`) and `scripts/schwab_convert.py` is a thin command line around it, because
+> "new script only, no core module changes" would have put a four-figure-row transformation
+> **outside** `mypy --strict` and outside the regression suite — the two gates that make it safe to
+> change later. The offline path is preserved as the recommendation intended: the CLI never touches
+> the server and the raw export never has to leave the owner's machine. A `POST /api/broker/convert`
+> door was added **beside** it, not instead of it. All seven rules below are implemented.
+
 **Transformation rules the converter must implement** (each verified against the real export):
 
 1. **Collapse the broker's 3-row DRIP group into one dividend row.** A US reinvested dividend
@@ -57,8 +83,10 @@ afterwards is mechanical.
    because rule 3 has already classified the group. Adding the quantity term closes it at no cost:
    `−85 + 255 = +170 ≠ 0` protects the split, while `−100 + 100 = 0` still drops a genuine journal.
    This is why rule 3's safety property was under-specified as first written.
-   *(**Derived, not observed.** The converter does not exist and the broker export was out of scope,
-   so this failure mode follows from rule 3's stated mechanism rather than from a reproduction.)*
+   *(Written 2026-08-10 as **derived, not observed** — the converter did not exist yet, so the
+   failure mode followed from rule 3's stated mechanism rather than from a reproduction. **It is
+   now covered by a test that fails without the quantity term**:
+   `tests/data_ingestion/test_broker_adapter.py::test_a_forward_split_survives_the_quantity_term`.)*
 4. **Drop cancelled orders together with the original order row they cancel.**
 5. **Dates:** `MM/DD/YYYY` → ISO. Rows carrying a dual `settle as of trade` date resolve to the
    **trade** date (the ledger's `trade_date` is the trade date).
@@ -68,7 +96,10 @@ afterwards is mechanical.
    disappears produces a ledger that looks complete and is not — the failure mode this whole
    assessment exists to prevent.
 
-**Touches:** new script only (plus its tests). No core module changes.
+**Touches:** ~~new script only (plus its tests). No core module changes.~~ **As built:** a new
+`data_ingestion/broker/` subpackage, one API route, one UI pane, and the `import_batches`
+provenance table + `import_batch_id` / `source_row_hash` columns on five ledgers — because a
+four-figure import with no undo is a worse failure than no import at all.
 
 ---
 
@@ -119,6 +150,15 @@ actions. The approved decision keeps D21 live.
 
 The **Work** list above is unchanged by this decision and stands as recorded.
 
+> **BUILT 2026-08-13 — all three Work items, plus one the list did not foresee.** `CASH` is
+> admitted to `drip_us`; the `d-drip` pane has the type switch; withholding is typed rather than
+> derived. The unforeseen one: a **blank** withholding on a US cash dividend now raises the soft
+> `us_cash_dividend_no_withholding` question **without altering the row** — dropping the readonly
+> `gross × 0.30` removed the guarantee that the field was ever filled, and silently booking
+> `net = gross` on a payout that was in fact withheld is a money-of-record error that looks
+> perfectly ordinary on screen. Documented as manual §6.2b (both mirrors), with §12.1's E26 anchor
+> and two unit tests.
+
 ---
 
 ## P2 — Interest, broker fees, and whether they reach returns
@@ -132,41 +172,87 @@ Cash movements can only be written one at a time
 `REBATE`, `cash.py:68`). There is **no CSV import kind for cash**, so a broker's interest and fee
 rows must be typed in individually.
 
-**Work:** add a fifth template kind — `account, date, kind, ccy, amount, note, acq_home_amount`.
+**Work:** add a template kind — `account, date, kind, ccy, amount, note, acq_home_amount`.
 Purely additive; touches no calculation.
 
-### P2b — Whether interest/fees enter the return metrics (DECIDED 2026-08-10)
+**DONE 2026-08-13 — and it is the SIXTH kind, not the fifth.** This item said "fifth" because it
+was written on 2026-08-06, when four existed; corporate actions (P0) took the fifth while this
+stayed deferred. The column set shipped as the same seven columns predicted above, with
+`acq_home_amount` and `note` in the opposite order
+(`data_ingestion/cash_import.py::CASH_MOVEMENT_COLUMNS`).
 
-They currently cannot. `portfolio/cash.py:13` states it explicitly — the cash pool "feeds NO
-return metric" — and `xirr_reporting` (`portfolio/returns.py:98`) admits only buys, sells, cash
-dividends, opening inventory and the terminal market value.
+Two things arrived with it that this item did not anticipate, both because "a broker's interest and
+fee rows" turned out to have **no ledger kind to be imported as**: three new movement kinds
+(`INTEREST` / `INTEREST_EXPENSE` / `BROKER_FEE`), and the two-axis table in `shared/cash_kinds.py`
+that governs them — the old predicate ("`WITHDRAW` is the only debit, everything else is an
+acquiring credit") would have made a `BROKER_FEE` **increase** the cash balance *and* drag
+`covered_ratio` down. `INTEREST` is the row that proves one boolean was never enough: a credit that
+is not an acquisition.
 
-**The consistency trap that shaped the decision:** deposits are *also* absent from XIRR. Adding
-interest but not deposits yields a metric that includes some cash activity and not the rest, which
-has no coherent interpretation. The three self-consistent options were:
+⚠ **The rows import, and almost nothing else knows they exist.** Four gaps, all found after this
+landed and none of them in this item's scope as written — one root cause, which is that every
+ledger enumeration was updated for corporate actions and none of them for cash:
 
-| Option | Meaning | Verdict |
-| --- | --- | --- |
-| Keep as is | XIRR stays a *portfolio* (trade-flow) return; interest lands in the cash pool and net worth only, with a footnote on the report | not chosen |
-| **Add a second metric** | **Keep XIRR untouched; add a whole-account IRR that includes every cash movement, deposits included** | **CHOSEN** |
-| Redefine XIRR | Requires `domain-ledger.md` sign-off recorded in `CHANGELOG.md`; every historical figure moves | rejected |
+- **not exportable.** `shared/ledger_registry.py` gives `cash_movements` no `export_kind`, so it is
+  in neither the per-ledger CSV nor the zip — the only ledger you can import and not export;
+- **no ledger tab.** The input page's tab bar has five (交易/股利/換匯/期初庫存/公司行動); the rows
+  are therefore unreadable on the page that owns the ledgers;
+- **no AI-input kind.** That door parses trades only;
+- **seven UI strings still say 「四帳本」** — and the exportable set is now **five**, since
+  corporate actions joined it. The strings are wrong in both directions at once: they under-report
+  the zip's contents *and* imply cash is one of the four when it is in neither.
 
-**DECIDED — owner sign-off 2026-08-10 (audit D36): option 2. XIRR is untouched; a whole-account IRR
-is added in the existing `portfolio/twr.py`** — no new module, and `twr.py` is already the home for
-a whole-account view.
+### P2b — Whether interest/fees enter the return metrics — **CLOSED: they do not**
 
-**Why not option 3.** Redefining XIRR moves every historical figure, invalidates the accounting
-manual's worked anchors and the stress-audit oracle's expectations, and would have to be re-verified
-against the whole corpus — for amounts this backlog itself calls trivial.
+**They do not, and no metric is planned that would.** Ruled twice by the owner, on independent
+grounds and in that order:
 
-**What option 2 buys beyond the interest/fee rows.** It is purely additive, and it also resolves a
-limitation the corporate-actions spec currently concedes: **D12** books the reorganisation fee as a
-`WITHDRAW` cash movement, while `xirr_reporting` (`portfolio/returns.py:135-146`) builds its flow
-series from `opening` + `transactions` + `dividends` only. The fee is therefore invisible to every
-current return metric. The second metric is where it becomes visible.
+- **D45 (owner ruling 2026-08-11)** — 「IRR 標記不需要」. D36 had chosen a **whole-account IRR**
+  alongside XIRR on 2026-08-10; the owner retired it **unimplemented**. `portfolio/twr.py` was
+  checked in place: `twr_index` / `convert_closes` / `build_overlay` and nothing named
+  `account_irr` — D36 never left the decision table.
+- **D1 = A (owner ruling 2026-08-13, cash-kinds work; recorded in `CHANGELOG.md` and manual §7.2)**
+  — reached later, independently, and it is the **wider** ruling: **all seven cash-movement kinds
+  are excluded from XIRR.**
+  `xirr_reporting` does not take `cash_movements` in its signature at all; the flow series is
+  `opening` + `transactions` + `dividends`, and stays that way. Two of the three kinds P2a added
+  are exactly this item's interest and fee rows, so the question was re-asked on its own merits
+  with the rows in hand — and answered the same way.
 
-**Sequencing consequence for whoever writes the accounting manual (corporate-actions W9):** D12's
-limitation must now be written as **resolved by the whole-account IRR**, not as permanent.
+> **The whole-account IRR's design notes are DELETED from this section, not struck through**
+> (owner instruction 2026-08-15). The other correction in this file — P1a's **Touches** line — is
+> struck rather than removed, because the superseded text still explains why the shipped shape
+> differs from it. This one explains nothing: it was never
+> built, nothing references it, and a rejected design left standing in a **backlog** reads as work
+> waiting to be picked up — which is the one thing it must not read as. The decision's full record,
+> with its original reasoning intact, is in `docs/spec/2026-08-06-corporate-actions.md` §8
+> (~~D36~~ → D45), where it *is* struck rather than removed because the manual's wording was
+> written against it.
+
+**What survives, because it is still load-bearing:**
+
+- **The consistency trap.** Deposits are *also* absent from XIRR. Admitting interest without
+  admitting deposits yields a metric that includes some cash activity and not the rest, which has
+  no coherent interpretation. Anyone re-opening this has to answer that first — it is why "just add
+  the interest rows to XIRR" is not the small change it looks like.
+- **Why XIRR is not redefined either.** It moves every historical figure, invalidates the
+  accounting manual's worked anchors and the stress-audit oracle's expectations, and would have to
+  be re-verified against the whole corpus — for amounts this backlog itself calls trivial (the
+  measured net is in the private assessment note; it is small enough that the re-verification cost
+  is orders of magnitude larger than the figure). It would also need `domain-ledger.md` sign-off
+  recorded in `CHANGELOG.md`.
+
+**Consequence — D12 is a STANDING limitation.** This section used to instruct whoever wrote the
+corporate-actions accounting manual (W9) to record the reorganisation fee's blind spot as *resolved
+by the whole-account IRR*. **That instruction is withdrawn.** The fee is booked as a `WITHDRAW`
+cash movement and is invisible to **every** return metric this system has; it surfaces in the cash
+ledger and in net worth, and no resolution is planned. The manual already says exactly that (v1.7a,
+both mirrors) — **this file was the last place still promising otherwise**. **No figure ever
+moved:** XIRR has never included cash movements, so retiring a metric that was never built changed
+nothing except what the documentation claims.
+
+**What P2a delivered instead.** The rows themselves import and land where they belong — the cash
+pool and net worth. That was always the recoverable half of this item, and it is done.
 
 ---
 
@@ -185,6 +271,14 @@ limitation must now be written as **resolved by the whole-account IRR**, not as 
 **Direction is NOT a gap.** Sell-to-open / buy-to-close map cleanly onto the existing declared
 short-sale model (option C, 2026-07-31): an STO is a short position holding the proceeds received,
 a BTC is the cover. The multiplier is what blocks reuse, not the sign convention.
+
+> **Status unchanged 2026-08-15: NOT STARTED.** What P1a did add is that option rows are now
+> **recognised and routed out**, never mistaken for equity: `broker/ir.py::OPTION_KINDS` names the
+> five, `grouping.py` routes them (and anything flagged `is_option`) away from the ledger CSVs, and
+> the converter reports them rather than dropping them. That is the opposite of support — it is the
+> guarantee that the absence of support is **visible**. The ground-truth build this was lifted from
+> ended its classifier with a catch-all that would have booked them as adjustments and buried them.
+> **`assignment` / `exercise` still need an owner ruling before this can begin.**
 
 ### The multiplier site list (corrected 2026-08-10, audit F-46)
 
@@ -251,5 +345,13 @@ Viable as a bridge when almost every contract in the history is a completed roun
   events are sells against holdings that were never bought inside the file. `opening_inventory`
   is the right mechanism, but it requires an **original cost total the export does not contain**.
   Resolving that is an owner input problem, not a code gap.
+  **Update 2026-08-15:** the engineering half shipped with P0's W7 — `original_cost_total > 0` is
+  hard-validated (D37), because `opening_import.py` used to check only `shares > 0`, so a cost of
+  **0** imported cleanly and permanently zeroed the basis **with no 待釐清 flag** — strictly worse
+  than the oversell it appears to fix, since the oversell at least announces itself. The owner has
+  since compiled the per-symbol figures in the git-ignored sample folder (some measured, some
+  estimated, and the file marks which is which). **They have not been imported into any instance
+  yet**, so this stays open as an owner input item.
 - **Nothing here is blocked on P0** except the converter's ability to emit corporate-action rows,
-  which is why P0 goes first.
+  which is why P0 goes first. *(P0's code is complete; see the status table at the top for what
+  "complete" does and does not mean.)*

@@ -33,7 +33,8 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   does not prove the owner's *actual* cost basis reconciles — only real figures can, and that run
   is now a post-release verification rather than a gate. Decisions: **D40 and D41 ratified**
   2026-08-11; **D42** (W6c in scope), **D43** (simulated corpus), **D45** (D36 retired) and
-  **D46** are the owner's own rulings; **D44 is the one OPEN decision** — see below. A single
+  **D46** are the owner's own rulings; **D44 was the last open one and is now RULED**, together
+  with **D47** and **D48** which the owner gave with it (2026-08-15) — see below. A single
   prose summary here would drift from the spec within a week, which is the failure this release
   spent an audit correcting, so the detail stays in §8's decision table and the commits.
 
@@ -397,6 +398,16 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   that never arrives is worse than one stating the blind spot plainly: the reader stops looking for
   the workaround. **No figure moved** — XIRR never included cash movements — so every historical
   number, worked anchor and oracle expectation is unchanged. Manual → `v1.7a`.
+  **Sixth place, found 2026-08-15:** `docs/spec/2026-08-06-broker-import-backlog.md` §P2b was where
+  D36 was *originally recorded*, and the propagation never reached it — so the file still called the
+  metric **CHOSEN** and still instructed the manual to write D12 as resolved by it, four days after
+  the manual had correctly stopped doing that. There is the shape of the failure: the correction
+  swept the documents that *quoted* the decision and missed the one that *made* it. Owner
+  instruction 2026-08-15 — in a **backlog**, delete the retired design rather than strike it: a
+  rejected plan left standing reads as work waiting to be picked up. The struck record with its
+  original reasoning stays in the corporate-actions spec §8, which is where a decision belongs.
+  Closed independently by **D1=A** (2026-08-13), which excluded all seven cash kinds from XIRR after
+  the interest and fee rows actually existed.
 - **D44 — RULED 2026-08-15, option (b): ask once, at entry.** The owner-entered target band
   (`instruments.target_low` / `target_high`) is still **not** re-expressed across a SPLIT, so a
   stale band meets a re-expressed price (W6c) and `target_cross` crosses on the split date and
