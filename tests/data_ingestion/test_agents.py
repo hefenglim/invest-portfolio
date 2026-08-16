@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from portfolio_dash.data_ingestion.agents import (
+    _AI_CSV_COLUMNS,
     AiDraft,
     AiDraftList,
     Completer,
@@ -12,8 +13,12 @@ from portfolio_dash.data_ingestion.agents import (
     ai_agents_input,
 )
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
-from portfolio_dash.data_ingestion.csv_import import write_transaction_row
-from portfolio_dash.data_ingestion.preview import commit_preview
+from portfolio_dash.data_ingestion.csv_import import (
+    TRANSACTION_COLUMNS,
+    build_transaction_preview,
+    write_transaction_row,
+)
+from portfolio_dash.data_ingestion.preview import ImportPreview, commit_preview
 from portfolio_dash.data_ingestion.store import list_transactions, upsert_instrument
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.llm import AINotActivated, LLMBudgetExceeded, LLMUnavailable
@@ -365,8 +370,21 @@ def _draft(note: str | None) -> AiDraft:
 def test_drafts_to_csv_one_line_per_draft() -> None:
     csv = _drafts_to_csv([_draft(None), _draft("手動")])
     lines = csv.rstrip("\n").split("\n")
-    assert lines[0] == "account,symbol,side,date,shares,price,note"
+    assert lines[0] == ",".join(_AI_CSV_COLUMNS)
     assert len(lines) == 3  # header + one line per draft (the mapping invariant)
+
+
+def test_ai_csv_columns_are_real_transaction_columns() -> None:
+    """A column the importer does not know is a column the importer silently ignores.
+
+    ``build_transaction_preview`` reads by header NAME, so a typo here would not raise —
+    it would just quietly drop whatever that column carried, which is precisely how
+    ``daytrade`` went missing in the first place (by absence rather than by typo).
+    """
+    assert set(_AI_CSV_COLUMNS) <= set(TRANSACTION_COLUMNS)
+    assert "daytrade" in _AI_CSV_COLUMNS  # the AI-1 regression pin
+    # Money of record is never handed to the model: the fee engine computes both ends.
+    assert "fee" not in _AI_CSV_COLUMNS and "tax" not in _AI_CSV_COLUMNS
 
 
 def test_drafts_to_csv_sanitizes_embedded_newlines_in_note() -> None:
@@ -377,3 +395,76 @@ def test_drafts_to_csv_sanitizes_embedded_newlines_in_note() -> None:
     assert len(lines) == 2  # header + exactly one data line
     assert "\r" not in csv
     assert lines[1].endswith("line1 line2 line3 line4")
+
+
+# --- AI-1/AI-2: what the preview PRICED must be what the commit WRITES ----------------------
+
+
+def _sell_completer(*, daytrade: bool = False, note: str | None = None) -> Completer:
+    """A completer emitting one TW SELL, so the day-trade tax rate is actually in play."""
+
+    def _c(
+        prompt: str, schema: type, *, agent: str, conn: object = None,
+        images: list[bytes] | None = None, model_override: str | None = None,
+    ) -> AiDraftList:
+        return AiDraftList(drafts=[AiDraft(
+            account_id="tw_broker", symbol="2330", side=Side.SELL, date=date(2026, 6, 1),
+            shares=Decimal("1000"), price=Decimal("600"), daytrade=daytrade, note=note,
+        )])
+
+    return _c
+
+
+def _recommit(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
+    """Exactly what ``POST /api/import/commit`` does: re-derive the preview FROM THE CSV.
+
+    ``input_center.py`` says it in a comment — "the preview's answer is advisory, this one
+    writes" — so anything the AI preview knew but the CSV does not carry is lost here.
+    """
+    return build_transaction_preview(conn, csv_text)
+
+
+def test_ai_daytrade_reaches_the_ledger_not_just_the_preview(conn: sqlite3.Connection) -> None:
+    """★ AI-1 disproof: the screen said 0.15%, the ledger got 0.3%.
+
+    ``AiDraft.daytrade`` was handed to ``TxnInput``, so the AI PREVIEW priced a TW same-day
+    round trip at the 0.15% rate. ``_drafts_to_csv`` then emitted seven columns with no
+    ``daytrade``, and the commit route re-derives its own preview from that CSV — so the row
+    was written as an ordinary sell at 0.3%, double what the user had just been shown. Fees
+    and tax are part of ``original_total``, so the cost basis was wrong by the difference too.
+
+    The two numbers below are the whole defect: they must be equal.
+    """
+    _setup(conn)
+    result = ai_agents_input(conn, "當沖賣出 2330 1000 股 @600",
+                             completer=_sell_completer(daytrade=True))
+    previewed = result.preview.rows[0].tax
+    assert previewed == Decimal("900")  # 600,000 x 0.15%, the day-trade rate
+
+    written = _recommit(conn, result.csv_text).rows[0].tax
+    assert written == previewed, "the commit re-derives from the CSV — daytrade must ride along"
+
+
+def test_ai_ordinary_sell_still_pays_the_full_rate(conn: sqlite3.Connection) -> None:
+    """The other half: carrying the flag must not turn every sell into a day trade."""
+    _setup(conn)
+    result = ai_agents_input(conn, "賣出 2330 1000 股 @600",
+                             completer=_sell_completer(daytrade=False))
+    assert result.preview.rows[0].tax == Decimal("1800")  # 600,000 x 0.3%
+    assert _recommit(conn, result.csv_text).rows[0].tax == Decimal("1800")
+
+
+def test_ai_note_with_a_comma_does_not_shift_the_columns(conn: sqlite3.Connection) -> None:
+    """★ AI-2 disproof: the prompt ASKS the model for notes, and a note is free text.
+
+    ``_drafts_to_csv`` did no CSV quoting at all (its own docstring said so). Measured before
+    the fix, one comma in a note did NOT merely shift columns — the row parsed to more fields
+    than the header declared, ``csv.DictReader`` filed the surplus under a ``None`` key, and
+    ``build_transaction_preview`` raised ``AttributeError: 'NoneType' object has no attribute
+    'strip'`` at its first line, OUTSIDE the try/except that catches malformed rows. So the
+    commit route did not degrade — it crashed, on text an LLM was invited to write. That puts
+    it in the never-500 class this codebase has already had to fix once for action rows.
+    """
+    _setup(conn)
+    result = ai_agents_input(conn, "賣出", completer=_sell_completer(note="停利, 分批"))
+    assert _recommit(conn, result.csv_text).rows[0].payload["note"] == "停利, 分批"

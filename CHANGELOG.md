@@ -161,6 +161,47 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   nobody should press. Visible for ordinary CSV imports too.
 
 ### Fixed
+- **The AI input door showed one tax and wrote another.** `AiDraft.daytrade` reached the
+  preview's `TxnInput`, so a TW same-day round trip was priced at the 當沖 rate of 0.15% — but
+  the commit-ready CSV the same function emitted had no `daytrade` column, and
+  `/api/import/commit` **re-derives its own preview from that CSV** ("the preview's answer is
+  advisory, this one writes"). The row was therefore written as an ordinary sell at 0.3%,
+  **double what the screen had just shown**, with the difference riding into `original_total`
+  as cost basis. Measured on the disproof test before the fix: previewed 900, written 1800.
+  The column already existed in `TRANSACTION_COLUMNS` and in `OPTIONAL_COLUMNS`; it was simply
+  never emitted. Two neighbours were checked and are **not** the same bug: `is_etf` is dropped
+  too but the instrument registry wins at the fee seam in both paths, and an unregistered
+  symbol is a hard issue that never commits — so there is no reachable divergence; `short_sale`
+  is absent from the draft schema entirely, which is a gap awaiting its prompt rule, not a
+  disagreement between two paths.
+  - **The flag is now visible, because it now has teeth.** While `daytrade` was being dropped
+    it was harmless whatever the model inferred; carrying it to the ledger makes a wrong
+    inference a money error, so the AI preview row gains an amber 當沖 chip next to the
+    direction chip. A flag the reader cannot see is a flag the reader cannot correct. What the
+    model should *infer* is a separate question and is deliberately not answered here: the
+    prompt has never taught it when to set the field, and changing that without the extraction
+    accuracy corpus would be a guess dressed as an improvement.
+  - ⚠ **A second defect found on the way, worse than expected:** the same generator did no CSV
+    quoting at all — its own docstring said so — while the prompt *asks* the model for a
+    free-text `note`. One comma did not merely shift the columns: the row parsed to more fields
+    than the header declared, `csv.DictReader` filed the surplus under a `None` key, and
+    `build_transaction_preview` raised `AttributeError` on its first line, **outside** the
+    try/except that catches malformed rows. So the commit route did not degrade, it crashed —
+    on text an LLM was invited to write. Now emitted through `csv.writer` (QUOTE_MINIMAL, so
+    comma-free values stay byte-identical); CR/LF in a note are still collapsed to a space,
+    because quoting would faithfully preserve a newline and the frontend commits only the
+    checked rows by splitting this text on `\n` and taking data line `index + 1`.
+
+- **A pasted JPEG went to the vision model labelled as a PNG.** The intake door sniffed a
+  screenshot's real format by magic bytes to decide whether to accept it, and the transport
+  then hardcoded `data:image/png` for every payload — the app identified the type correctly and
+  told the provider something else. Lenient providers sniff the bytes and shrug; a strict one
+  rejects it, and the failure surfaces as a generic vision/parse error nowhere near the cause.
+  One sniffer now serves both (`shared/image_types.py`), so "is this an image?" and "what do we
+  call it?" can no longer be answered differently. An unrecognised payload still falls back to
+  PNG rather than raising: the door rejects non-images before this point, so reaching it means a
+  direct caller skipped the check, and a wrong label beats no message.
+
 - **The cash ledger was writable and invisible: no export, no ledger tab, no printed
   section.** It became the 6th ledger on 2026-08-13 and every surface that enumerates ledgers
   was left at five, so a round trip through the export silently dropped rows the import had

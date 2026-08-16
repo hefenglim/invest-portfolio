@@ -933,3 +933,36 @@ prevents recurrence.
   what made it worth one home (`shared/money.cap_dp`). Rule: reach for `quantize` only when padding
   to a fixed scale is the intent (settlement). For a precision *ceiling*, cap — and if a helper for
   it already exists twice, the third caller is the signal to move it, not to copy it again.
+
+- **2026-08-16 — when the commit RE-DERIVES the preview, the handoff format is the contract, and
+  every field the preview priced has to be in it.** The AI input door built a `TxnInput` carrying
+  `daytrade`, so the preview quoted the TW same-day sell tax of 0.15%. It then handed the commit
+  route a CSV with no `daytrade` column, and that route rebuilds its own preview from the CSV on
+  purpose — "the preview's answer is advisory, this one writes". The row was written at 0.3%:
+  **double the tax the user had just been shown**, silently, with the difference flowing into
+  `original_total` as cost basis. Nothing could catch it, because every test on each side was
+  individually correct — the preview really did price a day trade, and the importer really did
+  honour a `daytrade` column. The bug lived in the gap.
+  Three rules:
+  **(1)** A re-derive-at-commit design (which is the right design — it stops a tampered preview
+  from writing) creates a **lossy channel**. Enumerate the preview's inputs against the channel's
+  columns, not against the writer's capabilities. `TRANSACTION_COLUMNS` had `daytrade` all along;
+  the generator simply never emitted it.
+  **(2)** Test the two sides **against each other**, not each against its own expectation. The
+  disproof here is one line — `assert re_derived.tax == previewed.tax` — and no amount of
+  single-side coverage substitutes for it.
+  **(3)** ⚠ **Making a dropped field effective gives it teeth, and teeth need to be visible.**
+  While `daytrade` was being discarded, a wrong inference by the model cost nothing; carrying it
+  to the ledger makes the same inference a money error. Shipping the fix therefore had to ship the
+  UI marker with it, in the same change — otherwise the correction quietly converts a harmless
+  parse error into an uncorrectable one.
+
+- **2026-08-16 — hand-rolled CSV generation fails as a CRASH, not as a shifted column.** The same
+  generator did no quoting, and its docstring said so as though that settled it. The prompt
+  *instructs* the model to write a free-text note; one comma made the row parse to more fields
+  than the header declared, `csv.DictReader` filed the surplus under a `None` key, and the parser
+  raised `AttributeError` at its first line — **outside** the try/except that catches malformed
+  rows. Rule: never hand-roll CSV output. `csv.writer` with QUOTE_MINIMAL leaves clean values
+  byte-identical, so there is no cost to reaching for it. And when a docstring says "this does no
+  X", read it as an open defect report, not as documentation — the note is only a defence if
+  someone proved the unhandled case is unreachable, and here the prompt made it routine.

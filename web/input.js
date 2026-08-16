@@ -1542,6 +1542,15 @@
       const tdSide = el('td', 'col-text');
       tdSide.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
         side === 'buy' ? '買' : '賣'));
+      /* The model may mark a row 當沖, and that HALVES the TW sell tax (0.3% -> 0.15%). It
+         used to be dropped before the write, so it was invisible and harmless; now it reaches
+         the ledger, so it has to be visible — a flag the user cannot see is a flag the user
+         cannot correct, and this one moves money. */
+      if (String(d.daytrade) === '1') {
+        const dt = el('span', 'dir-chip dir-daytrade', '當沖');
+        dt.title = '證交稅以當沖稅率計（0.15%，非現股 0.3%）——若判讀有誤請取消勾選後改用手動輸入';
+        tdSide.appendChild(dt);
+      }
       tr.appendChild(tdSide);
       const symbol = d.symbol || '';
       const it = inst(symbol);

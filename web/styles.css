@@ -388,6 +388,15 @@ button.is-busy {
 }
 .dir-buy { color: var(--bg); background: var(--text-2); font-weight: 700; }
 .dir-sell { color: var(--text-2); border: 1px solid var(--text-3); }
+/* 當沖 halves the TW sell tax (0.3% -> 0.15%), so a wrongly-inferred flag is a real money
+   error. It rides next to the direction chip because that is where the reader is already
+   looking when they check a parsed row — amber, because it wants a glance, not an alarm. */
+.dir-daytrade {
+  color: var(--series-myr);
+  border: 1px solid rgba(217, 161, 63, 0.45);
+  background: var(--amber-soft);
+  margin-left: 4px;
+}
 
 /* ---------- app nav (legacy top nav, kept for compat) ---------- */
 

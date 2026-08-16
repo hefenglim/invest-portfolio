@@ -1,5 +1,7 @@
 """AI Agents Input: parse natural-language transaction text into a preview."""
 
+import csv
+import io
 import sqlite3
 from collections.abc import Callable
 from datetime import date, datetime
@@ -79,22 +81,58 @@ def _latest_meta(conn: sqlite3.Connection) -> AiMeta:
     return AiMeta(model=row["model"], cost_usd=Decimal(row["cost"]))
 
 
+#: The columns this generator emits, a deliberate SUBSET of ``csv_import.TRANSACTION_COLUMNS``.
+#:
+#: ``fee``/``tax`` are omitted ON PURPOSE: they are money of record, and leaving them out is
+#: what makes the fee engine — not the model — compute them at both ends. Supplying them here
+#: would let an LLM-invented number override the engine (``build_transaction_preview`` honours
+#: a CSV fee/tax when present).
+#:
+#: ``short_sale`` is omitted because the prompt never teaches the model about declared shorts,
+#: so the column could only ever be ``0`` — an affordance that looks supported and is not.
+#: It arrives together with its prompt rule, not before it.
+#:
+#: ``is_etf`` is not a transaction column at all: the instrument registry owns that flag and
+#: wins at the fee seam (``csv_import.py`` ETF resolution), so ``AiDraft.is_etf`` steers only
+#: the preview, and an UNREGISTERED symbol is a hard issue that never reaches a commit. There
+#: is therefore no reachable divergence to close — unlike ``daytrade`` below.
+_AI_CSV_COLUMNS = ["account", "symbol", "side", "date", "shares", "price", "daytrade", "note"]
+
+
 def _drafts_to_csv(drafts: list[AiDraft]) -> str:
     """Render drafts as canonical transaction CSV for /api/import/commit — ONE line per draft.
 
-    The one-line-per-draft invariant is load-bearing: the AI preview's per-row index maps to
-    csv data line ``index + 1`` so the frontend can commit only the CHECKED rows (C7). A note
-    carrying an embedded newline would split a draft across lines and break that mapping, so
-    CR/LF in the note are collapsed to a single space here (this generator does no CSV quoting).
+    **Everything the preview PRICED has to survive this function**, because the commit route
+    re-derives its own preview from this text ("the preview's answer is advisory, this one
+    writes") and cannot see a field the CSV drops. ``daytrade`` used to be dropped here while
+    still reaching the preview's ``TxnInput``, so a TW same-day round trip was shown at the
+    0.15% rate and written at 0.3% — double, silently, with the difference riding into
+    ``original_total`` as cost basis.
+
+    Two shaping rules, both load-bearing:
+
+    * **Proper CSV quoting** (``csv.writer``, QUOTE_MINIMAL). The prompt asks the model for a
+      free-text ``note``, and ``note`` is the LAST column — so a comma inside it produced one
+      more field than the header declared, ``csv.DictReader`` filed the surplus under a ``None``
+      key, and ``build_transaction_preview`` raised ``AttributeError`` on its first line, outside
+      the try/except that catches malformed rows. (Were ``note`` not last, the same comma would
+      shift every later column instead — quieter and worse.) Minimal quoting leaves comma-free
+      values byte-identical, so the common case is unchanged.
+    * **CR/LF in the note are still collapsed to a space.** Quoting would preserve a newline
+      faithfully, and that is exactly the problem: the frontend commits only the CHECKED rows
+      by splitting this text on ``\\n`` and taking data line ``index + 1`` (C7), so a draft may
+      never span two lines even when the CSV grammar allows it.
     """
-    lines = ["account,symbol,side,date,shares,price,note"]
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(_AI_CSV_COLUMNS)
     for d in drafts:
         note = (d.note or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-        lines.append(
-            f"{d.account_id},{d.symbol},{d.side.value},{d.date.isoformat()},"
-            f"{d.shares},{d.price},{note}"
-        )
-    return "\n".join(lines) + "\n"
+        writer.writerow([
+            d.account_id, d.symbol, d.side.value, d.date.isoformat(),
+            d.shares, d.price, "1" if d.daytrade else "0", note,
+        ])
+    return buf.getvalue()
 
 
 Completer = Callable[..., AiDraftList]

@@ -10,6 +10,7 @@ import litellm as litellm  # re-exported so tests can monkeypatch llm_mod.litell
 from pydantic import BaseModel, ValidationError
 
 from portfolio_dash.shared.clock import app_now
+from portfolio_dash.shared.image_types import PNG, sniff_image_mime
 from portfolio_dash.shared.llm_config import (
     AINotActivated,
     LLMBudgetExceeded,
@@ -224,14 +225,24 @@ def _extract_json(content: str) -> str:
 
 
 def _build_messages(prompt: str, images: list[bytes] | None) -> list[dict[str, object]]:
-    """Assemble the chat messages; multimodal content when images are present."""
+    """Assemble the chat messages; multimodal content when images are present.
+
+    The data-URI's MIME comes from the bytes (:mod:`shared.image_types`), not from a constant.
+    It was hardcoded ``image/png`` while the intake door had already sniffed the real format —
+    so a pasted JPEG went out labelled as a PNG. Lenient providers sniff and shrug; a strict
+    one rejects it, and the failure then surfaces as a vision/parse error nowhere near the
+    mislabel. An unrecognised payload keeps PNG as the last resort: the door rejects non-images
+    before they get here, so reaching this branch means a direct caller skipped that check, and
+    a wrong label is still better than no message at all.
+    """
     if not images:
         return [{"role": "user", "content": prompt}]
     content: list[dict[str, object]] = [{"type": "text", "text": prompt}]
     for img in images:
         b64 = base64.b64encode(img).decode("ascii")
+        mime = sniff_image_mime(img) or PNG
         content.append(
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
         )
     return [{"role": "user", "content": content}]
 

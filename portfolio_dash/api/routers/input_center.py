@@ -89,6 +89,7 @@ from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.image_types import is_supported_image
 from portfolio_dash.shared.llm_config import get_model
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
@@ -1102,19 +1103,12 @@ _LLM_HTTP = {"budget_exceeded": 402, "ai_not_activated": 409,
 # FU-D20 screenshot intake bounds. The server is the authority for these limits — the
 # frontend caps to 4 as a courtesy, but every rule below is re-checked here so a direct
 # API caller cannot bypass them. Magic-byte sniffing rejects a non-image payload before it
-# ever reaches the vision model (never trust the client-declared MIME).
+# ever reaches the vision model (never trust the client-declared MIME) — and it is the SAME
+# sniffer the transport uses to label the data URI (``shared.image_types``), so this door and
+# the wire can no longer disagree about what a payload is.
 _AI_MAX_IMAGES = 4
 _AI_MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB decoded, per image
 _DATA_URI_PREFIX = re.compile(r"^data:image/[A-Za-z0-9.+-]+;base64,", re.IGNORECASE)
-
-
-def _sniff_image(data: bytes) -> bool:
-    """True when *data* opens with a PNG, JPEG, or WebP magic-byte signature."""
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return True
-    if data[:3] == b"\xff\xd8\xff":
-        return True
-    return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
 
 
 def _image_error(message: str) -> JSONResponse:
@@ -1139,7 +1133,7 @@ def _decode_ai_images(raw: list[str]) -> tuple[list[bytes], JSONResponse | None]
             return [], _image_error("圖片編碼無效（需為 base64 圖片）")
         if len(data) > _AI_MAX_IMAGE_BYTES:
             return [], _image_error("單張圖片不可超過 5 MB")
-        if not _sniff_image(data):
+        if not is_supported_image(data):
             return [], _image_error("僅支援 PNG／JPEG／WebP 圖片")
         out.append(data)
     return out, None
