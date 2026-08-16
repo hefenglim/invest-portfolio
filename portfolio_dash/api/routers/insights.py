@@ -151,6 +151,10 @@ def _insight_type_wire(conn: sqlite3.Connection, it: cs.InsightType) -> dict[str
         "enabled": it.enabled,
         "horizon_days": it.horizon_days,
         "eval_prompt": it.eval_prompt,
+        # The official-pack provenance stamp (M3 fix): lets a read surface reach a preset's
+        # OWN task without matching the (renamable) name — the assistant drawer's 立即產生
+        # button keys on this, not on the string "持倉建議與提點" (W2).
+        "preset_key": it.preset_key,
         "schedule": _schedule_for(conn, it.id),
         "active_calibration_version": it.active_calibration_version,
         "calib_summary": None,  # populated by 04c
@@ -421,11 +425,24 @@ def enable_official_pack(
             conn, name=preset["name"], scope=preset["scope"],
             use_system_prompt=preset["use_system_prompt"],
             self_correct=preset["self_correct"],
-            universe=None, alert_rules=None, enabled=True,
+            universe=None,
+            # Event-driven presets (scope "on_alert") carry their alert subscription; the
+            # scheduled ones carry none. AI-D12: the 提點 preset is created ENABLED like every
+            # other pack member — the deliberate override of the on_alert default-off rule,
+            # scoped to the official pack so a hand-created on_alert task still defaults off.
+            alert_rules=preset.get("alert_rules"), enabled=True,
             horizon_days=preset["horizon_days"], eval_prompt=None,
             preset_key=preset["preset_key"], now=now,
         )
         cs.set_strategies(conn, it.id, [(sp.id, 0)])
+        # An on_alert preset is event-triggered (spec 03): no cron to bind, and
+        # mount_schedule would 400 it. Only the scheduled presets take a schedule.
+        if preset["scope"] == "on_alert":
+            created.append({
+                "id": it.id, "name": it.name, "cron": None,
+                "strategy": sp.name, "strategy_reused": strategy_reused,
+            })
+            continue
         job_id = bind_insight_schedule(conn, it.id, cron=preset["suggested_cron"])
         cs.set_job_id(conn, it.id, job_id)
         # H1 fix: mount the live trigger now (was: only loaded at restart).

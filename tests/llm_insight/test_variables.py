@@ -17,6 +17,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.llm_insight import variables as V
+from portfolio_dash.portfolio import technicals as T
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.shared.enums import Currency
 
@@ -442,7 +443,7 @@ def test_technical_signals_var_from_closes(golden_db: sqlite3.Connection) -> Non
     closes = [Decimal(str(100 + i)) for i in range(1, 80)]
     ctx = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes)
     val = V.value_for("technical_signals_json", ctx)
-    assert isinstance(val, dict) and "rsi14" in val and "ma_cross" in val
+    assert isinstance(val, dict) and "rsi14" in val and "ma_cross_short" in val
     assert "volume" not in val  # probe-gated: no volumes fed
     # empty closes -> honest unavailable
     empty = V.value_for("technical_signals_json", V.VarContext(data=data, now=_NOW, symbol="X"))
@@ -464,6 +465,32 @@ def test_technical_signals_volume_probe_gate(golden_db: sqlite3.Connection) -> N
     val = V.value_for("technical_signals_json", ctx_vol)
     assert isinstance(val, dict) and "volume" in val
     assert set(val["volume"]) == {"ratio_to_avg", "surge"}
+
+
+def test_the_two_crosses_are_named_different_windows(golden_db: sqlite3.Connection) -> None:
+    """★ Why the rename exists. TWO different "moving-average cross" definitions reached the
+    SAME prompt: this variable computed 20/60 and ``rule_signals_json`` carries the rules
+    engine's 50/200, both under the bare word "cross". A card could quote one as the other.
+
+    The pin is not just the new key NAME — it is that the two variables, fed the SAME closes,
+    are built from different windows. A rename that left both computing the same thing would
+    be cosmetic, and the next reader would "simplify" them back into one.
+    """
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    closes = [Decimal(str(100 + i)) for i in range(1, 80)]  # 79 sessions
+    ctx = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes)
+
+    short = V.value_for("technical_signals_json", ctx)
+    assert isinstance(short, dict)
+    # 79 sessions is enough for the 20/60 short cross and NOT enough for the 50/200 rule —
+    # the difference this pin exists to protect. The rules engine reads its own series
+    # (260 sessions) separately; this asserts the SHORT variable is the 20/60 one.
+    short_cross = short.get("ma_cross_short")
+    assert short_cross is not None  # evaluable at 79 sessions...
+    assert T.ma_cross(closes, fast=20, slow=60) == short_cross  # ...and it IS the 20/60 math
+
+    # The rule engine's crossover needs 260 sessions, so on the same 79 it cannot even run —
+    # the two are computationally different, not just relabelled.
 
 
 def test_fear_greed_var_is_external_fed(golden_db: sqlite3.Connection) -> None:

@@ -223,6 +223,7 @@
     if (pos) {
       body.appendChild(statsSection(pos, accts));
       body.appendChild(signalsSection(symbol));
+      body.appendChild(adviceSection(symbol));
       body.appendChild(splitSection(pos));
       /* 試算 binds to ONE account (fees/tax are per-account); default to the PRIMARY
          (most-shares) account, which the server returns first in position_accounts. */
@@ -235,6 +236,7 @@
          name is an entry candidate (P2 batch 3). Render the signals section (honest-empty
          when data is thin) alongside the price chart; skip the holding-only sections. */
       body.appendChild(signalsSection(symbol));
+      body.appendChild(adviceSection(symbol));
       body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
     }
     /* 交易明細 — the UNIFIED activity list (期初 + 買 + 賣 + 配股/DRIP), rendered from
@@ -552,6 +554,133 @@
         if (currentSymbol !== symbol) return;
         box.replaceChildren(el('div', 'sd-empty sd-sig-empty', '技術訊號暫時無法取得'));
       });
+    return sec;
+  }
+
+  /* ---------- AI 建議 (W2, AI-D1/D12, 2026-08-16) ----------
+     The assistant's surface for ONE symbol: the latest per-symbol advice card, plus a
+     立即產生 button on the 「持倉建議與提點」 preset. Everything is server-computed — the
+     card body arrives as text and the run is a POST, so the drawer never computes money and
+     never parses markdown. Degrades to honest notes on any failure.
+
+     renderAdvice is defined FIRST because a card already on screen wires the run button's
+     click to runAdvice — a function declaration made AFTER it would not be hoisted into the
+     enclosing function's scope (the fix for the e2e-caught ReferenceError), so the order
+     here is load-bearing, not stylistic. */
+  function renderAdvice(box, card, tasks, taskId, onRun) {
+    box.replaceChildren();
+    const anyAdviceTask = tasks.some((t) => t.preset_key === 'advice');
+    if (!anyAdviceTask) {
+      /* The preset is not installed (fresh ledger / never clicked 一鍵安裝). Point at the
+         pipeline hub rather than leaving a dead button. */
+      const note = el('div', 'sd-empty sd-sig-empty',
+        '尚未建立「持倉建議與提點」任務');
+      const go = el('a', 'sd-advice-link', '前往洞察管線一鍵安裝');
+      go.href = 'pipeline-hub.html';
+      note.appendChild(go);
+      box.appendChild(note);
+      return;
+    }
+    if (card) {
+      const head = el('div', 'sd-advice-card');
+      head.appendChild(el('h4', 'sd-advice-title', card.title || ''));
+      if (card.summary) head.appendChild(el('p', 'sd-advice-body', card.summary));
+      const foot = el('div', 'sd-advice-foot');
+      foot.appendChild(el('span', 'sd-advice-time', f.datetime(card.created_at)));
+      const attrib = f.aiAttrib(card.model, card.tokens_in, card.tokens_out, card.cost_usd);
+      if (attrib) foot.appendChild(el('span', 'sd-advice-cost ai-attrib num', attrib));
+      head.appendChild(foot);
+      box.appendChild(head);
+    } else {
+      box.appendChild(el('div', 'sd-empty sd-sig-empty',
+        '尚無此標的的建議卡 — 等待排程產生，或立即產生一張'));
+    }
+    if (taskId) {
+      const run = el('button', 'btn sd-advice-run', card ? '重新產生' : '立即產生');
+      run.type = 'button';
+      run.title = '依現有倉位與最新資料產生一張建議卡（批次，約需數秒）';
+      run.addEventListener('click', onRun);
+      box.appendChild(run);
+    } else {
+      /* The preset exists but is DISABLED (AI-D12 default-on was overridden) — say so
+         instead of offering a button that would 409. */
+      box.appendChild(el('div', 'sd-empty sd-sig-empty',
+        '「持倉建議與提點」任務已停用 — 至洞察管線啟用後即可產生'));
+    }
+  }
+
+  function adviceSection(symbol) {
+    const sec = el('div', 'sd-section');
+    sec.appendChild(secHead('AI 建議', '批次產生・僅詮釋已算好的數字'));
+    const box = el('div', 'sd-advice');
+    box.appendChild(el('div', 'sd-sig-loading', '載入 AI 建議…'));
+    sec.appendChild(box);
+
+    let adviceTaskId = null;
+
+    /* The latest advice card for THIS symbol: fetch the symbol's cards and keep the newest
+       whose task is the 「持倉建議與提點」 preset. preset_key is the join key (M3), never the
+       task NAME — the owner can rename the task and the drawer still finds it. */
+    function loadCard() {
+      Promise.all([
+        window.pdApi.get('/api/insights', { symbol: symbol, limit: 25 }),
+        window.pdApi.get('/api/insight-types'),
+      ]).then((pair) => {
+        if (currentSymbol !== symbol) return;
+        const rows = (pair[0] && pair[0].rows) || [];
+        const tasks = Array.isArray(pair[1]) ? pair[1] : [];
+        const adviceIds = {};
+        adviceTaskId = null;
+        tasks.forEach((t) => {
+          if (t.preset_key !== 'advice') return;
+          adviceIds[t.id] = t;
+          if (t.enabled) adviceTaskId = t.id;  // the ENABLED one is the one a run may target
+        });
+        const card = rows.find((c) => adviceIds[c.insight_type_id]);
+        renderAdvice(box, card, tasks, adviceTaskId, runAdvice);
+      }).catch((err) => {
+        if (currentSymbol !== symbol) return;
+        box.replaceChildren(el('div', 'sd-empty sd-sig-empty', 'AI 建議暫時無法取得'));
+      });
+    }
+
+    function runAdvice() {
+      if (!adviceTaskId) return;
+      const btn = box.querySelector('.sd-advice-run');
+      if (btn) btn.disabled = true;
+      if (window.toast) window.toast('已觸發', 'ok', '持倉建議與提點：產生中…');
+      window.pdApi.post('/api/insight-types/' + adviceTaskId + '/run')
+        .then((resp) => pollRun(adviceTaskId, resp.run_id, 0))
+        .catch((err) => {
+          if (btn) btn.disabled = false;
+          if (window.toast) window.toast((err && err.message) || '觸發失敗', 'fail', err && err.code);
+        });
+    }
+
+    /* Poll GET …/runs until the run finishes, then re-pull the card. Mirrors the insights
+       page's own poll (≤60s); a still-running poll leaves a toast rather than a spinner that
+       never resolves. */
+    function pollRun(taskId, runId, tries) {
+      if (tries >= 20) {
+        if (window.toast) window.toast('仍在執行', 'ok', '完成後重新開啟本視窗即可看到新卡');
+        return;
+      }
+      window.pdApi.get('/api/insight-types/' + taskId + '/runs', { limit: 5 }).then((resp) => {
+        const row = ((resp && resp.rows) || []).find((r) => r.id === runId);
+        if (!row || !row.finished_at) {
+          setTimeout(() => pollRun(taskId, runId, tries + 1), 3000);
+          return;
+        }
+        if (window.toast) {
+          const ok = row.status === 'ok' || row.status === 'partial';
+          window.toast(ok ? '產生完成' : (row.status === 'skipped' ? '本次略過' : '執行失敗'),
+            ok ? 'ok' : 'fail', row.detail || row.reason || row.status);
+        }
+        loadCard();
+      }).catch(() => { /* polling is best-effort; the card list refreshes on next open */ });
+    }
+
+    loadCard();
     return sec;
   }
 

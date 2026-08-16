@@ -355,6 +355,12 @@ def test_scenario_3_missing_price_holding_warns_input(
 
 # --- one-click official pack (usability decision ①, 2026-07-05) ----------------
 
+#: The pack's five names, in creation order (W2 added the last two, 2026-08-16).
+#: Shared so an idempotency assertion never re-types the list by hand — the whole point of
+#: the pack is that a second click skips ALL of them, and a hand-typed subset would not
+#: notice a missing skip.
+_PACK_NAMES = ["持倉週報", "個股健檢", "市場週報", "持倉建議與提點", "持倉提點"]
+
 
 def test_official_pack_creates_tasks_with_schedules(
     api_client: TestClient, golden_db: sqlite3.Connection
@@ -362,7 +368,7 @@ def test_official_pack_creates_tasks_with_schedules(
     r = api_client.post("/api/insight-tasks/official-pack")
     assert r.status_code == 200
     body = r.json()
-    assert [c["name"] for c in body["created"]] == ["持倉週報", "個股健檢", "市場週報"]
+    assert [c["name"] for c in body["created"]] == _PACK_NAMES
     assert body["skipped"] == []
     # tasks exist with the preset knobs + a mounted schedule.
     types = {t["name"]: t for t in api_client.get("/api/insight-types").json()}
@@ -374,6 +380,18 @@ def test_official_pack_creates_tasks_with_schedules(
     assert weekly["schedule"] and checkup["schedule"] and market["schedule"]
     assert [s["name"] for s in weekly["strategies"]] == ["持倉週報策略"]
     assert [s["name"] for s in market["strategies"]] == ["市場週報策略"]
+    # W2 additions: the assistant (scheduled, enabled) and the 提點 card (event-driven).
+    advice, alert = types["持倉建議與提點"], types["持倉提點"]
+    assert advice["scope"] == "per_symbol" and advice["self_correct"] is True
+    assert advice["enabled"] is True and advice["schedule"]  # AI-D12: enabled like the rest
+    # The 提點 card is the ONE on_alert preset: enabled, subscribed to the six risk rules
+    # (AI-D11), and — being event-driven — it carries NO schedule and no cron job.
+    assert alert["scope"] == "on_alert" and alert["enabled"] is True
+    assert set(alert["alert_rules"]) == {
+        "target_cross", "single_weight", "fx_drift",
+        "drawdown_from_peak", "vol_spike", "consensus_change",
+    }
+    assert not alert["schedule"]
     # strategies were created from the library.
     names = {s["name"] for s in api_client.get("/api/strategy-prompts").json()}
     assert {"持倉週報策略", "個股健檢策略", "市場週報策略"} <= names
@@ -394,7 +412,7 @@ def test_official_pack_is_idempotent_and_reuses_strategies(
     assert len(weeklies) == 1 and "我的自訂版" in weeklies[0]["body"]
     second = api_client.post("/api/insight-tasks/official-pack").json()
     assert second["created"] == []
-    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+    assert sorted(second["skipped"]) == sorted(_PACK_NAMES)
 
 
 def test_official_pack_rename_then_repack_no_duplicate(
@@ -403,7 +421,7 @@ def test_official_pack_rename_then_repack_no_duplicate(
     # M3 fix (decision Q3a): the pack's idempotency keys on preset_key provenance, so a
     # RENAMED official task is never re-created (no double cron, no double cost).
     first = api_client.post("/api/insight-tasks/official-pack").json()
-    assert len(first["created"]) == 3
+    assert len(first["created"]) == 5
     weekly = next(c for c in first["created"] if c["name"] == "持倉週報")
     # user renames the official weekly task (PUT keeps preset_key untouched).
     detail = api_client.get("/api/insight-types").json()
@@ -417,14 +435,15 @@ def test_official_pack_rename_then_repack_no_duplicate(
     second = api_client.post("/api/insight-tasks/official-pack").json()
 
     assert second["created"] == []  # nothing re-created despite the rename
-    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+    assert sorted(second["skipped"]) == sorted(_PACK_NAMES)
     names = [t["name"] for t in api_client.get("/api/insight-types").json()]
     assert names.count("持倉週報") == 0 and names.count("我的週報") == 1
-    # exactly one schedule binding for the renamed task (no double cron).
+    # exactly one schedule binding per SCHEDULED task (no double cron); the on_alert 提點
+    # card is event-driven and binds none (W2), so the count is four, not five.
     n = golden_db.execute(
         "SELECT COUNT(*) AS n FROM schedule_config WHERE job_id LIKE 'insight:%'"
     ).fetchone()["n"]
-    assert n == 3
+    assert n == 4
 
 
 def test_official_pack_name_fallback_for_precolumn_installs(
@@ -437,9 +456,68 @@ def test_official_pack_name_fallback_for_precolumn_installs(
     golden_db.commit()
     second = api_client.post("/api/insight-tasks/official-pack").json()
     assert second["created"] == []
-    assert sorted(second["skipped"]) == sorted(["持倉週報", "個股健檢", "市場週報"])
+    assert sorted(second["skipped"]) == sorted(_PACK_NAMES)
 
 
+# --- W2: the 提點 preset is enabled + actually fires (AI-D5/AI-D11/AI-D12, 2026-08-16) ------
+# A created-enabled on_alert task that never reaches the runner is the dangerous version of
+# "shipped": every creation test above passes while the card never generates. These two drive
+# the dispatch path itself (real alerts_bridge + real composer_store, fake runner). golden_db
+# IS the conn the routes used — conftest injects it as the get_conn override.
+
+
+def test_alert_advice_preset_is_a_live_subscriber(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """After the pack runs, the 提點 task must be an ENABLED subscriber to each of its six
+    rules — the R7 gate reads scope+enabled+alert_rules, and a task failing any leg never
+    fires. This is the gate, not the card; the card needs the LLM, which is not wired here."""
+    from portfolio_dash.llm_insight import alerts_bridge
+
+    api_client.post("/api/insight-tasks/official-pack")
+    alerts_bridge.ensure_tables(golden_db)
+    for rule in ("target_cross", "single_weight", "fx_drift",
+                 "drawdown_from_peak", "vol_spike", "consensus_change"):
+        names = [s.name for s in alerts_bridge.on_alert_subscribers(golden_db, rule)]
+        assert "持倉提點" in names, f"持倉提點 not subscribed to {rule}"
+    # and it must NOT have picked up the rules it was told to stay out of (AI-D11): the
+    # data-health pair carries nothing an LLM can interpret, and signal_* is opt-in by design.
+    for rule in ("missing_price", "quota_low", "signal_trend"):
+        names = [s.name for s in alerts_bridge.on_alert_subscribers(golden_db, rule)]
+        assert "持倉提點" not in names, f"持倉提點 wrongly subscribed to {rule}"
+
+
+def test_alert_advice_preset_reaches_the_runner_on_a_fired_alert(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The 24h debounce and the R7 subscription both have to pass for a card to run. Drive a
+    fired target_cross event through the REAL dispatcher with a fake runner and assert the
+    提點 task ran once, with the fired rule/symbol handed over, then debounced."""
+    from datetime import datetime
+
+    from portfolio_dash.llm_insight import alerts_bridge
+
+    api_client.post("/api/insight-tasks/official-pack")
+    alerts_bridge.ensure_tables(golden_db)
+    now = datetime.now()
+    alerts_bridge.record_event(golden_db, rule_id="target_cross", symbol="2330", now=now)
+
+    ran: list[tuple[int, str, str | None]] = []
+
+    def runner(c: sqlite3.Connection, it_id: int, *, now: datetime,
+               fired_rule: str, fired_symbol: str | None) -> None:
+        ran.append((it_id, fired_rule, fired_symbol))
+
+    n = alerts_bridge.dispatch_alert_events(golden_db, runner, now=now)
+    assert n == 1 and len(ran) == 1
+    it_id, fired_rule, fired_symbol = ran[0]
+    assert fired_rule == "target_cross" and fired_symbol == "2330"
+    name = golden_db.execute(
+        "SELECT name FROM insight_types WHERE id=?", (it_id,)
+    ).fetchone()["name"]
+    assert name == "持倉提點"
+    # the event was consumed, and a second dispatch of the same key debounces.
+    assert alerts_bridge.dispatch_alert_events(golden_db, runner, now=now) == 0
 # --- per_market tasks over the API (2026-07-05 spec) ----------------------------
 
 

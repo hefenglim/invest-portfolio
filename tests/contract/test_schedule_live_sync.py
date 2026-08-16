@@ -42,7 +42,7 @@ def test_bind_unbind_delete_without_scheduler_no_crash(api_client: TestClient) -
 def test_official_pack_without_scheduler_no_crash(api_client: TestClient) -> None:
     r = api_client.post("/api/insight-tasks/official-pack")
     assert r.status_code == 200
-    assert len(r.json()["created"]) == 3
+    assert len(r.json()["created"]) == 5
 
 
 def test_mount_schedule_invalid_cron_400_no_write(
@@ -109,6 +109,12 @@ def test_official_pack_mounts_live_triggers(
     api_client: TestClient, live_scheduler: BackgroundScheduler
 ) -> None:
     body = api_client.post("/api/insight-tasks/official-pack").json()
-    assert len(body["created"]) == 3
-    for created in body["created"]:
-        assert live_scheduler.get_job(f"insight:{created['id']}") is not None
+    assert len(body["created"]) == 5
+    # The four SCHEDULED presets mount a live trigger; the on_alert 提點 card is
+    # event-driven and mounts none (it has no cron). Its absence is the assertion, not an
+    # afterthought — a skipped schedule bind is exactly the bug this test exists to catch.
+    by_name = {c["name"]: c for c in body["created"]}
+    for name in ("持倉週報", "個股健檢", "市場週報", "持倉建議與提點"):
+        assert live_scheduler.get_job(f"insight:{by_name[name]['id']}") is not None
+    alert = by_name["持倉提點"]
+    assert live_scheduler.get_job(f"insight:{alert['id']}") is None

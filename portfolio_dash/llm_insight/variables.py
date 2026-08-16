@@ -141,17 +141,20 @@ REGISTRY: tuple[VarSpec, ...] = (
     ),
     VarSpec(
         "technical_signals_json", "技術訊號", "price", "per_symbol", True,
-        "整合技術訊號：RSI(14)、20/60 均線交叉＋距今天數、52 週位階、趨勢結構（量能有料才附）",
-        '{"rsi14":"58.3","ma_cross":{"cross":"golden","days_ago":4},'
+        "整合技術訊號：RSI(14)、**短窗 20/60** 均線交叉（ma_cross_short）＋距今天數、52 週位階、"
+        "趨勢結構（量能有料才附）。**這個「交叉」是 20/60，不是法則引擎的 50/200**——兩者不同，"
+        "引用時請區分",
+        '{"rsi14":"58.3","ma_cross_short":{"cross":"golden","days_ago":4},'
         '"week52":{"pct_from_high":"-0.061","pct_from_low":"+0.452","window_days":180},'
         '"trend":{"structure":"uptrend","window_days":60}}',
     ),
     VarSpec(
         "rule_signals_json", "法則訊號", "price", "per_symbol", True,
         "四法則引擎訊號（與 /api/signals 同形狀，單一事實來源）：TechScore(0-100)＋各法則貢獻"
-        "分解、趨勢濾網／均線交叉／12-1 動能／RSI 情境四法則各自狀態與關鍵證據數字、涵蓋度、"
-        "條件語（evaluation_context）、params_version、held 旗標（未持倉＝建倉評估視角）。"
-        "數字由 api 層評估後餵入，LLM 僅詮釋不重算；價格歷史不足時如實降級。",
+        "分解、趨勢濾網／**50/200 均線交叉（ma_cross）**／12-1 動能／RSI 情境四法則各自狀態與關鍵"
+        "證據數字、涵蓋度、條件語（evaluation_context）、params_version、held 旗標"
+        "（未持倉＝建倉評估視角）。**這個「交叉」是 50/200，不是技術訊號變數的 20/60**——兩者不同，"
+        "引用時請區分。數字由 api 層評估後餵入，LLM 僅詮釋不重算；價格歷史不足時如實降級。",
         '{"symbol":"2330","held":true,"as_of":"2026-06-11","params_version":"rules-v1",'
         '"composite":{"tech_score":"82.5","coverage":"4/4","evaluation_context":"trend_up",'
         '"context_note":"…","missing":[],"contributions":{"trend_filter":"25.00"},'

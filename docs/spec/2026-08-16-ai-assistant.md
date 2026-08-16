@@ -27,6 +27,9 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **AI-D7** | 計分板 | 接基準重放（`relative`）＋實現波動（`volatility`） | 建議、owner 未推翻。`insight_service.py:396-445` 兩者回 None → 永遠 `pending_data`→`undetermined`，被排除出所有彙總——戰績頁「乾淨」是因為打不了分的被丟掉了。盲點的方向對助手有利，不可接受。兩條都是接線，不是新演算法 |
 | **AI-D8** | 產品立場 | 方向性判讀＋條件情境；**不做部位大小、不做下單** | 建議、owner 未推翻。實查全庫無 beta／相關性／Sharpe——給部位大小沒有風險模型可靠（藍圖 §9.3 第 2 條） |
 | **AI-D9** | 模型角色 | **不新增角色** | 建議（AI-D1 的直接後果）：沒有獨立功能，第 7 個角色只是空欄位 |
+| **AI-D10** | 建議卡的預測由誰決定 | **自由決定（維持卡 schema 現況）** | owner 裁示。預測選填、帶預測則必須帶信心（`cards.py:53-58` 既有）。能真心說「資料不足」比「每張卡都被評分但可能硬給數字」重要 |
+| **AI-D11** | 提點卡訂閱哪些警示 | **風險警示六條**：`target_cross`／`single_weight`／`fx_drift`／`drawdown_from_peak`／`vol_spike`／`consensus_change` | owner 裁示。⚠ `signal_*` 轉換事件**刻意不含**在 `'all'` 通配符裡（`gating.py:89-101`，原本就是設計如此）；資料健康類（`missing_price`／`quota_low`）LLM 沒有內容可詮釋 |
+| **AI-D12** | 建議 preset 預設啟用範圍 | **建啟用、demo 先行** | owner 裁示。依既有慣例建為 enabled（每個官方 preset 都是；on_alert 過去是唯一例外）；merge/main/prod 保持不動直到 owner 明確同意 |
 
 > **命名慣例**：本企劃的裁示用 `AI-D<n>`，**永不**與公司行動 spec 的 `D<n>` 編號空間混用。
 > 先例教訓：上一輪藍圖把自己的裁示寫在它自己的 §10（D1–D9），產生了「那是藍圖內部裁示

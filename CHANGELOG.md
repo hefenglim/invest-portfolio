@@ -26,6 +26,32 @@ parallel). The TW-only fundamentals gap matters because the real portfolio is US
 card is today structurally weaker than a TW card.
 
 ### Added
+- **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
+  that synthesize the owner's holding × technicals × the rule-signal engine × news × analyst
+  consensus into **建議與提點** — conditional evaluation scenarios with trigger conditions,
+  never a position size or an order (AI-D8).
+  - **「持倉建議與提點」** — a new `per_symbol` official preset, scheduled daily after the US
+    close and **enabled on creation** like every other pack member (AI-D12). Prediction is left
+    **free** (AI-D10): the card schema already requires a confidence whenever a prediction is
+    present, so "the data does not support a call" is a legitimate answer, not a forced number.
+  - **「持倉提點」** — the alert-triggered companion (AI-D5). When one of the six risk-alert
+    rules fires (AI-D11: 目標價 / 單一標的過重 / 匯率漂移 / 回撤 / 波動突升 / 共識下修 — the
+    data-health pair deliberately excluded, and `signal_*` transitions stay opt-in by design),
+    a card interprets what that alert means **for the position actually held**, on the ≤3
+    trading-day window. This preset is created **enabled** — the deliberate, scoped override of
+    the on_alert default-disabled convention (every hand-created on_alert task still defaults
+    off). Push (ntfy) stays off.
+  - **The drawer surface.** The symbol drawer gains an 「AI 建議」 section under 技術訊號: the
+    latest advice card for that symbol plus a 立即產生 button on the preset. It keys on
+    `preset_key`, never the (renamable) task name, and degrades to an honest note when the
+    preset is missing / disabled / the fetch fails — no dead button, no spinner that never
+    resolves. Two read fixes make it possible: `_insight_type_wire` now exposes `preset_key`
+    (it was stored but never served), and the existing fingerprint cache means a whole-task
+    re-run only pays for symbols whose inputs actually changed.
+  - **The two "moving-average cross" definitions are named apart** (AI-D2). `technicals.ma_cross`
+    (20/60) and the rules engine's 50/200 both reached the same prompt under the bare word
+    "cross"; the former is now `ma_cross_short` and both variable descriptors say their window,
+    so the assistant cannot quote one as the other.
 - **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
   `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
   released**). A share count that changes without a trade previously had no representation, so

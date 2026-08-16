@@ -16,13 +16,13 @@ user-facing :func:`library_wire` payload (``agents.py`` imports it and fills the
 ``{accounts}`` / ``{today}`` / ``{text}`` placeholders).
 """
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v11 (2026-07-22)"
+LIBRARY_VERSION = "official-v12 (2026-08-16)"  # +持倉建議與提點策略 / 持倉提點策略 (W2, AI-D1/D5)
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -406,12 +406,109 @@ _MARKET_BODY = (
 本卡為純敘事回顧，不附預測（prediction 留空）；tags 請包含市場名稱（台股／美股／馬股）。"""
 )
 
+# The assistant itself (AI-D1/D2/D8, 2026-08-16). Position-advice synthesis: the owner's
+# holding × technicals × rule-signal engine × news × analyst consensus, output as EVALUATION
+# SCENARIOS with trigger conditions — never a position size, never an order (decision H).
+# prediction is left FREE (AI-D10): the card schema already requires confidence whenever a
+# prediction is present (cards.py), so "the data does not support a call" is a legitimate
+# answer the model may give by leaving prediction empty — forcing one would manufacture
+# precision the input does not have.
+_ADVICE_BODY = (
+    "讀者是長期投資人，想知道「以我現在的部位，這檔股票現在該怎麼看」。"
+    "請綜合「我的倉位 × 技術面 × 法則引擎 × 近期新聞 × 分析師共識」產出一張「持倉建議與提點」卡"
+    "（title 含標的與一句結論）：\n"
+    + """{{symbol_detail_json}}
+
+〇、一句話結論 — 綜合全部輸入，對「這個部位現在該注意什麼」給出一句可操作的結論，
+放在最前面，並標注資料基準日。
+
+一、部位體質 — 現價相對原始/調整均價的位置、未實現損益與回本進度；同一標的可能分佈於
+多個帳戶，請分帳戶列示或明確標注「合計」，不得把單一帳戶數字當成總計。這是「建議」的
+出發點：同一個價格訊號對深度獲利與深套的意義不同。
+{{price_vs_cost_json}}
+
+二、技術面與法則引擎（兩者併讀，只詮釋、不重算、不虛構）—
+1) 法則引擎輸出：TechScore（0-100）與涵蓋度 coverage、evaluation_context／context_note
+   照實引述；逐一點名四法則狀態與關鍵證據數字（趨勢濾網 price_vs_ma、12-1 動能
+   return_12_1、RSI 情境 rsi14）；
+2) 逐項技術指標：RSI(14) 超買/超賣、52 週位階、趨勢結構、30 日波動與回撤；
+⚠ 「均線交叉」有兩個、視窗不同，引用時務必指明是哪一個：rule_signals_json 的 ma_cross
+   是 **50/200**（法則引擎、較慢）；technical_signals_json 的 ma_cross_short 是 **20/60**
+   （短窗、較快）。兩者可能同時存在且方向不同——請如實並陳快慢兩窗，不得混為一談；
+3) 若 rule_signals_json 為 unavailable，直說「法則訊號資料不足」，不得自行計算 TechScore
+   或杜撰法則狀態。價格序列為「近 30 個交易日逐日＋其餘每 5 日取樣」：以近 30 日為主要
+   判讀窗口，較早取樣點僅作脈絡。
+{{rule_signals_json}}
+{{technical_signals_json}}
+{{ma_signals_json}}
+{{volatility_json}}
+{{price_history_json}}
+
+三、新聞與共識 — 近期經整理個股新聞（標題／日期／摘要）作為催化劑或風險事件背景；分析師
+目標價區間、現價相對均值位置、評級分布與月度變化。新聞僅供背景判讀，不得從新聞取價格或
+報酬等數字；consensus_json 為 unavailable 時明講「無分析師覆蓋」，不得虛構。
+{{symbol_news_json}}
+{{consensus_json}}
+
+四、建議與提點（本卡的核心）— 綜合以上，給出**條件式評估情境**，不是買賣指令：
+對「加碼／持有／減碼／出場觀察」各寫一段「若…則…」的觸發條件與對應方向
+（例：「若 TechScore 維持強勢且價格守住 20 日均線、RSI 未過熱 → 屬偏多持有或小幅加碼的
+評估情境」、「若跌破 200 日均線且趨勢結構轉為下降 → 屬減碼重新評估情境」）。
+明確寫出觸發條件、對應方向、以及觀察視窗（幾個交易日內有效）。
+⚠ 產品紅線（不得越界）：只到條件與方向，**不給部位大小、不給買賣金額、不給停損停利價**；
+未持倉標的改以「建倉／觀望」情境描述。
+
+五、方向判讀與預測 — 綜合給出偏多／偏空／觀望之一。**prediction 由你決定是否給**：
+資料不足或訊號矛盾時可留空（並在內文說明為何不給）；若給，metric 一律 price_change，
+direction 用 up/down/flat，target_pct 僅在有明確依據時提供，且**必須附 confidence**
+（0-100，此預測命中的真實機率估計，寧可保守）。
+
+守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
+標記新鮮度，缺價或過期的資料點名排除於結論之外；愈近期的資料權重愈高。
+所有數字照輸入的原始數值與單位逐字引用，不得自行換算單位。"""
+)
+
+# The 提點 card (AI-D5/AI-D11, 2026-08-16): alert-triggered. The bridge's 24h debounce and the
+# ≤3-trading-day horizon addendum (ON_ALERT_NOTE) already apply; this body only has to interpret
+# ONE fired alert against the owner's position. The alert_rules subscription is set on the task,
+# not here.
+_ON_ALERT_ADVICE_BODY = (
+    "讀者是長期投資人，剛收到一則與其持倉相關的風險警示。請產出一張「提點」卡"
+    "（title 含標的與這則警示），用極短期視角（≤3 個交易日）回答「這件事對我的部位意味著"
+    "什麼」：\n"
+    + """{{symbol_detail_json}}
+
+一、這則警示 — 用一句白話說明觸發了什麼（警示規則與觸發數值），放在最前面。
+
+二、部位的暴露 — 這檔（或這個主題）在我組合裡的權重、成本位置與未實現損益：
+這則警示對「我」的實際意義，取決於我持有多少、套得多深。
+{{price_vs_cost_json}}
+
+三、極短期情境 — 綜合技術面與法則引擎（只詮釋不重算；「均線交叉」指明是 50/200 法則的
+ma_cross 還是 20/60 的 ma_cross_short，不得混用），給出 ≤3 個交易日的觀察情境與對應方向
+（若…則…）。**不給部位大小、不給買賣金額**——只到條件與方向。
+{{rule_signals_json}}
+{{technical_signals_json}}
+{{volatility_json}}
+
+四、背景 — 近期新聞與分析師共識作為佐證或反證；無資料時如實說明。
+{{symbol_news_json}}
+{{consensus_json}}
+
+守則：現在時間 {{now}}、資料基準 {{as_of}}；prediction 可留空，若給則 direction
+用 up/down/flat 且必須附 confidence（0-100，寧可保守）。"""
+)
+
 # Strategy templates: (name, version, scope hint, body). ``scope`` is advisory — the
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
     {"name": "個股健檢策略", "version": "v2.5", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
+    # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
+    {"name": "持倉建議與提點策略", "version": "v1", "scope": "per_symbol", "body": _ADVICE_BODY},
+    # The 提點 card (AI-D5/AI-D11): alert-triggered, ≤3 trading-day window via ON_ALERT_NOTE.
+    {"name": "持倉提點策略", "version": "v1", "scope": "on_alert", "body": _ON_ALERT_ADVICE_BODY},
 ]
 
 
@@ -428,6 +525,22 @@ class TaskPreset(TypedDict):
     horizon_days: int
     suggested_cron: str  # Asia/Taipei; the pack mounts this on creation
     description: str
+    # Event-driven tasks (scope "on_alert") have no cron and carry their alert subscription
+    # instead. Absent on every scheduled preset.
+    alert_rules: NotRequired[list[str]]
+
+
+# The six risk-alert rules the 提點 card subscribes to (AI-D11). Deliberately NOT "all": the
+# wildcard excludes signal_* transition rules by design (gating.py), and the data-health rules
+# (missing_price / quota_low) carry nothing an LLM can interpret — only cost and noise.
+ON_ALERT_ADVICE_RULES: list[str] = [
+    "target_cross",
+    "single_weight",
+    "fx_drift",
+    "drawdown_from_peak",
+    "vol_spike",
+    "consensus_change",
+]
 
 
 # The official pack (usability decision ①, 2026-07-05): one click creates these tasks
@@ -470,6 +583,36 @@ TASK_PRESETS: list[TaskPreset] = [
         "horizon_days": 14,
         "suggested_cron": "30 9 * * sat",
         "description": "台股／美股／馬股各一張市場部位週報（純敘事，資料自動市場切片）",
+    },
+    # W2 (AI-D1/D6, 2026-08-16): the assistant prototype, scheduled daily after the US close
+    # lands (Tue–Sat in Taipei). Enabled on creation like every other preset (AI-D12).
+    {
+        "preset_key": "advice",
+        "name": "持倉建議與提點",
+        "version": "v1",
+        "scope": "per_symbol",
+        "strategy": "持倉建議與提點策略",
+        "use_system_prompt": True,
+        "self_correct": True,
+        "horizon_days": 14,
+        "suggested_cron": "0 10 * * tue-sat",
+        "description": "逐持倉的「建議與提點」卡（倉位×技術×法則×新聞×共識；預測自由，帶信心）",
+    },
+    # W2 (AI-D5/AI-D11/AI-D12): the 提點 card. Event-driven — no cron; subscribes to the six
+    # risk-alert rules and is ENABLED on creation (the one place the on_alert default-disabled
+    # convention is deliberately overridden; every other on_alert task still defaults off).
+    {
+        "preset_key": "alert_advice",
+        "name": "持倉提點",
+        "version": "v1",
+        "scope": "on_alert",
+        "strategy": "持倉提點策略",
+        "use_system_prompt": True,
+        "self_correct": False,
+        "horizon_days": 3,
+        "suggested_cron": "",  # event-driven; never scheduled
+        "description": "風險警示觸發時，用 ≤3 交易日視角解讀「這件事對我的部位意味著什麼」",
+        "alert_rules": ON_ALERT_ADVICE_RULES,
     },
 ]
 

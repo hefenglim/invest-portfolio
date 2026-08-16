@@ -10,8 +10,8 @@ reference strategies BY NAME, so a version bump needs no preset change).
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v11() -> None:
-    assert ot.LIBRARY_VERSION == "official-v11 (2026-07-22)"
+def test_library_version_is_official_v12() -> None:
+    assert ot.LIBRARY_VERSION == "official-v12 (2026-08-16)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -127,9 +127,59 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v25_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v11 (2026-07-22)"
+    assert wire["library_version"] == "official-v12 (2026-08-16)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")
     assert checkup["version"] == "v2.5"
     assert "{{rule_signals_json}}" in checkup["body"]
+
+
+# --- W2: the assistant — 持倉建議與提點 + the 提點 on_alert card (AI-D1/D5, 2026-08-16) -------
+
+
+def test_advice_template_holds_the_product_red_lines() -> None:
+    """AI-D8: advice is directional + conditional, never a size or an order. The body must
+    forbid position sizing, and AI-D10 leaves prediction FREE (the schema already requires a
+    confidence whenever one is present — that guard is in cards.py, not here)."""
+    advice = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")
+    assert advice["scope"] == "per_symbol"
+    body = advice["body"]
+    assert "不給部位大小" in body and "不給買賣金額" in body
+    # The two moving-average crosses are named apart (AI-D2): the prompt must tell the model
+    # which window is which, or the assistant quotes one as the other.
+    assert "ma_cross_short" in body and "20/60" in body
+    assert "ma_cross" in body and "50/200" in body
+    # AI-D10: prediction is the model's to give or withhold, never forced.
+    assert "prediction 由你決定" in body and "confidence" in body
+
+
+def test_advice_and_alert_presets_resolve_and_subscribe() -> None:
+    """The two W2 presets reference real strategies, and the 提點 one carries its six-rule
+    subscription (AI-D11) — an on_alert task with no alert_rules subscribes to nothing, so the
+    subscription has to be pinned here, not assumed."""
+    template_names = {t["name"] for t in ot.STRATEGY_TEMPLATES}
+    advice = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "advice")
+    assert advice["strategy"] in template_names
+    assert advice["scope"] == "per_symbol" and advice["self_correct"] is True
+    alert = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "alert_advice")
+    assert alert["scope"] == "on_alert"
+    assert alert["strategy"] == "持倉提點策略"
+    assert set(alert["alert_rules"]) == {
+        "target_cross", "single_weight", "fx_drift",
+        "drawdown_from_peak", "vol_spike", "consensus_change",
+    }
+    # The wildcard and the data-health rules are deliberately NOT subscribed (AI-D11).
+    assert "all" not in alert["alert_rules"]
+    assert "missing_price" not in alert["alert_rules"]
+    assert "quota_low" not in alert["alert_rules"]
+    # The alert card's addendum applies the ≤3-trading-day window; the preset horizon agrees.
+    assert alert["horizon_days"] == 3
+
+
+def test_on_alert_advice_body_is_short_horizon_and_no_sizing() -> None:
+    body = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉提點策略")["body"]
+    assert "≤3 個交易日" in body
+    assert "不給部位大小" in body
+    assert "ma_cross_short" in body  # the cross disambiguation carries into the alert card too
+

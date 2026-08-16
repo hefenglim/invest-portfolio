@@ -966,3 +966,35 @@ prevents recurrence.
   byte-identical, so there is no cost to reaching for it. And when a docstring says "this does no
   X", read it as an open defect report, not as documentation — the note is only a defence if
   someone proved the unhandled case is unreachable, and here the prompt made it routine.
+
+- **2026-08-16 — a `.catch` that swallows the error hides the bug the e2e was written to catch.**
+  The W2 assistant drawer section caught a Promise rejection with `.catch(() => {...})` and
+  rendered "AI 建議暫時無法取得". The rejection was NOT a fetch failure — it was a
+  `ReferenceError: runAdvice is not defined` thrown INSIDE the `.then`, because `renderAdvice`
+  wired a button's click to `runAdvice`, a `function` declared *after* the call site, and a
+  function declaration is not hoisted into the enclosing function's scope the way the pattern
+  assumed. Two rules:
+  **(1)** A `function f(){}` declaration is hoisted to the TOP of its *script/module*, not to
+  the top of the enclosing *function* — code that works when called "later" (pollRun firing after
+  a network round-trip) can still break when called "now" (renderAdvice running synchronously in
+  the same tick). When a helper is called by a sibling, declare it before the sibling, or pass it
+  in as an argument (the fix here).
+  **(2)** The `.catch` did its *degrade* job and hid its *diagnose* job. The drawer's smoke
+  contract asserts zero console **errors**; a caught-and-relabelled `console.warn` still shows in
+  the trace, which is how this surfaced. A truly silent `.catch(() => {})` would have left the
+  button dead and the test green on the empty-state assertion. Degrade for the user; never
+  degrade for the person reading the console.
+
+- **2026-08-16 — "one red" is not a verdict; the machine's resource state is part of the test.**
+  The W2 full-suite run reported ONE failure: an e2e asserting zero console errors tripped on
+  `net::ERR_INSUFFICIENT_RESOURCES` — the 8 GB dev machine was under memory pressure (0 GB free,
+  ~50 browser processes, Memory Compression already at 1.45 GB), so Chromium could not allocate a
+  resource mid-flow. The failure was environmental, not the change: the SAME test passed in
+  isolation seconds later, and the full run reached 100% with **0 F / 0 E** on every other line.
+  Two rules:
+  **(1)** A zero-console-errors e2e is a *load-sensitive* assertion. `ERR_INSUFFICIENT_RESOURCES`
+  is the signature that says "the machine, not the code" — read the error text before treating a
+  single red e2e as a regression. If it passes in isolation, the suite was the environment.
+  **(2)** A full-suite run on a resource-tight box is itself a flaky test. The right reading is
+  per-module green (which W2 had: every changed module's suite passed on its own) plus a targeted
+  re-run of the lone failure — not a blanket "the suite is red".

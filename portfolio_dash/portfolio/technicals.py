@@ -268,7 +268,10 @@ def technical_signals(
     }
     out: dict[str, object] = {
         "rsi14": _q(rsi(closes, 14), "0.1"),
-        "ma_cross": ma_cross(closes),
+        # 20/60 is the SHORT cross, named so: ``rule_signals_json`` carries a DIFFERENT,
+        # 50/200, crossover under the bare word "cross", and both reach the same prompt.
+        # A bare "cross" here would read as the same fact restated; it is not.
+        "ma_cross_short": ma_cross(closes, fast=20, slow=60),
         "week52": w52_display,
         "trend": trend_structure(closes),
     }
