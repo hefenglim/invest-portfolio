@@ -9,6 +9,22 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**AI investment-assistant programme (2026-08-16)** — spec `docs/spec/2026-08-16-ai-assistant.md`.
+An inventory pass over the whole AI surface (four closed LLM loops, 34 variables, the four-rule
+engine, 13 alert rules) concluded the machinery exists and the gaps are one missing leg,
+verification, and a surface. **W1 already shipped (below): three AI-door defects found by
+inspection, one of which was writing the wrong tax right now.** Owner rulings — named `AI-D<n>`
+so they never collide with the corporate-actions spec's `D<n>` space — **AI-D1** (pure batch
+cards, no chat), **AI-D2** (fix the double ma_cross definition, then signal history + backtest;
+no new indicators), **AI-D3** (the AI door takes transactions + dividends + cash in ONE prompt),
+**AI-D4** (fundamentals: all three of yfinance / Finnhub / Alpha Vantage as key-gated providers,
+union-merged with per-field provenance, disagreement kept as two values and never averaged —
+**recorded as the scoped exception to the fallback chain in
+`.claude/rules/data-and-pricing.md`**), **AI-D5** (the official `on_alert` advice card, in scope,
+default-enabled; push stays off), **AI-D6** (prototype on demo first, fuel and verification in
+parallel). The TW-only fundamentals gap matters because the real portfolio is US-heavy — a US
+card is today structurally weaker than a TW card.
+
 ### Added
 - **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
   `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet

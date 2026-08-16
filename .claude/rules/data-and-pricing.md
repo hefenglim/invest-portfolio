@@ -136,6 +136,29 @@ Rules:
   staleness indicator; never crash the dashboard, never silently fabricate.
 - Source is recorded per row, so data provenance is always auditable.
 
+### Snapshot provenance — fundamentals are a UNION, not a fallback chain (AI-D4)
+
+**Owner ruling J, 2026-08-16, recorded in `docs/spec/2026-08-16-ai-assistant.md` §0.** The
+default for a quote / FX / price fetch is the **first-success-wins fallback chain** in
+`pricing/defaults.py` — one value is wanted, so the chain picks the first provider that can
+give it and stops. **Fundamentals are the deliberate, controlled exception.** Every *enabled*
+fundamentals provider (yfinance / Finnhub / Alpha Vantage) writes its own `external_snapshots`
+row — the table's primary key is already `(source, dataset, symbol, as_of)`, so provenance is
+already in the data model and the three rows coexist without a new table. The merge layer then
+folds them **together**, with every field carrying its `source`.
+
+- **On disagreement, keep BOTH values and flag `disagreement: true`. Never average.** An
+  average is a number no provider actually reported — it is the same red line as "the LLM
+  never emits numbers of record" and "a stale price is labelled, never guessed". The
+  disagreement is itself a fact the assistant should surface, not a number to smooth over.
+- **Key-gated.** A provider whose key is absent reports `available() == False`: it writes no
+  snapshot and raises no error, so registering the key later plugs it in without a code change.
+- ⚠ **This is scoped to fundamentals.** It is a deviation from the fallback convention, not a
+  replacement for it — other snapshot chains (consensus, chips, sentiment, indices) keep
+  first-success-wins unless the owner rules otherwise. An edge that exists in the code but not
+  in this file is the next audit finding, which is why the exception is written here rather
+  than left in the spec.
+
 ## Scheduling (pricing refresh)
 
 - APScheduler job in `scheduler/`. Cadence set by config (e.g. post-market for each
