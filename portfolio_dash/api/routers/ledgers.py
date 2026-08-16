@@ -71,6 +71,7 @@ from portfolio_dash.data_ingestion.store import (
     get_transaction,
     insert_corporate_action,
     list_accounts,
+    list_cash_movements,
     list_corporate_actions,
     list_dividends,
     list_fx_conversions,
@@ -101,6 +102,7 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
+from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
 from portfolio_dash.shared.corporate_actions import (
     KIND_ZH,
     ActionIndex,
@@ -111,6 +113,7 @@ from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.strategy.target_weights import move_target_weight
 
 router = APIRouter()
 
@@ -232,6 +235,48 @@ def fx(
             "from_ccy": c.from_ccy.value, "from_amt": decimal_str(c.from_amount),
             "to_ccy": c.to_ccy.value, "to_amt": decimal_str(c.to_amount),
             "implied_rate": decimal_str(c.implied_rate),
+        })
+    return _page(out, limit, offset)
+
+
+@router.get("/ledgers/cash")
+def cash_movements(
+    account_id: str | None = None,
+    frm: str | None = Query(None, alias="from"), to: str | None = None,
+    limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """The 6th ledger's page view (2026-08-16).
+
+    Cash movements have been writable through ``/api/cash/movements`` and importable as a CSV
+    kind since 2026-08-13, and readable **only** through the cash page's balance view — the
+    ledger page listed five of the six. This route is the sixth tab's source, in the same
+    shape as its neighbours (account/date filter, ``_page`` envelope) so the pager, the
+    filter bar and the CSV export button work on it without a special case.
+
+    ``signed_amount`` is computed here rather than on the client: amounts are stored unsigned
+    with the direction living in the kind (``shared/cash_kinds.py``), and ``web/`` may not
+    compute money. Sending only the raw amount would leave the frontend to either print a fee
+    as a positive number or re-derive the sign from a kind table it would then own a copy of.
+    """
+    bad = _check_dates(frm, to)
+    if bad is not None:
+        return bad
+    accts, _names_map, _ccys = _names(conn)
+    out: list[dict[str, Any]] = []
+    for m in list_cash_movements(conn, account_id=account_id):
+        if not _in_range(m.date, frm, to):
+            continue
+        out.append({
+            "id": m.id, "date": m.date.isoformat(), "account_id": m.account_id,
+            "account": accts.get(m.account_id, m.account_id),
+            "kind": m.kind, "kind_label": CASH_KIND_ZH.get(m.kind.upper(), m.kind),
+            "ccy": m.ccy.value,
+            "amount": decimal_str(m.amount),
+            "signed_amount": decimal_str(m.amount * movement_sign(m.kind)),
+            "acq_home_amount": (None if m.acq_home_amount is None
+                                else decimal_str(m.acq_home_amount)),
+            "note": m.note or "",
         })
     return _page(out, limit, offset)
 
@@ -1492,16 +1537,28 @@ def add_corporate_action(
     # D47: an EXCHANGE re-keys the position, so the owner's alert band follows the ticker.
     # After the rows land, never before — a band moved onto a symbol whose action then
     # failed to commit would be an alert on a security this ledger does not hold.
+    is_exchange = batch.rows[0].kind.strip().upper() == CorporateActionKind.EXCHANGE.value
     moved = (
         move_target_band(conn, from_symbol=batch.rows[0].from_symbol,
                          to_symbol=batch.rows[0].to_symbol)
-        if batch.rows[0].kind.strip().upper() == CorporateActionKind.EXCHANGE.value
+        if is_exchange
+        else None
+    )
+    # The owner's OTHER per-symbol setting. Same trigger, same timing, different store — and
+    # it was missed when the band was done, because a target weight is config that nothing
+    # recomputes, so a stranded one produces no disagreement anywhere, only a rebalance entry
+    # that can never be satisfied.
+    weight_moved = (
+        move_target_weight(conn, from_symbol=batch.rows[0].from_symbol,
+                           to_symbol=batch.rows[0].to_symbol, now=now)
+        if is_exchange
         else None
     )
     priced = _seed_child_price(conn, batch.rows[0], body.to_symbol_price, now=now)
     return {"ok": True, "written": len(written), "ids": written,
             "accounts": batch.accounts, "prices_restated": restated,
             "band_moved": _band_moved_wire(moved),
+            "weight_moved": None if weight_moved is None else decimal_str(weight_moved),
             "child_priced": priced,
             # D48b: a seeded price answers the very warning this field reports, so a symbol
             # that just got one is no longer unpriced. Leaving it listed would send the owner

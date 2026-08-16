@@ -364,6 +364,28 @@ def _preview_row(modal: Locator, account_index: int, row_index: int) -> Locator:
     return modal.locator(".ca-acct").nth(account_index).locator("tbody tr").nth(row_index)
 
 
+def _carry_preview(page: Page, carry: str) -> Any:
+    """Wait for the preview request that actually CARRIES *carry*, not merely the next one.
+
+    The form debounces its preview by 250 ms (``corp-action-form.js``). Filling the previous
+    field schedules a request; filling 成本分攤比例 reschedules it, and normally the two
+    coalesce into one. Under load they do not: the earlier timer fires first, a plain
+    ``expect_response`` on the URL returns on THAT response — which was computed without the
+    carve — and the assertions then read the DOM before the real one lands. Observed once in
+    a full-suite run on 2026-08-16 (parent cost 500,000 instead of 375,000), green on three
+    isolated re-runs, which is the signature of a race rather than a defect.
+
+    Keying the wait on the request BODY makes it mean what the test intends. Widening a
+    timeout would only make the flake rarer.
+    """
+    return page.expect_response(
+        lambda r: (
+            "/api/ledgers/corporate-actions/preview" in r.url
+            and f'"cost_carry":"{carry}"' in (r.request.post_data or "")
+        )
+    )
+
+
 def _combined_conserve(modal: Locator) -> Locator:
     """The ALL-ACCOUNTS 成本合計 verdict — a direct child of the preview host, where the
     per-account ones live inside their own ``.ca-acct`` card."""
@@ -663,7 +685,7 @@ def test_door3_spinoff_carves_the_cost_and_the_child_reconciles_from_nothing(
     _ratio_from(modal).fill("4")                            # 每持有 4 股 → 另外配發 1 股
     _ratio_to(modal).fill("1")
     _to_symbol_box(modal).fill("2330B")
-    with page.expect_response("**/api/ledgers/corporate-actions/preview") as prev:
+    with _carry_preview(page, "0.25") as prev:
         _field_input(modal, "成本分攤比例").fill("0.25")
     assert prev.value.status == 200
 

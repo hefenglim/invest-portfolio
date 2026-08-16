@@ -81,6 +81,50 @@ def save_target_weights(
     conn.commit()
 
 
+def move_target_weight(
+    conn: sqlite3.Connection, *, from_symbol: str, to_symbol: str, now: datetime
+) -> Decimal | None:
+    """Re-key one symbol's target weight after an EXCHANGE. Returns the weight, or ``None``.
+
+    The map is keyed by SYMBOL STRING, and until 2026-08-16 nothing re-keyed it: a merger or
+    a ticker rename left the target stranded on a symbol the ledger no longer holds, where
+    it could never be met and instead surfaced as a permanent
+    ``rebalance.excluded_with_target`` entry. The same shape as D47's price-alert band, and
+    it was missed because a weight is config rather than money — nothing recomputes it, so
+    nothing disagreed and no test could notice.
+
+    Four rules, each with a reason:
+
+    * **Move, not copy.** A copy leaves the dead ticker targeted, which is the defect.
+    * **The value does not change.** 「25% of the portfolio in this company」 survives a
+      change of ticker. (A SPLIT is immune either way — a ratio is unitless, so 25% stays
+      25% — which is why only the ticker-changing kinds need this at all.)
+    * **A destination the owner already targeted is never overwritten** (D47 parity): that
+      number is their judgement about the destination security and no merge rule could be
+      right. ⚠ The source's weight then STAYS, and stays stranded — visible in
+      ``excluded_with_target``, which is the honest place for it rather than a silent delete
+      of a value the owner typed.
+    * **SPINOFF does nothing.** The child is a different company; splitting the parent's
+      target between them needs an allocation rule nobody has given, and inventing one puts
+      a weight the owner never chose into the rebalance engine. The parent keeps its target
+      and the child has none.
+
+    Not called from ``data_ingestion``: that would be a new upward edge
+    (``architecture.md``). Both corporate-action doors invoke it from ``api/``, at the same
+    post-commit seam as ``reconcile_split_prices``.
+    """
+    if from_symbol == to_symbol:
+        return None
+    weights = load_target_weights(conn)
+    moved = weights.get(from_symbol)
+    if moved is None or to_symbol in weights:
+        return None
+    del weights[from_symbol]
+    weights[to_symbol] = moved
+    save_target_weights(conn, weights, now=now)
+    return moved
+
+
 def get_updated_at(conn: sqlite3.Connection) -> str | None:
     """ISO timestamp of the last save, or None when never saved / table absent."""
     try:

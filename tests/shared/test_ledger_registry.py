@@ -94,8 +94,13 @@ def test_export_zip_and_csv_kinds_derive_from_the_registry() -> None:
     assert export_ledgers.LEDGER_KINDS == {
         t.export_kind: (t.table, t.date_col) for t in exportable
     }
-    # cash_movements is deliberately outside the "four-ledger zip".
-    assert "cash_movements" not in export_ledgers._LEDGER_TABLES
+    # Every ledger is exportable since 2026-08-16 — this line asserted the opposite, on the
+    # grounds that cash_movements was "deliberately outside the four-ledger zip". It was not
+    # deliberate; it was the gap that made cash the one ledger you could import and not
+    # export. (The prose also still said "four" when the zip held five. The English
+    # count guard does not scan tests/, so only this rewrite caught it.)
+    assert all(t.export_kind is not None for t in LEDGER_TABLES)
+    assert "cash_movements" in export_ledgers._LEDGER_TABLES
 
 
 def test_db_stats_lists_every_ledger_under_the_帳本_category() -> None:

@@ -92,6 +92,7 @@ from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm_config import get_model
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.strategy.target_weights import move_target_weight
 
 router = APIRouter()
 
@@ -902,7 +903,11 @@ class ImportCommitBody(BaseModel):
 
 
 @router.post("/import/commit")
-def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def import_commit(
+    body: ImportCommitBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
     writer = _WRITERS.get(body.kind)
     if body.kind not in _BUILDERS or writer is None:
         return JSONResponse(status_code=400, content=error_body(
@@ -1004,6 +1009,28 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
             {r.payload.get("from_symbol", "") for r in written_rows}
             | {r.payload.get("to_symbol", "") for r in written_rows},
         )
+        # The owner's per-symbol config follows a re-keyed position, at the same post-commit
+        # seam and for the same reason the prices do: an EXCHANGE changes what the symbol
+        # means, and anything still filed under the old one is now filed under nothing. The
+        # price-alert band moves inside the row writer (D47); the target weight moves here,
+        # because `data_ingestion -> strategy` is not an authorised edge (architecture.md)
+        # and re-deriving the weights format on that side would make it a second owner.
+        #
+        # Deduplicated by PAIR, not per row: one event is N rows, one per holding account
+        # (D13), and the move is idempotent anyway — the second call finds the source gone.
+        pairs = {
+            (str(r.payload.get("from_symbol", "")), str(r.payload.get("to_symbol", "")))
+            for r in written_rows
+            if str(r.payload.get("kind", "")).strip().upper() == "EXCHANGE"
+        }
+        weights_moved = [
+            {"from_symbol": frm, "to_symbol": to, "weight": decimal_str(w)}
+            for frm, to in sorted(pairs)
+            if (w := move_target_weight(
+                conn, from_symbol=frm, to_symbol=to, now=now)) is not None
+        ]
+        if weights_moved:
+            out["weights_moved"] = weights_moved
     return out
 
 

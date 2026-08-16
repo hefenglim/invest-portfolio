@@ -100,6 +100,26 @@ _SPECS: Final[dict[CashKind, CashKindSpec]] = {
 #: Canonical stored spellings, for the write-path allowed set and the CSV/API validators.
 CASH_KIND_VALUES: Final[frozenset[str]] = frozenset(k.value for k in CashKind)
 
+#: The zh label of each kind — ONE owner, keyed by the stored spelling.
+#:
+#: Added 2026-08-16 after finding the failure it prevents already in production: the printed
+#: 資金收支明細 (``export/cash_statement.py``) carried its own four-entry label map, and the
+#: three kinds added on 2026-08-13 never reached it — so an interest row printed as the raw
+#: ``interest`` on a Chinese statement, and a fee as ``broker_fee``. Nothing failed; the map's
+#: ``.get(kind, kind)`` fallback is precisely what turns a missing label into plausible
+#: output. Every consumer now derives from here, so the next kind is labelled by adding it to
+#: ``CashKind`` — and :data:`CASH_KIND_ZH` is total over the enum, asserted by a test rather
+#: than by care.
+CASH_KIND_ZH: Final[dict[str, str]] = {
+    CashKind.DEPOSIT.value: "入金",
+    CashKind.WITHDRAW.value: "出金",
+    CashKind.OPENING.value: "期初資金",
+    CashKind.REBATE.value: "折讓款",
+    CashKind.INTEREST.value: "利息",
+    CashKind.INTEREST_EXPENSE.value: "融資利息",
+    CashKind.BROKER_FEE.value: "券商費用",
+}
+
 #: Kinds that REDUCE the pool balance. Exposed for readers that want the set rather than
 #: the per-row predicate (e.g. a SQL filter or a report grouping).
 DEBIT_KINDS: Final[frozenset[str]] = frozenset(

@@ -44,21 +44,27 @@ def test_every_listed_ledger_is_a_zip_member_and_nothing_else_is(
     assert csvs == {f"{EXPORT_KINDS[k].table}.csv" for k in listed}
 
 
-def test_cash_movements_is_a_ledger_but_not_an_export(api_client: TestClient) -> None:
-    """The known gap, asserted so it stays deliberate.
+def test_every_ledger_is_exportable_including_cash(api_client: TestClient) -> None:
+    """★ The asymmetry is closed, and this test is what closed it correctly.
 
-    ``cash_movements`` imports and does not export. That asymmetry is recorded in the
-    backlog spec and in the report's own header note 「本報告不含資金收支帳本」. When it is
-    closed, this test fails and points at the sentence that has to change with it — which is
-    the whole reason to assert an absence rather than to leave one.
+    Written on 2026-08-15 as ``test_cash_movements_is_a_ledger_but_not_an_export``: it
+    asserted the ABSENCE — cash imports, cash does not export — precisely so that the day
+    someone closed the gap, the test would fail and hand them the list of sentences that had
+    to change with it (the report's header note, its section count). On 2026-08-16 it did
+    exactly that, so the note is gone and the report has a 資金收支 section.
+
+    It is kept, inverted, rather than deleted: a round trip that loses rows is worth an
+    assertion in both directions.
     """
     tables = {t.table for t in LEDGER_TABLES}
     assert "cash_movements" in tables
     listed = {row["kind"] for row in api_client.get("/api/export/ledgers").json()["ledgers"]}
-    assert not any(EXPORT_KINDS[k].table == "cash_movements" for k in listed)
+    assert any(EXPORT_KINDS[k].table == "cash_movements" for k in listed)
+    assert {t.table for t in EXPORT_KINDS.values()} == tables
 
     doc = api_client.post("/api/export/ledgers-report", json={}).content.decode("utf-8")
-    assert "本報告不含資金收支帳本" in doc
+    assert "本報告不含資金收支帳本" not in doc
+    assert "資金收支" in doc
 
 
 def test_the_printable_report_has_one_section_per_exportable_ledger(

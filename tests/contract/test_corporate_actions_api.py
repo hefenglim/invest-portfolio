@@ -656,6 +656,51 @@ def test_the_import_route_commits_a_complete_batch_and_reconciles(
     assert _closes(golden_db, "2330") == [("6000", "10")]
 
 
+def test_the_csv_door_moves_the_target_weight_too(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """★ The SECOND door, asserted separately — one door passing proves nothing about the other.
+
+    The band move lives inside the row writer, so both doors get it from one place. The
+    weight move cannot: ``data_ingestion -> strategy`` is not an authorised edge
+    (``architecture.md``), so it is called from ``api/`` at each door, and two call sites
+    means two chances to wire only one. That is the exact shape of the defect being fixed
+    here — D47 wired the band and left the weight — so it gets its own test rather than an
+    assumption of symmetry.
+    """
+    from portfolio_dash.strategy.target_weights import (
+        load_target_weights,
+        save_target_weights,
+    )
+
+    _newco(golden_db)
+    save_target_weights(golden_db, {"2330": D("0.25")}, now=GOLDEN_NOW)
+    csv_text = ("account,date,kind,from_symbol,to_symbol,ratio_to,ratio_from\n"
+                f"tw_broker,{SPLIT_DAY.isoformat()},EXCHANGE,2330,NEWCO,1,1\n")
+    r = api_client.post("/api/import/commit",
+                        json={"kind": "corporate_actions", "csv_text": csv_text,
+                              "ack_warnings": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["written"] == 1
+    assert r.json()["weights_moved"] == [
+        {"from_symbol": "2330", "to_symbol": "NEWCO", "weight": "0.25"}]
+    assert load_target_weights(golden_db) == {"NEWCO": D("0.25")}
+
+
+def test_a_csv_import_with_no_targets_reports_no_weight_move(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The common case. The key is ABSENT rather than empty: a response field that appears
+    on every import for the one ledger in a thousand that has targets set is noise, and the
+    four other kinds keep a byte-identical payload (the rule the neighbouring
+    ``prices_restated`` block states)."""
+    csv_text = ("account,date,kind,from_symbol,to_symbol,ratio_to,ratio_from\n"
+                f"tw_broker,{SPLIT_DAY.isoformat()},SPLIT,2330,2330,10,1\n")
+    body = api_client.post("/api/import/commit",
+                           json={"kind": "corporate_actions", "csv_text": csv_text}).json()
+    assert "weights_moved" not in body
+
+
 # ------------------------------------------------------- D44: the band restate (one-click)
 
 
@@ -789,6 +834,51 @@ def test_creating_the_exchange_moves_the_band(
     assert new is not None and new.target_low == D("580")
     assert new.target_set_at == date(2026, 1, 5)   # the date rides with the value
     assert old is not None and old.target_low is None
+
+
+def test_creating_the_exchange_moves_the_target_weight_too(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """★ The owner's OTHER per-symbol setting, wired at the same seam (2026-08-16).
+
+    `strategy/target_weights.py` owns the rule and has its own unit tests; this asserts the
+    door actually CALLS it. Without a test at this level the unit tests would stay green with
+    the wiring absent — which is precisely how this defect survived D47: the band was wired,
+    the weight was not, and a stranded weight produces no disagreement anywhere. It surfaces
+    only as a `rebalance.excluded_with_target` entry, one indirection from its cause.
+    """
+    from portfolio_dash.strategy.target_weights import (
+        load_target_weights,
+        save_target_weights,
+    )
+
+    _newco(golden_db)
+    save_target_weights(golden_db, {"2330": D("0.25")}, now=GOLDEN_NOW)
+
+    r = api_client.post(_BASE, json=_exchange(ack_warnings=True))
+    assert r.status_code == 201, r.text
+    assert r.json()["weight_moved"] == "0.25"
+
+    after = load_target_weights(golden_db)
+    assert after == {"NEWCO": D("0.25")}, "the dead ticker must not keep a target"
+
+
+def test_a_SPLIT_never_moves_a_target_weight(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A ratio is unitless: after a 7-for-1, 「25% of the portfolio」 still means 25%. The
+    weight is also filed under a symbol that did not change (E20), so there is nothing to
+    re-key — and re-keying or re-scaling it would be a ruling nobody gave for splits."""
+    from portfolio_dash.strategy.target_weights import (
+        load_target_weights,
+        save_target_weights,
+    )
+
+    save_target_weights(golden_db, {"2330": D("0.25")}, now=GOLDEN_NOW)
+    r = api_client.post(_BASE, json=_body(ack_warnings=True))
+    assert r.status_code == 201, r.text
+    assert r.json()["weight_moved"] is None
+    assert load_target_weights(golden_db) == {"2330": D("0.25")}
 
 
 def test_a_SPLIT_never_moves_a_band(

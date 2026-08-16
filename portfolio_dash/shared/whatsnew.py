@@ -85,6 +85,37 @@ CATALOG: list[Feature] = [
     ),
     Feature(
         version="0.1.29",
+        id="cash-ledger-visible",
+        title="資金收支終於看得到、匯得出、印得出來",
+        desc="它是第六本帳，但先前只進得去、出不來：帳本頁沒有它的分頁，全帳本匯出的 zip 裡沒有它，"
+        "列印的帳本報告也沒有它那一節。現在三處都補上了。"
+        "金額會直接顯示正負——券商費用是負的、利息是正的——因為方向存在「類型」裡而不是數字裡，"
+        "由伺服器算好再送出，畫面不自己乘。順帶修掉一個已經在跑的錯誤："
+        "列印的資金收支明細把利息印成 interest、券商費用印成 broker_fee，"
+        "因為那份中文對照表少了 2026-08-13 新增的三種",
+        href="trades.html",
+        area="交易帳本 → 資金收支",
+        target="#tab-lcash",
+    ),
+    Feature(
+        version="0.1.29",
+        id="target-weight-follows-ticker",
+        title="換股之後，目標權重會跟著新代號走",
+        desc="以前目標權重是用代號當鍵存的，換股或改名之後就孤兒在舊代號上——那個代號已經沒有部位，"
+        "權重永遠達不到，只會在再平衡頁的「已排除但有目標」裡出現，而你看不出它是哪一次換股造成的。"
+        "現在會跟著搬，數值不變（換股換的是代號，不是你想配置的比例；分割本來就不受影響，"
+        "四分之一還是四分之一）。"
+        "如果新代號你自己已經設過目標權重，系統不會覆蓋它——那是你對新公司的判斷，"
+        "而任何自動合併規則都可能是錯的",
+        # 目標配置 is a panel INSIDE the 預警規則 tab, not a tab of its own — the first
+        # draft of this entry said #targets, which is not a settings tab and would have
+        # opened the page on whatever tab was last used.
+        href="settings.html#alerts",
+        area="設定 → 預警規則 → 目標配置",
+        target="#target-weights-panel",
+    ),
+    Feature(
+        version="0.1.29",
         id="ledger-report-corporate-actions",
         title="列印用的帳本報告補上「公司行動」一節",
         desc="以前這份報告只印四本帳，缺的正是唯一能解釋「為什麼 100 股變成 700 股」的那一本，"

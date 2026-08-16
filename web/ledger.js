@@ -8,7 +8,7 @@
   'use strict';
   /* D is set once the four ledgers resolve; render fns read it. Default to empty
      arrays so any pre-boot render (or a fetch failure) degrades to empty tables. */
-  let D = { transactions: [], dividends: [], fx: [], openings: [], actions: [] };
+  let D = { transactions: [], dividends: [], fx: [], openings: [], actions: [], cash: [] };
   const f = window.fmt;
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
@@ -21,7 +21,7 @@
   /* ===== tabs =====
      ledger.html 使用 tab-tx/div/fx/open；trades.html 自帶 glue（tab-ldiv 等）。
      僅在獨立帳本頁（無 pane-ldiv）時於此接線，避免誤抓輸入區同名的 #tab-div / #pane-div。 */
-  const TABS = ['tx', 'div', 'fx', 'open', 'action'];
+  const TABS = ['tx', 'div', 'fx', 'open', 'action', 'cash'];
   const ownsTabs = !document.getElementById('pane-ldiv');
   function showTab(t) {
     TABS.forEach((x) => {
@@ -60,6 +60,7 @@
     fx: { offset: 0, total: 0 },
     open: { offset: 0, total: 0 },
     action: { offset: 0, total: 0 },
+    cash: { offset: 0, total: 0 },
   };
   const pagers = {};
   let accountList = []; /* [{id, name}] from GET /api/accounts (chip registry) */
@@ -94,11 +95,12 @@
   });
 
   function resetOffsets() {
-    pageState.tx.offset = 0;
-    pageState.div.offset = 0;
-    pageState.fx.offset = 0;
-    pageState.open.offset = 0;
-    pageState.action.offset = 0;
+    /* Derived from pageState rather than listed one ledger per line. The listed form was
+       five assignments and adding a sixth ledger meant remembering to add a sixth — and a
+       forgotten one has no symptom until you filter while on page 3 of that tab, then get
+       an empty table. Same class as the ledger enumerations the registry removed on the
+       server side (2026-08-16). */
+    Object.keys(pageState).forEach((k) => { pageState[k].offset = 0; });
   }
 
   /* 代號搜尋與日期區間 — keyword filters the page client-side; dates hit the server */
@@ -666,6 +668,33 @@
     });
   }
 
+  function renderCash() {
+    const tbody = $('#cash-body');
+    if (!tbody) return;
+    tbody.replaceChildren();
+    byKeyword(D.cash).forEach((m) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'num', f.date(m.date)));
+      tr.appendChild(el('td', 'col-text', m.account));
+      tr.appendChild(el('td', 'col-text', m.kind_label));
+      tr.appendChild(el('td', 'col-text', m.ccy));
+      /* signed_amount is the SERVER's figure. The sign lives in the kind
+         (shared/cash_kinds.py) and this layer never computes money — printing `amount`
+         here would show a broker fee as an inflow. */
+      tr.appendChild(el('td', 'num', f.money(m.signed_amount, m.ccy)));
+      const tdAcq = el('td', 'num');
+      if (m.acq_home_amount === null || m.acq_home_amount === undefined) {
+        tdAcq.textContent = f.NULL_GLYPH;
+        tdAcq.classList.add('sign-nil');
+      } else {
+        tdAcq.textContent = m.acq_home_amount;   /* a server string; never re-scaled here */
+      }
+      tr.appendChild(tdAcq);
+      tr.appendChild(el('td', 'col-text', m.note || ''));
+      tbody.appendChild(tr);
+    });
+  }
+
   /* Door 3's entry point — the ONLY control on this page that CREATES an action. It opens
      the shared §6.7 form (web/corp-action-form.js); doors 1 and 2 open the same one with a
      different prefill. */
@@ -678,7 +707,9 @@
     });
   })();
 
-  function renderAll() { renderTx(); renderDiv(); renderFx(); renderOpen(); renderActions(); }
+  function renderAll() {
+    renderTx(); renderDiv(); renderFx(); renderOpen(); renderActions(); renderCash();
+  }
 
   /* ===== WPE (2026-07-07): per-ledger server pagination =====
      Each of the four tables fetches its OWN page (limit/offset + total_count from
@@ -738,10 +769,14 @@
     (rows) => { D.openings = rows; }, renderOpen);
   const loadAction = () => loadOne('action', '/api/ledgers/corporate-actions',
     (rows) => { D.actions = rows; }, renderActions);
+  const loadCash = () => loadOne('cash', '/api/ledgers/cash',
+    (rows) => { D.cash = rows; }, renderCash);
 
   async function loadAll() {
     loadFailToasted = false;
-    await Promise.all([loadTx(), loadDiv(), loadFx(), loadOpen(), loadAction()]);
+    await Promise.all([
+      loadTx(), loadDiv(), loadFx(), loadOpen(), loadAction(), loadCash(),
+    ]);
   }
 
   /* FU-D45: live-refresh seam for the input panes (trades.html). After ANY successful
@@ -760,6 +795,7 @@
       ['fx', 'lfx-pager', loadFx],
       ['open', 'lopen-pager', loadOpen],
       ['action', 'laction-pager', loadAction],
+      ['cash', 'lcash-pager', loadCash],
     ];
     HOSTS.forEach(([kind, hostId, loader]) => {
       const host = document.getElementById(hostId);

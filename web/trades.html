@@ -359,6 +359,9 @@
              a 6th tab on the input pane above: that pane is high-frequency capture, this
              section is low-frequency corrective record-keeping. -->
         <button type="button" id="tab-laction">公司行動</button>
+        <!-- The 6th ledger. Writable since 2026-08-13 and readable nowhere on this page
+             until 2026-08-16 — the tab bar showed five of six. -->
+        <button type="button" id="tab-lcash">資金收支</button>
       </div>
     </div>
     <div class="filter-bar" id="ledger-filters"></div>
@@ -413,6 +416,16 @@
       </table></div>
       <div id="laction-pager" hidden="hidden"></div>
     </div>
+    <div class="mode-pane" id="pane-lcash">
+      <div class="filter-bar" style="gap: 8px;">
+        <span class="hint">入金／出金／期初資金／折讓款／利息／融資利息／券商費用。金額的正負由類型決定，伺服器已算好；新增與修改在「現金」頁。</span>
+      </div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>日期</th><th class="col-text">帳戶</th><th class="col-text">類型</th><th class="col-text">幣別</th><th>金額</th><th>取得成本（家幣）</th><th class="col-text">備註</th></tr></thead>
+        <tbody id="cash-body"></tbody>
+      </table></div>
+      <div id="lcash-pager" hidden="hidden"></div>
+    </div>
     <div class="append-note">帳本更正為顯式操作：編輯／刪除前會以全帳本重播檢核（賣超與孤兒紀錄防呆），更正前的原值會寫入稽核軌跡留存。點擊交易列展開費率規則快照。</div>
   </section>
 
@@ -440,7 +453,7 @@ document.getElementById('input-toggle').addEventListener('click', function (e) {
   document.getElementById('input-section').classList.toggle('open');
 });
 /* glue: ledger tabs */
-const LEDGER_TABS = ['tx','ldiv','lfx','lopen','laction'];
+const LEDGER_TABS = ['tx','ldiv','lfx','lopen','laction','lcash'];
 LEDGER_TABS.forEach(function(t) {
   var btn = document.getElementById('tab-' + t);
   if (!btn) return;
@@ -465,7 +478,7 @@ document.getElementById('tab-tx').click();
      which is also what /api/export/ledger validates against — a 5th tab that is not here
      silently exports the transactions ledger under the corporate-action tab. */
   var KIND = { tx: 'transactions', ldiv: 'dividends', lfx: 'fx', lopen: 'opening',
-               laction: 'actions' };
+               laction: 'actions', lcash: 'cash' };
   var btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn btn-sm btn-export';

@@ -39,6 +39,7 @@ from portfolio_dash.export.report_html import (
     _version_line,
 )
 from portfolio_dash.portfolio.cash import CashLine, account_statement
+from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.wire import decimal_str
@@ -52,8 +53,14 @@ _CSV_COLUMNS = [
 ]
 
 # Statement kind -> zh label (mirrors web/cash.js KIND_LABEL; the report is display-only).
+# Statement line kinds are the LOWERCASED ledger kind for a cash movement (`cash.py:191`)
+# plus the five kinds that are not cash movements at all. The movement half is derived from
+# `CASH_KIND_ZH` rather than retyped: this dict listed four movement kinds and stopped there,
+# so 利息 / 融資利息 / 券商費用 printed as `interest` / `interest_expense` / `broker_fee` on a
+# Chinese statement from the day they were added (2026-08-13) until 2026-08-16. The `.get`
+# below still has a fallback, but nothing reachable depends on it any more.
 _KIND_ZH = {
-    "deposit": "入金", "withdraw": "出金", "opening": "期初資金", "rebate": "折讓款",
+    **{k.lower(): zh for k, zh in CASH_KIND_ZH.items()},
     "fx_in": "換入", "fx_out": "換出", "buy": "買入", "sell": "賣出", "dividend": "股利",
 }
 

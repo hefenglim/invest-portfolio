@@ -1,9 +1,8 @@
 """帳本報告 — a print-optimized, self-contained HTML ledger report over a date range.
 
 Mirrors the ledger data sources the zip exports (the same rows ``/api/ledgers/*`` reads):
-交易紀錄 / 股利紀錄 / 換匯紀錄 / 期初庫存 / 公司行動. ``cash_movements`` is **not** here,
-because it is not in the zip either — one absence, stated in the report header rather than
-left for the reader to notice. Each section is a
+交易紀錄 / 股利紀錄 / 換匯紀錄 / 期初庫存 / 公司行動 / 資金收支 — one section per exportable
+ledger, and ``tests/contract/test_export_ledger_list.py`` holds them to that. Each section is a
 chronological table with a per-section count line and — only where they arise naturally
 from the listed columns — simple per-currency ``Decimal`` sums (transaction net cash,
 dividend net, FX converted amounts, opening cost). This builder computes NO new money: it
@@ -21,12 +20,14 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from portfolio_dash.data_ingestion.store import (
+    StoredCashMovement,
     StoredCorporateAction,
     StoredDividend,
     StoredFxConversion,
     StoredOpening,
     StoredTransaction,
     list_accounts,
+    list_cash_movements,
     list_corporate_actions,
     list_dividends,
     list_fx_conversions,
@@ -46,6 +47,7 @@ from portfolio_dash.export.report_html import (
     _page_header,
     _version_line,
 )
+from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
 from portfolio_dash.shared.corporate_actions import KIND_ZH
 
 _ZERO = Decimal("0")
@@ -347,10 +349,60 @@ def _actions_section(
     )
 
 
+def _cash_section(
+    moves: list[StoredCashMovement],
+    accts: dict[str, str],
+    frm: str | None,
+    to: str | None,
+) -> str:
+    """資金收支 — the sixth and last ledger, printable since 2026-08-16.
+
+    **The sign comes from the kind, not from the stored amount** (`shared/cash_kinds.py`):
+    amounts are stored unsigned, so a fee and a deposit are the same number until the kind
+    is consulted. This section therefore prints the signed figure and totals it that way —
+    printing seven unsigned rows under one 「金額」 column would show money leaving the
+    account as money arriving, which is the one thing a statement must not do.
+
+    ``acq_home_amount`` gets its own column rather than a derived rate: F1 forbids storing a
+    rate, and deriving one for display here would be a second place that decides how to
+    round it.
+    """
+    rows: list[str] = []
+    totals: dict[str, Decimal] = {}
+    count = 0
+    for m in sorted(moves, key=lambda x: (x.date, x.id)):
+        if not _in_range(m.date, frm, to):
+            continue
+        count += 1
+        ccy = m.ccy.value
+        signed = m.amount * movement_sign(m.kind)
+        _add(totals, ccy, signed)
+        acq = (_fmt_amount(m.acq_home_amount, "") if m.acq_home_amount is not None
+               else _NULL)
+        rows.append(
+            "<tr>"
+            f'<td class="num">{_esc(m.date.isoformat())}</td>'
+            f'<td class="l">{_esc(accts.get(m.account_id, m.account_id))}</td>'
+            f'<td class="l">{_esc(CASH_KIND_ZH.get(m.kind.upper(), m.kind))}</td>'
+            f'<td class="num">{_amount_ccy(signed, ccy)}</td>'
+            f'<td class="num">{_esc(acq)}</td>'
+            f'<td class="l">{_esc(m.note or "")}</td>'
+            "</tr>"
+        )
+    if not rows:
+        return _empty_section("資金收支")
+    head = (
+        '<tr><th>日期</th><th class="l">帳戶</th><th class="l">類型</th>'
+        '<th>金額</th><th>取得成本（家幣）</th><th class="l">備註</th></tr>'
+    )
+    return _section(
+        "資金收支", count, head, "".join(rows), [_totals_line("淨額合計", totals)]
+    )
+
+
 def _header_html(now: datetime, frm: str | None, to: str | None) -> str:
     gen = now.strftime("%Y-%m-%d %H:%M")
-    nature = ("本報告直接呈現帳本原始輸入值；統計數字皆由這些紀錄重算，不由本報告寫入。"
-              "本報告不含資金收支帳本。")
+    nature = "本報告直接呈現帳本原始輸入值；統計數字皆由這些紀錄重算，不由本報告寫入。"
     meta = [
         f"生成時間 {_esc(gen)}",
         f"期間 {_esc(_range_label(frm, to))}",
@@ -376,6 +428,7 @@ def build_ledgers_report_html(
             _fx_section(list_fx_conversions(conn), accts, frm, to),
             _openings_section(list_opening(conn), accts, names, ccys, frm, to),
             _actions_section(list_corporate_actions(conn), accts, names, frm, to),
+            _cash_section(list_cash_movements(conn), accts, frm, to),
             _page_footer("帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。"),
         ]
     )

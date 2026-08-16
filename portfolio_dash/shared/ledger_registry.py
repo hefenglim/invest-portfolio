@@ -43,7 +43,8 @@ class LedgerTable:
     """Ledger-page tab key. ``None`` -> not individually exportable and NOT in the zip.
 
     One field, not two: the export zip is exactly the set of individually exportable
-    ledgers. ``cash_movements`` is deliberately outside both today.
+    ledgers. Every ledger is inside both today; ``None`` remains available for a ledger that
+    genuinely should not leave the database.
 
     ⚠ This sentence named a count until 2026-08-16 — in the very file whose existence is the
     argument against counting ledgers by hand. It was found by the guard written for the
@@ -60,7 +61,11 @@ LEDGER_TABLES: tuple[LedgerTable, ...] = (
     LedgerTable("dividends", "股利帳本", "date", "dividends", "update"),
     LedgerTable("fx_conversions", "換匯帳本", "date", "fx", "update"),
     LedgerTable("opening_inventory", "期初庫存", "build_date", "opening", "keyed"),
-    LedgerTable("cash_movements", "資金收支", "date", None, "update"),
+    # Exportable since 2026-08-16. It carried ``None`` from the day it was added: the ledger
+    # you could import and not export, so a round trip through the export lost rows that the
+    # import had accepted. One field changed, and the zip, the single-ledger CSV, the export
+    # centre's copy and the printable report all followed — which is what the registry is for.
+    LedgerTable("cash_movements", "資金收支", "date", "cash", "update"),
     # The 6th ledger (spec 2026-08-06). This ONE line is the whole registration: db-stats,
     # the export zip + its CSV tab, the Moomoo account merge and merge_reconcile.py all
     # derive from here. Surrogate PK, no account-scoped UNIQUE -> "update".

@@ -161,6 +161,50 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   nobody should press. Visible for ordinary CSV imports too.
 
 ### Fixed
+- **The cash ledger was writable and invisible: no export, no ledger tab, no printed
+  section.** It became the 6th ledger on 2026-08-13 and every surface that enumerates ledgers
+  was left at five, so a round trip through the export silently dropped rows the import had
+  just accepted, and the page that owns the ledgers had no way to show them. Closed by one
+  registry field (`export_kind`), which carried the zip, the single-ledger CSV, the export
+  centre's copy and the printable report with it — the payoff for the previous entry's work.
+  - **`GET /api/ledgers/cash`** feeds the new 資金收支 tab, in the same shape as its five
+    neighbours so the pager, the account/date filters and the CSV button need no special
+    case. It sends a **`signed_amount`**: amounts are stored unsigned with the direction in
+    the kind, so a page rendering the raw figure would print a broker fee as money arriving,
+    and `web/` may not compute money. The printed report's new section signs its total the
+    same way.
+  - ⚠ **A defect found on the way, already live:** `export/cash_statement.py` kept its own
+    four-entry label map, and the three kinds added on 2026-08-13 never reached it — so a
+    Chinese statement printed 利息 as `interest` and 券商費用 as `broker_fee`. Nothing failed,
+    because a `.get(kind, kind)` fallback is exactly what turns a missing label into
+    plausible output. One `CASH_KIND_ZH` in `shared/cash_kinds.py` now feeds every consumer.
+  - The tab↔export mapping is asserted from outside the page source
+    (`tests/contract/test_ledgers_cash_tab.py`). `trades.html`'s own comment already warned
+    what an omission costs — *"a 5th tab that is not here silently exports the transactions
+    ledger under the corporate-action tab"* — a wrong FILE under a right-looking button, with
+    no error to notice. Proven by removing the pair and watching it go red.
+
+- **A target weight stranded itself on a dead ticker after an EXCHANGE.**
+  `target_weights_config` is a single-row JSON keyed by SYMBOL STRING and nothing re-keyed it,
+  so a merger or rename left the owner's target filed under a symbol the ledger no longer
+  holds — unmeetable, and visible only as a permanent `rebalance.excluded_with_target` entry,
+  one indirection away from the event that caused it. **This is D47's shape, missed when D47
+  shipped**, and the reason it was missed is worth keeping: a weight is *config that nothing
+  recomputes*, so there is no second number for it to disagree with. No reconciliation goes
+  red, no replay complains. The alert band at least fires.
+  - **Value unchanged, source cleared, destination never overwritten** (D47 parity — that
+    number is the owner's judgement about the destination security and no merge rule could be
+    right). ⚠ In that collision case the source's weight **stays stranded**, deliberately:
+    `excluded_with_target` is the honest place for an unsatisfiable target, and silently
+    deleting a value the owner typed is worse. **SPINOFF does nothing** — the child is a
+    different company and carving the parent's target between them needs an allocation rule
+    nobody has given. A SPLIT is immune either way: a ratio is unitless.
+  - Called from `api/` at **both doors**, not from the row writer where the band move lives:
+    `data_ingestion -> strategy` is not an authorised edge (`architecture.md`), and
+    re-deriving the weights format on that side would make it a second owner. Two call sites
+    means two chances to wire only one, which is this defect's own shape — so each door has
+    its own test, and each was watched to fail with the call removed.
+
 - **Nine sentences said the app had four ledgers. It has six, and exports five.** The ledger
   registry removed hand-maintained ledger enumerations from the *code* and never reached the
   *copy*, so when corporate actions became the 5th ledger the words stayed put: the export

@@ -38,12 +38,21 @@ def test_kinds_map_covers_every_exportable_ledger() -> None:
     is what put it in the export zip and gave it a CSV tab key at the same time. Its
     ledger-page TAB is W7's entry-surface work; the router accepting the kind is not the
     same thing as the page offering it, and nothing breaks in between.
+
+    `cash` joined the same way on 2026-08-16 — and that warning above turned out to describe
+    its own gap: cash movements had been importable and NOT exportable since the day they
+    were added. The expected set stays a LITERAL here on purpose. Deriving it from the
+    registry would make this test agree with the registry by construction and assert
+    nothing; the derivation itself is checked in tests/shared/test_ledger_registry.py.
     """
-    assert set(LEDGER_KINDS) == {"transactions", "dividends", "fx", "opening", "actions"}
+    assert set(LEDGER_KINDS) == {
+        "transactions", "dividends", "fx", "opening", "actions", "cash",
+    }
     assert LEDGER_KINDS["transactions"] == ("transactions", "trade_date")
     assert LEDGER_KINDS["fx"] == ("fx_conversions", "date")
     assert LEDGER_KINDS["opening"] == ("opening_inventory", "build_date")
     assert LEDGER_KINDS["actions"] == ("corporate_actions", "date")
+    assert LEDGER_KINDS["cash"] == ("cash_movements", "date")
 
 
 def test_transactions_header_is_raw_db_columns() -> None:
