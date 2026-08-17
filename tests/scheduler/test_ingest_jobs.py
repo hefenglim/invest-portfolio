@@ -257,3 +257,57 @@ def test_failure_streak_resets_on_success(
     for _ in range(5):
         run_job(conn, "finmind_chips_daily", now=_NOW)
     assert _health_status(conn, "finmind") != "error"
+
+
+# --- fundamentals union jobs (W3, AI-D16) --------------------------------------------
+
+
+def test_fundamentals_jobs_registered() -> None:
+    ids = {j.id for j in JOBS}
+    assert {"fundamentals_daily", "fundamentals_av_weekly"} <= ids
+
+
+def test_fundamentals_daily_runs_yfinance_and_finnhub_only(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    """The daily leg is yfinance + finnhub across the whole universe (AV is the weekly)."""
+    seen: dict[str, object] = {}
+
+    def fake_union(conn: sqlite3.Connection, *, now: datetime, **kwargs: object) -> int:
+        seen.update(kwargs)
+        return 2
+
+    monkeypatch.setattr(jobs_mod.ingest, "ingest_fundamentals_union", fake_union)
+    rid = run_job(conn, "fundamentals_daily", now=_NOW)
+    assert rid > 0
+    assert seen.get("sources") == ("yfinance", "finnhub")
+    row = conn.execute("SELECT status FROM job_runs WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "ok"
+
+
+def test_fundamentals_av_weekly_no_runner_is_a_safe_noop(conn: sqlite3.Connection) -> None:
+    jobs_mod.register_fundamentals_runner(None)
+    rid = run_job(conn, "fundamentals_av_weekly", now=_NOW)
+    assert rid > 0
+    row = conn.execute("SELECT status FROM job_runs WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "ok"  # a missing runner is a no-op, not an error
+
+
+def test_fundamentals_av_weekly_dispatches_the_registered_runner(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    called = {"n": 0}
+
+    def stub_runner(conn: sqlite3.Connection, *, now: datetime) -> int:
+        called["n"] += 1
+        return 5
+
+    jobs_mod.register_fundamentals_runner(stub_runner)
+    try:
+        rid = run_job(conn, "fundamentals_av_weekly", now=_NOW)
+    finally:
+        jobs_mod.register_fundamentals_runner(None)
+    assert called["n"] == 1
+    row = conn.execute("SELECT status, detail FROM job_runs WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "ok"
+    assert "5 snapshot" in (row["detail"] or "")

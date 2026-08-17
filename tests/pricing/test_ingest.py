@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from portfolio_dash.bootstrap import bootstrap_db
-from portfolio_dash.pricing import ingest, snapshots_store
+from portfolio_dash.pricing import fundamentals_source, ingest, snapshots_store
 
 _NOW = datetime(2026, 6, 11, 18, 0)
 
@@ -261,3 +261,121 @@ def test_ingest_consensus_reread_is_idempotent(conn: sqlite3.Connection) -> None
         conn, source="yfinance", dataset="consensus", symbol="2330"
     )
     assert snap is not None and snap.payload["rating_score"] == "2"  # newest wins on read
+
+
+# --- fundamentals union ingest (W3, AI-D13/D14): every enabled source writes its own
+# row; no fallback chain, no merge. The registry's capable_ids is the capability+key
+# gate; a stub registry keeps the tests deterministic (and off the env). ---------------
+
+
+class _StubRegistry:
+    """Only the seam ingest_fundamentals_union uses: capable_ids()."""
+
+    def __init__(self, enabled: dict[str, list[str]]) -> None:
+        self._enabled = enabled  # market value -> source ids
+
+    def capable_ids(self, data_type: object, market: Any) -> list[str]:
+        return self._enabled.get(str(market), [])
+
+
+def _stub_registry(monkeypatch: pytest.MonkeyPatch, enabled: dict[str, list[str]]) -> None:
+    stub = _StubRegistry(enabled)
+    monkeypatch.setattr(ingest, "default_registry", lambda conn=None: stub)
+
+
+def _fake_block(symbol: str) -> dict[str, Any]:
+    return {"as_of": "2026-06-11", "currency": "USD", "pe_ratio": "25", "sym": symbol}
+
+
+def test_fundamentals_union_writes_one_row_per_enabled_source(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    _add_instrument(conn, "AAPL", "US")
+    _stub_registry(monkeypatch, {"US": ["alphavantage", "finnhub", "yfinance"]})
+    n = ingest.ingest_fundamentals_union(
+        conn, now=_NOW,
+        fetchers={s: lambda ref, *, as_of, token, _s=s: _fake_block(_s) for s in
+                  ("yfinance", "finnhub", "alphavantage")},
+    )
+    assert n == 3  # UNION: all three rows coexist (PK carries source)
+    for source in ("yfinance", "finnhub", "alphavantage"):
+        snap = snapshots_store.latest_snapshot(
+            conn, source=source, dataset="fundamentals", symbol="AAPL"
+        )
+        assert snap is not None and snap.payload["sym"] == source
+
+
+def test_fundamentals_union_keyless_sources_write_nothing(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # The gate: only yfinance is capable (keyless finnhub/AV absent from capable_ids).
+    _add_instrument(conn, "AAPL", "US")
+    _stub_registry(monkeypatch, {"US": ["yfinance"]})
+    n = ingest.ingest_fundamentals_union(
+        conn, now=_NOW,
+        fetchers={"yfinance": lambda ref, *, as_of, token: _fake_block("yfinance")},
+    )
+    assert n == 1
+    assert snapshots_store.latest_snapshot(
+        conn, source="finnhub", dataset="fundamentals", symbol="AAPL"
+    ) is None
+
+
+def test_fundamentals_union_sources_and_universe_are_restricted(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # The AV Saturday leg: sources=("alphavantage",) + an injected held-only universe.
+    _add_instrument(conn, "AAPL", "US")
+    _add_instrument(conn, "MSFT", "US")  # registered but NOT in the injected universe
+    _stub_registry(monkeypatch, {"US": ["alphavantage", "yfinance"]})
+    held = [r for r in ingest.all_universe(conn) if r.symbol == "AAPL"]
+    n = ingest.ingest_fundamentals_union(
+        conn, now=_NOW, sources=("alphavantage",), universe=held,
+        fetchers={"alphavantage": lambda ref, *, as_of, token: _fake_block("av")},
+    )
+    assert n == 1
+    assert snapshots_store.latest_snapshot(
+        conn, source="alphavantage", dataset="fundamentals", symbol="AAPL"
+    ) is not None
+    assert snapshots_store.latest_snapshot(
+        conn, source="alphavantage", dataset="fundamentals", symbol="MSFT"
+    ) is None
+    assert snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="fundamentals", symbol="AAPL"
+    ) is None  # yfinance not in this job's sources
+
+
+def test_fundamentals_union_isolates_per_source_failure(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    _add_instrument(conn, "AAPL", "US")
+    _stub_registry(monkeypatch, {"US": ["finnhub", "yfinance"]})
+
+    def boom(ref: object, *, as_of: object, token: object) -> None:
+        raise RuntimeError("finnhub 500")
+
+    n = ingest.ingest_fundamentals_union(
+        conn, now=_NOW,
+        fetchers={"finnhub": boom,
+                  "yfinance": lambda ref, *, as_of, token: _fake_block("yfinance")},
+    )
+    assert n == 1  # the yfinance row survives finnhub's failure
+
+
+def test_fundamentals_union_ledger_only_db_degrades_to_keyless(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    # The pricing conn fixture is bootstrap_db-only: NO data_sources table. The keyed
+    # providers' token getters raise OperationalError -> only the key-less leg runs.
+    _add_instrument(conn, "AAPL", "US")
+    monkeypatch.delenv("FINNHUB_KEY", raising=False)
+    monkeypatch.delenv("ALPHAVANTAGE_KEY", raising=False)
+    monkeypatch.setitem(
+        fundamentals_source.FETCHERS, "yfinance",
+        lambda ref, *, as_of, token=None: _fake_block("yfinance"),
+    )
+    n = ingest.ingest_fundamentals_union(conn, now=_NOW)
+    assert n == 1
+    assert snapshots_store.latest_snapshot(
+        conn, source="yfinance", dataset="fundamentals", symbol="AAPL"
+    ) is not None

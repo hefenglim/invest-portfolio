@@ -63,7 +63,7 @@ class VarSpec:
     token: str
     name: str
     category: str  # vars.js category id:
-    # position|price|dividend|fx|chips|consensus|news|sentiment|ai|system
+    # position|price|dividend|fx|chips|consensus|fundamentals|news|sentiment|ai|system
     scope: Scope
     available: bool
     desc: str
@@ -237,6 +237,18 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"ratings_prev_month":{"strong_buy":8,"buy":22,"hold":2,"sell":0,"strong_sell":0,'
         '"total":32},"rating_score":"1.76","upside_vs_mean_pct":"0.1440",'
         '"source":"yfinance"}',
+    ),
+    # --- fundamentals (基本面多來源聯集) — live from external_snapshots (W3, AI-D13..D16) ---
+    VarSpec(
+        "fundamentals_json", "基本面（多來源）", "fundamentals", "per_symbol", True,
+        "PE/PB/EPS(ttm)/市值/殖利率/beta/ROE/營收YoY 八欄，每來源一塊（yfinance／finnhub／"
+        "alphavantage，台股另含 finmind），各塊自帶 as_of 與 currency；不同來源數字可能不同"
+        "——並陳標來源，不取平均；缺塊＝該來源無覆蓋",
+        '{"symbol":"AAPL","last_as_of":"2026-08-17","sources":{"yfinance":{"as_of":'
+        '"2026-08-17","currency":"USD","pe_ratio":"28.4","pb_ratio":"45.06","eps_ttm":'
+        '"6.58","market_cap":"4210000000000","dividend_yield_pct":"0.4","roe_pct":"151.4",'
+        '"revenue_growth_yoy_pct":"7.8"},"finnhub":{"as_of":"2026-08-17","currency":"USD",'
+        '"pe_ratio":"28.02","beta":"1.1"}}}',
     ),
     # --- sentiment (市場情緒) — live from external_snapshots (spec 20.2) ---
     VarSpec(
@@ -452,7 +464,7 @@ _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
 _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
     "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
-    "symbol_news_json", "consensus_json", "rule_signals_json",
+    "symbol_news_json", "consensus_json", "rule_signals_json", "fundamentals_json",
 })
 
 

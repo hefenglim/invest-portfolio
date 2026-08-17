@@ -23,6 +23,25 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A provider's "convenience" object is not a stable schema — probe it, don't trust the
+  docs' key names (2026-08-18):** the W3 yfinance fundamentals leg read `fast_info["last_price"]`
+  (snake_case, per yfinance docs and older versions) and got nothing — this yfinance version's
+  `dict(fast_info)` yields **camelCase** keys (`lastPrice`/`marketCap`). Every
+  fast_info-dependent field silently vanished while the statement-derived fields all worked,
+  so the block looked healthy at a glance (7 fields present, all ratios missing). The live
+  probe (`scripts/probe_fundamentals.py`) caught it on its first run, before any test existed
+  — the probe-first discipline paid for itself immediately. Two rules: **(1)** external-field
+  key names go through a candidate tuple (`("lastPrice", "last_price", …)`), never a single
+  literal, for any provider object that isn't a documented JSON contract. **(2)** When a new
+  fetch leg is mostly green, ask which fields share a single upstream object — a dead seam
+  fails *by field family*, not by symbol.
+- **Decimal multiplication sums exponents — `× 100` for a percent rewrites the text
+  (2026-08-18):** `Decimal("0.015") * 100` is `1.500`, not `1.5`; the value is exact and `==`
+  agrees, but the stored TEXT changes (the same trap as `Decimal(1)` vs `Decimal("1.0")` in the
+  split-basis seam). Any ratio → percent conversion at a storage seam needs a canonical-string
+  step that strips trailing zeros (string-level `rstrip`, NOT `normalize()` — that one turns
+  `40000` into `4E+4`). Pinned by `fundamentals_source._clean`.
+
 - **When one validator serves two doors, check that BOTH doors pass the argument
   (2026-08-14):** `cash_import.py` fixed sibling-awareness a release earlier and wrote the rule
   down in its own module docstring — *"The whole file is one batch … the E1a class of failure"* —

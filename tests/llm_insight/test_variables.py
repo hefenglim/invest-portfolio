@@ -3,8 +3,9 @@
 The registry mirrors web/vars.js PLUS three backend-only date/time system tokens
 (spec 04.10: now / card_created_at / eval_date), two batch-③ signal vars
 (technical_signals_json / fear_greed_json), one batch-④ news var (symbol_news_json),
-one P1-batch-2 consensus var (consensus_json), and one P2-batch-3 rule-signals var
-(rule_signals_json) — 34 total across 10 categories.
+one P1-batch-2 consensus var (consensus_json), one P2-batch-3 rule-signals var
+(rule_signals_json), and one W3 fundamentals-union var (fundamentals_json)
+— 35 total across 11 categories.
 validate_tokens is the single reusable core (spec 04 R1 + spec 07 preflight):
 preview lists diagnostics, the execution path turns them into 422s. Value assembly reads
 only already-computed DashboardData / per-symbol detail / technicals / fed date context —
@@ -24,13 +25,14 @@ from portfolio_dash.shared.enums import Currency
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_registry_has_34_and_categories() -> None:
+def test_registry_has_35_and_categories() -> None:
     # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news
-    # + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals (rule_signals_json) = 34.
-    assert len(V.REGISTRY) == 34
-    assert len({v.category for v in V.REGISTRY}) == 10  # rule_signals joins existing 'price'
+    # + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals (rule_signals_json)
+    # + 1 W3 fundamentals (fundamentals_json) = 35.
+    assert len(V.REGISTRY) == 35
+    assert len({v.category for v in V.REGISTRY}) == 11  # fundamentals is its own category
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 34
+    assert len({v.token for v in V.REGISTRY}) == 35
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
@@ -42,21 +44,33 @@ def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
     assert counts == {
         # price gained technical_signals_json (4 → 5, batch ③) then rule_signals_json
         # (5 → 6, P2 batch 3); sentiment gained fear_greed_json (2 → 3) — batch ③; news
-        # gained symbol_news_json — batch ④; consensus is the P1-batch-2 category.
+        # gained symbol_news_json — batch ④; consensus is the P1-batch-2 category;
+        # fundamentals is the W3 category (fundamentals_json).
         "position": 6, "price": 6, "dividend": 3, "fx": 2,
         # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
-        "chips": 5, "consensus": 1, "news": 1, "sentiment": 3, "ai": 2, "system": 5,
+        "chips": 5, "consensus": 1, "fundamentals": 1, "news": 1, "sentiment": 3,
+        "ai": 2, "system": 5,
     }
 
 
-def test_available_split_32_now_2_later() -> None:
+def test_available_split_33_now_2_later() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    # 31 previously live + 1 P2-batch-3 rule_signals = 32; only the 2 'ai' vars stay deferred.
-    assert len(available) == 32
+    # 32 previously live + 1 W3 fundamentals = 33; only the 2 'ai' vars stay deferred.
+    assert len(available) == 33
     assert len(unavailable) == 2
     # only the 2 'ai' vars remain deferred (spec 04).
     assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)
+
+
+def test_fundamentals_var_registered_per_symbol_live() -> None:
+    """W3 (AI-D13..D16): the union variable — per_symbol, live, its own category, and
+    external-fed (assembled by the api seam, never by llm_insight itself)."""
+    spec = V.BY_TOKEN["fundamentals_json"]
+    assert spec.category == "fundamentals"
+    assert spec.scope == "per_symbol"
+    assert spec.available is True
+    assert "fundamentals_json" in V._EXTERNAL_TOKENS
 
 
 def test_date_vars_registered_as_available_portfolio_system() -> None:

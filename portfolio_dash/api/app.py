@@ -19,6 +19,7 @@ from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.digest_service import run_digest
 from portfolio_dash.api.dividend_inbox import scan_job as dividend_scan_job
 from portfolio_dash.api.errors import register_error_handlers
+from portfolio_dash.api.fundamentals_service import run_fundamentals_av
 from portfolio_dash.api.insight_service import (
     evaluate_due as insight_evaluate_due,
 )
@@ -88,6 +89,7 @@ from portfolio_dash.scheduler.jobs import (
     register_digest_runner,
     register_dividend_scan_runner,
     register_evaluation_runner,
+    register_fundamentals_runner,
     register_insight_runner,
     register_news_runner,
     register_signal_scan_runner,
@@ -193,6 +195,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Alert-compute (P3 batch 2): the FULL rule set (market-risk rules need pricing/consensus
     # reads that live in the api seam) — the scheduler's alert_scan runs through this.
     register_alert_compute_runner(scan_alert_compute)
+    # Fundamentals AV leg (W3, AI-D16): the Saturday job covers HELD symbols only; the
+    # held set is computed here (scheduler/ + pricing/ cannot replay the book).
+    register_fundamentals_runner(run_fundamentals_av)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()

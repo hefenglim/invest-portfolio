@@ -255,6 +255,35 @@ CATALOG: list[Feature] = [
         area="輸入 → 帳本記錄 → 公司行動 → 分拆",
         target="#tab-laction",
     ),
+    Feature(
+        version="0.1.29",
+        id="ai-advice-drawer",
+        title="個股抽屜多了一張「AI 建議」卡：你的部位 × 技術 × 法則 × 新聞 × 共識",
+        desc="它回答的不是「這檔股票好不好」，而是「以你現在的成本與倉位，現在該注意什麼」——"
+        "給的是條件式情境（若守住某均線、法則分數維持強勢，屬偏多持有情境），"
+        "不是買賣指令，也絕不給部位大小。每天美股收盤後自動產生；"
+        "抽屜裡也有一顆「立即產生」，只有輸入真的變過的標的才會重新計費。 "
+        "另一張姊妹卡「持倉提點」則在風險警示觸發時出現，"
+        "用不超過三個交易日的視角說「這件事對你的部位意味著什麼」",
+        href="index.html",
+        area="總覽 → 持股明細 → 標的抽屜 → AI 建議",
+        target="#holdings-table",
+    ),
+    Feature(
+        version="0.1.29",
+        id="fundamentals-three-markets",
+        title="建議卡的基本面不再只有台股：美股、馬股都有了，而且看得到資料來源",
+        desc="以前「基本面」這條腿只有台股（FinMind），美股卡先天比台股卡弱。現在 yfinance 每天抓、"
+        "Finnhub 與 Alpha Vantage 註冊金鑰後自動加入——每一家各寫各的，不合併、不取平均："
+        "兩家對同一檔的本益比給出不同數字時，卡上會兩個都列、各自標來源，"
+        "因為平均出來的數字沒有任何一家真的報過。台股除了 yfinance 還會並排 FinMind 的"
+        "本益比／股價淨值比／殖利率，三個市場同一種格式，可以直接比。 "
+        "排程在設定頁看得到：fundamentals_daily（每日）與 fundamentals_av_weekly"
+        "（週六、只跑你持有的標的——免費額度跑不起整個清單）",
+        href="settings.html#scheduler",
+        area="設定 → 排程中心",
+        target="#view-scheduler",
+    ),
     # --- v0.1.28 (share reconciliation) ---------------------------------------------------
     Feature(
         version="0.1.28",

@@ -22,7 +22,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v12 (2026-08-16)"  # +持倉建議與提點策略 / 持倉提點策略 (W2, AI-D1/D5)
+LIBRARY_VERSION = "official-v13 (2026-08-17)"  # 建議策略 v2: +基本面多來源段 (W3, AI-D14/15)
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -444,13 +444,28 @@ _ADVICE_BODY = (
 {{volatility_json}}
 {{price_history_json}}
 
-三、新聞與共識 — 近期經整理個股新聞（標題／日期／摘要）作為催化劑或風險事件背景；分析師
+三、基本面（多來源聯集，sources 下每個鍵是一家資料來源：yfinance／finnhub／alphavantage，
+台股另含 finmind；各塊欄位同義同名：pe_ratio＝本益比、pb_ratio＝股價淨值比、eps_ttm＝
+近四季每股盈餘、market_cap＝市值（以該塊 currency 計）、dividend_yield_pct＝殖利率%、
+beta、roe_pct＝股東權益報酬率%、revenue_growth_yoy_pct＝營收年增率%；各塊自帶 as_of
+與 currency）—
+1) 估值與體質並讀：PE/PB 的高低要搭配 ROE 與營收成長判讀「貴得有沒有道理」，殖利率
+   與 EPS 走向決定股利型部位的持有邏輯；
+2) ⚠ 紅線：不同來源對同一欄位給出不同數字是常態（計算口徑不同）——**如實並陳各家
+   數值與來源名，不得取平均、不得調和、不得自造任何一家都沒報過的數字**；引用任何
+   基本面數字時一律標注來源與基準日（例：「PE 28.4（yfinance，2026-08-17）」）；
+3) 某來源區塊缺席＝該來源無覆蓋或未啟用，明講即可；fundamentals_json 整體為
+   unavailable 時直說「無基本面資料」，不得虛構；台股的 finmind 塊僅 PE／PB／殖利率
+   三欄。
+{{fundamentals_json}}
+
+四、新聞與共識 — 近期經整理個股新聞（標題／日期／摘要）作為催化劑或風險事件背景；分析師
 目標價區間、現價相對均值位置、評級分布與月度變化。新聞僅供背景判讀，不得從新聞取價格或
 報酬等數字；consensus_json 為 unavailable 時明講「無分析師覆蓋」，不得虛構。
 {{symbol_news_json}}
 {{consensus_json}}
 
-四、建議與提點（本卡的核心）— 綜合以上，給出**條件式評估情境**，不是買賣指令：
+五、建議與提點（本卡的核心）— 綜合以上，給出**條件式評估情境**，不是買賣指令：
 對「加碼／持有／減碼／出場觀察」各寫一段「若…則…」的觸發條件與對應方向
 （例：「若 TechScore 維持強勢且價格守住 20 日均線、RSI 未過熱 → 屬偏多持有或小幅加碼的
 評估情境」、「若跌破 200 日均線且趨勢結構轉為下降 → 屬減碼重新評估情境」）。
@@ -458,7 +473,7 @@ _ADVICE_BODY = (
 ⚠ 產品紅線（不得越界）：只到條件與方向，**不給部位大小、不給買賣金額、不給停損停利價**；
 未持倉標的改以「建倉／觀望」情境描述。
 
-五、方向判讀與預測 — 綜合給出偏多／偏空／觀望之一。**prediction 由你決定是否給**：
+六、方向判讀與預測 — 綜合給出偏多／偏空／觀望之一。**prediction 由你決定是否給**：
 資料不足或訊號矛盾時可留空（並在內文說明為何不給）；若給，metric 一律 price_change，
 direction 用 up/down/flat，target_pct 僅在有明確依據時提供，且**必須附 confidence**
 （0-100，此預測命中的真實機率估計，寧可保守）。
@@ -506,7 +521,9 @@ STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "個股健檢策略", "version": "v2.5", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
     # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
-    {"name": "持倉建議與提點策略", "version": "v1", "scope": "per_symbol", "body": _ADVICE_BODY},
+    # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
+    # v2 (W3, AI-D14/15): +基本面 section — one block per source, never averaged.
+    {"name": "持倉建議與提點策略", "version": "v2", "scope": "per_symbol", "body": _ADVICE_BODY},
     # The 提點 card (AI-D5/AI-D11): alert-triggered, ≤3 trading-day window via ON_ALERT_NOTE.
     {"name": "持倉提點策略", "version": "v1", "scope": "on_alert", "body": _ON_ALERT_ADVICE_BODY},
 ]
@@ -589,14 +606,14 @@ TASK_PRESETS: list[TaskPreset] = [
     {
         "preset_key": "advice",
         "name": "持倉建議與提點",
-        "version": "v1",
+        "version": "v2",
         "scope": "per_symbol",
         "strategy": "持倉建議與提點策略",
         "use_system_prompt": True,
         "self_correct": True,
         "horizon_days": 14,
         "suggested_cron": "0 10 * * tue-sat",
-        "description": "逐持倉的「建議與提點」卡（倉位×技術×法則×新聞×共識；預測自由，帶信心）",
+        "description": "逐持倉的「建議與提點」卡（倉位×技術×法則×基本面×新聞×共識；預測自由，帶信心）",  # noqa: E501
     },
     # W2 (AI-D5/AI-D11/AI-D12): the 提點 card. Event-driven — no cron; subscribes to the six
     # risk-alert rules and is ENABLED on creation (the one place the on_alert default-disabled

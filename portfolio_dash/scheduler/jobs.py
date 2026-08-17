@@ -528,6 +528,8 @@ _INGEST_JOB_SOURCE: dict[str, str] = {
     "sentiment_daily": "yfinance",
     "index_quotes_daily": "yfinance",
     "consensus_daily": "yfinance",
+    "fundamentals_daily": "yfinance",
+    "fundamentals_av_weekly": "alphavantage",
 }
 
 
@@ -640,6 +642,49 @@ def consensus_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """
     return _run_ingest(
         conn, "consensus_daily", lambda: ingest.ingest_consensus(conn, now=now), now=now
+    )
+
+
+def fundamentals_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Daily: fundamentals blocks from yfinance + Finnhub, UNION semantics (W3, AI-D16).
+
+    Every enabled source writes its own snapshot row per symbol (no fallback chain — a
+    keyless Finnhub simply writes nothing). Fundamentals move slowly, so one morning run
+    right after consensus_daily is enough; the yfinance leg derives its ratios from the
+    light statement endpoints at the fetch seam (never Ticker.info).
+    """
+    return _run_ingest(
+        conn, "fundamentals_daily",
+        lambda: ingest.ingest_fundamentals_union(
+            conn, now=now, sources=("yfinance", "finnhub")
+        ),
+        now=now,
+    )
+
+
+# Fundamentals AV-leg runner seam (W3, AI-D16): the Saturday Alpha Vantage pass covers
+# HELD symbols only (free quota 25 calls/day cannot survive a full-universe pass), and
+# the held set is a portfolio/ replay result that scheduler/ + pricing/ cannot compute.
+# The app registers the api-side runner at startup — the same injection pattern as
+# signal_scan / alert_compute (architecture.md); no runner registered -> safe no-op.
+FundamentalsRunner = Callable[..., int]
+_FUNDAMENTALS_RUNNER: FundamentalsRunner | None = None
+
+
+def register_fundamentals_runner(fn: FundamentalsRunner | None) -> None:
+    """Register (or clear with None) the fundamentals AV-leg runner (app wiring seam)."""
+    global _FUNDAMENTALS_RUNNER
+    _FUNDAMENTALS_RUNNER = fn
+
+
+def fundamentals_av_weekly(conn: sqlite3.Connection, *, now: datetime) -> str:
+    """Saturday: Alpha Vantage fundamentals blocks for HELD symbols, via the registered
+    runner (``api.fundamentals_service.run_fundamentals_av``)."""
+    runner = _FUNDAMENTALS_RUNNER
+    if runner is None:
+        return "no fundamentals runner registered"
+    return _run_ingest(
+        conn, "fundamentals_av_weekly", lambda: runner(conn, now=now), now=now
     )
 
 
@@ -911,6 +956,16 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "consensus_daily", consensus_daily, "10 9 * * *", "Asia/Taipei", True,
         "Analyst target price + rating distribution (all instruments)",
+    ),
+    # Fundamentals union (W3, AI-D16): yfinance + Finnhub daily; Alpha Vantage on
+    # Saturday, HELD symbols only, via the registered runner (free quota 25/day).
+    JobSpec(
+        "fundamentals_daily", fundamentals_daily, "20 9 * * *", "Asia/Taipei", True,
+        "Fundamentals blocks: yfinance + Finnhub union (all instruments)",
+    ),
+    JobSpec(
+        "fundamentals_av_weekly", fundamentals_av_weekly, "40 9 * * sat", "Asia/Taipei",
+        True, "Alpha Vantage fundamentals (held symbols only; free quota 25/day)",
     ),
     # Rule-signal scan (P2 batch 2): post-close, after quotes refresh, before the alert
     # scan so any signal transition is recorded ahead of the on_alert dispatch pass.

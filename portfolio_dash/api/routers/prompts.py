@@ -377,6 +377,62 @@ def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
 # Honest degrade reason for a symbol yfinance carries no analyst data for (P1 batch 2).
 _CONSENSUS_NO_COVERAGE = "無分析師覆蓋（yfinance 無此標的的分析師目標價／評級資料）"
 
+# Honest degrade reason when NO fundamentals source has a block for the symbol (W3).
+_FUNDAMENTALS_NO_COVERAGE = (
+    "無基本面快照（yfinance 無覆蓋，Finnhub／Alpha Vantage 未啟用或無覆蓋）"
+)
+
+#: The three union sources whose blocks are read straight from their snapshots (W3,
+#: AI-D14 — one block per source, no merge). TW symbols additionally get a ``finmind``
+#: block mapped from the existing valuation snapshot (AI-D15, no double fetching).
+_FUNDAMENTALS_SOURCES = ("yfinance", "finnhub", "alphavantage")
+
+
+def _fundamentals_var(conn: sqlite3.Connection, symbol: str) -> dict[str, Any]:
+    """Assemble fundamentals_json: one block per source under ``sources`` (W3, AI-D14).
+
+    Each block is the provider's snapshot payload verbatim (canonical field names +
+    currency + as_of, already final at the fetch seam — this layer computes nothing).
+    TW symbols also get a ``finmind`` block mapped from the existing FinMind valuation
+    snapshot (per→pe_ratio, pbr→pb_ratio, dividend_yield→dividend_yield_pct) so all
+    three markets are same-shaped and comparable; per_percentile stays FinMind-specific
+    and remains only in valuation_json. No blocks at all → the unavailable shape, with
+    the reason fed via ``_external_reasons``.
+    """
+    blocks: dict[str, Any] = {}
+    for source in _FUNDAMENTALS_SOURCES:
+        snap = snapshots_store.latest_snapshot(
+            conn, source=source, dataset="fundamentals", symbol=symbol
+        )
+        if snap is not None:
+            blocks[source] = snap.payload
+    row = conn.execute(
+        "SELECT market FROM instruments WHERE symbol = ?", (symbol,)
+    ).fetchone()
+    if row is not None and row["market"] == "TW":
+        finmind = _finmind_var(conn, symbol, dataset="valuation", build=ES.build_valuation)
+        if finmind.get("unavailable") is not True:
+            block: dict[str, Any] = {
+                "as_of": finmind.get("last_as_of"),
+                "currency": "TWD",
+            }
+            for src_key, canon in (
+                ("per", "pe_ratio"), ("pbr", "pb_ratio"),
+                ("dividend_yield", "dividend_yield_pct"),
+            ):
+                if finmind.get(src_key) is not None:
+                    block[canon] = finmind[src_key]
+            if len(block) > 2:
+                blocks["finmind"] = block
+    if not blocks:
+        return {"unavailable": True, "last_as_of": None}
+    as_ofs = [b.get("as_of") for b in blocks.values() if b.get("as_of")]
+    return {
+        "symbol": symbol,
+        "last_as_of": max(as_ofs) if as_ofs else None,
+        "sources": blocks,
+    }
+
 
 def _consensus_var(conn: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     """Assemble consensus_json from the latest yfinance consensus snapshot (P1 batch 2).
@@ -451,6 +507,7 @@ def _external_vars(
             conn, symbol, dataset="financials", build=ES.build_financials
         )
         out["consensus_json"] = _consensus_var(conn, symbol)
+        out["fundamentals_json"] = _fundamentals_var(conn, symbol)
         out["symbol_news_json"] = _news_var(symbol, now=now or datetime.now(_TAIPEI))
         out["rule_signals_json"] = _rule_signals_var(
             conn, symbol, now=now or datetime.now(_TAIPEI)
@@ -482,6 +539,9 @@ def _external_reasons(conn: sqlite3.Connection, external_vars: dict[str, Any]) -
     consensus = external_vars.get("consensus_json")
     if isinstance(consensus, dict) and consensus.get("unavailable") is True:
         reasons["consensus_json"] = _CONSENSUS_NO_COVERAGE
+    fundamentals = external_vars.get("fundamentals_json")
+    if isinstance(fundamentals, dict) and fundamentals.get("unavailable") is True:
+        reasons["fundamentals_json"] = _FUNDAMENTALS_NO_COVERAGE
     rule_signals = external_vars.get("rule_signals_json")
     if isinstance(rule_signals, dict) and rule_signals.get("unavailable") is True:
         reasons["rule_signals_json"] = _RULE_SIGNALS_THIN

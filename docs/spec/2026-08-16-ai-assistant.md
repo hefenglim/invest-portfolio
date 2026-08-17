@@ -1,6 +1,6 @@
 # AI 投資助手 —— 規格（2026-08-16）
 
-**狀態：** owner 裁示完成（§0）。W1 已出貨（`f0ab8e7`）；W2–W8 依序實作。
+**狀態：** owner 裁示完成（§0）。W1（`f0ab8e7`）、W2（`c609c57`）、W3 已出貨；W4–W8 依序實作。
 **基準：** branch `feat/corporate-actions`，未合併，`__version__` 0.1.28。
 **上游：** `docs/reports/2026-07-06-ai-assistant-development-blueprint.md`（願景與誠實目標函數）；
 `C:\Users\hefeng\.claude\plans\validated-riding-mitten.md`（核准的實施計畫，含每案 3–5 選項與比較表）。
@@ -30,6 +30,10 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **AI-D10** | 建議卡的預測由誰決定 | **自由決定（維持卡 schema 現況）** | owner 裁示。預測選填、帶預測則必須帶信心（`cards.py:53-58` 既有）。能真心說「資料不足」比「每張卡都被評分但可能硬給數字」重要 |
 | **AI-D11** | 提點卡訂閱哪些警示 | **風險警示六條**：`target_cross`／`single_weight`／`fx_drift`／`drawdown_from_peak`／`vol_spike`／`consensus_change` | owner 裁示。⚠ `signal_*` 轉換事件**刻意不含**在 `'all'` 通配符裡（`gating.py:89-101`，原本就是設計如此）；資料健康類（`missing_price`／`quota_low`）LLM 沒有內容可詮釋 |
 | **AI-D12** | 建議 preset 預設啟用範圍 | **建啟用、demo 先行** | owner 裁示。依既有慣例建為 enabled（每個官方 preset 都是；on_alert 過去是唯一例外）；merge/main/prod 保持不動直到 owner 明確同意 |
+| **AI-D13** | W3 掛法（抓取層架構） | **混合式**：`DataType.FUNDAMENTALS` 進 enum，三家 provider 用 `supports()` 宣告能力（金鑰門控沿用 `default_registry` 已接好的 DB token_getter 佈線），**不進** `DEFAULT_PROVIDER_ORDER` fallback 鏈；抓取與解析放新的 `pricing/fundamentals_source.py`（比照 `consensus_source.py` 的純函式＋I/O 縫） | owner 裁示（W3-1）。聯集語義下鏈的「順序」毫無意義，但 `supports()`/`capable_ids()` 是現成的能力＋金鑰閘。owner 附問：多來源會不會讓線圖混亂——**不會**：`prices` 主鍵一檔一天一列、先成功者勝、重跑同鍵 upsert，圖表永遠只讀到一個收盤價；聯集只發生在 `external_snapshots`，而圖表從不讀它 |
+| **AI-D14** | W3 合併形狀 | **不合併，每家一塊**：`fundamentals_json = {source: block}`；欄名在各塊內正規化為同一組 canonical 名（改名不是合併）；「不取平均」紅線由提示詞執行——不同來源不同值必須並陳並標來源，不得平均、不得調和出任何一家都沒報過的數字 | owner 裁示（W3-2），**修訂 AI-D4 的機制**（原為合併層逐欄 `{value, source}`＋`disagreement` 旗標；兩值都留、各自標來源的精神不變——塊鍵本身就是來源）。已同步修訂 `.claude/rules/data-and-pricing.md` 的 AI-D4 節 |
+| **AI-D15** | W3 欄位集 | **固定 canonical 交集 8 欄**：`pe_ratio`／`pb_ratio`／`eps_ttm`／`market_cap`／`dividend_yield_pct`／`beta`／`roe_pct`／`revenue_growth_yoy_pct`；缺欄＝缺席不虛構；TW 由既有 FinMind valuation 快照映射出 `finmind` 塊（不重複抓取） | 建議、owner 採納（W3-3）。yfinance 避開 `Ticker.info`（`consensus_source.py:4` 的明文紀律），改由財報端點在抓取縫**本地推導**（比照 consensus 縫算 rating_score 的先例）；單位在縫上統一（市值＝報價幣別原始單位，殖利率／ROE／成長率＝百分比） |
+| **AI-D16** | W3 排程與額度 | `fundamentals_daily` 日跑 yfinance＋Finnhub（全宇宙）；`fundamentals_av_weekly` 週六跑 Alpha Vantage、**僅持有標的**（registered-runner 模式：持有集由 api 層算好注入） | 建議、owner 採納（W3-4）。AV 免費額度 25 calls/day，全宇宙一輪即爆；持有集是 `portfolio/` 的重放結果，`pricing/` 算不出——沿用 `signal_scan`／`alert_compute` 的 runner 註冊縫。實作為**兩個** job（run 歷史與健康歸屬各自乾淨），裁示文字「同 job」的意圖不變。探針先行：yfinance 腿即時可跑，finnhub／AV 腿待金鑰進場後跑，頻率依探針結果修 |
 
 > **命名慣例**：本企劃的裁示用 `AI-D<n>`，**永不**與公司行動 spec 的 `D<n>` 編號空間混用。
 > 先例教訓：上一輪藍圖把自己的裁示寫在它自己的 §10（D1–D9），產生了「那是藍圖內部裁示
@@ -88,8 +92,8 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | 波次 | 內容 | 決策 | 規模 | 狀態 |
 | --- | --- | --- | --- | --- |
 | **W1** | AI 門三缺陷（AI-1/2/3）＋ 資金列正負號預覽 | E 必修 | S | ✅ **出貨 `f0ab8e7`** |
-| **W2** | 修「均線交叉」重名 ＋ **助手雛形**：抽屜內建議卡、`on_alert` 提點卡（只用現有變數） | AI-D2 · AI-D1 · AI-D5 | S-M | ⬜ |
-| **W3** | 基本面三家 provider（聯集合併、逐筆標記來源）→ `fundamentals_json` 變數 | AI-D4 | L | ⬜ |
+| **W2** | 修「均線交叉」重名 ＋ **助手雛形**：抽屜內建議卡、`on_alert` 提點卡（只用現有變數） | AI-D2 · AI-D1 · AI-D5 | S-M | ✅ **出貨 `c609c57`** |
+| **W3** | 基本面三家 provider（聯集並存、每家一塊、塊內欄名正規化）→ `fundamentals_json` 變數 | AI-D4 · AI-D13–D16 | L | ✅ 本波提交（探針證據見 §4） |
 | **W4** | AI 門判別式聯集擴充（交易＋股利＋資金）＋ 準確度語料與閘門 | AI-D3 | M | ⬜ |
 | **W5** | 計分板補洞：基準重放（`relative`）＋ 實現波動（`volatility`） | AI-D7 | M | ⬜ |
 | **W6** | 訊號歷史（時序表）＋ 事件研究回測 → 點亮 `backtest_json`／`calibration_gap_json` | AI-D2 | L | ⬜ |
@@ -104,7 +108,7 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | --- | --- |
 | W1 | `data_ingestion/agents.py` · `shared/llm.py:226-236` · `shared/image_types.py`（新） |
 | W2 | `portfolio/technicals.py` ↔ `strategy/rules/params.py` · `llm_insight/official_templates.py`（模板＋preset＋`PROMPT_REGISTRY`）· `api/routers/insights.py`（on_alert 預設啟用）· `web/detail.js` |
-| W3 | `pricing/providers/{yfinance,finnhub,alphavantage}_provider.py` · `pricing/defaults.py` · 新 `pricing/fundamentals_source.py`（比照 `consensus_source.py`）· `pricing/ingest.py` · `portfolio/external_signals.py`（合併層）· `llm_insight/variables.py` · `api/routers/prompts.py::_external_vars` · `scheduler/jobs.py` |
+| W3 | `pricing/enums.py`（+FUNDAMENTALS）· `pricing/providers/{yfinance,finnhub,alphavantage}_provider.py`（supports 宣告）· 新 `pricing/fundamentals_source.py`（比照 `consensus_source.py`）· `pricing/ingest.py`（union 迴圈）· `scheduler/jobs.py`（兩 job＋runner 縫）· 新 `api/fundamentals_service.py`（AV 週跑 runner）· `llm_insight/variables.py`（新變數）· `api/routers/prompts.py::_external_vars`（每家一塊組裝＋TW finmind 映射）· `llm_insight/official_templates.py`（advice 模板 v2：基本面段＋不平均紅線） |
 | W4 | `data_ingestion/agents.py` · `cash_import.py`／`dividend_import.py`（復用）· `api/routers/input_center.py`（`_BUILDERS`/`_WRITERS`）· `data_ingestion/import_templates.py:35-47`（七／八個註冊點）· `web/input.js` · `tests/golden/ai_extraction/`（新） |
 | W5 | `api/insight_service.py:396-445` · `pricing/benchmarks.py` · `portfolio/twr.py` |
 | W6 | `strategy/signal_states.py`（新歷史表）· 新 `portfolio/backtest.py` · `llm_insight/variables.py:264-275` |
@@ -118,8 +122,12 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 - 每波：`pytest` 全套（**不接管線**，exit code 才是真的）· `mypy --strict` **裸跑** · `ruff` ·
   `/stress-audit --phase 1` `fail=0`（**基準 = `ops=126 pass=4780`**，確定性，別的數字就是真訊號）。
 - **W1 反證**（已過）：`daytrade` 那條在修正前是紅的。
-- **W3**：三家各一組 fixture（含**無金鑰降級**與**兩家不一致**兩種情境）；斷言合併輸出
-  **逐 field 帶 source**、不一致時**兩值皆在且不取平均**。
+- **W3**：三家各一組 fixture（含**無金鑰降級**與**兩家並存**兩種情境）；斷言
+  `sources` 下**每家一塊、兩值皆在**（AI-D14——不設合併層，也就沒有「平均」可斷言）。
+  **探針證據（2026-08-18，`scripts/probe_fundamentals.py`）**：yfinance 腿對 US／TW／MY
+  （含 sub-RM1 小板）8 欄得 7（`beta` 為設計性缺席——不碰 `Ticker.info`）；finnhub／AV
+  腿待金鑰進場後補跑。探針順帶抓到 `fast_info` 的鍵名在這版 yfinance 是 camelCase
+  （文件與舊版是 snake_case）——見 `LESSONS_LEARNED.md`。
 - **W4**：欄位級命中率報表；**資金列 `kind` 錯標率與 `daytrade` 錯標率單獨列出**——
   它們是唯二會動錢而不報錯的欄位。
 - **W6**：回測附最小樣本門檻與重疊註記；樣本不足時輸出「不足以判斷」而非數字。

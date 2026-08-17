@@ -10,8 +10,8 @@ reference strategies BY NAME, so a version bump needs no preset change).
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v12() -> None:
-    assert ot.LIBRARY_VERSION == "official-v12 (2026-08-16)"
+def test_library_version_is_official_v13() -> None:
+    assert ot.LIBRARY_VERSION == "official-v13 (2026-08-17)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -127,7 +127,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v25_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v12 (2026-08-16)"
+    assert wire["library_version"] == "official-v13 (2026-08-17)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")
@@ -152,6 +152,22 @@ def test_advice_template_holds_the_product_red_lines() -> None:
     assert "ma_cross" in body and "50/200" in body
     # AI-D10: prediction is the model's to give or withhold, never forced.
     assert "prediction 由你決定" in body and "confidence" in body
+
+
+def test_advice_template_v2_carries_fundamentals_with_the_never_average_rule() -> None:
+    """W3 (AI-D14/15): the advice body cites {{fundamentals_json}}, names the per-source
+    blocks, and carries the red line in its prompt-enforced form — different values across
+    sources are reported side by side with their sources, NEVER averaged or reconciled."""
+    advice = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")
+    assert advice["version"] == "v2"
+    body = advice["body"]
+    assert "{{fundamentals_json}}" in body
+    assert "不得取平均" in body
+    assert "標注來源" in body
+    # The canonical field names the model will see (the block key is the provenance).
+    assert "pe_ratio" in body and "roe_pct" in body
+    preset = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "advice")
+    assert preset["version"] == "v2"
 
 
 def test_advice_and_alert_presets_resolve_and_subscribe() -> None:

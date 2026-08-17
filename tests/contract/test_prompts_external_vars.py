@@ -61,13 +61,14 @@ def test_prompt_vars_external_now_available(api_client: TestClient) -> None:
         "financials_json", "market_sentiment_json", "index_quotes_json",
     ):
         assert by_token[token]["available"] is True, token
-    # 31 previously live + 1 P2-batch-3 rule_signals (rule_signals_json) = 32.
-    assert sum(1 for r in rows if r["available"]) == 32
+    # 32 previously live + 1 W3 fundamentals (fundamentals_json) = 33.
+    assert sum(1 for r in rows if r["available"]) == 33
     assert by_token["technical_signals_json"]["available"] is True
     assert by_token["fear_greed_json"]["available"] is True
     assert by_token["symbol_news_json"]["available"] is True
     assert by_token["consensus_json"]["available"] is True
     assert by_token["rule_signals_json"]["available"] is True
+    assert by_token["fundamentals_json"]["available"] is True
     # The spec-04 'ai' vars stay unavailable this round.
     assert by_token["backtest_json"]["available"] is False
     assert by_token["calibration_gap_json"]["available"] is False
@@ -359,3 +360,71 @@ def test_rule_signals_var_equals_full_api_signals_dict(api_client: TestClient) -
     # Both go through signals_service.to_wire with the SAME injected clock (GOLDEN_NOW) and
     # the SAME held check → identical evaluated_at/as_of/held/scores/composite.
     assert var == api_wire
+
+
+# --- (g) fundamentals_json (W3, AI-D13..D16): one block per source, no merge --------
+
+
+def test_fundamentals_renders_one_block_per_source(api_client: TestClient) -> None:
+    """Two enabled sources -> TWO blocks under ``sources``, verbatim payloads (the block
+    key IS the provenance); no merge, no averaging."""
+    conn = _conn_of(api_client)
+    for source, pe in (("yfinance", "28.5"), ("finnhub", "28.02")):
+        snapshots_store.add_snapshot(
+            conn, source=source, dataset="fundamentals", symbol="2330",
+            as_of=date(2026, 8, 17),
+            payload={"as_of": "2026-08-17", "currency": "TWD", "pe_ratio": pe},
+            fetched_at=datetime(2026, 8, 17, 9, 20),
+        )
+    out = _preview(api_client, "{{fundamentals_json}}", scope="per_symbol", symbol="2330")
+    value = json.loads(out["rendered"])
+    sources = value["sources"]
+    # BOTH values kept side by side — the never-average red line made visible.
+    assert sources["yfinance"]["pe_ratio"] == "28.5"
+    assert sources["finnhub"]["pe_ratio"] == "28.02"
+    assert value["last_as_of"] == "2026-08-17"
+
+
+def test_fundamentals_tw_maps_the_finmind_block(api_client: TestClient) -> None:
+    """TW: the existing FinMind valuation snapshot maps into a canonical ``finmind``
+    block (per/pbr/dividend_yield -> pe_ratio/pb_ratio/dividend_yield_pct) — same shape
+    as the other blocks, no double fetching (AI-D15)."""
+    conn = _conn_of(api_client)
+    snapshots_store.add_snapshot(
+        conn, source="finmind", dataset="valuation", symbol="2330",
+        as_of=date(2026, 8, 14),
+        payload={"rows": [
+            {"date": "2026-08-13", "PER": "24.0", "PBR": "6.0", "dividend_yield": "1.7"},
+            {"date": "2026-08-14", "PER": "24.1", "PBR": "6.2", "dividend_yield": "1.8"},
+        ]},
+        fetched_at=datetime(2026, 8, 14, 14, 40),
+    )
+    out = _preview(api_client, "{{fundamentals_json}}", scope="per_symbol", symbol="2330")
+    value = json.loads(out["rendered"])
+    finmind = value["sources"]["finmind"]
+    assert finmind["pe_ratio"] == "24.1"  # the LATEST row's value
+    assert finmind["pb_ratio"] == "6.2"
+    assert finmind["dividend_yield_pct"] == "1.8"
+    assert finmind["currency"] == "TWD"
+    assert finmind["as_of"] == "2026-08-14"
+    assert "per_percentile" not in finmind  # FinMind-specific: stays in valuation_json
+
+
+def test_fundamentals_non_tw_symbol_gets_no_finmind_block(api_client: TestClient) -> None:
+    conn = _conn_of(api_client)
+    snapshots_store.add_snapshot(
+        conn, source="yfinance", dataset="fundamentals", symbol="AAPL",
+        as_of=date(2026, 8, 17),
+        payload={"as_of": "2026-08-17", "currency": "USD", "pe_ratio": "28.4"},
+        fetched_at=datetime(2026, 8, 17, 9, 20),
+    )
+    out = _preview(api_client, "{{fundamentals_json}}", scope="per_symbol", symbol="AAPL")
+    value = json.loads(out["rendered"])
+    assert set(value["sources"]) == {"yfinance"}
+
+
+def test_fundamentals_degrades_with_no_coverage_reason(api_client: TestClient) -> None:
+    out = _preview(api_client, "{{fundamentals_json}}", scope="per_symbol", symbol="ZZZ")
+    value = json.loads(out["rendered"])
+    assert value["unavailable"] is True
+    assert "無基本面快照" in value["reason"]

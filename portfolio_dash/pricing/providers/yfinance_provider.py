@@ -46,8 +46,13 @@ class YFinanceProvider(ProviderBase):
     name = "yfinance"
 
     def supports(self, data_type: DataType, market: Market | None) -> bool:
+        # FUNDAMENTALS declared for all three markets (AI-D13): yfinance needs no key,
+        # and coverage thinness (e.g. sub-RM1 MY counters) degrades per symbol at the
+        # fetch seam rather than here. The fetch/parse itself lives in
+        # pricing/fundamentals_source.py (never Ticker.info — the consensus discipline).
         return data_type in {
             DataType.QUOTE_LATEST, DataType.QUOTE_HISTORY, DataType.FX, DataType.DIVIDEND,
+            DataType.FUNDAMENTALS,
         }
 
     def _parse_history_json(

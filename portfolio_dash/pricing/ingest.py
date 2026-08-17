@@ -18,8 +18,16 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from portfolio_dash.pricing import consensus_source, index_source, sentiment_source
+from portfolio_dash.pricing import (
+    consensus_source,
+    datasources_store,
+    fundamentals_source,
+    index_source,
+    sentiment_source,
+)
 from portfolio_dash.pricing import snapshots_store as S
+from portfolio_dash.pricing.defaults import default_registry
+from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.finmind_datasets import fetch_dataset
 from portfolio_dash.pricing.providers.yfinance_provider import yf_symbol
 from portfolio_dash.pricing.refs import InstrumentRef
@@ -244,4 +252,85 @@ def ingest_consensus(
             fetched_at=now,
         )
         written += 1
+    return written
+
+
+FetchFundamentals = Callable[..., dict[str, Any] | None]
+
+
+def ingest_fundamentals_union(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    sources: tuple[str, ...] | None = None,
+    universe: list[InstrumentRef] | None = None,
+    fetchers: dict[str, FetchFundamentals] | None = None,
+) -> int:
+    """Ingest fundamentals snapshots with UNION semantics (W3, AI-D13/D14).
+
+    Unlike every quote/FX/dividend fetch (first-success-wins fallback chain), EVERY
+    enabled provider in ``sources`` writes its own ``external_snapshots`` row per symbol —
+    the table's ``(source, dataset, symbol, as_of)`` key already keeps them apart, and the
+    variable layer assembles one block per source (no merge, never averaged).
+
+    "Enabled" = the registry's ``capable_ids(DataType.FUNDAMENTALS, market)`` — provider
+    capability AND the key gate in one check, so a keyless Finnhub/Alpha Vantage writes
+    nothing and raises nothing. ``sources`` restricts the union per job (the daily job
+    runs yfinance + finnhub; the Saturday job runs alphavantage alone — its free quota
+    cannot survive a full-universe pass). ``universe`` restricts the symbols (the AV leg
+    covers HELD symbols only; the held set is a ``portfolio/`` replay result, computed by
+    the api layer and INJECTED — pricing/ must not derive it, per the injection convention
+    in architecture.md). Per-(symbol, source) isolation: one failure/absence writes no
+    row and never stops the rest. Returns rows written.
+    """
+    wanted = sources if sources is not None else fundamentals_source.SOURCES
+    fetch_map = fetchers if fetchers is not None else fundamentals_source.FETCHERS
+    refs = universe if universe is not None else all_universe(conn)
+    as_of = now.date()
+    # Resolve the enabled sources ONCE per market (not per symbol). A ledger-only DB
+    # (bootstrap_db) has no data_sources table, so the keyed providers' token getters
+    # raise OperationalError inside supports() — degrade to the key-less yfinance leg,
+    # mirroring the "degrade if the table is absent" convention in architecture.md.
+    enabled: dict[Market, list[str]] = {}
+    try:
+        registry = default_registry(conn)
+        for market in {ref.market for ref in refs}:
+            enabled[market] = [
+                s for s in registry.capable_ids(DataType.FUNDAMENTALS, market)
+                if s in wanted
+            ]
+    except sqlite3.OperationalError:
+        enabled = {
+            market: (["yfinance"] if "yfinance" in wanted else [])
+            for market in {ref.market for ref in refs}
+        }
+    written = 0
+    for ref in refs:
+        for source in enabled.get(ref.market, []):
+            fetch = fetch_map.get(source)
+            if fetch is None:
+                continue
+            # The token string for keyed sources; the fetch seams also fall back to the
+            # env var, mirroring the provider ctors (same row, same convention). The
+            # table can be absent on a ledger-only DB — same degrade as above.
+            try:
+                token = datasources_store.get_api_key(conn, source)
+            except sqlite3.OperationalError:
+                token = None
+            try:
+                payload = fetch(ref, as_of=as_of, token=token)
+            except Exception:  # noqa: BLE001 — one bad (symbol, source) drops no other
+                continue
+            if not payload:
+                continue
+            S.add_snapshot(
+                conn,
+                source=source,
+                dataset=fundamentals_source.DATASET,
+                symbol=ref.symbol,
+                as_of=as_of,
+                payload=payload,
+                fetched_at=now,
+            )
+            written += 1
     return written

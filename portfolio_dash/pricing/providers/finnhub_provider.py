@@ -45,9 +45,11 @@ class FinnhubProvider(ProviderBase):
         return self._token
 
     def supports(self, data_type: DataType, market: Market | None) -> bool:
+        # FUNDAMENTALS (AI-D13): Finnhub's /stock/metric block, US-only, key-gated like
+        # the rest of this adapter. Fetch/parse lives in pricing/fundamentals_source.py.
         return (
             self._resolve_token() is not None
-            and data_type in {DataType.QUOTE_LATEST, DataType.DIVIDEND}
+            and data_type in {DataType.QUOTE_LATEST, DataType.DIVIDEND, DataType.FUNDAMENTALS}
             and market is Market.US
         )
 

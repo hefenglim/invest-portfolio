@@ -79,6 +79,11 @@ EXPECTED_CALL_SITES = {
     ("portfolio_dash/api/routers/instruments.py", "current_shares"),
     ("portfolio_dash/api/routers/strategy.py", "current_shares"),
     ("portfolio_dash/api/signals_service.py", "current_shares"),
+    # W3 (AI-D16): the AV-leg runner's held set — the same net-shares-positive predicate
+    # as strategy.py's `_held_set`, via the same action-aware wrapper. Containment holds
+    # the same structural way: an action-free symbol short-circuits inside `_shares_at`,
+    # and a held check against it is byte-identical to the pre-feature answer.
+    ("portfolio_dash/api/fundamentals_service.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "shares_through"),
     # E1a (spec §5, 2026-08-11): the ONE accessor that deliberately skips the structural

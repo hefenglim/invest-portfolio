@@ -48,12 +48,15 @@ class AlphaVantageProvider(ProviderBase):
         return self._token
 
     def supports(self, data_type: DataType, market: Market | None) -> bool:
+        # FUNDAMENTALS (AI-D13): AV's OVERVIEW endpoint, US-listed only, key-gated.
+        # Fetch/parse lives in pricing/fundamentals_source.py; the union ingest calls it
+        # (fundamentals are NOT a fallback chain — rules/data-and-pricing.md AI-D4/D14).
         if self._resolve_token() is None:
             return False
         if data_type is DataType.FX:
             return True
         return (
-            data_type in {DataType.QUOTE_LATEST, DataType.QUOTE_HISTORY}
+            data_type in {DataType.QUOTE_LATEST, DataType.QUOTE_HISTORY, DataType.FUNDAMENTALS}
             and market is Market.US
         )
 

@@ -23,7 +23,14 @@ union-merged with per-field provenance, disagreement kept as two values and neve
 `.claude/rules/data-and-pricing.md`**), **AI-D5** (the official `on_alert` advice card, in scope,
 default-enabled; push stays off), **AI-D6** (prototype on demo first, fuel and verification in
 parallel). The TW-only fundamentals gap matters because the real portfolio is US-heavy — a US
-card is today structurally weaker than a TW card.
+card is today structurally weaker than a TW card. **W3 rulings (2026-08-17):** **AI-D13** (hybrid
+mount — capability + key gate via `supports()`/`capable_ids`, never the fallback chain),
+**AI-D14** (**no merge layer — one block per source**; refines AI-D4's mechanism, not its red
+line: different values are reported side by side with their sources, never averaged — enforced
+by the prompt, and the rules file was amended to match), **AI-D15** (a canonical 8-field
+intersection; TW's `finmind` block is mapped from the existing valuation snapshot, never
+double-fetched), **AI-D16** (yfinance + Finnhub daily; Alpha Vantage Saturday, held symbols
+only — its free quota cannot survive a full-universe pass).
 
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
@@ -52,6 +59,34 @@ card is today structurally weaker than a TW card.
     (20/60) and the rules engine's 50/200 both reached the same prompt under the bare word
     "cross"; the former is now `ma_cross_short` and both variable descriptors say their window,
     so the assistant cannot quote one as the other.
+- **The fundamentals leg, for all three markets (W3, AI-D4 + AI-D13..D16).** The chips
+  variables were FinMind-only, so a US card was structurally weaker than a TW card. Three
+  providers now fetch fundamentals as a **union** — every enabled one writes its own
+  `external_snapshots` row (`(source, dataset, symbol, as_of)` was already the key) — and the
+  new per-symbol variable **`fundamentals_json`** assembles them as **one block per source**,
+  never merged and never averaged (AI-D14: the block key is the provenance; the prompt carries
+  the never-average red line). Capability + the key gate ride the providers' existing
+  `supports()` wiring, so a keyless Finnhub / Alpha Vantage simply writes nothing and raises
+  nothing until a key lands on the settings page (AI-D13).
+  - **Canonical 8 fields** (AI-D15): `pe_ratio` / `pb_ratio` / `eps_ttm` / `market_cap` /
+    `dividend_yield_pct` / `beta` / `roe_pct` / `revenue_growth_yoy_pct` — same names inside
+    every block; a field a provider cannot supply is absent, never fabricated. TW symbols also
+    get a `finmind` block mapped from the existing valuation snapshot (no double fetching).
+  - **yfinance leg, never `Ticker.info`** — ratios are derived at the fetch seam from the light
+    statement endpoints + `fast_info` (the `consensus_source` precedent), with the
+    honest-denominator rule (a negative-EPS PE is omitted, not stored negative). **Probe
+    verified 2026-08-18** (`scripts/probe_fundamentals.py`): 7 of 8 fields return for US, TW,
+    and MY — including a sub-RM1 MY counter; `beta` is the designed absence.
+  - **Cadence (AI-D16):** `fundamentals_daily` (09:20) runs yfinance + Finnhub over the whole
+    universe; `fundamentals_av_weekly` (Sat 09:40) runs Alpha Vantage over **held symbols
+    only** — its 25-calls/day free quota cannot survive a full-universe pass. The held set is a
+    portfolio replay result `pricing/` cannot compute, so the weekly job dispatches to a
+    registered api-side runner (the `signal_scan` / `alert_compute` pattern).
+  - The advice strategy advances to **v2**: a 基本面 section joins the card, with the
+    source-tagging and never-average rules spelled out. (Existing installs keep their v1 body
+    — the pack reuses a same-name strategy; use 重置為官方 or recreate the task to adopt v2.)
+    Variable count 34 → **35**, categories 10 → **11** (`web/vars.js` learned the new
+    category's label + order).
 - **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
   `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
   released**). A share count that changes without a trade previously had no representation, so
