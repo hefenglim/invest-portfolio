@@ -30,7 +30,25 @@ line: different values are reported side by side with their sources, never avera
 by the prompt, and the rules file was amended to match), **AI-D15** (a canonical 8-field
 intersection; TW's `finmind` block is mapped from the existing valuation snapshot, never
 double-fetched), **AI-D16** (yfinance + Finnhub daily; Alpha Vantage Saturday, held symbols
-only — its free quota cannot survive a full-universe pass).
+only — its free quota cannot survive a full-universe pass). **W4 rulings (2026-08-18):**
+**AI-D17** (the union schema is a discriminated union — `rows: list[TxnDraft|DivDraft|CashDraft]`
+keyed on a `kind` literal, plus an `unparsed` list so the model confesses the rows it cannot
+classify — FX / corporate actions / options — instead of silently dropping them; silent drops
+are exactly the ledger-distortion AI-D3 exists to kill), **AI-D18** (preview and commit go
+through the three EXISTING doors — the union drafts are grouped by kind, rendered to each
+kind's canonical CSV, and built by each kind's whole-file builder, with the cash pool injected
+by the router as a required argument; no new endpoint, no new writer, undo granularity and the
+row↔line invariant unchanged), **AI-D19** (prompt v6: three explicit sections + the cash-kind
+vocabulary joined from `cash_kinds.py` at module level so it can never drift; `daytrade` finally
+teaches its semantics — only on explicit 當沖 wording, the debt W1 deliberately left; and
+`short_sale` arrives with its prompt rule — only on explicit 放空/融券/short wording — exactly as
+the column comment said it would), **AI-D20** (a synthetic text corpus under
+`tests/golden/ai_extraction/` + a manual live runner `scripts/ai_extraction_eval.py` producing
+field-level hit rates with the cash-`kind` / `daytrade` / `short_sale` mislabel rates listed
+separately — the only fields that move money silently; thresholds calibrated to the first
+baseline run; screenshot cases go through the owner's manual review, never into the repo), and
+**AI-D21** (the preview renders three sections — transactions / dividends / cash — with the cash
+rows showing the Chinese kind label + an explicit ± sign, server-sourced from `CASH_KIND_ZH`).
 
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
