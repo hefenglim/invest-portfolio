@@ -266,7 +266,23 @@
             <button class="btn btn-primary" id="ai-parse" type="button">解析</button>
           </div>
           <div class="ai-result-head"><span>解析來源：<b class="num" id="ai-source"></b></span><span>模型：<b class="num" id="ai-model"></b></span></div>
-          <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th>費用</th><th>稅</th><th class="col-text">模型備註</th><th></th></tr></thead><tbody id="ai-body"></tbody></table></div>
+          <!-- W4 (AI-D17): rows the model saw but could NOT classify (換匯／公司行動／
+               選擇權) are confessed here — surfaced, never silently dropped. -->
+          <div class="result-banner" id="ai-unparsed" hidden="hidden"></div>
+          <!-- W4 (AI-D21): one section per kind; a kind with zero drafts stays hidden.
+               Each section commits through its OWN existing /api/import/commit kind. -->
+          <div id="ai-sec-transactions" hidden="hidden">
+            <div class="panel-sub" style="margin:10px 0 6px;font-weight:600;">交易</div>
+            <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th>費用</th><th>稅</th><th class="col-text">模型備註</th><th></th></tr></thead><tbody id="ai-body-transactions"></tbody></table></div>
+          </div>
+          <div id="ai-sec-dividends" hidden="hidden">
+            <div class="panel-sub" style="margin:10px 0 6px;font-weight:600;">股利</div>
+            <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">代號</th><th class="col-text">類型</th><th>毛額</th><th>扣繳</th><th>淨額</th><th>再投資股數</th><th>再投資價格</th><th class="col-text">模型備註</th><th></th></tr></thead><tbody id="ai-body-dividends"></tbody></table></div>
+          </div>
+          <div id="ai-sec-cash" hidden="hidden">
+            <div class="panel-sub" style="margin:10px 0 6px;font-weight:600;">資金</div>
+            <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">類型</th><th class="col-text">幣別</th><th>金額</th><th>取得成本（家幣）</th><th class="col-text">模型備註</th><th></th></tr></thead><tbody id="ai-body-cash"></tbody></table></div>
+          </div>
           <div class="result-banner" id="ai-result" hidden="hidden"></div>
           <div class="import-summary"><span class="spacer"></span><button class="btn btn-primary" id="ai-write-all" type="button">寫入全部勾選</button></div>
         </div>

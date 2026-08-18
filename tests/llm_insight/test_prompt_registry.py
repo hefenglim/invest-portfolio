@@ -23,6 +23,7 @@ from pathlib import Path
 import portfolio_dash
 from portfolio_dash.llm_insight import master
 from portfolio_dash.llm_insight import official_templates as ot
+from portfolio_dash.shared.cash_kinds import CASH_KIND_VALUES, CASH_KIND_ZH
 from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 _PKG_DIR = Path(portfolio_dash.__file__).resolve().parent
@@ -194,6 +195,22 @@ def test_instrument_resolve_prompt_embeds_every_gics_sector_key() -> None:
     rendered = prompt.format(query="聯電", market="TW")
     assert "聯電" in rendered and "TW" in rendered
     assert '{{"symbol"' not in rendered
+
+
+def test_ai_input_prompt_embeds_every_cash_kind() -> None:
+    """Drift guard (W4, AI-D19): the v6 union prompt teaches the cash-kind vocabulary JOINED
+    from ``shared/cash_kinds.py`` at module level — the same precedent as the GICS keys above —
+    so EVERY canonical kind AND its zh label must appear VERBATIM in the prompt. A kind added
+    to the enum without re-deriving this prompt fails here, not in a mislabelled pool."""
+    prompt = ot.AI_INPUT_PROMPT_BODY
+    for kind in sorted(CASH_KIND_VALUES):
+        assert kind in prompt, f"cash kind {kind!r} missing from AI_INPUT_PROMPT_BODY"
+        assert CASH_KIND_ZH[kind] in prompt, (
+            f"zh label for {kind!r} missing from AI_INPUT_PROMPT_BODY")
+    # only {accounts}/{today}/{text} interpolate; the row-shape braces stay escaped.
+    rendered = prompt.format(accounts="tw_broker=TW (TWD)", today="2026-08-18", text="買 2330")
+    assert "tw_broker=TW (TWD)" in rendered and "買 2330" in rendered
+    assert "{{" not in rendered and "{accounts}" not in rendered
 
 
 def test_code_owned_prompts_stay_out_of_user_facing_library_wire() -> None:

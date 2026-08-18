@@ -397,6 +397,14 @@ button.is-busy {
   background: var(--amber-soft);
   margin-left: 4px;
 }
+/* 放空 (declared short): books a NEGATIVE position whose basis is the proceeds — same
+   visibility rule as 當沖 (a flag that moves money is a flag the user must see). */
+.dir-short {
+  color: var(--series-myr);
+  border: 1px solid rgba(217, 161, 63, 0.45);
+  background: var(--amber-soft);
+  margin-left: 4px;
+}
 
 /* ---------- app nav (legacy top nav, kept for compat) ---------- */
 

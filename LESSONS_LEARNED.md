@@ -23,6 +23,25 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **"Deterministic" verified within one day proves nothing across days (2026-08-18):** the
+  stress-audit phase-1 pass count was recorded as `4780, deterministic (fixed ASOF dates)` —
+  verified three times, all on the SAME day. Two days later the identical commit reports 4787.
+  Something in the harness counts date-sensitively despite the pinned ASOF. The attribution
+  that settles any count surprise in two runs, without guessing: snapshot
+  `evidence/assertions.jsonl`, detached-checkout the reference commit, re-run THE SAME DAY,
+  diff the `(check, scope)` multisets. A count compared across days is noise; a count compared
+  same-day is signal.
+- **A script that prints zh/symbols on Windows must reconfigure stdout BEFORE the expensive
+  part, not after (2026-08-18):** the W4 accuracy runner's first smoke run completed its whole
+  (paid, network) pass and then crashed on the FINAL summary print — `⚠` is not in cp1252,
+  the default Windows console codec. `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`
+  at the top of `main()`. A report that crashes after the tokens are spent is the worst failure
+  mode a measurement tool has.
+- **A `type: ignore[code]` comment may not carry trailing prose without a second `#`
+  (2026-08-18):** `# type: ignore[call-arg] — the missing arg IS the test` is a mypy SYNTAX
+  error ("Invalid type: ignore comment"), and the invalid ignore then surfaces the very error
+  it meant to suppress — two errors for the price of one. The form is
+  `# type: ignore[call-arg]  # the missing arg IS the test`.
 - **A provider's "convenience" object is not a stable schema — probe it, don't trust the
   docs' key names (2026-08-18):** the W3 yfinance fundamentals leg read `fast_info["last_price"]`
   (snake_case, per yfinance docs and older versions) and got nothing — this yfinance version's

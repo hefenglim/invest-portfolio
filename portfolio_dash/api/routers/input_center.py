@@ -1170,18 +1170,26 @@ def ai_preview(
             return JSONResponse(status_code=400, content=error_body(
                 "validation_error",
                 "所選模型不支援影像，請改用支援影像的模型或改用「自動」", field="model_alias"))
+    # W4 (AI-D18): the pool probe is bound HERE — the layer above both data_ingestion and
+    # portfolio — and passed as the REQUIRED argument it is (see cash_import.py's docstring).
     result = ai_agents_input(
-        conn, body.text, today=now.date(),
+        conn, body.text, pool=cash_pool_fn(conn), today=now.date(),
         images=images or None, model_alias=body.model_alias or None,
     )
-    for r in result.preview.rows:
-        for issue in r.issues:
-            if issue.kind in _LLM_HTTP:
-                return JSONResponse(status_code=_LLM_HTTP[issue.kind],
-                                    content=error_body(issue.kind, issue.message))
-    wire = _preview_wire(result.preview)
-    wire["meta"] = {"model": result.meta.model, "via": result.meta.via,
-                    "cost_usd": None if result.meta.cost_usd is None
-                    else decimal_str(result.meta.cost_usd)}
-    wire["csv_text"] = result.csv_text
+    if result.error is not None:
+        # The LLM-failure degrade path (pre-union: a single error row scanned for _LLM_HTTP
+        # kinds; W4: one explicit field — the scan could not survive three preview buckets).
+        return JSONResponse(
+            status_code=_LLM_HTTP.get(result.error.kind, 503),
+            content=error_body(result.error.kind, result.error.message))
+    wire: dict[str, Any] = {
+        # One preview + one commit CSV PER KIND (transactions/dividends/cash); the frontend
+        # commits each kind through the ORDINARY /api/import/commit (AI-D18).
+        "previews": {kind: _preview_wire(p) for kind, p in result.previews.items()},
+        "csv_texts": result.csv_texts,
+        "unparsed": [u.model_dump() for u in result.unparsed],
+        "meta": {"model": result.meta.model, "via": result.meta.via,
+                 "cost_usd": None if result.meta.cost_usd is None
+                 else decimal_str(result.meta.cost_usd)},
+    }
     return wire

@@ -10,8 +10,8 @@ reference strategies BY NAME, so a version bump needs no preset change).
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v13() -> None:
-    assert ot.LIBRARY_VERSION == "official-v13 (2026-08-17)"
+def test_library_version_is_official_v14() -> None:
+    assert ot.LIBRARY_VERSION == "official-v14 (2026-08-18)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -22,31 +22,39 @@ def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
     for placeholder in ("{accounts}", "{today}", "{text}"):
         assert placeholder in body
     # literal JSON braces stay escaped so only those placeholders interpolate.
-    assert '{{"drafts"' in body
+    assert '{{"rows"' in body
     assert "recent PAST occurrence" in body       # date-anchor rule preserved
-    assert "MULTIPLE transactions" in body        # the screenshot extension
+    assert "MULTIPLE rows" in body                # the screenshot extension (v6 wording)
     # deliberately NOT exposed in the user-facing library payload.
     wire = ot.library_wire()
     assert "AI_INPUT_PROMPT_BODY" not in wire
     assert body not in str(wire.get("system_prompt", "")) + str(wire.get("strategies", ""))
 
 
-def test_ai_input_prompt_v5_pins_local_exchange_code_rule() -> None:
+def test_ai_input_prompt_v6_pins_local_exchange_code_rule() -> None:
     # FU-D41 (owner bug): 「前天聯電買入1張」 on a tw_broker row parsed to the US ADR
     # ticker "UMC" → dead lookup. The prompt must carry the explicit LOCAL-exchange-code
     # rule with the numeric-code examples and the ADR counter-example. v4 (W1 batch-A) adds
     # the parity MY (Bursa) guidance (pinned by test_prompts_v2_carry_my_bursa_guidance);
-    # v5 (W3 batch-B) adds the merged multi-market clause + optional ``market`` output field.
-    assert ot.AI_INPUT_PROMPT_VERSION == "v5"
+    # v5 (W3 batch-B) adds the merged multi-market clause + optional ``market`` output field;
+    # v6 (W4, AI-D17/D19) turns the door into the three-kind discriminated union.
+    assert ot.AI_INPUT_PROMPT_VERSION == "v6"
     body = ot.AI_INPUT_PROMPT_BODY
     assert "LOCAL exchange code" in body
     assert "聯電⇒2303" in body and "台積電⇒2330" in body and "鴻海⇒2317" in body
     assert "UMC" in body and "TSM" in body        # the never-an-ADR counter-example
     assert "Bursa" in body                        # MY accounts take the Bursa code
     # v5 merged multi-market guidance + the optional market output field in the schema.
-    assert "merged account" in body and "STOCK'S market" in body
-    assert '"market"}}]}}' in body                # schema carries the optional market field
-    assert "market\nfield to that market's value (US/TW/MY)" in body
+    # ("merged account" is wrap-tolerant: the prompt's line breaks are not the contract.)
+    assert "merged" in body and "MULTIPLE markets" in body and "STOCK'S market" in body
+    assert '"market"' in body                     # schema carries the optional market field
+    assert "field to that market's value" in body
+    # v6 (AI-D17): the union's three discriminators + the unparsed confession list.
+    assert '"kind":"txn"' in body and '"kind":"div"' in body and '"kind":"cash"' in body
+    assert "unparsed" in body
+    # v6 (AI-D19): the two flags teach their EXPLICIT-only semantics.
+    assert "explicitly says 當沖" in body
+    assert "放空／融券／short sell" in body
     # the rule text must survive .format (no stray placeholders were introduced).
     rendered = body.format(accounts="a=b (USD:US＋MYR:MY)", today="2026-07-19", text="x")
     assert "聯電⇒2303" in rendered and "STOCK'S market" in rendered
@@ -127,7 +135,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v25_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v13 (2026-08-17)"
+    assert wire["library_version"] == "official-v14 (2026-08-18)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

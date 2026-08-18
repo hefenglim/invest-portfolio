@@ -29,9 +29,9 @@ from tests.e2e.conftest import FlowServerFactory
 # Two clean drafts (2330 is registered in the golden seed) with DISTINCT prices so the filtered
 # commit body can be probed: 600 (row 0) must be sent, 610 (row 1) must NOT when row 1 is unchecked.
 _AI_CSV = (
-    "account,symbol,side,date,shares,price,note\n"
-    "tw_broker,2330,buy,2026-06-01,1000,600,\n"
-    "tw_broker,2330,buy,2026-06-02,500,610,\n"
+    "account,symbol,side,date,shares,price,daytrade,short_sale,note\n"
+    "tw_broker,2330,buy,2026-06-01,1000,600,0,0,\n"
+    "tw_broker,2330,buy,2026-06-02,500,610,0,0,\n"
 )
 
 
@@ -65,11 +65,15 @@ def _sink(page: Page) -> tuple[list[str], list[str]]:
 
 
 def _route_ai_preview(page: Page, csv_text: str, rows: list[dict[str, Any]]) -> None:
-    body = {"rows": rows,
-            "summary": {"total": len(rows), "ok": sum(1 for r in rows if r["status"] == "ok"),
-                        "warn": 0, "error": 0},
+    # W4 wire shape: one preview + one commit CSV per kind under previews/csv_texts.
+    body = {"previews": {"transactions": {
+                "rows": rows,
+                "summary": {"total": len(rows),
+                            "ok": sum(1 for r in rows if r["status"] == "ok"),
+                            "warn": 0, "error": 0}}},
+            "unparsed": [],
             "meta": {"model": "stub", "via": "litellm", "cost_usd": None},
-            "csv_text": csv_text}
+            "csv_texts": {"transactions": csv_text}}
     page.route("**/api/input/ai/preview",
                lambda route: route.fulfill(status=200, content_type="application/json",
                                            body=json.dumps(body)))
@@ -102,7 +106,7 @@ def _parse(page: Page) -> None:
     page.fill("#ai-text", "在元大買 2330 兩筆")
     with page.expect_response("**/api/input/ai/preview"):
         page.click("#ai-parse")
-    page.wait_for_selector("#ai-body tr")
+    page.wait_for_selector("#ai-body-transactions tr")
 
 
 @pytest.mark.e2e
@@ -118,10 +122,10 @@ def test_ai_full_success_clears_and_only_checked_row_written(
 
     _open_ai_tab(page, base)
     _parse(page)
-    expect(page.locator("#ai-body tr")).to_have_count(2)
+    expect(page.locator("#ai-body-transactions tr")).to_have_count(2)
 
     # uncheck row 2 (the 610 draft) — it must NOT reach the commit body.
-    page.locator("#ai-body tr").nth(1).locator("input[type=checkbox]").uncheck()
+    page.locator("#ai-body-transactions tr").nth(1).locator("input[type=checkbox]").uncheck()
     with page.expect_response("**/api/import/commit"):
         page.click("#ai-write-all")
 
@@ -133,7 +137,7 @@ def test_ai_full_success_clears_and_only_checked_row_written(
     expect(page.locator("#ai-result")).to_be_visible()
     expect(page.locator("#ai-result")).to_contain_text("寫入完成")
     expect(page.locator("#ai-text")).to_have_value("")
-    expect(page.locator("#ai-body tr")).to_have_count(0)
+    expect(page.locator("#ai-body-transactions tr")).to_have_count(0)
     expect(page.locator("#ai-write-all")).to_be_disabled()  # no double-submit possible
 
     assert not console_errors and not page_errors, (
@@ -157,7 +161,7 @@ def test_ai_partial_success_keeps_only_skipped_rows(
 
     _open_ai_tab(page, base)
     _parse(page)
-    expect(page.locator("#ai-body tr")).to_have_count(2)  # both checked by default
+    expect(page.locator("#ai-body-transactions tr")).to_have_count(2)  # both checked by default
 
     with page.expect_response("**/api/import/commit"):
         page.click("#ai-write-all")
@@ -165,7 +169,7 @@ def test_ai_partial_success_keeps_only_skipped_rows(
     # partial -> banner reports both counts; ONLY the skipped row remains; the text is NOT cleared.
     expect(page.locator("#ai-result")).to_contain_text("已寫入 1 筆")
     expect(page.locator("#ai-result")).to_contain_text("略過 1 筆")
-    expect(page.locator("#ai-body tr")).to_have_count(1)
+    expect(page.locator("#ai-body-transactions tr")).to_have_count(1)
     expect(page.locator("#ai-text")).not_to_have_value("")
 
     assert not console_errors and not page_errors, (

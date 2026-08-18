@@ -40,24 +40,28 @@ def _loopback_sockets() -> Iterator[None]:
 def _preview_body(daytrade: str) -> str:
     """One clean SELL row whose ``daytrade`` is whatever the model is pretending to have said.
 
-    The payload mirrors the real wire shape: ``daytrade`` arrives as the STRING "1"/"0"
+    The payload mirrors the real wire shape (W4): one preview + one commit CSV PER KIND under
+    ``previews`` / ``csv_texts``; ``daytrade`` arrives as the STRING "1"/"0"
     (``csv_import`` renders the flag that way in the preview payload), which is exactly the
     detail a JS truthiness check would get wrong — "0" is a non-empty string.
     """
     return json.dumps({
-        "rows": [{
-            "n": 0, "status": "ok", "reason": None, "code": None,
-            "data": {"account_id": _ACCOUNT, "symbol": _SYMBOL, "side": "sell",
-                     "trade_date": "2026-06-02", "quantity": "1000", "price": "600",
-                     "fee": "855", "tax": "900" if daytrade == "1" else "1800",
-                     "daytrade": daytrade},
-        }],
-        "summary": {"total": 1, "ok": 1, "warn": 0, "error": 0},
+        "previews": {"transactions": {
+            "rows": [{
+                "n": 0, "status": "ok", "reason": None, "code": None,
+                "data": {"account_id": _ACCOUNT, "symbol": _SYMBOL, "side": "sell",
+                         "trade_date": "2026-06-02", "quantity": "1000", "price": "600",
+                         "fee": "855", "tax": "900" if daytrade == "1" else "1800",
+                         "daytrade": daytrade, "short_sale": "0"},
+            }],
+            "summary": {"total": 1, "ok": 1, "warn": 0, "error": 0},
+        }},
+        "unparsed": [],
         "meta": {"model": "mock", "via": "litellm", "cost_usd": None},
-        "csv_text": (
-            "account,symbol,side,date,shares,price,daytrade,note\n"
-            f"{_ACCOUNT},{_SYMBOL},SELL,2026-06-02,1000,600,{daytrade},\n"
-        ),
+        "csv_texts": {"transactions": (
+            "account,symbol,side,date,shares,price,daytrade,short_sale,note\n"
+            f"{_ACCOUNT},{_SYMBOL},SELL,2026-06-02,1000,600,{daytrade},0,\n"
+        )},
     })
 
 
@@ -71,7 +75,7 @@ def _open_ai_pane(page: Page, base: str, daytrade: str) -> None:
     page.wait_for_selector("#ai-dropzone", state="visible")
     page.fill("#ai-text", "當沖賣出 2330 一張 600")
     page.click("#ai-parse")
-    page.wait_for_selector("#ai-body tr", state="visible")
+    page.wait_for_selector("#ai-body-transactions tr", state="visible")
 
 
 @pytest.mark.e2e
@@ -88,7 +92,7 @@ def test_a_daytrade_row_is_marked_in_the_ai_preview(
 
     _open_ai_pane(page, base, "1")
 
-    chip = page.locator("#ai-body .dir-daytrade")
+    chip = page.locator("#ai-body-transactions .dir-daytrade")
     expect(chip).to_have_count(1)
     expect(chip).to_have_text("當沖")
     # The tooltip states the consequence, not just the fact — a reader who does not already
@@ -110,5 +114,5 @@ def test_an_ordinary_row_carries_no_marker(
 
     _open_ai_pane(page, base, "0")
 
-    expect(page.locator("#ai-body tr")).to_have_count(1)  # the row rendered...
-    expect(page.locator("#ai-body .dir-daytrade")).to_have_count(0)  # ...without the chip
+    expect(page.locator("#ai-body-transactions tr")).to_have_count(1)  # the row rendered...
+    expect(page.locator("#ai-body-transactions .dir-daytrade")).to_have_count(0)  # ...no chip

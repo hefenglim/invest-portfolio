@@ -55,11 +55,15 @@ def _row(status: str, code: object, *, reason: object) -> dict[str, object]:
 
 def _preview(status: str, code: object, *, reason: object, counts: dict[str, int]) -> str:
     return json.dumps({
-        "rows": [_row(status, code, reason=reason)],
-        "summary": {"total": 1, **counts},
+        "previews": {"transactions": {
+            "rows": [_row(status, code, reason=reason)],
+            "summary": {"total": 1, **counts},
+        }},
+        "unparsed": [],
         "meta": {"model": "mock", "via": "litellm", "cost_usd": None},
-        "csv_text": f"account,symbol,side,date,shares,price,note\n"
-                    f"{_ACCOUNT},{_SYMBOL},BUY,2026-06-02,10,100,\n",
+        "csv_texts": {"transactions":
+                      "account,symbol,side,date,shares,price,daytrade,short_sale,note\n"
+                      f"{_ACCOUNT},{_SYMBOL},BUY,2026-06-02,10,100,0,0,\n"},
     })
 
 
@@ -108,7 +112,7 @@ def test_ai_input_inline_register_resumes(
     # Parse → the canned unregistered row renders with the inline 立即註冊 action.
     page.fill("#ai-text", f"在嘉信買 10 股 {_SYMBOL} @ 100")
     page.click("#ai-parse")
-    reg_btn = page.locator("#ai-body").get_by_role("button", name="立即註冊")
+    reg_btn = page.locator("#ai-body-transactions").get_by_role("button", name="立即註冊")
     reg_btn.wait_for(state="visible")
 
     # Click 立即註冊 → the shared quick-add dialog opens PREFILLED with the symbol. FU-D42a:
@@ -129,9 +133,9 @@ def test_ai_input_inline_register_resumes(
     # timeout: the confirm crosses the REAL POST /api/instruments, whose synchronous instant-quote
     # fetch probes live providers — on a network-restricted runner that probe can stall well past
     # the 5s default before force-registering (the flow itself is correct; only the latency varies).
-    expect(page.locator("#ai-body").get_by_role("button", name="立即註冊")).to_have_count(
-        0, timeout=30000)
-    expect(page.locator("#ai-body .st-ok")).to_have_count(1)
+    body = page.locator("#ai-body-transactions")
+    expect(body.get_by_role("button", name="立即註冊")).to_have_count(0, timeout=30000)
+    expect(body.locator(".st-ok")).to_have_count(1)
     # The vision parse ran ONCE (the initial 解析) — registering did NOT re-POST
     # /api/input/ai/preview.
     assert calls["n"] == 1, f"AI preview should not re-run on register; got {calls['n']} calls"
@@ -144,9 +148,9 @@ def test_ai_input_inline_register_resumes(
 def _preview_two() -> str:
     """A two-row canned preview: row 0 a CLEAN buy of the golden-registered AAPL (ok), row 1 the
     UNREGISTERED NEWCO (error). Both on schwab (US)."""
-    csv = ("account,symbol,side,date,shares,price,note\n"
-           "schwab,AAPL,BUY,2026-06-02,5,100,\n"
-           f"schwab,{_SYMBOL},BUY,2026-06-02,10,100,\n")
+    csv = ("account,symbol,side,date,shares,price,daytrade,short_sale,note\n"
+           "schwab,AAPL,BUY,2026-06-02,5,100,0,0,\n"
+           f"schwab,{_SYMBOL},BUY,2026-06-02,10,100,0,0,\n")
     rows = [
         {"n": 0, "status": "ok", "reason": None, "code": None,
          "data": {"account_id": "schwab", "symbol": "AAPL", "side": "buy",
@@ -157,8 +161,12 @@ def _preview_two() -> str:
                   "trade_date": "2026-06-02", "quantity": "10", "price": "100"}},
     ]
     return json.dumps({
-        "rows": rows, "summary": {"total": 2, "ok": 1, "warn": 0, "error": 1},
-        "meta": {"model": "mock", "via": "litellm", "cost_usd": None}, "csv_text": csv,
+        "previews": {"transactions": {
+            "rows": rows, "summary": {"total": 2, "ok": 1, "warn": 0, "error": 1},
+        }},
+        "unparsed": [],
+        "meta": {"model": "mock", "via": "litellm", "cost_usd": None},
+        "csv_texts": {"transactions": csv},
     })
 
 
@@ -197,15 +205,15 @@ def test_ai_register_preserves_other_rows_checkbox_state(
 
     page.fill("#ai-text", f"buy AAPL and {_SYMBOL}")
     page.click("#ai-parse")
-    page.wait_for_selector("#ai-body tr:nth-child(2)")
+    page.wait_for_selector("#ai-body-transactions tr:nth-child(2)")
 
-    rows = page.locator("#ai-body tr")
+    rows = page.locator("#ai-body-transactions tr")
     # row 0 (AAPL, ok) is checked by default — UNCHECK it (a deliberate user choice to preserve).
     rows.nth(0).locator("input[type=checkbox]").uncheck()
 
     # register row 1 (NEWCO): the inline action opens the shared dialog; confirm registers it
     # via the REAL POST /api/instruments.
-    reg_btn = page.locator("#ai-body").get_by_role("button", name="立即註冊")
+    reg_btn = page.locator("#ai-body-transactions").get_by_role("button", name="立即註冊")
     reg_btn.wait_for(state="visible")
     reg_btn.click()
     dialog = page.locator(".modal-backdrop").last
@@ -215,9 +223,9 @@ def test_ai_register_preserves_other_rows_checkbox_state(
     confirm.click()
 
     # heal is local (no second AI call): NEWCO row → checked+enabled; AAPL row stays UNCHECKED.
-    expect(page.locator("#ai-body").get_by_role("button", name="立即註冊")).to_have_count(
-        0, timeout=30000)
-    rows2 = page.locator("#ai-body tr")
+    body2 = page.locator("#ai-body-transactions")
+    expect(body2.get_by_role("button", name="立即註冊")).to_have_count(0, timeout=30000)
+    rows2 = page.locator("#ai-body-transactions tr")
     expect(rows2.nth(0).locator("input[type=checkbox]")).not_to_be_checked()  # preserved
     expect(rows2.nth(1).locator("input[type=checkbox]")).to_be_checked()      # healed → auto-check
     assert calls["n"] == 1, f"AI preview should not re-run on register; got {calls['n']} calls"

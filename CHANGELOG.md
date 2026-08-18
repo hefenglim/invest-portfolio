@@ -105,6 +105,48 @@ rows showing the Chinese kind label + an explicit ± sign, server-sourced from `
     — the pack reuses a same-name strategy; use 重置為官方 or recreate the task to adopt v2.)
     Variable count 34 → **35**, categories 10 → **11** (`web/vars.js` learned the new
     category's label + order).
+- **The AI door reads a whole statement — transactions + dividends + cash in one prompt
+  (W4, AI-D3 + AI-D17..D21).** A real statement is mixed; the door used to admit only
+  transactions, so the other rows needed separate doors (four pastes, four vision calls) —
+  and "skip the awkward rows" is exactly how a ledger goes wrong. The extraction schema is
+  now a **discriminated union** (`rows: list[TxnDraft|DivDraft|CashDraft]` on a `kind`
+  literal — a dividend row missing `gross` fails at the parse boundary, with one retry,
+  instead of inside a builder) plus an **`unparsed` confession list**: FX conversions,
+  corporate actions, options, and anything the model cannot classify are surfaced in a
+  banner, never silently dropped and never forced into a kind.
+  - **Preview and commit go through the three EXISTING doors** (AI-D18): the drafts are
+    grouped by kind, rendered to each kind's canonical CSV (the same column constants the
+    templates are generated from), and previewed by each kind's whole-file builder — what
+    the preview priced and what `/api/import/commit` re-derives cannot diverge, by
+    construction. The cash door's pool probe is bound by the router and injected as the
+    **required** argument it is, so the withdraw guard runs on AI-extracted withdrawals
+    exactly as it does on the CSV and manual doors. No new endpoint, no new writer; undo
+    stays per-kind granular; the row↔line commit invariant holds inside each kind.
+  - **Prompt v6** (AI-D19): three explicit sections + one worked example per kind; the
+    cash-kind vocabulary is joined from `cash_kinds.py` at module level (the GICS-keys
+    precedent — a registry test now asserts every kind appears verbatim, so the prompt can
+    never drift from the door's allowed set). **`daytrade` finally teaches its semantics**
+    (only on explicit 當沖 wording — the debt W1 left) and **`short_sale` arrives with its
+    rule** (only on explicit 放空/融券/short wording — never inferred from an oversized
+    sell), riding the CSV to the ledger exactly as the column comment planned.
+  - **The preview renders three sections** (AI-D21): transactions / dividends / cash, each
+    with its own columns and checkboxes; a kind with zero drafts stays hidden. Cash rows
+    show the **server-owned Chinese kind label + an explicit ± sign** (＋入金 / −券商費用) —
+    the direction lives in the kind, and a mislabel reverses the pool by 2× with no error,
+    so the label is the guard. Transaction rows gain the 放空 chip beside 當沖.
+  - **Accuracy is now measurable** (AI-D20): `tests/golden/ai_extraction/cases.json` holds
+    38 synthetic cases (three kinds × three markets × the edge cases — 當沖 both legs, an
+    undeclared same-day round trip, declared shorts, DRIP, the MY net dividend, every cash
+    kind, zh kind aliases, mixed statement blocks, and four must-confess-unparsed rows),
+    guarded against rot by a deterministic structure/coverage test, and measured by
+    `scripts/ai_extraction_eval.py` — a manual live runner that reports field-level hit
+    rates with the cash-`kind` / `daytrade` / `short_sale` mislabel rates **listed
+    separately** (the only fields that move money silently). Thresholds pin to the first
+    baseline run, not before. Screenshot cases go through the owner's manual review; real
+    exports never enter the repo.
+  - The txn arm also gains **sibling awareness** (C1 extended to this door): a sell covered
+    by a buy earlier in the same paste no longer flags 賣超 against a position the same
+    batch is still building.
 - **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
   `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
   released**). A share count that changes without a trade previously had no representation, so

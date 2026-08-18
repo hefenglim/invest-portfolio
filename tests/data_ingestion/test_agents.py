@@ -5,11 +5,11 @@ from decimal import Decimal
 import pytest
 
 from portfolio_dash.data_ingestion.agents import (
-    _AI_CSV_COLUMNS,
-    AiDraft,
+    _TXN_CSV_COLUMNS,
     AiDraftList,
     Completer,
-    _drafts_to_csv,
+    TxnDraft,
+    _txn_csv,
     ai_agents_input,
 )
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
@@ -20,10 +20,21 @@ from portfolio_dash.data_ingestion.csv_import import (
 )
 from portfolio_dash.data_ingestion.preview import ImportPreview, commit_preview
 from portfolio_dash.data_ingestion.store import list_transactions, upsert_instrument
+from portfolio_dash.data_ingestion.validate import CashPool
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.llm import AINotActivated, LLMBudgetExceeded, LLMUnavailable
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+
+
+def _RICH_POOL(account_id: str, ccy: Currency, **kw: object) -> CashPool:
+    """A pool probe with effectively infinite headroom — the withdraw guard never fires.
+
+    ``ai_agents_input`` takes the pool as a REQUIRED argument (AI-D18 — the same rule as
+    the cash CSV door), so every test below binds this stub explicitly; the one test that
+    wants the guard to fire supplies its own poor pool instead.
+    """
+    return CashPool(balance=Decimal("999999999"), low=Decimal("999999999"))
 
 
 def _setup(conn: sqlite3.Connection) -> None:
@@ -50,8 +61,8 @@ def _good_completer(
     model_override: str | None = None,
 ) -> AiDraftList:
     return AiDraftList(
-        drafts=[
-            AiDraft(
+        rows=[
+            TxnDraft(
                 account_id="tw_broker",
                 symbol="2330",
                 side=Side.BUY,
@@ -65,16 +76,19 @@ def _good_completer(
 
 def test_ai_input_builds_preview_with_fee_no_write(conn: sqlite3.Connection) -> None:
     _setup(conn)
-    result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
-    p = result.preview
+    result = ai_agents_input(conn, "buy 1000 2330 @600",
+                             pool=_RICH_POOL, completer=_good_completer)
+    p = result.previews["transactions"]
     assert len(p.rows) == 1 and p.rows[0].fee == Decimal("855")
     assert list_transactions(conn, account_id="tw_broker") == []  # not written
 
 
 def test_ai_input_commit_writes(conn: sqlite3.Connection) -> None:
     _setup(conn)
-    result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
-    commit_preview(conn, result.preview, accept={0}, writer=write_transaction_row)
+    result = ai_agents_input(conn, "buy 1000 2330 @600",
+                             pool=_RICH_POOL, completer=_good_completer)
+    commit_preview(conn, result.previews["transactions"], accept={0},
+                   writer=write_transaction_row)
     assert len(list_transactions(conn, account_id="tw_broker")) == 1
 
 
@@ -97,8 +111,10 @@ def test_ai_input_degrades_with_kind(
     ) -> AiDraftList:
         raise exc
 
-    result = ai_agents_input(conn, "buy ...", completer=boom)
-    assert result.preview.rows[0].issues[0].kind == kind
+    result = ai_agents_input(conn, "buy ...", pool=_RICH_POOL, completer=boom)
+    # W4: the degrade is one explicit field, not a synthetic row inside a preview bucket.
+    assert result.error is not None and result.error.kind == kind
+    assert result.previews == {} and result.csv_texts == {}
 
 
 def test_ai_input_prompt_carries_live_account_catalog(conn: sqlite3.Connection) -> None:
@@ -114,9 +130,10 @@ def test_ai_input_prompt_carries_live_account_catalog(conn: sqlite3.Connection) 
         images: list[bytes] | None = None, model_override: str | None = None,
     ) -> AiDraftList:
         seen["prompt"] = prompt
-        return AiDraftList(drafts=[])
+        return AiDraftList(rows=[])
 
-    ai_agents_input(conn, "在嘉信買 10 股 AAPL @211.40", completer=spy_completer)
+    ai_agents_input(conn, "在嘉信買 10 股 AAPL @211.40",
+                    pool=_RICH_POOL, completer=spy_completer)
     prompt = seen["prompt"]
     assert "<accounts>" in prompt
     for account_id in ("tw_broker", "schwab", "moomoo_my"):
@@ -134,9 +151,10 @@ def test_ai_input_prompt_carries_today_anchor(conn: sqlite3.Connection) -> None:
         images: list[bytes] | None = None, model_override: str | None = None,
     ) -> AiDraftList:
         seen["prompt"] = prompt
-        return AiDraftList(drafts=[])
+        return AiDraftList(rows=[])
 
-    ai_agents_input(conn, "7/3 買 2330", completer=spy_completer, today=date(2026, 7, 5))
+    ai_agents_input(conn, "7/3 買 2330", pool=_RICH_POOL,
+                    completer=spy_completer, today=date(2026, 7, 5))
     assert "<today>2026-07-05</today>" in seen["prompt"]
     assert "recent PAST occurrence" in seen["prompt"]  # rule text wraps across a newline
 
@@ -164,10 +182,11 @@ def test_ai_input_forwards_images_and_model_alias_to_completer(
     ) -> AiDraftList:
         seen["images"] = images
         seen["model_override"] = model_override
-        return AiDraftList(drafts=[])
+        return AiDraftList(rows=[])
 
     ai_agents_input(
-        conn, "", completer=spy, images=[b"\x89PNG\r\n\x1a\nDATA"], model_alias="my-vision",
+        conn, "", pool=_RICH_POOL, completer=spy,
+        images=[b"\x89PNG\r\n\x1a\nDATA"], model_alias="my-vision",
     )
     assert seen["images"] == [b"\x89PNG\r\n\x1a\nDATA"]
     assert seen["model_override"] == "my-vision"
@@ -183,7 +202,7 @@ def _one_draft_completer(account_id: str, symbol: str) -> Completer:
         prompt: str, schema: type, *, agent: str, conn: object = None,
         images: list[bytes] | None = None, model_override: str | None = None,
     ) -> AiDraftList:
-        return AiDraftList(drafts=[AiDraft(
+        return AiDraftList(rows=[TxnDraft(
             account_id=account_id, symbol=symbol, side=Side.BUY,
             date=date(2026, 6, 1), shares=Decimal("10"), price=Decimal("76"),
         )])
@@ -198,9 +217,9 @@ def test_ai_input_flags_us_ticker_on_tw_account_as_format_warning(
     # tw_broker row. The soft check appends a WARNING (needs_confirm — never blocks) and
     # never rewrites the symbol; the row also keeps its unregistered-symbol hard issue.
     _setup(conn)
-    result = ai_agents_input(conn, "前天聯電買入1張，76元",
+    result = ai_agents_input(conn, "前天聯電買入1張，76元", pool=_RICH_POOL,
                              completer=_one_draft_completer("tw_broker", "UMC"))
-    row = result.preview.rows[0]
+    row = result.previews["transactions"].rows[0]
     warn = [i for i in row.issues if i.kind == "symbol_format_mismatch"]
     assert len(warn) == 1
     assert warn[0].needs_confirm is True  # warning severity — surfaces, never blocks
@@ -215,18 +234,18 @@ def test_ai_input_numeric_tw_symbol_is_clean_of_format_warning(
     # 2303 (unregistered but correctly-shaped TWSE code) must NOT trigger the format
     # warning — only the ordinary unregistered-symbol issue applies.
     _setup(conn)
-    result = ai_agents_input(conn, "前天聯電買入1張，76元",
+    result = ai_agents_input(conn, "前天聯電買入1張，76元", pool=_RICH_POOL,
                              completer=_one_draft_completer("tw_broker", "2303"))
-    row = result.preview.rows[0]
+    row = result.previews["transactions"].rows[0]
     assert not any(i.kind == "symbol_format_mismatch" for i in row.issues)
 
 
 def test_ai_input_flags_cjk_symbol_on_us_account(conn: sqlite3.Connection) -> None:
     # The US-account mirror: a CJK (or numeric) symbol on a USD account is format-flagged.
     _setup(conn)
-    result = ai_agents_input(conn, "嘉信買台積電 5 股 @210",
+    result = ai_agents_input(conn, "嘉信買台積電 5 股 @210", pool=_RICH_POOL,
                              completer=_one_draft_completer("schwab", "台積電"))
-    row = result.preview.rows[0]
+    row = result.previews["transactions"].rows[0]
     assert any(i.kind == "symbol_format_mismatch" for i in row.issues)
 
 
@@ -235,8 +254,9 @@ def test_ai_input_registered_clean_row_has_no_format_warning(
 ) -> None:
     # The happy path (registered 2330 on tw_broker) stays byte-identical: zero issues.
     _setup(conn)
-    result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
-    assert result.preview.rows[0].issues == []
+    result = ai_agents_input(conn, "buy 1000 2330 @600",
+                             pool=_RICH_POOL, completer=_good_completer)
+    assert result.previews["transactions"].rows[0].issues == []
 
 
 # --- Batch B (F15): merged (multi-market) account catalog + per-market format check ----
@@ -270,7 +290,7 @@ def _draft_completer_market(account_id: str, symbol: str, market: str) -> Comple
         prompt: str, schema: type, *, agent: str, conn: object = None,
         images: list[bytes] | None = None, model_override: str | None = None,
     ) -> AiDraftList:
-        return AiDraftList(drafts=[AiDraft(
+        return AiDraftList(rows=[TxnDraft(
             account_id=account_id, symbol=symbol, side=Side.BUY,
             date=date(2026, 6, 1), shares=Decimal("10"), price=Decimal("76"),
             market=market,
@@ -300,9 +320,11 @@ def test_ai_input_merged_symbol_fits_a_bound_market_no_warning(
     _setup(conn)
     _insert_merged_account(conn)
     result = ai_agents_input(
-        conn, "buy AAPL", completer=_one_draft_completer("moomoo_merged", "AAPL"))
+        conn, "buy AAPL", pool=_RICH_POOL,
+        completer=_one_draft_completer("moomoo_merged", "AAPL"))
     assert not any(
-        i.kind == "symbol_format_mismatch" for i in result.preview.rows[0].issues)
+        i.kind == "symbol_format_mismatch"
+        for i in result.previews["transactions"].rows[0].issues)
 
 
 def test_ai_input_merged_symbol_fits_no_bound_market_warns(
@@ -312,9 +334,11 @@ def test_ai_input_merged_symbol_fits_no_bound_market_warns(
     _setup(conn)
     _insert_merged_account(conn)
     result = ai_agents_input(
-        conn, "buy", completer=_one_draft_completer("moomoo_merged", "12"))
+        conn, "buy", pool=_RICH_POOL,
+        completer=_one_draft_completer("moomoo_merged", "12"))
     assert any(
-        i.kind == "symbol_format_mismatch" for i in result.preview.rows[0].issues)
+        i.kind == "symbol_format_mismatch"
+        for i in result.previews["transactions"].rows[0].issues)
 
 
 def test_ai_input_merged_explicit_market_checks_that_pattern(
@@ -324,9 +348,11 @@ def test_ai_input_merged_explicit_market_checks_that_pattern(
     _setup(conn)
     _insert_merged_account(conn)
     result = ai_agents_input(
-        conn, "buy", completer=_draft_completer_market("moomoo_merged", "1234", "US"))
+        conn, "buy", pool=_RICH_POOL,
+        completer=_draft_completer_market("moomoo_merged", "1234", "US"))
     assert any(
-        i.kind == "symbol_format_mismatch" for i in result.preview.rows[0].issues)
+        i.kind == "symbol_format_mismatch"
+        for i in result.previews["transactions"].rows[0].issues)
 
 
 def test_ai_input_merged_explicit_market_matches_no_warning(
@@ -336,9 +362,11 @@ def test_ai_input_merged_explicit_market_matches_no_warning(
     _setup(conn)
     _insert_merged_account(conn)
     result = ai_agents_input(
-        conn, "buy", completer=_draft_completer_market("moomoo_merged", "1234", "MY"))
+        conn, "buy", pool=_RICH_POOL,
+        completer=_draft_completer_market("moomoo_merged", "1234", "MY"))
     assert not any(
-        i.kind == "symbol_format_mismatch" for i in result.preview.rows[0].issues)
+        i.kind == "symbol_format_mismatch"
+        for i in result.previews["transactions"].rows[0].issues)
 
 
 def test_ai_draft_market_rides_preview_payload(conn: sqlite3.Connection) -> None:
@@ -346,31 +374,33 @@ def test_ai_draft_market_rides_preview_payload(conn: sqlite3.Connection) -> None
     _setup(conn)
     _insert_merged_account(conn)
     result = ai_agents_input(
-        conn, "buy", completer=_draft_completer_market("moomoo_merged", "5225", "MY"))
-    assert result.preview.rows[0].payload.get("market") == "MY"
+        conn, "buy", pool=_RICH_POOL,
+        completer=_draft_completer_market("moomoo_merged", "5225", "MY"))
+    assert result.previews["transactions"].rows[0].payload.get("market") == "MY"
 
 
 def test_ai_draft_without_market_omits_payload_key(conn: sqlite3.Connection) -> None:
     # No market on the draft -> the payload key is NOT added (purely additive; single-market
     # accounts and the committed CSV are untouched).
     _setup(conn)
-    result = ai_agents_input(conn, "buy 1000 2330 @600", completer=_good_completer)
-    assert "market" not in result.preview.rows[0].payload
+    result = ai_agents_input(conn, "buy 1000 2330 @600",
+                             pool=_RICH_POOL, completer=_good_completer)
+    assert "market" not in result.previews["transactions"].rows[0].payload
 
 
-# --- _drafts_to_csv: one-line-per-draft invariant (C7 row<->line mapping) -------------------
+# --- _txn_csv: one-line-per-draft invariant (C7 row<->line mapping) ---------------------
 
 
-def _draft(note: str | None) -> AiDraft:
-    return AiDraft(account_id="tw_broker", symbol="2330", side=Side.BUY,
-                   date=date(2026, 1, 2), shares=Decimal("1000"), price=Decimal("600"),
-                   note=note)
+def _draft(note: str | None) -> TxnDraft:
+    return TxnDraft(account_id="tw_broker", symbol="2330", side=Side.BUY,
+                    date=date(2026, 1, 2), shares=Decimal("1000"), price=Decimal("600"),
+                    note=note)
 
 
-def test_drafts_to_csv_one_line_per_draft() -> None:
-    csv = _drafts_to_csv([_draft(None), _draft("手動")])
+def test_txn_csv_one_line_per_draft() -> None:
+    csv = _txn_csv([_draft(None), _draft("手動")])
     lines = csv.rstrip("\n").split("\n")
-    assert lines[0] == ",".join(_AI_CSV_COLUMNS)
+    assert lines[0] == ",".join(_TXN_CSV_COLUMNS)
     assert len(lines) == 3  # header + one line per draft (the mapping invariant)
 
 
@@ -381,23 +411,24 @@ def test_ai_csv_columns_are_real_transaction_columns() -> None:
     it would just quietly drop whatever that column carried, which is precisely how
     ``daytrade`` went missing in the first place (by absence rather than by typo).
     """
-    assert set(_AI_CSV_COLUMNS) <= set(TRANSACTION_COLUMNS)
-    assert "daytrade" in _AI_CSV_COLUMNS  # the AI-1 regression pin
+    assert set(_TXN_CSV_COLUMNS) <= set(TRANSACTION_COLUMNS)
+    assert "daytrade" in _TXN_CSV_COLUMNS   # the AI-1 regression pin
+    assert "short_sale" in _TXN_CSV_COLUMNS  # AI-D19: the flag arrived with its prompt rule
     # Money of record is never handed to the model: the fee engine computes both ends.
-    assert "fee" not in _AI_CSV_COLUMNS and "tax" not in _AI_CSV_COLUMNS
+    assert "fee" not in _TXN_CSV_COLUMNS and "tax" not in _TXN_CSV_COLUMNS
 
 
-def test_drafts_to_csv_sanitizes_embedded_newlines_in_note() -> None:
+def test_txn_csv_sanitizes_embedded_newlines_in_note() -> None:
     """A note carrying CR/LF must NOT split a draft across csv lines — else the AI preview's
     row index (n) would no longer map to csv data line n+1 (C7)."""
-    csv = _drafts_to_csv([_draft("line1\nline2\r\nline3\rline4")])
+    csv = _txn_csv([_draft("line1\nline2\r\nline3\rline4")])
     lines = csv.rstrip("\n").split("\n")
     assert len(lines) == 2  # header + exactly one data line
     assert "\r" not in csv
     assert lines[1].endswith("line1 line2 line3 line4")
 
 
-# --- AI-1/AI-2: what the preview PRICED must be what the commit WRITES ----------------------
+# --- AI-1/AI-2: what the preview PRICED must be what the commit WRITES -------------------
 
 
 def _sell_completer(*, daytrade: bool = False, note: str | None = None) -> Completer:
@@ -407,7 +438,7 @@ def _sell_completer(*, daytrade: bool = False, note: str | None = None) -> Compl
         prompt: str, schema: type, *, agent: str, conn: object = None,
         images: list[bytes] | None = None, model_override: str | None = None,
     ) -> AiDraftList:
-        return AiDraftList(drafts=[AiDraft(
+        return AiDraftList(rows=[TxnDraft(
             account_id="tw_broker", symbol="2330", side=Side.SELL, date=date(2026, 6, 1),
             shares=Decimal("1000"), price=Decimal("600"), daytrade=daytrade, note=note,
         )])
@@ -427,8 +458,8 @@ def _recommit(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
 def test_ai_daytrade_reaches_the_ledger_not_just_the_preview(conn: sqlite3.Connection) -> None:
     """★ AI-1 disproof: the screen said 0.15%, the ledger got 0.3%.
 
-    ``AiDraft.daytrade`` was handed to ``TxnInput``, so the AI PREVIEW priced a TW same-day
-    round trip at the 0.15% rate. ``_drafts_to_csv`` then emitted seven columns with no
+    ``TxnDraft.daytrade`` was handed to ``TxnInput``, so the AI PREVIEW priced a TW same-day
+    round trip at the 0.15% rate. The pre-W1 CSV renderer then emitted seven columns with no
     ``daytrade``, and the commit route re-derives its own preview from that CSV — so the row
     was written as an ordinary sell at 0.3%, double what the user had just been shown. Fees
     and tax are part of ``original_total``, so the cost basis was wrong by the difference too.
@@ -436,35 +467,38 @@ def test_ai_daytrade_reaches_the_ledger_not_just_the_preview(conn: sqlite3.Conne
     The two numbers below are the whole defect: they must be equal.
     """
     _setup(conn)
-    result = ai_agents_input(conn, "當沖賣出 2330 1000 股 @600",
+    result = ai_agents_input(conn, "當沖賣出 2330 1000 股 @600", pool=_RICH_POOL,
                              completer=_sell_completer(daytrade=True))
-    previewed = result.preview.rows[0].tax
+    previewed = result.previews["transactions"].rows[0].tax
     assert previewed == Decimal("900")  # 600,000 x 0.15%, the day-trade rate
 
-    written = _recommit(conn, result.csv_text).rows[0].tax
+    written = _recommit(conn, result.csv_texts["transactions"]).rows[0].tax
     assert written == previewed, "the commit re-derives from the CSV — daytrade must ride along"
 
 
 def test_ai_ordinary_sell_still_pays_the_full_rate(conn: sqlite3.Connection) -> None:
     """The other half: carrying the flag must not turn every sell into a day trade."""
     _setup(conn)
-    result = ai_agents_input(conn, "賣出 2330 1000 股 @600",
+    result = ai_agents_input(conn, "賣出 2330 1000 股 @600", pool=_RICH_POOL,
                              completer=_sell_completer(daytrade=False))
-    assert result.preview.rows[0].tax == Decimal("1800")  # 600,000 x 0.3%
-    assert _recommit(conn, result.csv_text).rows[0].tax == Decimal("1800")
+    assert result.previews["transactions"].rows[0].tax == Decimal("1800")  # 600,000 x 0.3%
+    assert _recommit(conn, result.csv_texts["transactions"]).rows[0].tax == Decimal("1800")
 
 
 def test_ai_note_with_a_comma_does_not_shift_the_columns(conn: sqlite3.Connection) -> None:
     """★ AI-2 disproof: the prompt ASKS the model for notes, and a note is free text.
 
-    ``_drafts_to_csv`` did no CSV quoting at all (its own docstring said so). Measured before
-    the fix, one comma in a note did NOT merely shift columns — the row parsed to more fields
-    than the header declared, ``csv.DictReader`` filed the surplus under a ``None`` key, and
-    ``build_transaction_preview`` raised ``AttributeError: 'NoneType' object has no attribute
-    'strip'`` at its first line, OUTSIDE the try/except that catches malformed rows. So the
-    commit route did not degrade — it crashed, on text an LLM was invited to write. That puts
-    it in the never-500 class this codebase has already had to fix once for action rows.
+    The pre-W1 renderer did no CSV quoting at all (its own docstring said so). Measured
+    before the fix, one comma in a note did NOT merely shift columns — the row parsed to
+    more fields than the header declared, ``csv.DictReader`` filed the surplus under a
+    ``None`` key, and ``build_transaction_preview`` raised ``AttributeError: 'NoneType'
+    object has no attribute 'strip'`` at its first line, OUTSIDE the try/except that
+    catches malformed rows. So the commit route did not degrade — it crashed, on text an
+    LLM was invited to write. That puts it in the never-500 class this codebase has
+    already had to fix once for action rows.
     """
     _setup(conn)
-    result = ai_agents_input(conn, "賣出", completer=_sell_completer(note="停利, 分批"))
-    assert _recommit(conn, result.csv_text).rows[0].payload["note"] == "停利, 分批"
+    result = ai_agents_input(conn, "賣出", pool=_RICH_POOL,
+                             completer=_sell_completer(note="停利, 分批"))
+    assert _recommit(conn, result.csv_texts["transactions"]
+                     ).rows[0].payload["note"] == "停利, 分批"

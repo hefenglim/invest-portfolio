@@ -7,7 +7,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.data_ingestion import agents as agents_mod
-from portfolio_dash.data_ingestion.agents import AiDraft, AiDraftList
+from portfolio_dash.data_ingestion.agents import (
+    AiDraftList,
+    CashDraft,
+    DivDraft,
+    TxnDraft,
+    UnparsedRow,
+)
 from portfolio_dash.shared.llm_config import (
     AINotActivated,
     LLMBudgetExceeded,
@@ -24,9 +30,9 @@ _PNG_DATA_URI = "data:image/png;base64," + _PNG_B64
 
 
 def _fake_ok(*_a: object, **_k: object) -> AiDraftList:
-    return AiDraftList(drafts=[AiDraft(account_id="tw_broker", symbol="2330", side=Side.BUY,
-                                       date=date(2026, 6, 2), shares=Decimal("10"),
-                                       price=Decimal("600"))])
+    return AiDraftList(rows=[TxnDraft(account_id="tw_broker", symbol="2330", side=Side.BUY,
+                                      date=date(2026, 6, 2), shares=Decimal("10"),
+                                      price=Decimal("600"))])
 
 
 def _seed_model(conn: sqlite3.Connection, alias: str, *, vision: bool,
@@ -42,10 +48,12 @@ def test_ai_preview_ok(api_client: TestClient, monkeypatch: pytest.MonkeyPatch) 
     r = api_client.post("/api/input/ai/preview", json={"text": "在元大買 10 股 2330 @ 600"})
     assert r.status_code == 200
     b = r.json()
-    assert b["summary"]["total"] == 1
-    assert b["rows"][0]["data"]["symbol"] == "2330"
+    # W4 (AI-D18): one preview + one commit CSV PER KIND, keyed by the existing import kind.
+    assert b["previews"]["transactions"]["summary"]["total"] == 1
+    assert b["previews"]["transactions"]["rows"][0]["data"]["symbol"] == "2330"
     assert b["meta"]["via"] == "litellm"
-    assert "csv_text" in b and "2330" in b["csv_text"]
+    assert "2330" in b["csv_texts"]["transactions"]
+    assert b["unparsed"] == []
 
 
 def test_ai_preview_budget_402(api_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,6 +82,68 @@ def test_ai_preview_unavailable_503(
     monkeypatch.setattr(agents_mod, "complete_structured", _boom)
     r = api_client.post("/api/input/ai/preview", json={"text": "x"})
     assert r.status_code == 503 and r.json()["error"]["code"] == "llm_unavailable"
+
+
+# --- W4 (AI-D17/D18/D21): the discriminated union over the wire ---------------------------
+
+
+def _fake_mixed(*_a: object, **_k: object) -> AiDraftList:
+    """One draft of each kind plus a confessed unparsed row — the mixed-statement shape."""
+    return AiDraftList(
+        rows=[
+            TxnDraft(account_id="tw_broker", symbol="2330", side=Side.BUY,
+                     date=date(2026, 6, 2), shares=Decimal("10"), price=Decimal("600")),
+            DivDraft(account_id="tw_broker", symbol="2330", date=date(2026, 6, 3),
+                     type="CASH", gross=Decimal("1000")),
+            CashDraft(account_id="tw_broker", date=date(2026, 6, 1),
+                      cash_kind="入金", ccy="TWD", amount=Decimal("50000")),
+        ],
+        unparsed=[UnparsedRow(text="TWD 轉 USD 31500", reason="換匯請改用換匯登錄")],
+    )
+
+
+def test_ai_preview_mixed_union_three_buckets(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One prompt, three kinds: each lands in its own preview + CSV, keyed by import kind."""
+    monkeypatch.setattr(agents_mod, "complete_structured", _fake_mixed)
+    r = api_client.post("/api/input/ai/preview", json={"text": "mixed"})
+    assert r.status_code == 200
+    b = r.json()
+    assert set(b["previews"]) == {"transactions", "dividends", "cash"}
+    assert set(b["csv_texts"]) == {"transactions", "dividends", "cash"}
+    assert b["previews"]["dividends"]["rows"][0]["data"]["gross"] == "1000"
+    # AI-D21: the cash row carries the server-owned zh label + explicit sign.
+    cash_row = b["previews"]["cash"]["rows"][0]
+    assert cash_row["data"]["kind"] == "DEPOSIT"      # the zh alias canonicalised at the door
+    assert cash_row["data"]["kind_label"] == "入金"
+    assert cash_row["data"]["sign"] == "1"
+    # AI-D17: the confessed unparsed row rides the wire verbatim.
+    assert b["unparsed"] == [{"text": "TWD 轉 USD 31500", "reason": "換匯請改用換匯登錄"}]
+
+
+def test_ai_preview_cash_withdraw_guard_is_wired(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AI-D18's load-bearing assertion: the AI door binds the REAL pool probe.
+
+    A withdrawal from an empty pool must surface ``withdraw_insufficient_balance`` as a
+    hard issue — if the router ever dropped the injection, this row would preview clean
+    and the AI door would ship a weaker guard than the manual form next to it.
+    """
+
+    def _withdraw(*_a: object, **_k: object) -> AiDraftList:
+        return AiDraftList(rows=[CashDraft(
+            account_id="tw_broker", date=date(2026, 6, 5), cash_kind="WITHDRAW",
+            ccy="TWD", amount=Decimal("999999"),
+        )])
+
+    monkeypatch.setattr(agents_mod, "complete_structured", _withdraw)
+    r = api_client.post("/api/input/ai/preview", json={"text": "提領 999999"})
+    assert r.status_code == 200
+    row = r.json()["previews"]["cash"]["rows"][0]
+    assert row["status"] == "error"
+    assert "不可透支" in (row["reason"] or "")
 
 
 # --- FU-D20: screenshot intake + per-run model picker ----------------------------------
@@ -181,9 +251,9 @@ def test_ai_preview_model_alias_reaches_completer(
 def _fake_unregistered(*_a: object, **_k: object) -> AiDraftList:
     """A draft whose symbol (ZZZZ9) is NOT in the golden registry — the AI-input path emits the
     unregistered-symbol block for it (resolution is exact-only, so no coercion to 2330/AAPL)."""
-    return AiDraftList(drafts=[AiDraft(account_id="schwab", symbol="ZZZZ9", side=Side.BUY,
-                                       date=date(2026, 6, 2), shares=Decimal("10"),
-                                       price=Decimal("100"))])
+    return AiDraftList(rows=[TxnDraft(account_id="schwab", symbol="ZZZZ9", side=Side.BUY,
+                                      date=date(2026, 6, 2), shares=Decimal("10"),
+                                      price=Decimal("100"))])
 
 
 def test_ai_preview_unregistered_symbol_carries_code(
@@ -194,7 +264,7 @@ def test_ai_preview_unregistered_symbol_carries_code(
     monkeypatch.setattr(agents_mod, "complete_structured", _fake_unregistered)
     r = api_client.post("/api/input/ai/preview", json={"text": "buy ZZZZ9"})
     assert r.status_code == 200
-    row = r.json()["rows"][0]
+    row = r.json()["previews"]["transactions"]["rows"][0]
     assert row["code"] == "unregistered_symbol"
     assert row["data"]["symbol"] == "ZZZZ9"
     assert row["status"] == "error"  # unregistered = hard block until registered
@@ -208,4 +278,4 @@ def test_ai_preview_registered_symbol_code_is_null(
     monkeypatch.setattr(agents_mod, "complete_structured", _fake_ok)
     r = api_client.post("/api/input/ai/preview", json={"text": "buy 2330"})
     assert r.status_code == 200
-    assert r.json()["rows"][0]["code"] is None
+    assert r.json()["previews"]["transactions"]["rows"][0]["code"] is None

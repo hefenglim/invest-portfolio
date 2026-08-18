@@ -18,11 +18,12 @@ user-facing :func:`library_wire` payload (``agents.py`` imports it and fills the
 
 from typing import Literal, NotRequired, TypedDict
 
+from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v13 (2026-08-17)"  # 建議策略 v2: +基本面多來源段 (W3, AI-D14/15)
+LIBRARY_VERSION = "official-v14 (2026-08-18)"  # AI 門提示詞 v6: 判別式聯集三類 (W4, AI-D17/19)
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -54,43 +55,89 @@ LIBRARY_VERSION = "official-v13 (2026-08-17)"  # 建議策略 v2: +基本面多�
 # v5 (W3 batch-B, 2026-07-22): merged (multi-market) account support (F15) — such an account
 # is listed with its per-market ccys (e.g. USD:US＋MYR:MY); the model takes the ticker format
 # OF THE STOCK'S market and sets the new optional ``market`` output field to that market.
-AI_INPUT_PROMPT_VERSION = "v5"
+# v6 (AI-assistant W4, AI-D17/D19, 2026-08-18): the door becomes a DISCRIMINATED UNION —
+# one prompt extracts transactions + dividends + cash movements (a real statement is mixed),
+# discriminated by ``kind``, plus an ``unparsed`` confession list (FX / corporate actions /
+# options / unclassifiable — surfaced, never silently dropped). ``daytrade`` finally teaches
+# its semantics (explicit 當沖 only — the debt W1 left) and ``short_sale`` arrives with its
+# rule (explicit 放空/融券/short only), exactly as the CSV column comment planned. The cash-kind
+# vocabulary is JOINED from ``shared/cash_kinds.py`` at module level (the GICS-keys precedent)
+# so the prompt can never drift from the door's allowed set.
+_CASH_KIND_VOCAB = "、".join(f"{kind}（{zh}）" for kind, zh in CASH_KIND_ZH.items())
+
+AI_INPUT_PROMPT_VERSION = "v6"
 AI_INPUT_PROMPT_BODY = (
-    "<task>Extract stock transactions from the user's text and any attached statement\n"
-    "screenshot into JSON.</task>\n"
-    '<schema>{{"drafts": [{{"account_id","symbol","side":"BUY|SELL","date":"YYYY-MM-DD",\n'
-    '"shares","price","daytrade":false,"is_etf":false,"note","market"}}]}}</schema>\n'
+    "<task>Extract stock transactions, dividends, and cash movements from the user's text\n"
+    "and any attached statement screenshot into JSON. A real statement is MIXED — one page\n"
+    "can carry all three kinds.</task>\n"
+    '<schema>{{"rows": [<one object per ledger line, discriminated by "kind">],\n'
+    '"unparsed": [{{"text", "reason"}}]}}</schema>\n'
+    "<row_shapes>\n"
+    'txn 買賣交易: {{"kind":"txn","account_id","symbol","side":"BUY|SELL",\n'
+    '"date":"YYYY-MM-DD","shares","price","daytrade":false,"short_sale":false,\n'
+    '"is_etf":false,"note","market"}}\n'
+    'div 股利: {{"kind":"div","account_id","symbol","date",\n'
+    '"type":"CASH|STOCK|DRIP|NET","gross","withholding","net","reinvest_shares",\n'
+    '"reinvest_price"}}\n'
+    'cash 資金異動: {{"kind":"cash","account_id","date","cash_kind","ccy","amount",\n'
+    '"acq_home_amount","note"}}\n'
+    "</row_shapes>\n"
     "<accounts>{accounts}</accounts>\n"
     "<today>{today}</today>\n"
+    "<cash_kind_vocabulary>" + _CASH_KIND_VOCAB + "</cash_kind_vocabulary>\n"
     "<example_input>在元大買 10 股 2330 @ 600</example_input>\n"
-    '<example_output>{{"drafts":[{{"account_id":"tw_broker","symbol":"2330","side":"BUY",\n'
-    '"date":"2026-06-01","shares":"10","price":"600"}}]}}</example_output>\n'
-    "<example_input>7/1 嘉信買 AAPL 5股 @210，隔天再買 5 股 @212</example_input>\n"
-    '<example_output>{{"drafts":[{{"account_id":"schwab","symbol":"AAPL","side":"BUY",\n'
-    '"date":"2026-07-01","shares":"5","price":"210"}},{{"account_id":"schwab",\n'
-    '"symbol":"AAPL","side":"BUY","date":"2026-07-02","shares":"5","price":"212"}}]}}\n'
+    '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2330",\n'
+    '"side":"BUY","date":"2026-06-01","shares":"10","price":"600"}}],"unparsed":[]}}\n'
     "</example_output>\n"
+    "<example_input>嘉信 AAPL 股息再投資 0.5 股 @210，毛額 105、扣繳 31.5</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"div","account_id":"schwab","symbol":"AAPL",\n'
+    '"date":"2026-06-01","type":"DRIP","gross":"105","withholding":"31.5",\n'
+    '"reinvest_shares":"0.5","reinvest_price":"210"}}],"unparsed":[]}}</example_output>\n'
+    "<example_input>8/3 從嘉信提領 500 美元，另有一筆 TWD 轉 USD 換匯 31500</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"cash","account_id":"schwab","date":"2026-08-03",\n'
+    '"cash_kind":"WITHDRAW","ccy":"USD","amount":"500"}}],"unparsed":[{{"text":"TWD 轉 USD\n'
+    " 換匯 31500\",\"reason\":\"換匯（兩幣別金額）請改用換匯登錄\"}}]}}</example_output>\n"
     "<rules>Return JSON only, no prose. account_id MUST be one of the ids listed in\n"
     "<accounts> (match the user's broker wording to the account name); never invent\n"
-    "an id. symbol MUST be the LOCAL exchange code of the ACCOUNT's market, never a\n"
-    "cross-listed/ADR ticker from another exchange: a TW (TWD) account takes the\n"
-    "TWSE/TPEx numeric code (聯電⇒2303, 台積電⇒2330, 鴻海⇒2317 — NEVER US tickers\n"
-    "like UMC/TSM even if the company also trades as a US ADR); a US (USD) account\n"
-    "takes the US ticker (AAPL); a MY (MYR) account takes the 4-digit Bursa code\n"
-    "(Maybank⇒1155, Tenaga⇒5347, Inari⇒0166 — ACE-market codes KEEP the leading\n"
-    "zero: 0166, never 166; map a brand/mall/subsidiary to its LISTED parent, e.g.\n"
-    "IOI Mall⇒IOI Properties 5249). A Chinese company name on a TW account always\n"
-    "maps to its numeric code. A merged account is listed with MULTIPLE markets (shown\n"
-    "as e.g. USD:US＋MYR:MY): take the ticker format OF THE STOCK'S market (a US stock\n"
-    "its US ticker, an MY stock its 4-digit Bursa code) and set the optional market\n"
-    "field to that market's value (US/TW/MY). Dates resolve against <today>: a month/day\n"
-    "without a\n"
-    "year means the most\n"
-    "recent PAST occurrence (a trade date is never in the future); relative words\n"
-    "(今天/昨天/上週五) resolve from <today>. One draft per transaction — text may\n"
-    "contain several. An attached screenshot is a broker statement that may list\n"
-    "MULTIPLE transactions: read every visible row and emit one draft per row; the\n"
-    "same JSON-only contract applies to text and images alike.</rules>\n"
+    "an id. Classify EVERY ledger line into exactly one kind and emit one object per\n"
+    "line — text and screenshots alike may carry several, of MIXED kinds. symbol MUST\n"
+    "be the LOCAL exchange code of the ACCOUNT's market, never a cross-listed/ADR\n"
+    "ticker from another exchange: a TW (TWD) account takes the TWSE/TPEx numeric code\n"
+    "(聯電⇒2303, 台積電⇒2330, 鴻海⇒2317 — NEVER US tickers like UMC/TSM even if the\n"
+    "company also trades as a US ADR); a US (USD) account takes the US ticker (AAPL);\n"
+    "a MY (MYR) account takes the 4-digit Bursa code (Maybank⇒1155, Tenaga⇒5347,\n"
+    "Inari⇒0166 — ACE-market codes KEEP the leading zero: 0166, never 166; map a\n"
+    "brand/mall/subsidiary to its LISTED parent, e.g. IOI Mall⇒IOI Properties 5249). A\n"
+    "Chinese company name on a TW account always maps to its numeric code. A merged\n"
+    "account is listed with MULTIPLE markets (shown as e.g. USD:US＋MYR:MY): take the\n"
+    "ticker format OF THE STOCK'S market (a US stock its US ticker, an MY stock its\n"
+    "4-digit Bursa code) and set the optional market field to that market's value\n"
+    "(US/TW/MY). Dates resolve against <today>: a month/day without a year means the\n"
+    "most recent PAST occurrence (a trade date is never in the future); relative words\n"
+    "(今天/昨天/上週五) resolve from <today>. Never output fee or tax fields — fees and\n"
+    "taxes are computed by the system, never extracted. daytrade: set true ONLY when the\n"
+    "user explicitly says 當沖 (a same-day round trip they declare); never infer it from\n"
+    "two same-day opposite drafts. short_sale: set true ONLY when the user explicitly\n"
+    "says 放空／融券／short sell — never infer it from a sell larger than the position;\n"
+    "when in doubt, false. Dividend types: CASH=現金股利入帳; STOCK=配股（股票股利，加\n"
+    "股數）; DRIP=股息再投資（填 reinvest_shares 與 reinvest_price）; NET=淨額入帳（馬股\n"
+    "單一層制）. gross/withholding/net are copied from the statement ONLY when it states\n"
+    "them — never compute a withholding yourself. Cash rows: amount is ALWAYS unsigned\n"
+    "(positive); the direction lives in cash_kind — one of the <cash_kind_vocabulary>\n"
+    "entries (canonical English or the zh label, both accepted). 券商費用／融資利息 are\n"
+    "OUTFLOWS (BROKER_FEE／INTEREST_EXPENSE); 入金／利息收入 are INFLOWS — a mislabelled\n"
+    "kind reverses the cash pool by twice the amount with no error raised, so when the\n"
+    "statement does not make the kind clear, put the row in unparsed instead of\n"
+    "guessing. acq_home_amount: fill ONLY when the statement explicitly states the\n"
+    "home-currency cost of a foreign-currency inflow (e.g. 入金 1000 USD，成本 31500\n"
+    "TWD); never derive it from an exchange rate. ccy is the row's own currency\n"
+    "(TWD/USD/MYR). unparsed: a 換匯 (a currency conversion carrying TWO amounts), a\n"
+    "corporate action (拆股/合併/換股/分拆), an option/future row, or any line you\n"
+    "cannot classify with confidence goes to unparsed with the row's verbatim text and\n"
+    "a short reason — never force it into a kind, never drop it silently. An attached\n"
+    "screenshot is a broker statement that may list MULTIPLE rows: read every visible\n"
+    "row and emit one object per row; the same JSON-only contract applies to text and\n"
+    "images alike.</rules>\n"
     "<user_text>{text}</user_text>"
 )
 
@@ -682,7 +729,7 @@ class PromptRegistryEntry(TypedDict):
 PROMPT_REGISTRY: list[PromptRegistryEntry] = [
     {
         "key": "ai_input",
-        "feature": "AI 交易輸入解析（文字／截圖 → 交易草稿）",
+        "feature": "AI 輸入解析（文字／截圖 → 交易／股利／資金草稿，判別式聯集）",
         "tier": "code-owned",
         "version": AI_INPUT_PROMPT_VERSION,
         "agent": "ai_agents_input",
