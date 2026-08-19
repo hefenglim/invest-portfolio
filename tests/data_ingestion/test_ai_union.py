@@ -30,6 +30,7 @@ from portfolio_dash.data_ingestion.agents import (
     DivDraft,
     TxnDraft,
     UnparsedRow,
+    _cash_csv,
     ai_agents_input,
 )
 from portfolio_dash.data_ingestion.cash_import import build_cash_movement_preview
@@ -268,6 +269,42 @@ def test_a_dividend_row_missing_gross_fails_at_the_parse_boundary() -> None:
         }], "unparsed": []})
 
 
+def test_a_mistyped_optional_field_fails_at_the_parse_boundary() -> None:
+    """``with_hold`` is NOT ``withholding`` — the same boundary, from the other side.
+
+    Pydantic's default IGNORES unknown fields, so a mistyped optional money field used to
+    parse clean with the value gone: the dividend model then computes its own withholding
+    where the statement's number was read and dropped. ``extra="forbid"`` turns the typo
+    into the same parse-boundary rejection (and retry) a missing required field gets —
+    silent information loss is AI-D3's sin whichever direction the field went missing.
+    """
+    with pytest.raises(ValidationError):
+        AiDraftList.model_validate({"rows": [{
+            "kind": "div", "account_id": "schwab", "symbol": "AAPL",
+            "date": "2026-06-01", "type": "DRIP", "gross": "105",
+            "with_hold": "31.5",  # typo for withholding
+        }], "unparsed": []})
+    with pytest.raises(ValidationError):
+        AiDraftList.model_validate({"rows": [{
+            "kind": "cash", "account_id": "schwab", "date": "2026-06-01",
+            "cash_kind": "DEPOSIT", "ccy": "USD", "amount": "1000",
+            "acq_home_amt": "31500",  # typo for acq_home_amount — the F1 cost, silently lost
+        }], "unparsed": []})
+
+
+def test_the_v5_drafts_key_fails_loud_not_empty() -> None:
+    """A model regressing to the v5 shape must NOT parse to an empty extraction.
+
+    ``{"drafts": [...]}`` under an ignore-extras policy is ``rows=[]`` — every extracted
+    row silently dropped and an empty preview shown as if the statement held nothing.
+    """
+    with pytest.raises(ValidationError):
+        AiDraftList.model_validate({"drafts": [{
+            "kind": "txn", "account_id": "tw_broker", "symbol": "2330", "side": "BUY",
+            "date": "2026-06-01", "shares": "10", "price": "600",
+        }], "unparsed": []})
+
+
 def test_an_unknown_kind_is_rejected_not_threaded_through() -> None:
     """``kind: "fx"`` is not a union member — it must not silently become anything."""
     with pytest.raises(ValidationError):
@@ -287,3 +324,21 @@ def test_unparsed_rows_ride_through_untouched(conn: sqlite3.Connection) -> None:
     assert result.previews == {}
     assert [(u.text, u.reason) for u in result.unparsed] == [
         ("AAPL 1拆4", "公司行動請用表單")]
+
+
+# ------------------------------------------------------------------ C7, per kind
+
+
+def test_cash_csv_sanitizes_embedded_newlines_in_note() -> None:
+    """C7 holds per kind, not only for transactions: a cash note carrying CR/LF must not
+    split the draft across two CSV lines — else cash preview row ``n`` no longer maps to
+    cash data line ``n + 1`` when the frontend commits the checked subset. The txn arm's
+    pin lives in ``test_agents.py``; the helper is shared, but only a per-kind test keeps
+    a future renderer from dropping the collapse for one kind."""
+    csv = _cash_csv([CashDraft(account_id="tw_broker", date=date(2026, 1, 2),
+                               cash_kind="DEPOSIT", ccy="TWD", amount=Decimal("1000"),
+                               note="line1\nline2\r\nline3\rline4")])
+    lines = csv.rstrip("\n").split("\n")
+    assert len(lines) == 2  # header + exactly one data line
+    assert "\r" not in csv
+    assert lines[1].endswith("line1 line2 line3 line4")

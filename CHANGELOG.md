@@ -147,6 +147,20 @@ rows showing the Chinese kind label + an explicit ± sign, server-sourced from `
   - The txn arm also gains **sibling awareness** (C1 extended to this door): a sell covered
     by a buy earlier in the same paste no longer flags 賣超 against a position the same
     batch is still building.
+  - **Senior-review hardening (two independent reviewers, five findings).** The parse
+    boundary now fails loud in BOTH directions: the drafts and `AiDraftList` are
+    `extra="forbid"`, so a mistyped optional money field (`with_hold` for `withholding`) or
+    a model regressing to the v5 `{"drafts": [...]}` shape raises at the boundary and takes
+    the one retry instead of silently dropping the statement's number — or the whole
+    extraction. (Behavior note: a model that habitually appends junk keys now degrades
+    loudly after the retry rather than being silently tolerated — deliberate.) The v6
+    prompt's cash one-shot example carried a raw newline inside a JSON string — invalid
+    JSON in the model's strongest anchor; all three example blocks are now machine-parsed
+    by a test. And the per-kind commit loop **settles before it reports**: a mid-loop hard
+    failure (a kind 500s after another kind already wrote) used to strand the written kinds
+    on screen looking uncommitted — no section retirement, no ledger refresh, and a retry
+    that re-posts them; the loop now finishes the settled kinds first, then reports the
+    failure with the remainder retry-able.
 - **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
   `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
   released**). A share count that changes without a trade previously had no representation, so

@@ -95,8 +95,8 @@ AI_INPUT_PROMPT_BODY = (
     '"reinvest_shares":"0.5","reinvest_price":"210"}}],"unparsed":[]}}</example_output>\n'
     "<example_input>8/3 從嘉信提領 500 美元，另有一筆 TWD 轉 USD 換匯 31500</example_input>\n"
     '<example_output>{{"rows":[{{"kind":"cash","account_id":"schwab","date":"2026-08-03",\n'
-    '"cash_kind":"WITHDRAW","ccy":"USD","amount":"500"}}],"unparsed":[{{"text":"TWD 轉 USD\n'
-    " 換匯 31500\",\"reason\":\"換匯（兩幣別金額）請改用換匯登錄\"}}]}}</example_output>\n"
+    '"cash_kind":"WITHDRAW","ccy":"USD","amount":"500"}}],"unparsed":[{{"text":"TWD 轉 USD 換匯 '
+    '31500","reason":"換匯（兩幣別金額）請改用換匯登錄"}}]}}</example_output>\n'
     "<rules>Return JSON only, no prose. account_id MUST be one of the ids listed in\n"
     "<accounts> (match the user's broker wording to the account name); never invent\n"
     "an id. Classify EVERY ledger line into exactly one kind and emit one object per\n"

@@ -23,6 +23,20 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A prompt's one-shot example is code — parse it in a test (2026-08-19, W4 review):** the
+  v6 AI-door prompt's cash example broke a Python string-concatenation line INSIDE a JSON
+  string value, so the rendered `<example_output>` was invalid JSON — in the model's
+  strongest anchor, where it teaches the output contract. The ast.parse check on the module
+  passed (the Python was valid; the payload wasn't). The guard that catches it:
+  `json.loads` every `<example_output>` block of the formatted prompt in a registry test.
+- **A loop that settles results only at the happy end strands completed work on a mid-loop
+  failure (2026-08-19, W4 review, two sites):** the per-kind AI commit loop posted kind 1,
+  then kind 2 500'd — and the catch-all returned without retiring kind 1's section,
+  refreshing the ledger, or reporting its counts. The rows were IN the ledger but looked
+  uncommitted, inviting a retry that re-posts them. Settle what already succeeded BEFORE
+  reporting the failure; the remainder stays retry-able. Same defect, two sites (main loop
+  and the 422-ack retry loop) — a pattern introduced by the loop itself, so check every
+  loop that accumulates results for its mid-loop failure path.
 - **"Deterministic" verified within one day proves nothing across days (2026-08-18):** the
   stress-audit phase-1 pass count was recorded as `4780, deterministic (fixed ASOF dates)` —
   verified three times, all on the SAME day. Two days later the identical commit reports 4787.

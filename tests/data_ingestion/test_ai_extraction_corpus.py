@@ -11,11 +11,13 @@ the network here anyway).
 import json
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from portfolio_dash.data_ingestion.agents import _TXN_CSV_COLUMNS
 from portfolio_dash.data_ingestion.cash_import import CASH_MOVEMENT_COLUMNS
+from portfolio_dash.data_ingestion.config_seed import DEFAULT_ACCOUNTS
 from portfolio_dash.data_ingestion.dividend_import import DIVIDEND_COLUMNS
 from portfolio_dash.shared.cash_kinds import CASH_KIND_VALUES
 
@@ -34,12 +36,48 @@ _ALLOWED = {
     "div": set(DIVIDEND_COLUMNS),
     "cash": set(CASH_MOVEMENT_COLUMNS),
 }
+#: The accounts the live runner seeds in self-contained mode (``seed_accounts``). A case
+#: asserting any other id can never pass a live run — and a red baseline that is corpus rot,
+#: not a prompt regression, is exactly what this guard exists to rule out.
+_ACCOUNT_IDS = {a.account_id for a in DEFAULT_ACCOUNTS}
 
 
 def _cases() -> list[dict[str, object]]:
     doc = json.loads(CORPUS.read_text(encoding="utf-8"))
     cases: list[dict[str, object]] = doc["cases"]
     return cases
+
+
+def _check_case(c: dict[str, Any]) -> None:
+    """One case's well-formedness, as assertions — extracted so the guard itself can be
+    tested against rot (a check that cannot fail is not a check)."""
+    assert c["id"] and c["input"].strip(), c["id"]
+    if "today" in c:
+        date.fromisoformat(c["today"])
+    expect = c["expect"]
+    assert isinstance(expect["rows"], list)
+    assert isinstance(expect["unparsed_contains"], list)
+    for sub in expect["unparsed_contains"]:
+        # "" is a substring of EVERY confession — a blank expectation makes the runner's
+        # recall check pass vacuously, which is rot wearing a green checkmark.
+        assert isinstance(sub, str) and sub.strip(), (
+            f"{c['id']}: blank unparsed_contains substring")
+    for row in expect["rows"]:
+        kind = row["kind"]
+        assert kind in _REQUIRED, f"{c['id']}: unknown row kind {kind!r}"
+        fields = row["fields"]
+        missing = _REQUIRED[kind] - fields.keys()
+        assert not missing, f"{c['id']}: {kind} row missing required fields {missing}"
+        stray = fields.keys() - _ALLOWED[kind]
+        assert not stray, f"{c['id']}: {kind} row asserts non-CSV fields {stray}"
+        assert fields["account"] in _ACCOUNT_IDS, (
+            f"{c['id']}: account {fields['account']!r} is not a seeded account id "
+            f"— the live runner can never pass this case")
+        for name, value in fields.items():
+            # Money/quantity as a JSON float would make the ground truth itself fuzzy.
+            assert isinstance(value, str), (
+                f"{c['id']}.{kind}.{name}: expected values are strings, got {value!r}")
+        date.fromisoformat(fields["date"])
 
 
 def test_corpus_parses_and_every_case_is_well_formed() -> None:
@@ -50,25 +88,34 @@ def test_corpus_parses_and_every_case_is_well_formed() -> None:
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids)), "duplicate case id"
     for c in cases:
-        assert c["id"] and c["input"].strip(), c["id"]
-        if "today" in c:
-            date.fromisoformat(c["today"])
-        expect = c["expect"]
-        assert isinstance(expect["rows"], list)
-        assert isinstance(expect["unparsed_contains"], list)
-        for row in expect["rows"]:
-            kind = row["kind"]
-            assert kind in _REQUIRED, f"{c['id']}: unknown row kind {kind!r}"
-            fields = row["fields"]
-            missing = _REQUIRED[kind] - fields.keys()
-            assert not missing, f"{c['id']}: {kind} row missing required fields {missing}"
-            stray = fields.keys() - _ALLOWED[kind]
-            assert not stray, f"{c['id']}: {kind} row asserts non-CSV fields {stray}"
-            for name, value in fields.items():
-                # Money/quantity as a JSON float would make the ground truth itself fuzzy.
-                assert isinstance(value, str), (
-                    f"{c['id']}.{kind}.{name}: expected values are strings, got {value!r}")
-            date.fromisoformat(fields["date"])
+        _check_case(c)
+
+
+def test_the_guard_catches_rotten_cases() -> None:
+    """The guard is only worth its determinism if rot actually fails it (AI-D20).
+
+    Two rot shapes the structural checks alone do not see: an account id the runner never
+    seeds (the case goes red forever and reads as a prompt regression), and a blank
+    ``unparsed_contains`` substring (the confession recall passes vacuously).
+    """
+    good: dict[str, object] = {
+        "id": "synthetic", "input": "入金 1000",
+        "expect": {
+            "rows": [{"kind": "cash", "fields": {
+                "account": "tw_broker", "date": "2026-06-01", "kind": "DEPOSIT",
+                "ccy": "TWD", "amount": "1000"}}],
+            "unparsed_contains": [],
+        },
+    }
+    _check_case(good)  # sanity: the fixture shape itself is well-formed
+    bad_account = json.loads(json.dumps(good))
+    bad_account["expect"]["rows"][0]["fields"]["account"] = "yuanta"
+    blank_substring = json.loads(json.dumps(good))
+    blank_substring["expect"]["rows"] = []
+    blank_substring["expect"]["unparsed_contains"] = ["  "]
+    for rotten in (bad_account, blank_substring):
+        with pytest.raises(AssertionError):
+            _check_case(rotten)
 
 
 def test_corpus_vocabulary_is_the_doors_own() -> None:

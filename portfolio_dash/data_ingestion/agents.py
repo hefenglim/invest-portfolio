@@ -32,7 +32,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from portfolio_dash.data_ingestion.cash_import import (
     CASH_MOVEMENT_COLUMNS,
@@ -70,6 +70,8 @@ class TxnDraft(BaseModel):
     the user never declared, and the flag exempts the sell from the 賣超 guard.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     kind: Literal["txn"] = "txn"
     account_id: str
     symbol: str
@@ -95,6 +97,8 @@ class DivDraft(BaseModel):
     a field the commit door cannot see (the AI-1 lesson, generalised).
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     kind: Literal["div"] = "div"
     account_id: str
     symbol: str
@@ -118,6 +122,8 @@ class CashDraft(BaseModel):
     ``_canonical_kind`` owns the alias table, so this door and the CSV door can never
     drift apart on what 入金 means.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     kind: Literal["cash"] = "cash"
     account_id: str
@@ -150,7 +156,19 @@ AnyDraft = Annotated[TxnDraft | DivDraft | CashDraft, Field(discriminator="kind"
 
 
 class AiDraftList(BaseModel):
-    """Structured LLM output: the extracted drafts plus the confessed unparsed rows."""
+    """Structured LLM output: the extracted drafts plus the confessed unparsed rows.
+
+    ``extra="forbid"`` here and on the three drafts (W4 review): the same parse boundary
+    AI-D17 set for MISSING fields, from the other side. Pydantic's default ignores unknown
+    keys, so a mistyped optional money field (``with_hold`` for ``withholding``) parsed
+    clean with the statement's number silently gone — and a model regressing to the v5
+    ``{"drafts": [...]}`` shape parsed to ``rows=[]``, the whole extraction dropped without
+    a word. Both are AI-D3's silent-drop sin; both now fail validation and take the one
+    retry instead. ``UnparsedRow`` stays lenient: an extra key on a confession costs
+    nothing, and the confession itself is the failure-soft path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     rows: list[AnyDraft] = Field(default_factory=list)
     unparsed: list[UnparsedRow] = Field(default_factory=list)

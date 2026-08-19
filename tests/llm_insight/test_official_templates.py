@@ -7,6 +7,9 @@ guardrail, frame unheld symbols as 建倉評估, and NOT change the task presets
 reference strategies BY NAME, so a version bump needs no preset change).
 """
 
+import json
+import re
+
 from portfolio_dash.llm_insight import official_templates as ot
 
 
@@ -58,6 +61,20 @@ def test_ai_input_prompt_v6_pins_local_exchange_code_rule() -> None:
     # the rule text must survive .format (no stray placeholders were introduced).
     rendered = body.format(accounts="a=b (USD:US＋MYR:MY)", today="2026-07-19", text="x")
     assert "聯電⇒2303" in rendered and "STOCK'S market" in rendered
+
+
+def test_ai_input_prompt_example_outputs_are_valid_json() -> None:
+    """Every ``<example_output>`` must parse as strict JSON — the one-shot example is the
+    model's strongest anchor (llm-insight.md), and the completion layer parses STRICTLY.
+    The v6 cash example shipped a raw newline INSIDE a string value (a Python string
+    concatenation break mid-token), teaching by an example the parser itself would reject.
+    Line breaks BETWEEN tokens are fine; inside a string they are not."""
+    rendered = ot.AI_INPUT_PROMPT_BODY.format(
+        accounts="a=b (TWD)", today="2026-08-18", text="x")
+    blocks = re.findall(r"<example_output>(.*?)</example_output>", rendered, re.S)
+    assert blocks, "the prompt lost its one-shot examples entirely"
+    for blk in blocks:
+        json.loads(blk)  # raises on any invalid example
 
 
 def test_ai_instrument_resolve_prompt_is_registered_and_versioned() -> None:

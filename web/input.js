@@ -1769,27 +1769,34 @@
     const restore = window.pdBusy ? window.pdBusy($('#ai-write-all'), '寫入中…') : () => {};
     const done = [];
     const needAck = [];
-    try {
-      for (const p of plan) {
-        try {
-          const resp = await api.post('/api/import/commit',
-            { kind: p.kind, csv_text: p.picked.text, ack_warnings: false });
-          done.push({ kind: p.kind, resp: resp, text: p.picked.text });
-        } catch (err) {
-          if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
-            needAck.push(p);
-            continue;
-          }
-          throw err;
+    let failed = null;
+    for (const p of plan) {
+      try {
+        const resp = await api.post('/api/import/commit',
+          { kind: p.kind, csv_text: p.picked.text, ack_warnings: false });
+        done.push({ kind: p.kind, resp: resp, text: p.picked.text });
+      } catch (err) {
+        if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
+          needAck.push(p);
+          continue;
         }
+        failed = err;
+        break;
       }
-    } catch (err) {
-      restore();
-      if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
-      return;
     }
     restore();
+    /* A mid-loop hard failure must still SETTLE the kinds that already wrote (section
+       cleanup + ledger refresh + counts) — their rows are in the ledger, so leaving them
+       on screen looking uncommitted invites a retry that re-posts them (the server's
+       content-hash dedupe absorbs the double write, but the UI would be lying). The
+       failed + never-attempted kinds keep their rows + csv, retry-able. */
     if (done.length) await finishAiCommits(done);
+    if (failed) {
+      if (window.toast) {
+        window.toast((failed && failed.message) || '寫入失敗', 'fail', failed && failed.code);
+      }
+      return;
+    }
     if (!needAck.length) return;
     window.confirmDialog({
       title: '匯入警告確認',
@@ -1797,18 +1804,25 @@
       confirmLabel: '確認寫入',
       onConfirm: async () => {
         const r2 = window.pdBusy ? window.pdBusy($('#ai-write-all'), '寫入中…') : () => {};
-        try {
-          const acked = [];
-          for (const p of needAck) {
+        const acked = [];
+        let failed2 = null;
+        for (const p of needAck) {
+          try {
             const resp = await api.post('/api/import/commit',
               { kind: p.kind, csv_text: p.picked.text, ack_warnings: true });
             acked.push({ kind: p.kind, resp: resp, text: p.picked.text });
+          } catch (e2) {
+            failed2 = e2;
+            break;
           }
-          r2();
-          await finishAiCommits(acked);
-        } catch (e2) {
-          r2();
-          if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail', e2 && e2.code);
+        }
+        r2();
+        /* Same settlement rule as the main loop above: kinds whose ack-commit already
+           wrote are retired + reported BEFORE the failure toast, never stranded. */
+        if (acked.length) await finishAiCommits(acked);
+        if (failed2 && window.toast) {
+          window.toast((failed2 && failed2.message) || '寫入失敗', 'fail',
+            failed2 && failed2.code);
         }
       }
     });
