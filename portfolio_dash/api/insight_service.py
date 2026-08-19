@@ -58,10 +58,12 @@ from portfolio_dash.llm_insight.generate import RunInputs, RunResult, run_insigh
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData, FreshnessReport
 from portfolio_dash.portfolio.price_basis import price_in, series_in
+from portfolio_dash.portfolio.technicals import annualized_volatility
+from portfolio_dash.pricing.benchmarks import Benchmark, benchmark_for_market
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.scheduler.jobs import insight_job_id
 from portfolio_dash.shared.corporate_actions import ActionIndex
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.llm_config import (
     LLMError,
     LLMRole,
@@ -82,6 +84,13 @@ logger = logging.getLogger(__name__)
 _NARRATIVE_MISS_THRESHOLD = 60
 # How far back to look for the create-time / due-time price closes when building the actual.
 _EVAL_LOOKBACK_DAYS = 14
+# AI-D24: the volatility metric's fixed measurement window (trading days) — the same
+# estimator length the alert inputs use (``api/alert_inputs.py`` vol_30d). Fixed, NOT the
+# prediction's horizon: a 3-day on_alert horizon would otherwise be a 3-return noise
+# reading. The lookback covers the create-side window's 31 closes: 30 trading days ≈ 42
+# calendar days + long-holiday cushion.
+_VOL_WINDOW = 30
+_VOL_LOOKBACK_DAYS = 75
 
 
 def calibration_gap(conn: sqlite3.Connection) -> Decimal | None:
@@ -393,6 +402,66 @@ def _price_on_or_before(
     return series[-1].value if series else None
 
 
+def _benchmark_for_symbol(conn: sqlite3.Connection, symbol: str) -> Benchmark | None:
+    """The fixed benchmark for the symbol's market (AI-D22), or ``None`` when unscorable.
+
+    Reads the ``instruments`` table (a ``data_ingestion`` table) directly — the established
+    cross-layer SQL convention (architecture.md): one shared connection, the coupling named
+    here, and a missing table/row degrades to ``None`` rather than raising. ``None`` covers
+    both an unregistered/removed symbol and a market with no wired benchmark (MY) — the
+    caller lands both as honest ``pending_data``, never a guessed proxy (an MYR stock vs a
+    USD index is noise, per the ruling).
+    """
+    try:
+        row = conn.execute(
+            "SELECT market FROM instruments WHERE symbol = ?", (symbol,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None  # no instruments table → no market → honestly unscorable
+    if row is None:
+        return None
+    return benchmark_for_market(Market(row[0]))
+
+
+def _window_return(
+    closes: list[tuple[date, Decimal]], start: date, end: date
+) -> Decimal | None:
+    """Fractional return ``start``→``end`` over an ASCENDING stored close series, or None.
+
+    The start leg is the first close ON/AFTER ``start`` (within ``+_EVAL_LOOKBACK_DAYS``),
+    the end leg the last close ON/BEFORE ``end`` — the same tolerance the price_change arms
+    use, so a benchmark weekend/holiday never fabricates a measurement gap. A zero start
+    leg → ``None``. Pure: the caller fetches the series (AI-D22/23 — used for the
+    benchmark leg of a ``relative`` prediction; both legs stay in their local currency,
+    per-market identical by construction).
+    """
+    lo = [c for d, c in closes
+          if start <= d <= start + timedelta(days=_EVAL_LOOKBACK_DAYS)]
+    hi = [c for d, c in closes
+          if end - timedelta(days=_EVAL_LOOKBACK_DAYS) <= d <= end]
+    if not lo or not hi or lo[0] == Decimal("0"):
+        return None
+    return (hi[-1] - lo[0]) / lo[0]
+
+
+def _vol_change_pct(
+    closes: list[tuple[date, Decimal]], created: date, due: date
+) -> Decimal | None:
+    """Fractional change in realized volatility, create→due (AI-D24), or ``None``.
+
+    Two fixed ``_VOL_WINDOW``-trading-day windows of ``annualized_volatility`` — one ending
+    at the create date (the baseline the model saw), one at the due date. The series MUST
+    already be re-expressed into one share basis: a split inside the window would read as a
+    vol spike, not a split (the caller passes it through ``series_in``). A zero or
+    insufficient-history baseline → ``None`` (pending_data, never a fabricated miss).
+    """
+    base = annualized_volatility([c for d, c in closes if d <= created], window=_VOL_WINDOW)
+    after = annualized_volatility([c for d, c in closes if d <= due], window=_VOL_WINDOW)
+    if base is None or after is None or base == Decimal("0"):
+        return None
+    return (after - base) / base
+
+
 def _measure_actual(
     conn: sqlite3.Connection, due: es.DueInsight, prediction: Prediction,
     *, actions: ActionIndex,
@@ -400,9 +469,11 @@ def _measure_actual(
     """Build the objective measurement for a due insight, or None when unavailable.
 
     A None return (or all-None measurement fields) signals the actual value is unavailable
-    (missing/halted price) → the caller defers as pending_data (anti-poison). Only
-    ``price_change`` is fully measured in v1; ``volatility``/``relative`` degrade to None
-    when their inputs are absent.
+    (missing/halted price) → the caller defers as pending_data (anti-poison). All three
+    metrics are measured (W5, AI-D22..D26): ``price_change`` from the symbol's own legs;
+    ``relative`` adds the fixed market benchmark's create→due return (``None`` for an MY
+    symbol, an unregistered symbol, or a missing benchmark series → honest pending_data);
+    ``volatility`` compares two fixed 30-day realized-vol windows.
 
     Baseline (M4 fix, decision Q1c): the card's stored ``price_at_create`` — the last
     close the model actually saw — is the preferred start price, so the score measures
@@ -415,7 +486,11 @@ def _measure_actual(
     7-for-1 scores every open card as a −86% collapse, i.e. a fabricated miss on the model's
     permanent record. ``price_at_create`` gets the same treatment as a fetched start price
     (``priced_on=created``, the closest date the stored scalar carries) — re-expressing one
-    leg and not the other would MANUFACTURE the discrepancy this fixes.
+    leg and not the other would MANUFACTURE the discrepancy this fixes. The volatility arm's
+    whole series is re-expressed the same way (a split inside a vol window is a vol spike,
+    not a split), and the benchmark leg rides the same seam as the performance router's
+    read — a structural no-op while the ledger records no action on the benchmark key, but
+    a HELD 0050 with a recorded SPLIT would otherwise fabricate a −86% "benchmark return".
     """
     symbol = due.symbol
     if symbol is None:
@@ -437,11 +512,40 @@ def _measure_actual(
         return None  # price unavailable/halted → pending_data
     change = (end_px - start_px) / start_px
     if prediction.metric == "relative":
-        # No benchmark series wired in v1 → benchmark unavailable → score_quant returns None.
-        return scoring.ActualMeasurement(symbol_return_pct=change, benchmark_return_pct=None)
+        bench = _benchmark_for_symbol(conn, symbol)
+        bench_ret: Decimal | None = None
+        if bench is not None:
+            bench_ret = _window_return(
+                [
+                    (p.as_of, p.value)
+                    for p in series_in(
+                        actions, bench.storage_key,
+                        get_price_history(
+                            conn, bench.storage_key, created,
+                            due_date + timedelta(days=_EVAL_LOOKBACK_DAYS),
+                        ),
+                        valued_on=due_date,
+                    )
+                ],
+                created, due_date,
+            )
+        return scoring.ActualMeasurement(
+            symbol_return_pct=change, benchmark_return_pct=bench_ret
+        )
     if prediction.metric == "volatility":
-        # Realized-vol change is not yet derived in v1 → unavailable → None verdict.
-        return scoring.ActualMeasurement(vol_change_pct=None)
+        series = series_in(
+            actions, symbol,
+            get_price_history(
+                conn, symbol,
+                created - timedelta(days=_VOL_LOOKBACK_DAYS), due_date,
+            ),
+            valued_on=due_date,
+        )
+        return scoring.ActualMeasurement(
+            vol_change_pct=_vol_change_pct(
+                [(p.as_of, p.value) for p in series], created, due_date
+            )
+        )
     return scoring.ActualMeasurement(price_change_pct=change)
 
 

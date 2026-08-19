@@ -1050,3 +1050,24 @@ prevents recurrence.
   **(2)** A full-suite run on a resource-tight box is itself a flaky test. The right reading is
   per-module green (which W2 had: every changed module's suite passed on its own) plus a targeted
   re-run of the lone failure — not a blanket "the suite is red".
+
+- **2026-08-20 — a disproof fixture must place its anomaly in exactly ONE window, or it disproves nothing.**
+  W5's volatility measurement compares two 30-day windows (create vs due). The first draft of the
+  split-disproof fixture put the SPLIT on the create date — so the resulting −86% jump appeared in
+  BOTH windows, both vols inflated by the same amount, and the raw (unfixed) path measured
+  ``change ≈ 0``: the "fabricated spike" the test claimed to demonstrate was not there, and the
+  assertion (``vol_change_pct > 1``) would have failed for the WRONG reason — or worse, been
+  weakened into passing vacuously. Caught in self-review before any gate ran. The fix: the split
+  moved to created+5, inside the due window only, with a wiggly (non-zero-vol) pre-regime so the
+  raw baseline is a real denominator. Rule: when a test's claim is "path X mis-measures THIS
+  event", compute both windows' contents by hand before writing the assertion — an anomaly both
+  sides share is invisible to a ratio.
+- **2026-08-20 — an edit after gate-launch invalidates the gate; kill and relaunch, don't "top up".**
+  A one-line production edit (benchmark leg through ``series_in``) landed ~2 minutes after the
+  detached mypy + pytest runs started. Both gates were certifying the PRE-edit tree. The tempting
+  shortcut — "let them finish, then re-run just the affected files" — certifies the final tree
+  only for those files and leaves the other 600+ files verified against code that no longer
+  exists. The right move is mechanical: kill the detached processes, clear the ``.done`` markers,
+  relaunch on the final tree. (Also: the kill/restart one-liner failed with a bare exit 255 and
+  no output — compose destructive-and-restart steps separately, and verify "nothing is running"
+  before relaunching.)

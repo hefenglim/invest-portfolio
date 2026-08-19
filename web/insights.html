@@ -489,8 +489,14 @@
       var quant = r.quant_hit == null ? EM : (r.quant_hit ? '✓' : '✗');
       tr.appendChild(el('td', 'col-text', quant));
       tr.appendChild(el('td', 'num', r.narrative_score == null ? EM : f.num(r.narrative_score)));
-      var res = el('td', 'col-text ' + (r.miss ? 'hit-no' : 'hit-yes'), r.miss ? '✗ 失誤' : '✓ 命中');
-      tr.appendChild(res);
+      /* AI-D26: a row whose evaluation never scored (pending_data / undetermined) carries
+         miss=0 — painting it "✓ 命中" reports a record the ledger does not hold. The wire
+         has always carried status (_row_wire); say what the row actually IS. */
+      var resCls, resTxt;
+      if (r.status === 'pending_data') { resCls = 'hit-open'; resTxt = '… 待資料'; }
+      else if (r.status === 'undetermined') { resCls = 'hit-open'; resTxt = '— 未定'; }
+      else { resCls = r.miss ? 'hit-no' : 'hit-yes'; resTxt = r.miss ? '✗ 失誤' : '✓ 命中'; }
+      tr.appendChild(el('td', 'col-text ' + resCls, resTxt));
       /* actual_value is a Decimal STRING ratio (move pct) -> f.signedPct (no bare .toFixed). */
       tr.appendChild(el('td', 'col-text num', r.actual_value == null ? EM : f.signedPct(r.actual_value)));
       tr.appendChild(el('td', 'num', f.datetime(r.evaluated_at)));

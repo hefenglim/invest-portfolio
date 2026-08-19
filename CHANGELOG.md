@@ -49,6 +49,20 @@ separately — the only fields that move money silently; thresholds calibrated t
 baseline run; screenshot cases go through the owner's manual review, never into the repo), and
 **AI-D21** (the preview renders three sections — transactions / dividends / cash — with the cash
 rows showing the Chinese kind label + an explicit ± sign, server-sourced from `CASH_KIND_ZH`).
+**W5 rulings (2026-08-19):** **AI-D22** (benchmark = a fixed server-side market map —
+TW→`0050`, US→`sp500` — looked up from the instrument's market; MY has no benchmark and stays
+honestly unscorable; the LLM never picks the yardstick, and `^KLSE` is a noted cheap follow-up
+with a yfinance suffix-routing catch), **AI-D23** (excess return compares both legs in their
+LOCAL currencies — per market the two legs share a currency by construction; converting both to
+TWD would cancel to the same answer while adding FX-data drop points, so `convert_closes` is
+deliberately NOT used), **AI-D24** (`vol_change_pct = vol_30d(due) / vol_30d(create) − 1` —
+fixed 30-trading-day windows of the same `annualized_volatility` estimator the alert inputs use,
+over the split-re-expressed close series; a zero baseline or insufficient history degrades to an
+honest None, never a miss), **AI-D25** (volatility gets its own flat band, ±5% — the shared
+±0.5% band would make nearly every `direction=flat` volatility call an automatic miss, since a
+30-day estimator jitters by several percent on a constant series; price_change/relative keep
+±0.5%), and **AI-D26** (scope: per-symbol wiring + the scoreboard's status-rendering fix;
+portfolio-scope scoring stays an honest None for W7).
 
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
@@ -161,6 +175,31 @@ rows showing the Chinese kind label + an explicit ± sign, server-sourced from `
     on screen looking uncommitted — no section retirement, no ledger refresh, and a retry
     that re-posts them; the loop now finishes the settled kinds first, then reports the
     failure with the remainder retry-able.
+- **The scoreboard can now score all three prediction metrics (W5, AI-D7 + AI-D22..D26).**
+  Two of the three quantitative prediction types could never be scored: `_measure_actual`
+  returned `benchmark_return_pct=None` for `relative` and `vol_change_pct=None` for
+  `volatility`, so every such card deferred five times and died `undetermined` — never a
+  hit, never a miss, and excluded from every hit-rate stat (the scoreboard looked clean
+  partly because the hard-to-score cards were invisible to it). The scorers themselves
+  were already written and tested; what was missing was the measurement seam feeding them.
+  - **`relative` replays the benchmark** (AI-D22/D23): the card's symbol maps through a
+    fixed server-side table (TW→`0050`, US→`sp500` — the series `history_daily` already
+    refreshes into `prices`) and the benchmark's create→due return is measured with the
+    same ±14-day tolerance as the symbol's own legs, both legs in their local currencies
+    (per market they share one by construction). An MY card, an unregistered symbol, or a
+    missing benchmark series degrades to `pending_data`, never a forced miss.
+  - **`volatility` compares two fixed 30-day windows** (AI-D24): realized vol over the 30
+    trading days ending at the due date vs the 30 ending at the create date, over the
+    split-re-expressed close series (`series_in`, so a split inside the window is not
+    mistaken for a vol spike), using the same `annualized_volatility` estimator the alert
+    inputs already use. A flat regime call now has a fair chance: the flat band for this
+    metric is **±5%** (AI-D25) instead of the shared ±0.5%, which a 30-day estimator
+    exceeds on noise alone. A zero baseline vol or insufficient history → honest None.
+  - **The scoreboard rows now tell unscorable from hit** (AI-D26): `renderScoreRows` never
+    read `status`, so a `pending_data` / `undetermined` row (miss=0) painted as
+    "✓ 命中" — the page reported a better record than the ledger held. Rows now render a
+    status chip (待資料 / 未定) unless the evaluation actually scored. Portfolio-scope
+    quant cards stay narrative-only (the `:421` None branch), by ruling, until W7.
 - **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
   `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
   released**). A share count that changes without a trade previously had no representation, so

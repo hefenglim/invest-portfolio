@@ -82,3 +82,26 @@ def get_benchmark(key: str) -> Benchmark | None:
         if b.key == key:
             return b
     return None
+
+
+#: Fixed market → benchmark map for prediction scoring (AI-D22, owner ruling 2026-08-19):
+#: the yardstick for a ``relative`` prediction is chosen by the CODE from the instrument's
+#: market, never by the LLM. MY deliberately has no entry — an MYR stock compared against
+#: a USD index is noise, so a MY ``relative`` prediction degrades to an honest
+#: ``pending_data``. Adding ``^KLSE`` later is cheap BUT needs the yfinance suffix routing
+#: re-derived first (``^KLSE`` with ``Market.MY`` would fetch as ``^KLSE.KL`` — see the
+#: module docstring's storage-key coupling analysis).
+_MARKET_BENCHMARK: dict[Market, str] = {
+    Market.TW: "0050",
+    Market.US: "sp500",
+}
+
+
+def benchmark_for_market(market: Market) -> Benchmark | None:
+    """The fixed benchmark for a market's ``relative`` predictions, or ``None`` (AI-D22).
+
+    ``None`` is the honest answer for a market with no wired benchmark (MY today): the
+    caller turns it into ``pending_data``, never a guessed proxy.
+    """
+    key = _MARKET_BENCHMARK.get(market)
+    return None if key is None else get_benchmark(key)

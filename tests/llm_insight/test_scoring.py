@@ -106,6 +106,26 @@ def test_volatility_none_returns_none() -> None:
     ) is None
 
 
+def test_volatility_flat_hit_within_vol_band() -> None:
+    # AI-D25: the vol flat band is ±5% — a 30-day vol estimator jitters by several percent
+    # on a constant series, so the shared ±0.5% band would make every flat call an
+    # automatic miss. +4% relative vol change is "stable".
+    actual = ActualMeasurement(vol_change_pct=Decimal("0.04"))
+    assert scoring.score_quant(_pred("volatility", "flat"), actual) is True
+
+
+def test_volatility_flat_miss_outside_vol_band() -> None:
+    # +6% relative vol change is a real regime move, not estimator noise.
+    actual = ActualMeasurement(vol_change_pct=Decimal("0.06"))
+    assert scoring.score_quant(_pred("volatility", "flat"), actual) is False
+
+
+def test_volatility_flat_band_does_not_leak_into_price_change() -> None:
+    # The wider band is scoped to volatility: a +2% price move is still NOT flat.
+    actual = ActualMeasurement(price_change_pct=Decimal("0.02"))
+    assert scoring.score_quant(_pred("price_change", "flat"), actual) is False
+
+
 # --- relative: symbol vs benchmark -------------------------------------------
 
 
@@ -134,6 +154,19 @@ def test_relative_down_hit_when_underperforms() -> None:
 def test_relative_missing_benchmark_returns_none() -> None:
     actual = ActualMeasurement(symbol_return_pct=Decimal("0.05"), benchmark_return_pct=None)
     assert scoring.score_quant(_pred("relative", "up"), actual) is None
+
+
+def test_relative_flat_band_stays_half_percent() -> None:
+    # AI-D25 widened only the VOLATILITY band; excess return keeps the shared ±0.5%:
+    # +0.4% excess is "in line with the benchmark" (flat hit), +0.6% is a real beat.
+    tight = ActualMeasurement(
+        symbol_return_pct=Decimal("0.054"), benchmark_return_pct=Decimal("0.05")
+    )
+    assert scoring.score_quant(_pred("relative", "flat"), tight) is True
+    wide = ActualMeasurement(
+        symbol_return_pct=Decimal("0.056"), benchmark_return_pct=Decimal("0.05")
+    )
+    assert scoring.score_quant(_pred("relative", "flat"), wide) is False
 
 
 # --- decide_miss --------------------------------------------------------------

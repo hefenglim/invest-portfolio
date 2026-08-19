@@ -25,6 +25,12 @@ from portfolio_dash.llm_insight.cards import Prediction
 
 # The flat band: |move| within ±0.5% counts as "flat" for a direction=flat prediction.
 _FLAT_BAND = Decimal("0.005")
+# Volatility gets its own, wider band (AI-D25, owner ruling 2026-08-19): ``vol_change_pct``
+# is the fractional change of a 30-day realized-vol ESTIMATOR, which jitters by several
+# percent on a constant series — at ±0.5% a ``direction=flat`` volatility call would be an
+# automatic miss, silently punishing one direction class. Price moves and excess returns
+# keep the shared band above.
+_VOL_FLAT_BAND = Decimal("0.05")
 
 
 class ActualMeasurement(BaseModel):
@@ -74,7 +80,8 @@ def _score_volatility(pred: Prediction, m: ActualMeasurement) -> bool | None:
     if change is None:
         return None
     # A volatility prediction is a regime call: up = vol rose, down = vol fell, flat = stable.
-    return _direction_hit(pred.direction, change)
+    # The flat arm uses the wider vol-specific band (AI-D25) — see ``_VOL_FLAT_BAND``.
+    return _direction_hit(pred.direction, change, band=_VOL_FLAT_BAND)
 
 
 def _score_relative(pred: Prediction, m: ActualMeasurement) -> bool | None:

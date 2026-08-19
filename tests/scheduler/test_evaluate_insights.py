@@ -17,6 +17,7 @@ import pytest
 
 from portfolio_dash.api import insight_service
 from portfolio_dash.bootstrap import bootstrap_db
+from portfolio_dash.data_ingestion.store import upsert_instrument
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
 from portfolio_dash.llm_insight import insights_store as istore
@@ -26,7 +27,7 @@ from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import upsert_prices
 from portfolio_dash.scheduler import jobs
 from portfolio_dash.shared import llm as llm_mod
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.llm_config import (
     LLMRole,
     ModelConfig,
@@ -35,6 +36,7 @@ from portfolio_dash.shared.llm_config import (
     set_role,
     upsert_model,
 )
+from portfolio_dash.shared.models.assets import Instrument
 
 NOW = datetime(2026, 6, 14, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
@@ -296,6 +298,183 @@ def test_evaluate_master_unset_quant_only(
     assert ev.quant_hit is True  # quant-only
     assert ev.narrative_score is None  # narrative skipped (master unset)
     assert ev.miss is False  # quant hit → not a miss
+
+
+# --- W5 (AI-D22..D26): relative + volatility are now scored, not deferred -------
+
+
+def _register(conn: sqlite3.Connection, symbol: str, market: Market, ccy: Currency) -> None:
+    upsert_instrument(conn, Instrument(symbol=symbol, market=market, quote_ccy=ccy,
+                                       sector="Tech", name=symbol))
+
+
+def _alternating(
+    start: date, days: int, base: str, pct: str
+) -> list[tuple[date, str]]:
+    """Daily closes oscillating ±pct around an anchor — a deterministic vol regime."""
+    b = Decimal(base)
+    p = Decimal(pct)
+    out: list[tuple[date, str]] = []
+    for i in range(days):
+        if i == 0:
+            px = b
+        else:
+            factor = (1 + p) if i % 2 == 0 else (1 / (1 + p))
+            px = Decimal(out[-1][1]) * factor
+        out.append((start + timedelta(days=i), str(px.quantize(Decimal("0.0001")))))
+    return out
+
+
+def test_evaluate_relative_hit_scored(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """US symbol +10% vs ^GSPC +2% → excess +8% → the up call scores a HIT. Pre-W5 this
+    card deferred five times and died undetermined, invisible to every stat."""
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("master must not be called when unset")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    _register(conn, "AAPL", Market.US, Currency.USD)
+    created = NOW - timedelta(days=10)
+    due = NOW - timedelta(days=1)
+    pred = Prediction(metric="relative", direction="up", horizon_days=5)
+    insight_id = _add_due_card(conn, symbol="AAPL", prediction=pred,
+                               created=created, due=due)
+    _prices(conn, "AAPL", [(created.date(), "100"), (due.date(), "110")])
+    _prices(conn, "^GSPC", [(created.date(), "5000"), (due.date(), "5100")])
+
+    insight_service.evaluate_due(conn, now=NOW)
+
+    ev = es.latest_for_insight(conn, insight_id)
+    assert ev is not None and ev.status == "scored"
+    assert ev.quant_hit is True
+    assert ev.miss is False
+
+
+def test_evaluate_relative_miss_scored(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Symbol +1% vs benchmark +4% → excess −3% → the up call is an objective MISS, and an
+    objective quant miss is a miss regardless of narrative (decide_miss)."""
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("master must not be called when unset")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    _register(conn, "AAPL", Market.US, Currency.USD)
+    created = NOW - timedelta(days=10)
+    due = NOW - timedelta(days=1)
+    pred = Prediction(metric="relative", direction="up", horizon_days=5)
+    insight_id = _add_due_card(conn, symbol="AAPL", prediction=pred,
+                               created=created, due=due)
+    _prices(conn, "AAPL", [(created.date(), "100"), (due.date(), "101")])
+    _prices(conn, "^GSPC", [(created.date(), "5000"), (due.date(), "5200")])
+
+    insight_service.evaluate_due(conn, now=NOW)
+
+    ev = es.latest_for_insight(conn, insight_id)
+    assert ev is not None and ev.status == "scored"
+    assert ev.quant_hit is False
+    assert ev.miss is True
+
+
+def test_evaluate_relative_my_symbol_defers_honestly(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AI-D22: MY has no wired benchmark — the card defers as pending_data, NEVER a
+    forced miss against a guessed proxy."""
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("master must not be called when unset")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    _register(conn, "1155", Market.MY, Currency.MYR)
+    created = NOW - timedelta(days=10)
+    due = NOW - timedelta(days=1)
+    pred = Prediction(metric="relative", direction="up", horizon_days=5)
+    insight_id = _add_due_card(conn, symbol="1155", prediction=pred,
+                               created=created, due=due)
+    _prices(conn, "1155", [(created.date(), "10"), (due.date(), "11")])
+
+    insight_service.evaluate_due(conn, now=NOW)
+
+    ev = es.latest_for_insight(conn, insight_id)
+    assert ev is not None and ev.status == "pending_data"
+    assert ev.defer_count == 1
+    assert ev.miss is False
+
+
+def test_evaluate_relative_without_benchmark_series_defers(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The market map has a benchmark for US but its prices were never fetched — the same
+    honest defer as any other missing actual (anti-poison, never a miss)."""
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("master must not be called when unset")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    _register(conn, "AAPL", Market.US, Currency.USD)
+    created = NOW - timedelta(days=10)
+    due = NOW - timedelta(days=1)
+    pred = Prediction(metric="relative", direction="up", horizon_days=5)
+    insight_id = _add_due_card(conn, symbol="AAPL", prediction=pred,
+                               created=created, due=due)
+    _prices(conn, "AAPL", [(created.date(), "100"), (due.date(), "110")])
+
+    insight_service.evaluate_due(conn, now=NOW)
+
+    ev = es.latest_for_insight(conn, insight_id)
+    assert ev is not None and ev.status == "pending_data"
+    assert ev.defer_count == 1
+
+
+def test_evaluate_volatility_hit_scored(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AI-D24: a calm 30-day window at create vs a wild one at due — the up call hits."""
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("master must not be called when unset")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    _register(conn, "TSLA", Market.US, Currency.USD)
+    created = NOW - timedelta(days=44)
+    due = NOW - timedelta(days=1)
+    calm = _alternating(created.date() - timedelta(days=40), 41, "100", "0.001")
+    wild = _alternating(created.date() + timedelta(days=1), 43, "100", "0.05")
+    _prices(conn, "TSLA", calm + wild)
+    pred = Prediction(metric="volatility", direction="up", horizon_days=5)
+    insight_id = _add_due_card(conn, symbol="TSLA", prediction=pred,
+                               created=created, due=due)
+
+    insight_service.evaluate_due(conn, now=NOW)
+
+    ev = es.latest_for_insight(conn, insight_id)
+    assert ev is not None and ev.status == "scored"
+    assert ev.quant_hit is True
+
+
+def test_evaluate_volatility_flat_hits_inside_the_vol_band(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AI-D25: the SAME calm regime at both ends → |vol change| ≈ 0, inside the ±5% vol
+    band → a flat call scores a HIT. At the shared ±0.5% band this was a near-automatic
+    miss — the estimator jitters more than that on an unchanged regime."""
+    def boom(**kw: object) -> _Resp:
+        raise AssertionError("master must not be called when unset")
+
+    monkeypatch.setattr(llm_mod.litellm, "completion", boom)
+    _register(conn, "TSLA", Market.US, Currency.USD)
+    created = NOW - timedelta(days=44)
+    due = NOW - timedelta(days=1)
+    same = _alternating(created.date() - timedelta(days=40), 84, "100", "0.001")
+    _prices(conn, "TSLA", same)
+    pred = Prediction(metric="volatility", direction="flat", horizon_days=5)
+    insight_id = _add_due_card(conn, symbol="TSLA", prediction=pred,
+                               created=created, due=due)
+
+    insight_service.evaluate_due(conn, now=NOW)
+
+    ev = es.latest_for_insight(conn, insight_id)
+    assert ev is not None and ev.status == "scored"
+    assert ev.quant_hit is True
 
 
 # --- scheduler job wiring -----------------------------------------------------

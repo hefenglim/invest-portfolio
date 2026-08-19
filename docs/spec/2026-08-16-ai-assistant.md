@@ -39,6 +39,11 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **AI-D19** | W4 提示詞 v6 | **三段顯式＋兩旗標進場**：共用規則＋三類各一段＋各一 one-shot；kind 詞表模組層 join 自 `cash_kinds.py`（GICS `_GICS_SECTOR_LIST` 前例）；`daytrade` 補「僅使用者明示當沖才設」（W1 刻意欠的）；`short_sale` 同規格進場（僅明示 放空/融券/short） | owner 裁納（W4-3）。`agents.py` 的欄位註解明寫 short_sale「與提示詞規則一起進」——這波就是那波；真實 Schwab 對帳單有 declared short，不進則混抽時那幾列卡賣超 |
 | **AI-D20** | W4 語料與閘門 | **合成文字語料＋live 報表**：`tests/golden/ai_extraction/` 30–50 例（三類×三市場×邊界）；`scripts/ai_extraction_eval.py` 產欄位級命中率報表，**cash `kind`／`daytrade`／`short_sale` 錯標率獨立列出**；手動跑，門檻隨第一輪基線校準；一條確定性 pytest 只驗語料檔本身防腐爛；截圖案例走人工複核（只落 `docs/human_noted/`） | owner 裁納（W4-4）。live runner 不進 CI：非確定＋花 token＋pytest-socket 禁網。否決卡帶回放——它量的是管線（已有測試）不是抽取品質，而語料要解決的是「改提示詞不再盲改」 |
 | **AI-D21** | W4 預覽呈現 | **三個區段**：交易／股利／資金各一表格；資金列顯示**中文 kind＋明示 ±**（＋入金／−券商費用——AI-D3 硬性要求的落點，中文詞表留 server 單源：payload 附 `kind_label`＋`sign`）；股利區顯示類型中文＋毛/扣/淨；空區段不渲染；`unparsed` 列在頂部提示條 | owner 裁納（W4-5）。否決單表（欄位聯集空格多）與分頁（藏兩類易漏看） |
+| **AI-D22** | W5 基準對應 | **固定市場對應，MY 誠實缺**：{TW→`0050`, US→`sp500`}（`pricing/benchmarks.py::BENCHMARKS` 的 key，新 helper `benchmark_for_market` 收在其旁單源），依個股市場（`instruments` 表）推得；MY 無基準 → `benchmark_return_pct=None` → 誠實 pending_data | owner 裁納（W5-1，2026-08-19）。零 schema 變更、零提示詞變更，**基準選擇權在程式不在 LLM**。否決：Prediction 加 benchmark 欄位（LLM 選尺有漂移風險＋既有列遷移）、MY 用 S&P 500 代理（MYR 對 USD 指數，噪音蓋過訊號）。^KLSE 有 yfinance 後綴路由坑（`^KLSE.KL`），列為日後便宜追加 |
+| **AI-D23** | W5 超額報酬幣別 | **雙腿皆本地幣**：個股報價幣 vs 基準自身幣——每個市場兩腿天然同幣（AAPL/USD vs ^GSPC/USD、2330/TWD vs 0050/TWD） | owner 裁納（W5-2）。否決雙腿換算報表幣：FX 對兩腿相同、近似完全抵銷，結論一樣卻多一層 FX 掉落點（缺匯率的日子整列掉落）。**`convert_closes` 因此刻意不用**——記錄在此，免得日後有人「修」它 |
+| **AI-D24** | W5 波動視窗 | **固定 30 日窗，due vs create**：`vol_change_pct = vol_30d(due)/vol_30d(create) − 1`，整段序列先 `series_in(valued_on=due)` 再切窗（分割落窗內不重表達會把 −95% 裂變當波動飆升）；基線 vol=0 或任一端歷史不足 → 誠實 None | owner 裁納（W5-3）。與 `alert_inputs.py:158-159` 的 vol_30d/vol_90d 同一估計器；horizon=3 的 on_alert 卡不退化成 3 點噪聲。否決：horizon 窗 vs 等長前窗（horizon=3 → 純噪聲；horizon=120 → 需 240+ 收盤）、30d vs 90d 基線比（量「近期 vs 長期」而非「預測後 vs 預測前」，與預測語義不對齊） |
+| **AI-D25** | W5 波動 flat 帶 | **波動專屬帶 ±5%**：`scoring.py` 新增 `_VOL_FLAT_BAND = Decimal("0.05")`，`_score_volatility` 傳 `band=`；`price_change`／`relative` 維持 ±0.5% 不動 | owner 裁納（W5-4）。30 日窗估計器在恒定序列上本身有數個百分點抖動，±0.5% 會讓 `direction=flat` 的波動預測幾乎必敗——變相懲罰整個方向類別，與「看起來在計分其實沒有」同類。否決 ±10%：±5% 已大致覆蓋估計器噪聲，更寬會吞掉真實的小幅升降 |
+| **AI-D26** | W5 範圍 | **個股層兩指標＋順修戰績列狀態**：組合層（symbol=None）維持誠實 None（W7 決策品質儀表再議）；同波修 `web/insights.html::renderScoreRows` 不讀 `status` 的既有缺陷——pending_data／undetermined 列現在 miss=0 被畫成「✓ 命中」（`_row_wire` 本就帶 status，純渲染修復） | owner 裁納（W5-5）。否決連組合層 relative 也接（twr_index/build_overlay 現成套件可行，但要再接 trend points/net invested 流程，超出本波「接線不是新演算法」的定位）。官方模板提示詞**不**放行 relative/volatility——自訂模板已能發，提示詞變更是語料品質問題，另一波 |
 
 > **命名慣例**：本企劃的裁示用 `AI-D<n>`，**永不**與公司行動 spec 的 `D<n>` 編號空間混用。
 > 先例教訓：上一輪藍圖把自己的裁示寫在它自己的 §10（D1–D9），產生了「那是藍圖內部裁示
@@ -100,7 +105,7 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **W2** | 修「均線交叉」重名 ＋ **助手雛形**：抽屜內建議卡、`on_alert` 提點卡（只用現有變數） | AI-D2 · AI-D1 · AI-D5 | S-M | ✅ **出貨 `c609c57`** |
 | **W3** | 基本面三家 provider（聯集並存、每家一塊、塊內欄名正規化）→ `fundamentals_json` 變數 | AI-D4 · AI-D13–D16 | L | ✅ 本波提交（探針證據見 §4） |
 | **W4** | AI 門判別式聯集擴充（交易＋股利＋資金）＋ 準確度語料與閘門 | AI-D3 · AI-D17–D21 | M | ✅ 本波提交 |
-| **W5** | 計分板補洞：基準重放（`relative`）＋ 實現波動（`volatility`） | AI-D7 | M | ⬜ |
+| **W5** | 計分板補洞：基準重放（`relative`）＋ 實現波動（`volatility`） | AI-D7 · AI-D22–D26 | M | ✅ 本波提交 |
 | **W6** | 訊號歷史（時序表）＋ 事件研究回測 → 點亮 `backtest_json`／`calibration_gap_json` | AI-D2 | L | ⬜ |
 | **W7** | 助手完全體：組合層、引用回測數字、戰績頁升級為決策品質儀表 | AI-D1 · AI-D9 | M | ⬜ |
 | **W8** | 選配：OHLC `*_raw`＋factor 地基、週線視角 | — | M | ⬜ 可延後 |
