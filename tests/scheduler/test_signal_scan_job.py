@@ -6,7 +6,7 @@ the job exists, is callable via run_job, and dispatches to whatever runner the a
 """
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -66,3 +66,39 @@ def test_signal_scan_runs_via_run_job(conn: sqlite3.Connection) -> None:
     ).fetchone()
     assert row["status"] == "ok"
     assert row["detail"] == "ok summary"
+
+
+# --- W6: progress forwarding mirror (FU-D46 seam, same as news_daily) -----------
+
+
+def test_signal_scan_forwards_progress_to_capable_runner(
+    conn: sqlite3.Connection,
+) -> None:
+    """A runner accepting `progress` gets a callback that feeds the in-flight registry —
+    the first post-upgrade scan replays the full history (minutes), so the jobs page shows
+    WHICH symbol is being backfilled instead of a silent spinner."""
+    seen: dict[str, str | None] = {}
+
+    def runner(
+        _c: sqlite3.Connection, *, now: datetime, progress: Callable[[str], None]
+    ) -> str:
+        progress("回填訊號歷史 WATCH（+61 列）（1/1）")
+        seen["during"] = jobs.running_progress().get("signal_scan")
+        return "ok"
+
+    jobs.register_signal_scan_runner(runner)
+    jobs._mark_running("signal_scan")  # simulate run_job owning the in-flight mark
+    try:
+        detail = jobs.signal_scan(conn, now=NOW)
+    finally:
+        jobs._clear_running("signal_scan")
+    assert seen["during"] == "回填訊號歷史 WATCH（+61 列）（1/1）"
+    assert detail == "ok"
+
+
+def test_signal_scan_legacy_runner_without_progress_still_called(
+    conn: sqlite3.Connection,
+) -> None:
+    """A stub/legacy runner without the param is called exactly as before (no TypeError)."""
+    jobs.register_signal_scan_runner(lambda c, *, now: "legacy ok")
+    assert jobs.signal_scan(conn, now=NOW) == "legacy ok"

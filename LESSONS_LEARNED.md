@@ -23,6 +23,27 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **Decimal returns: subtract FIRST, divide LAST (2026-08-21, W6):** hand-checked backtest
+  tests caught `(a/b) − 1` and `(a−b)/b` disagreeing at the 27th digit — divide-first spends
+  significant figures on the leading `1.0` and truncates the fraction's tail (values near
+  zero are where the digits are lost, and returns are near zero). The repo formula is
+  subtract-first (`insight_service._window_return` already did it that way). Write the
+  hand-check as EXACTLY the shipped formula, and when the two disagree, suspect your
+  hand-math's formula before the module's placement — this time it was both: the module's
+  formula was worse AND the test's event indices were off by one (the silent-seed day
+  shifts every event one day right).
+- **Variable-registry count pins live in THREE files (2026-08-21, W6):** flipping a
+  variable's `available` or adding one touches `test_prompts_api.py`, `test_prompts_-
+  external_vars.py`, AND `test_variables.py` (registry size, per-category counts, the
+  available/unavailable split, and the unavailable-render fixture). Two of the three were
+  missed by an otherwise-thorough exploration pass — the lesson is not "search harder" but
+  that ANY change to the registry's size/availability must grep all three files' count
+  assertions, and when the last unavailable token is lit, the marker-path test needs a
+  SYNTHETIC `VarSpec(available=False)` (monkeypatched into `BY_TOKEN`), not a real token.
+
+  assertions, and when the last unavailable token is lit, the marker-path test needs a
+  SYNTHETIC `VarSpec(available=False)` (monkeypatched into `BY_TOKEN`), not a real token.
+
 - **A prompt's one-shot example is code — parse it in a test (2026-08-19, W4 review):** the
   v6 AI-door prompt's cash example broke a Python string-concatenation line INSIDE a JSON
   string value, so the rendered `<example_output>` was invalid JSON — in the model's

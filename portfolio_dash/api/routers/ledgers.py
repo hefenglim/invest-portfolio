@@ -113,6 +113,7 @@ from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.strategy import signal_history, signal_states
 from portfolio_dash.strategy.target_weights import move_target_weight
 
 router = APIRouter()
@@ -870,10 +871,21 @@ def reconcile_split_prices(conn: sqlite3.Connection, symbols: Iterable[str]) -> 
     unit tests) has nothing to restate, so this degrades to 0 rather than raising an
     ``OperationalError`` out of a write path. Same table probe, same reason, as
     ``validate._has_prices``.
+
+    W6 (AI-D27): the restatement also invalidates the symbol's DERIVED signal rows, and
+    that delete happens BEFORE the prices probe — it must run even in a prices-less DB
+    (both stores degrade on a missing table). ``signal_history``: every stored evaluation
+    is wrong under the new basis (the next scan's replay rebuilds it). ``signal_states``:
+    the stale comparison row would diff against a post-restatement evaluation on the next
+    scan and fire PHANTOM transition events into ``alert_events`` — a basis restatement is
+    not a market event; with the row gone the next scan silently reseeds, zero events.
     """
     wanted = sorted({s for s in symbols if s})
     if not wanted:
         return 0
+    for s in wanted:
+        signal_history.delete_symbol(conn, s)
+        signal_states.delete_symbol(conn, s)
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prices'"
     ).fetchone() is None:

@@ -69,6 +69,7 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("alert_events", "預警事件", "系統記錄", "fired_at"),
     _TableSpec("alert_dispatch_log", "預警派發紀錄", "系統記錄", "dispatched_at"),
     _TableSpec("signal_states", "技術訊號狀態", "系統記錄", "updated_at"),
+    _TableSpec("signal_history", "訊號歷史", "系統記錄", "as_of"),
     _TableSpec("pending_dividend_skips", "配息略過記錄", "系統記錄", "skipped_at"),
     _TableSpec("rebate_skips", "折讓款略過記錄", "系統記錄", "skipped_at"),
     _TableSpec("digests", "摘要卡", "系統記錄", "digest_date"),

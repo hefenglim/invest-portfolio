@@ -54,29 +54,34 @@ def _seed_llm(conn: sqlite3.Connection, *, topup: str = "10.00") -> None:
 def test_prompt_vars_shape(api_client: TestClient) -> None:
     rows = api_client.get("/api/prompt-vars").json()
     # + 1 batch-④ news + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals
-    # + 1 W3 fundamentals (fundamentals_json) = 35.
-    assert len(rows) == 35
+    # + 1 W3 fundamentals (fundamentals_json) + 1 W6 signal_backtest_json = 36.
+    assert len(rows) == 36
     date_tokens = {r["token"] for r in rows} & {"now", "card_created_at", "eval_date"}
     assert date_tokens == {"now", "card_created_at", "eval_date"}
-    # the batch-③/④ + consensus + rule-signals + fundamentals vars surface in the area.
+    # the batch-③/④ + consensus + rule-signals + fundamentals + W6 vars surface in the area.
     tokens = {r["token"] for r in rows}
     assert {"technical_signals_json", "fear_greed_json", "symbol_news_json",
-            "consensus_json", "rule_signals_json", "fundamentals_json"} <= tokens
+            "consensus_json", "rule_signals_json", "fundamentals_json",
+            "backtest_json", "calibration_gap_json", "signal_backtest_json"} <= tokens
     h = next(r for r in rows if r["token"] == "holdings_json")
     assert h["scope"] == "portfolio" and h["available"] is True
     assert set(h) == {"token", "name", "category", "scope", "desc", "available", "sample",
                       "required_tier", "tier_ok", "tier_label"}  # tier fields (spec 20.15.3)
-    # chips went live (spec 20.2); the spec-04 'ai' vars stay unavailable.
+    # chips went live (spec 20.2); the spec-04 'ai' vars went live in W6 (AI-D31).
     inst = next(r for r in rows if r["token"] == "institutional_json")
     assert inst["available"] is True
     ai = next(r for r in rows if r["token"] == "backtest_json")
-    assert ai["available"] is False
+    assert ai["available"] is True
     # consensus went live (P1 batch 2); available and per_symbol.
     cons = next(r for r in rows if r["token"] == "consensus_json")
     assert cons["available"] is True and cons["scope"] == "per_symbol"
     # rule signals went live (P2 batch 3); available, per_symbol, in the 'price' category.
     rs = next(r for r in rows if r["token"] == "rule_signals_json")
     assert rs["available"] is True and rs["scope"] == "per_symbol"
+    # the W6 event study rides its own per-symbol token in the same category (AI-D31).
+    sb = next(r for r in rows if r["token"] == "signal_backtest_json")
+    assert sb["available"] is True
+    assert sb["scope"] == "per_symbol" and sb["category"] == "price"
     assert rs["category"] == "price"
     # fundamentals went live (W3); available, per_symbol, its own category.
     fund = next(r for r in rows if r["token"] == "fundamentals_json")

@@ -448,6 +448,26 @@ def scored_confidence_hits(conn: sqlite3.Connection) -> list[tuple[int, bool]]:
     return [(int(r["confidence"]), not bool(r["miss"])) for r in rows]
 
 
+def recent_confidence_hits(
+    conn: sqlite3.Connection, *, limit: int = 20
+) -> list[tuple[int, bool]]:
+    """The most recent ``limit`` scored ``(confidence, hit)`` pairs, newest first.
+
+    The rolling-window input for ``calibration_gap_json`` (W6, AI-D31) — the SAME
+    anti-poison population as :func:`scored_confidence_hits` (active, scored, stated
+    confidence), windowed by recency instead of all-time. ``id DESC`` is insertion order =
+    chronological (no ``evaluated_at`` nullability to trip on). Returns fewer than
+    ``limit`` when the scored population is smaller — the caller gates on the count.
+    """
+    rows = conn.execute(
+        "SELECT confidence, miss FROM insight_evaluations "
+        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL "
+        "ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [(int(r["confidence"]), not bool(r["miss"])) for r in rows]
+
+
 def miss_samples_for_version(
     conn: sqlite3.Connection, *, insight_type_id: int, version: int
 ) -> list[dict[str, Any]]:

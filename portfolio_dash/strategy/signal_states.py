@@ -345,6 +345,24 @@ def clear_all(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def delete_symbol(conn: sqlite3.Connection, symbol: str) -> int:
+    """Delete the stored state row for ``symbol``; returns 1 or 0.
+
+    Called from the corporate-action reconcile seam: a restated price basis makes the
+    stored comparison row WRONG — the next scan would diff a fresh evaluation against a
+    pre-restatement row and could fire PHANTOM transition events (a restatement is not a
+    market event). With the row gone, the next scan silently reseeds with zero events,
+    which is exactly the right semantics. Degrades to 0 on a ledger-only database where
+    the table was never created (never an OperationalError out of a write path).
+    """
+    try:
+        cur = conn.execute("DELETE FROM signal_states WHERE symbol = ?", (symbol,))
+    except sqlite3.OperationalError:
+        return 0
+    conn.commit()
+    return cur.rowcount
+
+
 __all__ = [
     "EVENT_CROSS",
     "EVENT_MOMENTUM",
@@ -355,6 +373,7 @@ __all__ = [
     "TransitionResult",
     "all_states",
     "clear_all",
+    "delete_symbol",
     "detect_transitions",
     "ensure_table",
     "extract_state",

@@ -496,12 +496,24 @@ def signal_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     A separate static job (jobs here are one-purpose; the blueprint allows this or an
     alert_scan pre-step — the runner-seam job is the lowest-coupling option and is
     independently triggerable via ``POST /api/scheduler/jobs/signal_scan/run``). No runner
-    wired → safe no-op summary."""
+    wired → safe no-op summary.
+
+    FU-D46 mirror (W6): when the runner accepts a ``progress`` keyword it receives the
+    in-flight progress callback — the first post-upgrade scan replays the full price
+    history into ``signal_history`` (minutes), and the owner watching the jobs page should
+    see which symbol is being backfilled, not a silent spinner.
+    """
     runner = _SIGNAL_SCAN_RUNNER
     if runner is None:
         return "no signal scan runner registered"
     set_progress("signal_scan", "掃描技術訊號")
-    return str(runner(conn, now=now))
+    kwargs: dict[str, Any] = {"now": now}
+    if _accepts_progress(runner):
+        def _report(msg: str) -> None:
+            set_progress("signal_scan", msg)
+
+        kwargs["progress"] = _report
+    return str(runner(conn, **kwargs))
 
 
 def dividend_inbox_scan(conn: sqlite3.Connection, *, now: datetime) -> str:

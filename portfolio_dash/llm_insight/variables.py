@@ -276,17 +276,41 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"title":"台積電法說 7/16 登場","summary":"聚焦全年成長…","source":"中央社",'
         '"lang":"zh","link":"https://…"}],"count":1}',
     ),
-    # --- ai (AI 自身 / 校正用) — available=False until spec 04 ---
+    # --- ai (AI 自身 / 校正用) — spec 04 evaluations（W6 點亮, AI-D31） ---
     VarSpec(
-        "backtest_json", "回測命中分佈", "ai", "portfolio", False,
-        "該洞察組合的歷史命中率信心分桶 — 校正提示詞錨定信心值用",
-        '{"bins":[{"conf":"0.7-0.8","actual_rate":"0.66","n":6}],'
-        '"overall_hit_rate":"0.625"}',
+        "backtest_json", "回測命中分佈", "ai", "portfolio", True,
+        "全體洞察評分的信心校準分桶（本地計分結果，非 LLM 自報）：每個信心桶的樣本數 n、"
+        "hit_count、平均宣告信心 claimed_pct、實際命中率 actual_pct、絕對誤差 "
+        "calibration_error_pp（皆百分比字串），外加 overall_hit_rate（全域命中率，"
+        "分數字串）——校正提示詞錨定信心值用：宣告信心不應長期高於同桶實際命中率。"
+        "無已評分樣本時 unavailable。",
+        '{"bins":[{"bucket":"60-80","n":6,"hit_count":4,"claimed_pct":"68.50",'
+        '"actual_pct":"66.67","calibration_error_pp":"1.83"}],"overall_hit_rate":"0.625"}',
     ),
     VarSpec(
-        "calibration_gap_json", "校準誤差", "ai", "portfolio", False,
-        "該組合信心 vs 實際命中的 rolling 偏差",
+        "calibration_gap_json", "校準誤差", "ai", "portfolio", True,
+        "最近 20 筆已評分洞察的滾動校準缺口：gap＝實際命中率 − 平均宣告信心"
+        "（帶號分數字串，0.001 量化；正＝模型低估自己、負＝高估），window_n＝窗內實際"
+        "樣本數（≤20）。已評分樣本 <8 時誠實 unavailable（個位數樣本的缺口是噪聲）。",
         '{"gap":"+0.085","window_n":16}',
+    ),
+    # --- price (訊號回測) — W6 事件研究（AI-D31：per-symbol，與 rule_signals_json 同類） ---
+    VarSpec(
+        "signal_backtest_json", "訊號回測", "price", "per_symbol", True,
+        "該標的的事件研究回測（本地計算，非 LLM 生成）：法則訊號符號轉換（四法則各自 "
+        "bullish/bearish）與 TechScore 狀態帶（65/35，與 evaluation_context 同一套門檻）"
+        "穿越事件發生後，+20/+60/+120 交易日的前向報酬分布（n／mean／median／"
+        "pct_positive，分數字串）vs 同標的無條件基線（baseline）。誠實防護：n<8 的格子"
+        "只回 insufficient 不給數字；重疊樣本（n_overlapping）與右刪失（n_censored）"
+        "如實註記；不年化。歷史不足（訊號歷史尚未累積）時 unavailable。",
+        '{"symbol":"2330","history":{"first":"2024-10-02","last":"2026-06-11","rows":406,'
+        '"params_version":"rules-v1"},"windows":[20,60,120],'
+        '"groups":[{"kind":"momentum_12_1","direction":"bullish","events":14,'
+        '"per_window":{"20":{"n":12,"mean":"0.0312","median":"0.0244",'
+        '"pct_positive":"0.7500","n_overlapping":3,"n_censored":2},'
+        '"60":{"n":7,"insufficient":true,"n_overlapping":1,"n_censored":5}}}],'
+        '"baseline":{"20":{"n":592,"mean":"0.0041","median":"0.0030",'
+        '"pct_positive":"0.5500"}},"events_without_price":0}',
     ),
     # --- system (系統狀態) — all available ---
     VarSpec(
@@ -465,6 +489,7 @@ _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
     "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
     "symbol_news_json", "consensus_json", "rule_signals_json", "fundamentals_json",
+    "backtest_json", "calibration_gap_json", "signal_backtest_json",
 })
 
 

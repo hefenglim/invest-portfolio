@@ -61,17 +61,20 @@ def test_prompt_vars_external_now_available(api_client: TestClient) -> None:
         "financials_json", "market_sentiment_json", "index_quotes_json",
     ):
         assert by_token[token]["available"] is True, token
-    # 32 previously live + 1 W3 fundamentals (fundamentals_json) = 33.
-    assert sum(1 for r in rows if r["available"]) == 33
+    # 33 previously live + 3 W6 (backtest_json / calibration_gap_json lit as-declared +
+    # the new per-symbol signal_backtest_json) = 36.
+    assert sum(1 for r in rows if r["available"]) == 36
     assert by_token["technical_signals_json"]["available"] is True
     assert by_token["fear_greed_json"]["available"] is True
     assert by_token["symbol_news_json"]["available"] is True
     assert by_token["consensus_json"]["available"] is True
     assert by_token["rule_signals_json"]["available"] is True
     assert by_token["fundamentals_json"]["available"] is True
-    # The spec-04 'ai' vars stay unavailable this round.
-    assert by_token["backtest_json"]["available"] is False
-    assert by_token["calibration_gap_json"]["available"] is False
+    # W6 (AI-D31): the spec-04 'ai' vars are live, and the event study has its own token.
+    assert by_token["backtest_json"]["available"] is True
+    assert by_token["calibration_gap_json"]["available"] is True
+    sb = by_token["signal_backtest_json"]
+    assert sb["available"] is True and sb["scope"] == "per_symbol"
 
 
 # --- (a2) prompt-vars carry tier metadata (spec 20.15.3) ----------------------

@@ -238,6 +238,20 @@ def get_price_history(
     ]
 
 
+def price_dates(conn: sqlite3.Connection, instrument: str) -> list[date]:
+    """All stored ``as_of_date``s for ``instrument``, ascending — date-only read.
+
+    The signal-history replay (W6) needs the SET of trading dates (to diff against the
+    stored history), not the closes; parsing every ``PriceRead`` for that would waste the
+    Decimal conversions. The table's PK already serves this scan.
+    """
+    rows = conn.execute(
+        "SELECT as_of_date FROM prices WHERE instrument=? ORDER BY as_of_date ASC",
+        (instrument,),
+    ).fetchall()
+    return [date.fromisoformat(r["as_of_date"]) for r in rows]
+
+
 def upsert_fx(conn: sqlite3.Connection, rows: list[FxRow], *, fetched_at: datetime) -> None:
     """Upsert FX rate rows into ``fx_rates``, keyed on (base, quote, as_of_date).
 

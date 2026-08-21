@@ -17,7 +17,7 @@ Two paths share one validation core (``validate_tokens``):
 import math
 import sqlite3
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -32,10 +32,22 @@ from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import list_dividends
 from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
+from portfolio_dash.llm_insight.evaluations_store import (
+    calibration_bins,
+    recent_confidence_hits,
+    scored_confidence_hits,
+)
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
 from portfolio_dash.news import organizer_prompt as news_organizer_prompt
 from portfolio_dash.news import store as news_store
 from portfolio_dash.portfolio import external_signals as ES
+from portfolio_dash.portfolio.backtest import (
+    FORWARD_WINDOWS,
+    EventStudy,
+    HistoryPoint,
+    WindowStats,
+    event_study,
+)
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
@@ -44,6 +56,9 @@ from portfolio_dash.shared import llm
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import budget_remaining
 from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.strategy import signal_history
+from portfolio_dash.strategy.rules.composite import BAND_HIGH, BAND_LOW
+from portfolio_dash.strategy.rules.params import PARAMS_VERSION
 
 router = APIRouter()
 
@@ -475,6 +490,152 @@ def _rule_signals_var(
     return wire
 
 
+# --- W6 variables (AI-D31): the two AI-self calibration stubs lit as DECLARED, plus the
+# event study on its own per-symbol token. All numbers computed locally; the LLM narrates.
+
+_Q3 = Decimal("0.001")
+_Q4 = Decimal("0.0001")
+# The rolling gap's honesty gate (AI-D31): a signed gap over a handful of samples is noise
+# theatre — aligned with the design mock's 「樣本 <8」 confidence-cap rule.
+_GAP_MIN_SCORED = 8
+_GAP_WINDOW = 20
+
+
+def _ratio(value: Decimal, exp: Decimal) -> str:
+    return decimal_str(value.quantize(exp, rounding=ROUND_HALF_UP))
+
+
+def _backtest_var(conn: sqlite3.Connection) -> dict[str, Any]:
+    """``backtest_json``: the GLOBAL calibration bins + overall hit rate, from scored
+    evaluations (the declared spec-04 meaning — confidence anchoring for prompts).
+
+    Degrades to the unavailable shape when nothing has been scored yet — an empty bins
+    list would anchor confidence on a population of zero without saying so.
+    """
+    pairs = scored_confidence_hits(conn)
+    if not pairs:
+        return {"unavailable": True, "last_as_of": None}
+    hits = sum(1 for _, hit in pairs if hit)
+    return {
+        "bins": calibration_bins(conn),  # already the wire shape (Decimal strings)
+        "overall_hit_rate": _ratio(Decimal(hits) / len(pairs), _Q3),
+    }
+
+
+def _calibration_gap_var(conn: sqlite3.Connection) -> dict[str, Any]:
+    """``calibration_gap_json``: the ROLLING signed calibration gap over the latest
+    ``_GAP_WINDOW`` scored evaluations — ``actual_hit_rate − mean_claimed`` as a signed
+    fraction (positive = the model is UNDER-confident), 0.001-quantized. Below
+    ``_GAP_MIN_SCORED`` scored rows it degrades honestly (see the constant's note).
+    """
+    pairs = recent_confidence_hits(conn, limit=_GAP_WINDOW)
+    if len(pairs) < _GAP_MIN_SCORED:
+        return {"unavailable": True, "last_as_of": None}
+    claimed_total = Decimal(0)  # explicit — sum() over Decimals types as Decimal|float
+    for confidence, _ in pairs:
+        claimed_total += Decimal(confidence)
+    claimed = claimed_total / (100 * len(pairs))
+    actual = Decimal(sum(1 for _, hit in pairs if hit)) / len(pairs)
+    gap = actual - claimed
+    rounded = gap.quantize(_Q3, rounding=ROUND_HALF_UP)
+    return {
+        "gap": ("+" if rounded >= 0 else "") + decimal_str(rounded),
+        "window_n": len(pairs),
+    }
+
+
+def _window_stats_wire(stats: WindowStats) -> dict[str, Any]:
+    """The study's full-precision Decimals are quantized HERE (display boundary — the
+    module stays exact), 4 dp like the ratio-like evidence keys."""
+    return {
+        "n": stats.n,
+        "mean": _ratio(stats.mean, _Q4),
+        "median": _ratio(stats.median, _Q4),
+        "pct_positive": _ratio(stats.pct_positive, _Q4),
+    }
+
+
+def _signal_backtest_wire(
+    symbol: str, rows: list[signal_history.SignalHistoryRow], study: EventStudy
+) -> dict[str, Any]:
+    groups: list[dict[str, Any]] = []
+    for group in study.groups:
+        per_window: dict[str, Any] = {}
+        for outcome in group.outcomes:
+            cell: dict[str, Any] = (
+                _window_stats_wire(outcome.stats)
+                if outcome.stats is not None
+                # 不足以判斷 — the count is shown, the numbers are withheld (AI-D30).
+                else {"n": outcome.n, "insufficient": True}
+            )
+            cell["n_overlapping"] = outcome.n_overlapping
+            cell["n_censored"] = outcome.n_censored
+            per_window[str(outcome.window)] = cell
+        groups.append({
+            "kind": group.kind,
+            "direction": group.direction,
+            "events": group.events,
+            "per_window": per_window,
+        })
+    baseline = {
+        str(w): (_window_stats_wire(s) if s is not None else None)
+        for w, s in zip(FORWARD_WINDOWS, study.baselines, strict=True)
+    }
+    return {
+        "symbol": symbol,
+        "history": {
+            "first": rows[0].as_of.isoformat(),
+            "last": rows[-1].as_of.isoformat(),
+            "rows": len(rows),
+            "params_version": PARAMS_VERSION,
+        },
+        "windows": list(FORWARD_WINDOWS),
+        "groups": groups,
+        "baseline": baseline,
+        "events_without_price": study.events_without_price,
+    }
+
+
+def _signal_backtest_var(
+    conn: sqlite3.Connection, symbol: str, *, now: datetime
+) -> dict[str, Any]:
+    """``signal_backtest_json``: the per-symbol event study over ``signal_history``.
+
+    The close series spans the FULL history (first stored signal date → today), NOT the
+    583-day evaluation window — forward returns must survive every event, and the
+    +120-session tail of an old event predates any recent window. Re-expressed into
+    today's share terms via ``series_in`` (valued_on=end) so a return across a split is
+    honest (AI-D30/W6c); local currency (AI-D23). Only the CURRENT params vintage is
+    studied. No history rows → the unavailable shape (the full-coverage floor means young
+    symbols honestly have none).
+    """
+    rows = signal_history.list_rows(conn, symbol, params_version=PARAMS_VERSION)
+    if not rows:
+        return {"unavailable": True, "last_as_of": None}
+    end = now.date()
+    history = series_in(
+        load_action_index(conn), symbol,
+        get_price_history(conn, symbol, rows[0].as_of, end),
+        valued_on=end,
+    )
+    closes = [(p.as_of, p.value) for p in history]
+    points = [
+        HistoryPoint(
+            as_of=r.as_of,
+            scores={
+                "trend_filter": r.trend_score,
+                "ma_cross": r.cross_score,
+                "momentum_12_1": r.momentum_score,
+                "rsi_regime": r.rsi_score,
+            },
+            tech_score=r.tech_score,
+        )
+        for r in rows
+    ]
+    study = event_study(points, closes, band_high=BAND_HIGH, band_low=BAND_LOW)
+    return _signal_backtest_wire(symbol, rows, study)
+
+
 def _external_vars(
     conn: sqlite3.Connection, symbol: str | None, *, now: datetime | None = None
 ) -> dict[str, Any]:
@@ -489,6 +650,9 @@ def _external_vars(
         "market_sentiment_json": _sentiment_var(conn),
         "fear_greed_json": _fear_greed_var(conn),
         "index_quotes_json": _index_var(conn),
+        # W6 (AI-D31): the two AI-self calibration vars — portfolio scope, always on.
+        "backtest_json": _backtest_var(conn),
+        "calibration_gap_json": _calibration_gap_var(conn),
     }
     if symbol:
         out["institutional_json"] = _finmind_var(
@@ -510,6 +674,9 @@ def _external_vars(
         out["fundamentals_json"] = _fundamentals_var(conn, symbol)
         out["symbol_news_json"] = _news_var(symbol, now=now or datetime.now(_TAIPEI))
         out["rule_signals_json"] = _rule_signals_var(
+            conn, symbol, now=now or datetime.now(_TAIPEI)
+        )
+        out["signal_backtest_json"] = _signal_backtest_var(
             conn, symbol, now=now or datetime.now(_TAIPEI)
         )
     return out

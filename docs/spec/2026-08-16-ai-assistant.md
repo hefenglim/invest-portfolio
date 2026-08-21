@@ -44,6 +44,12 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **AI-D24** | W5 波動視窗 | **固定 30 日窗，due vs create**：`vol_change_pct = vol_30d(due)/vol_30d(create) − 1`，整段序列先 `series_in(valued_on=due)` 再切窗（分割落窗內不重表達會把 −95% 裂變當波動飆升）；基線 vol=0 或任一端歷史不足 → 誠實 None | owner 裁納（W5-3）。與 `alert_inputs.py:158-159` 的 vol_30d/vol_90d 同一估計器；horizon=3 的 on_alert 卡不退化成 3 點噪聲。否決：horizon 窗 vs 等長前窗（horizon=3 → 純噪聲；horizon=120 → 需 240+ 收盤）、30d vs 90d 基線比（量「近期 vs 長期」而非「預測後 vs 預測前」，與預測語義不對齊） |
 | **AI-D25** | W5 波動 flat 帶 | **波動專屬帶 ±5%**：`scoring.py` 新增 `_VOL_FLAT_BAND = Decimal("0.05")`，`_score_volatility` 傳 `band=`；`price_change`／`relative` 維持 ±0.5% 不動 | owner 裁納（W5-4）。30 日窗估計器在恒定序列上本身有數個百分點抖動，±0.5% 會讓 `direction=flat` 的波動預測幾乎必敗——變相懲罰整個方向類別，與「看起來在計分其實沒有」同類。否決 ±10%：±5% 已大致覆蓋估計器噪聲，更寬會吞掉真實的小幅升降 |
 | **AI-D26** | W5 範圍 | **個股層兩指標＋順修戰績列狀態**：組合層（symbol=None）維持誠實 None（W7 決策品質儀表再議）；同波修 `web/insights.html::renderScoreRows` 不讀 `status` 的既有缺陷——pending_data／undetermined 列現在 miss=0 被畫成「✓ 命中」（`_row_wire` 本就帶 status，純渲染修復） | owner 裁納（W5-5）。否決連組合層 relative 也接（twr_index/build_overlay 現成套件可行，但要再接 trend points/net invested 流程，超出本波「接線不是新演算法」的定位）。官方模板提示詞**不**放行 relative/volatility——自訂模板已能發，提示詞變更是語料品質問題，另一波 |
+| **AI-D27** | W6 歷史來源 | **回放回填＋掃描增量**：rules 引擎是純函式（`rules-v1` 版本戳），對價格史逐日重放 `evaluate_symbol` 確定性重建進新表 `signal_history`；之後 `signal_scan` 每日增量補尾（**missing-set 規則**：`price_dates − stored as_of`，涵蓋左緣洞／中間洞／中斷自續） | owner 裁納（W6-1，2026-08-20）。重建值＝當時實採值（同價同參數、**同一 `_read_series` 組裝路徑**，逐日重組裝），非捏造；公司行動重表達價格時連動刪列（連 `signal_states` 一起——見 W6 節）由次掃重建。否決：純前向累積（momentum 暖機 252 交易日＋+120 前瞻 → 黑暗期 12–18 個月，D3a 繼續鎖死）、渲染時即席回放（無持久資產、每次渲染重算） |
+| **AI-D28** | W6 快照粒度 | **完整每日狀態向量**：4 法則 state+score、tech_score、evaluation_context、params_version，PK `(symbol, as_of)`——as_of＝**價格資料日**（評估實際描述的日期），非掃描日；假日重掃冪等覆寫同列 | owner 裁納（W6-2）。能畫走勢、能做法則＋composite 兩層研究；30 標的×5 年 ≈ 4 萬列，SQLite trivial。否決：只存轉換事件（與 `alert_events` 功能重疊且資訊最少——那裡還只有 3 法則、無 rsi）、只存 composite（法則層「哪條法則有效」恰好答不了） |
+| **AI-D29** | W6 事件範圍 | **4 法則方向性轉換＋composite 狀態帶穿越**：法則事件＝score 符號轉換（hold 語義，對上一個非零符號；bullish：trend above_confirmed／ma_cross golden·fast_above／momentum positive／rsi oversold(+0.5)，bearish 镜像） | owner 裁納（W6-3）。法則層回答「哪條法則有用」，composite 層回答「高分後真的漲嗎」——後者正是助手最常引用的數字。否決每日觀測條件分布（同一段趨勢的 200 天＝200 個自相關假樣本，統計上誤導） |
+| **AI-D30** | W6 基線與防護 | **同標的無條件基線＋全防護**：窗 +20/+60/+120 **交易日**（index-based）；基線＝該股全部有效交易日的同窗前向報酬分布；本地幣＋`series_in` 重表達（AI-D23／W6c 紀律） | owner 裁納（W6-4）。防護：事件 n<8 → 輸出「不足以判斷」不給數字（對齊 design mock 的 <8 門檻）；重疊事件註記計數（納入統計但亮明）；前瞻窗超出最新價格日的右刪失事件逐窗排除並報數；**不年化、不 Sharpe**。否決：基準指數基線（混大盤 beta、個股 drift 未控制，可日後並陳）、同市場 pooled 基線（跨標的混雜） |
+| **AI-D31** | W6 變數落點 | **分流**：`backtest_json`／`calibration_gap_json` 按**宣告意義**點亮（AI 自我校準：bins＝`calibration_bins` 全域＋`overall_hit_rate`；gap＝rolling 最近 20 筆 scored、**actual−claimed** 帶號 fraction、窗 <8 誠實 unavailable）＋**新 per-symbol 變數 `signal_backtest_json`** 載事件研究 | owner 裁納（W6-5）。探查查明兩 stub 的 declared 形狀本就是 AI 自我校準（spec-04），design mock 拿它錨定信心上限——語意不能毀；事件研究的粒度（per-symbol×rule×window）與 stub 的 portfolio scope 不合。否決：兩 stub 改作回測用（毀文件化語意且 AI 校準無出口）、只點 stub 不開研究變數（W6 產出對助手無感）。34→36 變數全 live；官方模板提示詞**不動**（引用是 W7 的語料品質決策） |
+| **AI-D32** | W6 composite 門檻值 | **65/35 對齊既有狀態帶**（`composite.py:29-30` `_BAND_HIGH/_BAND_LOW`）——事件＝「進入強勢／弱勢 context」，一套詞彙 | owner 裁納（W6-6）。否決 70/30＋文件區分（同一提示詞表面兩套門檻＝AI-D2「兩個 ma_cross」缺陷類）與兩套並陳（payload 翻倍、樣本更碎、n<8 更易觸發） |
 
 > **命名慣例**：本企劃的裁示用 `AI-D<n>`，**永不**與公司行動 spec 的 `D<n>` 編號空間混用。
 > 先例教訓：上一輪藍圖把自己的裁示寫在它自己的 §10（D1–D9），產生了「那是藍圖內部裁示
@@ -106,7 +112,7 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **W3** | 基本面三家 provider（聯集並存、每家一塊、塊內欄名正規化）→ `fundamentals_json` 變數 | AI-D4 · AI-D13–D16 | L | ✅ 本波提交（探針證據見 §4） |
 | **W4** | AI 門判別式聯集擴充（交易＋股利＋資金）＋ 準確度語料與閘門 | AI-D3 · AI-D17–D21 | M | ✅ 本波提交 |
 | **W5** | 計分板補洞：基準重放（`relative`）＋ 實現波動（`volatility`） | AI-D7 · AI-D22–D26 | M | ✅ 本波提交 |
-| **W6** | 訊號歷史（時序表）＋ 事件研究回測 → 點亮 `backtest_json`／`calibration_gap_json` | AI-D2 | L | ⬜ |
+| **W6** | 訊號歷史（時序表）＋ 事件研究回測 → 點亮 `backtest_json`／`calibration_gap_json`（＋新 `signal_backtest_json`） | AI-D2 · AI-D27–D32 | L | ✅ 本波提交 |
 | **W7** | 助手完全體：組合層、引用回測數字、戰績頁升級為決策品質儀表 | AI-D1 · AI-D9 | M | ⬜ |
 | **W8** | 選配：OHLC `*_raw`＋factor 地基、週線視角 | — | M | ⬜ 可延後 |
 

@@ -378,7 +378,8 @@ def delete_instrument(
     available for internal / test use (rebuild tooling, fixtures).
 
     Cleaned in addition to the instruments row: ``prices``, ``dividend_events`` (both keyed
-    ``instrument``), ``signal_states`` / ``alert_events`` (keyed ``symbol``), any
+    ``instrument``), ``signal_states`` / ``signal_history`` / ``alert_events`` (keyed
+    ``symbol``), any
     ``pending_dividend_skips`` fingerprint for the symbol, and the symbol's entry in the
     single-row ``target_weights_config`` JSON map. Raw SQL by table name keeps the cleanup
     atomic without importing upward (data_ingestion imports no higher layer).
@@ -398,7 +399,8 @@ def delete_instrument(
     # artifacts are keyed ``symbol`` and always cleaned. preserve_market_data keeps only the
     # former (so a benchmark's daily-close series stored under the same key is not orphaned).
     market_data = (("prices", "instrument"), ("dividend_events", "instrument"))
-    personal = (("signal_states", "symbol"), ("alert_events", "symbol"))
+    personal = (("signal_states", "symbol"), ("signal_history", "symbol"),
+                ("alert_events", "symbol"))
     tables = personal if preserve_market_data else (*market_data, *personal)
     for table, col in tables:
         if _table_exists(conn, table):

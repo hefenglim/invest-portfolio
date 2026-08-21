@@ -62,7 +62,28 @@ honest None, never a miss), **AI-D25** (volatility gets its own flat band, ±5% 
 ±0.5% band would make nearly every `direction=flat` volatility call an automatic miss, since a
 30-day estimator jitters by several percent on a constant series; price_change/relative keep
 ±0.5%), and **AI-D26** (scope: per-symbol wiring + the scoreboard's status-rendering fix;
-portfolio-scope scoring stays an honest None for W7).
+portfolio-scope scoring stays an honest None for W7). **W6 rulings (2026-08-20):** **AI-D27**
+(signal history comes from REPLAY backfill + scan incremental — the rules engine is a pure,
+params-stamped function, so re-evaluating each historical date through the same `_read_series`
+assembly deterministically rebuilds the row the scan would have written that day; the scan fills
+the missing date SET (`price_dates − stored as_of`), so a later deeper price backfill, a filled
+provider gap, or an aborted first backfill all self-heal on the next scan), **AI-D28** (each
+`signal_history` row is the full daily state vector — four rule states + scores, tech_score,
+evaluation_context, params_version — keyed `(symbol, as_of)` on the PRICE-DATA date, not the scan
+date, so a holiday re-scan overwrites the same row idempotently), **AI-D29** (event-study events
+= rule score-sign changes with hold semantics + composite tech_score band crossings; the
+daily-observation conditional distribution was rejected — 200 days of one trend are 200
+autocorrelated fake samples), **AI-D30** (forward windows +20/+60/+120 TRADING days against the
+SAME symbol's unconditional distribution as baseline, local currency, split-re-expressed
+(AI-D23/W6c discipline); guards: n<8 answers 「不足以判斷」 with no numbers, overlapping events
+annotated, right-censored events excluded per window and counted, NOTHING annualized), **AI-D31**
+(the two stub variables keep their DECLARED meaning — `backtest_json`/`calibration_gap_json`
+light up as AI self-calibration from `insight_evaluations`, data that exists today (the design
+mock prompts anchor confidence caps on them); the event study rides a NEW per-symbol
+`signal_backtest_json`; official template prompts untouched), and **AI-D32** (the composite event
+thresholds are the EXISTING 65/35 state bands (`composite.py` `_BAND_HIGH/_BAND_LOW`) — one
+vocabulary; a second 70/30 vocabulary on the same prompt surface would be the AI-D2
+two-definitions defect all over).
 
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
@@ -200,6 +221,47 @@ portfolio-scope scoring stays an honest None for W7).
     "✓ 命中" — the page reported a better record than the ledger held. Rows now render a
     status chip (待資料 / 未定) unless the evaluation actually scored. Portfolio-scope
     quant cards stay narrative-only (the `:421` None branch), by ruling, until W7.
+- **Signal history + the event-study backtest (W6, AI-D2 + AI-D27..D32).** The rules
+  engine had no memory: `signal_states` kept one row per symbol (latest state only), so
+  "how did TechScore get here" was unanswerable and the backtest the blueprint's D3a gates
+  indicator expansion on could never run — a deadlock (no history → no backtest → no
+  indicators). This wave builds the memory and the study, and lights the last dark prompt
+  variables (36/36 live).
+  - **`signal_history` — one row per symbol per price-data date** (AI-D27/D28): the full
+    state vector (four rule states + scores, tech_score, evaluation_context,
+    params_version), keyed `(symbol, as_of)` on the DATA date so a holiday re-scan
+    overwrites the same row idempotently. Depth comes from **replay** — the rules engine
+    is a pure, params-stamped function, so the scan re-evaluates each missing historical
+    date through the same `_read_series` assembly and rebuilds exactly the row it would
+    have written that day (years deep on the existing 5y price backfill). Forward
+    maintenance is the daily scan's missing-set fill, which also self-heals a later
+    deeper price backfill, a filled provider gap, or an aborted first backfill. The head
+    row rewrites only on real change (compare-then-skip), so a re-scan is a provable
+    no-op, `updated_at` included.
+  - **The corporate-action seam invalidates BOTH derived tables** (a pre-existing hole
+    this wave's seam would have inherited): a restated price basis makes every stored
+    evaluation wrong, and the stale `signal_states` comparison row could fire transition
+    events for a restatement that is not a market event. `reconcile_split_prices` — the
+    single wrapper all five corporate-action mutation doors call — now deletes both
+    tables' rows for the affected symbols; the next scan rebuilds the history and
+    silently reseeds the state with zero events. Instrument purge cleans
+    `signal_history` too.
+  - **The event study** (`portfolio/backtest.py`, pure Decimal, no conn): rule score-sign
+    changes with hold semantics + composite TechScore crossings of the EXISTING 65/35
+    state bands (AI-D32 — one threshold vocabulary; a second 70/30 would be the AI-D2
+    two-definitions defect), forward-return distributions at +20/+60/+120 trading days
+    vs the same symbol's unconditional distribution, local currency, over the
+    split-re-expressed full-span series. The guards are the point: a cell with n<8
+    answers 「不足以判斷」 with the count shown and the numbers withheld; overlapping and
+    right-censored events are counted and disclosed; nothing is annualized.
+  - **All 36 prompt variables are live** (AI-D31): the two spec-04 stubs keep their
+    DECLARED meaning — `backtest_json` serves the global confidence-bucket calibration
+    bins + overall hit rate, `calibration_gap_json` a rolling 20-evaluation signed gap
+    (actual − claimed, gated unavailable below 8 scored rows), both computed from
+    `insight_evaluations`; the event study rides the new per-symbol
+    `signal_backtest_json` (category `price`, external-fed like `rule_signals_json`).
+    Official template prompts are unchanged — adopting the new variables into prompts is
+    a W7 corpus-quality decision.
 - **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
   `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
   released**). A share count that changes without a trade previously had no representation, so

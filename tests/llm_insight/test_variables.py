@@ -17,6 +17,8 @@ from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.portfolio import technicals as T
 from portfolio_dash.portfolio.dashboard import build_dashboard
@@ -25,14 +27,14 @@ from portfolio_dash.shared.enums import Currency
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_registry_has_35_and_categories() -> None:
+def test_registry_has_36_and_categories() -> None:
     # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news
     # + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals (rule_signals_json)
-    # + 1 W3 fundamentals (fundamentals_json) = 35.
-    assert len(V.REGISTRY) == 35
+    # + 1 W3 fundamentals (fundamentals_json) + 1 W6 signal_backtest_json = 36.
+    assert len(V.REGISTRY) == 36
     assert len({v.category for v in V.REGISTRY}) == 11  # fundamentals is its own category
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 35
+    assert len({v.token for v in V.REGISTRY}) == 36
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
@@ -43,24 +45,23 @@ def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
         counts[v.category] = counts.get(v.category, 0) + 1
     assert counts == {
         # price gained technical_signals_json (4 → 5, batch ③) then rule_signals_json
-        # (5 → 6, P2 batch 3); sentiment gained fear_greed_json (2 → 3) — batch ③; news
-        # gained symbol_news_json — batch ④; consensus is the P1-batch-2 category;
-        # fundamentals is the W3 category (fundamentals_json).
-        "position": 6, "price": 6, "dividend": 3, "fx": 2,
+        # (5 → 6, P2 batch 3) then signal_backtest_json (6 → 7, W6); sentiment gained
+        # fear_greed_json (2 → 3) — batch ③; news gained symbol_news_json — batch ④;
+        # consensus is the P1-batch-2 category; fundamentals is the W3 category.
+        "position": 6, "price": 7, "dividend": 3, "fx": 2,
         # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
         "chips": 5, "consensus": 1, "fundamentals": 1, "news": 1, "sentiment": 3,
         "ai": 2, "system": 5,
     }
 
 
-def test_available_split_33_now_2_later() -> None:
+def test_available_split_all_live_since_w6() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    # 32 previously live + 1 W3 fundamentals = 33; only the 2 'ai' vars stay deferred.
-    assert len(available) == 33
-    assert len(unavailable) == 2
-    # only the 2 'ai' vars remain deferred (spec 04).
-    assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)
+    # W6 (AI-D31) lit the last two deferred vars (the 'ai' pair) and added
+    # signal_backtest_json live — the registry is now fully live, 36/36.
+    assert len(available) == 36
+    assert unavailable == []
 
 
 def test_fundamentals_var_registered_per_symbol_live() -> None:
@@ -129,11 +130,19 @@ def test_render_unknown_marker(golden_db: sqlite3.Connection) -> None:
     assert used == []  # unknown tokens are not "used" registry vars
 
 
-def test_unavailable_var_renders_marker(golden_db: sqlite3.Connection) -> None:
-    # backtest_json is available=false (spec 04) -> {"unavailable": true}
-    assert any(v.token == "backtest_json" and not v.available for v in V.REGISTRY)
+def test_unavailable_var_renders_marker(
+    golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # W6 (AI-D31) lit the last unavailable registry token, so the marker path
+    # (variables.py: the ``not spec.available`` guard) is pinned with a SYNTHETIC
+    # unavailable spec instead of sacrificing a real token.
+    monkeypatch.setitem(
+        V.BY_TOKEN, "synthetic_stub_json",
+        V.VarSpec("synthetic_stub_json", "合成樁", "ai", "portfolio", False,
+                  "測試用", '{}'),
+    )
     data = _data(golden_db)
-    out, _ = V.render_prompt("{{backtest_json}}", V.VarContext(data=data))  # type: ignore[arg-type]
+    out, _ = V.render_prompt("{{synthetic_stub_json}}", V.VarContext(data=data))  # type: ignore[arg-type]
     assert '"unavailable"' in out and "true" in out
 
 
