@@ -23,6 +23,21 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A missing-set fill rule is stale-blind to REVISIONS (2026-08-21, W6 review):** the
+  `signal_history` backfill fills dates that are ABSENT and re-evaluates the HEAD — a
+  provider correcting a close mid-series changes neither, so every downstream row whose
+  trailing window shifts stays stale (probed live: a filled 5-day hole healed the gap
+  dates, and a pre-existing row kept reading `tech_score=77.5` where a fresh replay over
+  the repaired series reads 82.5). When a cache's fill rule is "what's missing", its
+  docstring must also answer "what about what CHANGED" — the remedy here is the
+  derived-cache doctrine (`delete_symbol` + rescan), now written where it lives
+  (`strategy/signal_history.py`, `api/signals_service.py::_fill_signal_history`).
+- **A returned value nobody unpacks is a decoy (2026-08-21, W6 review):** `_read_series`
+  grew a third return (the last price date) for the history keying, then the fill loop
+  keyed rows on the loop date instead — provably identical, so nothing broke, but all five
+  call sites unpacked it into `_`. A reader meeting the signature later would treat the
+  third element as load-bearing. Reverted to the 2-tuple; if a caller ever needs the last
+  price date it can take `closes[-1]`'s date from its own read.
 - **Decimal returns: subtract FIRST, divide LAST (2026-08-21, W6):** hand-checked backtest
   tests caught `(a/b) − 1` and `(a−b)/b` disagreeing at the 27th digit — divide-first spends
   significant figures on the leading `1.0` and truncates the fraction's tail (values near
@@ -38,9 +53,6 @@ prevents recurrence.
   available/unavailable split, and the unavailable-render fixture). Two of the three were
   missed by an otherwise-thorough exploration pass — the lesson is not "search harder" but
   that ANY change to the registry's size/availability must grep all three files' count
-  assertions, and when the last unavailable token is lit, the marker-path test needs a
-  SYNTHETIC `VarSpec(available=False)` (monkeypatched into `BY_TOKEN`), not a real token.
-
   assertions, and when the last unavailable token is lit, the marker-path test needs a
   SYNTHETIC `VarSpec(available=False)` (monkeypatched into `BY_TOKEN`), not a real token.
 

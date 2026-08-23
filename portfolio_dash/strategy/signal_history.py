@@ -16,6 +16,13 @@ them. That is also the invalidation rule — a corporate action that re-expresse
 deletes BOTH tables' rows for the symbol (the reconcile seam), because a state computed
 under the old basis is not merely stale, it is wrong.
 
+Known limitation (W6 review, 2026-08-21): the missing-set fill only fills ABSENT dates and
+the head refresh only re-evaluates the last computable date, so a provider **revision**
+mid-series (a corrected close on an already-stored date, or a filled gap that shifts the
+trailing windows of later dates) leaves the downstream stored rows stale — nothing
+automatic detects a changed close. The remedy is the derived-cache doctrine above:
+``delete_symbol`` + the next scan rebuilds from the truth.
+
 Layer note: mirrors ``strategy/signal_states.py`` — conn-bearing persistence lives directly
 in ``strategy/``; this module imports only stdlib + the rule types; it does NOT import
 ``llm_insight`` / ``api`` / ``web`` (architecture.md #4). The orchestration (which dates to

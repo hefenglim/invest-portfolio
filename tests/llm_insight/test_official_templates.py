@@ -13,8 +13,8 @@ import re
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v14() -> None:
-    assert ot.LIBRARY_VERSION == "official-v14 (2026-08-18)"
+def test_library_version_is_official_v15() -> None:
+    assert ot.LIBRARY_VERSION == "official-v15 (2026-08-21)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -127,9 +127,9 @@ def test_prompts_v2_carry_my_bursa_guidance() -> None:
     assert "0166" in body.format(accounts="a=b", today="2026-07-21", text="x")
 
 
-def test_checkup_strategy_advances_to_v25_citing_rule_signals() -> None:
+def test_checkup_strategy_advances_to_v26_citing_rule_signals() -> None:
     checkup = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "個股健檢策略")
-    assert checkup["version"] == "v2.5"
+    assert checkup["version"] == "v2.6"
     body = checkup["body"]
     assert "{{rule_signals_json}}" in body                 # the new section cites the var
     assert "TechScore" in body                             # cite TechScore + coverage
@@ -145,18 +145,18 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
     template_names = {t["name"] for t in ot.STRATEGY_TEMPLATES}
     for preset in ot.TASK_PRESETS:
         assert preset["strategy"] in template_names
-    # the checkup preset specifically still points at the (now v2.5) 個股健檢策略.
+    # the checkup preset specifically still points at the (now v2.6) 個股健檢策略.
     checkup_preset = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "checkup")
     assert checkup_preset["strategy"] == "個股健檢策略"
 
 
-def test_library_wire_exposes_v25_checkup() -> None:
+def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v14 (2026-08-18)"
+    assert wire["library_version"] == "official-v15 (2026-08-21)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")
-    assert checkup["version"] == "v2.5"
+    assert checkup["version"] == "v2.6"
     assert "{{rule_signals_json}}" in checkup["body"]
 
 
@@ -179,12 +179,12 @@ def test_advice_template_holds_the_product_red_lines() -> None:
     assert "prediction 由你決定" in body and "confidence" in body
 
 
-def test_advice_template_v2_carries_fundamentals_with_the_never_average_rule() -> None:
+def test_advice_template_v3_carries_fundamentals_with_the_never_average_rule() -> None:
     """W3 (AI-D14/15): the advice body cites {{fundamentals_json}}, names the per-source
     blocks, and carries the red line in its prompt-enforced form — different values across
     sources are reported side by side with their sources, NEVER averaged or reconciled."""
     advice = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")
-    assert advice["version"] == "v2"
+    assert advice["version"] == "v3"
     body = advice["body"]
     assert "{{fundamentals_json}}" in body
     assert "不得取平均" in body
@@ -192,7 +192,40 @@ def test_advice_template_v2_carries_fundamentals_with_the_never_average_rule() -
     # The canonical field names the model will see (the block key is the provenance).
     assert "pe_ratio" in body and "roe_pct" in body
     preset = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "advice")
-    assert preset["version"] == "v2"
+    assert preset["version"] == "v3"
+
+
+def test_advice_template_v3_cites_the_backtest_and_anchors_confidence() -> None:
+    """W7 (AI-D33): the advice body cites all three W6 variables under the citation
+    discipline, and carries the confidence-anchoring law (bucket cap + gap adjustment)."""
+    body = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")["body"]
+    assert "{{signal_backtest_json}}" in body
+    assert "{{backtest_json}}" in body and "{{calibration_gap_json}}" in body
+    # The citation law: verbatim numbers, n<8 cites nothing, sample count + baseline.
+    assert "樣本不足" in body and "基線" in body
+    # The anchoring law (the design mock's intent, translated to the 0-100 int scale):
+    assert "actual_pct＋5" in body and "上限 70" in body
+    assert "actual−claimed<0" in body
+    # The pre-existing red lines survive the rewrite.
+    assert "不給部位大小" in body and "prediction 由你決定" in body
+
+
+def test_checkup_v26_cites_the_event_study() -> None:
+    """W7 (AI-D33): the checkup cites the per-symbol event study (no anchoring — its
+    confidence law stays the plain 寧可保守 one)."""
+    body = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "個股健檢策略")["body"]
+    assert "{{signal_backtest_json}}" in body
+    assert "尚無回測歷史" in body
+
+
+def test_weekly_template_v22_cites_ai_track_record() -> None:
+    """W7 (AI-D34): the weekly report narrates the AI's own calibration — both
+    portfolio-scope vars cited; the pure-narrative law (no prediction) is intact."""
+    weekly = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉週報策略")
+    assert weekly["version"] == "v2.2"
+    body = weekly["body"]
+    assert "{{backtest_json}}" in body and "{{calibration_gap_json}}" in body
+    assert "prediction 留空" in body  # the weekly stays narrative-only
 
 
 def test_advice_and_alert_presets_resolve_and_subscribe() -> None:

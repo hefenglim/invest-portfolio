@@ -30,6 +30,7 @@
     system_prompt: '',
     system_updated_at: '',
     strategies: [],
+    library: [],  // official template rows (W7, AI-D37) — feeds the 同步官方 button
   };
   function _toast(msg, kind, code) { if (window.toast) window.toast(msg, kind, code); }
   const $ = (s) => document.querySelector(s);
@@ -86,6 +87,14 @@
     D.strategies = (await api.get('/api/strategy-prompts')) || [];
   } catch (err) {
     _toast('策略提示詞載入失敗', 'fail', (err && err.message) || undefined);
+  }
+  /* W7 (AI-D37): the library rides boot (the from-library modal fetches lazily, but the
+     per-strategy 同步官方 button renders on boot) — a failed fetch just hides the button. */
+  try {
+    const lib0 = await api.get('/api/prompt-templates');
+    D.library = (lib0 && lib0.strategies) || [];
+  } catch (err) {
+    D.library = [];
   }
   $('#sys-prompt').value = D.system_prompt;
   $('#sys-prompt-meta').textContent =
@@ -391,6 +400,36 @@
       '變數代入目前快照，檢視實際送出的完整提示詞'));
     actions.appendChild(mkBtn('測試送出', null, () => testSend(t, ta),
       '經 LiteLLM 實際送出一次並回傳洞察結果（費用照記）'));
+    /* W7 (AI-D37): 同步官方 vX — only when the row's name matches an official template
+       AND its body has drifted. The overwrite goes through from-template's replace mode;
+       every task bound to this strategy id runs the new body on its next pass. */
+    const tpl = (D.library || []).find((x) => x.name === t.name);
+    if (tpl && tpl.body !== t.body) {
+      actions.appendChild(mkBtn('同步官方 ' + tpl.version, null, () => {
+        window.confirmDialog({
+          title: '同步官方 ' + tpl.version,
+          body: '將以官方「' + tpl.name + ' ' + tpl.version + '」覆寫此策略內文；' +
+            '你的自訂修改將遺失，引用此策略的洞察任務下次執行即升版。',
+          confirmLabel: '覆寫為官方版', danger: true,
+          onConfirm: async () => {
+            try {
+              const sp = await api.post('/api/strategy-prompts/from-template',
+                { name: t.name, mode: 'replace', strategy_id: t.id });
+              t.body = (sp && sp.body) || t.body;
+              t.updated_at = (sp && sp.updated_at) || t.updated_at;
+              ta.value = t.body;
+              window.toast('已同步官方 ' + tpl.version, 'ok',
+                t.name + '：綁定的任務下次執行即使用新版');
+            } catch (err) {
+              _toast((err && err.message) || '同步失敗', 'fail', err && err.code);
+              return;
+            }
+            /* re-render the card — the bodies now match, so the button disappears */
+            card.replaceWith(addStrategyCard(t));
+          },
+        });
+      }, '以官方模板覆寫內文（自訂修改將遺失；綁定的任務原地升版）'));
+    }
     actions.appendChild(mkBtn('封存', 'btn-danger', () => deleteStrategy(t, card),
       '被洞察類型引用時將阻擋'));
     body.appendChild(actions);

@@ -188,7 +188,7 @@ def test_relative_arm_measures_the_benchmark_leg(conn: sqlite3.Connection) -> No
            _daily_closes(CREATED, 20, Decimal("5000"), Decimal("5100")))
     actual = insight_service._measure_actual(
         conn, _due("AAA", created=CREATED, due=DUE, price_at_create="100"),
-        _pred("relative"), actions=load_action_index(conn),
+        _pred("relative"), actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.symbol_return_pct == Decimal("0.1")
@@ -202,7 +202,7 @@ def test_relative_arm_tw_uses_0050(conn: sqlite3.Connection) -> None:
     _plant(conn, "0050", Market.TW, _daily_closes(CREATED, 20, Decimal("200"), Decimal("202")))
     actual = insight_service._measure_actual(
         conn, _due("2330", created=CREATED, due=DUE, price_at_create="1000"),
-        _pred("relative"), actions=load_action_index(conn),
+        _pred("relative"), actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.symbol_return_pct == Decimal("0.05")
@@ -214,7 +214,7 @@ def test_relative_arm_my_symbol_defers_honestly(conn: sqlite3.Connection) -> Non
     _plant(conn, "1155", Market.MY, _daily_closes(CREATED, 20, Decimal("10"), Decimal("11")))
     actual = insight_service._measure_actual(
         conn, _due("1155", created=CREATED, due=DUE, price_at_create="10"),
-        _pred("relative"), actions=load_action_index(conn),
+        _pred("relative"), actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.symbol_return_pct == Decimal("0.1")
@@ -226,7 +226,7 @@ def test_relative_arm_without_benchmark_prices_defers(conn: sqlite3.Connection) 
     _plant(conn, "AAA", Market.US, _daily_closes(CREATED, 20, Decimal("100"), Decimal("110")))
     actual = insight_service._measure_actual(
         conn, _due("AAA", created=CREATED, due=DUE, price_at_create="100"),
-        _pred("relative"), actions=load_action_index(conn),
+        _pred("relative"), actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.benchmark_return_pct is None  # series absent → pending_data
@@ -253,7 +253,7 @@ def test_a_held_benchmarks_own_split_is_not_a_benchmark_crash(
     _plant(conn, "0050", Market.TW, bench)
     actual = insight_service._measure_actual(
         conn, _due("2330", created=CREATED, due=DUE, price_at_create="1000"),
-        _pred("relative"), actions=load_action_index(conn),
+        _pred("relative"), actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.symbol_return_pct == Decimal("0")
@@ -275,7 +275,7 @@ def test_volatility_arm_measures_the_regime_shift(conn: sqlite3.Connection) -> N
     _vol_fixture(conn)
     actual = insight_service._measure_actual(
         conn, _due("AAA", created=CREATED, due=DUE), _pred("volatility"),
-        actions=load_action_index(conn),
+        actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.vol_change_pct is not None
@@ -287,7 +287,7 @@ def test_volatility_arm_defers_when_history_is_short(conn: sqlite3.Connection) -
     _plant(conn, "AAA", Market.US, _daily_closes(CREATED, 20, Decimal("100"), Decimal("110")))
     actual = insight_service._measure_actual(
         conn, _due("AAA", created=CREATED, due=DUE), _pred("volatility"),
-        actions=load_action_index(conn),
+        actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.vol_change_pct is None  # 20 closes < 31 needed → pending_data
@@ -320,7 +320,7 @@ def test_a_split_inside_the_vol_window_is_not_a_regime_shift(
     _split_vol_fixture(conn)
     actual = insight_service._measure_actual(
         conn, _due("SPLT", created=CREATED, due=DUE), _pred("volatility"),
-        actions=load_action_index(conn),
+        actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.vol_change_pct is not None
@@ -339,7 +339,7 @@ def test_without_re_expression_the_split_would_measure_a_spike(
     )
     actual = insight_service._measure_actual(
         conn, _due("SPLT", created=CREATED, due=DUE), _pred("volatility"),
-        actions=load_action_index(conn),
+        actions=load_action_index(conn), now=NOW, reporting=TWD,
     )
     assert actual is not None
     assert actual.vol_change_pct is not None

@@ -21,6 +21,7 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import register_error_handlers
 from portfolio_dash.api.routers import insights as insights_router
 from portfolio_dash.llm_insight import composer_store as cs
+from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.scheduler.jobs import bind_insight_schedule, create_scheduler_tables
 
 NOW = datetime(2026, 6, 14, 10, 0, tzinfo=ZoneInfo("Asia/Taipei"))
@@ -495,3 +496,68 @@ def test_strategy_from_template_copies_and_suffixes(api_client: TestClient) -> N
     assert api_client.post(
         "/api/strategy-prompts/from-template", json={"name": "沒有這個模板"}
     ).status_code == 404
+
+
+def test_strategy_from_template_replace_mode(client: TestClient, conn: sqlite3.Connection) -> None:
+    """W7 (AI-D37): replace mode overwrites the body IN PLACE — tasks bind strategies by
+    id, so the bound task runs the official body on its next pass, with zero task edits."""
+    sp = client.post("/api/strategy-prompts/from-template",
+                     json={"name": "持倉週報策略"}).json()
+    # The owner customized the copy (body drifted from the library).
+    client.put(f"/api/strategy-prompts/{sp['id']}",
+               json={"name": sp["name"], "body": "我的自訂版本", "enabled": True})
+    # …and bound it to a task (the in-place upgrade must keep the binding).
+    it = client.post("/api/insight-types",
+                     json={"name": "Combo", "scope": "portfolio",
+                           "strategy_ids": [sp["id"]]}).json()
+
+    official = next(t for t in official_templates.STRATEGY_TEMPLATES
+                    if t["name"] == "持倉週報策略")
+    r = client.post("/api/strategy-prompts/from-template",
+                    json={"name": "持倉週報策略", "mode": "replace",
+                          "strategy_id": sp["id"]})
+    assert r.status_code == 200
+    out = r.json()
+    assert out["id"] == sp["id"] and out["name"] == "持倉週報策略"
+    assert out["body"] == official["body"] and out["enabled"] is True
+    # (No updated_at ordering assertion — the fixture freezes the clock; the restamp is
+    # update_strategy's documented behavior, covered by the CRUD tests.)
+    # The binding is intact — the task still references the SAME strategy id.
+    assert cs.referencing_insight_type_ids(conn, sp["id"]) == [it["id"]]
+    stored = cs.get_strategy(conn, sp["id"])
+    assert stored is not None and stored.body == official["body"]
+
+
+def test_strategy_from_template_replace_guards(
+    client: TestClient, conn: sqlite3.Connection,
+) -> None:
+    """The name/archived gate is re-verified server-side — a replayed request must not
+    overwrite a row the owner renamed or archived."""
+    sp = client.post("/api/strategy-prompts/from-template",
+                     json={"name": "持倉週報策略"}).json()
+    # 400: replace without strategy_id.
+    assert client.post("/api/strategy-prompts/from-template",
+                       json={"name": "持倉週報策略", "mode": "replace"}
+                       ).status_code == 400
+    # 404: unknown strategy id.
+    assert client.post("/api/strategy-prompts/from-template",
+                       json={"name": "持倉週報策略", "mode": "replace",
+                             "strategy_id": 9999}).status_code == 404
+    # 409: the row was RENAMED away from the official name — refuse to overwrite it.
+    client.put(f"/api/strategy-prompts/{sp['id']}",
+               json={"name": "我的週報", "body": "x", "enabled": True})
+    assert client.post("/api/strategy-prompts/from-template",
+                       json={"name": "持倉週報策略", "mode": "replace",
+                             "strategy_id": sp["id"]}).status_code == 409
+    renamed = cs.get_strategy(conn, sp["id"])
+    assert renamed is not None and renamed.body == "x"  # untouched
+    # 409: an archived row whose name still matches — a replay must not revive it.
+    sp2 = client.post("/api/strategy-prompts/from-template",
+                      json={"name": "持倉週報策略"}).json()  # the name freed by the rename
+    cs.archive_strategy(conn, sp2["id"], now=NOW)
+    assert client.post("/api/strategy-prompts/from-template",
+                       json={"name": "持倉週報策略", "mode": "replace",
+                             "strategy_id": sp2["id"]}).status_code == 409
+    archived = cs.get_strategy(conn, sp2["id"])
+    assert archived is not None and archived.archived is True
+

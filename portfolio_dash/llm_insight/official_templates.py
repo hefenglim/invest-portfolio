@@ -23,7 +23,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v14 (2026-08-18)"  # AI 門提示詞 v6: 判別式聯集三類 (W4, AI-D17/19)
+LIBRARY_VERSION = "official-v15 (2026-08-21)"  # W7 (AI-D33/34): 建議 v3 引用回測＋信心錨定
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -350,6 +350,14 @@ _WEEKLY_BODY = """讀者是長期投資人，每週檢視一次組合。請以�
 {{market_sentiment_json}}
 {{index_quotes_json}}
 
+六、AI 自身戰績與校準 — backtest_json 是本系統全部已評分預測的信心分桶命中率
+（claimed_pct＝我當時聲稱的信心均值，actual_pct＝該桶實際命中率），calibration_gap_json
+是最近 20 筆已評分預測的帶號校準缺口（actual−claimed，正值＝我最近低估自己）。
+用一句話向讀者誠實報告「我的預測最近準不準、有沒有系統性偏自信或偏保守」；數字逐字
+照抄，缺口帶正負號引用；任一為 unavailable（評分樣本不足）時直說，不得虛構。
+{{backtest_json}}
+{{calibration_gap_json}}
+
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 請在卡首標注基準日；依 {{freshness_json}}
 檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；愈近期的資料權重愈高。
 本卡為純敘事回顧，不附預測（prediction 留空）。"""
@@ -377,10 +385,15 @@ _CHECKUP_BODY = (
 均線交叉（黃金／死亡與距今天數 days_ago）、12-1 動能（return_12_1）、RSI 情境（rsi14）；
 3) 條件語：照實引述引擎給的情境註記（evaluation_context／context_note），不得改寫其結論；
 4) 法則訊號須與第二節的逐項技術指標相互印證；若 rule_signals_json 為 unavailable，直說
-「法則訊號資料不足」，不得自行計算 TechScore 或杜撰任何法則狀態。
+「法則訊號資料不足」，不得自行計算 TechScore 或杜撰任何法則狀態；
+5) 訊號回測：signal_backtest_json 是這些法則訊號在本標的自身的歷史驗證（法則轉換與
+   TechScore 進出 65/35 狀態帶後 +20/+60/+120 交易日的前向報酬，與同標的基線並陳）——
+   引用時逐字照抄，凡引用必帶樣本數 n 與同窗基線；標記 insufficient 的格子只說
+   「樣本不足」、不引用任何數字；整體 unavailable 時直說「尚無回測歷史」，不得虛構。
 本標的若未持倉（held=false 或 symbol_detail_json 無部位），本節與第八節一律改以「建倉評估」
 視角敘述（此刻是否為進場／觀望時機），而非加碼／減碼。
 {{rule_signals_json}}
+{{signal_backtest_json}}
 
 四、籌碼與基本面（僅台股有值；變數為空時整節跳過，不得虛構）— 法人買賣超與連買賣天數、
 融資融券變化、月營收動能、估值位階（PER/PBR 歷史百分位）、近四季財報摘要；點出籌碼大戶
@@ -460,6 +473,10 @@ _MARKET_BODY = (
 # prediction is present (cards.py), so "the data does not support a call" is a legitimate
 # answer the model may give by leaving prediction empty — forcing one would manufacture
 # precision the input does not have.
+# v3 (W7, AI-D33, 2026-08-21): + the 訊號回測 section (signal_backtest_json — the symbol's
+# OWN event study) and the confidence-anchoring law (backtest_json buckets cap the stated
+# confidence; a negative calibration_gap_json lowers it). Citation is prompt law, not
+# schema: InsightCard is untouched, and no code-side clamp rewrites the model's number.
 _ADVICE_BODY = (
     "讀者是長期投資人，想知道「以我現在的部位，這檔股票現在該怎麼看」。"
     "請綜合「我的倉位 × 技術面 × 法則引擎 × 近期新聞 × 分析師共識」產出一張「持倉建議與提點」卡"
@@ -520,10 +537,29 @@ beta、roe_pct＝股東權益報酬率%、revenue_growth_yoy_pct＝營收年增�
 ⚠ 產品紅線（不得越界）：只到條件與方向，**不給部位大小、不給買賣金額、不給停損停利價**；
 未持倉標的改以「建倉／觀望」情境描述。
 
-六、方向判讀與預測 — 綜合給出偏多／偏空／觀望之一。**prediction 由你決定是否給**：
+六、訊號回測（本標的自身的歷史驗證）— signal_backtest_json 是法則訊號在「這檔股票自己
+身上」的事件研究：四法則方向轉換與 TechScore 進出 65/35 狀態帶後 +20/+60/+120 交易日的
+前向報酬分布，與同標的的無條件基線並陳。用它回答「這個訊號在這檔股票上過去靈不靈」，
+作為第五節情境的佐證或反證。引用紀律：
+1) 數字逐字照抄（mean／median／pct_positive 與 baseline），不得自行換算、不得年化；
+2) 凡引用必帶樣本數 n 與同窗基線（例：「12-1 動能轉正後 +60 日均值 +4.2%（n=9，
+   基線 +1.8%）」）；n_overlapping>0 或 n_censored>0 時如實說明；
+3) 標記 insufficient 的格子只准說「樣本不足」，不得引用任何數字；
+4) 整體 unavailable 時直說「尚無回測歷史」，不得虛構。
+{{signal_backtest_json}}
+
+七、方向判讀與預測 — 綜合給出偏多／偏空／觀望之一。**prediction 由你決定是否給**：
 資料不足或訊號矛盾時可留空（並在內文說明為何不給）；若給，metric 一律 price_change，
 direction 用 up/down/flat，target_pct 僅在有明確依據時提供，且**必須附 confidence**
 （0-100，此預測命中的真實機率估計，寧可保守）。
+⚠ 信心錨定法（硬性上限，依據你自己過去的戰績——backtest_json 是你全體已評分預測的
+信心分桶命中率，calibration_gap_json 是你最近 20 筆的帶號校準缺口）：
+1) 在 {{backtest_json}} 的 bins 找到你打算給的信心值所屬區間（0-20／20-40／40-60／
+   60-80／80-100）：confidence 不得超過該區間 actual_pct＋5；該區間 n<8 時 confidence
+   上限 70；
+2) {{calibration_gap_json}} 的 gap 為負（actual−claimed<0，你最近高估自己）時，再依其
+   幅度下修信心（例：gap −0.050 → 再降 5）；為正或 unavailable 時不調整；
+3) backtest_json 整體 unavailable（尚無評分歷史）時不套用上限，沿用「寧可保守」。
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
 標記新鮮度，缺價或過期的資料點名排除於結論之外；愈近期的資料權重愈高。
@@ -564,13 +600,13 @@ ma_cross 還是 20/60 的 ma_cross_short，不得混用），給出 ≤3 個交�
 # Strategy templates: (name, version, scope hint, body). ``scope`` is advisory — the
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
-    {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.5", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "持倉週報策略", "version": "v2.2", "scope": "portfolio", "body": _WEEKLY_BODY},
+    {"name": "個股健檢策略", "version": "v2.6", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
     # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
     # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
     # v2 (W3, AI-D14/15): +基本面 section — one block per source, never averaged.
-    {"name": "持倉建議與提點策略", "version": "v2", "scope": "per_symbol", "body": _ADVICE_BODY},
+    {"name": "持倉建議與提點策略", "version": "v3", "scope": "per_symbol", "body": _ADVICE_BODY},
     # The 提點 card (AI-D5/AI-D11): alert-triggered, ≤3 trading-day window via ON_ALERT_NOTE.
     {"name": "持倉提點策略", "version": "v1", "scope": "on_alert", "body": _ON_ALERT_ADVICE_BODY},
 ]
@@ -650,10 +686,11 @@ TASK_PRESETS: list[TaskPreset] = [
     },
     # W2 (AI-D1/D6, 2026-08-16): the assistant prototype, scheduled daily after the US close
     # lands (Tue–Sat in Taipei). Enabled on creation like every other preset (AI-D12).
+    # v3 (W7, AI-D33): the strategy body now cites the backtest + anchors confidence.
     {
         "preset_key": "advice",
         "name": "持倉建議與提點",
-        "version": "v2",
+        "version": "v3",
         "scope": "per_symbol",
         "strategy": "持倉建議與提點策略",
         "use_system_prompt": True,

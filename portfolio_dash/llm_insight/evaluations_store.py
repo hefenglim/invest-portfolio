@@ -21,10 +21,13 @@ float — ``actual_value`` persists as a canonical Decimal string; ``narrative_s
 
 import sqlite3
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel
+
+from portfolio_dash.llm_insight import scoring  # same package; scoring imports only cards
+from portfolio_dash.shared.wire import decimal_str
 
 EvalStatus = Literal["pending_data", "scored", "undetermined"]
 
@@ -417,10 +420,15 @@ def calibration_bins(
             continue
         n = len(bucket)
         hit_count = sum(1 for r in bucket if not r["miss"])
-        claimed = sum(int(r["confidence"]) for r in bucket) / n
-        actual = (hit_count / n) * 100
-        claimed_dec = Decimal(str(claimed)).quantize(Decimal("0.01"))
-        actual_dec = Decimal(str(actual)).quantize(Decimal("0.01"))
+        # Pure Decimal + ROUND_HALF_UP (W7, AI-D36): the old path (float sum/n → str →
+        # context-default HALF_EVEN) was a second rounding vocabulary on the same prompt
+        # surface as the W6 variables' ROUND_HALF_UP.
+        claimed_dec = (
+            Decimal(sum(int(r["confidence"]) for r in bucket)) / n
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        actual_dec = (Decimal(hit_count * 100) / n).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
         out.append({
             "bucket": label,
             "n": n,
@@ -466,6 +474,52 @@ def recent_confidence_hits(
         (limit,),
     ).fetchall()
     return [(int(r["confidence"]), not bool(r["miss"])) for r in rows]
+
+
+# The rolling gap's honesty gate (W6 AI-D31; shared with the ai-score API in W7, AI-D36):
+# a signed gap over a handful of samples is noise theatre — the design mock's 「樣本 <8」
+# confidence-cap rule. ONE definition for both surfaces, so they cannot drift.
+ROLLING_GAP_MIN_SCORED = 8
+ROLLING_GAP_WINDOW = 20
+
+_GAP_Q = Decimal("0.001")
+
+
+class RollingGap(BaseModel):
+    """The rolling signed calibration gap over the latest scored evaluations."""
+
+    gap: Decimal | None  # None below the gate — the count is still reported honestly
+    window_n: int
+
+
+def rolling_calibration_gap(
+    conn: sqlite3.Connection,
+    *,
+    window: int = ROLLING_GAP_WINDOW,
+    min_scored: int = ROLLING_GAP_MIN_SCORED,
+) -> RollingGap:
+    """``actual_hit_rate − mean_claimed`` over the latest ``window`` scored evaluations.
+
+    Sign convention (AI-D31): POSITIVE = the model is UNDER-confident (actual exceeds
+    claimed). Returned UNQUANTIZED — wire shaping is :func:`gap_wire`'s job, so the prompt
+    variable and the API render the same number. Below ``min_scored`` rows the gap is
+    honestly None while ``window_n`` still reports the population seen.
+    """
+    pairs = recent_confidence_hits(conn, limit=window)
+    if len(pairs) < min_scored:
+        return RollingGap(gap=None, window_n=len(pairs))
+    claimed_total = Decimal(0)  # explicit — sum() over Decimals types as Decimal|float
+    for confidence, _ in pairs:
+        claimed_total += Decimal(confidence)
+    claimed = claimed_total / (100 * len(pairs))
+    actual = Decimal(sum(1 for _, hit in pairs if hit)) / len(pairs)
+    return RollingGap(gap=actual - claimed, window_n=len(pairs))
+
+
+def gap_wire(gap: Decimal) -> str:
+    """The ONE wire shape for a calibration gap: 0.001, ROUND_HALF_UP, explicit sign."""
+    rounded = gap.quantize(_GAP_Q, rounding=ROUND_HALF_UP)
+    return ("+" if rounded >= 0 else "") + decimal_str(rounded)
 
 
 def miss_samples_for_version(
@@ -528,14 +582,31 @@ def _row_wire(r: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _combo_calib_error_pp(bins: list[dict[str, Any]]) -> Decimal | None:
+    """Sample-weighted mean of a combo's bucket calibration errors (pp), 0.01 HALF_UP.
+
+    ``bins`` are the wire-shape rows of :func:`calibration_bins` for ONE combo; the weight
+    is each bucket's sample count. No confidence-stated rows → ``None`` (the tier reads
+    that as "calibration unknown", never as zero error).
+    """
+    total_n = sum(int(b["n"]) for b in bins)  # int() boxes the Any at the boundary
+    if total_n == 0:
+        return None
+    acc = Decimal(0)
+    for b in bins:
+        acc += Decimal(str(b["calibration_error_pp"])) * int(b["n"])  # keep Any boxed
+    return (acc / total_n).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def ai_score(
     conn: sqlite3.Connection,
     *,
+    min_samples: int,
     exclude_type_ids: set[int] | None = None,
     rows_limit: int | None = None,
     rows_offset: int = 0,
 ) -> dict[str, Any]:
-    """The battle-record table (spec 4.7): ``{totals, by_combo[], calibration_bins[], rows[]}``.
+    """The battle-record table (spec 4.7): ``{totals, by_combo[], calibration_bins[], …}``.
 
     ``totals``/``by_combo`` reflect the DISPLAYED active score (non-shadow scored rows);
     shadow rows are excluded from the displayed totals but kept in ``rows`` (and reachable
@@ -548,6 +619,14 @@ def ai_score(
     the archived-task exclusion so page boundaries are honest); the AGGREGATES always
     cover the whole set. ``rows_total_count`` reports the filtered total.
     ``rows_limit=None`` keeps the legacy everything-in-one shape for internal callers.
+
+    W7 (AI-D36) — the decision-quality fields: ``min_samples`` is a REQUIRED injected
+    argument (the value lives in the composer config; this layer must not read it), echoed
+    per combo with ``resolved_n``/``gate_open``; each combo carries ``calib_error_pp``
+    (sample-weighted over its own bins) and a ``tier`` stamp (``scoring.trust_tier`` —
+    hit rate × calibration error × sample count, computed HERE so the web layer renders a
+    string and never computes). Top level: ``rolling_gap`` — the SAME
+    :func:`rolling_calibration_gap` definition the prompt variable serves.
     """
     excluded = exclude_type_ids or set()
     combo_ids = [
@@ -558,7 +637,30 @@ def ai_score(
         )
         if int(r["insight_type_id"]) not in excluded
     ]
-    by_combo = [combo_score(conn, cid) for cid in combo_ids]
+    by_combo: list[dict[str, Any]] = []
+    for cid in combo_ids:
+        combo = combo_score(conn, cid)
+        calib_error = _combo_calib_error_pp(calibration_bins(conn, cid))
+        quant_rate = (
+            Decimal(combo["quant_hit_rate"]) if combo["quant_n"] > 0 else None
+        )
+        narrative_rate = (
+            Decimal(1) - Decimal(combo["miss_rate"]) if combo["n"] > 0 else None
+        )
+        combo["min_samples"] = min_samples
+        combo["resolved_n"] = combo["n"]
+        combo["gate_open"] = combo["n"] >= min_samples
+        combo["calib_error_pp"] = (
+            decimal_str(calib_error) if calib_error is not None else None
+        )
+        combo["tier"] = scoring.trust_tier(
+            n=combo["n"],
+            quant_n=combo["quant_n"],
+            quant_hit_rate=quant_rate,
+            narrative_success_rate=narrative_rate,
+            calib_error_pp=calib_error,
+        )
+        by_combo.append(combo)
     total_n = sum(c["n"] for c in by_combo)
     total_miss = sum(c["miss_count"] for c in by_combo)
     total_quant_hit = sum(c["quant_hit_count"] for c in by_combo)
@@ -587,10 +689,16 @@ def ai_score(
         if int(r["insight_type_id"]) not in excluded
     ]
     rows = all_rows if rows_limit is None else all_rows[rows_offset:rows_offset + rows_limit]
+    gap = rolling_calibration_gap(conn)
     return {
         "totals": totals,
         "by_combo": by_combo,
         "calibration_bins": calibration_bins(conn),
+        "rolling_gap": {
+            "gap": gap_wire(gap.gap) if gap.gap is not None else None,
+            "window_n": gap.window_n,
+            "min_scored": ROLLING_GAP_MIN_SCORED,
+        },
         "rows": rows,
         "rows_total_count": len(all_rows),
     }

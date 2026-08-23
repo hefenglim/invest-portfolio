@@ -21,6 +21,7 @@ def test_ai_score_empty_db(api_client: TestClient) -> None:
     assert body["totals"]["n"] == 0
     assert body["by_combo"] == []
     assert body["calibration_bins"] == []
+    assert body["rolling_gap"] == {"gap": None, "window_n": 0, "min_scored": 8}
     assert body["rows"] == []
 
 
@@ -101,3 +102,26 @@ def test_ai_score_rows_pagination(
     # aggregates are NOT affected by the rows page
     assert p1["totals"]["n"] == 5 and p2["totals"]["n"] == 5
     assert len(p1["by_combo"]) == 1
+
+
+def test_ai_score_decision_quality_fields(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """W7 (AI-D36): the HTTP shape of the trust tier + gate + rolling gap — the page
+    renders these server-computed strings and never computes them itself."""
+    now = datetime(2026, 6, 11, 14, 30)
+    es.ensure_tables(golden_db)
+    # 8 rows @ confidence 80, 6 hits → tier 可參考 (success 0.75, bins error 5.00).
+    for i in range(8):
+        es.add_evaluation(
+            golden_db, insight_id=100 + i, insight_type_id=10, calibration_version=1,
+            is_shadow=False, status="scored", quant_hit=i < 6, narrative_score=None,
+            miss=i >= 6, actual_value=None, confidence=80, now=now)
+    body = api_client.get("/api/ai-score").json()
+    combo = body["by_combo"][0]
+    assert combo["tier"] == "可參考"
+    assert combo["gate_open"] is True
+    assert combo["min_samples"] == 8 and combo["resolved_n"] == 8
+    assert combo["calib_error_pp"] == "5.00"
+    # The rolling gap shares the prompt variable's definition: claimed 0.80, actual 0.75.
+    assert body["rolling_gap"] == {"gap": "-0.050", "window_n": 8, "min_scored": 8}

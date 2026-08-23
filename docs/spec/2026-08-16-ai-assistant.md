@@ -50,6 +50,11 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **AI-D30** | W6 基線與防護 | **同標的無條件基線＋全防護**：窗 +20/+60/+120 **交易日**（index-based）；基線＝該股全部有效交易日的同窗前向報酬分布；本地幣＋`series_in` 重表達（AI-D23／W6c 紀律） | owner 裁納（W6-4）。防護：事件 n<8 → 輸出「不足以判斷」不給數字（對齊 design mock 的 <8 門檻）；重疊事件註記計數（納入統計但亮明）；前瞻窗超出最新價格日的右刪失事件逐窗排除並報數；**不年化、不 Sharpe**。否決：基準指數基線（混大盤 beta、個股 drift 未控制，可日後並陳）、同市場 pooled 基線（跨標的混雜） |
 | **AI-D31** | W6 變數落點 | **分流**：`backtest_json`／`calibration_gap_json` 按**宣告意義**點亮（AI 自我校準：bins＝`calibration_bins` 全域＋`overall_hit_rate`；gap＝rolling 最近 20 筆 scored、**actual−claimed** 帶號 fraction、窗 <8 誠實 unavailable）＋**新 per-symbol 變數 `signal_backtest_json`** 載事件研究 | owner 裁納（W6-5）。探查查明兩 stub 的 declared 形狀本就是 AI 自我校準（spec-04），design mock 拿它錨定信心上限——語意不能毀；事件研究的粒度（per-symbol×rule×window）與 stub 的 portfolio scope 不合。否決：兩 stub 改作回測用（毀文件化語意且 AI 校準無出口）、只點 stub 不開研究變數（W6 產出對助手無感）。34→36 變數全 live；官方模板提示詞**不動**（引用是 W7 的語料品質決策） |
 | **AI-D32** | W6 composite 門檻值 | **65/35 對齊既有狀態帶**（`composite.py:29-30` `_BAND_HIGH/_BAND_LOW`）——事件＝「進入強勢／弱勢 context」，一套詞彙 | owner 裁納（W6-6）。否決 70/30＋文件區分（同一提示詞表面兩套門檻＝AI-D2「兩個 ma_cross」缺陷類）與兩套並陳（payload 翻倍、樣本更碎、n<8 更易觸發） |
+| **AI-D33** | W7 引用方式 | **建議卡 v3＋健檢卡引用＋信心錨定**：v3 提示詞引用三個 W6 變數（照抄數字、事件 n<8 只說樣本不足不引用、引用必帶樣本數與同窗基線、overlap/censored 揭露）；錨定法＝信心 ≤ 對應區間 `actual_pct`+5，區間 n<8 時上限 70，`calibration_gap_json.gap` 為負時依幅度下修。個股健檢卡（v2.5→v2.6）同步引用 `signal_backtest_json`（信心法不動） | owner 裁納（W7-1，2026-08-21）。InsightCard schema 不動、**程式端不做信心夾取**——錨定是提示詞法，validator 默默改寫模型自陳的信心與「合併基本面」同類缺陷。否決：schema 加結構化引用欄（解析器／渲染／快取指紋全動，1–2 人規模過度工程）、只引用不錨定（校準變數接進提示詞卻不用，迴路只接一半） |
+| **AI-D34** | W7 組合層 | **週報引用校準雙變數**：持倉週報策略 v2.1→v2.2 引用 `backtest_json`＋`calibration_gap_json`（portfolio scope、永遠可用）——週報開始敘述 AI 自己的戰績與校準 | owner 裁納（W7-2）。零新模板／preset／任務型／排程額度。否決新組合層建議模板（組合層建議的品質依賴 AI-D35 的計分先落地，且多一個任務型多一份額度） |
+| **AI-D35** | W7 組合層計分 | **接 TWR 測 `price_change`**：`_measure_actual` 的 symbol=None 臂用既有 `portfolio/twr.py::twr_index`（鏈式日 TWR，流量調整——出入金不被當損益）測量 create→due 窗；relative／volatility 維持個股層 | owner 裁納（W7-3），**了結 AI-D26 留下的「W7 再議」**。量測幣別＝TWD（`evaluate_due` 加 `reporting=Currency.TWD` 預設，`run_for_id` 前例；卡片本就對著 TWD 儀表敘事）；`_FLAT_BAND ±0.5%` 同一條（AI-D25 的 vol 專屬帶不動）；`price_at_create` 無組合類比——on-or-after 腿是唯一誠實基線。否決：維持不可計分（組合層預測永不進戰績，W7-2 的敘事永不被驗證）、relative 一起接（三市場組合的混合基準是另一個裁示） |
+| **AI-D36** | W7 戰績頁 | **缺口卡＋門檻＋信賴分級**：`/api/ai-score` 擴欄**不新增路由**——`rolling_gap`（與提示詞變數同一條定義，抽進 `evaluations_store` 單源）＋每 combo 的 `min_samples` 門檻顯示＋後端算好的**信賴分級章**；順修 `calibration_bins` 對齊 ROUND_HALF_UP（原 float/HALF_EVEN 路徑，同一提示詞表面兩種進位詞彙） | owner 裁納（W7-4）。分級門檻：`n < 8` → 樣本不足（錨定 `MIN_SAMPLE`）；success＝`quant_hit_rate`（`quant_n>0` 時——`combo_score` 對無量化列回 "0" 非真 0%）否則 `1 − miss_rate`；**可參考** ⟺ success ≥ 0.6 且 calib_error_pp ≤ 10（錨定 `gap_alert_pp` 預設 10）且不為 None；其餘 → 早期。web 只渲染 server 字串（web 永不計算）。否決：per-combo 可靠性圖（後端已支援，UI 複雜度對 1–2 人不划算，日後追加）。`_ratio_str`／`_avg_str` 的 HALF_EVEN **亮明不順修**（會移動 miss_rate 等更多表面） |
+| **AI-D37** | W7 v3 推出 | **from-template 加 replace 模式**：既有 `POST /api/strategy-prompts/from-template` 加顯式 `mode`＋`strategy_id`（**無新路由**）；設定頁策略列在「名稱匹配官方模板且 body 不同」時顯示「同步官方 vX」，確認後覆寫 body（`strategy_prompts` 無 version 欄——以 `updated_at` 重蓋為戳） | owner 裁納（W7-5）。綁定語義：任務以 **strategy id** 綁定（`insight_type_strategies.strategy_prompt_id`）→ 覆寫即全部綁定任務下次 run 原地升版；名稱不符／已封存 → 409（伺服端重驗，防重放覆寫改名列）；R1 由 run 時閘門誠實接住（PUT 同慣例，不預檢）。否決：維持手動（W3 升 v2 時 demo 靠手動重建，每次升版重做）、pack 自動覆寫（會連使用者同名自訂一起蓋掉——skip-existing 的保護目的正是它） |
 
 > **命名慣例**：本企劃的裁示用 `AI-D<n>`，**永不**與公司行動 spec 的 `D<n>` 編號空間混用。
 > 先例教訓：上一輪藍圖把自己的裁示寫在它自己的 §10（D1–D9），產生了「那是藍圖內部裁示
@@ -113,7 +118,7 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **W4** | AI 門判別式聯集擴充（交易＋股利＋資金）＋ 準確度語料與閘門 | AI-D3 · AI-D17–D21 | M | ✅ 本波提交 |
 | **W5** | 計分板補洞：基準重放（`relative`）＋ 實現波動（`volatility`） | AI-D7 · AI-D22–D26 | M | ✅ 本波提交 |
 | **W6** | 訊號歷史（時序表）＋ 事件研究回測 → 點亮 `backtest_json`／`calibration_gap_json`（＋新 `signal_backtest_json`） | AI-D2 · AI-D27–D32 | L | ✅ 本波提交 |
-| **W7** | 助手完全體：組合層、引用回測數字、戰績頁升級為決策品質儀表 | AI-D1 · AI-D9 | M | ⬜ |
+| **W7** | 助手完全體：組合層、引用回測數字、戰績頁升級為決策品質儀表 | AI-D2 · AI-D33–D37 | M | ✅ 本波提交 |
 | **W8** | 選配：OHLC `*_raw`＋factor 地基、週線視角 | — | M | ⬜ 可延後 |
 
 > W3 與 W4 互相獨立，可對調或並行。
@@ -147,6 +152,11 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 - **W4**：欄位級命中率報表；**資金列 `kind` 錯標率與 `daytrade` 錯標率單獨列出**——
   它們是唯二會動錢而不報錯的欄位。
 - **W6**：回測附最小樣本門檻與重疊註記；樣本不足時輸出「不足以判斷」而非數字。
+- **W7**：信賴分級門檻由 `scoring.trust_tier` 的決策表測試釘死（n=7 完美也「樣本不足」、
+  0.6/10pp 邊界含本數、calib 未知→早期、narrative-only 不吃假 0%）；TWR 組合計分附
+  **反證**（窗中入金加倍持倉、價格不動 → 量到 0，naive 值會假造 +100%）；
+  `calibration_bins` 的 HALF_UP 對齊附 70.125→"70.13"（HALF_EVEN 會是 "70.12"）反證治具；
+  replace 模式附 400/404/409/封存四路與「綁定任務原地升版」斷言。
 - 每波在 **demo 站**行為驗證：`scripts/verify_live.py` + 真實瀏覽器走完新流程。
 - ⚠ **分支紀律不變：不 merge、不 tag、`__version__` 維持 0.1.28**，直到 owner 同意。
 

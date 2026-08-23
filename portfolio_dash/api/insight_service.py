@@ -59,6 +59,7 @@ from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData, FreshnessReport
 from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.technicals import annualized_volatility
+from portfolio_dash.portfolio.twr import twr_index
 from portfolio_dash.pricing.benchmarks import Benchmark, benchmark_for_market
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.scheduler.jobs import insight_job_id
@@ -161,7 +162,7 @@ def _per_symbol_ctx(
     once per universe symbol, so building the index here would re-read the action ledger
     once per card.
     """
-    external_vars = _external_vars(conn, symbol, now=now)
+    external_vars = _external_vars(conn, symbol, now=now, actions=actions)
     ctx = V.VarContext(
         data=data,
         symbol=symbol,
@@ -206,7 +207,7 @@ def _portfolio_ctx(
     conn: sqlite3.Connection, data: DashboardData, *, now: datetime, reporting: Currency
 ) -> V.VarContext:
     """Build the portfolio-scope VarContext (no per-symbol detail)."""
-    external_vars = _external_vars(conn, None)
+    external_vars = _external_vars(conn, None, actions=None)
     return V.VarContext(
         data=data,
         now=now,
@@ -444,6 +445,35 @@ def _window_return(
     return (hi[-1] - lo[0]) / lo[0]
 
 
+def _portfolio_return(
+    conn: sqlite3.Connection, created: date, due_date: date,
+    *, now: datetime, reporting: Currency,
+) -> Decimal | None:
+    """The portfolio's create→due return from the chain-linked TWR index (W7, AI-D35).
+
+    Flow-adjusted by construction: a mid-window deposit/withdrawal moves
+    ``net_invested``, not the return (the day's flow is removed from the day's value
+    change), so injected cash never reads as a gain. The series is the SAME
+    ``daily_value_series`` the dashboard trend card plots (the performance router's
+    ``twr_index`` feed, `routers/performance.py:93`), in the reporting currency. There is
+    no stored portfolio baseline analogous to ``price_at_create`` — the start leg is the
+    first index point ON/AFTER ``created`` (the honest on-or-after basis, the same
+    tolerance as the per-symbol legs). A thin/unavailable trend → ``None``
+    (pending_data, never a fabricated miss). Built per card, deliberately not hoisted:
+    a daily pass matures at most a handful of portfolio-scope cards (trap #21 is about
+    per-symbol loops).
+    """
+    data = build_dashboard(conn, now=now, reporting=reporting)
+    if not data.trend.available:
+        return None
+    index = twr_index(data.trend.points)
+    if not index:
+        return None
+    # The index ratio IS the window's TWR (chain-linked returns compound); the legs ride
+    # the same ±_EVAL_LOOKBACK_DAYS tolerance as the per-symbol arms.
+    return _window_return([(p.date, p.value) for p in index], created, due_date)
+
+
 def _vol_change_pct(
     closes: list[tuple[date, Decimal]], created: date, due: date
 ) -> Decimal | None:
@@ -464,16 +494,18 @@ def _vol_change_pct(
 
 def _measure_actual(
     conn: sqlite3.Connection, due: es.DueInsight, prediction: Prediction,
-    *, actions: ActionIndex,
+    *, actions: ActionIndex, now: datetime, reporting: Currency,
 ) -> scoring.ActualMeasurement | None:
     """Build the objective measurement for a due insight, or None when unavailable.
 
     A None return (or all-None measurement fields) signals the actual value is unavailable
     (missing/halted price) → the caller defers as pending_data (anti-poison). All three
-    metrics are measured (W5, AI-D22..D26): ``price_change`` from the symbol's own legs;
-    ``relative`` adds the fixed market benchmark's create→due return (``None`` for an MY
-    symbol, an unregistered symbol, or a missing benchmark series → honest pending_data);
-    ``volatility`` compares two fixed 30-day realized-vol windows.
+    metrics are measured at PER-SYMBOL scope (W5, AI-D22..D26): ``price_change`` from the
+    symbol's own legs; ``relative`` adds the fixed market benchmark's create→due return
+    (``None`` for an MY symbol, an unregistered symbol, or a missing benchmark series →
+    honest pending_data); ``volatility`` compares two fixed 30-day realized-vol windows.
+    At PORTFOLIO scope (symbol=None, W7 AI-D35) only ``price_change`` is measurable — via
+    the flow-adjusted TWR index (``_portfolio_return``); the other two stay honest None.
 
     Baseline (M4 fix, decision Q1c): the card's stored ``price_at_create`` — the last
     close the model actually saw — is the preferred start price, so the score measures
@@ -493,12 +525,22 @@ def _measure_actual(
     a HELD 0050 with a recorded SPLIT would otherwise fabricate a −86% "benchmark return".
     """
     symbol = due.symbol
-    if symbol is None:
-        return None  # portfolio-scope quant cards are v1 narrative-only (spec 04.10)
     created = datetime.fromisoformat(due.created_at).date()
     due_date = datetime.fromisoformat(due.due_at).date() if due.due_at is not None else None
     if due_date is None:
         return None
+    if symbol is None:
+        # Portfolio scope (W7, AI-D35 — closes AI-D26's deferred question): only
+        # ``price_change`` is measured, via the flow-adjusted TWR over create→due (a
+        # mid-window deposit never reads as profit). ``relative``/``volatility`` stay
+        # per-symbol — a blended three-market benchmark is a separate ruling. The shared
+        # ±0.5% flat band applies downstream in ``score_quant`` (AI-D25 untouched).
+        if prediction.metric != "price_change":
+            return None
+        change = _portfolio_return(conn, created, due_date, now=now, reporting=reporting)
+        if change is None:
+            return None  # thin/unavailable trend → pending_data (anti-poison)
+        return scoring.ActualMeasurement(price_change_pct=change)
     start_px = (
         price_in(actions, symbol, Decimal(due.price_at_create),
                  priced_on=created, valued_on=due_date)
@@ -551,7 +593,7 @@ def _measure_actual(
 
 def _score_one(
     conn: sqlite3.Connection, due: es.DueInsight, *, master_configured: bool, now: datetime,
-    actions: ActionIndex,
+    actions: ActionIndex, reporting: Currency,
 ) -> None:
     """Evaluate one due insight: quant → (master narrative) → miss → write the row.
 
@@ -565,7 +607,9 @@ def _score_one(
     quant_hit: bool | None = None
     actual: scoring.ActualMeasurement | None = None
     if prediction is not None:
-        actual = _measure_actual(conn, due, prediction, actions=actions)
+        actual = _measure_actual(
+            conn, due, prediction, actions=actions, now=now, reporting=reporting
+        )
         quant_hit = scoring.score_quant(prediction, actual)
         if quant_hit is None:
             _defer_or_undetermined(conn, due, now=now)
@@ -662,7 +706,9 @@ def _actual_value(actual: scoring.ActualMeasurement | None) -> Decimal | None:
     return actual.price_change_pct or actual.symbol_return_pct or actual.vol_change_pct
 
 
-def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
+def evaluate_due(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
+) -> int:
     """Score every due insight (Loop 2). Returns the count evaluated/deferred.
 
     The registered Loop-2 runner. Reads prices to build each actual measurement, feeds it
@@ -670,7 +716,10 @@ def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
     master role is unset or over budget), and writes ``insight_evaluations`` rows. One bad
     insight never aborts the rest (degrade, never crash the daily job). Archived tasks'
     cards are excluded (L2 fix) — their matured predictions must not keep consuming
-    scoring (incl. master narrative cost) after the task was deleted.
+    scoring (incl. master narrative cost) after the task was deleted. ``reporting`` sets
+    the currency the portfolio-scope TWR measurement runs in (AI-D35; the cards are
+    narrated against the TWD dashboard, so TWD is the default — the `run_for_id`
+    precedent).
     """
     es.ensure_tables(conn)
     istore.ensure_tables(conn)  # runs the price_at_create migration for legacy DBs (M4)
@@ -681,7 +730,7 @@ def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
     for due in es.due_insights(conn, now=now, exclude_type_ids=cs.archived_type_ids(conn)):
         try:
             _score_one(conn, due, master_configured=master_configured, now=now,
-                       actions=actions)
+                       actions=actions, reporting=reporting)
             processed += 1
         except Exception:  # noqa: BLE001 — one insight failing must not abort the pass
             logger.exception("evaluate_due failed for insight %s", due.insight_id)

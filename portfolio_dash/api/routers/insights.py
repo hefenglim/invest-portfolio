@@ -12,7 +12,7 @@ import threading
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, Query, Request
@@ -218,6 +218,11 @@ def create_strategy_prompt(
 
 class FromTemplateIn(BaseModel):
     name: str  # the official template's name (official_templates.STRATEGY_TEMPLATES)
+    # W7 (AI-D37): "copy" (default) adds a fresh row; "replace" overwrites an EXISTING
+    # strategy's body with the official one so every task bound to that strategy id
+    # upgrades in place on its next run.
+    mode: Literal["copy", "replace"] = "copy"
+    strategy_id: int | None = None
 
 
 @router.post("/strategy-prompts/from-template")
@@ -230,6 +235,14 @@ def create_strategy_from_template(
 
     The copy is the user's own row (editing it never touches the library). A taken name
     gets an「（官方vX）」suffix so re-adding after customization is always possible.
+
+    ``mode="replace"`` (W7, AI-D37) instead overwrites an existing row's body in place:
+    the UI offers it as「同步官方 vX」when the row's name matches an official template and
+    its body has drifted. The name/archived gate is re-verified HERE — a replayed request
+    must not overwrite a row the owner renamed or archived. ``strategy_prompts`` carries
+    no version column; the overwrite re-stamps ``updated_at``. R1 (scope/token fit) is
+    deliberately NOT pre-validated — the run-time gate is the honest net, same seam
+    doctrine as the strategy PUT.
     """
     cs.ensure_seeded(conn)
     tpl = next(
@@ -241,6 +254,31 @@ def create_strategy_from_template(
             status_code=404,
             content=error_body("not_found", f"官方模板庫沒有：{payload.name}"),
         )
+    if payload.mode == "replace":
+        if payload.strategy_id is None:
+            return JSONResponse(
+                status_code=400,
+                content=error_body("validation_error", "replace 模式需要 strategy_id"),
+            )
+        existing = cs.get_strategy(conn, payload.strategy_id)
+        if existing is None:
+            return JSONResponse(
+                status_code=404,
+                content=error_body("not_found", f"未知策略提示詞：{payload.strategy_id}"),
+            )
+        if existing.archived or existing.name != tpl["name"]:
+            return JSONResponse(
+                status_code=409,
+                content=error_body(
+                    "conflict", "策略名稱與官方模板不符（或已封存），已拒絕覆寫"
+                ),
+            )
+        sp = cs.update_strategy(
+            conn, existing.id, name=existing.name, body=tpl["body"],
+            enabled=existing.enabled, now=now,
+        )
+        assert sp is not None  # just fetched above
+        return sp.model_dump()
     taken = {s.name for s in cs.list_strategies(conn)}
     name = tpl["name"]
     if name in taken:
@@ -629,7 +667,8 @@ def get_ai_score(
     es.ensure_tables(conn)
     cs.ensure_seeded(conn)
     return es.ai_score(
-        conn, exclude_type_ids=cs.archived_type_ids(conn),
+        conn, min_samples=int(cs.get_evolution_config(conn)["min_samples"]),
+        exclude_type_ids=cs.archived_type_ids(conn),
         rows_limit=limit, rows_offset=offset,
     )
 

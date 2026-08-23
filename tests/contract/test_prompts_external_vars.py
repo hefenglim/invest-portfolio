@@ -302,7 +302,7 @@ def test_rule_signals_feeds_preview_and_generation(api_client: TestClient) -> No
 
     conn = _conn_of(api_client)
     _seed_long_series(conn, "2330")
-    ext = _external_vars(conn, "2330", now=GOLDEN_NOW)
+    ext = _external_vars(conn, "2330", now=GOLDEN_NOW, actions=load_action_index(conn))
     assert "rule_signals_json" in ext
     assert ext["rule_signals_json"].get("unavailable") is not True
     data = build_dashboard(conn, now=GOLDEN_NOW, reporting=Currency.TWD)
@@ -310,6 +310,39 @@ def test_rule_signals_feeds_preview_and_generation(api_client: TestClient) -> No
                           actions=load_action_index(conn))
     assert "rule_signals_json" in ctx.external_vars
     assert ctx.external_vars["rule_signals_json"]["composite"] is not None
+
+
+def test_per_symbol_ctx_never_rebuilds_the_action_index(api_client: TestClient) -> None:
+    """Trap #21 on the RUN path: ``_per_symbol_ctx`` must hand its caller-built index to
+    ``_external_vars`` — a rebuild inside the prompt seam is one extra ledger read PER
+    SYMBOL PER RUN. The monkeypatched bomb (scoped to the prompts module's namespace, so
+    the dashboard build is unaffected) turns any such rebuild into a failure."""
+    import pytest
+
+    import portfolio_dash.api.routers.prompts as prompts_mod
+    from portfolio_dash.api.insight_service import _per_symbol_ctx
+    from portfolio_dash.api.signals_service import scan_signals
+    from portfolio_dash.data_ingestion.holdings import load_action_index
+    from portfolio_dash.portfolio.dashboard import build_dashboard
+    from portfolio_dash.shared.enums import Currency
+
+    conn = _conn_of(api_client)
+    _seed_long_series(conn, "2330")
+    # The producer must reach the re-expression line — without history rows it returns the
+    # unavailable shape BEFORE the index is ever consulted, and the bomb proves nothing.
+    scan_signals(conn, now=GOLDEN_NOW)
+
+    def _bomb(_conn: sqlite3.Connection) -> None:
+        raise AssertionError("load_action_index rebuilt inside the prompt seam")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(prompts_mod, "load_action_index", _bomb)
+        data = build_dashboard(conn, now=GOLDEN_NOW, reporting=Currency.TWD)
+        # The index is built OUTSIDE the prompt seam (holdings.load_action_index is the
+        # real one) and threaded in — the bomb only catches an internal rebuild.
+        ctx = _per_symbol_ctx(conn, data, "2330", now=GOLDEN_NOW,
+                              reporting=Currency.TWD, actions=load_action_index(conn))
+    assert ctx.external_vars["signal_backtest_json"] is not None
 
 
 def test_rule_signals_partial_coverage_not_degraded(api_client: TestClient) -> None:
@@ -329,6 +362,7 @@ def test_rule_signals_partial_coverage_not_degraded(api_client: TestClient) -> N
         _external_vars,
         _rule_signals_var,
     )
+    from portfolio_dash.data_ingestion.holdings import load_action_index
 
     conn = _conn_of(api_client)
     _seed_long_series(conn, "2330", n=20)
@@ -343,7 +377,7 @@ def test_rule_signals_partial_coverage_not_degraded(api_client: TestClient) -> N
     assert var["rules"]["ma_cross"] is None
     assert var["rules"]["momentum_12_1"] is None
     # and NO degrade reason attaches (the var is available, so _external_reasons stays silent).
-    ext = _external_vars(conn, "2330", now=GOLDEN_NOW)
+    ext = _external_vars(conn, "2330", now=GOLDEN_NOW, actions=load_action_index(conn))
     assert ext["rule_signals_json"].get("unavailable") is not True
     assert "rule_signals_json" not in _external_reasons(conn, ext)
 

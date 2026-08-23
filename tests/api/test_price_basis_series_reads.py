@@ -183,7 +183,7 @@ def test_series_in_is_a_no_op_once_a_genuine_post_split_series_exists(
 
 def test_signals_52w_position_is_not_a_phantom_low(conn: sqlite3.Connection) -> None:
     _seed_split(conn)
-    closes, _, _ = signals_service._read_series(
+    closes, _ = signals_service._read_series(
         conn, "SPLT", now=NOW, params=default_params(),
         actions=load_action_index(conn),
     )
@@ -198,7 +198,7 @@ def test_signals_52w_position_pre_fix_reads_the_ratio_as_a_collapse(
     """DETECTION POWER — the raw read on the real path. −85.7% is the 7-for-1, not a move."""
     _seed_split(conn)
     _identity_series(monkeypatch, signals_service)
-    closes, _, _ = signals_service._read_series(
+    closes, _ = signals_service._read_series(
         conn, "SPLT", now=NOW, params=default_params(),
         actions=load_action_index(conn),
     )
@@ -348,7 +348,7 @@ def test_a_scored_card_is_not_marked_wrong_by_a_split(conn: sqlite3.Connection) 
     actual = insight_service._measure_actual(
         conn, _due("SPLT", created=date(2026, 5, 1), due=date(2026, 6, 20),
                    price_at_create=None),
-        PRED, actions=load_action_index(conn))
+        PRED, actions=load_action_index(conn), now=NOW, reporting=TWD)
     assert actual is not None
     assert actual.price_change_pct == Decimal("0")
 
@@ -362,7 +362,7 @@ def test_price_at_create_is_re_expressed_on_the_SAME_basis_as_the_fetched_leg(
     actual = insight_service._measure_actual(
         conn, _due("SPLT", created=date(2026, 5, 1), due=date(2026, 6, 20),
                    price_at_create="700"),
-        PRED, actions=load_action_index(conn))
+        PRED, actions=load_action_index(conn), now=NOW, reporting=TWD)
     assert actual is not None
     assert actual.price_change_pct == Decimal("0")
 
@@ -379,7 +379,7 @@ def test_a_scored_card_pre_fix_reads_the_ratio_as_a_collapse(
     actual = insight_service._measure_actual(
         conn, _due("SPLT", created=date(2026, 5, 1), due=date(2026, 6, 20),
                    price_at_create=None),
-        PRED, actions=load_action_index(conn))
+        PRED, actions=load_action_index(conn), now=NOW, reporting=TWD)
     assert actual is not None
     assert actual.price_change_pct == (POST_PRICE - PRE_PRICE) / PRE_PRICE
 
@@ -616,7 +616,7 @@ def test_an_action_free_ledger_never_executes_the_new_series_code(
     insight_service._measure_actual(
         conn, _due("SPLT", created=date(2026, 5, 1), due=date(2026, 6, 20),
                    price_at_create="700"),
-        PRED, actions=load_action_index(conn))
+        PRED, actions=load_action_index(conn), now=NOW, reporting=TWD)
     signals_service._read_series(conn, "SPLT", now=NOW,
                                  params=default_params(),
                                  actions=load_action_index(conn))

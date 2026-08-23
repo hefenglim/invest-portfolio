@@ -218,10 +218,11 @@ def test_ai_score_empty_db() -> None:
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     es.ensure_tables(c)
-    score = es.ai_score(c)
+    score = es.ai_score(c, min_samples=8)
     assert score["totals"]["n"] == 0
     assert score["by_combo"] == []
     assert score["calibration_bins"] == []
+    assert score["rolling_gap"] == {"gap": None, "window_n": 0, "min_scored": 8}
     assert score["rows"] == []
     c.close()
 
@@ -237,13 +238,122 @@ def test_ai_score_shape(conn: sqlite3.Connection) -> None:
     es.add_evaluation(conn, insight_id=3, insight_type_id=10, calibration_version=2,
                       is_shadow=True, status="scored", quant_hit=False, narrative_score=10,
                       miss=True, actual_value=Decimal("12"), confidence=95, now=NOW)
-    score = es.ai_score(conn)
+    score = es.ai_score(conn, min_samples=8)
     assert score["totals"]["n"] == 2  # shadow excluded from displayed active total
     assert score["totals"]["miss_count"] == 1
     assert len(score["by_combo"]) == 1
     assert score["by_combo"][0]["insight_type_id"] == 10
     assert len(score["rows"]) == 3  # all rows present (incl. shadow)
     assert any(r["is_shadow"] for r in score["rows"])
+
+
+# --- W7 (AI-D36): the rolling gap's ONE definition + HALF_UP bins + tier fields --------
+
+
+def _scored(
+    conn: sqlite3.Connection, row: int, confidence: int, miss: bool, *,
+    type_id: int = 10, narrative: int | None = None, quant: bool = True,
+) -> None:
+    es.add_evaluation(
+        conn, insight_id=1000 + row, insight_type_id=type_id, calibration_version=None,
+        is_shadow=False, status="scored", quant_hit=(not miss) if quant else None,
+        narrative_score=narrative, miss=miss, actual_value=None, confidence=confidence,
+        now=NOW + timedelta(days=row),
+    )
+
+
+def test_rolling_calibration_gap_gated_below_min_scored(
+    conn: sqlite3.Connection,
+) -> None:
+    for i in range(7):
+        _scored(conn, i, 80, False)
+    out = es.rolling_calibration_gap(conn)
+    assert out.gap is None and out.window_n == 7  # the count is still reported honestly
+
+
+def test_rolling_calibration_gap_sign_hand_checked(conn: sqlite3.Connection) -> None:
+    # 8 rows @ confidence 80, 6 hits → claimed 0.80, actual 0.75 → gap = actual−claimed.
+    for i in range(8):
+        _scored(conn, i, 80, i >= 6)
+    out = es.rolling_calibration_gap(conn)
+    assert out.gap == Decimal("-0.05") and out.window_n == 8
+    assert es.gap_wire(out.gap) == "-0.050"
+
+
+def test_rolling_calibration_gap_window_excludes_older_rows(
+    conn: sqlite3.Connection,
+) -> None:
+    # 5 OLD rows @100 all miss (would drag the gap negative), then 20 NEW rows @50 with
+    # 15 hits — the rolling window of 20 must EXCLUDE the old five: claimed 0.50,
+    # actual 15/20 = 0.75 → +0.25.
+    for i in range(5):
+        _scored(conn, i, 100, True)
+    for i in range(5, 25):
+        _scored(conn, i, 50, i >= 20)
+    out = es.rolling_calibration_gap(conn)
+    assert out.gap == Decimal("0.25") and out.window_n == 20
+    assert es.gap_wire(out.gap) == "+0.250"
+
+
+def test_gap_wire_sign_prefix_and_half_up_ties() -> None:
+    assert es.gap_wire(Decimal("0.0005")) == "+0.001"   # HALF_UP tie rounds away from 0
+    assert es.gap_wire(Decimal("-0.0015")) == "-0.002"
+    assert es.gap_wire(Decimal("0")) == "+0.000"        # explicit sign even at zero
+
+
+def test_calibration_bins_rounds_half_up_claimed(conn: sqlite3.Connection) -> None:
+    # 60-80 bucket: seven @70 + one @71 → mean 70.125 → "70.13" HALF_UP (the pre-W7
+    # float/HALF_EVEN path gave "70.12" — this is the disproof pair in one fixture).
+    for i in range(7):
+        _scored(conn, i, 70, False)
+    _scored(conn, 7, 71, False)
+    b = [x for x in es.calibration_bins(conn) if x["bucket"] == "60-80"][0]
+    assert b["claimed_pct"] == "70.13"
+
+
+def test_calibration_bins_rounds_half_up_actual(conn: sqlite3.Connection) -> None:
+    # 32 rows @70, 5 hits → actual 15.625 → "15.63" HALF_UP (pre-W7: "15.62").
+    for i in range(32):
+        _scored(conn, i, 70, i >= 5)
+    b = [x for x in es.calibration_bins(conn) if x["bucket"] == "60-80"][0]
+    assert b["actual_pct"] == "15.63"
+
+
+def test_ai_score_combo_gate_tier_and_rolling_gap_hand_checked(
+    conn: sqlite3.Connection,
+) -> None:
+    # Combo 10: 8 rows @80, 6 hits → success 0.75 ≥ 0.6, bins error 5.00 ≤ 10 → 可參考.
+    for i in range(8):
+        _scored(conn, i, 80, i >= 6, type_id=10)
+    # Combo 20: 5 rows @90 all hit → n=5 < 8 → gate closed, 樣本不足 despite perfection.
+    for i in range(5):
+        _scored(conn, 100 + i, 90, False, type_id=20)
+    score = es.ai_score(conn, min_samples=8)
+    combos = {c["insight_type_id"]: c for c in score["by_combo"]}
+    c10 = combos[10]
+    assert c10["min_samples"] == 8 and c10["resolved_n"] == 8
+    assert c10["gate_open"] is True
+    assert c10["calib_error_pp"] == "5.00"
+    assert c10["tier"] == "可參考"
+    c20 = combos[20]
+    assert c20["gate_open"] is False and c20["tier"] == "樣本不足"
+    # The rolling gap is GLOBAL (both combos): claimed (80×8+90×5)/13 /100, actual 11/13.
+    assert score["rolling_gap"] == {
+        "gap": "+0.008", "window_n": 13, "min_scored": 8,
+    }
+
+
+def test_ai_score_narrative_only_combo_is_not_read_as_zero_quant(
+    conn: sqlite3.Connection,
+) -> None:
+    # quant_n == 0: combo_score reports quant_hit_rate "0" — a fabricated-looking 0% the
+    # tier must NOT consume; the success leg is 1 − miss_rate = 0.75 here, so with the
+    # error leg clean the tier is 可參考 (without the quant_n guard it would be 早期).
+    for i in range(8):
+        _scored(conn, i, 80, i >= 6, narrative=70 if i < 6 else 30, quant=False)
+    combo = es.ai_score(conn, min_samples=8)["by_combo"][0]
+    assert combo["quant_n"] == 0 and combo["tier"] == "可參考"
+
 
 
 # --- samples for a calibration version ----------------------------------------

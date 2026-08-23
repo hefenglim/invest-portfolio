@@ -246,3 +246,61 @@ def test_calibration_error_perfect() -> None:
     # claimed 100, all hit → 0pp.
     rows = [(100, True), (100, True)]
     assert scoring.calibration_error(rows) == Decimal("0")
+
+
+# --- trust_tier (W7, AI-D36) ----------------------------------------------------
+
+
+def test_trust_tier_insufficient_below_min_sample_regardless_of_quality() -> None:
+    # A perfect record over 7 rows is still 樣本不足 — the same honesty gate as the
+    # event study's MIN_SAMPLE and the rolling gap's <8.
+    assert scoring.trust_tier(
+        n=7, quant_n=7, quant_hit_rate=Decimal("1"), narrative_success_rate=None,
+        calib_error_pp=Decimal("0"),
+    ) == "樣本不足"
+
+
+def test_trust_tier_boundaries_are_inclusive() -> None:
+    # success exactly 0.6 AND error exactly 10pp → 可參考 (both bounds inclusive).
+    assert scoring.trust_tier(
+        n=8, quant_n=8, quant_hit_rate=Decimal("0.6"), narrative_success_rate=None,
+        calib_error_pp=Decimal("10"),
+    ) == "可參考"
+
+
+def test_trust_tier_success_below_bar_is_early() -> None:
+    assert scoring.trust_tier(
+        n=8, quant_n=8, quant_hit_rate=Decimal("0.59"), narrative_success_rate=None,
+        calib_error_pp=Decimal("3"),
+    ) == "早期"
+
+
+def test_trust_tier_calibration_above_bar_is_early() -> None:
+    assert scoring.trust_tier(
+        n=8, quant_n=8, quant_hit_rate=Decimal("0.9"), narrative_success_rate=None,
+        calib_error_pp=Decimal("10.01"),
+    ) == "早期"
+
+
+def test_trust_tier_unknown_calibration_is_early_not_sufficient() -> None:
+    # No calibration evidence (None) is NOT evidence of calibration.
+    assert scoring.trust_tier(
+        n=8, quant_n=8, quant_hit_rate=Decimal("0.9"), narrative_success_rate=None,
+        calib_error_pp=None,
+    ) == "早期"
+
+
+def test_trust_tier_narrative_only_combo_uses_the_miss_rate_leg() -> None:
+    # quant_n == 0 → the "0" quant_hit_rate must NOT be consumed (combo_score reports
+    # "0" for 0/0 — reading it as a real 0% would demote every narrative-only task).
+    assert scoring.trust_tier(
+        n=8, quant_n=0, quant_hit_rate=Decimal("0"),
+        narrative_success_rate=Decimal("0.75"), calib_error_pp=Decimal("5"),
+    ) == "可參考"
+
+
+def test_trust_tier_no_success_evidence_at_all_is_early() -> None:
+    assert scoring.trust_tier(
+        n=8, quant_n=0, quant_hit_rate=None, narrative_success_rate=None,
+        calib_error_pp=Decimal("5"),
+    ) == "早期"

@@ -300,6 +300,62 @@ CATALOG: list[Feature] = [
         area="交易帳本 → AI 輸入",
         target="#tab-ai",
     ),
+    Feature(
+        version="0.1.29",
+        id="advice-cites-backtest",
+        title="建議卡開始引用「這檔股票自己的回測」，信心值有了校準上限",
+        desc="每張建議卡現在看得到法則訊號在這檔股票身上的歷史驗證：轉向後 +20/+60/+120 "
+        "個交易日平均怎麼走、樣本有幾次、跟同檔股票的平常水準差多少——樣本不到 8 次的格子"
+        "只會說「樣本不足」，不會硬給數字。卡上的信心值也被自己的戰績管住了："
+        "不得超過同信心區間過去的實際命中率（再寬 5 個百分點），最近偏自信時還會自動下修。"
+        "數字全部由系統算好，AI 只負責說給你聽",
+        href="index.html",
+        area="總覽 → 持股明細 → 標的抽屜 → AI 建議",
+        target="#holdings-table",
+    ),
+    Feature(
+        version="0.1.29",
+        id="weekly-report-ai-track-record",
+        title="持倉週報多了一節：AI 老實報告自己最近準不準",
+        desc="週報末尾新增「AI 自身戰績與校準」——各信心區間聲稱 vs 實際命中率、"
+        "最近 20 筆預測的校準缺口（負值代表最近高估自己）。樣本不夠時它會直說，不會編",
+        href="insights.html",
+        area="AI 洞察 → 洞察卡（持倉週報）",
+        target="#ins-pane-cards",
+    ),
+    Feature(
+        version="0.1.29",
+        id="scoreboard-decision-quality",
+        title="AI 戰績頁看得出任務「值不值得參考」了",
+        desc="新增滾動校準缺口卡（最近 20 筆，負值＝偏自信），每個任務多了信任等級章："
+        "可參考／早期／樣本不足——由命中率、校準誤差、樣本數三者合成，在伺服器算好，"
+        "頁面只負責顯示。樣本數後面也直接標出解鎖門檻（n=…／門檻 8）",
+        href="insights.html",
+        area="AI 洞察 → AI 戰績",
+        target="#ins-pane-score",
+    ),
+    Feature(
+        version="0.1.29",
+        id="portfolio-predictions-scored",
+        title="組合層的預測開始對答案了（用時間加權報酬，入出金不算損益）",
+        desc="以前只有個股預測會被評分，組合層卡片永遠「待資料」。現在組合的漲跌預測"
+        "到期會用 TWR（時間加權報酬）對答案——你中途入金加倍持倉，不會被當成預測命中。"
+        "相對大盤與波動率預測維持只對個股評分",
+        href="insights.html",
+        area="AI 洞察 → AI 戰績",
+        target="#ins-pane-score",
+    ),
+    Feature(
+        version="0.1.29",
+        id="strategy-sync-official-button",
+        title="官方模板升版，一鍵同步（不用再手動重建任務了）",
+        desc="策略提示詞卡片在「名稱對得上官方模板、內容已經不一樣」時會出現「同步官方 vX」"
+        "按鈕：確認後覆寫內文，引用它的所有洞察任務下次執行立刻用新版。"
+        "改過名字的、封存中的策略不會被誤蓋（伺服器會再驗一次）",
+        href="settings.html#prompts",
+        area="設定 → AI 提示詞",
+        target="#view-prompts",
+    ),
     # --- v0.1.28 (share reconciliation) ---------------------------------------------------
     Feature(
         version="0.1.28",

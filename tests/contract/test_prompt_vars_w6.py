@@ -11,6 +11,7 @@ import sqlite3
 from datetime import timedelta
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.api.routers.prompts import (
@@ -19,6 +20,7 @@ from portfolio_dash.api.routers.prompts import (
     _signal_backtest_var,
 )
 from portfolio_dash.api.signals_service import scan_signals
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import upsert_instrument
 from portfolio_dash.llm_insight.evaluations_store import EvalStatus, add_evaluation
 from portfolio_dash.pricing.results import PriceRow
@@ -132,7 +134,9 @@ def test_signal_backtest_var_unavailable_without_history(
         symbol="THIN", market=Market.US, quote_ccy=Currency.USD,
         sector="Tech", name="THIN",
     ))
-    assert _signal_backtest_var(golden_db, "THIN", now=GOLDEN_NOW) == {
+    assert _signal_backtest_var(
+        golden_db, "THIN", actions=load_action_index(golden_db), now=GOLDEN_NOW
+    ) == {
         "unavailable": True, "last_as_of": None,
     }
 
@@ -141,7 +145,9 @@ def test_signal_backtest_var_populated_after_scan(
     golden_db: sqlite3.Connection,
 ) -> None:
     _register_with_history(golden_db, "WATCH")
-    out = _signal_backtest_var(golden_db, "WATCH", now=GOLDEN_NOW)
+    out = _signal_backtest_var(
+        golden_db, "WATCH", actions=load_action_index(golden_db), now=GOLDEN_NOW
+    )
     assert out["symbol"] == "WATCH"
     assert out["history"]["rows"] == 61
     assert out["history"]["params_version"] == "rules-v1"
@@ -184,3 +190,45 @@ def test_ai_self_vars_render_through_preview(
     )
     assert r.status_code == 200
     assert json.loads(r.json()["rendered"]) == {"gap": "-0.050", "window_n": 8}
+
+
+def test_per_symbol_preview_builds_the_action_index_once(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trap #21 at the preview seam: ONE ``load_action_index`` per request.
+
+    Pre-fix the per-symbol preview built it TWICE (``_build_context``'s long-history read
+    + ``_signal_backtest_var``'s internal build); the run path (``_per_symbol_ctx``)
+    already threads a caller-built index but never passed it in, so generation rebuilt it
+    once per symbol. The count pin is the regression lock.
+    """
+    import portfolio_dash.api.routers.prompts as prompts_mod
+    from portfolio_dash.shared.corporate_actions import ActionIndex
+
+    calls = 0
+
+    def counting(conn: sqlite3.Connection) -> ActionIndex:
+        nonlocal calls
+        calls += 1
+        return load_action_index(conn)  # the real one, from its home module
+
+    # String-form setattr: patch the NAME in the prompts module (resolved at call time)
+    # while keeping the unpatched original reachable via the holdings import above.
+    monkeypatch.setattr(prompts_mod, "load_action_index", counting)
+    _register_with_history(golden_db, "WATCH")
+    r = api_client.post(
+        "/api/prompts/preview",
+        json={"body": "{{signal_backtest_json}}", "scope": "per_symbol",
+              "symbol": "WATCH"},
+    )
+    assert r.status_code == 200
+    assert calls == 1
+
+    calls = 0
+    r = api_client.post(
+        "/api/prompts/preview",
+        json={"body": "{{calibration_gap_json}}", "scope": "portfolio"},
+    )
+    assert r.status_code == 200
+    assert calls == 0  # portfolio scope deliberately pays zero ledger reads

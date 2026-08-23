@@ -45,7 +45,8 @@ def build_ai_predictions_csv(conn: sqlite3.Connection) -> ExportArtifact:
     # rows_limit=None -> the whole (archived-excluded) set, matching the table's source
     # before its client-side paging slice.
     score: dict[str, Any] = es.ai_score(
-        conn, exclude_type_ids=cs.archived_type_ids(conn), rows_limit=None
+        conn, min_samples=int(cs.get_evolution_config(conn)["min_samples"]),
+        exclude_type_ids=cs.archived_type_ids(conn), rows_limit=None,
     )
     rows: list[list[str]] = [
         [_s(r.get(col)) for col in _COLUMNS] for r in score["rows"]

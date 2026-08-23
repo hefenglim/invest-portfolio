@@ -83,7 +83,34 @@ mock prompts anchor confidence caps on them); the event study rides a NEW per-sy
 `signal_backtest_json`; official template prompts untouched), and **AI-D32** (the composite event
 thresholds are the EXISTING 65/35 state bands (`composite.py` `_BAND_HIGH/_BAND_LOW`) — one
 vocabulary; a second 70/30 vocabulary on the same prompt surface would be the AI-D2
-two-definitions defect all over).
+two-definitions defect all over). **W7 rulings (2026-08-21):** **AI-D33** (the advice template
+advances to v3 citing the three W6 variables — verbatim numbers only, an n<8 event cell is
+called sample-insufficient and cites nothing, every citation carries the sample count and the
+same-window baseline — plus the confidence-anchoring law the design mock always intended:
+confidence ≤ the matching bucket's actual hit rate + 5, capped at 70 when that bucket has
+n<8, and a negative `calibration_gap_json` lowers it by that magnitude; the checkup template
+(v2.6) cites the per-symbol event study too; the InsightCard schema is untouched and there is
+deliberately NO code-side confidence clamp — a validator silently rewriting the model's stated
+confidence is the same defect class as averaging two providers' fundamentals), **AI-D34** (the
+portfolio-scope half of "the assistant, complete" is the EXISTING weekly report, v2.1→v2.2,
+citing `backtest_json` + `calibration_gap_json` — the AI narrates its own track record weekly;
+no new template, preset, or task type), **AI-D35** (portfolio-scope `price_change` predictions
+are now SCORED — the `symbol=None` arm of `_measure_actual` measures the create→due window via
+the existing `twr_index` chain, flow-adjusted so a mid-window deposit never reads as profit,
+in TWD (the cards are narrated against the TWD dashboard) under the shared ±0.5% flat band;
+`relative`/`volatility` stay per-symbol — a blended three-market benchmark is a separate
+ruling), **AI-D36** (the scoreboard becomes a decision-quality dashboard with NO new route:
+`/api/ai-score` gains a rolling calibration gap sharing ONE definition with the prompt
+variable, per-combo sample-gate display, and a backend-computed trust tier — 樣本不足 (n<8,
+the MIN_SAMPLE anchor) / 早期 / 可參考 (success ≥ 0.6 AND calibration error ≤ 10pp, the
+`gap_alert_pp` anchor), with narrative-only combos judged on `1 − miss_rate` rather than a
+fabricated 0% quant rate — plus `calibration_bins` moves to Decimal ROUND_HALF_UP, retiring
+the float/HALF_EVEN path that shared a prompt surface with W6's ROUND_HALF_UP), and **AI-D37**
+(template upgrades finally REACH existing installs: `POST /api/strategy-prompts/from-template`
+gains an explicit replace mode — same route, no new endpoint — and the settings page shows a
+per-strategy 同步官方 button when the name matches an official template and the body differs;
+tasks bind strategies by id, so the overwrite upgrades every bound task in place; a renamed or
+archived strategy answers 409, so a replayed request cannot overwrite a row the user moved).
 
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
@@ -262,6 +289,41 @@ two-definitions defect all over).
     `signal_backtest_json` (category `price`, external-fed like `rule_signals_json`).
     Official template prompts are unchanged — adopting the new variables into prompts is
     a W7 corpus-quality decision.
+- **The assistant, complete — cards cite their own evidence, and the scoreboard answers
+  "should I listen" (W7, AI-D33..D37).** W6 built the evidence (signal history, the event
+  study, the calibration variables); W7 puts it on the cards and on the scoreboard. The
+  LLM only narrates — every number is computed locally (the programme's first rule).
+  - **The advice card (v3) cites its backtest and anchors its confidence** (AI-D33):
+    `signal_backtest_json` (this symbol's event study), `backtest_json` (the model's own
+    global calibration bins), and `calibration_gap_json` (its recent signed gap) join the
+    prompt under a strict citation law — verbatim numbers, an n<8 cell is called
+    sample-insufficient and cites nothing, every citation carries the sample count and the
+    same-window baseline. The confidence-anchoring law caps a card's stated confidence at
+    the matching bucket's actual hit rate + 5 (cap 70 when the bucket has n<8) and a
+    negative rolling gap lowers it by that magnitude. The checkup card (v2.6) cites the
+    event study as well; the weekly report (v2.2) narrates the AI's own track record from
+    the two portfolio-scope calibration variables (AI-D34). No schema change, and no
+    code-side confidence clamp — the anchoring is prompt law, auditable in the body.
+  - **Portfolio-scope predictions are scored now** (AI-D35, closing AI-D26's deferred
+    question): a portfolio card's `price_change` prediction is measured by the existing
+    chain-linked TWR index over the create→due window — flow-adjusted, so a mid-window
+    deposit never reads as a gain (a disproof test watches exactly that). Thin or missing
+    trend data stays an honest `pending_data`, never a fabricated miss.
+  - **The scoreboard is a decision-quality dashboard** (AI-D36): `/api/ai-score` (same
+    route) additionally serves the rolling calibration gap (ONE definition shared with
+    the prompt variable), each task's sample-gate progress (n vs its min_samples), and a
+    backend-computed **trust tier** per task — 樣本不足 / 早期 / 可參考 — synthesizing hit
+    rate × calibration error × sample count into the page's single vocabulary. The page
+    renders the tier as a stamp and the gap as a fifth stat card; it computes nothing.
+    `calibration_bins` now quantizes ROUND_HALF_UP in pure Decimal (the float/HALF_EVEN
+    path was a pre-existing second rounding vocabulary on the same surface).
+  - **Official template upgrades reach existing installs** (AI-D37): the strategy-prompt
+    settings card shows a 「同步官方 vX」 button when the row's name matches an official
+    template and its body has drifted; confirming (an explicit danger dialog — custom
+    edits are lost) overwrites the body through the existing from-template endpoint's new
+    replace mode, and every task bound to that strategy id runs the new body on its next
+    pass. A renamed or archived row answers 409 — a replayed request cannot overwrite a
+    row the owner moved.
 - **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
   `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
   released**). A share count that changes without a trade previously had no representation, so
@@ -413,6 +475,17 @@ two-definitions defect all over).
   nobody should press. Visible for ordinary CSV imports too.
 
 ### Fixed
+- **W6 post-ship review (three LOW findings, no HIGH/MEDIUM across three lenses).** The
+  `signal_backtest_json` producer rebuilt the corporate-action index per symbol per run —
+  `_per_symbol_ctx` already threads a caller-built `actions` (trap #21) but never passed it
+  in; the index is now built once per request and threaded through `_external_vars`
+  (a required argument — forgetting it is a TypeError, not a silent re-read).
+  `_read_series` briefly returned a third value (the last price date) that no call site
+  consumed — reverted to the 2-tuple rather than leave a decoy that invites a future reader
+  to treat it as load-bearing. And an honest limitation is now documented where it lives:
+  a provider *revision* mid-series (a corrected close on an already-stored date) leaves
+  downstream `signal_history` rows stale — the missing-set rule only fills absent dates;
+  the manual remedy (`delete_symbol` + rescan) is named in the module docstrings.
 - **The AI input door showed one tax and wrote another.** `AiDraft.daytrade` reached the
   preview's `TxnInput`, so a TW same-day round trip was priced at the 當沖 rate of 0.15% — but
   the commit-ready CSV the same function emitted had no `daytrade` column, and

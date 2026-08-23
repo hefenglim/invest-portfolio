@@ -165,3 +165,50 @@ def calibration_error(rows: list[tuple[int, bool]]) -> Decimal:
     hits = sum(1 for _, hit in rows if hit)
     actual = (Decimal(hits) / n) * Decimal("100")
     return abs(claimed - actual)
+
+
+# --- Trust tier (W7, AI-D36) ------------------------------------------------------
+# The scoreboard's per-task stamp — 命中率 × 校準誤差 × 樣本數 in ONE vocabulary, computed
+# HERE (the web layer renders the string; it never computes it). Anchors: the sample gate
+# is the event study's MIN_SAMPLE (= the evolution config's min_samples default); the
+# calibration bar is the calib_gap alert's gap_alert_pp default.
+TIER_MIN_SAMPLE = 8
+TIER_SUCCESS_MIN = Decimal("0.6")
+TIER_CALIB_MAX_PP = Decimal("10")
+
+TIER_SUFFICIENT = "可參考"
+TIER_EARLY = "早期"
+TIER_INSUFFICIENT = "樣本不足"
+
+
+def trust_tier(
+    *,
+    n: int,
+    quant_n: int,
+    quant_hit_rate: Decimal | None,
+    narrative_success_rate: Decimal | None,
+    calib_error_pp: Decimal | None,
+) -> str:
+    """One task's trust tier from its hit rate × calibration error × sample count.
+
+    * ``n < TIER_MIN_SAMPLE`` → 樣本不足 (regardless of the rates — a handful of hits is
+      noise theatre, the same honesty gate as the event study and the rolling gap).
+    * The success leg is ``quant_hit_rate`` when quant rows exist — ``combo_score`` reports
+      ``"0"`` for a quant-less combo, and reading that as a real 0% would demote every
+      narrative-only task on a number it never earned — else ``narrative_success_rate``.
+    * 可參考 ⟺ success ≥ 0.6 AND the calibration error is KNOWN and ≤ 10pp; a combo with
+      no calibration evidence (None) is 早期, not 可參考 — "no evidence of miscalibration"
+      is not evidence of calibration.
+    """
+    if n < TIER_MIN_SAMPLE:
+        return TIER_INSUFFICIENT
+    success = quant_hit_rate if quant_n > 0 else narrative_success_rate
+    if success is None:
+        return TIER_EARLY
+    if (
+        success >= TIER_SUCCESS_MIN
+        and calib_error_pp is not None
+        and calib_error_pp <= TIER_CALIB_MAX_PP
+    ):
+        return TIER_SUFFICIENT
+    return TIER_EARLY

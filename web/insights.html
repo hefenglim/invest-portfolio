@@ -108,7 +108,7 @@
   .hc-conclusion::before { content: '結論 '; font-size: 10px; color: var(--text-3); letter-spacing: 0.04em; }
 
   /* ---- AI 戰績 ---- */
-  .score-band { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px var(--pad) 4px; }
+  .score-band { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--gap); padding: 12px var(--pad) 4px; }
   .score-card {
     background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius);
     padding: 10px 13px; display: flex; flex-direction: column; gap: 2px;
@@ -117,7 +117,7 @@
   .score-card .v { font-family: var(--font-num); font-size: 19px; font-weight: 600; }
   .score-card .s { font-size: 10px; color: var(--text-3); }
   .strat-rows { display: flex; flex-direction: column; gap: 7px; padding: 10px var(--pad) 14px; }
-  .strat-row { display: grid; grid-template-columns: 170px 1fr 90px 70px; align-items: center; gap: 12px; font-size: 11.5px; }
+  .strat-row { display: grid; grid-template-columns: 150px 1fr 82px 92px 128px; align-items: center; gap: 12px; font-size: 11.5px; }
   .strat-row .name { color: var(--text); font-weight: 600; }
   .strat-row .track { height: 8px; background: var(--panel-3); border-radius: 4px; overflow: hidden; }
   .strat-row .fill { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
@@ -126,6 +126,13 @@
   .hit-yes { color: var(--ok); }
   .hit-no { color: var(--up); }
   .hit-open { color: var(--text-3); }
+  /* W7 (AI-D36): the trust tier pill + the sample-gate note — server-computed strings,
+     rendered verbatim (the page never computes a tier). */
+  .tier-pill { display: inline-block; font-size: 10px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--border-soft); color: var(--text-3); white-space: nowrap; }
+  .tier-pill.tier-good { color: var(--ok); border-color: rgba(63, 185, 80, 0.4); background: var(--ok-soft); }
+  .tier-pill.tier-early { color: var(--accent); border-color: var(--accent); }
+  .strat-row .gate-closed { opacity: 0.55; }
   .conf-cell { display: inline-flex; align-items: center; gap: 6px; }
   .conf-track { width: 44px; height: 5px; background: var(--panel-3); border-radius: 3px; overflow: hidden; display: inline-block; }
   .conf-fill { display: block; height: 100%; background: var(--series-usd); }
@@ -440,6 +447,19 @@
       '失誤 ' + f.num(totals.miss_count) + ' 筆'));
     band.appendChild(scoreCard('平均敘事分', totals.avg_narrative == null ? EM : f.num(totals.avg_narrative, 2),
       '滿分 100'));
+    /* W7 (AI-D36): the fifth card is the rolling calibration gap — the SAME definition the
+       prompt variable serves, rendered verbatim. Below the gate the card shows the honest
+       sample progress (樣本不足 n/8), never a number over a handful of rows. */
+    var rg = score.rolling_gap || null;
+    if (rg) {
+      band.appendChild(scoreCard('滾動校準缺口',
+        rg.gap == null
+          ? '樣本不足 ' + f.num(rg.window_n) + '／' + f.num(rg.min_scored)
+          : f.signedPct(rg.gap),
+        rg.gap == null
+          ? '滾動校準 · 滿 ' + f.num(rg.min_scored) + ' 筆解鎖'
+          : '最近 ' + f.num(rg.window_n) + ' 筆 · 負＝高估自己'));
+    }
 
     renderCombos(score.by_combo || []);
     renderScoreRows(score.rows || []);
@@ -465,7 +485,19 @@
       track.appendChild(fill);
       row.appendChild(track);
       row.appendChild(el('span', 'pct', c.quant_hit_rate == null ? EM : f.pct(c.quant_hit_rate)));
-      row.appendChild(el('span', 'n', 'n=' + f.num(c.n)));
+      /* W7 (AI-D36): the trust tier stamp + the sample gate, both server-computed; a legacy
+         payload without them renders the cells empty, never crashes. */
+      if (c.tier == null) {
+        row.appendChild(el('span', null, ''));
+      } else {
+        var pill = el('span', 'tier-pill ' + (c.tier === '可參考' ? 'tier-good'
+          : c.tier === '早期' ? 'tier-early' : ''), c.tier);
+        if (c.calib_error_pp != null) pill.title = '校準誤差 ' + c.calib_error_pp + 'pp';
+        row.appendChild(pill);
+      }
+      var gateTxt = 'n=' + f.num(c.n);
+      if (c.min_samples != null) gateTxt += '／門檻 ' + f.num(c.min_samples);
+      row.appendChild(el('span', 'n' + (c.gate_open === false ? ' gate-closed' : ''), gateTxt));
       wrap.appendChild(row);
     });
   }

@@ -13,8 +13,8 @@ Honesty guards (spec §4 / AI-D30 — these are the point of the module, not dec
   distribution numbers are NOT. A plausible-looking mean over 5 samples is the failure
   mode this guard exists to prevent.
 * **overlap annotation** — an event re-firing within one window length of the previous
-  same-group event is counted in ``n_overlapping`` (it stays in the stats; the count is
-  the disclosure that the samples are not independent).
+  ELIGIBLE event of its group FOR THAT WINDOW is counted in ``n_overlapping`` (it stays
+  in the stats; the count is the disclosure that the samples are not independent).
 * **right-censoring** — events whose forward window extends past the latest close are
   EXCLUDED from that window's stats and counted in ``n_censored`` (a +120-day window
   needs 120 trading days that have not happened yet for recent events).

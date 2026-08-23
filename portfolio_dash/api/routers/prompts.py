@@ -34,7 +34,8 @@ from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.evaluations_store import (
     calibration_bins,
-    recent_confidence_hits,
+    gap_wire,
+    rolling_calibration_gap,
     scored_confidence_hits,
 )
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
@@ -53,6 +54,7 @@ from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
 from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import budget_remaining
 from portfolio_dash.shared.wire import decimal_str
@@ -495,10 +497,6 @@ def _rule_signals_var(
 
 _Q3 = Decimal("0.001")
 _Q4 = Decimal("0.0001")
-# The rolling gap's honesty gate (AI-D31): a signed gap over a handful of samples is noise
-# theatre — aligned with the design mock's 「樣本 <8」 confidence-cap rule.
-_GAP_MIN_SCORED = 8
-_GAP_WINDOW = 20
 
 
 def _ratio(value: Decimal, exp: Decimal) -> str:
@@ -523,25 +521,15 @@ def _backtest_var(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def _calibration_gap_var(conn: sqlite3.Connection) -> dict[str, Any]:
-    """``calibration_gap_json``: the ROLLING signed calibration gap over the latest
-    ``_GAP_WINDOW`` scored evaluations — ``actual_hit_rate − mean_claimed`` as a signed
-    fraction (positive = the model is UNDER-confident), 0.001-quantized. Below
-    ``_GAP_MIN_SCORED`` scored rows it degrades honestly (see the constant's note).
+    """``calibration_gap_json``: the ROLLING signed calibration gap — ``actual − claimed``
+    (positive = the model is UNDER-confident). The computation lives in
+    ``evaluations_store.rolling_calibration_gap`` (W7, AI-D36: ONE definition shared with
+    the ai-score API); below the gate it degrades honestly.
     """
-    pairs = recent_confidence_hits(conn, limit=_GAP_WINDOW)
-    if len(pairs) < _GAP_MIN_SCORED:
+    result = rolling_calibration_gap(conn)
+    if result.gap is None:
         return {"unavailable": True, "last_as_of": None}
-    claimed_total = Decimal(0)  # explicit — sum() over Decimals types as Decimal|float
-    for confidence, _ in pairs:
-        claimed_total += Decimal(confidence)
-    claimed = claimed_total / (100 * len(pairs))
-    actual = Decimal(sum(1 for _, hit in pairs if hit)) / len(pairs)
-    gap = actual - claimed
-    rounded = gap.quantize(_Q3, rounding=ROUND_HALF_UP)
-    return {
-        "gap": ("+" if rounded >= 0 else "") + decimal_str(rounded),
-        "window_n": len(pairs),
-    }
+    return {"gap": gap_wire(result.gap), "window_n": result.window_n}
 
 
 def _window_stats_wire(stats: WindowStats) -> dict[str, Any]:
@@ -597,7 +585,7 @@ def _signal_backtest_wire(
 
 
 def _signal_backtest_var(
-    conn: sqlite3.Connection, symbol: str, *, now: datetime
+    conn: sqlite3.Connection, symbol: str, *, actions: ActionIndex, now: datetime
 ) -> dict[str, Any]:
     """``signal_backtest_json``: the per-symbol event study over ``signal_history``.
 
@@ -607,14 +595,15 @@ def _signal_backtest_var(
     today's share terms via ``series_in`` (valued_on=end) so a return across a split is
     honest (AI-D30/W6c); local currency (AI-D23). Only the CURRENT params vintage is
     studied. No history rows → the unavailable shape (the full-coverage floor means young
-    symbols honestly have none).
+    symbols honestly have none). ``actions`` is the request's ONE action index, built by
+    the caller (trap #21 — this producer runs once per symbol per generation run).
     """
     rows = signal_history.list_rows(conn, symbol, params_version=PARAMS_VERSION)
     if not rows:
         return {"unavailable": True, "last_as_of": None}
     end = now.date()
     history = series_in(
-        load_action_index(conn), symbol,
+        actions, symbol,
         get_price_history(conn, symbol, rows[0].as_of, end),
         valued_on=end,
     )
@@ -637,7 +626,11 @@ def _signal_backtest_var(
 
 
 def _external_vars(
-    conn: sqlite3.Connection, symbol: str | None, *, now: datetime | None = None
+    conn: sqlite3.Connection,
+    symbol: str | None,
+    *,
+    now: datetime | None = None,
+    actions: ActionIndex | None,
 ) -> dict[str, Any]:
     """Assemble the chips/sentiment/index/news variable values from external snapshots.
 
@@ -645,6 +638,10 @@ def _external_vars(
     not in ``llm_insight`` (layering, spec 20.3). Portfolio-scope sentiment/index are
     always assembled; the per-symbol chips need a symbol. Missing snapshots degrade to
     the assembler's ``{"unavailable": ...}`` shape, which the var renders as such.
+
+    ``actions`` is a REQUIRED keyword (the injection rule: forgetting it is a TypeError,
+    not a silent loss) — ``None`` is the explicit portfolio-scope value; a per-symbol
+    assembly always carries the request's ONE action index (trap #21).
     """
     out: dict[str, Any] = {
         "market_sentiment_json": _sentiment_var(conn),
@@ -676,8 +673,11 @@ def _external_vars(
         out["rule_signals_json"] = _rule_signals_var(
             conn, symbol, now=now or datetime.now(_TAIPEI)
         )
+        # Programmer-error guard: a per-symbol assembly always carries the request's
+        # action index (mypy cannot narrow the symbol/actions correlation for us).
+        assert actions is not None
         out["signal_backtest_json"] = _signal_backtest_var(
-            conn, symbol, now=now or datetime.now(_TAIPEI)
+            conn, symbol, actions=actions, now=now or datetime.now(_TAIPEI)
         )
     return out
 
@@ -726,7 +726,11 @@ def _build_context(
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
     symbol = payload.symbol if payload.scope == "per_symbol" else None
-    external_vars = _external_vars(conn, symbol, now=now)  # SR: thread now → news window
+    # ONE action index per request (trap #21): shared by the external vars
+    # (signal_backtest's re-expression) and the long-history read below. Portfolio
+    # previews deliberately pay zero ledger reads.
+    actions = load_action_index(conn) if symbol else None
+    external_vars = _external_vars(conn, symbol, now=now, actions=actions)
     ctx = V.VarContext(
         data=data,
         now=now,  # spec 04.10 {{now}} renders ISO-8601 +08:00 in preview/test
@@ -743,11 +747,12 @@ def _build_context(
         # ctx.closes gets the LONG series (honest 52w/MA120 technical signals);
         # price_points keeps only the recent window (token-bounded).
         # §5.1(d) / W6c: re-expressed into `as_of` exactly as the run path does, so the
-        # preview a prompt is authored against is the series the run will render. ONE index
-        # for this single-symbol request (trap #21). ⚠ volume keeps the provider's basis
+        # preview a prompt is authored against is the series the run will render. The ONE
+        # request index built above (trap #21). ⚠ volume keeps the provider's basis
         # (D39b).
+        assert actions is not None  # per-symbol preview always carries it (built above)
         long_hist = series_in(
-            load_action_index(conn), payload.symbol,
+            actions, payload.symbol,
             get_price_history(
                 conn, payload.symbol,
                 as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of,

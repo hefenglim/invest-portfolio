@@ -89,12 +89,8 @@ def required_calendar_days(params: RulesParams) -> int:
 def _read_series(
     conn: sqlite3.Connection, symbol: str, *, now: datetime, params: RulesParams,
     actions: ActionIndex,
-) -> tuple[list[Decimal], list[Decimal | None] | None, date | None]:
+) -> tuple[list[Decimal], list[Decimal | None] | None]:
     """Read the derived-window closes + aligned volumes for ``symbol`` from stored prices.
-
-    Returns ``(closes, volumes, last_price_date)`` — the third element is the date of the
-    last close in the window (``None`` when empty): the history row's ``as_of`` is THAT
-    date (the data the evaluation describes), never the scan's wall-clock date (AI-D28).
 
     Volumes are fed only when at least one session carries volume (so the volume-
     confirmation signal stays honestly absent pre-backfill), mirroring ``insight_service``.
@@ -123,7 +119,7 @@ def _read_series(
     closes: list[Decimal] = [p.value for p in history]
     raw_volumes: list[Decimal | None] = [p.volume for p in history]
     volumes = raw_volumes if any(v is not None for v in raw_volumes) else None
-    return closes, volumes, history[-1].as_of if history else None
+    return closes, volumes
 
 
 def evaluate_symbol(
@@ -135,7 +131,7 @@ def evaluate_symbol(
 ) -> SymbolSignals | None:
     """Evaluate one symbol's signals from stored prices (single-symbol drawer path)."""
     resolved = params if params is not None else default_params()
-    closes, volumes, _ = _read_series(conn, symbol, now=now, params=resolved,
+    closes, volumes = _read_series(conn, symbol, now=now, params=resolved,
                                       actions=load_action_index(conn))
     return engine.evaluate_symbol(closes, volumes, resolved)
 
@@ -179,7 +175,7 @@ def evaluate_all(
     actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
     out: list[tuple[str, SymbolSignals | None, bool]] = []
     for symbol in _registered_symbols(conn):
-        closes, volumes, _ = _read_series(conn, symbol, now=now, params=params,
+        closes, volumes = _read_series(conn, symbol, now=now, params=params,
                                           actions=actions)
         signals = engine.evaluate_symbol(closes, volumes, params)
         out.append((symbol, signals, _is_held(conn, symbol, account_ids=account_ids)))
@@ -299,7 +295,10 @@ def _fill_signal_history(
     * **Missing-set rule** (AI-D27): fill every computable date NOT already stored — a
       later deeper price backfill (left-edge hole), a provider gap filled in (middle hole),
       or an aborted first backfill all self-heal on the next scan, where a max-as_of
-      watermark would hide all three.
+      watermark would hide all three. ⚠ Limitation (W6 review): a provider REVISION to an
+      already-stored date is neither missing nor head — the downstream rows whose windows
+      shift stay stale until ``signal_history.delete_symbol`` + a rescan (the module
+      docstring carries the same note).
     * **Per-date re-assembly** (deliberate, NOT fetch-once-truncate): each date's window is
       read and re-expressed at THAT date through the same ``_read_series`` the daily scan
       uses, so a replayed row is by construction the row a scan on that date would have
@@ -318,7 +317,7 @@ def _fill_signal_history(
     for d in dates:
         if d in stored:
             continue
-        d_closes, d_volumes, _ = _read_series(
+        d_closes, d_volumes = _read_series(
             conn, symbol, now=datetime.combine(d, time.min),
             params=params, actions=actions,
         )
@@ -334,7 +333,7 @@ def _fill_signal_history(
     changed = 0
     head = dates[-1]
     if head in stored:  # a just-written head is identical by construction — skip it
-        h_closes, h_volumes, _ = _read_series(
+        h_closes, h_volumes = _read_series(
             conn, symbol, now=datetime.combine(head, time.min),
             params=params, actions=actions,
         )
@@ -399,7 +398,7 @@ def scan_signals(
     replayed = 0
     refreshed = 0
     for pos, symbol in enumerate(symbols, start=1):
-        closes, volumes, _ = _read_series(conn, symbol, now=now, params=params,
+        closes, volumes = _read_series(conn, symbol, now=now, params=params,
                                           actions=actions)
         signals = engine.evaluate_symbol(closes, volumes, params)
         new_state = signal_states.extract_state(signals)
