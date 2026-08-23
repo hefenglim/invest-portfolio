@@ -95,7 +95,7 @@ def test_calibration_gap_var_negative_sign_hand_checked(
     assert _calibration_gap_var(golden_db) == {
         "gap": "-0.050", "window_n": 8,
         # W7.1 — the direction ships as copyable text, not as a sign the model must read.
-        "reading": "最近 8 筆平均高估自己 5.000 個百分點",
+        "reading": "最近 8 筆平均高估自己 5.0 個百分點",
     }
 
 
@@ -111,7 +111,7 @@ def test_calibration_gap_var_positive_sign_and_the_rolling_window(
     # Window = the 20 newest: claimed 0.50, actual 15/20 = 0.75 → +0.25.
     assert _calibration_gap_var(golden_db) == {
         "gap": "+0.250", "window_n": 20,
-        "reading": "最近 20 筆平均低估自己 25.000 個百分點",
+        "reading": "最近 20 筆平均低估自己 25.0 個百分點",
     }
 
 
@@ -198,7 +198,7 @@ def test_ai_self_vars_render_through_preview(
     assert r.status_code == 200
     assert json.loads(r.json()["rendered"]) == {
         "gap": "-0.050", "window_n": 8,
-        "reading": "最近 8 筆平均高估自己 5.000 個百分點",
+        "reading": "最近 8 筆平均高估自己 5.0 個百分點",
     }
 
 
@@ -324,3 +324,23 @@ def test_signal_backtest_var_declares_its_unit_next_to_the_numbers(
     assert out["units"]["mean"].startswith("fraction")
     assert "13.36%" in out["units"]["mean"]  # the worked example travels with the payload
     assert set(out["units"]) == {"mean", "median", "pct_positive"}
+
+
+def test_calibration_gap_reading_agrees_with_the_number_it_describes(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """DISPROOF of two renderings of one quantity disagreeing (found in W7.1's own first
+    deploy): a raw gap of −0.4655 wires as "-0.466", so the words must say 46.6 — not the
+    46.550 an unquantized derivation produced.
+
+    20 rows @ 65.5 average claimed... built here as 20 rows alternating 65/66 with 9 hits:
+    claimed = 65.5/100 = 0.655, actual = 9/20 = 0.45 → gap = −0.205 → "-0.205" / 20.5pp.
+    The invariant under test is the AGREEMENT, so it is asserted arithmetically.
+    """
+    for i in range(20):
+        _score(golden_db, i, 65 if i % 2 else 66, i >= 9)
+    out = _calibration_gap_var(golden_db)
+    magnitude = out["gap"].lstrip("+-")
+    pp_from_number = str(Decimal(magnitude) * 100).rstrip("0").rstrip(".")
+    pp_in_words = out["reading"].split("自己 ")[1].split(" 個")[0].rstrip("0").rstrip(".")
+    assert pp_from_number == pp_in_words, (out["gap"], out["reading"])

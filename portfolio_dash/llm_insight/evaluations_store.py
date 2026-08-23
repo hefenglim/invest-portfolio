@@ -516,9 +516,21 @@ def rolling_calibration_gap(
     return RollingGap(gap=actual - claimed, window_n=len(pairs))
 
 
+def gap_quantized(gap: Decimal) -> Decimal:
+    """The ONE rounding for a calibration gap: 0.001, ROUND_HALF_UP.
+
+    Split out from :func:`gap_wire` (W7.1) so the plain-language ``reading`` beside the
+    number is derived from the SAME value the number shows. Deriving it from the raw
+    Decimal put ``"gap": "-0.466"`` next to 「高估自己 46.550 個百分點」 in one payload —
+    two renderings of one quantity disagreeing by 0.05pp, which is the same defect class
+    this whole change is about.
+    """
+    return gap.quantize(_GAP_Q, rounding=ROUND_HALF_UP)
+
+
 def gap_wire(gap: Decimal) -> str:
     """The ONE wire shape for a calibration gap: 0.001, ROUND_HALF_UP, explicit sign."""
-    rounded = gap.quantize(_GAP_Q, rounding=ROUND_HALF_UP)
+    rounded = gap_quantized(gap)
     return ("+" if rounded >= 0 else "") + decimal_str(rounded)
 
 

@@ -34,6 +34,7 @@ from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.evaluations_store import (
     calibration_bins,
+    gap_quantized,
     gap_wire,
     rolling_calibration_gap,
     scored_confidence_hits,
@@ -545,7 +546,8 @@ def _calibration_gap_var(conn: sqlite3.Connection) -> dict[str, Any]:
     # gap −0.466 as 「低估自身表現」 (the opposite) even though the template states the sign
     # convention in the same section: a signed fraction is one negation away from asserting
     # the reverse of the truth, so the direction ships as text the model can copy.
-    pp = _ratio(abs(result.gap) * 100, _Q3)
+    # Derived from the QUANTIZED gap, so the words and the number cannot disagree.
+    pp = _ratio(abs(gap_quantized(result.gap)) * 100, Decimal("0.1"))
     return {
         "gap": gap_wire(result.gap),
         "window_n": result.window_n,
