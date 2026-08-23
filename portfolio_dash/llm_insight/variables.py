@@ -283,16 +283,22 @@ REGISTRY: tuple[VarSpec, ...] = (
         "hit_count、平均宣告信心 claimed_pct、實際命中率 actual_pct、絕對誤差 "
         "calibration_error_pp（皆百分比字串），外加 overall_hit_rate（全域命中率，"
         "分數字串）——校正提示詞錨定信心值用：宣告信心不應長期高於同桶實際命中率。"
+        "**confidence_ceiling**（W7.1）是本系統依這份分桶＋滾動缺口算好的信心上限整數，"
+        "提示詞直接引用它，模型不必自己走 bins 推算（0 代表戰績不支持任何方向性信心）。"
         "無已評分樣本時 unavailable。",
         '{"bins":[{"bucket":"60-80","n":6,"hit_count":4,"claimed_pct":"68.50",'
-        '"actual_pct":"66.67","calibration_error_pp":"1.83"}],"overall_hit_rate":"0.625"}',
+        '"actual_pct":"66.67","calibration_error_pp":"1.83"}],"overall_hit_rate":"0.625",'
+        '"confidence_ceiling":71,"confidence_ceiling_note":"…"}',
     ),
     VarSpec(
         "calibration_gap_json", "校準誤差", "ai", "portfolio", True,
         "最近 20 筆已評分洞察的滾動校準缺口：gap＝實際命中率 − 平均宣告信心"
         "（帶號分數字串，0.001 量化；正＝模型低估自己、負＝高估），window_n＝窗內實際"
-        "樣本數（≤20）。已評分樣本 <8 時誠實 unavailable（個位數樣本的缺口是噪聲）。",
-        '{"gap":"+0.085","window_n":16}',
+        "樣本數（≤20）。**reading**（W7.1）是同一件事的白話版（「最近 N 筆平均高估／低估自己 "
+        "X 個百分點」）——提示詞照抄它，不要自己從正負號推方向：一份實測卡把 −0.466 讀成"
+        "「低估自身表現」，而模板就在同一段寫明了慣例。已評分樣本 <8 時誠實 unavailable"
+        "（個位數樣本的缺口是噪聲）。",
+        '{"gap":"+0.085","window_n":16,"reading":"最近 16 筆平均低估自己 8.500 個百分點"}',
     ),
     # --- price (訊號回測) — W6 事件研究（AI-D31：per-symbol，與 rule_signals_json 同類） ---
     VarSpec(
@@ -300,10 +306,14 @@ REGISTRY: tuple[VarSpec, ...] = (
         "該標的的事件研究回測（本地計算，非 LLM 生成）：法則訊號符號轉換（四法則各自 "
         "bullish/bearish）與 TechScore 狀態帶（65/35，與 evaluation_context 同一套門檻）"
         "穿越事件發生後，+20/+60/+120 交易日的前向報酬分布（n／mean／median／"
-        "pct_positive，分數字串）vs 同標的無條件基線（baseline）。誠實防護：n<8 的格子"
+        "pct_positive，分數字串——payload 的 units 欄同樣註明，因為這份 desc 模型看不到）"
+        "vs 同標的無條件基線（baseline）。誠實防護：n<8 的格子"
         "只回 insufficient 不給數字；重疊樣本（n_overlapping）與右刪失（n_censored）"
         "如實註記；不年化。歷史不足（訊號歷史尚未累積）時 unavailable。",
-        '{"symbol":"2330","history":{"first":"2024-10-02","last":"2026-06-11","rows":406,'
+        '{"symbol":"2330","units":{"mean":"fraction — 0.1336 means +13.36%",'
+        '"median":"fraction — same scale as mean",'
+        '"pct_positive":"fraction — 0.8182 means 81.82% of events"},'
+        '"history":{"first":"2024-10-02","last":"2026-06-11","rows":406,'
         '"params_version":"rules-v1"},"windows":[20,60,120],'
         '"groups":[{"kind":"momentum_12_1","direction":"bullish","events":14,'
         '"per_window":{"20":{"n":12,"mean":"0.0312","median":"0.0244",'

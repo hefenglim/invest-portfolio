@@ -55,6 +55,7 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | **AI-D35** | W7 組合層計分 | **接 TWR 測 `price_change`**：`_measure_actual` 的 symbol=None 臂用既有 `portfolio/twr.py::twr_index`（鏈式日 TWR，流量調整——出入金不被當損益）測量 create→due 窗；relative／volatility 維持個股層 | owner 裁納（W7-3），**了結 AI-D26 留下的「W7 再議」**。量測幣別＝TWD（`evaluate_due` 加 `reporting=Currency.TWD` 預設，`run_for_id` 前例；卡片本就對著 TWD 儀表敘事）；`_FLAT_BAND ±0.5%` 同一條（AI-D25 的 vol 專屬帶不動）；`price_at_create` 無組合類比——on-or-after 腿是唯一誠實基線。否決：維持不可計分（組合層預測永不進戰績，W7-2 的敘事永不被驗證）、relative 一起接（三市場組合的混合基準是另一個裁示） |
 | **AI-D36** | W7 戰績頁 | **缺口卡＋門檻＋信賴分級**：`/api/ai-score` 擴欄**不新增路由**——`rolling_gap`（與提示詞變數同一條定義，抽進 `evaluations_store` 單源）＋每 combo 的 `min_samples` 門檻顯示＋後端算好的**信賴分級章**；順修 `calibration_bins` 對齊 ROUND_HALF_UP（原 float/HALF_EVEN 路徑，同一提示詞表面兩種進位詞彙） | owner 裁納（W7-4）。分級門檻：`n < 8` → 樣本不足（錨定 `MIN_SAMPLE`）；success＝`quant_hit_rate`（`quant_n>0` 時——`combo_score` 對無量化列回 "0" 非真 0%）否則 `1 − miss_rate`；**可參考** ⟺ success ≥ 0.6 且 calib_error_pp ≤ 10（錨定 `gap_alert_pp` 預設 10）且不為 None；其餘 → 早期。web 只渲染 server 字串（web 永不計算）。否決：per-combo 可靠性圖（後端已支援，UI 複雜度對 1–2 人不划算，日後追加）。`_ratio_str`／`_avg_str` 的 HALF_EVEN **亮明不順修**（會移動 miss_rate 等更多表面） |
 | **AI-D37** | W7 v3 推出 | **from-template 加 replace 模式**：既有 `POST /api/strategy-prompts/from-template` 加顯式 `mode`＋`strategy_id`（**無新路由**）；設定頁策略列在「名稱匹配官方模板且 body 不同」時顯示「同步官方 vX」，確認後覆寫 body（`strategy_prompts` 無 version 欄——以 `updated_at` 重蓋為戳） | owner 裁納（W7-5）。綁定語義：任務以 **strategy id** 綁定（`insight_type_strategies.strategy_prompt_id`）→ 覆寫即全部綁定任務下次 run 原地升版；名稱不符／已封存 → 409（伺服端重驗，防重放覆寫改名列）；R1 由 run 時閘門誠實接住（PUT 同慣例，不預檢）。否決：維持手動（W3 升 v2 時 demo 靠手動重建，每次升版重做）、pack 自動覆寫（會連使用者同名自訂一起蓋掉——skip-existing 的保護目的正是它） |
+| **AI-D38** | W7.1 卡片輸出保真 | **生產端＋提示詞雙邊修**（demo 首跑實測後）：①`signal_backtest_json` 加 `units` 欄（mean/median/pct_positive 皆為**分數**，0.1336 = +13.36%）——單位原本只寫在變數登錄表 `desc`（UI 文件，模型看不到）；②提示詞明訂單位、明訂「insufficient 的格子不得引用任何數字，**且不得改用同窗 baseline 充當事件報酬**」、明訂「輸入裡沒有的數字一律不得出現」；③信心上限改由 `scoring.confidence_ceiling` **預先算好一個整數**放進 `backtest_json.confidence_ceiling`，提示詞只說「不得超過它」 | owner 裁納 2026-08-23。實測依據（demo @f1efd56，13 張建議卡＋13 張健檢卡）：信心錨定 **0/13 遵守**（40–70 vs 上限 22.14／5.00）；2/13 把同窗 baseline 當成事件報酬；1 張（NVDA）對一個 `insufficient` 格子**憑空造出 +0.0796%**（payload 全無 mean，且該值也不是基線）；同一批卡把同一個分數寫成 `0.1336%`／`0.0640 USD`／裸 `0.1053`／正確的 `+9.61%` 四種。生產端每次都是對的（sub-gate 不給數字、基線算術與獨立 oracle 12/12 相符、法則帶真數字進了提示詞）——所以修的是**語意的位置**：把單位與方向放到數字旁邊，把多步條件換成一個整數。**AI-D33 的紅線不變**：程式端仍不夾取模型自陳的信心，只是不再要求它臨場算上限。⚠ 一項**逾裁示範圍的延伸**（實作時發現後補報）：`calibration_gap_json` 加 `reading` 白話方向欄（「最近 20 筆平均高估自己 46.6 個百分點」）——週報 v2.2 首卡把 gap −0.466 讀成「低估自身表現」，而模板就在同一段寫明「正值＝我最近低估自己」；帶號分數只要讀反一次就斷言了相反的事實。⚠ **無下限是刻意的**：`confidence_ceiling` 在 demo 現況算出 **0**（39 − 46.6 penalty），代表「戰績不支持任何方向性信心」；提示詞用文字說明此情形，程式端不憑空發明樓地板——是否加下限／限制 gap 罰則上限是 owner 的下一個決策 |
 
 > **命名慣例**：本企劃的裁示用 `AI-D<n>`，**永不**與公司行動 spec 的 `D<n>` 編號空間混用。
 > 先例教訓：上一輪藍圖把自己的裁示寫在它自己的 §10（D1–D9），產生了「那是藍圖內部裁示
@@ -134,6 +135,7 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
 | W5 | `api/insight_service.py:396-445` · `pricing/benchmarks.py` · `portfolio/twr.py` |
 | W6 | `strategy/signal_states.py`（新歷史表）· 新 `portfolio/backtest.py` · `llm_insight/variables.py:264-275` |
 | W7 | `llm_insight/official_templates.py` · `web/insights.html` |
+| W7.1 | `llm_insight/scoring.py`（`confidence_ceiling`）· `api/routers/prompts.py`（`units`／`reading`／ceiling 注入）· `llm_insight/official_templates.py`（advice v3.1／checkup v2.7／weekly v2.3） |
 | W8 | `pricing/schema.py` · `pricing/store.py` |
 
 ---
@@ -157,6 +159,8 @@ owner 的「AI 助手」＝ **AI 建議**：用**倉位持股資訊 × 市場新
   **反證**（窗中入金加倍持倉、價格不動 → 量到 0，naive 值會假造 +100%）；
   `calibration_bins` 的 HALF_UP 對齊附 70.125→"70.13"（HALF_EVEN 會是 "70.12"）反證治具；
   replace 模式附 400/404/409/封存四路與「綁定任務原地升版」斷言。
+- **W7.1**：`confidence_ceiling` 由純函式決策表釘死（自洽上限 39、負缺口逐點下修、**0 不設樓地板的反證**、無歷史＝70、n<8 不錨定、良好校準給 77、壞標籤不炸）；producer 側釘 `units` 三鍵與白話 `reading` 的方向字（含「不得出現『低估』」的反面斷言）；模板側釘單位工作範例（0.1336／+13.36%）、「不得改用同窗 baseline」、「輸入裡沒有的數字一律不得出現」、`confidence_ceiling` 與「為 0 時」的處置。
+- **demo 首跑實測（2026-08-23 @f1efd56，這波修的來源）**：六個波一次驗，部署／遷移／站上 targeted 子集（423 passed）／`verify_live` 全綠，四本帳分毫未動；W6 首次回填 18,521 列／1,370s，立即重掃 0 列／10.8s（冪等），SPLIT 插刪循環兩表失效→重建**零幻影事件**、1,226 列價格逐列回到 `close == cap_4dp(close_raw)`；事件研究基線與獨立 oracle **12/12 相符**；W3 聯集在 2330 同時帶 yfinance 與 finmind 兩塊 PE（不平均）；W4 三區段 4／1／3 且 `daytrade=1`／`short_sale=1` 就位。**未覆蓋（誠實列出）**：W5 的 relative／volatility 兩臂與 W7-3 組合層 TWR 臂（demo 的卡全是個股層 `price_change`）、pending/undetermined 狀態章、409-封存那一路（無歷史的策略是硬刪不是封存，密封測試涵蓋）。
 - 每波在 **demo 站**行為驗證：`scripts/verify_live.py` + 真實瀏覽器走完新流程。
 - ⚠ **分支紀律不變：不 merge、不 tag、`__version__` 維持 0.1.28**，直到 owner 同意。
 

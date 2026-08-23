@@ -17,7 +17,7 @@ miss flag; ``calibration_error`` computes the confidence-vs-hit-rate gap in perc
 points. All math is :class:`~decimal.Decimal` (never float for a price/rate/ratio).
 """
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from pydantic import BaseModel
 
@@ -212,3 +212,80 @@ def trust_tier(
     ):
         return TIER_SUFFICIENT
     return TIER_EARLY
+
+
+# --- Confidence ceiling (W7.1, 2026-08-23, owner ruling 「生產端＋提示詞雙邊修」) ----------
+# AI-D33 put the anchoring law in the PROMPT and deliberately refused a code-side clamp: a
+# validator that silently rewrites the model's own stated confidence is the same defect class
+# as averaging two providers' fundamentals. The first live run (demo, 2026-08-23) exposed the
+# other failure mode — 0 of 13 advice cards obeyed a law that asked the model to execute a
+# three-step conditional over a bins table mid-generation.
+#
+# So the ARITHMETIC moves here and the RULE stays exactly where it was. The prompt still
+# states the ceiling, the model still writes the number, and nothing clamps anything after
+# the fact; the model is simply handed ONE integer instead of a table plus a procedure.
+CEILING_NO_DATA = 70  # a bucket at/below the sample gate anchors nothing (AI-D33's 上限 70)
+CEILING_HEADROOM = 5  # the law's "actual_pct + 5"
+
+
+def _bucket_bounds(label: str) -> tuple[int, int] | None:
+    """``"40-60"`` -> ``(40, 60)``; anything unparseable -> ``None`` (never raise on a bin)."""
+    lo, _, hi = label.partition("-")
+    try:
+        return int(lo), int(hi)
+    except ValueError:
+        return None
+
+
+def confidence_ceiling(
+    bins: list[dict[str, object]],
+    *,
+    gap: Decimal | None,
+    min_samples: int = TIER_MIN_SAMPLE,
+) -> int:
+    """The largest SELF-CONSISTENT confidence (0-100) the anchoring law admits.
+
+    The law is circular by construction — a confidence's cap depends on the bucket that same
+    confidence falls into — so the answer is the largest ``c`` with ``c <= cap(bucket(c))``:
+
+    * a bucket at or above the sample gate caps at ``actual_pct + CEILING_HEADROOM``;
+    * a bucket below the gate, or absent from ``bins`` entirely, caps at ``CEILING_NO_DATA``
+      — no evidence anchors nothing, which is AI-D33's 「該區間 n<8 時上限 70」.
+
+    A NEGATIVE rolling gap (the model has been over-confident) then subtracts its own
+    magnitude in points — the prompt's own worked example, gap −0.050 → −5 — floored at 0.
+    A positive or unknown gap adjusts nothing.
+
+    ⚠ There is deliberately NO floor: on a badly calibrated history this returns 0, which is
+    the law saying "your record does not support asserting anything". That is an honest
+    reading of a degenerate input, and the prompt is written to say so in words rather than
+    quietly inventing a floor here.
+    """
+    caps: list[tuple[int, int, Decimal]] = []
+    for b in bins:
+        bounds = _bucket_bounds(str(b.get("bucket", "")))
+        if bounds is None:
+            continue
+        n = int(str(b.get("n", 0)))
+        cap = (
+            Decimal(str(b.get("actual_pct", "0"))) + CEILING_HEADROOM
+            if n >= min_samples
+            else Decimal(CEILING_NO_DATA)
+        )
+        caps.append((bounds[0], bounds[1], cap))
+
+    def cap_for(c: int) -> Decimal:
+        for lo, hi, cap in caps:
+            if lo <= c < hi or (hi == 100 and c == 100):
+                return cap
+        return Decimal(CEILING_NO_DATA)  # a bucket nobody has ever scored
+
+    best = 0
+    for c in range(100, -1, -1):
+        if Decimal(c) <= cap_for(c):
+            best = c
+            break
+    if gap is not None and gap < 0:
+        penalty = int((-gap * 100).to_integral_value(rounding=ROUND_HALF_UP))
+        best = max(0, best - penalty)
+    return best

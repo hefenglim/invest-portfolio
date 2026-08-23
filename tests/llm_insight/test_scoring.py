@@ -304,3 +304,63 @@ def test_trust_tier_no_success_evidence_at_all_is_early() -> None:
         n=8, quant_n=0, quant_hit_rate=None, narrative_success_rate=None,
         calib_error_pp=Decimal("5"),
     ) == "早期"
+
+
+# --- confidence_ceiling (W7.1) -------------------------------------------------------
+# The anchoring law's arithmetic moved into code after the first live run had 0 of 13 cards
+# obey it; the RULE is unchanged and still lives in the prompt (AI-D33: no code-side clamp).
+
+
+def _bin(bucket: str, n: int, actual: str) -> dict[str, object]:
+    return {"bucket": bucket, "n": n, "actual_pct": actual}
+
+
+_LIVE_BINS = [_bin("40-60", 35, "17.14"), _bin("60-80", 10, "0.00")]
+
+
+def test_confidence_ceiling_is_the_largest_self_consistent_value() -> None:
+    """The law is circular — a value's cap depends on its own bucket — so 39 is the answer
+    for the demo's real bins: every value in 40-60 exceeds 17.14+5, every value in 60-80
+    exceeds 0+5, and 20-40 has never been scored so it caps at 70."""
+    assert scoring.confidence_ceiling(_LIVE_BINS, gap=None) == 39
+
+
+def test_confidence_ceiling_subtracts_a_negative_gap_in_points() -> None:
+    """The prompt's own worked example: gap −0.050 → −5."""
+    assert scoring.confidence_ceiling(_LIVE_BINS, gap=Decimal("-0.05")) == 34
+
+
+def test_confidence_ceiling_floors_at_zero_and_does_not_invent_one() -> None:
+    """DISPROOF of a hidden floor: the demo's −0.466 gap drives the ceiling to exactly 0.
+
+    A floor here would be this layer quietly overruling the owner's law; 0 is the honest
+    reading ("your record supports asserting nothing") and the prompt says so in words.
+    """
+    assert scoring.confidence_ceiling(_LIVE_BINS, gap=Decimal("-0.466")) == 0
+
+
+def test_confidence_ceiling_ignores_a_positive_gap() -> None:
+    assert scoring.confidence_ceiling(_LIVE_BINS, gap=Decimal("0.30")) == 39
+
+
+def test_confidence_ceiling_with_no_history_is_the_no_data_cap() -> None:
+    assert scoring.confidence_ceiling([], gap=None) == scoring.CEILING_NO_DATA
+
+
+def test_confidence_ceiling_below_the_sample_gate_does_not_anchor() -> None:
+    """A bucket with n<8 caps at 70 even when its measured hit rate is 0 — the same honesty
+    gate as the event study: a handful of rows is not evidence."""
+    assert scoring.confidence_ceiling([_bin("60-80", 3, "0.00")], gap=None) == 70
+
+
+def test_confidence_ceiling_rewards_a_well_calibrated_record() -> None:
+    """72% actual in the 60-80 bucket admits 77 (= 72+5); 78/79 would exceed their own cap
+    and 80+ falls into an unscored bucket capped at 70."""
+    assert scoring.confidence_ceiling([_bin("60-80", 40, "72.00")], gap=None) == 77
+
+
+def test_confidence_ceiling_tolerates_a_malformed_bucket_label() -> None:
+    """A bin is data, not a contract — an unparseable label is skipped, never raised on."""
+    assert scoring.confidence_ceiling(
+        [{"bucket": "n/a", "n": 99, "actual_pct": "5.00"}], gap=None
+    ) == scoring.CEILING_NO_DATA

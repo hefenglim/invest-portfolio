@@ -23,7 +23,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v15 (2026-08-21)"  # W7 (AI-D33/34): 建議 v3 引用回測＋信心錨定
+LIBRARY_VERSION = "official-v16 (2026-08-23)"  # W7.1: 單位/不得代用基線/上限改由後端算
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -352,7 +352,9 @@ _WEEKLY_BODY = """讀者是長期投資人，每週檢視一次組合。請以�
 
 六、AI 自身戰績與校準 — backtest_json 是本系統全部已評分預測的信心分桶命中率
 （claimed_pct＝我當時聲稱的信心均值，actual_pct＝該桶實際命中率），calibration_gap_json
-是最近 20 筆已評分預測的帶號校準缺口（actual−claimed，正值＝我最近低估自己）。
+是最近 20 筆已評分預測的帶號校準缺口。**方向一律照抄 calibration_gap_json.reading**
+（例：「最近 20 筆平均高估自己 46.6 個百分點」）——不要自己從 gap 的正負號推論方向，
+那個號一旦讀反，就會把「我最近太自信」講成「我太保守」。
 用一句話向讀者誠實報告「我的預測最近準不準、有沒有系統性偏自信或偏保守」；數字逐字
 照抄，缺口帶正負號引用；任一為 unavailable（評分樣本不足）時直說，不得虛構。
 {{backtest_json}}
@@ -388,8 +390,11 @@ _CHECKUP_BODY = (
 「法則訊號資料不足」，不得自行計算 TechScore 或杜撰任何法則狀態；
 5) 訊號回測：signal_backtest_json 是這些法則訊號在本標的自身的歷史驗證（法則轉換與
    TechScore 進出 65/35 狀態帶後 +20/+60/+120 交易日的前向報酬，與同標的基線並陳）——
-   引用時逐字照抄，凡引用必帶樣本數 n 與同窗基線；標記 insufficient 的格子只說
-   「樣本不足」、不引用任何數字；整體 unavailable 時直說「尚無回測歷史」，不得虛構。
+   mean／median／pct_positive 與 baseline 都是**分數不是百分比**（units 欄已註明：
+   0.1336 = +13.36%），寫成 % 要先乘 100；凡引用必帶樣本數 n 與同窗基線；標記
+   insufficient 的格子只說「樣本不足」、不引用任何數字，**也不得改用 baseline 的數字
+   充當該格子的事件報酬**（baseline 是全部交易日的無條件平均，不是這個訊號的表現）；
+   輸入裡沒有的數字一律不得出現；整體 unavailable 時直說「尚無回測歷史」，不得虛構。
 本標的若未持倉（held=false 或 symbol_detail_json 無部位），本節與第八節一律改以「建倉評估」
 視角敘述（此刻是否為進場／觀望時機），而非加碼／減碼。
 {{rule_signals_json}}
@@ -541,25 +546,32 @@ beta、roe_pct＝股東權益報酬率%、revenue_growth_yoy_pct＝營收年增�
 身上」的事件研究：四法則方向轉換與 TechScore 進出 65/35 狀態帶後 +20/+60/+120 交易日的
 前向報酬分布，與同標的的無條件基線並陳。用它回答「這個訊號在這檔股票上過去靈不靈」，
 作為第五節情境的佐證或反證。引用紀律：
-1) 數字逐字照抄（mean／median／pct_positive 與 baseline），不得自行換算、不得年化；
-2) 凡引用必帶樣本數 n 與同窗基線（例：「12-1 動能轉正後 +60 日均值 +4.2%（n=9，
-   基線 +1.8%）」）；n_overlapping>0 或 n_censored>0 時如實說明；
-3) 標記 insufficient 的格子只准說「樣本不足」，不得引用任何數字；
+1) **單位**：mean／median／pct_positive 與 baseline 全部是**分數，不是百分比**
+   （units 欄已註明：0.1336 表示 +13.36%）。寫成 % 必須先乘 100；把 0.1336 寫成
+   「0.1336%」是把真值縮小 100 倍，寫成「0.0640 USD」是把報酬率當成金額。不得年化。
+2) 凡引用必帶樣本數 n 與同窗基線（例：「12-1 動能轉正後 +60 日均值 +38.5%（n=12，
+   基線 +18.4%）」）；n_overlapping>0 或 n_censored>0 時如實說明重疊／右刪失的筆數，
+   並照 events 欄說出事件次數（n 不是「1 次事件」）。
+3) 標記 insufficient 的格子只准說「樣本不足」，**不得引用任何數字**——尤其不得改用同窗
+   baseline 的數字充當該格子的事件報酬：baseline 是這檔股票「全部交易日」的無條件平均，
+   不是這個訊號的表現，兩者混淆會把一個普通的大盤漲幅說成訊號的功勞。
 4) 整體 unavailable 時直說「尚無回測歷史」，不得虛構。
+5) **輸入裡沒有的數字一律不得出現。** 某格沒有 mean 就是沒有 mean — 不得估計、不得由
+   鄰窗或基線推導、不得四捨五入出一個新數字。
 {{signal_backtest_json}}
 
 七、方向判讀與預測 — 綜合給出偏多／偏空／觀望之一。**prediction 由你決定是否給**：
 資料不足或訊號矛盾時可留空（並在內文說明為何不給）；若給，metric 一律 price_change，
 direction 用 up/down/flat，target_pct 僅在有明確依據時提供，且**必須附 confidence**
 （0-100，此預測命中的真實機率估計，寧可保守）。
-⚠ 信心錨定法（硬性上限，依據你自己過去的戰績——backtest_json 是你全體已評分預測的
-信心分桶命中率，calibration_gap_json 是你最近 20 筆的帶號校準缺口）：
-1) 在 {{backtest_json}} 的 bins 找到你打算給的信心值所屬區間（0-20／20-40／40-60／
-   60-80／80-100）：confidence 不得超過該區間 actual_pct＋5；該區間 n<8 時 confidence
-   上限 70；
-2) {{calibration_gap_json}} 的 gap 為負（actual−claimed<0，你最近高估自己）時，再依其
-   幅度下修信心（例：gap −0.050 → 再降 5）；為正或 unavailable 時不調整；
-3) backtest_json 整體 unavailable（尚無評分歷史）時不套用上限，沿用「寧可保守」。
+⚠ 信心錨定法（硬性上限，依據你自己過去的戰績）：{{backtest_json}} 的
+**confidence_ceiling** 就是本系統依你的分桶命中率算好的上限整數——「所屬區間實際命中率
+＋5、無樣本區間上限 70」與滾動缺口下修都已經替你算完，bins 與 {{calibration_gap_json}}
+（reading 是同一份戰績的白話版）留著讓你在內文說明理由，**不必再自己推算上限**。
+1) confidence 不得超過 confidence_ceiling；照抄它或給更低的值。
+2) confidence_ceiling 為 0 時，代表你的戰績目前不支持任何方向性信心宣稱：confidence 填 0，
+   並在內文明說「依過往戰績暫不表態，本卡僅列情境與觸發條件」。
+3) backtest_json 整體 unavailable（尚無評分歷史）時沒有上限，沿用「寧可保守」。
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
 標記新鮮度，缺價或過期的資料點名排除於結論之外；愈近期的資料權重愈高。
@@ -600,13 +612,15 @@ ma_cross 還是 20/60 的 ma_cross_short，不得混用），給出 ≤3 個交�
 # Strategy templates: (name, version, scope hint, body). ``scope`` is advisory — the
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
-    {"name": "持倉週報策略", "version": "v2.2", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.6", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "持倉週報策略", "version": "v2.3", "scope": "portfolio", "body": _WEEKLY_BODY},
+    {"name": "個股健檢策略", "version": "v2.7", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
     # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
-    # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
     # v2 (W3, AI-D14/15): +基本面 section — one block per source, never averaged.
-    {"name": "持倉建議與提點策略", "version": "v3", "scope": "per_symbol", "body": _ADVICE_BODY},
+    # v3.1 (W7.1, 2026-08-23): the first live run's output defects — the return unit, the
+    # baseline worn as an event return, and a 3-step ceiling nobody executed — are answered
+    # by stating the unit, forbidding the substitution, and handing over ONE precomputed cap.
+    {"name": "持倉建議與提點策略", "version": "v3.1", "scope": "per_symbol", "body": _ADVICE_BODY},
     # The 提點 card (AI-D5/AI-D11): alert-triggered, ≤3 trading-day window via ON_ALERT_NOTE.
     {"name": "持倉提點策略", "version": "v1", "scope": "on_alert", "body": _ON_ALERT_ADVICE_BODY},
 ]
@@ -690,7 +704,7 @@ TASK_PRESETS: list[TaskPreset] = [
     {
         "preset_key": "advice",
         "name": "持倉建議與提點",
-        "version": "v3",
+        "version": "v3.1",
         "scope": "per_symbol",
         "strategy": "持倉建議與提點策略",
         "use_system_prompt": True,

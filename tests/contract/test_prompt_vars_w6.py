@@ -92,7 +92,11 @@ def test_calibration_gap_var_negative_sign_hand_checked(
     # 8 rows @ confidence 80, 6 hits → claimed 0.80, actual 0.75 → gap −0.05.
     for i in range(8):
         _score(golden_db, i, 80, i >= 6)
-    assert _calibration_gap_var(golden_db) == {"gap": "-0.050", "window_n": 8}
+    assert _calibration_gap_var(golden_db) == {
+        "gap": "-0.050", "window_n": 8,
+        # W7.1 — the direction ships as copyable text, not as a sign the model must read.
+        "reading": "最近 8 筆平均高估自己 5.000 個百分點",
+    }
 
 
 def test_calibration_gap_var_positive_sign_and_the_rolling_window(
@@ -105,7 +109,10 @@ def test_calibration_gap_var_positive_sign_and_the_rolling_window(
     for i in range(5, 25):
         _score(golden_db, i, 50, i >= 20)
     # Window = the 20 newest: claimed 0.50, actual 15/20 = 0.75 → +0.25.
-    assert _calibration_gap_var(golden_db) == {"gap": "+0.250", "window_n": 20}
+    assert _calibration_gap_var(golden_db) == {
+        "gap": "+0.250", "window_n": 20,
+        "reading": "最近 20 筆平均低估自己 25.000 個百分點",
+    }
 
 
 # --- signal_backtest_json (the per-symbol event study) ---------------------------
@@ -189,7 +196,10 @@ def test_ai_self_vars_render_through_preview(
         json={"body": "{{calibration_gap_json}}", "scope": "portfolio"},
     )
     assert r.status_code == 200
-    assert json.loads(r.json()["rendered"]) == {"gap": "-0.050", "window_n": 8}
+    assert json.loads(r.json()["rendered"]) == {
+        "gap": "-0.050", "window_n": 8,
+        "reading": "最近 8 筆平均高估自己 5.000 個百分點",
+    }
 
 
 def test_per_symbol_preview_builds_the_action_index_once(
@@ -232,3 +242,85 @@ def test_per_symbol_preview_builds_the_action_index_once(
     )
     assert r.status_code == 200
     assert calls == 0  # portfolio scope deliberately pays zero ledger reads
+
+
+# --- W7.1: the three fixes for the first live run's output defects ------------------
+# Demo, 2026-08-23: 0 of 13 advice cards obeyed the anchoring law; two printed a sub-gate
+# cell's same-window BASELINE as its event return; one fabricated a mean outright; and the
+# return unit was rendered four different ways in one batch. The producers were correct in
+# every case — so the fixes put the SEMANTICS next to the numbers.
+
+
+def test_backtest_var_carries_a_precomputed_confidence_ceiling(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """The law's arithmetic ships as ONE integer (AI-D33's rule is unchanged — the prompt
+    still states it and nothing clamps the model's answer).
+
+    Hand-check: 8 rows @70 with 6 hits → the 60-80 bucket is n=8 (at the gate),
+    actual 75.00 → cap 80.00. Scanning down from 100: 80-100 has never been scored → cap 70,
+    so 100..80 are all out; 79 falls in 60-80 and 79 <= 80 → ceiling 79. The rolling gap here
+    is POSITIVE (+0.050: claimed 0.70, actual 0.75 — the model under-sold itself), and a
+    positive gap adjusts nothing, so 79 stands.
+    """
+    for i in range(8):
+        _score(golden_db, i, 70, i >= 6)
+    out = _backtest_var(golden_db)
+    assert out["confidence_ceiling"] == 79
+    assert "上限" in out["confidence_ceiling_note"]
+
+
+def test_backtest_var_ceiling_pays_the_penalty_when_over_confident(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """The mirror of the case above — same bucket, the confidence claim inverted.
+
+    8 rows @80 with 6 hits: the 60-80 bucket takes confidence 80? No — bucket bounds are
+    [lo, hi), so 80 lands in 80-100 with actual 75.00 → cap 80.00, and 80 <= 80 → ceiling 80.
+    The rolling gap is −0.050 (claimed 0.80 vs actual 0.75), so 80 − 5 = 75.
+    """
+    for i in range(8):
+        _score(golden_db, i, 80, i >= 6)
+    assert _backtest_var(golden_db)["confidence_ceiling"] == 75
+
+
+def test_backtest_var_ceiling_is_zero_on_a_badly_calibrated_record(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """DISPROOF of a hidden floor: 8 rows @90 that all missed leave no admissible value.
+
+    The 80-100 bucket is at the gate with actual 0.00 → cap 5.00, every lower bucket is
+    unscored → cap 70, so the largest self-consistent value is 70; the −0.900 gap then
+    subtracts 90. The honest answer is 0, and the prompt says so in words rather than
+    letting this layer invent a floor the owner never ruled.
+    """
+    for i in range(8):
+        _score(golden_db, i, 90, True)
+    assert _backtest_var(golden_db)["confidence_ceiling"] == 0
+
+
+def test_calibration_gap_reading_names_the_direction_in_words(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """The live weekly card read gap −0.466 as 「低估自身表現」 — the exact opposite — with the
+    convention stated in the same prompt section. A signed fraction is one negation away
+    from asserting the reverse of the truth, so the direction is now copyable text."""
+    for i in range(8):
+        _score(golden_db, i, 80, i >= 6)  # claimed 0.80, actual 0.75 → gap −0.05
+    out = _calibration_gap_var(golden_db)
+    assert out["gap"].startswith("-")
+    assert "高估自己" in out["reading"] and "低估" not in out["reading"]
+
+
+def test_signal_backtest_var_declares_its_unit_next_to_the_numbers(
+    golden_db: sqlite3.Connection,
+) -> None:
+    """The unit lived only in the variable registry's `desc` — UI documentation the model
+    never sees — so 0.1336 was printed as 「+0.1336%」, the true value 100× smaller."""
+    _register_with_history(golden_db, "UNITS")
+    out = _signal_backtest_var(
+        golden_db, "UNITS", actions=load_action_index(golden_db), now=GOLDEN_NOW
+    )
+    assert out["units"]["mean"].startswith("fraction")
+    assert "13.36%" in out["units"]["mean"]  # the worked example travels with the payload
+    assert set(out["units"]) == {"mean", "median", "pct_positive"}

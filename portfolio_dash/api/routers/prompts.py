@@ -38,6 +38,7 @@ from portfolio_dash.llm_insight.evaluations_store import (
     rolling_calibration_gap,
     scored_confidence_hits,
 )
+from portfolio_dash.llm_insight.scoring import confidence_ceiling
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
 from portfolio_dash.news import organizer_prompt as news_organizer_prompt
 from portfolio_dash.news import store as news_store
@@ -514,9 +515,20 @@ def _backtest_var(conn: sqlite3.Connection) -> dict[str, Any]:
     if not pairs:
         return {"unavailable": True, "last_as_of": None}
     hits = sum(1 for _, hit in pairs if hit)
+    bins = calibration_bins(conn)  # already the wire shape (Decimal strings)
+    # W7.1 — the anchoring law's ARITHMETIC, done here. The first live run had 0 of 13 cards
+    # obey a rule that asked the model to walk a bins table mid-generation; the rule is
+    # unchanged and still lives in the prompt, the model is just handed one integer now.
+    # Nothing clamps the model's answer afterwards (AI-D33 stands).
+    gap = rolling_calibration_gap(conn).gap
     return {
-        "bins": calibration_bins(conn),  # already the wire shape (Decimal strings)
+        "bins": bins,
         "overall_hit_rate": _ratio(Decimal(hits) / len(pairs), _Q3),
+        "confidence_ceiling": confidence_ceiling(bins, gap=gap),
+        "confidence_ceiling_note": (
+            "本系統依你的戰績算好的信心上限（0-100 整數）：已套用「所屬區間實際命中率＋5、"
+            "無樣本區間上限 70」與滾動缺口下修。0 代表戰績不支持任何方向性信心宣稱。"
+        ),
     }
 
 
@@ -529,7 +541,20 @@ def _calibration_gap_var(conn: sqlite3.Connection) -> dict[str, Any]:
     result = rolling_calibration_gap(conn)
     if result.gap is None:
         return {"unavailable": True, "last_as_of": None}
-    return {"gap": gap_wire(result.gap), "window_n": result.window_n}
+    # W7.1 — a PRE-WORDED reading rides with the number. The weekly card of 2026-08-23 read
+    # gap −0.466 as 「低估自身表現」 (the opposite) even though the template states the sign
+    # convention in the same section: a signed fraction is one negation away from asserting
+    # the reverse of the truth, so the direction ships as text the model can copy.
+    pp = _ratio(abs(result.gap) * 100, _Q3)
+    return {
+        "gap": gap_wire(result.gap),
+        "window_n": result.window_n,
+        "reading": (
+            f"最近 {result.window_n} 筆平均高估自己 {pp} 個百分點"
+            if result.gap < 0
+            else f"最近 {result.window_n} 筆平均低估自己 {pp} 個百分點"
+        ),
+    }
 
 
 def _window_stats_wire(stats: WindowStats) -> dict[str, Any]:
@@ -571,6 +596,16 @@ def _signal_backtest_wire(
     }
     return {
         "symbol": symbol,
+        # W7.1 — the unit rides WITH the numbers. Every mean/median/pct_positive is a
+        # FRACTION, and that fact previously existed only in the variable registry's `desc`
+        # (UI documentation the model never sees): the first live run printed 0.1336 as
+        # 「+0.1336%」 — the true value 100× smaller — alongside a bare fraction and a USD
+        # amount, three renderings of one quantity in one batch of cards.
+        "units": {
+            "mean": "fraction — 0.1336 means +13.36%",
+            "median": "fraction — same scale as mean",
+            "pct_positive": "fraction — 0.8182 means 81.82% of events",
+        },
         "history": {
             "first": rows[0].as_of.isoformat(),
             "last": rows[-1].as_of.isoformat(),

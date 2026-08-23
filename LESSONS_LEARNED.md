@@ -1104,3 +1104,54 @@ prevents recurrence.
   relaunch on the final tree. (Also: the kill/restart one-liner failed with a bare exit 255 and
   no output — compose destructive-and-restart steps separately, and verify "nothing is running"
   before relaunching.)
+
+## A unit that lives in the documentation is not a unit (2026-08-23, W7.1)
+
+`signal_backtest_json` emitted returns as fraction strings and said so — in the variable
+registry's `desc`, which is rendered in the settings UI for the human and **never reaches the
+model**. The first live batch of cards printed `0.1336` as 「+0.1336%」 (the true value 100×
+smaller), as `+0.0640 USD`, and as a bare `0.1053`, all in one run.
+
+**The lesson is about WHERE meaning lives, not about the model.** A JSON payload handed to an
+LLM is a self-contained document: anything the reader must know to interpret a number has to
+travel *inside* it. Docstrings, registry descriptions, and the prompt author's memory are all
+out of band. The same failure appeared twice more the same day, in two directions:
+
+- **A sign is meaning too.** `calibration_gap_json` shipped `{"gap": "-0.466"}` with the
+  convention 「正值＝我最近低估自己」 stated in the template's own section, one line above the
+  variable — and the card still read it as 「低估自身表現」, the exact opposite. A signed number
+  is one negation away from asserting the reverse of the truth, so the direction now ships as
+  a pre-worded `reading` the model copies instead of interprets.
+- **A withheld number is an invitation.** A sub-gate cell honestly emits `insufficient: true`
+  with no mean — but the same payload carries a `baseline` block full of numbers, and two cards
+  simply used those instead, presenting an unconditional average as the signal's conditional
+  performance. One card went further and invented a value present nowhere in the input.
+  "Absent" is not self-explaining either: the rule against substitution has to be written down.
+
+Corollary for any future variable: put the unit, the sign convention, and the "what you may NOT
+do with this" **in the payload**, next to the value. The registry `desc` is for the human.
+
+## A law the model must execute is not a law (2026-08-23, W7.1)
+
+AI-D33 put the confidence-anchoring rule in the prompt and deliberately refused a code-side
+clamp — a validator silently rewriting the model's own stated confidence is the same defect
+class as averaging two providers' fundamentals. That reasoning still holds. What did not hold
+was the *form* of the rule: it asked the model to find its intended confidence's bucket in a
+bins table, read that bucket's actual hit rate, add 5, check a sample gate, then subtract a
+rolling gap — mid-generation, while also writing the card. **0 of 13 cards complied**, and the
+one card that restated the law correctly violated it in the same sentence.
+
+The fix keeps the doctrine and changes the shape: the backend computes the largest
+self-consistent ceiling once and the prompt says 「不得超過 confidence_ceiling」. Nothing clamps
+anything; the model is handed one integer instead of a procedure.
+
+**Generalise:** an instruction that requires multi-step arithmetic over a table is a
+*computation*, and computations belong on the deterministic side of the seam. Keep the
+*judgement* in the prompt; move the *arithmetic* to code. That line is not the same as the line
+AI-D33 drew, and confusing the two costs you either a silent override or an ignored rule.
+
+⚠ And measure the law's behaviour at its extremes on real data before trusting it: with the
+demo's record the ceiling computes to **0**, i.e. "your track record supports asserting
+nothing". That is an honest reading of a degenerate input, but a rule that outputs 0 for every
+card is a product decision, not just a calculation — surface it, do not paper over it with an
+invented floor.

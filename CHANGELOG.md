@@ -111,6 +111,27 @@ gains an explicit replace mode — same route, no new endpoint — and the setti
 per-strategy 同步官方 button when the name matches an official template and the body differs;
 tasks bind strategies by id, so the overwrite upgrades every bound task in place; a renamed or
 archived strategy answers 409, so a replayed request cannot overwrite a row the user moved).
+**W7.1 ruling (2026-08-23), after the first live run on the demo:** **AI-D38** — the machinery
+was right and the OUTPUT was not, so the fix goes on both sides. Measured over 13 advice cards
+and 13 checkup cards: **0 of 13 obeyed the confidence-anchoring law** (40–70 against a 22.14 /
+5.00 cap); two printed a sub-gate cell's same-window BASELINE as if it were that signal's event
+return; one fabricated an event mean outright for an `insufficient` cell; and one batch rendered
+the same fraction four ways (`0.1336%`, `0.0640 USD`, a bare `0.1053`, and a correct `+9.61%`).
+Every producer was correct in every case — the sub-gate cells emitted no numbers, the baseline
+arithmetic matched an independent oracle 12/12, and the law reached the model with its real bins
+interpolated — so what moves is where the SEMANTICS live: `signal_backtest_json` now carries a
+`units` block (the unit previously existed only in the variable registry's `desc`, which the
+model never sees), the citation law states the unit, forbids substituting the baseline for a
+missing event mean, and forbids any number absent from the input, and the anchoring law hands
+over ONE precomputed integer (`backtest_json.confidence_ceiling`) instead of a three-step walk
+over a bins table. **AI-D33's red line is unchanged** — nothing clamps the model's stated
+confidence; it is simply no longer asked to derive the cap mid-generation. `calibration_gap_json`
+also gains a plain-language `reading` (an extension beyond the ruling's letter, reported as
+such): the first v2.2 weekly card read gap −0.466 as 「低估自身表現」 — the exact opposite — with
+the convention stated in the same prompt section, and a signed fraction is one negation away
+from asserting the reverse of the truth. The ceiling has **no floor by design**: on the demo's
+record it computes to 0 ("your track record supports asserting nothing"), which the prompt
+states in words rather than having this layer invent a floor the owner never ruled.
 
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
@@ -475,6 +496,25 @@ archived strategy answers 409, so a replayed request cannot overwrite a row the 
   nobody should press. Visible for ordinary CSV imports too.
 
 ### Fixed
+- **The assistant cited its own record — in the wrong unit, from the wrong cell, at the wrong
+  confidence (W7.1, AI-D38).** The first live run of the v3 advice cards on the demo produced
+  three output defects with correct producers behind all of them, so all three fixes put the
+  semantics next to the numbers rather than adding a validator. **(1) Unit.** Every
+  `mean`/`median`/`pct_positive` in the event study is a FRACTION, a fact that lived only in
+  the variable registry's `desc` — UI documentation the model never sees. One batch of cards
+  rendered `0.1336` as 「+0.1336%」 (the true value 100× smaller), as `+0.0640 USD`, as a bare
+  `0.1053`, and correctly as `+9.61%`. `signal_backtest_json` now carries a `units` block with
+  a worked example, and both citing templates state it. **(2) Substitution and fabrication.**
+  A cell below the sample gate emits no mean at all; two cards printed the same-window
+  BASELINE (the unconditional average over every trading day) as that signal's event return,
+  and one invented a number present nowhere in the payload. The citation law now forbids both
+  by name. **(3) The ceiling.** Asking the model to walk a bins table and apply a three-step
+  conditional mid-generation produced 0 of 13 compliant cards; `scoring.confidence_ceiling`
+  computes the largest self-consistent value once and ships it as
+  `backtest_json.confidence_ceiling`. **AI-D33 stands** — nothing clamps what the model
+  writes. Also: `calibration_gap_json` gains a plain-language `reading`, because the weekly
+  card read a −0.466 gap as 「低估自身表現」 (the opposite) with the sign convention stated in
+  the same section.
 - **W6 post-ship review (three LOW findings, no HIGH/MEDIUM across three lenses).** The
   `signal_backtest_json` producer rebuilt the corporate-action index per symbol per run —
   `_per_symbol_ctx` already threads a caller-built `actions` (trap #21) but never passed it
