@@ -21,6 +21,18 @@ the structures below are the schema; exact rates are filled/verified at setup.
   500–1000 → 1 · ≥1000 → 5.
 - **Securities transaction tax (sell side):** 現股 0.3% · 當沖 0.15% · ETF 0.1%.
   Buy side: none.
+  ⚠ **The ETF flag is REGISTRY-AUTHORITATIVE and now THREE-STATE — never guessed** (AI-D40,
+  owner ruling 2026-08-24). The stress-audit fix of 2026-07-15 made a registered instrument's
+  `is_etf` win over the input flag at both fee seams (`manual.py`, `csv_import.py`), but left
+  the thing that **seeds** the registry defaulting to `False`: `quick_register`'s auto-register
+  path (`api/routers/input_center.py`) never passed the flag at all, so a TW ETF entered on its
+  first manual trade was taxed at 現股 **0.3%** instead of **0.1%** — 3× — and `tax_rate: 0.003`
+  was written into `fee_rule_snapshot` as the authority. `is_etf` is therefore `True` / `False` /
+  **`None`**; auto-registration writes `None`, and the fee engine meeting `None` **on a TW SELL**
+  computes with `False` but raises a soft issue `etf_flag_unknown`「無法判定是否為 ETF，賣出稅率
+  待確認」. A BUY carries no TW tax, so it stays silent. This is the same red line as "a stale
+  price is labelled, never guessed": **an unknown rate is disclosed, never defaulted in silence.**
+  Existing `0`/`1` rows are never rewritten — only future auto-registrations land `NULL`.
 - **Brokerage fee:** 0.1425% (configurable) + discount rate + **min NT$20**. Fee and
   tax are collected to integer NT$ by **無條件捨去 (unconditional floor, ROUND_DOWN)** —
   財政部 rule 角以下免收 (**owner sign-off 2026-07-15, FE-D3**; supersedes the earlier

@@ -112,6 +112,39 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
   **attribution breakdown** of that figure, **not** an extra gain added on top.
   Present it as decomposition (asset P&L vs. FX P&L), never additively.
 
+### Which figure actually embeds FX — A · B · B−A (AI-D41, owner ruling 2026-08-24)
+
+The bullet above is true of **XIRR**. It is **NOT** true of `total_return`, and the manual's
+invariant **I5 is corrected accordingly**: `portfolio/returns.py` computes
+`Σ_ccy (realized + unrealized)_native × spot_today` — the rate is applied to the **gain**, never
+to the **principal**. Meanwhile `portfolio/timeseries.py` builds `total_value − net_invested`
+with every flow converted at **its own trade-date** rate; that IS the FX-complete lifetime
+result, and it was labelled 「浮動損益」. Three figures, one decomposition:
+
+| | figure | what it is |
+| --- | --- | --- |
+| **A** | `total_return` — 資產損益（不含本金匯率） | each currency's native P&L at today's spot |
+| **B** | 含匯兌總損益 = `total_value − net_invested` | flows at trade-date FX, value at spot → FX-complete |
+| **B − A** | 本金匯率效果 | `cost × (spot_now − acq_rate)` — the 換匯損益 card's content |
+
+⚠ **Adding the 換匯損益 card to A double-counts the cross term** `(MV − C)(spot − acq)`. A, B and
+B−A are presented **side by side as a decomposition, never summed** — the same red line as the
+bullet above, applied to the figure the bullet does not cover. `total_return`'s definition is
+**unchanged**; only its label and the presence of B alongside it are new.
+
+### Which cash movements are return, and which are capital (AI-D42, 2026-08-24)
+
+`shared/cash_kinds.py` already draws this line — reuse its table, never re-derive the predicate:
+
+- **Pool income / cost → they ARE return.** `REBATE` · `INTEREST` (+) · `INTEREST_EXPENSE` ·
+  `BROKER_FEE` (−). These are P&L with no offsetting security flow, so `xirr_reporting` takes
+  them as flows (sign from `CASH_KIND_TABLE.credit`, each converted at its own date's FX).
+  FE-D1's 77% rebate is one of them, and it is **0.229% of capital per round trip** — the 群益
+  charge-first model is the owner's normal billing, not an edge case.
+- **Capital movements → they are NOT return.** `DEPOSIT` · `WITHDRAW` · `OPENING`. Admitting
+  them would silently redefine XIRR from "the return on money put into securities" to "the
+  return on the account" — a different metric, and not this one.
+
 ## Data integrity (carried over from the human's spec)
 
 - Permanent sources of truth: **opening inventory, transaction ledger, dividend ledger,
@@ -129,6 +162,18 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
   basis and emits no realized row (待釐清). A later buy nets the position positive again but
   does **not** restore the discarded basis, so the flag must not be cleared by one either —
   it is raised on "was ever negative", not on the final sign.
+- **A PREVIEW MUST MIRROR THE REPLAY'S BRANCHES, LITERALLY** (audit 2026-08-24, review §1.3).
+  Every "what would this trade do" surface — the manual sell preview
+  (`api/routers/input_center.py`), the drawer 試算 (`strategy/whatif.py`) — reproduces
+  `portfolio/cost_basis.py`'s **branch structure**, not just its happy-path formula. The three
+  sell branches are **declared short** (realized on `min(qty, max(shares,0))` only; the
+  remainder opens/extends a short and emits **no** realized row), **undeclared oversell**
+  (basis discarded → **no** realized row, 待釐清), and **ordinary**. Applying the ordinary
+  formula to all three fabricated a `+500` realized on a short extension the ledger books
+  nothing for — while the holdings column two rows above honestly printed 「—」, and the drawer
+  gave a third answer for the same trade. **One app must not show three answers**, and a
+  preview that disagrees with what will be written is worse than no preview. Pin it with a
+  contract test asserting `preview.realized ≡ the booked realized row` for all three shapes.
 
 ### Declared short sale (owner ruling 2026-07-31, spec option C)
 

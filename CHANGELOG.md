@@ -133,6 +133,21 @@ from asserting the reverse of the truth. The ceiling has **no floor by design**:
 record it computes to 0 ("your track record supports asserting nothing"), which the prompt
 states in words rather than having this layer invent a floor the owner never ruled.
 
+**Investment-logic review → the repair programme (2026-08-24).** A four-lens review of the whole
+branch (cost/return correctness · tax filing · multi-currency · decision layer) returned 14
+findings, 13 of which I re-verified against the code line by line, correcting two of the review's
+own characterisations. **The verdict: single-currency accounting is solid, the multi-currency layer
+is not — and almost nothing is a broken formula. Nearly every finding is a correct number
+answering a different question than its label claims.** Only ONE finding is a regression this
+branch introduced (`confidence_ceiling`, W7.1); the other thirteen predate W1. Owner rulings
+**AI-D39** (the ceiling double-counts one error — delete the gap subtraction, replace the
+absent-bucket 70 with `overall_hit_rate + 5`, and record violation rates instead of clamping),
+**AI-D40** (`is_etf` becomes three-state: never guess, mark unknown, ask), **AI-D41** (total
+return is presented as A · B · B−A — asset P&L, FX-complete P&L, and the principal-FX effect
+between them — never summed), **AI-D42** (four cash-movement kinds enter XIRR; capital movements
+do not), **AI-D43** (`convert_closes` IS permitted for the benchmark counterfactual — AI-D23
+parked it for the scoring legs, where both sides are same-currency; here FX is the substance).
+The programme stays on `feat/corporate-actions` — not merged, not tagged, `__version__` 0.1.28.
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
   that synthesize the owner's holding × technicals × the rule-signal engine × news × analyst

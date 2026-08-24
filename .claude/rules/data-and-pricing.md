@@ -99,6 +99,17 @@ Canonical tables (names indicative; finalize in the spec phase):
   tax, trade date. **Append-only in spirit**; corrections are new rows or explicit
   edits, never silent mutation. Store a fee/tax/FX-rate **snapshot** per row so 重算
   reproduces history even after rules change.
+  ⚠ **`fee_rule_snapshot` is PROVENANCE, not the replay's input** (recorded 2026-08-24, after a
+  review claimed 重算 depends on it — it does not: `portfolio/cost_basis.py` reads `ev.fees` /
+  `ev.tax` off the row). What it records is *which regime produced those two numbers*. It was
+  therefore **empty on every broker-imported row**: `csv_import.py` only computes (and snapshots)
+  a fee or tax it was **not** given, and a broker statement supplies both — the fee verbatim and
+  a literal `"0"` tax. That silence is indistinguishable from "no rule applied". A supplied
+  fee/tax now records `{"source": "supplied", …}` instead of `{}`, so a row's numbers are always
+  attributable to either the engine or the statement. `data_ingestion/broker/convert.py`'s
+  refusal to recompute is **deliberate and unchanged** — recomputing would yield a defensible
+  number that does not match the money that actually left the account, which is the wrong kind
+  of correct.
 - `dividends` — account, instrument, date, type (cash / stock / DRIP), gross,
   withholding, net, reinvest shares + price (see dividend models in `domain-ledger.md`).
 - `fx_conversions` — account, date, from_ccy, from_amount, to_ccy, to_amount (Q12).
