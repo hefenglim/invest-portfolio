@@ -14,7 +14,7 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 
 def test_library_version_is_official_v15() -> None:
-    assert ot.LIBRARY_VERSION == "official-v16 (2026-08-23)"
+    assert ot.LIBRARY_VERSION == "official-v17 (2026-08-25)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -152,7 +152,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v16 (2026-08-23)"
+    assert wire["library_version"] == "official-v17 (2026-08-25)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")
@@ -207,7 +207,14 @@ def test_advice_template_v3_cites_the_backtest_and_anchors_confidence() -> None:
     # the bins table is gone: the first live run had 0 of 13 cards execute it.
     assert "confidence_ceiling" in body
     assert "不得超過 confidence_ceiling" in body
-    assert "為 0 時" in body  # the degenerate case is spelled out, not floored away
+    # AI-D39 (2026-08-25): the old assertion pinned 「為 0 時」. With the rolling-gap step
+    # removed the ceiling can no longer reach 0 (CEILING_HEADROOM puts the minimum at 5),
+    # so that branch became text the model reads and can never act on. The degenerate
+    # case is still spelled out — it now keys on a LOW ceiling, which is reachable.
+    assert "為 0 時" not in body, "an unreachable branch must not stay in a prompt"
+    assert "偏低" in body and "情境與觸發條件" in body
+    # And it still forbids the failure mode that clause exists to prevent.
+    assert "不要為了讓卡片看起來有用" in body
     # The pre-existing red lines survive the rewrite.
     assert "不給部位大小" in body and "prediction 由你決定" in body
 

@@ -147,6 +147,25 @@ def _resolve_universe(
     return held  # default: follow holdings
 
 
+
+def _unavailable_across(var_contexts: dict[Any, Any]) -> list[str]:
+    """Union of the injected variables that came back "no data", over every context in a run.
+
+    R5 is a per-RUN gate while unavailability is per-symbol-per-token, so a union is the only
+    honest reduction: if ANY symbol in the batch was synthesised without its news / consensus /
+    fundamentals, the run was degraded. Intersecting would report a clean run whenever a single
+    symbol happened to have complete data.
+
+    This is the read that was missing (2026-08-25). ``RunInputs.unavailable_vars`` was threaded
+    all the way to the gate and set at NONE of the four construction sites, so R5 had never
+    fired: a run built entirely from absent inputs was recorded as clean.
+    """
+    seen: set[str] = set()
+    for ctx in var_contexts.values():
+        seen.update(V.unavailable_tokens(getattr(ctx, "external_vars", {}) or {}))
+    return sorted(seen)
+
+
 def _per_symbol_ctx(
     conn: sqlite3.Connection,
     data: DashboardData,
@@ -305,6 +324,9 @@ def run_for_id(
         master_configured=master_configured,
         universe_symbols=universe_symbols,
         missing_price_symbols=missing_prices,
+        # R5 (2026-08-25): the field the gate reads, finally populated. See
+        # _unavailable_across for why a union rather than an intersection.
+        unavailable_vars=_unavailable_across(var_contexts),
         is_shadow=is_shadow,
         fired_rule=fired_rule,
         fired_symbol=fired_symbol,

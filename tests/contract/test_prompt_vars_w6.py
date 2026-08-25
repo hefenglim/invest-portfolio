@@ -257,46 +257,55 @@ def test_backtest_var_carries_a_precomputed_confidence_ceiling(
     """The law's arithmetic ships as ONE integer (AI-D33's rule is unchanged — the prompt
     still states it and nothing clamps the model's answer).
 
-    Hand-check: 8 rows @70 with 6 hits → the 60-80 bucket is n=8 (at the gate),
-    actual 75.00 → cap 80.00. Scanning down from 100: 80-100 has never been scored → cap 70,
-    so 100..80 are all out; 79 falls in 60-80 and 79 <= 80 → ceiling 79. The rolling gap here
-    is POSITIVE (+0.050: claimed 0.70, actual 0.75 — the model under-sold itself), and a
-    positive gap adjusts nothing, so 79 stands.
+    Hand-check under AI-D39 (2026-08-25): 8 rows @70 with 6 hits → overall 75%. The 60-80
+    bucket is n=8 (at the gate), actual 75.00 → cap 80.00; every UNSCORED bucket now caps at
+    overall+5 = 80 rather than at the old constant 70. Scanning down from 100: 100..81 exceed
+    80, and 80 falls in the unscored 80-100 whose cap is exactly 80 → ceiling 80.
+
+    Was 79 before AI-D39, and the difference is entirely the unscored-bucket rule: the old
+    constant 70 blocked 80-100, so the answer had to drop into 60-80. The rolling gap is not
+    consulted at all now (it was +0.050 here and adjusted nothing either way).
     """
     for i in range(8):
         _score(golden_db, i, 70, i >= 6)
     out = _backtest_var(golden_db)
-    assert out["confidence_ceiling"] == 79
+    assert out["confidence_ceiling"] == 80
     assert "上限" in out["confidence_ceiling_note"]
 
 
-def test_backtest_var_ceiling_pays_the_penalty_when_over_confident(
+def test_backtest_var_ceiling_no_longer_charges_the_gap_a_second_time(
     golden_db: sqlite3.Connection,
 ) -> None:
-    """The mirror of the case above — same bucket, the confidence claim inverted.
+    """REPLACES test_backtest_var_ceiling_pays_the_penalty_when_over_confident (expected 75).
 
-    8 rows @80 with 6 hits: the 60-80 bucket takes confidence 80? No — bucket bounds are
-    [lo, hi), so 80 lands in 80-100 with actual 75.00 → cap 80.00, and 80 <= 80 → ceiling 80.
-    The rolling gap is −0.050 (claimed 0.80 vs actual 0.75), so 80 − 5 = 75.
+    8 rows @80 with 6 hits: bucket bounds are [lo, hi), so 80 lands in 80-100 with actual
+    75.00 → cap 80.00, and 80 <= 80 → ceiling 80. The old law then deducted the −0.050 rolling
+    gap to reach 75 — charging the model for over-confidence that the bucket's own
+    ``actual_pct + 5`` cap had already priced in (AI-D39 (a)).
     """
     for i in range(8):
         _score(golden_db, i, 80, i >= 6)
-    assert _backtest_var(golden_db)["confidence_ceiling"] == 75
+    assert _backtest_var(golden_db)["confidence_ceiling"] == 80
 
 
-def test_backtest_var_ceiling_is_zero_on_a_badly_calibrated_record(
+def test_backtest_var_ceiling_collapses_to_the_headroom_on_a_record_of_pure_misses(
     golden_db: sqlite3.Connection,
 ) -> None:
-    """DISPROOF of a hidden floor: 8 rows @90 that all missed leave no admissible value.
+    """REPLACES test_backtest_var_ceiling_is_zero_on_a_badly_calibrated_record (expected 0).
 
-    The 80-100 bucket is at the gate with actual 0.00 → cap 5.00, every lower bucket is
-    unscored → cap 70, so the largest self-consistent value is 70; the −0.900 gap then
-    subtracts 90. The honest answer is 0, and the prompt says so in words rather than
-    letting this layer invent a floor the owner never ruled.
+    8 rows @90 that ALL missed → overall 0%. The 80-100 bucket is at the gate with actual
+    0.00 → cap 5.00, and every unscored bucket now caps at overall+5 = 5 as well, so 5 is the
+    largest self-consistent value.
+
+    ⚠ A consequence worth naming: with the gap step gone the ceiling can no longer reach 0 —
+    ``CEILING_HEADROOM`` is a floor of sorts, at 5, and it is the SAME headroom every bucket
+    gets rather than a special case invented here. The advice template's old branch
+    「confidence_ceiling 為 0 時…」 became unreachable and was rewritten to key on a LOW
+    ceiling instead; dead text in a prompt is worse than dead code, because the model reads it.
     """
     for i in range(8):
         _score(golden_db, i, 90, True)
-    assert _backtest_var(golden_db)["confidence_ceiling"] == 0
+    assert _backtest_var(golden_db)["confidence_ceiling"] == 5
 
 
 def test_calibration_gap_reading_names_the_direction_in_words(

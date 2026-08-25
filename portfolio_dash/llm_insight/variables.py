@@ -283,7 +283,9 @@ REGISTRY: tuple[VarSpec, ...] = (
         "hit_count、平均宣告信心 claimed_pct、實際命中率 actual_pct、絕對誤差 "
         "calibration_error_pp（皆百分比字串），外加 overall_hit_rate（全域命中率，"
         "分數字串）——校正提示詞錨定信心值用：宣告信心不應長期高於同桶實際命中率。"
-        "**confidence_ceiling**（W7.1）是本系統依這份分桶＋滾動缺口算好的信心上限整數，"
+        "**confidence_ceiling**（W7.1；法則於 AI-D39／2026-08-25 修訂）是本系統依這份分桶"
+        "算好的信心上限整數；滾動缺口**不再參與**（分桶上限本身已是校準修正，再扣一次"
+        "等於同一個誤差算兩次），無樣本區間改用整體命中率＋5。"
         "提示詞直接引用它，模型不必自己走 bins 推算（0 代表戰績不支持任何方向性信心）。"
         "無已評分樣本時 unavailable。",
         '{"bins":[{"bucket":"60-80","n":6,"hit_count":4,"claimed_pct":"68.50",'
@@ -490,6 +492,29 @@ class VarContext:
 
 
 _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
+
+
+def unavailable_tokens(external_vars: dict[str, Any]) -> list[str]:
+    """Which injected variables came back as the documented "no data" shape.
+
+    ``{"unavailable": true}`` is this module's contract for a producer that had nothing to
+    give (see the module docstring); this reads it back so a CALLER can act on it. The one
+    caller that must is ``api/insight_service``, which fills
+    ``RunInputs.unavailable_vars`` → ``GateContext`` → gate **R5**.
+
+    That field existed, was threaded end to end, and was populated at NONE of the four
+    ``RunInputs`` construction sites (found 2026-08-25), so R5 had never fired in production:
+    a run whose every external input was missing was recorded as clean, and the one signal
+    saying "this batch was synthesised from absent data" never reached ``job_runs``.
+
+    Sorted, because R5 joins these into user-visible text and dict order would churn the
+    stored reason. Only the documented DICT shape counts — a list, ``None`` or the string
+    ``"unavailable"`` is a producer's ordinary output, not a declaration of absence.
+    """
+    return sorted(
+        token for token, value in external_vars.items()
+        if isinstance(value, dict) and value.get("unavailable") is True
+    )
 
 # Chips/sentiment/consensus/signal tokens whose value is fed via VarContext.external_vars.
 # ``rule_signals_json`` is external-fed like chips/consensus: the api seam evaluates it via

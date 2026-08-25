@@ -129,19 +129,34 @@
       sub.appendChild(rate);
       sub.appendChild(el('span', null, '· vs 原始投入成本'));
       card.appendChild(sub);
-      /* Tolerant of an older payload (e2e canned fixtures, a stale snapshot): the line simply
-         does not render when the server did not send B. */
-      if (!nil(k && k.total_return_fx_complete)) {
+      /* The B line renders whenever the server had anything to say about it — the VALUE when
+         it could be measured, otherwise「—」plus the server's reason (owner ruling 2026-08-25).
+         A row that silently disappears is indistinguishable from a feature that was never
+         built, and B is absent on any day a held symbol lacks a price, which is not rare.
+         Still tolerant of an OLDER payload (canned e2e fixtures, a stale snapshot): with
+         neither the value nor a reason present, nothing renders — the pre-AI-D41 behaviour. */
+      const hasB = !nil(k && k.total_return_fx_complete);
+      if (hasB || (k && k.fx_complete_reason)) {
         const fxs = el('div', 'kpi-subline');
         fxs.appendChild(el('span', null, '含匯兌總損益'));
-        fxs.appendChild(el('span', f.signClass(k.total_return_fx_complete),
-          f.signed(k.total_return_fx_complete, ccy)));
-        if (!nil(k.principal_fx_effect)) {
-          fxs.appendChild(el('span', null, '· 其中本金匯率效果'));
-          fxs.appendChild(el('span', f.signClass(k.principal_fx_effect),
-            f.signed(k.principal_fx_effect, ccy)));
+        if (hasB) {
+          fxs.appendChild(el('span', f.signClass(k.total_return_fx_complete),
+            f.signed(k.total_return_fx_complete, ccy)));
+          if (!nil(k.principal_fx_effect)) {
+            fxs.appendChild(el('span', null, '· 其中本金匯率效果'));
+            fxs.appendChild(el('span', f.signClass(k.principal_fx_effect),
+              f.signed(k.principal_fx_effect, ccy)));
+          }
+        } else {
+          fxs.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
         }
         card.appendChild(fxs);
+        if (!hasB) {
+          /* Server-authored wording, rendered verbatim — this layer never composes a reason. */
+          const why = el('div', 'kpi-subline', k.fx_complete_reason);
+          why.style.opacity = '.75';
+          card.appendChild(why);
+        }
       }
       if (!nil(k && k.total_return)) {
         if (k.total_return > 0) card.classList.add('kpi-up');

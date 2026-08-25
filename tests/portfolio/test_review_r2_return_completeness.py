@@ -182,8 +182,9 @@ def test_the_kpi_band_carries_the_fx_complete_figure_and_names_the_difference() 
                 TrendPoint(date=date(2026, 12, 31), total_value=D("121000"),
                            net_invested=D("100000"))],
         reporting_currency=Currency.TWD, available=True)
-    b = fx_complete_return(trend)
-    assert b == D("21000")
+    out = fx_complete_return(trend)
+    assert out.value == D("21000") and out.reason is None
+    b = out.value
 
     kpis = KpiSummary(reporting_currency=Currency.TWD, total_return=D("11000"),
                       total_return_fx_complete=b,
@@ -202,8 +203,10 @@ def test_the_fx_complete_figure_is_none_when_the_trend_is_unavailable() -> None:
     from portfolio_dash.portfolio.dashboard import fx_complete_return
     from portfolio_dash.portfolio.dashboard_models import TrendSeries
 
-    assert fx_complete_return(
-        TrendSeries(points=[], reporting_currency=Currency.TWD, available=False)) is None
+    out = fx_complete_return(
+        TrendSeries(points=[], reporting_currency=Currency.TWD, available=False))
+    assert out.value is None
+    assert out.reason and "無法計算" in out.reason
 
 
 def test_an_incomplete_last_trend_day_yields_no_fx_complete_figure() -> None:
@@ -215,4 +218,8 @@ def test_an_incomplete_last_trend_day_yields_no_fx_complete_figure() -> None:
         points=[TrendPoint(date=date(2026, 12, 31), total_value=D("121000"),
                            net_invested=D("100000"), incomplete=True)],
         reporting_currency=Currency.TWD, available=True)
-    assert fx_complete_return(trend) is None
+    out = fx_complete_return(trend)
+    assert out.value is None
+    # The reason must state BOTH facts: why it is absent, and why an earlier complete day
+    # is not substituted (a B on a different date than A makes B - A meaningless).
+    assert out.reason and "缺價" in out.reason and "不以較早日期替代" in out.reason

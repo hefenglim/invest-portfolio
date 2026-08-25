@@ -521,14 +521,23 @@ def _backtest_var(conn: sqlite3.Connection) -> dict[str, Any]:
     # obey a rule that asked the model to walk a bins table mid-generation; the rule is
     # unchanged and still lives in the prompt, the model is just handed one integer now.
     # Nothing clamps the model's answer afterwards (AI-D33 stands).
-    gap = rolling_calibration_gap(conn).gap
+    #
+    # AI-D39 (2026-08-25): the rolling gap NO LONGER participates — a bucket's cap is already
+    # the calibration correction, so deducting the gap charged the same over-confidence twice
+    # (demo: bins 39, gap −47, answer 0). `rolling_calibration_gap` is still read by
+    # `_calibration_gap_var`, which is where that number belongs: as a REPORTED diagnostic,
+    # not as a second penalty.
+    overall = Decimal(hits) / len(pairs)
     return {
         "bins": bins,
-        "overall_hit_rate": _ratio(Decimal(hits) / len(pairs), _Q3),
-        "confidence_ceiling": confidence_ceiling(bins, gap=gap),
+        "overall_hit_rate": _ratio(overall, _Q3),
+        # ⚠ The helper takes a PERCENTAGE, the wire field carries a FRACTION. Converted here,
+        # visibly and once — mixing the two silently is the exact defect W7.1 shipped.
+        "confidence_ceiling": confidence_ceiling(bins, overall_hit_pct=overall * 100),
         "confidence_ceiling_note": (
-            "本系統依你的戰績算好的信心上限（0-100 整數）：已套用「所屬區間實際命中率＋5、"
-            "無樣本區間上限 70」與滾動缺口下修。0 代表戰績不支持任何方向性信心宣稱。"
+            "本系統依你的戰績算好的信心上限（0-100 整數）：所屬區間實際命中率＋5；"
+            "該區間樣本不足或從未計分過時，改用你的整體命中率＋5（而非固定值），"
+            "所以沒有戰績的區間不會比量測過的區間更寬鬆。"
         ),
     }
 

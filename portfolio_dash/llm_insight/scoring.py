@@ -17,7 +17,7 @@ miss flag; ``calibration_error`` computes the confidence-vs-hit-rate gap in perc
 points. All math is :class:`~decimal.Decimal` (never float for a price/rate/ratio).
 """
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 
 from pydantic import BaseModel
 
@@ -224,7 +224,25 @@ def trust_tier(
 # So the ARITHMETIC moves here and the RULE stays exactly where it was. The prompt still
 # states the ceiling, the model still writes the number, and nothing clamps anything after
 # the fact; the model is simply handed ONE integer instead of a table plus a procedure.
-CEILING_NO_DATA = 70  # a bucket at/below the sample gate anchors nothing (AI-D33's 上限 70)
+#
+# ⚠ REVISED 2026-08-25 (AI-D39), and the revision is to the LAW, not to this implementation:
+# W7.1 executed AI-D33's three steps faithfully and two of them were wrong.
+#
+#   (a) The gap was subtracted ON TOP of the bucket cap. A bucket's cap is `actual_pct + 5`,
+#       which IS the calibration correction — deducting the global rolling gap as well charges
+#       the same over-confidence twice. Measured on the demo: bins said 39, the gap took 47,
+#       the answer was 0. That 0 was arithmetic, not evidence. The step is gone, and with it
+#       the `gap` parameter: a parameter kept "for compatibility" after it stops being read is
+#       how the next reader concludes the gap still matters.
+#   (b) A bucket nobody had scored capped at a CONSTANT 70, while a bucket measured at 40%
+#       capped at 45 — so ignorance outranked evidence, and a model could lift its own ceiling
+#       by moving into an unscored range. Over a 20-sample rolling window that is a limit
+#       cycle, not a calibration loop. An unscored bucket now caps at the OVERALL record.
+#
+# AI-D33's red line is untouched: nothing here clamps what the model writes. Only the integer
+# handed to the prompt changes. (The third step, recording violations instead of clamping, is
+# a separate surface — see `insights.ceiling_at_create`.)
+CEILING_NO_DATA = 70  # LAST RESORT ONLY: nothing has ever been scored, so there is no record
 CEILING_HEADROOM = 5  # the law's "actual_pct + 5"
 
 
@@ -240,7 +258,7 @@ def _bucket_bounds(label: str) -> tuple[int, int] | None:
 def confidence_ceiling(
     bins: list[dict[str, object]],
     *,
-    gap: Decimal | None,
+    overall_hit_pct: Decimal | None,
     min_samples: int = TIER_MIN_SAMPLE,
 ) -> int:
     """The largest SELF-CONSISTENT confidence (0-100) the anchoring law admits.
@@ -249,19 +267,26 @@ def confidence_ceiling(
     confidence falls into — so the answer is the largest ``c`` with ``c <= cap(bucket(c))``:
 
     * a bucket at or above the sample gate caps at ``actual_pct + CEILING_HEADROOM``;
-    * a bucket below the gate, or absent from ``bins`` entirely, caps at ``CEILING_NO_DATA``
-      — no evidence anchors nothing, which is AI-D33's 「該區間 n<8 時上限 70」.
+    * a bucket below the gate, or absent from ``bins`` entirely, caps at
+      ``overall_hit_pct + CEILING_HEADROOM`` — the record as a whole, since this particular
+      range has none of its own (AI-D39 (b));
+    * only when NOTHING has ever been scored (``overall_hit_pct is None``) does
+      ``CEILING_NO_DATA`` apply. That is a genuinely different state from "this bucket has no
+      history", and it is the only one a constant can honestly answer.
 
-    A NEGATIVE rolling gap (the model has been over-confident) then subtracts its own
-    magnitude in points — the prompt's own worked example, gap −0.050 → −5 — floored at 0.
-    A positive or unknown gap adjusts nothing.
+    ⚠ ``overall_hit_pct`` is a PERCENTAGE (0-100), the same unit as a bin's ``actual_pct`` —
+    NOT the fraction that ``backtest_json.overall_hit_rate`` carries on the wire. The caller
+    converts, visibly. Mixing the two silently is precisely the class of defect W7.1 shipped
+    (one score printed four different ways), so the unit is in the name.
 
-    ⚠ There is deliberately NO floor: on a badly calibrated history this returns 0, which is
-    the law saying "your record does not support asserting anything". That is an honest
-    reading of a degenerate input, and the prompt is written to say so in words rather than
-    quietly inventing a floor here.
+    ⚠ There is deliberately NO floor: on a badly calibrated history this returns a small
+    number, and the prompt says so in words rather than having this layer invent a floor the
+    owner never ruled.
     """
     caps: list[tuple[int, int, Decimal]] = []
+    # The fallback for a range with no record of its own: the record as a whole.
+    unscored_cap = (Decimal(CEILING_NO_DATA) if overall_hit_pct is None
+                    else overall_hit_pct + CEILING_HEADROOM)
     for b in bins:
         bounds = _bucket_bounds(str(b.get("bucket", "")))
         if bounds is None:
@@ -270,7 +295,7 @@ def confidence_ceiling(
         cap = (
             Decimal(str(b.get("actual_pct", "0"))) + CEILING_HEADROOM
             if n >= min_samples
-            else Decimal(CEILING_NO_DATA)
+            else unscored_cap
         )
         caps.append((bounds[0], bounds[1], cap))
 
@@ -278,14 +303,9 @@ def confidence_ceiling(
         for lo, hi, cap in caps:
             if lo <= c < hi or (hi == 100 and c == 100):
                 return cap
-        return Decimal(CEILING_NO_DATA)  # a bucket nobody has ever scored
+        return unscored_cap  # a bucket nobody has ever scored
 
-    best = 0
     for c in range(100, -1, -1):
         if Decimal(c) <= cap_for(c):
-            best = c
-            break
-    if gap is not None and gap < 0:
-        penalty = int((-gap * 100).to_integral_value(rounding=ROUND_HALF_UP))
-        best = max(0, best - penalty)
-    return best
+            return c
+    return 0

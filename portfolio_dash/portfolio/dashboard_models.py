@@ -98,6 +98,10 @@ class KpiSummary(BaseModel):
     # beside it are new, so every golden payload and stored snapshot still reconciles.
     total_return_fx_complete: Decimal | None = None
     principal_fx_effect: Decimal | None = None
+    # Why B is absent, when it is (owner ruling 2026-08-25). Without it the UI could
+    # only drop the row, and a row that silently vanishes is indistinguishable from a
+    # feature that was never built. Server-owned wording — web never composes it.
+    fx_complete_reason: str | None = None
     xirr: Decimal | None = None
     # Observation window (days) the XIRR was measured over; a short window (< 365) is a
     # low-confidence hint surfaced by the UI. None when there are no flows or no XIRR run.

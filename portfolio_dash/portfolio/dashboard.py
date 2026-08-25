@@ -12,6 +12,7 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 import sqlite3
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -228,7 +229,20 @@ def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
     )
 
 
-def fx_complete_return(trend: TrendSeries) -> Decimal | None:
+@dataclass(frozen=True)
+class FxCompleteOutcome:
+    """B of the A · B · B−A decomposition, plus WHY it is absent when it is.
+
+    Same shape and same reason as ``XirrOutcome``: a figure that legitimately degrades needs
+    to carry its own explanation, or the UI can only blank the row. Owner ruling 2026-08-25 —
+    a line that silently vanishes teaches the reader nothing; 「—」 with a reason does.
+    """
+
+    value: Decimal | None
+    reason: str | None
+
+
+def fx_complete_return(trend: TrendSeries) -> FxCompleteOutcome:
     """B of the A · B · B−A decomposition — the FX-COMPLETE lifetime result (AI-D41).
 
     ``total_return`` (A) translates each currency's NET P&L at today's spot, so the rate never
@@ -236,17 +250,20 @@ def fx_complete_return(trend: TrendSeries) -> Decimal | None:
     ``total_value − net_invested`` on its last point is the figure that does — and it was
     being displayed under the label 浮動損益.
 
-    ``None`` whenever the trend cannot support it: unavailable, empty, or a last day the trend
-    itself marks ``incomplete`` (a day it could not fully value must not become a headline
-    KPI). Honest degradation, never a fabricated stand-in — the same posture as every other
-    optional figure in ``KpiSummary``.
+    Degrades with a stated reason whenever the trend cannot support it: unavailable/empty, or
+    a last day the trend itself marks ``incomplete``. That last case does NOT fall back to an
+    earlier complete day: a B measured on a different date than A makes B − A a
+    plausible-looking wrong number, which is the whole failure mode this decomposition exists
+    to prevent.
     """
     if not trend.available or not trend.points:
-        return None
+        return FxCompleteOutcome(None, "尚無趨勢資料,無法計算含匯兌損益")
     last = trend.points[-1]
     if last.incomplete:
-        return None
-    return last.total_value - last.net_invested
+        return FxCompleteOutcome(
+            None, "最新一日有標的缺價,含匯兌總損益暫不計算(不以較早日期替代,否則與"
+                  "上方資產損益不同日,兩者的差額會失去意義)")
+    return FxCompleteOutcome(last.total_value - last.net_invested, None)
 
 
 def build_dashboard(
@@ -611,7 +628,8 @@ def build_dashboard(
     # AI-D41: B and B − A ride beside A. Computed HERE because this is the only layer
     # holding both the ReturnSummary and the TrendSeries; neither module can see the
     # other's figure, which is precisely why the discrepancy went unnoticed.
-    fx_complete = fx_complete_return(trend)
+    fx_outcome = fx_complete_return(trend)
+    fx_complete = fx_outcome.value
     principal_fx = (None if fx_complete is None or total_return_blended is None
                     else fx_complete - total_return_blended)
     kpis = KpiSummary(
@@ -620,6 +638,7 @@ def build_dashboard(
         total_return=total_return_blended,
         total_return_fx_complete=fx_complete,
         principal_fx_effect=principal_fx,
+        fx_complete_reason=fx_outcome.reason,
         total_return_rate=total_return_rate,
         realized_total=realized_total,
         unrealized_total=unrealized_total,

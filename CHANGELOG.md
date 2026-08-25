@@ -278,6 +278,52 @@ Both new parameters are **required keyword arguments with no default**, delibera
 default would let a caller silently ship the pre-2026-08-24 behaviour, and both omissions are
 invisible in the output — a plausible rate, quietly missing flows. Forgetting either is now a
 mypy error and a `TypeError`.
+### Changed — investment-logic review, wave R3 (the decision layer)
+
+- **The confidence ceiling charged one error twice, and rewarded having no record** (AI-D39).
+  This is the only finding in the whole review that THIS BRANCH introduced: W7.1 implemented
+  AI-D33's three-step law faithfully and the law itself was wrong in two ways.
+  **(a)** A bucket's cap is `actual_pct + 5`, which IS the calibration correction; subtracting
+  the global rolling gap on top charged the same over-confidence a second time — measured on
+  the demo, bins said 39, the gap took 47, the answer was 0. That 0 was arithmetic, not
+  evidence. The step is gone and so is the `gap` parameter: a parameter kept after it stops
+  being read is how the next reader concludes it still matters.
+  **(b)** `CEILING_NO_DATA = 70` capped an unscored bucket at 70 while a bucket measured at
+  40% capped at 45, so a model could raise its own ceiling by claiming a confidence in a range
+  it had never been scored in — and over a 20-sample rolling window that is a limit cycle, not
+  a calibration loop. An unscored bucket now falls back to `overall_hit_rate + 5`; the constant
+  survives only for "nothing has EVER been scored", which is a genuinely different state.
+  ⚠ **AI-D33's red line is untouched** — nothing clamps the model's stated confidence. Only
+  the integer handed to the prompt changes.
+  ⚠ **Consequence worth naming:** with the gap step gone the ceiling can no longer reach 0
+  (`CEILING_HEADROOM` puts the floor at 5), so the advice template's 「confidence_ceiling 為 0
+  時…」 branch became text the model reads and can never act on. Rewritten to key on a LOW
+  ceiling, which is reachable; the test that pinned the old clause now pins its ABSENCE. Dead
+  text in a prompt is worse than dead code. `LIBRARY_VERSION` → `official-v17`.
+  ⚠ The helper takes a PERCENTAGE while the wire field carries a FRACTION — converted once at
+  the call site, with the unit in the parameter name. Mixing those silently is exactly the
+  defect W7.1 shipped (one score rendered four different ways).
+- **The R5 degradation gate had never fired in production**, and not because of a judgement
+  call: `RunInputs.unavailable_vars` was threaded end to end — `RunInputs` → `GateContext` →
+  R5 — and populated at **none** of `insight_service`'s four construction sites. A run whose
+  every external variable came back `{"unavailable": true}` was recorded as clean, so the one
+  signal saying "this batch was synthesised from absent inputs" never reached `job_runs`. The
+  fix is a READ, not a new mechanism: the producers already emit that shape and `variables.py`
+  already documents it as the contract. R5 is a per-RUN gate while unavailability is
+  per-symbol-per-token, so the reduction is a **union** — if any symbol in the batch was built
+  without its news / consensus / fundamentals, the run was degraded. An intersection would
+  report a clean run whenever a single symbol happened to have complete data.
+
+### Fixed — R2 follow-up
+
+- **The 含匯兌總損益 line vanished instead of explaining itself** (owner ruling 2026-08-25). B
+  is absent on any day a held symbol lacks a price, which is not rare, and a row that silently
+  disappears is indistinguishable from a feature that was never built. `fx_complete_return` now
+  returns an outcome (value + reason) in the same shape and for the same reason as
+  `XirrOutcome`, and the KPI band renders 「—」 plus the server's wording. The reason states two
+  things, and the second is the load-bearing one: why an earlier complete day is **not**
+  substituted — a B measured on a different date than A turns B − A into a plausible-looking
+  wrong number, which is the failure mode this decomposition exists to prevent.
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
   that synthesize the owner's holding × technicals × the rule-signal engine × news × analyst

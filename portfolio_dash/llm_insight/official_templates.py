@@ -23,7 +23,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v16 (2026-08-23)"  # W7.1: 單位/不得代用基線/上限改由後端算
+LIBRARY_VERSION = "official-v17 (2026-08-25)"  # AI-D39: 上限法則修訂（缺口不再扣減）
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -566,11 +566,13 @@ direction 用 up/down/flat，target_pct 僅在有明確依據時提供，且**�
 （0-100，此預測命中的真實機率估計，寧可保守）。
 ⚠ 信心錨定法（硬性上限，依據你自己過去的戰績）：{{backtest_json}} 的
 **confidence_ceiling** 就是本系統依你的分桶命中率算好的上限整數——「所屬區間實際命中率
-＋5、無樣本區間上限 70」與滾動缺口下修都已經替你算完，bins 與 {{calibration_gap_json}}
-（reading 是同一份戰績的白話版）留著讓你在內文說明理由，**不必再自己推算上限**。
+＋5；該區間樣本不足或從未計分過時改用整體命中率＋5」已經替你算完，bins 與
+{{calibration_gap_json}}（reading 是同一份戰績的白話版）留著讓你在內文說明理由，
+**不必再自己推算上限**。
 1) confidence 不得超過 confidence_ceiling；照抄它或給更低的值。
-2) confidence_ceiling 為 0 時，代表你的戰績目前不支持任何方向性信心宣稱：confidence 填 0，
-   並在內文明說「依過往戰績暫不表態，本卡僅列情境與觸發條件」。
+2) confidence_ceiling 偏低（例如 20 以下）時，代表你的戰績目前撐不起有力的方向宣稱：
+   給一個同樣低的 confidence，並在內文明說「依過往戰績本卡以情境與觸發條件為主」。
+   不要為了讓卡片看起來有用而把 confidence 拉高到上限之上。
 3) backtest_json 整體 unavailable（尚無評分歷史）時沒有上限，沿用「寧可保守」。
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
