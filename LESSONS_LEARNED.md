@@ -1184,3 +1184,38 @@ evidence. That claim now has to be re-established from scratch rather than inher
 diagnosis that gets written down is worse than no diagnosis, because the next person spends
 their budget on the wrong hypothesis — the machine's real constraint here is 8.5 GB of RAM with
 ~1.5 GB free against 166 e2e tests that each spawn a uvicorn subprocess plus a browser context.
+
+## The toolchain was never broken — measured, 2026-08-26
+
+Three symptoms had been recorded across sessions as if they were a single defect in the test
+tooling: the e2e suite "hangs indefinitely"; two subprocess tests fail with `0xC0000142`
+(`STATUS_DLL_INIT_FAILED`); `stress-audit --ui` cannot start Playwright's driver
+(`Connection closed while reading from the driver`). A measurement pass, run with nothing else
+competing for the machine, retired all three:
+
+| claim | measured |
+| --- | --- |
+| e2e hangs | **173/173 pass in ~25 min** (collected count verified against result chars) |
+| Playwright driver dead | launches in isolation; 173 browser tests pass; `--ui` DOM leg ran (7 `phase1:dom` assertions) |
+| two subprocess tests fail | passed inside the 3792-test core run |
+| uvicorn processes leak | python-process count **stable and falling** across the run (6 → 4 → 6 → 0) — teardown works |
+| memory pressure | **real**: 8.5 GB total, min **452 MB free** during e2e, running ALONE |
+
+The last row is the whole explanation. Every one of those failures happened while **two or more
+heavy detached gates were running concurrently** (a full pytest plus mypy plus e2e). Alone, e2e
+already dips to 452 MB free; add another gate and the machine crosses into the region where
+Windows cannot commit memory for a new process's DLL initialisation — which is *precisely* what
+`0xC0000142` means, and equally what kills a freshly-spawned Playwright driver mid-handshake.
+
+**The rule, then, is a scheduling rule, not a code change:** run `tests/e2e` (and
+`stress-audit --ui`) **alone**. `mypy` and the core `pytest` may overlap with each other; neither
+may overlap with a browser suite. Nothing in `tests/e2e/conftest.py` needs changing — in
+particular do NOT raise its 60 s health-check ceiling, which is expect-polling, not a sleep mask;
+raising it converts a fast resource failure into a slow one.
+
+⚠ **The meta-lesson is about the diagnoses, not the machine.** "The e2e suite hangs" was written
+down twice on evidence that did not support it (once it was an instant `--timeout` argparse
+failure; once it was contention I had caused myself), and each time it was inherited by the next
+session as established fact. Symptoms observed while the observer is perturbing the system are
+not findings. Before recording an environment defect: reproduce it on a quiet machine, and
+record the *measurement*, not the impression.
