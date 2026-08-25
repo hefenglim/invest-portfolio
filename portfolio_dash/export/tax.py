@@ -26,9 +26,18 @@ from portfolio_dash.shared.models.ledger import FXConversion
 
 _ONE = Decimal("1")
 _ZERO = Decimal("0")
+# ⚠ TWO realized columns, and the FILING one comes first (review 2026-08-24).
+# ``realized_adjusted`` (= proceeds − adjusted_cost_removed) is the PERFORMANCE figure the
+# dashboard shows: the locked 2026-06-06 accounting model folds cash dividends into cost, so
+# that number already has the dividends netted out of it — while the dividends sheet in this
+# same package declares those same dividends as income. Subtotalling it taxes one sum twice.
+# ``realized_original`` (= proceeds − original_cost_removed, what was actually paid) is the
+# capital gain a filer declares, and it is what ``summary.md`` subtotals. The adjusted column
+# stays so the package can still be reconciled against the dashboard line for line.
 _REALIZED_COLS = ["sell_date", "account_id", "symbol", "quote_ccy", "shares_sold",
                   "proceeds_net", "original_cost_removed", "adjusted_cost_removed",
-                  "realized", "rate_used", "reporting_realized"]
+                  "realized_original", "realized_adjusted",
+                  "rate_used", "reporting_realized_original"]
 _DIV_COLS = ["date", "account_id", "symbol", "type", "gross", "withholding", "net", "ccy"]
 _FX_COLS = ["date", "account_id", "home_ccy", "foreign_ccy", "foreign_sold",
             "home_received", "rate_used", "realized"]
@@ -68,6 +77,7 @@ def build_tax_package_zip(
 
     realized_rows: list[list[str]] = []
     realized_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
+    adjusted_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     for r in book.realized.rows:
         if r.sell_date.year != year:
             continue
@@ -80,14 +90,18 @@ def build_tax_package_zip(
         if r.kind not in ("sale", "short_cover"):
             continue
         rate = _rate_on(conn, r.sell_date, r.quote_ccy, reporting)
-        reporting_realized = "" if rate is None else str(r.realized * rate)
+        # A short cover has no dividend history, so original == adjusted and the two realized
+        # columns coincide — the split only separates them on a long that took dividends.
+        realized_original = r.proceeds_net - r.original_cost_removed
+        reporting_realized = "" if rate is None else str(realized_original * rate)
         realized_rows.append([
             r.sell_date.isoformat(), r.account_id, r.symbol, r.quote_ccy.value,
             str(r.shares_sold), str(r.proceeds_net), str(r.original_cost_removed),
-            str(r.adjusted_cost_removed), str(r.realized),
+            str(r.adjusted_cost_removed), str(realized_original), str(r.realized),
             "" if rate is None else str(rate), reporting_realized,
         ])
-        realized_subtotal[r.quote_ccy] += r.realized
+        realized_subtotal[r.quote_ccy] += realized_original
+        adjusted_subtotal[r.quote_ccy] += r.realized
 
     div_rows: list[list[str]] = []
     div_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
@@ -125,7 +139,8 @@ def build_tax_package_zip(
         f"realized_gains_{year}.csv": csv_blob(_REALIZED_COLS, realized_rows),
         f"dividends_{year}.csv": csv_blob(_DIV_COLS, div_rows),
         f"fx_realized_{year}.csv": csv_blob(_FX_COLS, fx_rows),
-        "summary.md": _summary_md(year, realized_subtotal, div_subtotal, fx_subtotal),
+        "summary.md": _summary_md(year, realized_subtotal, div_subtotal, fx_subtotal,
+                                  adjusted_subtotal),
     }
     return zip_artifact(f"tax_package_{year}.zip", files)
 
@@ -141,12 +156,25 @@ def _subtotal_lines(subtotal: dict[Currency, Decimal]) -> str:
 
 def _summary_md(year: int, realized: dict[Currency, Decimal],
                 dividends: dict[Currency, Decimal],
-                fx: dict[Currency, Decimal]) -> bytes:
+                fx: dict[Currency, Decimal],
+                adjusted: dict[Currency, Decimal]) -> bytes:
+    """The filing subtotal is the ORIGINAL-basis one; the adjusted basis rides along, labelled.
+
+    Both figures are true, of different questions. Printing only the adjusted one (as this
+    package did until 2026-08-24) hands a filer a capital gain that already has the year's
+    dividends netted out of it, next to a dividends sheet declaring those same dividends.
+    """
     md = (
         f"# Tax Package {year}\n\n"
         "Per-currency subtotals (never summed across currencies).\n\n"
-        f"## Realized gains\n{_subtotal_lines(realized)}\n"
+        "申報用的已實現損益是「原始成本基礎」那一欄。\n\n"
+        f"## Realized gains — 申報用（原始成本基礎 original_cost）\n"
+        f"{_subtotal_lines(realized)}\n"
         f"## Dividends (net)\n{_subtotal_lines(dividends)}\n"
         f"## Realized FX P&L\n{_subtotal_lines(fx)}\n"
+        "## 對帳用：績效基礎已實現（調整後成本，股利已折抵）\n"
+        "⚠ 非申報數字。此欄的股利已折抵進成本，而上方股利表已就同一筆股利申報一次；"
+        "兩者相加會把同一筆錢課兩次。列出僅供與儀表板核對。\n"
+        f"{_subtotal_lines(adjusted)}"
     )
     return md.encode("utf-8")

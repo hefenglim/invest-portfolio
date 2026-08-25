@@ -588,7 +588,11 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
         original_avg = original_total / shares
         adjusted_avg = adjusted_total / shares
         dividend_portion = original_total - adjusted_total
-        payback = dividend_portion / original_total if original_total != _ZERO else _ZERO
+        # abs() per domain-ledger.md: "any RATIO over the basis must divide by
+        # abs(cost_total)". An open short carries a negative basis; the aggregate in
+        # api/routers/symbol.py demonstrably flips sign without this, and holding both
+        # sites to the one law is cheaper than proving this one unreachable.
+        payback = dividend_portion / abs(original_total) if original_total != _ZERO else _ZERO
         holdings.append(
             Holding(
                 account_id=account_id,

@@ -417,20 +417,32 @@ def test_position_preview_sell_not_held_is_null(
     assert b["account_cash"] == {"ccy": "TWD", "balance": "-495000"}
 
 
-def test_position_preview_sell_oversell_remain_floors_at_zero(
+def test_position_preview_sell_oversell_quotes_no_realized_and_a_signed_remainder(
     api_client: TestClient
 ) -> None:
-    """Oversell (qty > held) still renders honestly — remain_shares floors at 0 and the
-    pre-existing soft 賣超 issue is unchanged. cost_removed = 495,000 × (5000/1000) =
-    2,475,000 (the golden 2330 adjusted_total is 500,000 − 5,000 div = 495,000)."""
+    """Oversell (qty > held): the two figures that depend on a basis the ledger DISCARDS are
+    withheld, and the remainder is signed.
+
+    Changed 2026-08-24 (investment-logic review §1.3). This test previously pinned
+    ``cost_removed == "2475000"`` — 495,000 × (5000/1000), the held basis scaled past 100% —
+    and ``remain_shares == "0"``. Both were the ORDINARY branch's arithmetic applied to a
+    branch that does not use it: ``build_book`` treats an undeclared oversell by discarding
+    the position's cost basis and emitting NO realized row (待釐清), so every figure derived
+    from that basis is an invention, and flooring the remainder at 0 reported a flat position
+    where the ledger holds −4,000.
+
+    What must NOT move: the soft 賣超 issue, and the fact that the preview still renders.
+    """
     r = api_client.post("/api/input/manual/preview", json={
         "account_id": "tw_broker", "symbol": "2330", "side": "sell",
         "date": "2026-06-11", "shares": "5000", "price": "600"})
     assert r.status_code == 200
     b = r.json()
-    assert b["position_preview"]["kind"] == "sell"
-    assert b["position_preview"]["cost_removed"] == "2475000"
-    assert b["position_preview"]["remain_shares"] == "0"
+    pp = b["position_preview"]
+    assert pp["kind"] == "sell"
+    assert pp["cost_removed"] is None and pp["realized_pnl"] is None
+    assert pp["oversell"] is True and pp["note"]
+    assert pp["remain_shares"] == "-4000"
     assert "sell_exceeds_holdings" in {i["code"] for i in b["issues"]}
 
 

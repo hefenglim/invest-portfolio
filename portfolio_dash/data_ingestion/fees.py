@@ -17,12 +17,16 @@ the stamp is 0 and the seam surfaces the soft issue 「無 USD/MYR 匯率,印花
 """
 
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.enums import Side
+
+if TYPE_CHECKING:  # annotation only — fees.py stays a pure calculation module
+    from portfolio_dash.shared.models.assets import Instrument
 
 _ZERO = Decimal("0")
 _CENT = Decimal("0.01")
@@ -43,6 +47,56 @@ class FeeResult(BaseModel):
     fee: Decimal
     tax: Decimal
     snapshot: dict[str, str]
+
+
+def resolve_etf_flag(
+    instrument: "Instrument | None", input_flag: bool
+) -> tuple[bool, bool]:
+    """``(is_etf, unknown)`` for a fee computation — ONE definition, both entry seams.
+
+    The registry is authoritative when a row exists (stress-audit finding 2026-07-15: the
+    input flag was letting an ETF sell be taxed at the 現股 rate). AI-D40 adds the third
+    state on top: a registry row can now say "nobody has answered", and an UNREGISTERED
+    symbol is unanswered by construction — ``TxnInput.is_etf`` defaults to False, and a
+    default is not an answer.
+
+    ``is_etf`` is still a plain bool because ``compute_fees`` must produce a number either
+    way. What changes is that ``unknown`` travels with it, so the caller can DISCLOSE the
+    assumption instead of burying it in ``fee_rule_snapshot`` as though it were a fact.
+    """
+    if instrument is not None:
+        return instrument.is_etf, instrument.etf_flag_unknown
+    return input_flag, True
+
+
+def etf_flag_issue_applies(rules: FeeRuleSet, side: Side, unknown: bool) -> bool:
+    """Is the unresolved ETF flag actually CHANGING the tax on this trade?
+
+    Only then is it worth stopping the user. A buy carries no TW transaction tax, and a rule
+    set whose ETF and ordinary rates coincide gives the same answer either way — raising
+    there would be noise, and noise is how a real warning gets clicked through.
+    """
+    return unknown and side is Side.SELL and rules.tax_etf != rules.tax_normal
+
+def supplied_snapshot(fee: Decimal, tax: Decimal) -> dict[str, str]:
+    """Provenance for a row whose fee AND tax both came from the caller, not this engine.
+
+    ``fee_rule_snapshot`` is PROVENANCE, not the replay's input — 重算 reads ``ev.fees`` /
+    ``ev.tax`` straight off the row (``portfolio/cost_basis.py``), so an empty snapshot costs
+    no arithmetic. What it costs is the answer to *"where did these two numbers come from?"*,
+    and a broker statement supplies **both** (the fee verbatim, the tax a literal ``"0"``), so
+    the auto-fill branch never fires and every broker-imported row carried ``{}`` —
+    indistinguishable from "no rule was applied at all" (review 2026-08-24).
+
+    Nothing is recomputed here on purpose: ``data_ingestion/broker/convert.py`` refuses to
+    recompute because a defensible number that does not match the money that actually left
+    the account is the wrong kind of correct. This only records that refusal.
+
+    Both entry seams (``manual.py``, ``csv_import.py``) call this ONE helper so the two
+    cannot drift, which is the same reason the ETF-flag resolution is stated identically
+    in both.
+    """
+    return {"engine": "supplied", "fee": str(fee), "tax": str(tax)}
 
 
 def _cent(value: Decimal) -> Decimal:

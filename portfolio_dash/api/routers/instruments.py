@@ -103,6 +103,9 @@ def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
         "target_low": decimal_str(inst.target_low) if inst.target_low is not None else None,
         "target_high": decimal_str(inst.target_high) if inst.target_high is not None else None,
         "is_etf": inst.is_etf,
+        # AI-D40: True means the flag was never answered (auto-registration), so the UI can
+        # show 待確認 rather than presenting an assumed False as a decision.
+        "etf_flag_unknown": inst.etf_flag_unknown,
         "archived": inst.archived,
         # FU-D32: any permanent ledger history (incl. closed positions) — the watchlist
         # dialog pre-disables 永久移除 (purge) for these (~3 LIMIT-1 queries; fine at scale).
@@ -605,6 +608,12 @@ def update(
     # null = remove the alert) — the old exclude_none silently dropped it, so
     # clearing a target price never worked.
     fields = body.model_dump(exclude_unset=True)
+    if fields.get("is_etf") is not None:
+        # AI-D40: a human just answered the question, so the row stops being unanswered.
+        # Without this the 待確認 issue would keep firing on every sell AFTER the owner
+        # had already told the app the answer — a warning that cannot be cleared is a
+        # warning that gets ignored, which is how the 0.3%/0.1% mistake survives a fix.
+        fields["etf_flag_unknown"] = False
     updated = existing.model_copy(update=fields)
     upsert_instrument(conn, updated)
     # An explicit board set on a TW instrument resolves its board_status (the

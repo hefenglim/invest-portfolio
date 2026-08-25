@@ -18,7 +18,13 @@ from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dateparse import DateCandidate, resolve_date_column
-from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
+from portfolio_dash.data_ingestion.fees import (
+    FeeComputationError,
+    compute_fees,
+    etf_flag_issue_applies,
+    resolve_etf_flag,
+    supplied_snapshot,
+)
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
@@ -184,10 +190,11 @@ def txn_preview_row(
         (inp.account_id,),
     ).fetchone()
     if acc is not None and (fee is None or tax is None):
-        # Registry-authoritative ETF flag (same rule as manual.py — stress-audit
-        # finding 2026-07-15): a registered instrument's is_etf wins; the input
-        # flag only covers unregistered symbols (e.g. an AI draft pre-registration).
-        is_etf = res.instrument.is_etf if res.instrument is not None else inp.is_etf
+        # Registry-authoritative ETF flag + its third state — ONE definition, shared with
+        # manual.py (fees.resolve_etf_flag). Stress-audit 2026-07-15 made the registry win
+        # over the input flag; AI-D40 (2026-08-24) closed the hole underneath it, where the
+        # value SEEDING the registry was an unanswered False.
+        is_etf, etf_unknown = resolve_etf_flag(res.instrument, inp.is_etf)
         # Market-aware fee rule (Batch B): the resolved instrument selects the rule set bound
         # to (account, its market); an unregistered symbol (res.instrument None) keeps the
         # account scalar. Snapshot semantics unchanged (binding mirrors the scalar today).
@@ -218,11 +225,31 @@ def txn_preview_row(
             # Overflow-sized input (M4): a hard row issue, never a 500.
             issues.append(Issue(kind="fee_overflow", message=str(exc)))
         else:
+            if etf_flag_issue_applies(rules, inp.side, etf_unknown):
+                # Narrow on purpose: only when the unresolved flag actually MOVES the tax
+                # (see manual.py — the bulk door must not ship a weaker guard than the
+                # single-row form, nor a noisier one).
+                issues.append(Issue(
+                    kind="etf_flag_unknown", needs_confirm=True,
+                    message="無法判定是否為 ETF,賣出稅率待確認"
+                            "(暫以現股稅率試算,請至標的管理設定)"))
             if fee is None:
                 fee = fr.fee
             if tax is None:
                 tax = fr.tax
-            snap = fr.snapshot
+            snap = dict(fr.snapshot)
+            if etf_unknown:
+                snap["etf_flag"] = "unknown"
+            supplied = [k for k, v in (("fee", inp.fee), ("tax", inp.tax))
+                        if v is not None]
+            if supplied:
+                # PARTIAL auto-fill: the snapshot describes the regime, but one of the
+                # two numbers came from the caller, not from it. Say which.
+                snap["supplied"] = ",".join(supplied)
+    elif fee is not None and tax is not None:
+        # Both supplied (the broker-import shape) — record the provenance instead of
+        # leaving {}, which reads as "no rule applied". See fees.supplied_snapshot.
+        snap = supplied_snapshot(fee, tax)
 
     # Build payload for the writer (string dict + prefixed snapshot entries)
     payload: dict[str, str] = {

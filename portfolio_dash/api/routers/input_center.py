@@ -142,6 +142,7 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             "market": i.market.value,
             "ccy": i.quote_ccy.value,
             "etf": i.is_etf,
+            "etf_unknown": i.etf_flag_unknown,
             "archived": i.archived,
         }
         for i in insts
@@ -535,24 +536,96 @@ def _position_preview(
         if parse_side(body.side) is Side.SELL:
             if held is None:
                 return None
-            # frac / removed mirror build_book's ev.quantity / pos.shares and
-            # pos.adjusted_total × frac EXACTLY (same operands, same order) so the preview
-            # realized == the booked realized row (see the contract-test cross-check).
-            cost_removed = held.adjusted_cost_total * (qty / held.shares)
-            realized_pnl = (gross - fee - tax) - cost_removed
+            # THREE branches, because ``build_book`` has three (review 2026-08-24). The one
+            # below used to be applied to all of them, which invented a realized P&L for two
+            # kinds of trade the ledger books nothing for — measured: +2,000 shown on a short
+            # extension, +9,000 on an undeclared oversell, and 9,000 shown where a declared
+            # partial books 6,000. Anything that mirrors the replay must mirror its BRANCHES,
+            # not just its happy-path formula (domain-ledger.md).
+            long_shares = held.shares if held.shares > _ZERO else _ZERO
+            if body.short_sale:
+                # cost_basis.py: sell the long lot first, then open/extend the short with the
+                # remainder. Note the replay realizes at ``per_share_net × from_long`` — NOT
+                # at (gross − fee − tax) — so a partial declared sell must do the same.
+                from_long = min(qty, long_shares)
+                to_short = qty - from_long
+                per_share_net = (gross - fee - tax) / qty
+                cost_removed = (held.adjusted_cost_total * (from_long / held.shares)
+                                if from_long > _ZERO else None)
+                realized_pnl = (per_share_net * from_long - cost_removed
+                                if cost_removed is not None else None)
+                oversell = False
+                note = ("放空／加空的部分不產生已實現損益，帳本以收到的價金作為空單成本基礎"
+                        if to_short > _ZERO else None)
+            elif qty > held.shares:
+                # Undeclared oversell: the replay discards the position's cost basis and emits
+                # NO realized row (待釐清). A number here would be an invented one.
+                from_long, to_short = held.shares, _ZERO
+                cost_removed = realized_pnl = None
+                oversell = True
+                note = "賣超：成本基礎無法認定，帳本不會產生已實現損益（待釐清）"
+            else:
+                # The ORDINARY branch, byte-identical to before: frac / removed mirror
+                # build_book's ev.quantity / pos.shares and pos.adjusted_total × frac EXACTLY
+                # (same operands, same order) so the preview realized == the booked row.
+                from_long, to_short = qty, _ZERO
+                cost_removed = held.adjusted_cost_total * (qty / held.shares)
+                realized_pnl = (gross - fee - tax) - cost_removed
+                oversell = False
+                note = None
+            # SIGNED, not floored at 0 (changed 2026-08-24): a declared sell that opens a short
+            # leaves -N shares, and every other surface in the app renders an open short that
+            # way. Flooring printed 「0」 for a position the ledger holds.
             remain = held.shares - qty
             return {
                 "kind": "sell",
-                "cost_removed": decimal_str(cost_removed),
-                "realized_pnl": decimal_str(realized_pnl),
-                "remain_shares": decimal_str(remain if remain > _ZERO else _ZERO),
+                "cost_removed": None if cost_removed is None else decimal_str(cost_removed),
+                "realized_pnl": None if realized_pnl is None else decimal_str(realized_pnl),
+                "realized_shares": decimal_str(from_long),
+                "short_opened": decimal_str(to_short) if to_short > _ZERO else None,
+                "oversell": oversell,
+                "note": note,
+                "remain_shares": decimal_str(remain),
                 **_old_position_fields(held),
             }
         all_in = gross + fee + tax
         held_shares = held.shares if held is not None else _ZERO
         held_original = held.original_cost_total if held is not None else _ZERO
         held_adjusted = held.adjusted_cost_total if held is not None else _ZERO
-        new_shares = held_shares + qty  # qty > 0 guaranteed, so never a zero divisor
+        new_shares = held_shares + qty
+        if held_shares < _ZERO:
+            # A buy against an open short COVERS it first (cost_basis.py, owner rule
+            # 2026-07-31); it does not average into a long lot. The old line below assumed a
+            # non-negative holding — its "qty > 0 guaranteed, so never a zero divisor" comment
+            # was false (an exact cover makes new_shares 0, which the ArithmeticError catch
+            # then swallowed into a blank preview) and its averages blended the short's
+            # proceeds with the buy's cost, which is not a quantity the ledger ever holds.
+            short_shares = -held_shares
+            short_avg = held_original / held_shares      # neg/neg — the average sale price
+            cover = min(qty, short_shares)
+            per_share = all_in / qty
+            to_long = qty - cover
+            realized_cover = (short_avg - per_share) * cover
+            if to_long > _ZERO:
+                # Short fully covered; the leftover starts its long life at THIS buy's cost.
+                new_original = new_adjusted = per_share * to_long
+            else:
+                # Still short: the remaining proceeds, reduced pro rata by what was covered.
+                new_original = held_original + short_avg * cover
+                new_adjusted = held_adjusted + short_avg * cover
+            return {
+                "kind": "buy",
+                "new_shares": decimal_str(new_shares),
+                # Flat after an exact cover — no position, so no average to state.
+                "new_original_avg": (decimal_str(new_original / new_shares)
+                                     if new_shares != _ZERO else None),
+                "new_adjusted_avg": (decimal_str(new_adjusted / new_shares)
+                                     if new_shares != _ZERO else None),
+                "covered_shares": decimal_str(cover),
+                "realized_pnl": decimal_str(realized_cover),
+                "note": "回補空單：以本次每股成本結算，剩餘股數以本次成本為起點",
+                **_old_position_fields(held),
+            }
         return {
             "kind": "buy",
             "new_shares": decimal_str(new_shares),
@@ -695,7 +768,13 @@ def manual_commit(
                 field="account_id"))
         try:
             outcome = quick_register(
-                conn, symbol=body.symbol, market=market, now=now, force=False)
+                conn, symbol=body.symbol, market=market, now=now, force=False,
+                # AI-D40, stated rather than omitted: this door has no ETF answer to give,
+                # and the old silent default WAS an answer — an authoritative False, because
+                # the fee seams treat the registry as authoritative. None records "unknown",
+                # which surfaces as a soft issue on the first TW sell instead of quietly
+                # charging the 現股 rate on an ETF.
+                is_etf=None)
         except QuickRegisterError as exc:
             if exc.code != "duplicate_symbol":  # duplicate = registered meanwhile -> proceed
                 return JSONResponse(status_code=400, content=error_body(

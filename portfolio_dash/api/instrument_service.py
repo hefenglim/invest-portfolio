@@ -225,7 +225,7 @@ def restore_archived(
     board: str | None = None,
     quote_ccy: Currency | None = None,
     target_low: Decimal | None = None,
-    is_etf: bool = False,
+    is_etf: bool | None = None,
 ) -> Instrument:
     """Un-archive an already-registered archived instrument and apply any provided metadata
     overrides (FU-D18 restore doors b/c). Caller-supplied non-empty values win; omitted
@@ -239,7 +239,12 @@ def restore_archived(
             "board": board if board is not None else existing.board,
             "quote_ccy": quote_ccy or existing.quote_ccy,
             "target_low": target_low if target_low is not None else existing.target_low,
-            "is_etf": is_etf or existing.is_etf,
+            # AI-D40: None means "the caller did not answer", so the archived row keeps
+            # whatever it knew — including its own unknown marker. A real bool is an
+            # answer and clears the marker.
+            "is_etf": bool(is_etf) or existing.is_etf,
+            "etf_flag_unknown": (existing.etf_flag_unknown if is_etf is None
+                                 else False),
         }
     )
     upsert_instrument(conn, merged)  # never touches ``archived`` (owned by the flag setter)
@@ -336,7 +341,7 @@ def quick_register(
     board: str | None = None,
     quote_ccy: Currency | None = None,
     target_low: Decimal | None = None,
-    is_etf: bool = False,
+    is_etf: bool | None = None,
     force: bool = False,
     backfill_history: bool = True,
 ) -> QuickRegisterOutcome:
@@ -422,7 +427,13 @@ def quick_register(
     inst = Instrument(
         symbol=sym, market=market, quote_ccy=quote_ccy or _DEFAULT_CCY[market],
         sector=sector, name=resolved_name, board=resolved_board or "",
-        target_low=target_low, is_etf=is_etf,
+        target_low=target_low, is_etf=bool(is_etf),
+        # AI-D40: the DEFAULT is now None = "nobody answered". The auto-register path in
+        # api/routers/input_center.py reaches here without an ETF answer, and the old
+        # ``False`` default made that silence mean "not an ETF" — authoritatively, because
+        # the fee seams treat the registry as authoritative. Explicit registration (the
+        # instruments form) always passes a real bool, so it is unaffected.
+        etf_flag_unknown=is_etf is None,
     )
     register_instrument(conn, inst, prober=None, confirm=True)
 

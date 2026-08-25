@@ -1315,8 +1315,12 @@
       result.appendChild(kv('稅', f.money(r.tax, ccy)));
       if (mode === 'sell') {
         result.appendChild(kv('淨收款', f.money(r.proceeds_net, ccy) + ' ' + ccy));
+        /* realized / adjusted_cost_removed are NULL when the sell exceeds the holding: the
+           declared-short and 賣超 readings book different amounts and this drawer is not told
+           which (review 2026-08-24). f.* renders the null glyph; realized_note carries the
+           server's wording for the fork — web never composes that sentence itself. */
         result.appendChild(kv('調整成本移除', f.money(r.adjusted_cost_removed, ccy)));
-        result.appendChild(kv('已實現損益', f.signed(r.realized, ccy) + ' ' + ccy, f.signClass(r.realized)));
+        result.appendChild(kv('已實現損益', f.signed(r.realized, ccy) + (r.realized == null ? '' : ' ' + ccy), f.signClass(r.realized)));
         result.appendChild(kv('剩餘股數', f.shares(r.remaining_shares)));
         result.appendChild(kv('剩餘市值', f.money(r.remaining_market_value, ccy) + ' ' + ccy));
       } else {
@@ -1328,6 +1332,8 @@
       if (mode === 'sell' && r.oversell) {
         parts.push('⚠ 賣出股數超過持有 — 實際寫入時將要求確認（輸入錯誤或放空）');
       }
+      if (r.realized_note) parts.push(r.realized_note);
+      if (r.etf_flag_note) parts.push(r.etf_flag_note);
       note.textContent = parts.join('。');
     }
 

@@ -196,7 +196,10 @@ def _aggregate_position(
 
     original_avg = original_total / total_shares if total_shares != _ZERO else _ZERO
     adjusted_avg = adjusted_total / total_shares if total_shares != _ZERO else _ZERO
-    payback = dividend_portion / original_total if original_total != _ZERO else _ZERO
+    # abs(): same guard, same reason as unrealized_pct below — a short leg contributes a
+    # NEGATIVE basis, so a signed sum can shrink or flip the denominator and print a
+    # position that really returned 30% of its cost as -7.5% 回本進度 (review 2026-08-24).
+    payback = dividend_portion / abs(original_total) if original_total != _ZERO else _ZERO
     # Aggregate unrealized % on the SAME basis as the per-holding figure (audit H1):
     # Σ unrealized / Σ original cost. Server-side Decimal; the drawer only prints it.
     unrealized_sum = _sum(ur) if ur else None

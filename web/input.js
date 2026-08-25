@@ -599,16 +599,33 @@
          rows simply do not render). A SELL leaves the averages unchanged (no new_*_avg), so
          those pairs show old == old; a fresh BUY has null old_* → old renders as「—」. */
       const pp = preview.position_preview;
+      /* cost_removed / realized_pnl are NULL on the two branches the ledger books no realized
+         row for — extending a short, and an undeclared 賣超 (review 2026-08-24). f.* renders
+         the null glyph; pp.note carries the server's explanation. The ccy suffix is dropped on
+         a null so the row reads「—」and not「— USD」. */
+      const amt = (v) => f.money(v, ccy) + (v == null ? '' : ' ' + ccy);
+      const sgn = (v) => f.signed(v, ccy) + (v == null ? '' : ' ' + ccy);
       if (pp && pp.kind === 'sell') {
         pcPair('持股', f.shares(pp.old_shares), f.shares(pp.remain_shares));
         pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.old_original_avg, ccy));
         pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.old_adjusted_avg, ccy));
-        pcRow('調整成本移除', f.money(pp.cost_removed, ccy) + ' ' + ccy);
-        pcRow('已實現損益', f.signed(pp.realized_pnl, ccy) + ' ' + ccy, f.signClass(pp.realized_pnl));
+        pcRow('調整成本移除', amt(pp.cost_removed));
+        pcRow('已實現損益', sgn(pp.realized_pnl), f.signClass(pp.realized_pnl));
+        if (pp.short_opened) pcRow('開／加空股數', f.shares(pp.short_opened));
       } else if (pp && pp.kind === 'buy') {
         pcPair('持股', f.shares(pp.old_shares), f.shares(pp.new_shares));
         pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.new_original_avg, ccy));
         pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.new_adjusted_avg, ccy));
+        if (pp.covered_shares) {
+          pcRow('回補空單股數', f.shares(pp.covered_shares));
+          pcRow('已實現損益', sgn(pp.realized_pnl), f.signClass(pp.realized_pnl));
+        }
+      }
+      if (pp && pp.note) {
+        const n = el('div', 'pc-row');
+        n.style.opacity = '.8';
+        n.textContent = pp.note;
+        rows.appendChild(n);
       }
       /* R6-E: DISPLAY-ONLY account cash line + R7 A3 交易後現金 (A4 rename; owner-signed: no gating).
          Visually separated from the what-if rows; both use the SAME dynamic ccy label (ac.ccy);

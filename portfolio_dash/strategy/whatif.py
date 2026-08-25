@@ -121,7 +121,11 @@ def compute_whatif(
     Raises:
         WhatIfError: symbol is unheld and no *account_id* was given (cannot infer account).
     """
-    from portfolio_dash.data_ingestion.fees import compute_fees  # local: avoid cycle risk
+    from portfolio_dash.data_ingestion.fees import (  # local: avoid cycle risk
+        compute_fees,
+        etf_flag_issue_applies,
+        resolve_etf_flag,
+    )
     from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 
     # 1. Ledgers — the same bundle build_dashboard step 1 loads.
@@ -161,9 +165,10 @@ def compute_whatif(
     held_shares = held.shares if held is not None else _ZERO
     held_orig_total = held.original_cost_total if held is not None else _ZERO
     held_adj_total = held.adjusted_cost_total if held is not None else _ZERO
-    held_adj_avg = (held_adj_total / held_shares) if held_shares > _ZERO else _ZERO
 
-    is_etf = inst.is_etf if inst is not None else False
+    # AI-D40: the same resolver both write doors use, so the drawer cannot quote a rate the
+    # ledger would flag. ``inst`` is the registry row; an unregistered symbol is unanswered.
+    is_etf, etf_unknown = resolve_etf_flag(inst, False)
 
     # 3. Fee/tax via the REAL engine — never re-implement the math. FE-D2 estimate path:
     # resolve the current USD/MYR rate for a Moomoo US MY stamp (silent omit if unavailable).
@@ -209,13 +214,33 @@ def compute_whatif(
     else:  # SELL
         oversell = shares > held_shares
         proceeds_net = amount - fee - tax
-        adjusted_cost_removed = held_adj_avg * shares
-        realized = proceeds_net - adjusted_cost_removed
         remaining_shares = held_shares - shares
+        realized_note: str | None = None
+        if oversell:
+            # The drawer has no 放空 declaration to read, and the two possible readings book
+            # DIFFERENT realized amounts: a declared short realizes only the long portion and
+            # opens a short lot for the rest, while an undeclared oversell discards the cost
+            # basis entirely and books NOTHING (待釐清). Guessing either one prints a number
+            # the ledger will not produce — this drawer showed the full proceeds as profit,
+            # because held_adj_avg is 0 whenever held_shares <= 0 (review 2026-08-24, where
+            # the same trade got +3,000 here and +500 on the manual form: one app, two
+            # answers). So: state the fork, give no figure.
+            adjusted_cost_removed = realized = None
+            realized_note = (
+                "賣出股數超過持股：若為宣告放空，僅持有的部分結算已實現，其餘開立空單不產生"
+                "已實現；若為賣超，成本基礎無法認定，帳本不會產生已實現損益（待釐清）。"
+                "請用交易登錄頁勾選放空後檢視實際結果。")
+        else:
+            # Totals × frac, in build_book's own operand order — NOT avg × shares, which
+            # re-divides and can differ from the booked row in the last digit.
+            adjusted_cost_removed = held_adj_total * (shares / held_shares)
+            realized = proceeds_net - adjusted_cost_removed
         out.update(
             proceeds_net=str(proceeds_net),
-            adjusted_cost_removed=str(adjusted_cost_removed),
-            realized=str(realized),
+            adjusted_cost_removed=(None if adjusted_cost_removed is None
+                                   else str(adjusted_cost_removed)),
+            realized=None if realized is None else str(realized),
+            realized_note=realized_note,
             remaining_shares=str(remaining_shares),
             oversell=oversell,
         )
@@ -226,6 +251,11 @@ def compute_whatif(
     new_weight, old_weight, current_price = _new_weight(
         conn, now=now, reporting=reporting, symbol=symbol, inst=inst,
         held=held, result_shares=result_shares)
+    if etf_flag_issue_applies(rules, side, etf_unknown):
+        out["etf_flag_note"] = ("無法判定是否為 ETF,此試算暫以現股稅率計算,"
+                                "實際稅率待你在標的管理確認")
+    else:
+        out["etf_flag_note"] = None
     out["new_weight"] = new_weight
     out["old_weight"] = old_weight
     if side is Side.SELL:

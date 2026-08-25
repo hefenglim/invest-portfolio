@@ -119,13 +119,15 @@ def upsert_instrument(
     new_stamp = stamp if (low is not None or high is not None) else None
     conn.execute(
         """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board,
-               target_low, target_high, is_etf, industry, target_set_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               target_low, target_high, is_etf, etf_flag_unknown, industry,
+               target_set_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(symbol) DO UPDATE SET
                market=excluded.market, quote_ccy=excluded.quote_ccy,
                sector=excluded.sector, name=excluded.name, board=excluded.board,
                target_low=excluded.target_low, target_high=excluded.target_high,
-               is_etf=excluded.is_etf, industry=excluded.industry,
+               is_etf=excluded.is_etf, etf_flag_unknown=excluded.etf_flag_unknown,
+               industry=excluded.industry,
                target_set_at=CASE
                    WHEN instruments.target_low IS NOT excluded.target_low
                      OR instruments.target_high IS NOT excluded.target_high
@@ -138,6 +140,7 @@ def upsert_instrument(
             low,
             high,
             1 if inst.is_etf else 0,
+            1 if inst.etf_flag_unknown else 0,
             inst.industry,
             new_stamp,
         ),
@@ -241,6 +244,7 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         target_low=from_db(row["target_low"]) if row["target_low"] else None,
         target_high=from_db(row["target_high"]) if row["target_high"] else None,
         is_etf=bool(row["is_etf"]),
+        etf_flag_unknown=bool(row["etf_flag_unknown"]),
         archived=bool(row["archived"]),
         industry=row["industry"],
         target_set_at=(
@@ -253,7 +257,8 @@ def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, archived, industry, target_set_at FROM instruments WHERE symbol=?",
+        "is_etf, etf_flag_unknown, archived, industry, target_set_at "
+        "FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
     return _row_to_instrument(row) if row is not None else None
@@ -266,7 +271,7 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
     so no money figure is affected by archiving)."""
     rows = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, archived, industry, target_set_at FROM instruments"
+        "is_etf, etf_flag_unknown, archived, industry, target_set_at FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
 

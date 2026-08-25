@@ -144,10 +144,91 @@ branch introduced (`confidence_ceiling`, W7.1); the other thirteen predate W1. O
 absent-bucket 70 with `overall_hit_rate + 5`, and record violation rates instead of clamping),
 **AI-D40** (`is_etf` becomes three-state: never guess, mark unknown, ask), **AI-D41** (total
 return is presented as A · B · B−A — asset P&L, FX-complete P&L, and the principal-FX effect
-between them — never summed), **AI-D42** (four cash-movement kinds enter XIRR; capital movements
-do not), **AI-D43** (`convert_closes` IS permitted for the benchmark counterfactual — AI-D23
-parked it for the scoring legs, where both sides are same-currency; here FX is the substance).
+between them — never summed), **AI-D42** (the three cash-movement kinds that are COSTS OF
+TRADING AND FINANCING — `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` — enter XIRR; capital
+movements and idle-cash interest do not), **AI-D43** (`convert_closes` IS permitted for the
+benchmark counterfactual — AI-D23 parked it for the scoring legs, where both sides are
+same-currency; here FX is the substance).
+
+⚠ **AI-D42 reverses the owner's own earlier ruling `D1 = A` (2026-08-13)**, which made "cash
+movements never enter XIRR" an explicit rule and re-confirmed it for the three kinds added
+with the broker importer. Neither the four-lens review nor my first framing of the choice
+surfaced that conflict — it turned up while writing the manual entry, and the owner ruled
+again knowing it. The second ruling also drew a sharper line than the option offered: idle-cash
+`INTEREST` is EXCLUDED, because the principal earning it was never in XIRR's denominator, so
+crediting its income to the numerator is asymmetric. `D12`'s 重組費 is booked as a `WITHDRAW`,
+so that named standing limitation is untouched. The superseded text stays in the manual,
+annotated — why a decision was once made the other way is part of the record.
+
 The programme stays on `feat/corporate-actions` — not merged, not tagged, `__version__` 0.1.28.
+### Fixed — investment-logic review, wave R1 (entry, display and export; no ledger figure moves)
+
+Five defects that all shared one shape: **the arithmetic was right and the question was wrong.**
+None of them changes a number the ledger already holds — R1 touches only what gets computed at
+the door, shown on a screen, or written into an export.
+
+- **A TW ETF's first manual trade was taxed at three times the correct rate** (AI-D40). The
+  2026-07-15 stress audit made the instrument registry authoritative for `is_etf` at both fee
+  seams and left a comment at each saying so — but nothing guarded the value that *seeds* the
+  registry. `quick_register` defaulted `is_etf=False` and the manual door's auto-registration
+  never passed the argument at all, so a symbol first seen by trading it was permanently
+  recorded as not-an-ETF: 現股 0.3% instead of ETF 0.1%, with `tax_rate: 0.003` written into
+  `fee_rule_snapshot` as though it had been established. On a NT$110,000 sell that is NT$220.
+  The fix is the third state, not a better guess — `instruments.etf_flag_unknown` (additive
+  column; existing rows migrate in as *known*, and nothing reaches back to relabel them). The
+  engine still computes with False because a number has to come out, but raises a soft
+  `etf_flag_unknown` issue **only where the answer moves money** (a TW SELL whose rule set
+  prices the two differently — a buy carries no TW transaction tax, and noise is how a real
+  warning gets clicked through). Answering the flag on the instruments form clears the marker.
+  `fees.resolve_etf_flag` is the one definition both write doors read, so the bulk door can
+  never ship a weaker guard than the single-row form. `scripts/audit_etf_flags.py` (READ-ONLY)
+  lists TW rows that may need a human answer, ranked by whether the flag has already priced a
+  real sell — it reports and stops, because a script that "corrects" a ledger by guessing is
+  the same defect wearing a repair badge.
+  ⚠ The review's proposed fix — "pass one argument" — was under-specified: the manual body has
+  no `is_etf` field to forward (`input_center.py` says so in a comment), which is why the third
+  state had to be persisted rather than plumbed.
+- **The sell preview invented a realized P&L for trades the ledger books nothing for.**
+  `_position_preview`'s docstring claimed it "replicates build_book's OWN sell arithmetic
+  exactly … bit-for-bit". True of the ORDINARY branch it was written against, and only that
+  one: `build_book` has since grown the declared short (a sell realizes only the long portion;
+  the remainder opens a short lot) and the acked oversell (basis discarded, **no** realized
+  row). Measured: **+2,000 shown on a short extension and +9,000 on an undeclared oversell,
+  where the ledger books nothing**, and 9,000 shown where a declared partial books 6,000 —
+  while the holdings column two rows above honestly printed 「—」. The drawer's 試算 gave a
+  *third* answer for the same trade (+3,000), because its `held_adj_avg` collapses to 0 on a
+  negative share count, making the whole proceeds look like profit. The preview now mirrors the
+  replay's **branches**, and a parametrised contract test replays each hypothetical through
+  `build_book` and demands agreement — so a fourth branch fails on its own. The drawer, which
+  has no 放空 declaration to read, states the fork instead of picking one.
+  The same seam's BUY side is fixed with it: a buy against an open short **covers** it (owner
+  rule 2026-07-31) rather than averaging the short's proceeds into a long lot, and an exact
+  cover now reads 「已回補」 instead of dividing by zero into a blank card. The comment claiming
+  "qty > 0 guaranteed, so never a zero divisor" was false and is gone.
+- **回本進度 could print a negative percentage on a position that had recovered 30% of its
+  cost.** `domain-ledger.md` already requires every ratio over the basis to divide by
+  `abs(cost_total)`, and `unrealized_pct` six lines away obeys it with a comment explaining
+  why; `payback_ratio` predates the declared-short work and was never revisited. An open short
+  contributes a NEGATIVE basis, so the cross-account aggregate's signed sum shrinks or flips
+  the denominator.
+- **The tax package declared the year's dividends twice** (AI-D41's sibling). Its realized
+  subtotal was the *performance* figure — proceeds minus the **adjusted** cost, which the
+  locked 2026-06-06 model has already reduced by cash dividends — printed next to a dividends
+  sheet declaring those same dividends as income. `original_cost_removed` was already a column;
+  nothing subtotalled it. The sheet now leads with `realized_original` (the filing figure) and
+  keeps `realized_adjusted` beside it, labelled, for reconciliation against the dashboard.
+  ⚠ The review's worked example for this one was wrong — the post-close-dividend row it cited
+  is explicitly filtered at `export/tax.py`. The conclusion survived the example.
+- **Every broker-imported row carried an empty `fee_rule_snapshot`.** `csv_import` only
+  snapshots a fee or tax it had to compute, and a broker statement supplies both (the fee
+  verbatim, the tax a literal `"0"`), so the auto-fill branch never fired and `{}` was
+  indistinguishable from "no rule was applied". 重算 never needed it — `cost_basis.py` reads
+  `ev.fees`/`ev.tax` off the row — which is exactly why the silence went unnoticed: nothing
+  computed wrong, the provenance just was not there. Supplied rows now record
+  `{"engine": "supplied", …}`; a partially auto-filled row names which of the two numbers came
+  from the caller. `broker/convert.py`'s refusal to recompute is deliberate and unchanged.
+  ⚠ A second review claim here did not survive: 重算 does **not** depend on the snapshot, so
+  this is a provenance gap, not a correctness one.
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
   that synthesize the owner's holding × technicals × the rule-signal engine × news × analyst

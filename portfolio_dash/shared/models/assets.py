@@ -53,6 +53,12 @@ class Instrument(BaseModel):
     # claim" rather than as "old".
     target_set_at: date | None = None
     is_etf: bool = False  # single source of truth for ETF (never derive from sector)
+    # AI-D40 (2026-08-24): ``is_etf`` alone could not say "nobody has answered this yet",
+    # so auto-registration silently meant "not an ETF" and a TW ETF was taxed at 現股 0.3%
+    # instead of 0.1% on its first manual sell. When this is True the flag is UNSET, not
+    # False: the fee engine still computes with False (a number must come out) but raises
+    # ``etf_flag_unknown`` on a TW SELL so the rate is disclosed rather than assumed.
+    etf_flag_unknown: bool = False
     archived: bool = False  # FU-D13: stop-tracking flag; stays registered, off fetch scopes
     industry: str | None = None  # GICS industry (R6): nullable free text, filled by the
     # next wave's AI service; backend plumbing only this wave (no frontend form yet).

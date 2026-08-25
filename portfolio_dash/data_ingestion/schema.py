@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS instruments (
     sector TEXT, name TEXT, board TEXT,
     target_low TEXT, board_status TEXT NOT NULL DEFAULT 'resolved',
     is_etf INTEGER NOT NULL DEFAULT 0,
+    etf_flag_unknown INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
     target_high TEXT,
     industry TEXT,
@@ -125,6 +126,13 @@ def create_tables(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "instruments", "target_low", "TEXT")
     _add_column_if_missing(conn, "instruments", "board_status", "TEXT NOT NULL DEFAULT 'resolved'")
     _add_column_if_missing(conn, "instruments", "is_etf", "INTEGER NOT NULL DEFAULT 0")
+    # etf_flag_unknown (AI-D40, 2026-08-24): the THIRD state of the ETF flag. is_etf is a
+    # NOT NULL boolean and SQLite cannot relax that without a table rebuild, so "unknown"
+    # rides alongside as an additive column instead. Existing rows migrate in as 0 =
+    # KNOWN, which is the owner ruling verbatim: only FUTURE auto-registrations land
+    # unknown; nothing reaches back and re-labels what is already in the ledger.
+    _add_column_if_missing(
+        conn, "instruments", "etf_flag_unknown", "INTEGER NOT NULL DEFAULT 0")
     # archived (FU-D13): a closed-with-history symbol the user stopped tracking. Excluded
     # from quote/signal/news fetch scopes but stays REGISTERED, so no money figure changes.
     _add_column_if_missing(conn, "instruments", "archived", "INTEGER NOT NULL DEFAULT 0")
