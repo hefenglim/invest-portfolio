@@ -104,6 +104,33 @@ for touched cash pools and newly-registered instruments. It never deletes pre-ex
 demo data. No FX rates are exposed remotely, so reporting-currency blended KPIs (incl.
 XIRR) are out of phase-2 scope; every native-currency figure is still reconciled exactly.
 
+### 6. What this harness does NOT compare: point-in-time state (disclosed 2026-08-26)
+
+Every reconciliation runs **at the current state** — `/api/dashboard` holdings, realized rows,
+cash pools and KPIs against `oracle.replay(facts)`. There is no assertion family that compares
+the app and the oracle **as at a past date**, because the oracle has no daily replay: it
+produces one final `OracleResult`, not a series.
+
+That gap is not academic, and R6 (the ex-dividend date) is the case that exposed it. A STOCK
+dividend booked on its ex-date rather than its payment date changes the share count **only
+between those two dates** — the final position is identical either way by construction. So the
+scenario's permanent 配股 op genuinely exercises the app's ex-date path (verified: 1,700 vs
+1,600 shares on 2026-05-15 with and without the column) while every assertion in this harness
+compares a point where the two answers coincide. `fail=0` on that run is therefore silent about
+the ex-date's TIMING, and reading it as coverage would be exactly the "agree by both never
+running it" trap the accumulation rule exists to prevent.
+
+What does cover it today: hermetic hand-checked tests
+(`tests/portfolio/test_review_r6_ex_date.py`) that walk the share count day by day, plus the
+regression pin that a `NULL` ex_date replays byte-identically. The oracle derives the same
+STOCK-only rule independently (`DivFact.effective`), but that derivation is currently reviewed,
+not reconciled.
+
+**Closing it** means giving the oracle a point-in-time replay (`replay_through(facts, day)`)
+and adding a `trend.*` family that walks the app's `trend.points` against it. That is the right
+next extension of this harness; until it exists, any feature whose effect is confined to a
+window between two dates must say so here rather than lean on a green run.
+
 ## Must-pass assertion families
 
 A run is only green when **all** of these hold (exact Decimal unless noted):
