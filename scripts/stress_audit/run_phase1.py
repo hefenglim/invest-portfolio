@@ -132,11 +132,23 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     #     account that never left a conversion unbased must still report a ratio of exactly 1
     #     after being paid interest. Booking it as an unbased acquisition would raise a FALSE
     #     "basis incomplete" flag over the whole foreign exposure, cash AND stocks (F3).
-    # None of the three enters XIRR (D1=A) — ``xirr_reporting`` does not take cash movements
-    # at all, so that is held by its signature rather than by a filter these rows could slip.
+    # XIRR (AI-D42, 2026-08-24 — this paragraph SUPERSEDES the D1=A note that stood here, and
+    # the claim it rested on: ``xirr_reporting`` now DOES take cash movements, so the guarantee
+    # is no longer "held by the signature"). The four rows below straddle the new line, which
+    # is why all four are here rather than only the ones that count:
+    #   * ``rebate`` / ``interest_expense`` / ``broker_fee`` — costs of TRADING and FINANCING;
+    #     they enter the flow series and the oracle must reproduce each sign independently.
+    #   * ``interest`` — pool income, but the principal earning it never entered XIRR's
+    #     denominator, so it stays OUT. A test that only covered the included kinds could not
+    #     tell a correct exclusion from a forgotten one.
+    # ``rebate`` is the row that matters most and had no coverage until now: FE-D1's
+    # charge-first model refunds 77% of a TW commission next month, which is 0.229% of capital
+    # per round trip and the owner's ordinary billing — the single largest figure this change
+    # makes visible.
     op.cash_move("schwab", "interest", "USD", "2026-06-27", "12.34")
     op.cash_move("schwab", "interest_expense", "USD", "2026-06-28", "5.67")
     op.cash_move("schwab", "broker_fee", "USD", "2026-06-29", "8.90")
+    op.cash_move("schwab", "rebate", "USD", "2026-06-30", "21.50")
 
     buy("B14", "schwab", "MSFT", "2026-05-05", 20, 410)
     sell("S7", "schwab", "MSFT", "2026-06-05", 10, 420)

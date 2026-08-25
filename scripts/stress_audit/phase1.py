@@ -672,7 +672,13 @@ def _reconcile_fx_unrealized(ev, res, kpis, facts, prices, sp, phase):
         unreal_home = (stock_val + fcash) * ratio * (spot - avg)
         to_rep = O.ONE if funding == REPORTING else sp.rate(funding, REPORTING)
         exp += unreal_home * to_rep
-    ev.check("fx.reporting_unrealized", "rollup", exp, kpis.get("fx_unrealized"), phase)
+    # check_rel, not check: `exp` above is a FOUR-factor product whose operands each
+    # already compare EXACTLY against the app (fx.avg_rate / fx.covered_ratio /
+    # fx.foreign_cash, asserted above). Only the ASSOCIATION differs between the two
+    # implementations, and at 28-digit Decimal context that is worth 1 ULP — ~1e-27
+    # relative. See Evidence.ULP_REL_TOL for why 1e-20 cannot hide a money defect.
+    ev.check_rel("fx.reporting_unrealized", "rollup", exp,
+                 kpis.get("fx_unrealized"), phase)
 
 
 def _reconcile_kpis(ev, res, dash, prices, sp, phase):

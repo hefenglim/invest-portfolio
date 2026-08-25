@@ -122,6 +122,59 @@ class Evidence:
             self.fails.append(rec)
         return ok
 
+    #: Relative tolerance for the ONE structural case exact equality cannot express:
+    #: two independent implementations multiplying the SAME operands in a DIFFERENT
+    #: ASSOCIATION. ``Decimal`` carries 28 significant digits, so ``(a*b)*c`` and ``a*(b*c)``
+    #: can land 1 ULP apart — ~1e-27 relative — while every input compares byte-identical.
+    #:
+    #: 1e-20 sits SEVEN orders above that noise and TWELVE orders below the smallest error
+    #: that could mean anything (a rate is stored to 6 dp, money to 2). It cannot absorb a
+    #: money defect; it can only absorb the last digit of a quotient. Deliberately NOT
+    #: ``XIRR_TOL`` (1e-6 ABSOLUTE): that is loose enough to hide a real cent, and it is
+    #: disclosed for a root-find, which this is not.
+    #:
+    #: ⚠ Do NOT reach for this to make a stubborn check pass. If the OPERANDS differ, the
+    #: disagreement is real and this will not save you — which is the point.
+    ULP_REL_TOL: Decimal = Decimal("1e-20")
+
+    def check_rel(self, check: str, scope: str, expected: Any, actual: Any,
+                  phase: str = "", rel_tol: Decimal | None = None) -> bool:
+        """Assertion for a value whose two derivations differ only in MULTIPLICATION ORDER.
+
+        Found 2026-08-24 by a new scenario op: adding a ``rebate`` (an FX acquisition) turned
+        ``covered_ratio`` from a clean value into a 28-digit repeating one, and the rollup
+        ``(stock + cash) * ratio * (spot - avg) * to_rep`` then differed between oracle and app
+        in the 27th significant digit — while ``fx.avg_rate``, ``fx.covered_ratio`` and
+        ``fx.foreign_cash`` each still compared EXACTLY. The operands agreed; only the
+        association differed.
+
+        The oracle is NOT re-ordered to match the app: computing it differently is the only
+        reason an independent oracle is worth having, and association is not where money bugs
+        live. Both raw values stay in the evidence line.
+        """
+        tol = self.ULP_REL_TOL if rel_tol is None else rel_tol
+        de, da = _as_decimal(expected), _as_decimal(actual)
+        if de is None or da is None:
+            ok = expected is None and actual is None
+            delta = None
+            allowed = None
+        else:
+            delta = abs(de - da)
+            allowed = abs(de) * tol
+            ok = delta <= allowed
+        rec = {"check": check, "scope": scope, "phase": phase,
+               "expected": _sval(expected), "actual": _sval(actual),
+               "rel_tol": _sval(tol), "allowed": _sval(allowed),
+               "delta": _sval(delta), "pass": ok}
+        with self.assertions.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if ok:
+            self.n_pass += 1
+        else:
+            self.n_fail += 1
+            self.fails.append(rec)
+        return ok
+
 
 def _jsonable(v: Any) -> Any:
     try:
