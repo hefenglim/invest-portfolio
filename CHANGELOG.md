@@ -335,6 +335,73 @@ mypy error and a `TypeError`.
   was silently DROPPED by Pydantic's default and three new tests went green against a
   measurement that did not contain what they asserted. This model is the input to a scored,
   permanently stored verdict — an unknown field must fail loudly.
+
+- **The evidence windows outran the horizon they were cited to support** (review ⑪). The
+  advice card hands the model `signal_backtest_json` to back a DIRECTIONAL claim, and that
+  claim is then graded over the card's own prediction horizon — 14 CALENDAR days on the
+  official template. The study only ever measured **+20/+60/+120 TRADING days**, so the
+  assistant cited a +20-session distribution in support of a 14-day call: two different
+  questions, one quietly substituted for the other. `FORWARD_WINDOWS` now LEADS with **+10**
+  (≈14 calendar days); the longer windows all stay, because 「and then what?」 is a real and
+  separate question. The scoring contract is untouched.
+  Worth naming: right-censoring is monotone in window length, so the aligned window is also
+  the **best-sampled** one — the question the card is graded on is the one the data can
+  answer most often, not least. Three prompt bodies described the old window set verbatim;
+  leaving them would have made the instruction and the payload disagree, which is the same
+  defect class as AI-D2's two `ma_cross` definitions. `LIBRARY_VERSION` → `official-v18`,
+  持倉建議 v3.2 / 個股健檢 v2.8. The unreleased v0.1.29 what's-new entry also still
+  advertised the gap-based auto-adjustment that AI-D39 had already removed — corrected.
+
+- **The signals said 「資料基準＝今天」 over data that was days old** (review ⑬). `signal_history`
+  had always stamped its rows with the PRICE date. `signal_states` and the `/api/signals` wire
+  did not — both used `now.date()`. So on any day a provider had not delivered, the drawer and
+  `rule_signals_json` announced today as the basis, and the prompt 守則 (「資料基準 {{as_of}} —
+  在卡首標注基準日」) faithfully copied that wrong date onto the card. **The golden fixture was
+  itself an instance:** `GOLDEN_NOW` is 2026-06-11 while its newest close is 2026-06-09, and a
+  contract test had been pinning the wall-clock answer since it was written. `as_of` is now the
+  DATA date, `null` when a symbol has no prices at all (an honest gap beats a confident wrong
+  date), and `evaluated_at` keeps the wall clock — the two fields were always two facts.
+  ⚠ This restores the third return value of `_read_series` that W7 step 0(b) removed as dead
+  code. It WAS dead then; it is load-bearing now, and the docstring says so, because otherwise
+  the next dead-code pass removes it again. It returns a named dataclass rather than a bare
+  tuple so the third element identifies itself at every call site. `to_wire`'s `price_as_of`
+  has **no default** — the injection rule: forgetting it is a mypy error and a `TypeError`,
+  never a silent fallback to the wall clock, which is the defect the parameter exists to close.
+  There is also no scan-wide `as_of` any more: each symbol is stamped with its own last close,
+  so a market that has not delivered cannot borrow a fresher market's basis date.
+- **`freshness_json` covered prices and FX while four templates told the model to check
+  everything against it** (review ⑬, second half). It now carries a `sources` block — one row
+  per fed external variable with its `last_as_of`, `age_days`, and whether it degraded —
+  derived from the payloads the router **already built** (every producer stamps `last_as_of`),
+  so it costs no extra query. `FreshnessReport` itself is untouched: it is a pure function of
+  ledger + prices + FX and has no business knowing about news or fundamentals; the extension
+  rides the router-fed `VarContext` convention that `fx_rates` established.
+  ⚠ Deliberately **no invented staleness verdict**. A price has a market calendar to be judged
+  against; a fundamentals snapshot does not, and picking a 「good for N days」 threshold would be
+  exactly the guess this project forbids everywhere else. The date is reported; the judgement
+  belongs in the prompt, and the four 守則 now say so.
+
+- **Nothing recorded whether the model obeyed its own confidence ceiling** (AI-D38 step three).
+  Steps (a) and (b) fixed the ceiling's arithmetic; the accountability half was still missing,
+  and a rule with no measurement is a suggestion — W7.1's first live run had 0 of 13 cards obey
+  a comparable one. `insights` gains `ceiling_at_create`, stamped at generation from the SAME
+  `backtest_json` payload the prompt rendered (so the recorded number and the number the model
+  saw cannot disagree), and `/api/ai-score` gains a `ceiling_violations` block rendered as a
+  sixth scoreboard card.
+  The column has to live on the CARD, not the evaluation: an `insight_evaluations` row is
+  written a horizon later, while the ceiling is derived from calibration bins that keep moving
+  — unrecoverable after the fact. `price_at_create` (M4) is the exact precedent, migration and
+  all. Population (owner ruling 2026-08-26): every non-shadow card with both a stated
+  confidence and a recorded ceiling, **scored or not** — a violation is a fact about the moment
+  of creation, and gating it on evaluation would lag the number by a full horizon and would
+  permanently exclude every card that ends `undetermined`. A card with **no** recorded ceiling
+  is outside the population rather than compliant; counting those as obedient would flatter the
+  rate with rows the rule never applied to. An empty population reports `rate: null`, because
+  0% compliance and 「no comparable card yet」 are different facts.
+  ⚠ **AI-D33's red line, restated in a test:** a violating card is stored with the confidence
+  THE MODEL STATED. Measuring obedience must not slide into enforcing it — a validator quietly
+  rewriting the model's own stated confidence would be the same class of defect as averaging
+  two providers' PE into a number neither reported.
 ### Fixed — R2 follow-up
 
 - **The 含匯兌總損益 line vanished instead of explaining itself** (owner ruling 2026-08-25). B

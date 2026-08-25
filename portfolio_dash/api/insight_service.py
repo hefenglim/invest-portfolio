@@ -190,6 +190,8 @@ def _per_symbol_ctx(
         dividend_rows=_dividend_rows(conn),
         external_vars=external_vars,
         external_reasons=_external_reasons(conn, external_vars),
+        # ⑬ — derived from the payloads just built; no extra read.
+        external_as_of=V.external_as_of_map(external_vars),
     )
     as_of = now.date()
     # SR fix (2026-07-06): the technical signals (52-week position, MA120) need up to ~252
@@ -234,6 +236,8 @@ def _portfolio_ctx(
         dividend_rows=_dividend_rows(conn),
         external_vars=external_vars,
         external_reasons=_external_reasons(conn, external_vars),
+        # ⑬ — derived from the payloads just built; no extra read.
+        external_as_of=V.external_as_of_map(external_vars),
     )
 
 

@@ -23,7 +23,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v17 (2026-08-25)"  # AI-D39: 上限法則修訂（缺口不再扣減）
+LIBRARY_VERSION = "official-v18 (2026-08-26)"  # ⑪ +10 對齊計分窗；⑬ freshness sources
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -361,7 +361,9 @@ _WEEKLY_BODY = """讀者是長期投資人，每週檢視一次組合。請以�
 {{calibration_gap_json}}
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 請在卡首標注基準日；依 {{freshness_json}}
-檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；愈近期的資料權重愈高。
+檢查新鮮度：缺價或過期的標的必須點名並排除於結論之外，其 sources 一欄逐筆列出每個外部
+資料來源的基準日與已幾天，明顯落後或標為 unavailable 的來源同樣點名、不當作現況引用；
+愈近期的資料權重愈高。
 本卡為純敘事回顧，不附預測（prediction 留空）。"""
 
 _CHECKUP_BODY = (
@@ -389,7 +391,8 @@ _CHECKUP_BODY = (
 4) 法則訊號須與第二節的逐項技術指標相互印證；若 rule_signals_json 為 unavailable，直說
 「法則訊號資料不足」，不得自行計算 TechScore 或杜撰任何法則狀態；
 5) 訊號回測：signal_backtest_json 是這些法則訊號在本標的自身的歷史驗證（法則轉換與
-   TechScore 進出 65/35 狀態帶後 +20/+60/+120 交易日的前向報酬，與同標的基線並陳）——
+   TechScore 進出 65/35 狀態帶後 +10/+20/+60/+120 交易日的前向報酬，與同標的基線並陳；
+   +10 是對齊本卡計分窗的那一個）——
    mean／median／pct_positive 與 baseline 都是**分數不是百分比**（units 欄已註明：
    0.1336 = +13.36%），寫成 % 要先乘 100；凡引用必帶樣本數 n 與同窗基線；標記
    insufficient 的格子只說「樣本不足」、不引用任何數字，**也不得改用 baseline 的數字
@@ -437,7 +440,8 @@ unavailable（無分析師覆蓋），必須明講「無分析師覆蓋」，不
 3) confidence＝此預測命中的真實機率估計（0-100，寧可保守）。
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
-標記新鮮度；缺漏資料如實說明；愈近期的資料權重愈高。"""
+標記新鮮度（sources 一欄逐筆列出每個外部資料來源的基準日與已幾天）；缺漏或明顯落後的
+資料如實說明，不當作現況引用；愈近期的資料權重愈高。"""
 )
 
 _MARKET_BODY = (
@@ -464,7 +468,8 @@ _MARKET_BODY = (
 {{market_sentiment_json}}
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
-檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；愈近期的資料權重愈高。
+檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；其 sources 一欄逐筆列出每個外部
+資料來源的基準日與已幾天，明顯落後或標為 unavailable 的來源同樣點名；愈近期的資料權重愈高。
 金額一律照輸入數字的原始數值與單位逐字引用，不得自行換算成「萬／百萬」等單位
 （例：輸入 4290.80 就寫 4,290.80，不得寫成 429 萬）。
 匯率換算與換匯損益屬全組合層次，請見全組合週報，本卡不評匯率歸因。
@@ -543,7 +548,7 @@ beta、roe_pct＝股東權益報酬率%、revenue_growth_yoy_pct＝營收年增�
 未持倉標的改以「建倉／觀望」情境描述。
 
 六、訊號回測（本標的自身的歷史驗證）— signal_backtest_json 是法則訊號在「這檔股票自己
-身上」的事件研究：四法則方向轉換與 TechScore 進出 65/35 狀態帶後 +20/+60/+120 交易日的
+身上」的事件研究：四法則方向轉換與 TechScore 進出 65/35 狀態帶後 +10/+20/+60/+120 交易日的
 前向報酬分布，與同標的的無條件基線並陳。用它回答「這個訊號在這檔股票上過去靈不靈」，
 作為第五節情境的佐證或反證。引用紀律：
 1) **單位**：mean／median／pct_positive 與 baseline 全部是**分數，不是百分比**
@@ -576,7 +581,8 @@ direction 用 up/down/flat，target_pct 僅在有明確依據時提供，且**�
 3) backtest_json 整體 unavailable（尚無評分歷史）時沒有上限，沿用「寧可保守」。
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
-標記新鮮度，缺價或過期的資料點名排除於結論之外；愈近期的資料權重愈高。
+標記新鮮度，缺價或過期的資料點名排除於結論之外；其 sources 一欄逐筆列出每個外部資料
+來源的基準日與已幾天，明顯落後或標為 unavailable 的來源同樣點名；愈近期的資料權重愈高。
 所有數字照輸入的原始數值與單位逐字引用，不得自行換算單位。"""
 )
 
@@ -614,15 +620,15 @@ ma_cross 還是 20/60 的 ma_cross_short，不得混用），給出 ≤3 個交�
 # Strategy templates: (name, version, scope hint, body). ``scope`` is advisory — the
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
-    {"name": "持倉週報策略", "version": "v2.3", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.7", "scope": "per_symbol", "body": _CHECKUP_BODY},
-    {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
+    {"name": "持倉週報策略", "version": "v2.4", "scope": "portfolio", "body": _WEEKLY_BODY},
+    {"name": "個股健檢策略", "version": "v2.8", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "市場週報策略", "version": "v1.2", "scope": "per_market", "body": _MARKET_BODY},
     # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
     # v2 (W3, AI-D14/15): +基本面 section — one block per source, never averaged.
     # v3.1 (W7.1, 2026-08-23): the first live run's output defects — the return unit, the
     # baseline worn as an event return, and a 3-step ceiling nobody executed — are answered
     # by stating the unit, forbidding the substitution, and handing over ONE precomputed cap.
-    {"name": "持倉建議與提點策略", "version": "v3.1", "scope": "per_symbol", "body": _ADVICE_BODY},
+    {"name": "持倉建議與提點策略", "version": "v3.2", "scope": "per_symbol", "body": _ADVICE_BODY},
     # The 提點 card (AI-D5/AI-D11): alert-triggered, ≤3 trading-day window via ON_ALERT_NOTE.
     {"name": "持倉提點策略", "version": "v1", "scope": "on_alert", "body": _ON_ALERT_ADVICE_BODY},
 ]
@@ -706,7 +712,7 @@ TASK_PRESETS: list[TaskPreset] = [
     {
         "preset_key": "advice",
         "name": "持倉建議與提點",
-        "version": "v3.1",
+        "version": "v3.2",
         "scope": "per_symbol",
         "strategy": "持倉建議與提點策略",
         "use_system_prompt": True,

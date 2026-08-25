@@ -183,10 +183,10 @@ def test_series_in_is_a_no_op_once_a_genuine_post_split_series_exists(
 
 def test_signals_52w_position_is_not_a_phantom_low(conn: sqlite3.Connection) -> None:
     _seed_split(conn)
-    closes, _ = signals_service._read_series(
+    closes = signals_service._read_series(
         conn, "SPLT", now=NOW, params=default_params(),
         actions=load_action_index(conn),
-    )
+    ).closes
     w52 = week52_position(closes)
     assert w52["high"] == POST_PRICE and w52["low"] == POST_PRICE
     assert w52["pct_from_high"] == Decimal("0")
@@ -198,10 +198,10 @@ def test_signals_52w_position_pre_fix_reads_the_ratio_as_a_collapse(
     """DETECTION POWER — the raw read on the real path. −85.7% is the 7-for-1, not a move."""
     _seed_split(conn)
     _identity_series(monkeypatch, signals_service)
-    closes, _ = signals_service._read_series(
+    closes = signals_service._read_series(
         conn, "SPLT", now=NOW, params=default_params(),
         actions=load_action_index(conn),
-    )
+    ).closes
     w52 = week52_position(closes)
     assert w52["high"] == PRE_PRICE and w52["low"] == POST_PRICE
     assert w52["pct_from_high"] == (POST_PRICE - PRE_PRICE) / PRE_PRICE  # -6/7

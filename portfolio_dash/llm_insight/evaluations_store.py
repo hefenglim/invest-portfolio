@@ -528,6 +528,59 @@ def gap_quantized(gap: Decimal) -> Decimal:
     return gap.quantize(_GAP_Q, rounding=ROUND_HALF_UP)
 
 
+def ceiling_violations(conn: sqlite3.Connection) -> dict[str, Any]:
+    """How often a card claimed MORE confidence than its own record supported (⑫c).
+
+    AI-D38 step three. The anchoring law hands each card a ``confidence_ceiling`` and asks
+    the model to stay at or below it; nothing clamps the answer (AI-D33's red line — a
+    validator rewriting the model's stated confidence would be the defect, not the fix).
+    So the only way the rule can mean anything is to MEASURE obedience, which is what this
+    is. Reads ``insights`` directly — the create-time facts live there, and this store
+    already reads that table for ``due_insights``.
+
+    Population (owner ruling 2026-08-26): every non-shadow card carrying BOTH a stated
+    confidence and a recorded ceiling.
+
+    * **Not restricted to scored cards.** A violation is a fact about the moment of
+      creation; gating it on evaluation would lag the number by a full horizon and would
+      permanently exclude every card that ends ``undetermined`` — cards that could have
+      violated just the same.
+    * **A card with no recorded ceiling is OUTSIDE the population, not compliant.** Legacy
+      rows, and any card generated while ``backtest_json`` was unavailable, were never
+      governed by a ceiling; counting them as obedient would flatter the rate with rows
+      the rule never applied to.
+    * **Global, like ``calibration_bins`` and ``rolling_gap``** — this is a diagnostic
+      about the model's behaviour, not a per-task scoreboard, so archived tasks are not
+      excluded.
+
+    ``rate`` is ``None`` on an empty population: 0% compliance and 「no comparable cards
+    yet」 are different facts, and a reassuring 0.00% must not stand in for the second.
+
+    Degrades to the empty population when ``insights`` does not exist (architecture.md: a
+    cross-table read must read as "no rows", never as ``OperationalError``) — an
+    evaluations-only connection is a real shape in this codebase.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='insights'"
+    ).fetchone()
+    if exists is None:
+        return {"n": 0, "violations": 0, "rate": None}
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, "
+        "       SUM(CASE WHEN confidence > ceiling_at_create THEN 1 ELSE 0 END) AS v "
+        "FROM insights "
+        "WHERE is_shadow = 0 AND confidence IS NOT NULL "
+        "  AND ceiling_at_create IS NOT NULL"
+    ).fetchone()
+    n = int(row["n"] or 0)
+    violations = int(row["v"] or 0)
+    return {
+        "n": n,
+        "violations": violations,
+        "rate": _ratio_str(violations, n) if n else None,
+    }
+
+
 def gap_wire(gap: Decimal) -> str:
     """The ONE wire shape for a calibration gap: 0.001, ROUND_HALF_UP, explicit sign."""
     rounded = gap_quantized(gap)
@@ -711,6 +764,8 @@ def ai_score(
             "window_n": gap.window_n,
             "min_scored": ROLLING_GAP_MIN_SCORED,
         },
+        # ⑫c (AI-D38): recorded, never enforced — see :func:`ceiling_violations`.
+        "ceiling_violations": ceiling_violations(conn),
         "rows": rows,
         "rows_total_count": len(all_rows),
     }

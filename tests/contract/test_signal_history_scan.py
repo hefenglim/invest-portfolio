@@ -91,9 +91,14 @@ def test_weekend_scan_keys_the_row_by_price_date(golden_db: sqlite3.Connection) 
     scan_signals(golden_db, now=sunday)
     rows = sh.list_rows(golden_db, "WATCH")
     assert rows[-1].as_of == friday  # the data the evaluation describes
-    # …while signal_states keeps its own scan-date semantics (as_of = when scanned).
+    # ⑬ (2026-08-26): this line used to pin "2026-06-14" — the SCAN date — with the comment
+    # 「signal_states keeps its own scan-date semantics」. That divergence was known and
+    # accepted at W6 time, and the investment-logic review is what re-opened it: two sibling
+    # tables describing the same evaluation disagreed about which day it describes, and the
+    # wire + prompt 守則 published the wall-clock one. Both tables now key on the DATA date.
     state = ss.get_state(golden_db, "WATCH")
-    assert state is not None and state.as_of == "2026-06-14"
+    assert state is not None and state.as_of == "2026-06-12"
+    assert state.updated_at.startswith("2026-06-14")  # when scanned — a separate field
 
 
 def test_a_deleted_middle_row_is_refilled(golden_db: sqlite3.Connection) -> None:

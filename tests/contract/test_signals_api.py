@@ -85,7 +85,12 @@ def test_window_moves_with_params() -> None:
 def test_signals_shape_and_honest_degrade(api_client: TestClient) -> None:
     body = api_client.get("/api/signals").json()
     assert set(body) == {"as_of", "evaluated_at", "signals"}
-    assert body["as_of"] == "2026-06-11"
+    # ⑬ (2026-08-26): this pinned "2026-06-11" — GOLDEN_NOW's date — while the fixture's
+    # newest close is 2026-06-09. The old assertion was the defect in miniature: the
+    # endpoint announced 「資料基準＝今天」 over two-day-old data, and this test agreed.
+    # as_of is now the newest DATA date; evaluated_at still carries the wall clock.
+    assert body["as_of"] == "2026-06-09"
+    assert body["evaluated_at"].startswith("2026-06-11")
     syms = {s["symbol"] for s in body["signals"]}
     assert {"2330", "AAPL"} <= syms
     for entry in body["signals"]:

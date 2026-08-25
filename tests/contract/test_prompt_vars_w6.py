@@ -158,7 +158,8 @@ def test_signal_backtest_var_populated_after_scan(
     assert out["symbol"] == "WATCH"
     assert out["history"]["rows"] == 61
     assert out["history"]["params_version"] == "rules-v1"
-    assert out["windows"] == [20, 60, 120]
+    # ⑪ (2026-08-25): was [20, 60, 120]; +10 leads now — the scoring-window alignment.
+    assert out["windows"] == [10, 20, 60, 120]
     # The baseline rides the FULL-span closes (61 dates): window 20 → 41 valid starts,
     # window 120 → none (censored to None). Monotonic ascent → every sample positive.
     assert out["baseline"]["20"]["n"] == 41

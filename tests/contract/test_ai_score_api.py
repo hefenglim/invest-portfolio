@@ -22,6 +22,8 @@ def test_ai_score_empty_db(api_client: TestClient) -> None:
     assert body["by_combo"] == []
     assert body["calibration_bins"] == []
     assert body["rolling_gap"] == {"gap": None, "window_n": 0, "min_scored": 8}
+    # ⑫c (AI-D38): recorded, never clamped. rate null = no comparable card yet, NOT 0%.
+    assert body["ceiling_violations"] == {"n": 0, "violations": 0, "rate": None}
     assert body["rows"] == []
 
 

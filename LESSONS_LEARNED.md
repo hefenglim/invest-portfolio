@@ -1155,3 +1155,32 @@ demo's record the ceiling computes to **0**, i.e. "your track record supports as
 nothing". That is an honest reading of a degenerate input, but a rule that outputs 0 for every
 card is a product decision, not just a calculation — surface it, do not paper over it with an
 invented floor.
+
+## "No output growth" is not "frozen" (2026-08-26)
+
+Detached gate runs are watched by a monitor that flags a stall when the redirected output file
+stops growing — written after a real freeze, where process liveness was useless because a
+frozen process is still alive. It fired again, on a run whose output file was **0 bytes**. The
+conclusion "the suite hangs" was wrong twice over:
+
+1. `pytest` had been given `--timeout=300`, and **`pytest-timeout` is not installed** in this
+   venv (only `pytest-asyncio` and `pytest-socket` are). Argparse rejected it, the process died
+   in under a second, and the exit status went to a file nobody read. Zero bytes of stdout is
+   what an **instant startup failure** looks like — it is also what a freeze looks like at
+   t=0, and the monitor cannot tell them apart.
+2. Redirected `pytest` stdout is **block-buffered**, so even a healthy run shows 0 bytes for a
+   while. `python -u` fixes it, and without it "no growth" carries almost no information early.
+
+**Rules that follow:**
+- A stall detector must read **stderr and the process table**, not just the stdout size. Zero
+  bytes + no live process = it never started; zero bytes + a live process = possibly buffering;
+  bytes that stopped + a live process = the freeze the detector was built for.
+- Always pass `-u` when redirecting pytest, and always check the `.err` file before diagnosing.
+- Verify a plugin flag exists before putting it in a long detached command — a typo'd flag
+  costs a whole gate cycle, and the failure is silent by construction.
+
+⚠ **The wider damage:** an earlier session recorded "the e2e suite hangs" partly on this
+evidence. That claim now has to be re-established from scratch rather than inherited. A wrong
+diagnosis that gets written down is worse than no diagnosis, because the next person spends
+their budget on the wrong hypothesis — the machine's real constraint here is 8.5 GB of RAM with
+~1.5 GB free against 166 e2e tests that each spawn a uvicorn subprocess plus a browser context.

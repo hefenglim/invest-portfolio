@@ -27,7 +27,7 @@ The single source of truth for the prompt "Lego blocks". Three pieces:
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -307,7 +307,7 @@ REGISTRY: tuple[VarSpec, ...] = (
         "signal_backtest_json", "訊號回測", "price", "per_symbol", True,
         "該標的的事件研究回測（本地計算，非 LLM 生成）：法則訊號符號轉換（四法則各自 "
         "bullish/bearish）與 TechScore 狀態帶（65/35，與 evaluation_context 同一套門檻）"
-        "穿越事件發生後，+20/+60/+120 交易日的前向報酬分布（n／mean／median／"
+        "穿越事件發生後，+10/+20/+60/+120 交易日的前向報酬分布（n／mean／median／"
         "pct_positive，分數字串——payload 的 units 欄同樣註明，因為這份 desc 模型看不到）"
         "vs 同標的無條件基線（baseline）。誠實防護：n<8 的格子"
         "只回 insufficient 不給數字；重疊樣本（n_overlapping）與右刪失（n_censored）"
@@ -327,8 +327,11 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- system (系統狀態) — all available ---
     VarSpec(
         "freshness_json", "資料新鮮度", "system", "portfolio", True,
-        "缺價/過期標的清單 — 讓 AI 知道哪些數字不可信",
-        '{"missing_prices":["00919"],"stale":[{"symbol":"MSFT","as_of":"2026-06-06"}]}',
+        "缺價/過期標的清單，加上每個外部資料來源的基準日與已幾天 — 讓 AI 知道哪些數字不可信",
+        '{"missing_prices":["00919"],"stale":[{"symbol":"MSFT","as_of":"2026-06-06"}],'
+        '"sources":[{"token":"consensus_json","last_as_of":"2026-06-04","age_days":7,'
+        '"unavailable":false},{"token":"news_json","last_as_of":null,"age_days":null,'
+        '"unavailable":true}]}',
     ),
     VarSpec(
         "as_of", "資料時間", "system", "portfolio", True,
@@ -489,9 +492,37 @@ class VarContext:
     # Per-token degrade reasons fed by the router from data_source_health (spec 20.15.4),
     # e.g. "需要 Backer 方案" / "額度已滿". llm_insight does NOT read health itself.
     external_reasons: dict[str, str] = field(default_factory=dict)
+    # ⑬ — token → that source's own basis date (ISO or None), derived by the router from
+    # the SAME payloads it already built (:func:`external_as_of_map`). Fed rather than
+    # computed here for the fx_rates reason: the api layer reads conn, this one must not.
+    external_as_of: dict[str, str | None] = field(default_factory=dict)
 
 
 _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
+
+
+def external_as_of_map(external_vars: dict[str, Any]) -> dict[str, str | None]:
+    """Token → the basis date the producer stamped on its own payload, or ``None``.
+
+    ⑬ — every external producer already records when its data is from: the
+    ``portfolio.external_signals`` builders write ``last_as_of``, and the signals wire
+    writes ``as_of``. This reads what is already there — **no new query** — so that
+    ``freshness_json`` can answer 「這份資料是什麼時候的」 for every fed source instead of
+    only for prices and FX, which is all ``FreshnessReport`` covers while four official
+    templates instruct the model to check 新鮮度 against it.
+
+    Deliberately NOT a staleness verdict. A price has a market calendar to be judged
+    against; a fundamentals snapshot does not, and inventing a 「good for N days」 threshold
+    would be the guess this project forbids everywhere else. The date is reported; the
+    judgement belongs to the prompt.
+    """
+    out: dict[str, str | None] = {}
+    for token, value in external_vars.items():
+        stamp: object = None
+        if isinstance(value, dict):
+            stamp = value.get("last_as_of") or value.get("as_of")
+        out[token] = stamp if isinstance(stamp, str) else None
+    return out
 
 
 def unavailable_tokens(external_vars: dict[str, Any]) -> list[str]:
@@ -725,9 +756,40 @@ def _dividend_projection(data: DashboardData, *, market: str | None = None) -> d
     return out or {"unavailable": True}
 
 
+def _source_rows(ctx: VarContext) -> list[dict[str, Any]]:
+    """One row per FED external source: its basis date, its age, and whether it degraded.
+
+    ⑬ — the consolidated view. Without it the model had to walk 16 separate payloads to
+    notice that one of them was three weeks old, while the 守則 told it to consult
+    ``freshness_json``, which knew only about prices and FX.
+    """
+    today = ctx.now.date() if ctx.now is not None else None
+    rows: list[dict[str, Any]] = []
+    degraded = set(unavailable_tokens(ctx.external_vars))
+    for token in sorted(ctx.external_vars):
+        # A degraded source carries no basis date to misread — it reports None, not the
+        # date of whatever partial payload happened to survive.
+        stamp = None if token in degraded else ctx.external_as_of.get(token)
+        age: int | None = None
+        if stamp is not None and today is not None:
+            try:
+                age = (today - date.fromisoformat(stamp)).days
+            except ValueError:
+                stamp = None  # a producer stamped something that is not a date — say None
+        rows.append({
+            "token": token, "last_as_of": stamp, "age_days": age,
+            "unavailable": token in degraded,
+        })
+    return rows
+
+
 def _freshness(ctx: VarContext) -> dict[str, Any]:
-    """The freshness report; a market card sees only its own market's symbols."""
+    """The freshness report; a market card sees only its own market's symbols.
+
+    ``sources`` (⑬) extends the price/FX legs to every external source the router fed.
+    """
     dump = ctx.data.freshness.model_dump()
+    dump["sources"] = _source_rows(ctx)
     if ctx.market is None:
         return dump
     market_symbols = {

@@ -27,6 +27,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from datetime import time as dt_time
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -160,6 +161,26 @@ def _canonical_fingerprint_prompt(
         conn, insight_type_id, canon_ctx, calibration_version=calibration_version
     )
     return assembled.prompt + alert_note
+
+
+def _ceiling_at_create(external_vars: dict[str, Any]) -> int | None:
+    """The confidence ceiling this run handed the model, read from the rendered payload.
+
+    ⑫c (AI-D38 step three). ``backtest_json`` is assembled ONCE per run by the router and
+    is the same object the prompt rendered, so reading it here records exactly the number
+    the model was shown — not a re-derivation that could disagree with it.
+
+    ``None`` whenever the payload degraded (no scored history yet) or carries no integer
+    ceiling: those cards were never governed by a ceiling, and
+    :func:`evaluations_store.ceiling_violations` keeps them OUT of the population rather
+    than counting them as obedient.
+    """
+    payload = external_vars.get("backtest_json")
+    if not isinstance(payload, dict) or payload.get("unavailable") is True:
+        return None
+    value = payload.get("confidence_ceiling")
+    # bool is an int subclass — exclude it explicitly so a stray True never reads as 1.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _anomaly_card(symbol: str) -> InsightCard:
@@ -402,12 +423,16 @@ def run_insight_type(
         # M4 fix (decision Q1c): snapshot the last close the model actually saw — the
         # Loop-2 scoring baseline. None when no close series was fed (portfolio/market).
         seen_price = ctx.closes[-1] if ctx.closes else None
+        # ⑫c (AI-D38): snapshot the confidence ceiling this card was HANDED, from the same
+        # payload the prompt rendered. Derived from calibration bins that keep moving, so
+        # it is unrecoverable later — same reason price_at_create is stamped here.
+        seen_ceiling = _ceiling_at_create(ctx.external_vars)
         istore.add_card(
             conn, insight_type_id=insight_type_id, card=card, fingerprint=fp,
             calibration_version=stamp_version, horizon_days=effective_horizon,
             input_snapshot=snapshot, model=used_model, cost_usd=spent,
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
-            price_at_create=seen_price,
+            price_at_create=seen_price, ceiling_at_create=seen_ceiling,
             tokens_in=completion.tokens_in, tokens_out=completion.tokens_out,
         )
         created += 1

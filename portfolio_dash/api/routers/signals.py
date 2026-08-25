@@ -28,12 +28,15 @@ def signals(
     """Rule-engine signals for every registered symbol (held + watchlist; honest nulls
     where data is thin). Each entry carries a ``held`` flag."""
     results = signals_service.evaluate_all(conn, now=now)
+    # ⑬: the collection's basis date is the NEWEST per-symbol data date, and null when no
+    # symbol has any price — never the wall clock, which said 「今天」 over a stale universe.
+    dates = [d for _, _, _, d in results if d is not None]
     return {
-        "as_of": now.date().isoformat(),
+        "as_of": max(dates).isoformat() if dates else None,
         "evaluated_at": now.isoformat(),
         "signals": [
-            signals_service.to_wire(sym, sig, now=now, held=held)
-            for sym, sig, held in results
+            signals_service.to_wire(sym, sig, now=now, held=held, price_as_of=as_of)
+            for sym, sig, held, as_of in results
         ],
     }
 
@@ -46,7 +49,8 @@ def signal(
 ) -> dict[str, Any]:
     """One symbol's rule-engine signals — the drawer path (no holdings enumeration). Any
     registered or ad-hoc symbol resolves; the ``held`` flag marks whether it is a position."""
-    result = signals_service.evaluate_symbol(conn, symbol, now=now)
+    result, price_as_of = signals_service.evaluate_symbol(conn, symbol, now=now)
     return signals_service.to_wire(
-        symbol, result, now=now, held=signals_service.is_held(conn, symbol)
+        symbol, result, now=now, held=signals_service.is_held(conn, symbol),
+        price_as_of=price_as_of,
     )

@@ -483,9 +483,10 @@ def _rule_signals_var(
     degrades to the unavailable shape (every rule None AND no composite → cannot judge),
     which the var renders as ``{"unavailable": true, "reason": …}`` via _external_reasons.
     """
-    signals = signals_service.evaluate_symbol(conn, symbol, now=now)
+    signals, price_as_of = signals_service.evaluate_symbol(conn, symbol, now=now)
     wire = signals_service.to_wire(
-        symbol, signals, now=now, held=signals_service.is_held(conn, symbol)
+        symbol, signals, now=now, held=signals_service.is_held(conn, symbol),
+        price_as_of=price_as_of,
     )
     rules = wire.get("rules")
     rules_all_none = isinstance(rules, dict) and all(v is None for v in rules.values())
@@ -784,6 +785,8 @@ def _build_context(
         dividend_rows=_dividend_rows(conn),
         external_vars=external_vars,
         external_reasons=_external_reasons(conn, external_vars),
+        # ⑬ — derived from the payloads just built; no extra read.
+        external_as_of=V.external_as_of_map(external_vars),
     )
     if payload.scope == "per_market" and payload.market:
         ctx.market = payload.market  # market-sliced preview (2026-07-05 spec)

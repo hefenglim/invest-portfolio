@@ -114,11 +114,15 @@ def test_index_based_forward_return_hand_checked() -> None:
     assert (group.kind, group.direction, group.events) == (
         "momentum_12_1", "bearish", 1,
     )
-    out20, out60, out120 = group.outcomes
-    # Event at index 1 (price 101). +20 window → index 21 → censored on a 10-day series.
-    assert out20.n == 0 and out20.n_censored == 1 and out20.stats is None
-    # Baseline at +20 is likewise impossible here.
-    assert study.baselines[0] is None
+    by_window = {o.window: o for o in group.outcomes}
+    # Event at index 1 (price 101). EVERY window overshoots a 10-day series: +10 needs
+    # index 11, +20 needs 21. Keyed by window, not position — the window SET grew when the
+    # scoring-aligned +10 was added (⑧, 2026-08-25) and a positional unpack broke here.
+    for w in FORWARD_WINDOWS:
+        out = by_window[w]
+        assert out.n == 0 and out.n_censored == 1 and out.stats is None
+    # The baselines are likewise impossible here, on the same axis.
+    assert all(b is None for b in study.baselines)
 
 
 def test_min_sample_boundary_seven_vs_eight() -> None:

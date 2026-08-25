@@ -108,7 +108,7 @@
   .hc-conclusion::before { content: '結論 '; font-size: 10px; color: var(--text-3); letter-spacing: 0.04em; }
 
   /* ---- AI 戰績 ---- */
-  .score-band { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--gap); padding: 12px var(--pad) 4px; }
+  .score-band { display: grid; grid-template-columns: repeat(6, 1fr); gap: var(--gap); padding: 12px var(--pad) 4px; }
   .score-card {
     background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius);
     padding: 10px 13px; display: flex; flex-direction: column; gap: 2px;
@@ -138,6 +138,12 @@
   .conf-fill { display: block; height: 100%; background: var(--series-usd); }
   .backtest-note { padding: 0 var(--pad) 14px; font-size: 10.5px; color: var(--text-3); }
 
+  /* The band went 5 -> 6 cards with the ceiling-violation card (⑫c). Six equal columns
+     at the 980px edge leave ~160px each, which crushes the two cards whose sub-line is a
+     sentence (滾動校準缺口 / 信心上限違規率). One intermediate step to 3x2 first. */
+  @media (max-width: 1280px) {
+    .score-band { grid-template-columns: repeat(3, 1fr); }
+  }
   @media (max-width: 980px) {
     .insight-grid-page, .hc-grid { grid-template-columns: 1fr; }
     .score-band { grid-template-columns: repeat(2, 1fr); }
@@ -459,6 +465,19 @@
         rg.gap == null
           ? '滾動校準 · 滿 ' + f.num(rg.min_scored) + ' 筆解鎖'
           : '最近 ' + f.num(rg.window_n) + ' 筆 · 負＝高估自己'));
+    }
+    /* ⑫c (AI-D38): how often a card claimed more confidence than its own record supported.
+       RECORDED, never clamped — the card keeps the confidence the model stated. Population
+       = non-shadow cards carrying both a confidence and a recorded ceiling; rate null means
+       no comparable card yet (NOT 0% compliance). Tolerates a legacy payload: the whole
+       card is skipped when the block is absent. */
+    var cv = score.ceiling_violations || null;
+    if (cv) {
+      band.appendChild(scoreCard('信心上限違規率',
+        cv.rate == null ? EM : f.pct(cv.rate),
+        cv.rate == null
+          ? '尚無可比對的卡片'
+          : f.num(cv.n) + ' 張中 ' + f.num(cv.violations) + ' 張超標 · 只記錄不夾取'));
     }
 
     renderCombos(score.by_combo || []);

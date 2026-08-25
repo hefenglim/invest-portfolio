@@ -48,6 +48,13 @@ class InsightRecord(BaseModel):
     # Loop-2 scores from THIS baseline instead of the first close AFTER create (a number
     # the model never reasoned about). Decimal STRING; None for legacy/portfolio cards.
     price_at_create: str | None = None
+    # ⑫c / AI-D38 — the confidence ceiling the anchoring law computed for THIS card at
+    # generation time. Stamped here for the same reason as price_at_create: it is derived
+    # from calibration bins that keep moving, so it is unrecoverable after the fact, and
+    # an evaluation row (written a horizon later) is the wrong place for a create-time
+    # fact. None on legacy cards and whenever backtest_json was unavailable — those cards
+    # were never governed by a ceiling and must not be counted as having obeyed one.
+    ceiling_at_create: int | None = None
     # Per-card token usage (AI attribution, 2026-07-07): one LLM call = one card, so the
     # call's usage maps 1:1. Zero for legacy cards (the UI omits the token segment then).
     tokens_in: int = 0
@@ -74,7 +81,8 @@ CREATE TABLE IF NOT EXISTS insights (
     model TEXT NOT NULL,
     cost_usd TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    price_at_create TEXT
+    price_at_create TEXT,
+    ceiling_at_create INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_insights_fingerprint ON insights (fingerprint);
 CREATE INDEX IF NOT EXISTS idx_insights_type_symbol ON insights (insight_type_id, symbol);
@@ -99,6 +107,10 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
     # M4 fix (decision Q1c, 2026-07-07): additive migration — the seen-at-create price.
     _add_column_if_missing(conn, "insights", "price_at_create", "TEXT")
+    # ⑫c (AI-D38, 2026-08-26): additive migration — the ceiling this card was handed.
+    # NULLABLE with no default ON PURPOSE: existing rows must read "no ceiling recorded",
+    # never "ceiling 0", which would make every historical card a violation.
+    _add_column_if_missing(conn, "insights", "ceiling_at_create", "INTEGER")
     # AI attribution (2026-07-07): per-card token usage for the unified model/token/cost line.
     _add_column_if_missing(conn, "insights", "tokens_in", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "insights", "tokens_out", "INTEGER NOT NULL DEFAULT 0")
@@ -185,6 +197,7 @@ def add_card(
     is_shadow: bool = False,
     horizon_basis: HorizonBasis = "trading_days",
     price_at_create: Decimal | None = None,
+    ceiling_at_create: int | None = None,
     tokens_in: int = 0,
     tokens_out: int = 0,
 ) -> InsightRecord:
@@ -195,6 +208,10 @@ def add_card(
     maturity date (trading- or calendar-day horizon) or NULL for a narrative card.
     ``price_at_create`` (M4 fix) is the last close the model saw in its inputs — the
     Loop-2 scoring baseline; None when no close series was fed (portfolio/market card).
+    ``ceiling_at_create`` (⑫c) is the confidence ceiling the anchoring law handed this
+    card. It is RECORDED, never enforced — ``card.confidence`` is stored exactly as the
+    model stated it even when it exceeds the ceiling (AI-D33/AI-D38: a validator that
+    rewrote the model's own stated confidence would be the defect, not the fix).
     """
     due_at = _compute_due_at(
         card, horizon_days=horizon_days, now=now, horizon_basis=horizon_basis
@@ -203,8 +220,8 @@ def add_card(
         "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
         "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
-        "price_at_create, tokens_in, tokens_out) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "price_at_create, ceiling_at_create, tokens_in, tokens_out) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -224,6 +241,7 @@ def add_card(
             str(cost_usd),
             now.isoformat(),
             None if price_at_create is None else str(price_at_create),
+            ceiling_at_create,
             tokens_in,
             tokens_out,
         ),
@@ -270,6 +288,9 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         # ensure_tables ran its ALTER).
         price_at_create=(
             row["price_at_create"] if "price_at_create" in row.keys() else None
+        ),
+        ceiling_at_create=(
+            row["ceiling_at_create"] if "ceiling_at_create" in row.keys() else None
         ),
         tokens_in=(row["tokens_in"] or 0) if "tokens_in" in row.keys() else 0,
         tokens_out=(row["tokens_out"] or 0) if "tokens_out" in row.keys() else 0,

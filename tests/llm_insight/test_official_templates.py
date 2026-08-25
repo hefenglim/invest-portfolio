@@ -14,7 +14,7 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 
 def test_library_version_is_official_v15() -> None:
-    assert ot.LIBRARY_VERSION == "official-v17 (2026-08-25)"
+    assert ot.LIBRARY_VERSION == "official-v18 (2026-08-26)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -129,7 +129,7 @@ def test_prompts_v2_carry_my_bursa_guidance() -> None:
 
 def test_checkup_strategy_advances_to_v26_citing_rule_signals() -> None:
     checkup = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "個股健檢策略")
-    assert checkup["version"] == "v2.7"
+    assert checkup["version"] == "v2.8"
     body = checkup["body"]
     assert "{{rule_signals_json}}" in body                 # the new section cites the var
     assert "TechScore" in body                             # cite TechScore + coverage
@@ -145,18 +145,18 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
     template_names = {t["name"] for t in ot.STRATEGY_TEMPLATES}
     for preset in ot.TASK_PRESETS:
         assert preset["strategy"] in template_names
-    # the checkup preset specifically still points at the (now v2.7) 個股健檢策略.
+    # the checkup preset specifically still points at the (now v2.8) 個股健檢策略.
     checkup_preset = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "checkup")
     assert checkup_preset["strategy"] == "個股健檢策略"
 
 
 def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v17 (2026-08-25)"
+    assert wire["library_version"] == "official-v18 (2026-08-26)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")
-    assert checkup["version"] == "v2.7"
+    assert checkup["version"] == "v2.8"
     assert "{{rule_signals_json}}" in checkup["body"]
 
 
@@ -184,7 +184,7 @@ def test_advice_template_v3_carries_fundamentals_with_the_never_average_rule() -
     blocks, and carries the red line in its prompt-enforced form — different values across
     sources are reported side by side with their sources, NEVER averaged or reconciled."""
     advice = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")
-    assert advice["version"] == "v3.1"
+    assert advice["version"] == "v3.2"
     body = advice["body"]
     assert "{{fundamentals_json}}" in body
     assert "不得取平均" in body
@@ -192,7 +192,7 @@ def test_advice_template_v3_carries_fundamentals_with_the_never_average_rule() -
     # The canonical field names the model will see (the block key is the provenance).
     assert "pe_ratio" in body and "roe_pct" in body
     preset = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "advice")
-    assert preset["version"] == "v3.1"
+    assert preset["version"] == "v3.2"
 
 
 def test_advice_template_v3_cites_the_backtest_and_anchors_confidence() -> None:
@@ -248,7 +248,7 @@ def test_weekly_template_v22_cites_ai_track_record() -> None:
     """W7 (AI-D34): the weekly report narrates the AI's own calibration — both
     portfolio-scope vars cited; the pure-narrative law (no prediction) is intact."""
     weekly = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉週報策略")
-    assert weekly["version"] == "v2.3"
+    assert weekly["version"] == "v2.4"
     body = weekly["body"]
     assert "{{backtest_json}}" in body and "{{calibration_gap_json}}" in body
     assert "prediction 留空" in body  # the weekly stays narrative-only

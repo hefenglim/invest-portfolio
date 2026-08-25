@@ -3,8 +3,9 @@
 Given the per-day signal state vector (``signal_history`` rows, mapped to
 :class:`HistoryPoint` by the caller) and the symbol's close series, answer: **what
 happened after this signal fired in the past?** — forward-return distributions at
-+20/+60/+120 trading days after each event, against the SAME symbol's unconditional
-distribution as the baseline (AI-D30).
++10/+20/+60/+120 trading days after each event, against the SAME symbol's unconditional
+distribution as the baseline (AI-D30). The leading +10 is the scoring-window alignment
+(see :data:`FORWARD_WINDOWS`); the rest are the follow-through horizons.
 
 Honesty guards (spec §4 / AI-D30 — these are the point of the module, not decorations):
 
@@ -17,7 +18,9 @@ Honesty guards (spec §4 / AI-D30 — these are the point of the module, not dec
   in the stats; the count is the disclosure that the samples are not independent).
 * **right-censoring** — events whose forward window extends past the latest close are
   EXCLUDED from that window's stats and counted in ``n_censored`` (a +120-day window
-  needs 120 trading days that have not happened yet for recent events).
+  needs 120 trading days that have not happened yet for recent events). Censoring is
+  monotone in window length, so the +10 window is also the best-sampled one — the aligned
+  question is the one the data can answer most often, not least.
 * **no annualization, no Sharpe** — the study reports the window distributions as they
   are; nothing is extrapolated.
 
@@ -51,7 +54,15 @@ from decimal import Decimal
 # The study's own vocabulary (AI-D30): trading-day forward windows and the minimum
 # eligible-event count below which a cell reports 「不足以判斷」 instead of numbers
 # (aligned with the design mock's confidence-cap rule — 樣本 <8 → 信心上限 0.7).
-FORWARD_WINDOWS: tuple[int, ...] = (20, 60, 120)
+#
+# ⚠ +10 LEADS the set and is not a fourth horizon for its own sake: it is the SCORING
+# window (2026-08-25 review, ⑪). The advice card cites this study to back a directional
+# claim, and that claim is graded over the card's prediction horizon — 14 CALENDAR days on
+# the official template. 10 trading days ≈ 14 calendar days, so the cited evidence and the
+# graded claim finally measure the same span. Every longer window stays: they answer
+# "and then what?", which is a different and still useful question. Do not drop +10 without
+# also changing what the prompt is allowed to cite it for.
+FORWARD_WINDOWS: tuple[int, ...] = (10, 20, 60, 120)
 MIN_SAMPLE = 8
 
 COMPOSITE_KIND = "composite"
