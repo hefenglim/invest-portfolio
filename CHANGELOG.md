@@ -314,6 +314,27 @@ mypy error and a `TypeError`.
   without its news / consensus / fundamentals, the run was degraded. An intersection would
   report a clean run whenever a single symbol happened to have complete data.
 
+- **「持平」 was nearly unhittable, so the scoreboard was training the assistant out of saying
+  it** (review ⑩). Over a 14-day horizon at 30% annualised volatility the one-sigma move is
+  ~7%, so a fixed ±0.5% band gave `direction=flat` roughly a 6% chance of scoring a hit while
+  `up` and `down` sat near 51% each — and `price_change` is the only metric the official cards
+  emit, so that bias applied to almost every scored prediction. AI-D25 had already diagnosed
+  the identical problem for the volatility metric and widened its band; the same reasoning was
+  never carried across. The band is now `0.5 × the symbol's own one-sigma move over the actual
+  horizon`, floored at the old ±0.5% — roughly 38 / 31 / 31 instead of 6 / 51 / 51.
+  Three choices worth stating: the horizon is counted in **trading days from the price series
+  itself** (`annualized_volatility` annualises with 252, so a calendar-day horizon would be a
+  silent units error, and counting closes is exact through holidays); the baseline volatility
+  is the one **at create**, which is what the model could actually have seen; and `relative`
+  deliberately keeps the fixed band, because an excess return has a different variance from
+  the raw move and scaling it by the symbol's own vol would overstate it.
+  The band travels **with the measurement** rather than being derived inside `scoring`, so it
+  can be recorded alongside the verdict — a stored hit whose threshold is unknowable is not
+  evidence. Legacy rows and any seam that cannot compute a band fall back to the fixed one.
+  ⚠ `ActualMeasurement` also gains `extra="forbid"`: while adding the field a typo in its name
+  was silently DROPPED by Pydantic's default and three new tests went green against a
+  measurement that did not contain what they asserted. This model is the input to a scored,
+  permanently stored verdict — an unknown field must fail loudly.
 ### Fixed — R2 follow-up
 
 - **The 含匯兌總損益 line vanished instead of explaining itself** (owner ruling 2026-08-25). B

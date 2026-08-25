@@ -23,7 +23,21 @@ from pydantic import BaseModel
 
 from portfolio_dash.llm_insight.cards import Prediction
 
-# The flat band: |move| within ±0.5% counts as "flat" for a direction=flat prediction.
+# The flat band FLOOR: |move| within ±0.5% counts as "flat" when nothing better is known.
+#
+# ⚠ For ``price_change`` this is now a FLOOR, not the band (review ⑩, 2026-08-25). Fixed at
+# ±0.5% it made 「持平」 nearly unhittable: over 14 days at 30% annualised vol the one-sigma
+# move is ~7%, so flat scored ~6% while up/down sat near 51% each — and ``price_change`` is
+# the only metric the official cards emit, so the scoreboard was training the assistant out of
+# saying "I do not expect this to move". AI-D25 diagnosed the identical bias for volatility
+# and widened ITS band; the same reasoning was never applied here.
+#
+# The measurement seam now feeds ``ActualMeasurement.flat_band`` scaled to the symbol's own
+# volatility over the actual horizon; this constant remains the floor, so a very calm symbol
+# never ends up with a TIGHTER band than before — that would deepen the bias precisely where
+# 「持平」 is the honest call. ``relative`` deliberately keeps the fixed band: an excess return
+# has a different variance from the raw move, and scaling it by the symbol's own vol would
+# overstate it. That is a separate measurement, not an oversight.
 _FLAT_BAND = Decimal("0.005")
 # Volatility gets its own, wider band (AI-D25, owner ruling 2026-08-19): ``vol_change_pct``
 # is the fractional change of a 30-day realized-vol ESTIMATOR, which jitters by several
@@ -45,12 +59,25 @@ class ActualMeasurement(BaseModel):
     - ``symbol_return_pct`` / ``benchmark_return_pct`` — fractional returns; for ``relative``.
     """
 
-    model_config = {"arbitrary_types_allowed": True}
+    # extra="forbid" (2026-08-25): while adding ``flat_band`` a typo in the field name was
+    # silently DROPPED by Pydantic's default and three tests went green against a measurement
+    # that did not contain what they thought it did. A measurement is the input to a scored,
+    # stored verdict — an unknown field here must fail loudly, not be discarded.
+    model_config = {"arbitrary_types_allowed": True, "extra": "forbid"}
 
     price_change_pct: Decimal | None = None
     vol_change_pct: Decimal | None = None
     symbol_return_pct: Decimal | None = None
     benchmark_return_pct: Decimal | None = None
+    # The 「持平」 band ACTUALLY used for this measurement, scaled to the symbol's own
+    # volatility over the real horizon (review ⑩, 2026-08-25). ``None`` → the fixed
+    # ``_FLAT_BAND``, which is what legacy rows and any seam that cannot compute a band keep.
+    #
+    # It is fed in rather than derived here for two reasons: ``scoring`` stays pure (it has no
+    # price series), and a band that varies per card MUST be recorded with the verdict or a
+    # scored row cannot be audited — a stored hit whose threshold is unknowable is not
+    # evidence. See ``insight_evaluations.flat_band``.
+    flat_band: Decimal | None = None
 
 
 def _direction_hit(direction: str, move: Decimal, *, band: Decimal = _FLAT_BAND) -> bool:
@@ -72,7 +99,7 @@ def _score_price_change(pred: Prediction, m: ActualMeasurement) -> bool | None:
         if pred.direction == "up":
             return move >= target
         return move <= -target
-    return _direction_hit(pred.direction, move)
+    return _direction_hit(pred.direction, move, band=m.flat_band or _FLAT_BAND)
 
 
 def _score_volatility(pred: Prediction, m: ActualMeasurement) -> bool | None:

@@ -496,6 +496,41 @@ def _portfolio_return(
     return _window_return([(p.date, p.value) for p in index], created, due_date)
 
 
+#: How many of the symbol's own one-sigma horizon moves count as 「持平」 (review ⑩).
+#: 0.5 puts the three directions at roughly 38 / 31 / 31 on a normal move, against the
+#: 6 / 51 / 51 the fixed ±0.5% band produced over a 14-day horizon at 30% vol.
+_FLAT_BAND_SIGMAS = Decimal("0.5")
+#: Trading days per year — the same annualiser ``annualized_volatility`` uses, so the
+#: de-annualisation below is in its own units. Calendar days would be a units error.
+_TRADING_DAYS_PER_YEAR = Decimal("252")
+
+
+def _flat_band(
+    closes: list[tuple[date, Decimal]], created: date, due: date
+) -> Decimal | None:
+    """The 「持平」 band for THIS card: half the symbol's own one-sigma move over the horizon.
+
+    A fixed ±0.5% band is not a statement about the market, it is a statement about a number
+    someone picked — and over any real horizon it made 「持平」 nearly unhittable while up/down
+    stayed near even (review ⑩; AI-D25 already fixed the identical bias for volatility).
+
+    The horizon is counted in TRADING DAYS from the price series itself rather than from the
+    calendar: ``annualized_volatility`` annualises with 252, so a calendar-day horizon would
+    silently mix two day-counts. Counting the closes is also exact through holidays.
+
+    ``None`` when the baseline volatility is unavailable or zero, or the window contains no
+    trading days — the caller then falls back to the fixed band rather than to a guess.
+    """
+    vol = annualized_volatility([c for d, c in closes if d <= created], window=_VOL_WINDOW)
+    if vol is None or vol <= Decimal("0"):
+        return None
+    sessions = sum(1 for d, _ in closes if created < d <= due)
+    if sessions <= 0:
+        return None
+    horizon_sigma = vol * (Decimal(sessions) / _TRADING_DAYS_PER_YEAR).sqrt()
+    return _FLAT_BAND_SIGMAS * horizon_sigma
+
+
 def _vol_change_pct(
     closes: list[tuple[date, Decimal]], created: date, due: date
 ) -> Decimal | None:
@@ -610,7 +645,21 @@ def _measure_actual(
                 [(p.as_of, p.value) for p in series], created, due_date
             )
         )
-    return scoring.ActualMeasurement(price_change_pct=change)
+    # Review ⑩: the 「持平」 band is scaled to THIS symbol's own volatility over the real
+    # horizon. Reuses the same long window the volatility metric fetches, because the baseline
+    # must be the vol the model could have seen AT CREATE — not the post-hoc one.
+    band_series = series_in(
+        actions, symbol,
+        get_price_history(
+            conn, symbol, created - timedelta(days=_VOL_LOOKBACK_DAYS), due_date,
+        ),
+        valued_on=due_date,
+    )
+    return scoring.ActualMeasurement(
+        price_change_pct=change,
+        flat_band=_flat_band(
+            [(p.as_of, p.value) for p in band_series], created, due_date),
+    )
 
 
 def _score_one(
