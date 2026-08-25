@@ -402,6 +402,56 @@ mypy error and a `TypeError`.
   THE MODEL STATED. Measuring obedience must not slide into enforcing it — a validator quietly
   rewriting the model's own stated confidence would be the same class of defect as averaging
   two providers' PE into a number neither reported.
+### Added — investment-logic review, wave R4 (benchmark counterfactual)
+
+- **「同一筆錢、同樣的日期，買指數會是多少？」** — the review named this the single
+  highest-value missing capability, and the reason is that without it every return figure in
+  the app is unanchored: XIRR 15% is excellent or dismal depending entirely on what the market
+  did over the same period, and nothing here answered that. New pure module
+  `portfolio/benchmark_counterfactual.py` spends the portfolio's own reporting-currency flow
+  stream on each market's index at each flow's own date, and values the units at the last
+  close. Landed as **added fields on `/api/dashboard`** — no new route, so the stress-audit
+  `ops` invariant is untouched.
+  **Scope: lifetime, one number** (owner ruling 2026-08-26). The windowed comparison is
+  already answered by `twr.build_overlay`; a second, differently-scoped counterfactual would
+  be two answers to one question (the AI-D2 defect class), and a windowed version additionally
+  needs a 「what is the opening capital at the window start」 convention — cost? market value?
+  they differ — that nothing else in the app requires.
+  ⚠ **The excess is measured against B, never against A.** `total_return` (A) applies FX to
+  each currency's gain and never to its principal (AI-D41); the counterfactual buys its units
+  with reporting-currency money at each flow's own trade-date rate, exactly as
+  `trend.net_invested` does. Subtracting the counterfactual from A would contrast two
+  different treatments of the principal's FX and attribute the difference to skill.
+  ⚠ **A market with no index is NAMED, not dropped.** MY has no benchmark (AI-D22), and a flow
+  can also predate an index's stored history or land on a non-positive close. All of those
+  count toward `uncovered_ratio` and, where applicable, `uncovered_markets`. Silently omitting
+  them would compare a three-market portfolio against a two-market counterfactual and call the
+  gap alpha. The KPI line degrades its own label accordingly — 「差額（部分涵蓋）」 plus a
+  plain-language note — rather than printing a bare 「超額報酬」; same discipline as
+  `covered_ratio` (F2).
+  ⚠ **Nothing computable → `available=false` with a reason, never a zero.** A zero reads as
+  「the index went nowhere」, which is the opposite of 「we cannot tell」.
+- **One definition of 「money put in」, extracted rather than duplicated.**
+  `timeseries.build_reporting_flows` is now shared by the trend's `net_invested` and by the
+  counterfactual. Two copies would let the portfolio and its counterfactual quietly disagree
+  about which flows exist, and the entire comparison rests on them being the same money on the
+  same dates. Each flow now carries its market (routing) and symbol (so a per-symbol view can
+  filter without rebuilding); the trend ignores both.
+  ⚠ **Asymmetry recorded, not silently fixed:** these flows exclude cash movements, as they
+  always have, while `xirr_reporting` has taken REBATE / INTEREST_EXPENSE / BROKER_FEE since
+  AI-D42. So XIRR and B now disagree about those three kinds, and they sit side by side on one
+  KPI band. B's definition predates AI-D42 and moving it is an owner ruling of the same weight,
+  not a refactor — flagged here rather than changed.
+- `tests/golden/dashboard_full.json` gains the block and **nothing else**: 15 insertions, 0
+  deletions. The golden fixture seeds no benchmark prices, so its snapshot records the honest
+  degradation — which means the golden file alone never exercises the happy path, hence a
+  dedicated integration file that seeds a real index series.
+  ⚠ `test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches` guards that
+  the corporate-action feature did not widen the LEDGER symbol set. Benchmark reads are not
+  ledger symbols, so the two sets are now asserted separately, with the benchmark keys
+  enumerated from the registry — widening the list wholesale would have quietly retired a
+  guard that is still doing its job.
+
 ### Fixed — R2 follow-up
 
 - **The 含匯兌總損益 line vanished instead of explaining itself** (owner ruling 2026-08-25). B

@@ -213,6 +213,40 @@ class FxFreshness(BaseModel):
     stale: bool
 
 
+class BenchmarkMarketLeg(BaseModel):
+    """One market's share of the benchmark counterfactual (which index, and what it did)."""
+
+    market: Market
+    label: str  # zh-TW benchmark name, server-owned (the web layer never names an index)
+    terminal_value: Decimal
+    net_invested: Decimal
+
+
+class BenchmarkComparison(BaseModel):
+    """R4 / AI-D43 — 「同一筆錢、同樣的日期，買指數會是多少？」, lifetime.
+
+    ⚠ ``excess`` is measured against **B** (``total_return_fx_complete``), never against A
+    (``total_return``). The counterfactual buys its units with reporting-currency money at
+    each flow's own trade-date rate, exactly as ``trend.net_invested`` does; A applies FX to
+    the gain only (AI-D41), so subtracting the counterfactual from A would contrast two
+    different treatments of the principal's FX and call the difference market-beating skill.
+
+    ⚠ ``uncovered_ratio > 0`` means the headline covers only part of the money (MY has no
+    benchmark; a flow can also predate an index's stored history). The UI must degrade the
+    label rather than print a bare 「超額報酬」 — the same discipline as ``covered_ratio``.
+    """
+
+    available: bool
+    reason: str | None = None
+    terminal_value: Decimal | None = None
+    net_invested: Decimal | None = None
+    benchmark_return: Decimal | None = None
+    excess: Decimal | None = None
+    uncovered_markets: list[str] = Field(default_factory=list)
+    uncovered_ratio: Decimal | None = None
+    by_market: list[BenchmarkMarketLeg] = Field(default_factory=list)
+
+
 class FreshnessReport(BaseModel):
     prices: list[PriceFreshness]
     fx: list[FxFreshness]
@@ -259,6 +293,10 @@ class DashboardData(BaseModel):
     dividends: DividendSummary
     ex_dividend_calendar: list[ExDividendItem]
     trend: TrendSeries
+    # R4 / AI-D43: the lifetime index counterfactual. Additive with an honest default so
+    # DashboardData constructions predating it still validate; build_dashboard always fills
+    # it (with available=False + a reason when it cannot be computed).
+    benchmark: BenchmarkComparison | None = None
     freshness: FreshnessReport
     insights: list[InsightCardStub] = Field(default_factory=list)
     # Optional default: build_dashboard always populates it; the default only avoids

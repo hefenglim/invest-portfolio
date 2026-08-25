@@ -158,6 +158,43 @@
           card.appendChild(why);
         }
       }
+      /* R4 / AI-D43 — the index counterfactual, on the SAME line as B because it is the
+         figure it is measured against (AI-D41: subtracting it from A would contrast two
+         different treatments of the principal's FX and call the difference skill).
+         Every number is server-computed; this layer never names an index and never
+         subtracts. Tolerates an older payload (canned e2e fixtures): absent -> nothing. */
+      const bm = D.benchmark || null;
+      if (bm) {
+        const row = el('div', 'kpi-subline');
+        if (bm.available && !nil(bm.benchmark_return)) {
+          const names = (bm.by_market || []).map((m) => m.label).join('／');
+          row.appendChild(el('span', null, '同期買' + (names || '指數')));
+          row.appendChild(el('span', f.signClass(bm.benchmark_return),
+            f.signed(bm.benchmark_return, ccy)));
+          if (!nil(bm.excess)) {
+            /* Partial coverage must NOT print a bare 「超額」 — the same discipline as
+               covered_ratio: the label degrades, the number is not silently generalised. */
+            const partial = !nil(bm.uncovered_ratio) && Number(bm.uncovered_ratio) > 0;
+            row.appendChild(el('span', null, partial ? '· 差額（部分涵蓋）' : '· 差額'));
+            row.appendChild(el('span', f.signClass(bm.excess), f.signed(bm.excess, ccy)));
+          }
+          card.appendChild(row);
+          if (!nil(bm.uncovered_ratio) && Number(bm.uncovered_ratio) > 0) {
+            const note = el('div', 'kpi-subline',
+              (bm.uncovered_markets || []).join('／') + ' 無對應指數，'
+              + f.pct(bm.uncovered_ratio) + ' 的投入金額未納入比較');
+            note.style.opacity = '.75';
+            card.appendChild(note);
+          }
+        } else if (bm.reason) {
+          row.appendChild(el('span', null, '同期買指數'));
+          row.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
+          card.appendChild(row);
+          const why = el('div', 'kpi-subline', bm.reason);   /* server-authored, verbatim */
+          why.style.opacity = '.75';
+          card.appendChild(why);
+        }
+      }
       if (!nil(k && k.total_return)) {
         if (k.total_return > 0) card.classList.add('kpi-up');
         if (k.total_return < 0) card.classList.add('kpi-down');

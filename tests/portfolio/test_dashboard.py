@@ -23,6 +23,7 @@ from portfolio_dash.portfolio.dashboard import (
 )
 from portfolio_dash.portfolio.results import UnappliedAction
 from portfolio_dash.portfolio.returns import xirr_reporting
+from portfolio_dash.pricing.benchmarks import BENCHMARKS
 from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRead, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import (
@@ -607,7 +608,17 @@ def test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches
     assert not any(h.unbookable_action for h in data.holdings)
 
     # 2. ledger_symbols is unchanged: exactly the three non-action ledgers' symbols.
-    assert sorted(set(requested)) == ["2330", "AAPL"]
+    #
+    # R4 (2026-08-26) added benchmark reads to build_dashboard (0050 / ^GSPC — the index
+    # counterfactual). Those are NOT ledger symbols and must not weaken this guard, so the
+    # two sets are asserted SEPARATELY rather than the whole list being widened: a
+    # corporate-action change that pulls an extra LEDGER symbol still fails here, which is
+    # the property this test exists for. Benchmark keys are enumerated from the registry so
+    # the exclusion cannot silently grow either.
+    bench_keys = {b.storage_key for b in BENCHMARKS}
+    requested_set = set(requested)
+    assert sorted(requested_set - bench_keys) == ["2330", "AAPL"]
+    assert requested_set & bench_keys, "the benchmark counterfactual must have read an index"
 
     # 3. The values the change touches are the pre-change values (pinned from
     #    test_build_dashboard_happy_path, which predates this feature).

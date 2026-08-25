@@ -12,11 +12,12 @@ from bisect import bisect_right
 from datetime import date, timedelta
 from decimal import Decimal
 
+from portfolio_dash.portfolio.benchmark_counterfactual import ReportingFlow
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries
 from portfolio_dash.portfolio.price_basis import price_in
 from portfolio_dash.shared.corporate_actions import ActionIndex
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
@@ -71,6 +72,64 @@ def _fx_at(history: FxHistory, on: date, base: Currency, quote: Currency) -> Dec
     return None
 
 
+def build_reporting_flows(
+    bundle: LedgerBundle,
+    fx_history: FxHistory,
+    reporting: Currency,
+) -> list[ReportingFlow] | None:
+    """Every net-invested flow, in the reporting currency at its OWN trade-date FX.
+
+    Signs mirror the XIRR conventions, negated: opening ``+cost``, buy ``+gross`` (incl.
+    fees + tax), sell ``−net``, cash dividend ``−net``. Returns ``None`` when any flow's date
+    has no on-or-before FX rate for its pair — the same honest bail as the trend itself, and
+    the same rule XIRR uses.
+
+    ⚠ This is the ONE definition of 「what counts as money put in」, and it is extracted rather
+    than duplicated because :mod:`portfolio.benchmark_counterfactual` spends exactly this
+    stream on an index instead. Two copies would let the portfolio and its counterfactual
+    quietly disagree about which flows exist, and the whole comparison rests on them being the
+    same money on the same dates. Each flow carries its ``market`` so the counterfactual can
+    route it to that market's benchmark; the trend simply ignores that field.
+
+    Cash movements are deliberately absent, as they always were: this is the money that went
+    into SECURITIES. (⚠ Note the resulting asymmetry with ``xirr_reporting``, which since
+    AI-D42 does take REBATE / INTEREST_EXPENSE / BROKER_FEE. That gap predates this extraction
+    and moving it is an owner ruling, not a refactor.)
+    """
+    def quote_ccy(symbol: str) -> Currency:
+        inst = bundle.instruments.get(symbol)
+        if inst is None:
+            raise KeyError(f"unknown instrument: {symbol}")
+        return inst.quote_ccy
+
+    def market_of(symbol: str) -> Market:
+        inst = bundle.instruments.get(symbol)
+        if inst is None:
+            raise KeyError(f"unknown instrument: {symbol}")
+        return inst.market
+
+    raw: list[tuple[date, str, Decimal]] = []
+    for o in bundle.opening:
+        raw.append((o.build_date, o.symbol, o.original_cost_total))
+    for t in bundle.transactions:
+        gross = t.quantity * t.price
+        if t.side is Side.BUY:
+            raw.append((t.trade_date, t.symbol, gross + t.fees + t.tax))
+        else:
+            raw.append((t.trade_date, t.symbol, -(gross - t.fees - t.tax)))
+    for dv in bundle.dividends:
+        if dv.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY) — one definition
+            raw.append((dv.date, dv.symbol, -dv.net))
+
+    out: list[ReportingFlow] = []
+    for d, symbol, amount in raw:
+        rate = _fx_at(fx_history, d, quote_ccy(symbol), reporting)
+        if rate is None:
+            return None
+        out.append(ReportingFlow(d, market_of(symbol), convert(amount, rate), symbol))
+    return out
+
+
 def daily_value_series(
     bundle: LedgerBundle,
     price_history: PriceHistory,
@@ -99,35 +158,10 @@ def daily_value_series(
     # per-day rebuild would be the same answer at hundreds of times the cost.
     actions = ActionIndex.build(bundle.actions)
 
-    def quote_ccy(symbol: str) -> Currency:
-        inst = bundle.instruments.get(symbol)
-        if inst is None:
-            raise KeyError(f"unknown instrument: {symbol}")
-        return inst.quote_ccy
-
-    # Net-invested flow deltas (signs mirror the XIRR conventions, negated):
-    # opening +cost, buy +gross(incl. fees+tax), sell -net, cash dividend -net.
-    flows: list[tuple[date, Currency, Decimal]] = []
-    for o in bundle.opening:
-        flows.append((o.build_date, quote_ccy(o.symbol), o.original_cost_total))
-    for t in bundle.transactions:
-        gross = t.quantity * t.price
-        if t.side is Side.BUY:
-            flows.append((t.trade_date, quote_ccy(t.symbol), gross + t.fees + t.tax))
-        else:
-            flows.append((t.trade_date, quote_ccy(t.symbol), -(gross - t.fees - t.tax)))
-    for dv in bundle.dividends:
-        if dv.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY) — one definition
-            flows.append((dv.date, quote_ccy(dv.symbol), -dv.net))
-
-    # Convert each flow at its own date's carry-forward FX; bail honestly if any
-    # flow cannot be converted (no on-or-before rate).
-    converted: list[tuple[date, Decimal]] = []
-    for d, ccy, amount in flows:
-        rate = _fx_at(fx_history, d, ccy, reporting)
-        if rate is None:
-            return TrendSeries(points=[], reporting_currency=reporting, available=False)
-        converted.append((d, convert(amount, rate)))
+    reporting_flows = build_reporting_flows(bundle, fx_history, reporting)
+    if reporting_flows is None:
+        return TrendSeries(points=[], reporting_currency=reporting, available=False)
+    converted: list[tuple[date, Decimal]] = [(f.on, f.amount) for f in reporting_flows]
 
     points: list[TrendPoint] = []
     day = start

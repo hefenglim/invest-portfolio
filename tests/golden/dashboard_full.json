@@ -1589,6 +1589,21 @@
     "reporting_currency": "TWD",
     "available": true
   },
+  "benchmark": {
+    "available": false,
+    "reason": "所有投入流量都落在基準指數的歷史之外或缺少基準，無法計算基準對照",
+    "terminal_value": null,
+    "net_invested": null,
+    "benchmark_return": null,
+    "excess": null,
+    "uncovered_markets": [
+      "MY",
+      "TW",
+      "US"
+    ],
+    "uncovered_ratio": "1",
+    "by_market": []
+  },
   "freshness": {
     "prices": [
       {

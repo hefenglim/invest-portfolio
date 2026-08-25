@@ -27,9 +27,12 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.forex.fx_pnl import compute_fx_summary
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.allocation import combined_view, sector_allocation
+from portfolio_dash.portfolio.benchmark_counterfactual import counterfactual
 from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard_models import (
+    BenchmarkComparison,
+    BenchmarkMarketLeg,
     DashboardData,
     DividendProjection,
     DividendSummary,
@@ -46,7 +49,7 @@ from portfolio_dash.portfolio.dashboard_models import (
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.pnl import value_holdings
-from portfolio_dash.portfolio.price_basis import price_in
+from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.results import (
     CombinedView,
     ReturnSummary,
@@ -54,7 +57,14 @@ from portfolio_dash.portfolio.results import (
     UnappliedAction,
 )
 from portfolio_dash.portfolio.returns import total_return, xirr_reporting
-from portfolio_dash.portfolio.timeseries import FxHistory, PriceHistory, daily_value_series
+from portfolio_dash.portfolio.timeseries import (
+    FxHistory,
+    PriceHistory,
+    build_reporting_flows,
+    daily_value_series,
+)
+from portfolio_dash.portfolio.twr import convert_closes
+from portfolio_dash.pricing.benchmarks import benchmark_for_market
 from portfolio_dash.pricing.results import FxRead, PriceRead
 from portfolio_dash.pricing.store import (
     get_dividend_events,
@@ -68,7 +78,7 @@ from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import DividendType
-from portfolio_dash.shared.models.ledger import FXConversion
+from portfolio_dash.shared.models.ledger import FXConversion, LedgerBundle
 from portfolio_dash.shared.sectors import canonical_sector
 
 _ZERO = Decimal("0")
@@ -264,6 +274,84 @@ def fx_complete_return(trend: TrendSeries) -> FxCompleteOutcome:
             None, "最新一日有標的缺價,含匯兌總損益暫不計算(不以較早日期替代,否則與"
                   "上方資產損益不同日,兩者的差額會失去意義)")
     return FxCompleteOutcome(last.total_value - last.net_invested, None)
+
+
+_BENCH_EPOCH = date(1990, 1, 1)  # benchmark closes may predate the first ledger event
+
+
+def _benchmark_comparison(
+    conn: sqlite3.Connection,
+    bundle: LedgerBundle,
+    fx_history: FxHistory,
+    reporting: Currency,
+    *,
+    as_of: date,
+    actions: ActionIndex,
+    fx_complete: Decimal | None,
+) -> BenchmarkComparison:
+    """R4 / AI-D43 — spend the portfolio's own flows on each market's index instead.
+
+    Assembled HERE for the same reason ``fx_complete_return`` is: this is the only layer
+    holding both the ledger flows and the reporting-currency figure they must be compared
+    against. Reuses the request's ONE ``ActionIndex`` (trap #21) and the ALREADY-loaded
+    ``fx_history`` — a benchmark's quote currency is the quote currency of the market whose
+    flows it is standing in for, so the pair is loaded exactly when it is needed, and a
+    genuinely missing pair drops those closes and degrades that market to uncovered rather
+    than raising.
+
+    ⚠ ``series_in`` is applied to the benchmark series for the same reason and with the same
+    known limitation the performance router documents: nobody holds an index, so nobody
+    records its splits, making the call a structural no-op today — wired anyway because it
+    is correct the moment such an action IS recorded, and because one raw series read is how
+    the next reader concludes the re-expression rule is optional.
+    """
+    flows = build_reporting_flows(bundle, fx_history, reporting)
+    if flows is None:
+        return BenchmarkComparison(
+            available=False,
+            reason="部分投入流量缺少當日匯率，無法換算成報告幣，基準對照暫不可用",
+        )
+    closes_by_market: dict[Market, list[tuple[date, Decimal]]] = {}
+    labels: dict[Market, str] = {}
+    for market in {f.market for f in flows}:
+        bench = benchmark_for_market(market)
+        if bench is None:
+            continue  # MY today (AI-D22) — counted as uncovered, never silently dropped
+        raw = [
+            (p.as_of, p.value)
+            for p in series_in(
+                actions, bench.storage_key,
+                get_price_history(conn, bench.storage_key, _BENCH_EPOCH, as_of),
+                valued_on=as_of,
+            )
+        ]
+        converted = convert_closes(raw, fx_history, bench.quote_ccy, reporting)
+        if converted:
+            closes_by_market[market] = converted
+            labels[market] = bench.label
+
+    result = counterfactual(flows, closes_by_market)
+    excess = (
+        None if not result.available or fx_complete is None or result.benchmark_return is None
+        else fx_complete - result.benchmark_return
+    )
+    return BenchmarkComparison(
+        available=result.available,
+        reason=result.reason,
+        terminal_value=result.terminal_value,
+        net_invested=result.net_invested,
+        benchmark_return=result.benchmark_return,
+        excess=excess,
+        uncovered_markets=list(result.uncovered_markets),
+        uncovered_ratio=result.uncovered_ratio,
+        by_market=[
+            BenchmarkMarketLeg(
+                market=leg.market, label=labels[leg.market],
+                terminal_value=leg.terminal_value, net_invested=leg.net_invested,
+            )
+            for leg in result.by_market
+        ],
+    )
 
 
 def build_dashboard(
@@ -545,6 +633,10 @@ def build_dashboard(
 
     # 9. Trend — bulk-load histories, then the pure daily replay.
     trend_reason: str | None = None
+    # Declared OUT here (empty by default) because step 10's benchmark counterfactual reads
+    # it as well, and on a ledger with no events the trend branch below never runs. Empty is
+    # the honest value there: no flows to convert, so the counterfactual refuses.
+    trend_fx_history: FxHistory = {}
     if txs or divs or opening:
         # BOTH ends of every corporate action (audit F-50): a SPINOFF child appears in no
         # other ledger, so omitting it loaded no price history for a position the replay
@@ -565,7 +657,10 @@ def build_dashboard(
             sym: [(p.as_of, p.value) for p in get_price_history(conn, sym, _EPOCH, as_of)]
             for sym in ledger_symbols
         }
-        fx_history: FxHistory = {}
+        # (``trend_fx_history`` is declared before this branch so step 10's benchmark
+        # counterfactual can read it on an EMPTY ledger too — where it is simply empty and
+        # the counterfactual refuses honestly instead of raising UnboundLocalError.)
+        fx_history = trend_fx_history
         for ccy in {instruments[sym].quote_ccy for sym in ledger_symbols}:
             if ccy == reporting:
                 continue
@@ -632,6 +727,11 @@ def build_dashboard(
     fx_complete = fx_outcome.value
     principal_fx = (None if fx_complete is None or total_return_blended is None
                     else fx_complete - total_return_blended)
+    # R4 / AI-D43: the index counterfactual rides beside B, measured on the same ruler.
+    benchmark = _benchmark_comparison(
+        conn, bundle, trend_fx_history, reporting,
+        as_of=as_of, actions=actions, fx_complete=fx_complete,
+    )
     kpis = KpiSummary(
         reporting_currency=reporting,
         total_market_value=total_value,
@@ -707,6 +807,7 @@ def build_dashboard(
         dividends=dividend_summary,
         ex_dividend_calendar=calendar,
         trend=trend,
+        benchmark=benchmark,
         freshness=freshness,
         insights=[],
         dividend_projection=dividend_projection,
