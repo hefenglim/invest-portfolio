@@ -210,6 +210,10 @@ def dividends(
             "reinvest_price": (
                 decimal_str(d.reinvest_price) if d.reinvest_price is not None else None
             ),
+            # R6: the ex-dividend date. ``date`` above is the PAYMENT date; only a STOCK
+            # dividend's replay uses this one (Dividend.effective_date). None on every
+            # pre-R6 row — never guessed.
+            "ex_date": d.ex_date.isoformat() if d.ex_date is not None else None,
             "ccy": ccys.get(d.symbol, ""),
         })
     return _page(out, limit, offset)

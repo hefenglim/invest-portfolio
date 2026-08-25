@@ -41,6 +41,9 @@ _MODEL_ALLOWED_TYPES: dict[str, set[str]] = {
 DIVIDEND_COLUMNS: list[str] = [
     "account", "symbol", "date", "type", "gross",
     "withholding", "net", "reinvest_shares", "reinvest_price",
+    # R6 (review ⑧): the EX-DIVIDEND date, optional. ``date`` means the PAYMENT date. A row
+    # that omits this behaves exactly as it did before the column existed — never guessed.
+    "ex_date",
 ]
 
 
@@ -58,8 +61,12 @@ def _opt_decimal(row: dict[str, str], key: str) -> Decimal | None:
 def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     """Parse *csv_text* into an :class:`ImportPreview` of dividends rows.
 
-    Required columns: account, symbol, date, type, gross.
-    Optional columns: withholding, net, reinvest_shares, reinvest_price.
+    Required columns: account, symbol, date (the PAYMENT date), type, gross.
+    Optional columns: withholding, net, reinvest_shares, reinvest_price, ex_date.
+
+    ``ex_date`` (R6) is the ex-dividend date. Only a STOCK dividend uses it — see
+    ``Dividend.effective_date`` — and an unparseable or absent value is left as ``None``
+    rather than guessed, which replays exactly as before the column existed.
 
     The dividend model for the row is derived from the ``type`` column
     (``DRIP`` / ``STOCK`` / ``cash``); ``apply_dividend_model`` fills in computed
@@ -77,6 +84,8 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
             account_id, alias_issue = alias_import_account(raw["account"])
             symbol = raw["symbol"]
             div_date = date.fromisoformat(raw["date"])
+            ex_date_raw = raw.get("ex_date", "").strip()
+            ex_date = date.fromisoformat(ex_date_raw) if ex_date_raw else None
             # Normalize + validate type (2026-07-03): the raw value used to be
             # stored as-is, so a lowercase "cash" poisoned the ledger (readers do
             # DividendType(s.type) and raise). Same write/read invariant as ever:
@@ -196,6 +205,8 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
             payload["reinvest_shares"] = str(amounts.reinvest_shares)
         if amounts.reinvest_price is not None:
             payload["reinvest_price"] = str(amounts.reinvest_price)
+        if ex_date is not None:
+            payload["ex_date"] = ex_date.isoformat()
 
         rows.append(PreviewRow(index=idx, raw=raw, payload=payload, issues=issues))
 
@@ -224,5 +235,6 @@ def write_dividend_row(
         net=Decimal(p["net"]),
         reinvest_shares=Decimal(rs_str) if rs_str is not None else None,
         reinvest_price=Decimal(rp_str) if rp_str is not None else None,
+        ex_date=date.fromisoformat(p["ex_date"]) if p.get("ex_date") else None,
         commit=commit,
     )

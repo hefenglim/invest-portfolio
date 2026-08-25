@@ -21,6 +21,12 @@ from portfolio_dash.shared.models.ledger import (
 from portfolio_dash.shared.money import cap_dp, from_db, to_db
 from portfolio_dash.shared.sectors import CANONICAL_KEYS, canonical_sector
 
+#: Alias for :class:`datetime.date`. A Pydantic field named ``date`` SHADOWS the type
+#: inside its own class body, so every annotation after it — ``ex_date``, the
+#: ``effective_date`` return — resolves to the FIELD and mypy rejects it. Aliasing is the
+#: least surprising fix: renaming the field would change the ledger's wire contract.
+Date = date
+
 logger = logging.getLogger(__name__)
 
 # Transaction price precision cap (audit L11): cap to 4 dp on the way in — same
@@ -663,7 +669,8 @@ class StoredDividend(BaseModel):
     id: int
     account_id: str
     symbol: str
-    date: date
+    date: date  # the PAYMENT date (R6 pinned the meaning)
+    ex_date: Date | None = None  # R6: NULL on every pre-R6 row and whenever unknown
     type: str
     gross: Decimal
     withholding: Decimal
@@ -684,6 +691,7 @@ def insert_dividend(
     net: Decimal,
     reinvest_shares: Decimal | None = None,
     reinvest_price: Decimal | None = None,
+    ex_date: date | None = None,
     commit: bool = True,
 ) -> int:
     """Insert a dividends row and return its new primary-key id.
@@ -694,8 +702,8 @@ def insert_dividend(
     cur = conn.execute(
         """INSERT INTO dividends
                (account_id, symbol, date, type, gross, withholding, net,
-                reinvest_shares, reinvest_price)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+                reinvest_shares, reinvest_price, ex_date)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (
             account_id,
             symbol,
@@ -706,6 +714,7 @@ def insert_dividend(
             to_db(net),
             to_db(reinvest_shares) if reinvest_shares is not None else None,
             to_db(reinvest_price) if reinvest_price is not None else None,
+            ex_date.isoformat() if ex_date is not None else None,
         ),
     )
     if commit:
@@ -734,7 +743,8 @@ def list_dividends(
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         f"SELECT id, account_id, symbol, date, type, gross, withholding, net, "
-        f"reinvest_shares, reinvest_price FROM dividends{where} ORDER BY date ASC, id ASC",
+        f"reinvest_shares, reinvest_price, ex_date FROM dividends{where} "
+        f"ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
     return [
@@ -743,6 +753,10 @@ def list_dividends(
             account_id=r["account_id"],
             symbol=r["symbol"],
             date=date.fromisoformat(r["date"]),
+            ex_date=(
+                date.fromisoformat(r["ex_date"])
+                if "ex_date" in r.keys() and r["ex_date"] else None
+            ),
             type=r["type"],
             gross=from_db(r["gross"]),
             withholding=from_db(r["withholding"]),
@@ -1102,6 +1116,7 @@ def load_ledger_bundle(
         ],
         dividends=[
             Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
+                     ex_date=s.ex_date,
                      type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
                      net=s.net, reinvest_shares=s.reinvest_shares,
                      reinvest_price=s.reinvest_price)
@@ -1429,6 +1444,7 @@ def update_cash_movement(
         (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note,
          None if acq_home_amount is None else to_db(acq_home_amount), move_id),
     )
+
     conn.commit()
     return cur.rowcount > 0
 

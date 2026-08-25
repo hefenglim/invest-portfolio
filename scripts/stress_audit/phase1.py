@@ -319,12 +319,16 @@ class Ops:
         return resp
 
     def dividend(self, account_id, symbol, d, dtype, gross, *, withholding=None,
-                 net=None, reinvest_price=None, reinvest_shares=None):
+                 net=None, reinvest_price=None, reinvest_shares=None, ex_date=None):
+        # `d` is the PAYMENT date; `ex_date` (R6) is the ex-dividend date and is used by the
+        # replay for a STOCK dividend only. Driven through the SAME CSV door the owner uses,
+        # so the column being accepted end to end is part of what this exercises.
         cols = ["account", "symbol", "date", "type", "gross", "withholding", "net",
-                "reinvest_shares", "reinvest_price"]
+                "reinvest_shares", "reinvest_price", "ex_date"]
         row = {"account": account_id, "symbol": symbol, "date": d, "type": dtype,
                "gross": str(gross), "withholding": _s(withholding), "net": _s(net),
-               "reinvest_shares": _s(reinvest_shares), "reinvest_price": _s(reinvest_price)}
+               "reinvest_shares": _s(reinvest_shares), "reinvest_price": _s(reinvest_price),
+               "ex_date": _s(ex_date)}
         csv_text = ",".join(cols) + "\n" + ",".join(row[c] for c in cols) + "\n"
         r = self.api.post("/api/import/commit",
                           {"kind": "dividends", "csv_text": csv_text, "ack_warnings": True})

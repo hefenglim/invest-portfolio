@@ -452,6 +452,77 @@ mypy error and a `TypeError`.
   enumerated from the registry — widening the list wholesale would have quietly retired a
   guard that is still doing its job.
 
+### Added — investment-logic review, wave R5 (two portfolio-level risks)
+
+- **A portfolio could fall 25% with nothing firing.** `drawdown_from_peak` is per-SYMBOL,
+  against each name's own 52-week high, so a diversified book — the normal case — can drop a
+  quarter with no single holding down far enough to trip it. New **`portfolio_drawdown`** rule
+  reads the daily total-value series the trend already builds. Same two-severity shape as its
+  per-symbol sibling (risk at the knob, warn at half), threshold in `rules_config` like every
+  other rule.
+  ⚠ **`incomplete` days are skipped.** A trend point is flagged incomplete when a held symbol
+  had no price that day, and its `total_value` collapses accordingly — counting it would turn
+  a missing quote into a 「組合回撤 100%」 risk alert. The test asserts the same series with and
+  without the flag, so the skip is proven to be what makes the difference.
+  ⚠ **Naming is substance here, not wording.** Two switches both reading 「回撤」 on the settings
+  page, the notification list and the rule comments would be the AI-D2 two-definitions defect.
+  They are 「高點回撤」 (per-symbol) and 「組合整體回撤」 (whole book), and the settings copy states
+  the difference outright.
+- **The currency axis had no rule at all.** For a three-currency investor the largest
+  undiversified bet is usually the currency mix, not any one stock; `single_weight` and
+  `sector_weight` could not see it. New **`currency_weight`** rule, defaulting looser than
+  sector (0.70 vs 0.60) because a three-currency book concentrates naturally and a threshold
+  that fires constantly is one nobody reads.
+  ⚠ `CombinedView.by_currency_value` is **native**, so ranking or summing across currencies is
+  meaningless arithmetic — 10,000 USD and 300,000 TWD are 31 : 300 natively and roughly
+  half-and-half in fact. `by_currency_reporting` is added and accumulated in the SAME loop as
+  the native leg and the blended total, so the three can never disagree.
+- Both rules guard a non-positive denominator: a net-short book can carry a non-positive total
+  value or peak, and a ratio over one flips every sign — the audit-H1 trap. Silence beats a
+  table of inverted percentages.
+- ⚠ A new strategy rule must also enter `ops/notify.RULE_CATALOG` — a drift guard asserts the
+  subset, and a rule with no subscription entry is a rule nobody can be told about.
+- The golden payload gains `by_currency_reporting` and nothing else: 5 insertions, 0 deletions.
+
+### Added — investment-logic review, wave R6 (the ex-dividend date)
+
+- **A 配股 was worth −9% for a month, once a year.** The `dividends` ledger carried ONE date.
+  For a TW stock dividend the two that matter are ~30 days apart: the share price adjusts on
+  the **ex-date**, the shares arrive on the **payment date**. With only the payment date
+  recorded the replay held the OLD share count against the ALREADY-ADJUSTED price for that
+  whole gap, so a 10% 配股 read as a ~9% loss on every TW holding that pays one.
+  `dividends.ex_date` is added **NULLABLE, no default**: every existing row migrates in as
+  「unknown」, never as a guessed date, and a row with NULL replays **byte-identically** — the
+  regression test pinning that is the load-bearing one, because this touches money of record.
+  `date` is now pinned to mean the PAYMENT date.
+  ⚠ **Only STOCK moves**, and the rule is about what you actually own on a given day.
+  **STOCK** is an entitlement that attaches on the ex-date — you own the shares from then and
+  the quote says so. **DRIP** is a PURCHASE made when the cash lands; those shares do not exist
+  earlier. **CASH / NET** keeps the payment date deliberately: the dip between ex-date and
+  payment is HONEST — the position really is worth less and you really have not been paid, and
+  unlike the stock case nothing about what you own changed.
+  ⚠ The rule lives in ONE property (`Dividend.effective_date`) because three filters must agree
+  — `build_book`'s event ordering, `LedgerBundle.through` and `before_action_on`. `through`
+  matters most: it filters `dividends` by date, so without it the event is not even IN the
+  bundle on the days between ex and payment, and the ordering change alone would do nothing.
+- **The provider door was already discarding the answer.** `dividend_inbox` computes
+  `div_date = p.pay_date or p.ex_date` — it had both dates in hand and kept one. All four
+  inserts now pass `ex_date` through, which is what makes TW 配股 work with no user action.
+  The other three doors take it too: the dividend CSV gains an optional `ex_date` column, the
+  AI door gains the field plus a prompt rule forbidding an inferred one (a guessed ex-date
+  moves shares to the wrong day, which is the error this exists to remove), and the manual form
+  shows the input **only for 配股** — offering it on a cash payout invites filling a value the
+  ledger deliberately ignores.
+  ⚠ **A defect this nearly introduced:** `broker/convert.py` writes its header from
+  `template_columns()` but built its rows by hand. Adding a column to `DIVIDEND_COLUMNS`
+  without extending the row would have emitted 10 headers over 9 values, misaligning every
+  field after the gap — silently, into the ledger. Both that writer and the AI door's
+  `_div_csv` are fixed, and the broker one now asserts its row width against the template so
+  the next column addition fails loudly instead.
+  The broker converter itself supplies **blank**: a statement's distribution line carries the
+  payment date, not the ex-date, and inventing one would break its 「supplied verbatim, never
+  recomputed」 discipline.
+
 ### Fixed — R2 follow-up
 
 - **The 含匯兌總損益 line vanished instead of explaining itself** (owner ruling 2026-08-25). B

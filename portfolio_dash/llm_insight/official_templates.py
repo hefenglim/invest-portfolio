@@ -23,7 +23,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v18 (2026-08-26)"  # ⑪ +10 對齊計分窗；⑬ freshness sources
+LIBRARY_VERSION = "official-v19 (2026-08-26)"  # ⑪ +10 對齊計分窗；⑬ freshness sources
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -65,7 +65,7 @@ LIBRARY_VERSION = "official-v18 (2026-08-26)"  # ⑪ +10 對齊計分窗；⑬ f
 # so the prompt can never drift from the door's allowed set.
 _CASH_KIND_VOCAB = "、".join(f"{kind}（{zh}）" for kind, zh in CASH_KIND_ZH.items())
 
-AI_INPUT_PROMPT_VERSION = "v6"
+AI_INPUT_PROMPT_VERSION = "v7"  # R6: div ex_date
 AI_INPUT_PROMPT_BODY = (
     "<task>Extract stock transactions, dividends, and cash movements from the user's text\n"
     "and any attached statement screenshot into JSON. A real statement is MIXED — one page\n"
@@ -78,7 +78,7 @@ AI_INPUT_PROMPT_BODY = (
     '"is_etf":false,"note","market"}}\n'
     'div 股利: {{"kind":"div","account_id","symbol","date",\n'
     '"type":"CASH|STOCK|DRIP|NET","gross","withholding","net","reinvest_shares",\n'
-    '"reinvest_price"}}\n'
+    '"reinvest_price","ex_date"}}\n'
     'cash 資金異動: {{"kind":"cash","account_id","date","cash_kind","ccy","amount",\n'
     '"acq_home_amount","note"}}\n'
     "</row_shapes>\n"
@@ -122,7 +122,11 @@ AI_INPUT_PROMPT_BODY = (
     "when in doubt, false. Dividend types: CASH=現金股利入帳; STOCK=配股（股票股利，加\n"
     "股數）; DRIP=股息再投資（填 reinvest_shares 與 reinvest_price）; NET=淨額入帳（馬股\n"
     "單一層制）. gross/withholding/net are copied from the statement ONLY when it states\n"
-    "them — never compute a withholding yourself. Cash rows: amount is ALWAYS unsigned\n"
+    "them — never compute a withholding yourself. div date is the PAYMENT date\n"
+    "(發放日／入帳日); ex_date is the EX-DIVIDEND date (除息日／除權日), filled ONLY\n"
+    "when the statement states it — never infer or estimate one: a guessed ex-date\n"
+    "moves a 配股 to the wrong day in the ledger, which is the error it exists to\n"
+    "remove. Cash rows: amount is ALWAYS unsigned\n"
     "(positive); the direction lives in cash_kind — one of the <cash_kind_vocabulary>\n"
     "entries (canonical English or the zh label, both accepted). 券商費用／融資利息 are\n"
     "OUTFLOWS (BROKER_FEE／INTEREST_EXPENSE); 入金／利息收入 are INFLOWS — a mislabelled\n"

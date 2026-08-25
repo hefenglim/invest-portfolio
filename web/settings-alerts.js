@@ -43,7 +43,16 @@
     consensus_change: { name: '分析師共識轉弱', sev: 'info', step: 0.1,
       desc: '評級分數惡化達此值（1→5 制）或均值目標價下修逾 10%（對比 7 日前）時提示。' },
     target_cross: { name: '目標價穿越', sev: 'warn',
-      desc: '個股現價跌破目標下限或突破目標上限時警示。目標價在「觀察清單」逐檔設定，此處僅可停用。' }
+      desc: '個股現價跌破目標下限或突破目標上限時警示。目標價在「觀察清單」逐檔設定，此處僅可停用。' },
+    /* R5. ⚠ The name must NOT collapse into 「回撤」: 高點回撤 above is PER-SYMBOL against each
+       name's own 52-week high, this one is the whole book against its own peak. Two switches
+       reading the same is the AI-D2 two-definitions defect on the settings page. */
+    portfolio_drawdown: { name: '組合整體回撤', sev: 'risk', step: 1,
+      desc: '整個投資組合的每日總市值自歷史高點回撤達此幅度時警示（risk）；達一半幅度先給 warn。'
+        + '與上面的「高點回撤」不同：那是逐檔比各自的 52 週高點，分散的組合可能整體跌兩成而沒有任何一檔觸發。' },
+    currency_weight: { name: '幣別集中度', sev: 'risk', step: 5,
+      desc: '任一幣別合計權重（換算報告幣後）超過此比例時警示。三幣別的帳本最大的未分散賭注常常是幣別配置，'
+        + '而非任何單一持股。預設比產業集中度寬鬆，因為幣別天然集中。' }
   };
 
   /* Unit conversion between the WIRE (backend native units) and the EDITOR input.

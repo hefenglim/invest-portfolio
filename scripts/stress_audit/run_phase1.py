@@ -95,6 +95,12 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     op.dividend("moomoo_my", "1155", "2026-04-15", "NET", 300)                      # MY cash
     op.dividend("tw_broker", "2330", "2026-06-10", "CASH", 5000)
     op.dividend("tw_broker", "0050", "2026-06-12", "CASH", 800)
+    # R6 / review ⑧ — a TW 配股 whose ex-date and payment date are a month apart. Permanent
+    # scenario op (accumulation rule ①): without one, the ex-date replay agrees with the
+    # oracle by both never exercising it. The oracle derives the same STOCK-only rule
+    # independently, so the two must agree on the share count between the two dates.
+    op.dividend("tw_broker", "2330", "2026-05-30", "STOCK", 0,
+                reinvest_shares=100, ex_date="2026-05-02")
 
     # ---- oversell attempt -> block, then ack-write (creates 賣超 holding) ----
     # 0050 held here = B3(10)+B4(100)+B20(50)-S2(50) = 110; sell 200 > 110 -> oversell.

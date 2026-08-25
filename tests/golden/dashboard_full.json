@@ -408,6 +408,11 @@
       "USD": "38870.0",
       "MYR": "9875.000"
     },
+    "by_currency_reporting": {
+      "TWD": "1625000",
+      "USD": "1243840.0",
+      "MYR": "69125.000"
+    },
     "reporting_total_value": "2937965.000",
     "reporting_currency": "TWD"
   },

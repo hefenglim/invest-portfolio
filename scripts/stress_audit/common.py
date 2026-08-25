@@ -454,7 +454,10 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
                 gross=dec(r["gross"] or "0"), withholding=dec(r["withholding"] or "0"),
                 net=dec(r["net"] or "0"),
                 reinvest_shares=dec(r["reinvest_shares"]) if r["reinvest_shares"] else None,
-                reinvest_price=dec(r["reinvest_price"]) if r["reinvest_price"] else None))
+                reinvest_price=dec(r["reinvest_price"]) if r["reinvest_price"] else None,
+                # R6: tolerate a pre-migration DB (the column may not exist yet).
+                ex_date=(date.fromisoformat(r["ex_date"])
+                         if "ex_date" in r.keys() and r["ex_date"] else None)))
         for r in conn.execute("SELECT * FROM fx_conversions ORDER BY date, id"):
             f.fxs.append(O.FxFact(
                 id=r["id"], account_id=r["account_id"], d=date.fromisoformat(r["date"]),
@@ -562,7 +565,9 @@ def load_facts_from_api(api: Api) -> O.Facts:
             gross=dec(r.get("gross") or "0"), withholding=dec(r.get("withhold") or "0"),
             net=dec(r.get("net") or "0"),
             reinvest_shares=dec(r["reinvest_shares"]) if r.get("reinvest_shares") else None,
-            reinvest_price=dec(r["reinvest_price"]) if r.get("reinvest_price") else None))
+            reinvest_price=dec(r["reinvest_price"]) if r.get("reinvest_price") else None,
+            # R6: absent on an older wire -> None, which replays as the payment date.
+            ex_date=date.fromisoformat(r["ex_date"]) if r.get("ex_date") else None))
     for r in _page(api, "/api/ledgers/fx"):
         f.fxs.append(O.FxFact(
             id=r["id"], account_id=r["account_id"], d=date.fromisoformat(r["date"]),

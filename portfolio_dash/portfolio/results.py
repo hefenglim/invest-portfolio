@@ -230,5 +230,12 @@ class CombinedView(BaseModel):
     """Per-currency market value + blended reporting-currency total."""
 
     by_currency_value: dict[Currency, Decimal]
+    # The SAME values converted to the reporting currency (R5). ``by_currency_value`` above is
+    # NATIVE, so its entries cannot be compared or summed across currencies — 10,000 USD and
+    # 300,000 TWD are 31 : 300 natively and roughly half-and-half in reality. Anything that
+    # ranks or weights currencies must read THIS field. Computed in the same loop as the
+    # native leg and the blended total so the three can never disagree; additive with an empty
+    # default so CombinedView constructions predating it still validate.
+    by_currency_reporting: dict[Currency, Decimal] = Field(default_factory=dict)
     reporting_total_value: Decimal
     reporting_currency: Currency

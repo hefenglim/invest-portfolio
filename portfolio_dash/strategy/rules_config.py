@@ -42,6 +42,9 @@ class AlertRules(BaseModel):
     # FU-D28: target-price crossing. On/off only — the thresholds are PER-SYMBOL (the
     # instruments table's target_low / target_high), edited on the 觀察清單 page, NOT here.
     target_cross: Rule
+    # R5 (investment-logic review): two PORTFOLIO-level risks the per-symbol rules cannot see.
+    portfolio_drawdown: Rule
+    currency_weight: Rule
 
 
 # id -> (default_value | None, unit | None, min | None, max | None); all numerics are strings.
@@ -69,6 +72,18 @@ RULE_META: dict[str, tuple[str | None, str | None, str | None, str | None]] = {
     # consensus_change: the rating-score worsening threshold (1=best..5=worst scale, so
     # "worse" = increase). The mean-target-price cut leg (−10%) is a fixed named constant.
     "consensus_change": ("0.5", "score", "0.1", "4"),
+    # portfolio_drawdown: the WHOLE BOOK's peak-to-trough fall, as a ratio. warn fires at HALF
+    # this value, exactly like drawdown_from_peak — one editable knob, two severities.
+    # ⚠ NOT a duplicate of drawdown_from_peak, which is PER-SYMBOL against each name's own
+    # 52-week high. A diversified book can fall 25% with no single holding down enough to trip
+    # that one, which is the normal case and the reason this rule exists. Two switches on the
+    # settings page named 「回撤」 would be the AI-D2 two-definitions defect, so the labels and
+    # this comment keep them apart.
+    "portfolio_drawdown": ("0.20", "ratio", "0.05", "0.90"),
+    # currency_weight: one currency's share of the portfolio, in the REPORTING currency.
+    # Looser than sector_weight (0.60) on purpose: a three-currency book concentrates
+    # naturally, and a threshold that fires constantly is a threshold nobody reads.
+    "currency_weight": ("0.70", "ratio", "0.30", "1"),
     # target_cross (FU-D28): toggle-only (no numeric threshold) — the levels are per-symbol
     # (instruments.target_low / target_high), edited on 觀察清單. Same shape as stale_price.
     "target_cross": (None, None, None, None),

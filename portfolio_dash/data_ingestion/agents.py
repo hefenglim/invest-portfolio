@@ -55,6 +55,12 @@ from portfolio_dash.shared.llm import LLMError, complete_structured
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.symbol_format import matches_market_format
 
+#: Alias for :class:`datetime.date`. A Pydantic field named ``date`` SHADOWS the type
+#: inside its own class body, so every annotation after it — ``ex_date``, the
+#: ``effective_date`` return — resolves to the FIELD and mypy rejects it. Aliasing is the
+#: least surprising fix: renaming the field would change the ledger's wire contract.
+Date = date
+
 _TAIPEI = ZoneInfo("Asia/Taipei")
 
 # Market VALUE -> that market's quote ccy (inverse of markets.CCY_MARKET). Used to render a
@@ -102,13 +108,17 @@ class DivDraft(BaseModel):
     kind: Literal["div"] = "div"
     account_id: str
     symbol: str
-    date: date
+    date: date  # the PAYMENT date (R6 pinned the meaning)
     type: str  # CASH / STOCK / DRIP / NET — canonicalised + gated per account model downstream
     gross: Decimal
     withholding: Decimal | None = None
     net: Decimal | None = None
     reinvest_shares: Decimal | None = None
     reinvest_price: Decimal | None = None
+    #: R6 — the EX-DIVIDEND date, only when the statement states it. The prompt forbids
+    #: inferring one: a guessed ex-date silently moves a 配股's shares to the wrong day,
+    #: which is the very error R6 exists to remove.
+    ex_date: Date | None = None
 
 
 class CashDraft(BaseModel):
@@ -277,6 +287,7 @@ def _div_csv(drafts: list[DivDraft]) -> str:
             d.account_id, d.symbol, d.date.isoformat(), d.type, d.gross,
             _opt(d.withholding), _opt(d.net),
             _opt(d.reinvest_shares), _opt(d.reinvest_price),
+            d.ex_date.isoformat() if d.ex_date is not None else "",
         ]
         for d in drafts
     ])

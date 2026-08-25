@@ -12,6 +12,12 @@ from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.types import Money
 
+#: Alias for :class:`datetime.date`. A Pydantic field named ``date`` SHADOWS the type
+#: inside its own class body, so every annotation after it — ``ex_date``, the
+#: ``effective_date`` return — resolves to the FIELD and mypy rejects it. Aliasing is the
+#: least surprising fix: renaming the field would change the ledger's wire contract.
+Date = date
+
 
 class Transaction(BaseModel):
     """A buy or sell. Fees/tax are the snapshot taken at entry; stored, never recomputed."""
@@ -37,13 +43,46 @@ class Dividend(BaseModel):
 
     account_id: str
     symbol: str
+    #: The PAYMENT date — when the cash lands or the reinvestment is bought. Pinned to that
+    #: meaning by R6; before it, this column carried whichever date the source happened to
+    #: supply, which is why ``ex_date`` had to be added rather than inferred.
     date: date
+    #: The EX-DIVIDEND date, when known (R6 / review ⑧). ``None`` on every pre-R6 row and on
+    #: any source that does not supply one — never guessed, and a row with ``None`` replays
+    #: exactly as it did before this field existed.
+    ex_date: Date | None = None
     type: DividendType
     gross: Money
     withholding: Money
     net: Money
     reinvest_shares: Money | None = None
     reinvest_price: Money | None = None
+
+    @property
+    def effective_date(self) -> Date:
+        """The date the REPLAY books this event — the one every date filter must use.
+
+        Only a **STOCK** dividend (配股) moves to the ex-date, and the rule is about what you
+        actually own on a given day:
+
+        * **STOCK** — an entitlement that attaches on the ex-date. You own the shares from
+          then, and the quoted price already says so. Holding the OLD share count against the
+          ALREADY-ADJUSTED price for the ~month until payment is what made a 10% 配股 read as
+          a ~9% loss once a year (review ⑧).
+        * **DRIP** — the cash is paid on the payment date and the reinvestment is BOUGHT then,
+          at the recorded reinvest price. Those shares do not exist earlier.
+        * **CASH / NET** — the price drops on the ex-date while the cost reduces when the money
+          arrives. That dip is left in place deliberately: unlike the stock case it is HONEST,
+          because nothing about what you own changed on the ex-date — you are simply not paid
+          yet.
+
+        One property rather than a condition repeated at each filter: ``build_book``'s event
+        ordering, ``LedgerBundle.through`` and ``before_action_on`` must agree, and three
+        copies of a rule is how two of them drift.
+        """
+        if self.type is DividendType.STOCK and self.ex_date is not None:
+            return self.ex_date
+        return self.date
 
 
 class FXConversion(BaseModel):
@@ -116,7 +155,9 @@ class LedgerBundle:
         return replace(
             self,
             transactions=[t for t in self.transactions if t.trade_date <= day],
-            dividends=[d for d in self.dividends if d.date <= day],
+            # R6: `effective_date`, not `date` — a STOCK dividend with a known ex-date is
+            # booked from the ex-date, so it must be IN the bundle on those days at all.
+            dividends=[d for d in self.dividends if d.effective_date <= day],
             opening=[o for o in self.opening if o.build_date <= day],
             actions=[a for a in self.actions if a.date <= day],
             unreadable_actions=[u for u in self.unreadable_actions if u.date <= day],
@@ -149,7 +190,9 @@ class LedgerBundle:
         return replace(
             self,
             transactions=[t for t in self.transactions if t.trade_date < day],
-            dividends=[d for d in self.dividends if d.date < day],
+            # R6: same rule as `through` — a STOCK dividend booked from its ex-date is
+            # visible to a later action, and invisible to an earlier one.
+            dividends=[d for d in self.dividends if d.effective_date < day],
             opening=[o for o in self.opening if o.build_date <= day],
             actions=[a for a in self.actions if a.date < day],
             unreadable_actions=[u for u in self.unreadable_actions if u.date < day],

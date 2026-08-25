@@ -12,14 +12,17 @@ rule degrades silently. ``calibration_regression`` (spec 04c) is a separate EVEN
 ``alert_events``; it is intentionally NOT a rule here."""
 
 import sqlite3
-from datetime import datetime
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel
 
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.portfolio.dashboard_models import DashboardData
+from portfolio_dash.portfolio.dashboard_models import DashboardData, TrendPoint
+from portfolio_dash.portfolio.results import CombinedView
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.strategy.rules_config import AlertRules, get_alert_rules
@@ -140,6 +143,78 @@ def _score(x: Decimal) -> str:
 
 def _exdiv_phrase(delta: int) -> str:
     return "今日除息" if delta == 0 else f"{delta} 天後除息"
+
+
+@dataclass(frozen=True)
+class DrawdownOutcome:
+    """The portfolio's worst peak-to-trough fall, and where it stands today."""
+
+    max_depth: Decimal      # deepest peak→trough fall over the whole series, as a ratio ≥ 0
+    current_depth: Decimal  # today's fall from the running peak, as a ratio ≥ 0
+    peak_on: date
+    trough_on: date
+
+
+def max_drawdown(points: Sequence[TrendPoint]) -> DrawdownOutcome | None:
+    """The portfolio-level drawdown over the daily total-value series (R5).
+
+    ``drawdown_from_peak`` is per-SYMBOL, against each name's own 52-week high, so a
+    diversified book can fall 25% with no single holding down enough to trip it — the normal
+    case, and the one that matters most. This reads the series the trend already builds.
+
+    ⚠ **``incomplete`` days are skipped.** A trend point is flagged incomplete when a held
+    symbol had no price that day, and its ``total_value`` collapses accordingly. Counting it
+    would turn a missing quote into a 「組合回撤 100%」 risk alert — inventing a crash out of a
+    data gap, which is the same class of error as valuing a stale price without labelling it.
+
+    ``None`` (not zero) when fewer than two usable points survive, or when the running peak is
+    not positive: zero would read as 「no drawdown」 rather than 「nothing measured」, and a
+    non-positive peak (a net-short book can carry one) flips the ratio's sign — the audit-H1
+    trap from the other direction.
+    """
+    usable = [p for p in points if not p.incomplete]
+    if len(usable) < 2:
+        return None
+    peak = usable[0].total_value
+    peak_on = usable[0].date
+    best_peak_on, best_trough_on = usable[0].date, usable[0].date
+    max_depth = _ZERO
+    current = _ZERO
+    seen_positive_peak = False
+    for p in usable:
+        if p.total_value > peak:
+            peak, peak_on = p.total_value, p.date
+        if peak <= _ZERO:
+            continue  # never a denominator
+        seen_positive_peak = True
+        depth = (peak - p.total_value) / peak
+        if depth > max_depth:
+            max_depth = depth
+            best_peak_on, best_trough_on = peak_on, p.date
+        current = depth
+    if not seen_positive_peak:
+        return None
+    return DrawdownOutcome(
+        max_depth=max_depth, current_depth=current,
+        peak_on=best_peak_on, trough_on=best_trough_on,
+    )
+
+
+def currency_weights(view: CombinedView) -> dict[Currency, Decimal]:
+    """Each currency's share of the portfolio, in the REPORTING currency (R5).
+
+    ⚠ Reads ``by_currency_reporting``, never ``by_currency_value``: the latter is native, so
+    comparing or summing its entries across currencies is meaningless arithmetic (10,000 USD
+    vs 300,000 TWD is 31 : 300 natively and roughly half-and-half in fact).
+
+    Empty when the total is not positive — a zero denominator, and a negative one (possible on
+    a net-short book) would flip every weight's sign and render a table of inverted
+    percentages. Silence beats that.
+    """
+    total = sum(view.by_currency_reporting.values(), _ZERO)
+    if total <= _ZERO:
+        return {}
+    return {ccy: v / total for ccy, v in view.by_currency_reporting.items()}
 
 
 def compute_alerts_from(
@@ -381,6 +456,55 @@ def compute_alerts_from(
                     title=f"{sym} 突破目標價",
                     detail=f"現價 {t.price} ≥ 目標上限 {t.target_high}",
                     href=f"/symbol/{sym}"))
+
+    # --- R5: two PORTFOLIO-level risks the per-symbol rules structurally cannot see -------
+
+    # ⑬ portfolio_drawdown — the whole book's peak-to-trough fall.
+    # ⚠ NOT a duplicate of ① drawdown_from_peak, which is per-SYMBOL against each name's own
+    # 52-week high: a diversified portfolio can fall 25% with no single holding down enough to
+    # trip that one, and that is the normal case. Same two-severity shape (risk at the knob,
+    # warn at half) so the two rules read alike where they genuinely are alike. Computed from
+    # the trend the dashboard already built; `max_drawdown` skips `incomplete` days, so a
+    # missing quote can never be reported as a crash.
+    if (rules.portfolio_drawdown.enabled
+            and rules.portfolio_drawdown.value is not None and data.trend.available):
+        # ⚠ NOT named `dd`: the per-symbol drawdown rule above already binds that name to a
+        # Decimal in this same function scope, and mypy caught the collision. Two different
+        # kinds of drawdown sharing one variable name is how the next reader misreads which
+        # rule they are looking at — the same reason the two rules have distinct labels.
+        pdd = max_drawdown(data.trend.points)
+        if pdd is not None:
+            risk_pd = rules.portfolio_drawdown.value
+            warn_pd = risk_pd * _HALF
+            sev_pd: Severity | None = None
+            thr_pd = risk_pd
+            if pdd.current_depth >= risk_pd:
+                sev_pd, thr_pd = "risk", risk_pd
+            elif pdd.current_depth >= warn_pd:
+                sev_pd, thr_pd = "warn", warn_pd
+            if sev_pd is not None:
+                alerts.append(Alert(
+                    id="portfolio_drawdown", sev=sev_pd, rule="portfolio_drawdown",
+                    title="組合自高點回撤",
+                    detail=(f"目前自高點回撤 {_pct(pdd.current_depth)}＞門檻 {_pct(thr_pd)}"
+                            f"（歷史最大 {_pct(pdd.max_depth)}，"
+                            f"{pdd.peak_on.isoformat()} → {pdd.trough_on.isoformat()}）")))
+
+    # ⑭ currency_weight — one currency's share of the book. For a three-currency investor the
+    # largest undiversified bet is usually the currency mix, and single_weight / sector_weight
+    # could not see that axis at all. Weights are REPORTING-currency (see currency_weights):
+    # ranking native amounts across currencies is meaningless arithmetic.
+    if (rules.currency_weight.enabled
+            and rules.currency_weight.value is not None and data.currency_view is not None):
+        thr_cw = rules.currency_weight.value
+        for ccy, w in sorted(
+            currency_weights(data.currency_view).items(), key=lambda kv: kv[0].value
+        ):
+            if w > thr_cw:
+                alerts.append(Alert(
+                    id=f"currency_weight:{ccy.value}", sev="risk", rule="currency_weight",
+                    title=f"{ccy.value} 幣別權重偏高",
+                    detail=f"幣別權重 {_pct(w)}＞門檻 {_pct(thr_cw)}（以報告幣計）"))
 
     return alerts
 

@@ -351,7 +351,9 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                        EventPriority.BUY if tx.side is Side.BUY else EventPriority.SELL,
                        "tx", tx))
     for dv in bundle.dividends:
-        events.append((dv.date, EventPriority.DIVIDEND, "div", dv))
+        # R6: ordered by `effective_date`, so a STOCK dividend with a known ex-date is
+        # replayed on the ex-date — where the price already reflects it.
+        events.append((dv.effective_date, EventPriority.DIVIDEND, "div", dv))
     for ca in bundle.actions:
         events.append((ca.date, EventPriority.CORPORATE_ACTION, "action", ca))
     events.sort(key=lambda e: (e[0], e[1]))

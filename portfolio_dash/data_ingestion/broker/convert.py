@@ -146,7 +146,19 @@ def _dividend_rows(dividends: list[DividendEvent], account: str) -> list[list[st
             _money(d.gross), _money(d.withholding), _money(d.net),
             _shares(d.reinvest_shares) if d.reinvest_shares is not None else "",
             _money(d.reinvest_price) if d.reinvest_price is not None else "",
+            # R6 ``ex_date``: a broker statement's distribution line carries the payment
+            # date, not the ex-date, so this stays blank — the same 「supplied verbatim, never
+            # recomputed」 discipline this converter is built on. Blank replays exactly as it
+            # did before the column existed.
+            "",
         ])
+    # The header comes from ``template_columns``, so a row SHORTER than the column list
+    # misaligns every field after the gap instead of failing. Adding ex_date to
+    # DIVIDEND_COLUMNS without the blank above would have done exactly that, silently.
+    width = len(template_columns("dividends"))
+    assert all(len(r) == width for r in out), (
+        f"dividend row width must match the {width} template columns"
+    )
     return out
 
 

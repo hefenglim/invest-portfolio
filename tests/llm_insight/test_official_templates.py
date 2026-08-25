@@ -14,7 +14,7 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 
 def test_library_version_is_official_v15() -> None:
-    assert ot.LIBRARY_VERSION == "official-v18 (2026-08-26)"
+    assert ot.LIBRARY_VERSION == "official-v19 (2026-08-26)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -41,7 +41,7 @@ def test_ai_input_prompt_v6_pins_local_exchange_code_rule() -> None:
     # the parity MY (Bursa) guidance (pinned by test_prompts_v2_carry_my_bursa_guidance);
     # v5 (W3 batch-B) adds the merged multi-market clause + optional ``market`` output field;
     # v6 (W4, AI-D17/D19) turns the door into the three-kind discriminated union.
-    assert ot.AI_INPUT_PROMPT_VERSION == "v6"
+    assert ot.AI_INPUT_PROMPT_VERSION == "v7"  # R6 added div ex_date
     body = ot.AI_INPUT_PROMPT_BODY
     assert "LOCAL exchange code" in body
     assert "聯電⇒2303" in body and "台積電⇒2330" in body and "鴻海⇒2317" in body
@@ -152,7 +152,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v18 (2026-08-26)"
+    assert wire["library_version"] == "official-v19 (2026-08-26)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

@@ -47,14 +47,21 @@ def combined_view(
 ) -> CombinedView:
     """Per-currency market value plus a blended reporting-currency total."""
     by_ccy: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
+    # R5: the same values in the REPORTING currency. Accumulated here rather than derived
+    # later because the conversion is already happening on this line for the blended total —
+    # a second site would be a second chance for the two to disagree.
+    by_ccy_rep: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
     reporting_total = _ZERO
     for h in valued_holdings:
         if h.market_value is None:
             continue
         by_ccy[h.quote_ccy] += h.market_value
-        reporting_total += convert(h.market_value, current_fx(h.quote_ccy, reporting))
+        converted = convert(h.market_value, current_fx(h.quote_ccy, reporting))
+        by_ccy_rep[h.quote_ccy] += converted
+        reporting_total += converted
     return CombinedView(
         by_currency_value=dict(by_ccy),
+        by_currency_reporting=dict(by_ccy_rep),
         reporting_total_value=reporting_total,
         reporting_currency=reporting,
     )

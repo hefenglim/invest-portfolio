@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE TABLE IF NOT EXISTS dividends (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT NOT NULL, symbol TEXT NOT NULL, date TEXT NOT NULL, type TEXT NOT NULL,
-    gross TEXT, withholding TEXT, net TEXT, reinvest_shares TEXT, reinvest_price TEXT
+    gross TEXT, withholding TEXT, net TEXT, reinvest_shares TEXT, reinvest_price TEXT,
+    ex_date TEXT
 );
 CREATE TABLE IF NOT EXISTS fx_conversions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,6 +123,11 @@ def _drop_column_if_present(
 
 def create_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
+    # R6 (review ⑧): the EX-DIVIDEND date. NULLABLE with NO default on purpose — every
+    # existing row migrates in as "unknown", never as a guessed date, and a row with
+    # NULL replays byte-identically to before the column existed. `date` is pinned to
+    # mean the PAYMENT date.
+    _add_column_if_missing(conn, "dividends", "ex_date", "TEXT")
     _add_column_if_missing(conn, "instruments", "board", "TEXT")  # migrate legacy DBs
     _add_column_if_missing(conn, "instruments", "target_low", "TEXT")
     _add_column_if_missing(conn, "instruments", "board_status", "TEXT NOT NULL DEFAULT 'resolved'")

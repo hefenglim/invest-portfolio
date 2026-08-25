@@ -363,9 +363,16 @@ def confirm(
         if p is None or not p.confirmable:
             continue
         div_date = p.pay_date or p.ex_date
+        # R6 (review ⑧): the detection already carries BOTH dates and this door was keeping
+        # only the payment one. Handing the ex-date through costs nothing and is what lets a
+        # 配股's shares be booked when the price adjusts instead of a month later. Passed for
+        # every kind — `Dividend.effective_date` decides which kinds actually use it, so the
+        # rule stays in ONE place rather than being re-decided at each writer.
+        ex_date = p.ex_date
         if p.kind == "drip":
             row_id = insert_dividend(
                 conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
+                ex_date=ex_date,
                 div_type="DRIP", gross=p.est_gross, withholding=p.est_withhold,
                 net=p.est_net, reinvest_shares=p.est_reinvest_shares,
                 reinvest_price=p.est_reinvest_price,
@@ -373,17 +380,20 @@ def confirm(
         elif p.kind == "net":
             row_id = insert_dividend(
                 conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
+                ex_date=ex_date,
                 div_type="NET", gross=p.est_gross, withholding=_ZERO, net=p.est_net,
             )
         elif p.kind == "stock":
             row_id = insert_dividend(
                 conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
+                ex_date=ex_date,
                 div_type="STOCK", gross=_ZERO, withholding=_ZERO, net=_ZERO,
                 reinvest_shares=p.est_reinvest_shares,
             )
         else:  # cash (TW 沖減)
             row_id = insert_dividend(
                 conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
+                ex_date=ex_date,
                 div_type="CASH", gross=p.est_gross, withholding=_ZERO, net=p.est_net,
             )
         written.append(row_id)

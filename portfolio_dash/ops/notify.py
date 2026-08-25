@@ -78,6 +78,12 @@ RULE_CATALOG: list[tuple[str, str, str]] = [
     ("rebalance_drift", "配置漂移", "risk"),
     ("consensus_change", "分析師共識轉弱", "info"),
     ("target_cross", "目標價穿越", "warn"),  # FU-D28
+    # R5 (investment-logic review): the two PORTFOLIO-level risks. ⚠ 「組合整體回撤」 must stay
+    # distinct from 「高點回撤」 above — that one is per-symbol against each name's own 52-week
+    # high, this one is the whole book. Two subscriptions both reading 「回撤」 would be the
+    # AI-D2 two-definitions defect in the notification list.
+    ("portfolio_drawdown", "組合整體回撤", "risk"),
+    ("currency_weight", "幣別集中度", "risk"),
     ("signal_trend", "趨勢反轉", "info"),
     ("signal_cross", "均線交叉", "info"),
     ("signal_momentum", "動能轉向", "info"),

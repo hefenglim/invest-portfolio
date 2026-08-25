@@ -70,6 +70,47 @@ CATALOG: list[Feature] = [
     # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
     # delivery date and this has not been delivered; it is set at ship time, in the same edit
     # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29, investment-logic review (2026-08-24..26) — R4/R5/R6 waves --------------
+    Feature(
+        version="0.1.29",
+        id="benchmark-counterfactual",
+        title="「同一筆錢、同樣的日期，買指數會是多少？」",
+        desc="XIRR 15% 是好是壞，要看同期市場做了什麼——而這件事系統以前答不出來，"
+        "所有報酬數字等於沒有錨。KPI 帶現在多一列：把你自己的每一筆投入，"
+        "按各自的日期改買該市場的指數（台股 0050、美股 S&P 500），算到今天值多少，"
+        "以及與你實際結果的差額。⚠ 馬股目前沒有對應指數，那部分的錢會被明白標成"
+        "「未納入比較」並顯示比例——不會偷偷拿三個市場的組合去比兩個市場的假設",
+        href="index.html",
+        area="總覽 → KPI 指標帶",
+        target="#kpi-band",
+    ),
+    Feature(
+        version="0.1.29",
+        id="portfolio-level-risk-alerts",
+        title="新增兩條組合層預警：整體回撤、幣別集中度",
+        desc="原本的「高點回撤」是逐檔比各自的 52 週高點——分散的組合可能整體跌兩成，"
+        "卻沒有任何一檔跌到觸發門檻，那其實是最常見的情況。新的「組合整體回撤」直接看"
+        "每日總市值。另外，三幣別的帳本最大的未分散賭注常常是幣別配置而非任何單一持股，"
+        "所以也加了「幣別集中度」（換算報告幣後計算，預設 70%）。兩條門檻都可在"
+        "預警規則頁調整",
+        href="settings.html#alerts",
+        area="設定 → 預警規則",
+        target="#alert-rules-wrap",
+    ),
+    Feature(
+        version="0.1.29",
+        id="dividend-ex-date",
+        title="配股可以填除權日了——每年一個月的假虧損消失",
+        desc="台股配股的除權日與發放日通常差一個月：股價在除權日當天就掉了，股數卻要到"
+        "發放日才增加。帳本以前只有一個日期，所以那一個月會用舊股數對著已經調整的股價，"
+        "10% 配股讀成約 −9% 虧損。股利現在可填「除息／除權日」（選填），"
+        "配股會在除權日就入帳。⚠ 只有配股會用到這個日期："
+        "再投資（DRIP）的股票是發放日才買進的，現金股利的凹陷則是誠實的——"
+        "你確實還沒拿到錢。既有資料一律留空，數字完全不變",
+        href="trades.html#tab-div",
+        area="輸入 → 股利",
+        target="#d-exdate-field",
+    ),
     # --- v0.1.29, investment-logic review (2026-08-24..26) — R1/R2/R3 waves --------------
     Feature(
         version="0.1.29",

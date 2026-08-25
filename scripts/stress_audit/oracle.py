@@ -310,13 +310,35 @@ class DivFact:
     id: int
     account_id: str
     symbol: str
-    d: date
+    d: date            # the PAYMENT date
     type: str          # CASH | NET | DRIP | STOCK
     gross: Decimal
     withholding: Decimal
     net: Decimal
     reinvest_shares: Decimal | None
     reinvest_price: Decimal | None
+    ex_date: date | None = None
+
+    @property
+    def effective(self) -> date:
+        """The date this event is replayed on — derived from domain-ledger semantics.
+
+        Re-derived here rather than read off the app (the independence rule): a STOCK
+        dividend (配股) is an ENTITLEMENT that attaches on the ex-date, and the quoted price
+        adjusts on that same day, so holding the pre-dividend share count against the
+        post-adjustment price until payment misstates the position for the whole gap.
+
+        A **DRIP** does not move: its shares are BOUGHT when the cash lands, at the recorded
+        reinvest price, so they do not exist earlier. **CASH / NET** does not move either:
+        the price falls on the ex-date while the cost reduces on payment, and that dip is
+        honest — nothing about what is OWNED changed on the ex-date.
+
+        An absent ``ex_date`` falls back to the payment date, which is how every pre-R6 row
+        replays and why adding the column moved no existing figure.
+        """
+        if self.type.upper() == "STOCK" and self.ex_date is not None:
+            return self.ex_date
+        return self.d
 
 
 @dataclass
@@ -771,7 +793,7 @@ def replay(facts: Facts) -> OracleResult:
                        EventPriority.BUY if t.side == "BUY" else EventPriority.SELL,
                        t.id, "tx", t))
     for dv in facts.divs:
-        events.append((dv.d, EventPriority.DIVIDEND, dv.id, "div", dv))
+        events.append((dv.effective, EventPriority.DIVIDEND, dv.id, "div", dv))
     events.sort(key=lambda e: (e[0], e[1], e[2]))
 
     positions: dict[tuple[str, str], _Pos] = {}
@@ -1257,7 +1279,7 @@ def integrity_findings(
                        t.id, "tx", t))
     for dv in facts.divs:
         if dv.reinvest_shares:
-            events.append((dv.d, EventPriority.DIVIDEND, dv.id, "div", dv))
+            events.append((dv.effective, EventPriority.DIVIDEND, dv.id, "div", dv))
     events.sort(key=lambda e: (e[0], e[1], e[2]))
 
     positions: dict[tuple[str, str], _Pos] = {}

@@ -932,7 +932,7 @@
      the downloadable 範本; date carries its YYYY-MM-DD hint, optional columns marked 選填). */
   const CSV_HINTS = {
     transactions: '欄位：account・symbol・side・date(YYYY-MM-DD)・shares・price・fee（選填）・tax（選填）・daytrade（選填）・short_sale（選填，1＝宣告放空）・note（選填）',
-    dividends: '欄位：account・symbol・date(YYYY-MM-DD)・type(CASH/STOCK/DRIP/NET)・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）',
+    dividends: '欄位：account・symbol・date(YYYY-MM-DD，發放日)・type(CASH/STOCK/DRIP/NET)・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）・ex_date（選填，除息日；僅配股會用到）',
     fx: '欄位：account・date(YYYY-MM-DD)・from_ccy・from_amount・to_ccy・to_amount',
     openings: '欄位：account・symbol・shares・original_cost_total・build_date(YYYY-MM-DD)・original_avg_cost（選填・舊檔相容）',
     /* 比例一定是「兩個整數欄位」，不是一個算好的小數（§3.1(ii)）：0.2857 這種寫法會讓
@@ -2049,8 +2049,17 @@
       /* 配股時 Gross 欄位轉為「配股股數」、Net 欄位隱藏（$0 成本入帳） */
       $('#d-tw-gross-label').textContent = stock ? '配股股數' : 'Gross（總額）';
       $('#d-tw-net-field').hidden = stock;
+      /* R6: the ex-date field appears ONLY for 配股 — it is the only dividend type whose
+         effective date moves (Dividend.effective_date). Showing it on a cash payout would
+         invite filling a value the ledger deliberately ignores. */
+      const exf = $('#d-exdate-field');
+      if (exf) {
+        exf.hidden = !stock;
+        if (!stock) { const n = $('#d-exdate'); if (n) n.value = ''; }
+      }
       $('#d-model-note').textContent = stock
-        ? '台股模式（配股）：以 $0 成本股數入帳，調整均價下降。'
+        ? '台股模式（配股）：以 $0 成本股數入帳，調整均價下降。填入除權日後，股數會在除權日就入帳'
+          + '（股價當天已經反映），不填則沿用發放日。'
         : '台股模式：現金股利沖減成本（調整均價下降）；配股以 $0 成本股數入帳。';
     }));
 
@@ -2130,18 +2139,23 @@
         if (window.toast) window.toast('此帳戶橫跨多個市場，請先輸入已註冊的標的', 'fail');
         return;
       }
+      /* R6: ex_date is LAST, matching DIVIDEND_COLUMNS. The CSV door parses by header, so
+         the order only has to agree with the values built below — but keeping it aligned
+         with the canonical list is what stops the next column from being appended in two
+         different places. Only 配股 sends it; see Dividend.effective_date. */
       const header = ['account', 'symbol', 'date', 'type', 'gross', 'withholding', 'net',
-        'reinvest_shares', 'reinvest_price'];
+        'reinvest_shares', 'reinvest_price', 'ex_date'];
+      const exd = (($('#d-exdate') || {}).value || '').trim();
       let values;
       if (model === 'tw') {
         if (isStock()) {
           const shares = $('#d-tw-gross').value.trim();
           if (!shares) { if (window.toast) window.toast('請輸入配股股數', 'fail'); return; }
-          values = [a.id, sym, dte, 'STOCK', '0', '', '', shares, ''];
+          values = [a.id, sym, dte, 'STOCK', '0', '', '', shares, '', exd];
         } else {
           const gross = $('#d-tw-gross').value.trim();
           if (!gross) { if (window.toast) window.toast('請輸入股利總額', 'fail'); return; }
-          values = [a.id, sym, dte, 'CASH', gross, '', $('#d-tw-net').value.trim(), '', ''];
+          values = [a.id, sym, dte, 'CASH', gross, '', $('#d-tw-net').value.trim(), '', '', ''];
         }
       } else if (model === 'drip') {
         const gross = $('#d-drip-gross').value.trim();
@@ -2153,18 +2167,18 @@
            inferred from which account it happened to land in. */
         const wh = $('#d-drip-wh').value.trim();
         values = divUsState && divUsState.isCash()
-          ? [a.id, sym, dte, 'CASH', gross, wh, '', '', '']
+          ? [a.id, sym, dte, 'CASH', gross, wh, '', '', '', '']
           : [a.id, sym, dte, 'DRIP', gross, wh, '',
-            $('#d-drip-shares').value.trim(), $('#d-drip-price').value.trim()];
+            $('#d-drip-shares').value.trim(), $('#d-drip-price').value.trim(), ''];
       } else {
         const amt = $('#d-net-amt').value.trim();
         if (!amt) { if (window.toast) window.toast('請輸入淨額', 'fail'); return; }
-        values = [a.id, sym, dte, 'NET', amt, '', '', '', ''];
+        values = [a.id, sym, dte, 'NET', amt, '', '', '', '', ''];
       }
       commitOneRow('dividends', oneRowCsv(header, values), $('#d-confirm'),
         sym + ' 股利已寫入帳本（' + a.name + '）', () => {
           ['d-tw-gross', 'd-tw-net', 'd-drip-gross', 'd-drip-wh', 'd-drip-net',
-            'd-drip-shares', 'd-drip-price', 'd-net-amt'].forEach((id) => {
+            'd-drip-shares', 'd-drip-price', 'd-net-amt', 'd-exdate'].forEach((id) => {
             const n = $('#' + id); if (n) n.value = '';
           });
           /* Clear the OVERRIDE too, not just the value: a pencil left pressed over an
