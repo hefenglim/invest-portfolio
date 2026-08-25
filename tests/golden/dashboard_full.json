@@ -8,6 +8,8 @@
     "total_return_rate": "0.1754229393352213444626620957",
     "realized_total": "8000.0",
     "unrealized_total": "462765.0000000000000000000000",
+    "total_return_fx_complete": null,
+    "principal_fx_effect": null,
     "xirr": null,
     "xirr_window_days": 157,
     "fx_realized": "2000",

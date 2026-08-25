@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.ledger import Dividend
 
 
 class Holding(BaseModel):
@@ -182,6 +183,20 @@ class Book(BaseModel):
     # Default empty so every existing ``build_book`` consumer keeps working unchanged, and
     # so a directly-constructed ``Book`` (tests, fixtures) still validates.
     unapplied_actions: list[UnappliedAction] = Field(default_factory=list)
+    # Dividend events this replay REFUSED to book, in replay order (review 2026-08-24).
+    #
+    # ``Holding.unbookable_dividend`` says a POSITION is short one payout; it cannot say WHICH
+    # payout, and a consumer that needs to exclude the event itself needs the event. That
+    # consumer is ``returns.xirr_reporting``: the payment 總報酬 refuses was still counted as a
+    # positive cashflow there, so one dividend got three answers on three screens (excluded
+    # from total return, counted by XIRR, and the trend flagging the day 待釐清).
+    #
+    # Excluding by POSITION would over-correct — it would drop that symbol's other, perfectly
+    # bookable dividends too — which is why this carries the rows and not just a flag.
+    #
+    # ALWAYS EMPTY on the strict path (``allow_oversell=False``), which raises instead. Default
+    # empty so every existing consumer and every hand-built ``Book`` keeps working.
+    refused_dividends: list[Dividend] = Field(default_factory=list)
 
 
 class CurrencyReturn(BaseModel):

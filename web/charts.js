@@ -113,7 +113,9 @@
             html += '<div>總淨值（含現金）&nbsp;&nbsp;<b style="color:' + C.netWorth + '">' +
                     f.money(pt.net_worth, 'TWD') + '</b></div>';
           }
-          html += '<div>浮動損益&nbsp;&nbsp;<b style="color:' + spreadColor + '">' +
+          /* AI-D41: this spread converts every flow at its own trade-date rate, so it is
+             the FX-COMPLETE lifetime result — NOT the 浮動損益 it was labelled. */
+          html += '<div>累計總損益（含匯兌）&nbsp;&nbsp;<b style="color:' + spreadColor + '">' +
                   f.signed(spread, 'TWD') + '</b></div>';
           if (pt.incomplete) {
             html += '<div style="color:' + C.amber + ';font-size:11px">部分標的當日無價格</div>';

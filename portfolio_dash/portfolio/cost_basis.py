@@ -320,6 +320,10 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     # Book-level, NOT per-position: two of the three ways an action goes unapplied leave no
     # position to flag (see Book.unapplied_actions). Stays empty on the strict path.
     unapplied: list[UnappliedAction] = []
+    # Book-level for the same reason as `unapplied`, plus one of its own: the consumer
+    # (returns.xirr_reporting) must skip the EVENT, and a per-position flag cannot say
+    # WHICH event. Stays empty on the strict path, which raises instead.
+    refused_dividends: list[Dividend] = []
 
     # A stored action row the LOADER could not convert (2026-08-11). It never becomes an
     # event — there is no ratio to apply — but it must not be silent either: a dropped
@@ -499,6 +503,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                         "請刪除該筆股利，或改以現金收支登錄。"
                     )
                 existing.unbookable_dividend = True
+                refused_dividends.append(ev)
                 continue
             if existing.vacated_to is not None:
                 # E24 (D32) — the position was moved away by an EXCHANGE, and §4.2 leaves it
@@ -523,6 +528,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                         "請刪除該筆股利，或改以現金收支登錄。"
                     )
                 successor.unbookable_dividend = True
+                refused_dividends.append(ev)
                 continue
             if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
                 if existing.shares == _ZERO:
@@ -624,4 +630,5 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
         realized=RealizedPnL(rows=realized_rows, by_currency=dict(realized_by_ccy)),
         gross_invested=dict(gross),
         unapplied_actions=unapplied,
+        refused_dividends=refused_dividends,
     )

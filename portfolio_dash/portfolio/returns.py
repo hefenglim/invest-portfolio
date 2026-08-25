@@ -1,10 +1,11 @@
 """Returns: per-currency total return + blended reporting total, and reporting XIRR."""
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from typing import Protocol
 
 from pyxirr import InvalidPaymentsError
 from pyxirr import xirr as _xirr
@@ -15,6 +16,7 @@ from portfolio_dash.portfolio.results import (
     Holding,
     ReturnSummary,
 )
+from portfolio_dash.shared.cash_kinds import CashKind, movement_sign
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Instrument
@@ -95,6 +97,58 @@ class XirrOutcome:
     window_days: int | None
 
 
+#: The cash-movement kinds that are part of the RETURN (AI-D42, owner ruling 2026-08-24).
+#:
+#: ⚠ This SUPERSEDES the owner's earlier ruling ``D1 = A`` (2026-08-13), which made "cash
+#: movements never enter XIRR" an explicit rule; the superseded text and the reason for the
+#: change are kept in ``docs/accounting-formula-manual.md`` §4.4.7 limitation 2.
+#:
+#: The line is the COST OF TRADING AND FINANCING — not ``cash_kinds``' ``credit`` axis and not
+#: its ``fx_acquisition`` axis, neither of which separates these from a deposit:
+#:
+#: * ``REBATE`` — a refund of commission already capitalised into cost basis. FE-D1's
+#:   charge-first model refunds 77% next month, which is 0.229% of capital per round trip.
+#: * ``INTEREST_EXPENSE`` — the cost of financing the positions.
+#: * ``BROKER_FEE`` — a cost of trading that no transaction row carries.
+#:
+#: EXCLUDED, deliberately: ``DEPOSIT`` / ``WITHDRAW`` / ``OPENING`` are capital movements, and
+#: admitting them would quietly redefine XIRR from "the return on money put into securities"
+#: into an account return. ``INTEREST`` (earned on idle cash) is excluded too — the principal
+#: earning it never entered this metric's denominator, so crediting its yield to the numerator
+#: is asymmetric. D12's 重組費 is booked as a ``WITHDRAW``, so that standing limitation stands.
+XIRR_CASH_KINDS: frozenset[str] = frozenset(
+    {CashKind.REBATE.value, CashKind.INTEREST_EXPENSE.value, CashKind.BROKER_FEE.value}
+)
+
+
+class CashMovementFlow(Protocol):
+    """The three fields this metric needs off a cash-movement row.
+
+    A Protocol, not the stored model: ``portfolio/`` must not import ``data_ingestion``
+    (architecture.md), and the shape is genuinely all this needs.
+    """
+
+    @property
+    def date(self) -> date: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def ccy(self) -> Currency: ...
+    @property
+    def amount(self) -> Decimal: ...
+
+
+def _dividend_key(dv: Dividend) -> tuple[object, ...]:
+    """Value identity for a dividend row, so a REFUSED one can be matched and skipped.
+
+    By value rather than by object identity: the caller may have re-loaded the bundle between
+    ``build_book`` and here. Two byte-identical dividend rows on the same position and date
+    would both be refused by the replay anyway (they hit the same branch), so set semantics
+    are correct — this can never drop a bookable row that merely resembles a refused one.
+    """
+    return (dv.account_id, dv.symbol, dv.date, dv.type, str(dv.gross), str(dv.net))
+
+
 def xirr_reporting(
     transactions: list[Transaction],
     dividends: list[Dividend],
@@ -106,12 +160,21 @@ def xirr_reporting(
     current_fx: FxRate,
     as_of: date,
     reporting: Currency,
+    *,
+    refused_dividends: list[Dividend],
+    cash_movements: Sequence[CashMovementFlow],
 ) -> XirrOutcome:
     """Reporting-currency money-weighted XIRR + its observation window.
 
     Flows: buy - (gross incl. fees+tax), sell + (net), cash dividend + (net), DRIP/stock
-    neutral, opening - (original_cost_total at build_date), final market value + at as_of.
-    Each flow converted at its trade-date FX; final value at current spot.
+    neutral, opening - (original_cost_total at build_date), the three trading/financing
+    cash kinds signed by the shared table (see XIRR_CASH_KINDS), final market value +
+    at as_of. Each flow converted at its trade-date FX; final value at current spot.
+
+    ``refused_dividends`` and ``cash_movements`` are REQUIRED keyword arguments with no
+    default, deliberately: a default would let a caller silently ship the pre-2026-08-24
+    behaviour, and both omissions are invisible in the output (a plausible rate, quietly
+    missing flows). Forgetting either is now a mypy error and a TypeError.
 
     All-or-nothing on missing prices: if ANY held symbol lacks a current price the rate
     is None (the terminal value can't be formed), unlike total_return/allocation which
@@ -140,10 +203,23 @@ def xirr_reporting(
             add(tx.trade_date, ccy, -(tx.quantity * tx.price + tx.fees + tx.tax))
         else:
             add(tx.trade_date, ccy, tx.quantity * tx.price - tx.fees - tx.tax)
+    # A dividend the REPLAY refused (it landed on an open short, which this ledger has
+    # no debit row for) must not be an inflow here either — otherwise one payment gets
+    # three answers: excluded from 總報酬, counted by XIRR, and flagged 待釐清 on the
+    # trend. Matched by VALUE, per _dividend_key (review 2026-08-24).
+    refused = {_dividend_key(dv) for dv in refused_dividends}
     for dv in dividends:
         if dv.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY) — one definition
+            if _dividend_key(dv) in refused:
+                continue
             add(dv.date, ccy_of(dv.symbol), dv.net)
         # DRIP / STOCK are neutral (no external cashflow)
+    # AI-D42: the three trading/financing costs. A movement carries its OWN currency
+    # (no symbol to look one up from) and its sign comes from the shared cash_kinds
+    # table, so it can never be a credit here and a debit in the pool balance.
+    for mv in cash_movements:
+        if mv.kind.upper() in XIRR_CASH_KINDS:
+            add(mv.date, mv.ccy, movement_sign(mv.kind) * mv.amount)
 
     # Observation window: as_of minus the earliest INPUT flow date (measured before the
     # terminal value is appended). Independent of whether the rate ultimately converges.

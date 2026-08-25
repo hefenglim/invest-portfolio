@@ -107,10 +107,17 @@
       band.appendChild(card);
     }
 
-    /* hero 2: 總報酬 + 累計報酬率 subline */
+    /* hero 2: 資產損益 (A) + 累計報酬率, then the FX-complete figure (B) and B-A beside it.
+       AI-D41: `total_return` applies today's spot to each currency's NET P&L, so the rate
+       never reaches the PRINCIPAL — the honest label says so. B (`total_return_fx_complete`)
+       is the trend's total_value - net_invested, where every flow was converted at ITS OWN
+       trade-date rate. B - A is the principal-FX effect, i.e. what the 換匯損益 card holds.
+       The three are DISPLAYED side by side and never summed: adding the 換匯損益 figure to A
+       double-counts the cross term (invariant I5's red line, applied to the figure it did
+       not cover). Every value is a server Decimal string; this layer only formats. */
     {
       const card = el('div', 'kpi-card kpi-hero');
-      const label = el('div', 'kpi-label', '總報酬');
+      const label = el('div', 'kpi-label', '資產損益（不含本金匯率）');
       if (nil(k && k.total_return)) nilBadge(label);
       card.appendChild(label);
       const value = mkValue(k && k.total_return, (v) => f.signed(v, ccy), true);
@@ -122,6 +129,20 @@
       sub.appendChild(rate);
       sub.appendChild(el('span', null, '· vs 原始投入成本'));
       card.appendChild(sub);
+      /* Tolerant of an older payload (e2e canned fixtures, a stale snapshot): the line simply
+         does not render when the server did not send B. */
+      if (!nil(k && k.total_return_fx_complete)) {
+        const fxs = el('div', 'kpi-subline');
+        fxs.appendChild(el('span', null, '含匯兌總損益'));
+        fxs.appendChild(el('span', f.signClass(k.total_return_fx_complete),
+          f.signed(k.total_return_fx_complete, ccy)));
+        if (!nil(k.principal_fx_effect)) {
+          fxs.appendChild(el('span', null, '· 其中本金匯率效果'));
+          fxs.appendChild(el('span', f.signClass(k.principal_fx_effect),
+            f.signed(k.principal_fx_effect, ccy)));
+        }
+        card.appendChild(fxs);
+      }
       if (!nil(k && k.total_return)) {
         if (k.total_return > 0) card.classList.add('kpi-up');
         if (k.total_return < 0) card.classList.add('kpi-down');

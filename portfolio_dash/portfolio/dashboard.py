@@ -228,6 +228,27 @@ def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
     )
 
 
+def fx_complete_return(trend: TrendSeries) -> Decimal | None:
+    """B of the A · B · B−A decomposition — the FX-COMPLETE lifetime result (AI-D41).
+
+    ``total_return`` (A) translates each currency's NET P&L at today's spot, so the rate never
+    reaches the PRINCIPAL. The trend converts every flow at its own trade-date rate, so
+    ``total_value − net_invested`` on its last point is the figure that does — and it was
+    being displayed under the label 浮動損益.
+
+    ``None`` whenever the trend cannot support it: unavailable, empty, or a last day the trend
+    itself marks ``incomplete`` (a day it could not fully value must not become a headline
+    KPI). Honest degradation, never a fabricated stand-in — the same posture as every other
+    optional figure in ``KpiSummary``.
+    """
+    if not trend.available or not trend.points:
+        return None
+    last = trend.points[-1]
+    if last.incomplete:
+        return None
+    return last.total_value - last.net_invested
+
+
 def build_dashboard(
     conn: sqlite3.Connection, *, now: datetime, reporting: Currency
 ) -> DashboardData:
@@ -374,8 +395,15 @@ def build_dashboard(
         xirr_reason = _unapplied_action_reason(unapplied_actions)
     else:
         try:
-            outcome = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
-                                     price_map, resolver.rate, as_of, reporting)
+            outcome = xirr_reporting(
+                txs, divs, opening, valued, instruments, fx_at,
+                price_map, resolver.rate, as_of, reporting,
+                # The replay REFUSED these (a dividend on an open short); counting them
+                # here is what gave one payment three answers on three screens.
+                refused_dividends=book.refused_dividends,
+                # AI-D42: the three trading/financing costs. `cash_movements` is already
+                # loaded above for the pool/FX work — no extra read.
+                cash_movements=cash_movements)
             xirr_value = outcome.rate
             xirr_window_days = outcome.window_days
             if (xirr_value is not None and xirr_window_days is not None
@@ -580,10 +608,18 @@ def build_dashboard(
         unrealized_total = unrealized_rep
         if gross_rep != _ZERO:
             total_return_rate = total_return_blended / gross_rep
+    # AI-D41: B and B − A ride beside A. Computed HERE because this is the only layer
+    # holding both the ReturnSummary and the TrendSeries; neither module can see the
+    # other's figure, which is precisely why the discrepancy went unnoticed.
+    fx_complete = fx_complete_return(trend)
+    principal_fx = (None if fx_complete is None or total_return_blended is None
+                    else fx_complete - total_return_blended)
     kpis = KpiSummary(
         reporting_currency=reporting,
         total_market_value=total_value,
         total_return=total_return_blended,
+        total_return_fx_complete=fx_complete,
+        principal_fx_effect=principal_fx,
         total_return_rate=total_return_rate,
         realized_total=realized_total,
         unrealized_total=unrealized_total,

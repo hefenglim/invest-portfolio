@@ -84,6 +84,20 @@ class KpiSummary(BaseModel):
     total_return_rate: Decimal | None = None
     realized_total: Decimal | None = None
     unrealized_total: Decimal | None = None
+    # AI-D41 (2026-08-24) — the A · B · B−A decomposition. ``total_return`` above is A:
+    # Σ_ccy (realized + unrealized) × TODAY'S spot, so the rate is applied to each
+    # currency's GAIN and never to its PRINCIPAL. B is the trend's
+    # ``total_value − net_invested``, where every flow was converted at ITS OWN
+    # trade-date rate — the FX-complete lifetime figure, which the UI used to label
+    # 浮動損益. B − A is the principal-FX effect, i.e. the content of the 換匯損益 card.
+    #
+    # ⚠ These are PRESENTED SIDE BY SIDE, never summed. Adding the 換匯損益 figure to A
+    # double-counts the cross term (MV − C)(spot − acq) — the same red line
+    # domain-ledger.md draws for XIRR, applied to the figure that rule did not cover.
+    # ``total_return``'s own definition is UNCHANGED; only its label and B's presence
+    # beside it are new, so every golden payload and stored snapshot still reconciles.
+    total_return_fx_complete: Decimal | None = None
+    principal_fx_effect: Decimal | None = None
     xirr: Decimal | None = None
     # Observation window (days) the XIRR was measured over; a short window (< 365) is a
     # low-confidence hint surfaced by the UI. None when there are no flows or no XIRR run.

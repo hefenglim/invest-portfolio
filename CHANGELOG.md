@@ -229,6 +229,55 @@ the door, shown on a screen, or written into an export.
   from the caller. `broker/convert.py`'s refusal to recompute is deliberate and unchanged.
   ⚠ A second review claim here did not survive: 重算 does **not** depend on the snapshot, so
   this is a provenance gap, not a correctness one.
+### Changed — investment-logic review, wave R2 (the return figures; KPI and XIRR values move)
+
+Three defects in what the headline numbers MEAN. Unlike R1 these move figures the owner has
+already seen, so the stress-audit oracle was extended first and the accounting manual states
+each formula with its verification anchor before the code landed.
+
+- **A payment the ledger refuses was still an inflow to XIRR.** A cash dividend landing on an
+  open short is not representable here (a short seller pays the dividend in lieu and this
+  ledger has no debit row for it), so the replay skips it and flags the position. But
+  `xirr_reporting` read the raw dividend ledger, so ONE payment got THREE answers on three
+  screens: excluded from 總報酬, counted by XIRR, and the trend flagging the whole day 待釐清.
+  `Book` now reports `refused_dividends` — the ROWS, not just the existing per-position flag,
+  because a flag cannot say *which* payment and excluding by position would over-correct by
+  dropping that symbol's other, perfectly bookable dividends. Matched by value rather than
+  object identity, since the caller may re-load the bundle in between.
+- **The headline profit contained no FX on the principal** (AI-D41). `total_return` is
+  `Σ_ccy (realized + unrealized) × today's spot` — the rate reaches each currency's GAIN and
+  never its PRINCIPAL — while the trend's `total_value − net_invested` (every flow at its own
+  trade-date rate) is the FX-complete lifetime figure and was labelled 「浮動損益」. Both are
+  now presented, with the honest names: **A** 資產損益（不含本金匯率）, **B** 含匯兌總損益, and
+  **B − A** 本金匯率效果 — which is exactly the content of the 換匯損益 card.
+  ⚠ They are shown side by side and never summed: adding the 換匯損益 figure to A double-counts
+  the cross term `(MV − C)(spot − acq)`. That is the red line `domain-ledger.md` already drew
+  for XIRR, applied to the figure the rule did not cover — and manual invariant **I5 is
+  corrected accordingly**: "総報酬 already embeds FX" is true of XIRR and of the trend, and
+  false of `total_return`. `total_return`'s own definition is UNCHANGED, so every golden
+  payload, stored snapshot and export still reconciles; the golden gains two keys and no value
+  moves. B is computed in `portfolio/dashboard.py` because that is the only layer holding both
+  the `ReturnSummary` and the `TrendSeries` — neither module could see the other's figure,
+  which is precisely why the discrepancy survived this long. It degrades to null when the last
+  trend day is `incomplete` rather than falling back to an earlier day: a B measured on a
+  different date than A makes B − A a plausible-looking wrong number.
+- **77% of every TW commission reached no return metric** (AI-D42). `xirr_reporting` had no
+  `cash_movements` parameter at all, so FE-D1's charge-first rebate — 0.229% of capital per
+  round trip, and the owner's normal billing — plus every broker fee and all margin interest
+  were invisible to every return figure the app computes. The three kinds that are **costs of
+  trading and financing** (`REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE`) now enter the flow
+  series, signed by the shared `cash_kinds` table so a movement can never be a credit here and
+  a debit in the pool balance.
+  ⚠ **This reverses the owner's own ruling `D1 = A` (2026-08-13)**; see the rulings note above.
+  Idle-cash `INTEREST` is excluded — the principal earning it never entered this metric's
+  denominator, so crediting its yield to the numerator is asymmetric — and capital movements
+  stay out because admitting them would quietly redefine XIRR as an account return. D12's
+  重組費 is booked as a `WITHDRAW`, so that standing limitation is untouched.
+
+Both new parameters are **required keyword arguments with no default**, deliberately: a
+default would let a caller silently ship the pre-2026-08-24 behaviour, and both omissions are
+invisible in the output — a plausible rate, quietly missing flows. Forgetting either is now a
+mypy error and a `TypeError`.
 ### Added
 - **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
   that synthesize the owner's holding × technicals × the rule-signal engine × news × analyst

@@ -351,6 +351,27 @@ class OpenFact:
 DEBIT_KINDS = frozenset({"WITHDRAW", "INTEREST_EXPENSE", "BROKER_FEE"})
 ACQUIRING_KINDS = frozenset({"DEPOSIT", "OPENING", "REBATE"})
 
+# AI-D42 (owner ruling 2026-08-24, superseding D1=A of 2026-08-13). The kinds that are COSTS
+# OF TRADING AND FINANCING are part of the return and enter the XIRR flow series; capital
+# movements are not, and neither is interest earned on idle cash.
+#
+# Re-derived here, not imported, for the reason above — and the line is drawn on a different
+# axis from either set above, which is why it needs its own name rather than an expression
+# over them: ``REBATE`` is a credit AND an acquisition AND a return flow, while ``DEPOSIT``
+# is a credit AND an acquisition AND NOT a return flow. Neither ``credit`` nor
+# ``fx_acquisition`` separates them.
+#
+# * ``REBATE`` — a refund of commission that was capitalised into cost basis, so leaving it
+#   out overstates the cost of every round trip (FE-D1 charge-first: 0.229% of capital).
+# * ``INTEREST_EXPENSE`` — the cost of financing the positions.
+# * ``BROKER_FEE`` — a cost of trading that no transaction row carries.
+# * ``INTEREST`` is EXCLUDED although it is pool income: the principal earning it never
+#   entered XIRR's denominator, so crediting its yield to the numerator is asymmetric.
+# * ``DEPOSIT`` / ``WITHDRAW`` / ``OPENING`` are EXCLUDED: admitting them would quietly turn
+#   XIRR from "the return on money put into securities" into an account return. D12's
+#   重組費 is booked as a WITHDRAW, so that standing limitation is unchanged.
+XIRR_CASH_KINDS = frozenset({"REBATE", "INTEREST_EXPENSE", "BROKER_FEE"})
+
 
 @dataclass
 class CashFact:
@@ -1045,7 +1066,8 @@ def xirr_cashflows(res: OracleResult, facts: Facts, prices: dict[str, Decimal],
 
     Signs (domain-ledger.md): opening -original_cost_total @ build_date; buy
     -(qty*price+fee+tax); sell +(qty*price-fee-tax); cash dividend +net (CASH/NET);
-    DRIP/STOCK neutral; terminal +sum(price*shares) @ as_of. Each non-terminal flow is
+    DRIP/STOCK neutral; the three trading/financing cash kinds signed by DEBIT_KINDS
+    (AI-D42, see XIRR_CASH_KINDS); terminal +sum(price*shares) @ as_of. Each non-terminal flow is
     converted at its TRADE-DATE FX via ``fx_on(d, base, quote)`` (on-or-before, exactly
     like the app's get_fx_on); the terminal value at current spot via ``fx_now(base,
     quote)`` (latest, like the app's resolver). Raises KeyError if any required rate or
@@ -1071,6 +1093,14 @@ def xirr_cashflows(res: OracleResult, facts: Facts, prices: dict[str, Decimal],
     for dv in facts.divs:
         if dv.type in CASH_DIVIDEND_TYPES:
             add(dv.d, insts[dv.symbol].quote_ccy, dv.net)
+    # AI-D42: the three trading/financing costs. A cash movement carries its OWN currency
+    # (there is no symbol to look one up from), and the sign comes from DEBIT_KINDS — the
+    # same table the pool balance uses, so a movement can never be a credit here and a debit
+    # there.
+    for m in facts.cash:
+        kind = m.kind.upper()
+        if kind in XIRR_CASH_KINDS:
+            add(m.d, m.ccy, -m.amount if kind in DEBIT_KINDS else m.amount)
 
     final = ZERO
     for h in res.holdings.values():

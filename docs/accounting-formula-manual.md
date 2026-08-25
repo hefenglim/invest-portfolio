@@ -56,7 +56,7 @@
 | I2 | **原始成本 `original_total` 永不被覆寫**；所有報表由帳本重建。 | `domain-ledger.md` |
 | I3 | **報價數字來自財經 API，永不來自 LLM**。 | `data-and-pricing.md` |
 | I4 | **股息只計入總報酬一次**（經成本調整，非另立收入行）。 | §6 |
-| I5 | **換匯損益是報表幣別總報酬的「拆解」，永不加疊於上**。 | §8 |
+| I5 | **換匯損益是報表幣別總報酬的「拆解」，永不加疊於上**。⚠ 但「已內含 FX」只對 **XIRR** 與**趨勢的 `總市值 − 累計淨投入`** 成立，**對 `total_return` 不成立**——後者把匯率乘在**損益**上、乘不到**本金**上（AI-D41，2026-08-24；三數字關係見 §7.1a）。 | §7.1a、§8 |
 | I6 | **費用／稅／股利規則綁定 (帳戶, 市場) 配對**，非僅「市場」；單一市場帳戶退化為舊敘述（等同綁帳戶）。帳戶列的標量欄位（`fee_rule_set`／`dividend_model`／`settlement_ccy`）為已載明之 fallback。 | §2、§3 |
 | I7 | **均價一律 on read 計算，永不儲存四捨五入後的均價為權威值**。 | §4 |
 
@@ -808,6 +808,17 @@ EXCHANGE 是併入目的標的而非重新計價它，若把因子擴及 EXCHANG
 「真實發生、卻對每一個報酬指標不可見」的金額，只是它現在至少能以自己的名字入帳，而不必偽裝成一筆
 提領。
 
+> **⚠ 本限制之 XIRR 部分已於 2026-08-24 由 AI-D42 部分取代——上方原文完整保留，因為「當初為何那樣
+> 決定」本身是紀錄的一部分。** 變更的是：`REBATE`／`INTEREST_EXPENSE`／`BROKER_FEE` 三類（**交易與
+> 融資的成本**）自此進入 `xirr_reporting` 的流量序列。**未變更的是本限制指名的那個案例**——重組費記為
+> `WITHDRAW`（資本移動），在 AI-D42 之下仍然不進 XIRR，故限制 2 的具體結論原樣成立。
+> `DEPOSIT`／`WITHDRAW`／`OPENING` 全數維持排除（納入會把 XIRR 從「投入證券的資金報酬」悄悄改成
+> 「帳戶報酬」，那是另一個指標）；`INTEREST`（閒置現金利息）亦排除，因為孳生它的本金從未進入 XIRR 的
+> 分母，只把收益計入分子是不對稱的。
+> **取代的理由，用本段自己的話**：上文寫著「`BROKER_FEE` 也是一筆『真實發生、卻對每一個報酬指標不可
+> 見』的金額」——本手冊自己已將此記為盲點，而 D45 撤銷了本來要涵蓋它的帳戶層 IRR。AI-D42 補的是這個
+> 已被點名的缺口。量級依據：FE-D1 的 77% 退佣單趟差 **0.229% 資本**，且為 owner 券商之常態計費。
+
 > **本段於 2026-08-11 改寫（D45）。** 先前版本寫的是「這不是永久盲點」，理由是 D36 將另加一個
 > **帳戶層 IRR**（whole-account IRR）於 `portfolio/twr.py`，而該指標**看得見** `WITHDRAW`。
 > **D36 已由業主裁定不做（D45，2026-08-11），且從未實作**（就地查核：`portfolio/twr.py` 只有
@@ -1156,6 +1167,30 @@ $$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displayst
 
 **月度快照（月度快照）**：`api/snapshots.py::write_snapshot` 每晚以**同一 combiner** 將當月 `total_market_value / total_return / total_return_rate / xirr / by_currency`（by_currency 見 §7.3 幣別視圖）**存為月末記錄**（月結時最後上升值即月末值，upsert-by-month）。快照僅**持久化**本節與 §7.3 之 KPI，**不引入新公式**；缺價／缺匯之選填 KPI 存 NULL（誠實退化）。裁定月末歷史金額時，以快照列所存值 = 當時 combiner 依本手冊公式之輸出為準。
 
+### 7.1a 哪一個數字真的含匯兌 —— A · B · B−A（AI-D41，owner 裁示 2026-08-24）
+
+§8.4 說「總報酬 / XIRR 已內含 FX」。這對 **XIRR** 成立（每筆流量按交易日匯率換算、終值按當前
+匯率），**對 `total_return` 不成立**：
+
+$$\text{total\_return}=\sum_{ccy}\big(\text{realized}_{ccy}+\text{unrealized}_{ccy}\big)\times \text{spot}_{\text{today}}(ccy)$$
+
+匯率乘在**該幣別的淨損益**上；**本金**是用原幣衡量的，它自己的匯率變動從未進入這個式子。
+而 §7.5 的趨勢序列 `總市值 − 累計淨投入`（每筆流量按**自己交易日**的匯率換算）才是真正含匯兌的
+累計結果——它一直被標成「浮動損益」。三個數字，一組拆解：
+
+| | 數字 | 定義 | 意義 |
+| --- | --- | --- | --- |
+| **A** | `total_return`<br>資產損益（不含本金匯率） | $\sum_{ccy}(\text{realized}+\text{unrealized})_{ccy}\times \text{spot}_{\text{today}}$ | 各幣別原生損益按今日匯率換算 |
+| **B** | 含匯兌總損益 | $\text{total\_value}-\text{net\_invested}$（流量逐筆按交易日匯率） | 含匯兌的累計結果 |
+| **B−A** | 本金匯率效果 | $\approx \text{cost}\times(\text{spot}_{\text{today}}-\text{acq\_rate})$ | 即 §8 換匯損益卡的內容 |
+
+**A、B、B−A 並陳呈現，永不相加。** 把 §8 的換匯損益加到 A 之上會重複計算交叉項
+$(\text{MV}-\text{C})(\text{spot}-\text{acq})$——那正是 I5 禁止的事，只是換到 I5 原文沒有涵蓋的那個數字上。
+
+> `total_return` 的**定義未變**（golden payload、oracle、所有匯出的歷史比對因此完好）；改變的是
+> 它的**標籤**，以及 B 與 B−A 並列於其旁。實作：`portfolio/dashboard.py`（同時握有 `ReturnSummary`
+> 與 `TrendSeries` 的那一層）。
+
 ### 7.2 XIRR（年化、資金加權、FX-aware — 決策主指標）
 
 實作：`portfolio/returns.py::xirr_reporting`（求解器 `pyxirr.xirr`）。**單一報表幣別**；**每筆流量以其
@@ -1167,7 +1202,9 @@ $$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displayst
 | 賣出 sell | **+** | `+(quantity×price − fees − tax)`，日期 = `trade_date` |
 | 現金股利（TW `CASH` / MY `NET`） | **+** | `+net`，日期 = 股利日 |
 | **DRIP / STOCK** | **中性** | 不計入（非外部現金流；再投資非 − 流出、股利非 + 流入） |
-| **現金收支（`cash_movements` 全部七種 kind）** | **不計入** | **完全不在流量序列中**（見下方 D1=A） |
+| **現金收支 — `REBATE`** | **+** | `+amount`，日期 = 現金列日期（AI-D42） |
+| **現金收支 — `INTEREST_EXPENSE` / `BROKER_FEE`** | **−** | `−amount`，日期 = 現金列日期（AI-D42） |
+| **現金收支 — `DEPOSIT` / `WITHDRAW` / `OPENING` / `INTEREST`** | **不計入** | 前三者是**資本移動**（納入等於把 XIRR 改成帳戶報酬）；`INTEREST` 的本金從未進入分母 |
 | 期初庫存 opening | **−** | `−original_cost_total`，日期 = **`build_date`**（使期初資本被計入） |
 | 期末市值 | **+** | `Σ price×shares`（各持倉），日期 = `as_of` |
 
@@ -1185,8 +1222,11 @@ $$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displayst
 > `phase1:corp_refused`）。
 >
 > **重組費（D12）對 XIRR 不可見，是設計如此——而且沒有第二個指標會看見它（D45，2026-08-11）。**
-> 上表的流量序列**只由** `opening` + `transactions` + `dividends` 構成，故現金收支（含記為 `WITHDRAW`
-> 的重組費）永遠不會進入 XIRR；XIRR **刻意維持不變**，使本手冊每一個已錨定的歷史數字都留在原處。
+> ⚠ **本段的前提於 2026-08-24 由 AI-D42 部分取代，但本段的結論不變。** 流量序列現在還包含三類
+> **交易與融資的成本**（`REBATE`／`INTEREST_EXPENSE`／`BROKER_FEE`，見上表）；然而重組費是記為
+> `WITHDRAW` 的**資本移動**，仍然不在序列中，所以「重組費對 XIRR 不可見」原樣成立。原文保留於
+> §4.4.7 限制 2，連同取代的理由。⚠ 已錨定的 XIRR 數字**會**因三類新流量而移動（凡帳本存在該類
+> 現金列者），oracle 與錨點須一併更新——這是 AI-D42 明白接受的代價。
 > 先前本段寫著該費用「改由帳戶層 IRR 呈現」——**該指標（D36）已由業主裁定不做且從未實作**，所以那句
 > 話已刪除而非改寫成「待實作」。這是一個**常設限制**，完整說明見 §4.4.7 限制 2。
 
