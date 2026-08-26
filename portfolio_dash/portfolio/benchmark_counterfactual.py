@@ -56,17 +56,28 @@ _ZERO = Decimal("0")
 class ReportingFlow:
     """One net-invested flow, already in the reporting currency at its own trade-date FX.
 
-    ``amount`` is positive for money going in (opening cost, buy incl. fees+tax) and negative
-    for money coming back (sale net proceeds, cash dividend) — the ``timeseries`` sign
-    convention, unchanged, because the whole comparison rests on both sides consuming the
-    identical stream.
+    ``amount`` is positive for money going in (opening cost, buy incl. fees+tax, and since
+    AI-D48 a broker fee or margin interest) and negative for money coming back (sale net
+    proceeds, cash dividend, a commission rebate) — the ``timeseries`` sign convention,
+    unchanged, because the whole comparison rests on both sides consuming the identical
+    stream.
+
+    ⚠ ``market`` is ``None`` for a CASH-MOVEMENT flow, and that is not a missing value — it
+    is the fact that decides AI-D49. A broker fee has no market, so it can never be spent on
+    an index: :func:`counterfactual` leaves such flows entirely out of BOTH legs, while
+    ``trend.net_invested`` (hence **B**) counts them. The costs are therefore charged to the
+    portfolio and never to the benchmark, which is what 「同一筆錢買指數會是多少」 literally
+    means — a passive index holder does not pay this account's margin interest.
+
+    A ``None`` market is deliberately NOT a typed absence to be filled in later: it must not
+    be defaulted to some market, and the type is what stops that.
     """
 
     on: date
-    market: Market
+    market: Market | None
     amount: Decimal
     #: The instrument this flow belongs to, so a per-symbol drawer can filter the stream
-    #: without rebuilding it. Unused by the portfolio-level counterfactual.
+    #: without rebuilding it. Empty for a cash movement, which belongs to no instrument.
     symbol: str = ""
 
 
@@ -126,8 +137,15 @@ def counterfactual(
     reporting currency**. A market absent from the mapping has no benchmark and its flows are
     reported as uncovered rather than dropped.
     """
-    gross_all = sum((abs(f.amount) for f in flows), _ZERO)
-    if not flows:
+    # AI-D49: cash-movement flows (``market is None``) are excluded from BOTH legs and from
+    # the coverage ratio. ``uncovered_ratio`` answers 「how much of the money has no index to
+    # compare against」 — a market this app cannot cover (MY today). A broker fee is not
+    # uncovered money; it is money that was never going to buy an index at all, and folding
+    # it in would degrade the headline's label for a reason that has nothing to do with
+    # benchmark coverage.
+    placeable = [f for f in flows if f.market is not None]
+    gross_all = sum((abs(f.amount) for f in placeable), _ZERO)
+    if not placeable:
         return Counterfactual(
             available=False, reason=_NO_FLOWS, terminal_value=None, net_invested=None,
             benchmark_return=None, uncovered_markets=(), uncovered_ratio=None, by_market=(),
@@ -138,7 +156,8 @@ def counterfactual(
     uncovered_gross = _ZERO
     uncovered: set[str] = set()
 
-    for flow in flows:
+    for flow in placeable:
+        assert flow.market is not None  # `placeable` filtered these out; narrows the type
         closes = closes_by_market.get(flow.market)
         level = None if not closes else _close_at_or_before(closes, flow.on)
         if level is None:

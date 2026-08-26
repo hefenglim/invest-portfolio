@@ -337,7 +337,7 @@
   /* ============ E7: 匯出中心 ============ */
   const EXPORTS = [
     { group: '對帳與核對', items: [
-      { name: '持倉快照 CSV', desc: '目前所有持倉（原始/調整成本、現價、損益、權重），raw Decimal 精度。', backend: true },
+      { name: '持倉快照 CSV', desc: '目前所有持倉（原始/調整成本、現價、損益、權重），raw Decimal 精度。', path: '/api/export/holdings' },
       /* `ledgers: true` -> the desc is completed from GET /api/export/ledgers after render.
          The literal below is the FALLBACK, and it deliberately names nothing: this line read
          「四帳本（期初/交易/股利/換匯）」 (ledger-count-ok: historical quote) until
@@ -345,12 +345,12 @@
          actions joined the zip — it told the owner they were about to download four CSVs when
          the file held five. A count typed here cannot be checked by anything, so it is not
          typed here any more. */
-      { name: '全帳本匯出（zip）', desc: '各帳本各一份 CSV ＋ 費率規則快照，打包下載。', backend: true, ledgers: true },
-      { name: 'AI 用量明細 CSV', desc: 'llm_usage 全表：每次呼叫的模型、tokens、成本。', backend: true },
-      { name: '排程執行記錄 CSV', desc: 'job_runs 全表：時間、狀態、摘要、耗時。', backend: true }
+      { name: '全帳本匯出（zip）', desc: '各帳本各一份 CSV ＋ 費率規則快照，打包下載。', path: '/api/export/ledgers', ledgers: true },
+      { name: 'AI 用量明細 CSV', desc: 'llm_usage 全表：每次呼叫的模型、tokens、成本。', path: '/api/export/llm-usage' },
+      { name: '排程執行記錄 CSV', desc: 'job_runs 全表：時間、狀態、摘要、耗時。', path: '/api/export/job-runs' }
     ]},
     { group: '報稅', items: [
-      { name: '年度報稅包', desc: '指定年度的已實現損益＋股利收入（含預扣稅）＋匯損益實現明細，各幣別分列。', backend: true, year: true }
+      { name: '年度報稅包', desc: '指定年度的已實現損益＋股利收入（含預扣稅）＋匯損益實現明細，各幣別分列。', path: '/api/export/tax-package', year: true }
     ]}
   ];
 
@@ -372,26 +372,47 @@
         if (item.ledgers) desc.dataset.ledgers = '1';
         card.appendChild(desc);
         const foot = el('div', 'ec-foot');
+        let sel = null;
         if (item.year) {
-          const sel = el('select', 'select ec-year');
-          ['2026', '2025', '2024'].forEach((y) => {
-            const o = el('option', null, y + ' 年度');
-            o.value = y;
-            sel.appendChild(o);
-          });
+          sel = el('select', 'select ec-year');
+          /* Derived, never typed. This select held a literal ['2026','2025','2024'] until
+             2026-08-27 — wrong in both directions the moment a ledger starts earlier or the
+             year rolls over. `fillTaxYearSelect` is shared with the 帳本頁 control so the two
+             menus cannot disagree. */
+          if (window.pdExport && window.pdExport.fillTaxYearSelect) {
+            window.pdExport.fillTaxYearSelect(sel);
+          }
           foot.appendChild(sel);
         }
         const btn = el('button', 'btn btn-primary', '產生並下載');
         btn.type = 'button';
-        btn.addEventListener('click', () => {
-          if (window.toast) window.toast('已排入產生佇列', 'ok', item.name + ' — 由後端以 raw Decimal 產生（設計預覽，等待 export endpoint）');
+        /* 2026-08-27: this handler used to fire a SUCCESS toast (「已排入產生佇列」) and do
+           nothing — a Design-preview stub whose tooltip said 「等待 export endpoint」 while
+           all five endpoints had existed for months. Every card now goes through the same
+           backend reconciliation channel as the per-page 匯出 CSV buttons: raw Decimal from
+           the calculation core, filename from Content-Disposition, silent on success. */
+        btn.addEventListener('click', async () => {
+          const restore = window.pdBusy ? window.pdBusy(btn, '產生中…') : function () {};
+          try {
+            const body = {};
+            if (sel) {
+              const year = parseInt(sel.value, 10);
+              body.year = isFinite(year) ? year : new Date().getFullYear() - 1;
+            }
+            await window.pdApi.download(item.path, body);
+          } catch (err) {
+            if (window.toast) {
+              window.toast(err && err.message ? err.message : (item.name + ' 產生失敗'),
+                           'fail', err && err.code);
+            }
+          } finally {
+            restore();
+          }
         });
         foot.appendChild(btn);
-        if (item.backend) {
-          const tag = el('span', 'ec-tag', '後端產生');
-          tag.title = '此匯出需要後端 export endpoint（見 specs/）；頁面上各表格的「匯出 CSV」則立即可用（顯示值精度）。';
-          foot.appendChild(tag);
-        }
+        const tag = el('span', 'ec-tag', '後端產生');
+        tag.title = '數字直接出自後端 Decimal 計算核心；頁面上各表格的「匯出 CSV」為同一條通道。';
+        foot.appendChild(tag);
         card.appendChild(foot);
         grid.appendChild(card);
       });
@@ -399,7 +420,7 @@
       wrap.appendChild(sec);
     });
     wrap.appendChild(el('div', 'ec-note',
-      '提示：各頁面表格右上角的「⬇ 匯出 CSV」可立即匯出目前篩選結果（顯示值精度）。本頁項目為對帳級匯出，數字直接出自後端 Decimal 計算核心，不經前端格式化。'));
+      '提示：本頁與各頁面表格右上角的「⬇ 匯出 CSV」走同一條後端通道，數字直接出自 Decimal 計算核心，不經前端格式化。'));
   }
   /* The zip's contents, named by the server that builds it.
 

@@ -563,6 +563,69 @@ document.getElementById('tab-tx').click();
   });
   slot.appendChild(reportBtn);
 })();
+/* glue: 年度稅務包 — POST /api/export/tax-package. Until 2026-08-27 nothing on the site
+   actually called it, so R1's 申報用原始成本 column (realized_original + its subtotal — the
+   number that goes on a return) shipped unreachable from a browser.
+
+   「Nothing called it」 is not the same as 「there was no button」, and the difference is the
+   finding: the 設定頁 匯出中心 had a 年度報稅包 card with a ⬇ glyph and a 「產生並下載」 button
+   whose handler fired a SUCCESS toast (「已排入產生佇列」 — there is no queue) and downloaded
+   nothing. That card is wired for real in the same change; a control that reports success
+   and does nothing is worse than a missing one, and it is invisible to a wiring sweep that
+   asks only whether a control has a listener.
+
+   Placement here (owner ruling 2026-08-27): beside the ledger exports, where the ledgers a
+   tax package is built from are read. NOT the dashboard's 已實現損益 panel — it has no year
+   concept and would need a selector of its own. Two surfaces, one export, is the same shape
+   as 匯出 CSV living on both a panel head and in the 匯出中心.
+
+   The year list is DERIVED, never invented — see window.pdExport.fillTaxYearSelect, which
+   the 設定頁 匯出中心 shares so the two menus cannot disagree. */
+(function () {
+  var slot = document.getElementById('ledger-export-slot');
+  if (!slot || !window.pdApi) return;
+
+  var sel = document.createElement('select');
+  sel.className = 'select';
+  sel.id = 'tax-package-year';
+  sel.setAttribute('aria-label', '稅務包年度');
+  sel.title = '稅務包年度（依帳本最早一筆推出）';
+
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-sm';
+  btn.title = '下載該年度稅務包 ZIP（已實現損益／股利／換匯已實現，三張對帳級 CSV）';
+  btn.appendChild(Object.assign(document.createElement('span'), { className: 'ico', textContent: '⎘' }));
+  btn.appendChild(Object.assign(document.createElement('span'), { textContent: '稅務包' }));
+
+  /* The year menu is DERIVED, never typed: window.pdExport.fillTaxYearSelect reads each
+     ledger's oldest row (GET /api/db-stats) so the options span 「最早一筆帳本」..今年 and
+     default to 去年. ONE definition, shared with the 設定頁 匯出中心 — the copy that lived
+     there was a hard-coded ['2026','2025','2024']. */
+  if (window.pdExport && window.pdExport.fillTaxYearSelect) {
+    window.pdExport.fillTaxYearSelect(sel);
+  }
+
+  btn.addEventListener('click', async function () {
+    var restore = window.pdBusy ? window.pdBusy(btn, '產出中…') : function () {};
+    try {
+      /* An empty menu (db-stats unreachable AND the helper absent) must not post NaN.
+         去年 is the same default the helper would have chosen. */
+      var year = parseInt(sel.value, 10);
+      if (!isFinite(year)) year = new Date().getFullYear() - 1;
+      await window.pdApi.download('/api/export/tax-package', { year: year });
+    } catch (err) {
+      if (window.toast) {
+        window.toast(err && err.message ? err.message : '稅務包產出失敗', 'fail', err && err.code);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  slot.appendChild(sel);
+  slot.appendChild(btn);
+})();
 /* 待確認匯入收件匣：真實接線在 inbox.js（2026-07-03, R4）。 */
 /* #10: the new-row flash is no longer a fixed-300ms guess wired to #m-confirm (that flashed
    ONLY manual/tx commits). It now rides input.js's shared commit funnel (afterCommitRefresh

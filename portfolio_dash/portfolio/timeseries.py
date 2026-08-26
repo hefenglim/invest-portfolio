@@ -9,6 +9,7 @@ series unavailable (consistent with the XIRR rule).
 """
 
 from bisect import bisect_right
+from collections.abc import Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -16,6 +17,11 @@ from portfolio_dash.portfolio.benchmark_counterfactual import ReportingFlow
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries
 from portfolio_dash.portfolio.price_basis import price_in
+
+# ONE definition of both, shared with the metric that already takes these kinds: an oracle
+# of B that re-derived either would be free to disagree with XIRR about which flows exist.
+from portfolio_dash.portfolio.returns import XIRR_CASH_KINDS, CashMovementFlow
+from portfolio_dash.shared.cash_kinds import movement_sign
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
@@ -76,6 +82,8 @@ def build_reporting_flows(
     bundle: LedgerBundle,
     fx_history: FxHistory,
     reporting: Currency,
+    *,
+    cash_movements: Sequence[CashMovementFlow],
 ) -> list[ReportingFlow] | None:
     """Every net-invested flow, in the reporting currency at its OWN trade-date FX.
 
@@ -91,10 +99,26 @@ def build_reporting_flows(
     same money on the same dates. Each flow carries its ``market`` so the counterfactual can
     route it to that market's benchmark; the trend simply ignores that field.
 
-    Cash movements are deliberately absent, as they always were: this is the money that went
-    into SECURITIES. (⚠ Note the resulting asymmetry with ``xirr_reporting``, which since
-    AI-D42 does take REBATE / INTEREST_EXPENSE / BROKER_FEE. That gap predates this extraction
-    and moving it is an owner ruling, not a refactor.)
+    **Cash movements are included since AI-D48** (owner ruling 2026-08-27), on exactly the
+    three kinds ``xirr_reporting`` has taken since AI-D42: ``REBATE`` / ``INTEREST_EXPENSE`` /
+    ``BROKER_FEE`` — the costs of TRADING AND FINANCING. ``DEPOSIT`` / ``WITHDRAW`` /
+    ``OPENING`` stay out as capital movements, and ``INTEREST`` stays out because the idle
+    principal earning it never entered this figure. ``cash_movements`` is a REQUIRED keyword
+    argument with no default: a default would let a caller silently ship the pre-AI-D48 number,
+    which is a plausible figure quietly missing flows — invisible in the output, so it is made
+    visible in the type instead (mypy error and ``TypeError``).
+
+    Why it mattered: **A and B are printed side by side** (AI-D41) and their difference is
+    labelled 「本金匯率效果」. While XIRR counted a 77% rebate and B did not, that label was
+    false — the difference was 「本金匯率效果 ＋ 三類現金帳」. R4 then measured its excess
+    return against B, so a broker fee B could not see read as beating the index.
+
+    A cash movement carries **no market and no symbol** (``market=None``), and AI-D49 makes
+    that load-bearing: :func:`portfolio.benchmark_counterfactual.counterfactual` leaves those
+    flows out of both legs, so the costs are charged to the portfolio and never placed on the
+    index. Sign: the movement's ``credit`` from the shared table, NEGATED like every other
+    flow here — a fee (debit) therefore RAISES ``net_invested`` exactly as a buy-side fee
+    always has, and a rebate lowers it.
     """
     def quote_ccy(symbol: str) -> Currency:
         inst = bundle.instruments.get(symbol)
@@ -127,7 +151,48 @@ def build_reporting_flows(
         if rate is None:
             return None
         out.append(ReportingFlow(d, market_of(symbol), convert(amount, rate), symbol))
+    # AI-D48. Each movement carries its OWN currency (there is no symbol to look one up
+    # from) and its sign comes from the shared table, so a kind can never be a credit here
+    # and a debit in the pool balance.
+    for mv in cash_movements:
+        if mv.kind.upper() not in XIRR_CASH_KINDS:
+            continue
+        rate = _fx_at(fx_history, mv.date, mv.ccy, reporting)
+        if rate is None:
+            return None
+        out.append(ReportingFlow(
+            mv.date, None, convert(-movement_sign(mv.kind) * mv.amount, rate), ""))
     return out
+
+
+def trading_financing_cost(
+    cash_movements: Sequence[CashMovementFlow],
+    fx_history: FxHistory,
+    reporting: Currency,
+) -> Decimal | None:
+    """The reporting-currency P&L effect of the three AI-D48 cash kinds. ``None`` if a rate
+    is missing on any of their dates — the same all-or-nothing bail B itself takes.
+
+    Sign is the P&L one, NOT the ``net_invested`` one: a broker fee is **negative** here and
+    positive there. Needed because AI-D48 changed what ``B − A`` means. B now counts these
+    costs and A never did, so their difference is no longer 「本金匯率效果」 — it is
+    「本金匯率效果 ＋ 交易與融資成本」, which is precisely the mislabelling AI-D48 exists to
+    remove, reproduced one field over. The decomposition is therefore THREE terms:
+
+        B = A + 本金匯率效果 + 交易與融資成本
+
+    and ``principal_fx_effect`` is computed by subtracting this out rather than being left as
+    a residual that quietly absorbs whatever else joins B next.
+    """
+    total = _ZERO
+    for mv in cash_movements:
+        if mv.kind.upper() not in XIRR_CASH_KINDS:
+            continue
+        rate = _fx_at(fx_history, mv.date, mv.ccy, reporting)
+        if rate is None:
+            return None
+        total += convert(movement_sign(mv.kind) * mv.amount, rate)
+    return total
 
 
 def daily_value_series(
@@ -137,15 +202,20 @@ def daily_value_series(
     reporting: Currency,
     *,
     end: date,
+    cash_movements: Sequence[CashMovementFlow],
 ) -> TrendSeries:
     """Replay the ledgers day by day from the first event to ``end``.
 
     Returns ``available=False`` (empty points) when there are no ledger events, or
     when any flow date lacks an on-or-before FX rate for its needed pair.
     """
+    # R6: `effective_date`, matching `LedgerBundle.through` and `build_book`'s ordering.
+    # Latent rather than live — a 配股's ex-date cannot precede the position that earns it,
+    # so no real ledger starts on one — but three date filters spelling the rule three ways
+    # is how two of them drift, and this was the third.
     event_dates = (
         [t.trade_date for t in bundle.transactions]
-        + [d.date for d in bundle.dividends]
+        + [d.effective_date for d in bundle.dividends]
         + [o.build_date for o in bundle.opening]
     )
     if not event_dates:
@@ -158,7 +228,8 @@ def daily_value_series(
     # per-day rebuild would be the same answer at hundreds of times the cost.
     actions = ActionIndex.build(bundle.actions)
 
-    reporting_flows = build_reporting_flows(bundle, fx_history, reporting)
+    reporting_flows = build_reporting_flows(bundle, fx_history, reporting,
+                                            cash_movements=cash_movements)
     if reporting_flows is None:
         return TrendSeries(points=[], reporting_currency=reporting, available=False)
     converted: list[tuple[date, Decimal]] = [(f.on, f.amount) for f in reporting_flows]

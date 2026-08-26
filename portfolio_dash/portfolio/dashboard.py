@@ -11,7 +11,7 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -56,12 +56,17 @@ from portfolio_dash.portfolio.results import (
     SectorAllocation,
     UnappliedAction,
 )
-from portfolio_dash.portfolio.returns import total_return, xirr_reporting
+from portfolio_dash.portfolio.returns import (
+    CashMovementFlow,
+    total_return,
+    xirr_reporting,
+)
 from portfolio_dash.portfolio.timeseries import (
     FxHistory,
     PriceHistory,
     build_reporting_flows,
     daily_value_series,
+    trading_financing_cost,
 )
 from portfolio_dash.portfolio.twr import convert_closes
 from portfolio_dash.pricing.benchmarks import benchmark_for_market
@@ -288,6 +293,7 @@ def _benchmark_comparison(
     as_of: date,
     actions: ActionIndex,
     fx_complete: Decimal | None,
+    cash_movements: Sequence[CashMovementFlow],
 ) -> BenchmarkComparison:
     """R4 / AI-D43 — spend the portfolio's own flows on each market's index instead.
 
@@ -305,7 +311,8 @@ def _benchmark_comparison(
     is correct the moment such an action IS recorded, and because one raw series read is how
     the next reader concludes the re-expression rule is optional.
     """
-    flows = build_reporting_flows(bundle, fx_history, reporting)
+    flows = build_reporting_flows(bundle, fx_history, reporting,
+                                  cash_movements=cash_movements)
     if flows is None:
         return BenchmarkComparison(
             available=False,
@@ -313,7 +320,10 @@ def _benchmark_comparison(
         )
     closes_by_market: dict[Market, list[tuple[date, Decimal]]] = {}
     labels: dict[Market, str] = {}
-    for market in {f.market for f in flows}:
+    # AI-D49: a cash-movement flow has no market and buys no index, so it contributes no
+    # benchmark series to load. `counterfactual` excludes it from both legs; this loop must
+    # not ask for 「the index of None」.
+    for market in {f.market for f in flows if f.market is not None}:
         bench = benchmark_for_market(market)
         if bench is None:
             continue  # MY today (AI-D22) — counted as uncovered, never silently dropped
@@ -669,7 +679,7 @@ def build_dashboard(
                 if rows:
                     fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
         trend = daily_value_series(bundle, price_history, fx_history, reporting,
-                                   end=as_of)
+                                   end=as_of, cash_movements=cash_movements)
         if not trend.available:
             trend_reason = "帳本中有交易日期缺少匯率資料"
         else:
@@ -725,12 +735,22 @@ def build_dashboard(
     # other's figure, which is precisely why the discrepancy went unnoticed.
     fx_outcome = fx_complete_return(trend)
     fx_complete = fx_outcome.value
-    principal_fx = (None if fx_complete is None or total_return_blended is None
-                    else fx_complete - total_return_blended)
+    # AI-D48 made B − A a TWO-term difference, so the third term is subtracted out rather
+    # than left inside 「本金匯率效果」 — a residual that quietly absorbs whatever joins B next
+    # is the same mislabelling AI-D48 removed, one field over. B = A + 本金匯率 + 交易與融資成本.
+    trading_cost = trading_financing_cost(cash_movements, trend_fx_history, reporting)
+    principal_fx = (
+        None if fx_complete is None or total_return_blended is None or trading_cost is None
+        else fx_complete - total_return_blended - trading_cost
+    )
     # R4 / AI-D43: the index counterfactual rides beside B, measured on the same ruler.
     benchmark = _benchmark_comparison(
         conn, bundle, trend_fx_history, reporting,
         as_of=as_of, actions=actions, fx_complete=fx_complete,
+        # AI-D48/D49: the SAME stream B is built from. The counterfactual then declines to
+        # place the cash flows (they carry no market), so the costs land on the portfolio leg
+        # only — one stream, one place that decides what can be spent on an index.
+        cash_movements=cash_movements,
     )
     kpis = KpiSummary(
         reporting_currency=reporting,
@@ -738,6 +758,7 @@ def build_dashboard(
         total_return=total_return_blended,
         total_return_fx_complete=fx_complete,
         principal_fx_effect=principal_fx,
+        trading_financing_cost=None if fx_complete is None else trading_cost,
         fx_complete_reason=fx_outcome.reason,
         total_return_rate=total_return_rate,
         realized_total=realized_total,

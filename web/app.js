@@ -151,6 +151,24 @@
           fxs.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
         }
         card.appendChild(fxs);
+        /* AI-D48's third term, on its OWN subline rather than appended to the one above.
+           B = A + 本金匯率效果 + 交易與融資成本, so the cost is shown beside the FX effect
+           instead of hiding inside it — a residual labelled 本金匯率效果 that silently carries
+           broker fees is the mislabelling AI-D48 removed. Its own row because a third segment
+           on that line pushed the dashboard into horizontal scroll at 768px (caught by
+           test_no_horizontal_scroll), and because the owner's 群益 account books a rebate every
+           month, so this is the NORMAL case, not an edge one.
+           ZERO is not rendered at all: a ledger with no rebate / margin interest / broker fee
+           has nothing to disclose, and 「交易與融資成本 $0」 on every such account is noise.
+           `sign-nil` covers an older payload without the field (canned e2e fixtures). */
+        const tfc = k && k.trading_financing_cost;
+        const tfcSign = f.signClass(tfc);
+        if (hasB && tfcSign !== 'sign-nil' && tfcSign !== 'sign-flat') {
+          const cost = el('div', 'kpi-subline');
+          cost.appendChild(el('span', null, '· 交易與融資成本'));
+          cost.appendChild(el('span', tfcSign, f.signed(tfc, ccy)));
+          card.appendChild(cost);
+        }
         if (!hasB) {
           /* Server-authored wording, rendered verbatim — this layer never composes a reason. */
           const why = el('div', 'kpi-subline', k.fx_complete_reason);

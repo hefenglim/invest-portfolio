@@ -1210,7 +1210,17 @@ $$\text{total\_return}=\sum_{ccy}\big(\text{realized}_{ccy}+\text{unrealized}_{c
 | --- | --- | --- | --- |
 | **A** | `total_return`<br>資產損益（不含本金匯率） | $\sum_{ccy}(\text{realized}+\text{unrealized})_{ccy}\times \text{spot}_{\text{today}}$ | 各幣別原生損益按今日匯率換算 |
 | **B** | 含匯兌總損益 | $\text{total\_value}-\text{net\_invested}$（流量逐筆按交易日匯率） | 含匯兌的累計結果 |
-| **B−A** | 本金匯率效果 | $\approx \text{cost}\times(\text{spot}_{\text{today}}-\text{acq\_rate})$ | 即 §8 換匯損益卡的內容 |
+| **B−A** | 本金匯率效果 ＋ 交易與融資成本 | 見下方 AI-D48 註 | **自 2026-08-27 起為兩項之和，不再等同換匯損益卡** |
+| **本金匯率效果** | `principal_fx_effect` | $B-A-\text{交易與融資成本}$ | 即 §8 換匯損益卡的內容 |
+| **交易與融資成本** | `trading_financing_cost` | $\sum \operatorname{sign}(\text{kind})\times\text{amount}\times \text{fx}_{\text{該日}}$，kind ∈ {REBATE, INTEREST_EXPENSE, BROKER_FEE} | 損益符號：券商費用為**負**（與 §7.5 `net_invested` 之符號相反） |
+
+> **AI-D48（2026-08-27）把拆解變成三項**：B 納入了那三類資金收支而 A 從未納入，故 $B-A$ 自此
+> 是**兩項之和**。若仍把它整個標為「本金匯率效果」，就是把券商費用偷偷塞進一個匯率標籤裡——
+> 正是 AI-D48 要移除的那種誤標，只是換到隔壁一個欄位。因此：
+>
+> $$B = A + \text{本金匯率效果} + \text{交易與融資成本}$$
+>
+> 三項**並陳、可相加為 B**，但 **A 與 B 仍永不相加**（I5）——相加會重複計算交叉項。
 
 **A、B、B−A 並陳呈現，永不相加。** 把 §8 的換匯損益加到 A 之上會重複計算交叉項
 $(\text{MV}-\text{C})(\text{spot}-\text{acq})$——那正是 I5 禁止的事，只是換到 I5 原文沒有涵蓋的那個數字上。
@@ -1387,11 +1397,15 @@ $$\text{declared\_gross}[ccy] = \sum \text{shares}_h \times \text{cash\_amount}_
 實作：`portfolio/timeseries.py::daily_value_series`（純函式，combiner 預載價／匯歷史）。自首筆帳本事件日至 `as_of` **逐日重播**，每日兩序列（報告幣）：
 
 - **市值 `total_value`**：$\displaystyle\sum_{h:\ shares>0}\operatorname{convert}(\text{price}_{\le day}\times \text{shares}_h,\ \text{fx}_{\le day})$，價與匯採**當日或之前最後值（carry-forward）**。任一持倉當日**全無報價**或**賣超（負股）**→ 該日標 `incomplete`（**不臆造**、不貢獻市值）。
-- **累計淨投入 `net_invested`**：截至當日之流量累加，**流量符號與 XIRR 相反（§7.2 之負號）**：期初 `+original_cost_total`、買入 `+(qty×price+fees+tax)`、賣出 `−(qty×price−fees−tax)`、現金股利（CASH/NET）`−net`；DRIP/STOCK 中性。每筆流量以**其日期之 carry-forward 匯率**換算。
+- **累計淨投入 `net_invested`**：截至當日之流量累加，**流量符號與 XIRR 相反（§7.2 之負號）**：期初 `+original_cost_total`、買入 `+(qty×price+fees+tax)`、賣出 `−(qty×price−fees−tax)`、現金股利（CASH/NET）`−net`；DRIP/STOCK 中性。**自 AI-D48（2026-08-27）起另納三類資金收支**：`REBATE`／`INTEREST_EXPENSE`／`BROKER_FEE`，即 §7.2 XIRR 所納之同一組「交易與融資成本」，金額為 $-\operatorname{sign}(\text{kind})\times \text{amount}$（`sign` 取自 `shared/cash_kinds.py` 之 `credit`，再依本序列之相反符號取負）——故**券商費用／融資利息提高** `net_invested`（與買入手續費一貫），**退佣降低**之。`DEPOSIT`／`WITHDRAW`／`OPENING`（資本移動）與 `INTEREST`（閒置現金利息）**不納**，理由與 §7.2 逐字相同。每筆流量以**其日期之 carry-forward 匯率**換算。
 
-任一流量日期無「當日或之前」匯率 → 整條序列 `available = False`（與 §7.2 XIRR 之 all-or-nothing 一致）。
+  > **為何 AI-D42 之後還要這一條**：A 與 B **並排印在同一條 KPI 帶上**（§7.1a），其差額標示為「本金匯率效果」。AI-D42 只把 XIRR 搬上那三類，於是自 2026-08-24 起該標示不再為真——差額實為「本金匯率效果 ＋ 三類資金收支」。R4 基準對照之 `excess` 又以 B 為基準，故一筆 B 看不見的券商費會被讀成「贏過大盤」。
+  >
+  > **AI-D49 — 基準那一腿不吃這三類**：資金收支流量之 `market` 為 `None`，`benchmark_counterfactual.counterfactual()` 將其排除於**兩腿之外**，亦**不計入** `uncovered_ratio`（該比率之語意是「有多少錢找不到基準」，非「有多少錢本來就不該買指數」）。結果：交易與融資成本記在組合這一腿，指數那一腿不代付——與「同一筆錢、同樣的日期，買指數會是多少」之字面一致。
 
-> **驗證錨點：無**（`trend` / `net_invested` 無壓測斷言，**建議納入下次壓測**）；其成分（`price × shares`、all-in 買入成本、賣出淨額、股利淨額、`convert`）已於 §4／§5／§7 驗證。
+任一流量日期無「當日或之前」匯率 → 整條序列 `available = False`（與 §7.2 XIRR 之 all-or-nothing 一致）。**資金收支流量同受此規則**：一筆缺匯率之外幣券商費會使整條趨勢誠實缺席，而非被靜默略過。
+
+> **驗證錨點**（2026-08-27 起，AI-D51）：壓測 phase 1 之 `trend.*` 族——`trend.net_invested` 於**每個帳本事件日及其前一日**（股利貢獻**除息日**與**發放日**兩者）＋`ASOF`＋期末，與 `oracle.net_invested_through` **精確**比對（與價格無關）。同族另含 `trend.start`／`trend.contiguous_days`／`trend.incomplete`，以及 `trend.total_value`（僅於 oracle 判定當日可估值時）。⚠ **仍無比對「某一天的逐標的股數」**——無任何 app 介面回答該問題，詳見 `scripts/stress_audit/README.md` §6。其成分（`price × shares`、all-in 買入成本、賣出淨額、股利淨額、`convert`）另於 §4／§5／§7 驗證。
 > **實作位置**：`portfolio/timeseries.py`（`daily_value_series`、`_at_or_before`、`_fx_at`）、`portfolio/dashboard.py`（step 9 預載歷史）。
 > **依據**：`.claude/rules/domain-ledger.md`（XIRR 流量符號；carry-forward valuation）、`.claude/rules/data-and-pricing.md`。
 

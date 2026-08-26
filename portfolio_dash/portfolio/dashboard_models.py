@@ -89,7 +89,9 @@ class KpiSummary(BaseModel):
     # currency's GAIN and never to its PRINCIPAL. B is the trend's
     # ``total_value − net_invested``, where every flow was converted at ITS OWN
     # trade-date rate — the FX-complete lifetime figure, which the UI used to label
-    # 浮動損益. B − A is the principal-FX effect, i.e. the content of the 換匯損益 card.
+    # 浮動損益. B − A was the principal-FX effect (the content of the 換匯損益 card) until
+    # AI-D48 put the trading/financing cash kinds into B; it is now a TWO-term difference,
+    # split into the two fields below.
     #
     # ⚠ These are PRESENTED SIDE BY SIDE, never summed. Adding the 換匯損益 figure to A
     # double-counts the cross term (MV − C)(spot − acq) — the same red line
@@ -98,6 +100,16 @@ class KpiSummary(BaseModel):
     # beside it are new, so every golden payload and stored snapshot still reconciles.
     total_return_fx_complete: Decimal | None = None
     principal_fx_effect: Decimal | None = None
+    # AI-D48 (2026-08-27) made the decomposition THREE terms, because B now counts the
+    # trading/financing cash kinds (REBATE / INTEREST_EXPENSE / BROKER_FEE) and A never did:
+    #
+    #     B = A + principal_fx_effect + trading_financing_cost
+    #
+    # Sign is the P&L one — a broker fee is NEGATIVE here (it lowers B) while it RAISES
+    # `net_invested`. Without this field `principal_fx_effect` would have gone on being
+    # labelled 「本金匯率效果」 while silently carrying the costs too, which is exactly the
+    # mislabelling AI-D48 was raised to remove.
+    trading_financing_cost: Decimal | None = None
     # Why B is absent, when it is (owner ruling 2026-08-25). Without it the UI could
     # only drop the row, and a row that silently vanishes is indistinguishable from a
     # feature that was never built. Server-owned wording — web never composes it.

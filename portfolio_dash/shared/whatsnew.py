@@ -183,10 +183,46 @@ CATALOG: list[Feature] = [
         desc="報稅要的是原始取得成本，而儀表板的已實現損益用的是「調整後成本」"
         "（現金股利已折抵）——同一筆錢會被算兩次。匯出檔現在兩欄並列："
         "realized_original（申報數字，小計用它）與 realized_adjusted（與儀表板對帳用），"
-        "表頭註明哪一欄是哪一個。⚠ 這份稅務包目前只有 API（POST /api/export/tax-package），"
-        "站上還沒有按鈕",
-        href=None,
-        area="匯出 → 稅務包（目前僅 API）",
+        "表頭註明哪一欄是哪一個。",
+        href="trades.html",
+        area="帳本 → 右上角「稅務包」（也在 設定 → 匯出中心 → 報稅）",
+        target="#tax-package-year",
+    ),
+    Feature(
+        version="0.1.29",
+        id="kpi-band-no-sideways-scroll",
+        title="平板寬度（761–860px）的儀表板不再整頁左右捲動",
+        desc="KPI 帶在 860px 以下就會排成兩欄，但「兩欄就裁切、絕不外推」的保護卻要到 760px "
+        "以下才生效——中間這段每張卡片都撐不下去，整份文件被推寬（768px 實測 881px）。"
+        "保護已移到和版面同一個斷點",
+        href="index.html",
+        area="儀表板 → KPI 帶（平板／分割視窗寬度）",
+        target=".kpi-band",
+    ),
+    Feature(
+        version="0.1.29",
+        id="b-takes-trading-costs",
+        title="含匯兌總損益開始計入退佣、融資利息與券商費用",
+        desc="XIRR 從 8/24 起就把這三類算進報酬了，旁邊的「含匯兌總損益」卻沒有——"
+        "於是兩者差額標的「本金匯率效果」其實還夾帶著這些成本。現在 B 也收下這三類，"
+        "並把成本拆成獨立的一項：含匯兌總損益 ＝ 資產損益 ＋ 本金匯率效果 ＋ 交易與融資成本。"
+        "⚠ 帳本裡有這三類資金收支的話，這個數字會變（變準）；入金／出金／期初與閒置現金利息"
+        "仍然不算報酬。基準對照的超額報酬同步變動——指數那一腿不代付你的券商費",
+        href="index.html",
+        area="儀表板 → KPI 帶「含匯兌總損益」",
+        target=".kpi-band",
+    ),
+    Feature(
+        version="0.1.29",
+        id="export-centre-really-downloads",
+        title="匯出中心的五張卡片改成真的會下載",
+        desc="「產生並下載」以前按下去只會跳一則綠色的「已排入產生佇列」——沒有佇列，"
+        "也沒有檔案。五個後端端點其實都早就存在。現在五張卡片都走與各頁面「⬇ 匯出 CSV」"
+        "同一條後端通道（raw Decimal、檔名由後端決定）；年度報稅包多了一顆按鈕在帳本頁，"
+        "而年度選單改成依帳本最早一筆推出（原本是寫死的 2026/2025/2024）",
+        href="settings.html#exports",
+        area="設定 → 匯出中心",
+        target="#export-center-wrap",
     ),
     Feature(
         version="0.1.29",

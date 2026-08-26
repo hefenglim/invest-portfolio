@@ -400,6 +400,172 @@ def spots() -> C.Spot:
     return C.Spot(dict(FX_RATES))
 
 
+def _trend_sample_dates(facts, by_date, last_iso: str) -> list[str]:
+    """Which trend days to reconcile - the owner's 「事件日取樣」 (ruling 2026-08-27).
+
+    Every ledger date AND the day before it, because a timing defect is only visible across
+    the boundary it moves: the day before an event and the event day differ by exactly that
+    event. Dividends contribute BOTH dates - ``effective`` (the ex-date for a 配股) and ``d``
+    (the payment date) - so the two edges of the very window R6 corrected are sampled by
+    construction.
+
+    ``ASOF`` and its predecessor are added too. They are not a ledger event, they are the
+    FIXTURE boundary: it is where the seeded prices begin, hence where the app's days flip
+    from ``incomplete`` to valued.
+
+    Every point is NOT sampled, deliberately: adjacent days are near-identical, so a full walk
+    multiplies evidence volume without multiplying detection, and a failure buried in a
+    thousand near-identical lines is harder to localise, not easier.
+    """
+    events: set[date] = set()
+    for t in facts.txs:
+        events.add(t.trade_date)
+    for dv in facts.divs:
+        events.add(dv.effective)
+        events.add(dv.d)
+    for o in facts.openings:
+        events.add(o.build_date)
+    for a in facts.actions:
+        events.add(a.d)
+    for c in facts.cash:
+        events.add(c.d)
+    for f in facts.fxs:
+        events.add(f.d)
+    events.add(ASOF)
+    out: set[str] = {last_iso}
+    for e in events:
+        for cand in (e, date.fromordinal(e.toordinal() - 1)):
+            iso = cand.isoformat()
+            if iso in by_date:
+                out.add(iso)
+    return sorted(out)
+
+
+def _day_incomplete(res_d, day: date) -> bool:
+    """Whether the app must publish this trend day as ``incomplete`` - derived, not read.
+
+    Three causes, from ``domain-ledger.md`` plus this fixture's own price schedule:
+
+    * a held position that is 賣超 / 待釐清 (``oversold`` / ``unbookable_dividend`` /
+      ``unbookable_action``) has no honest value that day;
+    * a held position with NO stored price on-or-before ``day`` cannot be valued - and in this
+      fixture that is every day before :data:`ASOF`, because ``seed_all`` seeds exactly ONE
+      close per symbol, dated ASOF. That is a property of the FIXTURE, stated here rather than
+      buried in a comparison, and it is the reason this family cannot yet reconcile a
+      point-in-time SHARE COUNT (see the README's disclosed limitation).
+    * a day holding nothing is COMPLETE with a zero total - the app's loop simply adds nothing.
+
+    FX is not a cause: the fixture seeds every needed pair at ``EARLY_ASOF``, which precedes
+    the first ledger event, so an on-or-before rate always resolves.
+    """
+    for h in res_d.holdings.values():
+        if h.shares == O.ZERO:
+            continue
+        if h.oversold or h.unbookable_dividend or h.unbookable_action:
+            return True
+        if h.symbol not in PRICES or day < ASOF:
+            # Either no seeded close AT ALL, or none dated on-or-before this day. Written as
+            # a derivation rather than assumed: without the first clause a future scenario
+            # symbol with no price would CRASH this family on the `PRICES[...]` lookup below
+            # instead of failing an assertion, and a harness that crashes on new data is a
+            # harness people stop extending.
+            return True
+    return False
+
+
+def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
+    """POINT-IN-TIME reconciliation of the daily replay (the ``trend.*`` family).
+
+    Why it exists: every other family in this harness compares the app and the oracle at the
+    CURRENT state, and a whole class of defect is invisible there - anything whose effect is
+    confined to a window between two dates ends at the same place either way. R6's ex-date is
+    exactly that shape (a 配股's shares arrive a month earlier; the position at ``as_of`` is
+    identical), which is why ``fail=0`` was silent about it. Disclosed in README section 6 on
+    2026-08-26 and closed here to the extent the app's surfaces allow.
+
+    What is compared:
+
+    * ``trend.start`` / ``trend.contiguous_days`` - the replay's span, derived from the
+      earliest ledger event with dividends on their EFFECTIVE date.
+    * ``trend.net_invested`` - EXACT and price-free, the subtrahend of B
+      (``total_value - net_invested``) in AI-D41's A / B / B-A decomposition. This is the
+      assertion that guards the owner's 「B 收三類」 ruling: the app and the oracle must move
+      onto the three cash kinds together, and this family goes red in between.
+    * ``trend.incomplete`` - the app's honesty about days it cannot value, derived
+      independently by :func:`_day_incomplete` over a point-in-time replay.
+    * ``trend.total_value`` - only on days the oracle judges complete. With one seeded close
+      per symbol that is ASOF onward; asserting it on an unpriced day would be asserting the
+      fixture, not the app.
+
+    What is NOT compared, and why: a point-in-time per-symbol SHARE COUNT, because no app
+    surface returns one. ``trend.points`` carries four portfolio-level numbers, and the sell
+    preview's date-awareness lives in the 賣超 guard, not in a report. Closing that needs a
+    DAILY price fixture so ``total_value`` becomes assertable across the whole span - and that
+    is not one line, because back-dating this fixture's post-action prices would hand the read
+    side a wrong split basis. Recorded in the README rather than approximated here.
+    """
+    trend = (dash.get("trend") or {})
+    pts = trend.get("points") or []
+    ev.check("trend.available", "series", True, bool(trend.get("available")), phase)
+    if not pts:
+        return
+    by_date = {p["date"]: p for p in pts}
+    first_iso, last_iso = min(by_date), max(by_date)
+    span = date.fromisoformat(last_iso).toordinal() - date.fromisoformat(first_iso).toordinal()
+    ev.check("trend.contiguous_days", "series", span + 1, len(pts), phase)
+
+    starts = ([t.trade_date for t in facts.txs]
+              + [dv.effective for dv in facts.divs]
+              + [o.build_date for o in facts.openings])
+    if starts:
+        ev.check("trend.start", "series", min(starts).isoformat(), first_iso, phase)
+
+    fx_on = fx_on_resolver()
+    skipped: list[str] = []
+    for day_iso in _trend_sample_dates(facts, by_date, last_iso):
+        p = by_date[day_iso]
+        day = date.fromisoformat(day_iso)
+        try:
+            expected_ni = O.net_invested_through(facts, day, REPORTING, fx_on)
+        except KeyError:
+            # No on-or-before rate for some flow - the app publishes NO trend at all in that
+            # state, so there is nothing to compare rather than a zero to agree with.
+            continue
+        ev.check("trend.net_invested", day_iso, expected_ni, dec(p["net_invested"]), phase)
+
+        res_d = O.replay_through(facts, day)
+        if res_d.action_refusals:
+            # WHICH rule refused is scenario knowledge (see the A0 note in reconcile), and the
+            # app's refusal path marks the day incomplete for reasons this family does not
+            # re-derive. Collected and logged ONCE below — never per day: `ops` is a signal
+            # ("did the scenario change?"), and diagnostic logging that moves it by 75 turns
+            # that signal into noise.
+            skipped.append(day_iso)
+            continue
+        expected_inc = _day_incomplete(res_d, day)
+        ev.check("trend.incomplete", day_iso, expected_inc, bool(p["incomplete"]), phase)
+        if expected_inc:
+            continue
+        total = O.ZERO
+        for h in res_d.holdings.values():
+            if h.shares == O.ZERO:
+                continue
+            # Every scenario action predates ASOF and the only seeded close IS at ASOF, so the
+            # read-side split re-expression window (priced_on, day] is empty here and the
+            # stored close meets this day's share count unchanged. Stated, not assumed: the
+            # moment a fixture price predates an action, this line needs the factor.
+            rate = (O.ONE if h.quote_ccy == REPORTING
+                    else fx_on(day, h.quote_ccy, REPORTING))
+            total += PRICES[h.symbol] * h.shares * rate
+        ev.check("trend.total_value", day_iso, total, dec(p["total_value"]), phase)
+
+    # No silent caps: a day this family declined to judge is named, not quietly absent.
+    if skipped:
+        ev.op(phase, "ORACLE", "trend.days_not_judged",
+              {"reason": "corporate action refused by the oracle on that day"},
+              {"count": len(skipped), "dates": skipped})
+
+
 def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True,
               reports=False):
     """Full oracle-vs-system reconciliation at the current state."""
@@ -502,8 +668,12 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
 
     # ---- E. KPI totals + XIRR scalar ----
     if valuation and not oversold:
-        _reconcile_kpis(ev, res, dash, prices, sp, phase)
+        _reconcile_kpis(ev, res, dash, facts, prices, sp, phase)
         _reconcile_xirr(ev, res, dash, facts, prices, sp, phase)
+        # E3. POINT-IN-TIME: the daily replay, sampled at event boundaries. Behind the SAME
+        # gate as the KPI family — an oversold ledger has no honest valuation on any day, so
+        # judging its trend would be judging a state the app itself declines to value.
+        _reconcile_trend(ev, dash, facts, phase)
 
     # ---- E2. Ledger INTEGRITY (validity, not arithmetic — see oracle layer 4) ----
     _reconcile_integrity(ev, res, facts, phase)
@@ -685,7 +855,7 @@ def _reconcile_fx_unrealized(ev, res, kpis, facts, prices, sp, phase):
                  kpis.get("fx_unrealized"), phase)
 
 
-def _reconcile_kpis(ev, res, dash, prices, sp, phase):
+def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase):
     kpis = dash["kpis"]
     realized_total = O.ZERO
     for ccy, amt in res.realized_by_ccy.items():
@@ -709,6 +879,13 @@ def _reconcile_kpis(ev, res, dash, prices, sp, phase):
     ev.check("kpi.unrealized_total", "TWD", unreal_total, kpis.get("unrealized_total"), phase)
     ev.check("kpi.total_market_value", "TWD", mv_total, kpis.get("total_market_value"), phase)
     ev.check("kpi.total_return", "TWD", tr, kpis.get("total_return"), phase)
+    # AI-D48's third term. Asserted here because it is a NEW money-of-record figure and the
+    # accumulation rule requires the oracle to derive one independently before it ships; the
+    # other two terms are already pinned (A above, and B through `trend.total_value` /
+    # `trend.net_invested` at the last point).
+    ev.check("kpi.trading_financing_cost", "TWD",
+             O.trading_financing_cost(facts, REPORTING, fx_on_resolver()),
+             kpis.get("trading_financing_cost"), phase)
 
 
 def _reconcile_xirr(ev, res, dash, facts, prices, sp, phase):

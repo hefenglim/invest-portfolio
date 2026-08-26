@@ -523,6 +523,109 @@ mypy error and a `TypeError`.
   payment date, not the ex-date, and inventing one would break its 「supplied verbatim, never
   recomputed」 discipline.
 
+### Added — investment-logic review, wave R7 (three owner rulings: AI-D48…D51)
+
+- **B took the three cash kinds XIRR already had** (AI-D48). AI-D42 moved `xirr_reporting`
+  onto `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` and left B (含匯兌總損益) behind — but **A
+  and B are printed side by side on one KPI band** (AI-D41) and their difference is labelled
+  「本金匯率效果」. From the moment one of them counted a 77% rebate and the other did not, that
+  label was false: the difference was 「本金匯率效果 ＋ 三類資金收支」. R4 then made it
+  consequential — the benchmark comparison's `excess` is measured against B, so a broker fee B
+  could not see was being reported as beating the index. `build_reporting_flows` now takes
+  `cash_movements` as a **required keyword argument with no default**: a default would let a
+  caller silently ship the pre-ruling figure, which is a plausible number quietly missing
+  flows. `DEPOSIT` / `WITHDRAW` / `OPENING` (capital) and `INTEREST` (idle-cash yield whose
+  principal never entered the figure) stay out, for AI-D42's reasons unchanged.
+  Sign: a fee RAISES `net_invested` exactly as a buy-side fee always has; a rebate lowers it.
+  ⚠ **The ruling immediately reproduced its own defect one field over**, and that is fixed in
+  the same change: `principal_fx_effect` was computed as `B − A` and labelled 「本金匯率效果」
+  on the KPI band, so the moment B counted a broker fee that label was carrying a cost. The
+  decomposition is now THREE terms — `B = A + principal_fx_effect + trading_financing_cost` —
+  with the cost subtracted out rather than left as a residual that quietly absorbs whatever
+  joins B next. `trading_financing_cost` carries the P&L sign (a fee is negative) and renders
+  beside the FX effect. A / B are still never summed (I5); these three are.
+- **The index leg does not pay your broker** (AI-D49). A cash-movement flow carries
+  `market=None`, and that is load-bearing rather than a missing value: `counterfactual()`
+  leaves those flows out of **both** legs, so the costs are charged to the portfolio and never
+  placed on the index — which is what 「同一筆錢、同樣的日期，買指數會是多少」 literally means.
+  They are also kept out of `uncovered_ratio`, whose meaning is 「how much of the money has no
+  index to compare against」 (MY today), not 「money that was never going to buy an index」.
+  Rejected: charging both legs (invents a cost no index investor paid — the same red line as
+  never averaging two providers' numbers) and keeping a second securities-only B′ (two nearly
+  identical 「含匯兌總損益」 on one site is the AI-D2 defect class).
+- **The stress harness gained a point-in-time family** (AI-D51). Every reconciliation compared
+  the app and the oracle **at the current state**, where anything whose effect is confined to a
+  window between two dates is invisible — R6's ex-date exactly (the position at `as_of` is
+  identical either way), which is why that run's `fail=0` was silent about it. The oracle gained
+  `facts_through` / `replay_through` / `net_invested_through` (dividends cut on their EFFECTIVE
+  date, so an oracle that cut on the payment date could not have seen R6 either), and phase 1
+  gained `trend.*`: `start` · `contiguous_days` · `net_invested` · `incomplete` ·
+  `total_value`, sampled at **every ledger event date and the day before it** — dividends
+  contributing BOTH the ex-date and the payment date — plus `ASOF` and the last point.
+  ★ **Its detection power is measured, not asserted.** With the app moved onto the three cash
+  kinds and the oracle not yet, the run came back `fail=27` — every one of them
+  `trend.net_invested`, on exactly the dates carrying a cash movement, with nothing else in the
+  run disturbed. Green again once the oracle followed: `ops=128` (unchanged — no scenario
+  change), `pass` up by ~860 assertions.
+  ⚠ **A point-in-time per-symbol SHARE COUNT is still not compared**, and that is R6's actual
+  落點. No app surface answers it (`trend.points` carries four portfolio-level numbers; the sell
+  preview's date-awareness lives in the 賣超 guard, not a report), and `total_value` cannot
+  stand in because it is portfolio-wide while the fixture seeds one close per symbol at `ASOF`.
+  Closing it needs a daily price fixture seeded BEFORE the corporate actions — see
+  `scripts/stress_audit/README.md` §6, which now states what was closed and what was not.
+- `trend`'s start date now uses `Dividend.effective_date` like the other three filters. Latent
+  rather than live — a 配股's ex-date cannot precede the position that earns it — but three
+  date filters spelling one rule three ways is how two of them drift, and this was the third.
+
+### Fixed — the KPI band pushed the dashboard sideways from 761px to 860px
+
+- **The breakpoint ladder had a gap, the third of this exact shape in `styles.css`.** The KPI
+  band drops to TWO columns at `<=860px`, but 「2-col KPIs clip, never push」
+  (`min-width: 0; overflow: hidden`) only began at `<=760px`. Between those two widths every
+  card was a grid item with `min-width: auto`, unable to shrink below its own min-content, and
+  the whole document scrolled horizontally — measured at 768px: `scrollWidth` 881 against a 768
+  viewport, a hero card 398px wide in a 250px track. The guard now starts at the same
+  breakpoint as the layout that needs it. Prior gaps of the same shape: 861–1023px (the KPI
+  band again) and 761–1435px (the 資料來源 table).
+  ⚠ **This was NOT introduced by this wave**, and finding that out was the point: the failure
+  appeared beside new work on the same card, and a `git stash push web/` bisect returned the
+  identical 881px with every web change removed. It also means the 「3834/3834」 recorded for the
+  R5/R6 commit was an over-read — counting pytest's result characters proves a run FINISHED,
+  not that it passed, because `F` and `E` are result characters too (LESSONS_LEARNED).
+- The AI-D48 cost term sits on its OWN subline rather than as a third segment of the
+  含匯兌總損益 line (which is what re-broke 768px while the gap above was still open), and a
+  ZERO is not rendered at all — an account that has never paid a rebate, margin interest or
+  broker fee has nothing to disclose there. `tests/e2e/test_kpi_trading_cost_layout.py` pins
+  both: the golden fixture books only `DEPOSIT`, so the non-zero path is exercised through a
+  canned `/api/dashboard` rather than by seeding money into the spec-17 payload.
+
+### Fixed — the export centre was congratulating the user (AI-D50)
+
+- **Five buttons that reported success and did nothing.** The 設定 → 匯出中心 rendered five
+  cards with a ⬇ glyph and a 「產生並下載」 button whose handler fired `toast('已排入產生佇列',
+  'ok')` — there is no queue — and downloaded nothing. All five endpoints (`holdings` ·
+  `ledgers` · `llm-usage` · `job-runs` · `tax-package`) had existed for months while the
+  tooltip still said 「等待 export endpoint」. Every card now goes through the same backend
+  reconciliation channel as the per-page 匯出 CSV buttons.
+  ⚠ **A button that reports success and does nothing is worse than a missing one**, and it is
+  invisible to a wiring sweep that asks only whether a control has a listener — v0.1.26 swept
+  2,287 controls and found 0 dead. `tests/contract/test_export_endpoints_have_callers.py` is
+  the guard that would have caught it: every `POST /api/export/*` route must have a real
+  frontend caller, and the 匯出中心 must call the download seam.
+  ⚠ It found a **second** orphan on its first run: `POST /api/export/ledgers`, the whole-ledger
+  zip, reachable only by curl. The first version of the test missed it because the same path
+  has a GET (「what would the zip contain?」) whose literal satisfied a substring search — GET
+  calls are now stripped before the search.
+- **年度稅務包 is reachable, and its year menu is derived.** R1 added the 申報用原始成本 column
+  (`realized_original` + its per-currency subtotal — the number that goes on a return) to a
+  package no page could ask for. A 稅務包 control now sits in the 帳本頁 export row beside the
+  ledger exports (owner ruling AI-D50; NOT the dashboard's 已實現損益 panel, which has no year
+  concept). The year options span 「最早一筆帳本」..今年 from `GET /api/db-stats` and default to
+  **去年** — a filing is filed for the year that closed, and defaulting to 今年 hands over an
+  authoritative-looking part-year package. ONE definition
+  (`web/export.js::fillTaxYearSelect`), shared with the 匯出中心, whose own copy was a
+  hard-coded `['2026','2025','2024']`.
+
 ### Fixed — R2 follow-up
 
 - **The 含匯兌總損益 line vanished instead of explaining itself** (owner ruling 2026-08-25). B

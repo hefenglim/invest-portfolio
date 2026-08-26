@@ -10,6 +10,7 @@ import pytest
 
 from portfolio_dash.portfolio import timeseries as ts
 from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.returns import CashMovementFlow
 from portfolio_dash.portfolio.timeseries import daily_value_series
 from portfolio_dash.shared.corporate_actions import CorporateAction, CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
@@ -41,6 +42,13 @@ INSTRUMENTS_USD_PAIR = {
 }
 
 
+#: A ledger with no cash movements. Spelled out at every call site rather than given a
+#: default in the signature (AI-D48): `cash_movements` has NO default there, so a caller
+#: that forgets it is a mypy error and a TypeError instead of silently publishing the
+#: pre-ruling B — a plausible figure quietly missing flows.
+NO_CASH: list[CashMovementFlow] = []
+
+
 def _tx(day: date, side: Side, qty: str, price: str, fees: str = "1",
         symbol: str = "AAA") -> Transaction:
     return Transaction(account_id="schwab", symbol=symbol, side=side,
@@ -54,7 +62,7 @@ def test_carry_forward_values_and_net_invested() -> None:
                       (date(2026, 6, 3), Decimal("110"))]}
     fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
     series = daily_value_series(LedgerBundle(txs, instruments=INSTRUMENTS), prices, fx, TWD,
-                                end=date(2026, 6, 4))
+                                end=date(2026, 6, 4), cash_movements=NO_CASH)
     assert series.available is True
     assert [p.date for p in series.points] == [
         date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3), date(2026, 6, 4)]
@@ -70,7 +78,7 @@ def test_missing_early_price_flags_incomplete() -> None:
     prices = {"AAA": [(date(2026, 6, 2), Decimal("100"))]}  # nothing on day 1
     fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
     series = daily_value_series(LedgerBundle(txs, instruments=INSTRUMENTS), prices, fx, TWD,
-                                end=date(2026, 6, 2))
+                                end=date(2026, 6, 2), cash_movements=NO_CASH)
     assert series.points[0].incomplete is True
     assert series.points[0].total_value == Decimal("0")
     assert series.points[1].incomplete is False
@@ -82,7 +90,7 @@ def test_inverse_pair_fallback() -> None:
     prices = {"AAA": [(date(2026, 6, 1), Decimal("100"))]}
     fx = {(TWD, USD): [(date(2026, 6, 1), Decimal("0.03125"))]}  # 1/0.03125 = 32
     series = daily_value_series(LedgerBundle(txs, instruments=INSTRUMENTS), prices, fx, TWD,
-                                end=date(2026, 6, 1))
+                                end=date(2026, 6, 1), cash_movements=NO_CASH)
     assert series.available is True
     assert series.points[0].total_value == Decimal("32000")
     assert series.points[0].net_invested == Decimal("32000")
@@ -98,7 +106,7 @@ def test_dividend_and_sell_reduce_net_invested() -> None:
                       (date(2026, 6, 3), Decimal("120"))]}
     fx = {(USD, TWD): [(date(2026, 6, 1), Decimal("30"))]}
     series = daily_value_series(LedgerBundle(txs, divs, instruments=INSTRUMENTS),
-                                prices, fx, TWD, end=date(2026, 6, 3))
+                                prices, fx, TWD, end=date(2026, 6, 3), cash_movements=NO_CASH)
     # day1: +1001*30 = 30030 ; day2: -50*30 -> 28530 ; day3: -(600-1)*30 -> 10560
     assert [p.net_invested for p in series.points] == [
         Decimal("30030"), Decimal("28530"), Decimal("10560")]
@@ -112,7 +120,7 @@ def test_opening_inventory_counts_as_invested() -> None:
                                 build_date=date(2026, 6, 1))]
     prices = {"BBB": [(date(2026, 6, 1), Decimal("100"))]}
     series = daily_value_series(LedgerBundle(opening=opening, instruments=INSTRUMENTS),
-                                prices, {}, TWD, end=date(2026, 6, 1))
+                                prices, {}, TWD, end=date(2026, 6, 1), cash_movements=NO_CASH)
     assert series.available is True  # TWD->TWD needs no FX rows
     assert series.points[0].total_value == Decimal("1000")
     assert series.points[0].net_invested == Decimal("900")
@@ -122,14 +130,14 @@ def test_missing_flow_fx_makes_series_unavailable() -> None:
     txs = [_tx(date(2026, 6, 1), Side.BUY, "10", "100")]
     prices = {"AAA": [(date(2026, 6, 1), Decimal("100"))]}
     series = daily_value_series(LedgerBundle(txs, instruments=INSTRUMENTS), prices, {}, TWD,
-                                end=date(2026, 6, 2))
+                                end=date(2026, 6, 2), cash_movements=NO_CASH)
     assert series.available is False
     assert series.points == []
 
 
 def test_empty_ledgers_unavailable() -> None:
     series = daily_value_series(LedgerBundle(instruments=INSTRUMENTS), {}, {}, TWD,
-                                end=date(2026, 6, 1))
+                                end=date(2026, 6, 1), cash_movements=NO_CASH)
     assert series.available is False
     assert series.points == []
 
@@ -171,7 +179,8 @@ def test_skipped_corporate_action_makes_the_day_incomplete() -> None:
         False, False, False)
     assert flagged.shares == Decimal("10")  # still PRE-action
 
-    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 2))
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 2),
+        cash_movements=NO_CASH)
     assert series.available is True
     day1, day2 = series.points
 
@@ -228,7 +237,8 @@ def test_a_refused_action_with_no_position_to_flag_still_marks_the_day() -> None
     assert not any(h.unbookable_action or h.oversold or h.unbookable_dividend
                    or h.short_open for h in book.holdings)
 
-    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 4))
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 4),
+        cash_movements=NO_CASH)
     assert series.available is True
     # DATE SCOPING — the whole reason a book-level flag is safe here: `book` is rebuilt per
     # day from `bundle.through(day)`, whose `actions` filter is `a.date <= day`, so the
@@ -263,7 +273,8 @@ def test_a_duplicated_action_row_whose_flag_is_dropped_still_marks_the_day() -> 
     assert not any(h.unbookable_action or h.oversold or h.unbookable_dividend
                    or h.short_open for h in book.holdings)
 
-    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 4))
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 4),
+        cash_movements=NO_CASH)
     assert series.available is True
     assert [p.incomplete for p in series.points] == [False, False, True, True]
     assert [p.total_value for p in series.points] == [Decimal("30000")] * 4
@@ -289,15 +300,15 @@ def test_a_refused_action_changes_only_the_flag_never_a_number() -> None:
     def numbers(acts: list[CorporateAction]) -> list[tuple[Any, ...]]:
         s = daily_value_series(
             LedgerBundle(txs, instruments=INSTRUMENTS, actions=acts),
-            prices, fx, TWD, end=date(2026, 6, 4))
+            prices, fx, TWD, end=date(2026, 6, 4), cash_movements=NO_CASH)
         return [(p.date, p.total_value, p.net_invested, p.net_worth) for p in s.points]
 
     assert numbers(actions) == numbers([])
 
     flags = daily_value_series(LedgerBundle(txs, instruments=INSTRUMENTS, actions=actions),
-                               prices, fx, TWD, end=date(2026, 6, 4))
+                               prices, fx, TWD, end=date(2026, 6, 4), cash_movements=NO_CASH)
     clean = daily_value_series(LedgerBundle(txs, instruments=INSTRUMENTS),
-                               prices, fx, TWD, end=date(2026, 6, 4))
+                               prices, fx, TWD, end=date(2026, 6, 4), cash_movements=NO_CASH)
     assert [p.incomplete for p in flags.points] == [False, False, True, True]
     assert [p.incomplete for p in clean.points] == [False] * 4
 
@@ -373,14 +384,14 @@ def test_the_unapplied_action_branch_never_executes_for_an_action_free_ledger() 
     body, condition = _line_of(_GATE_BODY_MARKER), _line_of(_GATE_TEST_MARKER)
 
     executed = _lines_executed(
-        lambda: daily_value_series(clean, prices, fx, TWD, end=end))
+        lambda: daily_value_series(clean, prices, fx, TWD, end=end, cash_movements=NO_CASH))
     assert condition in executed, "the tracer never reached the gate — probe is broken"
     assert body not in executed, (
         "the unapplied-action branch RAN for a ledger with no corporate action — "
         "containment is broken (D38 invariant 1)")
 
     detonated = _lines_executed(
-        lambda: daily_value_series(refused, prices, fx, TWD, end=end))
+        lambda: daily_value_series(refused, prices, fx, TWD, end=end, cash_movements=NO_CASH))
     assert body in detonated, (
         "the probe cannot see the branch even when it must run — it proves nothing")
 
@@ -430,7 +441,8 @@ def test_net_worth_is_continuous_across_a_split_with_no_post_split_price() -> No
     assert build_book(bundle.through(date(2026, 6, 9))).holdings[0].shares == Decimal("10")
     assert build_book(bundle.through(_SPLIT_DATE)).holdings[0].shares == Decimal("200")
 
-    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11))
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11),
+        cash_movements=NO_CASH)
     values = _values(series)
     assert values[date(2026, 6, 9)] == Decimal("30000")     # 10 x 100 x 30
     assert values[_SPLIT_DATE] == Decimal("30000")          # 200 x 5 x 30
@@ -454,7 +466,8 @@ def test_without_the_reexpression_the_split_day_is_inflated_by_the_ratio(
         ts, "price_in",
         lambda index, symbol, price, *, priced_on, valued_on: price,
     )
-    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11)))
+    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11),
+        cash_movements=NO_CASH))
     assert values[date(2026, 6, 9)] == Decimal("30000")
     assert values[_SPLIT_DATE] == Decimal("600000")
     assert values[_SPLIT_DATE] == values[date(2026, 6, 9)] * 20
@@ -484,7 +497,8 @@ def test_marking_the_split_day_incomplete_would_drop_the_whole_position(
         return entry
 
     monkeypatch.setattr(ts, "_entry_at_or_before", unusable_across_a_split)
-    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11))
+    series = daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11),
+        cash_movements=NO_CASH)
     values = _values(series)
     assert values[date(2026, 6, 9)] == Decimal("30000")
     assert values[_SPLIT_DATE] == Decimal("0"), "the position vanished, not the day"
@@ -500,7 +514,8 @@ def test_a_post_split_price_makes_the_correction_disappear_by_itself() -> None:
     traded post-split) is used unchanged and the day still values at 30,000."""
     bundle, prices, fx = _split_fixture()
     prices["AAA"].append((_SPLIT_DATE, Decimal("5")))
-    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11)))
+    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11),
+        cash_movements=NO_CASH))
     assert values[_SPLIT_DATE] == Decimal("30000")
 
 
@@ -514,5 +529,6 @@ def test_a_reverse_split_is_re_expressed_upwards() -> None:
     )
     bundle = LedgerBundle(bundle.transactions, instruments=INSTRUMENTS, actions=[reverse])
     assert build_book(bundle.through(_SPLIT_DATE)).holdings[0].shares == Decimal("0.5")
-    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11)))
+    values = _values(daily_value_series(bundle, prices, fx, TWD, end=date(2026, 6, 11),
+        cash_movements=NO_CASH))
     assert values[_SPLIT_DATE] == Decimal("30000")     # 0.5 x 2000 x 30

@@ -1219,3 +1219,96 @@ failure; once it was contention I had caused myself), and each time it was inher
 session as established fact. Symptoms observed while the observer is perturbing the system are
 not findings. Before recording an environment defect: reproduce it on a quiet machine, and
 record the *measurement*, not the impression.
+
+## A button that reports success is invisible to a wiring sweep (2026-08-27)
+
+The 設定 → 匯出中心 rendered five export cards, each with a ⬇ glyph and a 「產生並下載」 button.
+Every one of those buttons ran `toast('已排入產生佇列', 'ok')` and did nothing else. There is no
+queue. All five endpoints (`holdings` · `ledgers` · `llm-usage` · `job-runs` · `tax-package`) had
+existed for months, while the card's own tooltip still said 「等待 export endpoint」 — a
+Design-preview stub that outlived the thing it was standing in for.
+
+**v0.1.26's button-wiring sweep checked 2,287 controls and reported 0 dead.** It was not wrong:
+these buttons have listeners. They are wired — to a lie. A sweep that asks *「does this control
+have a handler?」* cannot see the difference between a handler that works and a handler that
+congratulates you, and the second is strictly worse than a dead button: a dead button gets
+reported, a lying one gets believed.
+
+Two things follow.
+
+**1. Prefer a guard over a sweep, where the guard can exist.** The permanent check is
+`tests/contract/test_export_endpoints_have_callers.py`: every `POST /api/export/*` route must
+have a real frontend caller, and the export centre must call the download seam. That is
+structural — it compares router source against `web/` source — and it works precisely because the
+failure mode (an endpoint nobody calls) is invisible to anything that exercises the endpoint.
+Every API test of `/api/export/tax-package` passed the whole time.
+
+**2. My first version of that guard had the same blind spot it was written to fix.** It searched
+for the path literal anywhere in `web/`, and `/api/export/ledgers` has BOTH a GET (「what would the
+zip contain?」) and a POST (build it). The GET's literal satisfied the POST's coverage, so the
+orphaned whole-ledger zip stayed invisible — until the test was tightened to strip `pdApi.get(...)`
+calls first, at which point it immediately found the second orphan. **A coverage test that
+searches for a string will pass on a coincidence; make it search for the CALL.**
+
+⚠ Related, from the same change: I told the owner 「tax-package is the only export endpoint with
+no frontend button」 and asked them to rule on where to put one. That premise was incomplete — a
+button existed and lied — and the ruling was therefore made on a partial picture. Check the
+surface before framing a decision about the surface; a grep for the path found the router and the
+absence of a `download(` call, but not the card. Say so plainly when it happens, and record the
+corrected premise in the ruling itself (AI-D50 carries it).
+
+## Moving a shared figure moves its LABEL too (2026-08-27)
+
+AI-D48 put three cash kinds into B (含匯兌總損益) to close an asymmetry with XIRR. Directly
+beside B on the same KPI band sits `principal_fx_effect`, computed as `B − A` and labelled
+「本金匯率效果」. The moment B counted a broker fee, that label was carrying a trading cost under
+an exchange-rate name — **the exact defect the ruling was raised to remove, reproduced one field
+over, in the same commit.**
+
+It was caught by reading the rendering code while writing the ruling's own justification, not by
+any test: every assertion about `principal_fx_effect` was about its arithmetic, and the
+arithmetic was still correct. The fix is to make the third term its own field
+(`trading_financing_cost`) so the decomposition is `B = A + 本金匯率效果 + 交易與融資成本`,
+rather than leaving a residual that silently absorbs whatever joins B next.
+
+**The check to run whenever a figure changes definition: grep for every OTHER figure derived
+from it, and re-read the words printed next to each one.** A derived value whose formula is
+`X − Y` inherits every change to X and Y, and its label does not.
+
+## Counting pytest's result characters proves COMPLETION, not success (2026-08-27)
+
+The technique recorded earlier in this file — when the summary line does not print, count the
+`.FEsxX` characters after stripping `[ N%]` and compare against `--collect-only -q`'s total —
+answers exactly one question: *did the run finish?* It cannot answer *did it pass*, because
+**`F` and `E` are result characters too**. A run of 3,834 tests with two failures produces
+3,834 characters.
+
+That is how `pytest 3834/3834` was reported for the R5/R6 commit while
+`test_no_horizontal_scroll[768]` was already red. The number was true and the claim built on it
+was not. It was found only because a later change touched the same KPI card and a `git stash
+push web/` bisect showed the SAME 881px overflow with every web change removed — i.e. the
+regression predated the work being blamed for it.
+
+**The rule:** when reading a redirected pytest run without a summary line, count `F` and `E`
+separately and report that count, or grep `^(FAILED|ERROR)` — never infer success from a total.
+And when a gate turns red next to new work, *bisect before diagnosing*: a stash of the changed
+directory costs one run and is the difference between fixing a defect and inventing a cause for
+one.
+
+## A `page.route` on a session-scoped Playwright page leaks into every later test (2026-08-27)
+
+`tests/e2e/conftest.py::browser_page` is **session-scoped** — one Page for the whole e2e run —
+and Playwright routes are per-page and permanent until `unroute`. No file in `tests/e2e` called
+`unroute` before this date. That had been survivable only by accident: every stub so far
+targeted an endpoint nobody else requests (`/api/input/ai/preview`,
+`/api/insight-types/*/run`, `/api/instruments/lookup`).
+
+The first stub of a **universal** endpoint — `/api/dashboard`, which nearly every page fetches
+— broke the very next test in its own file, and would otherwise have fed a doctored payload to
+every test after it. It failed loudly only because the neighbouring assertion happened to be
+「this text must NOT appear」.
+
+**Rule:** stubbing a shared endpoint means installing and removing the route around your own
+navigation (a `@contextmanager` with `unroute` in `finally` — see
+`test_kpi_trading_cost_layout.py`). Noted in the `browser_page` docstring too, because that is
+where the next person looks. A leaked route never fails where it was installed.

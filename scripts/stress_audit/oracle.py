@@ -938,6 +938,130 @@ def replay(facts: Facts) -> OracleResult:
                         fx_avg, fx_real, fx_fcash, fx_cov, refusals)
 
 
+def facts_through(facts: Facts, day: date) -> Facts:
+    """Every fact dated on-or-before *day* — the ledger AS IT STOOD at that close.
+
+    Re-derived from ``domain-ledger.md``, never read off the app (the independence rule).
+    Each ledger is cut on its OWN date field, and dividends are cut on
+    :attr:`DivFact.effective`: a 配股 attaches on the ex-date, so between ex and payment it
+    must be IN the ledger at all — not merely sorted earlier. Cutting on the payment date is
+    the exact defect R6 fixed, and an oracle that cut the same way could not have seen it.
+
+    ``instruments`` is deliberately NOT cut. A registry row is not an event; dropping it
+    would make an early replay raise on ``quote_ccy`` rather than give an early answer.
+    """
+    return Facts(
+        txs=[t for t in facts.txs if t.trade_date <= day],
+        divs=[d for d in facts.divs if d.effective <= day],
+        fxs=[f for f in facts.fxs if f.d <= day],
+        openings=[o for o in facts.openings if o.build_date <= day],
+        cash=[c for c in facts.cash if c.d <= day],
+        instruments=facts.instruments,
+        actions=[a for a in facts.actions if a.d <= day],
+    )
+
+
+def trading_financing_cost(facts: Facts, reporting: str, fx_on) -> Decimal:
+    """The reporting-currency P&L effect of the three AI-D48 cash kinds.
+
+    The THIRD term of the decomposition ``B = A + 本金匯率效果 + 交易與融資成本``. It exists
+    as its own figure because AI-D48 briefly reproduced the defect it was raised to fix: B
+    started counting these costs while A never did, so ``B − A`` — labelled 「本金匯率效果」 on
+    the KPI band — was silently carrying broker fees under an exchange-rate name.
+
+    ⚠ Sign is the P&L one and is therefore the NEGATION of the same movement's contribution
+    to :func:`net_invested_through`: a broker fee is negative here and positive there. Two
+    signs for one row is exactly the kind of thing an oracle should state rather than infer,
+    so both are written out from ``DEBIT_KINDS`` at their own call site.
+    """
+    total = ZERO
+    for mv in facts.cash:
+        if mv.kind.upper() not in XIRR_CASH_KINDS:
+            continue
+        sign = -ONE if mv.kind.upper() in DEBIT_KINDS else ONE
+        rate = ONE if mv.ccy == reporting else fx_on(mv.d, mv.ccy, reporting)
+        total += sign * mv.amount * rate
+    return total
+
+
+def replay_through(facts: Facts, day: date) -> OracleResult:
+    """The oracle's answer as at the CLOSE of *day*.
+
+    Exists because every reconciliation in this harness compared the app and the oracle at
+    the CURRENT state, where a whole class of defect is invisible: anything whose effect is
+    confined to a window between two dates produces the same final answer either way.
+    R6's ex-date is precisely that shape — a 配股's shares arrive a month early or a month
+    late, and the position at ``as_of`` is identical either way — so ``fail=0`` was silent
+    about it (disclosed in this directory's README §6, 2026-08-26, and closed here).
+    """
+    return replay(facts_through(facts, day))
+
+
+def net_invested_through(facts: Facts, day: date, reporting: str, fx_on) -> Decimal:
+    """Reporting-currency money put into SECURITIES through *day* (the trend's B leg).
+
+    The app publishes this per day as ``trend.points[].net_invested``, and it is the
+    subtrahend of **B** (``total_value − net_invested``) — the FX-complete lifetime result
+    of AI-D41's A · B · B−A decomposition. It is worth an independent derivation for the
+    reason B exists at all: A applies FX to each currency's GAIN, while B converts every
+    FLOW at its own trade date, so the two disagree by the principal's FX effect and only
+    one of them can be checked against a flow stream.
+
+    Signs are the XIRR conventions NEGATED (money in is positive here):
+    opening ``+orig_total`` · buy ``+(qty·price + fee + tax)`` · sell ``−(qty·price − fee −
+    tax)`` · CASH/NET dividend ``−net`` · DRIP/STOCK neutral. Each flow converted at its OWN
+    date via ``fx_on`` (on-or-before), never at spot.
+
+    **Cash movements: the same three kinds as XIRR** (AI-D48, owner ruling 2026-08-27) —
+    ``XIRR_CASH_KINDS``, signed by ``DEBIT_KINDS`` and then NEGATED like every other flow
+    here, so a fee raises the figure exactly as a buy-side fee does and a rebate lowers it.
+    ``INTEREST`` and the capital movements stay out for AI-D42's reasons, unchanged.
+
+    ⚠ This function was written one commit earlier WITHOUT them, deliberately, so it was a
+    faithful oracle of the pre-ruling app — and the ``trend.*`` family then went red on
+    exactly 27 assertions (all of them ``trend.net_invested``, on exactly the dates carrying
+    a cash movement, with nothing else in the run disturbed) when the app moved and the
+    oracle had not yet. That red run IS this family's detection-power evidence; writing the
+    helper ahead of the change would have hidden the transition it exists to catch.
+
+    Raises ``KeyError`` when a required rate is missing — the app returns an unavailable
+    trend in that case, so a silent zero here would be a false agreement.
+    """
+    insts = facts.instruments
+    total = ZERO
+
+    def add(d: date, ccy: str, native: Decimal) -> None:
+        nonlocal total
+        rate = ONE if ccy == reporting else fx_on(d, ccy, reporting)
+        total += native * rate
+
+    for o in facts.openings:
+        if o.build_date <= day:
+            add(o.build_date, insts[o.symbol].quote_ccy, o.orig_total)
+    for t in facts.txs:
+        if t.trade_date > day:
+            continue
+        ccy = insts[t.symbol].quote_ccy
+        gross = t.qty * t.price
+        if t.side.upper() == "BUY":
+            add(t.trade_date, ccy, gross + t.fee + t.tax)
+        else:
+            add(t.trade_date, ccy, -(gross - t.fee - t.tax))
+    for dv in facts.divs:
+        # The PAYMENT date, not `effective`: this is when the cash actually arrives. Only a
+        # STOCK dividend moves under R6, and a STOCK dividend is not a cash flow at all.
+        if dv.d <= day and dv.type.upper() in ("CASH", "NET"):
+            add(dv.d, insts[dv.symbol].quote_ccy, -dv.net)
+    for mv in facts.cash:
+        # A movement carries its OWN currency (no symbol to look one up from). The sign is
+        # this module's own DEBIT_KINDS, re-derived from domain-ledger.md, then negated into
+        # the money-in-is-positive convention this series uses.
+        if mv.d <= day and mv.kind.upper() in XIRR_CASH_KINDS:
+            sign = -ONE if mv.kind.upper() in DEBIT_KINDS else ONE
+            add(mv.d, mv.ccy, -sign * mv.amount)
+    return total
+
+
 def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
     """Per (account, ccy) pool (portfolio/cash.py semantics, re-derived from rules):
     debits (WITHDRAW / INTEREST_EXPENSE / BROKER_FEE) reduce the pool, every other kind

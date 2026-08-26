@@ -399,7 +399,20 @@ def live_server(_e2e_loopback_socket: None) -> Iterator[str]:
 def browser_page(_e2e_loopback_socket: None) -> Iterator[Page]:
     """A headless chromium Page for the e2e session. Each test should fully drive a
     navigation; the page is shared but the per-page handlers in `assert_page_ok` are
-    detached after each assertion so listeners don't accumulate across tests."""
+    detached after each assertion so listeners don't accumulate across tests.
+
+    ⚠ **`page.route` is NOT cleaned up for you, and this page is session-scoped.** A route
+    installed by one test stays installed for every test that runs after it. No file in this
+    directory called `unroute` until 2026-08-27, and that was survivable only by luck: every
+    stub so far targeted an endpoint nobody else hits (`/api/input/ai/preview`,
+    `/api/insight-types/*/run`, `/api/instruments/lookup`). The first stub of a UNIVERSAL
+    endpoint — `/api/dashboard` — broke the very next test in its own file, and would have
+    quietly fed a doctored payload to every test after it.
+
+    So: if you stub an endpoint that more than one page requests, install and remove it
+    around your own navigation (`test_kpi_trading_cost_layout.py` has the context-manager
+    shape). A leaked route does not fail loudly; it makes some later test assert against
+    data you invented."""
     _assert_loopback_window()  # session fixtures init lazily — self-heal (see helper)
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)

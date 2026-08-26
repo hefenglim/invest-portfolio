@@ -1712,8 +1712,18 @@ button.avatar:hover { border-color: var(--accent); color: var(--text); }
 .toolbar .spacer { margin-left: auto; }
 /* every button placed in a panel-head centres against its (baseline-aligned) title row. */
 .panel-head .btn { align-self: center; }
-/* the trades ledger export slot holds two `.btn`s (匯出 CSV + 匯出報告) side by side. */
+/* the trades ledger export slot: 匯出 CSV + 匯出報告 + the 稅務包 year picker & button.
+   (It said "two `.btn`s" until 2026-08-27, when the tax package gained its first caller —
+   a count in prose beside the thing it counts goes stale silently.) */
 #ledger-export-slot { display: inline-flex; align-items: center; gap: 8px; }
+/* The shared `.select` is FORM-sized (it lives in input rows). This slot is a toolbar row,
+   where every tier pins to ONE height — the same-row invariant the toolbar-height e2e
+   asserts within 1px. Match `.btn-sm`'s box exactly: 11px font / 18px line / 4px 10px pad
+   over the same 1px border, so the picker is the same 28px as the buttons beside it. */
+#tax-package-year.select {
+  font-size: 11px; line-height: 18px; padding: 4px 10px;
+  width: auto; min-width: 0; align-self: center;
+}
 
 /* ---------- E2: sparkline ---------- */
 .spark-cell { text-align: center; }
@@ -1850,6 +1860,16 @@ details.freshness > summary > span:not(.sum-chips) {
 }
 @media (max-width: 860px) {
   .kpi-band, .kpi-band.v2 { grid-template-columns: repeat(2, 1fr); }
+  /* 2026-08-27: the LADDER HAD A GAP, the third one found in this file. The band drops to
+     TWO columns here, but 「2-col KPIs clip, never push」 (`min-width: 0; overflow: hidden`)
+     only started at <=760px — so from 761px to 860px each card was a grid item with
+     `min-width: auto`, unable to shrink below its own min-content, and the dashboard
+     scrolled the DOCUMENT sideways (measured at 768px: scrollWidth 881 vs clientWidth 768,
+     a hero card 398px wide in a 250px track). The guard belongs at the SAME breakpoint as
+     the layout that needs it; the <=760px block keeps its copy for the phone tier it also
+     serves. Prior gaps of this exact shape: 861–1023px (KPI band) and 761–1435px
+     (資料來源 table). */
+  .kpi-card { min-width: 0; overflow: hidden; }
   .row-2, .fx-grid, .insight-grid, .fresh-body { grid-template-columns: 1fr; }
   .app-header { flex-wrap: wrap; }
   .sum-chips { display: none; }

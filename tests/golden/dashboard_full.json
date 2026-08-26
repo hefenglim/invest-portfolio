@@ -10,6 +10,7 @@
     "unrealized_total": "462765.0000000000000000000000",
     "total_return_fx_complete": null,
     "principal_fx_effect": null,
+    "trading_financing_cost": null,
     "fx_complete_reason": "最新一日有標的缺價,含匯兌總損益暫不計算(不以較早日期替代,否則與上方資產損益不同日,兩者的差額會失去意義)",
     "xirr": null,
     "xirr_window_days": 157,
