@@ -584,6 +584,48 @@ def ratio_shares(qty: Decimal, ratio_to: Decimal, ratio_from: Decimal) -> Decima
     return qty * ratio_to / ratio_from
 
 
+def price_as_traded(facts: Facts, symbol: str, day: date, *,
+                    quote: Decimal, quoted_on: date) -> Decimal:
+    """The price AS TRADED on ``day``, derived from a quote dated ``quoted_on``.
+
+    A quote taken after a split is in post-split terms; the price that actually traded
+    BEFORE that split was larger by exactly the split's ratio — the mirror image of what
+    the ratio does to the share count. So the expression is the same one
+    :func:`apply_ratio` uses, applied to a price:
+
+        as_traded := quote * ratio_to / ratio_from,   for each SPLIT in ``(day, quoted_on]``
+
+    ONE ACTION AT A TIME, with the division last, and NEVER as a product of quotients
+    (trap #2a) — a product's error term is unbounded, which is the whole reason this file
+    refuses a ``split_factor``-style helper for share counts too.
+
+    Only ``SPLIT`` moves a price basis. ``EXCHANGE`` and ``SPINOFF`` change WHICH instrument
+    is held, not the terms the old one was quoted in, so they are skipped: the surviving
+    symbol's own quote already is its own basis.
+
+    This is the oracle's own arithmetic and must never delegate to ``pricing/`` (trap #11).
+
+    **Quantized to 4 dp at the end, and that is deliberate.** A ratio like ``1 / 3`` makes the
+    as-traded price a repeating decimal, and ``data-and-pricing.md`` caps a stored close at
+    4 dp — so an unquantized value is one the price column CANNOT HOLD. This function is the
+    single source of the fixture's daily closes: the harness seeds what it returns and values
+    with what it returns, so both sides meet the number that is actually stored. Quantizing
+    only HERE (measured: 91 ``trend.total_value`` failures off by 0.0070 without it) keeps
+    that agreement a property of one expression rather than of two roundings staying in step.
+
+    ⚠ This is the fixture's storage precision, not an accounting rule. It must never spread to
+    the share/cost arithmetic, where this file's whole discipline is to divide last and never
+    round in the middle.
+    """
+    out = quote
+    for act in sorted((a for a in facts.actions
+                       if a.kind == SPLIT and a.from_symbol == symbol
+                       and day < a.d <= quoted_on),
+                      key=lambda a: (a.d, a.id)):
+        out = out * act.ratio_to / act.ratio_from
+    return out.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
 def _positive_integer(term: Decimal) -> bool:
     """D14 / E6+E6a: both ratio terms are positive INTEGERS.
 

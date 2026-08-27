@@ -361,6 +361,52 @@ def seed_price(db_path: Path, symbol: str, market: str, close: Decimal,
         conn.close()
 
 
+def seed_prices_daily(
+    db_path: Path,
+    rows_by_date: dict[date, list[tuple[str, str, Decimal]]],
+    source: str = "stress-fixture-daily",
+) -> int:
+    """Seed a DAILY close series, each row stamped ``fetched_at`` = its OWN date.
+
+    That stamp is the whole point, and it is not cosmetic. ``upsert_prices`` multiplies a
+    row by the splits in the window ``(as_of, fetched_at]`` — "which splits had the provider
+    already folded in when this was fetched?". A history row fetched ON its own date predates
+    every later split, so the window is empty, the stored ``split_basis`` is the identity and
+    the close is kept exactly as given. That is both realistic (a quote pulled before a split
+    was never adjusted) and required: with ``fetched_at = now`` every historical row would be
+    multiplied by every subsequent split, and the fixture would be seeding a basis the ledger
+    never traded on.
+
+    It also keeps ``reconcile_prices`` a no-op on these rows for the same reason, so inserting
+    or deleting a SPLIT never silently repaints the history this family asserts against.
+
+    One ``upsert_prices`` call per date (it takes ONE ``fetched_at`` for a batch), all on one
+    connection. Returns the number of rows written.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.pricing.results import PriceRow
+    from portfolio_dash.pricing.store import upsert_prices
+    from portfolio_dash.shared.enums import Market
+    written = 0
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for d in sorted(rows_by_date):
+            rows = rows_by_date[d]
+            if not rows:
+                continue
+            upsert_prices(
+                conn,
+                [PriceRow(instrument=sym, market=Market(mkt), as_of=d, close=close,
+                          source=source)
+                 for sym, mkt, close in rows],
+                fetched_at=datetime.combine(d, datetime.min.time()),
+            )
+            written += len(rows)
+    finally:
+        conn.close()
+    return written
+
+
 def write_corporate_action(db_path: Path, account_id: str, action_date: str, kind: str,
                            from_symbol: str, to_symbol: str, ratio_to: int, ratio_from: int,
                            cost_carry: str | None = None, note: str | None = None) -> int:

@@ -1678,6 +1678,47 @@ two, and hand two back as blocked-on-them.
   the 13–15 quoted earlier in the programme. That figure was this sub-programme's own commits,
   not the branch's divergence, and it understates the size of an eventual single deployment.
 
+**The stress harness now reconciles a PAST-DATE share count (AI-D59).** The last disclosed gap
+in `scripts/stress_audit/README.md` §6 is closed, and closed with a measurement rather than a
+claim.
+
+- **What was missing.** AI-D51 gave the harness a daily replay and the `trend.*` family, but
+  `trend.total_value` could only be asserted from `ASOF` onward: `seed_all` seeds exactly ONE
+  close per symbol, dated `ASOF`, so every earlier day was unpriced by construction and
+  therefore `incomplete` — and skipped. That is precisely where a defect confined to a window
+  lives, which is R6's ex-date: a 配股 booked on the payment date instead of the ex-date changes
+  the share count only BETWEEN those dates, and ends at the same position either way.
+- **What closed it.** `_ensure_daily_prices` seeds a close for every fixture symbol on every day
+  from the first ledger event through `ASOF`. At a known price, `total_value` pins the share
+  count — the app and the oracle read the same close, so any surviving disagreement is a
+  quantity. The closes are **as traded on their own date** (`oracle.price_as_traded` multiplies
+  the ASOF quote back out by the intervening splits, one action at a time with the division
+  last, never a product of quotients), and each row is stamped `fetched_at` = its own date so
+  that both the write window `(as_of, fetched_at]` and the read window `(priced_on, day]` are
+  empty — nothing re-expresses these rows, so inserting or deleting a SPLIT can never repaint
+  the history the family asserts against. Seeding is derived from `facts` inside `reconcile`
+  before the dashboard is fetched, so it self-corrects across checkpoints.
+- ★ **Detection power, measured.** The R6 defect was deliberately reintroduced into the ORACLE
+  (`facts_through` cutting dividends on the payment date — exactly the pre-R6 behaviour) and the
+  harness run both ways. **Pre-change harness: `pass=5663 fail=0` — silent.** Current harness:
+  `fail=53`, every one a `trend.total_value`, every one dated **2026-05-02 … 2026-05-29** (the
+  ex-date-to-payment window), each off by 70,000 TWD — the value of the 配股 shares that should
+  exist in that gap. The pre-change row reproducing the previously recorded baseline *to the
+  digit* is itself the evidence that the probe restored the old state faithfully: that `fail=0`
+  was never coverage, it was blindness.
+- **New baseline: `ops=128 pass=6075 fail=0`** (was 5663). `ops` is unchanged and must stay 128
+  — this was closed with fixture data and assertions, not a new route.
+- ⚠ **Still reviewed rather than reconciled:** that a 配股 attaches on the ex-date while a cash
+  dividend does not is a reading of `domain-ledger.md` on BOTH sides, so two independent
+  implementations of the same misreading would still agree. Only the hermetic hand-computed
+  walk (`tests/portfolio/test_review_r6_ex_date.py`) catches that class, and it stays.
+- Two fixture defects were found and fixed by the new family on its first run, both mine: 91
+  `total_value` failures off by 0.0070 (the oracle valued at an unquantized repeating decimal
+  the 4-dp price column cannot hold — the quantization now lives in the one expression that
+  owns both the seed and the valuation), and 4 `trend.incomplete` failures from treating a day
+  AFTER the seeded series as unpriced, when carrying the last close forward is a valid
+  valuation and what the app does.
+
 ## [v0.1.28] - 2026-08-09
 
 A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not

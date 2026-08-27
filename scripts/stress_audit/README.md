@@ -104,7 +104,7 @@ for touched cash pools and newly-registered instruments. It never deletes pre-ex
 demo data. No FX rates are exposed remotely, so reporting-currency blended KPIs (incl.
 XIRR) are out of phase-2 scope; every native-currency figure is still reconciled exactly.
 
-### 6. Point-in-time state: half closed (2026-08-27), and what is still open
+### 6. Point-in-time state: CLOSED (2026-08-28)
 
 **The gap, as disclosed on 2026-08-26.** Every reconciliation ran **at the current state** —
 `/api/dashboard` holdings, realized rows, cash pools and KPIs against `oracle.replay(facts)`.
@@ -114,54 +114,78 @@ replay: it produced one final `OracleResult`, not a series.
 That is not academic, and R6 (the ex-dividend date) is the case that exposed it. A STOCK
 dividend booked on its ex-date rather than its payment date changes the share count **only
 between those two dates** — the final position is identical either way by construction. So the
-scenario's permanent 配股 op genuinely exercises the app's ex-date path (verified: 1,700 vs
-1,600 shares on 2026-05-15 with and without the column) while every assertion compared a point
-where the two answers coincide. `fail=0` on that run was therefore silent about the ex-date's
-TIMING, and reading it as coverage would be exactly the "agree by both never running it" trap
-the accumulation rule exists to prevent.
+scenario's permanent 配股 op genuinely exercises the app's ex-date path while every assertion
+compared a point where the two answers coincide.
 
-**What was built (AI-D51).** The oracle gained `facts_through` / `replay_through` /
+**Half one (AI-D51, 2026-08-27).** The oracle gained `facts_through` / `replay_through` /
 `net_invested_through`, and `phase1.py` gained the `trend.*` family, which samples the daily
 replay at **every ledger event date and the day before it** — dividends contributing BOTH
 `effective` (the ex-date for a 配股) and `d` (the payment date), so the two edges of R6's window
-are sampled by construction — plus `ASOF` and the last point. At each sampled day it compares:
+are sampled by construction — plus `ASOF` and the last point.
 
 | check | price-free? | what it pins |
 | --- | --- | --- |
 | `trend.start` · `trend.contiguous_days` | yes | the replay's span, dividends on their EFFECTIVE date |
 | `trend.net_invested` | **yes** | the subtrahend of **B** (`total_value − net_invested`), AI-D41 |
 | `trend.incomplete` | yes | the app's honesty about days it cannot value |
-| `trend.total_value` | no | only on days the oracle judges complete (ASOF onward, see below) |
+| `trend.total_value` | no | the per-day valuation — see below |
 
-`trend.net_invested` is the load-bearing one: it is exactly what AI-D48 moves when B takes the
-three cash kinds, so the app and the oracle must move together or this family goes red in
-between. That is its first job, ahead of R6.
+`trend.net_invested` remains the family's first job: it is exactly what AI-D48 moves when B
+takes the three cash kinds, so the app and the oracle must move together or this goes red in
+between.
 
-**What is STILL not compared: a point-in-time per-symbol SHARE COUNT** — which is R6's actual
-落點. Two reasons, both structural rather than lazy:
+**Half two (AI-D59, 2026-08-28) — the per-symbol SHARE COUNT, which was R6's actual 落點.**
+The blocker was never the assertion, it was the fixture: `seed_all` seeds exactly ONE close per
+symbol, dated `ASOF`, so every earlier day was unpriced by construction, every pre-ASOF day was
+`incomplete`, and `trend.total_value` was skipped precisely where the defect lives.
 
-1. **No app surface answers it.** `trend.points` carries four portfolio-level numbers
-   (`date` · `total_value` · `net_invested` · `incomplete` · `net_worth`), and the sell
-   preview's date-awareness lives in the 賣超 guard (`shares_through`), not in any report.
-   Adding one would be a new route, which this harness's `ops` invariant deliberately makes
-   expensive.
-2. **`total_value` cannot stand in for it here.** It is portfolio-wide, so ONE unpriced holding
-   makes the whole day `incomplete` — and `seed_all` seeds exactly one close per symbol, dated
-   `ASOF`. Every day before ASOF is therefore unpriced by construction.
+`_ensure_daily_prices` now seeds a close for every fixture symbol on **every day** from the
+first ledger event through `ASOF`. At a KNOWN price, `total_value` pins the share count: the
+app and the oracle read the same close, so any disagreement that survives is a quantity. Two
+properties keep the fixture honest rather than merely green:
 
-**Closing the rest** means giving the scenario a **daily** price series so `total_value` is
-assertable across the whole span; at a known price, `total_value` pins the share count exactly.
-That is not one line: this fixture's closes are quoted in POST-action terms and dated at ASOF
-(after every action), so back-dating them would hand the read side (`price_in`, whose window is
-`(priced_on, day]`) a split factor that should not apply — a wrong basis, silently. The seeding
-would have to run **before** the corporate actions so `reconcile_prices` re-expresses the
-history the way the app intends, which reorders a scenario that is currently green.
+* **The closes are AS TRADED on their own date.** `oracle.price_as_traded` multiplies the ASOF
+  quote back out by the splits between that day and ASOF — one action at a time, division
+  last, never a product of quotients (trap #2a) — which is the invariant
+  `data-and-pricing.md` states for the column. Seeding the post-split quote on a pre-split day
+  would store a basis the ledger never traded on. It quantizes to 4 dp, deliberately: a ratio
+  like `1/3` makes the price a repeating decimal that the capped column cannot hold, and one
+  expression owning both the seed and the valuation is what keeps them equal (measured: 91
+  `trend.total_value` failures off by 0.0070 before that line existed).
+* **Each row is stamped `fetched_at` = its own date**, so the write window
+  `(as_of, fetched_at]` and the read window `(priced_on, day]` are both empty. Nothing
+  re-expresses these rows — not `upsert_prices`, not `reconcile_prices` — so inserting or
+  deleting a SPLIT can never repaint the history this family asserts against.
 
-Until that exists, R6's timing is covered by hermetic hand-checked tests
-(`tests/portfolio/test_review_r6_ex_date.py`) that walk the share count day by day, plus the
-regression pin that a `NULL` ex_date replays byte-identically. The oracle derives the same
-STOCK-only rule independently (`DivFact.effective`) and now applies it in `facts_through`, but
-that derivation is still **reviewed, not reconciled**.
+Seeding is derived from `facts` inside `reconcile`, before the dashboard is fetched, so it is
+self-correcting: a checkpoint that runs before the scenario's corporate actions exist seeds an
+unadjusted series, and the next one re-seeds the same dates on the corrected basis.
+
+**Detection power, measured — not claimed.** The R6 defect was deliberately reintroduced into
+the ORACLE (`facts_through` cutting dividends on the payment date instead of the ex-date, which
+is exactly the pre-R6 behaviour) and the harness re-run:
+
+| harness | result |
+| --- | --- |
+| **pre-change** (one close at ASOF, pre-daily completeness rule) | `ops=128 pass=5663 fail=0` — **silent** |
+| **current** (daily as-traded series) | `ops=128 pass=6022 fail=53` |
+
+All 53 are `trend.total_value`, on **2026-05-02 … 2026-05-29** — exactly the ex-date-to-payment
+window — each off by 70,000 TWD, the value of the 配股 shares that should exist in that gap.
+The pre-change row reproducing the previously-recorded baseline *to the digit* is itself the
+evidence that the probe faithfully restored the old state: that `fail=0` was not coverage, it
+was blindness.
+
+Baseline after this change: **`ops=128 pass=6075 fail=0`**. `ops` is unchanged and must stay
+128 — this closed a gap with fixture data and assertions, not with a new route.
+
+**What is still reviewed rather than reconciled.** The oracle derives the STOCK-only ex-date
+rule independently (`DivFact.effective`), and that derivation is now *exercised* by the family
+above, but the rule itself — that a 配股 attaches on the ex-date and a CASH dividend does not —
+is still a reading of `domain-ledger.md` by both sides. Two independent implementations of the
+same misreading would still agree. The hermetic hand-checked tests
+(`tests/portfolio/test_review_r6_ex_date.py`) walk the share count day by day against
+hand-computed values, which is the only thing that catches that class.
 
 ## Must-pass assertion families
 

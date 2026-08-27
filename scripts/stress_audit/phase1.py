@@ -15,7 +15,7 @@ import csv
 import io
 import sqlite3
 import time
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import common as C
@@ -441,6 +441,57 @@ def _trend_sample_dates(facts, by_date, last_iso: str) -> list[str]:
     return sorted(out)
 
 
+def _daily_price_span(facts) -> date | None:
+    """The first ledger date — where the daily close series has to begin, or ``None``."""
+    days: list[date] = [t.trade_date for t in facts.txs]
+    days += [dv.effective for dv in facts.divs] + [dv.d for dv in facts.divs]
+    days += [o.build_date for o in facts.openings] + [a.d for a in facts.actions]
+    return min(days) if days else None
+
+
+def _ensure_daily_prices(db_path, facts) -> int:
+    """Seed a DAILY close for every fixture symbol across the whole replay span.
+
+    This is what closes the last half of the point-in-time gap. ``seed_all`` seeds exactly
+    ONE close per symbol, dated :data:`ASOF`, so every earlier day was unpriced by
+    construction and ``trend.total_value`` could not be asserted before ASOF — which is
+    precisely where a share-count defect confined to a window (R6's ex-date) lives. With a
+    price on every day, ``total_value`` at a KNOWN price pins the SHARE COUNT: the app and
+    the oracle read the same close, so any disagreement left is a quantity.
+
+    Two properties make this safe rather than a fixture that quietly lies:
+
+    * **The closes are AS TRADED on their own date** — :func:`oracle.price_as_traded`
+      multiplies the ASOF quote back out by the splits between that day and ASOF, which is
+      the invariant ``data-and-pricing.md`` states for the column. Seeding the post-split
+      quote on a pre-split day would store a basis the ledger never traded on.
+    * **Each row is stamped ``fetched_at`` = its own date**, so both the write window
+      ``(as_of, fetched_at]`` and the read window ``(priced_on, day]`` are empty. Nothing
+      re-expresses these rows — not ``upsert_prices``, not ``reconcile_prices`` — so a SPLIT
+      inserted or deleted later cannot repaint the history this family asserts against.
+
+    Called from :func:`reconcile` BEFORE the dashboard is fetched, and derived from ``facts``
+    each time, so it is self-correcting: a checkpoint that runs before the scenario's
+    corporate actions exist seeds an unadjusted series, and the next one re-seeds the same
+    dates on the corrected basis (idempotent upsert on ``(instrument, as_of_date)``).
+    """
+    start = _daily_price_span(facts)
+    if start is None or start > ASOF:
+        return 0
+    mkt_of = {i[0]: i[1] for i in INSTRUMENTS}
+    rows_by_date: dict[date, list] = {}
+    day = start
+    while day <= ASOF:
+        batch = [
+            (sym, mkt_of[sym],
+             O.price_as_traded(facts, sym, day, quote=quote, quoted_on=ASOF))
+            for sym, quote in PRICES.items() if sym in mkt_of
+        ]
+        rows_by_date[day] = batch
+        day += timedelta(days=1)
+    return C.seed_prices_daily(db_path, rows_by_date)
+
+
 def _day_incomplete(res_d, day: date) -> bool:
     """Whether the app must publish this trend day as ``incomplete`` - derived, not read.
 
@@ -448,11 +499,10 @@ def _day_incomplete(res_d, day: date) -> bool:
 
     * a held position that is 賣超 / 待釐清 (``oversold`` / ``unbookable_dividend`` /
       ``unbookable_action``) has no honest value that day;
-    * a held position with NO stored price on-or-before ``day`` cannot be valued - and in this
-      fixture that is every day before :data:`ASOF`, because ``seed_all`` seeds exactly ONE
-      close per symbol, dated ASOF. That is a property of the FIXTURE, stated here rather than
-      buried in a comparison, and it is the reason this family cannot yet reconcile a
-      point-in-time SHARE COUNT (see the README's disclosed limitation).
+    * a held position with NO stored price on-or-before ``day`` cannot be valued. Since
+      :func:`_ensure_daily_prices` seeds a close for every fixture symbol on every day from
+      the first ledger event through :data:`ASOF`, the only symbol that can now hit this is
+      one absent from :data:`PRICES` entirely — a future scenario symbol nobody priced.
     * a day holding nothing is COMPLETE with a zero total - the app's loop simply adds nothing.
 
     FX is not a cause: the fixture seeds every needed pair at ``EARLY_ASOF``, which precedes
@@ -463,12 +513,16 @@ def _day_incomplete(res_d, day: date) -> bool:
             continue
         if h.oversold or h.unbookable_dividend or h.unbookable_action:
             return True
-        if h.symbol not in PRICES or day < ASOF:
-            # Either no seeded close AT ALL, or none dated on-or-before this day. Written as
-            # a derivation rather than assumed: without the first clause a future scenario
-            # symbol with no price would CRASH this family on the `PRICES[...]` lookup below
-            # instead of failing an assertion, and a harness that crashes on new data is a
-            # harness people stop extending.
+        if h.symbol not in PRICES:
+            # No seeded close AT ALL. Written as a derivation rather than assumed: without
+            # this a future scenario symbol with no price would CRASH this family on the
+            # `PRICES[...]` lookup below instead of failing an assertion, and a harness that
+            # crashes on new data is a harness people stop extending.
+            #
+            # A day AFTER the seeded series is NOT incomplete: the read carries the last
+            # close forward (on-or-before), which is a valid valuation and what the app does.
+            # Measured — treating `day > ASOF` as unpriced reddened four days the app values
+            # correctly from the ASOF close.
             return True
     return False
 
@@ -550,13 +604,16 @@ def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
         for h in res_d.holdings.values():
             if h.shares == O.ZERO:
                 continue
-            # Every scenario action predates ASOF and the only seeded close IS at ASOF, so the
-            # read-side split re-expression window (priced_on, day] is empty here and the
-            # stored close meets this day's share count unchanged. Stated, not assumed: the
-            # moment a fixture price predates an action, this line needs the factor.
+            # The close for THIS day, as traded on it. `_ensure_daily_prices` seeded one
+            # per symbol per day at exactly this value, so the app reads the same number and
+            # the read-side window (priced_on, day] is empty — no factor on either side. The
+            # comparison that survives is therefore a pure SHARE-COUNT comparison, which is
+            # the whole reason the series exists.
             rate = (O.ONE if h.quote_ccy == REPORTING
                     else fx_on(day, h.quote_ccy, REPORTING))
-            total += PRICES[h.symbol] * h.shares * rate
+            close = O.price_as_traded(facts, h.symbol, day,
+                                      quote=PRICES[h.symbol], quoted_on=ASOF)
+            total += close * h.shares * rate
         ev.check("trend.total_value", day_iso, total, dec(p["total_value"]), phase)
 
     # No silent caps: a day this family declined to judge is named, not quietly absent.
@@ -571,6 +628,9 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     """Full oracle-vs-system reconciliation at the current state."""
     phase = f"phase1:{label}"
     facts = C.load_facts_from_db(db_path)
+    # BEFORE any API call: the dashboard must be built over the daily series, or the trend
+    # family would compare an app that could not value a day against an oracle that could.
+    _ensure_daily_prices(db_path, facts)
     res = O.replay(facts)
     sp = spots()
     prices = dict(PRICES)
