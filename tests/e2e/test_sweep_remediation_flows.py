@@ -174,3 +174,52 @@ def test_the_rebalance_footer_total_equals_the_visible_fields(
         f"the fixture rounds too cleanly to detect the defect: {shown}")
     assert abs(footer_pct - field_sum) < 0.05, (
         f"footer says {footer_pct}% but the {len(shown)} visible fields sum to {field_sum}%")
+
+
+@pytest.mark.e2e
+def test_an_oversell_preview_shows_the_discarded_basis_with_its_reason(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """F-01, owner ruling 2026-08-27: show the average the LEDGER will hold, and say why.
+
+    The card used to print 「500.00 → 500.00」 directly above its own warning that the basis
+    was about to be permanently discarded. It now prints the zero the replay actually leaves,
+    with a note — so the projection agrees with the row the user is about to see AND cannot be
+    read as 「your average cost is nothing」.
+    """
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    page.goto(f"{base}/trades.html", wait_until="networkidle")
+    page.wait_for_function(
+        "() => document.querySelector('#m-account')"
+        " && document.querySelector('#m-account').options.length > 0")
+    page.select_option("#m-account", "tw_broker")
+    page.fill("#m-symbol", "2330")
+    page.click("#m-side-sell")
+    page.fill("#m-date", "2026-06-12")
+    page.fill("#m-shares", "1500")          # tw_broker holds 1,000 — undeclared oversell
+    page.fill("#m-price", "600")
+    # The server preview is debounced; wait for the projection itself, not for a clock.
+    page.wait_for_function(
+        "() => (document.querySelector('#m-pc-rows') || {}).textContent"
+        "  && document.querySelector('#m-pc-rows').textContent.indexOf('調整均價') >= 0",
+        timeout=20000)
+
+    rows = page.locator("#m-pc-rows").inner_text()
+    assert "基礎已捨棄" in rows, f"the zero is unexplained: {rows}"
+    # The OLD averages are still shown, so the reader sees what is being discarded. They
+    # DIFFER from each other in this fixture (2330 carries a 5,000 dividend, so the adjusted
+    # basis is 495 against an original 500) — which is itself worth asserting: a projection
+    # that collapsed both to one number would pass a laxer check.
+    assert "500.00" in rows and "495.00" in rows, rows
+
+    # Each average must project to the ledger's ZERO, not repeat its own pre-trade value.
+    cells = page.eval_on_selector_all(
+        "#m-pc-rows .pc-row", "els => els.map(e => e.textContent || '')")
+    for label, old_avg in (("原始均價", "500.00"), ("調整均價", "495.00")):
+        row = next((t for t in cells if label in t), "")
+        assert row, f"no {label} row: {cells}"
+        before, _, after = row.partition("→")
+        assert old_avg in before, f"{label} lost its pre-trade value: {row!r}"
+        assert after.strip().startswith("0.00"), (
+            f"{label} still projects the pre-trade average: {row!r}")

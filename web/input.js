@@ -579,13 +579,14 @@
     };
     /* R7 A4: OLD → NEW comparison row — two SERVER-formatted strings joined by an arrow (a
        fresh position renders old as「—」via fmt's null glyph). No money arithmetic here. */
-    const pcPair = (k, oldV, newV) => {
+    const pcPair = (k, oldV, newV, note) => {
       const row = el('div', 'pc-row');
       row.appendChild(el('span', 'k', k));
       const v = el('span', 'v');
       v.appendChild(el('span', 'pc-old', oldV));
       v.appendChild(el('span', 'pc-arrow', ' → '));
       v.appendChild(el('span', 'pc-new', newV));
+      if (note) v.appendChild(el('span', 'pc-note', note));
       row.appendChild(v);
       rows.appendChild(row);
     };
@@ -612,8 +613,15 @@
       const sgn = (v) => f.signed(v, ccy) + (v == null ? '' : ' ' + ccy);
       if (pp && pp.kind === 'sell') {
         pcPair('持股', f.shares(pp.old_shares), f.shares(pp.remain_shares));
-        pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.new_original_avg, ccy));
-        pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.new_adjusted_avg, ccy));
+        /* On the 賣超 branch the projected average is ZERO because the replay DISCARDS the
+           basis — which is what the ledger will hold, so the number agrees with the row the
+           user is about to see. The note carries the reason, so 0 cannot be read as 「your
+           average cost is nothing」 (owner ruling 2026-08-27, F-01). */
+        const avgNote = pp.oversell ? '基礎已捨棄' : null;
+        pcPair('原始均價', f.price(pp.old_original_avg, ccy),
+               f.price(pp.new_original_avg, ccy), avgNote);
+        pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy),
+               f.price(pp.new_adjusted_avg, ccy), avgNote);
         pcRow('調整成本移除', amt(pp.cost_removed));
         pcRow('已實現損益', sgn(pp.realized_pnl), f.signClass(pp.realized_pnl));
         if (pp.short_opened) pcRow('開／加空股數', f.shares(pp.short_opened));

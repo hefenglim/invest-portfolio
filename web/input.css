@@ -39,6 +39,10 @@
 .pc-row:last-child { border-bottom: none; }
 .pc-row .k { color: var(--text-3); }
 .pc-row .v { font-family: var(--font-num); }
+/* A caveat ON a projected number (F-01 owner ruling 2026-08-27): the 賣超 branch shows the
+   average the ledger will actually hold — zero — and the note says WHY it is zero, so the
+   figure agrees with what gets written without reading as "your average cost is 0". */
+.pc-row .pc-note { color: var(--text-3); font-size: 10.5px; margin-left: 6px; }
 .ovr-chip {
   font-size: 9px;
   color: var(--amber);

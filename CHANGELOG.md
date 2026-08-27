@@ -1580,6 +1580,19 @@ observation (F-18) was re-checked and DISMISSED — see below.
   as proof of a shortfall — where the date-aware guard knows the day: the replay now records
   `oversold_on` / `oversold_sold` / `oversold_held` and the message names it · the 加值 guard
   turned a field red and said nothing.
+- **Owner review of the remediation itself (2026-08-27).** Four calls put back to the owner
+  because each deviated from the report's recommendation or went beyond it. Ruled: the 賣超
+  preview shows the ledger's **zero plus a 「基礎已捨棄」 note** (the report suggested an
+  em-dash; zero is what the holdings row will actually hold, so the projection agrees with
+  the screen the user is about to see, and the note stops it reading as "your average cost is
+  nothing"); F-03 **keeps the server-side row indices** rather than the report's client-side
+  CSV rebuild; F-12 **keeps 待執行/已停用** rather than the report's one-line 尚未執行, which
+  would have duplicated the timestamp cell beside it and left a disabled task labelled as
+  merely not-yet-run. And the ruling table itself: **only AI-D52 is an owner ruling** —
+  AI-D53/D54 are marked 〔記錄〕, because a blanket 「fix them all」 accepts WHAT is done and is
+  not a decision about how the implementer categorises it. The table's preamble now says so,
+  or the marker would read as a typo.
+
 - **F-18 — DISMISSED, nothing changed.** The sweep read a `DELETE /api/instruments/2330 → 422`
   as 永久移除 being pressable while the dialog said it was impossible. Re-checked: that 422 is
   the HIDE path (`DELETE`; purge is `POST …/purge`) refusing a HELD symbol with code `held`,
