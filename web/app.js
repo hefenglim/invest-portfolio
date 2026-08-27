@@ -34,6 +34,9 @@
       chip.className = 'badge badge-fresh-stale';
       chip.innerHTML = '<span class="dot"></span>部分過期';
       chip.title = '部分價格或匯率資料已過期，點擊查看資料新鮮度明細';
+      // Restored, not assumed: the else-branch below REMOVES the href, so a refresh that
+      // went fresh -> stale left a chip that says 「點擊查看」 and is no longer a link.
+      chip.href = '#freshness';
     } else {
       chip.className = 'badge badge-fresh-ok';
       chip.innerHTML = '<span class="dot"></span>資料新鮮';

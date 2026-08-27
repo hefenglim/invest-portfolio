@@ -358,6 +358,15 @@
       const ccy = el('span', 'badge badge-ccy'); ccy.id = 'report-ccy';
       tb.appendChild(ccy);
       const fresh = el('a', 'badge'); fresh.id = 'fresh-chip'; fresh.href = '#freshness';
+      /* F-09: the chip's own title promises 「點擊查看資料新鮮度明細」, and its target is a
+         <details> that is CLOSED by default — so following the anchor scrolled the reader to
+         a collapsed one-line header and nothing else. The href stays (the browser still does
+         the scrolling); this only opens the panel it scrolls to. Bound ONCE at creation, so
+         a re-rendered header cannot stack handlers. */
+      fresh.addEventListener('click', () => {
+        const d = document.getElementById('freshness');
+        if (d) d.open = true;
+      });
       tb.appendChild(fresh);
     }
     tb.appendChild(el('span', 'header-spacer'));

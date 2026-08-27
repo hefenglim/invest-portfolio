@@ -1,0 +1,1188 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>全站互動掃描 — 2026-08-27</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#1a1d21; --sub:#6b7280; --line:#e5e7eb;
+           --card:#f9fafb; --ok:#15803d; --warn:#b45309; --bad:#b91c1c; --accent:#1d4ed8;
+           --okbg:#f0fdf4; --warnbg:#fffbeb; --badbg:#fef2f2; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --fg:#e6e8eb; --sub:#9aa3ad;
+           --line:#262b33; --card:#161a20; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171;
+           --accent:#60a5fa; --okbg:#0e1a12; --warnbg:#1c1608; --badbg:#1e1010; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:26px 16px 70px; background:var(--bg); color:var(--fg);
+         font:15px/1.65 -apple-system,"Segoe UI","Noto Sans TC",sans-serif;
+         overflow-x:hidden; }
+  .wrap { max-width:1040px; margin:0 auto; }
+  h1 { font-size:24px; margin:0 0 6px; line-height:1.3; }
+  h2 { font-size:18px; margin:38px 0 10px; padding-top:16px; border-top:1px solid var(--line); }
+  h3 { font-size:15px; margin:24px 0 8px; }
+  h4 { font-size:13.5px; margin:18px 0 6px; color:var(--sub); font-weight:700;
+       letter-spacing:.02em; }
+  .lede { color:var(--sub); margin:0 0 22px; }
+  .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin:10px 0 18px;
+            border:1px solid var(--line); border-radius:8px; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; min-width:640px; }
+  th,td { padding:7px 9px; border-bottom:1px solid var(--line); vertical-align:top;
+          text-align:left; }
+  th { font-size:11.5px; color:var(--sub); font-weight:700; background:var(--card);
+       position:sticky; top:0; }
+  tr:last-child td { border-bottom:none; }
+  td.v { white-space:nowrap; font-weight:700; font-size:12px; }
+  .PASS { color:var(--ok); } .FAIL { color:var(--bad); } .UNTESTED { color:var(--warn); }
+  .INFO { color:var(--accent); }
+  code, kbd { background:var(--card); padding:1px 5px; border-radius:4px;
+              font:12px/1.5 ui-monospace,"SFMono-Regular",Consolas,monospace;
+              word-break:break-all; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:10px;
+         padding:13px 15px; margin:14px 0; }
+  .box.ok { background:var(--okbg); border-color:rgba(21,128,61,.35); }
+  .box.warn { background:var(--warnbg); border-color:rgba(180,83,9,.35); }
+  .box.bad { background:var(--badbg); border-color:rgba(185,28,28,.35); }
+  .kpi { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0 6px; }
+  .kpi div { flex:1 1 130px; background:var(--card); border:1px solid var(--line);
+             border-radius:10px; padding:10px 12px; }
+  .kpi b { display:block; font-size:22px; font-variant-numeric:tabular-nums; line-height:1.2; }
+  .kpi span { font-size:11.5px; color:var(--sub); }
+  ul,ol { margin:8px 0 0; padding-left:20px; } li { margin:5px 0; }
+  .f { border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:16px 0; }
+  .f.hi { border-left:4px solid var(--bad); }
+  .f.me { border-left:4px solid var(--warn); }
+  .f.lo { border-left:4px solid var(--accent); }
+  .f h3 { margin:0 0 8px; font-size:15.5px; }
+  .f .meta { font-size:12px; color:var(--sub); margin-bottom:8px; }
+  .tag { display:inline-block; font-size:11px; font-weight:700; padding:1px 7px;
+         border-radius:999px; border:1px solid currentColor; margin-right:6px; }
+  .tag.hi { color:var(--bad); } .tag.me { color:var(--warn); } .tag.lo { color:var(--accent); }
+  .n { font-variant-numeric:tabular-nums; }
+  .sub { color:var(--sub); font-size:12.5px; }
+  hr { border:none; border-top:1px solid var(--line); margin:26px 0; }
+  .final { border:2px solid var(--warn); border-radius:10px; padding:16px 18px;
+           margin-top:34px; background:var(--warnbg); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>全站互動掃描 — 每一顆按鈕，看的是「發生了什麼」</h1>
+<p class="lede">
+2026-08-27 · 分支 <code>feat/corporate-actions</code> · HEAD <code>9fcc832</code> · <code>__version__ 0.1.28</code><br>
+本機拋棄式實例（uvicorn + SQLite + 真實 Chromium）· 18 個進入點 / 11 個實際畫面 ·
+<b>504 次實際點擊</b> · 每次點擊都記錄了網路請求、DOM 變化、下載檔案、toast 與 console 例外。
+</p>
+
+<div class="box">
+本次掃描的前提來自 <code>docs/audit/2026-08-03-button-wiring-sweep.html</code>：那次證明了
+2,287 個控制項<b>有接線</b>，但沒有證明它們<b>做了事</b>。兩週後匯出中心被發現有五顆按鈕會跳
+「已排入產生佇列」綠色成功 toast 卻什麼都沒下載 —— 接線計數看不見這種錯。<br>
+所以這次的判定標準只有一個：<b>按下去之後，有沒有可觀察的效果？</b>
+（一個 <code>/api/*</code> 請求、一段 DOM 改變、一次導頁、一個真的存到磁碟的檔案。）
+只出現 toast 而沒有其他效果的，一律當成異常處理。
+</div>
+
+<!-- Added AFTER the sweep, when the findings were remediated. The sections below are
+     the sweep's own record and are deliberately unchanged. -->
+<div style="border-left:4px solid #3fb950;padding:12px 14px;margin:18px 0;">
+<b>修復狀態（2026-08-27，於本報告之後補記）</b><br>
+下列 17 條發現<b>全部已修</b>，每一條都先寫出一支反證測試並確認它在修正前是紅的。
+唯一的例外是 <b>F-18，經複查後判定不成立、未做任何更動</b>：報告記錄的
+<code>DELETE /api/instruments/2330 → 422</code> 來自「移除（隱藏）」對持倉標的的既有設計路徑
+（code <code>held</code>，前端據此跳出「無法移除」說明框），而不是「永久移除」；
+「永久移除」在顯示警語的情況下確實是停用的——唯一能啟用它的輸入框在該分支根本不會被建立。
+兩項 API 事實已釘成測試（<code>tests/contract/test_purge_gate_disposition.py</code>），
+下一位讀者不必重推。完整修復記事見 <code>CHANGELOG.md</code> 的
+「Full-site interaction sweep remediation」區塊。
+</div>
+
+<!-- ========================= 1. 摘要 ========================= -->
+<h2>1. 摘要</h2>
+
+<div class="kpi">
+  <div><b>504</b><span>實際點擊次數</span></div>
+  <div><b>340</b><span>不同的具名控制項</span></div>
+  <div><b>188</b><span>點擊後發出 /api 請求</span></div>
+  <div><b>19</b><span>下載檔案（逐一驗內容）</span></div>
+  <div><b>1</b><span>真正的死按鈕</span></div>
+  <div><b>17</b><span>異常項目</span></div>
+</div>
+
+<h4>覆蓋率</h4>
+<p>
+靜止畫面上可枚舉的控制項：18 個進入點合計 <b>3,165 個實例</b>；扣掉共用外殼的重複
+（<code>trades / input / ledger</code> 是同一個外殼，六個 <code>settings-*.html</code> 也是），
+實際不同的控制項是 <b>974 個</b>。這 974 個裡有大量是「每列一顆」的重複
+（觀察清單 28 列 × 3 顆、排程 23 列 × 2 顆、變數表 36 顆、資料來源 18 列 × 2 顆、帳本每列 2 顆…）。
+</p>
+<p>
+本次<b>實際按下並觀察效果</b>的是 <b>340 個不同的具名控制項</b>（504 次點擊），
+另外還包含所有執行時才生成的彈窗／抽屜／精靈／確認框內部控制項（靜止枚舉看不到這些）。
+重複列的族群採「同族全按」或「代表性抽樣」兩種策略，第 4 節逐頁標明是哪一種；
+第 7 節逐條列出沒測到的部分與原因。
+</p>
+
+<h4>結論</h4>
+<div class="box ok">
+<b>整體結構是健康的。</b>504 次點擊裡，只有 <b>1 顆</b>控制項真的完全沒有反應
+（<code>#ai-degrade-down</code> 的「重試」）。所有匯出按鈕（14 個路徑、19 個檔案）都真的產出了
+檔案，且內容是後端 raw Decimal，不是畫面上的格式化字串。
+<b>§9 點名的「五顆假匯出按鈕」在這個 HEAD 上已修好 —— 五張卡逐一按過，五個真實下載。</b>
+</div>
+<div class="box bad">
+<b>但錢的部分有兩個真問題。</b>兩者都不是死按鈕，而是「按了會給你一個和帳本不一致的答案」：
+<ul>
+<li><b>F-01（高）</b> 手動交易與個股抽屜的預覽，在「宣告放空」與「未宣告賣超」兩個分支把
+「交易後均價」印成交易<i>前</i>的均價。實測 CBS：預覽說 300.43 → 300.43，帳本實際會寫 308.63。</li>
+<li><b>F-02（高）</b> 帳本裡只要存在一筆已 ack 的賣超，<b>全站每一檔</b>個股抽屜的試算都失效，
+畫面只寫「試算暫不可用」，而後端已經算出來的原因（哪一檔、哪個帳戶）被前端 catch 掉丟棄。</li>
+</ul>
+</div>
+
+<h4>異常統計</h4>
+<div class="scroll"><table>
+<tr><th>嚴重度</th><th>數量</th><th>編號</th></tr>
+<tr><td class="v FAIL">高</td><td class="n">2</td><td>F-01、F-02</td></tr>
+<tr><td class="v UNTESTED">中</td><td class="n">4</td><td>F-03、F-04、F-05、F-06</td></tr>
+<tr><td class="v INFO">低</td><td class="n">11</td><td>F-07 … F-17</td></tr>
+</table></div>
+
+<!-- ========================= 2. 前次完整測試結果 ========================= -->
+<h2>2. 前次完整測試結果（不是本次掃描的產出）</h2>
+<p class="sub">
+以下是 <b>2026-08-26</b> 在同一個 HEAD <code>9fcc832</code> 上跑的自動化閘門結果，原樣引用。
+本次掃描<b>沒有</b>重跑這些（依指示：全套 pytest / e2e 約 25 分鐘、且會和瀏覽器搶記憶體，
+不會產生新訊號）。
+</p>
+<div class="scroll"><table>
+<tr><th>閘門</th><th>結果</th></tr>
+<tr><td>ruff</td><td>clean across <code>portfolio_dash</code> <code>tests</code> <code>scripts</code></td></tr>
+<tr><td>mypy（bare，<code>.venv</code> python）</td><td><code>Success: no issues found in 665 source files</code></td></tr>
+<tr><td>pytest（全套，含 e2e）</td><td>0 個 <code>F</code> 字元 · 0 個 <code>E</code> 字元 · 0 行 <code>FAILED</code>/<code>ERROR</code> · <code>[100%]</code></td></tr>
+<tr><td>stress-audit phase 1</td><td><code>ops=128 pass=5663 fail=0</code>（跑兩次結果相同）</td></tr>
+<tr><td>golden payload</td><td><code>+1</code> 欄位插入 · <code>0</code> 刪除</td></tr>
+<tr><td>CHANGELOG 完整性</td><td><code>grep -c "^## \[v"</code> = 30</td></tr>
+</table></div>
+<p class="sub">
+本次掃描為了取得一份「有獨立會計預言機背書」的資料庫，另外跑了一次
+<code>scripts/stress_audit/run_phase1.py</code>（本機、clean-room、安全），
+結果 <code>ops=128 pass=5656 fail=0</code> —— <code>fail=0</code> 一致，
+pass 數的差異是已知的牆鐘漂移（見 <code>scripts/stress_audit/README.md</code>）。
+<b>從未執行 <code>--phase 2</code></b>（那會動到線上 demo）。
+</p>
+
+<!-- ========================= 3. 測試方法 ========================= -->
+<h2>3. 本次測試方法</h2>
+
+<h4>環境</h4>
+<ul>
+<li><b>應用程式：</b>本機 <code>uvicorn portfolio_dash.api.app:create_app --port 8899</code>，
+<code>PD_DISABLE_SCHEDULER=1</code>（讓資料在掃描期間保持確定），
+<code>DB_PATH</code> 指向 scratchpad 的拋棄式 SQLite。<b>完全沒有碰 demo 或 prod。</b></li>
+<li><b>資料：</b>先用 <code>run_phase1.py</code> 產生的壓力驗證帳本
+（71 筆交易 / 14 筆股利 / 5 筆換匯 / 12 筆資金收支 / 10 筆公司行動 / 28 檔標的、
+三個帳戶、三種幣別、含空單與公司行動鏈），此帳本剛被獨立預言機以 <code>fail=0</code> 對帳過，
+所以任何數字對不上都可以直接歸咎於畫面而不是資料。掃描過程中另外由 UI 自己寫入了
+賣出／放空／回補／賣超／股利／期初／換匯／入金／公司行動 各一筆以上。</li>
+<li><b>瀏覽器：</b>Playwright + Chromium，<b>全程只開一個</b>（記憶體是這台機器的硬限制）。
+每次點擊前後記錄：完成的 <code>/api/*</code> 請求與狀態碼、<code>body.innerHTML</code> 雜湊與長度差、
+可見控制項數量、URL、下載檔（存檔並讀內容）、原生 dialog、<code>.toast</code> 文字、
+console error 與 <code>pageerror</code>。</li>
+<li><b>登入：</b>本機為 guest 模式（未建立任何使用者），所以 <code>/api/*</code> 未上鎖。
+登入頁本身以「空白送出」與「錯誤帳密」兩條路徑實測。<b>刻意沒有建立使用者</b> —— 那會把實例切成
+protected 模式並鎖住後續掃描（見第 7 節）。</li>
+</ul>
+
+<h4>驗證的是效果，不是接線</h4>
+<p>
+每一次點擊都被歸類成下列其中一種：發出請求（<code>req=</code>）／改了 DOM（<code>dom=Y</code>）／
+導頁（<code>url=</code>）／下載了檔案（<code>DL=</code>）／跳出對話框（<code>dlg=</code>）／
+只有 toast／<b>什麼都沒有</b>。最後一類才是異常。
+504 次點擊中「什麼都沒有」的原始筆數是 15，逐一回查後 14 筆是測試本身的假警報
+（按了已經是 active 的分頁／已經是全域區間的按鈕／填了 <code>input.value</code> 而 DOM 雜湊看不到），
+<b>只有 1 筆是真的死按鈕</b>。
+</p>
+
+<h4>記憶體限制擋掉了什麼（誠實交代）</h4>
+<ul>
+<li>不能同時開兩個瀏覽器，所以所有頁面是<b>串列</b>驅動的；一個長流程（例如精靈四步）
+如果中途被彈窗擋住，只能重新導頁再來一次，這造成了少數控制項在同一輪裡沒按到
+（第 7 節逐條列出）。</li>
+<li>沒有跑全套 <code>tests/e2e</code>（166 個測試各自起 uvicorn + chromium）——
+依指示不跑，也確實跑不動。</li>
+<li>掃描中途背景 uvicorn 被系統回收過一次，造成 <code>settings#llm</code> / <code>settings#alerts</code>
+一輪 22 次點擊全部逾時。<b>已重啟並整輪重跑</b>，報告中採用的是重跑後的結果。</li>
+</ul>
+
+<h4>一個必須說明的資料副作用</h4>
+<div class="box warn">
+掃描到中段時，我按下了觀察清單的<b>「回補歷史報價」</b>（這是使用者按得到的正常按鈕）。
+它真的成功了：<code>prices</code> 由 28 列變成 13,589 列、<code>fx_rates</code> 3,897 列，
+回補到 2021-08-30 —— <b>但那是真實市場報價，蓋在一份虛構帳本上</b>。
+從那之後，總市值／XIRR／TWR 的絕對值不再與預言機基準可比
+（例如 2330 帳上成交價 600，當日真實收盤 1,680，TWR 因此在建倉日出現 +3840% 的單日跳動 ——
+這是資料組合的產物，<b>不是</b> TWR 演算法的錯，其公式 <code>r=(V−F−V₋₁)/V₋₁</code> 正確扣掉了流量）。
+<b>回補之前</b>做的所有數字核對（第 6 節）都在原始 fixture 價格上完成，仍然有效；
+回補之後只做內部一致性檢查。
+</div>
+
+<!-- ========================= 4. 逐頁按鈕測試明細 ========================= -->
+<h2>4. 逐頁按鈕測試明細</h2>
+<p class="sub">
+判定：<span class="PASS">PASS</span> = 觀察到預期效果 ·
+<span class="FAIL">FAIL</span> = 有異常（對應第 5 節編號）·
+<span class="UNTESTED">UNTESTED</span> = 沒按到／按不到，原因寫在同一列 ·
+<span class="INFO">設計</span> = 行為與規則一致但值得知道。
+「（唯讀）」= 只讀了程式碼沒有按下去，會明確標示。
+</p>
+
+<h3>4.1 共用外殼（每一頁都有；在 index.html 上實測）</h3>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>側欄 10 個導覽連結</td><td>導向對應頁面</td><td>10 個目標頁全部在本次掃描中被開啟並渲染成功（儀表板／交易帳本／收件匣／資金管理／觀察清單／AI 洞察／洞察管線／新聞庫／資料中心／系統設定）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.sb-collapse</code> «／»</td><td>側欄收合／展開</td><td>DOM 改變 ±10；再按還原</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.mobile-nav-btn</code> ☰（390px）</td><td>手機抽屜開</td><td><code>#sidebar</code> class → <code>sidebar mobile-open</code></td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.search-btn</code> ⌕ 搜尋標的</td><td>開搜尋層並載入標的</td><td><code>GET /api/instruments→200</code>，DOM +4,875；輸入「2330」出現結果；ESC 關閉</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.bell-btn</code> ⚠ 告警鈴</td><td>展開告警面板</td><td>面板出現，2 列告警</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.bell-item</code> 第 1 列（產業權重偏高）</td><td>跳到相關畫面</td><td><code>href="#"</code>，URL 變成 <code>/index.html#</code>，DOM 無變化</td><td class="v FAIL">F-10</td></tr>
+<tr><td><code>.bell-item</code> 第 2 列（報價過期）</td><td>跳到相關畫面</td><td><code>href="index.html"</code>，可導頁</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#wn-btn</code> ✦ 新功能</td><td>開版本說明</td><td>DOM +13,430，內容為 v0.1.28 條目；ESC 後元素被移除</td><td class="v PASS">PASS</td></tr>
+<tr><td>☾ 深色／淺色</td><td>主題切換</td><td><code>data-theme</code> dark → light → dark</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.avatar</code> 使用者選單</td><td>展開選單</td><td><code>.user-menu</code> 可見；guest 模式只提供「啟用帳密保護」→ <code>settings.html#accounts</code></td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.quota-chip</code> AI 未啟用</td><td>連到 <code>settings.html#llm</code></td><td>原生連結，未逐一點（目標頁另行實測）</td><td class="v UNTESTED">唯讀</td></tr>
+<tr><td>⟳ 重新整理 ▾</td><td>展開兩個選項</td><td>兩個 <code>.refresh-opt</code> 皆可見</td><td class="v PASS">PASS</td></tr>
+<tr><td>└ 更新報價</td><td>抓取最新報價</td><td><code>POST /api/actions/refresh-quotes</code>，常駐進度 toast「報價更新中…」；事後 <code>prices</code> 由 13,589 → 13,592 列</td><td class="v PASS">PASS</td></tr>
+<tr><td>└ 重算（重建統計）</td><td>先確認再重放帳本</td><td>先開 confirmDialog（正確：不是直接執行），確認後 <code>POST /api/actions/recompute</code></td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#fresh-chip</code> 部分過期</td><td>tooltip 說「點擊查看資料新鮮度明細」</td><td>URL → <code>#freshness</code>，但 <code>&lt;details&gt;.open === false</code>，使用者捲到一個仍然收合的面板</td><td class="v FAIL">F-09</td></tr>
+<tr><td>toast / confirmDialog 元件</td><td>顯示與關閉</td><td>全站 60+ 次觸發，格式一致；confirmDialog 的 ✕／取消／確認皆實測有效</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h3>4.2 index.html — 儀表板</h3>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>每日摘要「歷史」</td><td>載入歷史清單</td><td><code>GET /api/digest/history?kind=daily→200</code>，DOM +391</td><td class="v PASS">PASS</td></tr>
+<tr><td>每日摘要「立即產生」</td><td>觸發批次</td><td><code>POST /api/digest/run→202</code> 後 <code>GET /api/digest/latest</code></td><td class="v PASS">PASS</td></tr>
+<tr><td>每週摘要「歷史」／「立即產生」</td><td>同上（kind=weekly）</td><td><code>GET .../history?kind=weekly→200</code>；<code>POST /api/digest/run→202</code></td><td class="v PASS">PASS</td></tr>
+<tr><td>摘要空狀態連結「設定 → 排程中心 → 摘要與週報」</td><td>連到 <code>settings.html#scheduler</code></td><td>原生連結；目標頁另行實測</td><td class="v UNTESTED">唯讀</td></tr>
+<tr><td><code>#ccyret</code> 各幣別報酬拆分 summary</td><td>展開／收合</td><td>展開後三列幣別數字出現，再按收合</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#trend-mode</code> 市值 ↔ 績效比較</td><td>切換圖表</td><td>切到績效比較時 <code>GET /api/performance/twr?benchmark=0050&window=3y→200</code>，<code>#twr-chart</code> 顯示、<code>#value-ranges</code> 隱藏</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#value-ranges</code> 1M / 3M / 6M / 全部</td><td>縮放市值圖</td><td>ECharts <code>dataZoom.start</code> 實測 0 → 86.46 → 59.83 → 20.96 → 0（不是只有 class 換色）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#twr-windows</code> 1年 / 3年 / 全部</td><td>換 TWR 視窗</td><td>三次不同的 <code>?window=1y|3y|all</code> 請求</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#twr-benchmark</code> select（0050 / S&P 500）</td><td>換基準</td><td>兩次不同請求；回補歷史後兩條基準線數值不同（0050 → 155.04、S&P 500 → 113.99）</td><td class="v PASS">PASS</td></tr>
+<tr><td>持股表頭排序（帳戶 / 股數 / 調整均價）</td><td>重新排序列</td><td>首三列由 <code>2330,0050,AAPL</code> → <code>NVDA,1155,0800EA</code> → … 每次都變</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#filter-bar</code> 帳戶 chips ×4</td><td>篩選持股列</td><td>全部 17 列 → 台灣券商 10 → 嘉信 4 → Moomoo 3 → 全部 17</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#filter-bar</code> 市場 chips ×4</td><td>篩選持股列</td><td>全部 17 → 台股 10 → 美股 5 → 馬股 2</td><td class="v PASS">PASS</td></tr>
+<tr><td>持股 <code>⬇ 匯出 CSV</code></td><td>下載持倉快照</td><td><code>POST /api/export/holdings→200</code> → <code>holdings_snapshot_2026-08-27.csv</code>（4,820 B，raw Decimal，20 欄）</td><td class="v PASS">PASS</td></tr>
+<tr><td>持股 <code>⎙ 匯出報告</code></td><td>下載可列印報告</td><td><code>POST /api/export/holdings-report→200</code> → HTML 11,209 B</td><td class="v PASS">PASS</td></tr>
+<tr><td>已實現 <code>⬇ 匯出 CSV</code></td><td>下載已實現明細</td><td><code>POST /api/export/realized→200</code> → CSV 3,503 B</td><td class="v PASS">PASS</td></tr>
+<tr><td>現金面板「資金管理」按鈕</td><td>導向 cash.html</td><td>URL → <code>/cash.html</code>，該頁完整載入</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#freshness</code> summary</td><td>展開新鮮度明細</td><td>展開後列出 17 檔股價 + 3 組匯率的 as-of 日期與「過期」標籤</td><td class="v PASS">PASS</td></tr>
+<tr><td>持股列 <code>&lt;tr&gt;</code> 本體</td><td>—</td><td>沒有 handler（抽屜綁在 <code>.sym-cell.sym-link</code> 上）；查 <code>web/app.js:556</code> 確認為刻意設計</td><td class="v INFO">設計</td></tr>
+<tr><td><code>.sym-cell.sym-link</code>（開個股抽屜）</td><td>開抽屜並載入該檔</td><td><code>GET /api/symbol/&lt;sym&gt;/detail</code> + <code>/signals</code> + <code>/insights</code> + <code>/insight-types</code> + <code>POST /api/whatif</code>；四檔標的各測一次</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.rb-open-btn</code> ⚖ 再平衡試算</td><td>開再平衡抽屜</td><td><code>GET /api/target-weights</code> + <code>POST /api/rebalance/preview</code>，DOM +8,185</td><td class="v PASS">PASS</td></tr>
+<tr><td>再平衡「目標合計」與 17 個目標 % 欄位</td><td>兩者一致</td><td>欄位顯示值加總 = 100.1%，頁尾寫 100.00%，且沒有觸發「超過 100%」警告</td><td class="v FAIL">F-06</td></tr>
+<tr><td>再平衡「套用預警上限」／「重設為現權重」／「匯出執行報告」</td><td>調整目標 / 還原 / 下載</td><td>抽屜已開啟並確認三顆存在，但未逐一按下</td><td class="v UNTESTED">未按</td></tr>
+</table></div>
+
+<h4>個股抽屜（<code>.sd-drawer</code>，執行時生成）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>「賣出試算」／「加碼試算」分頁</td><td>切換試算模式</td><td>切換後 <code>POST /api/whatif</code>，欄位組正確改變（賣出多出「調整成本移除／已實現損益／剩餘股數」）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#sim-shares</code> / <code>#sim-price</code></td><td>即時後端試算</td><td>每次輸入觸發一次 <code>POST /api/whatif→200</code>，數字逐項核對正確（見第 6 節）</td><td class="v PASS">PASS</td></tr>
+<tr><td>試算在「有賣超部位存在」時</td><td>照樣可算，或說明原因</td><td>全站每一檔都顯示「試算暫不可用」，後端回 400 且訊息指向<b>另一檔標的、另一個帳戶</b>；前端把訊息丟棄</td><td class="v FAIL">F-02</td></tr>
+<tr><td>配息史 <code>⬇ 匯出 CSV</code></td><td>下載該檔配息</td><td><code>POST /api/export/symbol-detail→200</code> → <code>2330_dividends.csv</code>（174 B，3 列，與帳本一致）</td><td class="v PASS">PASS</td></tr>
+<tr><td>交易明細分頁器 ◀ 1 2 ▶ + 跳頁框</td><td>換頁</td><td>第 2 頁 DOM −1,605，上一頁 +1,605（純前端分頁，14 筆／頁大小 10）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.sd-advice-link</code> 前往洞察管線一鍵安裝</td><td>導向 pipeline-hub</td><td>URL → <code>/pipeline-hub.html</code></td><td class="v PASS">PASS</td></tr>
+<tr><td>關閉：<code>.sd-close</code> ✕</td><td>關閉抽屜</td><td>DOM −8,848，元素移除</td><td class="v PASS">PASS</td></tr>
+<tr><td>關閉：ESC</td><td>關閉抽屜</td><td>元素移除</td><td class="v PASS">PASS</td></tr>
+<tr><td>關閉：點背景 <code>.sd-backdrop</code></td><td>關閉抽屜</td><td>元素移除</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h3>4.3 trades.html — 交易輸入（<code>input.html</code> / <code>ledger.html</code> 為 21 行的轉址殼）</h3>
+
+<h4>輸入區 5 個分頁</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#input-toggle</code> 交易輸入 摺疊列</td><td>展開／收合輸入區</td><td>class <code>.open</code> 切換，<code>.input-body</code> 顯示狀態跟著變</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#tab-manual / #tab-csv / #tab-ai / #tab-div / #tab-fxopen</code></td><td>各自顯示對應 pane</td><td>五次切換後 <code>#pane-*</code> 的可見性矩陣每次都只有一個 true</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h4>手動交易（<code>#pane-manual</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#m-account</code> 帳戶 select</td><td>換帳戶並重算預覽</td><td>切換後 <code>GET /api/input/holdings?account=…</code> + <code>POST /api/input/manual/preview</code></td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-symbol</code>（未註冊代號）</td><td>提示而非崩潰</td><td>顯示「未註冊 — 寫入時將自動查詢並註冊」，且在跨市場帳戶另加一條 ℹ 提示</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-side-buy</code> / <code>#m-side-sell</code></td><td>切換買賣，顯示放空列</td><td>賣出時 <code>#m-short-line</code> 出現，稅額重算</td><td class="v PASS">PASS</td></tr>
+<tr><td>股數 &lt; 0、價格 = 0</td><td>硬性阻擋</td><td><b>沒有發出任何請求</b>，<code>#m-issues</code> 顯示「✕ 股數必須大於 0 / ✕ 價格必須大於 0」，<code>#m-confirm</code> disabled</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-daytrade</code> 當沖</td><td>賣出稅 0.3% → 0.15%</td><td>同一筆 100 股 @700：稅 210 → 105 → 取消勾選回到 210</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-fee-pencil</code> ✎ 覆寫手續費</td><td>解鎖欄位、預覽跟著變</td><td>欄位 <code>readOnly=false</code>、出現「已覆寫」chip；填 999 後總成本與折讓預估同步更新；再按一次還原成 86</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-tax-pencil</code> ✎ 覆寫交易稅</td><td>同上</td><td>兩次點擊各觸發一次 preview</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-shares-hint button</code>「可賣 1,550 股」</td><td>填入原始股數字串</td><td><code>#m-shares</code> = <code>1550</code></td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-price-hint button</code>「持有均價 596.34」</td><td>填入 raw Decimal</td><td><code>#m-price</code> = <code>596.336033582125120344686246</code>（完整精度，不是顯示值）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-clear</code> 清除</td><td>清空表單</td><td>三個欄位清空、方向回買進、toast「已清除表單」、預覽卡收起（DOM +10,642）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-confirm</code>（一般賣出）</td><td>寫入且預覽 = 帳本</td><td><code>POST /api/input/manual/commit→201</code>；預覽「淨收款 7,473 / 調整成本移除 6,387 / 已實現 +1,086」與寫入後的已實現列完全一致</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-confirm</code>（宣告放空）</td><td>只在多頭段實現損益</td><td>已實現 +1,125 與帳本一致；但「原始／調整均價 300.43 → 300.43」與帳本實際的 328.54 不符</td><td class="v FAIL">F-01</td></tr>
+<tr><td><code>#m-confirm</code>（未宣告賣超，未勾 ack）</td><td>按不下去</td><td>按鈕 disabled（點擊逾時），<code>#m-issues</code> 顯示 ⚠ 與兩個處置選項</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#m-ack</code> 確認為賣超</td><td>解鎖寫入</td><td>勾選後 <code>#m-confirm</code> 可按；寫入後<b>沒有</b>產生已實現列、部位 <code>oversold=true</code>、基礎歸零 —— 與規則一致</td><td class="v PASS">PASS</td></tr>
+<tr><td>賣超預覽的「交易後均價」</td><td>應顯示基礎已捨棄</td><td>顯示「240.00 → 240.00」，正下方的警語卻說基礎會被永久捨棄（實際寫入後為 0）</td><td class="v FAIL">F-01</td></tr>
+<tr><td><code>#m-oversell-fix</code> 補登公司行動</td><td>開公司行動表單</td><td>按鈕存在且已渲染；改由帳本頁的 <code>#action-add</code> 完整實測同一個表單</td><td class="v UNTESTED">改由他門實測</td></tr>
+<tr><td>回補空單（買進）</td><td><code>short_cover</code> 損益</td><td>預覽「已實現 +724」= 帳本寫入的 <code>short_cover</code> 列 724.440；均價「— → 332.52」正確</td><td class="v PASS">PASS</td></tr>
+<tr><td>擴大空單（已是空單再賣）</td><td>不得捏造已實現</td><td>預覽全部顯示「—」並附註「放空／加空的部分不產生已實現損益」；帳本確實沒有新增已實現列</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h4>代號選擇器（<code>sym-picker.js</code>，三個表單共用）</h4>
+<div class="scroll"><table>
+<tr><th>操作</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>focus / click 開啟</td><td>顯示完整分組清單</td><td>21 列（已持有 + 未持有）</td><td class="v PASS">PASS</td></tr>
+<tr><td>鍵入「23」</td><td>過濾</td><td>剩「已持有 2330 TSMC 1,550 股 均價 596.34」</td><td class="v PASS">PASS</td></tr>
+<tr><td>ArrowDown</td><td>移動選取列</td><td>沒有任何 <code>.active</code> 列出現</td><td class="v FAIL">F-05</td></tr>
+<tr><td>Enter</td><td>選定該列</td><td><code>#m-symbol</code> 仍是「23」，選單仍開著</td><td class="v FAIL">F-05</td></tr>
+<tr><td>Escape</td><td>關閉</td><td>關閉成功</td><td class="v PASS">PASS</td></tr>
+<tr><td>「＋新增標的」（picker footer）</td><td>開快速新增</td><td>綁在 mousedown 上；同一個 <code>pdInstQuickAdd</code> 對話框已由觀察清單頁完整實測</td><td class="v UNTESTED">改由他門實測</td></tr>
+</table></div>
+
+<h4>CSV 匯入（<code>#pane-csv</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#csv-source</code> 標準範本 / 券商對帳單</td><td>切換兩個區塊</td><td><code>#csv-standard</code> / <code>#csv-broker</code> 可見性正確互換，說明文字跟著換</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#csv-kinds</code> 六個類型 chip（交易/股利/換匯/期初/公司行動/資金）</td><td>切換解析類型</td><td>六個全按，每次 <code>#csv-kind-note</code> 改寫</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#csv-template</code> ⬇ 下載範本</td><td>下載該類型範本</td><td>交易 → <code>import_template_transactions.csv</code>（501 B）；資金 → <code>import_template_cash.csv</code>（495 B）；欄位與說明正確</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#csv-paste</code> 貼上 3 列</td><td>後端預覽</td><td><code>POST /api/import/preview→200</code>，<code>#csv-counts</code>「可寫入 3・警告 0・錯誤 0」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#csv-body</code> 每列的勾選框</td><td>控制哪些列會寫入</td><td><b>取消勾選第 2、3 列後按「確認寫入勾選列」，資料庫交易數由 75 → 78（寫了 3 筆）</b>，橫幅寫「成功 3 筆・跳過 0 筆」</td><td class="v FAIL">F-03</td></tr>
+<tr><td><code>#csv-confirm</code> 確認寫入勾選列</td><td>只寫勾選列</td><td>送出整段貼上內容（<code>csv_text</code> = 全文）</td><td class="v FAIL">F-03</td></tr>
+<tr><td><code>#csv-datefmt-select</code> 日期格式</td><td>釘住格式並重新預覽</td><td>控制項存在；本次語料日期無歧義，未觸發該路徑</td><td class="v UNTESTED">未觸發</td></tr>
+<tr><td><code>#csv-dropzone</code> / <code>#csv-file-input</code></td><td>讀檔填入貼上框</td><td>未上傳檔案（改用貼上路徑，兩者匯入同一個 <code>commitCsv</code>）</td><td class="v UNTESTED">未按</td></tr>
+</table></div>
+
+<h4>券商對帳單（<code>#csv-broker</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#bk-broker</code> 券商 select</td><td>選擇轉換器</td><td>只有 <code>schwab</code> 一個 adapter（<code>GET /api/broker/adapters</code>）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#bk-account</code> 匯入到帳戶</td><td>三個帳戶</td><td>選項齊全</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#bk-commit</code> 全部寫入（沒有檔案時）</td><td>不可按</td><td>disabled（點擊逾時）—— 正確的護欄</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#bk-clear</code> 清除</td><td>清空檔案清單</td><td>DOM −8</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#bk-batches</code> 每列「復原」</td><td>刪除該批並刷新畫面</td><td><code>DELETE /api/import/batches/20→200</code>、toast「已復原 刪除 3 筆」、資料庫 78 → 75；<b>但下方帳本表格仍顯示 100 列、第一列還是剛被刪掉的那筆</b></td><td class="v FAIL">F-04</td></tr>
+<tr><td>實際上傳券商原始檔的完整流程</td><td>轉換 + 對帳 + 寫入</td><td>需要真實 Schwab 對帳單（<code>sample-trade-data/</code> 為真實財務資料，依安全規則不得使用）</td><td class="v UNTESTED">資料受限</td></tr>
+</table></div>
+
+<h4>AI 輸入（<code>#pane-ai</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#ai-parse</code> 解析（空白）</td><td>先擋下</td><td>不發請求，toast「請貼上對帳單文字或上傳截圖」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#ai-parse</code> 解析（有文字、無 LLM）</td><td>優雅降級</td><td><code>POST /api/input/ai/preview→402</code>，正確顯示 <code>#ai-degrade-quota</code>「AI 額度用盡」面板</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#ai-degrade-down button</code> 重試</td><td>重跑解析</td><td>該面板在此狀態不會出現；<b>強制顯示後按下 → 無請求、無 DOM 變化、無 toast</b>。程式碼中亦查無任何 listener</td><td class="v FAIL">F-07</td></tr>
+<tr><td><code>#ai-states</code></td><td>—</td><td>殘留的「設計檢視：」標籤 + 空 span（切換器已退役）</td><td class="v INFO">F-07 附註</td></tr>
+<tr><td><code>#ai-model-select</code> / 圖片上傳 / 每列勾選 / 立即註冊 / 寫入全部勾選</td><td>完整 AI 匯入流程</td><td>需要有效 LLM 金鑰才會產生可勾選的列</td><td class="v UNTESTED">需金鑰</td></tr>
+</table></div>
+
+<h4>股利（<code>#pane-div</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#d-account</code> 切換三種帳戶</td><td>切換三種股利模型表單</td><td>tw_broker → TW 現金欄位組；schwab → DRIP 欄位組；moomoo_my → 不預設，說明「此帳戶橫跨多個市場，請先輸入或選擇已註冊標的」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#d-type-cash</code> / <code>#d-type-stock</code></td><td>現金 ↔ 配股</td><td>配股時 <code>#d-exdate-field</code> 顯示、<code>#d-tw-net-field</code> 隱藏；切回還原</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#d-us-drip</code> / <code>#d-us-cash</code></td><td>再投資 ↔ 現金</td><td>再投資股數／價格欄位正確顯示與隱藏</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#d-drip-gross</code> 自動預扣</td><td>30% 預扣、淨額自動</td><td>Gross 100 → 預扣 30.00、淨額 70.00</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#d-drip-wh-pencil</code> ✎ 覆寫預扣稅</td><td>解鎖並重算淨額</td><td>覆寫 15 → 淨額 85.00；取消覆寫 → 回到 30.00</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#d-confirm</code> 確認寫入（TW 現金 3,000）</td><td>沖減調整成本</td><td><code>POST /api/import/preview</code> + <code>/commit</code>；2330 的 <code>adjusted_cost_total</code> 精確減少 <b>3000.0</b>，調整均價 596.336 → 594.4005，回本進度 0.56% → 0.883%</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#d-sym-closed-toggle</code> 顯示已清倉標的</td><td>picker 多一組</td><td>控制項存在，未按</td><td class="v UNTESTED">未按</td></tr>
+</table></div>
+
+<h4>期初庫存（<code>#pane-fxopen</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#o-shares</code> / <code>#o-total</code> → <code>#o-avg-view</code></td><td>即時顯示均價</td><td>500 股 / 45,000 → 顯示 <b>90.00</b></td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#o-confirm</code> 確認建檔</td><td>寫入期初列</td><td>preview + commit；<code>/api/ledgers/openings</code> 出現 2609、500 股、均價 90、總額 45,000</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h4>帳本區（6 個分頁）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#tab-tx / #tab-ldiv / #tab-lfx / #tab-lopen / #tab-laction / #tab-lcash</code></td><td>各自顯示對應表格</td><td>六個全按：交易 100 列（含展開列）、股利 14、換匯 5、期初 0（空狀態）、公司行動 10、資金 12</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#ledger-filters</code> 帳戶 chips ×4</td><td>伺服器端重新查詢</td><td>四個全按，每次六個 ledger 端點都帶 <code>account_id=</code> 重新請求；列數 100 → 24 → 34 → 94</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#ledger-sym-search</code></td><td>前端過濾「本頁」</td><td>輸入 TSLA → 8 列、無請求 —— 與欄位標籤「（篩選本頁）」一致</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#ledger-date-from</code> / <code>#ledger-date-to</code></td><td>伺服器端日期範圍</td><td>請求帶上 <code>&from=2026-07-01&to=2026-07-10</code>，列數 100 → 14 → 4，且顯示的日期都在範圍內</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#tx-pager</code> ◀ 1 2 ▶ + 跳頁</td><td>換 offset</td><td>第 2 頁 → <code>?limit=50&offset=50</code>，內容確實變成較早的交易；上一頁 → <code>offset=0</code></td><td class="v PASS">PASS</td></tr>
+<tr><td>交易列本體（展開費率快照）</td><td>顯示 <code>fee_snapshot</code></td><td>展開列出現「engine: v2 / rounding: floor / brokerage: 0.001425 / discount: 1 / min_fee: 20 / rebate_rate: 0.77」；0050 賣出列另有 <code>tax_rate: 0.001</code>（ETF 稅率，正確）</td><td class="v PASS">PASS</td></tr>
+<tr><td>交易列「編輯」</td><td>開編輯框並即時重算</td><td>標題「編輯交易 #74 — 0050」，改欄位觸發 <code>POST /api/input/manual/preview</code>；「↺ 還原自動」再觸發一次；取消關閉</td><td class="v PASS">PASS</td></tr>
+<tr><td>交易編輯 → 造成賣超</td><td>422 + 危險確認</td><td>把 2026-04-01 的買進 20 股改成 0.5 股 → <code>PUT /api/ledgers/transactions/23→422</code> → 「賣超確認：此更正將造成賣超（TSLA 部位將為 9.5 股）… 我了解，仍要寫入」；按取消後帳本原封不動</td><td class="v PASS">PASS（訊息見 F-16）</td></tr>
+<tr><td>交易列「刪除」</td><td>確認後刪除並重建統計</td><td>confirmDialog →《DELETE /api/ledgers/transactions/78→200》→ toast；TSLA 由 −40 股（賣超）回到 10 股、<code>oversold=false</code>；<b>且抽屜試算立刻恢復可用</b>（這條反向證明了 F-02 的因果）</td><td class="v PASS">PASS</td></tr>
+<tr><td>股利列 編輯 / 刪除</td><td>各自的表單與確認</td><td>「編輯股利 #16 — 2330」（含現金/配股/DRIP 三型欄位）；「刪除股利 … 統計將由其餘帳本紀錄重建」</td><td class="v PASS">PASS</td></tr>
+<tr><td>換匯列 編輯 / 刪除</td><td>同上</td><td>「編輯換匯 #6」（換出/換入幣別與金額）；刪除確認框正確</td><td class="v PASS">PASS</td></tr>
+<tr><td>期初列 編輯 / 刪除</td><td>同上</td><td>「編輯期初 — 2609（台灣券商）」；刪除確認框正確</td><td class="v PASS">PASS</td></tr>
+<tr><td>公司行動列 編輯</td><td>可改類型與比例</td><td>「編輯公司行動 #13 — CCB」含三種類型、來源/目的代號、比例、成本分攤，並警告會重算歷史</td><td class="v PASS">PASS</td></tr>
+<tr><td>公司行動列 刪除</td><td>刪除並可逆</td><td><code>DELETE /api/ledgers/corporate-actions/14→200</code>；CBS 由 200 股 @150.213 <b>完全還原</b>成 100 股 @300.4266666…，成本總額不變</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#action-add</code> ＋補登公司行動</td><td>開共用表單</td><td><code>GET /api/accounts</code>，表單開啟</td><td class="v PASS">PASS</td></tr>
+<tr><td>公司行動三種類型（分割／換股／分拆）</td><td>欄位跟著換</td><td>分割：每持有/變成；換股：每持有/換得/新代號；分拆：另外配發 + 成本分攤比例 + 子公司起始價</td><td class="v PASS">PASS</td></tr>
+<tr><td>公司行動 試算（成本守恆檢查）</td><td>行動前後成本相同</td><td>「行動前 CBS 100 300.43 30,043 / 行動後 CBS 200 150.21 30,043 <b>✓ 成本不變</b>」</td><td class="v PASS">PASS</td></tr>
+<tr><td>「登錄公司行動」</td><td>寫入並重放</td><td><code>POST /api/ledgers/corporate-actions→201</code>；CBS 實際變成 200 股 @150.2133、<code>original_cost_total</code> 一字不差</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#ledger-export-slot</code> ⬇ 匯出 CSV</td><td>依當前分頁與日期範圍匯出</td><td>交易 → <code>ledger_transactions_all_all.csv</code>（16,593 B）；切到股利 → <code>ledger_dividends_all_all.csv</code>（1,823 B）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>⎙ 匯出報告</code></td><td>可列印 HTML</td><td><code>POST /api/export/ledgers-report→200</code> → 40,838 B</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#tax-package-year</code> + <code>⎘ 稅務包</code></td><td>年度由帳本推導、下載 ZIP</td><td>下拉只有「2026 年度」且已選取（帳本最早 2026-01-05，正確）；<code>POST /api/export/tax-package→200</code> → <code>tax_package_2026.zip</code>（3,093 B，含 4 個檔，內容見第 6 節）</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h3>4.4 cash.html — 資金管理</h3>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>三個分頁 賬戶現金 / 出金入金 / 換匯中心</td><td>切換 + hash 同步</td><td>三個全按；<code>#cview-pools/flows/fx</code> 可見性正確，URL hash 跟著變</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.cash-line.clickable</code>（點某個幣別池）</td><td>載入該池對帳單</td><td><code>GET /api/cash/statement?account=moomoo_my&ccy=MYR→200</code>，14 列滾動餘額</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>.acct.clickable</code>（點帳戶名稱）</td><td>全幣別對帳單</td><td><code>GET /api/cash/statement?account=moomoo_my</code>（無 ccy），表頭多一欄「幣別」</td><td class="v PASS">PASS</td></tr>
+<tr><td>對帳單 <code>⬇ 匯出 CSV</code>（未選池時）</td><td>先擋下</td><td>fail toast「請先選擇資金池」，<b>沒有</b>假成功</td><td class="v PASS">PASS</td></tr>
+<tr><td>對帳單 <code>⬇ 匯出 CSV</code> / <code>⎙ 匯出報告</code>（已選池）</td><td>下載</td><td><code>POST /api/export/cash-statement→200</code>（1,117 B）與 <code>/cash-statement-report→200</code>（6,569 B）</td><td class="v PASS">PASS</td></tr>
+<tr><td>六個資金類型（入金/出金/期初資金/利息/融資利息/券商費用）</td><td>切換</td><td>六個全按；只有「出金」會顯示 <code>#cm-balance</code> 上限列（credits 不需要餘額）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#cm-balance .can-fill</code> 點擊帶入全額</td><td>填入 raw Decimal</td><td>顯示「賬戶現金：1,434,022 TWD」、<code>dataset.raw=1434022.0</code>；點擊後 <code>#cm-amount</code> = <code>1434022.0</code></td><td class="v PASS">PASS</td></tr>
+<tr><td>出金超額（99,999,999）</td><td>擋下並說明</td><td><code>#cm-amt-err</code>：「出金金額超過賬戶現金（1,434,022 TWD）— 出金不可透支」，<code>#cm-confirm</code> disabled；改回 1,000 後自動解除</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#cm-acq-mode</code> 匯率 / 家幣金額（外幣入金）</td><td>兩種取得成本輸入</td><td>切換兩次；並顯示「參考值：2026-08-27 收盤 1 USD = 32.50 TWD（市場中價，你的實際取得價可能不同）」與「不會從本帳戶的資金幣別扣款」的警語</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#cm-confirm</code> 入金 50,000</td><td>寫入資金列</td><td><code>POST /api/cash/movements→201</code>，資金列 12 → 13，列表頂端出現該筆</td><td class="v PASS">PASS</td></tr>
+<tr><td>資金列 編輯 / 刪除</td><td>修改與刪除</td><td>「編輯資金紀錄 #13（TW Broker・TWD）」；刪除確認框列出日期/類型/金額 → <code>DELETE /api/cash/movements/13→200</code>，回到 12 列</td><td class="v PASS">PASS</td></tr>
+<tr><td>換匯：單一幣別帳戶（tw_broker）</td><td>整區停用</td><td>五個控制項 <code>disabled=true</code> + 說明「該帳戶僅有單一幣別（TWD），無可換匯幣別」</td><td class="v PASS">PASS</td></tr>
+<tr><td>換匯：雙幣別帳戶（schwab）</td><td>解除停用</td><td>五個控制項全部 <code>disabled=false</code>，顯示「可用餘額：532,000 TWD」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#cfx-confirm</code> 換匯 33,000 TWD → 1,000 USD</td><td>寫入並雙邊扣加</td><td>隱含匯率顯示「1 USD = 33.0000 TWD」；<code>POST /api/cash/fx→201</code>；schwab TWD 532,000 → 499,000、USD 17,076.16 → 18,076.16（皆正確）</td><td class="v PASS">PASS</td></tr>
+<tr><td>換匯紀錄列表</td><td>唯讀 + 指路</td><td>沒有編輯/刪除，並註明「編輯／刪除請至交易帳本」—— 與帳本頁同一本帳，設計一致</td><td class="v PASS">PASS</td></tr>
+<tr><td>負池橫幅（<code>negative_pools</code>）</td><td>警示透支</td><td>本次資料沒有負池，無法觸發</td><td class="v UNTESTED">無法觸發</td></tr>
+</table></div>
+
+<h3>4.5 instruments.html — 觀察清單</h3>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#quick-add-btn</code>（空白代號）</td><td>擋下</td><td>fail toast「請先輸入代號」，無請求</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#quick-add-btn</code>（已註冊 2330）</td><td>提示已存在</td><td><code>GET /api/instruments/lookup?symbol=2330&market=TW</code>，開啟表單並標示「已註冊 — 此標的已在觀察清單中」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#new-market</code> select（台股/美股/馬股）</td><td>決定查詢市場</td><td>隨 quick-add 一併驗證（請求帶 <code>market=TW</code>）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#inst-search</code></td><td>前端過濾</td><td>28 列 → 輸入「CA」→ 17 列</td><td class="v PASS">PASS</td></tr>
+<tr><td>列「編輯」</td><td>開該列的編輯框</td><td>「編輯標的 — 2330 TSMC」，含代號/市場/名稱/產業（GICS 下拉）/細分/ETF 旗標，另有「重新偵測產業」按鈕</td><td class="v PASS">PASS（1/28 列）</td></tr>
+<tr><td>列「重新探測」（僅台股列）</td><td>向資料源重新探測</td><td><code>POST /api/instruments/probe→200</code> 接著 <code>PUT /api/instruments/2330→200</code> 再 <code>GET /api/instruments</code></td><td class="v PASS">PASS（1/12 列）</td></tr>
+<tr><td>列「移除」</td><td>兩種移除 + 解釋</td><td>對話框說明「移除（隱藏）可還原」vs「永久移除無法復原」，並直接告知此標的<b>有歷史帳務紀錄，不能永久移除</b></td><td class="v PASS">PASS</td></tr>
+<tr><td>└「永久移除」（明知不可行仍可按）</td><td>—</td><td>按下去 → <code>DELETE /api/instruments/2330→422</code>，被後端擋住（防禦深度正確，但對話框已知不可行卻仍讓按）</td><td class="v INFO">F-18</td></tr>
+<tr><td><code>#backfill-btn</code> 回補歷史報價</td><td>回補 12 個月 + 匯率</td><td>常駐 toast「歷史回補中…可能需要一分鐘」；事後 <code>prices</code> 28 → <b>13,589</b> 列、<code>fx_rates</code> → 3,897 列，最早 2021-08-30</td><td class="v PASS">PASS</td></tr>
+<tr><td>其餘 27 列的 編輯/重新探測/移除</td><td>同上</td><td>同一個 render loop 產生的同族控制，抽樣各一</td><td class="v UNTESTED">抽樣</td></tr>
+<tr><td>已封存標的的「還原」與切換</td><td>顯示封存列</td><td>本次資料沒有封存標的（該切換在 0 筆時 <code>display:none</code>）</td><td class="v UNTESTED">無資料</td></tr>
+</table></div>
+
+<h3>4.6 dividend-inbox.html — 收件匣</h3>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>「重新偵測」</td><td>向資料源掃描持倉配息</td><td><code>GET /api/dividend-inbox?refresh=1→200</code>；toast「✓ 偵測完成 9 檔事件已更新, <b>15 檔失敗</b>・待確認 7 筆」—— 失敗數如實揭露（15 檔是虛構的 CA* 代號）</td><td class="v PASS">PASS</td></tr>
+<tr><td>折讓款「明細 ▸」</td><td>展開逐筆交易</td><td>展開後 6 列：日期/標的/買賣/手續費/預估退款 + 合計列</td><td class="v PASS">PASS</td></tr>
+<tr><td>折讓款「略過」</td><td>移出待確認</td><td><code>POST /api/rebates/skip→200</code>，計數 7 → 6，側欄徽章同步</td><td class="v PASS">PASS</td></tr>
+<tr><td>折讓款「確認入帳」</td><td>問實際金額後記入現金池</td><td>開對話框「實際入帳金額（TWD）… 以實際入帳金額為準，預估僅供參考」→ <code>POST /api/rebates/confirm→200</code> → toast「2026-06・644 TWD 已記入現金池」；資金列 12 → 13</td><td class="v PASS">PASS</td></tr>
+<tr><td>股利群組「全部確認」</td><td>批次寫入股利帳本</td><td>對話框「將 1 筆偵測到的配息寫入股利帳本（金額由後端依除息日持股重新計算）」→ <code>POST /api/dividend-inbox/confirm→200</code></td><td class="v PASS">PASS</td></tr>
+<tr><td>「已忽略 / 已略過」<code>&lt;details&gt;</code></td><td>展開已處理項</td><td>原生 details，無 JS；未逐一展開</td><td class="v UNTESTED">未按</td></tr>
+<tr><td>「復原」條（session-only）</td><td>撤銷剛才的動作</td><td>設計上只存在於同一次操作後的短暫視窗，未捕捉到</td><td class="v UNTESTED">未捕捉</td></tr>
+</table></div>
+
+<h3>4.7 pipeline-hub.html — 洞察管線</h3>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#pp-official-pack</code> 啟用官方套組</td><td>安裝官方任務</td><td><code>POST /api/insight-tasks/official-pack→200</code>；任務由 0 → <b>5 條</b>，頁面改成「5 個洞察任務」（無二次確認，直接安裝）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#pp-add</code> ＋ 新增洞察任務</td><td>開四步精靈</td><td>載入 <code>alert-rules</code>/<code>strategy-prompts</code>/<code>instruments</code>/<code>status</code>/<code>dashboard</code> 五個端點後開啟，右側「管線預覽 — 即時組裝」隨選擇更新</td><td class="v PASS">PASS</td></tr>
+<tr><td>精靈「下一步 →」×3</td><td>1 觸發 → 2 範圍 → 3 組裝 → 4 確認</td><td>逐步前進，步驟章從 <code>cur</code> 變 <code>done</code>；第 3 步在沒有模板時按鈕變成 <b>「至少勾選一個模板」且不可按</b>（誠實的護欄）</td><td class="v PASS">PASS</td></tr>
+<tr><td>精靈「← 上一步」</td><td>回上一步</td><td>DOM +122，回到前一階段</td><td class="v PASS">PASS</td></tr>
+<tr><td>精靈 ✕ 關閉（<code>.pv-head .sd-close</code>）</td><td>關閉</td><td><code>.pv-backdrop</code> 移除</td><td class="v PASS">PASS</td></tr>
+<tr><td>精靈 點背景關閉</td><td>關閉</td><td><code>.pv-backdrop</code> 移除</td><td class="v PASS">PASS</td></tr>
+<tr><td>精靈 ESC 關閉</td><td>（其他彈層都支援）</td><td>ESC 無效，精靈仍開著</td><td class="v FAIL">F-14</td></tr>
+<tr><td>任務篩選 5 個 chip</td><td>過濾任務卡</td><td>安裝套組後實測：全部 5 → 需注意 5 → 已排程 4 → 預警觸發 1 → 閒置 <b>0</b></td><td class="v PASS">PASS</td></tr>
+<tr><td>「閒置」篩選 vs 卡片上的「閒置」狀態章</td><td>同一個詞同一個意思</td><td>五張卡的狀態章都寫「閒置」（＝從未執行），但「閒置」篩選回傳 0 張（＝管線層級 idle）</td><td class="v FAIL">F-12</td></tr>
+<tr><td>任務卡「乾跑預檢」</td><td>零成本走一次守門</td><td><code>POST /api/insight-tasks/1/preflight→200</code>，逐道列出 G0/G1/R1/R2… 的通過狀態</td><td class="v PASS">PASS</td></tr>
+<tr><td>任務卡節點 ①–⑤</td><td>跳到該節設定</td><td>點 ① 觸發 → <code>GET /api/insight-tasks/1/runs</code> + <code>/api/calibrations</code> + <code>/api/insight-tasks</code>，DOM +3,185（有反應，但本次未確認開啟的是哪一個面板）</td><td class="v PASS">PASS（面板未細查）</td></tr>
+<tr><td>「為什麼沒跑？」</td><td>診斷面板</td><td>此資料狀態下沒有渲染出來（<code>needWhy</code> 條件未成立）</td><td class="v UNTESTED">未渲染</td></tr>
+<tr><td>抽屜「編輯標的」（僅 <code>per_symbol</code> 任務）</td><td>編輯任務宇宙</td><td>未達到；程式碼上該 handler 只有一行 <code>window.toast('編輯標的','ok',…)</code>（唯讀所見）</td><td class="v UNTESTED">唯讀・疑似 no-op</td></tr>
+<tr><td>五張導覽卡（分析模板庫／數據變數庫／新聞資料庫／運行中心／進化設定）</td><td>導向對應頁</td><td>原生連結，目標頁（<code>settings#prompts</code>、<code>news.html</code>、<code>settings#scheduler</code>、<code>settings.html</code>）皆已另行實測</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h3>4.8 insights.html — AI 洞察</h3>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>預期</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>三個分頁 洞察卡 / 持倉健診 / AI 戰績</td><td>切換三個 pane</td><td>三個全按；<b>每個 pane 的空狀態文字各自不同</b>（不是同一句複製）：「尚無洞察卡」「尚無持倉健診卡 — 由單一標的洞察任務產生後顯示」「尚無到期預測 — 預測到期後由排程自動對答案」</td><td class="v PASS">PASS</td></tr>
+<tr><td>AI 戰績分頁的信心校準曲線 / 命中率 / 預測明細 + <code>⬇ 匯出 CSV</code></td><td>顯示評分</td><td>三區塊都渲染了骨架與說明，但沒有已評分資料可點</td><td class="v UNTESTED">無資料</td></tr>
+<tr><td><code>#ins-generate</code> 產生洞察（無可執行任務時）</td><td>說明並指路</td><td><code>GET /api/insight-types→200</code> → 直接 <code>window.location.href='pipeline-hub.html'</code>；解釋用的 fail toast 在同一個 tick 就被導頁清掉，使用者只會突然換頁</td><td class="v FAIL">F-11</td></tr>
+<tr><td>洞察卡本體點擊</td><td>—</td><td>沒有卡片可點；程式碼上 <code>.insight-card</code> 也沒有下鑽 handler（唯讀所見）</td><td class="v UNTESTED">無資料</td></tr>
+</table></div>
+
+<h3>4.9 news.html · data-center.html · login.html</h3>
+<div class="scroll"><table>
+<tr><th>頁</th><th>控制項</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>news</td><td><code>#nw-scope</code> 抓取範圍 select（29 個選項）</td><td>改選不發請求（它只決定「抓取新聞」的範圍）—— 正確</td><td class="v PASS">PASS</td></tr>
+<tr><td>news</td><td><code>#nw-run</code> 抓取新聞</td><td><code>POST /api/news/run→202</code>，接著每 3 秒輪詢 <code>GET /api/scheduler/runs?job_id=news_daily</code></td><td class="v PASS">PASS</td></tr>
+<tr><td>news</td><td><code>#nw-stock</code> / <code>#nw-source</code> select</td><td>改變即 <code>GET /api/news?…</code> 重新查詢</td><td class="v PASS">PASS</td></tr>
+<tr><td>news</td><td><code>#nw-from</code> / <code>#nw-to</code> 日期</td><td>請求帶 <code>date_from=</code> / <code>date_to=</code></td><td class="v PASS">PASS</td></tr>
+<tr><td>news</td><td><code>#nw-clear</code> 清除</td><td>欄位清空 + 重新查詢</td><td class="v PASS">PASS</td></tr>
+<tr><td>news</td><td>新聞列 → 全文摘要 modal</td><td>資料庫沒有新聞列可點</td><td class="v UNTESTED">無資料</td></tr>
+<tr><td>data-center</td><td><code>#dbstats-refresh</code> ⟳ 重新整理</td><td><code>GET /api/db-stats→200</code>，「更新於 03:25:52 → 03:25:55 → 03:26:01」（連按兩次都有新請求）</td><td class="v PASS">PASS</td></tr>
+<tr><td>data-center</td><td>其餘</td><td>整頁只有這一顆控制項（唯讀表格，56 個資料表、469 筆）</td><td class="v INFO">設計</td></tr>
+<tr><td>login</td><td><code>#login-btn</code>（欄位空白）</td><td>不發請求，<code>#login-error</code> 顯示「請輸入帳號與密碼」</td><td class="v PASS">PASS</td></tr>
+<tr><td>login</td><td><code>#login-btn</code>（錯誤帳密）</td><td><code>POST /api/auth/login→401</code>，<b>留在 login.html</b>（沒有被 api.js 的 401 轉址吃掉）、顯示「帳號或密碼錯誤」、按鈕重新啟用</td><td class="v PASS">PASS</td></tr>
+<tr><td>login</td><td>Enter 鍵送出</td><td>與按鈕同路徑，錯誤訊息一樣出現</td><td class="v PASS">PASS</td></tr>
+<tr><td>login</td><td><code>#login-hint</code></td><td>全站沒有任何程式寫入它，永遠 hidden 的空節點（無害）</td><td class="v INFO">死節點</td></tr>
+<tr><td>login</td><td>成功登入</td><td><b>刻意不做</b> —— 建立使用者會把本機實例切成 protected 模式並鎖住後續掃描</td><td class="v UNTESTED">刻意</td></tr>
+</table></div>
+
+<h3>4.10 settings.html — 八個檢視（含前次掃描點名的 844 個「未證實」容器）</h3>
+<div class="box">
+前次掃描把 844 個控制項標成「證據薄弱」，並點名了 <code>#jobs-body</code>、<code>#vars-panel</code>、
+<code>#sources-wrap</code>、<code>#hist-filter</code>、<code>#export-center-wrap</code>、
+<code>#market-order-wrap</code>、<code>#fee-rules-wrap</code>、<code>#digest-config-wrap</code>、
+<code>#syslog-pager</code> 這幾個容器。<b>本次逐一打開對應檢視並實際按下。</b>
+順帶澄清一件事：這些容器裡的控制項<b>不是</b>事件委派 —— 三份獨立的程式碼盤點都確認，
+每一列都是在 render loop 裡各自 <code>addEventListener</code>，容器整批 <code>replaceChildren()</code> 重建。
+「共用選擇器」只是前次工具的解析度限制。
+</div>
+
+<h4>匯出中心（<code>#view-exports</code>）— §9 點名的五顆假按鈕</h4>
+<div class="scroll"><table>
+<tr><th>卡片</th><th>路徑</th><th>實際下載</th><th>判定</th></tr>
+<tr><td>持倉快照 CSV</td><td><code>POST /api/export/holdings</code></td><td><code>holdings_snapshot_2026-08-27.csv</code> 5,276 B</td><td class="v PASS">PASS</td></tr>
+<tr><td>全帳本匯出（zip）</td><td><code>POST /api/export/ledgers</code></td><td><code>ledgers_2026-08-27.zip</code> 5,921 B</td><td class="v PASS">PASS</td></tr>
+<tr><td>AI 用量明細 CSV</td><td><code>POST /api/export/llm-usage</code></td><td><code>llm_usage_all_all.csv</code> 51 B（只有表頭 —— <code>llm_usage</code> 表確實 0 列，正確）</td><td class="v PASS">PASS</td></tr>
+<tr><td>排程執行記錄 CSV</td><td><code>POST /api/export/job-runs</code></td><td><code>job_runs_all_all.csv</code> 1,057 B（後來累積到 1,609 B）</td><td class="v PASS">PASS</td></tr>
+<tr><td>年度報稅包</td><td><code>POST /api/export/tax-package</code></td><td><code>tax_package_2026.zip</code> 3,184 B</td><td class="v PASS">PASS</td></tr>
+<tr><td>年度下拉</td><td><code>GET /api/db-stats</code> 推導</td><td>只有「2026」且已選取（不是寫死的 <code>['2026','2025','2024']</code>）</td><td class="v PASS">PASS</td></tr>
+</table></div>
+<div class="box ok"><b>五張卡全部是真的。</b>§9 描述的「已排入產生佇列」假 toast 在這個 HEAD 上已由
+<code>9fcc832</code> 修好（<code>web/settings-alerts.js:394-412</code> 改走 <code>pdApi.download</code>）。
+若在比 <code>9fcc832</code> 更舊的部署（prod / demo）上測，五顆假按鈕仍會存在。</div>
+
+<h4>資料來源（<code>#view-datasources</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#sources-wrap</code> 每列「測試」（18 個來源）</td><td><b>18 個 source id 全部觀察到各自的 <code>POST /api/datasources/&lt;id&gt;/test</code></b>：yfinance / twse / tpex / twstock / stockprices_dev / klsescreener / malaysiastock / alphavantage / finnhub / schwab / bursa / finmind / divtracker / fx_ecb / cnn_fng / fred / pytrends / newsapi。回報誠實且分得很細：「✓ 連線正常 台灣證券交易所・453 ms」「✕ 連線失敗 stockprices.dev・403 Forbidden」「✕ 尚未設定金鑰」「✕ 來源受阻（catalogue only）」「✕ 待測試（尚未線上驗證）」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#sources-wrap</code> 每列「設定金鑰」</td><td>點擊後開出金鑰輸入層（DOM +557～570），共 6 列驗證</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#market-order-wrap</code> ✕ 移除來源 chip</td><td>四次點擊四次 <code>PUT /api/datasources/market-order→200</code>，toast 逐字報出新順位（「台股：tpex → yfinance → twstock」等）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#market-order-wrap</code> ＋ 加入來源 / 拖曳排序</td><td>未按（拖曳需要模擬 HTML5 DnD）</td><td class="v UNTESTED">未按</td></tr>
+</table></div>
+
+<h4>排程中心（<code>#view-scheduler</code>，110 個可見控制項）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#jobs-body</code> 23 列 × 啟用 toggle</td><td>抽測 3 列：<code>PUT /api/scheduler/jobs/alert_scan|backup_daily|consensus_daily→200</code>，各自 toast「✓ 已更新 &lt;job&gt; 已停用」（<b>toggle 立刻寫入，不需要另按儲存</b>）</td><td class="v PASS">PASS（3/23 列）</td></tr>
+<tr><td><code>#jobs-body</code> 「立即執行」</td><td><code>POST /api/scheduler/jobs/alert_scan/run→202</code>；<code>/api/scheduler/runs</code> 出現真實記錄：<code>status: ok, detail: "18 alert(s) [single_weight, sector_weight, stale_price, fx_drift, drawdown_from_peak], 0 dispatched"</code></td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#jobs-body</code> cron 輸入框 × 23、狀態 chip × 23</td><td>已枚舉並確認每列各有一個；未逐列輸入</td><td class="v UNTESTED">抽樣</td></tr>
+<tr><td><code>#digest-config-wrap</code> 兩個排程 toggle</td><td><code>PUT /api/scheduler/jobs/digest_daily|digest_weekly→200</code></td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#digest-config-wrap</code> 兩個「立即產生」</td><td><code>POST /api/digest/run→202</code>，toast 帶出 run 編號「digest_daily #8」「digest_weekly #9」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#digest-config-wrap</code> 摘要設定儲存</td><td><code>PUT /api/digest/config→403</code>，toast「✕ 示範站不開放摘要設定，請於正式站操作」—— guest 模式的刻意封鎖，如實回報</td><td class="v INFO">設計</td></tr>
+<tr><td><code>#view-scheduler</code> <code>⬇ 匯出 CSV</code></td><td><code>POST /api/export/job-runs→200</code> → 1,609 B</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#hist-filter</code> 25 個歷史篩選 chip</td><td><b>25 個全按</b>，每一個都發出帶自己 <code>job_id</code> 的 <code>GET /api/scheduler/runs?…&job_id=&lt;id&gt;</code>，且列表長度隨之改變</td><td class="v PASS">PASS（25/25）</td></tr>
+<tr><td><code>#syslog-pager</code> ◀ 1 2 3 5 ▶</td><td>2/3/5 各自 <code>GET /api/system-log?limit=50&offset=50|100|200</code>；◀ 在第 1 頁不可按（正確）</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h4>AI 與額度（<code>#view-llm</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>＋ 新增模型</code></td><td>開 <code>#drawer-backdrop</code>（不是 <code>.modal</code>），標題「新增模型」，欄位依供應商自動代入（openrouter → <code>https://openrouter.ai/api/v1</code>）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#dr-vision</code> Vision 開關</td><td>class 切成 <code>toggle on</code>，無網路 —— 由「儲存」一起送出，與同區其他欄位一致</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#dr-key-reset</code> API Key 重設</td><td><code>#dr-key.readOnly</code> 由 true → false</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#drawer-save</code> 儲存（別名空白）</td><td><code>POST /api/llm/models→400</code>，toast「✕ 請輸入模型代號（alias）」，抽屜留著讓人改</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#drawer-cancel</code> 取消 / <code>#drawer-close</code> ✕</td><td>兩者都把 <code>#drawer-backdrop.hidden</code> 設回 true</td><td class="v PASS">PASS</td></tr>
+<tr><td>「關閉全部角色」</td><td>先 confirmDialog（「AI 功能將立即停用」）→ <code>PUT /api/llm/roles→200</code> → toast「所有角色預設已清空，AI 已停用」</td><td class="v PASS">PASS</td></tr>
+<tr><td>「＋ 添加額度」→「確認加值」（空白）</td><td>不送出，輸入框加上 <code>field-error</code> 紅框，<b>但沒有任何文字說明</b></td><td class="v FAIL">F-17</td></tr>
+<tr><td>「＋ 添加額度」→「確認加值」（5 USD）</td><td><code>POST /api/llm/quota/topup→200</code>，toast「✓ 加值成功 +$5.00 USD 已加入額度」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>⬇ 匯出 CSV</code>（AI 用量）</td><td><code>POST /api/export/llm-usage→200</code> → 51 B</td><td class="v PASS">PASS</td></tr>
+<tr><td>模型表每列「編輯」、角色 6 個 select</td><td>沒有已註冊模型 → 表格空、6 個 select 各只有 1 個空選項（正確的空狀態）</td><td class="v UNTESTED">無資料</td></tr>
+</table></div>
+
+<h4>帳戶與費率（<code>#view-accounts</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td><code>#nu-add</code> 新增用戶（空白）</td><td>toast「✕ 資料不完整 帳號與密碼為必填」，<code>/api/auth/session</code> 仍是 <code>{"mode":"guest"}</code> —— 沒有意外建立使用者</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#fee-rules-wrap</code> 四組規則的 <code>&lt;summary&gt;</code></td><td>展開後共 42 個費率欄位可見（tw / schwab / moomoo_us / moomoo_my）</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#fee-rules-wrap</code>「儲存」</td><td>把 tw 的 <code>brokerage</code> 改成 0.002 → <code>PUT /api/fee-rules/tw→200</code>；API 回讀 <code>effective: "0.002", overridden: true</code>；toast 特別註明「僅影響未來交易；歷史以交易列快照為準」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#fee-rules-wrap</code>「重設為系統預設」</td><td><b>用原生 <code>window.confirm</code></b>（全站其他確認都用 confirmDialog）→ <code>POST /api/fee-rules/tw/reset→200</code>；回讀 <code>effective: "0.001425", overridden: false</code></td><td class="v PASS">PASS（見 F-15）</td></tr>
+<tr><td><code>#fee-reset-all</code> 全部重設</td><td>同樣是原生 confirm；本次以單一規則集的 reset 驗證同一條後端路徑</td><td class="v INFO">F-15</td></tr>
+<tr><td><code>discount</code> 與 <code>rebate_rate</code> 並存衝突提示</td><td>API 回傳 <code>conflicts: null</code>（種子為 charge-first：discount=1 + rebate 0.77，正確不衝突）；未刻意製造衝突</td><td class="v UNTESTED">未觸發</td></tr>
+</table></div>
+
+<h4>AI 提示詞（<code>#view-prompts</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>「儲存設定」</td><td><code>PUT /api/system-prompt→200</code>，toast「已儲存 系統提示詞已更新，下次 AI 呼叫生效」</td><td class="v PASS">PASS</td></tr>
+<tr><td>「重置回官方版」</td><td>confirmDialog（「自訂修改將遺失（策略提示詞不受影響）」）→ <code>POST /api/system-prompt/reset→200</code> → toast「已重置」</td><td class="v PASS">PASS</td></tr>
+<tr><td><code>#vars-panel</code> 每列「複製」（36 顆）</td><td>抽測 1 顆：toast「✓ 已複製 <code>{{holdings_json}}</code>」<b>但同時拋出未捕捉的 <code>pageerror: Failed to execute 'writeText' on 'Clipboard': Write permission denied.</code></b> —— 剪貼簿寫入失敗，成功 toast 照跳</td><td class="v FAIL">F-08</td></tr>
+<tr><td>「從官方模板庫新增」／「＋ 新增策略」／進化設定</td><td>已枚舉，未逐一按</td><td class="v UNTESTED">未按</td></tr>
+</table></div>
+
+<h4>預警規則（<code>#view-alerts</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>15 個規則 toggle</td><td>15 個全按：只切 class、<b>零網路請求</b> —— 靠下方「儲存規則」一次送出（批次儲存設計，同區有明確的儲存鈕）</td><td class="v INFO">設計</td></tr>
+<tr><td>「儲存規則」</td><td><code>PUT /api/alert-rules→200</code>，toast「頂欄鈴鐺與儀表板於下次載入時生效」</td><td class="v PASS">PASS</td></tr>
+<tr><td>「還原預設值」</td><td><code>PUT /api/alert-rules→200</code>，toast「已還原預設值」</td><td class="v PASS">PASS</td></tr>
+<tr><td>「儲存目標配置」</td><td><code>PUT /api/target-weights→200</code>，toast「再平衡帶漂移警示與再平衡試算即以此為準」</td><td class="v PASS">PASS</td></tr>
+</table></div>
+
+<h4>通知中心（<code>#view-notify</code>）</h4>
+<div class="scroll"><table>
+<tr><th>控制項</th><th>實際觀察</th><th>判定</th></tr>
+<tr><td>全部 13 顆按鈕 + 4 個通道開關 + 「傳送測試訊息」×3</td><td><b>全部 <code>disabled</code></b>：guest（示範）模式下 <code>settings-notify.js:98</code> 把整區關掉並顯示「示範站不開放通知設定，請於正式站（受保護模式）設定」。這是 security review F1 的刻意封鎖，不是壞掉；但也代表這 48 個控制項<b>在本機無法測</b></td><td class="v UNTESTED">設計封鎖</td></tr>
+</table></div>
+
+<h3>4.11 版面：三種寬度、16 個頁面</h3>
+<div class="scroll"><table>
+<tr><th>寬度</th><th>結果</th></tr>
+<tr><td>768 px</td><td>16/16 頁 <code>scrollWidth 753 &lt; clientWidth 768</code> —— <b>無橫向溢出</b></td></tr>
+<tr><td>390 px</td><td>16/16 頁 <code>375 &lt; 390</code> —— 無橫向溢出</td></tr>
+<tr><td>1440 px</td><td>16/16 頁 <code>1425 &lt; 1440</code> —— 無橫向溢出</td></tr>
+</table></div>
+<div class="box warn">
+§9 提到「<code>web/styles.css</code> 斷點階梯缺口造成 768px 橫向溢出」。
+<b>本次在 768 / 390 / 1440 三種寬度、16 個頁面、有資料的狀態下都沒有重現。</b>
+可能已修，也可能只在某個我沒踩到的寬度或內容組合下出現 —— 只測了三檔寬度，
+不足以宣告它不存在（見第 7 節）。
+</div>
+
+<!-- ========================= 5. 異常清單 ========================= -->
+<h2>5. 異常清單</h2>
+
+<div class="f hi">
+<h3><span class="tag hi">高</span>F-01 — 手動交易與抽屜的預覽，把「交易後均價」印成交易前的均價（放空／賣超兩個分支）</h3>
+<div class="meta">
+頁面：<code>trades.html</code> <code>#pane-manual</code> · <code>index.html</code> 個股抽屜<br>
+程式：<b><code>web/input.js:610-611</code></b>（把 old 當成 new 傳）· <code>web/detail.js:1301-1303</code>（同一個假設寫在註解裡）·
+<code>portfolio_dash/api/routers/input_center.py:580-590</code>（sell 分支不回傳 <code>new_*_avg</code>）
+</div>
+<h4>重現</h4>
+<ol>
+<li>tw_broker 持有 CBS 100 股，均價 300.4266666…</li>
+<li>手動交易 → 賣出 → 200 股 @ 310 → 勾「放空（賣出股數可超過持股）」</li>
+<li>預覽顯示：<code>持股 100 → -100</code>、<code>原始均價 300.43 → 300.43</code>、<code>調整均價 300.43 → 300.43</code></li>
+<li>但帳本會寫的是：空單以<b>收到的價金</b>為成本基礎 → 61,726 × 100/200 ÷ 100 = <b>308.63</b></li>
+</ol>
+<p class="sub">同一件事已在 CA8 上<b>寫入後驗證</b>：預覽說 300.43 → 300.43，commit 之後
+<code>/api/dashboard</code> 回 <code>original_avg: "328.540"</code>、<code>original_cost_total: "-19712.400"</code>。
+預覽低估空單成本基礎 1,686 TWD（8.6%）。連跑兩次，文字一字不差。</p>
+<h4>賣超分支也一樣</h4>
+<p>schwab TSLA 持 10 股 → 賣 50 股（未宣告）：預覽寫「原始均價 240.00 → 240.00」，
+而正下方的警語說「這個部位的成本基礎會被永久捨棄」。寫入後實際是
+<code>original_avg: "-0"</code>、<code>original_cost_total: "0"</code>。
+<b>同一張卡上下兩行互相矛盾。</b></p>
+<h4>為什麼是錯的</h4>
+<p><code>.claude/rules/domain-ledger.md</code>：「<b>A PREVIEW MUST MIRROR THE REPLAY'S BRANCHES, LITERALLY</b>
+… 一個 app 不能對同一筆交易給三個答案；一個和實際會寫入的東西不一致的預覽，比沒有預覽更糟。」
+2026-08-24 的修正把 <code>realized</code> 修對了（本次實測三個分支的已實現數字<b>全部正確</b>），
+但同一條規則要求的是<b>分支結構</b>，而均價投影仍然只有一條 happy path。
+規則自己寫的釘樁是「<code>preview.realized ≡ the booked realized row</code>」——
+釘的正是唯一沒破的那一欄。</p>
+<h4>建議修法（單一建議）</h4>
+<p><b>在後端補齊，前端不要再自作主張。</b></p>
+<ol>
+<li><code>input_center.py::_position_preview</code> 的 sell 分支加上 <code>new_original_avg</code> /
+<code>new_adjusted_avg</code>：
+<ul>
+<li>ordinary → 與 old 相同（維持現狀，加密不加值但讓語意顯性）</li>
+<li>declared short 且 <code>to_short &gt; 0</code> → 空單基礎 <code>(gross−fee−tax) × to_short / qty ÷ to_short</code>，
+即每股淨賣出價；若同時仍有多頭剩餘則依 <code>remain</code> 的正負決定</li>
+<li>undeclared oversell → <b><code>None</code></b>（基礎被捨棄，沒有均價可言）</li>
+</ul></li>
+<li><code>web/input.js:610-611</code> 改成 <code>pcPair('原始均價', f.price(pp.old_original_avg), f.price(pp.new_original_avg))</code>；
+<code>f.price(null)</code> 已經會印破折號，所以賣超自動變成「240.00 → —」，與警語一致。</li>
+<li><code>web/detail.js:1301-1303</code> 的註解同步改寫 —— 那段註解目前是這個 bug 的<b>依據</b>，
+留著就會再被複製一次。</li>
+</ol>
+<h4>先寫成紅色的反證</h4>
+<p><code>tests/contract/</code> 新增一支，對三種賣出形狀各斷言一次
+<code>preview.position_preview["new_adjusted_avg"] == 重放後 book 的該部位 adjusted_avg（或 None）</code>。
+在修改前它必須是紅的：declared short 會拿到 <code>300.4266…</code> 而 book 是 <code>308.63</code>；
+oversell 會拿到 <code>240</code> 而 book 是 <code>0</code>。</p>
+</div>
+
+<div class="f hi">
+<h3><span class="tag hi">高</span>F-02 — 一筆已 ack 的賣超，讓全站每一檔的抽屜試算失效，而原因被丟棄</h3>
+<div class="meta">
+頁面：<code>index.html</code>（以及任何呼叫 <code>pdOpenSymbol</code> 的地方）<br>
+程式：<b><code>portfolio_dash/strategy/whatif.py:135-147</code></b> · <b><code>web/detail.js:1291-1294</code></b>
+</div>
+<h4>重現</h4>
+<ol>
+<li>在 schwab/TSLA（持 10 股）手動賣出 50 股，勾選「確認為賣超」後寫入。</li>
+<li>打開<b>任何一檔</b>股票的抽屜 —— 包括 tw_broker 的 2330、moomoo_my 的 1155。</li>
+<li>試算區只顯示「試算暫不可用」。</li>
+<li>直接打 API：<code>POST /api/whatif {account_id: "tw_broker", symbol: "2330", …}</code> →
+<code>400 {"code":"validation_error","message":"sell 50 &gt; held 10 for TSLA","field":"account_id"}</code></li>
+</ol>
+<p class="sub">因果已用兩個方向釘死：賣超寫入<b>前</b>，2330 / 0050 / AAPL / MSFT 的
+<code>POST /api/whatif</code> 全部是 200；把那筆賣出從帳本刪掉之後，2330 的試算<b>立刻恢復 200</b>。</p>
+<h4>為什麼是錯的</h4>
+<p>三個層次：</p>
+<ul>
+<li><b>波及範圍</b>：一檔標的的資料問題讓其他帳戶、其他市場的功能全部停擺。
+<code>whatif.py</code> 自己的註解已經記錄了這個現象（W5, 2026-08-11：「ONE oversold position anywhere
+in the ledger 500'd EVERY symbol's drawer」），並寫下「the fix is to degrade <b>with the reason</b>」。
+實際上只有 500 → 400 那一半做了。</li>
+<li><b>原因被丟棄</b>：後端已經把「哪一檔、哪個帳戶、哪一天」算好放在訊息裡，
+<code>detail.js</code> 的 <code>.catch(() =&gt; { note.textContent = '試算暫不可用'; })</code> 完全不看它。
+對照 XIRR 的做法（<code>xirr_unavailable_reason: "帳本中有賣超部位待釐清 — 無法計算 XIRR"</code>）
+就知道這個 app 的標準是<b>指名道姓</b>。</li>
+<li><b>兩個預覽面不同調</b>：同一個狀態下 <code>POST /api/input/manual/preview</code> <b>照樣算得出來</b>。
+手動表單說得出答案、抽屜說不行，兩個「這筆會怎樣」的介面對「有沒有答案」都不同意。</li>
+<li><code>field: "account_id"</code> 指的是一個和問題完全無關的欄位。</li>
+</ul>
+<h4>兩個選項（這裡是真的judgement call）</h4>
+<p><b>選項 A（建議）— 保留嚴格性，但把原因說出來、把範圍縮小。</b>
+<code>WhatIfError</code> 改帶結構化欄位（<code>blocking_symbol</code> / <code>blocking_account</code> /
+<code>blocking_date</code>），router 放進 <code>error.issues</code>；<code>detail.js</code> 把它印成
+「試算暫不可用 — 帳本中 <code>schwab/TSLA</code> 有待釐清的賣超，請先修正」，並附一個跳到該列的連結。
+維持 <code>allow_oversell=False</code>（試算不該報一個成本基礎已被丟棄的價）。
+成本最低、和 XIRR 的既有做法一致。</p>
+<p><b>選項 B — 把嚴格性縮到「被問到的那一檔」。</b>
+以 <code>allow_oversell=True</code> 重放，然後只有在<b>被查詢的 (account, symbol) 自己</b>
+<code>oversold=True</code> 時才拒絕，其他標的照常試算。答案更有用，但要仔細確認
+degraded book 的其他欄位（權重、報告幣市值）在有賣超時是否仍可信 ——
+規則說賣超部位沒有誠實的終值，所以權重分母會被污染。<b>除非 owner 想要，否則不建議。</b></p>
+<p>兩個選項都應該順手把 <code>field: "account_id"</code> 改成正確的欄位或拿掉。</p>
+<h4>先寫成紅色的反證</h4>
+<p>(1) 一支 API 測試：ledger 有一筆 acked oversell 時，
+<code>POST /api/whatif</code> 對<b>另一個帳戶的另一檔</b>的回應必須帶出可辨識的 blocking 資訊
+（選項 A）或回 200（選項 B）。(2) 一支 e2e：同狀態下打開 2330 抽屜，
+斷言畫面上出現的字串包含「TSLA」。修改前兩支都紅。</p>
+</div>
+
+<div class="f me">
+<h3><span class="tag me">中</span>F-03 — 「確認寫入勾選列」的勾選框是死的，實際寫入全部</h3>
+<div class="meta">
+頁面：<code>trades.html</code> → CSV 匯入<br>
+程式：<b><code>web/input.js:1096-1104</code></b>（建立 checkbox，沒有 listener、沒有 <code>dataset.n</code>）·
+<b><code>web/input.js:1156-1160</code></b>（<code>commitCsv</code> 送出 <code>csv_text: &lt;整段貼上&gt;</code>）
+</div>
+<h4>重現（已實測，非推論）</h4>
+<ol>
+<li>CSV 匯入 → 類型「交易」→ 貼上 3 列有效交易 → 預覽顯示「可寫入 3・警告 0・錯誤 0」，三個框都打勾。</li>
+<li>取消勾選第 2、3 列（勾選狀態實測為 <code>[true, false, false]</code>）。</li>
+<li>按「確認寫入勾選列」。</li>
+<li>資料庫 <code>transactions</code> 由 <b>75 → 78</b>；橫幅寫「✓ 寫入完成：成功 <b>3</b> 筆・跳過 0 筆」。</li>
+</ol>
+<h4>為什麼是錯的</h4>
+<p>按鈕標籤明確宣告了自己的作用範圍（「勾選列」），實際範圍卻是全部。
+這比匯出中心那五顆假按鈕更嚴重一階：那些是<b>少做</b>了事，這個是<b>多寫</b>了使用者明確取消的帳本列。
+同一頁的 AI 匯入面板做對了（<code>aiCheckedCsv</code>, <code>input.js:1716</code> 依 <code>dataset.n</code>
+重建 CSV），所以這不是「還沒做」，是兩條路徑走岔了。</p>
+<h4>建議修法（單一建議）</h4>
+<p>照抄 AI 面板的做法：<code>renderCsvPreview</code> 在每個 checkbox 上寫 <code>cb.dataset.n = r.n</code>，
+<code>commitCsv</code> 改成用勾選列重建 <code>csv_text</code>（表頭 + 勾選的原始行）。
+不要改成「把標籤改成『確認寫入全部』」—— 勾選框已經在畫面上了，把控制項變成裝飾品是更差的修法。</p>
+<h4>先寫成紅色的反證</h4>
+<p>e2e：貼 3 列、取消 2 列、送出，斷言 <code>GET /api/ledgers/transactions</code> 只多 1 列，
+且結果橫幅寫「成功 1 筆・跳過 2 筆」。修改前它會拿到 3。</p>
+</div>
+
+<div class="f me">
+<h3><span class="tag me">中</span>F-04 — 券商匯入／復原之後，下方帳本表格不刷新（呼叫了一個不存在的函式）</h3>
+<div class="meta">
+頁面：<code>trades.html</code> → CSV 匯入 → 券商對帳單<br>
+程式：<b><code>web/broker-import.js:164</code></b>（undo）· <b><code>web/broker-import.js:432</code></b>（全部寫入）·
+正確的接縫是 <b><code>web/ledger.js:788</code></b> <code>window.pdLedgerRefresh = loadAll</code>
+</div>
+<h4>重現（已實測）</h4>
+<ol>
+<li>先用 CSV 匯入寫進 3 筆交易（產生一個 import batch）。</li>
+<li>切到「券商對帳單」，在批次清單按該批的「復原」→ 確認。</li>
+<li><code>DELETE /api/import/batches/20→200</code>，toast「✓ 已復原 刪除 3 筆」，資料庫 78 → 75。</li>
+<li><b>下方帳本「交易」分頁仍然是 100 列，第一列還是剛被刪掉的 2026-08-03 那筆。</b></li>
+<li>瀏覽器主控台驗證：<code>typeof window.pdAfterLedgerChange === "undefined"</code>，
+<code>typeof window.pdLedgerRefresh === "function"</code>。</li>
+</ol>
+<h4>為什麼是錯的</h4>
+<p><code>if (window.pdAfterLedgerChange) window.pdAfterLedgerChange();</code> 這個寫法讓它<b>不會報錯</b>，
+所以它靜靜地什麼都不做了不知道多久。使用者看到的是一個成功 toast 加上一張還在顯示已刪除資料的表 ——
+和「按鈕接了一個謊」是同一類，只是方向相反。<code>input.js:1965</code> 與
+<code>corp-action-form.js:712</code> 都用對了 <code>pdLedgerRefresh</code>。</p>
+<h4>建議修法（單一建議）</h4>
+<p>兩處都改成 <code>if (window.pdLedgerRefresh) { try { await window.pdLedgerRefresh(); } catch (e) {} }</code>，
+與 <code>input.js:1965</code> 同形。順手加一條契約測試：
+<b>掃描 <code>web/*.js</code> 裡所有 <code>window.pdXxx()</code> 形式的呼叫，斷言每個名字在 <code>web/</code> 底下都有對應的賦值</b>
+—— 這一類「呼叫了不存在的全域函式」才不會再發生第三次
+（<code>pdPrefillManualSell</code> 是同一類的第二例，見 §8）。</p>
+<h4>先寫成紅色的反證</h4>
+<p>e2e：匯入一批 → 記下帳本第一列文字 → 復原 → 斷言帳本第一列<b>改變了</b>。修改前它不會變。</p>
+</div>
+
+<div class="f me">
+<h3><span class="tag me">中</span>F-05 — 代號選擇器完全無法用鍵盤選取</h3>
+<div class="meta">
+頁面：手動交易 / 股利 / 期初庫存 三個表單共用<br>
+程式：<b><code>web/sym-picker.js:147</code></b> — <code>b.addEventListener('mousedown', …)</code>
+</div>
+<h4>重現（已實測）</h4>
+<p>點 <code>#m-symbol</code> → 清單開啟 21 列 → 鍵入「23」→ 過濾到 2330 →
+按 <b>ArrowDown</b>：沒有任何 <code>.active</code> 列出現 → 按 <b>Enter</b>：
+<code>#m-symbol</code> 仍是「23」、清單仍開著。Escape 可以關閉。</p>
+<h4>為什麼是錯的</h4>
+<p>每一列是 <code>&lt;button&gt;</code>（Tab 可聚焦），但只綁 <code>mousedown</code>；
+鍵盤按 Enter/Space 發的是 <code>click</code>，不是 <code>mousedown</code>，所以永遠選不到。
+而且欄位 focusout 會關閉清單，Tab 過去的路徑也不通。
+<code>sym-picker.js</code> 的檔頭把自己描述成「OPEN-vs-TYPE 狀態機」，
+輸入過濾是它的核心功能之一 —— 一個「打字可以過濾、但只能用滑鼠選」的選單，
+對只用鍵盤的人等於整個輸入流程斷掉。</p>
+<h4>建議修法（單一建議）</h4>
+<p>在 <code>create()</code> 內對輸入框加一個 <code>keydown</code>：ArrowDown/ArrowUp 移動
+<code>activeIndex</code> 並在該列加上 <code>.active</code> + <code>scrollIntoView</code>，
+Enter 呼叫 <code>select(rows[activeIndex].symbol)</code> 並 <code>preventDefault()</code>，
+Home/End 跳頭尾。<b>保留 mousedown</b>（那是為了搶在 focusout 之前落值，有它的道理），
+只是多一條鍵盤路徑，不要改成 click。</p>
+<h4>先寫成紅色的反證</h4>
+<p>e2e：focus <code>#m-symbol</code> → type「23」→ ArrowDown → Enter →
+斷言 <code>#m-symbol.value === "2330"</code> 且清單已關。修改前拿到「23」。</p>
+</div>
+
+<div class="f me">
+<h3><span class="tag me">中</span>F-06 — 再平衡抽屜：頁尾寫 100.00%，但畫面上 17 個欄位加起來是 100.1%</h3>
+<div class="meta">
+頁面：<code>index.html</code> → ⚖ 再平衡試算<br>
+程式：<b><code>web/rebalance.js:196</code></b>（<code>inp.value = (state[sym]*100).toFixed(1)</code>）·
+<b><code>web/rebalance.js:324-331</code></b>（<code>sumTarget</code> 加總的是未取整的 <code>state</code>）·
+<code>web/rebalance.js:289</code>（頁尾）
+</div>
+<h4>重現（已實測）</h4>
+<p>打開抽屜（不動任何欄位）。17 個「目標 %」欄位的值是
+25.0 / 0.4 / 23.8 / 20.5 / 18.3 / 1.3 / 0.3 / 0.5 / 0.2 / 1.0 / 2.2 / 1.5 / 1.0 / 0.3 / 1.9 / 0.7 / 1.2
+= <b>100.1</b>。頁尾寫「目標合計 <b>100.00%</b>」，且沒有出現「⚠ 目標合計超過 100%」。</p>
+<h4>為什麼是錯的</h4>
+<p>欄位是 <code>toFixed(1)</code> 的顯示值，合計卻是用完整精度的 <code>state</code> 算的，
+兩個數字對同一件事給不同答案。而且送去 <code>POST /api/rebalance/preview</code> 的
+<code>targets</code> 也是完整精度的 <code>state</code>，所以<b>「匯出執行報告」算的是使用者從沒看過的目標</b>。
+這是這個 repo 已經踩過三次的 aggregate-vs-detail 類別。
+（實務衝擊有限：只要動過任一欄，那一欄就會變成使用者打的值；不動的話目標＝現況，動作全是「—」。）</p>
+<h4>兩個選項</h4>
+<p><b>選項 A（建議）— 顯示什麼就送什麼。</b>種子時就把 <code>state[sym]</code> 設成
+<code>Number((weightSum*100).toFixed(1))/100</code>，欄位與 state 從第一刻起就同源。
+<code>sumTarget</code> 自然變成 100.1%，頁尾誠實地顯示 100.1% 並亮出既有的超過-100% 警告
+（那正是這個警告存在的意義）。</p>
+<p><b>選項 B — 顯示更多小數。</b>欄位改 <code>toFixed(2)</code>（<code>step="0.01"</code>），
+誤差縮小但不會歸零（四捨五入永遠可能差一點）。治標。</p>
+<h4>先寫成紅色的反證</h4>
+<p>e2e：開抽屜不動任何欄位，讀 17 個 <code>.rb-input</code> 的值加總，
+斷言它等於頁尾「目標合計」的百分比。修改前 100.1 ≠ 100.00。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-07 — <code>#ai-degrade-down</code> 的「重試」沒有任何 listener</h3>
+<div class="meta">頁面：<code>trades.html</code> → AI 輸入 · 程式：<b><code>web/trades.html:291</code></b></div>
+<p><b>實測：</b>該面板只在 LLM 連線失敗時出現，本機環境先撞到 402（額度用盡）所以顯示的是另一張卡。
+把 <code>#ai-degrade-down</code> 強制設為可見後按下「重試」：<b>無請求、無 DOM 變化、無 toast</b>。
+全 repo grep 不到任何綁定它的程式碼。</p>
+<p class="sub">（誠實標註：這一次按下去之前，我用 JS 把面板改成可見 —— 這是唯一一次為了觸及控制項而動了 DOM。）</p>
+<p><b>為什麼重要：</b>它是那張卡上<b>唯一</b>的動作。旁邊兩張降級卡各有一個可用的連結（前往 AI 與額度設定），
+只有這一張把使用者留在死路上。</p>
+<p><b>建議：</b>綁上 <code>runAiPreview</code>（<code>input.js:1478</code>），與 <code>#ai-parse</code> 同一條路徑。
+順手清掉同一區的 <code>#ai-states</code> 殘骸（<code>trades.html:252</code>，留著一個「設計檢視：」標籤 + 空 span）。</p>
+<p><b>反證：</b>單元／e2e 測試：mock <code>/api/input/ai/preview</code> 回 503 → 斷言 <code>#ai-degrade-down</code> 可見
+→ 按「重試」→ 斷言又發出一次 <code>POST /api/input/ai/preview</code>。修改前是 0 次。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-08 — 變數表「複製」：剪貼簿寫入失敗，成功 toast 照跳</h3>
+<div class="meta">頁面：<code>settings.html#prompts</code> <code>#vars-panel</code>（36 顆）·
+程式：<b><code>web/settings-prompts.js:641-644</code></b>；做對的對照組在 <code>web/settings-notify.js:248-259</code></div>
+<p><b>實測：</b>按第一列的「複製」→ toast「✓ 已複製 <code>{{holdings_json}}</code>」，
+但同一次點擊拋出未捕捉的 <code>pageerror: Failed to execute 'writeText' on 'Clipboard': Write permission denied.</code>
+—— 這是本次 504 次點擊中<b>唯一</b>一個未捕捉的 JS 例外。</p>
+<p><b>為什麼重要：</b><code>navigator.clipboard</code> 只在 secure context 可用。
+本機（localhost）算 secure，所以問題在權限；但<b>自架在純 HTTP 上的實例，這個 API 根本不存在</b>，
+使用者會每次都看到綠色成功、每次都貼不出東西。同一個設定頁的
+<code>#nt-ntfy-topic-copy</code> 有正確的 rejection 分支 —— 兩種寫法並存於同一頁。</p>
+<p><b>建議：</b>照抄 <code>settings-notify.js:248-259</code>：把 toast 移進 <code>.then()</code>，
+<code>.catch()</code> 給一個 fail toast（並提供「手動選取」的退路）。</p>
+<p><b>反證：</b>e2e 中撤銷 clipboard 權限後按「複製」，斷言出現的是 fail toast 而不是「已複製」。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-09 — 「部分過期」chip 只把你捲到一個仍然收合的面板</h3>
+<div class="meta">頁面：<code>index.html</code> 頂欄 · 程式：<code>web/shell.js:360</code>（建 <code>&lt;a href="#freshness"&gt;</code>）· <code>web/app.js:40</code></div>
+<p><b>實測：</b>chip 的 <code>title</code> 是「部分價格或匯率資料已過期，<b>點擊查看資料新鮮度明細</b>」。
+按下後 URL 變成 <code>/index.html#freshness</code>，但 <code>document.getElementById('freshness').open === false</code>
+—— 目標是一個 <code>&lt;details&gt;</code>，捲過去之後使用者只看到一行標題。</p>
+<p><b>建議：</b>chip 的 click handler 裡加一行 <code>document.getElementById('freshness').open = true;</code>
+（保留 <code>href</code> 讓捲動仍由瀏覽器負責）。</p>
+<p><b>反證：</b>e2e：按 chip → 斷言 <code>#freshness.open === true</code>。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-10 — 4/16 種告警的鈴鐺列是 <code>href="#"</code>，點了什麼都不會發生</h3>
+<div class="meta">頁面：全站頂欄鈴鐺 · 程式：<code>web/alerts.js:36</code>、<code>web/alerts.js:231-236</code>；
+後端 <code>portfolio_dash/strategy/alerts.py:53</code>（<code>href: str|None = None</code>）</div>
+<p><b>實測：</b>「Information Technology 產業權重偏高」那一列 <code>href="#"</code>，
+點下去 URL 變成 <code>/index.html#</code>、DOM 完全沒變。同一個面板裡「報價過期 ×17」那列
+<code>href="index.html"</code> 可以導頁。</p>
+<p><b>範圍（唯讀查證）：</b>16 種 <code>Alert(...)</code> 之中有 4 種沒給 <code>href</code> ——
+<code>sector_weight</code>、<code>fx_drift</code>、<code>portfolio_drawdown</code>、<code>currency_weight</code>。
+這四個剛好是<b>組合層級的風險</b>，也就是最值得點進去看的那幾個。</p>
+<p><b>建議：</b>四個各給一個合理的落點：<code>sector_weight</code> → <code>index.html#sector-chart</code>、
+<code>currency_weight</code> → 幣別組成面板、<code>fx_drift</code> → <code>cash.html#fx</code>、
+<code>portfolio_drawdown</code> → <code>index.html</code> 趨勢卡。
+真的沒有落點的，就<b>不要渲染成 <code>&lt;a&gt;</code></b>（<code>alerts.js:231</code> 已經有「沒有 href 就不綁 listener」的分支，
+把標籤也一起改成 <code>&lt;div&gt;</code>，游標就不會騙人）。</p>
+<p><b>反證：</b>單元測試：對 16 種 alert 逐一斷言「<code>href is None</code> ⟺ 渲染出來不是 <code>&lt;a&gt;</code>」。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-11 — 「產生洞察」在沒有任務時，解釋用的 toast 被同一 tick 的導頁吃掉</h3>
+<div class="meta">頁面：<code>insights.html</code> · 程式：<b><code>web/insights.html:790-793</code></b></div>
+<p><b>實測：</b>按「產生洞察」→ <code>GET /api/insight-types→200</code>（空陣列）→ 立刻
+<code>window.location.href = 'pipeline-hub.html'</code>。程式碼裡那行
+<code>window.toast('尚無可執行的洞察任務','fail','前往「洞察管線」建立或啟用任務')</code>
+在同一個同步區塊裡，導頁一發生就被銷毀 —— 掃描期間<b>一次都沒捕捉到這個 toast</b>。
+使用者的體感是「按了一顆叫『產生洞察』的按鈕，然後莫名其妙換到另一頁」。</p>
+<p><b>建議：</b>把導頁包進 <code>setTimeout(…, 1200)</code>（與 shell.js 的重算／更新報價同一種寫法：
+<code>prog.done(...)</code> 之後 <code>setTimeout(reload, 900)</code>），讓訊息有時間被看到。</p>
+<p><b>反證：</b>e2e：在 0 任務狀態按「產生洞察」，斷言導頁<b>之前</b>畫面上出現過「尚無可執行的洞察任務」。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-12 — 同一張畫面上，「閒置」是兩個不同的判斷</h3>
+<div class="meta">頁面：<code>pipeline-hub.html</code> ·
+程式：<b><code>web/pipeline.js:273</code></b>（狀態章＝<code>lastRun ? lastRun.status : 'idle'</code>）
+vs <b><code>web/pipeline.js:218</code></b>（篩選＝<code>normLv(t.level) === 'idle'</code>）</div>
+<p><b>實測：</b>安裝官方套組後有 5 條任務，每一張卡的狀態章都印「閒置」（因為從未執行）；
+但點上方「閒置」篩選 → <b>0 張卡</b>，而「需注意」→ 5 張。頂部摘要也寫「5 個需注意・0 個閒置」。</p>
+<p><b>為什麼重要：</b>使用者看到五張寫著「閒置」的卡，按「閒置」卻得到空清單。
+兩個判斷各自都對（一個是「跑過沒」，一個是「管線層級」），錯在<b>用了同一個詞</b>。</p>
+<p><b>建議：</b>把狀態章的 <code>idle</code> 文案改成「<b>尚未執行</b>」（<code>pipeline.js:251</code> 的
+<code>idle: ['pill-off','閒置']</code> → <code>['pill-off','尚未執行']</code>），
+「閒置」這個詞留給篩選／摘要用的管線層級。改一行文案，不動任何邏輯。</p>
+<p><b>反證：</b>e2e：安裝官方套組後，斷言「畫面上出現『閒置』字樣的卡片數」＝「按下『閒置』篩選後的卡片數」。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-13 — 「含匯兌總損益」降級時，把原因說成「缺價」，實際是賣超</h3>
+<div class="meta">頁面：<code>index.html</code> KPI 帶 · 程式：<b><code>portfolio_dash/portfolio/dashboard.py:279</code></b></div>
+<p><b>實測：</b>寫入 TSLA 賣超之後，KPI 顯示
+「含匯兌總損益 — <b>最新一日有標的缺價</b>,含匯兌總損益暫不計算…」。
+但 TSLA 有價（畫面上同一列印著 250.00），真正的原因是賣超讓該部位沒有誠實的市值。
+同一塊 KPI 上的 XIRR 就說對了：「帳本中有賣超部位待釐清 — 無法計算 XIRR」。</p>
+<p><b>建議：</b>在算 <code>fx_complete_reason</code> 時區分兩種來源：真的缺價 → 保留現有文案；
+<code>has_oversold</code> → 換成與 XIRR 同一句話。這個 repo 對「誠實標籤」的標準很高
+（「a stale price is labelled, never guessed」），一句指錯方向的原因會讓人跑去查報價來源。</p>
+<p><b>反證：</b>單元測試：帳本含一筆 acked oversell 且所有標的都有當日價 →
+斷言 <code>fx_complete_reason</code> 提到「賣超」而不是「缺價」。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-14 — 洞察精靈不支援 ESC 關閉</h3>
+<div class="meta">頁面：<code>pipeline-hub.html</code> · 程式：<b><code>web/pipeline.js:117-134</code></b>（<code>ppModal</code> 沒有 keydown）</div>
+<p><b>實測：</b>✕ 可以關、點背景可以關、<b>ESC 不行</b>。相對地，個股抽屜（<code>detail.js:124</code>）、
+搜尋層（<code>shell.js</code>）、公司行動表單（<code>corp-action-form.js:588</code>，capture 階段）都吃 ESC。
+精靈是全站最大的彈層（四步、佔滿畫面），偏偏是唯一不吃 ESC 的。</p>
+<p><b>建議：</b><code>ppModal</code> 裡加一個 document keydown（在 <code>back.remove()</code> 時一併移除），
+與 <code>corp-action-form.js:588</code> 同形。一次修好所有用 <code>ppModal</code> 的彈層。</p>
+<p><b>反證：</b>e2e：開精靈 → ESC → 斷言 <code>.pv-backdrop</code> 已移除。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-15 — 費率重設用原生 <code>window.confirm</code>，全站其他確認都用 <code>confirmDialog</code></h3>
+<div class="meta">頁面：<code>settings.html#accounts</code> · 程式：<b><code>web/settings-fees.js:245</code></b> 與 <b><code>:256</code></b></div>
+<p><b>實測：</b>按「重設為系統預設」時，Playwright 捕捉到的是
+<code>dlg=confirm:重設「台灣券商規則」所有費率為系統預設？</code> —— 瀏覽器原生對話框。
+本次掃描在其他地方遇到的 30+ 次確認全部是 app 自己的 <code>confirmDialog</code>
+（有標題、說明、危險樣式、✕/取消/確認）。</p>
+<p><b>為什麼重要：</b>不只是外觀。原生 confirm 只能給一行字，
+而其他刪除確認都會說清楚「會刪掉幾筆、影響什麼、能不能還原」——
+費率重設是會影響<b>未來所有交易成本</b>的操作，卻是說明最少的那一個。</p>
+<p><b>建議：</b>兩處都換成 <code>window.confirmDialog({title, body, confirmLabel, danger:true, onConfirm})</code>，
+body 寫明「僅影響未來交易，歷史以交易列快照為準」（這句話目前只出現在成功之後的 toast 裡，
+在<b>決定之前</b>看到才有用）。</p>
+<p><b>反證：</b>契約測試：grep <code>web/*.js</code>，斷言 <code>window.confirm(</code> 的出現次數為 0。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-16 — 帳本編輯的賣超警告，報的是「最終淨部位」而不是出事的那一天</h3>
+<div class="meta">頁面：<code>trades.html</code> 帳本 → 編輯 · 程式：<b><code>portfolio_dash/api/routers/ledgers.py:417</code></b></div>
+<p><b>實測：</b>把 2026-04-01 的 TSLA 買進 20 股改成 0.5 股（讓 2026-04-20 那筆賣出失去掩護）→
+<code>PUT →422</code> → 對話框寫：「此更正將造成賣超（<b>TSLA 部位將為 9.5 股</b>）—
+確認後可強制寫入」。9.5 是<b>最終</b>淨部位，而且是正數 —— 看起來和「賣超」互相矛盾。
+真正出事的是 2026-04-20 那一天（當天只有 0.5 股卻賣了 1 股）。</p>
+<p><b>為什麼重要：</b><code>domain-ledger.md</code> 特別記載賣超檢查是 <b>DATE-AWARE</b> 的
+（2026-07-31：只看淨額的檢查曾經放行過被後買掩護的回填賣出）。
+檢查本身正確，只有訊息還停留在淨額語彙，會讓人以為系統算錯了。</p>
+<p><b>建議：</b>訊息改成指名那一天：「此更正會讓 2026-04-20 的賣出（1 股）超過當日持股（0.5 股）」。
+<code>holdings.shares_through</code> 已經算出這個日期了，只是沒放進訊息。</p>
+<p><b>反證：</b>API 測試：斷言 422 的 message 含有出事的<b>日期</b>字串。</p>
+</div>
+
+<div class="f lo">
+<h3><span class="tag lo">低</span>F-17 — 「確認加值」空白金額時只有紅框，沒有任何說明</h3>
+<div class="meta">頁面：<code>settings.html#llm</code> → ＋ 添加額度 · 程式：<code>web/settings-llm.js</code>（加值 modal）</div>
+<p><b>實測：</b>金額留白按「確認加值」：不發請求（正確），輸入框被加上
+<code>class="input field-error"</code>（紅框），<b>沒有 toast、沒有任何文字</b>。
+對照組：同一頁的模型儲存空白 alias 會給「✕ 請輸入模型代號（alias）」；
+觀察清單空白代號會給「✕ 請先輸入代號」；資金頁超額出金會給完整的一句話。</p>
+<p><b>建議：</b>加一個 fail toast（或欄位下方的說明），與同頁其他表單一致。</p>
+<p><b>反證：</b>e2e：空白送出後斷言畫面上出現非空的錯誤文字。</p>
+</div>
+
+<h3>另外一個「知道就好」的觀察</h3>
+<div class="f lo">
+<h3><span class="tag lo">觀察</span>F-18 — 觀察清單「永久移除」在對話框已說明不可行時仍可按</h3>
+<p>移除對話框已經逐字說明「此標的<b>有歷史帳務紀錄，無法永久移除</b>…請改用『移除（隱藏）』」，
+但「永久移除」按鈕仍是可按的，按下去換來一個 <code>DELETE /api/instruments/2330→422</code>
+（後端擋住了，防禦深度正確，主控台留下一筆 422 資源錯誤）。
+建議：既然畫面已經<b>知道</b>不行，就把該按鈕 disabled 並保留同一段說明；
+後端的 422 留著當第二道防線。這不是錯誤，是可以少一次挫折的地方。</p>
+</div>
+
+<!-- ========================= 6. 數字正確性驗證 ========================= -->
+<h2>6. 數字正確性驗證</h2>
+<p class="sub">
+以下全部在<b>回補歷史報價之前</b>完成，也就是資料庫還是那份剛被獨立預言機以
+<code>fail=0</code> 對過帳的壓力測試帳本時。核對方式是：畫面上的字 ↔ <code>/api/*</code> JSON ↔ 手算。
+</p>
+
+<h4>6.1 KPI 帶 ↔ <code>/api/dashboard</code></h4>
+<div class="scroll"><table>
+<tr><th>畫面</th><th>API（完整精度）</th><th>判定</th></tr>
+<tr><td>總市值 4,340,735 TWD</td><td><code>total_market_value = 4340734.776355421686746987952</code></td><td class="v PASS">✓</td></tr>
+<tr><td>資產損益（不含本金匯率）+633,490</td><td><code>total_return = 633489.7083554216867469879513</code></td><td class="v PASS">✓</td></tr>
+<tr><td>累計報酬率 +10.72%</td><td><code>total_return_rate = 0.1071564364843941547139872350</code></td><td class="v PASS">✓</td></tr>
+<tr><td>含匯兌總損益 +750,692</td><td><code>total_return_fx_complete = 750692.316355421686746987952</code></td><td class="v PASS">✓</td></tr>
+<tr><td>其中本金匯率效果 +116,988</td><td><code>principal_fx_effect = 116987.7780000000000000000007</code></td><td class="v PASS">✓</td></tr>
+<tr><td>交易與融資成本 +215</td><td><code>trading_financing_cost = 214.830</code></td><td class="v PASS">✓</td></tr>
+<tr><td>年化報酬 (XIRR) +36.67%・觀察期 229 天</td><td><code>xirr = 0.36668676792175187</code>, <code>xirr_window_days = 229</code></td><td class="v PASS">✓</td></tr>
+<tr><td>換匯損益 已實現 −2,375 / 未實現 −11,827</td><td><code>fx_realized = -2375.000</code>, <code>fx_unrealized = -11826.71635305421306578074010</code></td><td class="v PASS">✓</td></tr>
+</table></div>
+<p class="sub">A（資產損益）／B（含匯兌總損益）／B−A（本金匯率效果）在畫面上是<b>並列</b>的三行，
+沒有任何地方把它們相加 —— 與 AI-D41 的裁示一致。</p>
+
+<h4>6.2 持股列的每一欄（逐檔手算）</h4>
+<div class="scroll"><table>
+<tr><th>標的</th><th>畫面</th><th>手算</th><th>判定</th></tr>
+<tr><td>2330</td><td>1,550 股・原始均價 599.69・調整均價 596.34・未實現 +160,679 (+17.29%)</td><td>1,085,000 − 596.336033582…×1550 = 160,679.15 ✓；報酬率分母用<b>原始</b>成本 929,519.5 → 17.286% ✓</td><td class="v PASS">✓</td></tr>
+<tr><td>0050</td><td>110 股・135.01 / 127.74・+1,899 (+12.79%)</td><td>15,950 − 14,050.9 = 1,899.1 ✓；1,899 / 14,851.1 = 12.79% ✓</td><td class="v PASS">✓</td></tr>
+<tr><td>MSFT</td><td>65.26747 股・402.18・市值 27,412.34</td><td>65.26747 × 420 = 27,412.34 ✓；未實現 1,163.27 ✓</td><td class="v PASS">✓</td></tr>
+<tr><td>CA9</td><td>400 股・原始 150.21 / 調整 140.21・+7,915 (+13.17%)・回本 6.66%</td><td>64,000 − 56,085 = 7,915 ✓；7,915 / 60,084 = 13.17% ✓；累計配息 4,000 / 60,084 = 6.657% ✓</td><td class="v PASS">✓</td></tr>
+<tr><td>權重</td><td>2330 = 25.00%</td><td>1,085,000 / 4,340,735 = 24.9958% ✓</td><td class="v PASS">✓</td></tr>
+</table></div>
+<p class="sub"><b>「原始均價」與「調整均價」兩欄同時存在、報酬率分母用原始成本</b> ——
+與 <code>domain-ledger.md</code>「total return rate = total return / original invested cost」一致。</p>
+
+<h4>6.3 各幣別報酬拆分（不可跨幣加總）</h4>
+<p>MYR +17.51%（+2,449.81 / 13,987.02）· TWD +14.28%（+279,632 / 1,958,271）·
+USD +8.73%（+10,345.20 / 118,549.04）。三列各自的 <code>已實現 + 未實現 = 總報酬</code>、
+<code>總報酬 ÷ 累計投入 = 報酬率</code> 都對得上，且卡片底下明寫「各幣別為原幣金額，不可跨幣加總」。<span class="PASS">✓</span></p>
+
+<h4>6.4 費用與稅（fee-engine v2，逐筆對規則）</h4>
+<div class="scroll"><table>
+<tr><th>情境</th><th>畫面</th><th>規則</th><th>判定</th></tr>
+<tr><td>TW 買進 2330 100 @610</td><td>手續費 86 · 稅 0</td><td>0.1425% × 61,000 = 86.925 → <b>無條件捨去</b> 86 ✓（FE-D3）</td><td class="v PASS">✓</td></tr>
+<tr><td>TW 賣出 0050 50 @150（ETF）</td><td>手續費 20 · 稅 <b>7</b></td><td>0.1425%×7,500 = 10.69 → floor 10 → <b>最低 20</b> ✓；ETF 稅率 0.1%×7,500 = 7.5 → floor <b>7</b> ✓（不是現股 0.3%）</td><td class="v PASS">✓</td></tr>
+<tr><td>TW 當沖</td><td>稅 210 → 105</td><td>0.3% → 0.15% ✓</td><td class="v PASS">✓</td></tr>
+<tr><td>US 賣出 TSLA 50 @250</td><td>手續費 0.27</td><td>SEC 0.26（<code>0.0000206×12,500</code>）+ TAF 0.01 ✓，快照裡逐項可見</td><td class="v PASS">✓</td></tr>
+<tr><td>群益折讓預估</td><td>買進 86 → 預估次月折讓 <b>+66</b>（不計入成本）</td><td>floor(86 × 0.77) = 66 ✓，且明寫「不計入成本」（FE-D1 forecast-only）</td><td class="v PASS">✓</td></tr>
+<tr><td>折讓款收件匣 2026-07</td><td>手續費合計 389 → 預估退款 <b>297</b></td><td><b>逐筆</b>無條件捨去後相加：83+128+15+36+15+20 = 297 ✓（不是 389×0.77=299.53）</td><td class="v PASS">✓</td></tr>
+</table></div>
+
+<h4>6.5 預覽 ↔ 實際寫入（三個賣出分支）</h4>
+<div class="scroll"><table>
+<tr><th>分支</th><th>預覽</th><th>帳本實際寫入</th><th>判定</th></tr>
+<tr><td>一般賣出（0050 50 @150）</td><td>淨收款 7,473 / 調整成本移除 6,387 / 已實現 +1,086</td><td><code>proceeds_net 7473</code> / <code>adjusted_cost_removed 6386.7768…</code> / <code>realized 1086.2231…</code></td><td class="v PASS">✓</td></tr>
+<tr><td>宣告放空（CA8 持 40，賣 100 @330）</td><td>已實現 +1,125（只算 40 股）/ 開空 60 股 / 明註「放空段不產生已實現損益」</td><td><code>shares_sold 40</code> / <code>proceeds_net 13141.60</code>（＝32,854 × 40/100）/ <code>realized 1124.560</code></td><td class="v PASS">✓ 已實現正確</td></tr>
+<tr><td>回補空單（買 60 @320）</td><td>已實現 +724 / 均價 — → 332.52</td><td><code>kind: short_cover</code> / <code>realized 724.440</code> ＝ (332.524 − 19,227/60) × 60 ✓</td><td class="v PASS">✓</td></tr>
+<tr><td>未宣告賣超（TSLA 持 10，賣 50）</td><td>調整成本移除 — / 已實現 — / 明註「帳本不會產生已實現損益（待釐清）」</td><td><b>沒有</b>已實現列；部位 <code>oversold=true</code>、<code>original_cost_total 0</code></td><td class="v PASS">✓ 已實現正確</td></tr>
+<tr><td>以上四者的「交易後均價」欄</td><td>放空與賣超兩例印的是<b>交易前</b>的均價</td><td>實際 328.54 / 0</td><td class="v FAIL">F-01</td></tr>
+</table></div>
+
+<h4>6.6 抽屜試算 ↔ 手算</h4>
+<p>2330 賣出試算 300 股 @700：成交 210,000 → 手續費 floor(0.1425%×210,000)=299 ✓ →
+稅 0.3%×210,000=630 ✓ → 淨收款 209,071 ✓ → 調整成本移除 596.336033582…×300 = 178,900.81 ✓ →
+已實現 +30,170 ✓。加碼試算 100 @650：手續費 92（92.625 floor）✓、稅 0 ✓、總成本 65,092 ✓、
+原始均價 599.69 → 602.80（(929,527+65,092)/1,650）✓。<span class="PASS">全部吻合</span></p>
+
+<h4>6.7 空單部位的呈現（signed quantity 的每一條公式）</h4>
+<p>CA8 −40 股、均價 332.524、現價 330：未實現 = (330 − 332.524) × (−40) = <b>+100.96 → 畫面 +101</b> ✓；
+報酬率 = 101 / <b>abs</b>(−13,300.96) = <b>+0.76%</b> ✓（用了絕對值，沒有把獲利的空單印成虧損 —— audit-H1 那個陷阱的反向）；
+權重 −0.31%（負曝險慣例）✓；<code>fully_recovered</code> 為 null（<code>short_open</code> 時不計回本）✓；
+列的 tooltip 是「放空中…」而不是「賣超…」，兩種負股數<b>視覺上分得開</b> ✓。</p>
+
+<h4>6.8 資金池與換匯</h4>
+<p>合併現金 3,436,521 TWD ↔ <code>reporting_total = 3436521.207</code> ✓，五個池的金額逐一相符。
+換匯 33,000 TWD → 1,000 USD 之後：schwab TWD 532,000 → 499,000（−33,000）、
+USD 17,076.16 → 18,076.16（+1,000）✓，合併現金 −500 ✓
+（成交匯率 33.0 vs 現貨 32.5，1,000 USD 少值 500 TWD —— 正確）。
+對帳單滾動餘額逐列驗算，例：2026-06-24 賣出 1155 100 股 @11.500，
+gross 1,150 − 費 4.00 − 稅 2.00 = <b>+1,144.00</b> ✓。</p>
+
+<h4>6.9 匯出檔案的內容（不是只看有沒有下載）</h4>
+<ul>
+<li><code>holdings_snapshot_*.csv</code> — 20 欄、raw Decimal（<code>599.6948815776513165629239865</code>），
+與 API 逐欄相符；<code>reporting_ccy_value</code> 對 AAPL 是 1,033,853.4375 ＝ 31,810.875 × 32.5 ✓。</li>
+<li><code>realized_pnl_*.csv</code> — 同時給 <code>original_cost_removed</code> 與 <code>adjusted_cost_removed</code> 兩欄。</li>
+<li><code>tax_package_2026.zip</code> — 四個檔：<code>realized_gains_2026.csv</code>、<code>dividends_2026.csv</code>、
+<code>fx_realized_2026.csv</code>（−2,375.000，與 <code>fx_realized</code> 一致 ✓）、<code>summary.md</code>。
+<code>summary.md</code> 逐幣別小計、明寫「申報用的是原始成本基礎那一欄」，
+並在績效基礎那一節<b>主動警告</b>：「⚠ 非申報數字。此欄的股利已折抵進成本，而上方股利表已就同一筆股利申報一次」
+—— 這正是 no-double-counting 規則要求的那句話。</li>
+<li><code>llm_usage_all_all.csv</code> 51 B（只有表頭）— <code>llm_usage</code> 表真的是 0 列，<b>空是正確答案</b>。</li>
+<li><code>2330_dividends.csv</code> — 3 列，與帳本 <code>dividends</code> 完全一致。</li>
+</ul>
+
+<h4>6.10 誠實降級（這些是<b>對</b>的，不是異常）</h4>
+<ul>
+<li>17 檔標的與 3 組匯率全部標「過期」，並在 <code>#freshness</code> 逐筆列出 as-of 日期 ——
+沒有用舊價偽裝成新價。</li>
+<li>基準比較：「MY 無對應指數，1.99% 的投入金額未納入比較」／回補前是
+「所有投入流量都落在基準指數的歷史之外或缺少基準」—— 涵蓋率不足時直接說出來。</li>
+<li>XIRR 在有賣超時回 <code>null</code> 並附上指名道姓的原因。</li>
+<li>賣超列的市值、未實現、報酬率全部印「—」，而不是 0。</li>
+<li>配息偵測「9 檔事件已更新, <b>15 檔失敗</b>」—— 失敗數沒有被藏起來。</li>
+</ul>
+
+<!-- ========================= 7. 未測到 ========================= -->
+<h2>7. 未測到的部分（逐條，附原因）</h2>
+<div class="scroll"><table>
+<tr><th>範圍</th><th>數量</th><th>為什麼沒測到</th></tr>
+<tr><td><code>settings#notify</code> 整區</td><td>48 個控制項</td><td><b>設計上被鎖住。</b>本機是 guest 模式，<code>settings-notify.js:98</code> 把整區 <code>disabled</code> 並顯示「示範站不開放通知設定」。要測必須先建立使用者切到 protected 模式 —— 那會鎖住後續整個掃描。</td></tr>
+<tr><td>登入成功路徑</td><td>1</td><td>同上。<b>刻意不做</b>：建立使用者會把本機實例切成需要登入。空白送出與錯誤帳密兩條路徑都測了。</td></tr>
+<tr><td>券商對帳單完整匯入流程</td><td>~8</td><td>需要真實 Schwab 匯出檔。<code>sample-trade-data/</code> 是真實財務資料，依安全規則不得使用；找不到合成的券商原始檔。</td></tr>
+<tr><td>AI 輸入面板的解析結果流程（勾選/立即註冊/寫入全部勾選/圖片上傳）</td><td>~10</td><td>需要有效 LLM 金鑰。402 降級路徑已測。</td></tr>
+<tr><td>洞察卡 / 持倉健診 / AI 戰績 的內容操作</td><td>~10</td><td>沒有洞察資料（需要真的跑一次 LLM 批次）。三個分頁的空狀態都已驗證且各自不同。</td></tr>
+<tr><td>新聞列 → 全文摘要 modal</td><td>~4</td><td><code>news.db</code> 沒有資料列；「抓取新聞」已觸發但批次未在觀察窗內完成。</td></tr>
+<tr><td>觀察清單其餘 27 列的 編輯／重新探測／移除</td><td>~70</td><td>同一個 render loop 產生的同族控制，各抽測一列。已封存標的的「還原」在 0 筆時 <code>display:none</code>，無法觸及。</td></tr>
+<tr><td><code>#jobs-body</code> 其餘 20 列的 toggle、23 個 cron 輸入框、23 個狀態 chip</td><td>~66</td><td>同族抽樣（3 個 toggle + 1 個「立即執行」已證實真的呼叫後端）。25 個 <code>#hist-filter</code> chip 則是<b>全數</b>實測。</td></tr>
+<tr><td><code>#vars-panel</code> 其餘 35 顆「複製」</td><td>35</td><td>同族抽樣 1 顆（且該顆就抓到 F-08）。</td></tr>
+<tr><td>再平衡抽屜的「套用預警上限」「重設為現權重」「匯出執行報告」</td><td>3</td><td>抽屜開啟後未逐一按下（時間分配）。</td></tr>
+<tr><td>拖曳排序（報價來源順位 chips）</td><td>~4</td><td>需要模擬 HTML5 drag-and-drop；✕ 移除與清單重寫已驗證。</td></tr>
+<tr><td>CSV 檔案拖放 / <code>#csv-file-input</code> / 日期格式歧義路徑</td><td>~5</td><td>改用貼上路徑（兩者匯入同一個 <code>commitCsv</code>）；本次語料日期無歧義。</td></tr>
+<tr><td>負現金池橫幅、費率 <code>discount</code>×<code>rebate_rate</code> 衝突提示</td><td>2</td><td>本次資料沒有負池，種子費率是 charge-first（不衝突）；沒有刻意製造。</td></tr>
+<tr><td>洞察管線「為什麼沒跑？」、抽屜「編輯標的」</td><td>2</td><td>此資料狀態下沒有渲染出來（<code>needWhy</code> 條件未成立 / 需要 <code>per_symbol</code> 任務）。「編輯標的」在程式碼上疑似只有一行 toast，但<b>沒有按到，不列為異常</b>。</td></tr>
+<tr><td>其他寬度的版面（例如 600 / 900 / 1024 px）</td><td>—</td><td>只測了 768 / 390 / 1440。前次的教訓正是「900 與 390 兩檔跨過了一個只在 768 出現的缺陷」，所以三檔<b>不足以</b>宣告 §9 那個溢出不存在。</td></tr>
+<tr><td>側欄／頂欄部分連結（quota chip、摘要空狀態連結）</td><td>~4</td><td>是原生 <code>&lt;a href&gt;</code>，目標頁本身已在別處完整實測，未逐一點擊。</td></tr>
+</table></div>
+<p class="sub">
+另外必須說明兩件事：<b>(1)</b> 本次有 97 次點擊回報逾時，其中 13 次是 notify 的設計封鎖、
+22 次是背景伺服器被回收那一輪（已重跑）、其餘多數是「按鈕正確地處於 disabled」
+（例如未勾 ack 的賣超確認、無檔案的「全部寫入」、第 1 頁的 ◀）或彈層遮擋造成的測試瑕疵。
+<b>(2)</b> 上表所有「唯讀」「未按」的列，在第 4 節都已個別標成 UNTESTED，沒有被算進 PASS。
+</p>
+
+<!-- ========================= 8. 刻意未追查 ========================= -->
+<h2>8. 刻意未追查</h2>
+<ul>
+<li><code>web/broker-import.js</code> 之外還有第二個「呼叫不存在的全域函式」：
+<code>corp-action-form.js:374</code> 的 <code>window.pdPrefillManualSell</code> 在 <code>index.html</code> 載入的任何腳本裡都沒有定義
+（唯讀所見，未從儀表板實際觸發）。與 F-04 同一類，建議一起用同一支契約測試蓋掉。</li>
+<li><code>web/app.js:967</code> 讀取 <code>#fx-summary</code>，這個 id 在 <code>web/</code> 底下任何 HTML 都不存在（有 <code>if (sum)</code> 保護，無害的死碼）。</li>
+<li>拖曳 <code>#trend-chart</code> 的 dataZoom 之後，<code>#value-ranges</code> 的 <code>.active</code> 不會清掉，
+按鈕會宣稱一個圖表沒在顯示的區間（純外觀，未實測拖曳）。</li>
+<li>補登公司行動彈窗裡有三個輸入框（子公司起始價／備註／重組費用）沒有 listener，只在送出時讀取，
+所以常駐的試算預覽不會反映它們（唯讀所見）。</li>
+<li>15 個預警規則 toggle 只切 class、靠「儲存規則」批次送出。同一頁的通知開關在 2026-07-12
+因為同樣的形狀被回報過「關不掉」。這裡有明確的儲存鈕，判定為設計；但如果 owner 想統一，是同一個題目。</li>
+<li>抽屜配息史／交易明細的分頁器是純前端分頁（不打後端），與帳本頁的伺服器端分頁行為不同。兩者各自都對。</li>
+<li>啟用官方套組沒有二次確認（一按就裝 5 條任務）。可逆，且不碰帳本，未追。</li>
+<li>時間加權報酬（TWR）在「帳上成交價與當日市場收盤差很多」時會出現巨大的單日跳動。
+本次是我自己造成的資料組合（虛構帳本 + 真實回補價），<b>演算法本身經檢視是對的</b>（正確扣除了 flow），不列為異常。</li>
+<li><code>prices</code> 表在回補後有 13,589 列而部分標的（虛構的 CA*）永遠拿不到報價，
+導致趨勢圖 238 天裡有 161 天標記「部分標的當日無價格」。圖表<b>有</b>誠實標示，未追。</li>
+</ul>
+
+<!-- ========================= 結語 ========================= -->
+<div class="final">
+<b>本次掃描沒有修改任何應用程式碼、測試、文件、設定或資料。</b><br>
+唯一新增的檔案就是這份報告（<code>docs/audit/2026-08-27-full-site-interaction-sweep.html</code>，
+未 commit、未 stage）。所有寫入動作都發生在 scratchpad 裡的拋棄式 SQLite 上，
+沒有任何操作觸及 demo 或 prod，<code>--phase 2</code> 從未執行，也沒有任何 git 寫入。<br><br>
+<b>上述 17 項異常全部等待 owner 核可後，才會在後續 session 動手修改。</b>
+</div>
+
+<p class="sub" style="margin-top:26px">
+掃描日期 2026-08-27 · HEAD <code>9fcc832</code> · 分支 <code>feat/corporate-actions</code> ·
+504 次點擊 · 19 個下載檔逐一驗內容 · 1 個未捕捉的 JS 例外 · 0 次 500。
+</p>
+
+</div>
+</body>
+</html>

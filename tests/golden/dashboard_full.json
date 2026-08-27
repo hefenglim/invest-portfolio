@@ -1717,7 +1717,7 @@
       "rule": "sector_weight",
       "title": "Information Technology 產業權重偏高",
       "detail": "產業權重 83.2%＞門檻 60.0%",
-      "href": null
+      "href": "index.html#sector-chart"
     },
     {
       "id": "stale_price:00919",
@@ -1749,7 +1749,7 @@
       "rule": "fx_drift",
       "title": "Charles Schwab 匯率偏離成本",
       "detail": "即期匯率偏離成本匯率 3.2%＞門檻 3.0%",
-      "href": null
+      "href": "cash.html#fx"
     }
   ]
 }

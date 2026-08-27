@@ -121,14 +121,25 @@
     head.appendChild(el('span', 'pv-title', title));
     var x = el('button', 'sd-close', '✕');
     x.type = 'button';
-    x.addEventListener('click', function () { back.remove(); });
+    /* F-14: ONE dismissal path, so ESC, ✕ and the backdrop cannot drift apart — and so the
+       document listener is always removed with the layer that installed it. Every OTHER
+       overlay in the app took ESC (the symbol drawer, the search layer, the corporate-action
+       form); the insight wizard, which is the largest of them, was the only one that did not.
+       Capture phase, mirroring corp-action-form.js:588. */
+    var dismiss = function () {
+      document.removeEventListener('keydown', onKey, true);
+      back.remove();
+    };
+    function onKey(e) { if (e.key === 'Escape') dismiss(); }
+    document.addEventListener('keydown', onKey, true);
+    x.addEventListener('click', dismiss);
     head.appendChild(x);
     box.appendChild(head);
     var body = el('div', 'pv-body');
     box.appendChild(body);
-    buildBody(body, function () { back.remove(); });
+    buildBody(body, dismiss);
     back.appendChild(box);
-    back.addEventListener('click', function (e) { if (e.target === back) back.remove(); });
+    back.addEventListener('click', function (e) { if (e.target === back) dismiss(); });
     document.body.appendChild(back);
     return back;
   };
@@ -248,7 +259,13 @@
     var s = normLv(status);  /* I2: 'off' -> 'idle' */
     var map = {
       ok: ['pill-ok', '成功'], partial: ['pill-warn', '部分'], warn: ['pill-warn', '注意'],
-      skipped: ['pill-fail', '跳過'], error: ['pill-fail', '失敗'], idle: ['pill-off', '閒置']
+      skipped: ['pill-fail', '跳過'], error: ['pill-fail', '失敗'],
+      /* F-12: this pill answers "what happened on the LAST RUN"; the filter chip and the
+         summary count answer "what is this task's pipeline LEVEL". Both used to say 「閒置」,
+         so five cards stamped 「閒置」 sat behind a 「閒置」 filter that matched none of them
+         (they were all 需注意). Two judgements, two vocabularies. The disabled case gets its
+         own word too — it is not waiting for anything. */
+      idle: ['pill-off', '待執行'], disabled: ['pill-off', '已停用']
     };
     var pair = map[s] || ['pill-off', s];
     var p = el('span', 'pill ' + pair[0]);
@@ -270,7 +287,7 @@
       head.appendChild(el('span', 'pp-scope ' + sm.cls, sm.label));
       var st = el('span', 'pp-statusline');
       var lastRun = t.last_run;
-      st.appendChild(statusPill(t.enabled ? (lastRun ? lastRun.status : 'idle') : 'idle'));
+      st.appendChild(statusPill(!t.enabled ? 'disabled' : (lastRun ? lastRun.status : 'idle')));
       st.appendChild(el('span', null, lastRun ? f.datetime(lastRun.at) : '尚未執行'));
       head.appendChild(st);
       head.appendChild(el('span', 'spacer'));

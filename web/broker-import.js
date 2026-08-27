@@ -161,7 +161,14 @@
           const r = await api.del('/api/import/batches/' + b.id);
           if (window.toast) window.toast('已復原', 'ok', '刪除 ' + r.deleted + ' 筆');
           await loadBatches();
-          if (window.pdAfterLedgerChange) window.pdAfterLedgerChange();
+          /* F-04: `pdAfterLedgerChange` was never defined ANYWHERE — the
+             `if (window.…)` guard turned a wrong name into a silent no-op, so an undo
+             toasted 「刪除 3 筆」 over a table still listing all three. The seam ledger.js
+             actually exposes is `pdLedgerRefresh` (ledger.js:788), which input.js:1996 and
+             corp-action-form.js:712 both use correctly. */
+          if (window.pdLedgerRefresh) {
+            try { await window.pdLedgerRefresh(); } catch (e) { /* degrade silently */ }
+          }
         } catch (err) {
           if (window.toast) window.toast((err && err.message) || '復原失敗', 'fail', err && err.code);
         }
@@ -429,7 +436,9 @@
     restore();
     renderCommitResult(results, stopped, plan.length);
     await loadBatches();
-    if (window.pdAfterLedgerChange) window.pdAfterLedgerChange();
+    if (window.pdLedgerRefresh) {                       // see the note on the undo path
+      try { await window.pdLedgerRefresh(); } catch (e) { /* degrade silently */ }
+    }
   }
 
   function renderCommitResult(results, stopped, planned) {

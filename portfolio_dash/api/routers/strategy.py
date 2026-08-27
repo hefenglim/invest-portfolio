@@ -133,8 +133,11 @@ def post_whatif(body: WhatIfBody,
                                 side=side, shares=body.shares, price=body.price,
                                 account_id=body.account_id)
     except WhatIfError as exc:
+        # `field` and `issues` come FROM the exception (F-02). Hard-coding "account_id" here
+        # marked an input the user had got right whenever the blocker was an oversell in some
+        # other account, and threw away an identity the raiser had already resolved.
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", str(exc), field="account_id"))
+            "validation_error", str(exc), field=exc.field, issues=exc.issues))
     return result
 
 

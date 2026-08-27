@@ -272,7 +272,8 @@ def compute_alerts_from(
                 alerts.append(Alert(
                     id=f"sector_weight:{sector}", sev="risk", rule="sector_weight",
                     title=f"{sector} 產業權重偏高",
-                    detail=f"產業權重 {_pct(w)}＞門檻 {_pct(thr)}"))
+                    detail=f"產業權重 {_pct(w)}＞門檻 {_pct(thr)}",
+                    href="index.html#sector-chart"))
 
     if rules.stale_price.enabled:
         for p in data.freshness.prices:
@@ -298,7 +299,8 @@ def compute_alerts_from(
                     alerts.append(Alert(
                         id=f"fx_drift:{acct_id}", sev="info", rule="fx_drift",
                         title=f"{names.get(acct_id, acct_id)} 匯率偏離成本",
-                        detail=f"即期匯率偏離成本匯率 {_pct(drift)}＞門檻 {_pct(thr)}"))
+                        detail=f"即期匯率偏離成本匯率 {_pct(drift)}＞門檻 {_pct(thr)}",
+                        href="cash.html#fx"))
 
     if rules.exdiv_upcoming.enabled and rules.exdiv_upcoming.value is not None:
         days = int(rules.exdiv_upcoming.value)
@@ -488,7 +490,8 @@ def compute_alerts_from(
                     title="組合自高點回撤",
                     detail=(f"目前自高點回撤 {_pct(pdd.current_depth)}＞門檻 {_pct(thr_pd)}"
                             f"（歷史最大 {_pct(pdd.max_depth)}，"
-                            f"{pdd.peak_on.isoformat()} → {pdd.trough_on.isoformat()}）")))
+                            f"{pdd.peak_on.isoformat()} → {pdd.trough_on.isoformat()}）"),
+                    href="index.html#trend-chart"))
 
     # ⑭ currency_weight — one currency's share of the book. For a three-currency investor the
     # largest undiversified bet is usually the currency mix, and single_weight / sector_weight
@@ -504,7 +507,8 @@ def compute_alerts_from(
                 alerts.append(Alert(
                     id=f"currency_weight:{ccy.value}", sev="risk", rule="currency_weight",
                     title=f"{ccy.value} 幣別權重偏高",
-                    detail=f"幣別權重 {_pct(w)}＞門檻 {_pct(thr_cw)}（以報告幣計）"))
+                    detail=f"幣別權重 {_pct(w)}＞門檻 {_pct(thr_cw)}（以報告幣計）",
+                    href="index.html#ccy-content"))
 
     return alerts
 

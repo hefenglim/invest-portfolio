@@ -1508,6 +1508,105 @@ mypy error and a `TypeError`.
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
 
+**Full-site interaction sweep remediation (2026-08-27)** — report
+`docs/audit/2026-08-27-full-site-interaction-sweep.html`. A hands-on pass over all 18 page
+entry points in a real browser: 504 presses on 340 distinct named controls (974 distinct
+controls in the resting DOM), 188 of them producing an `/api/*` call, 19 downloads opened and
+content-checked. Its premise was that the 2026-08-03 wiring sweep (2,287 controls, "0 dead")
+proved listeners EXIST and not that they DO anything — which the export-centre cards had since
+demonstrated. 17 findings; all fixed here, each pinned by a test proven RED first. One
+observation (F-18) was re-checked and DISMISSED — see below.
+
+- **F-01 (high) — the sell preview printed the PRE-trade average as the post-trade average**
+  on the declared-short and undeclared-oversell branches. `web/input.js` was handed no
+  `new_*_avg` on a SELL and stated the omission as a fact — "a SELL leaves the averages
+  unchanged" — which is true of the ORDINARY branch and of no other: a declared short leaves a
+  SHORT lot based on the proceeds received, an oversell DISCARDS the basis, and a full exit
+  leaves no position at all. Measured: preview 300.43 → 300.43 where the ledger books 308.63,
+  and 「240.00 → 240.00」 printed directly above the card's own warning that the basis was about
+  to be permanently discarded. ⚠ This is the SAME rule the 2026-08-24 review fixed one column
+  over: that wave pinned `preview.realized` against the booked realized row for all three
+  branches and left the average pair projecting a single happy path. `_position_preview` now
+  projects the position TOTALS per branch and divides on read; `whatif.py` does the same for
+  the drawer, which has no 放空 declaration to read and so states the fork and gives no figure,
+  exactly as it already did for the realized amount. The parametrised guard now asserts BOTH
+  columns against `build_book` for all six shapes.
+- **F-02 (high) — one acked oversell blanked every symbol's 試算, and the reason was thrown
+  away twice.** `compute_whatif` builds the book strictly on purpose, and its own comment
+  records that the 2026-08-11 repair was "to degrade with the reason" — only the 500-to-400
+  half had shipped. `OversellError` now carries the offending account / symbol / date as
+  REQUIRED kwargs, `WhatIfError` carries `field` + `issues` so the router stops stamping every
+  case with an unrelated `field="account_id"`, and the drawer repeats the server's sentence
+  instead of a bare 「試算暫不可用」. Owner option A: the strictness is unchanged.
+- **F-03 (med) — 「確認寫入勾選列」 ignored the ticks and wrote the whole paste.** Measured:
+  3 rows pasted, 2 unticked, 3 written, banner 「成功 3 筆」. A step worse than the export
+  buttons that reported success and did nothing — this wrote ledger rows the user had removed.
+  `commit_preview` has always taken an `accept` set (its comment already reasons about "a row
+  the caller deselected"); it simply had no caller. `/api/import/commit` gains an optional
+  `select` of row INDICES — not a re-rendered CSV, because `csv.DictReader` row *n* is not text
+  line *n+1* once a quoted field contains a newline, and this frontend has no CSV parser.
+  Omitting it still writes everything, so the AI door and undo are byte-compatible.
+- **F-04 (med) — `window.pdAfterLedgerChange` was never defined anywhere.** Called from two
+  places in `broker-import.js`; the defensive `if (window.x)` idiom turned the wrong name into
+  a silent no-op, so an undo toasted 「已復原 刪除 3 筆」 over a table still listing all three.
+  The real seam is `pdLedgerRefresh`. A new contract test scans every `window.pd*()` call in
+  `web/` against its assignments — the class of typo that is invisible to a listener count.
+- **F-05 (med) — the symbol picker could not be driven from the keyboard.** Rows are bound on
+  `mousedown` (deliberately — it beats the input's `focusout`), and `mousedown` is not what
+  Enter fires, so typing filtered the list and nothing could then choose from it. ArrowUp /
+  ArrowDown / Home / End / Enter added; the pointer path is untouched. Arrowing uses
+  `ensureOpen()`, never `open()`, which would clear the filter the user just typed.
+- **F-06 (med) — the rebalance footer said 100.00% over fields that summed to 100.1%.** The
+  inputs were `toFixed(1)` views of full-precision weights while the footer total and the plan
+  POSTed to `/api/rebalance/preview` summed the unrounded state, so 匯出執行報告 computed a
+  plan the owner had never seen. Owner option A: seed the state THROUGH the display precision,
+  so the two agree by construction and the existing over-100% warning fires when it should.
+- **F-07…F-17 (low), each with its own regression:** the AI 「重試」 button had no listener at
+  all and it is that card's only action (the two sibling degrade cards each offer a way out) ·
+  the variable-table 「複製」 fired a success toast unconditionally because `clipboard.writeText`
+  is async — the run's ONE uncaught exception, beside a green ✓ · the 「部分過期」 chip scrolled
+  to a `<details>` it left collapsed · four of sixteen alerts rendered as `href="#"`, and they
+  were exactly the portfolio-level risks (`sector_weight`, `fx_drift`, `portfolio_drawdown`,
+  `currency_weight`) — each now lands on the panel showing the number it is about, guarded by
+  an AST test that no `Alert(...)` is built without an href · 「產生洞察」 destroyed its own
+  explanatory toast with a same-tick navigation · 「閒置」 named two different judgements on one
+  screen (five cards stamped 閒置 behind a 閒置 filter matching none of them) · B's degradation
+  blamed 「缺價」 for a 賣超, while XIRR two rows above named it correctly — `incomplete` has
+  five causes and the reason named one · the insight wizard was the only overlay in the app
+  that ignored ESC · fee reset was the app's only native `window.confirm`, and it is the
+  control that changes what every future trade costs (now `confirmDialog`, stating up front
+  that history keeps its own fee snapshot; a contract test bans native dialogs) · the oversell
+  block quoted the position's FINAL NET quantity — 「部位將為 9.5 股」, a positive number offered
+  as proof of a shortfall — where the date-aware guard knows the day: the replay now records
+  `oversold_on` / `oversold_sold` / `oversold_held` and the message names it · the 加值 guard
+  turned a field red and said nothing.
+- **F-18 — DISMISSED, nothing changed.** The sweep read a `DELETE /api/instruments/2330 → 422`
+  as 永久移除 being pressable while the dialog said it was impossible. Re-checked: that 422 is
+  the HIDE path (`DELETE`; purge is `POST …/purge`) refusing a HELD symbol with code `held`,
+  which `instruments.js` catches by name to raise its 「無法移除」 dialog. 永久移除 is genuinely
+  disabled whenever the warning shows — the type-to-confirm input that alone can enable it is
+  not created on that branch. A test pins the two API facts so the next reader need not
+  re-derive them.
+- **Payload / spec impact.** `tests/golden/dashboard_full.json` moves by exactly TWO lines —
+  `sector_weight` and `fx_drift` gain the hrefs they never had; nothing else in the snapshot
+  changes (the other two href-less rules do not fire in the golden fixture). `_Position` gains
+  three locator fields, so `docs/spec/2026-08-06-corporate-actions.md` §4.4 — the NORMATIVE
+  field-transfer table — gains a row for each, stating that they are not transferred and are
+  unreachable (E3/E22 refuse any action on a position that has them set) plus the warning that
+  the two quantities are in PRE-action share terms and must never be carried forward if those
+  guards are ever relaxed. That table's own count guard caught the addition and refused the
+  change until the rows existed; it also surfaced that the `_apply_action` docstring still said
+  "nine fields" while the table listed ten, stale since `vacated_to` landed. `.claude/rules/
+  domain-ledger.md`'s preview rule is widened from `preview.realized` to every projected column.
+
+- **A gate claim from `9fcc832` was wrong, and the tree carried a real error.** `mypy` was
+  reported clean at 665 files; re-run with a COLD cache it found an existing type error in
+  `tests/portfolio/test_review_r7_b_takes_cash_kinds.py` (a decomposition summed over
+  `Decimal | None`). The earlier run was reading a stale incremental cache. Fixed, and the
+  assertion is now stronger — `is not None` first, so a never-computed figure fails as itself
+  rather than as a value mismatch. This is the second over-read of a gate in this programme
+  (the first was counting pytest result characters); both are in `LESSONS_LEARNED.md`.
+
 ## [v0.1.28] - 2026-08-09
 
 A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not

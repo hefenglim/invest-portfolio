@@ -543,6 +543,13 @@ def _position_preview(
             # partial books 6,000. Anything that mirrors the replay must mirror its BRANCHES,
             # not just its happy-path formula (domain-ledger.md).
             long_shares = held.shares if held.shares > _ZERO else _ZERO
+            # Each branch also projects the position TOTALS it leaves behind, because the
+            # averages beside the realized figure are the SAME mirror obligation one column
+            # over (sweep F-01, 2026-08-27). Until now the SELL side returned no ``new_*_avg``
+            # at all and the frontend asserted, as a fact, that "a SELL leaves the averages
+            # unchanged" — true of the ORDINARY branch and of no other. Totals, never averages:
+            # ``build_book`` moves totals and divides on read (domain-ledger.md), so projecting
+            # an average directly would re-divide and drift in the last digit.
             if body.short_sale:
                 # cost_basis.py: sell the long lot first, then open/extend the short with the
                 # remainder. Note the replay realizes at ``per_share_net × from_long`` — NOT
@@ -552,9 +559,23 @@ def _position_preview(
                 per_share_net = (gross - fee - tax) / qty
                 cost_removed = (held.adjusted_cost_total * (from_long / held.shares)
                                 if from_long > _ZERO else None)
+                original_removed = (held.original_cost_total * (from_long / held.shares)
+                                    if from_long > _ZERO else _ZERO)
                 realized_pnl = (per_share_net * from_long - cost_removed
                                 if cost_removed is not None else None)
                 oversell = False
+                # The short lot holds the PROCEEDS as its basis and the holding is reported
+                # signed (cost_basis.py: ``original_total - short_proceeds`` over
+                # ``shares - short_shares``), so subtracting the proceeds here reproduces the
+                # negative basis exactly — for a fresh short AND for one being extended.
+                new_original_total = (held.original_cost_total - original_removed
+                                      - per_share_net * to_short)
+                # `is None`, not `or`: a Decimal("0") is falsy, and while both arms happen
+                # to be zero here, an `or` on a money value is a habit that stops being
+                # harmless the moment the operand can be a legitimate zero-vs-absent.
+                removed_adj = _ZERO if cost_removed is None else cost_removed
+                new_adjusted_total = (held.adjusted_cost_total - removed_adj
+                                      - per_share_net * to_short)
                 note = ("放空／加空的部分不產生已實現損益，帳本以收到的價金作為空單成本基礎"
                         if to_short > _ZERO else None)
             elif qty > held.shares:
@@ -563,6 +584,22 @@ def _position_preview(
                 from_long, to_short = held.shares, _ZERO
                 cost_removed = realized_pnl = None
                 oversell = True
+                # DISCARDED, so the projection is zero — not the pre-trade average, which the
+                # card used to print directly above its own warning that the basis is about to
+                # be permanently discarded. Zero is what the ledger will hold, so this agrees
+                # with the row the user is about to see rather than contradicting the note.
+                #
+                # ⚠ The replay zeroes only the LONG totals (``pos.original_total = _ZERO``);
+                # an open SHORT lot keeps its proceeds and is netted in afterwards. Long and
+                # short are mutually exclusive by construction, so the signed holding is
+                # entirely one or the other — and an undeclared sell INTO an existing short
+                # therefore leaves that short's basis untouched. Zeroing both printed an
+                # average of 0 where the ledger goes on holding 130.
+                if held.shares > _ZERO:
+                    new_original_total = new_adjusted_total = _ZERO
+                else:
+                    new_original_total = held.original_cost_total
+                    new_adjusted_total = held.adjusted_cost_total
                 note = "賣超：成本基礎無法認定，帳本不會產生已實現損益（待釐清）"
             else:
                 # The ORDINARY branch, byte-identical to before: frac / removed mirror
@@ -572,11 +609,19 @@ def _position_preview(
                 cost_removed = held.adjusted_cost_total * (qty / held.shares)
                 realized_pnl = (gross - fee - tax) - cost_removed
                 oversell = False
+                new_original_total = (held.original_cost_total
+                                      - held.original_cost_total * (qty / held.shares))
+                new_adjusted_total = held.adjusted_cost_total - cost_removed
                 note = None
             # SIGNED, not floored at 0 (changed 2026-08-24): a declared sell that opens a short
             # leaves -N shares, and every other surface in the app renders an open short that
             # way. Flooring printed 「0」 for a position the ledger holds.
             remain = held.shares - qty
+            # A flat position is DROPPED by the replay (``if shares == _ZERO: continue``), so
+            # there is no average to report — the same null the BUY branch already returns on
+            # an exact cover.
+            new_original_avg = None if remain == _ZERO else new_original_total / remain
+            new_adjusted_avg = None if remain == _ZERO else new_adjusted_total / remain
             return {
                 "kind": "sell",
                 "cost_removed": None if cost_removed is None else decimal_str(cost_removed),
@@ -586,6 +631,10 @@ def _position_preview(
                 "oversell": oversell,
                 "note": note,
                 "remain_shares": decimal_str(remain),
+                "new_original_avg": (None if new_original_avg is None
+                                     else decimal_str(new_original_avg)),
+                "new_adjusted_avg": (None if new_adjusted_avg is None
+                                     else decimal_str(new_adjusted_avg)),
                 **_old_position_fields(held),
             }
         all_in = gross + fee + tax
@@ -980,6 +1029,14 @@ class ImportCommitBody(BaseModel):
     #: See :class:`ImportPreviewBody`. Carried through from the preview so the commit
     #: re-derives the SAME verdict — the preview's answer is advisory, this one writes.
     pending_actions_csv: str | None = None
+    #: The rows the caller actually ticked, as ``PreviewRow.index`` values. ``None`` means
+    #: "all of them" — every other caller (the AI door, which commits a CSV it has already
+    #: filtered, and undo) sends nothing and means exactly that, so the omission stays
+    #: byte-compatible. Sent as INDICES, not as a re-rendered CSV: ``csv.DictReader`` row *n*
+    #: is not text line *n+1* once a quoted field contains a newline, and the frontend must
+    #: not re-parse what the server has already parsed correctly (F-03, 2026-08-27 — the
+    #: button was labelled 「確認寫入勾選列」 and wrote the whole paste).
+    select: list[int] | None = None
 
 
 @router.post("/import/commit")
@@ -1010,6 +1067,12 @@ def import_commit(
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", "有警告列需確認後才寫入"))
     accept = {r.index for r in preview.rows if not r.has_hard_issue}
+    if body.select is not None:
+        # INTERSECTED, never substituted: a deselected row is skipped, and so is a row the
+        # validator rejected even if the caller ticked it. `commit_preview`'s own comment has
+        # always reasoned about "a row the caller deselected" — the seam was built for this
+        # and had no caller until now.
+        accept &= set(body.select)
     # Provenance. The hashes are derived from the rows' own content, so re-uploading the
     # same export matches and skips rather than doubling the ledger, and the batch id makes
     # the whole import removable in one step. The batch INSERT sits inside commit_preview's

@@ -1704,6 +1704,100 @@ CATALOG: list[Feature] = [
         href=None,
         area="全站",
     ),
+    # --- v0.1.29, full-site interaction sweep remediation (2026-08-27) ------------------
+    Feature(
+        version="0.1.29",
+        id="sell-preview-shows-the-new-average",
+        title="賣出預覽的「交易後均價」以前印的是交易前的數字",
+        desc="宣告放空與賣超這兩種賣出，帳本寫進去的均價和交易前完全不同——放空以收到的"
+        "價金當成本基礎，賣超則直接捨棄成本基礎——但預覽兩邊都印同一個舊數字。"
+        "最誇張的一幕是賣超：卡片上一行寫「240.00 → 240.00」，下一行的警語寫"
+        "「這個部位的成本基礎會被永久捨棄」。現在三種賣出各自投影它真正會留下的部位，"
+        "沒有部位就顯示破折號；個股抽屜因為沒有放空勾選可讀，改成誠實地不給數字",
+        href="trades.html",
+        area="交易輸入 → 手動交易",
+        target="#pane-manual",
+    ),
+    Feature(
+        version="0.1.29",
+        id="whatif-names-the-blocking-oversell",
+        title="一筆賣超讓全站每一檔的試算都掛掉，而畫面不說是哪一筆",
+        desc="帳本裡任何一個未釐清的賣超部位，都會讓每一檔股票的抽屜試算只顯示"
+        "「試算暫不可用」——包含其他帳戶、其他市場的標的。後端其實早就算出是哪個帳戶、"
+        "哪一檔、哪一天，只是被丟掉了。現在那句話會直接說出來，右上角 XIRR 的說法本來就"
+        "是這樣指名道姓的",
+        href="index.html",
+        area="儀表板 → 個股抽屜 → 試算",
+        target=".sd-drawer",
+    ),
+    Feature(
+        version="0.1.29",
+        id="csv-import-honours-the-checkboxes",
+        title="「確認寫入勾選列」以前不看勾選，整份都寫",
+        desc="CSV 預覽每一列都有勾選框，取消勾選卻不影響任何事——實測貼三列、取消兩列，"
+        "三列全部寫進帳本。現在只寫勾選的列，結果橫幅會如實寫「成功 1 筆・跳過 2 筆」，"
+        "而且全部取消勾選時按鈕會停用（以前照樣可按，然後寫全部）",
+        href="trades.html",
+        area="交易輸入 → CSV 匯入",
+        target="#csv-confirm",
+    ),
+    Feature(
+        version="0.1.29",
+        id="broker-undo-refreshes-the-ledger",
+        title="券商匯入的復原之後，下方帳本沒有跟著更新",
+        desc="復原成功、跳出「已刪除 3 筆」，下方帳本表格卻還列著那三筆——因為它呼叫的是一個"
+        "從來不存在的函式名稱，而防呆寫法讓它安靜地什麼都沒做。現在接到正確的刷新縫，"
+        "並且加了一條守衛：只要有程式呼叫一個沒被定義的全域函式，測試就會擋下來",
+        href="trades.html",
+        area="交易輸入 → CSV 匯入 → 券商對帳單",
+        target="#bk-batches",
+    ),
+    Feature(
+        version="0.1.29",
+        id="symbol-picker-keyboard",
+        title="代號選單現在可以用鍵盤選",
+        desc="以前打字可以過濾，但方向鍵不會標記任何一列、Enter 也選不到——只能用滑鼠點。"
+        "現在 ↑ ↓ 移動、Enter 選取、Home/End 跳頭尾，滑鼠的行為完全沒變。"
+        "手動交易、股利、期初庫存三個表單共用這個選單",
+        href="trades.html",
+        area="交易輸入 → 代號欄位",
+        target="#m-symbol",
+    ),
+    Feature(
+        version="0.1.29",
+        id="rebalance-total-matches-the-fields",
+        title="再平衡的「目標合計」和畫面上的欄位對不起來",
+        desc="頁尾寫 100.00%，但畫面上 17 個目標欄位加起來是 100.1%——欄位顯示的是四捨五入到"
+        "小數一位的值，合計卻用完整精度算，而送去試算與匯出執行報告的也是你沒看過的那組數字。"
+        "現在欄位與內部狀態從一開始就同源，合計誠實顯示 100.1%，超過 100% 的警告也會如實亮起",
+        href="index.html",
+        area="儀表板 → 持倉明細 → 再平衡試算",
+        target=".rb-open-btn",
+    ),
+    Feature(
+        version="0.1.29",
+        id="alerts-portfolio-level-links",
+        title="四種組合層警示點下去沒有反應",
+        desc="產業權重偏高、匯率偏離成本、組合自高點回撤、幣別權重偏高——這四種剛好是最值得"
+        "點進去看的組合層風險，卻是鈴鐺清單裡唯一沒有落點的四種（游標變成手指，點了什麼都"
+        "不會發生）。現在各自連到顯示那個數字的面板；真的沒有落點的警示以後不會再畫成連結",
+        href="index.html",
+        area="頂欄 → 風險預警鈴鐺",
+        target=".bell-btn",
+    ),
+    Feature(
+        version="0.1.29",
+        id="honest-degrade-messages",
+        title="幾句說錯方向的提示訊息",
+        desc="「含匯兌總損益」暫不計算時一律說是「最新一日有標的缺價」，但真正的原因也可能是"
+        "賣超或公司行動未套用——同一塊 KPI 上的 XIRR 本來就說得出是哪一種。帳本編輯的賣超警告"
+        "報的是「最終淨部位」（可能是正數，看起來像在自相矛盾），現在改成指名出事的那一天與"
+        "當日持股。另外「重試」按鈕接上了、複製失敗不再跳成功、加值空白會說明原因、"
+        "費率重設改用完整的確認框並先講清楚歷史不會被重算",
+        href="index.html",
+        area="全站",
+        target=".kpi-band",
+    ),
 ]
 
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's

@@ -596,8 +596,13 @@
       });
       /* R6-E + R7 A4: drawer-parity 試算 what-if rendered as OLD → NEW pairs (SERVER-computed;
          position_preview is null when the symbol is unregistered / inputs incomplete — the
-         rows simply do not render). A SELL leaves the averages unchanged (no new_*_avg), so
-         those pairs show old == old; a fresh BUY has null old_* → old renders as「—」. */
+         rows simply do not render). A fresh BUY has null old_* → old renders as「—」.
+         ⚠ This block used to render the SELL averages as old → OLD, on the stated assumption
+         that "a SELL leaves the averages unchanged". That holds for the ORDINARY branch and
+         for no other (sweep F-01, 2026-08-27): a declared short leaves a SHORT lot whose basis
+         is the proceeds received, an undeclared oversell DISCARDS the basis, and a full exit
+         leaves no position at all. The server now projects all three (`new_*_avg`, null when
+         there is no position), so this side never re-derives one. */
       const pp = preview.position_preview;
       /* cost_removed / realized_pnl are NULL on the two branches the ledger books no realized
          row for — extending a short, and an undeclared 賣超 (review 2026-08-24). f.* renders
@@ -607,8 +612,8 @@
       const sgn = (v) => f.signed(v, ccy) + (v == null ? '' : ' ' + ccy);
       if (pp && pp.kind === 'sell') {
         pcPair('持股', f.shares(pp.old_shares), f.shares(pp.remain_shares));
-        pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.old_original_avg, ccy));
-        pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.old_adjusted_avg, ccy));
+        pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.new_original_avg, ccy));
+        pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.new_adjusted_avg, ccy));
         pcRow('調整成本移除', amt(pp.cost_removed));
         pcRow('已實現損益', sgn(pp.realized_pnl), f.signClass(pp.realized_pnl));
         if (pp.short_opened) pcRow('開／加空股數', f.shares(pp.short_opened));
@@ -1100,6 +1105,11 @@
       cb.type = 'checkbox';
       cb.checked = r.status !== 'error';
       cb.disabled = r.status === 'error';
+      /* The row's own PreviewRow.index, which the commit sends back as `select` (F-03).
+         These boxes existed, were pre-ticked, and were bound to nothing: unticking two of
+         three rows still wrote all three, under a button labelled 「確認寫入勾選列」. */
+      cb.dataset.n = String(r.n || 0);
+      cb.addEventListener('change', refreshCsvConfirm);
       tdCb.appendChild(cb);
       tr.appendChild(tdCb);
       tr.appendChild(el('td', 'num', '#' + ((r.n || 0) + 1)));
@@ -1145,8 +1155,28 @@
       return;
     }
     hideDateFmtChooser();
-    /* confirm enables when there is anything non-error to write */
-    $('#csv-confirm').disabled = ((s.ok || 0) + (s.warn || 0)) === 0;
+    refreshCsvConfirm();
+  }
+
+  /* The ticked rows, as PreviewRow.index values — the server filters on these. Indices
+     rather than a rebuilt CSV: a quoted field may contain a newline, so DictReader row n is
+     not text line n+1, and this layer has no CSV parser (and must not grow one). */
+  function csvSelectedRows() {
+    const body = $('#csv-body');
+    const boxes = body ? body.querySelectorAll('input[type=checkbox]') : [];
+    const picked = [];
+    Array.prototype.forEach.call(boxes, (cb) => {
+      if (cb.checked && !cb.disabled) picked.push(parseInt(cb.dataset.n, 10));
+    });
+    return picked.filter((n) => !Number.isNaN(n));
+  }
+
+  /* Confirm enables only when something is actually ticked — mirrors refreshAiWriteBtn.
+     Previously it enabled on "anything non-error exists", so a user who unticked every row
+     was still invited to press a button that would write all of them. */
+  function refreshCsvConfirm() {
+    const btn = $('#csv-confirm');
+    if (btn) btn.disabled = csvSelectedRows().length === 0;
   }
 
   /* Commit the pasted CSV. The backend re-derives from csv_text (re-validates vs the
@@ -1157,7 +1187,8 @@
     const csvText = paste ? paste.value.trim() : '';
     if (!csvText) return;
     const commitBody = (ack) => {
-      const b = { kind: csvKind, csv_text: csvText, ack_warnings: ack };
+      const b = { kind: csvKind, csv_text: csvText, ack_warnings: ack,
+                  select: csvSelectedRows() };
       if (csvDateFormat) b.date_format = csvDateFormat;  // FU-D19: carry the pinned format
       return b;
     };
@@ -1276,6 +1307,12 @@
     $('#ai-degrade-quota').hidden = true;
     $('#ai-degrade-down').hidden = true;
     $('#ai-parse').addEventListener('click', runAiPreview);
+    /* F-07: the 重試 button on the 「LLM 服務暫時無法連線」 degrade card had no listener at
+       all — and it is that card's ONLY action, so the two sibling cards offered a way out
+       (前往 AI 與額度設定) and this one left the user on a dead end. Same handler as 解析,
+       because retrying IS parsing again. */
+    const aiRetry = $('#ai-retry');
+    if (aiRetry) aiRetry.addEventListener('click', runAiPreview);
     const writeAll = $('#ai-write-all');
     if (writeAll) writeAll.addEventListener('click', commitAi);
     refreshAiWriteBtn();   // no parse yet -> 寫入 starts disabled (no empty commit)

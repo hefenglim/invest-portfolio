@@ -230,9 +230,15 @@
      in place; others navigate via the href (kept for middle-click / a11y). */
   function makeItemRow(sev, titleText, detailText, href) {
     const mapped = mapAlertHref(href);
-    const item = el('a', 'bell-item sev-' + sev);
-    item.href = mapped.href || '#';
-    if (mapped.sym && window.pdOpenSymbol) {
+    /* F-10: an alert with no landing spot is rendered as a DIV, not an <a href="#">. The
+       old form gave a pointer cursor, a hover underline and a keyboard tab stop to a row
+       that navigates to the top of the page you are already on — the cursor was making a
+       promise the row could not keep. All sixteen rules now carry an href (alerts.py has an
+       AST guard), so this is defence for the seventeenth. */
+    const dead = !mapped.href || mapped.href === '#';
+    const item = el(dead ? 'div' : 'a', 'bell-item sev-' + sev);
+    if (!dead) item.href = mapped.href;
+    if (!dead && mapped.sym && window.pdOpenSymbol) {
       item.addEventListener('click', (ev) => {
         ev.preventDefault();
         panel.hidden = true;

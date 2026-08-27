@@ -158,9 +158,20 @@
        is a target PERCENTAGE (a UI weight), NOT money — the only money/share numbers come
        back from the backend preview below and render through f.*. */
     const state = {};
+    /* The 目標 % field renders ONE decimal place of a percent, so the state behind it must be
+       that same number. It was not: the fields were `.toFixed(1)` views of full-precision
+       weights, while 目標合計 and the plan POSTed to /api/rebalance/preview were summed from
+       the unrounded values. Measured 2026-08-27 (F-06): 17 visible fields summing to 100.1%
+       under a footer reading 「目標合計 100.00%」, with the over-100% warning silent — and the
+       exported execution report computed from targets the user had never seen.
+       Seeding THROUGH the display precision makes the two agree by construction. The cost is
+       a ≤0.05pp nudge to an untouched current weight; the benefit is that 目標合計 now shows
+       100.1% and trips the existing warning, which is what that warning is for. */
+    const displayRatio = (ratio) => Number(((Number(ratio) || 0) * 100).toFixed(1)) / 100;
     order.forEach((sym) => {
       const g = groups[sym];
-      state[sym] = (storedTargets[sym] !== undefined) ? storedTargets[sym] : g.weightSum;
+      state[sym] = displayRatio(
+        (storedTargets[sym] !== undefined) ? storedTargets[sym] : g.weightSum);
     });
 
     /* build rows ONCE (one per SYMBOL); keep refs to computed cells, keyed by symbol for
@@ -364,14 +375,14 @@
 
     capBtn.addEventListener('click', () => {
       rows.forEach((r) => {
-        state[r.symbol] = Math.min(r.group.weightSum, CAP);  /* combined current weight vs cap */
+        state[r.symbol] = displayRatio(Math.min(r.group.weightSum, CAP));  /* combined current weight vs cap */
         r.inp.value = (state[r.symbol] * 100).toFixed(1);
       });
       update();
     });
     resetBtn.addEventListener('click', () => {
       rows.forEach((r) => {
-        state[r.symbol] = r.group.weightSum;  /* reset to combined current weight */
+        state[r.symbol] = displayRatio(r.group.weightSum);  /* reset to combined current weight */
         r.inp.value = (state[r.symbol] * 100).toFixed(1);
       });
       update();

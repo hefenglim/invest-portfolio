@@ -172,8 +172,25 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   formula to all three fabricated a `+500` realized on a short extension the ledger books
   nothing for — while the holdings column two rows above honestly printed 「—」, and the drawer
   gave a third answer for the same trade. **One app must not show three answers**, and a
-  preview that disagrees with what will be written is worse than no preview. Pin it with a
-  contract test asserting `preview.realized ≡ the booked realized row` for all three shapes.
+  preview that disagrees with what will be written is worse than no preview.
+  ⚠ **EVERY projected column, not just the realized one** (widened 2026-08-27, sweep F-01).
+  The 2026-08-24 pin was written as 「`preview.realized` ≡ the booked realized row for all three
+  shapes」 — and that is exactly what shipped, so the AVERAGE pair rendered beside it went on
+  projecting a single happy path for another three days. A declared short leaves a SHORT lot
+  based on the proceeds received; an undeclared oversell DISCARDS the basis; a full exit leaves
+  no position at all (`build_book` drops `shares == 0`). The preview printed the PRE-trade
+  average for all of them, so a card read 「240.00 → 240.00」 directly above its own warning that
+  the basis was about to be permanently discarded. **A pin that names one field certifies one
+  field.** The contract test is parametrised over every sell shape × every projected column and
+  compares against `build_book`, so a new column or a fourth branch fails on its own
+  (`tests/api/test_review_r1_preview_mirrors_replay.py`).
+  ⚠ **Project the TOTALS, then divide on read** — never project an average directly. The replay
+  moves `original_total` / `adjusted_total` and computes `avg = total / shares` on read
+  (`data-and-pricing.md`); an average projected in one step re-divides and can differ in the
+  last digit from the row that gets written.
+  ⚠ **A surface that cannot know which branch applies must say so, not pick one.** The drawer
+  has no 放空 declaration to read, so it states the fork and gives NO figure — for the averages
+  exactly as it already did for the realized amount.
 
 ### Declared short sale (owner ruling 2026-07-31, spec option C)
 

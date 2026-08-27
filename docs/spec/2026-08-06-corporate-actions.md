@@ -532,8 +532,8 @@ defaulted**. A SPINOFF row without it is rejected at validation — the same pos
 ### 4.4 Complete `_Position` field transfer table — NORMATIVE
 
 The formulas above name only the fields they change, which leaves the rest to inference. `_Position`
-has **ten** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an explicit
-rule here, because "the formula didn't mention it" is not a specification.
+has **thirteen** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an
+explicit rule here, because "the formula didn't mention it" is not a specification.
 
 > **Count corrected 2026-08-10 (F-37), and the guard has since paid for itself.** This paragraph
 > said *seven* while the table listed *eight* rows and the class already had *nine* —
@@ -556,9 +556,24 @@ rule here, because "the formula didn't mention it" is not a specification.
 | `short_shares` | `× to / from` (E4) | **`P := 0`** — see below | unchanged (E5 guarantees 0) |
 | `short_proceeds` | unchanged (E4) | **`P := 0`** — see below | unchanged (E5 guarantees 0) |
 | `ever_oversold` | unchanged | **SOURCE** is `False` (E3 rejects). **DESTINATION** must be `False` too — **E22** rejects the action otherwise; nothing is transferred | same (E22 applies to the child's destination as well) |
+| `oversold_on` *(added 2026-08-27, **F-16**)* | unchanged | **not transferred, and UNREACHABLE** — non-`None` only when `ever_oversold` is `True`, which E3 (source) / E22 (destination) already refuse | same |
+| `oversold_sold` *(added 2026-08-27, **F-16**)* | unchanged | same as above; ⚠ **must never be carried** even if the guards above were ever relaxed — it is a share count in PRE-action terms | same |
+| `oversold_held` *(added 2026-08-27, **F-16**)* | unchanged | same as above, and the same PRE-action-terms warning | same |
 | `unbookable_dividend` | unchanged | OR-ed into Q: `Q.unbookable_dividend \|= P.unbookable_dividend` (E19) | same OR into the child (E19); `P` keeps its own |
 | `unbookable_action` *(added 2026-08-10)* | unchanged | OR-ed into Q: `Q.unbookable_action \|= P.unbookable_action` (the propagation line in the EXCHANGE branch) | same OR into the child (the SPINOFF branch's line); `P` keeps its own |
 | `vacated_to` *(added 2026-08-11, **E24 / D32**)* | unchanged (`None`) | **`P.vacated_to := to_symbol`** — the field's only writer | unchanged (`None`): a SPINOFF does **not** vacate its parent |
+
+**Why three fields whose rule is "unreachable" still get rows (F-16, 2026-08-27).** They record
+WHERE the first oversell happened — the date, the quantity sold and the quantity held — so a caller
+can name the day the ledger broke instead of quoting the position's final net quantity (which the
+date-aware guard makes meaningless: it can be positive). They are set only alongside
+`ever_oversold`, so E3 and E22 already refuse every action that could touch them, and no transfer
+rule can execute. That is a *reason*, not an exemption: **"unreachable" is a claim that can quietly
+stop being true**, and this section exists precisely because inference is not a specification. The
+warning on the two quantity rows is the part that would actually bite — they are share counts in
+PRE-action terms, so a future relaxation that carried them forward unscaled would produce a
+sentence naming a day, a quantity sold and a quantity held that no longer correspond to anything.
+Pinned by `test_f16_locator_fields_never_survive_into_a_corporate_action`.
 
 **Why the DESTINATION's `ever_oversold` needs its own rule (E22, D16).** The first version of this
 table reasoned only about the source: "E3 rejects the action, so it is `False` here." That covers

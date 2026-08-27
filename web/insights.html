@@ -790,8 +790,13 @@
           return t.enabled && t.scope !== 'on_alert'; // on_alert is event-triggered
         });
         if (!runnable.length) {
+          /* F-11: the toast and the navigation were in the same synchronous block, so the
+             message explaining WHY the page was about to change never survived to be read —
+             it was destroyed by the very navigation it was explaining. Pressing a button
+             called 「產生洞察」 and simply landing on another page reads as a misfire.
+             Delayed like shell.js's 重算/報價更新 do it (prog.done → setTimeout(reload)). */
           if (window.toast) window.toast('尚無可執行的洞察任務', 'fail', '前往「洞察管線」建立或啟用任務');
-          window.location.href = 'pipeline-hub.html';
+          setTimeout(function () { window.location.href = 'pipeline-hub.html'; }, 1200);
           return;
         }
         if (runnable.length === 1) { runTask(runnable[0]); return; }

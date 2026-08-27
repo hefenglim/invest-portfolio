@@ -257,7 +257,9 @@ class FxCompleteOutcome:
     reason: str | None
 
 
-def fx_complete_return(trend: TrendSeries) -> FxCompleteOutcome:
+def fx_complete_return(
+    trend: TrendSeries, *, has_oversold: bool, has_unapplied_action: bool
+) -> FxCompleteOutcome:
     """B of the A · B · B−A decomposition — the FX-COMPLETE lifetime result (AI-D41).
 
     ``total_return`` (A) translates each currency's NET P&L at today's spot, so the rate never
@@ -275,8 +277,18 @@ def fx_complete_return(trend: TrendSeries) -> FxCompleteOutcome:
         return FxCompleteOutcome(None, "尚無趨勢資料,無法計算含匯兌損益")
     last = trend.points[-1]
     if last.incomplete:
+        # WHICH kind of incomplete (F-13, 2026-08-27). `TrendPoint.incomplete` is set by five
+        # different causes — a missing price, a 賣超 position, an unbookable dividend, an
+        # unapplied corporate action, a whole-book action failure — and this reason named only
+        # the first. Measured: an oversold TSLA that HAD a same-day close produced 「最新一日
+        # 有標的缺價」, sending the reader off to check the price feed, while the XIRR row two
+        # lines above, reading the same book, said 「帳本中有賣超部位待釐清」. Same ladder order
+        # as the XIRR gate, so one book never yields two diagnoses.
+        why = ("帳本中有賣超部位待釐清" if has_oversold
+               else "帳本中有公司行動無法套用（待釐清）" if has_unapplied_action
+               else "最新一日有標的缺價")
         return FxCompleteOutcome(
-            None, "最新一日有標的缺價,含匯兌總損益暫不計算(不以較早日期替代,否則與"
+            None, f"{why},含匯兌總損益暫不計算(不以較早日期替代,否則與"
                   "上方資產損益不同日,兩者的差額會失去意義)")
     return FxCompleteOutcome(last.total_value - last.net_invested, None)
 
@@ -733,7 +745,9 @@ def build_dashboard(
     # AI-D41: B and B − A ride beside A. Computed HERE because this is the only layer
     # holding both the ReturnSummary and the TrendSeries; neither module can see the
     # other's figure, which is precisely why the discrepancy went unnoticed.
-    fx_outcome = fx_complete_return(trend)
+    fx_outcome = fx_complete_return(
+        trend, has_oversold=has_oversold,
+        has_unapplied_action=bool(unapplied_actions))
     fx_complete = fx_outcome.value
     # AI-D48 made B − A a TWO-term difference, so the third term is subtracted out rather
     # than left inside 「本金匯率效果」 — a residual that quietly absorbs whatever joins B next

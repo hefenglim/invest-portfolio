@@ -1288,22 +1288,35 @@
       }).then((r) => {
         if (mySeq !== seq) return;  // superseded by a newer edit — drop this reply
         render(r);
-      }).catch(() => {
+      }).catch((err) => {
         if (mySeq !== seq) return;  // superseded — ignore a stale failure
         result.replaceChildren();
-        note.textContent = '試算暫不可用';  // never fabricate, never fall back to local math
+        /* Never fabricate, never fall back to local math — but DO repeat the server's own
+           explanation when it gave one (F-02). An oversell anywhere in the ledger blocks
+           every symbol's 試算, and a bare 「試算暫不可用」 left the user with no way to find
+           the offending row. Only a deliberate 400 is quoted: a 500 or a dropped connection
+           carries `statusText`, not an explanation, and 「Internal Server Error」 on the card
+           would be worse than the generic line. */
+        const explained = err && err.status === 400
+          && err.code === 'validation_error' && err.message;
+        note.textContent = explained || '試算暫不可用';
       });
     }
 
     function render(r) {
       result.replaceChildren();
       note.textContent = '';
-      /* OLD → NEW pairs (持股 / 原始均價 / 調整均價 / 權重). On a SELL the averages are
-         unchanged, so the backend returns no new_*_avg — new == old is a correct render, not
-         a gap (Senior Review #10); 持股-new is the remaining shares. */
+      /* OLD → NEW pairs (持股 / 原始均價 / 調整均價 / 權重); 持股-new is the remaining shares.
+         ⚠ This comment used to record as settled ("Senior Review #10") that a SELL leaves the
+         averages unchanged, so old == old was "a correct render, not a gap". That is true of
+         the ORDINARY branch alone (sweep F-01, 2026-08-27) — and the comment is how the
+         assumption survived being questioned. The server now sends new_*_avg on both sides:
+         null on an oversell, where this surface has no 放空 declaration to read and so states
+         the fork rather than picking a branch, and null on a full exit, which leaves no
+         position at all. f.price(null) renders the dash. */
       const newShares = mode === 'sell' ? r.remaining_shares : r.new_shares;
-      const newOrigAvg = mode === 'sell' ? r.old_original_avg : r.new_original_avg;
-      const newAdjAvg = mode === 'sell' ? r.old_adjusted_avg : r.new_adjusted_avg;
+      const newOrigAvg = r.new_original_avg;
+      const newAdjAvg = r.new_adjusted_avg;
       result.appendChild(pair('持股', f.shares(r.old_shares), f.shares(newShares)));
       result.appendChild(pair('原始均價', f.price(r.old_original_avg, ccy), f.price(newOrigAvg, ccy)));
       result.appendChild(pair('調整均價', f.price(r.old_adjusted_avg, ccy), f.price(newAdjAvg, ccy)));

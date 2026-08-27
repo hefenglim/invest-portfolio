@@ -249,7 +249,6 @@
 
       <!-- Tab: AI -->
       <div class="mode-pane" id="pane-ai">
-        <div class="state-switch"><span>設計檢視：</span><span id="ai-states" style="display:flex;gap:6px;"></span></div>
         <div id="ai-normal">
           <div class="dc-grid" style="padding-bottom:0;">
             <div class="field"><label for="ai-text">貼上對帳單文字…</label><textarea class="input" id="ai-text" style="min-height:110px;" spellcheck="false"></textarea></div>
@@ -288,7 +287,7 @@
         </div>
         <div class="degrade-panel" id="ai-degrade-off" hidden="hidden"><span class="glyph">◈</span><span class="ttl">AI 未啟用</span><span class="sub">尚未設定任何 LLM 模型</span><a class="btn btn-primary" href="settings.html#llm">前往 AI 與額度設定</a></div>
         <div class="degrade-panel" id="ai-degrade-quota" hidden="hidden"><span class="glyph">$</span><span class="ttl">AI 額度用盡</span><span class="sub">補充額度後即可繼續使用</span><a class="btn btn-primary" href="settings.html#llm">前往額度設定</a></div>
-        <div class="degrade-panel" id="ai-degrade-down" hidden="hidden"><span class="glyph">⚠</span><span class="ttl">LLM 服務暫時無法連線</span><span class="sub">請稍後重試</span><button class="btn btn-primary" type="button">重試</button></div>
+        <div class="degrade-panel" id="ai-degrade-down" hidden="hidden"><span class="glyph">⚠</span><span class="ttl">LLM 服務暫時無法連線</span><span class="sub">請稍後重試</span><button class="btn btn-primary" id="ai-retry" type="button">重試</button></div>
       </div>
 
       <!-- Tab: 股利 -->

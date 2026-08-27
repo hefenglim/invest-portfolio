@@ -1312,3 +1312,43 @@ every test after it. It failed loudly only because the neighbouring assertion ha
 navigation (a `@contextmanager` with `unroute` in `finally` — see
 `test_kpi_trading_cost_layout.py`). Noted in the `browser_page` docstring too, because that is
 where the next person looks. A leaked route never fails where it was installed.
+
+## mypy's incremental cache can report a clean tree over a real error (2026-08-27)
+
+`mypy` was recorded as `Success: no issues found in 665 source files` for commit `9fcc832`.
+Re-run on the SAME commit with `.mypy_cache` deleted, it found a genuine error that had been
+sitting in the tree — a three-term decomposition summed over `Decimal | None` operands in
+`tests/portfolio/test_review_r7_b_takes_cash_kinds.py`. The file count differed too (667, not
+665), which was the visible tell and was not noticed at the time.
+
+A cached run only re-checks what it believes changed. The error was introduced in the same
+session that produced the cache entry, so nothing invalidated it afterwards.
+
+**The rule:** the pre-ship mypy gate runs with a **cold cache** — `rm -rf .mypy_cache` before
+`python -m mypy` — or its "clean" is a statement about the cache, not about the code. The file
+count is part of the result: if it moves without files being added or removed, the run is not
+comparable to the previous one.
+
+This is the SECOND over-read of a gate in this programme; the first is the section above, on
+counting pytest result characters. Both had the same shape — a number that was true, and a
+claim built on it that was not. Both were caught only by a deliberate re-derivation (`git
+stash push` there, a cache wipe here). **When a gate result is going to be reported to the
+owner, re-derive it rather than reading it off a convenient artefact.**
+
+## A defensive `if (window.x)` turns a typo into permanent silence (2026-08-27)
+
+`web/broker-import.js` called `window.pdAfterLedgerChange()` from two places. Nothing in the
+repository has ever assigned that name; the seam `ledger.js` exposes is `pdLedgerRefresh`.
+Because every such call site is written as `if (window.pdX) window.pdX()`, the wrong name did
+not throw, did not log, and did not appear in a console-error sweep — an undo deleted three
+rows, toasted 「已復原 刪除 3 筆」, and left the table below still listing all three.
+
+The idiom is right (these seams are genuinely optional per page). What was missing is that
+nothing checked the NAMES. A wiring sweep cannot see this: the listener exists and fires.
+
+**The rule:** an optional cross-file global needs a static guard that every `window.pd*()`
+call has a matching `window.pd* =` somewhere in `web/`
+(`tests/contract/test_web_globals_are_defined.py`). Same family as the export-centre buttons
+that toasted success and downloaded nothing, and as the checkbox column bound to nothing:
+**a control or seam that fails SILENTLY is invisible to every sweep that counts things.** What
+finds them is asking, one at a time, "what actually changed when I pressed that?"

@@ -230,3 +230,104 @@ def test_ordinary_buy_is_byte_identical_to_before() -> None:
     assert Decimal(str(pp["new_original_avg"])) == D("250")
     assert "covered_shares" not in pp
     conn.close()
+
+
+# --- F-01 (full-site interaction sweep, 2026-08-27): the column beside the one above -----
+#
+# The guard above pins `preview.realized ≡ the booked realized row` for every branch. It
+# pins the one column that was NOT broken twice. The average pair rendered next to it still
+# projects old → old on all three branches, because the SELL side returns no `new_*_avg` at
+# all and `web/input.js` states the omission as a fact — "A SELL leaves the averages
+# unchanged". That is true of the ORDINARY branch and of no other:
+#
+#   * a DECLARED short that consumes the long lot leaves a SHORT position whose basis is the
+#     proceeds received, so the average becomes the average SALE price;
+#   * an UNDECLARED oversell DISCARDS the basis (`pos.original_total = _ZERO`), so the
+#     average collapses to zero — and the preview printed the PRE-trade average directly
+#     above its own warning that the basis will be permanently discarded;
+#   * a FULL exit leaves no position at all (`build_book` drops `shares == 0`), so there is
+#     no average to show — the convention the BUY branch's exact-cover case already uses.
+
+
+def _booked_avgs(
+    conn: sqlite3.Connection, body: ManualBody
+) -> tuple[Decimal | None, Decimal | None]:
+    """Replay the ledger WITH the hypothetical row; return the position's (original,
+    adjusted) averages afterwards, or (None, None) when it holds no position at all.
+
+    Asked of ``build_book`` rather than hand-computed, for the same reason
+    :func:`_booked_realized` is: a hand-computed expectation can agree with a wrong preview.
+    """
+    _tx(conn, Side.SELL, str(body.shares), str(body.price), body.date,
+        short=body.short_sale)
+    book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    for h in book.holdings:
+        if h.account_id == "schwab" and h.symbol == "TSLA":
+            return h.original_avg, h.adjusted_avg
+    return None, None
+
+
+@pytest.mark.parametrize(
+    ("setup", "qty", "price", "short"),
+    [
+        pytest.param([("BUY", "100", "240")], "40", "300", False, id="ordinary"),
+        pytest.param([("BUY", "100", "240")], "100", "300", False, id="full-exit"),
+        pytest.param([("BUY", "100", "240")], "150", "300", False, id="oversell"),
+        pytest.param([("BUY", "100", "240")], "150", "300", True, id="declared-partial"),
+        pytest.param([("BUY", "100", "240"), ("SHORT", "150", "260")],
+                     "50", "300", True, id="short-extension"),
+        pytest.param([("BUY", "100", "240"), ("SHORT", "150", "260")],
+                     "50", "300", False, id="undeclared-into-a-short"),
+    ],
+)
+def test_preview_new_average_equals_the_average_the_ledger_actually_books(
+    setup: list[tuple[str, str, str]], qty: str, price: str, short: bool
+) -> None:
+    conn = _conn()
+    for kind, q, p in setup:
+        _tx(conn, Side.BUY if kind == "BUY" else Side.SELL, q, p, date(2026, 4, 1),
+            short=(kind == "SHORT"))
+    body = _body(qty, price, short=short)
+    pp = _preview(conn, body)
+    booked_orig, booked_adj = _booked_avgs(conn, body)
+    for key, booked in (("new_original_avg", booked_orig), ("new_adjusted_avg", booked_adj)):
+        shown_raw = pp.get(key)
+        shown = None if shown_raw is None else Decimal(str(shown_raw))
+        assert shown == booked, f"{key}: preview {shown!r} != booked {booked!r}"
+    conn.close()
+
+
+def test_a_declared_short_projects_the_average_sale_price_not_the_old_cost() -> None:
+    """Hold 100 @240, declare a sell of 200 @310: the long goes, a 100-share short opens.
+
+    The short's basis is the proceeds received, so the projected average is the per-share
+    NET sale price — not the 240 the position used to cost. Stated as a literal so the
+    identity above cannot pass by agreeing with a second wrong derivation.
+    """
+    conn = _conn()
+    _tx(conn, Side.BUY, "100", "240", date(2026, 4, 1))
+    pp = _preview(conn, _body("200", "310", short=True))
+    assert pp["remain_shares"] == "-100"
+    assert Decimal(str(pp["new_original_avg"])) == D("310")   # per_share_net, no fees here
+    assert Decimal(str(pp["new_adjusted_avg"])) == D("310")
+    conn.close()
+
+
+def test_an_undeclared_oversell_projects_the_discarded_basis_not_the_old_average() -> None:
+    """The card must not print 「240.00 → 240.00」 above a warning that says the basis is gone."""
+    conn = _conn()
+    _tx(conn, Side.BUY, "100", "240", date(2026, 4, 1))
+    pp = _preview(conn, _body("150", "300"))
+    assert pp["oversell"] is True
+    assert Decimal(str(pp["new_original_avg"])) == D("0")
+    assert Decimal(str(pp["new_adjusted_avg"])) == D("0")
+    conn.close()
+
+
+def test_a_full_exit_shows_no_average_because_there_is_no_position() -> None:
+    conn = _conn()
+    _tx(conn, Side.BUY, "100", "240", date(2026, 4, 1))
+    pp = _preview(conn, _body("100", "300"))
+    assert pp["remain_shares"] == "0"
+    assert pp["new_original_avg"] is None and pp["new_adjusted_avg"] is None
+    conn.close()

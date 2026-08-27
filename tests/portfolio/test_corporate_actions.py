@@ -298,6 +298,16 @@ _SPEC_4_4_FIELDS = (
     "short_shares",
     "short_proceeds",
     "ever_oversold",
+    # F-16, 2026-08-27 — the first oversell's location, so a caller can name the DAY the
+    # ledger broke instead of the position's final net quantity. Transfer rule: NOT
+    # transferred and UNREACHABLE — they are non-None only when `ever_oversold` is True, and
+    # E3 (source) / E22 (destination) already refuse any action touching such a position.
+    # Stated rather than left implicit precisely because "unreachable" is a claim that can
+    # stop being true. Pinned by test_e3_action_on_an_oversold_position and by
+    # test_f16_locator_fields_never_survive_into_a_corporate_action below.
+    "oversold_on",
+    "oversold_sold",
+    "oversold_held",
     "unbookable_dividend",
     "unbookable_action",
     # E24 (D32), 2026-08-11 — added only after §4.4 gained its row, which is what this
@@ -640,6 +650,40 @@ def test_e18_exchange_into_a_short_destination() -> None:
     assert dest is not None and dest.short_open
     assert (dest.shares, dest.original_cost_total) == (D("-10"), D("-300")), \
         "the short keeps its own proceeds as basis — nothing was merged into it"
+
+
+def test_f16_locator_fields_never_survive_into_a_corporate_action() -> None:
+    """§4.4's row for the three F-16 locator fields, pinned rather than argued.
+
+    They are non-None only on a position whose ``ever_oversold`` is True, and E3 refuses any
+    action on such a source. So no transfer rule can ever run on a non-None value — and the
+    quantities would be WRONG if one did, because they are share counts in PRE-action terms
+    while every price after the action is post-action.
+
+    "Unreachable" is a claim that can quietly stop being true, which is exactly why §4.4
+    demands a row for every field instead of letting silence stand for a rule.
+    """
+    txs = [_buy("AAA", "10", "5"), _sell("AAA", "50", "6", date(2026, 2, 1))]
+    bundle = LedgerBundle(txs, instruments=INSTR, actions=[_act(CorporateActionKind.SPLIT)])
+    book = _book(bundle, allow_oversell=True)
+    h = _held(book, "AAA")
+    assert h is not None and h.oversold
+
+    # The locator records the event that actually happened, unscaled by the refused split.
+    assert h.oversold_on == date(2026, 2, 1)
+    assert h.oversold_sold == D("50")
+    assert h.oversold_held == D("10")
+    # And the action really was refused, which is what makes the row above unreachable.
+    assert h.unbookable_action
+
+
+def test_a_position_that_was_never_oversold_carries_no_locator() -> None:
+    """The fields must stay None on an ordinary book, or every consumer has to re-check."""
+    bundle = LedgerBundle([_buy("AAA", "10", "5")], instruments=INSTR, actions=[])
+    h = _held(_book(bundle), "AAA")
+    assert h is not None and not h.oversold
+    assert h.oversold_on is None
+    assert h.oversold_sold is None and h.oversold_held is None
 
 
 def test_e22_exchange_into_an_oversold_destination_is_refused() -> None:

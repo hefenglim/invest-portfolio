@@ -240,26 +240,53 @@
     }
   }
 
-  async function resetSet(name) {
-    if (!window.pdApi) return;
-    if (!window.confirm('重設「' + (RS_NAMES[name] || name) + '」所有費率為系統預設？')) return;
-    try {
-      replaceCard(await window.pdApi.post('/api/fee-rules/' + name + '/reset'));
-      if (window.toast) window.toast('已重設為系統預設', 'ok');
-    } catch (err) {
-      if (window.toast) window.toast(err.message, 'fail', err.code);
-    }
+  /* F-15: these two were the app's only native `window.confirm` — everywhere else (30+
+     confirmations met by the 2026-08-27 sweep) uses `confirmDialog`, which carries a title,
+     an explanation, a danger style and a named action button. The difference is not cosmetic:
+     a native confirm fits one line, and these two change what EVERY future trade costs. The
+     one fact the owner needs before deciding — that history is safe, because each row keeps
+     its own fee snapshot — was only being told to them AFTERWARDS, in the success toast. */
+  const HISTORY_NOTE = '僅影響未來交易；既有交易列各自保留當時的費率快照，不會被重算。';
+
+  function askThen(opts, run) {
+    if (!window.confirmDialog) { run(); return; }   // degrade: never silently do nothing
+    window.confirmDialog({
+      title: opts.title, body: opts.body, confirmLabel: opts.confirmLabel,
+      danger: true, onConfirm: run,
+    });
   }
 
-  async function resetAll() {
+  function resetSet(name) {
     if (!window.pdApi) return;
-    if (!window.confirm('重設全部費率規則為系統預設？此動作會清除所有費率調整。')) return;
-    try {
-      renderAll(await window.pdApi.post('/api/fee-rules/reset-all'));
-      if (window.toast) window.toast('全部費率已重設為系統預設', 'ok');
-    } catch (err) {
-      if (window.toast) window.toast(err.message, 'fail', err.code);
-    }
+    askThen({
+      title: '重設費率規則',
+      body: '將「' + (RS_NAMES[name] || name) + '」的所有費率恢復為系統預設值。' + HISTORY_NOTE,
+      confirmLabel: '重設此規則',
+    }, async () => {
+      try {
+        replaceCard(await window.pdApi.post('/api/fee-rules/' + name + '/reset'));
+        if (window.toast) window.toast('已重設為系統預設', 'ok');
+      } catch (err) {
+        if (window.toast) window.toast(err.message, 'fail', err.code);
+      }
+    });
+  }
+
+  function resetAll() {
+    if (!window.pdApi) return;
+    askThen({
+      title: '重設全部費率規則',
+      body: '將所有券商的費率規則恢復為系統預設值，清除你做過的每一項費率調整。'
+        + HISTORY_NOTE,
+      confirmLabel: '全部重設',
+    }, async () => {
+      try {
+        renderAll(await window.pdApi.post('/api/fee-rules/reset-all'));
+        if (window.toast) window.toast('全部費率已重設為系統預設', 'ok');
+      } catch (err) {
+        if (window.toast) window.toast(err.message, 'fail', err.code);
+      }
+    });
   }
 
   /* Replace a single card in place (keeps other cards' open/scroll state). */

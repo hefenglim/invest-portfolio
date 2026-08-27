@@ -172,6 +172,11 @@ def test_the_decomposition_stays_three_honest_terms(conn: sqlite3.Connection) ->
     _move(conn, "REBATE", "200")
     k = build_dashboard(conn, now=NOW, reporting=TWD).kpis
 
+    # `is not None` FIRST: both fields are Optional, and `None == D("0")` is a silent False
+    # that reads as an ordinary value mismatch rather than "the figure was never computed".
+    # It also narrows the type for the decomposition below, which is why mypy flagged the sum.
+    assert k.trading_financing_cost is not None and k.principal_fx_effect is not None
+    assert k.total_return is not None and k.total_return_fx_complete is not None
     assert k.trading_financing_cost == D("-700")  # P&L sign: a fee is negative
     assert k.principal_fx_effect == D("0")  # one currency -> no principal-FX effect at all
     assert k.total_return_fx_complete == (

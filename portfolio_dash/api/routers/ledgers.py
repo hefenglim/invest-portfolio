@@ -360,8 +360,13 @@ def _orphan_keys(bundle: LedgerBundle) -> set[tuple[str, str]]:
     return orphans
 
 
-def _oversold_shares(bundle: LedgerBundle) -> dict[tuple[str, str], Decimal] | None:
-    """Map of (account, symbol) → negative shares for oversold positions.
+def _oversold_shares(bundle: LedgerBundle) -> dict[tuple[str, str], Holding] | None:
+    """Map of (account, symbol) → the oversold Holding.
+
+    The whole Holding, not just ``shares``: the guard is DATE-AWARE, so the position's final
+    net quantity is not evidence of the problem — it can even be positive, since a later buy
+    nets it back up without restoring the discarded basis (F-16). ``oversold_on`` /
+    ``oversold_sold`` / ``oversold_held`` carry the day that actually broke.
 
     ``None`` when the ledger is un-bookable (e.g. a pre-existing orphan) — the caller
     then declines to scope the oversell rather than block an unrelated correction."""
@@ -369,7 +374,26 @@ def _oversold_shares(bundle: LedgerBundle) -> dict[tuple[str, str], Decimal] | N
         book = build_book(bundle, allow_oversell=True)
     except (ValueError, KeyError):
         return None
-    return {(h.account_id, h.symbol): h.shares for h in book.holdings if h.oversold}
+    return {(h.account_id, h.symbol): h for h in book.holdings if h.oversold}
+
+
+def _oversell_phrase(symbol: str, held: Holding) -> str:
+    """Name the DAY the ledger broke, not the position's final net quantity.
+
+    The date-aware guard exists because a back-dated sell can be uncovered on its own date
+    and covered by a later buy (domain-ledger.md, 2026-07-31). Reporting the end-state
+    therefore contradicts the finding it is reporting: 「部位將為 9.5 股」 is a positive number
+    offered as proof of a shortfall, and it names no day to go and look at.
+
+    Falls back to the old shape when the replay recorded no event — that arm is reachable for
+    a position flagged only by ``shares < 0``, and a message with a stale format is better
+    than one asserting a date that was never established.
+    """
+    if held.oversold_on is None or held.oversold_sold is None or held.oversold_held is None:
+        return f"{symbol} 部位將為 {decimal_str(held.shares)} 股"
+    return (f"{held.oversold_on.isoformat()} 的 {symbol} 賣出 "
+            f"{decimal_str(held.oversold_sold)} 股，超過當日持股 "
+            f"{decimal_str(held.oversold_held)} 股")
 
 
 def _replay_block(
@@ -409,13 +433,12 @@ def _replay_block(
                 message="此更正會使帳本無法重建，請檢查相關股利/期初紀錄")
         return None
     pre_over = pre_over_raw or {}
-    for key, shares in post_over.items():
+    for key, held in post_over.items():
         prev = pre_over.get(key)
-        if prev is None or shares < prev:  # newly oversold OR gone more negative
-            return _ReplayBlock(
-                code="oversell",
-                message=f"{key[1]} 部位將為 {decimal_str(shares)} 股",
-            )
+        # Compared on `shares` exactly as before — the SCOPE of the block is unchanged; only
+        # the sentence it produces is.
+        if prev is None or held.shares < prev.shares:  # newly oversold OR gone more negative
+            return _ReplayBlock(code="oversell", message=_oversell_phrase(key[1], held))
     return None
 
 

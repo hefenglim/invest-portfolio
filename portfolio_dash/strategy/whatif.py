@@ -13,6 +13,7 @@ priced into a rule set, so it raises ``WhatIfError`` (the router maps it to a 40
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
@@ -32,7 +33,19 @@ _ZERO = Decimal("0")
 
 
 class WhatIfError(ValueError):
-    """Raised when the request cannot be simulated (e.g. unheld symbol, no account)."""
+    """Raised when the request cannot be simulated (e.g. unheld symbol, no account).
+
+    Carries the wire detail the router needs (``field``, ``issues``) rather than a bare
+    sentence. The router used to stamp EVERY case with ``field="account_id"`` — right for
+    "cannot infer account", actively misleading for a blocking oversell that lives in some
+    other account entirely and needs no change to the account_id the user sent (F-02).
+    """
+
+    def __init__(self, message: str, *, field: str | None = None,
+                 issues: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+        self.issues = issues
 
 
 def _holding_for(holdings: list[Holding], account_id: str, symbol: str) -> Holding | None:
@@ -144,13 +157,32 @@ def compute_whatif(
         # feature). `build_book` here is deliberately strict (`allow_oversell` defaults
         # False) because a 試算 must not quote a price off a book whose basis was discarded;
         # the fix is to degrade with the reason, not to relax the strictness.
+        if isinstance(exc, OversellError):
+            # The other half of this seam's OWN recorded fix. The comment above says the
+            # 2026-08-11 repair was "to degrade with the reason"; only the 500-to-400 half
+            # shipped, and the reason — already computed, right here — was dropped on the
+            # floor by the router and then again by the drawer. The KPI band's XIRR, reading
+            # the same book, has been naming it out loud the whole time.
+            raise WhatIfError(
+                f"帳本中有賣超部位待釐清（{exc.account_id}／{exc.symbol}，"
+                f"{exc.trade_date.isoformat()}）— 無法試算，請先修正該筆交易",
+                issues=[{
+                    "sev": "error",
+                    "code": "oversold_position",
+                    "text": str(exc),
+                    "field": None,
+                    "account_id": exc.account_id,
+                    "symbol": exc.symbol,
+                    "trade_date": exc.trade_date.isoformat(),
+                }],
+            ) from exc
         raise WhatIfError(str(exc)) from exc
 
     # 2. Resolve account (explicit wins; else most-shares; else cannot infer -> 400).
     resolved = account_id or _most_shares_account(book.holdings, symbol)
     if resolved is None:
         raise WhatIfError(
-            f"無法推斷帳戶：{symbol} 未持有且未指定 account_id")
+            f"無法推斷帳戶：{symbol} 未持有且未指定 account_id", field="account_id")
     inst = instruments.get(symbol)
     # Market-aware fee rule (Batch B): pass the resolved instrument's market so a dual-market
     # account picks the market-appropriate rule set. An unregistered symbol (inst None) has no
@@ -199,6 +231,11 @@ def compute_whatif(
         out["old_original_avg"] = None
         out["old_adjusted_avg"] = None
 
+    # Declared once for BOTH arms: the BUY arm always has an average to give, the SELL arm
+    # may not (a full exit leaves no position; an oversell forks into two different bases and
+    # this surface has no declaration to read). One name, one meaning across the branch.
+    new_original_avg: Decimal | None
+    new_adjusted_avg: Decimal | None
     if side is Side.BUY:
         total_cost = amount + fee + tax
         new_shares = held_shares + shares
@@ -226,6 +263,12 @@ def compute_whatif(
             # the same trade got +3,000 here and +500 on the manual form: one app, two
             # answers). So: state the fork, give no figure.
             adjusted_cost_removed = realized = None
+            # The same fork, applied to the averages (sweep F-01, 2026-08-27): a declared
+            # short would leave a SHORT lot averaged at the sale price, an undeclared oversell
+            # DISCARDS the basis. Two branches, two different averages, and this surface has
+            # no declaration to read — so it states the fork and gives no figure here either,
+            # exactly as it does for the realized amount.
+            new_original_avg = new_adjusted_avg = None
             realized_note = (
                 "賣出股數超過持股：若為宣告放空，僅持有的部分結算已實現，其餘開立空單不產生"
                 "已實現；若為賣超，成本基礎無法認定，帳本不會產生已實現損益（待釐清）。"
@@ -235,6 +278,16 @@ def compute_whatif(
             # re-divides and can differ from the booked row in the last digit.
             adjusted_cost_removed = held_adj_total * (shares / held_shares)
             realized = proceeds_net - adjusted_cost_removed
+            # Totals moved, THEN divided on read (domain-ledger.md) — same operands and order
+            # as build_book, so a partial exit's projected average is the pre-trade one to the
+            # last digit rather than a second re-division of it. A FULL exit leaves no
+            # position (the replay drops `shares == 0`), so it has no average at all.
+            new_original_total = held_orig_total - held_orig_total * (shares / held_shares)
+            new_adjusted_total = held_adj_total - adjusted_cost_removed
+            new_original_avg = (None if remaining_shares == _ZERO
+                                else new_original_total / remaining_shares)
+            new_adjusted_avg = (None if remaining_shares == _ZERO
+                                else new_adjusted_total / remaining_shares)
         out.update(
             proceeds_net=str(proceeds_net),
             adjusted_cost_removed=(None if adjusted_cost_removed is None
@@ -243,6 +296,8 @@ def compute_whatif(
             realized_note=realized_note,
             remaining_shares=str(remaining_shares),
             oversell=oversell,
+            new_original_avg=(None if new_original_avg is None else str(new_original_avg)),
+            new_adjusted_avg=(None if new_adjusted_avg is None else str(new_adjusted_avg)),
         )
         result_shares = remaining_shares
 

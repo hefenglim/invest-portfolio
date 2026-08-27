@@ -18,6 +18,7 @@ from decimal import Decimal
 
 from portfolio_dash.data_ingestion.store import StoredCashMovement
 from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries
 from portfolio_dash.portfolio.returns import xirr_reporting
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -182,7 +183,7 @@ def test_the_kpi_band_carries_the_fx_complete_figure_and_names_the_difference() 
                 TrendPoint(date=date(2026, 12, 31), total_value=D("121000"),
                            net_invested=D("100000"))],
         reporting_currency=Currency.TWD, available=True)
-    out = fx_complete_return(trend)
+    out = fx_complete_return(trend, has_oversold=False, has_unapplied_action=False)
     assert out.value == D("21000") and out.reason is None
     b = out.value
 
@@ -204,7 +205,8 @@ def test_the_fx_complete_figure_is_none_when_the_trend_is_unavailable() -> None:
     from portfolio_dash.portfolio.dashboard_models import TrendSeries
 
     out = fx_complete_return(
-        TrendSeries(points=[], reporting_currency=Currency.TWD, available=False))
+        TrendSeries(points=[], reporting_currency=Currency.TWD, available=False),
+        has_oversold=False, has_unapplied_action=False)
     assert out.value is None
     assert out.reason and "無法計算" in out.reason
 
@@ -218,8 +220,62 @@ def test_an_incomplete_last_trend_day_yields_no_fx_complete_figure() -> None:
         points=[TrendPoint(date=date(2026, 12, 31), total_value=D("121000"),
                            net_invested=D("100000"), incomplete=True)],
         reporting_currency=Currency.TWD, available=True)
-    out = fx_complete_return(trend)
+    out = fx_complete_return(trend, has_oversold=False, has_unapplied_action=False)
     assert out.value is None
     # The reason must state BOTH facts: why it is absent, and why an earlier complete day
     # is not substituted (a B on a different date than A makes B - A meaningless).
     assert out.reason and "缺價" in out.reason and "不以較早日期替代" in out.reason
+
+
+# --- F-13 (full-site interaction sweep, 2026-08-27) --------------------------------------
+#
+# `TrendPoint.incomplete` has FIVE causes — a missing price, a 賣超 position, an unbookable
+# dividend, an unapplied corporate action, and a whole-book action failure — and B's reason
+# named only the first. On the same KPI band, two rows apart, XIRR reading the same book said
+# 「帳本中有賣超部位待釐清」 while B said 「最新一日有標的缺價」 about a symbol that had a
+# same-day close. A reason that points at the wrong subsystem costs the reader a trip through
+# the price feed before they find the ledger row that is actually blocking the figure.
+
+
+def _incomplete_trend() -> TrendSeries:
+    return TrendSeries(
+        points=[TrendPoint(date=date(2026, 12, 31), total_value=D("121000"),
+                           net_invested=D("100000"), incomplete=True)],
+        reporting_currency=Currency.TWD, available=True)
+
+
+def test_an_oversold_book_blames_the_oversell_not_the_price_feed() -> None:
+    from portfolio_dash.portfolio.dashboard import fx_complete_return
+
+    out = fx_complete_return(_incomplete_trend(), has_oversold=True,
+                             has_unapplied_action=False)
+    assert out.value is None
+    assert out.reason and "賣超" in out.reason, out.reason
+    assert "缺價" not in out.reason, f"still blaming the price feed: {out.reason}"
+    # The second half of the sentence is load-bearing and must survive the new first half.
+    assert "不以較早日期替代" in out.reason
+
+
+def test_an_unapplied_action_is_named_as_itself() -> None:
+    from portfolio_dash.portfolio.dashboard import fx_complete_return
+
+    out = fx_complete_return(_incomplete_trend(), has_oversold=False,
+                             has_unapplied_action=True)
+    assert out.reason and "公司行動" in out.reason and "缺價" not in out.reason
+
+
+def test_oversell_outranks_an_unapplied_action_exactly_as_xirr_orders_them() -> None:
+    """One book must not yield two diagnoses. The XIRR gate checks 賣超 first; so does this."""
+    from portfolio_dash.portfolio.dashboard import fx_complete_return
+
+    out = fx_complete_return(_incomplete_trend(), has_oversold=True,
+                             has_unapplied_action=True)
+    assert out.reason and "賣超" in out.reason and "公司行動" not in out.reason
+
+
+def test_a_genuinely_missing_price_still_says_so() -> None:
+    from portfolio_dash.portfolio.dashboard import fx_complete_return
+
+    out = fx_complete_return(_incomplete_trend(), has_oversold=False,
+                             has_unapplied_action=False)
+    assert out.reason and "缺價" in out.reason

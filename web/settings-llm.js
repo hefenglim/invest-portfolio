@@ -384,7 +384,15 @@
     if (!inp) return;
     const save = async () => {
       const raw = inp.value;
-      if (raw === '' || Number(raw) < 0) { inp.classList.add('field-error'); return; }
+      /* F-17: a red border and nothing else. Every other guard on this site says WHY —
+         a blank model alias gets 「✕ 請輸入模型代號（alias）」, an over-limit withdrawal gets a
+         whole sentence. A colour alone is not a message: it does not say what is wrong, and
+         a reader who is not looking at that field when it turns red never learns anything. */
+      if (raw === '' || Number(raw) < 0) {
+        inp.classList.add('field-error');
+        _toast('請輸入警示閾值', 'fail', '需為 0 或以上的金額（USD）');
+        return;
+      }
       inp.classList.remove('field-error');
       try {
         await api.put('/api/llm/quota', { alert_threshold_usd: raw });
@@ -445,7 +453,11 @@
       backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
       ok.addEventListener('click', async () => {
         const raw = inp.value;
-        if (!raw || Number(raw) <= 0) { inp.classList.add('field-error'); return; }
+        if (!raw || Number(raw) <= 0) {
+          inp.classList.add('field-error');   // see the note on the threshold guard above
+          _toast('請輸入加值金額', 'fail', '需為大於 0 的金額（USD）');
+          return;
+        }
         ok.disabled = true;
         try {
           await api.post('/api/llm/quota/topup', { amount_usd: raw });

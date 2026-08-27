@@ -639,8 +639,22 @@
         const cp = el('button', 'btn-link', '複製');
         cp.type = 'button';
         cp.addEventListener('click', () => {
-          try { navigator.clipboard.writeText('{{' + v.token + '}}'); } catch (e) { /* noop */ }
-          window.toast('已複製', 'ok', '{{' + v.token + '}}');
+          /* F-08: `writeText` is ASYNC — it returns a promise and rejects on a denied
+             permission or a non-secure context, so the try/catch caught nothing and the
+             success toast fired unconditionally. Measured 2026-08-27: a green 「✓ 已複製」
+             beside an uncaught `Write permission denied` (the only uncaught exception in
+             504 clicks), and on a plain-HTTP self-hosted instance `navigator.clipboard` is
+             not there at all. Same shape as settings-notify.js::copyTopic, which had it
+             right — two idioms for one job on the same settings page. */
+          const label = '{{' + v.token + '}}';
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(label).then(
+              () => window.toast('已複製', 'ok', label),
+              () => window.toast('複製失敗，請手動選取', 'fail', label)
+            );
+          } else {
+            window.toast('瀏覽器不支援自動複製，請手動選取', 'fail', label);
+          }
         });
         tdCopy.appendChild(cp);
         tr.appendChild(tdCopy);

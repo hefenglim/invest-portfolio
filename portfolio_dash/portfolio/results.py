@@ -66,6 +66,15 @@ class Holding(BaseModel):
     # missing opening inventory / buy). STICKY since 2026-07-31: the discarded basis is not
     # restored by a later buy, so the warning must not be cleared by one either.
     oversold: bool = False
+    # WHERE the first oversell happened. NOT a fourth trust mechanism — the docstring's three
+    # (display flag / valuation suppression / XIRR suppression) all belong to `oversold` and
+    # are unchanged; these are detail ON that flag, so a message can name the day the ledger
+    # broke instead of the position's final net quantity (F-16, 2026-08-27: 「部位將為 9.5 股」,
+    # a POSITIVE number, offered as proof of a shortfall). None on a ledger replayed strictly,
+    # and on a position flagged only by the `shares < 0` arm.
+    oversold_on: date | None = None
+    oversold_sold: Decimal | None = None
+    oversold_held: Decimal | None = None
     # A DECLARED short (`short_sale` on the sell) that is still open. ``shares`` is negative
     # and the cost fields hold the proceeds received, so avg/market_value/unrealized are all
     # meaningful — unlike `oversold`, this is a real, priced position, not an unresolved

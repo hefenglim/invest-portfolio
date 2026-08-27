@@ -32,7 +32,26 @@ _ZERO = Decimal("0")
 
 
 class OversellError(Exception):
-    """A sell quantity exceeds held shares (input error vs short sale — require confirm)."""
+    """A sell quantity exceeds held shares (input error vs short sale — require confirm).
+
+    Carries the OFFENDING POSITION, not just a sentence about it. Every strict caller
+    (重算 / 試算 / tax export) has to tell the user WHICH row to go and fix, and a caller
+    that must regex a message to do so will not do it — measured by the 2026-08-27 sweep,
+    where the drawer discarded the whole message and printed a bare 「試算暫不可用」 for
+    every symbol in the book, in every account and every market (F-02).
+
+    The three identifying kwargs are REQUIRED and have no defaults: forgetting them is a
+    ``TypeError`` and a mypy error, never a quiet return to an unattributable failure —
+    which is the exact state this constructor exists to end. ``str(exc)`` is unchanged, so
+    every existing catch-and-report site keeps its wording byte-for-byte.
+    """
+
+    def __init__(self, message: str, *, account_id: str, symbol: str,
+                 trade_date: date) -> None:
+        super().__init__(message)
+        self.account_id = account_id
+        self.symbol = symbol
+        self.trade_date = trade_date
 
 
 class UnbookableLedgerError(ValueError):
@@ -69,6 +88,16 @@ class _Position:
     # anywhere (measured 2026-07-30: average 6,100 against a 379 market price). Once true,
     # this stays true.
     ever_oversold: bool = False
+    #: WHERE the first oversell happened, recorded so a caller can name the day instead of
+    #: quoting the position's final net quantity. The guard is date-aware (a back-dated sell
+    #: can be uncovered on its own date and covered by a later buy), so the final number is
+    #: not evidence of anything — 「部位將為 9.5 股」 was being offered as proof of a shortfall
+    #: (F-16, 2026-08-27). FIRST occurrence only: that is the one the user has to fix, and a
+    #: later one may be a consequence of it. Recorded only on the ``allow_oversell`` path;
+    #: the strict path raises with the same facts on the exception itself.
+    oversold_on: date | None = None
+    oversold_sold: Decimal | None = None
+    oversold_held: Decimal | None = None
     # A dividend arrived while the short was open — skipped, never booked (see the dividend
     # branch). Surfaced so the position is visibly 待釐清 instead of quietly incomplete.
     unbookable_dividend: bool = False
@@ -166,9 +195,12 @@ def _apply_action(
 ) -> None:
     """Apply one corporate action to the live position map (spec §4.1-§4.4).
 
-    The field transfer is NORMATIVE and complete: `_Position` has nine fields and every one
-    of them has an explicit rule in §4.4, because "the formula didn't mention it" is not a
-    specification. The count is pinned by a test, because this docstring and §4.4 both fell
+    The field transfer is NORMATIVE and complete: `_Position` has thirteen fields and every
+    one of them has an explicit rule in §4.4, because "the formula didn't mention it" is not
+    a specification. (This sentence said *nine* while the table listed *ten*: `vacated_to`
+    updated the table and the test tuple but not this line, because the count guard reads the
+    tuple and cannot see prose. Corrected 2026-08-27 alongside F-16's three fields.)
+    The count is pinned by a test, because this docstring and §4.4 both fell
     behind once already — W3 added `unbookable_action` and neither was updated, so the
     "complete" claim was false for two commits (audit F-37, 2026-08-10). Two of those rules
     exist only because a review found the omission —
@@ -446,11 +478,19 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                 if ev.quantity > pos.shares:
                     if not allow_oversell:
                         raise OversellError(
-                            f"sell {ev.quantity} > held {pos.shares} for {ev.symbol}"
+                            f"sell {ev.quantity} > held {pos.shares} for {ev.symbol}",
+                            account_id=ev.account_id, symbol=ev.symbol,
+                            trade_date=ev.trade_date,
                         )
                     # Graceful: net to a negative (賣超) position; its cost basis is
                     # undefined, so drop it and emit no realized row (待釐清). UNCHANGED —
                     # only the marker below is new, and it never clears.
+                    if pos.oversold_on is None:
+                        # BEFORE the mutation below, so `pos.shares` is still what was held
+                        # on that date rather than the post-sale negative.
+                        pos.oversold_on = ev.trade_date
+                        pos.oversold_sold = ev.quantity
+                        pos.oversold_held = pos.shares
                     pos.ever_oversold = True
                     pos.shares -= ev.quantity
                     pos.original_total = _ZERO
@@ -617,6 +657,9 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                 # later buy nets the position back above zero (that buy does not restore the
                 # basis the oversell discarded).
                 oversold=pos.ever_oversold or pos.shares < _ZERO,
+                oversold_on=pos.oversold_on,
+                oversold_sold=pos.oversold_sold,
+                oversold_held=pos.oversold_held,
                 short_open=pos.short_shares > _ZERO,
                 unbookable_dividend=pos.unbookable_dividend,
                 unbookable_action=pos.unbookable_action,
