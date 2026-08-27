@@ -207,6 +207,11 @@
     if (dt && dt.checked) body.daytrade = true;
     const sc = $('#m-short');
     if (sc && sc.checked && m.side === 'sell') body.short_sale = true;
+    /* Sent ONLY when the box is on screen — i.e. the symbol is unregistered and its market
+       is one where the flag prices something. An absent box means "no answer given", which
+       is exactly the `None` the server treats as AI-D40's unset. */
+    const ne = $('#m-new-etf');
+    if (ne) body.new_symbol_is_etf = !!ne.checked;
     if (m.feeOverride) {
       const fv = $('#m-fee').value.trim();
       if (fv !== '') body.fee_override = fv;
@@ -234,6 +239,31 @@
     symHint.replaceChildren();
     if (sym && !it) {
       symHint.appendChild(el('span', null, '未註冊 — 寫入時將自動查詢並註冊（依帳戶判定市場）　'));
+      /* The ETF answer, asked at the moment the user is already looking at the symbol
+         (2026-08-28). Without it the row registers UNSET and the first TW sell only then
+         discloses `etf_flag_unknown` — correct, but it surfaces the question after a sell has
+         already been priced on the assumption.
+         Shown ONLY for TW and MY, because those are the two markets where the flag changes
+         money: TW sell tax 0.3% vs ETF 0.1%, and the MY stamp duty is ETF-EXEMPT. On a US
+         trade it would be a field that never does anything.
+         ⚠ It answers the REGISTRATION, never this trade: the body field is
+         `new_symbol_is_etf` and the server reads it only on the auto-register path. */
+      const mkt = accountMarket($('#m-account').value, null);
+      if (mkt === 'TW' || mkt === 'MY') {
+        const lab = el('label', null, null);
+        lab.style.cssText = 'display:inline-flex;align-items:center;gap:4px;cursor:pointer;';
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.id = 'm-new-etf';
+        lab.appendChild(cb);
+        lab.appendChild(el('span', null, '這是 ETF'));
+        lab.title = mkt === 'TW'
+          ? '勾選後以 ETF 稅率註冊（賣出證交稅 0.1%，現股為 0.3%）。不勾選＝尚未回答，'
+            + '首次賣出時會提示待確認，而不會靜默套用現股稅率'
+          : '勾選後以 ETF 註冊（馬股印花稅 ETF 免徵）。不勾選＝尚未回答，首次賣出時會提示待確認';
+        symHint.appendChild(lab);
+        symHint.appendChild(el('span', null, '　'));
+      }
       /* FU-D23: an inline 立即註冊 action opens the shared quick-add dialog with the symbol
          pre-filled + market inferred from the account. The commit-time auto-register fallback
          stays, so this is optional convenience, not a gate. */

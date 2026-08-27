@@ -16,7 +16,9 @@ Discipline (``rules/data-and-pricing.md``):
 """
 
 from collections.abc import Sequence
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
 
 _ZERO = Decimal("0")
 
@@ -26,6 +28,37 @@ def _q(value: Decimal | None, exp: str) -> Decimal | None:
     (data-and-pricing.md: quantize at display) — the raw computation stays full-precision.
     """
     return value.quantize(Decimal(exp), rounding=ROUND_HALF_UP) if value is not None else None
+
+
+def resample_weekly(points: list[dict[str, Any]]) -> list[Decimal]:
+    """Daily ``[{date, close}]`` → one close per ISO WEEK, chronological.
+
+    A week is represented by its LAST close — the value the week settled at. Grouping is by
+    ISO ``(year, week)``, never by position: a four-session holiday week would push the next
+    Monday into the wrong bucket under a 「every 5th row」 chunker, and the error compounds with
+    every holiday in the year rather than cancelling out.
+
+    Rows missing a ``date`` or a ``close`` are dropped rather than guessed at, and an empty
+    input yields an empty list — the caller degrades, nothing is padded.
+
+    ⚠ Read-only lens (owner ruling 2026-08-28, the small half of W8). Nothing here is stored:
+    ``signal_history``'s key stays ``(symbol, as_of)`` and there is no second
+    ``PARAMS_VERSION``. A weekly signal that PERSISTED would need a timeframe dimension in
+    that key, and mixing two timeframes under one key is how a TechScore silently averages
+    two different questions.
+    """
+    by_week: dict[tuple[int, int], tuple[date, Decimal]] = {}
+    for row in points:
+        d = row.get("date")
+        close = row.get("close")
+        if not isinstance(d, date) or close is None:
+            continue
+        iso = d.isocalendar()
+        key = (iso[0], iso[1])
+        prev = by_week.get(key)
+        if prev is None or d >= prev[0]:
+            by_week[key] = (d, Decimal(close))
+    return [by_week[k][1] for k in sorted(by_week)]
 
 
 def moving_average(closes: list[Decimal], window: int) -> Decimal | None:

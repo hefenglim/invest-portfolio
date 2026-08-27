@@ -1747,6 +1747,38 @@ make sayable, and the four-lens review had called it the highest-value item in t
   元大高股息, a real ETF recorded as `is_etf=False`, with 0 sells so far. Nothing was written:
   AI-D40 forbids the program relabelling those rows, and prod's ledger is empty anyway.
 
+**The ETF question is now asked at the door, and the weekly lens exists (AI-D61 / AI-D62).**
+
+- **`is_etf` at entry, not after the first sell (AI-D61, owner's own proposal).** The manual
+  door's auto-register path can now carry the answer: `ManualBody.new_symbol_is_etf`, surfaced
+  as a checkbox beside the existing 「未註冊」 hint. The old path made the user find out later —
+  register (unknown) → trade → sell → soft issue → go to 標的管理 → tick → re-check the rate.
+  ⚠ Shown **only for TW and MY**, the two markets where the flag prices something (TW sell tax
+  0.3% vs ETF 0.1%; the MY stamp duty is ETF-exempt); on a US trade it would be a control that
+  never does anything. ⚠ Named `new_symbol_is_etf` rather than `is_etf` because the difference
+  is the whole point: it is read at exactly one line — the auto-register call — so a REGISTERED
+  instrument can never be relabelled by a trade. That is the 2026-07-15 stress-audit fix (an
+  input flag beating the registry) and this field must not re-open it. AI-D40 is not relaxed:
+  no answer still records unknown and still discloses `etf_flag_unknown` on the first TW sell.
+  ★ Motivated by a measurement, not a hunch — the read-only demo audit found `0056` 元大高股息
+  registered as `is_etf=False` with 0 sells: not yet wrong, wrong on its first sell.
+- **W8's second half as a READ-ONLY LENS (AI-D62).** `technicals.resample_weekly` collapses
+  daily closes to one per ISO week (the week's last close) at read time, feeding one new
+  per-symbol variable `weekly_signals_json` (37 → 38) — MA over 10/20/40 **weeks** and 13/52
+  **week** returns. It answers the question the daily-only stack cannot: 「日線轉弱，但週線
+  還沒破」. ⚠ Grouped by ISO week, **never by taking every 5th row**: a four-session holiday
+  week pushes the next Monday into the wrong bucket and the error compounds across a year of
+  holidays rather than cancelling. ⚠ Nothing persists — `signal_history`'s key stays
+  `(symbol, as_of)`, and TechScore / `alert_events` / the event-study backtest / `rules-v1` are
+  untouched. A real second timeframe needs a timeframe dimension in that key plus a migration,
+  because two timeframes under one key overwrite each other and a composite score would
+  silently average two different questions; that is a W6-sized wave, not a close-out. Every
+  key is named in weeks and the payload states its own `timeframe`, and the checkup card
+  (v2.8 → v2.9, `LIBRARY_VERSION` → `official-v21`) is told the two timeframes may not be
+  compared or written into one sentence — AI-D2's 「one name, two definitions」 applied before
+  it can bite. Cited by a template on the way in, because W6 shipped three variables no
+  official template referenced and they stayed dark until W7.
+
 ## [v0.1.28] - 2026-08-09
 
 A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not

@@ -322,6 +322,19 @@ class ManualBody(BaseModel):
     # single-market account (the one market is inferred exactly as before); a merged account
     # with a blank market + unknown symbol is a commit-time 422 (market_required).
     market: str = ""
+    #: The ETF answer for a symbol this commit is about to AUTO-REGISTER — and ONLY for that.
+    #:
+    #: ⚠ Named ``new_symbol_is_etf``, not ``is_etf``, because the difference is the whole
+    #: point. The registry is authoritative at both fee seams (stress-audit fix 2026-07-15,
+    #: reaffirmed by AI-D40); a per-trade ``is_etf`` that could beat it is the 3× overtax
+    #: defect from the other direction. This value is read at exactly one place — the
+    #: auto-register call below — and an already-registered instrument never reaches it.
+    #:
+    #: ``None`` keeps AI-D40's behaviour unchanged: the row registers with the flag UNSET and
+    #: the first TW sell discloses ``etf_flag_unknown`` rather than assuming a rate. What this
+    #: field adds is the chance to answer at the moment the user is already looking at the
+    #: symbol, instead of after a sell has already priced the guess.
+    new_symbol_is_etf: bool | None = None
 
 
 def _txn_input(body: ManualBody) -> TxnInput:
@@ -818,12 +831,16 @@ def manual_commit(
         try:
             outcome = quick_register(
                 conn, symbol=body.symbol, market=market, now=now, force=False,
-                # AI-D40, stated rather than omitted: this door has no ETF answer to give,
-                # and the old silent default WAS an answer — an authoritative False, because
-                # the fee seams treat the registry as authoritative. None records "unknown",
-                # which surfaces as a soft issue on the first TW sell instead of quietly
-                # charging the 現股 rate on an ETF.
-                is_etf=None)
+                # AI-D40, stated rather than omitted: the old silent default WAS an answer
+                # — an authoritative False, because the fee seams treat the registry as
+                # authoritative. ``None`` records "unknown", which surfaces as a soft issue on
+                # the first TW sell instead of quietly charging the 現股 rate on an ETF.
+                #
+                # Since 2026-08-28 the door can also CARRY an answer (``new_symbol_is_etf``),
+                # given at the moment the user is already looking at the symbol. Still only
+                # here, on the auto-register path: a registered instrument never reaches this
+                # line, so the field cannot become a per-trade override of the registry.
+                is_etf=body.new_symbol_is_etf)
         except QuickRegisterError as exc:
             if exc.code != "duplicate_symbol":  # duplicate = registered meanwhile -> proceed
                 return JSONResponse(status_code=400, content=error_body(

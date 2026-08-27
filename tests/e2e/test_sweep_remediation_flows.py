@@ -223,3 +223,44 @@ def test_an_oversell_preview_shows_the_discarded_basis_with_its_reason(
         assert old_avg in before, f"{label} lost its pre-trade value: {row!r}"
         assert after.strip().startswith("0.00"), (
             f"{label} still projects the pre-trade average: {row!r}")
+
+
+@pytest.mark.e2e
+def test_the_etf_question_is_asked_only_where_it_prices_something(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """The ETF answer is asked at the moment the symbol is first entered (2026-08-28).
+
+    Only for TW and MY: those are the two markets where the flag changes money — TW sell tax
+    0.3% vs ETF 0.1%, and the MY stamp duty is ETF-exempt. On a US trade the same checkbox
+    would be a control that never does anything, which is its own kind of lie.
+
+    And only while the symbol is UNREGISTERED: once the registry has an answer, the registry
+    is authoritative at both fee seams and a per-trade box would be an override wearing a
+    registration badge.
+    """
+    base = flow_server(_seed_golden)
+    page = fresh_page
+    page.goto(f"{base}/trades.html", wait_until="networkidle")
+    page.wait_for_function(
+        "() => document.querySelector('#m-account')"
+        " && document.querySelector('#m-account').options.length > 0")
+
+    # TW account + a symbol the golden ledger has never seen -> the question is asked.
+    page.select_option("#m-account", "tw_broker")
+    page.fill("#m-symbol", "00888")
+    page.wait_for_timeout(400)
+    assert page.locator("#m-new-etf").count() == 1, "TW: the ETF question was not asked"
+
+    # A REGISTERED symbol -> no question; the registry already holds the answer.
+    page.fill("#m-symbol", "2330")
+    page.wait_for_timeout(400)
+    assert page.locator("#m-new-etf").count() == 0, (
+        "a registered symbol must not be re-asked — the registry is authoritative")
+
+    # US account + an unregistered symbol -> the flag prices nothing there.
+    page.select_option("#m-account", "schwab")
+    page.fill("#m-symbol", "ZZZZ")
+    page.wait_for_timeout(400)
+    assert page.locator("#m-new-etf").count() == 0, (
+        "US: asked a question whose answer changes no number")

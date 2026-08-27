@@ -23,7 +23,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v20 (2026-08-28)"  # R4 的基準對照進週報（AI-D60）
+LIBRARY_VERSION = "official-v21 (2026-08-28)"  # ＋週線視角進個股健檢（W8 唯讀鏡頭）
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -394,6 +394,11 @@ _CHECKUP_BODY = (
 {{technical_signals_json}}
 {{volatility_json}}
 {{price_history_json}}
+週線視角 — weekly_signals_json 的每一個數字都是「週」（ma10w＝10 週均線），與上面的日線數字
+是兩個時間框，**不可互相比較、不可混寫在同一句**。用它回答日線單獨答不了的那個問題：短期
+轉弱時，較長的結構是否仍完好（例：「日線跌破 20 日線，但週線仍在 40 週均線之上」）。
+weeks 不足時該欄為 null，直說「週線資料不足」，不得以日線數字頂替。
+{{weekly_signals_json}}
 
 三、法則訊號（TechScore 與四法則綜合）— 引用法則引擎的輸出，只詮釋、不重算、不虛構：
 1) TechScore（0-100）與涵蓋度 coverage：一句話定調綜合技術強弱，並說明有幾條法則可評估；
@@ -633,7 +638,7 @@ ma_cross 還是 20/60 的 ma_cross_short，不得混用），給出 ≤3 個交�
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
     {"name": "持倉週報策略", "version": "v2.5", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.8", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "個股健檢策略", "version": "v2.9", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.2", "scope": "per_market", "body": _MARKET_BODY},
     # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
     # v2 (W3, AI-D14/15): +基本面 section — one block per source, never averaged.

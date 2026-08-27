@@ -24,7 +24,14 @@ def test_the_variable_is_registered_and_available() -> None:
     assert spec.scope == "portfolio"
 
 
-def test_the_registry_grew_by_exactly_one() -> None:
-    """The count the plan named (36 → 37). Pinned so a silent drop is not a silent pass."""
-    assert len(V.REGISTRY) == 37
-    assert sum(1 for v in V.REGISTRY if v.available) == 37
+def test_the_registry_carries_both_of_the_days_additions() -> None:
+    """36 → 38 on 2026-08-28: R4's counterfactual, then the weekly lens.
+
+    The count is pinned by name rather than by arithmetic, because a bare number tells the
+    next reader nothing about which variable went missing when it fails.
+    """
+    tokens = {v.token for v in V.REGISTRY}
+    assert "benchmark_counterfactual_json" in tokens   # R4's missing leg (AI-D60)
+    assert "weekly_signals_json" in tokens             # W8's read-only lens
+    assert len(V.REGISTRY) == 38
+    assert sum(1 for v in V.REGISTRY if v.available) == 38

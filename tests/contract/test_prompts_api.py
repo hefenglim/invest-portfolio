@@ -55,7 +55,7 @@ def test_prompt_vars_shape(api_client: TestClient) -> None:
     rows = api_client.get("/api/prompt-vars").json()
     # + 1 batch-④ news + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals
     # + 1 W3 fundamentals (fundamentals_json) + 1 W6 signal_backtest_json = 36.
-    assert len(rows) == 37  # 37: R4's benchmark_counterfactual_json (2026-08-28)
+    assert len(rows) == 38  # 37: R4's benchmark_counterfactual_json (2026-08-28)
     date_tokens = {r["token"] for r in rows} & {"now", "card_created_at", "eval_date"}
     assert date_tokens == {"now", "card_created_at", "eval_date"}
     # the batch-③/④ + consensus + rule-signals + fundamentals + W6 vars surface in the area.

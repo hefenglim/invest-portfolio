@@ -14,7 +14,7 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 
 def test_library_version_is_official_v15() -> None:
-    assert ot.LIBRARY_VERSION == "official-v20 (2026-08-28)"
+    assert ot.LIBRARY_VERSION == "official-v21 (2026-08-28)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -129,7 +129,11 @@ def test_prompts_v2_carry_my_bursa_guidance() -> None:
 
 def test_checkup_strategy_advances_to_v26_citing_rule_signals() -> None:
     checkup = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "個股健檢策略")
-    assert checkup["version"] == "v2.8"
+    assert checkup["version"] == "v2.9"
+    # v2.9's content: the weekly lens, WITH the do-not-mix-timeframes instruction. A weekly
+    # number quotable beside a daily one with no boundary is AI-D2's defect in a new place.
+    if "{{weekly_signals_json}}" in checkup["body"]:
+        assert "不可互相比較" in checkup["body"]
     body = checkup["body"]
     assert "{{rule_signals_json}}" in body                 # the new section cites the var
     assert "TechScore" in body                             # cite TechScore + coverage
@@ -145,18 +149,18 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
     template_names = {t["name"] for t in ot.STRATEGY_TEMPLATES}
     for preset in ot.TASK_PRESETS:
         assert preset["strategy"] in template_names
-    # the checkup preset specifically still points at the (now v2.8) 個股健檢策略.
+    # the checkup preset specifically still points at the (now v2.9) 個股健檢策略.
     checkup_preset = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "checkup")
     assert checkup_preset["strategy"] == "個股健檢策略"
 
 
 def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v20 (2026-08-28)"
+    assert wire["library_version"] == "official-v21 (2026-08-28)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")
-    assert checkup["version"] == "v2.8"
+    assert checkup["version"] == "v2.9"
     assert "{{rule_signals_json}}" in checkup["body"]
 
 

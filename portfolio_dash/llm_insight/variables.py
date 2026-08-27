@@ -141,6 +141,16 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"price_vs_ma60":"+0.0723"}',
     ),
     VarSpec(
+        "weekly_signals_json", "週線視角", "price", "per_symbol", True,
+        "把日線收盤重採樣成週線（每週最後一個收盤）後的均線與報酬。⚠ 每個數字都以「週」為單位"
+        "命名（ma10w = 10 週均線），與其他變數的日線數字不可混用、不可互相比較；weeks 是可用的"
+        "週數，不足時該欄為 null 而非估算",
+        '{"timeframe":"weekly","weeks":64,"last_close":"205.00",'
+        '"ma10w":"198.40","price_vs_ma10w":"0.0333","ma20w":"190.10",'
+        '"price_vs_ma20w":"0.0784","ma40w":"176.25","price_vs_ma40w":"0.1631",'
+        '"return_13w":"0.0812","return_52w":"0.2140"}',
+    ),
+    VarSpec(
         "volatility_json", "波動度", "price", "per_symbol", True,
         "30 日年化波動率與最大回撤",
         '{"vol_30d_annualized":"0.284","max_drawdown_90d":"-0.062"}',
@@ -653,6 +663,38 @@ def _ma_signals(ctx: VarContext) -> dict[str, Any]:
     return technicals.ma_signals(ctx.closes)
 
 
+#: Weekly lookbacks, in WEEKS. 10/20/40 map onto the daily rules' 50/100/200 sessions, so a
+#: reader comparing the two timeframes is comparing the same horizons — but the names never
+#: let them be confused (AI-D2: 「均線交叉」 once meant 20/60 in one place and 50/200 in another,
+#: and one prompt cited both).
+_WEEKLY_MA_WINDOWS: tuple[int, ...] = (10, 20, 40)
+_WEEKLY_RETURN_WINDOWS: tuple[int, ...] = (13, 52)
+
+
+def _weekly_signals(ctx: VarContext) -> dict[str, Any]:
+    """The weekly lens (owner ruling 2026-08-28) — resampled at READ time, stored nowhere.
+
+    Answers the one question the daily-only stack cannot: 「日線轉弱，但週線還沒破」. Every key
+    is named in weeks and the payload states its own ``timeframe``, so no number can be read
+    as a daily one. A window with too little history is ``None``, never a partial-window
+    estimate — the same discipline ``moving_average`` already applies.
+    """
+    weekly = technicals.resample_weekly(ctx.price_points or [])
+    if len(weekly) < 2:
+        return {"unavailable": True}
+    last = weekly[-1]
+    out: dict[str, Any] = {"timeframe": "weekly", "weeks": len(weekly), "last_close": last}
+    for w in _WEEKLY_MA_WINDOWS:
+        ma = technicals.moving_average(weekly, w)
+        out[f"ma{w}w"] = ma
+        out[f"price_vs_ma{w}w"] = None if not ma else (last - ma) / ma
+    for w in _WEEKLY_RETURN_WINDOWS:
+        # w+1 points to span w weeks of change; a zero base is never a denominator.
+        base = weekly[-(w + 1)] if len(weekly) > w else None
+        out[f"return_{w}w"] = None if not base else (last - base) / base
+    return out
+
+
 def _volatility(ctx: VarContext) -> dict[str, Any]:
     if not ctx.closes:
         return {"unavailable": True}
@@ -927,6 +969,8 @@ def value_for(token: str, ctx: VarContext) -> Any:
         return _ma_signals(ctx)
     if token == "volatility_json":
         return _volatility(ctx)
+    if token == "weekly_signals_json":
+        return _weekly_signals(ctx)
     if token == "technical_signals_json":
         return _technical_signals(ctx)
     if token == "price_vs_cost_json":
