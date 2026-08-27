@@ -37,6 +37,17 @@ def _volume(value: object) -> Decimal | None:
 
 
 def yf_symbol(ref: InstrumentRef) -> str:
+    # A `^`-prefixed ticker is a Yahoo INDEX, and Yahoo indices carry no exchange suffix in
+    # ANY market — ^GSPC, ^KLSE, ^TWII. Checked FIRST, because the suffix would otherwise
+    # route a non-US index to a ticker that does not exist (^KLSE with Market.MY becomes
+    # ^KLSE.KL), which is the documented reason MY had no benchmark for so long.
+    #
+    # This is not an assumption about ^KLSE: `pricing/index_source.py` has fetched exactly
+    # these three raw tickers for the sentiment variable all along, bypassing this function
+    # entirely. The rule was already true of the codebase; only this function did not know
+    # it, and ^GSPC never exposed the gap because the US suffix is empty anyway.
+    if ref.symbol.startswith("^"):
+        return ref.symbol
     if ref.market is Market.TW and ref.board == "TPEx":
         return f"{ref.symbol}.TWO"
     return f"{ref.symbol}{_SUFFIX[ref.market]}"

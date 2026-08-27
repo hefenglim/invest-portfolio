@@ -36,8 +36,13 @@ test_layering.py`` greps every file under ``pricing/`` for both violations.
 import sqlite3
 from collections.abc import Iterable
 from datetime import date, datetime
+from decimal import Decimal
 
-from portfolio_dash.pricing.store import SplitFactorFn, express_close
+from portfolio_dash.pricing.store import (
+    SplitFactorFn,
+    express_close,
+    express_optional,
+)
 from portfolio_dash.shared.money import from_db
 
 # ``close_raw`` is guaranteed present by ``pricing/schema.create_tables`` — the write seam
@@ -47,10 +52,24 @@ from portfolio_dash.shared.money import from_db
 # here so that a hand-edited row degrades to "left untouched" instead of raising and
 # stopping the restatement of every OTHER row in the same pass.
 _ROWS_SQL = (
-    "SELECT as_of_date, fetched_at, close, close_raw, split_basis FROM prices "
+    "SELECT as_of_date, fetched_at, close, close_raw, open, open_raw, high, high_raw, "
+    "low, low_raw, split_basis FROM prices "
     "WHERE instrument=? AND close_raw IS NOT NULL AND fetched_at IS NOT NULL "
     "ORDER BY as_of_date"
 )
+
+#: The optional OHLC columns, paired with their raw (W8). ``close`` is handled separately
+#: because it is NOT NULL and carries the basis comparison.
+_OPTIONAL_OHLC: tuple[str, ...] = ("open", "high", "low")
+
+
+def _raw_or_none(text: str | None) -> Decimal | None:
+    """A ``*_raw`` cell that may legitimately be absent (the provider omitted the column).
+
+    ``from_db`` deliberately raises on anything unparseable rather than coercing, so the
+    absent case is handled HERE instead of loosening that guarantee for every caller.
+    """
+    return None if text is None else from_db(text)
 
 
 def reconcile_prices(
@@ -85,11 +104,21 @@ def reconcile_prices(
                 through=datetime.fromisoformat(r["fetched_at"]).date(),
             )
             close, stored_basis = express_close(from_db(r["close_raw"]), basis)
-            if (close, stored_basis) != (r["close"], r["split_basis"]):
-                updates.append((close, stored_basis, symbol, r["as_of_date"]))
+            # W8: every OHLC column is restated from its OWN raw under the SAME factor.
+            # Recomputed, never rescaled in place and never divided back out — so a SPLIT
+            # that is inserted and then deleted restores all four byte-identically, which
+            # matters because `prices` is the only place this feature writes outside the
+            # ledgers and 重算 does not cover it.
+            wanted = [close] + [
+                express_optional(_raw_or_none(r[f"{c}_raw"]), basis) for c in _OPTIONAL_OHLC
+            ]
+            current = [r["close"]] + [r[c] for c in _OPTIONAL_OHLC]
+            if (wanted, stored_basis) != (current, r["split_basis"]):
+                updates.append((*wanted, stored_basis, symbol, r["as_of_date"]))
     if updates:
         conn.executemany(
-            "UPDATE prices SET close=?, split_basis=? WHERE instrument=? AND as_of_date=?",
+            "UPDATE prices SET close=?, open=?, high=?, low=?, split_basis=? "
+            "WHERE instrument=? AND as_of_date=?",
             updates,
         )
         conn.commit()

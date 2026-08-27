@@ -68,6 +68,12 @@ BENCHMARKS: tuple[Benchmark, ...] = (
         ref=InstrumentRef(symbol="^GSPC", market=Market.US, board=""),
         quote_ccy=Currency.USD,
     ),
+    Benchmark(
+        key="klci",
+        label="富時大馬 KLCI",
+        ref=InstrumentRef(symbol="^KLSE", market=Market.MY, board=""),
+        quote_ccy=Currency.MYR,
+    ),
 )
 
 
@@ -86,14 +92,18 @@ def get_benchmark(key: str) -> Benchmark | None:
 
 #: Fixed market → benchmark map for prediction scoring (AI-D22, owner ruling 2026-08-19):
 #: the yardstick for a ``relative`` prediction is chosen by the CODE from the instrument's
-#: market, never by the LLM. MY deliberately has no entry — an MYR stock compared against
-#: a USD index is noise, so a MY ``relative`` prediction degrades to an honest
-#: ``pending_data``. Adding ``^KLSE`` later is cheap BUT needs the yfinance suffix routing
-#: re-derived first (``^KLSE`` with ``Market.MY`` would fetch as ``^KLSE.KL`` — see the
-#: module docstring's storage-key coupling analysis).
+#: market, never by the LLM.
+#:
+#: MY was deliberately absent until 2026-08-27, because ``yf_symbol`` would have routed
+#: ``^KLSE`` with ``Market.MY`` to ``^KLSE.KL`` — a ticker that does not exist. That routing
+#: is now re-derived (a ``^``-prefixed Yahoo ticker is an index and takes no suffix in any
+#: market), so KLCI is wired and every market has a yardstick. ``benchmark_for_market`` still
+#: returns ``None`` for anything unmapped, and every caller must keep honouring it: the
+#: degradation path is the honest answer for a market added later, not dead code.
 _MARKET_BENCHMARK: dict[Market, str] = {
     Market.TW: "0050",
     Market.US: "sp500",
+    Market.MY: "klci",
 }
 
 

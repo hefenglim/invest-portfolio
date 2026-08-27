@@ -4,7 +4,8 @@ The scorers were always written and tested (``tests/llm_insight/test_scoring.py`
 the two v1 stubs never did is FEED them. This file pins the new measurement arms:
 
 - ``_window_return`` / ``_vol_change_pct`` — the pure helpers, hand-checked;
-- ``_benchmark_for_symbol`` — the fixed market map (AI-D22), MY/unknown → honest None;
+- ``_benchmark_for_symbol`` — the fixed market map (AI-D22); every market is now wired
+  (MY gained KLCI 2026-08-27), so the honest None is carried by an UNREGISTERED symbol;
 - ``_measure_actual``'s relative arm — symbol leg vs the benchmark leg, both local-ccy
   (AI-D23), plus every degrade path landing as ``benchmark_return_pct=None``
   (pending_data, never a forced miss);
@@ -163,15 +164,19 @@ def test_vol_change_pct_degrades_on_a_short_or_flat_baseline() -> None:
 # --- _benchmark_for_symbol (AI-D22) --------------------------------------------
 
 
-def test_benchmark_lookup_maps_us_and_tw_and_refuses_my(conn: sqlite3.Connection) -> None:
+def test_benchmark_lookup_maps_every_market(conn: sqlite3.Connection) -> None:
+    """MY joined the map on 2026-08-27 (AI-D58's sibling work) — this test used to end with
+    「and refuses my」, and the rename is the point: the refusal was never about MY, it was
+    about not inventing a yardstick for a market that has none."""
     _register(conn, "AAA", Market.US, USD)
     _register(conn, "2330", Market.TW, TWD)
     _register(conn, "1155", Market.MY, MYR)
     assert insight_service._benchmark_for_symbol(conn, "AAA").key == "sp500"  # type: ignore[union-attr]
     assert insight_service._benchmark_for_symbol(conn, "2330").key == "0050"  # type: ignore[union-attr]
-    # MY has no wired benchmark — and an unregistered symbol has no market at all. Both
-    # are the same honest None (AI-D22: no proxy, no guessed index).
-    assert insight_service._benchmark_for_symbol(conn, "1155") is None
+    assert insight_service._benchmark_for_symbol(conn, "1155").key == "klci"  # type: ignore[union-attr]
+    # An UNREGISTERED symbol has no market at all, so it still has no yardstick — the honest
+    # None that AI-D22 is really about (no proxy, no guessed index), now carried by the case
+    # that will always exist rather than by a market that happened to be unwired.
     assert insight_service._benchmark_for_symbol(conn, "NOPE") is None
 
 

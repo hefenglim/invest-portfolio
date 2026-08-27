@@ -30,15 +30,18 @@ def check_amounts(gross: Decimal, withholding: Decimal, net: Decimal) -> str | N
 
     What it does NOT do is demand ``gross - withholding == net``. That identity belongs to the
     US DRIP model alone, not to dividends in general: a TW cash dividend legitimately nets
-    less than gross through deductions this app DOES NOT MODEL (二代健保補充保費, 匯費), and a
-    US payout can carry an ADR fee. Rejecting those would push the user to falsify the gross.
-    The real invariant is conservation: a payout can never DELIVER more than it declared.
+    less than gross through statutory levies and remittance charges this app DOES NOT MODEL,
+    and a US payout can carry an ADR fee. Rejecting those would push the user to falsify the
+    gross. The real invariant is conservation: a payout can never DELIVER more than it
+    declared. (That wrong identity was genuinely proposed once — see ``LESSONS_LEARNED.md`` —
+    which is why the reason this gate is lenient is written here rather than left to be
+    re-derived by the next reader.)
 
     To be unambiguous, because the wording above has been misread once: **no levy other than
-    the US 30% DRIP withholding is computed anywhere in this codebase.** 二代健保補充保費 is
-    named here only as an EXAMPLE of a legal gross/net gap the gate must tolerate — there is
-    no rate, threshold or field for it in ``FEE_RULES`` or in the dividend model (owner
-    decision 2026-07-26: out of scope; fees/taxes stop at 手續費 + 證交稅). For a TW cash
+    the US 30% DRIP withholding is computed anywhere in this codebase, and none is planned.**
+    There is no rate, threshold or field for any TW dividend levy in ``FEE_RULES`` or in the
+    dividend model, and per the owner's ruling of 2026-08-27 (spec ``AI-D55``) that is a
+    PERMANENT exclusion, not a deferral — fees and taxes stop at 手續費 + 證交稅. For a TW cash
     dividend the user types the net actually received and that number is what reaches the
     ledger; the gap is simply unexplained, not itemised.
     """

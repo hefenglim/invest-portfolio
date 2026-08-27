@@ -186,25 +186,44 @@ def test_factor_receives_the_rows_own_window(conn: sqlite3.Connection) -> None:
                     ("AAPL", date(2026, 6, 5), _NOW.date())]
 
 
-# --- the columns nobody reads -------------------------------------------------------
+# --- the rest of the row --------------------------------------------------------------
 
 
-def test_ohlc_keeps_the_provider_basis(conn: sqlite3.Connection) -> None:
-    """``open``/``high``/``low`` are NOT multiplied, deliberately (see ``upsert_prices``).
+def test_every_ohlc_column_is_re_expressed(conn: sqlite3.Connection) -> None:
+    """``open``/``high``/``low`` now take the factor too (W8, owner ruling 2026-08-27).
 
-    They have no reader in the codebase and no raw column of their own, so multiplying
-    them would create a derived value W6b's reconcile could never restate. ``split_basis``
-    on the same row records the difference, so nothing is lost. Locked by a test so that
-    giving them the factor is a deliberate change that also adds their raws — the same
-    treatment §5.1 already gives ``volume``.
+    This test previously pinned the OPPOSITE, and its own docstring named the condition for
+    changing it: "giving them the factor is a deliberate change that also adds their raws".
+    That is exactly what W8 did — the columns each gained a ``*_raw``, so the derived value
+    is restatable and reversible, which was the whole objection. The guard did its job; this
+    is what it looks like when a locked decision is deliberately unlocked.
+
+    Full coverage of the new columns lives in ``test_ohlc_raw_basis.py``.
     """
     row_with_ohlc = PriceRow(instrument="AAPL", market=Market.US, as_of=_DAY,
                              close=Decimal("5"), open=Decimal("4"), high=Decimal("6"),
                              low=Decimal("3"), source="fake")
     upsert_prices(conn, [row_with_ohlc], fetched_at=_NOW, factor_of=_factor("20"))
     row = _stored(conn)
-    assert row["close"] == "100"  # re-expressed
-    assert (row["open"], row["high"], row["low"]) == ("4", "6", "3")  # provider basis
+    assert (row["close"], row["open"], row["high"], row["low"]) == ("100", "80", "120", "60")
+
+
+def test_volume_is_still_never_multiplied(conn: sqlite3.Connection) -> None:
+    """The exception that survives W8, and for a STRONGER reason than the old OHLC one.
+
+    ``volume`` is a count, not a price: a 20-for-1 split multiplies the share count and
+    divides the price, so applying the price factor to it would be actively WRONG, not
+    merely unrestatable. It therefore gets no raw column and no factor.
+    """
+    row = PriceRow(instrument="AAPL", market=Market.US, as_of=_DAY, close=Decimal("5"),
+                   volume=Decimal("1000"), source="fake")
+    upsert_prices(conn, [row], fetched_at=_NOW, factor_of=_factor("20"))
+    stored = conn.execute(
+        "SELECT close, volume FROM prices WHERE instrument='AAPL' AND as_of_date=?",
+        (_DAY.isoformat(),),
+    ).fetchone()
+    assert stored["close"] == "100"     # the price moved
+    assert stored["volume"] == "1000"   # the count did not
 
 
 def test_reads_are_unaffected_by_the_new_columns(conn: sqlite3.Connection) -> None:

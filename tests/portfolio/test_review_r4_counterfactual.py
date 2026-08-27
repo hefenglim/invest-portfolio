@@ -87,7 +87,13 @@ def test_a_flow_dated_before_the_benchmarks_first_close_is_uncovered_not_dropped
 
 
 def test_a_market_with_no_benchmark_is_named_not_silently_skipped() -> None:
-    """MY has no benchmark in the registry (AI-D22). The money is still real."""
+    """A market absent from the supplied closes map. The money is still real.
+
+    MY used to be that market in production too; it gained KLCI on 2026-08-27. This test
+    never depended on the registry — it passes its own closes map — so what it pins is the
+    MECHANISM, which is now reached by a market whose benchmark series has not been fetched
+    yet (``dashboard.py`` only enters a market whose converted closes are non-empty).
+    """
     out = counterfactual(
         [
             ReportingFlow(date(2026, 1, 1), Market.US, D("3000")),

@@ -338,7 +338,9 @@ def _benchmark_comparison(
     for market in {f.market for f in flows if f.market is not None}:
         bench = benchmark_for_market(market)
         if bench is None:
-            continue  # MY today (AI-D22) — counted as uncovered, never silently dropped
+            # No market is unmapped today (MY gained KLCI 2026-08-27), but a market
+            # added later would land here — uncovered and NAMED, never dropped.
+            continue
         raw = [
             (p.as_of, p.value)
             for p in series_in(

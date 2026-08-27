@@ -53,11 +53,18 @@ date does not. The stored close therefore fixes one canonical meaning:
   writes outside the ledgers and 重算 does not cover it.
 - **Cap last, measured:** `cap(raw) × 20` stores `2.8340` where `cap(raw × 20)` stores
   `2.8333`; at `×3` it is `0.4251` vs `0.4250` — the sub-RM1 MY tick above.
-- **Only `close` is re-expressed** (D39b). `open` / `high` / `low` keep the provider's basis,
-  like `volume`: they have no `*_raw` of their own, so a factor applied to them could never be
-  restated or reversed. ⚠ A row's `close` and its `open`/`high`/`low` can therefore be on
-  **different bases** — the first candlestick drawn from this table must divide them by
-  `split_basis` first, or add its own raw columns.
+- **All four OHLC columns are re-expressed** (W8, owner ruling 2026-08-27 — **supersedes
+  D39b**). `close`, `open`, `high` and `low` each carry their own `*_raw` and are stored as
+  `cap_4dp(raw × split_basis)`, so every one of them is restatable and reversible. D39b's
+  objection was precisely that a factor applied to a column with no raw "could never be
+  restated or reversed", and its own escape clause was "or add its own raw columns" — W8 took
+  that clause. Until then a row could carry a post-split close beside pre-split highs and
+  lows; harmless only because nothing read those columns, and a trap for the first
+  candlestick chart drawn from this table.
+- **`volume` is still never multiplied**, and for a STRONGER reason than the old OHLC one: it
+  is a count, not a price. A 20-for-1 split multiplies the share count and divides the price,
+  so giving `volume` the price factor would be actively **wrong**, not merely unrestatable.
+  It gets no raw column and no factor.
 - **The write multiplies; the read divides.** The write window is `(as_of, fetched_at]` —
   "which splits had the provider already folded in?" — and multiplies them back **out** to
   recover the as-traded value. The read (`portfolio/price_basis.price_in`) window is

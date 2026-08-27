@@ -77,9 +77,10 @@ the two formulations agree and that no separate line exists.
 
 ### Dividend handling per type
 
-- **Cash (TW, MY):** reduce `adjusted_total` by **net** cash received — net = gross less
-  any withholding and (TW) 二代健保補充保費 / dividend tax, captured at entry in
-  `Dividend.net`. (TW quote TWD; MY MYR.) These are the only dividends that reduce
+- **Cash (TW, MY):** reduce `adjusted_total` by **net** cash received — net = gross less any
+  withholding and any statutory levy, exactly as the statement shows it, captured at entry in
+  `Dividend.net`. The app models NONE of those levies and never will (spec `AI-D55`); the user
+  types the net actually received. (TW quote TWD; MY MYR.) These are the only dividends that reduce
   adjusted cost.
 - **DRIP (US — Schwab, Moomoo):** 30% withholding; net reinvested → repurchased shares
   recorded at **$0 cost**. This adds zero-cost shares (lowering both `original_avg` and

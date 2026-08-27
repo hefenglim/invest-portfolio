@@ -44,6 +44,17 @@ def _opt(v: Decimal | None) -> str | None:
     return to_db(_cap_dp(v, _PRICE_DP)) if v is not None else None
 
 
+def _opt_raw(v: Decimal | None) -> str | None:
+    """A ``*_raw`` column: the provider's value verbatim, NOT capped.
+
+    The cap belongs on the DERIVED value, applied last and to the product. A raw column is
+    the input the reconcile recomputes from, so capping it here would make the first
+    reconcile silently move the derived value onto a slightly different number — the exact
+    reason ``close_raw`` has always been written through ``to_db`` rather than ``_opt``.
+    """
+    return to_db(v) if v is not None else None
+
+
 class SplitFactorFn(Protocol):
     """The split factor already folded into a fetched price row, injected (D17).
 
@@ -110,6 +121,23 @@ def express_close(raw: Decimal, basis: Decimal) -> tuple[str, str]:
     return to_db(_cap_dp(raw * basis, _PRICE_DP)), to_db(basis)
 
 
+def express_optional(raw: Decimal | None, basis: Decimal) -> str | None:
+    """One OHLC column OTHER than the close, under the row's factor — or ``None``.
+
+    Delegates to :func:`express_close` rather than repeating the expression, so the price
+    basis keeps exactly ONE owner (§6.0) and the identity short-circuit, the cap-goes-last
+    rule and the no-repaint guarantee apply to all four columns by construction instead of
+    by four copies staying in step.
+
+    ``None`` in, ``None`` out: providers routinely omit OHLC, and a factor must never
+    conjure a value out of a missing one.
+    """
+    if raw is None:
+        return None
+    value, _ = express_close(raw, basis)
+    return value
+
+
 def upsert_prices(
     conn: sqlite3.Connection,
     rows: list[PriceRow],
@@ -145,13 +173,15 @@ def upsert_prices(
        ``data-and-pricing.md`` asks for "full source precision" and says the cap
        "removes representation noise, not information"; once the close is derived, the
        source it derives from is the thing that must not lose information.
-    3. ``open`` / ``high`` / ``low`` keep the provider's basis and are **not**
-       multiplied. They have no reader anywhere in the codebase, and multiplying a
-       column with no raw of its own would produce a derived value the reconcile can
-       never restate — the stale-basis bug F-23 describes, made permanent. Their basis
-       is recoverable at any time from ``split_basis`` on the same row. A future reader
-       must add its own ``*_raw`` column and take the factor with it. (Same reasoning
-       §5.1 already applies to ``volume``, which is likewise left untouched.)
+    3. ``open`` / ``high`` / ``low`` are expressed **exactly like the close** (W8, owner
+       ruling 2026-08-27) — each has its own ``*_raw``, so the derived value is always
+       restatable and reversible, which is the condition the earlier design said had to
+       be met first. Until W8 they kept the provider's basis, so a row could carry a
+       post-split close beside pre-split highs and lows; harmless only because nothing
+       read them, and a trap for the first candlestick chart. ``volume`` is STILL left
+       untouched and deliberately so: it is a count, not a price, and a split restates it
+       in the opposite direction — giving it this factor would be wrong, not merely
+       unrestatable.
 
     **No factor → the pre-existing code path, structurally** (owner requirement,
     2026-08-10), and **the cap applied last, to the product** (F-20). Both live in
@@ -167,20 +197,25 @@ def upsert_prices(
         close, stored_basis = express_close(r.close, basis)
         params.append((
             r.instrument, r.market.value, r.as_of.isoformat(), close,
-            _opt(r.open), _opt(r.high), _opt(r.low), _opt(r.volume), r.source,
-            fetched_at.isoformat(), to_db(r.close), stored_basis,
+            express_optional(r.open, basis), express_optional(r.high, basis),
+            express_optional(r.low, basis), _opt(r.volume), r.source,
+            fetched_at.isoformat(), to_db(r.close),
+            _opt_raw(r.open), _opt_raw(r.high), _opt_raw(r.low), stored_basis,
         ))
     conn.executemany(
         # F-23: the basis columns MUST be restated by DO UPDATE. Left out, a re-fetch
         # writes a new close over a stale basis, and the next reconcile compounds the
         # error from the wrong starting point — silently, and only on a re-fetch.
         """INSERT INTO prices (instrument, market, as_of_date, close, open, high, low,
-               volume, source, fetched_at, close_raw, split_basis)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               volume, source, fetched_at, close_raw, open_raw, high_raw, low_raw,
+               split_basis)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(instrument, as_of_date) DO UPDATE SET
                close=excluded.close, open=excluded.open, high=excluded.high, low=excluded.low,
                volume=excluded.volume, source=excluded.source, fetched_at=excluded.fetched_at,
-               close_raw=excluded.close_raw, split_basis=excluded.split_basis""",
+               close_raw=excluded.close_raw, open_raw=excluded.open_raw,
+               high_raw=excluded.high_raw, low_raw=excluded.low_raw,
+               split_basis=excluded.split_basis""",
         params,
     )
     conn.commit()

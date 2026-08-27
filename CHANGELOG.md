@@ -1620,6 +1620,64 @@ observation (F-18) was re-checked and DISMISSED — see below.
   rather than as a value mismatch. This is the second over-read of a gate in this programme
   (the first was counting pytest result characters); both are in `LESSONS_LEARNED.md`.
 
+**Programme close-out, owner rulings 2026-08-27 (AI-D55…D58).** The owner reviewed every
+remaining open item at once and ruled: hold on shipping, remove two things permanently, add
+two, and hand two back as blocked-on-them.
+
+- **二代健保補充保費 — permanently excluded, term removed (AI-D55).** It was never
+  implemented: `FEE_RULES` and the dividend model carry no rate, threshold or field for it,
+  and `dividend_model.py` already said "owner decision 2026-07-26: out of scope". What this
+  ruling changes is the STATUS — from "paused, may return" to "excluded, will not" — and the
+  term is now gone from live code and design docs (four call sites, all explanatory). The
+  explanation those mentions were carrying is kept, generalised: the dividend gate does NOT
+  demand `gross − withholding == net`, because a TW cash dividend legitimately nets less
+  through levies this app does not model. That identity was genuinely proposed once
+  (`LESSONS_LEARNED.md`), so the reason is written down rather than left to be re-derived.
+  ⚠ **Dated records are untouched** — CHANGELOG entries, the lesson, and the 2026-07 audit
+  reports say what was decided at the time, and rewriting them to erase a real decision is
+  falsifying the log. The only forward-looking place the term survives is the exclusion
+  ruling itself, which has to name what it excludes or the decision becomes unfindable.
+- **MY finally has a benchmark: KLCI (`^KLSE`).** The blocker was real and was documented in
+  `benchmarks.py`: `yf_symbol` appends the market suffix unconditionally, so `^KLSE` with
+  `Market.MY` would have been fetched as `^KLSE.KL`. Re-derived: **a `^`-prefixed Yahoo
+  ticker is an INDEX and carries no exchange suffix in any market.** That is not a guess
+  about `^KLSE` — `pricing/index_source.py` has been fetching exactly those three raw tickers
+  (`^TWII`, `^GSPC`, `^KLSE`) for the sentiment variable all along, bypassing `yf_symbol`
+  entirely; the rule was already true of the codebase and only this function did not know it,
+  with `^GSPC` never exposing the gap because the US suffix is empty anyway. MY `relative`
+  predictions and the R4 counterfactual now have a yardstick. Safe before any price is
+  fetched: `dashboard.py` only admits a market whose converted closes are non-empty, so MY
+  stays honestly `uncovered` until the daily job has run. The `None` degradation path lost
+  the market that used to exercise it, so it is now pinned by monkeypatch instead of deleted
+  — code no test exercises is code that stops working quietly.
+- **W8: `open` / `high` / `low` get the same two-column basis as `close` (AI-D58).** Each
+  gains a `*_raw` and is stored as `cap_4dp(raw × split_basis)`, with the raw un-capped
+  because it is the input the reconcile recomputes from. **This supersedes D39b**, whose
+  objection was precisely that a factor on a column with no raw "could never be restated or
+  reversed" and whose own escape clause was "or add its own raw columns". Until now a row
+  could carry a post-split close beside pre-split highs and lows — harmless only because
+  nothing read them (verified again: the sole statement naming those columns is the INSERT),
+  and a trap for the first candlestick chart. The reconcile restates all four from their own
+  raws, so a SPLIT inserted and then deleted restores the row byte-identically — pinned,
+  because `prices` is the only place this feature writes outside the ledgers and 重算 does
+  not rebuild it. ⚠ **`volume` is still never multiplied**, now for a stronger reason than
+  the old OHLC one: it is a count, not a price, so the price factor would be actively wrong.
+  ⚠ The three new columns sit AFTER `split_basis` in the DDL, which reads oddly, because
+  `ALTER TABLE` can only append and a guard demands the fresh and migrated schemas agree
+  column for column.
+- **Permanently excluded, not deferred (AI-D56):** portfolio-scope `relative` / `volatility`
+  scoring (it needs a blended-benchmark ruling the owner declined to make) and the
+  `_ratio_str` / `_avg_str` HALF_EVEN inconsistency (accepted as-is; aligning it would move
+  the last digit of `miss_rate` and several other displayed values). Both leave the backlog.
+  The difference from "deferred" is that a deferred item comes back as a question next round.
+- **Held on the owner, not on the code:** the ETF-flag audit found nothing to confirm because
+  the local ledger is empty (0 instruments, 0 transactions) — it is meaningful only against
+  real TW rows, and running it against demo/prod is a VM operation needing approval. The W4
+  live extraction baseline needs an API key that is not configured.
+- **A count correction:** this branch is **76 commits** ahead of `main` and of `v0.1.28`, not
+  the 13–15 quoted earlier in the programme. That figure was this sub-programme's own commits,
+  not the branch's divergence, and it understates the size of an eventual single deployment.
+
 ## [v0.1.28] - 2026-08-09
 
 A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not

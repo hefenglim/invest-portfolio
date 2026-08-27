@@ -17,17 +17,24 @@ import sqlite3
 # ⚠ ``close`` and ``open``/``high``/``low`` CAN BE ON DIFFERENT BASES ON THE SAME ROW.
 # Only ``close`` is re-expressed by a split (spec §5.1, amended 2026-08-10): it is the only
 # price with a preserved source, so it is the only one a reconcile can restate or reverse.
-# ``open``/``high``/``low`` keep the provider's basis as delivered, like ``volume``. That is
-# invisible today because nothing reads them — every SELECT against this table names its
-# columns and none names these — but the first candlestick chart drawn from this table will
-# mix a post-split close with pre-split highs and lows unless it divides them by
-# ``split_basis`` first. ``split_basis`` is on the row precisely so that stays recoverable.
+# ``open``/``high``/``low`` carry the SAME two-column basis as ``close`` (W8, owner ruling
+# 2026-08-27, spec ``AI-D58``): each has its own ``*_raw`` holding the provider's value as
+# delivered, and the stored column is ``raw × split_basis``. Before W8 they kept the
+# provider's basis untouched, so a row could carry a post-split close beside pre-split highs
+# and lows — invisible only because nothing read them, and a trap for the first candlestick
+# chart. ``volume`` is still deliberately untouched: it is a count, not a price, and a split
+# restates it in the opposite direction.
 _DDL = """
 CREATE TABLE IF NOT EXISTS prices (
     instrument TEXT NOT NULL, market TEXT NOT NULL, as_of_date TEXT NOT NULL,
     close TEXT NOT NULL, open TEXT, high TEXT, low TEXT, volume TEXT,
     source TEXT NOT NULL, fetched_at TEXT NOT NULL,
     close_raw TEXT, split_basis TEXT NOT NULL DEFAULT '1',
+    -- W8's three raws sit AFTER split_basis, which reads oddly beside close_raw but is
+    -- required: a migrated database gets them by ALTER TABLE, which can only append, and
+    -- `test_fresh_and_migrated_schemas_agree_column_for_column` demands the fresh DDL and
+    -- the migrated one agree column for column. DDL order follows migration order.
+    open_raw TEXT, high_raw TEXT, low_raw TEXT,
     PRIMARY KEY (instrument, as_of_date)
 );
 CREATE TABLE IF NOT EXISTS fx_rates (
@@ -80,4 +87,15 @@ def create_tables(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "prices", "close_raw", "TEXT")
     _add_column_if_missing(conn, "prices", "split_basis", "TEXT NOT NULL DEFAULT '1'")
     conn.execute("UPDATE prices SET close_raw = close WHERE close_raw IS NULL")
+    # W8: the same treatment for the other three OHLC columns. A pre-W8 row was never
+    # multiplied, so its basis really is 1 and its raw value really is its stored value —
+    # the UPDATE says so instead of leaving a NULL for a later reconcile to guess at.
+    # Guarded on ``IS NULL`` (and on the value being present), so it is a no-op on every
+    # later boot and never invents a raw for a column the provider omitted.
+    for column in ("open", "high", "low"):
+        _add_column_if_missing(conn, "prices", f"{column}_raw", "TEXT")
+        conn.execute(
+            f"UPDATE prices SET {column}_raw = {column} "
+            f"WHERE {column}_raw IS NULL AND {column} IS NOT NULL"
+        )
     conn.commit()
