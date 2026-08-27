@@ -31,10 +31,12 @@ def test_registry_has_36_and_categories() -> None:
     # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news
     # + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals (rule_signals_json)
     # + 1 W3 fundamentals (fundamentals_json) + 1 W6 signal_backtest_json = 36.
-    assert len(V.REGISTRY) == 36
+    # 37 since 2026-08-28: R4's benchmark_counterfactual_json.
+    assert len(V.REGISTRY) == 37
     assert len({v.category for v in V.REGISTRY}) == 11  # fundamentals is its own category
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 36
+    # 37 since 2026-08-28: R4's benchmark_counterfactual_json.
+    assert len({v.token for v in V.REGISTRY}) == 37
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
@@ -48,7 +50,8 @@ def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
         # (5 → 6, P2 batch 3) then signal_backtest_json (6 → 7, W6); sentiment gained
         # fear_greed_json (2 → 3) — batch ③; news gained symbol_news_json — batch ④;
         # consensus is the P1-batch-2 category; fundamentals is the W3 category.
-        "position": 6, "price": 7, "dividend": 3, "fx": 2,
+        # position 7 since 2026-08-28: R4's benchmark_counterfactual_json.
+        "position": 7, "price": 7, "dividend": 3, "fx": 2,
         # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
         "chips": 5, "consensus": 1, "fundamentals": 1, "news": 1, "sentiment": 3,
         "ai": 2, "system": 5,
@@ -60,7 +63,8 @@ def test_available_split_all_live_since_w6() -> None:
     unavailable = [v.token for v in V.REGISTRY if not v.available]
     # W6 (AI-D31) lit the last two deferred vars (the 'ai' pair) and added
     # signal_backtest_json live — the registry is now fully live, 36/36.
-    assert len(available) == 36
+    # 37 since 2026-08-28: R4's benchmark_counterfactual_json.
+    assert len(available) == 37
     assert unavailable == []
 
 

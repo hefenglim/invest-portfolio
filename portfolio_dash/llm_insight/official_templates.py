@@ -23,7 +23,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v19 (2026-08-26)"  # ⑪ +10 對齊計分窗；⑬ freshness sources
+LIBRARY_VERSION = "official-v20 (2026-08-28)"  # R4 的基準對照進週報（AI-D60）
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -354,7 +354,15 @@ _WEEKLY_BODY = """讀者是長期投資人，每週檢視一次組合。請以�
 {{market_sentiment_json}}
 {{index_quotes_json}}
 
-六、AI 自身戰績與校準 — backtest_json 是本系統全部已評分預測的信心分桶命中率
+六、基準對照 — 「同一筆錢、同樣的日期，改買該市場的指數，今天會是多少？」這是報酬數字唯一
+的錨：沒有它，XIRR 或總報酬是高是低無從判斷。引用 benchmark_return 與 excess，並說明這是
+與「含匯兌總損益（B）」相比，不是與資產損益（A）相比。
+⚠ 若 coverage_note 存在，表示只有部分資金有基準可對照——此時**一律照抄該說明，且不得使用
+「超額報酬」或「打敗大盤」這類措辭**，因為那個差額只涵蓋部分的錢。unavailable 時直說原因，
+不得以其他指數頂替，也不得省略本節而讓讀者以為組合沒有被對照過。
+{{benchmark_counterfactual_json}}
+
+七、AI 自身戰績與校準 — backtest_json 是本系統全部已評分預測的信心分桶命中率
 （claimed_pct＝我當時聲稱的信心均值，actual_pct＝該桶實際命中率），calibration_gap_json
 是最近 20 筆已評分預測的帶號校準缺口。**方向一律照抄 calibration_gap_json.reading**
 （例：「最近 20 筆平均高估自己 46.6 個百分點」）——不要自己從 gap 的正負號推論方向，
@@ -624,7 +632,7 @@ ma_cross 還是 20/60 的 ma_cross_short，不得混用），給出 ≤3 個交�
 # Strategy templates: (name, version, scope hint, body). ``scope`` is advisory — the
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
-    {"name": "持倉週報策略", "version": "v2.4", "scope": "portfolio", "body": _WEEKLY_BODY},
+    {"name": "持倉週報策略", "version": "v2.5", "scope": "portfolio", "body": _WEEKLY_BODY},
     {"name": "個股健檢策略", "version": "v2.8", "scope": "per_symbol", "body": _CHECKUP_BODY},
     {"name": "市場週報策略", "version": "v1.2", "scope": "per_market", "body": _MARKET_BODY},
     # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).

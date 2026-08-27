@@ -63,7 +63,8 @@ def test_prompt_vars_external_now_available(api_client: TestClient) -> None:
         assert by_token[token]["available"] is True, token
     # 33 previously live + 3 W6 (backtest_json / calibration_gap_json lit as-declared +
     # the new per-symbol signal_backtest_json) = 36.
-    assert sum(1 for r in rows if r["available"]) == 36
+    # 37 since 2026-08-28: R4's benchmark_counterfactual_json.
+    assert sum(1 for r in rows if r["available"]) == 37
     assert by_token["technical_signals_json"]["available"] is True
     assert by_token["fear_greed_json"]["available"] is True
     assert by_token["symbol_news_json"]["available"] is True

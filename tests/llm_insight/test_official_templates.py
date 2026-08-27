@@ -14,7 +14,7 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 
 def test_library_version_is_official_v15() -> None:
-    assert ot.LIBRARY_VERSION == "official-v19 (2026-08-26)"
+    assert ot.LIBRARY_VERSION == "official-v20 (2026-08-28)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -152,7 +152,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v19 (2026-08-26)"
+    assert wire["library_version"] == "official-v20 (2026-08-28)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")
@@ -248,7 +248,14 @@ def test_weekly_template_v22_cites_ai_track_record() -> None:
     """W7 (AI-D34): the weekly report narrates the AI's own calibration — both
     portfolio-scope vars cited; the pure-narrative law (no prediction) is intact."""
     weekly = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉週報策略")
-    assert weekly["version"] == "v2.4"
+    assert weekly["version"] == "v2.5"
+    # v2.5's whole content: R4's counterfactual, and the coverage red line WITH it. A
+    # benchmark comparison the model can quote without the partial-coverage caveat is how
+    # 「打敗大盤」 gets written about a number that only covers part of the money.
+    body = weekly["body"]
+    assert "{{benchmark_counterfactual_json}}" in body
+    assert "coverage_note" in body and "超額報酬" in body
+    assert "含匯兌總損益" in body, "must say WHICH return figure the excess is measured against"
     body = weekly["body"]
     assert "{{backtest_json}}" in body and "{{calibration_gap_json}}" in body
     assert "prediction 留空" in body  # the weekly stays narrative-only

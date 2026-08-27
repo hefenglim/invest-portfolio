@@ -105,6 +105,17 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"MYR":{"total_return":"688.30","rate":"0.0973"}}',
     ),
     VarSpec(
+        "benchmark_counterfactual_json", "基準對照（同一筆錢買指數）", "position", "portfolio",
+        True,
+        "把每一筆淨投入按其自身日期改買該市場的指數，算到今日的價值，並與含匯兌總損益（B）"
+        "相比。⚠ uncovered_ratio > 0 表示只涵蓋部分資金（例如某市場無基準，或流量早於指數"
+        "的儲存歷史）——此時 excess 不得被稱為「超額報酬」，coverage_note 會說明",
+        '{"available":true,"benchmark_return":"241800","excess":"66730",'
+        '"uncovered_ratio":"0","by_market":[{"market":"TW","label":"元大台灣50",'
+        '"benchmark_return":"128400"},{"market":"US","label":"S&P 500",'
+        '"benchmark_return":"113400"}]}',
+    ),
+    VarSpec(
         "realized_json", "已實現損益明細", "position", "portfolio", True,
         "每筆賣出的淨收款、調整成本移除、已實現損益",
         '[{"symbol":"2330","shares_sold":200,"proceeds_net":"119350","realized":"21350",'
@@ -879,6 +890,27 @@ def value_for(token: str, ctx: VarContext) -> Any:
             return {"scope_note": "以下為全組合彙總，非本市場切片；"
                                   "本市場數字見 holdings_json 與 returns_by_ccy_json", **kpis}
         return kpis
+    if token == "benchmark_counterfactual_json":
+        bench = getattr(data, "benchmark", None)
+        if bench is None or not bench.available:
+            # Honest degradation, with the server's own reason when it gave one — never a
+            # fabricated comparison and never a silent zero.
+            reason = getattr(bench, "reason", None) if bench is not None else None
+            return {"unavailable": True, "reason": reason} if reason else _UNAVAILABLE
+        out = bench.model_dump()
+        if bench.uncovered_ratio and bench.uncovered_ratio > 0:
+            # The red line, carried IN THE DATA rather than trusted to the prompt. When part
+            # of the money has no benchmark, `excess` is not 「超額報酬」 — it is a comparison
+            # over a subset, and `BenchmarkComparison`'s own docstring forbids the bare label.
+            # Same discipline as `covered_ratio` (F2): degrade the claim, do not hide the
+            # number.
+            out["coverage_note"] = (
+                "只有部分資金有基準可對照（未涵蓋："
+                + "、".join(bench.uncovered_markets or ["部分流量"])
+                + "）。excess 是這部分資金的差額，不可稱為「超額報酬」，"
+                  "也不可用來評價整體績效"
+            )
+        return out
     if token == "returns_by_ccy_json":
         return _returns_by_ccy(data, market=ctx.market)
     if token == "realized_json":

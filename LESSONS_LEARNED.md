@@ -1352,3 +1352,53 @@ call has a matching `window.pd* =` somewhere in `web/`
 that toasted success and downloaded nothing, and as the checkbox column bound to nothing:
 **a control or seam that fails SILENTLY is invisible to every sweep that counts things.** What
 finds them is asking, one at a time, "what actually changed when I pressed that?"
+
+## A green harness proves nothing about what it cannot see (2026-08-28)
+
+The stress harness reported `ops=128 pass=5663 fail=0` for weeks while being structurally
+blind to an entire defect class. `seed_all` seeds ONE close per symbol dated `ASOF`, so every
+earlier day was unpriced, therefore `incomplete`, therefore SKIPPED by `trend.total_value` —
+and a defect confined to a window between two dates lives exactly there. R6's ex-date is that
+shape: a 配股 booked on the payment date instead of the ex-date moves the share count only
+BETWEEN those dates and ends at the same position either way.
+
+The blindness was not obvious from the outside. Every number in that line was true; the
+inference "5,663 assertions passed, so the ledger is verified" was not.
+
+**How it was settled — and the shape worth copying.** The defect was deliberately reintroduced
+into the ORACLE (`facts_through` cutting dividends on the payment date, exactly the pre-R6
+behaviour) and the harness run in BOTH configurations:
+
+| harness | result |
+| --- | --- |
+| pre-change (one close at ASOF) | `pass=5663 fail=0` — silent |
+| after the daily series | `fail=53`, all `trend.total_value`, all inside the ex→pay window |
+
+The pre-change run reproducing the previously recorded baseline **to the digit** was itself the
+proof that the probe had restored the old state faithfully — without that, "it was blind
+before" would have been an assertion about code that no longer existed.
+
+**Rules:**
+1. **A new assertion family's detection power is MEASURED, by breaking the thing on purpose.**
+   Adding assertions and observing `fail=0` demonstrates only that two implementations agree
+   where they both run.
+2. **When a fixture makes an assertion unreachable, say so in the fixture's own words.** The
+   README had disclosed this gap for two days before it was closed, which is why closing it was
+   a morning's work rather than a rediscovery.
+3. Watch for the family that can only run where the answers already coincide. `trend.*` sampled
+   the ex-date and the payment date from day one — the SAMPLING was right and the VALUATION was
+   unreachable, and only one of those two was written down.
+
+## A killed background job leaves its children alive, holding the output file (2026-08-28)
+
+Killing a `run_in_background` bash job terminates the wrapper, not the `python -m pytest` it
+spawned. Observed: an e2e run "stopped" at 18:43 was still running at 18:44 with its uvicorn
+children, and a detached PowerShell relaunch then failed silently on its FIRST command because
+the old process still held the redirect target — so it skipped to the next step and produced a
+result for the wrong gate.
+
+**Rules:** before relaunching a long gate, kill strays explicitly
+(`Get-CimInstance Win32_Process -Filter "Name='python.exe'"` → `Stop-Process`) and verify the
+count is zero. Give each chunk its OWN output file, so no result can be attributed to the wrong
+run. And ⚠ `Remove-Item "$sp\ec*.txt"` also deletes `ec_chunks.txt` — a glob that eats its own
+plan file makes the loop iterate over nothing and look like it ran.

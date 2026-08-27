@@ -1719,6 +1719,34 @@ claim.
   AFTER the seeded series as unpriced, when carrying the last close forward is a valid
   valuation and what the app does.
 
+**R4's missing leg: the benchmark comparison is now visible to the prompt (AI-D60).** R4
+shipped the counterfactual onto the dashboard and the drawer and never built the variable its
+own plan specified — so the anchor existed and the narrator could not see it. No insight card
+could say the portfolio beat or lagged the index, which is the one sentence R4 was built to
+make sayable, and the four-lens review had called it the highest-value item in the programme.
+
+- `benchmark_counterfactual_json` (36 → 37 variables, `position` category 6 → 7), fed from the
+  dashboard's own `BenchmarkComparison` — a record-of-figure the LLM narrates and never
+  recomputes.
+- ⚠ **Wired into the WEEKLY PORTFOLIO report, not the per-symbol advice card.** The
+  counterfactual is a portfolio-level number; on a per-symbol card it invites 「this stock beat
+  the market」 from a figure about the whole book. `kpis_json` already carries a `scope_note`
+  for exactly this trap ("a per_market card must not read them as this market's numbers"), and
+  the same reasoning applies here. Weekly `v2.4` → `v2.5`, `LIBRARY_VERSION` →
+  `official-v20`.
+- ⚠ **The coverage red line lives in the DATA, not in the prompt's memory.** When
+  `uncovered_ratio > 0` the variable attaches a `coverage_note` naming the uncovered markets,
+  and the template is instructed to quote it verbatim and to avoid 「超額報酬」/「打敗大盤」
+  entirely — `BenchmarkComparison`'s own docstring forbids the bare label in that state, and a
+  variable that hands the model a bare `excess` invites the sentence the rule prohibits.
+- **The ETF-flag audit ran against demo** (read-only, owner-authorised, via `vm_exec.py` so the
+  operation log carries it). Demo sits at `v0.1.28-62-g4990b3b` — 16 commits behind this branch
+  — so `scripts/audit_etf_flags.py` is not on that box and the audit's own question was run as a
+  read-only query instead. Result: 18 TW instruments, `etf_flag_unknown` column ABSENT
+  (confirming demo predates AI-D40's three-state fix), and one genuine suspect — `0056`
+  元大高股息, a real ETF recorded as `is_etf=False`, with 0 sells so far. Nothing was written:
+  AI-D40 forbids the program relabelling those rows, and prod's ledger is empty anyway.
+
 ## [v0.1.28] - 2026-08-09
 
 A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not
