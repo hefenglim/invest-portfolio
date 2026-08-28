@@ -23,7 +23,9 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v21 (2026-08-28)"  # ＋週線視角進個股健檢（W8 唯讀鏡頭）
+# v22: the W8 weekly lens in the checkup card, and the daytrade negative one-shot the
+# W4 live baseline measured into existence.
+LIBRARY_VERSION = "official-v22 (2026-08-28)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -65,7 +67,7 @@ LIBRARY_VERSION = "official-v21 (2026-08-28)"  # ＋週線視角進個股健檢�
 # so the prompt can never drift from the door's allowed set.
 _CASH_KIND_VOCAB = "、".join(f"{kind}（{zh}）" for kind, zh in CASH_KIND_ZH.items())
 
-AI_INPUT_PROMPT_VERSION = "v7"  # R6: div ex_date
+AI_INPUT_PROMPT_VERSION = "v7.1"  # R6 ex_date; +daytrade negative one-shot (W4 baseline)
 AI_INPUT_PROMPT_BODY = (
     "<task>Extract stock transactions, dividends, and cash movements from the user's text\n"
     "and any attached statement screenshot into JSON. A real statement is MIXED — one page\n"
@@ -89,6 +91,18 @@ AI_INPUT_PROMPT_BODY = (
     '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2330",\n'
     '"side":"BUY","date":"2026-06-01","shares":"10","price":"600"}}],"unparsed":[]}}\n'
     "</example_output>\n"
+    # A NEGATIVE one-shot for `daytrade` (2026-08-28). The live corpus measured the PROSE rule
+    # failing on exactly the case it names: a same-day round trip the user never called 當沖
+    # came back with daytrade=1 in BOTH baseline runs. That flag halves the TW sell tax
+    # (0.3% -> 0.15%), so an over-eager true is money the ledger quietly loses. The rule
+    # already said "never infer it from two same-day opposite drafts" and was not enough — so
+    # show the shape that must NOT be produced, which is what a one-shot is for.
+    "<example_input>8/15 早上買 2330 一張 @600，下午賣出 @610</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2330",\n'
+    '"side":"BUY","date":"2026-08-15","shares":"1000","price":"600","daytrade":false}},\n'
+    '{{"kind":"txn","account_id":"tw_broker","symbol":"2330","side":"SELL",\n'
+    '"date":"2026-08-15","shares":"1000","price":"610","daytrade":false}}],\n'
+    '"unparsed":[]}}</example_output>\n'
     "<example_input>嘉信 AAPL 股息再投資 0.5 股 @210，毛額 105、扣繳 31.5</example_input>\n"
     '<example_output>{{"rows":[{{"kind":"div","account_id":"schwab","symbol":"AAPL",\n'
     '"date":"2026-06-01","type":"DRIP","gross":"105","withholding":"31.5",\n'

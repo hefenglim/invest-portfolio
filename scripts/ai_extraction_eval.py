@@ -42,6 +42,7 @@ from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.agents import ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.validate import CashPool
+from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.shared.llm_config import (
     LLMRole,
     ModelConfig,
@@ -78,6 +79,13 @@ def _build_conn(args: argparse.Namespace) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     bootstrap_db(conn)
+    # `bootstrap_db` owns the LEDGER tables; `prices` / `fx_rates` belong to pricing's own
+    # schema (data-and-pricing.md keeps that split deliberately). Without this line every
+    # case that touches FX died as `OperationalError: no such table: fx_rates` and was
+    # reported as a RUNNER ERROR — which took ALL THREE MY cases and the merged-account US
+    # case out of the run. Measured 2026-08-28 on the first live baseline: 4 of the 6
+    # "failures" were this, so MY extraction accuracy was not low, it was UNMEASURED.
+    create_pricing_tables(conn)
     ensure_llm_seeded(conn)
     seed_accounts(conn)
     key = os.environ.get(args.api_key_env, "").strip()

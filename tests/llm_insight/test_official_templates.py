@@ -14,7 +14,7 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 
 def test_library_version_is_official_v15() -> None:
-    assert ot.LIBRARY_VERSION == "official-v21 (2026-08-28)"
+    assert ot.LIBRARY_VERSION == "official-v22 (2026-08-28)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -41,7 +41,13 @@ def test_ai_input_prompt_v6_pins_local_exchange_code_rule() -> None:
     # the parity MY (Bursa) guidance (pinned by test_prompts_v2_carry_my_bursa_guidance);
     # v5 (W3 batch-B) adds the merged multi-market clause + optional ``market`` output field;
     # v6 (W4, AI-D17/D19) turns the door into the three-kind discriminated union.
-    assert ot.AI_INPUT_PROMPT_VERSION == "v7"  # R6 added div ex_date
+    assert ot.AI_INPUT_PROMPT_VERSION == "v7.1"
+    # v7.1 IS the negative one-shot: the W4 live corpus measured the prose rule
+    # 「never infer it from two same-day opposite drafts」 failing on the exact case it
+    # names (daytrade 0/2 before, 11/11 after). A wrongly-set daytrade halves the TW
+    # sell tax, so pin the example itself, not just the version string.
+    assert "8/15 早上買 2330" in ot.AI_INPUT_PROMPT_BODY
+    assert '"daytrade":false' in ot.AI_INPUT_PROMPT_BODY  # R6 added div ex_date
     body = ot.AI_INPUT_PROMPT_BODY
     assert "LOCAL exchange code" in body
     assert "聯電⇒2303" in body and "台積電⇒2330" in body and "鴻海⇒2317" in body
@@ -156,7 +162,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v21 (2026-08-28)"
+    assert wire["library_version"] == "official-v22 (2026-08-28)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

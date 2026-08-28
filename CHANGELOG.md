@@ -1779,6 +1779,45 @@ make sayable, and the four-lens review had called it the highest-value item in t
   it can bite. Cited by a template on the way in, because W6 shipped three variables no
   official template referenced and they stayed dark until W7.
 
+**W4's live extraction baseline exists at last — and measuring it stopped a regression the
+obvious fix would have shipped (AI-D63).** The corpus was built so a prompt edit would be
+measured rather than blind; it had never run, because it needs a real model and a real key. The
+owner supplied a dedicated key on 2026-08-28. Thirteen runs of
+`google/gemini-2.5-flash` via OpenRouter.
+
+**Baseline: field hit rate 99.3–100% (best run 295/295), and the three silent-money fields
+AI-D20 demands be reported separately are clean — cash `kind` 12/12, `short_sale` 24/24,
+`daytrade` 24/24.** Known non-deterministic cases, listed rather than averaged away:
+`div-tw-stock` ≈29%, `english-statement-fragment` (date) ≈23%, `unparsed-ambiguous-cash` ≈23%.
+
+Three things the runs showed that no single run could:
+
+- ★ **A harness defect wearing a model failure's clothes.** The first run read 34/40 and four of
+  its six failures were `RUNNER ERROR: no such table: fx_rates` — the eval built its in-memory
+  DB with `bootstrap_db` alone, which owns the LEDGER tables, while `prices`/`fx_rates` belong
+  to pricing's schema. Every FX-touching case died: **all three MY cases plus the merged-account
+  US case**. MY extraction was not poor, it was UNMEASURED. Fixed; evaluated fields 263 → 295.
+- ★ **`daytrade` was a real defect and the prose rule could not hold it.** The prompt already
+  said 「never infer it from two same-day opposite drafts」 and the model broke it on the exact
+  scenario that sentence names — setting `daytrade=1` on a same-day round trip the user never
+  declared, which halves the TW sell tax (0.3% → 0.15%). A **negative one-shot** — showing the
+  shape that must NOT be produced — took it from **0/2 to 11/11**. Prompt `v7` → `v7.1`,
+  `LIBRARY_VERSION` → `official-v22`.
+- ★ **The same technique applied to `div-tw-stock` was measured to be a REGRESSION, and was
+  reverted.** A STOCK one-shot fixed that case 6/6 — and taught the model to zero the `gross`
+  on OTHER dividend types: `div-my-net` went from 0/4 failing to 4/6 failing, writing a real
+  88.50 as 0. Trading 「a 配股's gross printed as 50」 (a field the replay does not read) for 「a
+  MY net dividend zeroed」 is strictly worse, so the one-shot is gone and `div-tw-stock` is
+  recorded as a known limitation rather than dressed up as fixed. **That is what the corpus is
+  for**: it turned 「this fix is actually a regression」 into a visible fact instead of an
+  undetected one.
+
+⚠ Thresholds stay OFF. `--max-cash-kind-miss 0 --max-daytrade-miss 0 --max-short-miss 0` are
+sound for a manual run; `--min-field-hit` is deliberately left unset, because pinning a
+non-deterministic runner's default to one run turns the next run's noise into a false
+regression. ⚠ The preview's 當沖 chip stays — a better prompt is not a reason to remove the
+backstop that lets the user see and untick a flag that moves money.
+
 ## [v0.1.28] - 2026-08-09
 
 A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not
