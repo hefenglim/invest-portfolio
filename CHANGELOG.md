@@ -27,9 +27,18 @@ that a stated rule did not hold on its own example.
 - Also stated: a dividend row has **no currency column** — the account determines it. The model
   wanted to send one every time, which forced a guaranteed retry, i.e. a paid call wasted on
   every dividend extraction.
-- ⚠ **Not yet measured.** Arms A/B/B2 ran `google/gemini-2.5-flash`; the demo registry holds
-  flash-**lite**, so an on-site run would change the model and produce a number that cannot be
-  compared to the 11-run baseline. Recorded as pending rather than dressed up.
+- ★ **Measured (arm C, 2026-08-29): `unparsed-option` 7/11 → 11/11**, all five dividend cases
+  11/11, case level 434/440 → **436/440 = 99.1%**. Eleven runs on the demo instance with the
+  model forced to `gemini-2.5-flash` — the same one arms A/B/B2 used, so the numbers are
+  comparable. Cost US$0.211.
+- ⚠ The demo registry did **not** actually contain a non-lite flash model (it was believed to;
+  the DB said otherwise), so the row was added by copying the key already installed on the host
+  — the credential never left the VM.
+- ⚠ **A marking I had just added turned out to be false and was removed.** `unparsed-option` was
+  labelled an accepted `known_limitation` at ~7/11 an hour before this run; it now passes 11/11.
+  Leaving it would have told the next reader that a fixed case is permanently broken — the same
+  mis-signal the marking exists to prevent, pointing the other way. `unparsed-ambiguous-cash`
+  keeps its marking (9/11 in two consecutive arms — stable, not drifting).
 
 **The confession rows now carry their prompt, and the known limitations are marked (AI-D74).**
 The live run exposed an asymmetry inside a single operation: the `schema_mismatch` row held

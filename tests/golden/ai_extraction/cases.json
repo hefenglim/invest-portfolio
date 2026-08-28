@@ -789,8 +789,7 @@
         "unparsed_contains": [
           "TSLA"
         ]
-      },
-      "known_limitation": "Measured ~7/11 on 2026-08-28. The model DOES refuse the option and DOES confess it; it drops the ticker from the quoted text, so the unparsed_contains substring check fails. No spurious row is produced. Accepted rather than tuned away."
+      }
     },
     {
       "id": "unparsed-ambiguous-cash",
@@ -802,7 +801,7 @@
           "500"
         ]
       },
-      "known_limitation": "Measured ~9/11 on 2026-08-28. An amount with no stated direction is sometimes guessed as DEPOSIT instead of being confessed. Real, but the row is visible to the user in the preview before commit."
+      "known_limitation": "Measured 9/11 on 2026-08-29 (arm C, gemini-2.5-flash) and 9/11 the round before: an amount with no stated direction is sometimes guessed as DEPOSIT instead of being confessed. Stable, not drifting. The row is visible to the user in the preview before commit."
     },
     {
       "id": "mixed-three-kinds",
