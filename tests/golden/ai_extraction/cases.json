@@ -2,7 +2,11 @@
   "version": 1,
   "comment": "W4 (AI-D20) AI-extraction accuracy corpus — SYNTHETIC, hand-authored. Each case is one input text (+ a fixed `today` anchor) and the rows the extraction MUST produce, expressed at the COMMIT-CSV level (the csv_texts the door emits), because a draft that cannot ride the CSV is a miss (the AI-1 lesson). Field names are the kind's CSV columns; `kind` routes the row. Values are strings everywhere — money is never a JSON float. Asserted fields per row are a SUBSET of the CSV columns (note is free-text and only asserted where a case says so); daytrade/short_sale are asserted on EVERY txn row and cash `kind` on EVERY cash row — the three fields that move money silently. Measured by scripts/ai_extraction_eval.py (live, manual); guarded against rot by tests/data_ingestion/test_ai_extraction_corpus.py (deterministic).",
   "today_default": "2026-08-18",
-  "accounts": ["tw_broker", "schwab", "moomoo_my"],
+  "accounts": [
+    "tw_broker",
+    "schwab",
+    "moomoo_my"
+  ],
   "cases": [
     {
       "id": "tw-simple-buy",
@@ -10,7 +14,19 @@
       "input": "8/15 在元大買 10 股 2330 @ 600",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "BUY", "date": "2026-08-15", "shares": "10", "price": "600", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "10",
+              "price": "600",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -21,7 +37,19 @@
       "input": "8/15 買進台積電 1 張，成交價 600 元",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "BUY", "date": "2026-08-15", "shares": "1000", "price": "600", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "1000",
+              "price": "600",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -32,7 +60,19 @@
       "input": "今天當沖賣出 2330 1000 股 @610",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "SELL", "date": "2026-08-18", "shares": "1000", "price": "610", "daytrade": "1", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "SELL",
+              "date": "2026-08-18",
+              "shares": "1000",
+              "price": "610",
+              "daytrade": "1",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -43,7 +83,19 @@
       "input": "今天當沖買進 2330 一張 @600",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "BUY", "date": "2026-08-18", "shares": "1000", "price": "600", "daytrade": "1", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "BUY",
+              "date": "2026-08-18",
+              "shares": "1000",
+              "price": "600",
+              "daytrade": "1",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -54,8 +106,32 @@
       "input": "8/15 早上買 2330 一張 @600，下午賣出 @610",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "BUY", "date": "2026-08-15", "shares": "1000", "price": "600", "daytrade": "0", "short_sale": "0"}},
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "SELL", "date": "2026-08-15", "shares": "1000", "price": "610", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "1000",
+              "price": "600",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          },
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "SELL",
+              "date": "2026-08-15",
+              "shares": "1000",
+              "price": "610",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -66,7 +142,19 @@
       "input": "8/15 放空 2317 500 股 @210",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2317", "side": "SELL", "date": "2026-08-15", "shares": "500", "price": "210", "daytrade": "0", "short_sale": "1"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2317",
+              "side": "SELL",
+              "date": "2026-08-15",
+              "shares": "500",
+              "price": "210",
+              "daytrade": "0",
+              "short_sale": "1"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -77,7 +165,19 @@
       "input": "8/15 賣出 2330 500 股 @700",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "SELL", "date": "2026-08-15", "shares": "500", "price": "700", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "SELL",
+              "date": "2026-08-15",
+              "shares": "500",
+              "price": "700",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -88,7 +188,19 @@
       "input": "8/15 買 00878 1000 股 @22.5",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "00878", "side": "BUY", "date": "2026-08-15", "shares": "1000", "price": "22.5", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "00878",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "1000",
+              "price": "22.5",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -99,7 +211,19 @@
       "input": "前天聯電買入1張，76元",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2303", "side": "BUY", "date": "2026-08-16", "shares": "1000", "price": "76", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2303",
+              "side": "BUY",
+              "date": "2026-08-16",
+              "shares": "1000",
+              "price": "76",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -110,7 +234,19 @@
       "input": "7/3 買 2330 10 股 @600",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "BUY", "date": "2026-07-03", "shares": "10", "price": "600", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "BUY",
+              "date": "2026-07-03",
+              "shares": "10",
+              "price": "600",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -121,7 +257,19 @@
       "input": "昨天賣出 2330 100 股 @700",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "SELL", "date": "2026-08-17", "shares": "100", "price": "700", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "SELL",
+              "date": "2026-08-17",
+              "shares": "100",
+              "price": "700",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -132,7 +280,19 @@
       "input": "8/15 嘉信買 AAPL 5 股 @210",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "schwab", "symbol": "AAPL", "side": "BUY", "date": "2026-08-15", "shares": "5", "price": "210", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "schwab",
+              "symbol": "AAPL",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "5",
+              "price": "210",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -143,8 +303,32 @@
       "input": "7/1 嘉信買 AAPL 5股 @210，隔天再買 5 股 @212",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "schwab", "symbol": "AAPL", "side": "BUY", "date": "2026-07-01", "shares": "5", "price": "210", "daytrade": "0", "short_sale": "0"}},
-          {"kind": "txn", "fields": {"account": "schwab", "symbol": "AAPL", "side": "BUY", "date": "2026-07-02", "shares": "5", "price": "212", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "schwab",
+              "symbol": "AAPL",
+              "side": "BUY",
+              "date": "2026-07-01",
+              "shares": "5",
+              "price": "210",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          },
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "schwab",
+              "symbol": "AAPL",
+              "side": "BUY",
+              "date": "2026-07-02",
+              "shares": "5",
+              "price": "212",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -155,7 +339,19 @@
       "input": "8/15 Schwab 賣出 MSFT 2 股 @500",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "schwab", "symbol": "MSFT", "side": "SELL", "date": "2026-08-15", "shares": "2", "price": "500", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "schwab",
+              "symbol": "MSFT",
+              "side": "SELL",
+              "date": "2026-08-15",
+              "shares": "2",
+              "price": "500",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -166,7 +362,19 @@
       "input": "8/15 在嘉信 short sell 20 股 TSLA @250",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "schwab", "symbol": "TSLA", "side": "SELL", "date": "2026-08-15", "shares": "20", "price": "250", "daytrade": "0", "short_sale": "1"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "schwab",
+              "symbol": "TSLA",
+              "side": "SELL",
+              "date": "2026-08-15",
+              "shares": "20",
+              "price": "250",
+              "daytrade": "0",
+              "short_sale": "1"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -177,7 +385,19 @@
       "input": "8/15 moomoo 買 NVDA 3 股 @180",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "moomoo_my", "symbol": "NVDA", "side": "BUY", "date": "2026-08-15", "shares": "3", "price": "180", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "moomoo_my",
+              "symbol": "NVDA",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "3",
+              "price": "180",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -188,7 +408,19 @@
       "input": "8/15 moomoo 買 1155 1000 股 @9.85",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "moomoo_my", "symbol": "1155", "side": "BUY", "date": "2026-08-15", "shares": "1000", "price": "9.85", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "moomoo_my",
+              "symbol": "1155",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "1000",
+              "price": "9.85",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -199,7 +431,19 @@
       "input": "8/15 買 Inari 0166 500 股 @3.20",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "moomoo_my", "symbol": "0166", "side": "BUY", "date": "2026-08-15", "shares": "500", "price": "3.20", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "moomoo_my",
+              "symbol": "0166",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "500",
+              "price": "3.20",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -210,7 +454,19 @@
       "input": "8/15 買 0097 2000 股 @0.425",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "moomoo_my", "symbol": "0097", "side": "BUY", "date": "2026-08-15", "shares": "2000", "price": "0.425", "daytrade": "0", "short_sale": "0"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "moomoo_my",
+              "symbol": "0097",
+              "side": "BUY",
+              "date": "2026-08-15",
+              "shares": "2000",
+              "price": "0.425",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -221,7 +477,16 @@
       "input": "7/3 台積電現金股利入帳 4000 元",
       "expect": {
         "rows": [
-          {"kind": "div", "fields": {"account": "tw_broker", "symbol": "2330", "date": "2026-07-03", "type": "CASH", "gross": "4000"}}
+          {
+            "kind": "div",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "date": "2026-07-03",
+              "type": "CASH",
+              "gross": "4000"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -232,7 +497,17 @@
       "input": "6/1 2330 股票股利配股 50 股",
       "expect": {
         "rows": [
-          {"kind": "div", "fields": {"account": "tw_broker", "symbol": "2330", "date": "2026-06-01", "type": "STOCK", "gross": "0", "reinvest_shares": "50"}}
+          {
+            "kind": "div",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "date": "2026-06-01",
+              "type": "STOCK",
+              "gross": "0",
+              "reinvest_shares": "50"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -243,7 +518,19 @@
       "input": "嘉信 AAPL 股息再投資 0.5 股 @210，毛額 105、扣繳 31.5（8/1）",
       "expect": {
         "rows": [
-          {"kind": "div", "fields": {"account": "schwab", "symbol": "AAPL", "date": "2026-08-01", "type": "DRIP", "gross": "105", "withholding": "31.5", "reinvest_shares": "0.5", "reinvest_price": "210"}}
+          {
+            "kind": "div",
+            "fields": {
+              "account": "schwab",
+              "symbol": "AAPL",
+              "date": "2026-08-01",
+              "type": "DRIP",
+              "gross": "105",
+              "withholding": "31.5",
+              "reinvest_shares": "0.5",
+              "reinvest_price": "210"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -254,7 +541,18 @@
       "input": "8/3 嘉信 MSFT 現金股息入帳：毛額 100、扣繳 30、淨額 70",
       "expect": {
         "rows": [
-          {"kind": "div", "fields": {"account": "schwab", "symbol": "MSFT", "date": "2026-08-03", "type": "CASH", "gross": "100", "withholding": "30", "net": "70"}}
+          {
+            "kind": "div",
+            "fields": {
+              "account": "schwab",
+              "symbol": "MSFT",
+              "date": "2026-08-03",
+              "type": "CASH",
+              "gross": "100",
+              "withholding": "30",
+              "net": "70"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -265,7 +563,16 @@
       "input": "8/5 moomoo 馬股 1155 股息淨額入帳 88.50 馬幣",
       "expect": {
         "rows": [
-          {"kind": "div", "fields": {"account": "moomoo_my", "symbol": "1155", "date": "2026-08-05", "type": "NET", "gross": "88.50"}}
+          {
+            "kind": "div",
+            "fields": {
+              "account": "moomoo_my",
+              "symbol": "1155",
+              "date": "2026-08-05",
+              "type": "NET",
+              "gross": "88.50"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -276,7 +583,16 @@
       "input": "8/1 入金 50000 元到元大",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "tw_broker", "date": "2026-08-01", "kind": "DEPOSIT", "ccy": "TWD", "amount": "50000"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "tw_broker",
+              "date": "2026-08-01",
+              "kind": "DEPOSIT",
+              "ccy": "TWD",
+              "amount": "50000"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -287,7 +603,17 @@
       "input": "嘉信入金 1000 美元，台幣成本 31500（8/1）",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "schwab", "date": "2026-08-01", "kind": "DEPOSIT", "ccy": "USD", "amount": "1000", "acq_home_amount": "31500"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "schwab",
+              "date": "2026-08-01",
+              "kind": "DEPOSIT",
+              "ccy": "USD",
+              "amount": "1000",
+              "acq_home_amount": "31500"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -298,7 +624,16 @@
       "input": "8/2 從 moomoo 提領 500 馬幣",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "moomoo_my", "date": "2026-08-02", "kind": "WITHDRAW", "ccy": "MYR", "amount": "500"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "moomoo_my",
+              "date": "2026-08-02",
+              "kind": "WITHDRAW",
+              "ccy": "MYR",
+              "amount": "500"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -309,7 +644,16 @@
       "input": "嘉信券商費用 25 美元（8/3）",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "schwab", "date": "2026-08-03", "kind": "BROKER_FEE", "ccy": "USD", "amount": "25"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "schwab",
+              "date": "2026-08-03",
+              "kind": "BROKER_FEE",
+              "ccy": "USD",
+              "amount": "25"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -320,7 +664,16 @@
       "input": "8/4 嘉信利息收入 3.21 美元",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "schwab", "date": "2026-08-04", "kind": "INTEREST", "ccy": "USD", "amount": "3.21"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "schwab",
+              "date": "2026-08-04",
+              "kind": "INTEREST",
+              "ccy": "USD",
+              "amount": "3.21"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -331,7 +684,16 @@
       "input": "8/4 元大融資利息支出 120 元",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "tw_broker", "date": "2026-08-04", "kind": "INTEREST_EXPENSE", "ccy": "TWD", "amount": "120"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "tw_broker",
+              "date": "2026-08-04",
+              "kind": "INTEREST_EXPENSE",
+              "ccy": "TWD",
+              "amount": "120"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -342,7 +704,16 @@
       "input": "8/5 元大折讓款 153 元入帳",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "tw_broker", "date": "2026-08-05", "kind": "REBATE", "ccy": "TWD", "amount": "153"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "tw_broker",
+              "date": "2026-08-05",
+              "kind": "REBATE",
+              "ccy": "TWD",
+              "amount": "153"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -353,7 +724,16 @@
       "input": "期初資金 100000 元（2026/1/1 建立）",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "tw_broker", "date": "2026-01-01", "kind": "OPENING", "ccy": "TWD", "amount": "100000"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "tw_broker",
+              "date": "2026-01-01",
+              "kind": "OPENING",
+              "ccy": "TWD",
+              "amount": "100000"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -364,7 +744,16 @@
       "input": "8/6 匯出 200 美元自嘉信",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "schwab", "date": "2026-08-06", "kind": "WITHDRAW", "ccy": "USD", "amount": "200"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "schwab",
+              "date": "2026-08-06",
+              "kind": "WITHDRAW",
+              "ccy": "USD",
+              "amount": "200"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -375,7 +764,9 @@
       "input": "8/1 台幣 31500 轉成 1000 美元",
       "expect": {
         "rows": [],
-        "unparsed_contains": ["31500"]
+        "unparsed_contains": [
+          "31500"
+        ]
       }
     },
     {
@@ -384,7 +775,9 @@
       "input": "AAPL 8/1 一拆四",
       "expect": {
         "rows": [],
-        "unparsed_contains": ["AAPL"]
+        "unparsed_contains": [
+          "AAPL"
+        ]
       }
     },
     {
@@ -393,8 +786,11 @@
       "input": "8/2 TSLA 8月 call 權利金收入 300 美元",
       "expect": {
         "rows": [],
-        "unparsed_contains": ["TSLA"]
-      }
+        "unparsed_contains": [
+          "TSLA"
+        ]
+      },
+      "known_limitation": "Measured ~7/11 on 2026-08-28. The model DOES refuse the option and DOES confess it; it drops the ticker from the quoted text, so the unparsed_contains substring check fails. No spurious row is produced. Accepted rather than tuned away."
     },
     {
       "id": "unparsed-ambiguous-cash",
@@ -402,8 +798,11 @@
       "input": "8/3 帳戶異動 500 美元",
       "expect": {
         "rows": [],
-        "unparsed_contains": ["500"]
-      }
+        "unparsed_contains": [
+          "500"
+        ]
+      },
+      "known_limitation": "Measured ~9/11 on 2026-08-28. An amount with no stated direction is sometimes guessed as DEPOSIT instead of being confessed. Real, but the row is visible to the user in the preview before commit."
     },
     {
       "id": "mixed-three-kinds",
@@ -411,9 +810,39 @@
       "input": "6/1 入金 50000 元；6/2 買 2330 一張 @600；6/3 台積電現金股利 4000 元入帳",
       "expect": {
         "rows": [
-          {"kind": "cash", "fields": {"account": "tw_broker", "date": "2026-06-01", "kind": "DEPOSIT", "ccy": "TWD", "amount": "50000"}},
-          {"kind": "txn", "fields": {"account": "tw_broker", "symbol": "2330", "side": "BUY", "date": "2026-06-02", "shares": "1000", "price": "600", "daytrade": "0", "short_sale": "0"}},
-          {"kind": "div", "fields": {"account": "tw_broker", "symbol": "2330", "date": "2026-06-03", "type": "CASH", "gross": "4000"}}
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "tw_broker",
+              "date": "2026-06-01",
+              "kind": "DEPOSIT",
+              "ccy": "TWD",
+              "amount": "50000"
+            }
+          },
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "BUY",
+              "date": "2026-06-02",
+              "shares": "1000",
+              "price": "600",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          },
+          {
+            "kind": "div",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "date": "2026-06-03",
+              "type": "CASH",
+              "gross": "4000"
+            }
+          }
         ],
         "unparsed_contains": []
       }
@@ -424,10 +853,33 @@
       "input": "嘉信對帳單 8/1：買 AAPL 5 股 @210；利息收入 3.21 美元；台幣 31500 轉 1000 美元",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "schwab", "symbol": "AAPL", "side": "BUY", "date": "2026-08-01", "shares": "5", "price": "210", "daytrade": "0", "short_sale": "0"}},
-          {"kind": "cash", "fields": {"account": "schwab", "date": "2026-08-01", "kind": "INTEREST", "ccy": "USD", "amount": "3.21"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "schwab",
+              "symbol": "AAPL",
+              "side": "BUY",
+              "date": "2026-08-01",
+              "shares": "5",
+              "price": "210",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          },
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "schwab",
+              "date": "2026-08-01",
+              "kind": "INTEREST",
+              "ccy": "USD",
+              "amount": "3.21"
+            }
+          }
         ],
-        "unparsed_contains": ["31500"]
+        "unparsed_contains": [
+          "31500"
+        ]
       }
     },
     {
@@ -436,9 +888,40 @@
       "input": "8/1 Bought 10 AAPL @ 210.50; MSFT dividend gross 100 withholding 30; broker fee 25 USD",
       "expect": {
         "rows": [
-          {"kind": "txn", "fields": {"account": "schwab", "symbol": "AAPL", "side": "BUY", "date": "2026-08-01", "shares": "10", "price": "210.50", "daytrade": "0", "short_sale": "0"}},
-          {"kind": "div", "fields": {"account": "schwab", "symbol": "MSFT", "date": "2026-08-01", "type": "CASH", "gross": "100", "withholding": "30"}},
-          {"kind": "cash", "fields": {"account": "schwab", "date": "2026-08-01", "kind": "BROKER_FEE", "ccy": "USD", "amount": "25"}}
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "schwab",
+              "symbol": "AAPL",
+              "side": "BUY",
+              "date": "2026-08-01",
+              "shares": "10",
+              "price": "210.50",
+              "daytrade": "0",
+              "short_sale": "0"
+            }
+          },
+          {
+            "kind": "div",
+            "fields": {
+              "account": "schwab",
+              "symbol": "MSFT",
+              "date": "2026-08-01",
+              "type": "CASH",
+              "gross": "100",
+              "withholding": "30"
+            }
+          },
+          {
+            "kind": "cash",
+            "fields": {
+              "account": "schwab",
+              "date": "2026-08-01",
+              "kind": "BROKER_FEE",
+              "ccy": "USD",
+              "amount": "25"
+            }
+          }
         ],
         "unparsed_contains": []
       }

@@ -463,11 +463,12 @@ def ai_agents_input(
     """
     completer = completer or complete_structured
     anchor = today if today is not None else datetime.now(_TAIPEI).date()
+    rendered = _PROMPT.format(
+        text=text, accounts=_accounts_catalog(conn), today=anchor.isoformat()
+    )
     try:
         result = completer(
-            _PROMPT.format(
-                text=text, accounts=_accounts_catalog(conn), today=anchor.isoformat()
-            ),
+            rendered,
             AiDraftList,
             agent="ai_agents_input",
             conn=conn,
@@ -490,6 +491,11 @@ def ai_agents_input(
             agent="ai_agents_input",
             outcome="unparsed_rows",
             source_text=text,
+            # The prompt is captured here too. Measured on the live demo 2026-08-28: a
+            # `schema_mismatch` row carried 13,242 chars of prompt while an
+            # `unparsed_rows` row carried ZERO — one corpus holding two completenesses,
+            # with the confession rows (the richest ones) as the poorer half.
+            prompt=rendered,
             raw_output="\n".join(f"{u.text}\t{u.reason}" for u in result.unparsed),
             error_reason=f"{len(result.unparsed)} row(s) could not be classified",
         )

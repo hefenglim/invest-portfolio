@@ -372,6 +372,11 @@ def test_confessed_unparsed_rows_are_recorded_once(conn: sqlite3.Connection) -> 
     assert "TSLA" in str(rows[0]["raw_output"])
     assert "fx conversion unsupported" in str(rows[0]["raw_output"])
     assert "2 row(s)" in str(rows[0]["error_reason"])
+    # A1: the confession row must carry its prompt too. Live on demo a
+    # `schema_mismatch` row held 13,242 chars of prompt and an `unparsed_rows` row
+    # held zero -- one corpus, two completenesses, the richest rows the poorer half.
+    assert len(str(rows[0]["prompt"])) > 500
+    assert "<task>" in str(rows[0]["prompt"])
 
 
 def test_a_clean_extraction_records_nothing(conn: sqlite3.Connection) -> None:

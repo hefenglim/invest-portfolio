@@ -25,7 +25,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
 # v22: the W8 weekly lens in the checkup card, and the daytrade negative one-shot the
 # W4 live baseline measured into existence.
-LIBRARY_VERSION = "official-v23 (2026-08-28)"
+LIBRARY_VERSION = "official-v24 (2026-08-28)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -67,7 +67,7 @@ LIBRARY_VERSION = "official-v23 (2026-08-28)"
 # so the prompt can never drift from the door's allowed set.
 _CASH_KIND_VOCAB = "、".join(f"{kind}（{zh}）" for kind, zh in CASH_KIND_ZH.items())
 
-AI_INPUT_PROMPT_VERSION = "v7.3"  # R6 ex_date; +daytrade negative one-shot (W4 baseline)
+AI_INPUT_PROMPT_VERSION = "v7.4"  # R6 ex_date; +daytrade negative one-shot (W4 baseline)
 AI_INPUT_PROMPT_BODY = (
     "<task>Extract stock transactions, dividends, and cash movements from the user's text\n"
     "and any attached statement screenshot into JSON. A real statement is MIXED — one page\n"
@@ -118,6 +118,19 @@ AI_INPUT_PROMPT_BODY = (
     '<example_output>{{"rows":[{{"kind":"div","account_id":"moomoo_my","symbol":"5347",\n'
     '"date":"2026-04-20","type":"NET","gross":"42.75"}}],\n'
     '"unparsed":[]}}</example_output>\n'
+    # A CONTRASTIVE negative one-shot for option premium (2026-08-28). Measured on the
+    # live demo: an option premium came back as {{"kind":"div","type":"CASH",
+    # "gross":"300"}} -- a dividend that does not exist -- and was caught only because
+    # the model also supplied a `ccy` the schema forbids. The prose rule naming options
+    # already existed and did not hold, exactly as the daytrade rule did not. Both halves
+    # ride in ONE example so the lesson is 'a premium is not a dividend', not 'avoid
+    # dividends': the option goes to unparsed WHILE a real cash dividend is booked.
+    "<example_input>9/14 NVDA 9月 put 權利金收入 180 美元；"
+    "9/14 PG 現金股利 62 美元</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"div","account_id":"schwab","symbol":"PG",\n'
+    '"date":"2026-09-14","type":"CASH","gross":"62"}}],\n'
+    '"unparsed":[{{"text":"9/14 NVDA 9月 put 權利金收入 180 美元",\n'
+    '"reason":"option premium is not a dividend"}}]}}</example_output>\n'
     "<example_input>嘉信 AAPL 股息再投資 0.5 股 @210，毛額 105、扣繳 31.5</example_input>\n"
     '<example_output>{{"rows":[{{"kind":"div","account_id":"schwab","symbol":"AAPL",\n'
     '"date":"2026-06-01","type":"DRIP","gross":"105","withholding":"31.5",\n'
@@ -157,6 +170,9 @@ AI_INPUT_PROMPT_BODY = (
     "- DRIP: 股息再投資.\n"
     "  -> [Rule]: MUST extract both reinvest_shares and reinvest_price.\n"
     "- NET: 淨額入帳（馬股單一層制）.\n"
+    "A div row has NO currency field — the account determines the currency, so never\n"
+    "emit ccy on a div row. An option/warrant/future premium is NEVER a dividend of\n"
+    "any type: it goes to unparsed.\n"
     "General field rules: gross / withholding / net are copied EXACTLY from the\n"
     "statement text. Do NOT compute them; never compute a withholding yourself.\n"
     '[Exception]: type=STOCK distributes no cash, so gross is explicitly "0" and the\n'

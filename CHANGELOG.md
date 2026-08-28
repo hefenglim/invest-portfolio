@@ -9,6 +9,37 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**An option premium is never a dividend — caught on the live demo, not in review (AI-D73).**
+Pasting an option premium through the demo's AI door made the model return
+`{"kind":"div","symbol":"TSLA","type":"CASH","gross":"300","ccy":"USD"}` — **a $300 dividend
+that does not exist**. It was stopped only because the model *also* supplied a `ccy`, which
+`DivDraft` forbids: an accidental catch with nothing to do with options. Omit that one field
+and the fake dividend passes the schema into the preview.
+
+⚠ The prompt **already said** an option row goes to `unparsed`. The prose rule failed on the
+exact case it names — the identical shape as W4's `daytrade`, and the second time this session
+that a stated rule did not hold on its own example.
+
+- The fix is **one example carrying both halves** (owner technique 2): the NVDA option goes to
+  `unparsed` **while a real PG cash dividend on the same line is booked**. A lone negative
+  example teaches "be shy about dividends"; the pair teaches 「權利金 ≠ 股利」. Values appear in
+  no corpus case, so `unparsed-option` still has to be generalised to.
+- Also stated: a dividend row has **no currency column** — the account determines it. The model
+  wanted to send one every time, which forced a guaranteed retry, i.e. a paid call wasted on
+  every dividend extraction.
+- ⚠ **Not yet measured.** Arms A/B/B2 ran `google/gemini-2.5-flash`; the demo registry holds
+  flash-**lite**, so an on-site run would change the model and produce a number that cannot be
+  compared to the 11-run baseline. Recorded as pending rather than dressed up.
+
+**The confession rows now carry their prompt, and the known limitations are marked (AI-D74).**
+The live run exposed an asymmetry inside a single operation: the `schema_mismatch` row held
+13,242 characters of prompt and the `unparsed_rows` row held **zero** — one corpus with two
+completenesses, the richest records being the poorer half. A new e2e pins the panel itself
+(empty state is a sentence, not a bare `0`; both buttons disabled with nothing to download or
+clear), proven red against a deliberately broken `data-center.js`. And `unparsed-option` /
+`unparsed-ambiguous-cash` now carry a `known_limitation` field recording the measured rate and
+why it is accepted, so the next reader cannot mistake a known limitation for a fresh regression.
+
 **AI-D65's other half is now actually built: a confessed `unparsed` row is recorded too.**
 The ruling was written into the spec and the CHANGELOG and then only half implemented —
 `OUTCOMES` declared `unparsed_rows` and nothing ever wrote it. Found while preparing the live
