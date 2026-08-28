@@ -9,6 +9,19 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Provider credentials are redacted before anything is stored in the failure log.** The seam
+calls the provider with `api_key=` in its kwargs, and a provider's auth error is free to echo
+what it was sent; `error_reason` holds `repr(exc)` of that exception. So a rejected key could
+have landed in the table **and ridden out through the one-click `.jsonl` download**. Redaction
+runs inside the single `_cap` helper, so it covers every text column by construction rather
+than by remembering to call it at each site, and it runs **before** truncation so a secret
+cannot survive by sitting past the 16 KiB boundary. Ordinary diagnostic content is untouched —
+pinned by its own test, because a redactor that eats the evidence defeats the log.
+
+Found while verifying that a real key had NOT leaked (it had not: zero hits across tracked
+files, the full git history, untracked files, and all 33 eval capture dumps). The hole was
+reachable, not yet taken.
+
 **The failure log gets a front door: per-category counts, a one-click `.jsonl`, and a clear that
 cannot touch the billing record (AI-D72).** Three routes over the ring `shared/llm_fail_log.py`
 already fills, and no new table. The panel went into `data-center.html`'s reserved

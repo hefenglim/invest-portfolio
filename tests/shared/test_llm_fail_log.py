@@ -302,3 +302,46 @@ def test_capture_all_records_successful_attempts(
     assert row["outcome"] == "ok"
     assert row["raw_output"] == '{"x": 7}'
     assert fl.capture_all() is False  # restored
+
+
+# --- credentials never reach the table ------------------------------------------------
+
+
+def test_a_provider_key_in_an_error_is_redacted(conn: sqlite3.Connection) -> None:
+    """The seam calls the provider with `api_key=`; an auth error may echo it back.
+
+    Without redaction that key would land in the table AND ride out through the one-click
+    .jsonl download. Written after verifying a real key had NOT leaked -- the hole was
+    reachable, not yet taken.
+    """
+    leaked = "sk-or-v1-9531cb0cAAAABBBBCCCCDDDD"
+    fl.record(
+        conn, agent="a", outcome="provider_error",
+        error_reason=f"AuthenticationError(api_key='{leaked}')",
+        prompt=f"Authorization: Bearer {leaked}",
+        raw_output=f'{{"error":"bad key {leaked}"}}',
+    )
+    row = fl.list_rows(conn)[0]
+    blob = " ".join(str(row[f]) for f in ("prompt", "raw_output", "error_reason"))
+    assert leaked not in blob
+    assert "9531cb0c" not in blob
+    assert "[REDACTED]" in blob
+
+
+def test_redaction_happens_before_truncation(conn: sqlite3.Connection) -> None:
+    """A secret must not survive by sitting past the 16 KiB boundary."""
+    leaked = "sk-proj-ZZZZYYYYXXXXWWWW"
+    fl.record(conn, agent="a", outcome="provider_error",
+              prompt="x" * (fl._MAX_TEXT - 5) + " " + leaked)
+    assert leaked not in str(fl.list_rows(conn)[0]["prompt"])
+
+
+def test_ordinary_text_is_left_alone(conn: sqlite3.Connection) -> None:
+    """Redaction must not eat the diagnostic content it exists to protect."""
+    fl.record(conn, agent="a", outcome="invalid_json",
+              prompt="8/5 moomoo 馬股 1155 股息淨額入帳 88.50 馬幣",
+              raw_output='{"rows":[{"kind":"div","symbol":"1155"}]}')
+    row = fl.list_rows(conn)[0]
+    assert "88.50" in str(row["prompt"])
+    assert "1155" in str(row["raw_output"])
+    assert "[REDACTED]" not in str(row["prompt"])

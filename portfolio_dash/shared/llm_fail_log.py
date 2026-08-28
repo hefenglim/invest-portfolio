@@ -49,11 +49,33 @@ may not import anything above itself. It depends on stdlib plus ``shared.clock``
 """
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
 from portfolio_dash.shared.clock import app_now
+
+#: Provider API keys, redacted before ANYTHING is stored.
+#:
+#: The seam calls the provider with ``api_key=`` in the kwargs, and a provider's auth
+#: error is free to echo what it was sent. ``error_reason`` holds ``repr(exc)`` of that
+#: exception, so without this a rejected key could land in the table AND ride out through
+#: the one-click ``.jsonl`` download. Applied to every text column rather than only
+#: ``error_reason``: the cheap defence is the one that does not depend on predicting which
+#: field the secret arrives in.
+_KEY_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),          # OpenAI / OpenRouter / Anthropic style
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"(?i)(api[_-]?key['\"]?\s*[:=]\s*['\"]?)[A-Za-z0-9._\-]{8,}"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace anything shaped like a provider credential with a marker."""
+    for pat in _KEY_PATTERNS:
+        text = pat.sub(lambda m: (m.group(1) if m.re.groups else "") + "[REDACTED]", text)
+    return text
 
 #: Newest rows kept; older ones are pruned as part of each insert.
 _KEEP = 300
@@ -148,7 +170,13 @@ def ensure_table(conn: sqlite3.Connection) -> None:
 
 
 def _cap(text: str) -> tuple[str, bool]:
-    """Cut *text* to the cap, reporting whether anything was removed."""
+    """Redact credentials, then cut to the cap, reporting whether anything was removed.
+
+    Redaction happens BEFORE the cut so a secret cannot survive by sitting past the
+    boundary, and inside this one helper so every text column is covered by construction
+    rather than by remembering to call it at each site.
+    """
+    text = redact_secrets(text)
     if len(text) <= _MAX_TEXT:
         return text, False
     return text[:_MAX_TEXT], True
