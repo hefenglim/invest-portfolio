@@ -9,6 +9,33 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**A share-adding dividend with no share count is refused at the DOOR, not three screens later by
+the replay (AI-D71).** The replay always refused it — `cost_basis.py` raises
+`"DRIP/STOCK dividend … requires reinvest_shares"` rather than coercing to zero, deliberately and
+with a test. The import door did not. `apply_dividend_model` passes the field straight through for
+STOCK and only *derives* it for DRIP when a `reinvest_price` is present, and the M5 conservation
+gate `check_amounts(gross, 0, 0)` passes for any non-negative gross. So the row landed with **zero
+issues** — and then every later rebuild of the whole book raised, which
+`tests/portfolio/test_cost_basis.py` records as a class that once *"crashed every rebuild that held
+a MY dividend"*.
+
+`.claude/rules/architecture.md` states that `data_ingestion` "rejects bad input loudly; never
+silently coerces". This path did not, and the AI door can produce exactly this row.
+
+- The guard's condition **mirrors the replay's own test** — `type in {DRIP, STOCK} and
+  reinvest_shares is None` — rather than restating the rule in different words, so the door and the
+  replay cannot drift apart later.
+- It is a **hard** issue, not needs-confirm: there is no "yes I meant it" reading of a share
+  dividend that adds no shares, so a confirmable warning would only move the failure downstream.
+- **DRIP that can derive its shares is untouched.** That is most of the real US ledger, and a guard
+  that rejected it would be worse than the hole it closes — pinned by its own test.
+- Found while tracing what a wrong `gross` on a stock dividend could actually cost. The answer, from
+  the new capture: for the shape this model produces (`gross:"50"` **with** `reinvest_shares:"50"`)
+  the damage is confined to one display field. Nothing prevented the other shape; now the door does.
+- Counter-evidence recorded: exactly the three guard assertions were red before the change, while
+  the three "must not break" assertions were already green — so the fixture can express both
+  directions rather than only the one being fixed.
+
 **The dividend rules are structured, the examples are contrastive, and 40/40 cases now hold at
 100% field accuracy across eleven consecutive live runs (AI-D68…AI-D70).** Prompt `v7.1` → `v7.3`,
 `LIBRARY_VERSION` → `official-v23`. Three measured arms, 33 live runs of

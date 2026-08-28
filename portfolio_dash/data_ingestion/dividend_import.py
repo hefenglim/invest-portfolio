@@ -192,6 +192,25 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
         if amount_issue is not None:
             issues.append(Issue(kind="dividend_amounts", message=amount_issue))
 
+        # A share-adding dividend with no share count is refused HERE, because the replay
+        # already refuses it: `cost_basis.py` raises "DRIP/STOCK dividend ... requires
+        # reinvest_shares" rather than coercing to zero. Until this guard existed the door
+        # accepted such a row with NO issue at all — `apply_dividend_model` passes the field
+        # through for STOCK and only derives it for DRIP when a reinvest_price is present,
+        # and the conservation gate above passes for any non-negative gross. The row landed
+        # clean and then broke every later rebuild of the whole book (the class
+        # `test_cost_basis.py` records as having once "crashed every rebuild that held a MY
+        # dividend"). The condition is written to MIRROR the replay's own test, not to
+        # restate it in different words, so the two cannot drift apart.
+        if div_type in ("DRIP", "STOCK") and amounts.reinvest_shares is None:
+            issues.append(Issue(
+                kind="reinvest_shares_required",
+                message=(
+                    f"{div_type} 股利必須有股數（reinvest_shares）"
+                    "——配股／再投資是以股數入帳，缺這個欄位重算會失敗"
+                ),
+            ))
+
         payload: dict[str, str] = {
             "account_id": account_id,
             "symbol": symbol,
