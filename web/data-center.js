@@ -143,4 +143,109 @@
 
   if (refreshBtn) refreshBtn.addEventListener('click', load);
   load();
+
+  // --- AI extraction failure log (AI-D64) --------------------------------------
+  // A bounded ring the LLM seam writes to on failure. The panel exists so the ring is
+  // visible: rows roll off silently at capacity, so `oldest` is the cue to download
+  // before the tail is lost.
+  var flBody = document.getElementById('fl-body');
+  var flNote = document.getElementById('fl-note');
+  var flCap = document.getElementById('fl-cap');
+  var flRefresh = document.getElementById('fl-refresh');
+  var flDownload = document.getElementById('fl-download');
+  var flClear = document.getElementById('fl-clear');
+
+  function flRow(r) {
+    var tr = document.createElement('tr');
+    var a = document.createElement('td');
+    a.className = 'col-text';
+    a.textContent = r.agent;
+    var n = document.createElement('td');
+    n.className = 'num';
+    n.textContent = String(r.n);
+    var o = document.createElement('td');
+    o.className = 'num';
+    // An empty table shows an em-dash, never a 0 that reads as "measured zero".
+    o.textContent = r.oldest ? String(r.oldest).slice(0, 19).replace('T', ' ') : '—';
+    tr.appendChild(a); tr.appendChild(n); tr.appendChild(o);
+    return tr;
+  }
+
+  function flRender(resp) {
+    if (!flBody) return;
+    flBody.textContent = '';
+    var rows = (resp && resp.by_agent) || [];
+    if (!rows.length) {
+      var tr = document.createElement('tr');
+      var td = document.createElement('td');
+      td.colSpan = 3;
+      td.className = 'panel-sub';
+      td.textContent = '目前沒有失敗記錄。';
+      tr.appendChild(td); flBody.appendChild(tr);
+    } else {
+      rows.forEach(function (r) { flBody.appendChild(flRow(r)); });
+    }
+    var total = (resp && resp.total) || 0;
+    var cap = (resp && resp.capacity) || 0;
+    if (flCap) flCap.textContent = total + ' / ' + cap + ' 筆';
+    if (flNote) {
+      flNote.textContent = total >= cap
+        ? '已達上限：最舊的記錄正在被覆寫，需要保留請先下載 .jsonl。'
+        : '抽取或解析失敗時即時留存完整提示詞與模型原始回覆，供分析、重測或微調語料使用。';
+    }
+    if (flDownload) flDownload.disabled = !total;
+    if (flClear) flClear.disabled = !total;
+  }
+
+  function flLoad() {
+    if (!flBody || !window.pdApi) return;
+    if (flRefresh) flRefresh.disabled = true;
+    window.pdApi.get('/api/llm-fail-log').then(flRender).catch(function (err) {
+      if (flNote) flNote.textContent = '失敗記錄載入失敗' + ((err && err.message) ? '：' + err.message : '');
+    }).then(function () {
+      if (flRefresh) flRefresh.disabled = false;
+    });
+  }
+
+  if (flRefresh) flRefresh.addEventListener('click', flLoad);
+
+  if (flDownload) {
+    flDownload.addEventListener('click', function () {
+      var restore = window.pdBusy ? window.pdBusy(flDownload, '打包中…') : function () {};
+      window.pdApi.download('/api/llm-fail-log/export', {}).catch(function (err) {
+        if (window.toast) window.toast(err.message, 'fail', err.code);
+      }).then(function () { restore(); });
+    });
+  }
+
+  if (flClear) {
+    flClear.addEventListener('click', function () {
+      // Native dialogs are banned (tests/contract/test_web_native_dialogs.py); and the
+      // copy names what SURVIVES, because the neighbouring table is the billing record
+      // and deleting that would hand back spent budget.
+      var run = function () {
+        var restore = window.pdBusy ? window.pdBusy(flClear, '清除中…') : function () {};
+        window.pdApi.del('/api/llm-fail-log').then(function (resp) {
+          if (window.toast) window.toast('已清除 ' + ((resp && resp.deleted) || 0) + ' 筆失敗記錄', 'ok');
+          flLoad();
+        }).catch(function (err) {
+          if (window.toast) window.toast(err.message, 'fail', err.code);
+        }).then(function () { restore(); });
+      };
+      if (!window.confirmDialog) { run(); return; }
+      window.confirmDialog({
+        title: '清除 AI 抽取失敗記錄',
+        body: '將永久刪除所有已留存的失敗情境（提示詞、模型原始回覆、錯誤原因）。'
+            + '若還需要作為分析或微調語料，請先下載 .jsonl。
+
+'
+            + 'AI 請求明細與額度不受影響，一筆都不會刪。',
+        confirmLabel: '永久清除',
+        danger: true,
+        onConfirm: run
+      });
+    });
+  }
+
+  flLoad();
 })();

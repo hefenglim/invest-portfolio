@@ -9,6 +9,31 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**The failure log gets a front door: per-category counts, a one-click `.jsonl`, and a clear that
+cannot touch the billing record (AI-D72).** Three routes over the ring `shared/llm_fail_log.py`
+already fills, and no new table. The panel went into `data-center.html`'s reserved
+「資料保留策略」 slot — copy-only with no controls, left for exactly this.
+
+- `GET /api/llm-fail-log` — counts per `agent`, the ring's capacity, and a preview of the newest
+  rows with `prompt` / `raw_output` trimmed to 400 chars **plus a `*_len`**, so the panel stays
+  small without misreporting how much there is. `POST /api/llm-fail-log/export` ships the whole
+  thing untrimmed — that one is the fine-tuning artefact, and truncating it would defeat its
+  purpose. `DELETE /api/llm-fail-log` empties it. All three take an optional `?agent=`.
+- **Deliberately not in `export.py`**: that file's contract test treats every
+  `@router.post("/export/…")` as a dashboard report requiring a frontend caller. This is an admin
+  diagnostic, not a report.
+- ⚠ **The clear button's copy names what SURVIVES** — 「AI 請求明細與剩餘額度一筆都不會動」 —
+  because the neighbouring table is the billing record: remaining budget is
+  `Σ topups − Σ llm_usage.cost`, so a helpful "tidy up the AI records" would hand back spent money.
+  ★ **Proven, not asserted**: injecting `DELETE FROM llm_usage` into `delete_all` turned BOTH
+  guards red (the store test and the HTTP test) and restoring turned both green. A comment would
+  have made the same claim and caught nothing.
+- The panel shows `N / 300 筆` and the **oldest** record, because rows roll off silently at
+  capacity — that date creeping forward is the only cue that the tail is being lost. Native
+  dialogs are banned by `test_web_native_dialogs.py`, so the clear uses `window.confirmDialog`.
+- Empty state renders an em-dash rather than `0`: "nothing has failed yet" and "measured zero"
+  are different statements.
+
 **A share-adding dividend with no share count is refused at the DOOR, not three screens later by
 the replay (AI-D71).** The replay always refused it — `cost_basis.py` raises
 `"DRIP/STOCK dividend … requires reinvest_shares"` rather than coercing to zero, deliberately and

@@ -67,13 +67,28 @@
     <div class="set-body" style="padding-top:6px;"><span class="panel-sub" id="dbstats-note"></span></div>
   </section>
 
-  <!-- C. 資料保留策略 (copy-only forward-looking note; no controls exist yet) -->
+  <!-- C. AI 抽取失敗記錄 (AI-D64) — the retention panel this slot was reserved for. -->
+  <section class="panel" data-screen-label="AI 抽取失敗記錄">
+    <div class="panel-head">
+      <h2 class="panel-title">AI 抽取失敗記錄</h2>
+      <span class="panel-sub num" id="fl-cap"></span>
+      <button class="btn" id="fl-refresh" type="button"><span class="ico">⟳</span>重新整理</button>
+      <button class="btn" id="fl-download" type="button"><span class="ico">⭳</span>下載 .jsonl</button>
+      <button class="btn btn-danger" id="fl-clear" type="button">清除</button>
+    </div>
+    <div class="table-wrap"><table class="data"><thead><tr>
+      <th class="col-text">用途分類</th><th>筆數</th><th>最舊記錄</th>
+    </tr></thead><tbody id="fl-body"></tbody></table></div>
+    <div class="set-body" style="padding-top:6px;"><span class="panel-sub" id="fl-note"></span></div>
+  </section>
+
+  <!-- D. 資料保留策略 (copy-only forward-looking note; no controls exist yet) -->
   <section class="panel" data-screen-label="資料保留策略">
     <div class="panel-head">
       <h2 class="panel-title">資料保留策略</h2>
       <span class="panel-sub">未來規劃</span>
     </div>
-    <div class="set-body"><span class="panel-sub">本頁為唯讀統計。未來將於此設定各資料表的保留期限與自動清理策略；目前所有歷史完整保留，不做任何自動清理。</span></div>
+    <div class="set-body"><span class="panel-sub">除 AI 抽取失敗記錄（上方，上限 300 筆滾動）之外，本頁其餘為唯讀統計。未來將於此設定各資料表的保留期限與自動清理策略；目前其他歷史完整保留，不做任何自動清理。</span></div>
   </section>
 
 </div>

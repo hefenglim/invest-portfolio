@@ -70,6 +70,35 @@ CATALOG: list[Feature] = [
     # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
     # delivery date and this has not been delivered; it is set at ship time, in the same edit
     # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29, AI extraction quality (2026-08-28) --------------------------------------
+    Feature(
+        version="0.1.29",
+        id="llm-fail-log",
+        title="AI 抽取失敗時，現在會留下完整現場",
+        desc="以前 AI 讀錯一張對帳單，系統只知道「某個欄位不對」，模型當時到底說了什麼"
+        "已經被丟掉了——連我們自己都無法事後重現。現在只要抽取或解析失敗，"
+        "當下就把完整提示詞、模型原始回覆與錯誤原因存下來，資料中心可看各用途的累計筆數、"
+        "一鍵打包 .jsonl 供分析或重測，也可以清除。⚠ 上限 300 筆滾動保留，"
+        "面板會顯示最舊記錄的時間提醒你何時該下載；清除只刪這份記錄，"
+        "AI 請求明細與剩餘額度一筆都不會動",
+        href="data-center.html",
+        area="資料中心 → AI 抽取失敗記錄",
+        target="#fl-body",
+    ),
+    Feature(
+        version="0.1.29",
+        id="ai-door-dividend-accuracy",
+        title="AI 門的股利與日期判讀，用 33 次實測校準過",
+        desc="把股利規則改成「欄位規則綁在類型自己的定義下」並成對舉例（配股 gross=0 對照"
+        "馬股淨額 gross=實際金額），40 個測試案例的欄位正確率連續 11 次跑都是 100%。"
+        "最大的改善其實不在股利：一行裡用分號串起多筆（買股、股利、券商費用）時，"
+        "以前只有第一筆會用對日期、後面兩筆會退回今天——那是會動到成本基礎與資金餘額的錯誤，"
+        "現在 11 次跑全對。⚠ 另外補上一道防線：配股或再投資若沒有股數，"
+        "匯入當下就會被擋下，不再是等到重算整本帳時才失敗",
+        href="trades.html",
+        area="交易帳本 → AI 智慧登錄",
+        target="#ai-text",
+    ),
     # --- v0.1.29, investment-logic review (2026-08-24..26) — R4/R5/R6 waves --------------
     Feature(
         version="0.1.29",
