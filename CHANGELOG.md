@@ -9,6 +9,54 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**The LLM seam now keeps what it sent and what it got back — the blind spot that produced a
+wrong conclusion one commit earlier (AI-D64…AI-D67).** Nothing in this codebase retained a
+prompt or a raw completion. `shared/llm.py` built `messages` as a local, read `content` as a
+local, parsed it, and dropped both — on success *and* on failure; `llm_usage` stored tokens and
+cost, never text. So when an extraction came back wrong the only surviving evidence was which
+parsed field mismatched.
+
+That is not hypothetical. The W4 baseline recorded a 配股 failure as *"contained to the dividend
+ledger, the replay does not read `gross`"* — and the containment could not be checked, because
+the model's actual words were gone. Verified this round: the import door has **no guard** requiring
+`reinvest_shares` on a STOCK dividend (`dividend_import.py` passes it through, `dividend_model.py`
+does not compute it, and the conservation gate `check_amounts(gross, 0, 0)` passes for any
+non-negative gross), while the replay **raises** on one (`cost_basis.py:606-613`) — a raise that
+`test_cost_basis.py:234` records as having once *"crashed every rebuild that held a MY dividend"*.
+Whether that row was harmless or a landmine turned on a field the report never captured.
+
+- **New `shared/llm_fail_log.py`** — a bounded ring recording one row **per ATTEMPT**, not per
+  call. The seam bills *before* it parses and salvages once with a second full provider call, so
+  one logical failure is two billed attempts with two different raw outputs; a per-call row would
+  hide half of what was paid for. Each row carries the `llm_usage` id of its own attempt, so the
+  two tables reconcile. `agent` **is** the task category — every call site already passes one and
+  it already threads into `llm_usage`; a parallel taxonomy would be a second name for one thing.
+- **Bounded by construction**: 300 newest rows pruned on insert (the `action_log.py` precedent),
+  each text column capped at 16 KiB with a `truncated` flag → a hard ~14 MiB ceiling rather than a
+  hope. Base64 image payloads are **never** stored (a vision call carries up to four 5 MB images);
+  only the text and an `image_count` survive.
+- ★ **`invalid_json` and `schema_mismatch` are now different outcomes.** They shared one generic
+  `"invalid structured output"` message and were indistinguishable. "The model emitted garbage"
+  and "the model emitted the wrong fields" are different defects and different training signals.
+  ⚠ The classifier reads the error's own `type`, **not** its class: pydantic v2 raises
+  `ValidationError` for *both*, reporting a malformed document as `json_invalid` — the obvious
+  `isinstance` version was written first and would have labelled every bad reply a schema mismatch.
+- ★ **An unrelated 500 fixed on the way past.** `resp.choices[0]` / `resp.usage` were read
+  **outside** the `try`, so a provider answering 200 with an unreadable body raised a bare
+  `IndexError` that never became `LLMUnavailable` — it reached the global catch-all as HTTP **500**
+  instead of the intended 503 degrade. Both the structured and text paths now degrade. Pinned by a
+  test proven red first (`IndexError: list index out of range` at the exact line).
+- **The corpus evaluator inherits the same capture.** `scripts/ai_extraction_eval.py --dump-dir`
+  writes one `.jsonl` line per attempt carrying the full prompt, the model's verbatim reply, the
+  case id, the verdict and the field-level misses. A case that "fails" by field comparison returned
+  *parseable* JSON, so the production policy would record nothing — which is exactly the case whose
+  raw reply has to be read. An explicit `set_capture_mode()` switch, **off** in production.
+- ⚠ **Stated gap, not papered over**: the settings page's model-ping reaches the provider directly
+  and bypasses this seam entirely. Its failures do not reach the log and the module docstring says so.
+- ⚠ **Red line, pinned by a test rather than a comment**: clearing this log must never touch
+  `llm_usage`. Remaining budget is `Σ topups − Σ llm_usage.cost`, so deleting usage rows would
+  silently hand the user free budget.
+
 **AI investment-assistant programme (2026-08-16)** — spec `docs/spec/2026-08-16-ai-assistant.md`.
 An inventory pass over the whole AI surface (four closed LLM loops, 34 variables, the four-rule
 engine, 13 alert rules) concluded the machinery exists and the gaps are one missing leg,

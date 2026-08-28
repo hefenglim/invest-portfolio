@@ -11,6 +11,9 @@ import sqlite3
 from fastapi.testclient import TestClient
 
 from portfolio_dash.api.routers.db_stats import _PORTFOLIO_REGISTRY
+from portfolio_dash.shared.llm_fail_log import (
+    ensure_table as ensure_llm_fail_log_table,
+)
 
 
 def _get(api_client: TestClient) -> dict[str, object]:
@@ -159,6 +162,7 @@ def _build_full_portfolio_schema(conn: sqlite3.Connection) -> None:
     ensure_rebate_tables(conn)  # rebate_skips
     ensure_fee_tables(conn)  # fee_rule_overrides
     ensure_snapshots_table(conn)  # portfolio_snapshots
+    ensure_llm_fail_log_table(conn)  # llm_fail_log (AI-D64)
 
 
 def test_every_portfolio_table_is_registered() -> None:

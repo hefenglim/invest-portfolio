@@ -43,6 +43,7 @@ from portfolio_dash.data_ingestion.agents import ai_agents_input
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.validate import CashPool
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
+from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.llm_config import (
     LLMRole,
     ModelConfig,
@@ -71,10 +72,38 @@ def _field_eq(name: str, expected: str, actual: str) -> bool:
     return expected.strip() == actual.strip()
 
 
+def _drain_capture(
+    conn: sqlite3.Connection, after_id: int, case_id: str, verdict: str,
+    misses: list[str],
+) -> list[dict[str, object]]:
+    """Take the rows this case just produced and stamp them with the case's identity.
+
+    Correlation is by row id, not by position: a case can produce two attempts (the
+    salvage re-call) or none, so counting would drift. Every row is enriched with the
+    case id, the verdict and the field-level misses, which makes the dump self-contained
+    — the reason a case failed and the raw reply that caused it sit on the same line.
+    """
+    out: list[dict[str, object]] = []
+    for row in reversed(fail_log.list_rows(conn)):  # oldest-first within the case
+        if int(row["id"]) <= after_id:  # type: ignore[arg-type]
+            continue
+        row["case_id"] = case_id
+        row["case_verdict"] = verdict
+        row["case_misses"] = misses
+        out.append(row)
+    return out
+
+
+def _max_capture_id(conn: sqlite3.Connection) -> int:
+    rows = fail_log.list_rows(conn, limit=1)
+    return int(rows[0]["id"]) if rows else 0  # type: ignore[arg-type]
+
+
 def _build_conn(args: argparse.Namespace) -> sqlite3.Connection:
     if args.db:
         conn = sqlite3.connect(args.db)
         conn.row_factory = sqlite3.Row
+        fail_log.ensure_table(conn)
         return conn
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -86,6 +115,7 @@ def _build_conn(args: argparse.Namespace) -> sqlite3.Connection:
     # case out of the run. Measured 2026-08-28 on the first live baseline: 4 of the 6
     # "failures" were this, so MY extraction accuracy was not low, it was UNMEASURED.
     create_pricing_tables(conn)
+    fail_log.ensure_table(conn)
     ensure_llm_seeded(conn)
     seed_accounts(conn)
     key = os.environ.get(args.api_key_env, "").strip()
@@ -118,6 +148,12 @@ def main() -> int:
     ap.add_argument("--model-alias", default=None,
                     help="force this registry alias at the chain head (both modes)")
     ap.add_argument("--json", default=None, help="also dump the raw report to this path")
+    ap.add_argument("--dump-dir", default=None,
+                    help="write a .jsonl of EVERY attempt (full prompt + raw model reply, "
+                         "stamped with case id/verdict/misses) here. Without it a failing "
+                         "case reports only 'want X got Y' and the model's actual words "
+                         "are lost — the blind spot that produced a wrong containment "
+                         "claim in the W4 baseline (AI-D64)")
     ap.add_argument("--limit", type=int, default=None,
                     help="run only the first N cases (smoke mode)")
     ap.add_argument("--min-field-hit", type=float, default=None)
@@ -133,6 +169,11 @@ def main() -> int:
         raise SystemExit("--model-name is required in self-contained mode (or pass --db)")
 
     conn = _build_conn(args)
+    # Capture EVERY attempt, not only failures. A case that "fails" by field comparison
+    # returned parseable JSON, so under the production policy nothing would be recorded —
+    # and that is precisely the case whose raw reply has to be read.
+    fail_log.set_capture_mode(True)
+    captured: list[dict[str, object]] = []
     stats = {"hit": 0, "miss": 0, "missing_rows": 0, "spurious_rows": 0,
              "unparsed_hit": 0, "unparsed_miss": 0}
     per_kind = {k: {"hit": 0, "miss": 0} for k in ("txn", "div", "cash")}
@@ -144,16 +185,21 @@ def main() -> int:
 
     for i, case in enumerate(cases):
         today = date.fromisoformat(case.get("today", default_today.isoformat()))
+        before_id = _max_capture_id(conn)
         try:
             result = ai_agents_input(
                 conn, case["input"], pool=_rich_pool, today=today,
                 model_alias=args.model_alias)
         except Exception as exc:  # noqa: BLE001 — a corpus run must finish and report
             failures.append(f"{case['id']}: RUNNER ERROR {exc!r}")
+            captured += _drain_capture(
+                conn, before_id, case["id"], "RUNNER_ERROR", [repr(exc)])
             continue
         if result.error is not None:
-            failures.append(f"{case['id']}: LLM degrade ({result.error.kind}) "
-                            f"{result.error.message}")
+            degrade = (f"LLM degrade ({result.error.kind}) {result.error.message}")
+            failures.append(f"{case['id']}: {degrade}")
+            captured += _drain_capture(
+                conn, before_id, case["id"], "DEGRADE", [degrade])
             continue
 
         actual: dict[str, list[dict[str, str]]] = {}
@@ -209,6 +255,8 @@ def main() -> int:
             failures.append(f"{case['id']}: FAIL — " + "; ".join(case_misses))
         else:
             passed += 1
+        captured += _drain_capture(
+            conn, before_id, case["id"], "FAIL" if case_misses else "PASS", case_misses)
         print(f"[{i + 1}/{len(cases)}] {case['id']}: "
               f"{'PASS' if not case_misses else 'FAIL'}")
 
@@ -231,6 +279,13 @@ def main() -> int:
         print("\n— failures —")
         for line in failures:
             print(" ", line)
+    if args.dump_dir:
+        out_dir = Path(args.dump_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = date.today().isoformat()
+        dump = out_dir / f"ai_extraction_capture_{stamp}_{os.getpid()}.jsonl"
+        dump.write_text(fail_log.to_jsonl(captured), encoding="utf-8")
+        print(f"\ncaptured {len(captured)} attempt(s) -> {dump}")
     if args.json:
         Path(args.json).write_text(json.dumps({
             "cases": len(cases), "passed": passed, "stats": stats,

@@ -1402,3 +1402,41 @@ result for the wrong gate.
 count is zero. Give each chunk its OWN output file, so no result can be attributed to the wrong
 run. And ⚠ `Remove-Item "$sp\ec*.txt"` also deletes `ec_chunks.txt` — a glob that eats its own
 plan file makes the loop iterate over nothing and look like it ran.
+
+## Four ways to read a green that isn't there (2026-08-28)
+
+All four happened in one session, on the same codebase, to the same person. They are not one
+mistake repeated — each hid the failure at a different layer, which is why "be careful reading
+gates" is not a usable rule and the four checks below are.
+
+1. **A stale `.mypy_cache`** reported "665 files, 0 errors" over a real error. → Delete the
+   cache before a gate run; a cold run is the only run that counts.
+2. **Counting result characters** in pytest output proved the run had FINISHED, not that it had
+   PASSED. → Never infer a verdict from progress output.
+3. **The wrong invocation.** `mypy .` overrides `pyproject.toml`'s
+   `files = ["portfolio_dash", "tests", "scripts/probe"]` and pulls in gitignored
+   `sample-trade-data/` plus the deliberately-unchecked `scripts/stress_audit/` — 528 errors,
+   none of them in checked code. The correct call is bare `mypy`, no path argument. A gate is
+   only a gate if it is INVOKED right, not just READ right.
+4. **A masked exit code.** `pytest > out.txt 2>&1; echo "EXIT=$?"; grep -E "FAILED" out.txt | head`
+   run in the background reports the exit status of the LAST command in the pipeline (`head`,
+   always 0). The notification said "exit code 0" while a test was genuinely failing.
+
+**Rules:**
+- Write the verdict INTO the artefact: `pytest ... > out.txt 2>&1; echo "REAL_EXIT=$?" >> out.txt`,
+  then read `REAL_EXIT` from the file. A number that travels separately from its run can be
+  attributed to the wrong run.
+- Never end a gate command with a pipe. The pipeline's status is not the gate's status.
+- Grep the artefact for `^FAILED|^ERROR` **as well as** checking the code — two independent
+  reads, because each of the four failures above defeated exactly one of them.
+
+## A stale file in the scratchpad silently hijacked a test run (2026-08-28)
+
+A driver script run from the shared scratchpad printed `pageerrors: []` and exited 0 without
+executing anything it was asked to. Cause: Python puts the SCRIPT'S OWN DIRECTORY first on
+`sys.path`, and the scratchpad still held a `click.py` from an old Playwright session — so
+`import click`, deep inside litellm, resolved to that browser script and ran it.
+
+**Rules:** the scratchpad is shared across sessions and accumulates modules with ordinary names
+(`click.py`, `types.py`, `json.py`). Run throwaway drivers from a fresh subdirectory, and treat
+"exited 0 with output from something else entirely" as a shadowing symptom, not a fluke.

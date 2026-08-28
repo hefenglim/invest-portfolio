@@ -98,6 +98,9 @@ from portfolio_dash.scheduler.jobs import (
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.db import session
+from portfolio_dash.shared.llm_fail_log import (
+    ensure_table as ensure_llm_fail_log_table,
+)
 from portfolio_dash.shared.logging_config import configure_logging
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
 from portfolio_dash.strategy.signal_history import (
@@ -178,6 +181,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_evaluations_tables(conn)  # insight_evaluations table (spec 04c)
         ensure_signal_states_table(conn)  # signal_states derived cache (P2 batch 2)
         ensure_signal_history_table(conn)  # signal_history per-day states (W6, AI-D27)
+        ensure_llm_fail_log_table(conn)  # llm_fail_log capture ring (AI-D64)
         notify_ops.ensure_seeded(conn)  # notify_config single-row + one-time topic (WP 3B)
         digest_ops.ensure_seeded(conn)  # digests + digest_config single-row (P3 batch 3)
     # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam

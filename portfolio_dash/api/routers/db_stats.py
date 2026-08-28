@@ -52,6 +52,7 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("portfolio_snapshots", "月度 KPI 快照", "市場資料", "month"),
     # AI 記錄 — per-call / per-card AI history
     _TableSpec("llm_usage", "AI 請求明細", "AI 記錄", "ts"),
+    _TableSpec("llm_fail_log", "AI 抽取失敗記錄", "AI 記錄", "created_at"),
     _TableSpec("insights", "洞察卡", "AI 記錄", "created_at"),
     _TableSpec("insight_evaluations", "洞察評分", "AI 記錄", "evaluated_at"),
     _TableSpec("calibration_prompts", "校正提示詞版本", "AI 記錄", "created_at"),

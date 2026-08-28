@@ -9,6 +9,7 @@ from decimal import Decimal
 import litellm as litellm  # re-exported so tests can monkeypatch llm_mod.litellm
 from pydantic import BaseModel, ValidationError
 
+from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.image_types import PNG, sniff_image_mime
 from portfolio_dash.shared.llm_config import (
@@ -133,15 +134,22 @@ def log_usage(
     output_tokens: int,
     cost: Decimal,
     cache_tokens: int = 0,
-) -> None:
-    """Append one row to the ``llm_usage`` table and commit."""
-    conn.execute(
+) -> int:
+    """Append one row to the ``llm_usage`` table, commit, and return its row id.
+
+    The id is returned so a failure capture (:mod:`shared.llm_fail_log`) can point at the
+    call it was billed for: a failed structured call is logged HERE before it is parsed,
+    so every captured failure has a usage row and the two reconcile. Callers that do not
+    need the link ignore the value.
+    """
+    cur = conn.execute(
         "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost, "
         "cache_tokens) VALUES (?,?,?,?,?,?,?)",
         (app_now().isoformat(), model, agent, input_tokens, output_tokens, str(cost),
          cache_tokens),
     )
     conn.commit()
+    usage_id = int(cur.lastrowid or 0)
     # Structured log of the LLM call (spec 19.4): one point covers both call paths
     # (complete_structured + complete_text) — same values written to the DB row, cost as
     # its canonical string. Logging only; no LLM behaviour or numbers change.
@@ -155,6 +163,7 @@ def log_usage(
             "cost": str(cost),
         },
     )
+    return usage_id
 
 
 def _response_format_for(schema: type[BaseModel]) -> dict[str, object]:
@@ -264,6 +273,23 @@ class StructuredCompletion[T: BaseModel](BaseModel):
     tokens_out: int = 0
 
 
+def _parse_outcome(exc: Exception) -> str:
+    """Tell "not JSON at all" from "JSON with the wrong fields".
+
+    Do NOT switch on the exception class here. Pydantic v2 raises ``ValidationError`` for
+    BOTH shapes — a malformed document arrives as an error whose ``type`` is
+    ``json_invalid``, never as a bare ``json.JSONDecodeError`` (measured 2026-08-28, after
+    the obvious ``isinstance`` version was written and would have labelled every bad reply
+    a schema mismatch). The two are different defects and different training signals, so
+    the classification reads the error's own type.
+    """
+    if isinstance(exc, ValidationError):
+        if any(d.get("type") == "json_invalid" for d in exc.errors()):
+            return "invalid_json"
+        return "schema_mismatch"
+    return "invalid_json"
+
+
 def _complete_with_meta[T: BaseModel](
     model: ModelConfig,
     messages: list[dict[str, object]],
@@ -287,7 +313,12 @@ def _complete_with_meta[T: BaseModel](
         extra["response_format"] = _response_format_for(schema)
     if temperature is not None:
         extra["temperature"] = temperature
-    for _attempt in range(2):
+    # Captured once per attempt (:mod:`shared.llm_fail_log`). Recorded HERE, at the
+    # per-model layer, not at the chain layer above: failover keeps only the LAST
+    # exception, so a chain-level capture would lose the primary model's failure
+    # entirely — which is usually the one worth reading.
+    prompt_text, image_count = fail_log.prompt_text_of(messages)
+    for attempt in range(1, 3):
         try:
             resp = litellm.completion(
                 model=litellm_model_string(model),
@@ -300,25 +331,45 @@ def _complete_with_meta[T: BaseModel](
                 **extra,
             )
         except Exception as exc:  # noqa: BLE001
+            fail_log.record(
+                conn, agent=agent, outcome="provider_error", model=model.model_name,
+                attempt=attempt, prompt=prompt_text, error_reason=repr(exc),
+                image_count=image_count,
+            )
             raise LLMUnavailable(f"provider error ({model.id}): {exc}") from exc
 
-        content = resp.choices[0].message.content or ""
-        usage = resp.usage
+        # `choices` / `usage` are read INSIDE the try deliberately. They used to sit
+        # outside it, so a malformed provider envelope raised a bare AttributeError /
+        # IndexError that never became LLMUnavailable: it escaped to the global catch-all
+        # as an HTTP 500 instead of the intended 503 degrade (found 2026-08-28).
+        try:
+            content = resp.choices[0].message.content or ""
+            usage = resp.usage
+            tokens_in, tokens_out = usage.prompt_tokens, usage.completion_tokens
+        except (AttributeError, IndexError, KeyError, TypeError) as exc:
+            fail_log.record(
+                conn, agent=agent, outcome="provider_error", model=model.model_name,
+                attempt=attempt, prompt=prompt_text,
+                error_reason=f"malformed response envelope: {exc!r}",
+                image_count=image_count,
+            )
+            raise LLMUnavailable(f"malformed response from {model.id}: {exc}") from exc
+
         cost = cost_of(
             ModelPricing(
                 model=model.model_name,
                 input_price_per_mtok=model.input_price_per_mtok,
                 output_price_per_mtok=model.output_price_per_mtok,
             ),
-            usage.prompt_tokens,
-            usage.completion_tokens,
+            tokens_in,
+            tokens_out,
         )
-        log_usage(
+        usage_id = log_usage(
             conn,
             model=model.model_name,
             agent=agent,
-            input_tokens=usage.prompt_tokens,
-            output_tokens=usage.completion_tokens,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
             cost=cost,
             cache_tokens=cached_tokens_of(usage),
         )
@@ -327,11 +378,26 @@ def _complete_with_meta[T: BaseModel](
         except (ValidationError, json.JSONDecodeError, ValueError):
             try:
                 parsed = schema.model_validate_json(_extract_json(content))
-            except (ValidationError, json.JSONDecodeError, ValueError):
+            except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+                # The two shapes are recorded SEPARATELY (see `_parse_outcome`): the one
+                # generic message they used to share could not tell a prompt author
+                # whether the model had emitted garbage or the wrong fields.
+                fail_log.record(
+                    conn, agent=agent, model=model.model_name, attempt=attempt,
+                    outcome=_parse_outcome(exc),
+                    prompt=prompt_text, raw_output=content, error_reason=repr(exc),
+                    image_count=image_count, usage_id=usage_id,
+                )
                 continue
+        if fail_log.capture_all():
+            fail_log.record(
+                conn, agent=agent, outcome="ok", model=model.model_name,
+                attempt=attempt, prompt=prompt_text, raw_output=content,
+                image_count=image_count, usage_id=usage_id,
+            )
         return StructuredCompletion(
             value=parsed, model=model.model_alias, cost=cost,
-            tokens_in=usage.prompt_tokens, tokens_out=usage.completion_tokens,
+            tokens_in=tokens_in, tokens_out=tokens_out,
         )
     raise LLMUnavailable(f"invalid structured output from {model.id}")
 
@@ -370,10 +436,19 @@ def complete_structured_meta[T: BaseModel](
     *temperature* (e.g. ``0`` for a deterministic classify/resolve call) is forwarded to the
     provider on every candidate; ``None`` leaves the provider default.
     """
-    check_budget(conn)
-    candidates = _select_for(
-        conn, role=role, vision=bool(images), model_override=model_override
-    )
+    # The pre-call gates are captured here rather than per-model: they refuse before any
+    # candidate is chosen, so there is no model to attribute them to.
+    try:
+        check_budget(conn)
+        candidates = _select_for(
+            conn, role=role, vision=bool(images), model_override=model_override
+        )
+    except (LLMBudgetExceeded, AINotActivated) as exc:
+        fail_log.record(
+            conn, agent=agent, outcome=exc.kind, prompt=prompt,
+            error_reason=repr(exc), image_count=len(images or ()),
+        )
+        raise
     messages = _build_messages(prompt + _json_instruction(schema), images)
     last: LLMUnavailable | None = None
     for model in candidates:
@@ -444,6 +519,7 @@ def _text_with(
     Mirrors :func:`_complete_with` minus the JSON parse / retry (there is no schema to
     validate). Raises :exc:`LLMUnavailable` on a provider error.
     """
+    prompt_text, image_count = fail_log.prompt_text_of(messages)
     try:
         resp = litellm.completion(
             model=litellm_model_string(model),
@@ -455,10 +531,25 @@ def _text_with(
             max_tokens=model.max_output_tokens,
         )
     except Exception as exc:  # noqa: BLE001
+        fail_log.record(
+            conn, agent=agent, outcome="provider_error", model=model.model_name,
+            prompt=prompt_text, error_reason=repr(exc), image_count=image_count,
+        )
         raise LLMUnavailable(f"provider error ({model.id}): {exc}") from exc
 
-    content = resp.choices[0].message.content or ""
-    usage = resp.usage
+    # Inside the try for the same reason as the structured path: a malformed envelope
+    # must degrade as 503, not escape as a 500.
+    try:
+        content = resp.choices[0].message.content or ""
+        usage = resp.usage
+    except (AttributeError, IndexError, KeyError, TypeError) as exc:
+        fail_log.record(
+            conn, agent=agent, outcome="provider_error", model=model.model_name,
+            prompt=prompt_text, error_reason=f"malformed response envelope: {exc!r}",
+            image_count=image_count,
+        )
+        raise LLMUnavailable(f"malformed response from {model.id}: {exc}") from exc
+
     cost = cost_of(
         ModelPricing(
             model=model.model_name,
@@ -503,8 +594,14 @@ def complete_text(
     (no model), :exc:`LLMBudgetExceeded` (cap hit), or :exc:`LLMUnavailable` (all
     candidates failed) — callers map these to 402 / 409 / 503 via the global handlers.
     """
-    check_budget(conn)
-    candidates = _select_for(conn, role=role, vision=False)
+    try:
+        check_budget(conn)
+        candidates = _select_for(conn, role=role, vision=False)
+    except (LLMBudgetExceeded, AINotActivated) as exc:
+        fail_log.record(
+            conn, agent=agent, outcome=exc.kind, prompt=prompt, error_reason=repr(exc),
+        )
+        raise
     messages: list[dict[str, object]] = []
     if system is not None:
         messages.append({"role": "system", "content": system})
