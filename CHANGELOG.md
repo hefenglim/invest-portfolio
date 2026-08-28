@@ -9,6 +9,83 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**The dividend rules are structured, the examples are contrastive, and 40/40 cases now hold at
+100% field accuracy across eleven consecutive live runs (AI-D68…AI-D70).** Prompt `v7.1` → `v7.3`,
+`LIBRARY_VERSION` → `official-v23`. Three measured arms, 33 live runs of
+`google/gemini-2.5-flash`, all in one session because the pass rate drifts with the wall clock.
+
+**Owner technique (2026-08-28): bind the field rule to the TYPE's own definition and declare the
+override explicitly, instead of leaving both facts in distant prose that contradict each other.**
+The old text contradicted itself in one line: `DRIP` named its fields
+(「填 reinvest_shares 與 reinvest_price」) while `STOCK` said only 「加股數」 and never named the
+field; meanwhile the general rule said `gross` is copied only when the statement states it, and
+`gross` is a REQUIRED column while a 配股 statement states no amount. The model was handed a
+required field, an instruction not to invent one, and no rule making a share dividend's gross
+structurally zero — so it put the only number it could see into it.
+
+| case | A (control) | B (structured prose) | **B2 (prose + contrastive pair)** |
+| --- | --- | --- | --- |
+| `div-tw-stock` | 10/11 | 11/11 | **11/11** |
+| `div-my-net` | 11/11 | **3/11** | **11/11** |
+| `english-statement-fragment` | **2/11** | 8/11 | **11/11** |
+| `my-sub-rm1-three-decimals` | 9/11 | 11/11 | **11/11** |
+| `cash-opening` | 10/11 | 8/11 | **11/11** |
+| `unparsed-ambiguous-cash` | 7/11 | 11/11 | **9/11** |
+| `unparsed-option` | 11/11 | 8/11 | **7/11** |
+| case-level | 423/440 = 96.1% | 423/440 = 96.1% | **434/440 = 98.6%** |
+
+Field hit rate under B2 was **295/295 on every one of the eleven runs**.
+
+- ★ **The spillover is caused by the CONTENT, not by the form of an example — which overturns
+  AI-D63's diagnosis.** W4 blamed the STOCK one-shot's shape ("the model over-generalised from
+  `gross:"0"`"). Arm B contains **no example at all** and reproduces the same regression: 8 of 11
+  runs wrote a real RM88.50 NET dividend as `gross:"0"` (`div-my-net` 11/11 → 3/11). Any
+  instruction saying 「for STOCK, gross is 0」 leaks across dividend types regardless of how it is
+  delivered. The "configuration D" that AI-D63 disclosed as untested is now tested, and it fails.
+- ★ **The owner's contrastive-pair rule is the countermeasure, measured.** Adding a second example
+  where `gross` carries the STATED amount (a MY net dividend) alongside the zero case repaired the
+  regression completely: `div-my-net` 3/11 → 11/11. One extreme boundary teaches the value; a pair
+  teaches that the value depends on `type`.
+- ★ **The largest win was not the target.** `english-statement-fragment` — one leading date
+  governing three items, where the model dated item 1 correctly and fell back to *today* for a
+  dividend and a broker fee, both money-of-record — went **2/11 → 11/11**. Arm B alone already
+  moved it 2 → 8 with no date rule whatsoever, which suggests carving the run-on rules paragraph
+  into a tagged block improves adherence to its NEIGHBOURING rules too. A planned date-scope rule
+  was therefore **not** added: the defect stopped reproducing, and a rule that cannot be measured
+  is complexity without evidence.
+- ⚠ **One regression, kept and disclosed rather than tuned away.** `unparsed-option` 11/11 → 7/11.
+  The model still refuses the option and still confesses it — it drops the ticker from the quoted
+  text (`"8月 call 權利金收入 300 美元"` instead of `"8/2 TSLA 8月 …"`), so the corpus's
+  `unparsed_contains: ["TSLA"]` substring check fails. **No spurious row is fabricated**; a user
+  still sees the line was not classified. Traded knowingly for +15 elsewhere including two
+  money-of-record dates.
+- ⚠ **Honest limit on two of the numbers**: the contrastive pair uses the same sentence template as
+  `div-tw-stock` and `div-my-net` with different symbols, dates and amounts, so those two cases now
+  partly measure pattern recognition. The independent evidence is the other 38 cases — above all
+  `english-statement-fragment`, which has no analogue in the prompt.
+
+**★ Two of W4's headline numbers were measuring memorisation, and a guard now prevents the class
+(AI-D68).** The `daytrade` negative one-shot added in W4 was, character for character, the input of
+corpus case `tw-sameday-roundtrip-NOT-daytrade`; the reverted STOCK one-shot was `div-tw-stock`'s
+input verbatim. So "daytrade 0/2 → 11/11" and "the STOCK one-shot fixes it 6/6" both measured the
+model recognising an answer printed in its own prompt. The failure mode is self-reinforcing — the
+obvious way to fix a failing case is to paste it in as an example, which makes it pass while
+teaching nothing — so `tests/llm_insight/test_prompt_examples_are_not_the_corpus.py` now fails the
+build on any one-shot that duplicates a corpus input, and carries a second test proving it can
+actually see a duplicate. The daytrade example was rewritten as a different instance of the same
+shape; all four dividend/daytrade examples now use symbols, dates and amounts absent from the corpus.
+
+**★ AI-D63's `div-tw-stock ≈29%` was never a valid control.** Re-measured this session it is
+**10/11 = 91%**; the 29% was pooled across the reverted one-shot experiments. Consequently the
+"6/6 fix" that regression was traded for was probably never a real effect, while the `div-my-net`
+regression it caused was large and real — reverting was right, but for a better reason than the one
+recorded. The AI-D63 wording stays on record, marked.
+
+**The containment claim from AI-D63 is now verified rather than assumed, and it holds.** The
+capture shows the failing shape is `gross:"50"` **with** `reinvest_shares:"50"` — the share count
+is correct, so the replay never raises and the damage is confined to one display field. It holds
+because of how this model happens to fail, not because anything prevents the other shape.
+
 **The LLM seam now keeps what it sent and what it got back — the blind spot that produced a
 wrong conclusion one commit earlier (AI-D64…AI-D67).** Nothing in this codebase retained a
 prompt or a raw completion. `shared/llm.py` built `messages` as a local, read `content` as a

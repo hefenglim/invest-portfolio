@@ -25,7 +25,7 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
 # v22: the W8 weekly lens in the checkup card, and the daytrade negative one-shot the
 # W4 live baseline measured into existence.
-LIBRARY_VERSION = "official-v22 (2026-08-28)"
+LIBRARY_VERSION = "official-v23 (2026-08-28)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -67,7 +67,7 @@ LIBRARY_VERSION = "official-v22 (2026-08-28)"
 # so the prompt can never drift from the door's allowed set.
 _CASH_KIND_VOCAB = "、".join(f"{kind}（{zh}）" for kind, zh in CASH_KIND_ZH.items())
 
-AI_INPUT_PROMPT_VERSION = "v7.1"  # R6 ex_date; +daytrade negative one-shot (W4 baseline)
+AI_INPUT_PROMPT_VERSION = "v7.3"  # R6 ex_date; +daytrade negative one-shot (W4 baseline)
 AI_INPUT_PROMPT_BODY = (
     "<task>Extract stock transactions, dividends, and cash movements from the user's text\n"
     "and any attached statement screenshot into JSON. A real statement is MIXED — one page\n"
@@ -97,11 +97,26 @@ AI_INPUT_PROMPT_BODY = (
     # (0.3% -> 0.15%), so an over-eager true is money the ledger quietly loses. The rule
     # already said "never infer it from two same-day opposite drafts" and was not enough — so
     # show the shape that must NOT be produced, which is what a one-shot is for.
-    "<example_input>8/15 早上買 2330 一張 @600，下午賣出 @610</example_input>\n"
-    '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2330",\n'
-    '"side":"BUY","date":"2026-08-15","shares":"1000","price":"600","daytrade":false}},\n'
-    '{{"kind":"txn","account_id":"tw_broker","symbol":"2330","side":"SELL",\n'
-    '"date":"2026-08-15","shares":"1000","price":"610","daytrade":false}}],\n'
+    "<example_input>5/9 上午買 2412 1000 股 @128，下午 @131 賣出</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2412",\n'
+    '"side":"BUY","date":"2026-05-09","shares":"1000","price":"128","daytrade":false}},\n'
+    '{{"kind":"txn","account_id":"tw_broker","symbol":"2412","side":"SELL",\n'
+    '"date":"2026-05-09","shares":"1000","price":"131","daytrade":false}}],\n'
+    '"unparsed":[]}}</example_output>\n'
+    # A CONTRASTIVE PAIR, not a single boundary example (owner technique 2,
+    # 2026-08-28). Arm B measured that stating 'STOCK => gross is 0' as PROSE already
+    # drives the model to zero `gross` on OTHER dividend types (div-my-net 11/11 ->
+    # 3/11, a real RM88.50 written as 0). One example of the zero case would deepen
+    # that; two examples where `gross` DIFFERS BY TYPE force the model to read `type`
+    # to decide. Neither instance appears in the corpus, so the cases still have to be
+    # generalised to rather than recognised.
+    "<example_input>3/12 2891 股票股利配股 120 股</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"div","account_id":"tw_broker","symbol":"2891",\n'
+    '"date":"2026-03-12","type":"STOCK","gross":"0","reinvest_shares":"120"}}],\n'
+    '"unparsed":[]}}</example_output>\n'
+    "<example_input>4/20 moomoo 馬股 5347 股息淨額入帳 42.75 馬幣</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"div","account_id":"moomoo_my","symbol":"5347",\n'
+    '"date":"2026-04-20","type":"NET","gross":"42.75"}}],\n'
     '"unparsed":[]}}</example_output>\n'
     "<example_input>嘉信 AAPL 股息再投資 0.5 股 @210，毛額 105、扣繳 31.5</example_input>\n"
     '<example_output>{{"rows":[{{"kind":"div","account_id":"schwab","symbol":"AAPL",\n'
@@ -133,14 +148,25 @@ AI_INPUT_PROMPT_BODY = (
     "user explicitly says 當沖 (a same-day round trip they declare); never infer it from\n"
     "two same-day opposite drafts. short_sale: set true ONLY when the user explicitly\n"
     "says 放空／融券／short sell — never infer it from a sell larger than the position;\n"
-    "when in doubt, false. Dividend types: CASH=現金股利入帳; STOCK=配股（股票股利，加\n"
-    "股數）; DRIP=股息再投資（填 reinvest_shares 與 reinvest_price）; NET=淨額入帳（馬股\n"
-    "單一層制）. gross/withholding/net are copied from the statement ONLY when it states\n"
-    "them — never compute a withholding yourself. div date is the PAYMENT date\n"
-    "(發放日／入帳日); ex_date is the EX-DIVIDEND date (除息日／除權日), filled ONLY\n"
-    "when the statement states it — never infer or estimate one: a guessed ex-date\n"
-    "moves a 配股 to the wrong day in the ledger, which is the error it exists to\n"
-    "remove. Cash rows: amount is ALWAYS unsigned\n"
+    "when in doubt, false.\n"
+    "<dividend_rules>\n"
+    "- CASH: 現金股利入帳.\n"
+    "- STOCK: 配股（股票股利，加股數）.\n"
+    '  -> [Rule]: MUST set gross="0". The share count MUST go to reinvest_shares,\n'
+    "     NEVER to gross.\n"
+    "- DRIP: 股息再投資.\n"
+    "  -> [Rule]: MUST extract both reinvest_shares and reinvest_price.\n"
+    "- NET: 淨額入帳（馬股單一層制）.\n"
+    "General field rules: gross / withholding / net are copied EXACTLY from the\n"
+    "statement text. Do NOT compute them; never compute a withholding yourself.\n"
+    '[Exception]: type=STOCK distributes no cash, so gross is explicitly "0" and the\n'
+    "number of shares belongs in reinvest_shares.\n"
+    "div date is the PAYMENT date (發放日／入帳日); ex_date is the EX-DIVIDEND date\n"
+    "(除息日／除權日), filled ONLY when the statement states it — never infer or\n"
+    "estimate one: a guessed ex-date moves a 配股 to the wrong day in the ledger,\n"
+    "which is the error it exists to remove.\n"
+    "</dividend_rules>\n"
+    "Cash rows: amount is ALWAYS unsigned\n"
     "(positive); the direction lives in cash_kind — one of the <cash_kind_vocabulary>\n"
     "entries (canonical English or the zh label, both accepted). 券商費用／融資利息 are\n"
     "OUTFLOWS (BROKER_FEE／INTEREST_EXPENSE); 入金／利息收入 are INFLOWS — a mislabelled\n"
