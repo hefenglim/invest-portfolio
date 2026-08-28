@@ -43,6 +43,7 @@ from portfolio_dash.data_ingestion.dividend_import import build_dividend_preview
 from portfolio_dash.data_ingestion.preview import commit_preview
 from portfolio_dash.data_ingestion.store import upsert_instrument
 from portfolio_dash.data_ingestion.validate import CashPool
+from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
@@ -342,3 +343,41 @@ def test_cash_csv_sanitizes_embedded_newlines_in_note() -> None:
     assert len(lines) == 2  # header + exactly one data line
     assert "\r" not in csv
     assert lines[1].endswith("line1 line2 line3 line4")
+
+
+def test_confessed_unparsed_rows_are_recorded_once(conn: sqlite3.Connection) -> None:
+    """AI-D65: a successful call whose model confessed is still worth keeping.
+
+    The seam records only calls that FAIL outright, so without this the confessions are
+    rendered on screen once and thrown away -- and they are the richest fine-tuning
+    signal, because the model is naming its own boundary against real text.
+
+    ONE row per call, not per confessed line: the unit of diagnosis is "this paste, this
+    prompt, this reply", and splitting it would duplicate the prompt N times while losing
+    which confessions arrived together.
+    """
+    _setup(conn)
+    fail_log.ensure_table(conn)
+    completer = _union_completer(unparsed=[
+        UnparsedRow(text="8/2 TSLA call 權利金 300", reason="options unsupported"),
+        UnparsedRow(text="8/3 TWD→USD 31500", reason="fx conversion unsupported"),
+    ])
+    ai_agents_input(conn, "亂碼 ###", pool=_RICH_POOL, completer=completer)
+
+    rows = fail_log.list_rows(conn)
+    assert len(rows) == 1, "one row per CALL, not per confessed line"
+    assert rows[0]["outcome"] == "unparsed_rows"
+    assert rows[0]["agent"] == "ai_agents_input"
+    assert "亂碼 ###" in str(rows[0]["source_text"])
+    assert "TSLA" in str(rows[0]["raw_output"])
+    assert "fx conversion unsupported" in str(rows[0]["raw_output"])
+    assert "2 row(s)" in str(rows[0]["error_reason"])
+
+
+def test_a_clean_extraction_records_nothing(conn: sqlite3.Connection) -> None:
+    """The log must stay a FAILURE log -- a clean run leaves no trace."""
+    _setup(conn)
+    fail_log.ensure_table(conn)
+    ai_agents_input(conn, "在元大買 10 股 2330 @ 600", pool=_RICH_POOL,
+                    completer=_union_completer())
+    assert fail_log.list_rows(conn) == []

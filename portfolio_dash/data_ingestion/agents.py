@@ -49,6 +49,7 @@ from portfolio_dash.data_ingestion.rules_binding import allowed_markets
 from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.data_ingestion.validate import CashPoolFn, Issue, TxnInput
 from portfolio_dash.llm_insight.official_templates import AI_INPUT_PROMPT_BODY
+from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm import LLMError, complete_structured
@@ -475,6 +476,23 @@ def ai_agents_input(
         )
     except LLMError as exc:
         return AiInputResult(error=Issue(kind=exc.kind, message=str(exc)))
+
+    if result.unparsed:
+        # AI-D65: a SUCCESSFUL call whose model confessed it could not classify some rows.
+        # The seam above records only calls that failed outright, so without this the
+        # confessions are shown on screen once and then thrown away -- and they are the
+        # richest signal in the log, because the model is naming its own boundary against
+        # real text. ONE row per call, not per confessed line: the unit of diagnosis is
+        # "this paste, this prompt, this reply", and splitting it would duplicate the
+        # prompt N times while losing which confessions arrived together.
+        fail_log.record(
+            conn,
+            agent="ai_agents_input",
+            outcome="unparsed_rows",
+            source_text=text,
+            raw_output="\n".join(f"{u.text}\t{u.reason}" for u in result.unparsed),
+            error_reason=f"{len(result.unparsed)} row(s) could not be classified",
+        )
 
     txns = [r for r in result.rows if isinstance(r, TxnDraft)]
     divs = [r for r in result.rows if isinstance(r, DivDraft)]

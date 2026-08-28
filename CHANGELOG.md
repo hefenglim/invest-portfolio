@@ -9,6 +9,19 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**AI-D65's other half is now actually built: a confessed `unparsed` row is recorded too.**
+The ruling was written into the spec and the CHANGELOG and then only half implemented —
+`OUTCOMES` declared `unparsed_rows` and nothing ever wrote it. Found while preparing the live
+demo verification, where it would have mattered immediately: garbage input makes the model
+behave *correctly* (zero rows, plus a confession of the lines it could not classify), which is
+a SUCCESSFUL call. Under the shipped code that logged nothing, so the panel would have stayed
+empty and the redactor would have been examined through a door that never opened.
+
+**One row per CALL, not per confessed line.** The unit of diagnosis is "this paste, this
+prompt, this reply"; splitting it would duplicate the prompt N times while losing which
+confessions arrived together. A clean extraction still records nothing — pinned by its own
+test, because this has to stay a failure log rather than an activity log.
+
 **Provider credentials are redacted before anything is stored in the failure log.** The seam
 calls the provider with `api_key=` in its kwargs, and a provider's auth error is free to echo
 what it was sent; `error_reason` holds `repr(exc)` of that exception. So a rejected key could
