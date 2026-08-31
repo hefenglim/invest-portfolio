@@ -1440,3 +1440,35 @@ executing anything it was asked to. Cause: Python puts the SCRIPT'S OWN DIRECTOR
 **Rules:** the scratchpad is shared across sessions and accumulates modules with ordinary names
 (`click.py`, `types.py`, `json.py`). Run throwaway drivers from a fresh subdirectory, and treat
 "exited 0 with output from something else entirely" as a shadowing symptom, not a fluke.
+
+## A control experiment that keeps the suspect variable confirms the wrong cause (2026-09-01)
+
+Third recurrence of the `-qq` trap above (2026-08-02, again 2026-08-13, now here), but the
+recurrence is not the lesson — the diagnosis is.
+
+A 4,548-test gate run finished at `[100%]`, printed its warnings summary, and stopped: no
+`N passed` line. To find out why, a single-test control run was executed — and it was mute
+too. That looked conclusive, so the conclusion recorded was **"this pytest build never prints
+the final summary line"**, and it travelled into the commit message of `9b7c272` as a stated
+fact about the environment.
+
+It was false. Both runs carried `-q` on the command line, and `pyproject.toml`'s `addopts`
+already supplies one, so both were `-qq`. The control reproduced the symptom because it
+reproduced the **cause** — it varied the test count, which was never the suspect, and held the
+flag, which was. Re-running the same single test with no extra `-q` printed
+`1 passed, 1 warning in 1.62s` on the first try.
+
+The verdict itself survived (the status-character histogram was `4548 × .` with `F`/`E` counted
+separately and zero, and a later clean re-run returned exit 0 and `4548 passed`), so this cost
+no wrong decision — only a false sentence in a permanent record.
+
+**Rules:**
+- A control experiment must **remove the suspect**, not shrink the workload. Shrinking the
+  input reproduces everything the input did not cause, which is most things.
+- When a tool behaves oddly, the first variable to strip is **your own flags**, before any
+  claim about the tool, the build, or the environment. An assertion about the environment is
+  the most expensive kind to get wrong: it outlives the session and gets believed.
+- The three existing entries on this trap all say "check `addopts` before adding verbosity
+  flags", and all three were read in this session's own memory index. A rule that fires only
+  when you remember it at the moment of typing is not a control — **stop passing `-q`**; the
+  config already has it.
