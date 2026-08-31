@@ -267,6 +267,14 @@ class FreshnessReport(BaseModel):
     missing_fx: list[str]
     xirr_unavailable_reason: str | None = None
     trend_unavailable_reason: str | None = None
+    # Why the WHOLE ``fx`` block is null, when it is (QA-01, 2026-08-29). Additive with a
+    # default of None = the section is present. It is the last-resort companion to
+    # ``FXSummary.reporting_unavailable_reason``: that one explains a PARTIAL rollup while
+    # the section still renders; this one explains its complete absence, which until now
+    # was reported by no field at all — the silence that let an empty account's missing
+    # rate erase a correct 33,000 TWD unnoticed. Same shape and same source (the resolver's
+    # own message) as ``xirr_unavailable_reason`` directly above.
+    fx_unavailable_reason: str | None = None
     # Ledger symbols with no Instrument row: their events are EXCLUDED from all
     # computation (cannot be booked without a quote currency) and listed here so the
     # UI can prompt the user to register them (2026-07-02).

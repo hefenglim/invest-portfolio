@@ -164,12 +164,22 @@ def _cash_builder(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     return build_cash_movement_preview(conn, csv_text, pool=cash_pool_fn(conn))
 
 
+def _fx_builder(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
+    """The 換匯 parser needs the same injection, for the same reason (QA-09, 2026-08-29).
+
+    `build_fx_preview` gained a REQUIRED pool probe when the balance guard and the
+    currency check moved onto it — it had neither, while `POST /api/cash/fx` enforced both.
+    `_LOAD_ORDER` already puts `fx` after `cash` and `transactions`, so a conversion funded by
+    a deposit in the owner's own export is seen as funded here too."""
+    return build_fx_preview(conn, csv_text, pool=cash_pool_fn(conn))
+
+
 _BUILDERS: dict[str, Callable[[sqlite3.Connection, str], ImportPreview]] = {
     "cash": _cash_builder,
     "openings": build_opening_preview,
     "transactions": build_transaction_preview,
     "dividends": build_dividend_preview,
-    "fx": build_fx_preview,
+    "fx": _fx_builder,
 }
 _WRITERS: dict[str, Writer] = {
     "cash": write_cash_movement_row,

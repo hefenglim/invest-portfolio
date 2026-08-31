@@ -322,6 +322,102 @@ def test_a_pending_action_widens_what_is_SEEN_not_what_is_allowed(
     assert _oversold(preview) == [1]
 
 
+# --- QA-01 on the share ledger (FIX-A1): only rows that will be WRITTEN are siblings --
+
+
+def test_a_deselected_buy_stops_covering_the_sell(conn: sqlite3.Connection) -> None:
+    """★ The commit-door defect at this seam: with ``select`` naming only the sell, the
+    covering buy is a flow no ledger will ever hold, so the sell is 賣超 again — the
+    cash door's deselected-deposit rule, replayed with shares."""
+    preview = build_transaction_preview(conn, _csv(
+        "schwab,AAA,buy,2026-01-05,100,10",
+        "schwab,AAA,sell,2026-02-05,100,12",
+    ), select={1})
+    assert _oversold(preview) == [1]
+
+
+def test_select_narrows_the_batch_and_nothing_else(conn: sqlite3.Connection) -> None:
+    """Every row stays in the output with its index, raw text and payload — ``row_hashes``
+    and the wire depend on that alignment — and a deselected row still gets its own
+    verdict; it only stops covering its siblings."""
+    full = build_transaction_preview(conn, _csv(
+        "schwab,AAA,buy,2026-01-05,100,10",
+        "schwab,AAA,sell,2026-02-05,100,12",
+    ))
+    narrowed = build_transaction_preview(conn, _csv(
+        "schwab,AAA,buy,2026-01-05,100,10",
+        "schwab,AAA,sell,2026-02-05,100,12",
+    ), select={1})
+    assert [r.index for r in narrowed.rows] == [r.index for r in full.rows]
+    assert [r.raw for r in narrowed.rows] == [r.raw for r in full.rows]
+    assert [r.payload for r in narrowed.rows] == [r.payload for r in full.rows]
+
+
+def test_selecting_both_rows_is_the_whole_file_batch(conn: sqlite3.Connection) -> None:
+    """A selection that keeps the cover changes nothing — the paired proof that the
+    narrowing subtracts only what was deselected."""
+    preview = build_transaction_preview(conn, _csv(
+        "schwab,AAA,buy,2026-01-05,100,10",
+        "schwab,AAA,sell,2026-02-05,100,12",
+    ), select={0, 1})
+    assert _oversold(preview) == []
+
+
+# --- FIX-A1b (Master V6): a structurally invalid row is not a sibling either --------
+
+
+def test_a_structurally_invalid_buy_covers_nothing(conn: sqlite3.Connection) -> None:
+    """★ The V6 shape: a buy priced −50.00 is a hard ``error`` on its own line — it can
+    never be written, so it can never cover. Until FIX-A1b it stayed in the batch and the
+    sell previewed ``ok``; a no-select commit then wrote the sell ALONE (200 / written 1 /
+    a lone unacked oversold SELL), reachable by a mere typo. The cash door has always had
+    this boundary (``_pool_free_issues`` decides membership)."""
+    preview = build_transaction_preview(conn, _csv(
+        "schwab,AAA,buy,2026-01-05,100,-50.00",
+        "schwab,AAA,sell,2026-02-05,60,12",
+    ))
+    assert preview.rows[0].has_hard_issue
+    assert _oversold(preview) == [1]
+
+
+def test_a_structurally_invalid_sell_does_not_drain_its_siblings(
+    conn: sqlite3.Connection,
+) -> None:
+    """The exclusion errs conservative in BOTH directions: a hard-invalid sell will never
+    book its outflow, so the later sell really is covered by what the ledger will hold —
+    flagging it would be a false 賣超 against a fictitious drain. Only row 2's verdict is
+    pinned: the broken row's OWN soft findings are rendered against ITS siblings (row 2
+    included, correctly — they describe what happens if its price is fixed) and are moot
+    under its hard error anyway."""
+    preview = build_transaction_preview(conn, _csv(
+        "schwab,AAA,buy,2026-01-05,100,10",
+        "schwab,AAA,sell,2026-01-10,100,-1",
+        "schwab,AAA,sell,2026-02-05,100,12",
+    ))
+    assert preview.rows[1].has_hard_issue
+    assert 2 not in _oversold(preview)
+
+
+def test_the_boundary_is_the_structural_family_and_the_rest_cannot_false_cover(
+    conn: sqlite3.Connection,
+) -> None:
+    """Why the ledger-dependent HARD kinds stay IN the batch: a pending flow covers only
+    its own ``(account, symbol)`` key, and those kinds hit every row of that key equally —
+    so the "covered" sell is exactly as un-writable as the buy that covers it, and no
+    writable row ever gains a false cover. Pinned for the two reachable kinds: an unknown
+    account and an unregistered symbol each hard-block BOTH halves of the pair."""
+    unknown_account = build_transaction_preview(conn, _csv(
+        "ghost,AAA,buy,2026-01-05,100,10",
+        "ghost,AAA,sell,2026-02-05,60,12",
+    ))
+    assert all(r.has_hard_issue for r in unknown_account.rows)
+    unregistered = build_transaction_preview(conn, _csv(
+        "schwab,NOPE,buy,2026-01-05,100,10",
+        "schwab,NOPE,sell,2026-02-05,60,12",
+    ))
+    assert all(r.has_hard_issue for r in unregistered.rows)
+
+
 # --- performance: one ActionIndex for the file, not one per row (trap #21) ----------
 
 

@@ -185,14 +185,21 @@ def test_unfiltered_report_is_the_full_set() -> None:
 
 
 def test_per_holding_return_ratio_is_display_percentage() -> None:
-    """A holding with a positive adjusted cost renders a 2-dp percentage return =
-    unrealized ÷ adjusted cost. 2330 = 105,000 / 495,000 ≈ 21.21%. The adjusted avg
-    495 = (500,000 − 5,000 dividend) / 1,000 is the origin of that cost basis."""
+    """A holding renders a 2-dp percentage return = the SERVER's ``unrealized_pct``.
+
+    QA-04 (2026-08-29): this column used to be re-derived here as unrealized ÷ ADJUSTED
+    cost, giving 105,000 / 495,000 ≈ 21.21% while the dashboard showed 21.00% for the same
+    holding at the same instant. It is now printed from ``HoldingRow.unrealized_pct`` —
+    unrealized ÷ abs(ORIGINAL cost), the audit-H1 basis shared with 累計報酬率 and 回本進度 —
+    so 2330 = 105,000 / 500,000 = 21.00%. The 調整後均價 column is unaffected: 495 =
+    (500,000 − 5,000 dividend) / 1,000 is still what the dividend sweep does to the basis.
+    """
     conn = _golden_conn()
     try:
         art = _build(conn)
     finally:
         conn.close()
     doc = art.content.decode("utf-8")
-    assert "21.21%" in doc  # 2330 unrealized 105,000 / adjusted cost 495,000
+    assert "21.00%" in doc  # 2330 unrealized 105,000 / ORIGINAL cost 500,000
+    assert "21.21%" not in doc  # the old adjusted-cost re-derivation is gone
     assert "495" in doc     # 2330 adjusted avg (TWD, 0 dp)

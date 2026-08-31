@@ -79,6 +79,9 @@ from portfolio_dash.shared.wire import decimal_str
 router = APIRouter()
 
 _ZERO = Decimal("0")
+# 100% payback — the 已回本 threshold, materialised so the two wire sites below test the
+# same Decimal and neither can drift into a float or a string comparison.
+_ONE = Decimal("1")
 
 # Share-reconciliation tolerance (owner ruling 2026-08-06): ignore anything past the 6th
 # decimal place of a SHARE COUNT. DRIP/STOCK reinvest shares are stored as `net / price`, a
@@ -155,10 +158,25 @@ def _account_wire(h: HoldingRow) -> dict[str, Any]:
         # 已回本: cumulative cash dividends have fully repaid the original cost, so the
         # adjusted basis has gone <= 0 (legal per domain-ledger.md). Decided HERE with an
         # exact Decimal comparison so the UI never threshold-tests a Decimal string.
-        # The `not short_open` gate is load-bearing: a short's basis is NEGATIVE by
-        # construction, so the bare <= 0 test labelled every open short
-        # 「配息已完全沖減成本」 without a single dividend having been paid.
-        "fully_recovered": h.adjusted_cost_total <= _ZERO and not h.short_open,
+        #
+        # THREE conditions, because a basis reaches zero-or-below three ways and only one
+        # of them is a payback:
+        #  · `payback_ratio >= 1` — the reduction actually CAME FROM DIVIDENDS. Without it
+        #    a 賣超 qualified: an acked oversell DISCARDS the basis (`build_book` zeroes
+        #    both totals), so `<= 0` was true with `dividend_portion` 0, and the drawer
+        #    printed 「配息已完全沖減成本」 above 「累計配息 0」 — on the very position whose
+        #    賣超 badge was asking the owner to fix it. It also covers a zero-cost position
+        #    left by a SPINOFF with `cost_carry == 1`, and an `-ε` basis residue surviving
+        #    a full short cover. This is the ratio the LABEL IS ABOUT (manual §6.4).
+        #  · `adjusted_cost_total <= _ZERO` — the original condition, kept: the ratio is
+        #    over the ORIGINAL total, so this is the statement about the CURRENT basis.
+        #  · `not short_open` — kept for its own reason, not because a short's ratio is
+        #    incidentally 0 today: a short's basis is NEGATIVE by construction, which is
+        #    the trap this gate was added for (domain-ledger.md, 2026-07-31) and which
+        #    should stay written down rather than be absorbed into the ratio test.
+        "fully_recovered": (h.payback_ratio >= _ONE
+                            and h.adjusted_cost_total <= _ZERO
+                            and not h.short_open),
     }
 
 
@@ -243,8 +261,12 @@ def _aggregate_position(
         # one account's pre-action share count contaminates the total. A per-account row can
         # still be clean — the drawer shows both, and only the aggregate is poisoned by one.
         "unbookable_action": any(h.unbookable_action for h in rows),
-        # 已回本 across the aggregated position (see _account_wire).
-        "fully_recovered": (adjusted_total <= _ZERO
+        # 已回本 across the aggregated position — the SAME three conditions, over the
+        # aggregate's own figures (see _account_wire for why each one is there). `payback`
+        # is this function's aggregate ratio, so a symbol whose accounts are individually
+        # 已回本 stays 已回本 in total, and one whose basis merely reached zero does not.
+        "fully_recovered": (payback >= _ONE
+                            and adjusted_total <= _ZERO
                             and not any(h.short_open for h in rows)),
     }
 

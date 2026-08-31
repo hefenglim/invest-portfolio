@@ -312,6 +312,36 @@ def _apply_action(
         return
 
 
+#: The zh sentence for a decimal fault in the replay. It lived in ``portfolio/dashboard.py``
+#: until 2026-08-29, which is exactly why the other eleven call sites did not have it.
+_UNCOMPUTABLE_ZH = ("帳本中有一列的數值無法計算（例如股數為 0 或數值過大的交易），"
+                    "請於交易帳本修正該列後重試")
+
+
+def _uncomputable_message(booking: object | None) -> str:
+    """The sentence for an uncomputable ledger, naming the row when one owns the fault.
+
+    Every seam renders ``str(exc)`` VERBATIM into its 4xx envelope (重算 / 稅務套件 / 試算 and
+    ``api/errors.py``'s handler), so this text is the whole of what the owner gets. It names
+    the offending (symbol, account, date) whenever the fault happened while booking a known
+    event — and deliberately does NOT when it did not: a fault in the holdings assembly
+    belongs to a position's totals rather than to one ledger line, and pointing at the last
+    row that happened to be read would send the owner to edit the wrong one.
+
+    ``getattr`` rather than an isinstance ladder because the four event species spell the
+    same three facts differently (``trade_date`` / ``date`` / ``build_date``;
+    ``symbol`` / ``from_symbol``), and a message helper must never be the thing that raises.
+    """
+    account_id = getattr(booking, "account_id", None)
+    symbol = getattr(booking, "symbol", None) or getattr(booking, "from_symbol", None)
+    when = (getattr(booking, "trade_date", None) or getattr(booking, "date", None)
+            or getattr(booking, "build_date", None))
+    if account_id is None or symbol is None or when is None:
+        return _UNCOMPUTABLE_ZH
+    return (f"{symbol}（{account_id}）於 {when.isoformat()} 的帳本資料數值無法計算"
+            "（數值過大或除以零）— 請於交易帳本修正該列後重試")
+
+
 def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     """Replay the ledger in date order; return open holdings, realized P&L, gross invested.
 
@@ -390,290 +420,387 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
         events.append((ca.date, EventPriority.CORPORATE_ACTION, "action", ca))
     events.sort(key=lambda e: (e[0], e[1]))
 
-    for _d, _p, kind, ev in events:
-        if kind == "action":
-            assert isinstance(ev, CorporateAction)
-            _apply_action(positions, ev, quote_ccy, unapplied,
-                          allow_oversell=allow_oversell)
-        elif kind == "open":
-            assert isinstance(ev, OpeningInventory)
-            key = (ev.account_id, ev.symbol)
-            pos = positions.setdefault(key, _Position(quote_ccy(ev.symbol)))
-            pos.shares += ev.shares
-            pos.original_total += ev.original_cost_total
-            pos.adjusted_total += ev.original_cost_total
-            gross[pos.quote_ccy] += ev.original_cost_total
-        elif kind == "tx":
-            assert isinstance(ev, Transaction)
-            ccy = quote_ccy(ev.symbol)
-            key = (ev.account_id, ev.symbol)
-            pos = positions.setdefault(key, _Position(ccy))
-            if ev.side is Side.BUY:
-                # A buy COVERS an open declared short before it adds to the long lot. The
-                # cover settles at THIS buy's all-in per-share cost and the leftover shares
-                # start their long life at that same cost — the owner's stated rule
-                # (2026-07-31): 買回的每股成本結算獲利，剩下的股數以本次成本為起點。
-                cover = min(ev.quantity, pos.short_shares)
-                if cover > _ZERO:
-                    per_share = (ev.quantity * ev.price + ev.fees + ev.tax) / ev.quantity
-                    short_avg = pos.short_proceeds / pos.short_shares
-                    realized_rows.append(
-                        RealizedRow(
-                            account_id=ev.account_id,
-                            symbol=ev.symbol,
-                            quote_ccy=ccy,
-                            sell_date=ev.trade_date,   # realizes on the COVER date
-                            shares_sold=cover,
-                            proceeds_net=short_avg * cover,
-                            original_cost_removed=per_share * cover,
-                            adjusted_cost_removed=per_share * cover,
-                            realized=(short_avg - per_share) * cover,
-                            kind="short_cover",
-                        )
+    # -- ONE OWNER for the never-500 re-typing (2026-08-29) ---------------------------
+    # A decimal fault on ledger data is an ``ArithmeticError``, NOT a ``ValueError``, so it
+    # walks past the entire ``except (ValueError, KeyError)`` degradation family that
+    # ``UnbookableLedgerError`` was deliberately made a ``ValueError`` in order to reach.
+    # Until this arm existed, exactly ONE of the twelve ``build_book`` call sites re-typed it
+    # (``portfolio/dashboard.py``), so a single hand-edited row with ``quantity='1E+999999'``
+    # answered 422 on ``GET /api/dashboard`` and **500** on 重算, the tax package and 試算 —
+    # measured, all four doors, one row. Two of those three even had an arm for it: they
+    # caught ``decimal.InvalidOperation``, which is ONE LEAF of ``ArithmeticError``, while
+    # ``decimal.Overflow`` and ``decimal.DivisionByZero`` are its SIBLINGS, not its subclasses.
+    #
+    # Re-typing at four call sites is four chances to miss one, and three had been missed, so
+    # it happens HERE — where the fault is raised — and every caller inherits it unchanged.
+    #
+    # The wrap covers the holdings assembly as well as the event loop: ``original_avg =
+    # original_total / shares`` overflows for a position with a colossal total and a tiny
+    # share count (measured), which the loop books without complaint. ``booking`` is cleared
+    # when the loop ends so that fault is not blamed on the last row read.
+    booking: object | None = None
+    try:
+        for _d, _p, kind, ev in events:
+            booking = ev
+            if kind == "action":
+                assert isinstance(ev, CorporateAction)
+                _apply_action(positions, ev, quote_ccy, unapplied,
+                              allow_oversell=allow_oversell)
+            elif kind == "open":
+                assert isinstance(ev, OpeningInventory)
+                key = (ev.account_id, ev.symbol)
+                pos = positions.setdefault(key, _Position(quote_ccy(ev.symbol)))
+                pos.shares += ev.shares
+                pos.original_total += ev.original_cost_total
+                pos.adjusted_total += ev.original_cost_total
+                gross[pos.quote_ccy] += ev.original_cost_total
+            elif kind == "tx":
+                assert isinstance(ev, Transaction)
+                ccy = quote_ccy(ev.symbol)
+                if ev.quantity < _ZERO:
+                    # A NEGATIVE quantity has no defined meaning on either side, and until QA-12
+                    # this branch did not exist — the comment below claimed a negative row "stays
+                    # loud" while the code did the opposite of that on BOTH sides:
+                    #
+                    #   * a negative BUY was SILENTLY DROPPED — `cover = min(-100, 0) = -100` is
+                    #     not `> 0`, then `to_long = -100 - (-100) = 0` is not `> 0` either, so
+                    #     neither branch ran and nothing anywhere recorded that a row had been
+                    #     ignored;
+                    #   * a negative SELL was BOOKED, at `frac = -100/1000 = -0.1`, which
+                    #     *increases* the position's cost (500,712 -> 550,783.2) and emits a
+                    #     realized row of -9,928.8. That is exactly the "plausible-looking wrong
+                    #     number" the zero-quantity note below refuses to accept;
+                    #   * and against a position holding nothing it was neither: `frac = -100/0`
+                    #     raised `decimal.DivisionByZero`, which is NOT an `InvalidOperation`, so
+                    #     the re-typing guard of the day did not cover it either. (The
+                    #     `ArithmeticError` arm above does now — but a re-typed decimal fault is
+                    #     still a worse answer than a row named by the branch that knows it.)
+                    #
+                    # LOUD ON BOTH PATHS (2026-08-29). Wave 1 refused it on the strict path and
+                    # SKIPPED it under `allow_oversell`, for one stated reason: nothing then
+                    # caught an `UnbookableLedgerError` leaving `GET /api/dashboard` (measured:
+                    # 500, through `api/errors.py`'s catch-all), so raising would have taken down
+                    # the one page the owner lives on. That handler now exists, so the constraint
+                    # is gone — and with it the reason to describe one corrupt row two ways.
+                    #
+                    # Why LOUD is right HERE while the dividend-on-an-open-short below is SKIPPED
+                    # and flagged: the two inputs are not the same species. A dividend landing on
+                    # a short is a LEGITIMATE ledger state the owner may hold for months, and the
+                    # position it belongs to is right there to carry the 待釐清 flag. A negative
+                    # quantity is database corruption that NO write door can produce
+                    # (manual/commit -> 400, `PUT /api/ledgers/transactions/{id}` -> 400, CSV
+                    # import -> per-row error), and `Book` has a refusal channel for corporate
+                    # actions and one for dividends but NONE for a transaction — so continuing
+                    # would mean the dashboard's numbers silently describe a ledger the owner
+                    # cannot see. Refusing names the row on every surface instead.
+                    #
+                    # 重算 (`api/routers/actions.py`), the tax package (`api/routers/export.py`),
+                    # the drawer 試算 (`strategy/whatif.py`) and `api/errors.py`'s handler each
+                    # turn this into a 4xx envelope carrying `str(exc)` verbatim.
+                    raise UnbookableLedgerError(
+                        f"{ev.symbol}（{ev.account_id}）於 {ev.trade_date.isoformat()} 的交易"
+                        f"股數為負（{ev.quantity}）— 負股數在買進與賣出兩側都沒有定義，"
+                        "請於交易帳本修正該列"
                     )
-                    pos.short_proceeds -= short_avg * cover
-                    pos.short_shares -= cover
-                to_long = ev.quantity - cover
-                if to_long > _ZERO:
-                    # Exact total when nothing was covered, so an ordinary buy is
-                    # byte-identical to the pre-short engine (no per-share round trip).
-                    cost = (ev.quantity * ev.price + ev.fees + ev.tax if cover == _ZERO
-                            else per_share * to_long)
-                    pos.shares += to_long
-                    pos.original_total += cost
-                    pos.adjusted_total += cost
-                    gross[ccy] += cost      # covering a short is not new investment
-            elif getattr(ev, "short_sale", False):
-                # DECLARED short sale: sell the long lot first (ordinary realized P&L), then
-                # open/extend the short lot with the remainder. Declared per transaction and
-                # OFF by default, so a missing buy can never become a fabricated short.
-                from_long = pos.shares if pos.shares > _ZERO else _ZERO
-                from_long = min(ev.quantity, from_long)
-                per_share_net = (ev.quantity * ev.price - ev.fees - ev.tax) / ev.quantity
-                if from_long > _ZERO:
-                    frac = from_long / pos.shares
+                if ev.quantity == _ZERO:
+                    # A zero-quantity row moves no shares and no money, so booking it and
+                    # skipping it produce the SAME book — which is the whole reason skipping
+                    # is safe here rather than a silent loss. Booking it, on the other hand,
+                    # divides by the quantity (declared short) or by a zero share count
+                    # (ordinary sell) and raises `decimal.InvalidOperation` on BOTH the strict
+                    # path and the `allow_oversell` dashboard path, so the never-500
+                    # degradation cannot catch it: that pattern catches `KeyError`, and this
+                    # replay's own refusal channels raise `OversellError` /
+                    # `UnbookableLedgerError`. It also emitted a realized row of all zeros
+                    # against a live position.
+                    #
+                    # `== 0` DELIBERATELY, not `<= 0` — but for a narrower reason than this note
+                    # used to give. A negative quantity is a different input class with no defined
+                    # meaning on either side, so it does NOT share this branch's justification
+                    # ("booking it and skipping it produce the same book"): it is refused above,
+                    # by the guard that now exists, rather than absorbed here. Merging the two
+                    # into `<= 0` would silence a corrupt row with a comment about a harmless one.
+                    #
+                    # Placed AFTER `quote_ccy` so a row naming an unregistered instrument still
+                    # fails loud, and BEFORE `setdefault` so no phantom position is created.
+                    continue
+                key = (ev.account_id, ev.symbol)
+                pos = positions.setdefault(key, _Position(ccy))
+                if ev.side is Side.BUY:
+                    # A buy COVERS an open declared short before it adds to the long lot. The
+                    # cover settles at THIS buy's all-in per-share cost and the leftover shares
+                    # start their long life at that same cost — the owner's stated rule
+                    # (2026-07-31): 買回的每股成本結算獲利，剩下的股數以本次成本為起點。
+                    cover = min(ev.quantity, pos.short_shares)
+                    if cover > _ZERO:
+                        per_share = (ev.quantity * ev.price + ev.fees + ev.tax) / ev.quantity
+                        short_avg = pos.short_proceeds / pos.short_shares
+                        realized_rows.append(
+                            RealizedRow(
+                                account_id=ev.account_id,
+                                symbol=ev.symbol,
+                                quote_ccy=ccy,
+                                sell_date=ev.trade_date,   # realizes on the COVER date
+                                shares_sold=cover,
+                                proceeds_net=short_avg * cover,
+                                original_cost_removed=per_share * cover,
+                                adjusted_cost_removed=per_share * cover,
+                                realized=(short_avg - per_share) * cover,
+                                kind="short_cover",
+                            )
+                        )
+                        pos.short_proceeds -= short_avg * cover
+                        pos.short_shares -= cover
+                    to_long = ev.quantity - cover
+                    if to_long > _ZERO:
+                        # Exact total when nothing was covered, so an ordinary buy is
+                        # byte-identical to the pre-short engine (no per-share round trip).
+                        cost = (ev.quantity * ev.price + ev.fees + ev.tax if cover == _ZERO
+                                else per_share * to_long)
+                        pos.shares += to_long
+                        pos.original_total += cost
+                        pos.adjusted_total += cost
+                        gross[ccy] += cost      # covering a short is not new investment
+                elif getattr(ev, "short_sale", False):
+                    # DECLARED short sale: sell the long lot first (ordinary realized P&L), then
+                    # open/extend the short lot with the remainder. Declared per transaction and
+                    # OFF by default, so a missing buy can never become a fabricated short.
+                    from_long = pos.shares if pos.shares > _ZERO else _ZERO
+                    from_long = min(ev.quantity, from_long)
+                    per_share_net = (ev.quantity * ev.price - ev.fees - ev.tax) / ev.quantity
+                    if from_long > _ZERO:
+                        frac = from_long / pos.shares
+                        original_removed = pos.original_total * frac
+                        adjusted_removed = pos.adjusted_total * frac
+                        realized_rows.append(
+                            RealizedRow(
+                                account_id=ev.account_id,
+                                symbol=ev.symbol,
+                                quote_ccy=ccy,
+                                sell_date=ev.trade_date,
+                                shares_sold=from_long,
+                                proceeds_net=per_share_net * from_long,
+                                original_cost_removed=original_removed,
+                                adjusted_cost_removed=adjusted_removed,
+                                realized=per_share_net * from_long - adjusted_removed,
+                            )
+                        )
+                        pos.shares -= from_long
+                        pos.original_total -= original_removed
+                        pos.adjusted_total -= adjusted_removed
+                    to_short = ev.quantity - from_long
+                    if to_short > _ZERO:
+                        pos.short_shares += to_short
+                        pos.short_proceeds += per_share_net * to_short
+                else:
+                    if ev.quantity > pos.shares:
+                        if not allow_oversell:
+                            raise OversellError(
+                                f"sell {ev.quantity} > held {pos.shares} for {ev.symbol}",
+                                account_id=ev.account_id, symbol=ev.symbol,
+                                trade_date=ev.trade_date,
+                            )
+                        # Graceful: net to a negative (賣超) position; its cost basis is
+                        # undefined, so drop it and emit no realized row (待釐清). UNCHANGED —
+                        # only the marker below is new, and it never clears.
+                        if pos.oversold_on is None:
+                            # BEFORE the mutation below, so `pos.shares` is still what was held
+                            # on that date rather than the post-sale negative.
+                            pos.oversold_on = ev.trade_date
+                            pos.oversold_sold = ev.quantity
+                            pos.oversold_held = pos.shares
+                        pos.ever_oversold = True
+                        pos.shares -= ev.quantity
+                        pos.original_total = _ZERO
+                        pos.adjusted_total = _ZERO
+                        continue
+                    frac = ev.quantity / pos.shares
                     original_removed = pos.original_total * frac
                     adjusted_removed = pos.adjusted_total * frac
+                    proceeds_net = ev.quantity * ev.price - ev.fees - ev.tax
                     realized_rows.append(
                         RealizedRow(
                             account_id=ev.account_id,
                             symbol=ev.symbol,
                             quote_ccy=ccy,
                             sell_date=ev.trade_date,
-                            shares_sold=from_long,
-                            proceeds_net=per_share_net * from_long,
+                            shares_sold=ev.quantity,
+                            proceeds_net=proceeds_net,
                             original_cost_removed=original_removed,
                             adjusted_cost_removed=adjusted_removed,
-                            realized=per_share_net * from_long - adjusted_removed,
+                            realized=proceeds_net - adjusted_removed,
                         )
                     )
-                    pos.shares -= from_long
+                    pos.shares -= ev.quantity
                     pos.original_total -= original_removed
                     pos.adjusted_total -= adjusted_removed
-                to_short = ev.quantity - from_long
-                if to_short > _ZERO:
-                    pos.short_shares += to_short
-                    pos.short_proceeds += per_share_net * to_short
-            else:
-                if ev.quantity > pos.shares:
-                    if not allow_oversell:
-                        raise OversellError(
-                            f"sell {ev.quantity} > held {pos.shares} for {ev.symbol}",
-                            account_id=ev.account_id, symbol=ev.symbol,
-                            trade_date=ev.trade_date,
-                        )
-                    # Graceful: net to a negative (賣超) position; its cost basis is
-                    # undefined, so drop it and emit no realized row (待釐清). UNCHANGED —
-                    # only the marker below is new, and it never clears.
-                    if pos.oversold_on is None:
-                        # BEFORE the mutation below, so `pos.shares` is still what was held
-                        # on that date rather than the post-sale negative.
-                        pos.oversold_on = ev.trade_date
-                        pos.oversold_sold = ev.quantity
-                        pos.oversold_held = pos.shares
-                    pos.ever_oversold = True
-                    pos.shares -= ev.quantity
-                    pos.original_total = _ZERO
-                    pos.adjusted_total = _ZERO
-                    continue
-                frac = ev.quantity / pos.shares
-                original_removed = pos.original_total * frac
-                adjusted_removed = pos.adjusted_total * frac
-                proceeds_net = ev.quantity * ev.price - ev.fees - ev.tax
-                realized_rows.append(
-                    RealizedRow(
-                        account_id=ev.account_id,
-                        symbol=ev.symbol,
-                        quote_ccy=ccy,
-                        sell_date=ev.trade_date,
-                        shares_sold=ev.quantity,
-                        proceeds_net=proceeds_net,
-                        original_cost_removed=original_removed,
-                        adjusted_cost_removed=adjusted_removed,
-                        realized=proceeds_net - adjusted_removed,
-                    )
-                )
-                pos.shares -= ev.quantity
-                pos.original_total -= original_removed
-                pos.adjusted_total -= adjusted_removed
-        else:  # dividend
-            assert isinstance(ev, Dividend)
-            key = (ev.account_id, ev.symbol)
-            existing = positions.get(key)
-            if existing is None:
-                # Fail loud on a dividend for a position with no prior buy/opening:
-                # silently creating one would discard cash dividends (filtered out at
-                # 0 shares) or fabricate a $0-cost ghost holding from a DRIP.
-                raise ValueError(
-                    f"dividend for unknown position {key} (no prior buy/opening inventory)"
-                )
-            if existing.short_shares > _ZERO:
-                # A dividend landing on an OPEN SHORT is not representable. A short seller
-                # PAYS the dividend in lieu, and there is no debit row for that — while the
-                # branches below would (a) book the recorded positive net as realized INCOME,
-                # because an open short also has `shares == 0` in the long lot, or (b) add
-                # DRIP/STOCK shares straight to the long lot, breaking the long/short
-                # exclusivity the whole replay depends on (a 10-share DRIP against a 10-share
-                # short nets to zero, and the position — with its proceeds — vanishes from
-                # the report entirely). Both are money-of-record errors, so: fail loud on the
-                # strict path, and on the dashboard path skip the event and flag the position
-                # rather than crash (the same posture as the oversell degradation).
-                if not allow_oversell:
-                    raise UnbookableLedgerError(
-                        f"{ev.symbol}（{ev.account_id}）於 {ev.date.isoformat()} 有股利紀錄，"
-                        "但該時點是放空部位 — 放空方需支付股利，本系統無此借方分錄。"
-                        "請刪除該筆股利，或改以現金收支登錄。"
-                    )
-                existing.unbookable_dividend = True
-                refused_dividends.append(ev)
-                continue
-            if existing.vacated_to is not None:
-                # E24 (D32) — the position was moved away by an EXCHANGE, and §4.2 leaves it
-                # in the map with zeroed fields (required, so a later buy on the old ticker
-                # cannot reopen it carrying −ε). So `existing is not None` and
-                # `short_shares == 0`: NEITHER refusal above applies and the payment books.
-                # Both branches below are money-of-record errors on a dead ticker —
-                #   CASH/NET  → post-close realized income on a symbol that no longer exists;
-                #   DRIP/STOCK → `shares += reinvest_shares` RESURRECTS it at `avg = 0`, and
-                #     a delisted ticker never gets a price, and ONE unpriced holding makes
-                #     `returns.py` return `rate=None` for the WHOLE portfolio.
-                # The second is why this is not cosmetic: the damage is portfolio-wide.
-                # The owner records such a payment as a cash movement instead — the same
-                # remedy `domain-ledger.md` already gives for a dividend on an open short.
-                successor = _follow_exchange_chain(positions, ev.account_id, existing)
-                if not allow_oversell:
-                    raise UnbookableLedgerError(
-                        f"{ev.symbol}（{ev.account_id}）於 {ev.date.isoformat()} 有股利紀錄，"
-                        f"但該部位已於此之前換股為 {existing.vacated_to} — "
-                        "已換出的標的不再有持倉可歸屬這筆配息，"
-                        "記在原標的上會變成一筆已下市代號的已實現收益（或把部位以零成本復活）。"
-                        "請刪除該筆股利，或改以現金收支登錄。"
-                    )
-                successor.unbookable_dividend = True
-                refused_dividends.append(ev)
-                continue
-            if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
-                if existing.shares == _ZERO:
-                    # AUDIT H2 (2026-07-26) — the position is already CLOSED when this cash
-                    # dividend lands. TW/MY pay weeks after the ex-date, so being entitled on
-                    # the ex-date and flat by the payment date is ordinary, not exotic.
-                    #
-                    # Reducing `adjusted_total` here would be a write into a zero-share
-                    # position that the holdings loop below drops (`shares == 0 -> continue`),
-                    # so the payout silently disappeared from 總報酬 / 已實現 / 未實現 while
-                    # 股利總覽 (which walks the dividend ledger directly) and the XIRR cashflow
-                    # series both still counted it — one payout, three disagreeing answers.
-                    #
-                    # Book it as REALIZED INCOME instead: it is money received that can no
-                    # longer be attributed to a cost basis. Still exactly ONCE (the cost path
-                    # is skipped, not doubled), so the no-double-counting invariant holds.
-                    realized_rows.append(
-                        RealizedRow(
-                            account_id=ev.account_id,
-                            symbol=ev.symbol,
-                            quote_ccy=existing.quote_ccy,
-                            sell_date=ev.date,
-                            shares_sold=_ZERO,
-                            proceeds_net=ev.net,
-                            original_cost_removed=_ZERO,
-                            adjusted_cost_removed=_ZERO,
-                            realized=ev.net,
-                            kind="dividend",
-                        )
-                    )
-                else:
-                    existing.adjusted_total -= ev.net
-            else:  # DRIP / STOCK add shares at zero cost
-                if ev.reinvest_shares is None:
-                    # Fail loud: a DRIP/stock dividend without share count would
-                    # silently drop the reinvestment instead of coercing to zero.
+            else:  # dividend
+                assert isinstance(ev, Dividend)
+                key = (ev.account_id, ev.symbol)
+                existing = positions.get(key)
+                if existing is None:
+                    # Fail loud on a dividend for a position with no prior buy/opening:
+                    # silently creating one would discard cash dividends (filtered out at
+                    # 0 shares) or fabricate a $0-cost ghost holding from a DRIP.
                     raise ValueError(
-                        f"{ev.type} dividend for {key} requires reinvest_shares"
+                        f"dividend for unknown position {key} (no prior buy/opening inventory)"
                     )
-                existing.shares += ev.reinvest_shares
+                if existing.short_shares > _ZERO:
+                    # A dividend landing on an OPEN SHORT is not representable. A short seller
+                    # PAYS the dividend in lieu, and there is no debit row for that — while the
+                    # branches below would (a) book the recorded positive net as realized INCOME,
+                    # because an open short also has `shares == 0` in the long lot, or (b) add
+                    # DRIP/STOCK shares straight to the long lot, breaking the long/short
+                    # exclusivity the whole replay depends on (a 10-share DRIP against a 10-share
+                    # short nets to zero, and the position — with its proceeds — vanishes from
+                    # the report entirely). Both are money-of-record errors, so: fail loud on the
+                    # strict path, and on the dashboard path skip the event and flag the position
+                    # rather than crash (the same posture as the oversell degradation).
+                    if not allow_oversell:
+                        raise UnbookableLedgerError(
+                            f"{ev.symbol}（{ev.account_id}）於 {ev.date.isoformat()} 有股利紀錄，"
+                            "但該時點是放空部位 — 放空方需支付股利，本系統無此借方分錄。"
+                            "請刪除該筆股利，或改以現金收支登錄。"
+                        )
+                    existing.unbookable_dividend = True
+                    refused_dividends.append(ev)
+                    continue
+                if existing.vacated_to is not None:
+                    # E24 (D32) — the position was moved away by an EXCHANGE, and §4.2 leaves it
+                    # in the map with zeroed fields (required, so a later buy on the old ticker
+                    # cannot reopen it carrying −ε). So `existing is not None` and
+                    # `short_shares == 0`: NEITHER refusal above applies and the payment books.
+                    # Both branches below are money-of-record errors on a dead ticker —
+                    #   CASH/NET  → post-close realized income on a symbol that no longer exists;
+                    #   DRIP/STOCK → `shares += reinvest_shares` RESURRECTS it at `avg = 0`, and
+                    #     a delisted ticker never gets a price, and ONE unpriced holding makes
+                    #     `returns.py` return `rate=None` for the WHOLE portfolio.
+                    # The second is why this is not cosmetic: the damage is portfolio-wide.
+                    # The owner records such a payment as a cash movement instead — the same
+                    # remedy `domain-ledger.md` already gives for a dividend on an open short.
+                    successor = _follow_exchange_chain(positions, ev.account_id, existing)
+                    if not allow_oversell:
+                        raise UnbookableLedgerError(
+                            f"{ev.symbol}（{ev.account_id}）於 {ev.date.isoformat()} 有股利紀錄，"
+                            f"但該部位已於此之前換股為 {existing.vacated_to} — "
+                            "已換出的標的不再有持倉可歸屬這筆配息，"
+                            "記在原標的上會變成一筆已下市代號的已實現收益（或把部位以零成本復活）。"
+                            "請刪除該筆股利，或改以現金收支登錄。"
+                        )
+                    successor.unbookable_dividend = True
+                    refused_dividends.append(ev)
+                    continue
+                if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
+                    if existing.shares == _ZERO:
+                        # AUDIT H2 (2026-07-26) — the position is already CLOSED when this cash
+                        # dividend lands. TW/MY pay weeks after the ex-date, so being entitled on
+                        # the ex-date and flat by the payment date is ordinary, not exotic.
+                        #
+                        # Reducing `adjusted_total` here would be a write into a zero-share
+                        # position that the holdings loop below drops (`shares == 0 -> continue`),
+                        # so the payout silently disappeared from 總報酬 / 已實現 / 未實現 while
+                        # 股利總覽 (which walks the dividend ledger directly) and the XIRR cashflow
+                        # series both still counted it — one payout, three disagreeing answers.
+                        #
+                        # Book it as REALIZED INCOME instead: it is money received that can no
+                        # longer be attributed to a cost basis. Still exactly ONCE (the cost path
+                        # is skipped, not doubled), so the no-double-counting invariant holds.
+                        realized_rows.append(
+                            RealizedRow(
+                                account_id=ev.account_id,
+                                symbol=ev.symbol,
+                                quote_ccy=existing.quote_ccy,
+                                sell_date=ev.date,
+                                shares_sold=_ZERO,
+                                proceeds_net=ev.net,
+                                original_cost_removed=_ZERO,
+                                adjusted_cost_removed=_ZERO,
+                                realized=ev.net,
+                                kind="dividend",
+                            )
+                        )
+                    else:
+                        existing.adjusted_total -= ev.net
+                else:  # DRIP / STOCK add shares at zero cost
+                    if ev.reinvest_shares is None:
+                        # Fail loud: a DRIP/stock dividend without share count would
+                        # silently drop the reinvestment instead of coercing to zero.
+                        raise ValueError(
+                            f"{ev.type} dividend for {key} requires reinvest_shares"
+                        )
+                    existing.shares += ev.reinvest_shares
 
-    # Flag the positions an unreadable row names, now that the replay has built them. The
-    # RECORD went in before the event loop (a book that cannot read its ledger should say
-    # so first); the FLAG can only go on afterwards, and the two halves are the same split
-    # `_reject` makes for the same reason — some refusals have no position to flag.
-    for bad in bundle.unreadable_actions:
-        for sym in (bad.from_symbol, bad.to_symbol):
-            if (touched := positions.get((bad.account_id, sym))) is not None:
-                touched.unbookable_action = True
+        # The event loop is done. What follows works on ACCUMULATED totals, so a fault
+        # below belongs to no single ledger row — and must not name one.
+        booking = None
 
-    holdings: list[Holding] = []
-    for (account_id, symbol), pos in positions.items():
-        # An OPEN declared short is a real position and must be reported, so the quantity is
-        # SIGNED: long stays positive, short comes out negative with the received proceeds as
-        # its (negative) basis. Every downstream formula then works unchanged —
-        # avg = total/shares is the short's average sale price, market_value = price*shares is
-        # the negative exposure, and unrealized = (price-avg)*shares profits when price falls.
-        shares = pos.shares - pos.short_shares
-        original_total = pos.original_total - pos.short_proceeds
-        adjusted_total = pos.adjusted_total - pos.short_proceeds
-        if shares == _ZERO:
-            continue
-        original_avg = original_total / shares
-        adjusted_avg = adjusted_total / shares
-        dividend_portion = original_total - adjusted_total
-        # abs() per domain-ledger.md: "any RATIO over the basis must divide by
-        # abs(cost_total)". An open short carries a negative basis; the aggregate in
-        # api/routers/symbol.py demonstrably flips sign without this, and holding both
-        # sites to the one law is cheaper than proving this one unreachable.
-        payback = dividend_portion / abs(original_total) if original_total != _ZERO else _ZERO
-        holdings.append(
-            Holding(
-                account_id=account_id,
-                symbol=symbol,
-                quote_ccy=pos.quote_ccy,
-                shares=shares,
-                original_avg=original_avg,
-                adjusted_avg=adjusted_avg,
-                original_cost_total=original_total,
-                adjusted_cost_total=adjusted_total,
-                dividend_portion=dividend_portion,
-                payback_ratio=payback,
-                # 賣超 is now STICKY: an undeclared oversell keeps its warning even after a
-                # later buy nets the position back above zero (that buy does not restore the
-                # basis the oversell discarded).
-                oversold=pos.ever_oversold or pos.shares < _ZERO,
-                oversold_on=pos.oversold_on,
-                oversold_sold=pos.oversold_sold,
-                oversold_held=pos.oversold_held,
-                short_open=pos.short_shares > _ZERO,
-                unbookable_dividend=pos.unbookable_dividend,
-                unbookable_action=pos.unbookable_action,
+        # Flag the positions an unreadable row names, now that the replay has built them. The
+        # RECORD went in before the event loop (a book that cannot read its ledger should say
+        # so first); the FLAG can only go on afterwards, and the two halves are the same split
+        # `_reject` makes for the same reason — some refusals have no position to flag.
+        for bad in bundle.unreadable_actions:
+            for sym in (bad.from_symbol, bad.to_symbol):
+                if (touched := positions.get((bad.account_id, sym))) is not None:
+                    touched.unbookable_action = True
+
+        holdings: list[Holding] = []
+        for (account_id, symbol), pos in positions.items():
+            # An OPEN declared short is a real position and must be reported, so the quantity is
+            # SIGNED: long stays positive, short comes out negative with the received proceeds as
+            # its (negative) basis. Every downstream formula then works unchanged —
+            # avg = total/shares is the short's average sale price, market_value = price*shares is
+            # the negative exposure, and unrealized = (price-avg)*shares profits when price falls.
+            shares = pos.shares - pos.short_shares
+            original_total = pos.original_total - pos.short_proceeds
+            adjusted_total = pos.adjusted_total - pos.short_proceeds
+            if shares == _ZERO:
+                continue
+            original_avg = original_total / shares
+            adjusted_avg = adjusted_total / shares
+            dividend_portion = original_total - adjusted_total
+            # abs() per domain-ledger.md: "any RATIO over the basis must divide by
+            # abs(cost_total)". An open short carries a negative basis; the aggregate in
+            # api/routers/symbol.py demonstrably flips sign without this, and holding both
+            # sites to the one law is cheaper than proving this one unreachable.
+            payback = dividend_portion / abs(original_total) if original_total != _ZERO else _ZERO
+            holdings.append(
+                Holding(
+                    account_id=account_id,
+                    symbol=symbol,
+                    quote_ccy=pos.quote_ccy,
+                    shares=shares,
+                    original_avg=original_avg,
+                    adjusted_avg=adjusted_avg,
+                    original_cost_total=original_total,
+                    adjusted_cost_total=adjusted_total,
+                    dividend_portion=dividend_portion,
+                    payback_ratio=payback,
+                    # 賣超 is now STICKY: an undeclared oversell keeps its warning even after a
+                    # later buy nets the position back above zero (that buy does not restore the
+                    # basis the oversell discarded).
+                    oversold=pos.ever_oversold or pos.shares < _ZERO,
+                    oversold_on=pos.oversold_on,
+                    oversold_sold=pos.oversold_sold,
+                    oversold_held=pos.oversold_held,
+                    short_open=pos.short_shares > _ZERO,
+                    unbookable_dividend=pos.unbookable_dividend,
+                    unbookable_action=pos.unbookable_action,
+                )
             )
+
+        realized_by_ccy: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
+        for r in realized_rows:
+            realized_by_ccy[r.quote_ccy] += r.realized
+
+        return Book(
+            holdings=holdings,
+            realized=RealizedPnL(rows=realized_rows, by_currency=dict(realized_by_ccy)),
+            gross_invested=dict(gross),
+            unapplied_actions=unapplied,
+            refused_dividends=refused_dividends,
         )
-
-    realized_by_ccy: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
-    for r in realized_rows:
-        realized_by_ccy[r.quote_ccy] += r.realized
-
-    return Book(
-        holdings=holdings,
-        realized=RealizedPnL(rows=realized_rows, by_currency=dict(realized_by_ccy)),
-        gross_invested=dict(gross),
-        unapplied_actions=unapplied,
-        refused_dividends=refused_dividends,
-    )
+    except ArithmeticError as exc:
+        # The CLASS, not one cause. ``ZeroDivisionError`` is in it too, so a non-Decimal
+        # divide is covered by the same arm. ``from exc`` keeps the failing operation in the
+        # traceback: only the sentence the owner reads is replaced, never the diagnosis.
+        raise UnbookableLedgerError(_uncomputable_message(booking)) from exc

@@ -229,8 +229,11 @@ def _fx_section(
         count += 1
         _add(out_totals, c.from_ccy.value, c.from_amount)
         _add(in_totals, c.to_ccy.value, c.to_amount)
-        rate = (f"1 {_esc(c.to_ccy.value)} = "
-                f"{_fmt_amount(c.implied_rate, c.from_ccy.value)} {_esc(c.from_ccy.value)}")
+        # QA-10: a conversion that received nothing has no implied rate. The whole cell is
+        # 「—」 rather than 「1 USD = — TWD」, which reads as a missing digit in a real sentence.
+        rate = _NULL if c.implied_rate is None else (
+            f"1 {_esc(c.to_ccy.value)} = "
+            f"{_fmt_amount(c.implied_rate, c.from_ccy.value)} {_esc(c.from_ccy.value)}")
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(c.date.isoformat())}</td>'

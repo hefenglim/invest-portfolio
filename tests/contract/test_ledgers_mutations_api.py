@@ -157,6 +157,13 @@ def _first_fx(api_client: TestClient) -> tuple[int, dict[str, object]]:
 
 def test_edit_fx_updates_values(api_client: TestClient) -> None:
     fx_id, row = _first_fx(api_client)
+    # QA-10 (2026-08-29): the edit door now runs the SAME hard no-overdraft guard the entry
+    # door runs (FU-D34), so raising the sell leg needs the pool to actually cover it. The
+    # golden schwab TWD pool holds nothing but this conversion's own −32,000, so the amount is
+    # funded first — the edit itself, and what it asserts, are unchanged.
+    api_client.post("/api/cash/movements", json={
+        "account_id": "schwab", "date": "2026-01-05", "kind": "deposit",
+        "ccy": "TWD", "amount": "200000"})
     r = api_client.put(f"/api/ledgers/fx/{fx_id}", json={
         "account_id": row["account_id"], "date": row["date"],
         "from_ccy": row["from_ccy"], "from_amt": "123456",
@@ -177,7 +184,15 @@ def test_edit_fx_same_ccy_400(api_client: TestClient) -> None:
 
 def test_delete_fx_removes_row(api_client: TestClient) -> None:
     fx_id, _ = _first_fx(api_client)
-    assert api_client.delete(f"/api/ledgers/fx/{fx_id}").status_code == 200
+    # QA-10 (2026-08-29): the golden AAPL purchase was paid for out of the USD this conversion
+    # produced, so deleting it strands that spend and the door asks for the ack-able
+    # ``negative_cash`` first — exactly as DELETE /api/cash/movements has since audit C3. The
+    # ack still deletes (this is a correction door); that is what is asserted here.
+    blocked = api_client.delete(f"/api/ledgers/fx/{fx_id}")
+    assert blocked.status_code == 422
+    assert blocked.json()["error"]["code"] == "negative_cash"
+    assert api_client.delete(
+        f"/api/ledgers/fx/{fx_id}?ack_negative=true").status_code == 200
     rows = api_client.get("/api/ledgers/fx", params={"limit": 500}).json()["rows"]
     assert all(x["id"] != fx_id for x in rows)
 

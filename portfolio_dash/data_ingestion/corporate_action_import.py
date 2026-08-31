@@ -237,6 +237,14 @@ def build_corporate_action_preview(
     #
     # A malformed batch row excludes itself too: `convert_stored` cannot build a
     # `CorporateAction` from it, so it lands on `unreadable` and never reaches the walk.
+    #
+    # ⚠ Since 2026-08-29 (FIX-A2, QA BUG-04) the BOOK replay inside the validator honours
+    # the same rule: `validate_corporate_action` hands its strictly-earlier batch siblings
+    # to `_book_before`, so the four book-derived rejections (E3/E22/E5/E18) see the same
+    # predecessors the index does. Before that, a chain whose prerequisite action was
+    # same-batch and whose post-action trades were already stored (the owner's real GGR
+    # shape) passed E1a but hard-rejected `oversold_source` — and a byte-identical second
+    # upload wrote it, because pass 1 had stored the prerequisite. One file, one pass.
     index: ActionIndex = load_action_index(conn, pending=batch)
     bundle: LedgerBundle | None
     book_cache: dict[date, Book] = {}

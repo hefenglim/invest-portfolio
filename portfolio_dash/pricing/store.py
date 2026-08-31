@@ -20,6 +20,7 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.money import cap_dp, from_db, to_db
 
 _DEFAULT_MAX_AGE = 4  # days
+_ZERO = Decimal(0)
 _ONE = Decimal(1)
 # The canonical TEXT for "no factor applied" — the ``split_basis`` DDL default, so a row
 # written by this seam for a symbol with no corporate action is indistinguishable from a
@@ -86,6 +87,40 @@ def _no_factor(symbol: str, *, after: date, through: date) -> Decimal:
     which is also the column's DDL default).
     """
     return _ONE
+
+
+def storable_close(close: Decimal) -> bool:
+    """Whether a provider close is a PRICE at all — the ONE owner of that predicate.
+
+    Public because :mod:`pricing.refresh` needs the SAME question answered before it hands a
+    whole provider batch to :func:`upsert_prices`: the seam refuses (loudly, for every direct
+    caller), the refresh pre-filters (gracefully, so one unusable row never costs the other
+    symbols their update). Two copies of ``close > 0`` would be two things to keep in step,
+    and the failure mode of their disagreement is a batch the refresh believed it had cleaned
+    and the seam then rejected in full.
+
+    ``is_finite`` mirrors :func:`upsert_fx`'s guard for parity rather than for reach:
+    ``PriceRow.close`` is ``Money`` (``allow_inf_nan=False``), so Pydantic already rejects
+    inf/NaN one layer up — keeping the term means the price and FX guards read as the same
+    rule instead of as two rules that happen to agree.
+    """
+    return close.is_finite() and close > _ZERO
+
+
+def storable_rate(rate: Decimal) -> bool:
+    """Whether a provider rate is an FX RATE at all — the ONE owner of that predicate.
+
+    The sibling of :func:`storable_close`, and public for the same reason: :mod:`pricing.refresh`
+    must ask this question of a whole provider batch BEFORE handing it to :func:`upsert_fx`,
+    which refuses the batch outright. Two copies of ``rate > 0`` would be two things to keep in
+    step, and the symptom of their disagreement is a batch the refresh believed it had cleaned
+    and the seam then rejected in full — losing every OTHER pair's update to one bad row.
+
+    Identical in shape to ``shared.fx.convert``'s read-side guard, deliberately: a value no
+    reader may use is a value no writer may store, and the two ends of ``fx_rates`` say so with
+    the same expression rather than with two that happen to agree.
+    """
+    return rate.is_finite() and rate > _ZERO
 
 
 def express_close(raw: Decimal, basis: Decimal) -> tuple[str, str]:
@@ -189,7 +224,30 @@ def upsert_prices(
     measured traps each one closes. This seam owns only *which* factor applies to a row
     (the window ``(as_of, fetched_at]``); how a (raw, factor) pair becomes stored TEXT has
     exactly one owner, so the write and the reconcile cannot drift apart.
+
+    **A non-positive close is REFUSED here, at the single price write seam** (QA-09), for the
+    same reason and in the same shape as :func:`upsert_fx`'s rate guard — the two ends of the
+    ``prices`` table now agree that a value no reader may use is a value no writer may store.
+    What makes it worth a guard rather than a comment is that neither bad value announces
+    itself: a stored ``0`` renders ``market_price=0``, ``market_value=0``,
+    ``unrealized_pnl = -cost`` and ``price_stale=False`` — a total loss indistinguishable from
+    a real quote — and a NEGATIVE close sign-flips the position's value while raising at no
+    seam at all. ``data-and-pricing.md`` rules both out by name ("never silently fabricate";
+    "a stale price is labelled, never guessed"): the honest degradation for an unusable quote
+    is the last-known price with the staleness flag, which is exactly what refusing leaves in
+    place.
+
+    Validated over the WHOLE batch BEFORE anything is written, so a mixed batch cannot land
+    half-applied. Callers that must not raise (the scheduler's refresh sweeps) pre-filter with
+    :func:`storable_close` — the same predicate, one owner — and report the refused symbols in
+    ``RefreshSummary.failed``.
     """
+    for r in rows:
+        if not storable_close(r.close):
+            raise ValueError(
+                f"price close must be positive and finite: {r.instrument} "
+                f"@ {r.as_of.isoformat()} got {r.close}"
+            )
     through = fetched_at.date()
     params: list[tuple[str | None, ...]] = []
     for r in rows:
@@ -292,7 +350,35 @@ def upsert_fx(conn: sqlite3.Connection, rows: list[FxRow], *, fetched_at: dateti
 
     Rates are float-noise-capped to 6 dp on the way in (rates are not money;
     the 4-6 dp high-precision rule in data-and-pricing.md still holds).
+
+    **A non-positive rate is REFUSED here, at the single write seam.**
+    ``shared.fx.convert`` already refuses one on READ, and this is the only place FX rows
+    are written, so the two ends now agree: a value no reader may use is a value no writer
+    may store. The asymmetry that makes this worth a guard rather than a comment is that
+    ZERO announces itself — an inverse read raises ``decimal.DivisionByZero``, from code
+    whose degradation catches ``KeyError`` and not that — while NEGATIVE announces nothing:
+    it sign-flips every converted figure and raises at no seam at all, which is the failure
+    mode ``data-and-pricing.md`` rules out by name ("never silently fabricate", "a stale
+    price is labelled, never guessed").
+
+    Validated over the WHOLE batch BEFORE anything is written, so a mixed batch cannot land
+    half-applied. The predicate is :func:`storable_rate` — the same one :mod:`pricing.refresh`
+    pre-filters with, so the seam and the sweep cannot drift into disagreeing about what a rate
+    is. ``is_finite`` mirrors ``convert`` for parity rather than for reach: ``FxRow.rate`` is
+    ``Money`` (``allow_inf_nan=False``), so Pydantic already rejects inf/NaN one layer up —
+    keeping the term means the two guards can be read as the same rule instead of as two rules
+    that happen to agree.
+
+    Callers that must not raise (the scheduler's refresh sweeps) pre-filter with
+    :func:`storable_rate` and report the refused pairs in ``RefreshSummary.failed``; every
+    other caller is still told loudly, here.
     """
+    for r in rows:
+        if not storable_rate(r.rate):
+            raise ValueError(
+                f"FX rate must be positive and finite: {r.base.value}/{r.quote.value} "
+                f"@ {r.as_of.isoformat()} got {r.rate}"
+            )
     conn.executemany(
         """INSERT INTO fx_rates (base, quote, as_of_date, rate, source, fetched_at)
            VALUES (?,?,?,?,?,?)

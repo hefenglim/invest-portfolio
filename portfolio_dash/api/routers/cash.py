@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.data_ingestion.fx_import import fx_balance_issues, fx_ccy_issues
 from portfolio_dash.data_ingestion.store import (
     StoredCashMovement,
     StoredFxConversion,
@@ -134,7 +135,9 @@ def _synthetic(movement: CashMovementInput) -> StoredCashMovement:
         ccy=movement.ccy, amount=movement.amount, note=movement.note)
 
 
-def cash_pool_fn(conn: sqlite3.Connection) -> CashPoolFn:
+def cash_pool_fn(
+    conn: sqlite3.Connection, *, exclude_fx_id: int | None = None
+) -> CashPoolFn:
     """Bind ``portfolio/cash.py``'s pool arithmetic for the shared movement guard (D17 shape).
 
     ``data_ingestion`` may not import ``portfolio`` (``architecture.md`` — the arrow runs the
@@ -156,9 +159,17 @@ def cash_pool_fn(conn: sqlite3.Connection) -> CashPoolFn:
     The two figures are computed by the SAME two expressions the manual door used before the
     extraction (``cash_balances`` for the balance, ``running_min(pool_lines(...))`` for the
     dip), so the guard's verdict is unchanged.
+
+    ``exclude_fx_id`` is the fx-conversion analogue of ``CashPoolFn.exclude_id``: the EDITED
+    conversion's own prior effect is stripped from the snapshot before anything is asked of
+    it, so correcting a row within the headroom its old amounts already consumed is not
+    falsely blocked. It belongs here rather than on the protocol because a conversion is not
+    a movement — the protocol's ``include``/``exclude_id`` speak movement rows, and widening
+    them would change the guard every movement door shares in order to serve one that is not
+    a movement at all.
     """
     movements = list_cash_movements(conn)
-    fx = list_fx_conversions(conn)
+    fx = [f for f in list_fx_conversions(conn) if f.id != exclude_fx_id]
     txns = list_transactions(conn)
     divs = list_dividends(conn)
     insts = {i.symbol: i for i in list_instruments(conn)}
@@ -229,15 +240,79 @@ def _negative_response(account_id: str, ccy: Currency, low: Decimal) -> JSONResp
         "通常代表漏記入金或換匯;確認無誤可強制寫入"))
 
 
-def _fx_insufficient_response(
-    acct: Account, ccy: Currency, available: Decimal, requested: Decimal
-) -> JSONResponse:
-    """FU-D34 (需求五) HARD block:换匯不可透支 — no ack override, no financing."""
-    return JSONResponse(status_code=422, content=error_body(
-        "fx_insufficient_balance",
-        f"換出金額 {decimal_str(requested)} {ccy.value} 超過 {acct.name} 的 "
-        f"{ccy.value} 可用餘額 {decimal_str(available)} — 換匯不可透支（不提供融資）",
-        field="from_amt"))
+def fx_change_guard(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    on: date,
+    from_ccy: Currency,
+    from_amt: Decimal,
+    to_ccy: Currency,
+    to_amt: Decimal,
+    exclude_fx_id: int | None = None,
+) -> JSONResponse | None:
+    """The 換匯 write guard EVERY door runs; ``None`` when the conversion is acceptable.
+
+    The single seam for ``POST /api/cash/fx`` and ``PUT /api/ledgers/fx/{id}``, and the same
+    two rules the CSV importer applies through :func:`fx_ccy_issues` /
+    :func:`fx_balance_issues` — which live in ``data_ingestion`` because the importer may not
+    import this module, and are called from here so the three doors cannot answer three
+    different things about one conversion.
+
+    Until 2026-08-29 the edit door had neither rule: it validated ``> 0`` and
+    ``from_ccy != to_ccy`` and wrote. ``web/ledger.js`` renders free currency selects and free
+    amount inputs on the 交易帳本 換匯 row, so the weaker door was three clicks away — and a
+    conversion is the one movement that may never overdraft at all (FU-D34: no ack, no
+    financing), which is why both branches here are HARD.
+
+    ``exclude_fx_id`` is the edited row's own id, stripped from the pool snapshot first
+    (self-exclusion) so a correction inside the headroom the row already consumes is not
+    refused; the guard's other branch is what stops that correction growing past it.
+    """
+    acct = _accounts(conn).get(account_id)
+    if acct is None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"帳戶 {account_id} 不存在", field="account_id"))
+    ccy_issues = fx_ccy_issues(acct, from_ccy, to_ccy)  # audit C2: both legs
+    if ccy_issues:
+        # The issues come back in leg order, so the first one names the from-leg whenever the
+        # from-leg is the offender; the field is presentation and stays at the door.
+        field = "from_ccy" if from_ccy not in _allowed_ccys(acct) else "to_ccy"
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", ccy_issues[0].message, field=field))
+    balance_issues = fx_balance_issues(
+        account=acct, on=on, from_ccy=from_ccy, from_amount=from_amt,
+        to_ccy=to_ccy, to_amount=to_amt,
+        pool=cash_pool_fn(conn, exclude_fx_id=exclude_fx_id))
+    if balance_issues:
+        return JSONResponse(status_code=422, content=error_body(
+            "fx_insufficient_balance", balance_issues[0].message, field="from_amt"))
+    return None
+
+
+def fx_delete_guard(
+    conn: sqlite3.Connection, existing: StoredFxConversion, *, ack_negative: bool
+) -> JSONResponse | None:
+    """The ack-able ``negative_cash`` check for deleting a conversion; ``None`` when clean.
+
+    The same treatment :func:`remove_movement` has applied since audit C3, extended to the
+    control beside it on the same ledger page. Deleting a conversion strands whatever the
+    money it produced went on to pay for: the to-pool loses a credit, so it is the leg that
+    can go below zero, and the from-pool loses a debit, which can only help — both are
+    checked anyway, because an edit history can put an account in either shape and a guard
+    that inspects one leg is a guard that misses the next one.
+
+    Ack-able, not hard, because this is a CORRECTION door: a negative pool almost always
+    means a missed deposit, and the owner must still be able to fix the ledger.
+    """
+    if ack_negative:
+        return None
+    would_be = [f for f in list_fx_conversions(conn) if f.id != existing.id]
+    for ccy in (existing.to_ccy, existing.from_ccy):
+        low = _pool_min(conn, existing.account_id, ccy, fx=would_be)
+        if low < _ZERO:
+            return _negative_response(existing.account_id, ccy, low)
+    return None
 
 
 @router.get("/cash")
@@ -389,14 +464,20 @@ def cash_statement(
         {"ccy": pool_ccy.value, "balance": decimal_str(stmt[-1][1] if stmt else _ZERO)}
         for pool_ccy, stmt in statements
     ]
-    # Flatten every pool's rows, then sort newest-first for display. The key is the REVERSE
-    # of the chronological order (running_statement's `_ordered` = date asc, credits-before-
-    # debits), so same-day rows show end-of-day balance on top; each row keeps its OWN pool
-    # balance and currencies are never interleaved into one running total.
+    # Flatten every pool's rows, then display the EXACT reverse of the chronological order
+    # (running_statement's `_ordered` = date asc, credits-before-debits, insertion order
+    # within ties): sort ascending by that same key — stable, so `_ordered`'s within-tie
+    # sequence survives — then reverse the LIST. Not `sort(..., reverse=True)`: a stable
+    # sort's reverse flips only the keys, keeping equal-key rows ascending, which left
+    # same-day same-sign rows oldest-first inside the newest-first table with the day's end
+    # balance at the BOTTOM (QA R1 BUG-06). Result: newest-first, debits before credits
+    # within a day, end-of-day balance on top; each row keeps its OWN pool balance and
+    # currencies are never interleaved into one running total.
     flat: list[tuple[Currency, CashLine, Decimal]] = [
         (pool_ccy, ln, bal) for pool_ccy, stmt in statements for ln, bal in stmt
     ]
-    flat.sort(key=lambda item: (item[1].date, item[1].delta < _ZERO), reverse=True)
+    flat.sort(key=lambda item: (item[1].date, item[1].delta < _ZERO))
+    flat.reverse()
     page = flat[offset:offset + limit]
     single = ccy is not None
     current_balance = statements[0][1][-1][1] if single and statements[0][1] else _ZERO
@@ -601,8 +682,10 @@ def add_fx(
     two doors; this door checks the pool first. Unlike movement withdrawals (which keep
     their date-aware ``negative_cash`` guard + ack override), a conversion may NEVER drive
     the from-pool below zero: the sell amount must be ≤ the pool's current balance (the
-    ``cash_balances`` figure the 換匯中心 balance line shows). There is NO ack override —
-    no financing / overdraft.
+    ``cash_balances`` figure the 換匯中心 balance line shows), AND it may not introduce or
+    deepen a below-zero dip in the pool's timeline (QA-11 — the end aggregate cannot see a
+    back-dated conversion). Both live in :func:`fx_change_guard`, which the edit door and the
+    CSV importer run too. There is NO ack override — no financing / overdraft.
     """
     if body.from_amt <= _ZERO or body.to_amt <= _ZERO:
         return JSONResponse(status_code=400, content=error_body(
@@ -610,24 +693,11 @@ def add_fx(
     if body.from_ccy is body.to_ccy:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "換出與換入幣別不可相同", field="to_ccy"))
-    acct = _accounts(conn).get(body.account_id)
-    if acct is None:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"帳戶 {body.account_id} 不存在", field="account_id"))
-    allowed = _allowed_ccys(acct)
-    for leg in (body.from_ccy, body.to_ccy):  # audit C2: both legs must be allowed
-        if leg not in allowed:
-            return JSONResponse(status_code=400, content=error_body(
-                "validation_error",
-                f"{leg.value} 非此帳戶可用幣別"
-                f"（交割幣 {acct.settlement_ccy.value}／資金幣 {acct.funding_ccy.value}）",
-                field="from_ccy" if leg is body.from_ccy else "to_ccy"))
-    # FU-D34 (需求五): the from-pool must cover the sell amount — HARD 422, no ack override.
-    # Same cash_balances math the balance line displays (consistency), so frontend hint and
-    # backend authority never disagree; exact-balance conversion (== available) still passes.
-    available = _balances(conn).get((body.account_id, body.from_ccy), _ZERO)
-    if body.from_amt > available:
-        return _fx_insufficient_response(acct, body.from_ccy, available, body.from_amt)
+    bad = fx_change_guard(
+        conn, account_id=body.account_id, on=body.date, from_ccy=body.from_ccy,
+        from_amt=body.from_amt, to_ccy=body.to_ccy, to_amt=body.to_amt)
+    if bad is not None:
+        return bad
     fx_id = insert_fx_conversion(
         conn, account_id=body.account_id, date=body.date, from_ccy=body.from_ccy,
         from_amount=body.from_amt, to_ccy=body.to_ccy, to_amount=body.to_amt)

@@ -174,7 +174,10 @@ def test_unknown_kind_names_what_was_typed(seeded: sqlite3.Connection) -> None:
 
 
 @pytest.mark.parametrize(("row", "fragment"), [
-    ("tw_broker,,DEPOSIT,TWD,100,,", "Invalid isoformat"),
+    # G-1: was "Invalid isoformat" — CPython's own English, which this door stopped
+    # printing when ``_date_cell`` landed. Every other fragment in this table is Chinese;
+    # the date row was the one left certifying the leak.
+    ("tw_broker,,DEPOSIT,TWD,100,,", "日期（date）不可空白"),
     ("tw_broker,2026-07-01,DEPOSIT,,100,,", "幣別（ccy）不可空白"),
     ("tw_broker,2026-07-01,DEPOSIT,GBP,100,,", "僅支援"),
     ("tw_broker,2026-07-01,DEPOSIT,TWD,,,", "金額（amount）不可空白"),

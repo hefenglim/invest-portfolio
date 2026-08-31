@@ -164,3 +164,89 @@ def test_a_malformed_sibling_never_reaches_the_walk(conn: sqlite3.Connection) ->
     ))
     assert _hard(preview, 0) != set()                                # the bad row is refused
     assert "no_position_on_action_date" in _hard(preview, 1)         # and lends nothing
+
+
+# --- FIX-A2 (QA BUG-04): the BOOK replay sees same-batch predecessors too -----------
+#
+# The chain tests above have an empty destination ledger, so only the SHARE WALK (E1a)
+# needed the sibling — and it has had it since 2026-08-14. The shape below is the owner's
+# real GGR history: the post-EXCHANGE trades are ALREADY STORED, so without the sibling the
+# four book-derived rejections (E3/E22/E5/E18) replay a destination that sells shares it
+# never received, flag it oversold, and E3 hard-rejects the very row whose prerequisite is
+# eight lines up in the same file. Pass 2 of the byte-identical file then wrote it, because
+# pass 1 had stored the EXCHANGE — an undocumented two-pass behind a message that told the
+# owner to 補登 a buy that exists.
+
+
+def _ggr_shape(conn: sqlite3.Connection) -> None:
+    """Stored trades of the real history: buy the SPAC, then trade the DESTINATION between
+    the (not yet imported) EXCHANGE and reverse SPLIT dates."""
+    _buy(conn, "SPAC", "300", date(2022, 1, 18))
+    insert_transaction(conn, account_id="schwab", symbol="NEWCO", side=Side.SELL,
+                       quantity=D("299"), price=D("5"), fees=D("0"), tax=D("0"),
+                       trade_date=date(2022, 6, 30))
+    insert_transaction(conn, account_id="schwab", symbol="NEWCO", side=Side.BUY,
+                       quantity=D("199"), price=D("0.53"), fees=D("0"), tax=D("0"),
+                       trade_date=date(2024, 9, 23))
+    conn.commit()
+
+
+def test_a_chain_whose_post_action_trades_are_stored_passes_in_ONE_pass(
+    conn: sqlite3.Connection,
+) -> None:
+    """★ The GGR regression: EXCHANGE + dependent reverse SPLIT in one file, trades already
+    stored — no hard issue on either row, first pass."""
+    _ggr_shape(conn)
+    preview = build_corporate_action_preview(conn, _csv(
+        "schwab,2022-04-05,EXCHANGE,SPAC,NEWCO,300,300,,",
+        "schwab,2025-10-06,SPLIT,NEWCO,NEWCO,10,200,,",
+    ))
+    assert _hard(preview, 0) == set()
+    assert _hard(preview, 1) == set()
+
+
+def test_the_one_pass_actually_WRITES_both_rows(conn: sqlite3.Connection) -> None:
+    """The defect was measured at the commit (written 1 / rejected 1, then pass 2), so the
+    pin is on the commit's buckets, not only on the preview's issue sets."""
+    from portfolio_dash.data_ingestion.corporate_action_import import (
+        write_corporate_action_row,
+    )
+    from portfolio_dash.data_ingestion.preview import commit_preview
+
+    _ggr_shape(conn)
+    preview = build_corporate_action_preview(conn, _csv(
+        "schwab,2022-04-05,EXCHANGE,SPAC,NEWCO,300,300,,",
+        "schwab,2025-10-06,SPLIT,NEWCO,NEWCO,10,200,,",
+    ))
+    summary = commit_preview(conn, preview, accept={0, 1},
+                             writer=write_corporate_action_row)
+    assert len(summary.written) == 2
+    assert summary.rejected == []
+
+
+def test_the_same_split_with_the_prerequisite_absent_is_still_oversold_source(
+    conn: sqlite3.Connection,
+) -> None:
+    """The paired proof: no EXCHANGE anywhere — not stored, not in the file — and the
+    destination genuinely sold shares it never received, so E3 must still hard-reject,
+    and its message (「請先補登…」) is now accurate."""
+    _ggr_shape(conn)
+    preview = build_corporate_action_preview(conn, _csv(
+        "schwab,2025-10-06,SPLIT,NEWCO,NEWCO,10,200,,",
+    ))
+    assert "oversold_source" in _hard(preview, 0)
+
+
+def test_a_malformed_prerequisite_lends_no_position_to_the_BOOK_either(
+    conn: sqlite3.Connection,
+) -> None:
+    """`convert_stored` is the ONE converter for both halves (index and book), so a ratio
+    of 1.5 excludes itself from the replayed book exactly as it does from the walk — the
+    dependent SPLIT stays rejected rather than passing on shares a refused row lent it."""
+    _ggr_shape(conn)
+    preview = build_corporate_action_preview(conn, _csv(
+        "schwab,2022-04-05,EXCHANGE,SPAC,NEWCO,1.5,1,,",
+        "schwab,2025-10-06,SPLIT,NEWCO,NEWCO,10,200,,",
+    ))
+    assert _hard(preview, 0) != set()
+    assert "oversold_source" in _hard(preview, 1)

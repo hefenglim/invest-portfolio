@@ -58,6 +58,11 @@
     cash_not_conserved: '轉換過程本身遺失或多算了現金。這是程式的問題，不是你檔案的問題 — 請回報。',
     shares_not_conserved: '轉換過程本身遺失或多算了股數。這是程式的問題，不是你檔案的問題 — 請回報。',
     suppressed_not_zero: '被判定為互相抵銷而丟棄的群組並沒有真的歸零。這是程式的問題 — 請回報。',
+    /* Its sibling above was mapped and this one was not, so it rendered as the raw code
+       `suppressed_ref_unknown` — a blocking issue explained to the owner in nothing but a
+       Python identifier (QA-29b). Same failure mode as the printed statement's private
+       label map: `|| i.code` turns a missing entry into plausible-looking output. */
+    suppressed_ref_unknown: '被丟棄的群組指向了匯出檔裡找不到的列。這是程式的問題，不是你檔案的問題 — 請回報。',
     rows_lost: '有列在轉換途中消失了。這是程式的問題 — 請回報。',
     over_reinvested: '有一組配息再投入的金額超過它收到的金額。請回報。',
     withholding_exceeds_gross: '有一筆預扣稅大於股利總額。請回報。',

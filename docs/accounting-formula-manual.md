@@ -1653,12 +1653,31 @@ balance**（空池為 0）。
 
 ### 9.3 負池語意與護欄（date-aware guard）
 
-**負池通常代表漏記入金或換匯**。護欄分兩層：
+**負池通常代表漏記入金或換匯**。護欄分三類——**寫入門（硬拒、不可 ack）**、**更正門（可 `ack_negative`）**、
+**交易門（軟警告）**。出金／換匯之硬護欄為 owner 裁定 **FU-D43a**／**FU-D34**（載於 `api/routers/cash.py`
+檔頭與 `data_ingestion/fx_import.py` docstring；本節 2026-08-29 同步為實作語意，見 §12.3 `v1.9`）：
 
-- **現金門（deposit/withdraw、fx.convert）之硬護欄**：以 **`running_min`（date-aware，含未來回填）** 檢查
-  「會使該池在**某時點**降至負」；若 `running_min < 0` 且未 `ack_negative` → **422 `negative_cash`**
-  （`此筆會使 … 現金於某時點降至 … — 通常代表漏記入金或換匯;確認無誤可強制寫入`）。編輯／刪除須使
-  **所有受影響池**（舊 + 新 account/ccy）皆不為負。
+- **出金門之硬護欄（FU-D43a）——不可 ack**：一筆 `WITHDRAW` **永不可**使其池透支。兩道檢查**並行**
+  （`validate.py::_withdraw_issues`——手動表單、編輯門、CSV 匯入門共用同一守門）：①（期末餘額）
+  `amount` 超過該池**當前餘額**（與賬戶現金線同一 `cash_balances` 數字；恰等於餘額者可過）；
+  ②（date-aware，audit C3）該筆會**新引入或加深**時間線上低於零之 dip（如回填出金早於其資金到位）。
+  兩者皆答 **422 `withdraw_insufficient_balance`**——獨立錯誤碼，**`ack_negative` 不可繞過**，前端據此
+  不提供 ack。**批次感知**：CSV 同檔為一批、時間線按日期排序（同檔入金可支應同檔出金；兩筆僅「聯合」
+  透支之出金**皆**被攔）；編輯門先剔除舊列自身效果（self-exclusion）再檢。
+- **換匯門之硬護欄（FU-D34，需求五）——不可 ack、不提供融資**：三個門（`POST /api/cash/fx`、
+  `PUT /api/ledgers/fx/{id}`、CSV 匯入）跑**同一** `fx_ccy_issues`／`fx_balance_issues`（住在
+  `data_ingestion/fx_import.py`，pool 算術由上層注入）：① `from_amount` 超過 from-pool 當前餘額；
+  ②（date-aware）該筆會新引入或加深 dip（換匯日早於資金到位）。兩者皆答 **422
+  `fx_insufficient_balance`**，無任何 ack。**批次感知（CSV）**：批 = **實際會被寫入**之列（結構有效
+  **且**被勾選）——被拒或被剔除之列不得資助 sibling；同檔先換入之幣仍可支應後續換出（E1a 保留）。
+- **既有 dip 規則（兩硬護欄之 date-aware 分支共通）**：判準為 `after.low < min(before.low, 0)`——
+  一筆**不加深**既有 dip 之列**永不**被該 dip 阻擋，已在赤字之帳本仍可更正。
+- **更正門之 `negative_cash`＋`ack_negative`——僅存於此**：**縮減資金面**之編輯／刪除（PUT／DELETE
+  現金收支、DELETE 換匯）以 **date-aware `running_min`** 檢查更正後帳本，**所有受影響池**（編輯之舊＋新
+  (account, ccy)；換匯刪除之**兩腿**）任一於**某時點**降至負 → **422 `negative_cash`**
+  （`此筆會使 … 現金於某時點降至 … — 通常代表漏記入金或換匯;確認無誤可強制寫入`），`ack_negative`
+  可強制寫入——這是**更正門**，負池是待修的資料問題而非可執行的禁令。編輯中**新出金本身**仍受 FU-D43a
+  硬擋、永不降格為可 ack 警告；可 ack 的只有「移除舊列效果」那一半（deposit/opening-side 語意）。
 - **交易門之軟警告（soft）**：`api/routers/input_center.py::_cash_overdraft_issue` — **僅當**帳戶已啟用現金
   追蹤（≥1 筆 cash movement）**且**該筆買入會使該標的現金池 < 0 時，附一則**警告 issue（永不硬阻擋）**。
   未追蹤現金的帳戶不會觸發。
@@ -1673,21 +1692,33 @@ balance**（空池為 0）。
 - 據此，credit 型的四種（`DEPOSIT`／`OPENING`／`REBATE`／`INTEREST`）進池時**不做任何餘額檢查**
   （`validate.py`：`kind != "WITHDRAW"` 即直接回空 issue 清單）。
 
-驗證錨點：`tests/data_ingestion/test_cash_import.py::test_credits_need_no_balance_guard`、
+驗證錨點——出金側：`tests/data_ingestion/test_cash_import.py::test_credits_need_no_balance_guard`、
 `::test_withdraw_over_balance_is_hard_and_writes_nothing`、
 `::test_backdated_withdraw_before_its_funding_is_blocked`（date-aware）、
-`::test_two_withdrawals_that_only_jointly_overdraft_are_both_caught`。
+`::test_two_withdrawals_that_only_jointly_overdraft_are_both_caught`；換匯側：
+`tests/contract/test_cash_api.py::test_fx_over_balance_hard_block`、
+`::test_fx_ack_negative_no_longer_bypasses`（FU-D34 無 ack）、
+`tests/api/test_r1_fx_door_parity.py::test_a_pre_existing_dip_does_not_block_a_covered_conversion`
+（既有 dip 規則）、`tests/data_ingestion/test_r1_fx_import_injection.py::`
+`test_the_row_that_will_not_be_written_does_not_fund_its_sibling`（批 = 會被寫入之列）；更正門：
+`tests/contract/test_cash_api.py::test_movement_edit_delta_guard_and_delete`、
+`::test_deposit_edit_to_withdraw_keeps_removal_ack`、
+`tests/api/test_r1_fx_door_parity.py::test_deleting_a_conversion_that_strands_a_later_withdrawal_needs_an_ack`。
 
-**範例與現行覆蓋**：`running_min` 硬護欄一旦偵得某池於**某時點**會降至負且未 `ack_negative`，即回 **422
-`negative_cash`**（訊息形如 `此筆會使 … 現金於某時點降至 …`）。合併後拓樸之當前壓測場景**未觸發** `negative_cash`
-阻擋（其唯一一筆 Schwab USD→TWD 回換 USD 5,000 → TWD 162,000 通過 running_min 檢查而成交，見 §8.2；該場景無
-`negative_cash` 斷言）。此硬護欄之行為由單元測試錨定（`tests/api/…` 之 `_negative_response`／`_pool_min` 路徑），
+**範例與現行覆蓋**：寫入門之透支由 `withdraw_insufficient_balance`／`fx_insufficient_balance` 硬拒（如上，
+無 ack）；更正門一旦偵得某受影響池於**某時點**會降至負且未 `ack_negative`，即回 **422 `negative_cash`**
+（訊息形如 `此筆會使 … 現金於某時點降至 …`）。合併後拓樸之當前壓測場景**未觸發**任一阻擋（其唯一一筆
+Schwab USD→TWD 回換 USD 5,000 → TWD 162,000 通過檢查而成交，見 §8.2；該場景無 `negative_cash` 斷言）。
+護欄行為由上列單元／契約測試錨定（更正門含 `tests/api/…` 之 `_negative_response`／`_pool_min` 路徑），
 非由本 phase-1 場景之單一 op 錨定。
 
 > **實作位置**：`portfolio/cash.py`（`cash_balances`、`pool_lines`、`running_min`、`running_statement`）、
-> `api/routers/cash.py`（`_pool_min`、`_negative_response`、`add_movement`／`add_fx` 護欄）、
+> `data_ingestion/validate.py::_withdraw_issues`（FU-D43a）、`data_ingestion/fx_import.py::fx_balance_issues`
+> （FU-D34）、`api/routers/cash.py`（`movement_guard`／`fx_change_guard`／`fx_delete_guard`、`_pool_min`、
+> `_negative_response`——pool 算術以 `cash_pool_fn` 注入，見 `architecture.md` 之 C3 seam）、
 > `api/routers/input_center.py::_cash_overdraft_issue`。
-> **依據**：`.claude/rules/data-and-pricing.md`（cash pools；audit C3/C5/C9）。
+> **依據**：`.claude/rules/data-and-pricing.md`（cash pools；audit C3/C5/C9）；FU-D43a／FU-D34
+> （owner 裁定，載於上列檔頭／函式 docstring）。
 
 ---
 
@@ -1850,7 +1881,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E13 | FX 加權均率（schwab 32.875／moomoo 4.5） | §8.1 | `fx.avg_rate schwab / moomoo_my` |
 | E14 | 未實現換匯（rollup −11,757.48 TWD） | §8.3 | `fx.reporting_unrealized rollup`（`phase1:final`） |
 | E15 | 現金池期末（tw_broker TWD 1,089,099） | §9.2 | `cash.balance tw_broker|TWD`（`phase1:final`） |
-| E16 | 負池護欄（`negative_cash` 硬護欄；當前場景未觸發，行為由單元測試錨定） | §9.3 | 單元 `_negative_response`／`_pool_min` |
+| E16 | 負池護欄（更正門之 `negative_cash`＋`ack_negative`；寫入門為 FU-D43a／FU-D34 硬拒；當前場景未觸發，行為由單元測試錨定） | §9.3 | 單元 `_negative_response`／`_pool_min` |
 | E17 | 賣超阻擋（422 `oversell_unacknowledged`） | §5.3／§10.5 | `guard.oversell_blocks`（`tw_broker/0050 sell 200>held 110`） |
 | E18 | **SPLIT**（CA1 3-for-1 + 同日賣出 → 260 股；已實現 144.666…669） | §4.4.5(a) | `corp.anchor.split_forward`；`realized.realized tw_broker/CA1@2026-03-02` |
 | E19 | **SPLIT 不動股利折入部分**（CA9 2-for-1 → 400 股；`dividend_portion` 4,000 不變） | §4.4.5(b) | `corp.anchor.split_shares_dividend_adj`；`corp.anchor.split_keeps_dividend_portion` |
@@ -1923,6 +1954,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.7` | 2026-08-11 | **公司行動（SPLIT／EXCHANGE／SPINOFF）**（owner 裁定 D1–D39，規格 `docs/spec/2026-08-06-corporate-actions.md`；基線 `v0.1.28 + feat/corporate-actions`）。① **新增 §4.4**（置於 §4 成本基礎之下、§4.3 之後，**不重新編號任何既有章節**——§7.5 於同一句中以現行編號指稱「§5 已實現／未實現損益」與「§7 總報酬」，重新編號會使該指稱與全庫既有的 §5.1／§7.2 等引用同時失效）：帳本列與**守恆律**（Σ`original_total`／Σ`adjusted_total`／Σ`dividend_portion`／`gross_invested` 皆不變；價值腿**僅** SPLIT）＋兩個刻意例外（零股現金 = 普通賣出、重組費 = `WITHDRAW`）；**比例為兩個正整數**且 `qty × to ÷ from` **先乘後除**（實測 `210×1/3 = 70` vs `210×(1/3) = 69.999…9`，後者會被 `validate.py` 的裸 `>` 判為賣超 → STICKY 丟棄基礎）；**三式與 `_Position` 九欄位移轉表逐字引用規格 §4.1–§4.4**（手冊不以自己的話重述公式）；D21 子公司回本進度須標示承接來源；**六個已驗證工作範例**（§12.1 之 E18–E24）；**邊界矩陣 E1–E24**（含賣超／宣告式賣空之交互 E3/E4/E5/E18/E22 與 E24）；價格基礎（`close_raw` / `split_basis`、讀取時再表述、**僅 SPLIT**）。② **§1.4／§1.1／§12.4：永久帳本由四本改為五本**（新增 `corporate_actions`）——遺漏它重算，會得到一個「看似正常、卻按行動前股數計價」的金額。③ **§4.1 同日優先序由 `0/1/2/3` 改為 `EventPriority` 之 `0/10/20/30/40`**，公司行動插入於 `OPENING` 與 `BUY` 之間；**相對順序未變**，故不含行動之帳本逐位元不變。④ **交叉引用**：§5.1（行動不產生 `RealizedRow`）、§5.3（`unbookable_action` 為第三種誠實退化）、§7.1（不動 `gross_invested`）、§7.2（行動非現金流；未套用之行動使 XIRR **全投組**空白且原因須指名帳戶／標的／日期）。⑤ **兩項限制**：**D11**（`volume` 不做還原）為**長期**限制；**D12**（重組費）**非**永久盲點——D36 裁定 XIRR **刻意不動**、另加**帳戶層 IRR** 於 `portfolio/twr.py`，本版就地查核該檔仍只有 TWR 指數／基準疊圖，故記為「**待 D36**」。⑥ **D34：現金＋股票混合併購為硬性排除**，舊規格的「兩列作法」已撤銷且**不得**作為程序出現（`CORPORATE_ACTION(10)` 先於 `SELL(30)` → EXCHANGE 歸零來源 → 同日 SELL 落在 0 股部位 → STICKY 賣超）；最接近的可表達作法記為**非官方變通**並載明其不精確之處。⑦ 驗證基礎更新為當前實跑（phase-1 **118 ops／3,791 斷言／0 fail**；phase 2 **1,192／0 fail**），公司行動錨點 `corp.*` 共 23 項全數通過。同 change set 重生英文鏡像。**除本條外無任何既有公式或會計定義變更。** |
 | `v1.7a` | 2026-08-11 | **D45 — D36（帳戶層 IRR）由業主裁定不做。** §4.4.7 限制 2 與 §7 XIRR 註記皆改寫:重組費（D12）先前被記載為「對 XIRR 不可見、但帳戶層 IRR 會看見」，該第二個指標已撤銷且從未實作，故 D12 回復為**常設限制**——重組費在本系統現有的每一個報酬指標中都看不見，只在現金帳與淨值可見。**沒有任何數字改變**（XIRR 本來就不含現金收支），改的是限制的陳述:承諾一個不會到來的修正，比把盲點講清楚更糟 |
 | `v1.8` | 2026-08-13 | **現金收支七種 kind／兩軸表 + 美股現金股利（P1b）**（業主裁決 **D1 = A**，2026-08-13；D35，2026-08-10）。① **新增 §9.1.1**：現金收支由四種增為**七種**（新增 `INTEREST` 利息、`INTEREST_EXPENSE` 融資利息、`BROKER_FEE` 券商費用），由 `shared/cash_kinds.py` 這唯一一張表以**兩條正交軸**規範——`credit`（是否增加池餘額）與 `fx_acquisition`（是否進 `covered_ratio` 分母）。舊述詞「`kind == "WITHDRAW"` 才是借方、其餘皆為取得型 credit」會讓一筆 `BROKER_FEE` **增加**現金餘額**又**拉低 `covered_ratio`（兩個錯誤的金額之記錄且皆不拋錯）；`INTEREST` 即是證明一個布林值不夠的那一列——**credit 但非取得**。② **§8.1 增訂第二軸之規範**：分母只收取得型 kind，池內孳生之收益（利息，同 sale proceeds 與外幣現金股利）**沿用池均價**；否則一個從未換匯、僅收到利息的 USD 帳戶會回報 `covered_ratio < 1`，並依 F3 把現金與股票整個曝險標為基礎不完整（**在每個真實帳戶上都響的假警報**）。輸入端據此以 `acq_cost_not_an_acquisition` 拒收利息／費用的取得成本。③ **§7.2 增訂明訂規則**：**七種 kind 全部不進 XIRR**（D1=A）——`xirr_reporting` 的簽章根本不收 `cash_movements`，流量序列仍只由 `opening` + `transactions` + `dividends` 構成；被否決的選項 B 會改變每一個歷史 XIRR 的意義，選項 C 因多數列**沒有 symbol** 而當場否決。④ **§9.3 明訂護欄不擴張**：`running_min` 提領護欄與 N1 外幣提領提示仍**只**鍵在 `WITHDRAW`——提領是使用者的**意圖**（值得擋），費用／融資利息是**已發生事實之記錄**，且融資帳戶本來就會有負現金餘額。⑤ **新增 §6.2b**：`drip_us` 模型自 P1b 起同時受理 `DRIP` 與 `CASH`，移除每列的 `dividend_type_mismatch` 軟阻擋；美股現金股利與 TW／MY 同式降成本（**D35**，本節只錨定公式不重新裁決），**預扣由使用者填寫而非 `gross × 0.30`**（券商實扣經其自身分位進位，與乘積不會逐分相符），空白預扣於 `drip_us` 上以軟性 `us_cash_dividend_no_withholding` 追問但**不改數**。§6 前言與 §6.3b 同步標明其適用範圍為 `CASH_DIVIDEND_TYPES` 全體。⑥ **§4.4.7 限制 2 就地更新**：原文「只有四種 kind、只有 `WITHDRAW` 是借方（`api/routers/cash.py::_KINDS`）」已失效（該常數不存在），改引 `CASH_MOVEMENT_KINDS`；D12 之結論**不變**且由 D1=A 再次確認。⑦ 新增 §12.1 之 **E25／E26**、§12.2 四則詞彙。**沒有任何既有數字改變**：三種新 kind 從未進入任何報酬流量序列，`covered_ratio` 恆 1 之帳本仍跳過乘法，故本手冊每一個已錨定的工作範例與壓測 oracle 的每一個期望值都留在原處。⑧ **壓測場景同版補齊**：phase-1 新增 ops 50–52（`schwab` USD 池之 `INTEREST`／`INTEREST_EXPENSE`／`BROKER_FEE`）與一筆 `schwab/AAPL` `CASH` 股利，實跑 **122 ops、3,799/3,799、0 fail**；oracle 之 `DEBIT_KINDS`／`ACQUIRING_KINDS` 係獨立於 app 的表另寫，故一致非自我確認。此前之「只有 hermetic 錨點」狀態已解除。同 change set 重生英文鏡像。 |
+| `v1.9` | 2026-08-29 | **§9.3 護欄語意同步至實作（FU-D43a／FU-D34）**（QA R1 BUG-02；基線 `v0.1.28 + staged`）。§9.3 原記「現金門（deposit/withdraw、fx.convert）之硬護欄 = `running_min < 0` 且未 `ack_negative` → 422 `negative_cash`」——與實作及其自引之測試相左：**出金**為硬拒 **422 `withdraw_insufficient_balance`（FU-D43a：`ack_negative` 不可繞過、無融資）**，**換匯**為硬拒 **422 `fx_insufficient_balance`（FU-D34，需求五：無 ack、不提供融資）**；兩者皆為「期末餘額 + date-aware dip」雙檢、批次感知（CSV 同檔互為 sibling；換匯之批 = 結構有效**且**被勾選之列），並共用「不加深既有 dip 永不阻擋」規則（`after.low < min(before.low, 0)`）。credit 型 kind 進池本就不做餘額檢查（§9.1.1，未變）。`negative_cash`＋`ack_negative` **僅**存於縮減資金面之更正門（PUT／DELETE 現金收支、DELETE 換匯——date-aware `running_min`、**所有受影響池**：編輯之舊＋新 (account, ccy)、換匯刪除之兩腿）。§9.3 依此改寫（寫入門硬拒／更正門可 ack／交易門軟警告三類）並補列換匯側與更正門驗證錨點；§12.1 E16 措辭同步限縮。仲裁意涵：此前依 §1.1 仲裁一筆被拒之出金會誤判 app 為錯——本版起以實作（owner 簽署之 docstring 裁定 + §9.3 引用之測試）為準。同 change set 重生英文鏡像。**無任何公式或會計定義變更——純為護欄語意之文件同步。** |
 
 ### 12.4 如何仲裁一個爭議金額
 

@@ -2037,14 +2037,48 @@ proving the rollup view and the per-row statement converge on the same value.)
 
 ### 9.3 Negative-Pool Semantics and Guards (date-aware guard)
 
-**A negative pool usually means an unrecorded deposit or conversion.** The guard has two
-layers:
+**A negative pool usually means an unrecorded deposit or conversion.** The guards come in
+three classes — **write gates (hard, no ack)**, **correction gates (`ack_negative`-able)**,
+and the **transaction gate (soft warning)**. The hard withdraw/fx guards are the owner
+rulings **FU-D43a** / **FU-D34** (recorded in the `api/routers/cash.py` module header and
+the `data_ingestion/fx_import.py` docstrings; this section was synchronized to the
+implemented semantics on 2026-08-29, see §12.3 `v1.9`):
 
-- **Hard guard on cash gates (deposit/withdraw, fx.convert)**: uses **`running_min`
-  (date-aware, incl. future backfill)** to check whether the row would drive the pool
-  negative at **some point in time**; if `running_min < 0` and not `ack_negative` →
-  **422 `negative_cash`** (`此筆會使 … 現金於某時點降至 … — 通常代表漏記入金或換匯;確認無誤可強制寫入`).
-  An edit / delete must leave **all affected pools** (old + new account/ccy) non-negative.
+- **Hard guard on the withdraw gate (FU-D43a) — no ack**: a `WITHDRAW` may **never**
+  overdraft its pool. Two checks run **side by side** (`validate.py::_withdraw_issues` —
+  the manual form, the edit door and the CSV import door share the one guard):
+  ① (end balance) `amount` exceeds the pool's **current balance** (the same
+  `cash_balances` figure the 賬戶現金 line displays; an exact-balance withdrawal passes);
+  ② (date-aware, audit C3) the row would **introduce or deepen** a below-zero dip in the
+  running timeline (e.g. a backfilled withdrawal dated before its funding). Both answer
+  **422 `withdraw_insufficient_balance`** — a distinct code, **`ack_negative` cannot
+  bypass it**, and the frontend offers no ack for it. **Batch-aware**: a CSV file is one
+  batch and the timeline is date-ordered (a same-file deposit funds a same-file
+  withdrawal; two withdrawals that only **jointly** overdraft are **both** caught); the
+  edit door strips the edited row's own prior effect first (self-exclusion).
+- **Hard guard on the fx.convert gate (FU-D34, 需求五) — no ack, no financing**: all
+  three doors (`POST /api/cash/fx`, `PUT /api/ledgers/fx/{id}`, the CSV importer) run the
+  **same** `fx_ccy_issues` / `fx_balance_issues` (living in
+  `data_ingestion/fx_import.py`, with the pool arithmetic injected from above):
+  ① `from_amount` exceeds the from-pool's current balance; ② (date-aware) the row would
+  introduce or deepen a dip (conversion dated before its funding arrives). Both answer
+  **422 `fx_insufficient_balance`**, with no ack of any kind. **Batch-aware (CSV)**: the
+  batch is the set of rows that **will actually be written** (structurally valid **and**
+  selected) — a rejected or deselected row funds no sibling; currency the same file
+  converted IN earlier still covers a later conversion out (E1a preserved).
+- **Pre-existing-dip rule (shared by both hard guards' date-aware branch)**: the test is
+  `after.low < min(before.low, 0)` — a row that does **not deepen** an existing dip is
+  **never** blocked by it, so a ledger already in the red stays correctable.
+- **`negative_cash` + `ack_negative` on the correction gates — and only there**:
+  funding-shrinking edits / deletes (PUT / DELETE of a cash movement, DELETE of a
+  conversion) check the corrected ledger with the **date-aware `running_min`**; if **any
+  affected pool** (an edit's old + new (account, ccy); both legs of a deleted
+  conversion) would go negative at **some point in time** → **422 `negative_cash`**
+  (`此筆會使 … 現金於某時點降至 … — 通常代表漏記入金或換匯;確認無誤可強制寫入`), and `ack_negative`
+  forces the write — these are **correction doors**, and a negative pool is a data
+  problem to fix, not a rule to enforce. Within an edit, the **new withdrawal itself**
+  stays hard-guarded by FU-D43a and never degrades to an ack-able warning; only the
+  "removal of the old row's effect" half is ack-able (deposit/opening-side semantics).
 - **Soft warning on the transaction gate (soft)**:
   `api/routers/input_center.py::_cash_overdraft_issue` — **only if** the account already
   has cash tracking enabled (≥1 cash movement) **and** the buy would drive that symbol's
@@ -2065,24 +2099,40 @@ foreign-withdrawal advisory — both remain keyed on `WITHDRAW` **alone**:
   balance check at all** on the way in (`validate.py`: `kind != "WITHDRAW"` returns an empty
   issue list immediately).
 
-Verification anchors: `tests/data_ingestion/test_cash_import.py::test_credits_need_no_balance_guard`,
+Verification anchors — withdraw side:
+`tests/data_ingestion/test_cash_import.py::test_credits_need_no_balance_guard`,
 `::test_withdraw_over_balance_is_hard_and_writes_nothing`,
 `::test_backdated_withdraw_before_its_funding_is_blocked` (date-aware),
-`::test_two_withdrawals_that_only_jointly_overdraft_are_both_caught`.
+`::test_two_withdrawals_that_only_jointly_overdraft_are_both_caught`; fx side:
+`tests/contract/test_cash_api.py::test_fx_over_balance_hard_block`,
+`::test_fx_ack_negative_no_longer_bypasses` (FU-D34 has no ack),
+`tests/api/test_r1_fx_door_parity.py::test_a_pre_existing_dip_does_not_block_a_covered_conversion`
+(pre-existing-dip rule), `tests/data_ingestion/test_r1_fx_import_injection.py::`
+`test_the_row_that_will_not_be_written_does_not_fund_its_sibling` (batch = rows that will
+be written); correction gates:
+`tests/contract/test_cash_api.py::test_movement_edit_delta_guard_and_delete`,
+`::test_deposit_edit_to_withdraw_keeps_removal_ack`,
+`tests/api/test_r1_fx_door_parity.py::test_deleting_a_conversion_that_strands_a_later_withdrawal_needs_an_ack`.
 
-**Example and current coverage**: once the `running_min` hard guard detects that a pool
-would go negative at **some point** without `ack_negative`, it returns **422 `negative_cash`**
-(message of the form `此筆會使 … 現金於某時點降至 …`). The post-merge stress scenario **does not
-trigger** a `negative_cash` block (its single Schwab USD→TWD reconversion, USD 5,000 → TWD
-162,000, passes the running_min check and settles — see §8.2; the scenario has no
-`negative_cash` assertion). This hard guard's behaviour is anchored by unit tests (the
-`_negative_response` / `_pool_min` paths under `tests/api/…`), not by a single op in this
-phase-1 scenario.
+**Example and current coverage**: an overdraft at a write gate is hard-refused as
+`withdraw_insufficient_balance` / `fx_insufficient_balance` (above, no ack); once a
+correction gate detects that an affected pool would go negative at **some point** without
+`ack_negative`, it returns **422 `negative_cash`** (message of the form
+`此筆會使 … 現金於某時點降至 …`). The post-merge stress scenario **does not trigger** any of
+these blocks (its single Schwab USD→TWD reconversion, USD 5,000 → TWD 162,000, passes the
+checks and settles — see §8.2; the scenario has no `negative_cash` assertion). The guards'
+behaviour is anchored by the unit/contract tests listed above (the correction gates
+including the `_negative_response` / `_pool_min` paths under `tests/api/…`), not by a
+single op in this phase-1 scenario.
 
 > **Implementation**: `portfolio/cash.py` (`cash_balances`, `pool_lines`, `running_min`,
-> `running_statement`), `api/routers/cash.py` (`_pool_min`, `_negative_response`,
-> `add_movement` / `add_fx` guards), `api/routers/input_center.py::_cash_overdraft_issue`.
-> **Basis**: `.claude/rules/data-and-pricing.md` (cash pools; audit C3/C5/C9).
+> `running_statement`), `data_ingestion/validate.py::_withdraw_issues` (FU-D43a),
+> `data_ingestion/fx_import.py::fx_balance_issues` (FU-D34), `api/routers/cash.py`
+> (`movement_guard` / `fx_change_guard` / `fx_delete_guard`, `_pool_min`,
+> `_negative_response` — the pool arithmetic is injected via `cash_pool_fn`, see the C3
+> seam in `architecture.md`), `api/routers/input_center.py::_cash_overdraft_issue`.
+> **Basis**: `.claude/rules/data-and-pricing.md` (cash pools; audit C3/C5/C9);
+> FU-D43a / FU-D34 (owner rulings, recorded in the module/function docstrings above).
 
 ---
 
@@ -2287,7 +2337,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E13 | FX weighted-avg rate (schwab 32.875 / moomoo 4.5) | §8.1 | `fx.avg_rate schwab / moomoo_my` |
 | E14 | Unrealized FX (rollup −11,757.48 TWD) | §8.3 | `fx.reporting_unrealized rollup` (`phase1:final`) |
 | E15 | Cash-pool terminal (tw_broker TWD 1,089,099) | §9.2 | `cash.balance tw_broker|TWD` (`phase1:final`) |
-| E16 | Negative-pool guard (`negative_cash` hard guard; not triggered in the current scenario, behaviour anchored by unit tests) | §9.3 | unit `_negative_response` / `_pool_min` |
+| E16 | Negative-pool guard (`negative_cash` + `ack_negative` on the correction gates; the write gates hard-refuse per FU-D43a / FU-D34; not triggered in the current scenario, behaviour anchored by unit tests) | §9.3 | unit `_negative_response` / `_pool_min` |
 | E17 | Oversell block (422 `oversell_unacknowledged`) | §5.3 / §10.5 | `guard.oversell_blocks` (`tw_broker/0050 sell 200>held 110`) |
 | E18 | **SPLIT** (CA1 3-for-1 + same-day sell → 260 shares; realized 144.666…669) | §4.4.5(a) | `corp.anchor.split_forward`; `realized.realized tw_broker/CA1@2026-03-02` |
 | E19 | **SPLIT leaves the dividend portion alone** (CA9 2-for-1 → 400 shares; `dividend_portion` 4,000 unchanged) | §4.4.5(b) | `corp.anchor.split_shares_dividend_adj`; `corp.anchor.split_keeps_dividend_portion` |
@@ -2360,6 +2410,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.7` | 2026-08-11 | **Corporate actions (SPLIT / EXCHANGE / SPINOFF)** (owner decisions D1–D39, spec `docs/spec/2026-08-06-corporate-actions.md`; baseline `v0.1.28 + feat/corporate-actions`). ① **New §4.4**, placed under §4 Cost Basis after §4.3, **renumbering nothing** — the spec's own §7.5 names "§5 Realized/Unrealized P&L" and "§7 Total Return" by their current numbers in the same sentence, and renumbering would invalidate that reference together with every existing §5.1/§7.2-style citation across the repo: the ledger row and the **conservation law** (Σ`original_total` / Σ`adjusted_total` / Σ`dividend_portion` / `gross_invested` all unchanged; the value leg **SPLIT-only**) plus the two deliberate exceptions (cash in lieu = ordinary SELL, reorganisation fee = `WITHDRAW`); **the ratio is two positive integers** and `qty × to ÷ from` is **multiply-first** (measured `210×1/3 = 70` vs `210×(1/3) = 69.999…9`, which `validate.py`'s bare `>` turns into an oversell → STICKY basis discard); **the three formulas and the nine-field `_Position` transfer table are quoted verbatim from spec §4.1–§4.4** (the manual never restates a formula in its own words); D21's provenance label on a spun-off child's payback progress; **six verified worked examples** (§12.1 E18–E24); the **edge matrix E1–E24** (including the oversell / declared-short interactions E3/E4/E5/E18/E22 and E24); the price basis (`close_raw` / `split_basis`, read-time re-expression, **SPLIT-scoped**). ② **§1.4 / §1.1 / §12.4: the permanent ledgers go from four to five** (adding `corporate_actions`) — omitting it from a replay yields an amount that looks normal and is priced on pre-action share counts. ③ **§4.1's same-day priority changes from `0/1/2/3` to `EventPriority`'s `0/10/20/30/40`**, inserting the action between `OPENING` and `BUY`; the **relative order is unchanged**, so a ledger with no action replays byte-identically. ④ **Cross-references**: §5.1 (an action emits no `RealizedRow`), §5.3 (`unbookable_action` as the third honest degradation), §7.1 (`gross_invested` untouched), §7.2 (an action is not a cash flow; an unapplied action blanks XIRR **portfolio-wide** and the reason must name account / symbol / date). ⑤ **Two limitations**: **D11** (`volume` is not un-adjusted) is stated as **standing**; **D12** (the reorganisation fee) is **not** a permanent blind spot — D36 leaves XIRR **deliberately untouched** and adds a **whole-account IRR** in `portfolio/twr.py`; checked in place for this revision, that file still holds no IRR, so it is written up as "**pending D36**". ⑥ **D34: cash-and-stock mergers are a hard exclusion**; the spec's former two-row recipe is withdrawn and **must not appear as a procedure** (`CORPORATE_ACTION(10)` precedes `SELL(30)` → the EXCHANGE zeroes the source → the same-day SELL lands on a zero-share position → STICKY 賣超); the nearest expressible form is recorded as an **unofficial workaround** with its inexactness stated. ⑦ Verification basis updated to the current run (phase-1 **118 ops / 3,791 assertions / 0 fail**; phase 2 **1,192 / 0 fail**), with all 23 `corp.*` corporate-action assertions passing. Mirror regenerated in the same change set. **No existing formula or accounting definition changed other than the above.** |
 | `v1.7a` | 2026-08-11 | **D45 — the owner retired D36 (the whole-account IRR).** §4.4.7 limitation 2 and the §7 XIRR note are both rewritten: the reorganisation fee (D12) was documented as "invisible to XIRR but visible in the whole-account IRR", and that second metric is withdrawn and was never implemented, so D12 reverts to a **standing limitation** — the fee is invisible to every return metric this system has and surfaces only in the cash ledger and net worth. **No figure changed** (XIRR never included cash movements); what changed is the statement of the limitation: promising a fix that never arrives is worse than stating the blind spot plainly |
 | `v1.8` | 2026-08-13 | **Seven cash-movement kinds / a two-axis table + the US cash dividend (P1b)** (owner ruling **D1 = A**, 2026-08-13; D35, 2026-08-10). ① **New §9.1.1**: cash movements go from four kinds to **seven** (adding `INTEREST`, `INTEREST_EXPENSE`, `BROKER_FEE`), governed by the single table in `shared/cash_kinds.py` on **two orthogonal axes** — `credit` (does it increase the pool balance?) and `fx_acquisition` (does it enter `covered_ratio`'s denominator?). The old predicate — "`kind == \"WITHDRAW\"` is the only debit, everything else is an acquiring credit" — would make a `BROKER_FEE` **increase** the cash balance **and** drag `covered_ratio` down (two wrong money-of-record figures, neither of which raises); `INTEREST` is the row that proves one boolean was never enough — **a credit that is not an acquisition**. ② **§8.1 gains the second axis as a rule**: the denominator admits acquiring kinds only, while income arising inside the pool (interest, like sale proceeds and foreign cash dividends) **inherits the pool average**; otherwise a USD account that never converted a cent would report `covered_ratio < 1` for merely earning interest and would flag the whole cash *and* stock exposure as basis-incomplete under F3 (**a false alarm on every real account**). The input door accordingly rejects an acquisition cost on interest/fees with `acq_cost_not_an_acquisition`. ③ **§7.2 gains an explicit rule**: **all seven kinds are excluded from XIRR** (D1=A) — `xirr_reporting` does not take `cash_movements` in its signature at all, and the flow series is still `opening` + `transactions` + `dividends`. The rejected option B would change the meaning of every historical XIRR; option C was rejected on sight because most of these rows **have no symbol**. ④ **§9.3 records that the guard did NOT expand**: the `running_min` withdrawal guard and N1's foreign-withdrawal advisory remain keyed on `WITHDRAW` **alone** — a withdrawal is the user's **intention** (worth blocking), a fee or margin interest is a **recorded fact**, and a margin account legitimately runs a negative cash balance. ⑤ **New §6.2b**: the `drip_us` model accepts both `DRIP` and `CASH` from P1b, removing the per-row `dividend_type_mismatch` soft block; a US cash dividend reduces `adjusted_total` exactly as TW/MY cash does (**D35** — anchored here, not re-decided), **withholding is typed by the user rather than derived from `gross × 0.30`** (the broker's own cent rounding will not match the product), and a blank withholding on `drip_us` raises the soft `us_cash_dividend_no_withholding` question **without altering the row**. §6's preamble and §6.3b are updated to say their scope is all of `CASH_DIVIDEND_TYPES`. ⑥ **§4.4.7 limitation 2 corrected in place**: it said "only four kinds, only `WITHDRAW` is a debit (`api/routers/cash.py::_KINDS`)" — that constant no longer exists; it now cites `CASH_MOVEMENT_KINDS`. D12's conclusion is **unchanged** and is reconfirmed by D1=A. ⑦ Added §12.1 **E25 / E26** and four §12.2 glossary rows. **No existing figure changed**: the three new kinds never entered any return flow series, and a ledger whose `covered_ratio` is 1 still skips the multiply, so every worked anchor in this manual and every stress-audit oracle expectation stays where it is. ⑧ **The stress scenario was extended in the same version**: phase-1 gains ops 50-52 (`INTEREST` / `INTEREST_EXPENSE` / `BROKER_FEE` on `schwab`'s USD pool) and one `schwab/AAPL` `CASH` dividend; the run is **122 ops, 3,799/3,799, 0 fail**. The oracle's `DEBIT_KINDS` / `ACQUIRING_KINDS` are written independently of the app's table, so the agreement is not one definition confirming itself. The earlier 'hermetic anchors only' status is lifted. Mirror regenerated in the same change set. |
+| `v1.9` | 2026-08-29 | **§9.3 guard semantics synchronized to the implementation (FU-D43a / FU-D34)** (QA R1 BUG-02; baseline `v0.1.28 + staged`). §9.3 still read "hard guard on cash gates (deposit/withdraw, fx.convert) = `running_min < 0` and not `ack_negative` → 422 `negative_cash`" — contradicting the implementation and the very tests the section cites: a **withdrawal** is hard-refused **422 `withdraw_insufficient_balance` (FU-D43a: `ack_negative` cannot bypass it, no financing)** and an **fx conversion** is hard-refused **422 `fx_insufficient_balance` (FU-D34, 需求五: no ack, no financing)**; both run the double check "end balance + date-aware dip", are batch-aware (a CSV file's rows are each other's siblings; the fx batch = the structurally-valid **and** selected rows), and share the pre-existing-dip rule (`after.low < min(before.low, 0)` — a dip the row does not deepen never blocks). Credit kinds still get no balance check on the way in (§9.1.1, unchanged). `negative_cash` + `ack_negative` survives **only** on the funding-shrinking correction gates (PUT / DELETE of a cash movement, DELETE of a conversion — date-aware `running_min`, **all affected pools**: an edit's old + new (account, ccy), both legs of a deleted conversion). §9.3 rewritten accordingly (three classes: hard write gates / ack-able correction gates / soft transaction gate) with fx-side and correction-gate verification anchors added; §12.1 E16 wording narrowed to match. Arbitration consequence: under the old text a §1.1 arbitration of a refused withdrawal would have concluded the app was wrong — from this version the implemented semantics (owner-signed docstring rulings + the tests §9.3 cites) govern. Mirror regenerated in the same change set. **No formula or accounting-definition change — a documentation sync of guard semantics only.** |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

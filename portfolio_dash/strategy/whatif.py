@@ -49,9 +49,24 @@ class WhatIfError(ValueError):
 
 
 def _holding_for(holdings: list[Holding], account_id: str, symbol: str) -> Holding | None:
-    """The (account, symbol) holding with shares > 0, or None if unheld."""
+    """The (account, symbol) holding, SIGNED, or None if nothing is held.
+
+    ``!= _ZERO``, not ``> _ZERO`` (QA-04, 2026-08-29). An OPEN DECLARED SHORT is reported by
+    ``build_book`` as a real position with a NEGATIVE share count and the received proceeds as
+    its negative basis — it is not "unheld". The old filter dropped it, so the BUY arm read the
+    position as absent and projected a FRESH LONG at this trade's own price on the very
+    position the drawer renders two rows above as ``shares: "-10", short_open: true``: measured
+    ``new_shares "6"`` / ``new_original_avg "150"`` where the ledger books ``-4`` at ``199.995``
+    plus a ``+299.970`` short_cover. ``/api/input/manual/preview`` already answered that same
+    trade correctly, so one app gave two answers for one trade.
+
+    ``build_book`` never emits ``shares == 0`` (it drops flat positions), so the comparison is
+    "is there a position at all". A NEGATIVE count here is always a declared short: an
+    undeclared oversell raises ``OversellError`` out of the strict replay above, and the caller
+    degrades to a 400 rather than quoting off a book whose basis was discarded.
+    """
     for h in holdings:
-        if h.account_id == account_id and h.symbol == symbol and h.shares > _ZERO:
+        if h.account_id == account_id and h.symbol == symbol and h.shares != _ZERO:
             return h
     return None
 
@@ -146,6 +161,16 @@ def compute_whatif(
     instruments = bundle.instruments
     try:
         book = build_book(bundle)
+    # ``InvalidOperation`` used to be the third member of this tuple, for the never-500 rule:
+    # a decimal fault on ledger data is a user-fixable data problem like the other two, but it
+    # is an ``ArithmeticError`` — NOT a ``ValueError`` — so it slipped past every degradation
+    # site that catches ``(ValueError, KeyError)``. It was also ONE LEAF of that class:
+    # ``decimal.Overflow`` and ``decimal.DivisionByZero`` are its siblings, so a
+    # ``quantity='1E+999999'`` row still 500'd this door (measured, 2026-08-29). ``build_book``
+    # now re-types the whole class into ``UnbookableLedgerError`` at the ONE place it is
+    # raised, so the leaf is gone from here rather than widened: the arm below already
+    # produces the envelope, and four call sites each remembering the same widening is how
+    # three of them came to be missing it.
     except (UnbookableLedgerError, OversellError) as exc:
         # An un-bookable ledger is a user-fixable data problem, not a server fault.
         #
@@ -222,7 +247,12 @@ def compute_whatif(
     # OLD-vs-NEW pre-trade triple (R7 A4, C5): the held position as it stands, so the drawer
     # renders 持股/原始均價/調整均價 old→new. Null when nothing is held (held_shares == 0);
     # averages computed from totals on read (domain-ledger.md), never a stored rounded average.
-    if held_shares > _ZERO:
+    #
+    # `!= _ZERO` (QA-04): an open short is SIGNED, so it reports `-10` and an average of
+    # `-1999.950 / -10 = 199.995` — the average SALE price, which is what a negative basis over
+    # a negative share count means. Printing 「—」 for it contradicted the position row the same
+    # drawer had already rendered.
+    if held_shares != _ZERO:
         out["old_shares"] = str(held_shares)
         out["old_original_avg"] = str(held_orig_total / held_shares)
         out["old_adjusted_avg"] = str(held_adj_total / held_shares)
@@ -239,18 +269,67 @@ def compute_whatif(
     if side is Side.BUY:
         total_cost = amount + fee + tax
         new_shares = held_shares + shares
-        new_original_avg = (held_orig_total + total_cost) / new_shares
-        new_adjusted_avg = (held_adj_total + total_cost) / new_shares
-        out.update(
-            total_cost=str(total_cost),
-            new_shares=str(new_shares),
-            new_original_avg=str(new_original_avg),
-            new_adjusted_avg=str(new_adjusted_avg),
-        )
+        if held_shares < _ZERO:
+            # A buy against an OPEN SHORT covers it first (cost_basis.py, owner rule
+            # 2026-07-31); it does not average into a long lot. Same operands, same order and
+            # the same names as `api/routers/input_center.py::_position_preview`'s buy arm, so
+            # the drawer and the trade form cannot give two answers for one trade (QA-04).
+            short_shares = -held_shares
+            short_avg = held_orig_total / held_shares    # neg/neg — the average sale price
+            cover = min(shares, short_shares)
+            per_share = total_cost / shares
+            to_long = shares - cover
+            realized_cover = (short_avg - per_share) * cover
+            if to_long > _ZERO:
+                # Short fully covered; the leftover starts its long life at THIS buy's cost.
+                new_original = new_adjusted = per_share * to_long
+            else:
+                # Still short: the remaining proceeds, reduced pro rata by what was covered.
+                new_original = held_orig_total + short_avg * cover
+                new_adjusted = held_adj_total + short_avg * cover
+            # Totals moved, THEN divided on read (domain-ledger.md). An exact cover leaves NO
+            # position — the replay drops `shares == 0` — so it has no average at all, the same
+            # null the SELL arm's full exit already returns.
+            new_original_avg = None if new_shares == _ZERO else new_original / new_shares
+            new_adjusted_avg = None if new_shares == _ZERO else new_adjusted / new_shares
+            out.update(
+                total_cost=str(total_cost),
+                new_shares=str(new_shares),
+                new_original_avg=(None if new_original_avg is None
+                                  else str(new_original_avg)),
+                new_adjusted_avg=(None if new_adjusted_avg is None
+                                  else str(new_adjusted_avg)),
+                covered_shares=str(cover),
+                realized=str(realized_cover),
+                realized_note="回補空單：以本次每股成本結算，剩餘股數以本次成本為起點",
+            )
+        else:
+            new_original_avg = (held_orig_total + total_cost) / new_shares
+            new_adjusted_avg = (held_adj_total + total_cost) / new_shares
+            # The three cover fields are emitted as NULLs rather than omitted: the SELL arm
+            # always sends `realized` / `realized_note`, and one BUY reply shaped differently
+            # from another is how a renderer learns to test for a missing key instead of a
+            # stated absence.
+            out.update(
+                total_cost=str(total_cost),
+                new_shares=str(new_shares),
+                new_original_avg=str(new_original_avg),
+                new_adjusted_avg=str(new_adjusted_avg),
+                covered_shares=None,
+                realized=None,
+                realized_note=None,
+            )
         result_shares = new_shares
     else:  # SELL
         oversell = shares > held_shares
         proceeds_net = amount - fee - tax
+        # SIGNED, and that is the point (QA-04): selling into an OPEN SHORT of 10 leaves −15,
+        # not −5. `held_shares` used to be 0 for a short because `_holding_for` dropped it, so
+        # the drawer printed the trade quantity as if the position started from flat. The share
+        # count is the ONE figure both readings of an over-sell agree on — a declared short
+        # extends the short lot to −15, an undeclared oversell nets `pos.shares` to −5 against
+        # an untouched 10-share short lot, which `build_book` reports as −15 too — so it is
+        # stated even where the basis and the realized amount are withheld below.
         remaining_shares = held_shares - shares
         realized_note: str | None = None
         if oversell:
@@ -345,6 +424,15 @@ def _new_weight(
 
     Honest degradation: any missing current price or FX rate -> None for the affected field(s),
     never fabricated.
+
+    ⚠ The dashboard scan below keeps its ``shares > 0`` filter, so a position whose ONLY
+    holding of *symbol* is an open SHORT yields no ``current_price`` and every field here
+    degrades to None (QA-04 fix, deliberate scope). ``domain-ledger.md`` records that
+    allocation weights over a net-short portfolio "can exceed 100% or sign-flip" — an honest
+    reading of a degenerate input, but one this card has no room to explain, and 「—」 says
+    less than a signed percentage that needs a paragraph. The MONEY fields (shares, both
+    averages, realized, covered) are computed for the short in every branch above; only the
+    weight/剩餘市值 pair abstains, and it abstained before this fix too.
     """
     if inst is None:
         return None, None, None

@@ -46,6 +46,13 @@
   };
   const CAP_KEYS = new Set(['taf_cap', 'clearing_cap', 'stamp_cap_stock', 'stamp_cap_etf']);
 
+  /* Read-only fields: the stored spelling -> what it means, and why it cannot be changed.
+     The server marks them with `editable: false`; these two maps are display only. */
+  const ROUNDING_ZH = { floor: '無條件捨去 (floor)', half_up: '四捨五入 (half_up)' };
+  const READONLY_ZH = {
+    rounding: '由市場規定，不可修改（台股費稅無條件捨去至整數元，財政部「角以下免收」；美／馬每項費用四捨五入至最小幣值單位）'
+  };
+
   function isMeaningful(f) {
     if (f.key === 'rounding') return true;
     if (f.overridden) return true;
@@ -79,20 +86,29 @@
     row.appendChild(label);
 
     const ctrl = el('div', 'fee-ctrl');
-    let input;
-    if (f.key === 'rounding') {
-      input = el('select', 'input fee-input');
-      [['floor', '無條件捨去 (floor)'], ['half_up', '四捨五入 (half_up)']].forEach((opt) => {
-        const o = el('option', null, opt[1]); o.value = opt[0]; input.appendChild(o);
-      });
-      input.value = f.effective || f.default || 'half_up';
-    } else {
-      input = el('input', 'input fee-input');
-      input.type = 'number'; input.step = 'any'; input.min = '0';
-      if (!CAP_KEYS.has(f.key) && Number(f.default) <= 1) input.max = '1';
-      input.value = f.effective === null || f.effective === undefined ? '' : f.effective;
-      if (CAP_KEYS.has(f.key)) input.placeholder = f.default === null ? '無上限' : '';
+
+    /* READ-ONLY fields are shown, never offered. `rounding` is the market's own rule, not a
+       preference: TW quantizes fee AND tax by 無條件捨去 to integer NT$ (FE-D3, 財政部
+       角以下免收) and US/MY quantize each component to the 2-dp minor unit — the engine
+       branches on the market, and never read this field at all. It was editable anyway, so
+       an override was accepted, reported as effective, changed no money, and was written
+       into every subsequent row's permanent fee_rule_snapshot as the regime that produced
+       its numbers (QA-07). Deliberately NOT given the `.fee-input` class: `collect()` reads
+       that class, so a read-only field cannot be posted back even by accident. */
+    if (f.editable === false) {
+      const shownValue = ROUNDING_ZH[f.effective] || f.effective || '—';
+      ctrl.appendChild(el('div', 'fee-readonly num', shownValue));
+      const why = el('span', 'panel-sub', READONLY_ZH[f.key] || '由市場規定，不可修改');
+      ctrl.appendChild(why);
+      row.appendChild(ctrl);
+      return row;
     }
+
+    const input = el('input', 'input fee-input');
+    input.type = 'number'; input.step = 'any'; input.min = '0';
+    if (!CAP_KEYS.has(f.key) && Number(f.default) <= 1) input.max = '1';
+    input.value = f.effective === null || f.effective === undefined ? '' : f.effective;
+    if (CAP_KEYS.has(f.key)) input.placeholder = f.default === null ? '無上限' : '';
     input.dataset.key = f.key;
     ctrl.appendChild(input);
 

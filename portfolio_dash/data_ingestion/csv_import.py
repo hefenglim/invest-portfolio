@@ -11,7 +11,7 @@ import csv
 import io
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -39,6 +39,7 @@ from portfolio_dash.data_ingestion.validate import (
     Issue,
     TxnInput,
     alias_import_account,
+    transaction_structural_issues,
     validate_transaction,
 )
 from portfolio_dash.shared.corporate_actions import ActionIndex
@@ -275,8 +276,105 @@ def txn_preview_row(
     )
 
 
+class _CellError(Exception):
+    """One CSV cell that could not be read, carrying the COLUMN and the VALUE that broke it.
+
+    The two attributes are the whole point. ``str(exc)`` on the underlying Python exception
+    was what reached the import preview's 原因 column — the one column whose entire job is to
+    tell the owner why a row was rejected — and it said, verbatim (QA-23):
+
+        ``[<class 'decimal.ConversionSyntax'>]``   for ``1,200`` typed into ``shares``
+        ``'shares'``                                for a header missing that column
+        ``Invalid isoformat string: '2026/01/05'``  for a slash-separated date
+
+    A CPython class name is not a reason, and none of the three names a column the owner can
+    go and look at. The static zh-TW guard cannot catch this class either: it scans
+    ``Issue(message=<literal>)`` and skips non-literals, and ``str(exc)`` is a call — so the
+    rule is enforced by the typed readers below, at the point where the column name is still
+    in scope, rather than by inspection afterwards.
+    """
+
+    def __init__(self, column: str, value: str, reason: str) -> None:
+        self.column = column
+        self.value = value
+        self.reason = reason
+        super().__init__(f"{column}: {reason}")
+
+    @property
+    def message(self) -> str:
+        """The 原因 column's text: what is wrong, which column, and what was typed."""
+        if not self.value:
+            return f"{self.reason}（欄位 {self.column}）"
+        return f"欄位 {self.column} 的內容「{self.value}」{self.reason}"
+
+
+_MISSING_COLUMN = "缺少必要欄位"
+_BLANK_CELL = "必填欄位不可空白"
+_NOT_A_NUMBER = "不是有效的數字（請移除千分位逗號、貨幣符號與空白）"
+_NOT_A_DATE = "不是有效的日期（請用 YYYY-MM-DD）"
+_NOT_A_SIDE = "不是有效的買賣別（請填 BUY 或 SELL）"
+
+
+def _cell(raw: dict[str, str], column: str, *, required: bool = True) -> str:
+    """Read one column, distinguishing an ABSENT column from a blank cell.
+
+    They are different owner mistakes — a missing header versus an empty cell on one row —
+    and ``KeyError`` used to render both as the bare quoted word ``'shares'``.
+    """
+    if column not in raw:
+        raise _CellError(column, "", _MISSING_COLUMN)
+    value = raw[column]
+    if required and not value:
+        raise _CellError(column, "", _BLANK_CELL)
+    return value
+
+
+def _decimal_cell(raw: dict[str, str], column: str) -> Decimal:
+    value = _cell(raw, column)
+    try:
+        return Decimal(value)
+    except InvalidOperation:
+        raise _CellError(column, value, _NOT_A_NUMBER) from None
+
+
+def _optional_decimal_cell(raw: dict[str, str], column: str) -> Decimal | None:
+    """``fee`` / ``tax``: absent or blank means "not supplied", which is not an error.
+
+    Blank is meaningful here — ``data-and-pricing.md``'s provenance rule turns a supplied
+    fee into a ``"source": "supplied"`` snapshot and an unsupplied one into a computed
+    figure, so the two must stay distinguishable. Only a non-empty, unparseable cell fails.
+    """
+    value = raw.get(column, "")
+    if not value:
+        return None
+    try:
+        return Decimal(value)
+    except InvalidOperation:
+        raise _CellError(column, value, _NOT_A_NUMBER) from None
+
+
+def _date_cell(raw: dict[str, str], column: str) -> date:
+    value = _cell(raw, column)
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise _CellError(column, value, _NOT_A_DATE) from None
+
+
+def _side_cell(raw: dict[str, str], column: str) -> Side:
+    value = _cell(raw, column)
+    try:
+        return Side(value.upper())
+    except ValueError:
+        raise _CellError(column, value, _NOT_A_SIDE) from None
+
+
 def build_transaction_preview(
-    conn: sqlite3.Connection, csv_text: str, *, pending_actions: ActionIndex | None = None
+    conn: sqlite3.Connection,
+    csv_text: str,
+    *,
+    pending_actions: ActionIndex | None = None,
+    select: Collection[int] | None = None,
 ) -> ImportPreview:
     """Parse *csv_text* into an :class:`ImportPreview` of transaction rows.
 
@@ -304,6 +402,15 @@ def build_transaction_preview(
                   are about to be imported alongside these trades (the broker one-click
                   flow, so a post-split sell does not demand the 賣超 ack for an action
                   that arrives seconds later). Omitted, the stored ledger's index is read.
+        select: the row indices that will actually be COMMITTED (``None`` = all of them —
+                  the preview door and every non-selecting caller). It narrows the sibling
+                  BATCH the oversell guard counts, never what this door permits or which
+                  rows appear in the output: every row keeps its index, raw text and
+                  payload, so ``row_hashes`` and the wire stay aligned; a deselected row
+                  still gets its own verdict, it simply stops covering its siblings
+                  (QA-01, extended to transactions 2026-08-29 — a covering buy the caller
+                  deselected let the sell it covered commit alone: 200, ``written: 1``,
+                  holdings at −60 shares, and the 賣超 confirmation was never shown).
 
     Returns:
         :class:`ImportPreview` containing one :class:`PreviewRow` per data row.
@@ -322,16 +429,16 @@ def build_transaction_preview(
         # --- parse: build TxnInput from CSV columns ---
         try:
             # Legacy Moomoo account id -> moomoo_my (+ soft info issue appended below).
-            account_id, alias_issue = alias_import_account(raw["account"])
+            account_id, alias_issue = alias_import_account(_cell(raw, "account"))
             inp = TxnInput(
                 account_id=account_id,
-                symbol=raw["symbol"],
-                side=Side(raw["side"].upper()),
-                quantity=Decimal(raw["shares"]),
-                price=Decimal(raw["price"]),
-                trade_date=date.fromisoformat(raw["date"]),
-                fee=Decimal(raw["fee"]) if raw.get("fee") else None,
-                tax=Decimal(raw["tax"]) if raw.get("tax") else None,
+                symbol=_cell(raw, "symbol"),
+                side=_side_cell(raw, "side"),
+                quantity=_decimal_cell(raw, "shares"),
+                price=_decimal_cell(raw, "price"),
+                trade_date=_date_cell(raw, "date"),
+                fee=_optional_decimal_cell(raw, "fee"),
+                tax=_optional_decimal_cell(raw, "tax"),
                 daytrade=raw.get("daytrade", "").lower() in ("1", "true", "y", "yes"),
                 # A DECLARED short sale — the ONLY way a sell may exceed holdings without the
                 # 賣超 guard. Absent, blank or unrecognised means False, and False is the safe
@@ -342,8 +449,18 @@ def build_transaction_preview(
                 short_sale=raw.get("short_sale", "").lower() in ("1", "true", "y", "yes"),
                 note=raw.get("note") or None,
             )
-        except (KeyError, ValueError, InvalidOperation) as exc:
-            parsed.append((idx, raw, None, Issue(kind="parse_error", message=str(exc))))
+        except _CellError as exc:
+            parsed.append((idx, raw, None, Issue(kind="parse_error", message=exc.message)))
+            continue
+        except (KeyError, ValueError, InvalidOperation):
+            # Belt and braces. Everything above is read through a typed cell reader, so this
+            # arm is reachable only via ``TxnInput``'s own model validation (pydantic's
+            # ValidationError IS a ValueError). Its text is English and structural, so the
+            # owner gets a Chinese sentence pointing at the row instead — never ``str(exc)``,
+            # which is exactly how the Python internals got onto the screen in the first place.
+            parsed.append((idx, raw, None, Issue(
+                kind="parse_error",
+                message="這一列的內容無法解析，請對照範本檢查各欄位格式")))
             continue
 
         parsed.append((idx, raw, inp, alias_issue))
@@ -352,7 +469,32 @@ def build_transaction_preview(
     # Only rows that PARSED are siblings. An unparseable row has no account, symbol,
     # quantity or date, so it cannot cover anything; counting it would be inventing a flow
     # out of a defect. (``cash_import.py:260`` filters the same way, for the same reason.)
-    batch = [parsed_in for _idx, _raw, parsed_in, _issue in parsed if parsed_in is not None]
+    #
+    # And with *select*, only rows that will be WRITTEN are siblings (QA-01's rule, on the
+    # share ledger): a buy the caller deselected is a flow no ledger will ever hold, so it
+    # must not cover the sell that IS committed — the cash door's deselected-deposit
+    # defect, replayed with shares instead of money.
+    #
+    # And a STRUCTURALLY invalid row is out too (FIX-A1b, Master probe V6, 2026-08-30) —
+    # ``cash_import``'s other membership term, mirrored: its batch takes only rows clean of
+    # ``_pool_free_issues`` (the shared validator with the money question neutralised), so
+    # a deposit of −500 never funds a withdrawal. Here a buy priced −50.00 — a hard
+    # ``error`` on its own line — still covered its sell, which then previewed ``ok`` and a
+    # no-select commit wrote it ALONE: 200 / written 1 / a lone unacked oversold SELL.
+    # Membership is the row-level structural prefix ONLY (decidable from the TxnInput,
+    # no second validation pass); the ledger-dependent hard kinds stay in on the shared-key
+    # argument — see :func:`~data_ingestion.validate.transaction_structural_issues`. The
+    # row's own verdict is still rendered against the narrowed batch, exactly as cash does
+    # for its excluded rows, and the exclusion errs conservative in both directions: a bad
+    # buy stops lending shares it will never book, and a bad SELL stops draining shares it
+    # will never book — either way siblings are judged against what the ledger will hold.
+    batch = [
+        parsed_in
+        for row_idx, _raw, parsed_in, _issue in parsed
+        if parsed_in is not None
+        and (select is None or row_idx in select)
+        and not transaction_structural_issues(parsed_in)
+    ]
     action_index = pending_actions if pending_actions is not None else load_action_index(conn)
     for idx, raw, row_inp, extra in parsed:
         if row_inp is None:

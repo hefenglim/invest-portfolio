@@ -52,12 +52,22 @@ real instrument split. That is a known gap, not a bug to route around: inferring
 from a price gap would be guessing, which ``domain-ledger.md`` forbids, and a heuristic
 here would silently rewrite market history. The repair is a recorded action, nothing else.
 
-**Only the close is re-expressed** (D39b). ``volume``, and ``open``/``high``/``low``, have
-no ``*_raw`` column of their own, so a factor applied to them could never be restated or
-reversed — they keep the provider's basis and are therefore **discontinuous across a
-split**. A consumer that compares volumes across a split date (the volume-confirmation
-signal) is reading two different denominations; correcting that needs its own raw column,
-not a read-path divide.
+**All four OHLC columns are re-expressed** (W8, owner ruling 2026-08-27 — supersedes D39b).
+``close``, ``open``, ``high`` and ``low`` each carry their own ``*_raw`` and are stored as
+``cap_4dp(raw × split_basis)``, so every one of them is restatable and reversible. D39b's
+objection was exactly that a factor applied to a column with no raw "could never be restated
+or reversed", and its own escape clause was "or add its own raw columns"; W8 took that
+clause. Until then a row could carry a post-split close beside pre-split highs and lows —
+harmless only because nothing read those columns, and a trap for the first candlestick chart
+drawn from this table.
+
+**``volume`` is still never multiplied, and for a STRONGER reason than the old OHLC one: it
+is a count, not a price.** A 20-for-1 split multiplies the share count and divides the price,
+so giving ``volume`` the price factor would be actively **wrong**, not merely unrestatable.
+It gets no raw column and no factor, and it is therefore **discontinuous across a split**: a
+consumer that compares volumes across a split date (the volume-confirmation signal) is
+reading two different denominations. Correcting that needs the inverse factor applied
+deliberately as a count, not the price factor and not a read-path divide.
 """
 
 from collections.abc import Sequence

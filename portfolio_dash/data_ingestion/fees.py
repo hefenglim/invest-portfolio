@@ -4,11 +4,15 @@ Translates the owner's broker schedules (``docs/reference/broker-fee-schedules-2
 into a single pure function ``compute_fees``. Money is ``Decimal`` end to end; rates come
 from the account's :class:`FeeRuleSet` (config, never hard-coded).
 
-Rounding (per rule set):
-  * TW (``rounding="floor"``): ROUND_DOWN to integer NT$ for fee AND tax; the min-NT$20
-    floor is applied AFTER the floor (財政部 FE-D3; 群益 example 142.5 → 142).
-  * US / MY (``rounding="half_up"``): each fee COMPONENT quantized to the 2-dp minor unit
-    ROUND_HALF_UP, then summed (documented assumption pending statement verification).
+Rounding is a property of the MARKET, hard-coded per branch — it is NOT dispatched on
+``FeeRuleSet.rounding``, which this module never reads (QA-07):
+  * TW: ROUND_DOWN to integer NT$ for fee AND tax; the min-NT$20 floor is applied AFTER
+    the floor (財政部 FE-D3, owner sign-off 2026-07-15; 群益 example 142.5 → 142).
+  * US / MY: each fee COMPONENT quantized to the 2-dp minor unit ROUND_HALF_UP, then
+    summed (documented assumption pending statement verification).
+Each branch therefore stamps its OWN regime into the snapshot (see ``_REGIME_*``): a
+``fee_rule_snapshot`` is PROVENANCE (``data-and-pricing.md``) — "which regime produced
+those two numbers" — so it may only ever name the code path that actually ran.
 
 FE-D2 (MY stamp on US trades): the stamp is computed in MYR from the USD notional and the
 trade-date USD/MYR rate, then converted back to USD for booking. ``compute_fees`` stays
@@ -31,6 +35,14 @@ if TYPE_CHECKING:  # annotation only — fees.py stays a pure calculation module
 _ZERO = Decimal("0")
 _CENT = Decimal("0.01")
 _INT = Decimal("1")
+
+#: The quantization regime each branch IMPLEMENTS, stamped into ``fee_rule_snapshot``.
+#: Read the value off the CODE PATH, never off ``rules.rounding``: the field is not an input
+#: to any arithmetic here, so copying it could only ever record a regime that did not run —
+#: a provenance lie, written permanently into the ledger (QA-07, 2026-08-29). Each constant
+#: names exactly one quantizer below, so the stamp and the rounding cannot drift.
+_REGIME_FLOOR = "floor"      # _floor_int: ROUND_DOWN to integer NT$ (TW, FE-D3)
+_REGIME_HALF_UP = "half_up"  # _cent: ROUND_HALF_UP to the 2-dp minor unit (US / MY)
 
 
 class FeeComputationError(ValueError):
@@ -125,7 +137,7 @@ def _tw(
 ) -> FeeResult:
     """TW: floor(notional×brokerage×discount) then max(·, min_fee); sell tax floored."""
     snap["engine"] = "v2"
-    snap["rounding"] = rules.rounding
+    snap["rounding"] = _REGIME_FLOOR  # this branch floors, whatever rules.rounding claims
     snap["brokerage"] = str(rules.brokerage)
     snap["discount"] = str(rules.discount)
     snap["min_fee"] = str(rules.min_fee)
@@ -176,7 +188,7 @@ def _us(
 ) -> FeeResult:
     """US (Schwab + Moomoo): sum per-component (each cent-quantized) + MY stamp as tax."""
     snap["engine"] = "v2"
-    snap["rounding"] = rules.rounding
+    snap["rounding"] = _REGIME_HALF_UP  # every component goes through _cent
     if notional <= _ZERO:
         return FeeResult(fee=_ZERO, tax=_ZERO, snapshot=snap)
 
@@ -225,7 +237,7 @@ def _my(
 ) -> FeeResult:
     """MY (Moomoo MY market): commission + platform + clearing + SST; stamp step as tax."""
     snap["engine"] = "v2"
-    snap["rounding"] = rules.rounding
+    snap["rounding"] = _REGIME_HALF_UP  # every component goes through _cent
     if notional <= _ZERO:
         return FeeResult(fee=_ZERO, tax=_ZERO, snapshot=snap)
 

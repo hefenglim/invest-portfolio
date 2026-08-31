@@ -45,7 +45,7 @@ from typing import Protocol
 from portfolio_dash.shared.cash_kinds import is_debit, is_fx_acquisition
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.enums import DividendType, Side
+from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import Dividend, FXConversion, Transaction
 
 _ZERO = Decimal("0")
@@ -115,6 +115,8 @@ def acquisition_basis(
     movements: Sequence[MovementRow],
     home: Currency,
     foreign: Currency,
+    *,
+    as_of: date | None = None,
 ) -> FXPoolBasis:
     """Split the pool's foreign ACQUISITIONS into basis-known and basis-unknown.
 
@@ -128,13 +130,32 @@ def acquisition_basis(
     as sale proceeds and foreign cash dividends already do (``domain-ledger.md``). Counting
     it here would report ``covered_ratio < 1`` on a USD account that never converted a cent,
     flagging the whole foreign exposure — cash *and* stocks, per F3 — as basis-incomplete.
+
+    ``as_of`` bounds BOTH sources to acquisitions dated ``<= as_of``; the default (None) is
+    the full history. It exists for the REALIZED side, where the manual (§8.2) defines the
+    cost of a reconversion as 「回換前 ... avg_rate」 — the average as it stood on the day of
+    the disposal (QA-02). Two consequences worth stating rather than rediscovering:
+
+    * **The bound is ``<=``, not ``<``.** This ledger carries dates, not timestamps, so a
+      same-day fund-then-convert has no intra-day ordering to appeal to. A strict ``<``
+      would leave such a day with no basis at all — a regression dressed as rigour.
+    * **A disposal never appears here**, so bounding is safe for the very row being priced:
+      a ``foreign -> home`` conversion is not an acquisition at any date, and under weighted
+      average a disposal changes neither the average nor the coverage (N1).
+
+    UNREALIZED deliberately keeps calling this UNBOUNDED: it marks to market what is held
+    now, so its rate must include every acquisition made to date.
     """
     with_basis = home_cost = without_basis = _ZERO
     for c in conversions:
+        if as_of is not None and c.date > as_of:
+            continue
         if c.from_ccy == home and c.to_ccy == foreign:
             with_basis += c.to_amount
             home_cost += c.from_amount
     for m in movements:
+        if as_of is not None and m.date > as_of:
+            continue
         if m.ccy != foreign or not is_fx_acquisition(m.kind):
             continue
         if m.acq_home_amount is None:
@@ -151,12 +172,15 @@ def average_acquisition_rate(
     foreign: Currency,
     *,
     movements: Sequence[MovementRow] | None = None,
+    as_of: date | None = None,
 ) -> Decimal | None:
     """Weighted-average home-per-foreign rate over the pool's basis-known acquisitions.
 
     Returns None if the account has no such acquisition (no FX cost basis).
+    ``as_of`` bounds the acquisitions to that date — see :func:`acquisition_basis`.
     """
-    return acquisition_basis(conversions, movements or [], home, foreign).avg_rate
+    return acquisition_basis(
+        conversions, movements or [], home, foreign, as_of=as_of).avg_rate
 
 
 def foreign_cash_balance(
@@ -170,12 +194,20 @@ def foreign_cash_balance(
 ) -> Decimal:
     """Reconstruct the foreign-currency cash balance from the account's ledgers.
 
-    + conversions into foreign, + foreign sale net proceeds, + foreign CASH dividends net,
-    + foreign cash CREDITS (deposit / opening / rebate), - foreign buys (incl. fees+tax),
-    - reconversions out of foreign, - foreign WITHDRAW. DRIP/STOCK dividends move no cash
-    (DRIP nets to zero) and are excluded.
+    + conversions into foreign, + foreign sale net proceeds, + foreign cash-family dividends
+    net (``CASH_DIVIDEND_TYPES`` = CASH + NET), + foreign cash CREDITS (deposit / opening /
+    rebate), - foreign buys (incl. fees+tax), - reconversions out of foreign, - foreign
+    WITHDRAW. DRIP/STOCK dividends move no cash (DRIP nets to zero) and are excluded.
 
     Equals the funds view (``portfolio/cash.py``) for the same (account, ccy) pool.
+
+    ⚠ The dividend filter is ``CASH_DIVIDEND_TYPES``, never a bare ``is DividendType.CASH``.
+    This module is a REPLAY SITE, and ``shared/models/enums.py`` holds that frozenset for
+    exactly this reason — "ONE definition for every replay site ... so they can never drift".
+    It did drift (QA-03): the narrow filter dropped every **NET** dividend, which is the MY
+    single-tier net-received payout — real cash, in the pool's own currency — so the FX view
+    disagreed with the funds view by the whole dividend, breaking the identity this module's
+    own header claims and the manual anchors as ``fx.pool_equals_funds`` (§8.3).
     """
     cash = _ZERO
     for c in conversions:
@@ -191,7 +223,7 @@ def foreign_cash_balance(
         else:
             cash += t.quantity * t.price - t.fees - t.tax
     for d in dividends:
-        if d.type is DividendType.CASH and instruments[d.symbol].quote_ccy == foreign:
+        if d.type in CASH_DIVIDEND_TYPES and instruments[d.symbol].quote_ccy == foreign:
             cash += d.net
     for m in movements or []:
         if m.ccy != foreign:

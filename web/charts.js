@@ -387,12 +387,21 @@
           let html = '<div style="font-size:11px;color:' + C.faint + '">' +
                      params[0].axisValue + '</div>';
           params.forEach((s) => {
-            const v = Number(s.value);            // rebased index string → display only
-            const delta = v - 100;
+            /* The index itself is rendered from the WIRE STRING via fmt, never via a float
+               round trip: fmt rounds on the digit string (_round/_inc/_x100), and toFixed
+               disagreed with it on boundary values — 100.005 gave '100.00' where fmt.num
+               gives '100.01' — so the same number read differently depending on which
+               surface you looked at. fmt also suppresses a rounded-away '-0.00', which the
+               hand-rolled `(delta >= 0 ? '+' : '−')` could not: a delta of -0.001 printed
+               '−0.00%', a minus sign in front of zero.
+               `delta` stays a float: it is a tooltip-only index delta, not money, and the
+               two are formatted by the same helper so the rounding rule is shared. */
+            const delta = Number(s.value) - 100;
             const col = delta > 0 ? C.up : delta < 0 ? C.down : C.text;
-            html += '<div>' + s.marker + s.seriesName + '&nbsp;&nbsp;<b>' + v.toFixed(2) +
+            html += '<div>' + s.marker + s.seriesName + '&nbsp;&nbsp;<b>' +
+                    f.num(s.value, 2) +
                     '</b>&nbsp;<span style="color:' + col + '">(' +
-                    (delta >= 0 ? '+' : '−') + Math.abs(delta).toFixed(2) + '%)</span></div>';
+                    f.signedNum(delta, 2) + '%)</span></div>';
           });
           return html;
         }

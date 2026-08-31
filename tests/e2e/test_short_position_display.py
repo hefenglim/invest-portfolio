@@ -134,12 +134,31 @@ def test_a_negative_weight_never_draws_a_full_bar(
             f"{bar['trackPx']}px) — visually identical to the largest holding"
         )
 
-    # And every bar on the page stays inside its track, whatever the sign.
-    all_rows = page.evaluate("""() => Array.from(document.querySelectorAll('.mini-bar'))
-        .map(mb => {
-          const f = mb.querySelector('.fill'), t = mb.querySelector('.track');
-          return {fill: Math.round(f.getBoundingClientRect().width),
-                  track: Math.round(t.getBoundingClientRect().width),
-                  label: mb.lastChild.textContent.trim()}; })""")
-    over = [b for b in all_rows if b["fill"] > b["track"] + 1]
-    assert not over, f"mini-bar fill overflows its track: {over}"
+    # And EVERY bar on the page — not just `.mini-bar`. Widened 2026-08-29 (QA-21): this
+    # sweep named one class, so it could not see the currency-mix stacked bar 220 lines
+    # below the fix in the same JS file, which assigned the same negative weight to
+    # `.ccy-stack .seg` unclamped. Add a bar class here as one tuple, or the next sibling
+    # is missed exactly as this one was. Two assertions, because the two failure modes look
+    # nothing alike: an over-range value OVERFLOWS, a negative one is DISCARDED and vanishes.
+    bars = page.evaluate(
+        """(pairs) => pairs.flatMap(([fillSel, hostSel]) =>
+             Array.from(document.querySelectorAll(fillSel)).map(node => {
+               const host = node.closest(hostSel) || node.parentElement;
+               return {sel: fillSel,
+                       inline: node.style.width,
+                       fill: Math.round(node.getBoundingClientRect().width),
+                       track: Math.round(host.getBoundingClientRect().width),
+                       label: (node.title
+                               || (node.closest('.mini-bar') || host).textContent).trim()};
+             }))""",
+        [[".mini-bar .fill", ".mini-bar .track"], [".ccy-stack .seg", ".ccy-stack"]],
+    )
+    assert bars, "the bar sweep matched nothing — it would pass on an empty page"
+    dropped = [b for b in bars if not b["inline"]]
+    assert not dropped, (
+        f"these bars carry NO inline width: an invalid value (a negative percentage) was "
+        f"DISCARDED by the CSSOM, so the element fell back to its auto size — a full bar "
+        f"for a block `.fill`, and 0px (gone) for a flex `.seg`: {dropped}"
+    )
+    over = [b for b in bars if b["fill"] > b["track"] + 1]
+    assert not over, f"bar fill overflows its track: {over}"

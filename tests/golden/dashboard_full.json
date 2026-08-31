@@ -458,7 +458,9 @@
     },
     "reporting_currency": "TWD",
     "reporting_realized_fx": "2000",
-    "reporting_unrealized_fx": "10545.0"
+    "reporting_unrealized_fx": "10545.0",
+    "excluded_accounts": [],
+    "reporting_unavailable_reason": null
   },
   "dividends": {
     "by_year": [
@@ -1680,6 +1682,7 @@
     "missing_fx": [],
     "xirr_unavailable_reason": "無法計算（缺少現價、現金流無正負變化，或迭代未收斂）",
     "trend_unavailable_reason": null,
+    "fx_unavailable_reason": null,
     "unregistered_symbols": [],
     "last_backup_at": null
   },

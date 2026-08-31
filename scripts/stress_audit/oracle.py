@@ -1134,13 +1134,44 @@ def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
     return dict(bal)
 
 
+def _fx_avg_as_of(
+    convs: list[FxFact], moves: list[CashFact], home: str, foreign: str, on: date,
+) -> Decimal | None:
+    """Weighted-average home-per-foreign rate over acquisitions dated ``<= on``.
+
+    The cost side of a DISPOSAL is the average as it stood on the disposal's own date
+    (manual §8.2 「回換前 ... avg_rate」). Re-derived here from the rule text, deliberately
+    duplicating the un-bounded sum in :func:`_fx_pools` rather than sharing it: the bound
+    is the property under test, and a helper shared with the full-history path would make
+    the two agree by construction.
+
+    ``moves`` is already scoped to the pool's currency by the caller. The bound is ``<=``
+    because the ledger carries dates, not timestamps.
+    """
+    h = ZERO
+    f = ZERO
+    for c in convs:
+        if c.d <= on and c.from_ccy == home and c.to_ccy == foreign:
+            h += c.from_amt
+            f += c.to_amt
+    for m in moves:
+        if m.d <= on and m.kind.upper() in ACQUIRING_KINDS and m.acq_home_amount is not None:
+            h += m.acq_home_amount
+            f += m.amount
+    return (h / f) if f != ZERO else None
+
+
 def _fx_pools(facts: Facts):
     """Per-account FX pool (domain-ledger.md / forex module semantics).
 
     avg_rate = sum(home cost) / sum(foreign acquired) over home->foreign conversions AND
-    foreign cash CREDITS that carry an acq_home_amount (spec 2026-07-30 F1).
-    realized_fx = sum over foreign->home reconversions of (home_received - foreign_sold*avg_rate).
-    foreign_cash = conversions +/- ; +sale net ; -buy allin ; +CASH dividend net (foreign)
+    foreign cash CREDITS that carry an acq_home_amount (spec 2026-07-30 F1). It is
+    FULL-HISTORY: it prices the exposure still held, so it is asked as of today.
+    realized_fx = sum over foreign->home reconversions of
+    (home_received - foreign_sold * the average AS AT THAT RECONVERSION'S DATE) — a
+    disposal's cost is fixed by the acquisitions that funded it, so entering a later
+    conversion must not restate it (manual §8.2; see :func:`_fx_avg_as_of`).
+    foreign_cash = conversions +/- ; +sale net ; -buy allin ; +cash-family dividend net
                    ; +/- foreign cash movements (credit/WITHDRAW).
     covered_ratio = basis-known acquisitions / all acquisitions (F2); exactly 1 when nothing
                    is unbased. It scales BOTH unrealized legs (F3) — see phase1's reconcile.
@@ -1185,7 +1216,16 @@ def _fx_pools(facts: Facts):
             r = ZERO
             for c in convs:
                 if c.from_ccy == foreign and c.to_ccy == home:
-                    r += c.to_amt - c.from_amt * a
+                    # Each reconversion is priced at the average 回換前 — the acquisitions
+                    # dated on or before it (manual §8.2). Applying ONE all-time average
+                    # let a later conversion restate an already-reported figure, and at a
+                    # high enough later rate flip its sign (QA-02). A reconversion with no
+                    # acquisition yet contributes nothing rather than being priced by a
+                    # rate that did not exist on its date.
+                    rate = _fx_avg_as_of(convs, moves, home, foreign, c.d)
+                    if rate is None:
+                        continue
+                    r += c.to_amt - c.from_amt * rate
             realized[aid] = r
         # foreign cash reconstruction
         cash = ZERO
@@ -1206,7 +1246,13 @@ def _fx_pools(facts: Facts):
         for dv in facts.divs:
             if dv.account_id != aid:
                 continue
-            if dv.type == "CASH" and facts.instruments[dv.symbol].quote_ccy == foreign:
+            # CASH *and* NET (domain-ledger.md: TW cash and MY single-tier net are both
+            # money that lands in the pool). This read ``== "CASH"`` while ``_cash_balances``
+            # above already read ``CASH_DIVIDEND_TYPES``, so the oracle carried the SAME
+            # narrowing the app did (QA-03) and could not have caught it: the two views it
+            # is supposed to prove equal were both wrong in the same direction. An oracle
+            # that shares the app's bug is not an oracle.
+            if dv.type in CASH_DIVIDEND_TYPES and facts.instruments[dv.symbol].quote_ccy == foreign:
                 cash += dv.net
         for m in moves:
             cash += -m.amount if m.kind.upper() in DEBIT_KINDS else m.amount

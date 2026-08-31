@@ -105,11 +105,22 @@ def _oversold_rows(payload: dict[str, object]) -> list[object]:
     Matched on ``reason``, because ``code`` is deliberately narrow — it exists for the one
     issue the frontend takes an ACTION on (``unregistered_symbol``) and is ``None`` for
     everything else. The wire simply does not carry an issue kind for a warning.
+
+    ⚠ The marker was ``"held"`` until 2026-08-29 (QA-24). That was the English headline
+    ``sell 150 > held 100``, which the UI rendered verbatim as the FIRST line of the 賣超
+    confirmation dialog — above the Chinese sentence explaining that acking permanently
+    discards the cost basis — so one dialog read half in each language. The message is now
+    「賣出 3600 股，超過持有的 1000 股」, and 「超過」 + 「持有」 is the substring both branches
+    share (the date-aware one reads 「超過 {date} 當日持有的 …」). This helper failed CLOSED
+    when the text moved: it returned ``[]`` and the assertion read "no oversell warning",
+    which is the reassuring direction to be wrong in — worth remembering if it is ever
+    rewritten.
     """
     rows = payload["rows"]
     assert isinstance(rows, list)
     return [r for r in rows
-            if r["status"] == "warn" and "held" in (r["reason"] or "")]
+            if r["status"] == "warn"
+            and "超過" in (r["reason"] or "") and "持有" in (r["reason"] or "")]
 
 
 def test_pending_actions_csv_clears_a_post_split_sell_on_PREVIEW(
@@ -142,6 +153,19 @@ def test_pending_actions_csv_is_re_applied_on_COMMIT(api_client: TestClient) -> 
         "kind": "transactions", "csv_text": _POST_SPLIT_SELL,
         "pending_actions_csv": _SPLIT_CSV})
     assert ok.status_code == 200 and ok.json()["written"] == 1
+
+
+def test_pending_actions_csv_composes_with_a_selection(api_client: TestClient) -> None:
+    """FIX-A1's re-derivation must not cost the widening: a ``select`` makes the commit
+    re-derive the preview over the narrowed batch (QA-01, extended to transactions), and
+    if that second derivation dropped ``pending_actions`` the sell would surface a 賣超
+    KIND the full-file preview never showed — and be skipped under the shrink-only rule.
+    Selecting the row explicitly must book it exactly as omitting the selection does."""
+    ok = api_client.post("/api/import/commit", json={
+        "kind": "transactions", "csv_text": _POST_SPLIT_SELL,
+        "pending_actions_csv": _SPLIT_CSV, "select": [0]})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["written"] == 1
 
 
 def test_pending_actions_csv_is_ignored_by_every_OTHER_kind(api_client: TestClient) -> None:

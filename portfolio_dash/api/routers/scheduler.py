@@ -32,6 +32,7 @@ from portfolio_dash.scheduler.jobs import (
     start_job_run,
 )
 from portfolio_dash.scheduler.runtime import reschedule_job
+from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
@@ -261,7 +262,11 @@ def _usage_window_cost(
     if calls == 0:
         return None
     return {
-        "cost_usd": str(total),
+        # decimal_str, never str(): a summed Decimal with a small exponent renders as
+        # `9E-8`, which shared/wire.py's canonical form explicitly forbids and which
+        # web/format.js's PLAIN_DECIMAL guard rejects — dropping the value onto the
+        # Number() float path, i.e. out of the Decimal-string contract entirely.
+        "cost_usd": decimal_str(total),
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "calls": calls,
@@ -281,12 +286,17 @@ def _cost_block(conn: sqlite3.Connection, job_id: str, row: Any) -> dict[str, An
         if cost_usd is None:
             return None
         try:
-            if Decimal(cost_usd) == 0:
-                return None
+            exact = Decimal(cost_usd)
         except (InvalidOperation, TypeError):
             return None
+        if exact == 0:
+            return None
         return {
-            "cost_usd": cost_usd,
+            # The stored TEXT is whatever the runner wrote (``str(cost)`` today, which can
+            # be `9E-8`); this router is the endpoint's last seam, so it re-serializes
+            # through the canonical wire form rather than passing the raw column on. Value-
+            # preserving: an already-canonical string round-trips byte-identically.
+            "cost_usd": decimal_str(exact),
             "tokens_in": None,
             "tokens_out": None,
             "calls": None,

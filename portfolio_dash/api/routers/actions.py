@@ -82,7 +82,32 @@ def recompute(
     try:
         build_book(bundle)
     except OversellError as exc:
-        return JSONResponse(status_code=422, content=error_body("oversell", str(exc)))
+        # The wording, the code and the ``issues`` shape are ``api/routers/export.py``'s and
+        # ``strategy/whatif.py``'s, on purpose. This arm answered ``error_body("oversell",
+        # str(exc))``, and ``str(exc)`` is written for a developer by design:
+        # ``sell 9999 > held 10 for AAPL``. ``message`` is rendered VERBATIM as a red toast, so
+        # that sentence went straight to the owner — on the one door whose whole job is to say
+        # the ledger does not replay. The English detail still travels, in ``issues[].text``.
+        #
+        # ``"oversold_position"`` also unifies the code: 試算, the tax package and
+        # ``api/errors.py``'s handler all use it, so a frontend branch written for them fires
+        # here too. ⚠ ``"oversell"`` stays correct for a DIFFERENT door — ``ledgers.py``'s
+        # mutation guard uses it as a retryable-with-ack signal that ``web/inbox.js`` and
+        # ``web/ledger.js`` branch on (「賣超確認」 → re-send with ``ack_oversell``). 重算 has no
+        # ack to offer, so it was never that signal.
+        return JSONResponse(status_code=422, content=error_body(
+            "oversold_position",
+            f"帳本中有賣超部位待釐清（{exc.account_id}／{exc.symbol}，"
+            f"{exc.trade_date.isoformat()}）— 無法重算，請先修正該筆交易",
+            issues=[{
+                "sev": "error",
+                "code": "oversold_position",
+                "text": str(exc),
+                "field": None,
+                "account_id": exc.account_id,
+                "symbol": exc.symbol,
+                "trade_date": exc.trade_date.isoformat(),
+            }]))
     except UnbookableLedgerError as exc:
         # never-500 at EVERY build_book call site: the strict replay refuses an event it
         # cannot book honestly (e.g. a dividend inside an open-short window), and 重算

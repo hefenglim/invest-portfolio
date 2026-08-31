@@ -29,7 +29,7 @@ and all three are audit findings, not preferences:
 
 import sqlite3
 from collections.abc import Iterable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 
@@ -40,6 +40,11 @@ from pydantic import BaseModel, Field
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import reconcile_price_basis
+
+# Sibling router, same layer, no cycle (``cash`` imports nothing from here) — the same shape
+# ``rebates.py`` already uses for ``movement_guard``. The alternative is a second spelling of
+# the 換匯 guard on the correction door, which is exactly the drift QA-10 found.
+from portfolio_dash.api.routers.cash import fx_change_guard, fx_delete_guard
 from portfolio_dash.api.wire import issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import check_amounts
@@ -239,7 +244,10 @@ def fx(
             "account": accts.get(c.account_id, c.account_id),
             "from_ccy": c.from_ccy.value, "from_amt": decimal_str(c.from_amount),
             "to_ccy": c.to_ccy.value, "to_amt": decimal_str(c.to_amount),
-            "implied_rate": decimal_str(c.implied_rate),
+            # None when nothing was received (QA-10): `decimal_str` takes a Decimal, and
+            # `web/format.js`'s `f.rate(null)` already renders 「—」.
+            "implied_rate": (decimal_str(c.implied_rate)
+                             if c.implied_rate is not None else None),
         })
     return _page(out, limit, offset)
 
@@ -763,7 +771,16 @@ def edit_fx(
     body: FxEditBody,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
-    if get_fx_conversion(conn, fx_id) is None:
+    """Correct one fx_conversions row — through the SAME guard ``POST /api/cash/fx`` runs.
+
+    Until 2026-08-29 (QA-10) this door validated only ``> 0`` and ``from_ccy != to_ccy``,
+    while the entry door enforced currency↔account coherence (audit C2) and the hard
+    no-overdraft rule (FU-D34). Two doors onto one ledger with two different rule sets is the
+    C3 asymmetry stated the other way round, and the weaker one is reachable from the 交易帳本
+    換匯 row, whose currency selects and amount inputs are free-form.
+    """
+    existing = get_fx_conversion(conn, fx_id)
+    if existing is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"換匯 #{fx_id} 不存在"))
     guard = _mutation_guard(conn, account_id=body.account_id, symbol=None)
@@ -775,6 +792,15 @@ def edit_fx(
     if body.from_ccy is body.to_ccy:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "換出與換入幣別不可相同", field="to_ccy"))
+    # ``exclude_fx_id``: the edited row's own prior effect is stripped from the pool first, so
+    # a correction WITHIN the headroom the old amounts already consumed is not falsely
+    # blocked — the ``exclude_id`` pattern ``edit_movement`` proved on the movement door.
+    bad = fx_change_guard(
+        conn, account_id=body.account_id, on=body.date, from_ccy=body.from_ccy,
+        from_amt=body.from_amt, to_ccy=body.to_ccy, to_amt=body.to_amt,
+        exclude_fx_id=fx_id)
+    if bad is not None:
+        return bad
     update_fx_conversion(
         conn, fx_id, account_id=body.account_id, date=body.date,
         from_ccy=body.from_ccy, from_amount=body.from_amt,
@@ -786,11 +812,24 @@ def edit_fx(
 @router.delete("/ledgers/fx/{fx_id}")
 def remove_fx(
     fx_id: int,
+    ack_negative: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
-    if get_fx_conversion(conn, fx_id) is None:
+    """Delete one fx_conversions row, with the ack-able ``negative_cash`` guard (QA-10).
+
+    Deleting a conversion removes the credit that funded whatever came after it, so the
+    to-pool can drop below zero at some point in time — the same event ``remove_movement``
+    has answered 422 ``negative_cash`` for since audit C3, on the control beside this one.
+    ``ack_negative=true`` still deletes: this is a correction door, and a negative pool is a
+    data problem to be fixed rather than a rule to be enforced.
+    """
+    existing = get_fx_conversion(conn, fx_id)
+    if existing is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"換匯 #{fx_id} 不存在"))
+    blocked = fx_delete_guard(conn, existing, ack_negative=ack_negative)
+    if blocked is not None:
+        return blocked
     delete_fx_conversion(conn, fx_id)
     return {"ok": True, "id": fx_id}
 
@@ -1652,9 +1691,30 @@ def _seed_child_price(
 
     **Written through** ``pricing.store.upsert_prices``, from ``api/`` — ``pricing/`` owns
     every write to ``prices`` (``architecture.md``) and ``data_ingestion`` may not reach in.
-    ``factor_of`` is left at the identity: the row is dated the action day and the child is
-    brand new, so no split can exist between that date and now to un-adjust. That is a
-    derivation from the child's age, not a shortcut.
+
+    **``fetched_at`` is the ACTION DAY, not ``now``** (QA-05). The owner typed an *as-traded*
+    price and dated it themselves, so it was "observed" on its own date; stamping it with the
+    wall clock made a claim about the row that is not true, and the claim is load-bearing.
+    ``pricing/`` reads ``fetched_at`` as the upper bound of the window ``(as_of, fetched_at]``
+    — "which splits had the provider already folded into this delivered number?" — and
+    multiplies them back OUT (``data-and-pricing.md``, the as-traded invariant). With the row
+    dated the action day, ``as_of == fetched_at.date()``, so that window is EMPTY by
+    construction, on the write **and on every later**
+    ``pricing.reconcile.reconcile_prices`` pass: ``split_basis`` can only ever be the
+    identity, and ``factor_of`` may safely stay at ``_no_factor``.
+
+    The earlier justification — 「the child is brand new, so no split can exist between that
+    date and now」 — was a derivation from the child's *age*, and it is false for a
+    **back-dated** spin-off, which this route fully permits and which backfilling broker
+    history is the stated use case for. Measured: a SPINOFF dated 2023-01-15 with a typed
+    50.00, then the child's own 2-for-1 SPLIT of 2024-06-01, stored ``close='100.00'`` over
+    ``close_raw='50.00'`` / ``split_basis='2'``; the read divided the same split back out to
+    50.00 and met a POST-split 100-share count — 5,000 where the economics say 2,500.
+    A split changes the denomination, never the value.
+
+    ``now`` is still the tz/precision convention this column is written in everywhere else
+    (``upsert_prices`` stores ``fetched_at.isoformat()``), so only the DATE moves; the
+    timezone comes from the request's own clock rather than being invented here.
 
     **Degrades rather than raises.** ``bootstrap_db`` does not create ``prices`` (only
     ``pricing.schema.create_tables`` does), so a ledger-only database has no such table —
@@ -1678,7 +1738,7 @@ def _seed_child_price(
             conn,
             [PriceRow(instrument=inst.symbol, market=inst.market, as_of=inp.date,
                       close=close, source="manual")],
-            fetched_at=now,
+            fetched_at=datetime.combine(inp.date, time.min, tzinfo=now.tzinfo),
         )
     except sqlite3.OperationalError:
         return None

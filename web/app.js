@@ -25,6 +25,28 @@
     return n;
   };
 
+  /* Bar-fill width, clamped to 0..100 — the ONE helper for EVERY segmented bar in this
+     file: the holdings table's `.mini-bar .fill` and the currency-mix `.ccy-stack .seg`.
+
+     Neither declares a width in CSS, so the inline value is the only source — and an
+     INVALID inline width is not clamped by the browser, it is DISCARDED. The element then
+     falls back to its auto size: a full-width block for `.fill`, 0px (i.e. gone) for a flex
+     `.seg`. A net-short position carries a NEGATIVE weight by construction (net-exposure
+     convention, domain-ledger.md), which is how both bars met an out-of-range value:
+       · 2026-08-05 — `width: -2.29%` was dropped and a −2.29% holding drew a 100% bar,
+         visually identical to the 99.33% holding above it while its own label said −2.29%.
+       · 2026-08-29 — the currency stack assigned `180.80%` / `-137.23%` verbatim. The
+         negative segment vanished, AND — the container being `display:flex` — the
+         over-range sibling made flex-shrink RESCALE every other segment: a legal 56.43%
+         currency rendered at 23.8% of the track (measured in Chromium). One out-of-range
+         value corrupts the WHOLE bar, not just its own segment.
+     ONE helper on purpose: the second bar went unclamped because this lived inside
+     `renderHoldings`. The label carries the sign; the bar only ever claims magnitude. */
+  const barWidth = (value, max) => {
+    const pct = max ? (value / max) * 100 : 0;
+    return (Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0) + '%';
+  };
+
   /* ============ A. Header ============ */
   function renderHeader() {
     $('#asof-value').textContent = f.datetime(D.as_of);
@@ -252,8 +274,10 @@
       band.appendChild(card);
     }
 
-    /* combo helper */
-    const combo = (title, rows) => {
+    /* combo helper. `note` is a SERVER-authored line rendered verbatim under the rows —
+       it is how a PARTIAL total says it is partial (QA-02), so it must show even when the
+       values themselves are present. This layer never composes it and never sums. */
+    const combo = (title, rows, note) => {
       const card = el('div', 'kpi-card kpi-combo');
       const label = el('div', 'kpi-label', title);
       card.appendChild(label);
@@ -272,16 +296,29 @@
         row.appendChild(vv);
         card.appendChild(row);
       });
+      if (note) {
+        const why = el('div', 'kpi-subline', note);
+        why.style.opacity = '.75';
+        card.appendChild(why);
+      }
       return card;
     };
     band.appendChild(combo('損益（' + ccy + '）', [
       ['已實現', k && k.realized_total],
       ['未實現', k && k.unrealized_total]
     ]));
+    /* Two DIFFERENT server reasons, and the FX card must show whichever exists:
+       `fx.reporting_unavailable_reason` = the rollup ran but SOME account could not be
+       expressed in the reporting currency (the figures below are real but partial);
+       `freshness.fx_unavailable_reason` = the whole section failed and both figures are
+       null. Before QA-01/QA-02 neither existed, so a partial total and a vanished one both
+       rendered as a bare number / a bare 「—」 with nothing to explain them. */
+    const fxWhy = (D.fx && D.fx.reporting_unavailable_reason)
+      || (D.freshness && D.freshness.fx_unavailable_reason) || null;
     band.appendChild(combo('換匯損益（歸因拆分）', [
-      ['已實現', k && k.fx_realized, '匯率資料不足'],
-      ['未實現', k && k.fx_unrealized, '匯率資料不足']
-    ]));
+      ['已實現', k && k.fx_realized, fxWhy || '匯率資料不足'],
+      ['未實現', k && k.fx_unrealized, fxWhy || '匯率資料不足']
+    ], fxWhy));
   }
 
   /* ============ B2. 各幣別報酬拆分 ============ */
@@ -487,19 +524,7 @@
     const rows = sortedFilteredHoldings();
     const maxWeight = Math.max(...D.holdings.map((h) => h.weight || 0));
     const maxPayback = Math.max(...D.holdings.map((h) => h.payback_ratio || 0));
-    /* Mini-bar fill width, clamped to 0..100.
-
-       `.mini-bar .fill` declares NO width (styles.css) — as a block it spans the whole
-       track — so an INVALID inline width is not clamped by the browser, it is DISCARDED,
-       and the element falls back to a full bar. An open short has a negative weight by
-       construction (net-exposure convention, domain-ledger.md), so `width: -2.29%` was
-       dropped and a −2.29% position rendered a 100% bar — visually identical to the 99.33%
-       holding right above it, while its own label said −2.29%. Measured 2026-08-05.
-       The label carries the sign; the bar only ever claims magnitude, never more. */
-    const barWidth = (value, max) => {
-      const pct = max ? (value / max) * 100 : 0;
-      return (Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0) + '%';
-    };
+    /* Mini-bar fill widths go through the module-scope `barWidth` clamp — see its note. */
 
     rows.forEach((h) => {
       const tr = el('tr');
@@ -721,7 +746,10 @@
     Object.keys(cv.by_currency_value).forEach((ccy) => {
       if (!shareByCcy[ccy]) return;
       const seg = el('span', 'seg');
-      seg.style.width = (shareByCcy[ccy] * 100) + '%';
+      /* The share is already a fraction of 1, so the whole bar IS the denominator. Same
+         clamp as the mini-bars — an unclamped share here does not merely mis-draw its own
+         segment, it discards the negative one and rescales all the rest (see `barWidth`). */
+      seg.style.width = barWidth(shareByCcy[ccy], 1);
       seg.style.background = CCY_COLOR[ccy] || '#777';
       seg.title = ccy + ' ' + f.pct(shareByCcy[ccy]);
       stack.appendChild(seg);
@@ -847,6 +875,15 @@
     const fx = D.fx;
     if (!fx) {
       grid.appendChild(emptyState('匯率資料不足，無法合併計價'));
+      /* The section is gone — say WHICH rate took it (server-authored, verbatim). Until
+         QA-01 this state carried no explanation at all, which is how one empty account's
+         missing rate erased a correct 33,000 TWD without anyone noticing. */
+      const why = D.freshness && D.freshness.fx_unavailable_reason;
+      if (why) {
+        const note = el('div', 'fx-note', why);
+        note.style.gridColumn = '1 / -1';
+        grid.appendChild(note);
+      }
       return;
     }
     Object.keys(fx.by_account).forEach((id) => {
@@ -956,13 +993,27 @@
       grid.appendChild(card);
     });
 
+    /* PARTIAL ROLLUP (QA-02): one or more accounts hold money that could not be expressed
+       in the reporting currency, so the two totals below are short by exactly that much.
+       The banner carries the server's own wording (which accounts, which FX pair, which of
+       the two figures) verbatim; it spans the whole grid so it reads as a panel-level
+       warning rather than one account's card note. */
+    if (fx.reporting_unavailable_reason) {
+      const note = el('div', 'fx-note', fx.reporting_unavailable_reason);
+      note.style.gridColumn = '1 / -1';
+      grid.appendChild(note);
+    }
+
     const mk = (label, v) => {
       const s = el('span', null, label + ' ');
       const vv = el('span', 'v ' + f.signClass(v), f.signed(v, fx.reporting_currency) + ' ' + fx.reporting_currency);
       s.appendChild(vv);
       return s;
     };
-    footer.appendChild(el('span', null, '報告幣別合計：'));
+    /* The LABEL degrades with the figure — a partial sum must not be headed 「合計」 flat
+       (same discipline as the benchmark card's 「差額（部分涵蓋）」). */
+    footer.appendChild(el('span', null, fx.reporting_unavailable_reason
+      ? '報告幣別合計（部分帳戶未納入）：' : '報告幣別合計：'));
     footer.appendChild(mk('已實現', fx.reporting_realized_fx));
     footer.appendChild(mk('未實現', fx.reporting_unrealized_fx));
 
@@ -976,6 +1027,14 @@
         chip.appendChild(el('b', f.signClass(v), f.signed(v, fx.reporting_currency) + ' ' + fx.reporting_currency));
         sum.appendChild(chip);
       });
+      /* The chips are what a COLLAPSED panel shows, so the partial marker has to travel
+         with them — otherwise the collapsed state is the one place a partial total still
+         reads as complete (QA-02). Reason verbatim in the tooltip. */
+      if (fx.reporting_unavailable_reason) {
+        const warn = el('span', 'ccy-chip', '部分帳戶未納入');
+        warn.title = fx.reporting_unavailable_reason;
+        sum.appendChild(warn);
+      }
     }
   }
 

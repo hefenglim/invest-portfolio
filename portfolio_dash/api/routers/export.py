@@ -36,7 +36,7 @@ from portfolio_dash.export.rebalance_report import build_rebalance_report_html
 from portfolio_dash.export.symbol_detail import build_symbol_detail_csv
 from portfolio_dash.export.tax import build_tax_package_zip
 from portfolio_dash.export.usage import build_job_runs_csv, build_llm_usage_csv
-from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError
+from portfolio_dash.portfolio.cost_basis import OversellError, UnbookableLedgerError
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.ledger_registry import EXPORT_KINDS
 
@@ -264,6 +264,31 @@ def export_tax_package(
     except UnbookableLedgerError as exc:
         return JSONResponse(status_code=422, content=error_body(
             "unbookable_ledger", str(exc)))
+    except OversellError as exc:
+        # QA-06: ``OversellError`` is a SEPARATE hierarchy (``Exception``, not ``ValueError``,
+        # and ``cost_basis.py`` says so on purpose), so the arm above never caught it — and one
+        # acknowledged 賣超 took the tax package down with a 500 while /api/dashboard and the
+        # realized / holdings / holdings-report exports all answered 200 on the SAME ledger.
+        # 賣超 is a state this app is designed to survive; surviving it everywhere but here is
+        # the defect. The exact shape ``strategy/whatif.py`` already fixed at this same seam.
+        #
+        # ``build_tax_package_zip``'s ``build_book`` stays STRICT (``allow_oversell`` defaults
+        # False) — a tax package must not silently omit a sale — so this degrades with the
+        # REASON rather than relaxing the strictness, and names the offending row (the error
+        # carries account/symbol/date precisely so no caller has to regex a sentence for them).
+        return JSONResponse(status_code=422, content=error_body(
+            "oversold_position",
+            f"帳本中有賣超部位待釐清（{exc.account_id}／{exc.symbol}，"
+            f"{exc.trade_date.isoformat()}）— 無法產生稅務套件，請先修正該筆交易",
+            issues=[{
+                "sev": "error",
+                "code": "oversold_position",
+                "text": str(exc),
+                "field": None,
+                "account_id": exc.account_id,
+                "symbol": exc.symbol,
+                "trade_date": exc.trade_date.isoformat(),
+            }]))
     return _respond(art)
 
 

@@ -768,9 +768,13 @@
     /* cap / div are backend Decimal STRINGS; coerce to local numbers ONLY for the bar-width
        geometry and sign decisions. The displayed cap / div values render via f.* on the
        original strings; the 合計 total displayed is the backend money-of-record
-       h.unrealized_pnl (Decimal STRING) — by the proven identity capital_gain +
-       dividend_portion ≡ unrealized_pnl (price×shares − adjusted_total) — never a client
-       money-sum. totalN below stays a float ONLY for the bar-width geometry (presentation). */
+       h.unrealized_pnl (Decimal STRING) — because capital_gain + dividend_portion is the
+       DECOMPOSITION of unrealized_pnl, never a client money-sum. The relation is derived,
+       not exact: unrealized_pnl is (price − avg) × shares with avg computed on read, so it
+       carries a ~1e-25 residue against the exact price×shares − adjusted_total. That is
+       inherent to computing the average on read (data-and-pricing.md) and is not a defect —
+       but it is not an identity either, and calling it "proven" invited someone to assert
+       equality on it. totalN below stays a float ONLY for the bar-width geometry. */
     const cap = h.capital_gain;
     const div = h.dividend_portion != null ? h.dividend_portion : 0;
     const capN = Number(cap);
@@ -1338,6 +1342,17 @@
         result.appendChild(kv('剩餘市值', f.money(r.remaining_market_value, ccy) + ' ' + ccy));
       } else {
         result.appendChild(kv('總成本（含費稅）', f.money(r.total_cost, ccy) + ' ' + ccy));
+        /* A BUY against an OPEN SHORT covers it and REALIZES (QA-04): the server now sends
+           covered_shares + realized on that branch (null on an ordinary buy), so the card
+           must show them — a realized figure the API returns and the card omits is the same
+           silence as not computing it. Same two labels the trade form uses (web/input.js), so
+           the two doors read identically for one trade. No arithmetic here: f.* only. */
+        if (r.covered_shares != null) {
+          result.appendChild(kv('回補空單股數', f.shares(r.covered_shares)));
+          result.appendChild(kv('已實現損益',
+            f.signed(r.realized, ccy) + (r.realized == null ? '' : ' ' + ccy),
+            f.signClass(r.realized)));
+        }
       }
       /* fee/tax rule summary + oversell honesty, from the backend reply. */
       const parts = [];

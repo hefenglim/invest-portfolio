@@ -11,6 +11,15 @@ exact sequence against it and dumping the responses; the post-extraction run rep
 cases plus the resulting ledger byte-for-byte. What is pinned here is therefore evidence, not
 a restatement of the new code's behaviour.
 
+⚠ ONE pin was deliberately re-recorded (QA-18, 2026-08-29): the ``unknown_movement_kind``
+message listed 「deposit / withdraw / opening / rebate」 — four of the SEVEN registered kinds.
+It never grew when the broker-statement importer added INTEREST, INTEREST_EXPENSE and
+BROKER_FEE (2026-08-13), so the one message whose job is to say what IS accepted told the
+owner that three legal kinds were not. The message is now derived from ``CashKind`` +
+``CASH_KIND_ZH``; the expectation here stays a LITERAL on purpose, because a pin that derives
+from the code it guards has stopped being a pin. Re-record it if the vocabulary grows again —
+that is the intended maintenance, and it is one line.
+
 The cases run as ONE ordered sequence against one ledger, because several of them only mean
 something in sequence: the withdraw messages quote a balance that earlier rows created, the
 self-exclusion edit needs a row to edit, and the REBATE lock needs a booked rebate. The final
@@ -27,6 +36,15 @@ from fastapi.testclient import TestClient
 
 # (name, method, body-or-target, expected status, expected error dict or None)
 # ``target`` names an earlier case whose created id to act on; "__missing__" is an absent id.
+#: The accepted-kind tail of the ``unknown_movement_kind`` message. Kept as ONE literal
+#: (not derived from ``CashKind``): a pin that derives from the code it guards has
+#: stopped being a pin. Extracted only because the line does not otherwise fit.
+_KINDS = (
+    "（可用類型：入金 deposit／出金 withdraw／期初資金 opening／折讓款 rebate／"
+    "利息 interest／融資利息 interest_expense／券商費用 broker_fee）"
+)
+
+
 _POST = "POST"
 _PUT = "PUT"
 _DELETE = "DELETE"
@@ -38,7 +56,7 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "100"},
      "status": 400, "err": {
          "code": "validation_error", "field": "kind",
-         "message": "未知類型 transfer（deposit / withdraw / opening / rebate）"}},
+         "message": f"未知類型 transfer{_KINDS}"}},
     # An unknown kind AND a bad amount: the FIRST failure is the one reported. Pinned
     # because collecting both would be a nicer bulk experience and a changed manual door.
     {"n": "bad_kind_wins_over_bad_amount", "m": _POST, "b": {
@@ -46,7 +64,7 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "0"},
      "status": 400, "err": {
          "code": "validation_error", "field": "kind",
-         "message": "未知類型 transfer（deposit / withdraw / opening / rebate）"}},
+         "message": f"未知類型 transfer{_KINDS}"}},
     {"n": "zero_amount", "m": _POST, "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "deposit",
         "ccy": "TWD", "amount": "0"},
@@ -175,7 +193,7 @@ _SEQUENCE: list[dict[str, Any]] = [
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "nope",
         "ccy": "TWD", "amount": "600000"},
      "status": 400, "err": {"code": "validation_error", "field": "kind",
-                            "message": "未知類型 nope（deposit / withdraw / opening / rebate）"}},
+                            "message": f"未知類型 nope{_KINDS}"}},
     {"n": "edit_rebate_kind_locked", "m": _PUT, "target": "rebate_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-02", "kind": "deposit",
         "ccy": "TWD", "amount": "153"},

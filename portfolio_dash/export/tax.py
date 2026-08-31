@@ -16,8 +16,7 @@ from portfolio_dash.data_ingestion.store import (
     load_ledger_bundle,
 )
 from portfolio_dash.export.artifact import ExportArtifact, csv_blob, zip_artifact
-from portfolio_dash.forex.fx_pnl import realized_fx_rows
-from portfolio_dash.forex.pools import average_acquisition_rate
+from portfolio_dash.forex.fx_pnl import realized_fx_rows_as_of
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.pricing.store import get_fx_on
 from portfolio_dash.shared.enums import Currency
@@ -125,9 +124,15 @@ def build_tax_package_zip(
         # Same weighted average the dashboard uses — foreign cash movements that carry a
         # home cost are part of the basis (spec 2026-07-30). Reading a different average
         # here would make the tax package disagree with 換匯損益 on the same reconversion.
+        #
+        # ⚠ That is not a hypothetical: it HAPPENED. When QA-02 date-bounded the dashboard's
+        # realized-FX rate (manual §8.2, 「回換前 avg_rate」) this call site kept the ALL-TIME
+        # average, and the two surfaces reported 2,500 vs 10,000 for one 2026-02-20
+        # reconversion — the exact disagreement the paragraph above forbids in writing.
+        # ``realized_fx_rows_as_of`` is now the ONE entry point, so a future divergence would
+        # have to be written on purpose rather than left behind by an unshared argument.
         acct_moves = [m for m in moves if m.account_id == acct.account_id]
-        avg = average_acquisition_rate(acct_convs, home, foreign, movements=acct_moves)
-        for fr in realized_fx_rows(acct_convs, home, foreign, avg):
+        for fr in realized_fx_rows_as_of(acct_convs, acct_moves, home, foreign):
             if fr.date.year != year:
                 continue
             fx_rows.append([fr.date.isoformat(), acct.account_id, fr.home_ccy.value,

@@ -266,6 +266,64 @@ def test_statement_same_day_newest_first_balance_on_top(api_client: TestClient) 
     assert body["rows"][0]["balance"] == "700" and body["rows"][1]["balance"] == "1000"
 
 
+def _post_same_day_same_sign_movements(api_client: TestClient) -> None:
+    """Seed the BUG-06 shape into the (empty) moomoo_my USD pool: one day carrying TWO
+    same-sign credits plus a debit, then a later day. Chronological (`_ordered`) sequence:
+    +1000 → 1000, +250 → 1250, −300 → 950 (end of 05-01), +40 → 990."""
+    for movement in (
+        {"date": "2026-05-01", "kind": "deposit", "amount": "1000"},
+        {"date": "2026-05-01", "kind": "deposit", "amount": "250"},
+        {"date": "2026-05-01", "kind": "withdraw", "amount": "300"},
+        {"date": "2026-05-02", "kind": "deposit", "amount": "40"},
+    ):
+        r = api_client.post("/api/cash/movements", json={
+            "account_id": "moomoo_my", "ccy": "USD", **movement})
+        assert r.status_code == 201, r.text
+
+
+def test_statement_same_day_same_sign_rows_reverse_chronological(
+    api_client: TestClient,
+) -> None:
+    """QA R1 BUG-06: `sort(key=(date, sign), reverse=True)` is STABLE, so equal-key rows
+    (same day, same sign) stayed oldest-first inside the newest-first table and the day's
+    end balance sat at the bottom. The display must be the EXACT reverse of the
+    chronological order: within 2026-05-01 the debit leads (it settles last), the two
+    same-sign credits follow newest-first, and the first row of the day's block carries
+    the end-of-day balance."""
+    _post_same_day_same_sign_movements(api_client)
+    body = api_client.get("/api/cash/statement",
+                          params={"account": "moomoo_my", "ccy": "USD"}).json()
+    assert [r["date"] for r in body["rows"]] == [
+        "2026-05-02", "2026-05-01", "2026-05-01", "2026-05-01"]  # table newest-first
+    assert [r["delta"] for r in body["rows"]] == ["40", "-300", "250", "1000"]
+    assert [r["balance"] for r in body["rows"]] == ["990", "950", "1250", "1000"]
+    # First row of the 05-01 block carries the day's END balance (pre-fix it was "1250").
+    assert body["rows"][1]["balance"] == "950"
+    assert body["current_balance"] == "990" and body["total_count"] == 4
+    # Pagination slices the SAME display order (offset/limit over the sorted flat list).
+    page = api_client.get("/api/cash/statement", params={
+        "account": "moomoo_my", "ccy": "USD", "offset": 1, "limit": 2}).json()
+    assert [r["delta"] for r in page["rows"]] == ["-300", "250"]
+    assert page["total_count"] == 4
+
+
+def test_export_cash_statement_csv_stays_oldest_first(api_client: TestClient) -> None:
+    """FIX-B1 scope pin: the reconciliation CSV reads `account_statement` directly
+    (oldest-first) and must NOT inherit the statement route's display reversal."""
+    _post_same_day_same_sign_movements(api_client)
+    r = api_client.post("/api/export/cash-statement",
+                        json={"account": "moomoo_my", "ccy": "USD"})
+    assert r.status_code == 200
+    reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    data = [row for row in reader[1:] if row and not row[0].startswith("#")]
+    assert [row[0] for row in data] == [
+        "2026-05-01", "2026-05-01", "2026-05-01", "2026-05-02"]
+    assert [Decimal(row[10]) for row in data] == [
+        Decimal("1000"), Decimal("250"), Decimal("-300"), Decimal("40")]
+    assert [Decimal(row[11]) for row in data] == [
+        Decimal("1000"), Decimal("1250"), Decimal("950"), Decimal("990")]
+
+
 def test_export_cash_statement_csv(api_client: TestClient) -> None:
     r = api_client.post("/api/export/cash-statement",
                         json={"account": "tw_broker", "ccy": "TWD"})

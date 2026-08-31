@@ -27,14 +27,20 @@
   'use strict';
 
   /** Structured error thrown for any non-2xx response. Mirrors the
-      api/errors.py envelope: { error: { code, message, field?, issues? } }. */
+      api/errors.py envelope: { error: { code, message, field?, issues? } }.
+
+      `message` is left EMPTY when the envelope supplied none (2026-08-29): `super()`
+      leaves Error's inherited '' in that case, and '' is falsy, so a caller's
+      `(err && err.message) || '中文預設'` reaches its Chinese fallback. Assigning the
+      argument unconditionally would write `undefined` here — which renders as the string
+      "undefined" at any site that concatenates without a fallback. See _toError. */
   class PdApiError extends Error {
     constructor(status, code, message, field, issues) {
       super(message);
       this.name = 'PdApiError';
       this.status = status;
       this.code = code;
-      this.message = message;
+      if (message !== undefined && message !== null) this.message = message;
       this.field = field;            // optional; undefined when absent
       this.issues = issues;          // optional; undefined when absent
     }
@@ -95,10 +101,22 @@
     return init;
   }
 
-  /** Parse a non-2xx envelope defensively into a PdApiError. */
+  /** Parse a non-2xx envelope defensively into a PdApiError.
+
+      NO MESSAGE IS INVENTED HERE. This used to open with
+      `let message = resp.statusText || 'request failed'` — always truthy — so every
+      caller's `(err && err.message) || '中文預設'` was dead code and a proxy 502 with an
+      HTML body toasted 「Bad Gateway」 at the owner (82 Chinese fallbacks across 27 files
+      were unreachable, 2026-08-29). The server's envelope is the ONLY source of a
+      user-facing message; when it did not supply one, `message` stays unset and the
+      caller's own Chinese default is what the owner reads.
+
+      The English `statusText` is not lost — it rides along on `err.statusText` for
+      diagnostics (web/detail.js's comment already names it as such). It is simply not a
+      sentence anyone should be shown. */
   async function _toError(resp) {
     let code = 'error';
-    let message = resp.statusText || 'request failed';
+    let message;                       // stays undefined unless the envelope supplies one
     let field;
     let issues;
     try {
@@ -111,9 +129,11 @@
         issues = err.issues;           // stays undefined if absent
       }
     } catch (e) {
-      /* no / non-JSON body — keep statusText-derived defaults */
+      /* no / non-JSON body — no message of record; the caller's zh fallback renders */
     }
-    return new PdApiError(resp.status, code, message, field, issues);
+    const out = new PdApiError(resp.status, code, message, field, issues);
+    out.statusText = resp.statusText || '';   // diagnostics only — never toasted
+    return out;
   }
 
   /** Shared response handler: 2xx → parsed-untouched JSON (or null); else throw. */

@@ -133,9 +133,12 @@ def test_zero_price_symbol_excluded_not_crash() -> None:
     """
     conn = _golden()
     # AAPL is held; overwrite its current quote with 0 (halted / degenerate feed).
-    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
-                                  as_of=date(2026, 6, 9), close=Decimal("0"),
-                                  source="test")], fetched_at=_NOW)
+    # The write seam REFUSES a non-positive close since QA-09, so a degenerate 0 can now only
+    # reach the table by a hand edit or a legacy row written before that guard — which is
+    # exactly the state this reader-side guard has to survive, so the seam is bypassed on
+    # purpose rather than the case being retired with it.
+    conn.execute("UPDATE prices SET close='0', close_raw='0' "
+                 "WHERE instrument='AAPL' AND as_of_date='2026-06-09'")
     conn.commit()
     result = compute_rebalance(conn, now=_NOW, reporting=Currency.TWD,
                                targets={"AAPL": Decimal("0.5"), "2330": Decimal("0.5")})

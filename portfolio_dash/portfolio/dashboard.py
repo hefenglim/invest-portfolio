@@ -29,7 +29,7 @@ from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.allocation import combined_view, sector_allocation
 from portfolio_dash.portfolio.benchmark_counterfactual import counterfactual
 from portfolio_dash.portfolio.cash import cash_balances
-from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
 from portfolio_dash.portfolio.dashboard_models import (
     BenchmarkComparison,
     BenchmarkMarketLeg,
@@ -413,7 +413,30 @@ def build_dashboard(
 
     # 2. Book and valuation. allow_oversell: an acked oversell must not crash the
     # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
-    book = build_book(bundle, allow_oversell=True)
+    try:
+        book = build_book(bundle, allow_oversell=True)
+    except ArithmeticError as exc:
+        # ⚠ NOT THE OWNER any more (2026-08-29). ``cost_basis.build_book`` re-types every
+        # ``ArithmeticError`` out of the replay into an ``UnbookableLedgerError`` naming the
+        # offending row, so this arm no longer fires for a ledger fault — go THERE to change
+        # the behaviour or the wording. The re-typing moved because this was the ONLY call
+        # site that had it: the same row that degraded here answered 500 on 重算, the tax
+        # package and 試算, and fixing it at four sites is four chances to miss one.
+        #
+        # Kept, deliberately, as a floor rather than deleted: the guarantee this file owes its
+        # caller is "``build_dashboard`` does not raise a raw decimal fault", and that must
+        # hold even if the replay is swapped, patched or extended. It is pinned as a CHANNEL
+        # by ``tests/portfolio/test_r8_decimal_fault_degrades.py``, which injects the fault
+        # rather than provoking it, precisely so the guarantee survives its current cause.
+        #
+        # The arm catches the CLASS, not one cause: ``decimal.DivisionByZero`` and
+        # ``decimal.Overflow`` are SIBLINGS of ``InvalidOperation``, not subclasses (this arm
+        # said ``InvalidOperation`` until wave 3 and both walked straight past it), and
+        # ``ZeroDivisionError`` is in the class too.
+        raise UnbookableLedgerError(
+            "帳本中有一列的數值無法計算（例如股數為 0 或數值過大的交易），"
+            "請於交易帳本修正該列後重試"
+        ) from exc
     has_oversold = any(h.oversold for h in book.holdings)
     # Read off the BOOK, not off the holdings: two of the three ways an action goes
     # unapplied leave no holding to inspect — an EXCHANGE that already emptied the source
@@ -570,12 +593,38 @@ def build_dashboard(
                 stock_value += h.market_value
         exposure[acct.account_id] = (acct.settlement_ccy, stock_value)
     fx_summary: FXSummary | None
+    fx_reason: str | None = None
     try:
         fx_summary = compute_fx_summary(accounts, instruments, txs, divs, convs,
                                         exposure, resolver.rate, reporting,
                                         cash_movements)
-    except KeyError:
+    except KeyError as exc:
+        # LAST RESORT, and no longer a SILENT one. `compute_fx_summary` now degrades per
+        # account (QA-01: an EMPTY account with no home->reporting rate used to raise here
+        # and take the whole `fx` section — and both FX KPIs — down with it), so a missing
+        # rate does not reach this branch any more. What made that defect invisible was
+        # that `fx = None` explained nothing anywhere on the payload; the resolver's
+        # message is therefore surfaced VERBATIM as `freshness.fx_unavailable_reason`,
+        # exactly as `xirr_unavailable_reason` already does with the same message.
         fx_summary = None
+        fx_reason = str(exc).strip("'\"")
+    if fx_summary is not None and not any(
+            r.realized_fx is not None or r.unrealized_fx_total is not None
+            for r in fx_summary.by_account.values()):
+        # NOTHING TO REPORT is not a report of zero. Every FX-exposed account came back
+        # None (no account has an FX cost basis at all), so the two rollup totals are the
+        # ZERO an empty accumulator starts at — a number no ledger row supports, and
+        # exactly the "initialised value rendered as a fact" defect. The section is absent
+        # instead, and now says why.
+        #
+        # ⚠ This is NOT the QA-01 bail-out coming back. That one dropped the section
+        # because ONE unrelated (and empty) account lacked a rate, discarding another
+        # account's correct 33,000 TWD; this fires only when EVERY account is None, so a
+        # single real figure anywhere keeps the section. It is also decided from the
+        # LEDGER rather than from whether some unrelated pair happened to be stored, which
+        # is what made the old behaviour differ for the same portfolio on two days.
+        fx_summary = None
+        fx_reason = "尚無換匯或外幣入金的取得成本,無匯兌損益可計算"
 
     # 6. Dividend summary — cash actually received (incl. DRIP net), native ccy.
     # ttm_cutoff bounds the trailing-12-month window (display-only attribution).
@@ -827,6 +876,7 @@ def build_dashboard(
                     for (base, quote), read in fx_reads_sorted if read is None],
         xirr_unavailable_reason=xirr_reason,
         trend_unavailable_reason=trend_reason,
+        fx_unavailable_reason=fx_reason,
         unregistered_symbols=unregistered,
     )
 

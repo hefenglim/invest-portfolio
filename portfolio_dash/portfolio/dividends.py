@@ -54,6 +54,25 @@ def project_dividends(
     an unknown account_id raises KeyError = fail loud on corrupt data). Currencies are
     NEVER summed across; ``by_currency`` is keyed by the event currency (falling back to
     the instrument's quote currency).
+
+    **A holding whose SHARE COUNT is 待釐清 is excluded, not multiplied.** The projection is
+    ``shares × declared cash per share``, so it is decided by the same question
+    ``value_holdings`` (``portfolio/pnl.py``) asks before it will value a position — *are
+    the shares right?* — and it must answer it the same way:
+
+    * ``unbookable_action`` — a corporate action was skipped, so ``shares`` is in PRE-action
+      terms while the declared per-share amount is, like the price, POST-action. The product
+      is wrong by the action's whole ratio (measured: a refused 3-for-1 projects 150 where
+      the applied one projects 450) and it renders as a clean, precise number.
+    * ``oversold`` — the basis was discarded and the ledger is known to be missing a buy or
+      an opening, so the count is not the owner's position. STICKY, so a later buy can leave
+      it POSITIVE and inside the ``shares > 0`` filter below.
+    * ``unbookable_dividend`` / ``short_open`` are NOT excluded, for the reasons
+      ``value_holdings`` gives: the first has right shares and a cost-side gap only, and the
+      second is a real position (its negative shares fail ``shares > 0`` on their own).
+
+    Exclusion is PER POSITION, matching ``value_holdings``'s containment requirement: one
+    flagged holding must never blank a whole currency's projection.
     """
     gross: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     net: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
@@ -61,6 +80,10 @@ def project_dividends(
 
     by_symbol: dict[str, list[Holding]] = defaultdict(list)
     for h in holdings:
+        # Same predicate, same order, same reason as portfolio/pnl.py::value_holdings —
+        # a share count that may not be valued may not be multiplied by a dividend either.
+        if h.oversold or h.unbookable_action:
+            continue
         if h.shares > _ZERO:
             by_symbol[h.symbol].append(h)
 

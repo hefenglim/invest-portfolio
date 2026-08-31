@@ -12,6 +12,7 @@ from portfolio_dash.data_ingestion.store import upsert_opening
 from portfolio_dash.data_ingestion.validate import (
     Issue,
     alias_import_account,
+    unknown_account_issue,
     validate_opening_cost,
 )
 from portfolio_dash.shared.enums import Currency
@@ -91,9 +92,9 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
         ).fetchone()
         settle_ccy: str | None = acct_row["settlement_ccy"] if acct_row is not None else None
         if acct_row is None:
-            issues.append(
-                Issue(kind="unknown_account", message=f"帳戶 {account_id} 不存在")
-            )
+            # L-1: the shared sentence. A BLANK ``account`` cell rendered 「帳戶  不存在」
+            # here — two spaces, no name — while the cash door already said 「帳戶不可空白」.
+            issues.append(unknown_account_issue(account_id))
 
         # --- resolve the authoritative total (money of record) ---
         if total is not None:

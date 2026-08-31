@@ -4,10 +4,10 @@ import base64
 import binascii
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
@@ -83,7 +83,7 @@ from portfolio_dash.data_ingestion.store import (
     list_instruments,
     list_transactions,
 )
-from portfolio_dash.data_ingestion.validate import Issue, TxnInput
+from portfolio_dash.data_ingestion.validate import Issue, TxnInput, unknown_account_issue
 from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
@@ -456,10 +456,18 @@ def _old_position_fields(held: Holding | None) -> dict[str, str | None]:
 
     ``old_shares`` / ``old_original_avg`` / ``old_adjusted_avg`` come straight from the held
     Holding (averages = total / shares, computed on read — never a stored rounded average,
-    domain-ledger.md). Null for a fresh position (held None or 0 shares), so a first-time buy
-    renders 新 values against an OLD dash.
+    domain-ledger.md). Null for a fresh position (held None, or the ``shares == 0`` the replay
+    never emits), so a first-time buy renders 新 values against an OLD dash.
+
+    ``!= _ZERO``, not ``> _ZERO`` (2026-08-29, with QA-04): an OPEN DECLARED SHORT is a real
+    position with a signed quantity and a negative basis, so ``total / shares`` is its average
+    SALE price — the same figure every other surface prints for it. Withholding it rendered
+    「— → −4」 on a buy that covers a short the page had just listed as −10, which is the
+    QA-04 shape (「the position reads as unheld」) one column to the left. An oversold position
+    cannot reach here — :func:`_unclear` withholds the whole preview first — so a negative
+    ``shares`` here is always a short, never a discarded basis.
     """
-    if held is None or held.shares <= _ZERO:
+    if held is None or held.shares == _ZERO:
         return {"old_shares": None, "old_original_avg": None, "old_adjusted_avg": None}
     return {
         "old_shares": decimal_str(held.shares),
@@ -546,8 +554,25 @@ def _position_preview(
             # REFUSED the action, so the two disagree about whether the position exists at
             # all — the very disagreement this seam must not build a guard on.
             return None
+        # The held position as three plain numbers, shared by BOTH arms. A flat position is
+        # zeros, not a special case: ``build_book`` starts every position from the same zeros
+        # (``_Position()``), so a branch written against these locals books what the replay
+        # books whether or not a row already exists. They also spare the SELL branches a
+        # ``held is not None`` narrowing mypy cannot infer and an ``assert`` would only claim.
+        held_shares = held.shares if held is not None else _ZERO
+        held_original = held.original_cost_total if held is not None else _ZERO
+        held_adjusted = held.adjusted_cost_total if held is not None else _ZERO
         if parse_side(body.side) is Side.SELL:
-            if held is None:
+            # QA-08 (2026-08-29): "not held" is NOT the end of the SELL arm. A DECLARED short
+            # opens a position out of NOTHING — ``build_book`` takes ``from_long = 0`` and the
+            # whole quantity becomes a short lot — and this guard ran BEFORE ``short_sale``
+            # was ever consulted, so the one shape that creates a position was the only one of
+            # eleven trade shapes with no projection at all. Nothing wrong was displayed; the
+            # card was simply blank, which reads as "the app has nothing to say about this"
+            # rather than "nobody wired this branch". The other three branches genuinely need
+            # a prior position (there is no cost to remove and no basis to discard without
+            # one), so they still bail out here.
+            if held is None and not body.short_sale:
                 return None
             # THREE branches, because ``build_book`` has three (review 2026-08-24). The one
             # below used to be applied to all of them, which invented a realized P&L for two
@@ -555,7 +580,7 @@ def _position_preview(
             # extension, +9,000 on an undeclared oversell, and 9,000 shown where a declared
             # partial books 6,000. Anything that mirrors the replay must mirror its BRANCHES,
             # not just its happy-path formula (domain-ledger.md).
-            long_shares = held.shares if held.shares > _ZERO else _ZERO
+            long_shares = held_shares if held_shares > _ZERO else _ZERO
             # Each branch also projects the position TOTALS it leaves behind, because the
             # averages beside the realized figure are the SAME mirror obligation one column
             # over (sweep F-01, 2026-08-27). Until now the SELL side returned no ``new_*_avg``
@@ -570,9 +595,9 @@ def _position_preview(
                 from_long = min(qty, long_shares)
                 to_short = qty - from_long
                 per_share_net = (gross - fee - tax) / qty
-                cost_removed = (held.adjusted_cost_total * (from_long / held.shares)
+                cost_removed = (held_adjusted * (from_long / held_shares)
                                 if from_long > _ZERO else None)
-                original_removed = (held.original_cost_total * (from_long / held.shares)
+                original_removed = (held_original * (from_long / held_shares)
                                     if from_long > _ZERO else _ZERO)
                 realized_pnl = (per_share_net * from_long - cost_removed
                                 if cost_removed is not None else None)
@@ -581,20 +606,26 @@ def _position_preview(
                 # signed (cost_basis.py: ``original_total - short_proceeds`` over
                 # ``shares - short_shares``), so subtracting the proceeds here reproduces the
                 # negative basis exactly — for a fresh short AND for one being extended.
-                new_original_total = (held.original_cost_total - original_removed
+                new_original_total = (held_original - original_removed
                                       - per_share_net * to_short)
                 # `is None`, not `or`: a Decimal("0") is falsy, and while both arms happen
                 # to be zero here, an `or` on a money value is a habit that stops being
                 # harmless the moment the operand can be a legitimate zero-vs-absent.
                 removed_adj = _ZERO if cost_removed is None else cost_removed
-                new_adjusted_total = (held.adjusted_cost_total - removed_adj
+                new_adjusted_total = (held_adjusted - removed_adj
                                       - per_share_net * to_short)
                 note = ("放空／加空的部分不產生已實現損益，帳本以收到的價金作為空單成本基礎"
                         if to_short > _ZERO else None)
-            elif qty > held.shares:
+            elif qty > held_shares:
                 # Undeclared oversell: the replay discards the position's cost basis and emits
                 # NO realized row (待釐清). A number here would be an invented one.
-                from_long, to_short = held.shares, _ZERO
+                #
+                # ``long_shares``, not ``held_shares`` (E-2, 2026-08-29): the holding is
+                # SIGNED, so an undeclared sell landing on an OPEN SHORT put a negative share
+                # count on the wire — held −5, sell 20 reported ``realized_shares: "-5"``.
+                # Nothing realizes out of a lot that does not exist; the field is the LONG
+                # portion, which is what the declared branch above already takes.
+                from_long, to_short = long_shares, _ZERO
                 cost_removed = realized_pnl = None
                 oversell = True
                 # DISCARDED, so the projection is zero — not the pre-trade average, which the
@@ -608,28 +639,28 @@ def _position_preview(
                 # entirely one or the other — and an undeclared sell INTO an existing short
                 # therefore leaves that short's basis untouched. Zeroing both printed an
                 # average of 0 where the ledger goes on holding 130.
-                if held.shares > _ZERO:
+                if held_shares > _ZERO:
                     new_original_total = new_adjusted_total = _ZERO
                 else:
-                    new_original_total = held.original_cost_total
-                    new_adjusted_total = held.adjusted_cost_total
+                    new_original_total = held_original
+                    new_adjusted_total = held_adjusted
                 note = "賣超：成本基礎無法認定，帳本不會產生已實現損益（待釐清）"
             else:
                 # The ORDINARY branch, byte-identical to before: frac / removed mirror
                 # build_book's ev.quantity / pos.shares and pos.adjusted_total × frac EXACTLY
                 # (same operands, same order) so the preview realized == the booked row.
                 from_long, to_short = qty, _ZERO
-                cost_removed = held.adjusted_cost_total * (qty / held.shares)
+                cost_removed = held_adjusted * (qty / held_shares)
                 realized_pnl = (gross - fee - tax) - cost_removed
                 oversell = False
-                new_original_total = (held.original_cost_total
-                                      - held.original_cost_total * (qty / held.shares))
-                new_adjusted_total = held.adjusted_cost_total - cost_removed
+                new_original_total = (held_original
+                                      - held_original * (qty / held_shares))
+                new_adjusted_total = held_adjusted - cost_removed
                 note = None
             # SIGNED, not floored at 0 (changed 2026-08-24): a declared sell that opens a short
             # leaves -N shares, and every other surface in the app renders an open short that
             # way. Flooring printed 「0」 for a position the ledger holds.
-            remain = held.shares - qty
+            remain = held_shares - qty
             # A flat position is DROPPED by the replay (``if shares == _ZERO: continue``), so
             # there is no average to report — the same null the BUY branch already returns on
             # an exact cover.
@@ -651,9 +682,6 @@ def _position_preview(
                 **_old_position_fields(held),
             }
         all_in = gross + fee + tax
-        held_shares = held.shares if held is not None else _ZERO
-        held_original = held.original_cost_total if held is not None else _ZERO
-        held_adjusted = held.adjusted_cost_total if held is not None else _ZERO
         new_shares = held_shares + qty
         if held_shares < _ZERO:
             # A buy against an open short COVERS it first (cost_basis.py, owner rule
@@ -825,8 +853,18 @@ def manual_commit(
         else:
             market = _account_market(conn, body.account_id)
         if market is None:
+            # R-2: the sentence comes from ``unknown_account_issue``, which is the ONE owner
+            # of 「帳戶不可空白」 vs 「帳戶 {id} 不存在」 — wave 8 registered five importers on it
+            # and missed this one, because this door builds an ``error_body`` envelope rather
+            # than an :class:`Issue` and so did not look like a copy. It was: with a blank id
+            # the hand-built f-string rendered 「帳戶␣␣不存在，無法自動註冊標的」, telling the
+            # owner that an account they never typed does not exist. Only the account clause
+            # is shared; 「，無法自動註冊標的」 is this door's own reason for refusing and stays
+            # here. The 400, the ``validation_error`` code and the ``account_id`` field are
+            # unchanged, and the named-account sentence is byte-identical to before.
             return JSONResponse(status_code=400, content=error_body(
-                "validation_error", f"帳戶 {body.account_id} 不存在，無法自動註冊標的",
+                "validation_error",
+                f"{unknown_account_issue(body.account_id).message}，無法自動註冊標的",
                 field="account_id"))
         try:
             outcome = quick_register(
@@ -876,7 +914,9 @@ def manual_commit(
 
 # --- CSV import: preview (12.3) + commit (12.4) shared infrastructure ---
 
-def _cash_builder(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
+def _cash_builder(
+    conn: sqlite3.Connection, csv_text: str, *, select: Collection[int] | None = None
+) -> ImportPreview:
     """Bind the pool arithmetic ONCE for the whole file, then build the cash preview.
 
     The 6th kind is registered through a named wrapper rather than as a bare parser because
@@ -891,7 +931,21 @@ def _cash_builder(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
     mypy error rather than a silent overdraft. Binding it HERE (not per row) is D17's other
     rule — the probe closes over one ledger snapshot, so an N-row file reads the ledgers once.
     """
-    return build_cash_movement_preview(conn, csv_text, pool=cash_pool_fn(conn))
+    return build_cash_movement_preview(conn, csv_text, pool=cash_pool_fn(conn), select=select)
+
+
+def _fx_builder(
+    conn: sqlite3.Connection, csv_text: str, *, select: Collection[int] | None = None
+) -> ImportPreview:
+    """The same binding for the 換匯 kind (QA-09).
+
+    ``build_fx_preview`` gained the identical REQUIRED probe, for the identical reason: it had
+    no balance guard and no currency check at all, while ``POST /api/cash/fx`` enforces both —
+    and a conversion is the one movement that may never overdraft (FU-D34: no ack, no
+    financing). Registered through a named wrapper for the same reason the cash one is: the
+    argument has no default, so this wrapper cannot silently go missing.
+    """
+    return build_fx_preview(conn, csv_text, pool=cash_pool_fn(conn), select=select)
 
 
 #: Every kind's preview builder has ONE shape, which is what lets the two import endpoints
@@ -899,9 +953,54 @@ def _cash_builder(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
 #: behind this same signature rather than special-casing the kind at the call sites.
 Builder = Callable[[sqlite3.Connection, str], ImportPreview]
 
+
+class SelectAwareBuilder(Protocol):
+    """A builder whose row-level guard reasons about a row's SIBLINGS in the same file.
+
+    Only these three kinds have one, so only these three need to know which rows will
+    actually be written; every other kind validates a row against the stored ledger alone
+    and is unaffected by a selection.
+    """
+
+    def __call__(
+        self,
+        conn: sqlite3.Connection,
+        csv_text: str,
+        *,
+        select: Collection[int] | None = None,
+    ) -> ImportPreview: ...
+
+
+def _txn_builder(
+    conn: sqlite3.Connection, csv_text: str, *, select: Collection[int] | None = None
+) -> ImportPreview:
+    """The transactions kind under QA-01's select narrowing (FIX-A1, 2026-08-29).
+
+    ``build_transaction_preview`` is sibling-aware (the oversell guard counts the whole
+    file's batch), so it has the same select hole the cash door had: the preview's clean
+    verdict on a sell was derived WITH its covering buy in the batch, and deselecting that
+    buy on commit left the verdict standing. Measured (Master probe T2): buy 100 + sell 60
+    in one file, commit ``select=[sell]`` → 200, ``written: 1``, holdings ``shares: "-60"``
+    — a silently written oversold state whose 賣超 confirmation was never shown, while the
+    manual door answers the identical sell with the sticky needs_confirm. A named wrapper
+    for the same reason as ``_cash_builder``: the registration cannot silently lose the
+    argument.
+    """
+    return build_transaction_preview(conn, csv_text, select=select)
+
+
+#: Kinds whose guard validates a row against its SIBLINGS in the same file, and which
+#: therefore must be re-derived over the rows the commit will actually WRITE (QA-01). A
+#: deselected deposit funding a withdrawal that is then written alone was a 200 with the pool
+#: at −60,000; the manual door answers 422 for the identical movement. ``transactions``
+#: joined 2026-08-29 (FIX-A1): the share-side twin — a deselected covering buy funding the
+#: sell that is written alone — answered 200 / ``written: 1`` / shares −60.
+_BATCH_GUARDED: dict[str, SelectAwareBuilder] = {
+    "cash": _cash_builder, "fx": _fx_builder, "transactions": _txn_builder}
+
 _BUILDERS: dict[str, Builder] = {
     "transactions": build_transaction_preview, "dividends": build_dividend_preview,
-    "fx": build_fx_preview, "openings": build_opening_preview,
+    "fx": _fx_builder, "openings": build_opening_preview,
     "corporate_actions": build_corporate_action_preview,
     "cash": _cash_builder,
 }
@@ -979,16 +1078,28 @@ def _bad_date_format(date_format: str | None) -> JSONResponse | None:
 
 
 def _resolve_builder(
-    kind: str, conn: sqlite3.Connection, pending_actions_csv: str | None
+    kind: str,
+    conn: sqlite3.Connection,
+    pending_actions_csv: str | None,
+    *,
+    select: Collection[int] | None = None,
 ) -> Builder:
     """The kind's builder, widened when trades arrive WITH the actions that legalise them.
 
-    Only ``transactions`` is affected, and only when the caller supplies the accompanying
-    action file — which today means the broker one-click import, where the converter emits
-    trades and corporate actions from the same statement in one run.
+    *select* narrows the SIBLING batch of the three kinds that have one (see
+    :data:`_BATCH_GUARDED`) to the rows the commit will actually write, so a row that is not
+    going into the ledger cannot fund one that is. It is ignored by every other kind, and by
+    the preview door, which has no selection to speak of.
 
-    **Why this exists at all.** The commit order is trades-then-actions and cannot be
-    reversed: a corporate action's own guards need the position to exist, so actions-first
+    The ``pending_actions_csv`` widening applies to ``transactions`` only, and only when the
+    caller supplies the accompanying action file — which today means the broker one-click
+    import, where the converter emits trades and corporate actions from the same statement
+    in one run. It COMPOSES with the QA-01 narrowing (the dedicated branch below): the index
+    widens which corporate actions the guard can see, *select* narrows which sibling TRADES
+    fund each other, and the two answer different questions about the same file.
+
+    **Why the widening exists at all.** The commit order is trades-then-actions and cannot
+    be reversed: a corporate action's own guards need the position to exist, so actions-first
     rejects them. But a sell that is only legal AFTER a split then meets a share count taken
     before it, and raises 賣超 — the ONE confirmation in this system whose acknowledgement
     permanently discards a cost basis (the STICKY rule). The ledger ends up correct either
@@ -1000,11 +1111,14 @@ def _resolve_builder(
     coming simply is not in the file, and a malformed one excludes itself
     (``load_action_index``).
     """
-    builder = _BUILDERS[kind]
-    if kind != "transactions" or not pending_actions_csv:
-        return builder
-    index = load_action_index(conn, pending=parse_action_batch(pending_actions_csv))
-    return lambda c, text: build_transaction_preview(c, text, pending_actions=index)
+    if kind == "transactions" and pending_actions_csv:
+        index = load_action_index(conn, pending=parse_action_batch(pending_actions_csv))
+        return lambda c, text: build_transaction_preview(
+            c, text, pending_actions=index, select=select)
+    sibling_aware = _BATCH_GUARDED.get(kind)
+    if sibling_aware is not None:
+        return lambda c, text: sibling_aware(c, text, select=select)
+    return _BUILDERS[kind]
 
 
 class ImportPreviewBody(BaseModel):
@@ -1090,6 +1204,41 @@ def import_commit(
         # always reasoned about "a row the caller deselected" — the seam was built for this
         # and had no caller until now.
         accept &= set(body.select)
+        if body.kind in _BATCH_GUARDED:
+            # ⚠ QA-01: for the kinds whose guard reads a row's SIBLINGS, the verdict above
+            # was derived against the WHOLE file — which is not what will be written. Re-derive
+            # it over ``accept``, so a deselected deposit stops funding the withdrawal that is
+            # committed alone (measured: 200 written, pool at −60,000, while the manual door
+            # answers 422 for the identical movement), and a deselected covering buy stops
+            # funding the sell that is committed alone (FIX-A1, Master probe T2: 200,
+            # written 1, holdings at −60 shares, no 賣超 confirmation ever shown).
+            #
+            # SHRINK ONLY, and that is what makes one pass sufficient rather than a fixed
+            # point: the re-derived accept is intersected with the one above, so the batch a
+            # surviving row was judged against is a SUPERSET of what gets written. The rows
+            # that superset holds and the ledger will not are all debits — a credit never
+            # fails this guard, and a structurally invalid row was already out of the batch —
+            # so every surviving verdict was reached with LESS headroom than it will have.
+            full_kinds = {r.index: {i.kind for i in r.issues} for r in preview.rows}
+            preview = _resolve_builder(
+                body.kind, conn, body.pending_actions_csv, select=accept)(conn, norm.text)
+            accept &= {r.index for r in preview.rows if not r.has_hard_issue}
+            # The shrink-only rule, adapted for SOFT issues (FIX-A1). The cash/fx guards
+            # reject HARD, so the intersection above already drops what they refuse; the
+            # transactions guard raises ``needs_confirm`` findings (賣超 above all), which
+            # ride the blanket ``ack_warnings`` — an ack given against the FULL-file
+            # preview, where the narrowed finding was never shown. A row whose narrowed
+            # verdict surfaces an issue KIND absent from its full-file verdict is therefore
+            # dropped into ``skipped`` rather than written under a confirmation the owner
+            # never saw. Kind-level on purpose: a row whose kinds are unchanged (e.g. a
+            # genuinely-oversold sell the user acked) still writes — that ack was informed,
+            # and only the message's numbers can differ under a smaller batch. Dropping is
+            # still shrink-only, and the drops are all SELLS (only the oversell guard reads
+            # the batch), so surviving siblings were judged with LESS shares than they get.
+            accept -= {
+                r.index for r in preview.rows
+                if {i.kind for i in r.issues} - full_kinds.get(r.index, set())
+            }
     # Provenance. The hashes are derived from the rows' own content, so re-uploading the
     # same export matches and skips rather than doubling the ledger, and the batch id makes
     # the whole import removable in one step. The batch INSERT sits inside commit_preview's

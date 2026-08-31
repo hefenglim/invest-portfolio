@@ -17,6 +17,7 @@ so the guards hold no matter which path a row arrives on. For transactions:
 
 import sqlite3
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Protocol
@@ -44,13 +45,17 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book
 from portfolio_dash.shared.cash_kinds import (
     CASH_KIND_VALUES,
+    CASH_KIND_ZH,
+    CashKind,
     canonical_kind,
     is_fx_acquisition,
 )
 from portfolio_dash.shared.corporate_actions import (
     ActionIndex,
+    CorporateAction,
     CorporateActionKind,
     apply_ratio_to_price,
+    convert_stored,
     is_ratio_term,
 )
 from portfolio_dash.shared.enums import Currency
@@ -174,6 +179,52 @@ def alias_import_account(raw_account: str) -> tuple[str, Issue | None]:
     )
 
 
+def unknown_account_issue(account_id: str) -> Issue:
+    """The ONE unknown-account finding, for every door that has an account to check (L-1).
+
+    Six sites built this sentence for themselves — ``validate_transaction``,
+    ``validate_corporate_action``, ``validate_cash_movement``, and the fx / dividend /
+    opening importers — each interpolating the id into 「帳戶 <id> 不存在」. Wave 7 (K-2) fixed
+    the blank case at ONE of them, which left the owner reading 「帳戶不可空白」 from 現金 and
+    「帳戶  不存在」 — two spaces, no name — from the other four, for the identical blank cell
+    in the identical column. That is the cross-door divergence ``architecture.md``'s C3 seam
+    exists to prevent, reached from the other direction: not two guards disagreeing, but one
+    guard's wording forked five ways. It is a message, so it gets a function, not a seam.
+
+    **A BLANK account is not an UNKNOWN one.** Interpolating an empty id claims that an
+    account the owner never typed does not exist, in the one column whose whole job is to say
+    which cell to go and fix; from a door that does not strip its input (the manual forms) it
+    rendered 「帳戶     不存在」. The predicate is therefore ``.strip()``, not ``== ""``.
+
+    **The blank sentence names NO column and NO form field, on purpose** (K-2's reasoning,
+    now binding on five more doors): the callers span CSV cells called ``account`` and wire
+    fields called ``account_id``, and which of the two to print is presentation — it already
+    lives in ``api/wire.py::_ISSUE_FIELD`` and ``api/routers/cash.py::_MOVEMENT_ISSUE_FIELD``.
+    (Rejected for that reason: reusing ``csv_import``'s 「必填欄位不可空白（欄位 account）」,
+    which names a CSV column the manual forms have not got.)
+
+    The ``kind`` is ``unknown_account`` at every call site and is unchanged, so no wire
+    contract moves; the finding stays HARD (``needs_confirm=False``) everywhere.
+
+    ⚠ Not yet the owner of the SAME sentence in ``portfolio_dash/api/routers/``, which build
+    it by hand for ``error_body`` envelopes rather than for an :class:`Issue`. Sharing it
+    there wants a message-only function under this one; it was out of L-1's scope and is
+    recorded so the next reader finds the copies rather than the divergence.
+
+    **Six copies remain**, re-measured 2026-08-29 and listed by FUNCTION rather than counted
+    per module — a bare tally cannot say WHICH copy a later wave already took, and this list
+    was misread once for exactly that reason: ``broker_import.broker_convert`` ·
+    ``cash.fx_change_guard`` · ``cash.cash_statement`` · ``cash.cash_acq_rate`` ·
+    ``input_center.input_holdings`` · ``ledgers._mutation_guard``. ``input_center`` held
+    **two**; the auto-register refusal in ``manual_commit`` was registered on this helper in
+    wave 9, so the door still appears above — one copy fixed is not the door done.
+    """
+    return Issue(
+        kind="unknown_account",
+        message=("帳戶不可空白" if not account_id.strip() else f"帳戶 {account_id} 不存在"),
+    )
+
+
 def validate_opening_cost(original_cost_total: Decimal) -> Issue | None:
     """F-13 (D37): an opening's ``original_cost_total`` must be **> 0** — HARD.
 
@@ -234,6 +285,52 @@ def pending_share_flows(
     return flows
 
 
+def transaction_structural_issues(inp: TxnInput) -> list[Issue]:
+    """The ROW-LEVEL structural prefix of :func:`validate_transaction` — every check that
+    depends on nothing but the row's own numbers (M4/H2 family): non-positive or
+    overflow-sized quantity/price, negative fee/tax.
+
+    Split out (FIX-A1b, Master probe V6, 2026-08-30) because it now answers TWO questions
+    and they must never diverge: it is the row's own structural verdict inside
+    :func:`validate_transaction`, and it decides sibling-BATCH MEMBERSHIP for the
+    transactions CSV door — ``cash_import._pool_free_issues``'s role, played by the same
+    one owner ("re-running the one owner of those rules is deliberate — restating them
+    would make this module a second owner"). A row that can never be written can never
+    cover: a buy priced −50.00 is a hard ``error`` on its own line, yet it still counted
+    in the oversell guard's batch, so the sell it "covered" previewed ``ok`` and a
+    no-select commit wrote it alone — 200 / written 1 / a lone unacked oversold SELL,
+    reachable by a mere typo. The cash door already excludes such rows (QA-01's
+    "a structurally invalid row was already out of the batch" — true for cash/fx, false
+    for transactions until this function).
+
+    Deliberately ONLY the ledger-independent checks — decidable from the ``TxnInput``
+    alone, so membership needs no connection and no second validation pass. The remaining
+    HARD kinds stay in the batch because none of them can fund a FALSE cover:
+    ``unknown_account`` and ``market_mismatch`` hit every row of the same
+    ``(account, symbol)`` key equally (the only key a pending flow can cover), so the
+    "covered" sell is just as un-writable; ``symbol_unresolved`` likewise — pending flows
+    are keyed on the RAW symbol, and the same raw spelling resolves (or fails) the same
+    way for both rows; ``fee_overflow`` sits downstream of the M4 bound enforced HERE,
+    whose whole purpose is that a row passing it cannot overflow the fee quantize — and it
+    is computed per row after batch assembly, so admitting it into membership would take a
+    circular second pass to exclude a case the bound already excludes.
+    """
+    issues: list[Issue] = []
+    if inp.quantity <= 0:
+        issues.append(Issue(kind="non_positive_quantity", message="股數必須大於 0"))
+    elif inp.quantity > _MAX_MAGNITUDE:
+        issues.append(Issue(kind="amount_too_large", message="股數過大,無法處理"))
+    if inp.price <= 0:
+        issues.append(Issue(kind="non_positive_price", message="價格必須大於 0"))
+    elif inp.price > _MAX_MAGNITUDE:
+        issues.append(Issue(kind="amount_too_large", message="價格過大,無法處理"))
+    if inp.fee is not None and inp.fee < 0:
+        issues.append(Issue(kind="negative_fee", message="手續費不可為負"))
+    if inp.tax is not None and inp.tax < 0:
+        issues.append(Issue(kind="negative_tax", message="交易稅不可為負"))
+    return issues
+
+
 def validate_transaction(
     conn: sqlite3.Connection,
     inp: TxnInput,
@@ -269,25 +366,13 @@ def validate_transaction(
         "SELECT settlement_ccy FROM accounts WHERE account_id=?", (inp.account_id,)
     ).fetchone()
     if acc is None:
-        issues.append(
-            Issue(kind="unknown_account", message=f"帳戶 {inp.account_id} 不存在")
-        )
+        issues.append(unknown_account_issue(inp.account_id))
 
-    # --- quantity and price must be positive, and within a sane bound (M4) ---
-    if inp.quantity <= 0:
-        issues.append(Issue(kind="non_positive_quantity", message="股數必須大於 0"))
-    elif inp.quantity > _MAX_MAGNITUDE:
-        issues.append(Issue(kind="amount_too_large", message="股數過大,無法處理"))
-    if inp.price <= 0:
-        issues.append(Issue(kind="non_positive_price", message="價格必須大於 0"))
-    elif inp.price > _MAX_MAGNITUDE:
-        issues.append(Issue(kind="amount_too_large", message="價格過大,無法處理"))
-
-    # --- negative fee / tax (H2): hard reject on every path ---
-    if inp.fee is not None and inp.fee < 0:
-        issues.append(Issue(kind="negative_fee", message="手續費不可為負"))
-    if inp.tax is not None and inp.tax < 0:
-        issues.append(Issue(kind="negative_tax", message="交易稅不可為負"))
+    # --- quantity/price positive and bounded (M4) + negative fee/tax (H2) ---
+    # One owner: the SAME structural prefix that decides sibling-batch membership at the
+    # CSV door (FIX-A1b) — see :func:`transaction_structural_issues` for why the two
+    # questions must not diverge. Same checks, same kinds, same order as before the split.
+    issues.extend(transaction_structural_issues(inp))
 
     # --- account↔instrument market coherence (H1): only when BOTH are known ---
     # Batch B: relaxed from a 1:1 (account market == instrument market) check to a
@@ -341,11 +426,19 @@ def validate_transaction(
         if (capped := _depth_cap_issue(walk_index, {inp.symbol})) is not None:
             issues.append(capped)
         if inp.quantity > held_then or inp.quantity > held:
+            # Traditional Chinese, because the UI renders this string as the HEADLINE of the
+            # 賣超 confirmation dialog — directly above the Chinese sentence explaining that
+            # confirming permanently discards the position's cost basis — and
+            # ``ledgers.py::_oversell_response`` embeds it inside a Chinese wrapper. The old
+            # `sell 150 > held 100` made one sentence read half in each language, on the one
+            # dialog whose whole job is to make sure the owner understood before acking.
+            # The NUMBERS are the message; they survive the translation unchanged.
             if inp.quantity > held_then and inp.quantity <= held:
-                msg = (f"sell {inp.quantity} > held {held_then} on {inp.trade_date.isoformat()}"
-                       f" (目前淨額 {held}，但那一天只有 {held_then})")
+                msg = (f"賣出 {inp.quantity} 股，超過 {inp.trade_date.isoformat()} 當日"
+                       f"持有的 {held_then} 股（目前淨額 {held} 股，"
+                       f"但那一天只有 {held_then} 股）")
             else:
-                msg = f"sell {inp.quantity} > held {held}"
+                msg = f"賣出 {inp.quantity} 股，超過持有的 {held} 股"
             issues.append(
                 Issue(
                     kind="sell_exceeds_holdings",
@@ -470,17 +563,57 @@ def _book_before(
     *,
     bundle: LedgerBundle | None,
     cache: dict[date, Book] | None,
+    pending: Sequence[CorporateAction] = (),
 ) -> Book:
     """The replayed book as a corporate action dated *day* sees it — memoised per date.
 
     ``allow_oversell=True`` because this is a validation read, not a booking: it must
     return the degraded book so the caller can inspect the flags, never raise. A raise
     here would turn a data problem into a 500 on the import preview.
+
+    *pending* (FIX-A2, QA BUG-04 / corpus F4, 2026-08-29) is the row's SIBLING batch
+    actions, already converted — the replay applies those sorting STRICTLY before
+    ``(day, EventPriority.CORPORATE_ACTION)``, the same cut the share walk's index already
+    uses. All corporate actions share that priority, so the cut is ``p.date < day``: a
+    same-date sibling never applies, and a batch row can never justify itself. Without
+    this, the four book-derived rejections (E3/E22/E5/E18) replayed the STORED ledger only,
+    so a chain whose prerequisite action is same-batch (the GGR shape: EXCHANGE PPGH→GGR,
+    then a reverse SPLIT of GGR, with the post-exchange trades already stored) hard-rejected
+    ``oversold_source`` on pass 1 while a byte-identical pass 2 wrote it — an undocumented
+    two-pass whose rejection message misdirected the owner to 補登 a buy that exists.
+
+    **Cache discipline** (the FIX-A2 leak question, answered structurally): the applied
+    subset is a pure function of (batch, *day*) — every row of one batch dated *day* yields
+    the SAME strictly-before siblings, itself and every same-date row excluded by the cut —
+    so under ONE batch a per-date entry serves every row of that date, which is exactly
+    trap #21's bound (one replay per distinct action date, not per row). A cache may be
+    SHARED across calls with different batches only while every sharer derives the same
+    subset at every date it reads. The one sharing caller (``ledgers._preview_payload`` →
+    ``_split_conversion``) satisfies that by construction: both its batches are single-date
+    (one submitted action × N accounts), and a single-date batch's strictly-before subset is
+    EMPTY at the only date it reads — its entries are stored-only books, and it can neither
+    write nor read a widened one. A future caller with a multi-date batch must own its cache
+    for the life of that batch, as the CSV importer does.
+
+    A widened replay that cannot book (e.g. a pending SPINOFF whose child is not registered
+    yet — ``build_book``'s ``quote_ccy`` raises ``KeyError``) degrades to the stored-only
+    book, i.e. exactly the pre-FIX-A2 verdict, never a 500 — and is NOT cached, because it
+    is the degradation, not the (batch, date)-scoped answer. That sibling's own refusals
+    (E10 / D48a) already tell the story on its own row. The stored-only replay keeps its
+    pre-existing contract: callers pre-check reachability, so it may raise.
     """
     if cache is not None and day in cache:
         return cache[day]
+    applied = [p for p in pending if p.date < day]
     full = bundle if bundle is not None else load_ledger_bundle(conn)
-    book = build_book(full.before_action_on(day), allow_oversell=True)
+    if applied:
+        try:
+            widened = replace(full, actions=[*full.actions, *applied])
+            book = build_book(widened.before_action_on(day), allow_oversell=True)
+        except (ValueError, KeyError):
+            return build_book(full.before_action_on(day), allow_oversell=True)
+    else:
+        book = build_book(full.before_action_on(day), allow_oversell=True)
     if cache is not None:
         cache[day] = book
     return book
@@ -544,7 +677,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
 
     if conn.execute("SELECT 1 FROM accounts WHERE account_id=?",
                     (inp.account_id,)).fetchone() is None:
-        add(Issue(kind="unknown_account", message=f"帳戶 {inp.account_id} 不存在"))
+        add(unknown_account_issue(inp.account_id))
 
     # --- E6 / E6a (D14): both ratio terms are POSITIVE INTEGERS ---
     # Not "Decimal > 0": that admits 0.2857, a rounded quotient, which shorts a 2-for-7 of
@@ -800,7 +933,23 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     # walker's three-bound cut, not `through`'s single `<= day`: a same-day sell sorts
     # AFTER the action and must stay invisible to it, while a same-day opening sorts
     # before and must not.
-    book = _book_before(conn, inp.date, bundle=bundle, cache=book_cache)
+    #
+    # PLUS the sibling batch actions dated strictly before this one (FIX-A2, QA BUG-04):
+    # the share walk has seen same-batch predecessors since 2026-08-14 (`load_action_index`
+    # pending=batch), but this replay read the stored ledger only, so the two halves of one
+    # validator disagreed about whether the prerequisite EXCHANGE had happened — E1a passed
+    # and E3 hard-rejected the same row, curable only by an undocumented second upload.
+    # Converted through the SAME `convert_stored` the index uses, so a malformed sibling
+    # excludes itself (→ unreadable) identically on both paths and can neither lend shares
+    # nor blank a book; its own row is rejected on its own terms in the same pass. Only the
+    # strictly-earlier subset is converted — `_book_before` re-applies the cut as the
+    # boundary's owner, and D15/E12 keeps the same-date-intersecting case unreachable.
+    pending_actions: list[CorporateAction] = []
+    if any(b.date < inp.date for b in siblings):
+        pending_actions, _unreadable = convert_stored(
+            [b for b in siblings if b.date < inp.date])
+    book = _book_before(
+        conn, inp.date, bundle=bundle, cache=book_cache, pending=pending_actions)
     by_key = {(h.account_id, h.symbol): h for h in book.holdings}
     source = by_key.get((inp.account_id, inp.from_symbol))
     dest = by_key.get((inp.account_id, inp.to_symbol))
@@ -1165,6 +1314,17 @@ def validate_corporate_action_change(
 # guard below even though BROKER_FEE / INTEREST_EXPENSE are also debits.
 CASH_MOVEMENT_KINDS: frozenset[str] = CASH_KIND_VALUES
 
+#: The accepted-kind list shown when a kind is rejected, DERIVED from the vocabulary rather
+#: than written out (QA-18). The hand-written list said 「deposit / withdraw / opening /
+#: rebate」 and never grew when the broker-statement importer added INTEREST,
+#: INTEREST_EXPENSE and BROKER_FEE on 2026-08-13 — so the one message whose job is to tell
+#: the owner what IS accepted told them that three legal kinds were not. Deriving it is the
+#: same fix, and for the same reason, as ``CASH_KIND_ZH`` replacing the printed statement's
+#: private four-entry label map. Enum declaration order is stable, so the list is too.
+_ACCEPTED_KINDS_ZH: str = "／".join(
+    f"{CASH_KIND_ZH[k.value]} {k.value.lower()}" for k in CashKind
+)
+
 
 class CashMovementInput(BaseModel):
     """A user-supplied cash movement, BEFORE it is trusted.
@@ -1392,14 +1552,18 @@ def validate_cash_movement(
     if kind not in CASH_MOVEMENT_KINDS:
         return [Issue(
             kind="unknown_movement_kind",
-            message=f"未知類型 {inp.kind}（deposit / withdraw / opening / rebate）")]
+            message=f"未知類型 {inp.kind}（可用類型：{_ACCEPTED_KINDS_ZH}）")]
     if inp.amount <= _ZERO:
         return [Issue(kind="non_positive_amount", message="金額必須大於 0")]
     known = (accounts if accounts is not None
              else {a.account_id: a for a in list_accounts(conn)})
     account = known.get(inp.account_id)
     if account is None:
-        return [Issue(kind="unknown_account", message=f"帳戶 {inp.account_id} 不存在")]
+        # A BLANK account is not an UNKNOWN one (K-2). The wording — and the reasoning K-2
+        # recorded here for it — moved into :func:`unknown_account_issue` when L-1 gave the
+        # sentence one owner: this door was the only one of six saying it correctly, which is
+        # the divergence, not the fix. Nothing about THIS door's behaviour changed.
+        return [unknown_account_issue(inp.account_id)]
     # audit C2: a pool may only hold the account's settlement or funding currency.
     if inp.ccy not in {account.settlement_ccy, account.funding_ccy}:
         return [Issue(

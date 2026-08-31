@@ -789,8 +789,23 @@ class StoredFxConversion(BaseModel):
     to_amount: Decimal
 
     @property
-    def implied_rate(self) -> Decimal:
-        """Home-currency units per one foreign-currency unit (from_amount / to_amount)."""
+    def implied_rate(self) -> Decimal | None:
+        """Home-currency units per one foreign-currency unit (from_amount / to_amount).
+
+        ``None`` when nothing was received: a conversion with ``to_amount == 0`` has no
+        implied rate, and dividing by it raised ``decimal.DivisionByZero`` all the way out to
+        the generic 500 handler — one hand-edited row took the entire 換匯 ledger page down
+        (QA-10). Every write door already refuses a zero leg, so this is only reachable by
+        editing the database directly, which is exactly the posture
+        :attr:`StoredOpening.original_avg` in this module already takes for the same shape.
+
+        ``None`` rather than ``Decimal(0)``: a rate of zero is a NUMBER, and a number nobody
+        can derive is the kind of fabricated figure ``data-and-pricing.md`` rules out. The two
+        consumers already render an absent value as 「—」 (``web/format.js``'s ``f.rate`` and
+        ``export/report_html._NULL``), so the honest answer costs nothing downstream.
+        """
+        if self.to_amount == 0:
+            return None
         return self.from_amount / self.to_amount
 
 

@@ -31,6 +31,7 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from tests.conftest import DashboardClientFactory
 
 D = Decimal
 _TSLA = Instrument(symbol="TSLA", market=Market.US, quote_ccy=Currency.USD,
@@ -152,6 +153,11 @@ def test_ordinary_sell_is_byte_identical_to_before() -> None:
                      "50", "300", True, id="short-extension"),
         pytest.param([("BUY", "100", "240"), ("SHORT", "150", "260")],
                      "50", "300", False, id="undeclared-into-a-short"),
+        # QA-08: a declared short opened from a FLAT position — nothing held at all. The
+        # only one of the eleven trade shapes the preview refused to project, because the
+        # SELL arm returned None on `held is None` BEFORE the `short_sale` branch was
+        # reached. The ledger books it like any other declared short.
+        pytest.param([], "30", "300", True, id="declared-short-from-flat"),
     ],
 )
 def test_preview_realized_equals_the_realized_the_ledger_actually_books(
@@ -278,6 +284,11 @@ def _booked_avgs(
                      "50", "300", True, id="short-extension"),
         pytest.param([("BUY", "100", "240"), ("SHORT", "150", "260")],
                      "50", "300", False, id="undeclared-into-a-short"),
+        # QA-08: a declared short opened from a FLAT position — nothing held at all. The
+        # only one of the eleven trade shapes the preview refused to project, because the
+        # SELL arm returned None on `held is None` BEFORE the `short_sale` branch was
+        # reached. The ledger books it like any other declared short.
+        pytest.param([], "30", "300", True, id="declared-short-from-flat"),
     ],
 )
 def test_preview_new_average_equals_the_average_the_ledger_actually_books(
@@ -330,4 +341,154 @@ def test_a_full_exit_shows_no_average_because_there_is_no_position() -> None:
     pp = _preview(conn, _body("100", "300"))
     assert pp["remain_shares"] == "0"
     assert pp["new_original_avg"] is None and pp["new_adjusted_avg"] is None
+    conn.close()
+
+
+# --- QA-08 (2026-08-29): the ELEVENTH shape — a declared short opened from FLAT ----------
+#
+# `_position_preview`'s SELL arm returned None on `held is None` before `body.short_sale`
+# was ever consulted, so the one trade shape that creates a position out of nothing was the
+# one shape with no projection at all. Nothing wrong was shown; the card was simply blank
+# where the app is otherwise complete — and blank is what a preview looks like when the
+# thing it is previewing is the branch nobody wired.
+
+
+def test_a_declared_short_from_a_flat_position_is_projected_not_withheld() -> None:
+    """Nothing held; declare a sell of 30 @ 300. from_long = 0, the whole 30 opens a short.
+
+    The projected basis is the proceeds received, so the average IS the per-share net sale
+    price — a negative total over a negative share count, exactly as the replay reports it.
+    """
+    conn = _conn()
+    pp = _preview(conn, _body("30", "300", short=True))
+    assert pp["kind"] == "sell"
+    assert pp["remain_shares"] == "-30"
+    assert pp["realized_shares"] == "0"
+    assert pp["short_opened"] == "30"
+    assert pp["oversell"] is False
+    # Nothing was held, so nothing realizes and nothing is removed — not a zero, an absence.
+    assert pp["realized_pnl"] is None and pp["cost_removed"] is None
+    assert Decimal(str(pp["new_original_avg"])) == D("300")
+    assert Decimal(str(pp["new_adjusted_avg"])) == D("300")
+    # A fresh position has no OLD side to compare against.
+    assert pp["old_shares"] is None and pp["old_original_avg"] is None
+    assert pp["note"] is not None and "空單" in str(pp["note"])
+    conn.close()
+
+
+def _booked_position(conn: sqlite3.Connection) -> tuple[Decimal, Decimal, Decimal] | None:
+    book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    for h in book.holdings:
+        if (h.account_id, h.symbol) == ("schwab", "TSLA"):
+            return h.shares, h.original_avg, h.adjusted_avg
+    return None
+
+
+def test_the_flat_declared_short_projection_equals_what_the_ledger_books() -> None:
+    """The projection, then the same trade replayed — share count and both averages."""
+    conn = _conn()
+    body = _body("30", "300", short=True)
+    pp = _preview(conn, body)
+    _tx(conn, Side.SELL, "30", "300", body.date, short=True)
+    booked = _booked_position(conn)
+    assert booked is not None
+    shares, orig_avg, adj_avg = booked
+    assert Decimal(str(pp["remain_shares"])) == shares
+    assert Decimal(str(pp["new_original_avg"])) == orig_avg
+    assert Decimal(str(pp["new_adjusted_avg"])) == adj_avg
+    conn.close()
+
+
+def test_qa08_through_the_real_door_with_the_real_fee_engine(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """The QA-08 repro end to end: `/api/input/manual/preview` then `/commit`, same numbers.
+
+    Schwab SELL 30 AAPL @ 200 declared short, nothing held. The real engine charges
+    SEC 0.12 + TAF 0.01 = 0.13, so the short's basis is −5,999.87 and its average sale price
+    is 5,999.87 / 30. Compared against what the dashboard reports AFTER the commit rather
+    than against hand-typed constants alone, because a constant can agree with a wrong
+    preview.
+    """
+    def seed(conn: sqlite3.Connection) -> None:
+        seed_accounts(conn)
+        upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US,
+                                           quote_ccy=Currency.USD, sector="Tech",
+                                           name="Apple"))
+
+    client = dashboard_client_factory(seed)
+    body = {"account_id": "schwab", "symbol": "AAPL", "date": "2026-03-01",
+            "side": "SELL", "shares": "30", "price": "200", "short_sale": True}
+    preview = client.post("/api/input/manual/preview", json=body)
+    assert preview.status_code == 200, preview.text
+    payload = preview.json()
+    assert payload["fee"] == "0.13" and payload["tax"] == "0"
+    pp = payload["position_preview"]
+    assert pp is not None, "QA-08: the only trade shape with no projection at all"
+    assert pp["remain_shares"] == "-30"
+    assert pp["realized_pnl"] is None and pp["short_opened"] == "30"
+
+    commit = client.post("/api/input/manual/commit", json=body)
+    assert commit.status_code == 201, commit.text
+    holding = next(h for h in client.get("/api/dashboard").json()["holdings"]
+                   if h["symbol"] == "AAPL" and h["account_id"] == "schwab")
+    assert holding["short_open"] is True
+    assert Decimal(pp["remain_shares"]) == Decimal(holding["shares"])
+    assert Decimal(pp["new_original_avg"]) == Decimal(holding["original_avg"])
+    assert Decimal(pp["new_adjusted_avg"]) == Decimal(holding["adjusted_avg"])
+    # …and the basis the QA run measured: −(30 × 200 − 0.13) = −5,999.87.
+    #
+    # Quantized, because the STORED value carries the 28-significant-digit residue of the
+    # replay's own ``(gross − fee − tax) / qty × qty`` round trip
+    # (−5999.870000000000000000000001), and the preview reproduces that residue exactly
+    # because it uses the same operands in the same order. That is the whole reason every
+    # other assertion above compares the preview against the REPLAY rather than against a
+    # typed constant: a constant would have pinned a number neither surface produces.
+    assert Decimal(holding["original_cost_total"]).quantize(D("0.01")) == D("-5999.87")
+
+
+# --- the BUY side, every projected column (the mirror obligation one arm over) ------------
+
+
+def _booked_buy_state(
+    conn: sqlite3.Connection, body: ManualBody
+) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal, Decimal]:
+    """Replay WITH the hypothetical buy: (shares, orig_avg, adj_avg, realized, covered)."""
+    _tx(conn, Side.BUY, str(body.shares), str(body.price), body.date)
+    book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    covers = [r for r in book.realized.rows if r.sell_date == body.date]
+    held = next((h for h in book.holdings
+                 if (h.account_id, h.symbol) == ("schwab", "TSLA")), None)
+    return ((held.shares if held is not None else None),
+            (held.original_avg if held is not None else None),
+            (held.adjusted_avg if held is not None else None),
+            sum((r.realized for r in covers), D("0")),
+            sum((r.shares_sold for r in covers), D("0")))
+
+
+@pytest.mark.parametrize(
+    ("qty", "price"),
+    [
+        pytest.param("30", "200", id="partial-cover-still-short"),
+        pytest.param("50", "200", id="exact-cover-flat"),
+        pytest.param("80", "200", id="over-cover-goes-long"),
+    ],
+)
+def test_buy_cover_preview_matches_every_column_the_ledger_books(
+    qty: str, price: str
+) -> None:
+    """Short 50 open at 260; a buy at 200 covers it. Shares, BOTH averages, realized, cover."""
+    conn = _conn()
+    _tx(conn, Side.BUY, "100", "240", date(2026, 4, 1))
+    _tx(conn, Side.SELL, "150", "260", date(2026, 6, 10), short=True)   # 50 short @ 260
+    body = _buy_body(qty, price)
+    pp = _preview(conn, body)
+    shares, orig_avg, adj_avg, realized, covered = _booked_buy_state(conn, body)
+    assert Decimal(str(pp["new_shares"])) == (shares if shares is not None else D("0"))
+    for key, booked in (("new_original_avg", orig_avg), ("new_adjusted_avg", adj_avg)):
+        shown_raw = pp.get(key)
+        shown = None if shown_raw is None else Decimal(str(shown_raw))
+        assert shown == booked, f"{key}: preview {shown!r} != booked {booked!r}"
+    assert Decimal(str(pp["realized_pnl"])) == realized
+    assert Decimal(str(pp["covered_shares"])) == covered
     conn.close()
