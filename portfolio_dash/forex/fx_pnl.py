@@ -45,9 +45,20 @@ def realized_fx_rows(
     ⚠ **Prefer :func:`realized_fx_rows_as_of` for anything the owner reads as a realized
     figure.** Passing the pool's ALL-TIME average here prices every reconversion at a rate
     that keeps moving: an acquisition entered later restates a disposal already reported,
-    and at a high enough later rate it flips its sign (QA-02, measured +10,000 -> -35,000
-    on one February row). The manual (§8.2) defines the cost side as 「回換前 ... avg_rate」,
-    which is what the ``_as_of`` variant computes.
+    and at a high enough later rate it flips its sign. The manual (§8.2) defines the cost
+    side as 「回換前 ... avg_rate」, which is what the ``_as_of`` variant computes.
+
+    QA-02, with the scenario stated so the figure is reproducible rather than remembered —
+    three earlier records of this finding quoted three different numbers (-10,000, -35,000
+    and -15,000) because each measured a different ledger and none said which:
+
+        Jan 10  TWD 300,000 -> USD 10,000   (rate 30)
+        Feb 10  USD  10,000 -> TWD 310,000  -> realized +10,000 at the Feb-10 average of 30
+        Mar 10  TWD 350,000 -> USD 10,000   (rate 35), unrelated to the February disposal
+
+    The full-history average is then 32.5, and THIS function reprices the February row to
+    ``310,000 - 10,000 x 32.5 = -15,000`` — a reported gain turned into a loss by a later
+    purchase. ``realized_fx_rows_as_of`` keeps it at +10,000.
 
     This form survives for the case it is actually right for: a caller that already knows
     the single rate it wants applied. Empty if ``avg_rate`` is None (no FX cost basis).

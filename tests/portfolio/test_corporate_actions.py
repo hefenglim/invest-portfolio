@@ -310,6 +310,12 @@ _SPEC_4_4_FIELDS = (
     "oversold_held",
     "unbookable_dividend",
     "unbookable_action",
+    # QA-06, 2026-09-01 — the position exists only because a share-adding dividend landed on a
+    # flat lot, so its basis is zero. Transfer rule: OR-ed into the destination by BOTH
+    # EXCHANGE and SPINOFF (an action must not launder the doubt onto a position the owner
+    # will look at instead), untouched by SPLIT. Pinned by
+    # tests/portfolio/test_qa06_revived_by_dividend.py, one replay test per action kind.
+    "revived_by_dividend",
     # E24 (D32), 2026-08-11 — added only after §4.4 gained its row, which is what this
     # assertion is for. Transfer rule: written by EXCHANGE (`P.vacated_to := to_symbol`),
     # untouched by SPLIT and SPINOFF. Pinned by tests/portfolio/test_dividend_after_exchange.py.

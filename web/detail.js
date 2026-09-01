@@ -452,6 +452,10 @@
       add('badge-missing', '股利待釐清',
         '放空期間有股利紀錄：放空方需支付股利，此筆未列入計算，'
         + '本列數字少計該筆金額（請改以現金收支登錄）');
+    } else if (h.revived_by_dividend) {
+      add('badge-revived', '配息復活',
+        '此部位原本已清空，是配股／DRIP 再投入才重新有股數，成本基礎為零，'
+        + '整筆市值都會顯示為未實現獲利（請確認確有收到這些股份）');
     } else if (h.short_open) {
       add('badge-short', '放空中',
         '已宣告的放空部位；成本基礎為賣出價款，買回時結算損益');
@@ -1362,6 +1366,9 @@
       }
       if (r.realized_note) parts.push(r.realized_note);
       if (r.etf_flag_note) parts.push(r.etf_flag_note);
+      /* QA-19 — the drawer has no 當沖 checkbox, so it states the assumption instead of
+         quoting one rate as though it were the only one. */
+      if (r.daytrade_note) parts.push(r.daytrade_note);
       note.textContent = parts.join('。');
     }
 

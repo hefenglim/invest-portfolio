@@ -1472,3 +1472,36 @@ no wrong decision — only a false sentence in a permanent record.
   flags", and all three were read in this session's own memory index. A rule that fires only
   when you remember it at the moment of typing is not a control — **stop passing `-q`**; the
   config already has it.
+
+## Two pytest sessions driving one Chrome wedge each other, and the "isolated" re-run was not isolated (2026-09-01)
+
+A full-suite run sat at `[51%]` for **two hours** with zero CPU while still spawning fresh
+uvicorns. `tests/e2e` sorts into the middle of the suite alphabetically, so 51% is exactly where
+the browser tests begin — the run was not hung at a random point, it was hung at the e2e
+boundary. A leaked uvicorn from 9:18 was still listening two hours later.
+
+Cause: the e2e suite drives the **installed Google Chrome** (Playwright `channel`), not a
+private bundled chromium, so two pytest sessions — or one session plus the leftovers of a
+previous killed one — contend for the same browser installation. Chunking e2e into 7 groups of
+7 files turned the same tests green in 4–10 minutes per chunk.
+
+**The diagnostic mistake is the more valuable half.** One chunk failed
+`test_kpi_trading_cost_layout` with an EMPTY `#kpi-band`, so the whole dashboard had not
+rendered. Re-running it "alone" also failed; stashing `web/` made it pass; restoring made it
+pass again. Three of those four runs happened **while the chunk runner was still going**, so the
+"isolated" control was sharing the machine with five more browser sessions. With the runner
+finished, the same test passed **6/6** with the changes in place. The change was innocent, and a
+`git stash` A/B of n=1 nearly convicted it.
+
+**Rules:**
+- Never run two pytest sessions concurrently when either touches `tests/e2e`. Serialise them,
+  and confirm the previous runner's process tree is gone before starting the next.
+- An A/B is evidence only when the two arms differ in exactly ONE variable. "I ran it alone"
+  is a claim about the machine, not about the command — verify no other run is live before
+  believing either arm. (Same failure shape as the `-qq` control earlier the same day, which
+  also kept the suspect variable and confirmed a false cause.)
+- A single pass/fail pair is not a verdict on a browser test. Sample it — 6 runs cost minutes
+  and turned "my change broke the dashboard" into "this test fails under load".
+- Kill only your own process tree by walking `ParentProcessId`. The stale browser processes on
+  this machine belonged to the USER's Chrome session, and killing them to tidy up would have
+  closed their windows.

@@ -390,6 +390,22 @@ def compute_whatif(
                                 "實際稅率待你在標的管理確認")
     else:
         out["etf_flag_note"] = None
+    # QA-19 (owner ruling 2026-09-01). The drawer has no 當沖 checkbox to read — `compute_fees`
+    # is called without `daytrade`, so this estimate is always the NON-daytrade rate, while the
+    # manual form honours its checkbox and books the daytrade rate. One trade, two screens, two
+    # answers. The ruling settled the PRECEDENCE (daytrade wins over ETF, which is what
+    # `fees._tw` already does); it did not give this surface an input, and
+    # `domain-ledger.md` is explicit that a surface which cannot know which branch applies must
+    # SAY so rather than pick one silently. So: disclose, exactly as the ETF flag above does,
+    # and only when it would actually change the number — a buy carries no TW tax, and a rule
+    # set whose daytrade and applied rates coincide would make this pure noise.
+    applied_rate = fr.snapshot.get("tax_rate")
+    if (side is Side.SELL and applied_rate is not None
+            and str(rules.tax_daytrade) != applied_rate):
+        out["daytrade_note"] = ("此試算以非當沖稅率計算;若為當沖,賣出稅率為 "
+                                f"{rules.tax_daytrade}(當沖優先於 ETF 稅率)")
+    else:
+        out["daytrade_note"] = None
     out["new_weight"] = new_weight
     out["old_weight"] = old_weight
     if side is Side.SELL:

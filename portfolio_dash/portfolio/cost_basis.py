@@ -105,6 +105,12 @@ class _Position:
     # dashboard path (E1a/E2/E3/E5/E18/E22). The shares are then in PRE-action terms against
     # global post-action prices, so the position is 待釐清 rather than merely stale.
     unbookable_action: bool = False
+    # QA-06 (owner ruling 2026-09-01: 記錄並標記). A share-adding dividend (DRIP / STOCK)
+    # landed while the LONG lot was flat, so the position exists ONLY because of it: shares
+    # are added at $0 cost onto a basis of zero. Booked, not refused — you may genuinely have
+    # received those shares — but flagged, because with every flag clean it is indistinguishable
+    # from an ordinary holding whose entire market value happens to be profit.
+    revived_by_dividend: bool = False
     # E24 (D32): the symbol an EXCHANGE moved this position to, in the same account. Set ONLY
     # by §4.2's zeroing, so it distinguishes "vacated by an action" from "sold down to zero"
     # — and that distinction is the whole rule. A guard keyed on `shares == 0` instead would
@@ -278,6 +284,9 @@ def _apply_action(
             dest.adjusted_total += source.adjusted_total
             dest.unbookable_dividend |= source.unbookable_dividend      # E19
             dest.unbookable_action |= source.unbookable_action
+            # QA-06 travels with the position: an EXCHANGE moves the zero-basis shares to Q,
+            # so the destination inherits the doubt about whether they should exist at all.
+            dest.revived_by_dividend |= source.revived_by_dividend
             source.shares = _ZERO
             source.original_total = _ZERO
             source.adjusted_total = _ZERO
@@ -301,6 +310,7 @@ def _apply_action(
         dest.adjusted_total += carved_adjusted
         dest.unbookable_dividend |= source.unbookable_dividend          # E19
         dest.unbookable_action |= source.unbookable_action
+        dest.revived_by_dividend |= source.revived_by_dividend           # QA-06
         # `total - carved`, NOT `total * (1 - c)`: algebraically identical, numerically not.
         # `1 - c` rounds once and `* (1-c)` rounds again, so the two sides can miss §2.1's
         # conservation law by an ulp. Subtracting exactly what was added makes the law hold
@@ -728,6 +738,30 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                         raise ValueError(
                             f"{ev.type} dividend for {key} requires reinvest_shares"
                         )
+                    # QA-06 (owner ruling 2026-09-01: 記錄並標記). The long lot is FLAT and a
+                    # share-adding dividend is about to reopen it. The three earlier refusals do
+                    # not apply — this is not a short (checked above), not a vacated ticker
+                    # (checked above), and the position is known (`existing is not None`) — so
+                    # the payment books, and the ruling is that it SHOULD: entitlement on the
+                    # ex-date with a flat position on the payment date is ordinary, exactly as
+                    # the CASH branch above already recognises for TW/MY.
+                    #
+                    # What is NOT ordinary is the result. Every $0-cost share lands on a basis
+                    # of zero, so the revived position reports `original_cost_total == 0`,
+                    # `avg == 0`, `payback_ratio` forced to 0, and `unrealized == price × shares`
+                    # — its ENTIRE market value as profit. Under DRIP accounting each of those
+                    # numbers is individually right, which is precisely the danger: with every
+                    # flag clean it is indistinguishable from a real holding, and the audit found
+                    # it wearing exactly that disguise (shares 1.4, cost 0, market value 98).
+                    #
+                    # Flag, do not suppress. The SHARES are right (you hold them) and the price
+                    # is global and current, so `market_value` is genuinely correct: this takes
+                    # display mechanism (1) ONLY, like `unbookable_dividend` and unlike
+                    # `oversold` / `unbookable_action`. See `results.Holding` for the taxonomy —
+                    # and note that answer was reasoned from "are the SHARES right?", not copied
+                    # from the neighbouring flag, which is how audit F-49 was created.
+                    if existing.shares == _ZERO:
+                        existing.revived_by_dividend = True
                     existing.shares += ev.reinvest_shares
 
         # The event loop is done. What follows works on ACCUMULATED totals, so a fault
@@ -785,6 +819,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     short_open=pos.short_shares > _ZERO,
                     unbookable_dividend=pos.unbookable_dividend,
                     unbookable_action=pos.unbookable_action,
+                    revived_by_dividend=pos.revived_by_dividend,
                 )
             )
 

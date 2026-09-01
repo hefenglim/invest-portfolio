@@ -37,6 +37,12 @@ class Holding(BaseModel):
     * ``unbookable_action`` — the shares are in PRE-action terms against a POST-action
       price, so the market value is wrong by the action's whole ratio: all three. It gets
       (3) via ``Book.unapplied_actions`` rather than via this flag — see that field for why.
+    * ``revived_by_dividend`` — shares are RIGHT and the price is global and current, so the
+      market value is correct: (1) ONLY, the same answer as ``unbookable_dividend`` but reached
+      from the opposite direction. Nothing here is *incomplete*; every figure is individually
+      correct under DRIP accounting. What the flag carries is that the position exists ONLY
+      because a share-adding dividend landed on a flat lot, so its basis is zero and its whole
+      market value reads as profit — a shape a reader cannot otherwise tell from a real holding.
     * ``short_open`` — NOT a 待釐清 flag at all. A declared short is a real, priced position
       whose signed quantity every formula already handles; it takes none of the three.
 
@@ -92,6 +98,14 @@ class Holding(BaseModel):
     # Mechanisms (1) + (2); mechanism (3) is driven by `Book.unapplied_actions`, which sees
     # the two cases this flag structurally cannot (see that field).
     unbookable_action: bool = False
+    # QA-06 (owner ruling 2026-09-01: 記錄並標記). This position was FLAT when a DRIP/STOCK
+    # dividend added shares to it, so it exists only because of that payout and carries a cost
+    # basis of exactly zero. Booked deliberately — the shares may really have been received —
+    # but never silent: `original_cost_total == 0` makes `payback_ratio` 0 and `unrealized`
+    # equal to the entire market value, which is indistinguishable from an ordinary holding
+    # unless something says so. Display mechanism (1) only; see the taxonomy above for why
+    # valuation and XIRR are deliberately NOT suppressed.
+    revived_by_dividend: bool = False
 
 
 class RealizedRow(BaseModel):

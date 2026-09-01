@@ -605,6 +605,17 @@ button.is-busy {
   line-height: 15px;
   padding: 0 5px;
 }
+/* 配息復活 — QA-06. Amber for the same reason as 放空中 and deliberately NOT the red
+   .badge-missing: nothing here is 待釐清. The shares are real and every figure is correct;
+   what the badge says is that the position exists only because a share-adding dividend
+   landed on a flat lot, so its basis is zero and its whole market value reads as profit. */
+.badge-revived {
+  color: var(--amber);
+  border-color: rgba(200, 149, 42, 0.45);
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 5px;
+}
 /* Muted mini badge — e.g. XIRR short-window confidence hint (FU-D26.7). Inherits the
    base .badge neutral panel/border tokens (theme-aware); text-3 keeps it low-key. */
 .badge-window-mini {

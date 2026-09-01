@@ -532,7 +532,7 @@ defaulted**. A SPINOFF row without it is rejected at validation — the same pos
 ### 4.4 Complete `_Position` field transfer table — NORMATIVE
 
 The formulas above name only the fields they change, which leaves the rest to inference. `_Position`
-has **thirteen** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an
+has **fourteen** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an
 explicit rule here, because "the formula didn't mention it" is not a specification.
 
 > **Count corrected 2026-08-10 (F-37), and the guard has since paid for itself.** This paragraph
@@ -546,6 +546,11 @@ explicit rule here, because "the formula didn't mention it" is not a specificati
 > — and refused the change until this row existed. That is the mechanism working exactly as
 > intended, and it is worth recording that it caught a real omission rather than a hypothetical one.
 > Note the assertion also pins field **order**, because the rows here are read against it.
+>
+> **It fired again on 2026-09-01**, on QA-06's `revived_by_dividend` — added, propagated at both
+> action sites, covered by its own replay tests, and still missing from this table. Twice now the
+> author believed the field was finished and the table disagreed. That is the argument for keeping
+> the assertion keyed on `dataclasses.fields` rather than on a number someone remembers to update.
 
 | Field | SPLIT (P) | EXCHANGE: source P → dest Q | SPINOFF: parent P → child Q |
 | --- | --- | --- | --- |
@@ -561,6 +566,7 @@ explicit rule here, because "the formula didn't mention it" is not a specificati
 | `oversold_held` *(added 2026-08-27, **F-16**)* | unchanged | same as above, and the same PRE-action-terms warning | same |
 | `unbookable_dividend` | unchanged | OR-ed into Q: `Q.unbookable_dividend \|= P.unbookable_dividend` (E19) | same OR into the child (E19); `P` keeps its own |
 | `unbookable_action` *(added 2026-08-10)* | unchanged | OR-ed into Q: `Q.unbookable_action \|= P.unbookable_action` (the propagation line in the EXCHANGE branch) | same OR into the child (the SPINOFF branch's line); `P` keeps its own |
+| `revived_by_dividend` *(added 2026-09-01, **QA-06**)* | unchanged | OR-ed into Q: `Q.revived_by_dividend \|= P.revived_by_dividend` — an EXCHANGE moves the zero-basis shares to Q and zeroes `P`, so leaving the flag behind would launder it onto a position nobody looks at again | same OR into the child: the carve `× c` of a zero basis is zero, so the child inherits the same zero-basis doubt; `P` keeps its own |
 | `vacated_to` *(added 2026-08-11, **E24 / D32**)* | unchanged (`None`) | **`P.vacated_to := to_symbol`** — the field's only writer | unchanged (`None`): a SPINOFF does **not** vacate its parent |
 
 **Why three fields whose rule is "unreachable" still get rows (F-16, 2026-08-27).** They record

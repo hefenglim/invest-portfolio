@@ -60,6 +60,11 @@ class HoldingRow(BaseModel):
     # `unrealized_pct` are wrong by the action's ratio — not short by one payout. The UI must
     # therefore say something different about it than it says about a missed dividend.
     unbookable_action: bool = False
+    # QA-06: the position was FLAT when a DRIP/STOCK dividend added shares, so it exists only
+    # because of that payout and its basis is zero (see Holding.revived_by_dividend). Unlike
+    # the two flags above nothing is wrong or missing — `unrealized_pnl` really is the whole
+    # market value — so the UI states the CAUSE, not a warning that the numbers are unreliable.
+    revived_by_dividend: bool = False
     # Unrealized return rate for THIS holding, server-computed (audit H1, 2026-07-26):
     # ``unrealized_pnl / original_cost_total``. The denominator is deliberately the ORIGINAL
     # invested cost — the same basis as ``KpiSummary.total_return_rate`` (domain-ledger.md:

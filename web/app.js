@@ -552,6 +552,10 @@
         tr.classList.add('row-stale');
         tr.title = '放空期間有股利紀錄：放空方需支付股利，此筆未列入計算，'
           + '本列數字少計該筆金額（請改以現金收支登錄）';
+      } else if (h.revived_by_dividend) {
+        /* QA-06 — informs, does NOT mark the row stale: nothing here is 待釐清. */
+        tr.title = '配息復活：此部位原本已清空，是配股／DRIP 再投入才重新有股數，'
+          + '成本基礎為零，因此整筆市值都會顯示為未實現獲利（請確認確有收到這些股份）';
       } else if (h.short_open) {
         tr.title = '放空中：已宣告的放空部位，成本基礎為賣出時收到的價款；'
           + '買回時以買回價結算損益';
@@ -576,6 +580,10 @@
         const db = el('span', 'badge badge-missing', '股利待釐清');
         db.title = '放空期間出現股利紀錄，未列入計算（放空方需支付股利）';
         cell.appendChild(db);
+      } else if (h.revived_by_dividend) {
+        const rb = el('span', 'badge badge-revived', '配息復活');
+        rb.title = '部位已清空後由配股／DRIP 重新產生，成本基礎為零，市值全數列為未實現獲利';
+        cell.appendChild(rb);
       } else if (h.short_open) {
         const sb = el('span', 'badge badge-short', '放空中');
         sb.title = '已宣告的放空部位；成本基礎為賣出價款，買回時結算損益';

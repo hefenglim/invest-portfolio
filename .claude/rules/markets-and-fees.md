@@ -33,6 +33,17 @@ the structures below are the schema; exact rates are filled/verified at setup.
   待確認」. A BUY carries no TW tax, so it stays silent. This is the same red line as "a stale
   price is labelled, never guessed": **an unknown rate is disclosed, never defaulted in silence.**
   Existing `0`/`1` rows are never rewritten — only future auto-registrations land `NULL`.
+  ⚠ **當沖 OUTRANKS ETF — settled, not incidental (QA-19, owner ruling 2026-09-01).** A TW sell
+  that is both a same-day round trip AND an ETF resolves to the **當沖 0.15%**, never the ETF
+  0.1%. `fees.py::_tw` already reads `tax_daytrade if daytrade else tax_etf if is_etf else
+  tax_normal`, so this rule records the precedence rather than changing it — and it is recorded
+  precisely because **no repository artefact stated the real-world answer**, which made the
+  engine's ordering an accident that any future edit could reverse in good faith. A rate that
+  only exists as the order of a ternary is not a decision, it is a coincidence.
+  Consequence for every preview surface: `strategy/whatif.py` has no 當沖 input to read, so the
+  drawer **discloses the assumption** (`daytrade_note`) instead of presenting the non-daytrade
+  rate as the only answer — the same posture as `etf_flag_unknown`, and required by
+  `domain-ledger.md`'s rule that a surface which cannot know which branch applies must say so.
 - **Brokerage fee:** 0.1425% (configurable) + discount rate + **min NT$20**. Fee and
   tax are collected to integer NT$ by **無條件捨去 (unconditional floor, ROUND_DOWN)** —
   財政部 rule 角以下免收 (**owner sign-off 2026-07-15, FE-D3**; supersedes the earlier
