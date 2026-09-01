@@ -23,6 +23,30 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A `min-height` aligns baselines only if the content is guaranteed to be ONE line
+  (2026-09-02, KPI band v3):** the rebuilt band's whole point was that the three big
+  numbers share a baseline, and `.kpi-label { min-height: 19px }` was the rule meant to
+  deliver it — a badged label and an un-badged one would then be equally tall. It is a
+  FLOOR, not a cap. At 900px the XIRR card's 「觀察期 240 天・短窗參考」 badge wrapped inside
+  the label (which carries `flex-wrap: wrap` as audit M1's protection against a nowrap pair
+  setting a width floor), the label went two lines, and that card's number sat **17px**
+  below its neighbours' — the exact "these do not line up" defect, inside the fix for it.
+  The rule: an element whose height must be constant may not host content of variable
+  length. Status chips moved out of `.kpi-label` into a `.kpi-flag` row **under** the value,
+  where a second line costs height inside the card and moves no number. Found by
+  `tests/e2e/test_kpi_band_tiers.py` on its first run, not by eye — which is the second
+  half of the lesson: **layout intent is only testable as geometry.** Every assertion this
+  repo had about the band read TEXT, so five cards speaking three different grammars, an
+  inverted width allocation and a value orphaned onto its own line were all green for
+  months. Assert `getBoundingClientRect`, not `inner_text`, for anything whose defect is
+  that it looks wrong.
+- **Read the tier back from `matchMedia`, never from the viewport width you asked for
+  (2026-09-02):** Chrome's media-query width and Playwright's `set_viewport_size` differ by
+  the scrollbar, so a test that asserts "1101px must use the wide tier" is asserting a
+  browser detail and will flip on a scrollbar change. Ask the page which tier it resolved
+  and assert the shape THAT tier must produce — then add one test proving the width sweep
+  still reaches every tier, or the coverage rots silently.
+
 - **A missing-set fill rule is stale-blind to REVISIONS (2026-08-21, W6 review):** the
   `signal_history` backfill fills dates that are ABSENT and re-evaluates the HEAD — a
   provider correcting a close mid-series changes neither, so every downstream row whose

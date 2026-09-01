@@ -14,10 +14,18 @@ correct. Only a width sweep catches them, so the sweep is the regression surface
 The widths are the measured boundaries, not round numbers:
   1440 — full labels, one topbar row
   1280 — the old dead `.kpi-band` breakpoint (`.kpi-band.v2` out-specified it)
-  1100 — trimmed labels, one topbar row
+  1101 — KPI v3's widest tier at its NARROWEST: detail cards at `span 3` are 178px here
+  1100 — one pixel below, where the detail row folds to 2x2
    900 — the old 1280->860 gap (KPI band still 4 columns, 換匯 grid still 2)
+   861 — KPI v3 heroes at `span 4` are 171px here, against a 168px 大數字
    768 — tablet, above the <=760px mobile layer
+   481 — one pixel above the tier where the two long-key cards go full width
    390 — phone
+
+The 1101/861/481 widths were added with KPI band v3 (2026-09-01). Every one of them is a
+tier boundary read off a MEASURED text width, and the previous three gaps in this file's
+own ladder (861-1023, 761-1435, 1024-1077) were all "we sampled 900 and 390 and stepped
+over the defect" — the boundary just inside a tier is where a band is squeezed hardest.
 """
 
 import pytest
@@ -26,7 +34,7 @@ from playwright.sync_api import Page
 from tests.conftest import _seed_golden
 from tests.e2e.conftest import FlowServerFactory
 
-_SWEEP_WIDTHS = (1440, 1280, 1100, 900, 768, 390)
+_SWEEP_WIDTHS = (1440, 1280, 1101, 1100, 900, 861, 768, 481, 390)
 _ALL_PAGES = (
     "index.html", "trades.html", "ledger.html", "cash.html", "instruments.html",
     "insights.html", "data-center.html", "dividend-inbox.html", "settings.html",

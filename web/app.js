@@ -89,12 +89,30 @@
     page.insertBefore(bar, page.firstChild);
   }
 
-  /* ============ B. KPI band v2 — 3 hero + 2 combo (5 visual units) ============ */
+  /* ============ B. KPI band v3 — 7 cards, ONE grammar (方案 A, owner ruling 2026-09-01) ==
+     Supersedes the v2 band (3 hero + 2 combo on five fixed `fr` tracks). v2's 資產損益 card
+     answered FOUR unrelated questions — 我賺多少 / 報酬率 / 含匯兌口徑 / 跟指數比 — as seven
+     inline `flex-wrap` lines inside the second-narrowest of five tracks (249px at a 1,440px
+     viewport, against 220px for the card holding ONE number). The wrapping was decided by
+     the flex container, not by us: 「其中本金匯率效果」 stayed on one line while its 「−13,187」
+     landed alone at the head of the next, and a 「·」 opened a row that was really a
+     continuation. v3 gives every card the same shape:
+
+         label → [one big value, hero cards only] → right-aligned key/value rows
+               → [server-authored note, verbatim] → caption pinned to the card floor
+
+     Card ORDER is unchanged from v2 (owner ruling 順序-1) so the dashboard's first cell is
+     still 總市值; only `grid-column: span n` changes per tier, never `order:`, so the visual
+     order and the reading order cannot drift apart. The tier ladder and its measured
+     boundaries live in `styles.css` under "KPI band v3".
+
+     Every figure is a server Decimal STRING; this layer only formats and never sums. A, B
+     and B−A stay in separate cards, presented side by side — adding the 換匯損益 card or
+     本金匯率效果 to A double-counts the cross term (`domain-ledger.md` §AI-D41). */
   function renderKpis() {
     const k = D.kpis;
     const ccy = k ? k.reporting_currency : D.reporting_currency;
     const band = $('#kpi-band');
-    band.classList.add('v2');
     band.replaceChildren();
 
     const nil = (v) => v === null || v === undefined;
@@ -107,218 +125,216 @@
       }
       return value;
     };
-    /* Unavailable-figure badge. The VISIBLE text is a short zh label; the (often long,
-       English, technical) backend reason rides in the tooltip and is shown in full in the
-       資料新鮮度 panel, where there is room. Rendering the raw reason here used to give the
-       XIRR card a 348px nowrap label inside a ~150px card — clipped on every screen and a
-       page-overflow source below 1280px (audit M1). */
-    const nilBadge = (label, reason, short) => {
-      const text = short || '資料不足';
-      const b = el('span', 'badge badge-stale-mini', text);
+    /* A status flag — 「資料不足」, 「觀察期 N 天・短窗參考」 — placed UNDER the value, never
+       in the label. v2 put it in the label, where it wraps to a second line in a narrow
+       card: at 900px that made the XIRR card's label one line taller than its neighbours'
+       and dropped its big number 17px below theirs, which is exactly the "cards do not line
+       up" complaint this band was rebuilt to answer. Under the value it also reads better —
+       it qualifies the figure, and 標籤-5's rule is that a qualifier sits next to the thing
+       it qualifies. `test_kpi_band_tiers::test_cards_in_one_row_align` is the guard: put a
+       badge back in a label and it fails at 900px.
+       The VISIBLE text stays a short zh label; the (often long, English, technical) backend
+       reason rides in the tooltip and is shown in full in the 資料新鮮度 panel, where there
+       is room — rendering the raw reason here once gave this card a 348px nowrap label
+       inside a ~150px one (audit M1). */
+    const addFlag = (card, text, reason, cls) => {
+      let host = card.querySelector('.kpi-flag');
+      if (!host) card.appendChild(host = el('div', 'kpi-flag'));
+      const b = el('span', 'badge ' + (cls || 'badge-stale-mini'), text);
       b.title = reason || text;
-      label.appendChild(b);
-      return label;
+      host.appendChild(b);
     };
 
-    /* hero 1: 總市值 */
+    /* --- the card factory: one grammar, two sizes -----------------------------------
+       `hero` carries a big value and spans 4 of 12 columns; `detail` carries rows only and
+       spans 3. `extra` is a span modifier for the two tiers where one card must go full
+       width — `kpi-wide-sm` (<=860px) and `kpi-wide-xs` (<=480px). Both are measured, not
+       chosen: see the ladder comment in styles.css. */
+    const mkCard = (role, title, extra) => {
+      const card = el('div', 'kpi-card ' + (role === 'hero' ? 'kpi-hero' : 'kpi-combo')
+        + (extra ? ' ' + extra : ''));
+      card.appendChild(el('div', 'kpi-label', title));
+      band.appendChild(card);
+      return card;
+    };
+    /* An aligned key/value row — the band's ONLY data grammar. The value is pinned to the
+       card's right edge, so a long key wraps downward inside its own column and a break can
+       never land between a label and its number.
+       `sub` is the 標籤-5 qualifier (owner ruling 2026-09-01): a block under the key rather
+       than words appended to it, because the full inline key needs 234px and the tightest
+       tier gives 171px. It stays beside the figure it qualifies instead of being demoted to
+       the card's footer, and it wraps without pushing the value.
+       `wi` prefixes 「其中 」 on a subordinate row; it is hidden at <=480px, where the indent
+       and its corner glyph already carry the meaning and the word costs width we lack. */
+    const addRow = (card, key, v, opts) => {
+      const o = opts || {};
+      const row = el('div', 'combo-row' + (o.indent ? ' combo-ind' : ''));
+      const kk = el('span', 'k');
+      if (o.wi) kk.appendChild(el('em', 'combo-wi', '其中 '));
+      kk.appendChild(document.createTextNode(key));
+      if (o.sub) kk.appendChild(el('em', 'combo-sub', o.sub));
+      row.appendChild(kk);
+      const vv = el('span', 'v');
+      if (nil(v)) {
+        vv.textContent = f.NULL_GLYPH;
+        vv.classList.add('sign-nil');
+        vv.title = o.reason || '資料不足';
+      } else {
+        vv.textContent = o.pct ? f.signedPct(v) : f.signed(v, ccy);
+        vv.classList.add(f.signClass(v));
+      }
+      row.appendChild(vv);
+      card.appendChild(row);
+    };
+    /* A SERVER-authored explanation, rendered verbatim — this layer never composes one. It
+       is how a PARTIAL total says it is partial (QA-02), so it shows even when the values
+       beside it are present. */
+    const addNote = (card, note) => {
+      if (note) card.appendChild(el('div', 'kpi-note', note));
+    };
+    /* Our own static footnote. Pinned to the card floor by CSS so a row of unequal-length
+       cards lines its captions up, and rendered at a different SIZE and COLOUR from the
+       data — not the same 11px at `opacity: .75` that made v2's coverage disclaimer look
+       like one more figure. */
+    const addCap = (card, text) => card.appendChild(el('div', 'kpi-cap', text));
+    /* The signed accent bar. Via `f.signClass`, which parses the Decimal STRING, rather
+       than `v > 0` (which coerces through a float) — same reason the rest of this layer
+       never does arithmetic on a money value. */
+    const sign = (card, v) => {
+      const cls = f.signClass(v);
+      if (cls === 'sign-up') card.classList.add('kpi-up');
+      if (cls === 'sign-down') card.classList.add('kpi-down');
+    };
+
+    /* 1 · 總市值 — the anchor, and the band's only unsigned figure. */
     {
-      const card = el('div', 'kpi-card kpi-hero');
-      const label = el('div', 'kpi-label', '總市值');
-      if (nil(k && k.total_market_value)) nilBadge(label, '匯率資料不足', '匯率不足');
-      card.appendChild(label);
+      const card = mkCard('hero', '總市值');
       const value = mkValue(k && k.total_market_value, (v) => f.money(v, ccy), false);
-      if (!nil(k && k.total_market_value)) value.appendChild(el('span', 'kpi-unit', ' ' + ccy));
+      if (!nil(k && k.total_market_value)) {
+        value.appendChild(el('span', 'kpi-unit', ' ' + ccy));
+      }
       card.appendChild(value);
-      band.appendChild(card);
+      if (nil(k && k.total_market_value)) addFlag(card, '匯率不足', '匯率資料不足');
     }
 
-    /* hero 2: 資產損益 (A) + 累計報酬率, then the FX-complete figure (B) and B-A beside it.
-       AI-D41: `total_return` applies today's spot to each currency's NET P&L, so the rate
-       never reaches the PRINCIPAL — the honest label says so. B (`total_return_fx_complete`)
-       is the trend's total_value - net_invested, where every flow was converted at ITS OWN
-       trade-date rate. B - A is the principal-FX effect, i.e. what the 換匯損益 card holds.
-       The three are DISPLAYED side by side and never summed: adding the 換匯損益 figure to A
-       double-counts the cross term (invariant I5's red line, applied to the figure it did
-       not cover). Every value is a server Decimal string; this layer only formats. */
+    /* 2 · 資產損益 (A). AI-D41: `total_return` applies today's spot to each currency's NET
+       P&L, so the rate never reaches the PRINCIPAL — the label says so. B and B−A sit in
+       總損益口徑 below, beside this figure and never added to it. */
     {
-      const card = el('div', 'kpi-card kpi-hero');
-      const label = el('div', 'kpi-label', '資產損益（不含本金匯率）');
-      if (nil(k && k.total_return)) nilBadge(label);
-      card.appendChild(label);
-      const value = mkValue(k && k.total_return, (v) => f.signed(v, ccy), true);
-      card.appendChild(value);
-      const sub = el('div', 'kpi-subline');
-      sub.appendChild(el('span', null, '累計報酬率'));
-      const rate = el('span', nil(k && k.total_return_rate) ? 'sign-nil' : f.signClass(k.total_return_rate),
-        nil(k && k.total_return_rate) ? f.NULL_GLYPH : f.signedPct(k.total_return_rate));
-      sub.appendChild(rate);
-      sub.appendChild(el('span', null, '· vs 原始投入成本'));
-      card.appendChild(sub);
-      /* The B line renders whenever the server had anything to say about it — the VALUE when
-         it could be measured, otherwise「—」plus the server's reason (owner ruling 2026-08-25).
-         A row that silently disappears is indistinguishable from a feature that was never
-         built, and B is absent on any day a held symbol lacks a price, which is not rare.
-         Still tolerant of an OLDER payload (canned e2e fixtures, a stale snapshot): with
-         neither the value nor a reason present, nothing renders — the pre-AI-D41 behaviour. */
-      const hasB = !nil(k && k.total_return_fx_complete);
-      if (hasB || (k && k.fx_complete_reason)) {
-        const fxs = el('div', 'kpi-subline');
-        fxs.appendChild(el('span', null, '含匯兌總損益'));
-        if (hasB) {
-          fxs.appendChild(el('span', f.signClass(k.total_return_fx_complete),
-            f.signed(k.total_return_fx_complete, ccy)));
-          if (!nil(k.principal_fx_effect)) {
-            fxs.appendChild(el('span', null, '· 其中本金匯率效果'));
-            fxs.appendChild(el('span', f.signClass(k.principal_fx_effect),
-              f.signed(k.principal_fx_effect, ccy)));
-          }
-        } else {
-          fxs.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
-        }
-        card.appendChild(fxs);
-        /* AI-D48's third term, on its OWN subline rather than appended to the one above.
-           B = A + 本金匯率效果 + 交易與融資成本, so the cost is shown beside the FX effect
-           instead of hiding inside it — a residual labelled 本金匯率效果 that silently carries
-           broker fees is the mislabelling AI-D48 removed. Its own row because a third segment
-           on that line pushed the dashboard into horizontal scroll at 768px (caught by
-           test_no_horizontal_scroll), and because the owner's 群益 account books a rebate every
-           month, so this is the NORMAL case, not an edge one.
-           ZERO is not rendered at all: a ledger with no rebate / margin interest / broker fee
-           has nothing to disclose, and 「交易與融資成本 $0」 on every such account is noise.
-           `sign-nil` covers an older payload without the field (canned e2e fixtures). */
-        const tfc = k && k.trading_financing_cost;
-        const tfcSign = f.signClass(tfc);
-        if (hasB && tfcSign !== 'sign-nil' && tfcSign !== 'sign-flat') {
-          const cost = el('div', 'kpi-subline');
-          cost.appendChild(el('span', null, '· 交易與融資成本'));
-          cost.appendChild(el('span', tfcSign, f.signed(tfc, ccy)));
-          card.appendChild(cost);
-        }
-        if (!hasB) {
-          /* Server-authored wording, rendered verbatim — this layer never composes a reason. */
-          const why = el('div', 'kpi-subline', k.fx_complete_reason);
-          why.style.opacity = '.75';
-          card.appendChild(why);
-        }
-      }
-      /* R4 / AI-D43 — the index counterfactual, on the SAME line as B because it is the
-         figure it is measured against (AI-D41: subtracting it from A would contrast two
-         different treatments of the principal's FX and call the difference skill).
-         Every number is server-computed; this layer never names an index and never
-         subtracts. Tolerates an older payload (canned e2e fixtures): absent -> nothing. */
-      const bm = D.benchmark || null;
-      if (bm) {
-        const row = el('div', 'kpi-subline');
-        if (bm.available && !nil(bm.benchmark_return)) {
-          const names = (bm.by_market || []).map((m) => m.label).join('／');
-          row.appendChild(el('span', null, '同期買' + (names || '指數')));
-          row.appendChild(el('span', f.signClass(bm.benchmark_return),
-            f.signed(bm.benchmark_return, ccy)));
-          if (!nil(bm.excess)) {
-            /* Partial coverage must NOT print a bare 「超額」 — the same discipline as
-               covered_ratio: the label degrades, the number is not silently generalised. */
-            const partial = !nil(bm.uncovered_ratio) && Number(bm.uncovered_ratio) > 0;
-            row.appendChild(el('span', null, partial ? '· 差額（部分涵蓋）' : '· 差額'));
-            row.appendChild(el('span', f.signClass(bm.excess), f.signed(bm.excess, ccy)));
-          }
-          card.appendChild(row);
-          if (!nil(bm.uncovered_ratio) && Number(bm.uncovered_ratio) > 0) {
-            const note = el('div', 'kpi-subline',
-              (bm.uncovered_markets || []).join('／') + ' 無對應指數，'
-              + f.pct(bm.uncovered_ratio) + ' 的投入金額未納入比較');
-            note.style.opacity = '.75';
-            card.appendChild(note);
-          }
-        } else if (bm.reason) {
-          row.appendChild(el('span', null, '同期買指數'));
-          row.appendChild(el('span', 'sign-nil', f.NULL_GLYPH));
-          card.appendChild(row);
-          const why = el('div', 'kpi-subline', bm.reason);   /* server-authored, verbatim */
-          why.style.opacity = '.75';
-          card.appendChild(why);
-        }
-      }
-      if (!nil(k && k.total_return)) {
-        if (k.total_return > 0) card.classList.add('kpi-up');
-        if (k.total_return < 0) card.classList.add('kpi-down');
-      }
-      band.appendChild(card);
+      const card = mkCard('hero', '資產損益（不含本金匯率）');
+      card.appendChild(mkValue(k && k.total_return, (v) => f.signed(v, ccy), true));
+      if (nil(k && k.total_return)) addFlag(card, '資料不足');
+      addRow(card, '累計報酬率', k && k.total_return_rate,
+        { sub: '對原始投入成本', pct: true });
+      addCap(card, '拆解、匯率口徑與指數對照見下列。');
+      sign(card, k && k.total_return);
     }
 
-    /* hero 3: XIRR */
+    /* 3 · 年化報酬 (XIRR) — the decision metric, so it is the card that goes full width
+       first when the band folds (`kpi-wide-sm`, <=860px). */
     {
-      const card = el('div', 'kpi-card kpi-hero');
-      const label = el('div', 'kpi-label', '年化報酬 (XIRR)');
+      const card = mkCard('hero', '年化報酬 (XIRR)', 'kpi-wide-sm');
       const xirrNil = nil(k && k.xirr);
-      /* short badge, full reason in the tooltip (the 資料新鮮度 panel prints it in full). */
-      if (xirrNil) nilBadge(label, (D.freshness && D.freshness.xirr_unavailable_reason) || '資料不足');
+      card.appendChild(mkValue(k && k.xirr, f.signedPct, true));
+      /* short flag, full reason in the tooltip (the 資料新鮮度 panel prints it in full). */
+      if (xirrNil) {
+        addFlag(card, '資料不足',
+          (D.freshness && D.freshness.xirr_unavailable_reason) || '資料不足');
+      }
       /* Short-window confidence hint: XIRR annualizes, so a sub-year observation window
          makes the figure volatile. window_days is a plain count (not money) — safe to
          compare/render directly. Only shown when an XIRR value is present. */
       const xirrWin = k && k.xirr_window_days;
       if (!xirrNil && xirrWin !== null && xirrWin !== undefined && xirrWin < 365) {
-        const wb = el('span', 'badge badge-window-mini', '觀察期 ' + xirrWin + ' 天・短窗參考');
-        wb.title = '觀察期不足一年，年化 XIRR 波動較大，僅供參考。';
-        label.appendChild(wb);
+        addFlag(card, '觀察期 ' + xirrWin + ' 天・短窗參考',
+          '觀察期不足一年，年化 XIRR 波動較大，僅供參考。', 'badge-window-mini');
       }
-      card.appendChild(label);
-      const value = mkValue(k && k.xirr, f.signedPct, true);
-      card.appendChild(value);
-      const sub = el('div', 'kpi-subline');
-      sub.appendChild(el('span', null, '資金加權・FX-aware・決策主指標'));
-      card.appendChild(sub);
-      if (!xirrNil) {
-        if (k.xirr > 0) card.classList.add('kpi-up');
-        if (k.xirr < 0) card.classList.add('kpi-down');
-      }
-      band.appendChild(card);
+      addCap(card, '資金加權・FX-aware・決策主指標');
+      sign(card, k && k.xirr);
     }
 
-    /* combo helper. `note` is a SERVER-authored line rendered verbatim under the rows —
-       it is how a PARTIAL total says it is partial (QA-02), so it must show even when the
-       values themselves are present. This layer never composes it and never sums. */
-    const combo = (title, rows, note) => {
-      const card = el('div', 'kpi-card kpi-combo');
-      const label = el('div', 'kpi-label', title);
-      card.appendChild(label);
-      rows.forEach(([rk, v, reason]) => {
-        const row = el('div', 'combo-row');
-        row.appendChild(el('span', 'k', rk));
-        const vv = el('span', 'v');
-        if (nil(v)) {
-          vv.textContent = f.NULL_GLYPH;
-          vv.classList.add('sign-nil');
-          vv.title = reason || '資料不足';
-        } else {
-          vv.textContent = f.signed(v, ccy);
-          vv.classList.add(f.signClass(v));
-        }
-        row.appendChild(vv);
-        card.appendChild(row);
-      });
-      if (note) {
-        const why = el('div', 'kpi-subline', note);
-        why.style.opacity = '.75';
-        card.appendChild(why);
-      }
-      return card;
-    };
-    band.appendChild(combo('損益（' + ccy + '）', [
-      ['已實現', k && k.realized_total],
-      ['未實現', k && k.unrealized_total]
-    ]));
-    /* Two DIFFERENT server reasons, and the FX card must show whichever exists:
+    /* 4 · 損益拆解 — the two halves of card 2's figure. They were a whole card away from it
+       in v2, with XIRR in between, so the identity was invisible; the caption states it
+       rather than printing the sum again. */
+    {
+      const card = mkCard('detail', '損益拆解（' + ccy + '）');
+      addRow(card, '已實現', k && k.realized_total);
+      addRow(card, '未實現', k && k.unrealized_total);
+      addCap(card, '兩者合計即上方「資產損益」。');
+    }
+
+    /* 5 · 換匯損益 — an attribution breakdown of the reporting-currency result, never an
+       extra gain added on top of it (`domain-ledger.md`); the caption says so on the card.
+       Two DIFFERENT server reasons, and this card must show whichever exists:
        `fx.reporting_unavailable_reason` = the rollup ran but SOME account could not be
        expressed in the reporting currency (the figures below are real but partial);
        `freshness.fx_unavailable_reason` = the whole section failed and both figures are
        null. Before QA-01/QA-02 neither existed, so a partial total and a vanished one both
        rendered as a bare number / a bare 「—」 with nothing to explain them. */
-    const fxWhy = (D.fx && D.fx.reporting_unavailable_reason)
-      || (D.freshness && D.freshness.fx_unavailable_reason) || null;
-    band.appendChild(combo('換匯損益（歸因拆分）', [
-      ['已實現', k && k.fx_realized, fxWhy || '匯率資料不足'],
-      ['未實現', k && k.fx_unrealized, fxWhy || '匯率資料不足']
-    ], fxWhy));
+    {
+      const fxWhy = (D.fx && D.fx.reporting_unavailable_reason)
+        || (D.freshness && D.freshness.fx_unavailable_reason) || null;
+      const card = mkCard('detail', '換匯損益（歸因拆分）');
+      addRow(card, '已實現', k && k.fx_realized, { reason: fxWhy || '匯率資料不足' });
+      addRow(card, '未實現', k && k.fx_unrealized, { reason: fxWhy || '匯率資料不足' });
+      addNote(card, fxWhy);
+      addCap(card, '外幣部位的歸因拆分，不與損益相加。');
+    }
+
+    /* 6 · 總損益口徑 — B (`total_return_fx_complete`) and the two terms that separate it
+       from A. AI-D48: B = A + 本金匯率效果 + 交易與融資成本, so the broker cost is shown
+       BESIDE the FX effect rather than hiding inside a residual labelled 本金匯率效果.
+       The B row renders whenever the server had anything to say about it — the value when
+       it could be measured, otherwise 「—」 plus the server's reason (owner ruling
+       2026-08-25: a row that silently disappears is indistinguishable from a feature that
+       was never built, and B is absent on any day a held symbol lacks a price).
+       ZERO trading cost renders NOTHING: a ledger with no rebate / margin interest / broker
+       fee has nothing to disclose, and 「交易與融資成本 $0」 on every such account is noise.
+       `sign-nil` covers an older payload without the field (canned e2e fixtures). */
+    {
+      const card = mkCard('detail', '總損益口徑', 'kpi-wide-xs');
+      const hasB = !nil(k && k.total_return_fx_complete);
+      addRow(card, '含匯兌總損益', k && k.total_return_fx_complete,
+        { reason: (k && k.fx_complete_reason) || '資料不足' });
+      if (hasB && !nil(k.principal_fx_effect)) {
+        addRow(card, '本金匯率效果', k.principal_fx_effect, { indent: true, wi: true });
+      }
+      const tfc = k && k.trading_financing_cost;
+      const tfcSign = f.signClass(tfc);
+      if (hasB && tfcSign !== 'sign-nil' && tfcSign !== 'sign-flat') {
+        addRow(card, '交易與融資成本', tfc, { indent: true, wi: true });
+      }
+      if (!hasB) addNote(card, k && k.fx_complete_reason);
+      addCap(card, '與上方「資產損益」並列呈現，不相加。');
+    }
+
+    /* 7 · 指數對照 — R4 / AI-D43, the counterfactual A is measured against. Every number is
+       server-computed; this layer never names an index and never subtracts.
+       Partial coverage must NOT print a bare 「差額」 — the same discipline as covered_ratio:
+       the LABEL degrades and the caption names the markets left out. v2 said that in a
+       parenthetical and a full sentence at the same weight as the data; here the
+       degradation is the key's own qualifier and the sentence is a caption, but neither the
+       wording nor the rule has changed.
+       Tolerates an older payload with no `benchmark` at all (canned e2e fixtures): the card
+       still renders, with 「—」 — the 2026-08-25 ruling applied to the card as well as the
+       row. */
+    {
+      const card = mkCard('detail', '指數對照', 'kpi-wide-xs');
+      const bm = D.benchmark || null;
+      const ok = !!(bm && bm.available && !nil(bm.benchmark_return));
+      const why = (bm && bm.reason) || '資料不足';
+      const partial = ok && !nil(bm.uncovered_ratio) && Number(bm.uncovered_ratio) > 0;
+      addRow(card, '同期指數', ok ? bm.benchmark_return : null,
+        { sub: ok ? ((bm.by_market || []).map((m) => m.label).join('／') || null) : null,
+          reason: why });
+      addRow(card, '差額', (ok && !nil(bm.excess)) ? bm.excess : null,
+        { sub: partial ? '部分涵蓋' : null, reason: why });
+      if (!ok) addNote(card, bm && bm.reason);   /* server-authored, verbatim */
+      if (partial) {
+        addCap(card, (bm.uncovered_markets || []).join('／') + ' 無對應指數，'
+          + f.pct(bm.uncovered_ratio) + ' 的投入金額未納入比較');
+      }
+    }
   }
 
   /* ============ B2. 各幣別報酬拆分 ============ */
