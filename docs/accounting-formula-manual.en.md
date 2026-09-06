@@ -11,7 +11,7 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.8` (2026-08-13)
+> **Version**: `v1.10` (2026-09-06)
 > **Code baseline**: `v0.1.28 + feat/corporate-actions` (corporate actions
 > SPLIT / EXCHANGE / SPINOFF; incl. the 2026-08-13 **seven cash-movement kinds / two-axis
 > table** and the **US cash dividend, P1b**)
@@ -981,6 +981,24 @@ an explicit rule for the three new kinds by owner ruling **D1 = A** on 2026-08-1
 that really happened and is invisible to every return metric — it can merely now be booked
 under its own name instead of disguised as a withdrawal.
 
+> **⚠ The XIRR part of this limitation was partially superseded by AI-D42 on 2026-08-24 — the
+> original text above is kept in full, because "why it was decided that way" is itself part of
+> the record.** What changed: the three kinds `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` (the
+> **costs of trading and financing**) now enter `xirr_reporting`'s flow series. What did NOT
+> change is the very case this limitation names — a reorganisation fee booked as `WITHDRAW` (a
+> capital movement) still stays out of XIRR under AI-D42, so limitation 2's concrete conclusion
+> stands as written. `DEPOSIT` / `WITHDRAW` / `OPENING` all remain excluded (admitting them would
+> quietly turn XIRR from "the return on money put into securities" into an account return — a
+> different metric); `INTEREST` (interest on idle cash) is excluded too, because the principal
+> that earns it never entered XIRR's denominator, and crediting only its yield to the numerator
+> is asymmetric.
+> **The reason for the supersession, in this paragraph's own words**: the text above says "a
+> `BROKER_FEE` is likewise an amount that really happened and is invisible to every return
+> metric" — the manual had already recorded this as a blind spot, and D45 retired the
+> whole-account IRR that was meant to cover it. AI-D42 fills the gap the manual itself named.
+> Magnitude: FE-D1's 77% rebate is **0.229% of capital per round trip**, and it is the owner's
+> broker's normal billing.
+
 > **Rewritten 2026-08-11 (D45).** The previous version said this was "no longer a permanent
 > blind spot", on the ground that D36 would add a **whole-account IRR** in `portfolio/twr.py`
 > which *does* see a `WITHDRAW`. **The owner has retired D36 (D45, 2026-08-11) and it was
@@ -1464,7 +1482,9 @@ value at the **current spot**. Cash-flow signs:
 | sell | **+** | `+(quantity×price − fees − tax)`, date = `trade_date` |
 | cash dividend (TW `CASH` / MY `NET`) | **+** | `+net`, date = dividend date |
 | **DRIP / STOCK** | **neutral** | not included (not an external cash flow; reinvest is not a − outflow, dividend not a + inflow) |
-| **cash movements (all seven `cash_movements` kinds)** | **not included** | **absent from the flow series entirely** (see D1=A below) |
+| **cash movement — `REBATE`** | **+** | `+amount`, date = the cash row's date (AI-D42) |
+| **cash movement — `INTEREST_EXPENSE` / `BROKER_FEE`** | **−** | `−amount`, date = the cash row's date (AI-D42) |
+| **cash movement — `DEPOSIT` / `WITHDRAW` / `OPENING` / `INTEREST`** | **not included** | the first three are **capital movements** (admitting them turns XIRR into an account return); `INTEREST`'s principal never entered the denominator |
 | opening inventory | **−** | `−original_cost_total`, date = **`build_date`** (so opening capital is counted) |
 | terminal market value | **+** | `Σ price×shares` (each holding), date = `as_of` |
 
@@ -1486,14 +1506,33 @@ terminal value can be formed → returns `None` (no partial degradation); no sig
 > `None` (`corp.xirr_blanked_by_unapplied`, `phase1:corp_refused`).
 >
 > **The reorganisation fee (D12) is invisible to XIRR by design — and no second metric sees it
-> either (D45, 2026-08-11).** The flow series above is built from `opening` + `transactions` +
-> `dividends` **only**, so cash movements (including a reorganisation fee booked as `WITHDRAW`)
-> never reach XIRR; XIRR is **deliberately left untouched** so that every anchored historical
-> figure in this manual stays where it is. This paragraph previously said the fee "surfaces in a
-> whole-account IRR instead" — **that metric (D36) was retired by the owner and never
-> implemented**, so the sentence is deleted rather than softened to "pending". It is a
-> **standing limitation**; full treatment in §4.4.7, limitation 2.
+> either (D45, 2026-08-11).**
+> ⚠ **This paragraph's premise was partially superseded by AI-D42 on 2026-08-24; its conclusion
+> is unchanged.** The flow series now also carries the three **costs of trading and financing**
+> (`REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE`, see the table above); the reorganisation fee,
+> however, is a **capital movement** booked as `WITHDRAW` and is still not in the series, so "the
+> reorganisation fee is invisible to XIRR" holds as written. The original text is preserved in
+> §4.4.7, limitation 2, together with the reason for the supersession. ⚠ Anchored XIRR figures
+> **do** move with the three new flows (wherever a ledger holds such cash rows) — the oracle and
+> the anchors move with them; that is the price AI-D42 explicitly accepted.
+> This paragraph previously said the fee "surfaces in a whole-account IRR instead" — **that
+> metric (D36) was retired by the owner and never implemented**, so the sentence is deleted
+> rather than softened to "pending". It is a **standing limitation**; full treatment in §4.4.7,
+> limitation 2.
 
+> **⚠ This paragraph (D1 = A) was superseded by AI-D42 on 2026-08-24 — the original text is kept
+> in full below, because "why it was decided that way" is itself part of the record (the
+> supersession marker was added 2026-09-06, v1.10).** Since AI-D42, `REBATE` / `INTEREST_EXPENSE`
+> / `BROKER_FEE` **are** XIRR flows (see the table above); `DEPOSIT` / `WITHDRAW` / `OPENING`
+> (capital movements) and `INTEREST` (interest on idle cash) **still are not**. The sentences
+> below — "`xirr_reporting` **does not take `cash_movements` in its signature at all**" and the
+> verification anchor "no `cash_movements` parameter" — **are no longer true**:
+> `portfolio/returns.py::xirr_reporting` now takes a **required** keyword argument
+> `cash_movements` (no default, deliberately — a default would let a caller silently fall back
+> to the pre-AI-D42 definition), and the flow series is `opening` + `transactions` + `dividends`
+> + the three `XIRR_CASH_KINDS`. "No number changes because of this" likewise held only under
+> D1 = A; AI-D42 explicitly accepted that anchors move (§4.4.7 limitation 2 banner).
+>
 > **No cash movement enters XIRR — including the three added on 2026-08-13 (owner ruling
 > D1 = option A, 2026-08-13).** There are now **seven** cash-movement kinds (§9.1.1); the new
 > `INTEREST` (interest earned), `INTEREST_EXPENSE` (margin interest) and `BROKER_FEE` are **no
@@ -1692,7 +1731,29 @@ day**, two series per day (reporting currency):
 - **Cumulative net invested `net_invested`**: the flow accumulation up to that day, with
   **signs opposite to XIRR (§7.2's negative sign)**: opening `+original_cost_total`, buy
   `+(qty×price+fees+tax)`, sell `−(qty×price−fees−tax)`, cash dividend (CASH/NET) `−net`;
-  DRIP/STOCK neutral. Each flow is converted at **its date's carry-forward FX**.
+  DRIP/STOCK neutral. **Since AI-D48 (2026-08-27) the three cash-movement kinds are taken
+  too**: `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` — the same "costs of trading and
+  financing" §7.2's XIRR takes — as $-\operatorname{sign}(\text{kind})\times \text{amount}$
+  (`sign` from the `credit` axis of `shared/cash_kinds.py`, then negated for this series'
+  opposite sign convention), so **a broker fee / margin interest RAISES** `net_invested` (as a
+  buy-side fee does) and **a rebate LOWERS** it. `DEPOSIT` / `WITHDRAW` / `OPENING` (capital
+  movements) and `INTEREST` (interest on idle cash) are **not taken**, for the reasons stated
+  verbatim in §7.2. Each flow is converted at **its date's carry-forward FX**.
+
+  > **Why this rule is still needed after AI-D42**: A and B are **printed side by side on the
+  > same KPI band** (§7.1a), and their difference is labelled 「本金匯率效果」 (the principal FX
+  > effect). AI-D42 moved only XIRR onto the three kinds, so from 2026-08-24 that label was no
+  > longer true — the difference was really "principal FX effect + three cash-movement kinds".
+  > R4's benchmark comparison then takes its `excess` against B, so a broker fee B could not see
+  > would have read as "beat the market".
+  >
+  > **AI-D49 — the benchmark leg does NOT take the three kinds**: a cash-movement flow has
+  > `market = None`, and `benchmark_counterfactual.counterfactual()` excludes it from **both
+  > legs** and from `uncovered_ratio` as well (that ratio means "how much money has no
+  > benchmark", not "how much money was never meant to buy an index"). Result: the costs of
+  > trading and financing are charged to the portfolio leg, and the index leg does not pay them
+  > on its behalf — consistent with the literal question "the same money, on the same dates,
+  > in the index instead".
 
 If any flow date has no "on-or-before" FX → the whole series `available = False` (consistent
 with §7.2 XIRR's all-or-nothing).
@@ -2001,8 +2062,11 @@ money-of-record figures, neither of which raises.**
 > the oracle already carries its own independent `DEBIT_KINDS` / `ACQUIRING_KINDS`
 > (`scripts/stress_audit/oracle.py`) waiting for the scenario. Recommended for the next
 > adversarial round.
-> **They reach no return metric**: **all seven** kinds are excluded from XIRR (owner ruling
-> **D1 = A**, 2026-08-13; see §7.2).
+> **Only three kinds reach a return metric (AI-D42, 2026-08-24; this sentence synchronized
+> 2026-09-06)**: `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` are XIRR flows (and, since AI-D48,
+> flows of the net-value trend's `net_invested` as well); `DEPOSIT` / `WITHDRAW` / `OPENING` /
+> `INTEREST` are not (see §7.2). This sentence previously read "**all seven** kinds are excluded
+> from XIRR (owner ruling D1 = A, 2026-08-13)" — a leftover from before AI-D42 superseded D1 = A.
 
 ### 9.2 Running-Balance Statement and Same-Day Ordering
 
@@ -2411,6 +2475,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.7a` | 2026-08-11 | **D45 — the owner retired D36 (the whole-account IRR).** §4.4.7 limitation 2 and the §7 XIRR note are both rewritten: the reorganisation fee (D12) was documented as "invisible to XIRR but visible in the whole-account IRR", and that second metric is withdrawn and was never implemented, so D12 reverts to a **standing limitation** — the fee is invisible to every return metric this system has and surfaces only in the cash ledger and net worth. **No figure changed** (XIRR never included cash movements); what changed is the statement of the limitation: promising a fix that never arrives is worse than stating the blind spot plainly |
 | `v1.8` | 2026-08-13 | **Seven cash-movement kinds / a two-axis table + the US cash dividend (P1b)** (owner ruling **D1 = A**, 2026-08-13; D35, 2026-08-10). ① **New §9.1.1**: cash movements go from four kinds to **seven** (adding `INTEREST`, `INTEREST_EXPENSE`, `BROKER_FEE`), governed by the single table in `shared/cash_kinds.py` on **two orthogonal axes** — `credit` (does it increase the pool balance?) and `fx_acquisition` (does it enter `covered_ratio`'s denominator?). The old predicate — "`kind == \"WITHDRAW\"` is the only debit, everything else is an acquiring credit" — would make a `BROKER_FEE` **increase** the cash balance **and** drag `covered_ratio` down (two wrong money-of-record figures, neither of which raises); `INTEREST` is the row that proves one boolean was never enough — **a credit that is not an acquisition**. ② **§8.1 gains the second axis as a rule**: the denominator admits acquiring kinds only, while income arising inside the pool (interest, like sale proceeds and foreign cash dividends) **inherits the pool average**; otherwise a USD account that never converted a cent would report `covered_ratio < 1` for merely earning interest and would flag the whole cash *and* stock exposure as basis-incomplete under F3 (**a false alarm on every real account**). The input door accordingly rejects an acquisition cost on interest/fees with `acq_cost_not_an_acquisition`. ③ **§7.2 gains an explicit rule**: **all seven kinds are excluded from XIRR** (D1=A) — `xirr_reporting` does not take `cash_movements` in its signature at all, and the flow series is still `opening` + `transactions` + `dividends`. The rejected option B would change the meaning of every historical XIRR; option C was rejected on sight because most of these rows **have no symbol**. ④ **§9.3 records that the guard did NOT expand**: the `running_min` withdrawal guard and N1's foreign-withdrawal advisory remain keyed on `WITHDRAW` **alone** — a withdrawal is the user's **intention** (worth blocking), a fee or margin interest is a **recorded fact**, and a margin account legitimately runs a negative cash balance. ⑤ **New §6.2b**: the `drip_us` model accepts both `DRIP` and `CASH` from P1b, removing the per-row `dividend_type_mismatch` soft block; a US cash dividend reduces `adjusted_total` exactly as TW/MY cash does (**D35** — anchored here, not re-decided), **withholding is typed by the user rather than derived from `gross × 0.30`** (the broker's own cent rounding will not match the product), and a blank withholding on `drip_us` raises the soft `us_cash_dividend_no_withholding` question **without altering the row**. §6's preamble and §6.3b are updated to say their scope is all of `CASH_DIVIDEND_TYPES`. ⑥ **§4.4.7 limitation 2 corrected in place**: it said "only four kinds, only `WITHDRAW` is a debit (`api/routers/cash.py::_KINDS`)" — that constant no longer exists; it now cites `CASH_MOVEMENT_KINDS`. D12's conclusion is **unchanged** and is reconfirmed by D1=A. ⑦ Added §12.1 **E25 / E26** and four §12.2 glossary rows. **No existing figure changed**: the three new kinds never entered any return flow series, and a ledger whose `covered_ratio` is 1 still skips the multiply, so every worked anchor in this manual and every stress-audit oracle expectation stays where it is. ⑧ **The stress scenario was extended in the same version**: phase-1 gains ops 50-52 (`INTEREST` / `INTEREST_EXPENSE` / `BROKER_FEE` on `schwab`'s USD pool) and one `schwab/AAPL` `CASH` dividend; the run is **122 ops, 3,799/3,799, 0 fail**. The oracle's `DEBIT_KINDS` / `ACQUIRING_KINDS` are written independently of the app's table, so the agreement is not one definition confirming itself. The earlier 'hermetic anchors only' status is lifted. Mirror regenerated in the same change set. |
 | `v1.9` | 2026-08-29 | **§9.3 guard semantics synchronized to the implementation (FU-D43a / FU-D34)** (QA R1 BUG-02; baseline `v0.1.28 + staged`). §9.3 still read "hard guard on cash gates (deposit/withdraw, fx.convert) = `running_min < 0` and not `ack_negative` → 422 `negative_cash`" — contradicting the implementation and the very tests the section cites: a **withdrawal** is hard-refused **422 `withdraw_insufficient_balance` (FU-D43a: `ack_negative` cannot bypass it, no financing)** and an **fx conversion** is hard-refused **422 `fx_insufficient_balance` (FU-D34, 需求五: no ack, no financing)**; both run the double check "end balance + date-aware dip", are batch-aware (a CSV file's rows are each other's siblings; the fx batch = the structurally-valid **and** selected rows), and share the pre-existing-dip rule (`after.low < min(before.low, 0)` — a dip the row does not deepen never blocks). Credit kinds still get no balance check on the way in (§9.1.1, unchanged). `negative_cash` + `ack_negative` survives **only** on the funding-shrinking correction gates (PUT / DELETE of a cash movement, DELETE of a conversion — date-aware `running_min`, **all affected pools**: an edit's old + new (account, ccy), both legs of a deleted conversion). §9.3 rewritten accordingly (three classes: hard write gates / ack-able correction gates / soft transaction gate) with fx-side and correction-gate verification anchors added; §12.1 E16 wording narrowed to match. Arbitration consequence: under the old text a §1.1 arbitration of a refused withdrawal would have concluded the app was wrong — from this version the implemented semantics (owner-signed docstring rulings + the tests §9.3 cites) govern. Mirror regenerated in the same change set. **No formula or accounting-definition change — a documentation sync of guard semantics only.** |
+| `v1.10` | 2026-09-06 | **§7.2 / §9.1.1 D1 = A leftovers synchronized to AI-D42** (QA DOC-02; baseline `v0.1.28 + feat/corporate-actions`). AI-D42 (2026-08-24) admitted `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` into XIRR (the §7.2 table and the §4.4.7 banner were updated then), but the whole "D1 = A" paragraph of §7.2 ("does not take `cash_movements` in its signature at all", verification anchor "no `cash_movements` parameter") and §9.1.1's "all seven kinds are excluded from XIRR" carried **no supersession marker** and contradicted the table directly above them; `portfolio/returns.py::xirr_reporting` in fact takes a **required** keyword argument `cash_movements` (no default, deliberately). This version: ① a supersession banner on the §7.2 D1 = A paragraph (original text kept in full); ② the §9.1.1 sentence rewritten as three-in / four-out; ③ **`INTEREST` stays out of XIRR — reconfirmed** (measured: adding one `INTEREST` 500 USD row leaves XIRR byte-identical at `0.3336061959279546`; the `BROKER_FEE` 500 USD control moves it to `0.33285721007646424`), and the one passage in the engineering rule file `.claude/rules/domain-ledger.md` that listed `INTEREST` as a flow is corrected (the only inverted statement in the repository; the `CASH_KIND_TABLE.credit` it cited does not exist — the real name is `shared/cash_kinds.py::movement_sign`). This mirror had not received AI-D42 since v1.8 (`grep -c AI-D42` = 0): regenerated in the same change set — the §4.4.7 banner, the §7.2 table and its two banners, the §7.6 AI-D48 / AI-D49 passage, the §9.1.1 sentence and the version record. **No formula or accounting definition changed; no figure moved.** |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

@@ -109,9 +109,14 @@
   const GRACE_MS = 6000;
 
   /* Run-history status -> [pill class, zh label]. Shared by the history table so a
-     'running'/'skipped' row is not miscoloured as 失敗 (unmapped -> 失敗). */
+     'running'/'skipped' row is not miscoloured as 失敗 (unmapped -> 失敗).
+     'partial' (M10-02): a quote refresh that lost a HELD symbol, or an insight run that
+     stopped part-way — the class + label are pipeline.js's statusPill() pair, copied
+     verbatim so one run reads the same word on both pages (it used to read 失敗 here,
+     部分 there, and 完成 in the drawer). */
   const HIST_STATUS = {
     ok: ['pill-ok', '成功'],
+    partial: ['pill-warn', '部分'],
     running: ['pill-run', '執行中'],
     skipped: ['pill-off', '略過'],
   };
@@ -186,6 +191,7 @@
     const ok = lr.ok === true || status === 'ok';
     let cls = 'pill-fail', label = '失敗';
     if (status === 'skipped') { cls = 'pill-off'; label = '略過'; }
+    else if (status === 'partial') { cls = 'pill-warn'; label = '部分'; }  /* M10-02: pipeline.js's pair; ok=false but not 失敗 */
     else if (ok) { cls = 'pill-ok'; label = '成功'; }
     const metaRow = el('div');
     metaRow.style.display = 'flex';
@@ -302,6 +308,7 @@
     const msg = lr.message || lr.detail || '';
     let cls = 'pill-fail', label = '失敗';
     if (status === 'skipped') { cls = 'pill-off'; label = '略過'; }
+    else if (status === 'partial') { cls = 'pill-warn'; label = '部分'; }  /* M10-02: pipeline.js's pair; ok=false but not 失敗 */
     else if (ok) { cls = 'pill-ok'; label = '成功'; }
     const pill = _pill(cls, label);
     pill.title = msg ? msg + '（點擊查看詳情）' : '點擊查看詳情';
@@ -453,7 +460,10 @@
         tdLast.appendChild(sp);
       } else {
         const lastWrap = el('span', 'last-run');
-        const dot = el('span', 'run-dot ' + (j.last.status === 'ok' ? 'dot-ok' : 'dot-err'));
+        /* M10-02: a partial run is amber, like its pill — .dot-warn (settings.html) carries the
+           same --amber token .pill-warn uses. */
+        const dot = el('span', 'run-dot ' + (j.last.status === 'ok' ? 'dot-ok'
+          : j.last.status === 'partial' ? 'dot-warn' : 'dot-err'));
         lastWrap.appendChild(dot);
         lastWrap.appendChild(el('span', 'num', f.datetime(j.last.at)));
         if (j.last.detail) lastWrap.title = j.last.detail;

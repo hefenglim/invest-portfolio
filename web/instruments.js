@@ -12,6 +12,12 @@
   /* D.list is mutable: starts empty (any pre-fetch render shows a blank table)
      and is replaced by the fetched rows once GET /api/instruments resolves. */
   let D = { list: [] };
+  /* M6-04: render() cannot tell the six ways the table ends up empty apart from D.list
+     alone — an empty list BEFORE the first fetch, or after a FAILED one, is not 「尚無標的」,
+     it is 「還不知道」. `listKnown` is true only while D.list is the server's answer; while
+     false the table stays blank (the fail toast already says why) and no empty state is
+     drawn, because a placeholder that says "nothing here" during loading is a lie. */
+  let listKnown = false;
   /* FU-D13: archived (停止追蹤) rows are hidden by default behind the toolbar toggle. */
   let showArchived = false;
   const f = window.fmt;
@@ -88,7 +94,10 @@
   function render(filter) {
     const tbody = $('#inst-body');
     tbody.replaceChildren();
-    const q = (filter || '').trim().toLowerCase();
+    const prior = document.getElementById('inst-empty');
+    if (prior) prior.remove();
+    const raw = (filter || '').trim();
+    const q = raw.toLowerCase();
     /* Toolbar toggle reflects how many archived rows exist; hidden entirely when none. */
     const archivedCount = D.list.filter((i) => i.archived).length;
     const toggle = $('#toggle-archived');
@@ -100,10 +109,9 @@
         ? '隱藏已移除／封存'
         : ('顯示已移除／封存 (' + archivedCount + ')');
     }
-    D.list
-      .filter((i) => showArchived || !i.archived)
-      .filter((i) => !q || i.symbol.toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q))
-      .forEach((i) => {
+    const matches = (i) => !q || i.symbol.toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q);
+    const visible = D.list.filter((i) => showArchived || !i.archived).filter(matches);
+    visible.forEach((i) => {
         const tr = el('tr');
         if (i.archived) tr.classList.add('inst-archived');
         const tdSym = el('td', 'col-text');
@@ -251,6 +259,27 @@
         tr.appendChild(tdAct);
         tbody.appendChild(tr);
       });
+    /* M6-04 empty states — a SIBLING after the <table> (a <div> inside <tbody> is invalid
+       HTML; the parser hoists it out of the table), reusing shell.js's `.search-empty`
+       treatment (「查無標的 — …」 in the symbol search). Two texts, by owner ruling:
+         • the list is genuinely empty         -> 尚無標的, and how to add one;
+         • rows exist but none is visible      -> 無符合的標的, naming the query when there is
+           one, and — whenever the hidden 已移除／封存 rows hold the hits (all-archived, or a
+           query that only they match) — how many, and the toggle that reveals them.
+       Neither is drawn while the list is unknown (see `listKnown`). */
+    if (listKnown && !visible.length) {
+      let text;
+      if (!D.list.length) {
+        text = '尚無標的 — 在上方「新增標的」輸入代號加入；持有標的會由交易自動註冊';
+      } else {
+        const hidden = showArchived ? 0 : D.list.filter((i) => i.archived && matches(i)).length;
+        text = '無符合' + (raw ? '「' + raw + '」' : '') + '的標的';
+        if (hidden) text += ' — 已移除／封存中有 ' + hidden + ' 筆符合，按「顯示已移除／封存」可查看';
+      }
+      const note = el('div', 'search-empty', text);
+      note.id = 'inst-empty';
+      tbody.closest('table').insertAdjacentElement('afterend', note);
+    }
   }
   /* ---- edit modal — now a THIN caller of the SHARED pdInstQuickAdd builder (Wave A1,
      mode:'edit'). ONE modal definition holds 名稱／產業／產業細分／板別(TW)／ETF／目標價下限/上限
@@ -442,11 +471,13 @@
       resp = await window.pdApi.get('/api/instruments');
     } catch (err) {
       D = { list: [] };
+      listKnown = false;  // M6-04: an unknown list is blank, never 「尚無標的」
       render($('#inst-search').value);
       if (window.toast) window.toast('標的清單載入失敗', 'fail', err && err.message ? err.message : undefined);
       return;
     }
     D = { list: (resp && resp.list) || [] };
+    listKnown = true;
     render($('#inst-search').value);
   }
 

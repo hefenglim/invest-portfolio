@@ -298,7 +298,15 @@ def check_budget(conn: sqlite3.Connection) -> None:
     """
     remaining = budget_remaining(conn)
     if remaining <= 0:
-        raise LLMBudgetExceeded(f"token budget exhausted (remaining ${remaining})")
+        # zh-TW at the RAISE SITE, because this text is what the owner reads. `api/errors.py`
+        # swaps a structural English message for a Chinese default (`_prefer_zh`) — but the AI
+        # door does not go through that handler: `data_ingestion/agents.py` catches LLMError
+        # and `api/routers/input_center.py` returns `error_body(kind, str(exc))` verbatim, so
+        # the 402 toast read "token budget exhausted (remaining $0)" directly beneath a
+        # degrade panel that already said 「AI 額度用盡」 (G-02, 2026-09-02). One raise site,
+        # one sentence, every consumer — and `_prefer_zh` forwards a Chinese text unchanged,
+        # so the remaining balance survives instead of collapsing to the generic default.
+        raise LLMBudgetExceeded(f"AI 額度用盡（剩餘 ${remaining}）— 補充額度後即可繼續使用")
 
 
 _PROVIDER_PREFIX = {

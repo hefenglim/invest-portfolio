@@ -93,7 +93,11 @@ def autoregister_spinoff_child(
     requires both ends of an action to share a quote currency, so inheriting is the only
     value that could pass validation anyway — it is a derivation, not an assumption. Name,
     sector and industry are left blank rather than copied: they are facts about a different
-    company, and a child carrying its parent's name is worse than one carrying none.
+    company, and a child carrying its parent's name is worse than one carrying none. **So is
+    the ETF flag** (NEW-21, 2026-09-06): it is left UNANSWERED (``etf_flag_unknown=True``), not
+    copied and not defaulted — the model default ``False/False`` reads as "answered: not an
+    ETF", which silenced AI-D40's ``etf_flag_unknown`` disclosure on a spun-off TW ETF's first
+    sell. Same posture as ``quick_register`` handed ``is_etf=None``.
 
     **No network call.** Registration must not be able to fail because a provider has not
     listed the child yet — which, for a spin-off, is the normal case on day one. The price
@@ -123,4 +127,9 @@ def spinoff_child_draft(parent: Instrument, child_symbol: str) -> Instrument:
     ✓ 成本不變 over a book built from different assumptions.
     """
     return Instrument(symbol=child_symbol, market=parent.market,
-                      quote_ccy=parent.quote_ccy, sector="", name="")
+                      quote_ccy=parent.quote_ccy, sector="", name="",
+                      # NEW-21: nobody has answered whether the CHILD is an ETF. Not inherited
+                      # (a fact about another company) and not the model's False default
+                      # (which means "answered: no") — the fee engine computes with False and
+                      # DISCLOSES it on a TW SELL, exactly as for a manual auto-registration.
+                      etf_flag_unknown=True)

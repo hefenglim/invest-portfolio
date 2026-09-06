@@ -41,7 +41,7 @@ def test_quotes_job_passes_market_worklist(
         return _Summary()
 
     monkeypatch.setattr(jobs_mod, "refresh_quotes", fake_refresh)
-    detail = quotes_us(conn, now=_NOW)
+    detail = quotes_us(conn, now=_NOW).detail  # M10-02: the job returns a JobOutcome
     assert captured["registry"] == "REG"
     assert captured["symbols"] == ["AAPL"]  # only US, not TW
     assert "1 ok" in detail and "0 failed" in detail

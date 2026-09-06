@@ -90,6 +90,7 @@ def _rich_pool() -> CashPoolFn:
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         return CashPool(balance=Decimal("999999999"), low=_ZERO)
 

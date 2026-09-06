@@ -22,7 +22,10 @@
   var f = window.fmt;
 
   /* fetched state (filled by boot()) */
-  var STATE = { tasks: [], health: null };
+  /* `loaded` (M7-01) = /api/insight-tasks/status has answered at least once. Distinguishes
+     「no data yet / the fetch failed」 from「the data says zero」, which the health row must
+     never conflate — see renderHealth. */
+  var STATE = { tasks: [], health: null, loaded: false };
 
   var $ = function (s) { return document.querySelector(s); };
   var el = function (tag, cls, text) {
@@ -172,6 +175,22 @@
       c.appendChild(el('div', 'pp-h-sub', sub));
       return c;
     };
+    /* M7-01: NO DATA IS NOT A VERDICT. init() paints this row once with an empty STATE
+       while /api/insight-tasks/status is in flight (~10s on a warm ledger), and refresh()'s
+       catch leaves STATE.health null after a failure. Every card below reads a field off
+       that empty object, and the quota card's `quota != null && Number(quota) < 1` is FALSE
+       for undefined — so the empty shell asserted 「額度充足」 on a GREEN dot, and 「0 個洞察
+       任務」, both contrary to fact, for as long as the fetch took. Saying nothing is worse
+       than nothing only when it is silent; saying the opposite is worse than both. Until the
+       status endpoint has answered, every card reports 「狀態未取得」 on the neutral dot —
+       true both before the first answer and after a failed one. The fetch LATENCY itself is
+       a separate, backlogged issue and is deliberately untouched here. */
+    if (!STATE.loaded) {
+      ['AI 大師模型', 'LLM 額度', '最近批次', '任務狀態'].forEach(function (label) {
+        wrap.appendChild(card(label, '—', '狀態未取得', 'idle'));
+      });
+      return;
+    }
     /* master role status */
     wrap.appendChild(card('AI 大師模型', h.master_ok ? '已設定' : '未設定',
       h.master_ok ? '回測評分・校正生成正常' : '回測評分與校正生成暫停', h.master_ok ? 'ok' : 'warn'));
@@ -632,18 +651,22 @@
   /* ================= boot / refresh ================= */
   function refresh() {
     if (!pdApi) {
-      STATE = { tasks: [], health: null };
+      STATE = { tasks: [], health: null, loaded: false };
       renderHealth(); renderFilterBar(); renderCards();
       return;
     }
     return pdApi.get('/api/insight-tasks/status').then(function (resp) {
       STATE.tasks = (resp && resp.tasks) || [];
       STATE.health = (resp && resp.health) || null;
+      /* M7-01: the ONLY place this flips true — an answer arrived. Both failure paths
+         above/below rebuild STATE without it, so a failed refresh drops back to 狀態未取得
+         rather than keeping the last render's assertions. */
+      STATE.loaded = true;
       renderHealth();
       renderFilterBar();
       renderCards();
     }).catch(function () {
-      STATE = { tasks: [], health: null };
+      STATE = { tasks: [], health: null, loaded: false };
       renderHealth(); renderFilterBar(); renderCards();
       if (window.toast) window.toast('任務狀態載入失敗', 'fail', '已顯示空狀態');
     });

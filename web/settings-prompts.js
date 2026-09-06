@@ -315,6 +315,7 @@
         }
         t.archived = true;
         card.remove();
+        syncTplEmpty();   /* 封存最後一張卡後回到空狀態，而不是空白 */
         window.toast('已封存', 'ok', t.name + ' 已移出可選清單');
       }
     });
@@ -440,9 +441,30 @@
       card.classList.toggle('open');
     });
     list.appendChild(card);
+    syncTplEmpty();
     return card;
   }
+
+  /* M9-05: with no strategy rows the panel rendered a 0px-tall void between its title and
+     its two buttons — 「空」 and 「壞掉」 look identical, and this list is empty on every
+     fresh install. Same shape and tone as the 授權用戶 empty state on this page. Kept in
+     sync from the three places the card count can change (initial render / add / 封存)
+     rather than re-rendering the list, so an open card is never collapsed by a sibling. */
+  function syncTplEmpty() {
+    if (!list) return;
+    const existing = list.querySelector('.tpl-empty');
+    if (list.querySelector('.tpl-card')) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) return;
+    list.appendChild(el('div', 'tpl-empty',
+      '尚無策略提示詞 — 洞察批次目前只會套用上方的系統提示詞，不會產生任何策略卡片。'
+      + '按右上角「新增策略」自訂一則，或「從官方模板庫新增」複製一份可編輯的官方版本。'));
+  }
+
   D.strategies.filter((t) => !t.archived).forEach(addStrategyCard);
+  syncTplEmpty();
 
   /* ＋ 新增策略：表單 → 推入清單（後端接線後 POST /api/strategy-prompts） */
   const tplAdd = document.getElementById('tpl-add');

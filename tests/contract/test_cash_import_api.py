@@ -9,9 +9,14 @@ The other half is registration. A kind can be fully implemented and completely u
 preview, commit, and the unknown-kind 400 envelope.
 """
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
+
+from portfolio_dash.api.deps import get_now
+from tests.conftest import GOLDEN_NOW
 
 _HEADER = "account,date,kind,ccy,amount,acq_home_amount,note\n"
 
@@ -29,8 +34,21 @@ def _commit(client: TestClient, csv_text: str, *, ack: bool = False) -> Any:
         "kind": "cash", "csv_text": csv_text, "ack_warnings": ack})
 
 
+#: M5-06: ``GET /api/cash`` balances are AS OF the request clock, and this file's rows (and
+#: the shipped template's example rows) are dated 2026-07 — after the frozen GOLDEN_NOW of
+#: 2026-06-11. The balance helper therefore reads the ledger as of a day after every row it
+#: writes, so each assertion keeps checking what was WRITTEN, which is what this file is about.
+_AFTER_EVERY_ROW = datetime(2026, 12, 31, 12, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+
+
 def _balance(client: TestClient, account_id: str, ccy: str) -> str | None:
-    for row in client.get("/api/cash").json()["balances"]:
+    overrides = client.app.dependency_overrides  # type: ignore[attr-defined]
+    overrides[get_now] = lambda: _AFTER_EVERY_ROW
+    try:
+        rows = client.get("/api/cash").json()["balances"]
+    finally:
+        overrides[get_now] = lambda: GOLDEN_NOW
+    for row in rows:
         if row["account_id"] == account_id and row["ccy"] == ccy:
             amount: str = row["amount"]
             return amount

@@ -15,15 +15,18 @@ pricing / data_ingestion / api / scheduler — ``architecture.md``). No money in
 
 import hashlib
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from portfolio_dash.llm_insight.cards import InsightCard, Prediction
 from portfolio_dash.shared.wire import to_wire
+
+logger = logging.getLogger(__name__)
 
 HorizonBasis = Literal["trading_days", "calendar_days"]
 
@@ -59,6 +62,14 @@ class InsightRecord(BaseModel):
     # call's usage maps 1:1. Zero for legacy cards (the UI omits the token segment then).
     tokens_in: int = 0
     tokens_out: int = 0
+    # M7-08 (owner ruling, option C, 2026-09-06): True when the stored ``prediction`` blob
+    # could not be read back through the card schema (a required field the schema grew
+    # later, a narrowed Literal, a corrupt blob, a NULLed confidence). The card is then
+    # served with ``prediction=None`` and its title/summary intact, and every consumer
+    # draws a 待釐清 pill — the same flag-never-hide posture as ``oversold`` /
+    # ``unbookable_dividend`` (``domain-ledger.md``). Before this, one such row raised out
+    # of every list read and took ``GET /api/dashboard`` down with it.
+    unreadable: bool = False
 
 
 _DDL = """
@@ -252,24 +263,48 @@ def add_card(
     return rec
 
 
-def _card_from_row(row: sqlite3.Row) -> InsightCard:
-    prediction = (
-        Prediction.model_validate_json(row["prediction"])
-        if row["prediction"] is not None
-        else None
-    )
-    return InsightCard(
-        title=row["title"],
-        summary=row["summary"],
-        body_md=row["body_md"],
-        tags=json.loads(row["tags"]),
-        symbol=row["symbol"],
-        confidence=row["confidence"],
-        prediction=prediction,
-    )
+def _card_from_row(row: sqlite3.Row) -> tuple[InsightCard, bool]:
+    """Rebuild the card from its row → ``(card, unreadable)``.
+
+    The stored ``prediction`` blob is re-validated through ``Prediction`` and the
+    ``InsightCard`` validator on every read, so schema drift (the blob's shape has no
+    migration — ``ensure_tables`` only adds columns) or a corrupt blob used to raise here
+    and abort the whole list read. M7-08: such a row degrades to a narrative card with
+    ``unreadable=True`` — title/summary/confidence pass through as stored, the prediction
+    is dropped (never guessed at), and the row id is logged so the operator can find it.
+    Only the prediction blob is tolerated; the narrative columns are NOT NULL TEXT and
+    need no such guard.
+    """
+    narrative: dict[str, Any] = {
+        "title": row["title"],
+        "summary": row["summary"],
+        "body_md": row["body_md"],
+        "tags": json.loads(row["tags"]),
+        "symbol": row["symbol"],
+        "confidence": row["confidence"],
+    }
+    try:
+        prediction = (
+            Prediction.model_validate_json(row["prediction"])
+            if row["prediction"] is not None
+            else None
+        )
+        return InsightCard(**narrative, prediction=prediction), False
+    except ValidationError as exc:
+        reasons = "; ".join(
+            f"{'.'.join(str(p) for p in e['loc']) or '<blob>'}: {e['msg']}"
+            for e in exc.errors()
+        )
+        logger.warning(
+            "insight %s: stored prediction is unreadable (%s) — served as 待釐清 "
+            "with prediction=None",
+            row["id"], reasons,
+        )
+        return InsightCard(**narrative, prediction=None), True
 
 
 def _record_from_row(row: sqlite3.Row) -> InsightRecord:
+    card, unreadable = _card_from_row(row)
     return InsightRecord(
         id=row["id"],
         insight_type_id=row["insight_type_id"],
@@ -277,7 +312,8 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         is_shadow=bool(row["is_shadow"]),
         calibration_version=row["calibration_version"],
         fingerprint=row["fingerprint"],
-        card=_card_from_row(row),
+        card=card,
+        unreadable=unreadable,
         horizon_days=row["horizon_days"],
         due_at=row["due_at"],
         input_snapshot=row["input_snapshot"],

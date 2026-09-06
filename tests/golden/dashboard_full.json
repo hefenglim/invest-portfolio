@@ -46,6 +46,9 @@
       "unbookable_dividend": false,
       "unbookable_action": false,
       "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.1960784313725490196078431373",
       "spark_30d": [
         "600"
@@ -79,6 +82,9 @@
       "unbookable_dividend": false,
       "unbookable_action": false,
       "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.05555555555555555555555555556",
       "spark_30d": [
         "38"
@@ -112,6 +118,9 @@
       "unbookable_dividend": false,
       "unbookable_action": false,
       "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.21000000000000000000000",
       "spark_30d": [
         "110"
@@ -145,6 +154,9 @@
       "unbookable_dividend": false,
       "unbookable_action": false,
       "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": null,
       "spark_30d": []
     },
@@ -176,6 +188,9 @@
       "unbookable_dividend": false,
       "unbookable_action": false,
       "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.2",
       "spark_30d": [
         "300"
@@ -209,6 +224,9 @@
       "unbookable_dividend": false,
       "unbookable_action": false,
       "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.125",
       "spark_30d": [
         "450"
@@ -242,6 +260,9 @@
       "unbookable_dividend": false,
       "unbookable_action": false,
       "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.1194444444444444444444444444",
       "spark_30d": [
         "9.875"
@@ -275,6 +296,9 @@
       "unbookable_dividend": false,
       "unbookable_action": false,
       "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.4406779661016949152542372881",
       "spark_30d": [
         "170"

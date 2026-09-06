@@ -62,6 +62,7 @@ def _pool_fn(conn: sqlite3.Connection) -> CashPoolFn:
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         rows = [m for m in movements if m.id != exclude_id]
         rows.extend(
@@ -88,6 +89,7 @@ def _rich_pool_fn(_conn: sqlite3.Connection) -> CashPoolFn:
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         return CashPool(balance=Decimal("1e12"), low=Decimal("0"))
 

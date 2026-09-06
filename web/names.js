@@ -11,13 +11,21 @@
    the stable key; `accountShort` offers a compact variant for tight chips, and the id
    itself is always available at the call site as the secondary/disambiguating form.
 
-   NOT covered here (by design): surfaces that render an account label straight from
-   the API payload (`account_name` from /api/dashboard rows, `name` from
-   /api/input/context selects — e.g. rebalance legs, cash statements, the input/cash
-   selects). Those are the API-fed forms; unifying them is the job of the PLANNED
-   SUCCESSOR — a server-side `account.display_name` field carried on /api/* — which is
-   deferred to a future golden-payload re-baseline. Until then this file is the single
-   naming authority for the frontend's map-based surfaces only.
+   ⚠ This paragraph used to read "NOT covered here (by design): surfaces that render an
+   account label straight from the API payload". That exemption was framed as a per-PAGE
+   split, and it was not one: by 2026-09-02 it had reached ADJACENT TABLES OF ONE DRAWER —
+   a filter chip reading 「嘉信 Schwab」 above rows whose 帳戶 column read 「Charles Schwab」.
+   G-01 therefore moved the dashboard's 各帳戶現金 card, the drawer's 交易明細 table and the
+   six 交易帳本 tables onto this resolver (every ledger row already carries `account_id`), and
+   `tests/contract/test_account_name_single_source.py` now fails on any web/*.js that renders
+   the payload's raw `account` — so a new table cannot silently reopen the split. The few
+   remaining API-fed surfaces (cash.js / corp-action-form.js / input.js) are named in that
+   test's `_PENDING` list, which only ever shrinks.
+
+   The PLANNED SUCCESSOR is unchanged and still owner-gated: a server-side
+   `account.display_name` carried on /api/*, deferred to a future golden-payload re-baseline.
+   Until then the names below are hard-coded here, so renaming an account in the DB does NOT
+   change what the frontend shows.
 
    Load this BEFORE any dependent script (app.js / detail.js / ledger.js). Dependents
    degrade gracefully (id fallback, no crash) if it is absent. */

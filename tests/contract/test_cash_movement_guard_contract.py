@@ -20,6 +20,21 @@ owner that three legal kinds were not. The message is now derived from ``CashKin
 from the code it guards has stopped being a pin. Re-record it if the vocabulary grows again —
 that is the intended maintenance, and it is one line.
 
+⚠ FIVE pins were re-recorded on 2026-09-06 for the owner's M5-06 / M5-07 rulings, and the
+re-recording is deliberate behaviour, not drift:
+
+* M5-07 — the three ``於某時點降至`` messages (``edit_rebate_amount``,
+  ``edit_deposit_shrinks_pool``, ``delete_rebate``) now name THE DAY the pool bottoms. Same
+  status, same code, same figure; only the day is new.
+* M5-06 — ``withdraw_backdated_before_funding`` is refused by a DIFFERENT branch: the guard's
+  covering balance is now the pool's balance ON THE WITHDRAWAL'S OWN DATE (2026-06-01 → 0), so
+  the primary 「超過 … 賬戶現金 0」 check fires before the running-minimum one ever runs. Same
+  status, same code, same verdict; the sentence states the same fact more directly.
+* M5-06 — ``GET /api/cash`` balances are AS OF the request clock, and every row this sequence
+  writes is dated AFTER the frozen GOLDEN_NOW (2026-06-11). The ledger is therefore read back
+  with a clock dated after the last row, so ``_EXPECTED_BALANCES`` keeps asserting what was
+  WRITTEN (its whole purpose) rather than a figure that excludes it.
+
 The cases run as ONE ordered sequence against one ledger, because several of them only mean
 something in sequence: the withdraw messages quote a balance that earlier rows created, the
 self-exclusion edit needs a row to edit, and the REBATE lock needs a booked rebate. The final
@@ -29,10 +44,19 @@ different set of written rows would not be the same behaviour.
 Golden pools before any of this: schwab USD 0 / schwab TWD −32,000 / tw_broker TWD −495,000.
 """
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
+
+from portfolio_dash.api.deps import get_now
+from tests.conftest import GOLDEN_NOW
+
+#: The clock the final ledger read uses (M5-06): after the latest row the sequence writes
+#: (2026-07-25), so the as-of balances include every written row.
+_LEDGER_READ_NOW = datetime(2026, 8, 1, 12, 0, tzinfo=ZoneInfo("Asia/Taipei"))
 
 # (name, method, body-or-target, expected status, expected error dict or None)
 # ``target`` names an earlier case whose created id to act on; "__missing__" is an absent id.
@@ -177,14 +201,16 @@ _SEQUENCE: list[dict[str, Any]] = [
          "code": "withdraw_insufficient_balance", "field": "amount",
          "message": "出金金額 999999 TWD 超過 TW Broker 的 TWD 賬戶現金 55153 — "
                     "出金不可透支（請先補登入金或換匯）"}},
-    # audit C3: the END balance covers it, but the pool dips below zero before its funding.
+    # audit C3: the END balance covers it, but the pool had nothing on 2026-06-01. Since
+    # M5-06 the covering balance is the one on the withdrawal's own date, so the primary
+    # check refuses it outright (it used to fall through to the running-minimum sentence).
     {"n": "withdraw_backdated_before_funding", "m": _POST, "b": {
         "account_id": "moomoo_my", "date": "2026-06-01", "kind": "withdraw",
         "ccy": "USD", "amount": "400"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "此筆出金會使 Moomoo MY 的 USD 現金於某時點降至 -400"
-                    "（出金日早於資金到位）— 出金不可透支，請先補登入金或換匯"}},
+         "message": "出金金額 400 USD 超過 Moomoo MY 的 USD 賬戶現金 0 — "
+                    "出金不可透支（請先補登入金或換匯）"}},
     {"n": "withdraw_exact_balance", "m": _POST, "b": {
         "account_id": "moomoo_my", "date": "2026-07-25", "kind": "withdraw",
         "ccy": "USD", "amount": "1500"}, "status": 201, "id": 7},
@@ -215,14 +241,14 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "200", "note": "改金額"},
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 tw_broker 的 TWD 現金於某時點降至 -500000 — "
+         "message": "此筆會使 tw_broker 的 TWD 現金於 2026-01-05 降至 -500000 — "
                     "通常代表漏記入金或換匯;確認無誤可強制寫入"}},
     {"n": "edit_deposit_shrinks_pool", "m": _PUT, "target": "deposit_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "deposit",
         "ccy": "TWD", "amount": "1"},
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 tw_broker 的 TWD 現金於某時點降至 -544846 — "
+         "message": "此筆會使 tw_broker 的 TWD 現金於 2026-07-20 降至 -544846 — "
                     "通常代表漏記入金或換匯;確認無誤可強制寫入"}},
     # ...and the ack DOES still bypass the deposit-side guard (only the withdraw one is hard).
     {"n": "edit_deposit_shrinks_acked", "m": _PUT, "target": "deposit_ok", "b": {
@@ -235,7 +261,7 @@ _SEQUENCE: list[dict[str, Any]] = [
     {"n": "delete_rebate", "m": _DELETE, "target": "rebate_ok",
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 tw_broker 的 TWD 現金於某時點降至 -544999 — "
+         "message": "此筆會使 tw_broker 的 TWD 現金於 2026-07-20 降至 -544999 — "
                     "通常代表漏記入金或換匯;確認無誤可強制寫入"}},
     {"n": "delete_unknown_id", "m": _DELETE, "target": "__missing__",
      "status": 404, "err": {"code": "not_found", "message": "紀錄 #99999 不存在"}},
@@ -278,7 +304,13 @@ def replayed(api_client: TestClient) -> dict[str, Any]:
         seen[case["n"]] = (response.status_code, body)
         if response.status_code == 201:
             ids[case["n"]] = int(body["id"])
-    seen["__cash__"] = api_client.get("/api/cash", params={"limit": 500}).json()
+    # M5-06: balances are as of the clock; read the ledger back AFTER its last row so the
+    # assertion below still sees everything the sequence wrote (see the module docstring).
+    api_client.app.dependency_overrides[get_now] = lambda: _LEDGER_READ_NOW  # type: ignore[attr-defined]
+    try:
+        seen["__cash__"] = api_client.get("/api/cash", params={"limit": 500}).json()
+    finally:
+        api_client.app.dependency_overrides[get_now] = lambda: GOLDEN_NOW  # type: ignore[attr-defined]
     return seen
 
 

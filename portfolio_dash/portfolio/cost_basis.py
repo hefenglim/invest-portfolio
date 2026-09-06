@@ -122,6 +122,41 @@ class _Position:
     # audit F-47 case 2, where a flag is discarded with its carrier). The successor is the
     # position the owner still holds and the only one they will look at.
     vacated_to: str | None = None
+    # M1-03 / D21 (owner-approved 2026-08-09, grill Q9; implemented 2026-09-06). WHERE this
+    # position's dividend portion came from, when a SPINOFF carved it in. §4.3 scales both
+    # totals by the same `c`, so the child's `payback_ratio` is the parent's to the last digit
+    # — correct arithmetic (the cost came across, so the recovery came with it) under a label
+    # that says the child paid dividends it never paid. The number stays; these say whose it is.
+    #
+    # `payback_from`: the DIRECT parent (the SPINOFF's `from_symbol`). Not recursive — a
+    #   grandchild names the child it was carved from, whose own record still names ITS parent.
+    #   First writer wins if two carve-outs ever land on one position.
+    # `payback_carried`: `carved_original − carved_adjusted` summed over every SPINOFF into this
+    #   position — the parent's dividend portion × cost_carry ON THE ACTION DATE. HISTORICAL:
+    #   money that moved once, so a partial sell does not rescale it (the ratio the label
+    #   explains does not move either). It travels through an EXCHANGE (a rename must not
+    #   launder the label — the same rule as `revived_by_dividend`) and is cleared by whatever
+    #   empties the long lot or discards its basis (`_clear_payback_provenance`).
+    # `payback_own`: cash dividends THIS position received while it held shares, so the label
+    #   can say 「自身配息 0」 instead of leaving the reader to subtract. Accumulated on every
+    #   position (one add per CASH/NET payout), emitted only beside `payback_from`.
+    payback_from: str | None = None
+    payback_carried: Decimal = field(default_factory=lambda: Decimal("0"))
+    payback_own: Decimal = field(default_factory=lambda: Decimal("0"))
+
+
+def _clear_payback_provenance(pos: _Position) -> None:
+    """M1-03: the long lot this label described no longer exists — forget it.
+
+    ``build_book`` keeps a ``_Position`` in its map after a full exit (only the holdings loop
+    skips ``shares == 0``), so a position re-bought later is the SAME object; without this a
+    re-bought KEMG would still say 「承接自 KEMB」 about a basis that left with the sale. Called
+    wherever the long lot is emptied or its basis discarded: a full sell (ordinary, or the long
+    leg of a declared short), an oversell, an EXCHANGE away.
+    """
+    pos.payback_from = None
+    pos.payback_carried = _ZERO
+    pos.payback_own = _ZERO
 
 
 class _SkipAction(Exception):  # noqa: N818 - control flow, not an error surfaced to a caller
@@ -201,7 +236,7 @@ def _apply_action(
 ) -> None:
     """Apply one corporate action to the live position map (spec §4.1-§4.4).
 
-    The field transfer is NORMATIVE and complete: `_Position` has thirteen fields and every
+    The field transfer is NORMATIVE and complete: `_Position` has seventeen fields and every
     one of them has an explicit rule in §4.4, because "the formula didn't mention it" is not
     a specification. (This sentence said *nine* while the table listed *ten*: `vacated_to`
     updated the table and the test tuple but not this line, because the count guard reads the
@@ -287,9 +322,16 @@ def _apply_action(
             # QA-06 travels with the position: an EXCHANGE moves the zero-basis shares to Q,
             # so the destination inherits the doubt about whether they should exist at all.
             dest.revived_by_dividend |= source.revived_by_dividend
+            # M1-03: the payback provenance travels too — Q IS the carved-out lot under a new
+            # name, and a rename must not launder 「承接自 P」 off it. First writer wins on Q.
+            if dest.payback_from is None:
+                dest.payback_from = source.payback_from
+            dest.payback_carried += source.payback_carried
+            dest.payback_own += source.payback_own
             source.shares = _ZERO
             source.original_total = _ZERO
             source.adjusted_total = _ZERO
+            _clear_payback_provenance(source)      # M1-03: moved to Q with the basis
             # §4.4: zero the short fields even though E5 proved them "already zero". They
             # are NEARLY zero: a full cover computes `P - (P/S)*S`, and Decimal division is
             # inexact whenever S does not divide P, so a residue survives. Today it hides
@@ -311,6 +353,14 @@ def _apply_action(
         dest.unbookable_dividend |= source.unbookable_dividend          # E19
         dest.unbookable_action |= source.unbookable_action
         dest.revived_by_dividend |= source.revived_by_dividend           # QA-06
+        # M1-03 / D21: record WHOSE dividends the child's payback ratio is built on. The
+        # portion carved in is exactly `carved_original − carved_adjusted` — the parent's
+        # dividend portion × c on THIS date (KEMB 1,500 × 0.18 = 270.00) — so the child's
+        # ratio and this amount are two views of one carve. Direct parent only; first writer
+        # wins; the parent's own record (if it is itself a child) is untouched.
+        if dest.payback_from is None:
+            dest.payback_from = action.from_symbol
+        dest.payback_carried += carved_original - carved_adjusted
         # `total - carved`, NOT `total * (1 - c)`: algebraically identical, numerically not.
         # `1 - c` rounds once and `* (1-c)` rounds again, so the two sides can miss §2.1's
         # conservation law by an ulp. Subtracting exactly what was added makes the law hold
@@ -598,6 +648,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                         pos.shares -= from_long
                         pos.original_total -= original_removed
                         pos.adjusted_total -= adjusted_removed
+                        if pos.shares == _ZERO:
+                            _clear_payback_provenance(pos)   # M1-03: the long lot is gone
                     to_short = ev.quantity - from_long
                     if to_short > _ZERO:
                         pos.short_shares += to_short
@@ -623,6 +675,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                         pos.shares -= ev.quantity
                         pos.original_total = _ZERO
                         pos.adjusted_total = _ZERO
+                        _clear_payback_provenance(pos)       # M1-03: basis discarded
                         continue
                     frac = ev.quantity / pos.shares
                     original_removed = pos.original_total * frac
@@ -644,6 +697,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     pos.shares -= ev.quantity
                     pos.original_total -= original_removed
                     pos.adjusted_total -= adjusted_removed
+                    if pos.shares == _ZERO:
+                        _clear_payback_provenance(pos)       # M1-03: full exit
             else:  # dividend
                 assert isinstance(ev, Dividend)
                 key = (ev.account_id, ev.symbol)
@@ -731,6 +786,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                         )
                     else:
                         existing.adjusted_total -= ev.net
+                        existing.payback_own += ev.net      # M1-03: 自身配息, see _Position
                 else:  # DRIP / STOCK add shares at zero cost
                     if ev.reinvest_shares is None:
                         # Fail loud: a DRIP/stock dividend without share count would
@@ -820,6 +876,13 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     unbookable_dividend=pos.unbookable_dividend,
                     unbookable_action=pos.unbookable_action,
                     revived_by_dividend=pos.revived_by_dividend,
+                    # M1-03 / D21: the pair is None unless a SPINOFF fed this position, so
+                    # an ordinary holding's row gains three nulls and nothing else.
+                    payback_from_symbol=pos.payback_from,
+                    payback_carried_dividends=(pos.payback_carried
+                                               if pos.payback_from is not None else None),
+                    payback_own_dividends=(pos.payback_own
+                                           if pos.payback_from is not None else None),
                 )
             )
 

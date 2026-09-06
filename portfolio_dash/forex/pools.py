@@ -143,8 +143,15 @@ def acquisition_basis(
       a ``foreign -> home`` conversion is not an acquisition at any date, and under weighted
       average a disposal changes neither the average nor the coverage (N1).
 
-    UNREALIZED deliberately keeps calling this UNBOUNDED: it marks to market what is held
-    now, so its rate must include every acquisition made to date.
+    UNREALIZED calls this bounded to the VALUATION DAY (X8b, M5-06's third reader): it marks
+    to market what is held now, so its rate must include every acquisition made to date —
+    and none made after it. Full history was the same reading until a row could be dated in
+    the future; a rated 2099 deposit then moved today's average (measured: 32 → 38.666…)
+    and an unrated one pulled today's ``covered_ratio`` down on exposure that is fully
+    covered. ``avg_rate`` and ``covered_ratio`` come from ONE bounded call on purpose: the
+    coverage must be computed over the population that produced the balance it scales (F2
+    is pro rata over the flows that MADE the balance), or ``fx_basis_gap = cash × (1 −
+    ratio)`` reports a gap on money every dollar of which has a known cost.
     """
     with_basis = home_cost = without_basis = _ZERO
     for c in conversions:
@@ -191,6 +198,7 @@ def foreign_cash_balance(
     foreign: Currency,
     *,
     movements: Sequence[MovementRow] | None = None,
+    as_of: date | None = None,
 ) -> Decimal:
     """Reconstruct the foreign-currency cash balance from the account's ledgers.
 
@@ -199,7 +207,14 @@ def foreign_cash_balance(
     rebate), - foreign buys (incl. fees+tax), - reconversions out of foreign, - foreign
     WITHDRAW. DRIP/STOCK dividends move no cash (DRIP nets to zero) and are excluded.
 
-    Equals the funds view (``portfolio/cash.py``) for the same (account, ccy) pool.
+    Equals the funds view (``portfolio/cash.py``) for the same (account, ccy) pool — for
+    the same ``as_of``. The bound is :func:`acquisition_basis`'s: rows dated ``<= as_of``
+    count, ``None`` is the whole history, inclusive because this ledger carries dates, not
+    timestamps. It is here because the funds view became date-aware first (M5-06, owner
+    ruling 2026-09-06) and the identity this docstring claims — the manual's
+    ``fx.pool_equals_funds`` (§8.3) — then failed on any ledger with a future-dated row: the
+    資金 page read 「today」 while this pool still read 「ever」, and ``unrealized_fx_cash``
+    marked money that has not arrived to market.
 
     ⚠ The dividend filter is ``CASH_DIVIDEND_TYPES``, never a bare ``is DividendType.CASH``.
     This module is a REPLAY SITE, and ``shared/models/enums.py`` holds that frozenset for
@@ -211,11 +226,15 @@ def foreign_cash_balance(
     """
     cash = _ZERO
     for c in conversions:
+        if as_of is not None and c.date > as_of:
+            continue
         if c.to_ccy == foreign:
             cash += c.to_amount
         if c.from_ccy == foreign:
             cash -= c.from_amount
     for t in transactions:
+        if as_of is not None and t.trade_date > as_of:
+            continue
         if instruments[t.symbol].quote_ccy != foreign:
             continue
         if t.side is Side.BUY:
@@ -223,9 +242,13 @@ def foreign_cash_balance(
         else:
             cash += t.quantity * t.price - t.fees - t.tax
     for d in dividends:
+        if as_of is not None and d.date > as_of:
+            continue
         if d.type in CASH_DIVIDEND_TYPES and instruments[d.symbol].quote_ccy == foreign:
             cash += d.net
     for m in movements or []:
+        if as_of is not None and m.date > as_of:
+            continue
         if m.ccy != foreign:
             continue
         cash += -m.amount if _is_debit(m.kind) else m.amount

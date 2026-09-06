@@ -282,9 +282,11 @@ def _data_health(
             age = (now.date() - pr.as_of).days
             if age > _STALE_AGE_DAYS:
                 stale.append({"symbol": sym, "age_days": age})
+    # A ``partial`` run (a held symbol's quote was lost) is not a success — owner ruling
+    # 2026-09-06, M10-02; counting ``error`` alone called an all-holdings-lost refresh clean.
     failed = conn.execute(
         "SELECT COUNT(*) AS n FROM job_runs "
-        "WHERE status = 'error' AND substr(started_at,1,10) = ?",
+        "WHERE status IN ('error', 'partial') AND substr(started_at,1,10) = ?",
         (_today(now),),
     ).fetchone()["n"]
     return {"stale": stale, "failed_jobs": int(failed)}
@@ -556,9 +558,9 @@ def _chores(conn: sqlite3.Connection, data: DashboardData, *, now: datetime) -> 
         pr = get_latest_price(conn, h.symbol, now=now)
         if pr is None or (now.date() - pr.as_of).days > _STALE_AGE_DAYS:
             stale.append(h.symbol)
-    failed = conn.execute(
+    failed = conn.execute(  # partial counts too — same ruling as _data_health (M10-02)
         "SELECT COUNT(*) AS n FROM job_runs "
-        "WHERE status = 'error' AND substr(started_at,1,10) >= ?",
+        "WHERE status IN ('error', 'partial') AND substr(started_at,1,10) >= ?",
         ((now.date() - timedelta(days=_WEEK_DAYS)).isoformat(),),
     ).fetchone()["n"]
     return {"stale": stale, "failed_jobs": int(failed)}

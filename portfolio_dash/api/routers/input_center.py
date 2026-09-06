@@ -5,6 +5,7 @@ import binascii
 import re
 import sqlite3
 from collections.abc import Callable, Collection
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
@@ -90,8 +91,10 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.image_types import is_supported_image
+from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.llm_config import get_model
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.models.ledger import LedgerBundle, Transaction
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy.target_weights import move_target_weight
 
@@ -185,6 +188,20 @@ def _unclear(h: Holding) -> bool:
     return h.oversold or h.unbookable_action
 
 
+def _book_of(bundle: LedgerBundle) -> Book | None:
+    """:func:`_book_or_none` over a bundle the caller already holds (never-500, same arms).
+
+    Split out for :func:`_position_preview`, which replays FOUR derived bundles off one
+    ledger read: re-deriving the bundle per replay would multiply the SQL, and — worse —
+    a second read could observe a different ledger, so the four books would no longer be
+    four views of one truth.
+    """
+    try:
+        return build_book(bundle, allow_oversell=True)
+    except (ValueError, KeyError, ArithmeticError):
+        return None
+
+
 def _book_or_none(conn: sqlite3.Connection) -> Book | None:
     """The cost-basis replay over the current ledger, or ``None`` when it cannot be booked.
 
@@ -193,10 +210,7 @@ def _book_or_none(conn: sqlite3.Connection) -> Book | None:
     an absent one off the SAME replay — ``Book.holdings`` is the only source that answers
     both, and asking a second share path instead is how two answers to one question appear.
     """
-    try:
-        return build_book(_to_models(conn), allow_oversell=True)
-    except (ValueError, KeyError):
-        return None
+    return _book_of(_to_models(conn))
 
 
 def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding] | None:
@@ -419,12 +433,19 @@ def _issue_wire_manual(
 
 
 def _cash_overdraft_issue(
-    conn: sqlite3.Connection, body: ManualBody, draft_fee: Decimal, draft_tax: Decimal
+    conn: sqlite3.Connection, body: ManualBody, draft_fee: Decimal, draft_tax: Decimal,
+    *, as_of: date,
 ) -> Issue | None:
     """Soft overdraft warning (audit C1b): only when the account opted into cash tracking
     (>=1 cash movement) AND this BUY would push the instrument's cash pool below zero.
 
     Never a hard block — users may not track cash at all (only fires once they do).
+
+    ``as_of`` is the request clock's day (M5-06, X8a): the pool is read as of TODAY — the
+    same figure the 賬戶現金 line beside this warning quotes — so a deposit dated in the
+    future is in the ledger but cannot silence a warning about a pool that is negative
+    today. Required, no default: a caller that forgets it is a ``TypeError``, not a quiet
+    return to the whole-history read.
     """
     if parse_side(body.side) is not Side.BUY:
         return None
@@ -439,6 +460,7 @@ def _cash_overdraft_issue(
     bal = cash_balances(
         list_cash_movements(conn), list_fx_conversions(conn), list_transactions(conn),
         list_dividends(conn), {i.symbol: i for i in list_instruments(conn)},
+        as_of=as_of,
     )
     current = bal.get((body.account_id, inst.quote_ccy), _ZERO)
     cost = body.shares * body.price + draft_fee + draft_tax
@@ -476,6 +498,71 @@ def _old_position_fields(held: Holding | None) -> dict[str, str | None]:
     }
 
 
+def _draft_transaction(body: ManualBody, fee: Decimal, tax: Decimal) -> Transaction:
+    """The row the commit is ABOUT to write, as the replay's own event type.
+
+    Same fields, same order as ``store.load_ledger_bundle``'s conversion, so replaying this
+    object and replaying the stored row afterwards are the same replay. ``fee``/``tax`` are
+    the resolved figures from ``enter_transaction`` (the engine's, or the user's overrides) —
+    the preview must not compute a second pair.
+    """
+    return Transaction(
+        account_id=body.account_id, symbol=body.symbol, side=parse_side(body.side),
+        quantity=body.shares, price=body.price, fees=fee, tax=tax,
+        trade_date=body.date, short_sale=body.short_sale,
+    )
+
+
+def _ledger_before(bundle: LedgerBundle, draft: Transaction) -> LedgerBundle:
+    """Everything the replay books BEFORE *draft* — the ledger as that trade will see it.
+
+    The cut is :class:`EventPriority`'s, read from the enum rather than re-stated, because
+    that enum exists to be the ONE owner of same-day order (``OPENING 0 → CORPORATE_ACTION
+    10 → BUY 20 → SELL 30 → DIVIDEND 40``). A transaction's own rank is BUY or SELL, so:
+
+    * ``opening`` / ``actions`` — ``<= day``: both rank below either side, so a same-day
+      opening and a same-day corporate action are already applied when the trade books
+      (the same call ``LedgerBundle.before_action_on`` makes for openings, and D3's ruling);
+    * ``transactions`` — ``< day``, plus the same-day rows whose rank is not ABOVE the
+      draft's: a same-day BUY precedes a SELL, and the draft is last within its own rank
+      because ``list_transactions`` orders by ``(trade_date, id)`` and the new row takes the
+      highest id;
+    * ``dividends`` — ``< day`` STRICTLY. DIVIDEND (40) outranks both sides, so a payout
+      dated on the trade date books AFTER the trade. This is the half that makes the bug
+      reachable without any backfill at all: a sell entered for "yesterday" was projected
+      against a cost basis that day's dividends had already reduced.
+
+    ``effective_date``, never ``date`` (R6): a STOCK dividend with an ex-date is booked from
+    the ex-date, and three copies of that rule is how two of them drift.
+
+    NOT :meth:`LedgerBundle.through` (``<= day`` on everything — right for the trend replay,
+    wrong here: it would let the same-day dividend in) and NOT :meth:`before_action_on`
+    (``< day`` on transactions — right for an action at rank 10, wrong for a trade that
+    follows the day's earlier trades).
+    """
+    day = draft.trade_date
+    rank = EventPriority.BUY if draft.side is Side.BUY else EventPriority.SELL
+    return replace(
+        bundle,
+        opening=[o for o in bundle.opening if o.build_date <= day],
+        actions=[a for a in bundle.actions if a.date <= day],
+        transactions=[
+            t for t in bundle.transactions
+            if t.trade_date < day
+            or (t.trade_date == day
+                and (EventPriority.BUY if t.side is Side.BUY else EventPriority.SELL) <= rank)
+        ],
+        dividends=[d for d in bundle.dividends if d.effective_date < day],
+        unreadable_actions=[u for u in bundle.unreadable_actions if u.date <= day],
+    )
+
+
+def _with_draft(bundle: LedgerBundle, draft: Transaction) -> LedgerBundle:
+    """*bundle* plus the drafted row, APPENDED — its position within its own (date, rank)
+    group, and therefore the book, is the one the stored row will take (highest id)."""
+    return replace(bundle, transactions=[*bundle.transactions, draft])
+
+
 def _position_preview(
     conn: sqlite3.Connection, body: ManualBody, fee: Decimal, tax: Decimal, gross: Decimal
 ) -> dict[str, Any] | None:
@@ -486,28 +573,54 @@ def _position_preview(
     Never-500: any degradation path → null.
 
     Every branch also carries the R7 (C5) OLD-vs-NEW pre-trade triple (``old_shares`` /
-    ``old_original_avg`` / ``old_adjusted_avg``) via :func:`_old_position_fields`; the
-    existing ``new_*`` fields are byte-identical.
+    ``old_original_avg`` / ``old_adjusted_avg``) via :func:`_old_position_fields`.
 
-    * SELL, position currently held → ``cost_removed`` = adjusted_total × (qty / held_shares),
-      ``realized_pnl`` = (gross − fee − tax) − cost_removed, ``remain_shares`` =
-      max(0, held − qty). cost_removed/realized_pnl replicate build_book's OWN sell arithmetic
-      exactly (via the position TOTALS, not a re-divided average), so the preview equals the
-      booked realized row bit-for-bit — a mirror of the ledger's sell math, NOT a second source
-      (no double counting). Oversell (qty > held) still renders honestly; remain floors at 0.
-      Not held → null.
-    * BUY → ``new_shares`` / ``new_original_avg`` / ``new_adjusted_avg`` from the held totals +
-      this trade's ALL-IN cost (gross+fee+tax); not held → fresh-position math (held = 0, both
-      averages = all-in / qty). Averages are computed from totals on read, never a stored
-      rounded average (domain-ledger.md).
+    **The projection is the REPLAY, run — not arithmetic that resembles it** (M4-01,
+    2026-09-02). Three books are built off ONE ledger read, all through the same
+    ``build_book`` every dashboard number comes from:
+
+    * ``before`` — :func:`_ledger_before`, the ledger as the drafted trade will SEE it. Its
+      holding picks the branch (long / flat / short) and its realized-row count is the
+      watermark below.
+    * ``at_date`` — ``before`` + the draft. The rows past the watermark are exactly what THIS
+      trade books: 0 rows for a short extension or an undeclared oversell, 1 otherwise. So
+      ``realized_pnl`` / ``cost_removed`` / ``covered_shares`` are READ off the booked row
+      instead of re-derived, and the three sell branches cannot drift apart again.
+    * ``after`` — the WHOLE ledger + the draft. Its holding is what the position will look
+      like once the row is written, so ``remain_shares`` / ``new_shares`` and both averages
+      come from ``Holding`` — where the averages are ``total / shares`` computed on read
+      (domain-ledger.md: project the TOTALS, then divide on read — here we do not even
+      project, we replay).
+
+    Until M4-01 all of it was arithmetic on ``book.holdings`` — the ledger's END state — with
+    ``body.date`` never consulted, so a row that is not the last event was projected against a
+    position the replay never shows it. Measured on the QA ledger: a sell back-dated three
+    months reported 13,881.65 realized where the book gives 9,682.45, and a sell dated
+    YESTERDAY reported 78.18 against 51.62 because that day's dividends (``EventPriority``
+    books DIVIDEND after SELL) had already reduced the cost basis the card divided. The 賣超
+    guard went date-aware on 2026-07-31 (``holdings.shares_through``); the money on the same
+    card did not, and the check strip said 「可寫入」 over all of it.
+
+    Wire shape is UNCHANGED — same keys, same types, same null conventions:
+
+    * SELL → ``cost_removed`` / ``realized_pnl`` (null on the two branches that book no row),
+      ``realized_shares`` / ``short_opened`` / ``oversell`` / ``note`` from the branch,
+      ``remain_shares`` + both averages from the post-write holding (averages null when the
+      replay holds no position at all, e.g. a full exit). Not held → null.
+    * BUY → ``new_shares`` + both averages from the post-write holding; against an open short
+      it also carries ``covered_shares`` / ``realized_pnl`` / ``note`` from the cover row.
+
+    ``gross`` is kept in the signature for the caller's existing contract; the replay derives
+    proceeds from the draft's own ``quantity × price``, which is that same number by
+    construction — one owner for it, and no chance of the two disagreeing.
 
     **Why this seam gates on the FLAG and not on ``Book.unapplied_actions``** (the opposite
     call from ``pnl.py`` / ``timeseries.py`` / the XIRR gate, so the reason is written down).
     Those three multiply ``shares`` by a GLOBAL, already-post-action price, so any refusal
     anywhere makes their number wrong and they must read the book-level record — which sees
     the two refusals that leave no flagged holding. Nothing here is multiplied by a market
-    price: every figure is arithmetic on the position's OWN totals, so the only question is
-    whether THIS position's totals and share count disagree. That is exactly what
+    price: every figure comes from the position's OWN replayed totals, so the only question
+    is whether THIS position's totals and share count disagree. That is exactly what
     ``unbookable_action`` marks, and ``_reject`` sets it on every refusal where a source
     position exists. The two flagless refusals leave nothing for a book-level gate to
     withhold: a source that never existed (E1) transferred nothing, and a source already at
@@ -533,7 +646,8 @@ def _position_preview(
     if qty <= _ZERO or body.price <= _ZERO:
         return None
     try:
-        book = _book_or_none(conn)
+        bundle = _to_models(conn)
+        book = _book_of(bundle)
         if book is None:  # un-bookable ledger → no trustworthy position math
             return None
         key = (body.account_id, body.symbol)
@@ -554,14 +668,47 @@ def _position_preview(
             # REFUSED the action, so the two disagree about whether the position exists at
             # all — the very disagreement this seam must not build a guard on.
             return None
-        # The held position as three plain numbers, shared by BOTH arms. A flat position is
-        # zeros, not a special case: ``build_book`` starts every position from the same zeros
-        # (``_Position()``), so a branch written against these locals books what the replay
-        # books whether or not a row already exists. They also spare the SELL branches a
-        # ``held is not None`` narrowing mypy cannot infer and an ``assert`` would only claim.
-        held_shares = held.shares if held is not None else _ZERO
-        held_original = held.original_cost_total if held is not None else _ZERO
-        held_adjusted = held.adjusted_cost_total if held is not None else _ZERO
+        # --- the three replays (M4-01) ------------------------------------------------
+        draft = _draft_transaction(body, fee, tax)
+        prefix = _ledger_before(bundle, draft)
+        # Is the draft the ledger's LAST event? Every filter in ``_ledger_before`` keeps a
+        # SUBSET, so equal cardinality means equal lists — and then ``prefix is bundle`` for
+        # every purpose here. Reusing the books costs two replays instead of four, and makes
+        # "a trade dated after everything behaves exactly as it did before" true by
+        # construction rather than by re-derivation.
+        latest = (len(prefix.transactions) == len(bundle.transactions)
+                  and len(prefix.dividends) == len(bundle.dividends)
+                  and len(prefix.opening) == len(bundle.opening)
+                  and len(prefix.actions) == len(bundle.actions)
+                  # Every list ``_ledger_before`` filters, including the rejects — a short
+                  # circuit that skips one of them is a claim of equality that is not true.
+                  and len(prefix.unreadable_actions) == len(bundle.unreadable_actions))
+        before = book if latest else _book_of(prefix)
+        at_date = _book_of(_with_draft(prefix, draft))
+        after = at_date if latest else _book_of(_with_draft(bundle, draft))
+        if before is None or at_date is None or after is None:
+            return None
+        # Everything ahead of the draft books identically in both replays — same event
+        # prefix, and the draft sorts LAST within its own (date, rank) group — so the rows
+        # past this watermark are exactly what THIS trade books: one row, or none at all
+        # (a short extension and an undeclared oversell each book nothing, by design).
+        booked = at_date.realized.rows[len(before.realized.rows):]
+        realized_pnl = sum((r.realized for r in booked), _ZERO) if booked else None
+        cost_removed = (sum((r.adjusted_cost_removed for r in booked), _ZERO)
+                        if booked else None)
+        # The position as the DRAFT sees it (picks the branch) and as the LEDGER will hold it
+        # once the row is written (the projected columns). Before M4-01 both were the same
+        # end-state ``Holding``, which is why a row landing anywhere but last was projected
+        # against a position it never meets.
+        prior = next((h for h in before.holdings if (h.account_id, h.symbol) == key), None)
+        prior_shares = prior.shares if prior is not None else _ZERO
+        final = next((h for h in after.holdings if (h.account_id, h.symbol) == key), None)
+        # A flat position is DROPPED by the replay (``if shares == _ZERO: continue``), so
+        # there is no average to report — the null the BUY branch already returns on an
+        # exact cover, now reached through the replay's own rule instead of a copy of it.
+        new_shares = final.shares if final is not None else _ZERO
+        new_original_avg = None if final is None else decimal_str(final.original_avg)
+        new_adjusted_avg = None if final is None else decimal_str(final.adjusted_avg)
         if parse_side(body.side) is Side.SELL:
             # QA-08 (2026-08-29): "not held" is NOT the end of the SELL arm. A DECLARED short
             # opens a position out of NOTHING — ``build_book`` takes ``from_long = 0`` and the
@@ -574,98 +721,50 @@ def _position_preview(
             # one), so they still bail out here.
             if held is None and not body.short_sale:
                 return None
-            # THREE branches, because ``build_book`` has three (review 2026-08-24). The one
-            # below used to be applied to all of them, which invented a realized P&L for two
+            # THREE branches, because ``build_book`` has three (review 2026-08-24). One
+            # formula used to be applied to all of them, which invented a realized P&L for two
             # kinds of trade the ledger books nothing for — measured: +2,000 shown on a short
             # extension, +9,000 on an undeclared oversell, and 9,000 shown where a declared
             # partial books 6,000. Anything that mirrors the replay must mirror its BRANCHES,
             # not just its happy-path formula (domain-ledger.md).
-            long_shares = held_shares if held_shares > _ZERO else _ZERO
-            # Each branch also projects the position TOTALS it leaves behind, because the
-            # averages beside the realized figure are the SAME mirror obligation one column
-            # over (sweep F-01, 2026-08-27). Until now the SELL side returned no ``new_*_avg``
-            # at all and the frontend asserted, as a fact, that "a SELL leaves the averages
-            # unchanged" — true of the ORDINARY branch and of no other. Totals, never averages:
-            # ``build_book`` moves totals and divides on read (domain-ledger.md), so projecting
-            # an average directly would re-divide and drift in the last digit.
+            #
+            # The MONEY on each branch is no longer re-derived here — it is read off the row
+            # the replay booked above (M4-01), because a copy of a branch is a copy that can
+            # go stale, and this one did: it read the END-state holding, so all three branches
+            # were being chosen and computed against a position the trade never sees. What
+            # stays is the branch DECISION, which no realized row can express: the split
+            # between the long portion and the shares that open a short, and which of the two
+            # silent branches produced the absent row. Both now read ``prior_shares`` — the
+            # position AS OF the trade date — so they agree with the date-aware 賣超 guard
+            # (``holdings.shares_through``, 2026-07-31) instead of contradicting it.
+            long_shares = prior_shares if prior_shares > _ZERO else _ZERO
             if body.short_sale:
                 # cost_basis.py: sell the long lot first, then open/extend the short with the
-                # remainder. Note the replay realizes at ``per_share_net × from_long`` — NOT
-                # at (gross − fee − tax) — so a partial declared sell must do the same.
+                # remainder — so only the long portion realizes, and only it books a row.
                 from_long = min(qty, long_shares)
                 to_short = qty - from_long
-                per_share_net = (gross - fee - tax) / qty
-                cost_removed = (held_adjusted * (from_long / held_shares)
-                                if from_long > _ZERO else None)
-                original_removed = (held_original * (from_long / held_shares)
-                                    if from_long > _ZERO else _ZERO)
-                realized_pnl = (per_share_net * from_long - cost_removed
-                                if cost_removed is not None else None)
                 oversell = False
-                # The short lot holds the PROCEEDS as its basis and the holding is reported
-                # signed (cost_basis.py: ``original_total - short_proceeds`` over
-                # ``shares - short_shares``), so subtracting the proceeds here reproduces the
-                # negative basis exactly — for a fresh short AND for one being extended.
-                new_original_total = (held_original - original_removed
-                                      - per_share_net * to_short)
-                # `is None`, not `or`: a Decimal("0") is falsy, and while both arms happen
-                # to be zero here, an `or` on a money value is a habit that stops being
-                # harmless the moment the operand can be a legitimate zero-vs-absent.
-                removed_adj = _ZERO if cost_removed is None else cost_removed
-                new_adjusted_total = (held_adjusted - removed_adj
-                                      - per_share_net * to_short)
                 note = ("放空／加空的部分不產生已實現損益，帳本以收到的價金作為空單成本基礎"
                         if to_short > _ZERO else None)
-            elif qty > held_shares:
+            elif qty > prior_shares:
                 # Undeclared oversell: the replay discards the position's cost basis and emits
-                # NO realized row (待釐清). A number here would be an invented one.
+                # NO realized row (待釐清). A number here would be an invented one — and the
+                # projected averages follow the replay's own zeroing through ``final`` above,
+                # so the card no longer prints the PRE-trade average directly over its own
+                # warning that the basis is about to be permanently discarded.
                 #
-                # ``long_shares``, not ``held_shares`` (E-2, 2026-08-29): the holding is
+                # ``long_shares``, not ``prior_shares`` (E-2, 2026-08-29): the holding is
                 # SIGNED, so an undeclared sell landing on an OPEN SHORT put a negative share
                 # count on the wire — held −5, sell 20 reported ``realized_shares: "-5"``.
                 # Nothing realizes out of a lot that does not exist; the field is the LONG
                 # portion, which is what the declared branch above already takes.
                 from_long, to_short = long_shares, _ZERO
-                cost_removed = realized_pnl = None
                 oversell = True
-                # DISCARDED, so the projection is zero — not the pre-trade average, which the
-                # card used to print directly above its own warning that the basis is about to
-                # be permanently discarded. Zero is what the ledger will hold, so this agrees
-                # with the row the user is about to see rather than contradicting the note.
-                #
-                # ⚠ The replay zeroes only the LONG totals (``pos.original_total = _ZERO``);
-                # an open SHORT lot keeps its proceeds and is netted in afterwards. Long and
-                # short are mutually exclusive by construction, so the signed holding is
-                # entirely one or the other — and an undeclared sell INTO an existing short
-                # therefore leaves that short's basis untouched. Zeroing both printed an
-                # average of 0 where the ledger goes on holding 130.
-                if held_shares > _ZERO:
-                    new_original_total = new_adjusted_total = _ZERO
-                else:
-                    new_original_total = held_original
-                    new_adjusted_total = held_adjusted
                 note = "賣超：成本基礎無法認定，帳本不會產生已實現損益（待釐清）"
             else:
-                # The ORDINARY branch, byte-identical to before: frac / removed mirror
-                # build_book's ev.quantity / pos.shares and pos.adjusted_total × frac EXACTLY
-                # (same operands, same order) so the preview realized == the booked row.
                 from_long, to_short = qty, _ZERO
-                cost_removed = held_adjusted * (qty / held_shares)
-                realized_pnl = (gross - fee - tax) - cost_removed
                 oversell = False
-                new_original_total = (held_original
-                                      - held_original * (qty / held_shares))
-                new_adjusted_total = held_adjusted - cost_removed
                 note = None
-            # SIGNED, not floored at 0 (changed 2026-08-24): a declared sell that opens a short
-            # leaves -N shares, and every other surface in the app renders an open short that
-            # way. Flooring printed 「0」 for a position the ledger holds.
-            remain = held_shares - qty
-            # A flat position is DROPPED by the replay (``if shares == _ZERO: continue``), so
-            # there is no average to report — the same null the BUY branch already returns on
-            # an exact cover.
-            new_original_avg = None if remain == _ZERO else new_original_total / remain
-            new_adjusted_avg = None if remain == _ZERO else new_adjusted_total / remain
             return {
                 "kind": "sell",
                 "cost_removed": None if cost_removed is None else decimal_str(cost_removed),
@@ -674,53 +773,35 @@ def _position_preview(
                 "short_opened": decimal_str(to_short) if to_short > _ZERO else None,
                 "oversell": oversell,
                 "note": note,
-                "remain_shares": decimal_str(remain),
-                "new_original_avg": (None if new_original_avg is None
-                                     else decimal_str(new_original_avg)),
-                "new_adjusted_avg": (None if new_adjusted_avg is None
-                                     else decimal_str(new_adjusted_avg)),
+                # SIGNED, not floored at 0 (2026-08-24): a declared sell that opens a short
+                # leaves -N shares, and every other surface renders an open short that way.
+                "remain_shares": decimal_str(new_shares),
+                "new_original_avg": new_original_avg,
+                "new_adjusted_avg": new_adjusted_avg,
                 **_old_position_fields(held),
             }
-        all_in = gross + fee + tax
-        new_shares = held_shares + qty
-        if held_shares < _ZERO:
+        if prior_shares < _ZERO:
             # A buy against an open short COVERS it first (cost_basis.py, owner rule
-            # 2026-07-31); it does not average into a long lot. The old line below assumed a
-            # non-negative holding — its "qty > 0 guaranteed, so never a zero divisor" comment
-            # was false (an exact cover makes new_shares 0, which the ArithmeticError catch
-            # then swallowed into a blank preview) and its averages blended the short's
-            # proceeds with the buy's cost, which is not a quantity the ledger ever holds.
-            short_shares = -held_shares
-            short_avg = held_original / held_shares      # neg/neg — the average sale price
-            cover = min(qty, short_shares)
-            per_share = all_in / qty
-            to_long = qty - cover
-            realized_cover = (short_avg - per_share) * cover
-            if to_long > _ZERO:
-                # Short fully covered; the leftover starts its long life at THIS buy's cost.
-                new_original = new_adjusted = per_share * to_long
-            else:
-                # Still short: the remaining proceeds, reduced pro rata by what was covered.
-                new_original = held_original + short_avg * cover
-                new_adjusted = held_adjusted + short_avg * cover
+            # 2026-07-31); it does not average into a long lot. The cover's realized figure
+            # and the shares it settles are the booked row's, not a second derivation of the
+            # owner's rule — and ``prior_shares`` asks the position AS OF the buy's own date,
+            # so a back-dated buy covers the short that was open THEN.
             return {
                 "kind": "buy",
                 "new_shares": decimal_str(new_shares),
-                # Flat after an exact cover — no position, so no average to state.
-                "new_original_avg": (decimal_str(new_original / new_shares)
-                                     if new_shares != _ZERO else None),
-                "new_adjusted_avg": (decimal_str(new_adjusted / new_shares)
-                                     if new_shares != _ZERO else None),
-                "covered_shares": decimal_str(cover),
-                "realized_pnl": decimal_str(realized_cover),
+                "new_original_avg": new_original_avg,
+                "new_adjusted_avg": new_adjusted_avg,
+                "covered_shares": decimal_str(sum((r.shares_sold for r in booked), _ZERO)),
+                "realized_pnl": decimal_str(
+                    realized_pnl if realized_pnl is not None else _ZERO),
                 "note": "回補空單：以本次每股成本結算，剩餘股數以本次成本為起點",
                 **_old_position_fields(held),
             }
         return {
             "kind": "buy",
             "new_shares": decimal_str(new_shares),
-            "new_original_avg": decimal_str((held_original + all_in) / new_shares),
-            "new_adjusted_avg": decimal_str((held_adjusted + all_in) / new_shares),
+            "new_original_avg": new_original_avg,
+            "new_adjusted_avg": new_adjusted_avg,
             **_old_position_fields(held),
         }
     except (ValueError, KeyError, ArithmeticError):
@@ -728,12 +809,17 @@ def _position_preview(
 
 
 def _account_cash(
-    conn: sqlite3.Connection, body: ManualBody
+    conn: sqlite3.Connection, body: ManualBody, *, as_of: date
 ) -> tuple[dict[str, Any] | None, Decimal | None]:
     """DISPLAY-ONLY cash-pool balance for the trade's settlement (quote) currency (R6-E) —
-    the SAME ``cash_balances`` figure /api/cash serves, so the draft line and the 資金 page
-    never disagree. null when the symbol is unregistered (no quote ccy); ``balance`` null when
-    the pool has no tracked activity. Adds NO issue and NO gating (owner-signed). Never-500.
+    the SAME ``cash_balances`` figure /api/cash serves, AS OF THE SAME DAY (``as_of`` = the
+    request clock's date, M5-06), so the draft line and the 資金 page never disagree. That
+    sentence was false between X1 and X8a (2026-09-06): /api/cash had moved to today's
+    balance while this read the whole history, so the two differed by exactly any
+    future-dated row. ``as_of`` is required with no default so the next caller cannot
+    silently fall back to the whole history. null when the symbol is unregistered (no quote
+    ccy); ``balance`` null when the pool has no tracked activity. Adds NO issue and NO
+    gating (owner-signed). Never-500.
 
     Returns ``(wire_dict, balance)``: the wire dict is the byte-identical ``{ccy, balance}``
     the response embeds, and ``balance`` is the SAME raw Decimal so the caller can compute the
@@ -748,6 +834,7 @@ def _account_cash(
         bal = cash_balances(
             list_cash_movements(conn), list_fx_conversions(conn), list_transactions(conn),
             list_dividends(conn), {i.symbol: i for i in list_instruments(conn)},
+            as_of=as_of,
         )
         amount = bal.get((body.account_id, inst.quote_ccy))
     except (ValueError, KeyError, ArithmeticError):
@@ -780,7 +867,7 @@ def manual_preview(
         draft.instrument.market if draft.instrument is not None else None,
     )
     issues = list(draft.issues)
-    overdraft = _cash_overdraft_issue(conn, body, draft.fee, draft.tax)
+    overdraft = _cash_overdraft_issue(conn, body, draft.fee, draft.tax, as_of=now.date())
     if overdraft is not None:
         issues.append(overdraft)
     # FE-D1 forecast HINT (informational, 不計入成本): the TW charge-first rebate on next
@@ -795,7 +882,7 @@ def manual_preview(
     # both SERVER-computed as Decimal strings (the frontend renders only). null on any
     # degradation / unregistered symbol / incomplete inputs — the base preview never fails.
     position_preview = _position_preview(conn, body, draft.fee, draft.tax, gross)
-    account_cash, cash_bal = _account_cash(conn, body)
+    account_cash, cash_bal = _account_cash(conn, body, as_of=now.date())
     # R7 A3 (additive, C5): projected pool AFTER settlement = balance + the ALREADY-SIGNED total
     # (BUY total is negative, SELL positive), in the SAME quote ccy as account_cash. Emitted only
     # when the balance is known (else null) — a pure Decimal add over figures already computed,

@@ -136,14 +136,20 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
 
 `shared/cash_kinds.py` already draws this line — reuse its table, never re-derive the predicate:
 
-- **Pool income / cost → they ARE return.** `REBATE` · `INTEREST` (+) · `INTEREST_EXPENSE` ·
+- **Costs of trading and financing → they ARE return.** `REBATE` (+) · `INTEREST_EXPENSE` ·
   `BROKER_FEE` (−). These are P&L with no offsetting security flow, so `xirr_reporting` takes
-  them as flows (sign from `CASH_KIND_TABLE.credit`, each converted at its own date's FX).
-  FE-D1's 77% rebate is one of them, and it is **0.229% of capital per round trip** — the 群益
-  charge-first model is the owner's normal billing, not an edge case.
+  them as flows (the set is `portfolio/returns.py::XIRR_CASH_KINDS`; the sign comes from the
+  kind's `credit` axis via `shared/cash_kinds.py::movement_sign`, each converted at its own
+  date's FX). FE-D1's 77% rebate is one of them, and it is **0.229% of capital per round
+  trip** — the 群益 charge-first model is the owner's normal billing, not an edge case.
 - **Capital movements → they are NOT return.** `DEPOSIT` · `WITHDRAW` · `OPENING`. Admitting
   them would silently redefine XIRR from "the return on money put into securities" to "the
   return on the account" — a different metric, and not this one.
+- **`INTEREST` (earned on idle cash) is NOT return either** — the principal that earns it never
+  entered this metric's denominator, so crediting its yield to the numerator is asymmetric.
+  (This bullet listed `INTEREST` among the flows until 2026-09-06 — a transcription error; the
+  ruling text in `docs/spec/2026-08-16-ai-assistant.md` AI-D42, the manual §7.2 and the code
+  all exclude it, and adding an `INTEREST` row leaves XIRR byte-identical, measured.)
 
 ## Data integrity (carried over from the human's spec)
 

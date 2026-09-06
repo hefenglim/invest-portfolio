@@ -76,7 +76,13 @@ OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     # action row that does not exist. It is never inferred (domain-ledger.md: the system cannot
     # distinguish a genuine short from a missing buy), so an explicit column is the only way in.
     "transactions": frozenset({"fee", "tax", "daytrade", "short_sale", "note"}),
-    "dividends": frozenset({"withholding", "net", "reinvest_shares", "reinvest_price"}),
+    # ex_date (M4-04, 2026-09-02): appended to DIVIDEND_COLUMNS by R6 (review ⑧) and never
+    # mirrored here, so the ONE blank-able column in any template carried no (選填) marker —
+    # while the example rows below did not carry the cell at all. A template is a product the
+    # owner FILLS IN: a required-looking column the examples leave out is an invitation to
+    # type in the wrong one.
+    "dividends": frozenset({"withholding", "net", "reinvest_shares", "reinvest_price",
+                            "ex_date"}),
     "fx": frozenset(),
     "openings": frozenset({"original_avg_cost"}),
     # cost_carry is SPINOFF-only (E8 rejects it on the other two kinds); note is free text.
@@ -117,11 +123,14 @@ _TRANSACTION_ROWS: list[list[str]] = [
     ["schwab", "AAPL", "sell", "2026-07-16", "10", "215", "", "", "", "1", "宣告放空"],
 ]
 
+# ⚠ TEN cells per row, one per DIVIDEND_COLUMNS entry — the last is ``ex_date`` (M4-04).
+# Both rows carried NINE until 2026-09-02, so anyone editing the downloaded file in Excel and
+# typing under the last header cell was one column out from the parser for the whole row.
 _DIVIDEND_ROWS: list[list[str]] = [
     # TW cash dividend (net = gross, single-tier) — reduces adjusted cost.
-    ["tw_broker", "2330", "2026-07-10", "CASH", "5000", "", "", "", ""],
+    ["tw_broker", "2330", "2026-07-10", "CASH", "5000", "", "", "", "", ""],
     # US DRIP — 30% withholding + net auto-computed; reinvest_shares from net / reinvest_price.
-    ["schwab", "AAPL", "2026-07-11", "DRIP", "100", "", "", "", "150"],
+    ["schwab", "AAPL", "2026-07-11", "DRIP", "100", "", "", "", "150", ""],
 ]
 
 _FX_ROWS: list[list[str]] = [

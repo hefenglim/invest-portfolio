@@ -17,7 +17,7 @@ on its build date. An empty section renders 「本區間無紀錄」. The header
 
 import sqlite3
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from portfolio_dash.data_ingestion.store import (
     StoredCashMovement,
@@ -105,6 +105,18 @@ def _totals_line(label: str, totals: dict[str, Decimal]) -> str:
 
 def _add(totals: dict[str, Decimal], ccy: str, value: Decimal) -> None:
     totals[ccy] = totals.get(ccy, _ZERO) + value
+
+
+_RATE_Q = Decimal("0.0001")
+
+
+def _fmt_rate(value: Decimal) -> str:
+    """An FX rate at 4 dp, ROUND_HALF_UP — matches ``web/format.js`` ``rateExact(v, 4)``.
+
+    A rate is NOT money (data-and-pricing.md): it never takes a currency's minor unit, so it
+    does not go through ``_fmt_amount`` — that printed the 換匯 隱含匯率 as 「28」 for a TWD leg.
+    """
+    return f"{value.quantize(_RATE_Q, rounding=ROUND_HALF_UP):,.4f}"
 
 
 def _empty_section(title: str) -> str:
@@ -231,9 +243,11 @@ def _fx_section(
         _add(in_totals, c.to_ccy.value, c.to_amount)
         # QA-10: a conversion that received nothing has no implied rate. The whole cell is
         # 「—」 rather than 「1 USD = — TWD」, which reads as a missing digit in a real sentence.
+        # M3-08: the rate is formatted as a RATE (4 dp), never through `_fmt_amount` in the
+        # from-currency's minor unit — that printed 27.99998642… as 「28」 because TWD is 0 dp.
         rate = _NULL if c.implied_rate is None else (
             f"1 {_esc(c.to_ccy.value)} = "
-            f"{_fmt_amount(c.implied_rate, c.from_ccy.value)} {_esc(c.from_ccy.value)}")
+            f"{_fmt_rate(c.implied_rate)} {_esc(c.from_ccy.value)}")
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(c.date.isoformat())}</td>'

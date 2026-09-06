@@ -4,7 +4,10 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
+from fastapi import HTTPException
+
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
+from portfolio_dash.data_ingestion.csv_import import _CellError, _side_cell
 from portfolio_dash.data_ingestion.validate import Issue
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.assets import MarketRule
@@ -25,10 +28,44 @@ _ISSUE_FIELD = {
 
 _DIV_MODEL = {"cash_cost_reduction": "tw", "drip_us": "drip", "cash": "net"}
 
+#: The column name the borrowed CSV cell reader puts in its message. It is also the JSON
+#: field name on every body that carries a side, so the sentence names something the caller
+#: can actually find in the payload they sent.
+_SIDE_COLUMN = "side"
+
 
 def parse_side(value: str) -> Side:
-    """Accept lowercase/any-case wire side ('buy'/'sell') -> core Side enum."""
-    return Side(value.strip().upper())
+    """Accept lowercase/any-case wire side ('buy'/'sell') -> core Side enum.
+
+    ⚠ **A bad side is a DATA problem, and this function is where it used to become a 500.**
+    ``Side(value.strip().upper())`` raised a bare ``ValueError`` — ``'HODL' is not a valid
+    Side`` — which no router caught, so ``api/errors.py``'s catch-all answered
+    ``internal_error``「系統發生未預期的錯誤，請稍後再試」 for a typo (M4-03, measured
+    2026-09-02 on ``hodl`` / ``""`` / ``" "`` / ``b`` / ``0`` / ``买``; ``ManualBody.side`` and
+    ``TxnEditBody.side`` are both bare ``str`` with no validator, so the manual door and the
+    ledger-correction door shared the fault).
+
+    Fixed HERE rather than with a per-body Pydantic validator because this is the seam every
+    caller crosses — four call sites in ``input_center.py`` and three in ``ledgers.py`` — and
+    a validator would have to be repeated on each body to cover them.
+
+    **The sentence is BORROWED, not written.** ``csv_import._side_cell`` has always answered
+    the same bad cell with 「欄位 side 的內容「hodl」不是有效的買賣別（請填 BUY 或 SELL）」 and
+    a blank one with 「必填欄位不可空白（欄位 side）」, so the CSV door and the manual door now
+    give byte-identical answers by construction (``tests/contract/test_m4_manual_side_zh.py``
+    compares them). Reusing the private helper follows the precedent ``api/errors.py`` set
+    when it imports ``portfolio.cost_basis._UNCOMPUTABLE_ZH``: one owner for the sentence
+    beats two copies that drift. ``.strip()`` is applied first so ``"buy "`` keeps working
+    and ``" "`` reads as blank rather than as an invalid value.
+
+    Raises ``HTTPException(400)``, which ``api/errors.py::_http`` renders through the standard
+    envelope (``code: "validation_error"``) — the same shape ``instruments.py`` and
+    ``performance.py`` already raise for their own zh refusals.
+    """
+    try:
+        return _side_cell({_SIDE_COLUMN: value.strip()}, _SIDE_COLUMN)
+    except _CellError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from None
 
 
 def issue_wire(issue: Issue) -> dict[str, Any]:

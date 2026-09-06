@@ -17,6 +17,9 @@ class DividendAmounts(BaseModel):
 
 _US_WITHHOLDING = Decimal("0.30")
 _ZERO = Decimal("0")
+# The M4 bound, restated: ``validate._MAX_MAGNITUDE`` is the owner of the number; this module
+# imports nothing above ``shared/`` and is kept that way (see ``check_amounts``).
+_MAX_MAGNITUDE = Decimal("1e12")
 
 
 def check_amounts(gross: Decimal, withholding: Decimal, net: Decimal) -> str | None:
@@ -47,6 +50,12 @@ def check_amounts(gross: Decimal, withholding: Decimal, net: Decimal) -> str | N
     """
     if gross < _ZERO or withholding < _ZERO or net < _ZERO:
         return "股利金額不可為負"
+    # M5-05 (owner ruling 2026-09-06): the same 1e12 bound ``validate._MAX_MAGNITUDE`` puts on
+    # shares/price and the cash / 換匯 amounts. A 31-digit dividend previewed ``ok`` and was
+    # stored verbatim, after which every pool sum holding it lost its last digit to the
+    # 28-digit Decimal context. Here, in the ONE gate, so the CSV door and the edit door agree.
+    if gross > _MAX_MAGNITUDE or withholding > _MAX_MAGNITUDE or net > _MAX_MAGNITUDE:
+        return "股利金額過大,無法處理"
     if withholding + net > gross:
         return (
             f"股利金額不自洽：預扣 {withholding} + 淨額 {net} 大於總額 {gross}"

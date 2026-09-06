@@ -8,6 +8,8 @@ Two guarantees:
    rename that is not mirrored in the template header is caught here.
 """
 
+import csv
+import io
 import re
 import sqlite3
 from collections.abc import Iterator
@@ -224,3 +226,50 @@ def test_the_paste_placeholder_is_the_transactions_header() -> None:
     expected = ",".join(_kind_columns("transactions"))
     assert f'placeholder="{expected}"' in html, (
         f"web/trades.html paste placeholder is not the canonical header: {expected}")
+
+
+@pytest.mark.parametrize("kind", TEMPLATE_KINDS)
+def test_every_example_row_is_exactly_as_wide_as_the_header(kind: str) -> None:
+    """M4-04: a template is a PRODUCT THE USER FILLS IN, so a short example row is bad data
+    waiting to happen — open it in Excel, type under the last column, and every cell from
+    that point on is one column left of where the parser will read it.
+
+    Measured 2026-09-02 on the DIVIDENDS template: header 10 fields, both example rows 9.
+    ``ex_date`` was appended to ``DIVIDEND_COLUMNS`` (R6, review ⑧) and neither
+    ``_DIVIDEND_ROWS`` nor ``OPTIONAL_COLUMNS['dividends']`` was updated with it — so it was
+    also the only blank-able column in any template with no ``(選填)`` marker. Every other
+    kind was already 11/11/11, 6/6/6, 6/6/6, 9/9/9, 7/7/7.
+
+    The round-trip guard above could not see it: ``csv.DictReader`` pads a short row with
+    ``None`` and the missing column was optional, so the row parsed clean.
+
+    Asserted on the RENDERED text rather than on ``_ROWS``, because that is the artefact the
+    owner downloads (annotated header, CRLF, quoting and all).
+    """
+    rows = list(csv.reader(io.StringIO(render_import_template(kind))))
+    header, examples = rows[0], rows[1:]
+    assert examples, f"{kind}: template carries no example row"
+    widths = {i: len(r) for i, r in enumerate(examples, start=1) if len(r) != len(header)}
+    assert not widths, (
+        f"{kind}: header has {len(header)} columns {header}; "
+        f"example row(s) {widths} disagree")
+
+
+@pytest.mark.parametrize("kind", TEMPLATE_KINDS)
+def test_every_blank_able_column_is_marked_optional(kind: str) -> None:
+    """The other half of M4-04: a column an example row leaves EMPTY must carry ``(選填)``.
+
+    An unmarked column that the template itself leaves blank tells the owner two opposite
+    things at once — which is how ``ex_date`` read before this: required-looking, and blank
+    in both examples.
+    """
+    rows = list(csv.reader(io.StringIO(render_import_template(kind))))
+    header, examples = rows[0], rows[1:]
+    for pos, name in enumerate(header):
+        # A cell the row does not reach counts as blank too —「the example leaves this column
+        # empty」 is the same fact whether the cell is "" or absent, and ``ex_date`` was
+        # absent, which is exactly how it dodged this question for a release.
+        blank_somewhere = any(pos >= len(r) or r[pos] == "" for r in examples)
+        if blank_somewhere:
+            assert "(選填)" in name or "(YYYY-MM-DD)" in name, (
+                f"{kind}: column {name!r} is blank in an example row but is not marked 選填")

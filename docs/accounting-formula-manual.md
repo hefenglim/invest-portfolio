@@ -1,6 +1,6 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.8`（2026-08-13）
+> **版本**：`v1.10`（2026-09-06）
 > **程式碼基線**：`v0.1.28 + feat/corporate-actions`（公司行動 SPLIT／EXCHANGE／SPINOFF；含
 > 2026-08-13 之**現金收支七種 kind／兩軸表**與**美股現金股利 P1b**）
 > **仲裁狀態**：**已由 owner 正式簽署（2026-07-15）**，自版本 **v0.1.19** 起正式生效為站上任何
@@ -1268,6 +1268,14 @@ $(\text{MV}-\text{C})(\text{spot}-\text{acq})$——那正是 I5 禁止的事，
 > 先前本段寫著該費用「改由帳戶層 IRR 呈現」——**該指標（D36）已由業主裁定不做且從未實作**，所以那句
 > 話已刪除而非改寫成「待實作」。這是一個**常設限制**，完整說明見 §4.4.7 限制 2。
 
+> **⚠ 本段（D1 = A）已於 2026-08-24 由 AI-D42 取代——原文完整保留於下，因為「當初為何那樣決定」本身是紀錄的一部分（取代標記補於 2026-09-06，v1.10）。** 自 AI-D42 起，`REBATE`／`INTEREST_EXPENSE`／
+> `BROKER_FEE` 三類**是** XIRR 流量（見上表）；`DEPOSIT`／`WITHDRAW`／`OPENING`（資本移動）與 `INTEREST`
+> （閒置現金利息）**仍不是**。下文「`xirr_reporting` 的函式簽章**根本不接收 `cash_movements`**」與驗證錨點
+> 「無 `cash_movements` 參數」**自此不再為真**：`portfolio/returns.py::xirr_reporting` 現帶**必填**關鍵字
+> 參數 `cash_movements`（無預設值，刻意如此——預設值會讓呼叫端悄悄回到 AI-D42 之前的定義），流量序列 =
+> `opening` + `transactions` + `dividends` + `XIRR_CASH_KINDS` 三類。「沒有任何數字因此改變」一句同樣只對
+> D1 = A 當時成立；AI-D42 明白接受錨點會移動（§4.4.7 限制 2 橫幅）。
+>
 > **現金收支一律不進 XIRR——包含 2026-08-13 新增的三種（業主裁決 D1 = 選項 A，2026-08-13）。**
 > 現金收支自此有**七種 kind**（§9.1）；新增的 `INTEREST`（利息收入）、`INTEREST_EXPENSE`（融資利息）、
 > `BROKER_FEE`（券商費用）與既有四種**同樣不是 XIRR 流量**。這不是「尚未接上」，而是一條**明訂的規則**：
@@ -1624,7 +1632,10 @@ attribution 拆解（資產損益 vs 換匯損益），絕不是另外加在總�
 > 位置，因該池背後有兩筆換匯）——`cash.balance scope = schwab|USD` 與
 > `fx.covered_ratio scope = schwab`。oracle 的 `DEBIT_KINDS`／`ACQUIRING_KINDS`
 > （`scripts/stress_audit/oracle.py`）是**獨立於 app 的表**另寫的，故此處的一致並非同一份定義自我確認。
-> **不進報酬指標**：七種 kind **全部**不是 XIRR 流量（業主裁決 **D1 = A**，2026-08-13；見 §7.2）。
+> **進報酬指標者只有三種（AI-D42，2026-08-24；本句於 2026-09-06 同步）**：`REBATE`／`INTEREST_EXPENSE`／
+> `BROKER_FEE` 是 XIRR 流量（淨值趨勢之 `net_invested` 自 AI-D48 起亦同）；`DEPOSIT`／`WITHDRAW`／`OPENING`／
+> `INTEREST` 不是（見 §7.2）。本句原文「七種 kind 全部不是 XIRR 流量（業主裁決 D1 = A，2026-08-13）」為
+> AI-D42 取代 D1 = A 後之殘留。
 
 ### 9.2 對帳單（running-balance statement）與同日排序
 
@@ -1955,6 +1966,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.7a` | 2026-08-11 | **D45 — D36（帳戶層 IRR）由業主裁定不做。** §4.4.7 限制 2 與 §7 XIRR 註記皆改寫:重組費（D12）先前被記載為「對 XIRR 不可見、但帳戶層 IRR 會看見」，該第二個指標已撤銷且從未實作，故 D12 回復為**常設限制**——重組費在本系統現有的每一個報酬指標中都看不見，只在現金帳與淨值可見。**沒有任何數字改變**（XIRR 本來就不含現金收支），改的是限制的陳述:承諾一個不會到來的修正，比把盲點講清楚更糟 |
 | `v1.8` | 2026-08-13 | **現金收支七種 kind／兩軸表 + 美股現金股利（P1b）**（業主裁決 **D1 = A**，2026-08-13；D35，2026-08-10）。① **新增 §9.1.1**：現金收支由四種增為**七種**（新增 `INTEREST` 利息、`INTEREST_EXPENSE` 融資利息、`BROKER_FEE` 券商費用），由 `shared/cash_kinds.py` 這唯一一張表以**兩條正交軸**規範——`credit`（是否增加池餘額）與 `fx_acquisition`（是否進 `covered_ratio` 分母）。舊述詞「`kind == "WITHDRAW"` 才是借方、其餘皆為取得型 credit」會讓一筆 `BROKER_FEE` **增加**現金餘額**又**拉低 `covered_ratio`（兩個錯誤的金額之記錄且皆不拋錯）；`INTEREST` 即是證明一個布林值不夠的那一列——**credit 但非取得**。② **§8.1 增訂第二軸之規範**：分母只收取得型 kind，池內孳生之收益（利息，同 sale proceeds 與外幣現金股利）**沿用池均價**；否則一個從未換匯、僅收到利息的 USD 帳戶會回報 `covered_ratio < 1`，並依 F3 把現金與股票整個曝險標為基礎不完整（**在每個真實帳戶上都響的假警報**）。輸入端據此以 `acq_cost_not_an_acquisition` 拒收利息／費用的取得成本。③ **§7.2 增訂明訂規則**：**七種 kind 全部不進 XIRR**（D1=A）——`xirr_reporting` 的簽章根本不收 `cash_movements`，流量序列仍只由 `opening` + `transactions` + `dividends` 構成；被否決的選項 B 會改變每一個歷史 XIRR 的意義，選項 C 因多數列**沒有 symbol** 而當場否決。④ **§9.3 明訂護欄不擴張**：`running_min` 提領護欄與 N1 外幣提領提示仍**只**鍵在 `WITHDRAW`——提領是使用者的**意圖**（值得擋），費用／融資利息是**已發生事實之記錄**，且融資帳戶本來就會有負現金餘額。⑤ **新增 §6.2b**：`drip_us` 模型自 P1b 起同時受理 `DRIP` 與 `CASH`，移除每列的 `dividend_type_mismatch` 軟阻擋；美股現金股利與 TW／MY 同式降成本（**D35**，本節只錨定公式不重新裁決），**預扣由使用者填寫而非 `gross × 0.30`**（券商實扣經其自身分位進位，與乘積不會逐分相符），空白預扣於 `drip_us` 上以軟性 `us_cash_dividend_no_withholding` 追問但**不改數**。§6 前言與 §6.3b 同步標明其適用範圍為 `CASH_DIVIDEND_TYPES` 全體。⑥ **§4.4.7 限制 2 就地更新**：原文「只有四種 kind、只有 `WITHDRAW` 是借方（`api/routers/cash.py::_KINDS`）」已失效（該常數不存在），改引 `CASH_MOVEMENT_KINDS`；D12 之結論**不變**且由 D1=A 再次確認。⑦ 新增 §12.1 之 **E25／E26**、§12.2 四則詞彙。**沒有任何既有數字改變**：三種新 kind 從未進入任何報酬流量序列，`covered_ratio` 恆 1 之帳本仍跳過乘法，故本手冊每一個已錨定的工作範例與壓測 oracle 的每一個期望值都留在原處。⑧ **壓測場景同版補齊**：phase-1 新增 ops 50–52（`schwab` USD 池之 `INTEREST`／`INTEREST_EXPENSE`／`BROKER_FEE`）與一筆 `schwab/AAPL` `CASH` 股利，實跑 **122 ops、3,799/3,799、0 fail**；oracle 之 `DEBIT_KINDS`／`ACQUIRING_KINDS` 係獨立於 app 的表另寫，故一致非自我確認。此前之「只有 hermetic 錨點」狀態已解除。同 change set 重生英文鏡像。 |
 | `v1.9` | 2026-08-29 | **§9.3 護欄語意同步至實作（FU-D43a／FU-D34）**（QA R1 BUG-02；基線 `v0.1.28 + staged`）。§9.3 原記「現金門（deposit/withdraw、fx.convert）之硬護欄 = `running_min < 0` 且未 `ack_negative` → 422 `negative_cash`」——與實作及其自引之測試相左：**出金**為硬拒 **422 `withdraw_insufficient_balance`（FU-D43a：`ack_negative` 不可繞過、無融資）**，**換匯**為硬拒 **422 `fx_insufficient_balance`（FU-D34，需求五：無 ack、不提供融資）**；兩者皆為「期末餘額 + date-aware dip」雙檢、批次感知（CSV 同檔互為 sibling；換匯之批 = 結構有效**且**被勾選之列），並共用「不加深既有 dip 永不阻擋」規則（`after.low < min(before.low, 0)`）。credit 型 kind 進池本就不做餘額檢查（§9.1.1，未變）。`negative_cash`＋`ack_negative` **僅**存於縮減資金面之更正門（PUT／DELETE 現金收支、DELETE 換匯——date-aware `running_min`、**所有受影響池**：編輯之舊＋新 (account, ccy)、換匯刪除之兩腿）。§9.3 依此改寫（寫入門硬拒／更正門可 ack／交易門軟警告三類）並補列換匯側與更正門驗證錨點；§12.1 E16 措辭同步限縮。仲裁意涵：此前依 §1.1 仲裁一筆被拒之出金會誤判 app 為錯——本版起以實作（owner 簽署之 docstring 裁定 + §9.3 引用之測試）為準。同 change set 重生英文鏡像。**無任何公式或會計定義變更——純為護欄語意之文件同步。** |
+| `v1.10` | 2026-09-06 | **§7.2／§9.1.1 之 D1 = A 殘留同步至 AI-D42**（QA DOC-02；基線 `v0.1.28 + feat/corporate-actions`）。2026-08-24 AI-D42 已把 `REBATE`／`INTEREST_EXPENSE`／`BROKER_FEE` 三類納入 XIRR（§7.2 表與 §4.4.7 橫幅早已更新），但 §7.2 之「D1 = A」整段（「函式簽章根本不接收 `cash_movements`」、驗證錨點「無 `cash_movements` 參數」）與 §9.1.1 之「七種 kind 全部不是 XIRR 流量」**未加取代標記**，與同節上表自相矛盾；`portfolio/returns.py::xirr_reporting` 實際帶**必填**關鍵字參數 `cash_movements`（無預設值，刻意如此）。本版：① §7.2 D1 = A 段補取代橫幅（原文完整保留）；② §9.1.1 該句改寫為三類進、四類不進；③ **`INTEREST` 不進 XIRR 再次確認**（實測：帳本加一筆 `INTEREST` 500 USD → XIRR 逐位相同 `0.3336061959279546`；對照組加 `BROKER_FEE` 500 USD → `0.33285721007646424`），並修正工程規則檔 `.claude/rules/domain-ledger.md` 中唯一把 `INTEREST` 列為流量的段落（全倉庫唯一寫反處；其引用之 `CASH_KIND_TABLE.credit` 不存在，實名 `shared/cash_kinds.py::movement_sign`）。英文鏡像自 v1.8 起未收到 AI-D42（`grep -c AI-D42` = 0）：本版同 change set 重生 §4.4.7 橫幅、§7.2 表與兩段橫幅、§7.6 AI-D48／AI-D49 段、§9.1.1 句與版本紀錄。**無任何公式或會計定義變更；無任何數字移動。** |
 
 ### 12.4 如何仲裁一個爭議金額
 

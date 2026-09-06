@@ -23,6 +23,7 @@ from portfolio_dash.api.routers.cash import MovementBody, movement_guard
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.rules_binding import rule_sets_for
 from portfolio_dash.data_ingestion.store import insert_cash_movement, list_accounts
+from portfolio_dash.data_ingestion.validate import unknown_account_message
 from portfolio_dash.shared.wire import decimal_str, to_wire
 
 router = APIRouter()
@@ -92,17 +93,21 @@ def confirm(
     """
     accounts = {a.account_id: a for a in list_accounts(conn)}
     acct = accounts.get(body.account_id)
+    if acct is None:
+        # M6-03: an account nobody registered is told so — the shared sentence, not a claim
+        # about the rebate setting of something that does not exist. Two conditions, two
+        # sentences; they used to share one ``or``.
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", unknown_account_message(body.account_id), field="account_id"))
     # Batch B: rebate-relevant iff ANY bound rule set rebates (>0); that set supplies the rate.
-    # rule_sets_for is consulted only for a KNOWN account (mirrors the pre-swap
-    # `rule_row is not None` guard); an unknown account -> acct None -> the 400 below.
+    # rule_sets_for is consulted only for a KNOWN account (the unknown one answered above).
     rebate_rate = _ZERO
-    if acct is not None:
-        for rule_name in rule_sets_for(conn, body.account_id):
-            rate = get_fee_rule_set(rule_name, conn).rebate_rate
-            if rate > _ZERO:
-                rebate_rate = rate
-                break
-    if acct is None or rebate_rate <= _ZERO:
+    for rule_name in rule_sets_for(conn, body.account_id):
+        rate = get_fee_rule_set(rule_name, conn).rebate_rate
+        if rate > _ZERO:
+            rebate_rate = rate
+            break
+    if rebate_rate <= _ZERO:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"帳戶 {body.account_id} 無折讓款設定", field="account_id"))
 

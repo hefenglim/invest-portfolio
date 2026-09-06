@@ -13,11 +13,19 @@ if the pool history should balance from day one. This is operational cash tracki
 it feeds NO return metric (XIRR stays trade-flow based per domain-ledger.md).
 
 Two views are exposed:
-* ``cash_balances`` — the END balance per pool (used by the cards + reporting total).
-* ``pool_lines`` / ``running_min`` / ``running_statement`` — the DATE-ORDERED timeline
-  of one pool, so a back-dated withdrawal that dips the running balance below zero is
-  caught (audit C3) and the statement view (audit C5) can show a per-line running
-  balance. Both computed server-side; the frontend never computes money.
+* ``cash_balances`` — the balance per pool AS OF a date (used by the cards + reporting
+  total). **A balance is date-aware** (M5-06, owner ruling 2026-09-06): a row dated after
+  ``as_of`` is in the ledger but not in that day's balance, so 「今天的餘額」 only counts
+  what has happened by today — the same rule ``networth.daily_cash_series`` has always
+  applied when it walks the calendar, which is why the two used to disagree by exactly
+  the future row. ``as_of=None`` is the whole history (the pre-ruling reading).
+* ``pool_lines`` / ``running_low`` / ``running_min`` / ``running_statement`` — the
+  DATE-ORDERED timeline of one pool, so a back-dated withdrawal that dips the running
+  balance below zero is caught (audit C3) and the statement view (audit C5) can show a
+  per-line running balance. The timeline is deliberately NOT bounded by a date: a
+  future-dated flow still enters the running minimum, otherwise a deposit dated 2099
+  could fund a withdrawal today whenever a pre-existing dip silences that branch. Both
+  computed server-side; the frontend never computes money.
 """
 
 from collections.abc import Sequence
@@ -92,40 +100,51 @@ def cash_balances(
     transactions: Sequence[_TxRow],
     dividends: Sequence[_DivRow],
     instruments: dict[str, Instrument],
+    *,
+    as_of: date | None = None,
 ) -> dict[tuple[str, Currency], Decimal]:
     """All (account, currency) pool balances, including zero/negative ones.
+
+    ``as_of`` bounds the balance to rows dated **on or before** that day (M5-06). A pool
+    whose rows are all later is still LISTED — at zero — so the set of pools is the same
+    whichever day is asked for; only the amounts move. ``None`` is the whole history.
+    Inclusive on purpose: this ledger carries dates, not timestamps, so "today" includes
+    everything dated today (the same reading ``forex/pools.acquisition_basis`` gives its
+    own ``as_of``).
 
     Rows whose symbol is unregistered are skipped (same degradation rule as the
     dashboard) — an un-bookable row must not crash the cash view either.
     """
     bal: dict[tuple[str, Currency], Decimal] = {}
 
-    def add(account_id: str, ccy: Currency, delta: Decimal) -> None:
+    def add(account_id: str, ccy: Currency, on: date, delta: Decimal) -> None:
         key = (account_id, ccy)
-        bal[key] = bal.get(key, _ZERO) + delta
+        bal[key] = bal.get(key, _ZERO) + (delta if as_of is None or on <= as_of else _ZERO)
 
     for m in movements:
-        add(m.account_id, m.ccy, _movement_sign(m.kind) * m.amount)
+        add(m.account_id, m.ccy, m.date, _movement_sign(m.kind) * m.amount)
 
     for c in fx_conversions:
-        add(c.account_id, c.from_ccy, -c.from_amount)
-        add(c.account_id, c.to_ccy, c.to_amount)
+        add(c.account_id, c.from_ccy, c.date, -c.from_amount)
+        add(c.account_id, c.to_ccy, c.date, c.to_amount)
 
     for t in transactions:
         inst = instruments.get(t.symbol)
         if inst is None:
             continue
         if t.side is Side.BUY:
-            add(t.account_id, inst.quote_ccy, -(t.quantity * t.price + t.fees + t.tax))
+            add(t.account_id, inst.quote_ccy, t.trade_date,
+                -(t.quantity * t.price + t.fees + t.tax))
         else:
-            add(t.account_id, inst.quote_ccy, t.quantity * t.price - t.fees - t.tax)
+            add(t.account_id, inst.quote_ccy, t.trade_date,
+                t.quantity * t.price - t.fees - t.tax)
 
     for d in dividends:
         inst = instruments.get(d.symbol)
         if inst is None:
             continue
         if d.type in CASH_DIVIDEND_TYPES:
-            add(d.account_id, inst.quote_ccy, d.net)
+            add(d.account_id, inst.quote_ccy, d.date, d.net)
 
     return bal
 
@@ -229,18 +248,29 @@ def _ordered(lines: Sequence[CashLine]) -> list[CashLine]:
     return sorted(lines, key=lambda ln: (ln.date, 0 if ln.delta >= _ZERO else 1))
 
 
+def running_low(lines: Sequence[CashLine]) -> tuple[Decimal, date | None]:
+    """Minimum running balance over the date-ordered pool AND the day it is first reached.
+
+    ``(0, None)`` for a pool that never dips below zero (an empty pool included): the day
+    is only meaningful for a dip, and the strict ``<`` means a low reached on several days
+    names the EARLIEST of them (M5-07) — that is the day the money was first short, which
+    is what the owner has to go and fund."""
+    bal = _ZERO
+    mn = _ZERO
+    on: date | None = None
+    for ln in _ordered(lines):
+        bal += ln.delta
+        if bal < mn:
+            mn, on = bal, ln.date
+    return mn, on
+
+
 def running_min(lines: Sequence[CashLine]) -> Decimal:
     """Minimum running balance over the date-ordered pool (0 for an empty pool).
 
     Negative iff the pool dips below zero at ANY point in time — the date-aware
     overdraft check (audit C3), stricter than the end-aggregate it replaces."""
-    bal = _ZERO
-    mn = _ZERO
-    for ln in _ordered(lines):
-        bal += ln.delta
-        if bal < mn:
-            mn = bal
-    return mn
+    return running_low(lines)[0]
 
 
 def running_statement(lines: Sequence[CashLine]) -> list[tuple[CashLine, Decimal]]:

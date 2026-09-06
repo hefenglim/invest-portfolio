@@ -74,6 +74,7 @@
   .run-dot { width:7px;height:7px;border-radius:50%; }
   .dot-ok { background:var(--ok); }
   .dot-err { background:var(--up); }
+  .dot-warn { background:var(--amber); }  /* partial run — the token .pill-warn uses */
   .err-inline { font-size:10px;color:var(--up);margin-top:2px; }
   .run-result { margin-top:5px; }
   .pill-warn { color:var(--amber);border-color:rgba(217,161,63,.4);background:var(--amber-soft); }
@@ -188,6 +189,12 @@
   .tw-input { width:76px;text-align:right;font-family:var(--font-num); }
   .tw-unit { font-size:10.5px;color:var(--text-3);width:14px; }
   .tw-empty { padding:12px var(--pad);font-size:12px;color:var(--text-3); }
+  /* M9-05: 策略提示詞 empty state — same dashed-box treatment as .users-empty (styles.css),
+     so an empty list reads as "empty" instead of as a 0px blank the panel forgot to fill. */
+  .tpl-empty {
+    font-size:12px;color:var(--text-2);line-height:1.5;padding:12px 14px;
+    background:var(--panel-2);border:1px dashed var(--border-soft);border-radius:var(--radius-sm);
+  }
   .tw-sumbar { padding:8px var(--pad) 12px;font-size:12px;color:var(--text-2); }
   .tw-sumbar .num { font-family:var(--font-num);font-weight:700;margin-left:4px; }
   .tw-sumbar .sign-up { color:var(--up); }
@@ -350,7 +357,7 @@
       <div id="digest-config-wrap" class="digest-config"></div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">排程工作表</h2><span class="panel-sub">時區 <span class="num" id="sched-tz"></span></span></div>
+      <div class="panel-head"><h2 class="panel-title">排程工作表</h2></div>
       <div class="table-wrap"><table class="data" id="jobs-table"><thead><tr>
         <th class="col-text">工作</th><th>啟用</th><th class="col-text">排程 (cron)</th>
         <th class="col-text">時區</th><th class="col-text">狀態</th><th class="col-text">上次執行</th><th>下次執行</th><th></th>

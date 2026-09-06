@@ -153,6 +153,18 @@
     }).catch(() => {});
   }
 
+  /* G-02 (measured 2026-09-02 on a real manual run): `job_runs.detail` is composed
+     SERVER-side and is not owner-facing prose. The ok path reads
+     「manual: organized 0, headline 1, skipped 0 over 24 symbol(s) (budget stop)」 and the
+     error path is a bare `str(exc)` — both went verbatim into the toast body below.
+
+     Same rule the API error envelope already applies (api/errors.py::_prefer_zh): KEEP a
+     detail that was written for the owner, DROP one that was not. Deliberately not
+     translated here — parsing the backend's sentence would make this file a second, drifting
+     owner of its wording, which is the very class G-02 exists to close. */
+  const CJK = /[㐀-䶿一-鿿豈-﫿]/;
+  const zhDetail = (d) => (d && CJK.test(d) ? d : null);
+
   /* 抓取新聞 (3C): POST /api/news/run {scope} -> 202 + background pipeline. Poll the run
      history for completion, then reload the list. NEVER runs the LLM on page load — only on
      this explicit click. Guest/demo → 403, surfaced as a friendly fail toast. */
@@ -162,8 +174,8 @@
       const run = resp && resp.rows && resp.rows[0];
       if (run && run.finished_at) {
         if (prog) {
-          if (run.status === 'error') prog.fail('抓取失敗', run.detail || '請稍後再試');
-          else prog.done('抓取完成', run.detail || '已更新新聞庫');
+          if (run.status === 'error') prog.fail('抓取失敗', zhDetail(run.detail) || '請稍後再試');
+          else prog.done('抓取完成', zhDetail(run.detail) || '已更新新聞庫');
         }
         state.offset = 0; load();
         return;

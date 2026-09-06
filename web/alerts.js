@@ -219,11 +219,15 @@
     return syms.slice(0, 4).join('、') + ' 等 ' + syms.length + ' 檔';
   }
 
-  /* A group's target href: the shared href when every row points to the same place,
-     else the dashboard (a multi-symbol group can't open a single drawer). */
+  /* A group's target href: the shared href when every row points to the same place, else
+     null — the group has NO single landing spot. It used to answer `index.html` there, which
+     on the dashboard (where the biggest group lives) reloaded the page the user was already
+     on, and the 18 member alerts were unreachable in the UI (M1-04). A group with no shared
+     href is now rendered as an EXPANDER instead (see makeGroupRow); the members themselves
+     each carry a perfectly good per-symbol href. */
   function groupHref(items) {
     const first = items[0] && items[0].href;
-    return items.every((a) => a && a.href === first) ? first : 'index.html';
+    return items.every((a) => a && a.href === first) ? first : null;
   }
 
   /* Build one bell row (single alert OR a grouped rule). Symbol rows open the drawer
@@ -251,6 +255,48 @@
     txt.appendChild(el('div', 'bell-detail', detailText));
     item.appendChild(txt);
     return item;
+  }
+
+  /* A grouped rule whose members land in DIFFERENT places (the 18-symbol 自高點回撤 group):
+     an expander row, not a link. Clicking toggles the member rows in place — each built by
+     the SAME makeItemRow as an ungrouped alert, so every member keeps its own title, detail,
+     severity dot and drawer-opening click. Collapsed by default: the grouping exists to keep
+     the panel short (FU-D26), and this only restores a way to READ the rows it folds away. */
+  function makeGroupRow(sev, titleText, detailText, items) {
+    const wrap = el('div', 'bell-group');
+    const row = el('button', 'bell-item bell-group-head sev-' + sev);
+    row.type = 'button';
+    row.setAttribute('aria-expanded', 'false');
+    row.style.cssText = 'width:100%;text-align:left;background:none;border:0;font:inherit;cursor:pointer';
+    row.appendChild(el('span', 'sev-dot'));
+    const txt = el('div', 'bell-txt');
+    txt.appendChild(el('div', 'bell-title', titleText));
+    txt.appendChild(el('div', 'bell-detail', detailText));
+    row.appendChild(txt);
+    const caret = el('span', 'bell-group-caret', '▸');
+    caret.style.cssText = 'margin-left:auto;align-self:center;color:var(--text-3);font-size:11px';
+    row.appendChild(caret);
+
+    const kids = el('div', 'bell-group-items');
+    kids.hidden = true;
+    kids.style.cssText = 'border-left:2px solid var(--border);margin-left:14px';
+    items.forEach((a) => {
+      kids.appendChild(makeItemRow(a.sev, a.title, a.detail, a.href));
+    });
+
+    row.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const open = kids.hidden;
+      kids.hidden = !open;
+      row.setAttribute('aria-expanded', open ? 'true' : 'false');
+      caret.textContent = open ? '▾' : '▸';
+      positionPanel();          // the panel grew/shrank — re-anchor to the bell
+    });
+
+    wrap.appendChild(row);
+    wrap.appendChild(kids);
+    return wrap;
   }
 
   /* Group the flat alert list by `rule`, preserving first-appearance order. */
@@ -284,12 +330,14 @@
        summary); singleton rules render exactly as before. */
     groupByRule(alerts).forEach((g) => {
       if (g.rule && g.items.length >= 2) {
-        panel.appendChild(makeItemRow(
-          maxSev(g.items),
-          ruleNoun(g.items[0]) + ' ×' + g.items.length,
-          groupDetail(g.items),
-          groupHref(g.items),
-        ));
+        const href = groupHref(g.items);
+        const title = ruleNoun(g.items[0]) + ' ×' + g.items.length;
+        const detail = groupDetail(g.items);
+        /* One shared destination → a link, exactly as before. No shared destination → an
+           expander, so the folded rows stay reachable (M1-04). */
+        panel.appendChild(href
+          ? makeItemRow(maxSev(g.items), title, detail, href)
+          : makeGroupRow(maxSev(g.items), title, detail, g.items));
       } else {
         g.items.forEach((a) => {
           panel.appendChild(makeItemRow(a.sev, a.title, a.detail, a.href));

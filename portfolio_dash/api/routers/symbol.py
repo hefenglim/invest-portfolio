@@ -155,6 +155,11 @@ def _account_wire(h: HoldingRow) -> dict[str, Any]:
         "short_open": h.short_open,
         "unbookable_dividend": h.unbookable_dividend,
         "unbookable_action": h.unbookable_action,
+        # M1-03 / D21: whose dividends `payback_ratio` is built on (None unless a SPINOFF fed
+        # this position). Decimal strings like every other money field of the row.
+        "payback_from_symbol": h.payback_from_symbol,
+        "payback_carried_dividends": _dstr_or_none(h.payback_carried_dividends),
+        "payback_own_dividends": _dstr_or_none(h.payback_own_dividends),
         # 已回本: cumulative cash dividends have fully repaid the original cost, so the
         # adjusted basis has gone <= 0 (legal per domain-ledger.md). Decided HERE with an
         # exact Decimal comparison so the UI never threshold-tests a Decimal string.
@@ -228,6 +233,20 @@ def _aggregate_position(
         if unrealized_sum is not None and original_total != _ZERO
         else None
     )
+    # M1-03 / D21: the aggregate's ratio is over the SUM of the rows' portions, so its
+    # provenance is the sum of the carried / own amounts of the rows that carry one, named
+    # after the first such row. None when no account's position was fed by a SPINOFF.
+    # Known limit: a same-symbol position in ANOTHER account that was bought outright emits
+    # no `payback_own_dividends`, so it feeds the aggregate ratio but not 自身配息 here; the
+    # per-account rows beneath the aggregate are each exact.
+    carried_rows = [h for h in rows if h.payback_from_symbol is not None]
+    payback_from = carried_rows[0].payback_from_symbol if carried_rows else None
+    payback_carried = (_sum([h.payback_carried_dividends for h in carried_rows
+                             if h.payback_carried_dividends is not None])
+                       if carried_rows else None)
+    payback_own = (_sum([h.payback_own_dividends for h in carried_rows
+                         if h.payback_own_dividends is not None])
+                   if carried_rows else None)
 
     return {
         "account_count": len(rows),
@@ -261,6 +280,9 @@ def _aggregate_position(
         # one account's pre-action share count contaminates the total. A per-account row can
         # still be clean — the drawer shows both, and only the aggregate is poisoned by one.
         "unbookable_action": any(h.unbookable_action for h in rows),
+        "payback_from_symbol": payback_from,
+        "payback_carried_dividends": _dstr_or_none(payback_carried),
+        "payback_own_dividends": _dstr_or_none(payback_own),
         # 已回本 across the aggregated position — the SAME three conditions, over the
         # aggregate's own figures (see _account_wire for why each one is there). `payback`
         # is this function's aggregate ratio, so a symbol whose accounts are individually
@@ -588,7 +610,9 @@ def symbol_detail(
             "last_date": None,
             "stale": True,
             "partial": False,
-            "note": f"no stored price history for {symbol}",
+            # Rendered VERBATIM as the drawer's empty state (web/detail.js::chartSection),
+            # where every other empty state on the site is Chinese (G-02, 2026-09-02).
+            "note": f"尚無 {symbol} 的歷史價格資料",
         }
 
     # dividend_events — all ledger dividends for this symbol; lowercase type, UPPER ccy.
@@ -759,5 +783,10 @@ def _realized_wire(r: RealizedRow) -> dict[str, str]:
         "original_cost_removed": decimal_str(r.original_cost_removed),
         "adjusted_cost_removed": decimal_str(r.adjusted_cost_removed),
         "realized": decimal_str(r.realized),
-        "kind": r.kind,  # "sale" | "dividend" (post-close payout, audit H2)
+        # "sale" | "dividend" (post-close payout, audit H2) | "short_cover" (the
+        # declared-short cover, `results.py:144`). The third value shipped with the
+        # short-sale work and this comment never grew it, so the drawer rendered a
+        # cover identically to a sale until M2-06 — a stale enumeration reads as an
+        # exhaustive one.
+        "kind": r.kind,
     }

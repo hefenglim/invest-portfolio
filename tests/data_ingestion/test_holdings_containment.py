@@ -84,6 +84,14 @@ EXPECTED_CALL_SITES = {
     # the same structural way: an action-free symbol short-circuits inside `_shares_at`,
     # and a held check against it is byte-identical to the pre-feature answer.
     ("portfolio_dash/api/fundamentals_service.py", "current_shares"),
+    # M10-02 (2026-09-06): the quote jobs' partial threshold — "did a HELD instrument
+    # fail?" — answered by `actions.py::held_symbols` and injected into `scheduler/jobs.py`,
+    # which may not import `data_ingestion` itself. It is the SAME net-shares-positive
+    # predicate as `strategy.py::_held_set` and `fundamentals_service.py::_held_refs`, via
+    # the same action-aware wrapper, so containment holds the same structural way: an
+    # action-free symbol short-circuits inside `_shares_at`, the walk never runs, and the
+    # held answer is byte-identical to the pre-feature one.
+    ("portfolio_dash/api/routers/actions.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "shares_through"),
     # E1a (spec §5, 2026-08-11): the ONE accessor that deliberately skips the structural

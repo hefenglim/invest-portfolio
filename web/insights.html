@@ -235,6 +235,13 @@
 <script src="pager.js?v=0.1.28"></script>
 <script src="export.js?v=0.1.28"></script>
 <script src="alerts.js?v=0.1.28"></script>
+<!-- G-02: loaded ONLY for window.ppSkipReason — the gate-code -> zh table (SKIP_REASONS).
+     This page rendered a run's `reason` raw, so a skipped 產生洞察 read 「持倉週報：R6_quota」
+     while the 管線 hub's diagnose modal spelled the same code out in Chinese. Copying the
+     table here would make two tables for one enum, which is what test_skip_reason_coverage.py
+     exists to prevent; pipeline.js's init() no-ops on a page with no #pp-list, so importing
+     the page controller costs nothing but the file. -->
+<script src="pipeline.js?v=0.1.28"></script>
 <script>
 /* AI 洞察 — async-booted from the REAL API (decision B, spec 19/04).
    洞察卡 + 持倉健診 ← GET /api/insights (stored cards; cost_usd is a Decimal STRING).
@@ -288,7 +295,19 @@
       f.aiAttrib(card.model, card.tokens_in, card.tokens_out, card.cost_usd));
   }
 
+  /* M7-08: the server could not read this card's stored prediction back (schema drift or
+     a corrupt blob) and serves the narrative flagged (`unreadable`). Same badge as the
+     holdings table's 待釐清 marks — a data problem is shown, never hidden. It replaces the
+     confidence chip: 「純描述・無預測」 would be a lie (there IS a prediction, unreadable),
+     and a stated confidence with nothing readable to anchor it is not a confidence. */
+  function unreadablePill() {
+    var pill = el('span', 'badge badge-missing', '預測待釐清');
+    pill.title = '此卡片儲存的預測資料無法讀取，僅顯示敘述內容';
+    return pill;
+  }
+
   function confChip(card) {
+    if (card.unreadable) return null;
     if (card.confidence == null) {
       return el('span', 'insight-conf', '純描述・無預測');
     }
@@ -309,11 +328,13 @@
     if (card.symbol) {
       head.appendChild(el('span', 'insight-time', MARKET_LABEL[card.symbol] || card.symbol));
     }
+    if (card.unreadable) head.appendChild(unreadablePill());
     c.appendChild(head);
     c.appendChild(el('p', 'insight-body', card.summary || card.body_md || ''));
     var foot = el('div', 'insight-foot');
     foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
-    foot.appendChild(confChip(card));
+    var conf = confChip(card);
+    if (conf) foot.appendChild(conf);
     foot.appendChild(attribNode(card));
     c.appendChild(foot);
     return c;
@@ -323,6 +344,10 @@
      else a CONSERVATIVE keyword scan of title+summary; null = neutral (no accent).
      Colors follow the app's locked Taiwan convention (紅漲綠跌): 偏多=red 偏空=green. */
   function verdictOf(card) {
+    /* M7-08: an unreadable prediction gets the pill, not a verdict — a surface that
+       cannot know which branch applies says so rather than picking one (domain-ledger.md);
+       the keyword scan below is a fallback for cards that never HAD a prediction. */
+    if (card.unreadable) return null;
     var p = card.prediction;
     if (p && p.direction) {
       if (p.direction === 'up') return 'up';
@@ -348,6 +373,7 @@
       c.classList.add('hv-' + v);
       head.appendChild(el('span', 'hc-verdict v-' + v, VERDICT_LABEL[v]));
     }
+    if (card.unreadable) head.appendChild(unreadablePill());
     c.appendChild(head);
     var sec = el('div', 'hc-section');
     sec.appendChild(el('p', 'hc-text', card.summary || card.body_md || ''));
@@ -355,7 +381,8 @@
     if (card.title) c.appendChild(el('p', 'hc-conclusion', card.title));
     var foot = el('div', 'insight-foot');
     foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
-    foot.appendChild(confChip(card));
+    var conf = confChip(card);
+    if (conf) foot.appendChild(conf);
     foot.appendChild(attribNode(card));
     c.appendChild(foot);
     if (opts.dimmed) c.classList.add('dimmed');
@@ -444,15 +471,32 @@
       drawCalib(score.calibration_bins || []);
       return;
     }
+    /* M7-03: below the sample gate the band states 「資料不足」 and prints NO percentage —
+       the same rule the 滾動校準缺口 card two lines down has always followed, and the same
+       one 「任務 #1 · 樣本不足 · n=3／門檻 8」 states directly underneath. Until 2026-09-03 the
+       band had no gate at all: `if (!totals.n)` only caught n=0, so n=1..7 fell straight
+       through to 66.67% over three rows. The flag is SERVER-computed (totals.gate_open /
+       resolved_n / min_samples) — the page renders a verdict, it does not derive one. A
+       legacy payload without the flags (gate_open undefined) keeps the old rendering. */
+    var gated = totals.gate_open === false;
+    var gateSub = '樣本 ' + f.num(totals.resolved_n != null ? totals.resolved_n : totals.n)
+      + '／門檻 ' + f.num(totals.min_samples);
+    /* quant_hit_rate is "0" both for「零命中」and for「沒有任何量化預測」— totals.quant_n is the
+       denominator that tells them apart, so a rate with no population reads 資料不足 too. */
+    var noQuant = totals.quant_n === 0;
     /* miss_rate / quant_hit_rate are RATIO Decimal STRINGS (0..1); render as percentages
        via f.pct (Number()-coerced internally). avg_narrative is a 0..100 score string. */
     band.appendChild(scoreCard('累計評估數', f.num(totals.n), '已評分樣本'));
-    band.appendChild(scoreCard('量化命中率', totals.quant_hit_rate == null ? EM : f.pct(totals.quant_hit_rate),
-      '命中 ' + f.num(totals.quant_hit_count) + ' 筆'));
-    band.appendChild(scoreCard('失誤率', totals.miss_rate == null ? EM : f.pct(totals.miss_rate),
-      '失誤 ' + f.num(totals.miss_count) + ' 筆'));
-    band.appendChild(scoreCard('平均敘事分', totals.avg_narrative == null ? EM : f.num(totals.avg_narrative, 2),
-      '滿分 100'));
+    band.appendChild(scoreCard('量化命中率',
+      gated || noQuant ? '資料不足' : totals.quant_hit_rate == null ? EM : f.pct(totals.quant_hit_rate),
+      noQuant && !gated ? '尚無量化預測可對答案' : gated ? gateSub
+        : '命中 ' + f.num(totals.quant_hit_count) + ' 筆'));
+    band.appendChild(scoreCard('失誤率',
+      gated ? '資料不足' : totals.miss_rate == null ? EM : f.pct(totals.miss_rate),
+      gated ? gateSub : '失誤 ' + f.num(totals.miss_count) + ' 筆'));
+    band.appendChild(scoreCard('平均敘事分',
+      gated ? '資料不足' : totals.avg_narrative == null ? EM : f.num(totals.avg_narrative, 2),
+      gated ? gateSub : '滿分 100'));
     /* W7 (AI-D36): the fifth card is the rolling calibration gap — the SAME definition the
        prompt variable serves, rendered verbatim. Below the gate the card shows the honest
        sample progress (樣本不足 n/8), never a number over a handful of rows. */
@@ -751,8 +795,15 @@
         if (row.status === 'ok' || row.status === 'partial') {
           if (window.toast) window.toast('產生完成', 'ok', name + (row.detail ? '：' + row.detail : ''));
         } else if (window.toast) {
+          /* `reason` is a GATE CODE (R6_quota, R1_scope_mismatch…), not prose — spell it out
+             through the shared table (pipeline.js) so this toast and the 管線 診斷 modal say
+             the same thing about the same run. Degrades to the raw code if the script is
+             absent, exactly as ppSkipReason itself does for an unmapped code. */
+          var why = row.reason
+            ? (window.ppSkipReason ? window.ppSkipReason(row.reason) : row.reason)
+            : (row.detail || row.status);
           window.toast(row.status === 'skipped' ? '本次略過' : '執行失敗', 'fail',
-            name + '：' + (row.reason || row.detail || row.status));
+            name + '：' + why);
         }
         refresh({ quiet: true });
       }).catch(function () { /* polling is best-effort */ });

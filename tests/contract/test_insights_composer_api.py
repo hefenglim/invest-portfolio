@@ -561,3 +561,41 @@ def test_strategy_from_template_replace_guards(
     archived = cs.get_strategy(conn, sp2["id"])
     assert archived is not None and archived.archived is True
 
+
+
+# --- M7-04: the strategy's REQUIRED scope travels with the strategy ------------
+
+
+def test_strategy_list_reports_its_required_scope(client: TestClient) -> None:
+    """``GET /api/strategy-prompts`` stamps each body with the scope it REQUIRES.
+
+    The wizard's step-3 compatibility lock read ``t.scope`` off this payload, which never
+    carried the field, so ``undefined !== 'per_symbol'`` was true for every template: every
+    row rendered 「全組合」, nothing was ever locked, and an incompatible pick only failed at
+    create time with a 422 that names no template (M7-04). The value is derived from the
+    SAME ``variables.validate_tokens`` core R1 rejects with, so the badge and the rejection
+    can never disagree.
+    """
+    client.post("/api/strategy-prompts", json={"name": "PF", "body": "{{kpis_json}}"})
+    client.post(
+        "/api/strategy-prompts",
+        json={"name": "Sym", "body": "看 {{symbol_detail_json}} 與 {{price_history_json}}"},
+    )
+    by_name = {s["name"]: s for s in client.get("/api/strategy-prompts").json()}
+    assert by_name["PF"]["scope"] == "portfolio"
+    assert by_name["Sym"]["scope"] == "per_symbol"
+
+
+def test_strategy_scope_agrees_with_the_r1_rejection(client: TestClient) -> None:
+    """A body stamped ``per_symbol`` is exactly the body a portfolio task is refused for."""
+    sid = client.post(
+        "/api/strategy-prompts", json={"name": "Sym", "body": "{{symbol_detail_json}}"}
+    ).json()["id"]
+    listed = client.get("/api/strategy-prompts").json()[0]
+    assert listed["scope"] == "per_symbol"
+    r = client.post(
+        "/api/insight-tasks",
+        json={"name": "T", "scope": "portfolio", "strategy_ids": [sid],
+              "use_system_prompt": True, "self_correct": False},
+    )
+    assert r.status_code == 422

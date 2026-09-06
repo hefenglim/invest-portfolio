@@ -44,12 +44,14 @@ def test_a_zero_to_amount_row_renders_an_em_dash_and_the_report_still_builds() -
 
 
 def test_an_ordinary_conversion_still_states_its_rate() -> None:
-    """Control: an ordinary conversion still states its rate (TWD is a 0-dp minor unit)."""
+    """Control: an ordinary conversion still states its rate — at 4 dp since M3-08 (it read
+    「32」 here because the rate went through the TWD 0-dp money format; a rate is not money —
+    see test_m3_08_fx_rate_is_not_money)."""
     conn = _conn()
     insert_fx_conversion(conn, account_id="schwab", date=date(2026, 2, 2),
                          from_ccy=Currency.TWD, from_amount=Decimal("64000"),
                          to_ccy=Currency.USD, to_amount=Decimal("2000"))
     section = _fx_section(build_ledgers_report_html(
         conn, now=GOLDEN_NOW, frm=None, to=None).content.decode("utf-8"))
-    assert "1 USD = 32 TWD" in section
+    assert "1 USD = 32.0000 TWD" in section
     conn.close()

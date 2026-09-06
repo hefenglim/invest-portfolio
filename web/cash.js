@@ -108,6 +108,10 @@
      declared further down initForms would sit in its temporal dead zone at that call. */
   let acqPrefillSeq = 0;
   let acqPrefillMsg = '';   // same reason: renderAcqHint() is reachable from that early call
+  /* M5-03: does acqPrefillMsg describe a value we PUT in the field (「參考值：…可直接修改」),
+     or explain why there is none (the `available === false` reason)? The first becomes a lie
+     the moment the user clears the box; the second stays true. */
+  let acqPrefillFilled = false;
   let booted = false;  // FU-D25: gate pd-cash-tab re-renders until the first boot() populated D
   /* FU-D43c estimate state — MODULE scope, not initForms: syncFxCcy() calls
      resetEstimate() early in initForms(), and `let` declarations further down initForms
@@ -116,6 +120,7 @@
   let estPristine = true;  // buy field untouched -> the estimate may write it
   let estSeq = 0;          // stale-response fence (bumped on reset + every request)
   let estTimer = null;     // debounce so typing does not spray requests
+  let estInFlight = false; // M5-04: a request is out — 確認 must say so, not blame the user
 
   /* WPE (2026-07-07): movements ledger pages via the endpoint's limit/offset */
   const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
@@ -178,9 +183,11 @@
       tr.appendChild(el('td', 'col-text', x.account));
       tr.appendChild(el('td', 'num', f.money(x.from_amt, x.from_ccy) + ' ' + x.from_ccy));
       tr.appendChild(el('td', 'num', f.money(x.to_amt, x.to_ccy) + ' ' + x.to_ccy));
-      /* implied rate is computed by the backend (from/to, home per foreign) — never here */
+      /* implied rate is computed by the backend (from/to, home per foreign) — never here.
+         Fixed 4 dp (M3-08): a rate is not money, and `rate()`'s magnitude switch gave this
+         one column two precisions (4.6000 beside 28.00). */
       tr.appendChild(el('td', 'num',
-        '1 ' + x.to_ccy + ' = ' + f.rate(x.implied_rate) + ' ' + x.from_ccy));
+        '1 ' + x.to_ccy + ' = ' + f.rateExact(x.implied_rate, 4) + ' ' + x.from_ccy));
       tbody.appendChild(tr);
     });
     if (!cfxLed.rows.length) {
@@ -299,7 +306,24 @@
     }
     if (r.kind === 'fx_in' || r.kind === 'fx_out') {
       let s = '換匯 ' + (r.ref || '');
-      if (r.fx_rate != null) s += ' @ ' + f.rate(r.fx_rate);
+      if (r.fx_rate != null) {
+        /* M5-01: the backend's rate is from_amount / to_amount — 「how many from_ccy per one
+           to_ccy」 — for BOTH legs of a conversion. Printed bare it silently changed quoting
+           convention with the conversion's direction: two adjacent rows read 「@ 31.77」 and
+           「@ 0.0315」, one TWD-per-USD and one USD-per-TWD, neither carrying a unit. The
+           sentence below is renderFxLedger()'s, verbatim — that column has been labelling
+           the SAME number correctly all along, so this is the existing wording reaching the
+           second surface, not a third convention. Pool ccy + counter ccy recover the pair
+           (fx_out spends from_ccy, fx_in receives to_ccy); with either missing it degrades
+           to the old bare rate rather than mislabelling one. The precision follows that
+           column too (M3-08: fixed 4 dp — this IS the conversion's ledger figure, not a
+           market reference rate), or the statement becomes the third convention. */
+        const from = r.kind === 'fx_out' ? ccy : r.counter_ccy;
+        const to = r.kind === 'fx_out' ? r.counter_ccy : ccy;
+        s += (from && to)
+          ? ' @ 1 ' + to + ' = ' + f.rateExact(r.fx_rate, 4) + ' ' + from
+          : ' @ ' + f.rateExact(r.fx_rate, 4);
+      }
       if (r.counter_amount != null && r.counter_ccy) {
         s += '（對應 ' + f.signed(r.counter_amount, r.counter_ccy) + ' ' + r.counter_ccy + '）';
       }
@@ -860,6 +884,8 @@
       if (!show) {
         $('#cm-acq').value = '';
         acqPrefillMsg = '';
+        acqPrefillFilled = false;
+        $('#cm-acq-hint').className = 'cfx-balance';
         $('#cm-acq-hint').textContent = '';
         return;
       }
@@ -871,6 +897,7 @@
       const account = $('#cm-account').value, ccy = $('#cm-ccy').value;
       const on = $('#cm-date').value;
       if (!account || !ccy || !on) return;
+      hint.className = 'cfx-balance';
       hint.textContent = '查詢當日匯率…';
       try {
         const r = await api.get('/api/cash/acq-rate', { account_id: account, ccy: ccy, on: on });
@@ -878,16 +905,19 @@
         if (r.available) {
           $('#cm-acq-mode').value = 'rate';
           $('#cm-acq').value = r.rate;
+          acqPrefillFilled = true;
           acqPrefillMsg = '參考值：' + on + ' 收盤 1 ' + ccy + ' = ' + f.rate(r.rate)
             + ' ' + r.home_ccy + '（市場中價，你的實際取得價可能不同，可直接修改）';
         } else {
           $('#cm-acq').value = '';
+          acqPrefillFilled = false;
           acqPrefillMsg = r.reason + '（留白也可送出：金額照樣計入餘額，'
             + '但不列入匯損益計算並會被標示）';
         }
         renderAcqHint();
       } catch (err) {
         if (seq !== acqPrefillSeq) return;
+        acqPrefillFilled = false;
         acqPrefillMsg = '無法取得參考匯率，請手動輸入（可留白）';
         renderAcqHint();
       }
@@ -898,15 +928,44 @@
        what-if on the user's OWN entry, exactly like updImplied() in the FX form below; it
        is a display aid and never a stored figure. */
     function renderAcqHint() {
-      var parts = acqPrefillMsg ? [acqPrefillMsg] : [];
+      var hint = $('#cm-acq-hint');
+      /* The field exists only for a foreign credit (syncAcqField). Bound to #cm-amount's
+         input as well, so this also runs for a home-currency movement that has no 取得成本
+         at all — which must stay silent rather than warn about a hidden field. */
+      if (!isForeignMovement()) {
+        hint.className = 'cfx-balance';
+        hint.textContent = '';
+        return;
+      }
       var amt = $('#cm-amount').value.trim(), cost = $('#cm-acq').value.trim();
-      if ($('#cm-acq-mode').value === 'amount' && amt && cost
-          && Number(amt) > 0 && Number(cost) > 0) {
+      /* M5-03 (2026-09-03): the add form and the edit dialog disagreed about a BLANK
+         取得成本. The dialog's updAcqHint() has an `if (!cost)` branch that warns
+         「未登錄取得成本 — 此筆不列入加權平均，帳戶的匯損益會標示缺口。」; the add form said
+         that only when the RATE LOOKUP had failed, because the sentence lived in
+         acqPrefillMsg and prefillAcq writes it only on the `available === false` branch.
+         Clear the box yourself on a day that HAS a rate and the message left standing was
+         「參考值：… 可直接修改」 — a reference to a value no longer in the field, at the entry
+         point where a stray select-all is likeliest, for the ONE operation that lowers
+         covered_ratio (domain-ledger.md F2). Same sentence as the dialog's on purpose: two
+         surfaces, one consequence, one wording. The lookup-failure reason is NOT replaced —
+         it explains an absence and stays true; only the prefill message, which described a
+         value we ourselves put there, is dropped. */
+      if (!cost) {
+        var blank = acqPrefillFilled || !acqPrefillMsg ? [] : [acqPrefillMsg];
+        blank.push('未登錄取得成本 — 此筆不列入加權平均，帳戶的匯損益會標示缺口。');
+        hint.className = 'cfx-balance warn';
+        hint.textContent = blank.join('　·　');
+        return;
+      }
+      var parts = acqPrefillMsg ? [acqPrefillMsg] : [];
+      if ($('#cm-acq-mode').value === 'amount' && amt && Number(amt) > 0
+          && Number(cost) > 0) {
         parts.push('換算後 1 ' + $('#cm-ccy').value + ' = '
           + (Number(cost) / Number(amt)).toFixed(4) + ' '
           + (fundingCcyOf($('#cm-account').value) || ''));
       }
-      $('#cm-acq-hint').textContent = parts.join('　·　');
+      hint.className = 'cfx-balance';
+      hint.textContent = parts.join('　·　');
     }
     $('#cm-acq').addEventListener('input', renderAcqHint);
     $('#cm-acq-mode').addEventListener('change', renderAcqHint);
@@ -961,6 +1020,9 @@
         restore();
         if (window.toast) window.toast('寫入成功', 'ok', (KIND_LABEL[cmKind] || '') + ' ' + amount);
         $('#cm-amount').value = ''; $('#cm-note').value = ''; $('#cm-acq').value = '';
+        // M5-03: the hint must describe the field's CURRENT content — clearing the box and
+        // leaving 「參考值：…」 standing is the same stale sentence by another route.
+        renderAcqHint();
         await boot();
       } catch (err) {
         restore();
@@ -996,16 +1058,58 @@
        (it can never fight the user) and the 重新試算 affordance appears; erasing the buy
        field to empty makes it pristine again (filling an EMPTY field destroys nothing).
        All hoisted function declarations — syncFxCcy() above calls them during init;
-       the estPristine/estSeq/estTimer state lives at MODULE scope (TDZ, see top). */
+       the estPristine/estSeq/estTimer state lives at MODULE scope (TDZ, see top).
+
+       M5-08 (P1) / M5-04, 2026-09-03 — THE AUTO-FILLED FIGURE MAY NEVER OUTLIVE THE SELL
+       AMOUNT IT WAS COMPUTED FROM. The estimate is a hint the user may overwrite (a
+       conversion is booked at the price actually dealt — that stays), but a value the PAGE
+       wrote is the page's to retract. It previously survived in two windows:
+
+         * clearing 賣出金額 hid the caption and left the old figure in the buy field, so the
+           form read 「— → 1,573.70」 with nothing to have produced it;
+         * a new 賣出金額 left it there for the whole round trip — measured at 1.91 s live —
+           so 可用餘額 filling 42,000 sat beside 1,573.70 (the 50,000 answer) and the only
+           tell was the 隱含匯率 line reading a rate no provider quoted.
+
+       Both windows end at a 確認 click that writes that pair into the ledger. So the
+       retraction is SYNCHRONOUS with the input event (scheduleEstimate, before the debounce
+       even starts), not deferred to the response: a fix that waited for the reply would
+       leave the window it exists to close. Invariant, asserted by
+       tests/e2e/test_m5_fx_estimate_staleness_flow.py: while the buy field is pristine its
+       content either answers the sell amount currently in the form, or is empty and
+       captioned 「試算中…」. */
 
     function setReestimateVisible(vis) {
       const b = $('#cfx-reestimate');
       if (b) b.hidden = !vis;
     }
 
+    /* The estimate request for the form as it stands, or null when there is nothing to
+       ask. ONE definition, read by both the scheduler and the runner — they disagreed
+       about "askable" and the gap was where the stale value lived. */
+    function estimateQuery() {
+      const from = $('#cfx-from-ccy').value;
+      const to = $('#cfx-to-ccy').value;
+      const amt = $('#cfx-from-amt').value.trim();
+      if (!from || !to || from === to || amt === '' || decCmp(amt, '0') <= 0) return null;
+      return { from_ccy: from, to_ccy: to, amount: amt };
+    }
+
+    /* Retract an AUTO-FILLED buy amount and say why. Never touches a value the user typed:
+       the estPristine guard is the whole difference between retracting our own hint and
+       deleting the owner's entry. */
+    function clearAutoEstimate(caption) {
+      if (!estPristine) return;
+      const to = $('#cfx-to-amt');
+      if (to && to.value !== '') { to.value = ''; updImplied(); }
+      const cap = $('#cfx-estimate');
+      if (cap) { cap.hidden = !caption; cap.textContent = caption || ''; }
+    }
+
     function resetEstimate() {
       estSeq += 1;  // drop any in-flight response
       if (estTimer) { clearTimeout(estTimer); estTimer = null; }
+      estInFlight = false;
       estPristine = true;
       setReestimateVisible(false);
       const cap = $('#cfx-estimate');
@@ -1014,27 +1118,27 @@
 
     async function runEstimate() {
       if (!estPristine) return;
-      const cap = $('#cfx-estimate');
-      const from = $('#cfx-from-ccy').value;
-      const to = $('#cfx-to-ccy').value;
-      const amt = $('#cfx-from-amt').value.trim();
-      if (!from || !to || from === to || amt === '' || decCmp(amt, '0') <= 0) {
-        if (cap) { cap.hidden = true; cap.textContent = ''; }
-        return;
-      }
+      const q = estimateQuery();
+      if (!q) { clearAutoEstimate(''); return; }
+      clearAutoEstimate('試算中…');  // also covers 重新試算, which does not go through the debounce
       const seq = ++estSeq;
+      estInFlight = true;
       let resp;
       try {
-        resp = await api.get('/api/cash/fx-estimate',
-          { from_ccy: from, to_ccy: to, amount: amt });
+        resp = await api.get('/api/cash/fx-estimate', q);
       } catch (err) {
-        return;  // the estimate is a hint — fail silent, never block entry
-      }
-      if (seq !== estSeq || !estPristine) return;  // stale, or the user took over
-      if (!resp || resp.available === false) {
-        if (cap) { cap.hidden = false; cap.textContent = (resp && resp.reason) || '暫無法試算'; }
+        // The estimate is a hint — never block entry. But the field must not be left
+        // holding an answer to a question that failed.
+        if (seq === estSeq) { estInFlight = false; clearAutoEstimate('暫無法試算'); }
         return;
       }
+      if (seq !== estSeq || !estPristine) return;  // stale, or the user took over
+      estInFlight = false;
+      if (!resp || resp.available === false) {
+        clearAutoEstimate((resp && resp.reason) || '暫無法試算');
+        return;
+      }
+      const cap = $('#cfx-estimate');
       $('#cfx-to-amt').value = resp.estimate;  // server Decimal string, placed verbatim
       if (cap) {
         cap.hidden = false;
@@ -1047,7 +1151,17 @@
 
     function scheduleEstimate() {
       if (!estPristine) return;
-      if (estTimer) clearTimeout(estTimer);
+      /* Nulled, not just cleared: estTimer is now READ (by 確認, to tell 「試算中」 from 「請填
+         兩側金額」), so a cleared-but-non-null id would report a pending estimate forever. */
+      if (estTimer) { clearTimeout(estTimer); estTimer = null; }
+      /* Bumped UNCONDITIONALLY: an answer already in flight was computed for the PREVIOUS
+         sell amount, and letting it land during the debounce is the same stale figure by a
+         slower route. */
+      estSeq += 1;
+      estInFlight = false;
+      const q = estimateQuery();
+      clearAutoEstimate(q ? '試算中…' : '');
+      if (!q) return;
       estTimer = setTimeout(() => { estTimer = null; runEstimate(); }, 250);
     }
 
@@ -1089,7 +1203,23 @@
     $('#cfx-confirm').addEventListener('click', async () => {
       const fromA = $('#cfx-from-amt').value.trim();
       const toA = $('#cfx-to-amt').value.trim();
-      if (!fromA || !toA) { if (window.toast) window.toast('請填兩側金額', 'fail'); return; }
+      if (!fromA || !toA) {
+        /* M5-04: the buy field is empty because WE are still filling it (fx-estimate was
+           measured at 1.91 s live), so 「請填兩側金額」 blamed the user for the page's own
+           latency and told them to do something that was about to undo itself. Name the
+           real reason — and still offer the always-valid way out, since the actual dealt
+           amount may be typed at any time. */
+        const pending = !toA && estPristine && (estTimer !== null || estInFlight);
+        if (window.toast) {
+          if (pending) {
+            window.toast('買入金額試算中，請稍候', 'fail',
+              '正在依匯率試算；也可直接填入實際成交金額');
+          } else {
+            window.toast('請填兩側金額', 'fail');
+          }
+        }
+        return;
+      }
       /* FU-D34: NO ack-retry — a conversion may never overdraft the pool. The live check
          already disables 確認 when the amount exceeds 可用餘額; the backend re-validates as
          the authority and a 422 fx_insufficient_balance renders inline under the amount. */

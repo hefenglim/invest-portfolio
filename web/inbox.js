@@ -45,6 +45,17 @@
         window.toast('已略過', 'ok', label + '・可於「已忽略」取消忽略');
       }
       await boot();
+      /* M6-01 (2026-09-03): repaint the SIDEBAR 收件匣 badge. shell.js exposes
+         window.pdRefreshInboxBadge for exactly this and its own comment names the three
+         callers it exists for — 「a rebate confirm/skip, a dividend commit, an inbox action」
+         — but only rebate-inbox.js ever called it, so this panel's actions moved its own
+         badge 4 → 3 and left the sidebar reading 4 with the title 「4 筆待確認（配息 4・折讓款
+         0）」 indefinitely. The network trace after a confirm carried no /count request at
+         all: an omission, not a race. Written inline at each mutating site, exactly as
+         rebate-inbox.js writes it — a shared local wrapper would hide the call from the
+         very grep that would have caught its absence. Non-critical and silent on failure
+         (shell.js swallows its own errors): a badge is a hint, never a gate. */
+      if (window.pdRefreshInboxBadge) window.pdRefreshInboxBadge();
     } catch (err) {
       if (window.toast) window.toast((err && err.message) || '操作失敗', 'fail', err && err.code);
     }
@@ -57,6 +68,10 @@
       confirmedSession.unshift({
         id: id, symbol: it.symbol || '', ex_date: it.ex_date || '',
         ccy: it.ccy || '', net: it.est_net,
+        /* M6-02: a 配股 has no money of its own (gross = net = 0 in the ledger, correctly) —
+           it is measured in SHARES. Carry both so renderStrip can label each row by the
+           figure that identifies it. */
+        kind: it.kind || '', shares: it.est_reinvest_shares,
       });
     });
     renderStrip();
@@ -75,7 +90,16 @@
       const row = el('div', 'icf-row');
       let txt = c.symbol || ('#' + c.id);
       if (c.ex_date) txt += '・' + (f ? f.date(c.ex_date) : c.ex_date);
-      if (c.net != null && c.ccy && f) txt += '・Net ' + f.money(c.net, c.ccy) + ' ' + c.ccy;
+      /* M6-02: 全部確認 on one group books the cash dividend AND the 配股, so two rows here
+         carry the SAME code and the SAME date. Labelling both by 「Net …」 printed the 配股 as
+         「Net 0 TWD」 — the ledger's honest figure, and useless as a name: each row sits beside
+         a 復原 button that DELETES a ledger row, so an ambiguous label is an ambiguous
+         destructive action. Label each row by the figure that identifies it. */
+      if (c.kind === 'stock') {
+        txt += '・配股' + (c.shares != null && f ? ' ' + f.shares(c.shares) + ' 股' : '');
+      } else if (c.net != null && c.ccy && f) {
+        txt += '・Net ' + f.money(c.net, c.ccy) + ' ' + c.ccy;
+      }
       row.appendChild(el('span', 'icf-label', txt));
       const undo = el('button', 'btn btn-sm', '復原');
       undo.type = 'button';
@@ -94,6 +118,8 @@
       renderStrip();
       if (window.toast) window.toast('已復原', 'ok', '帳本紀錄已刪除，項目將重新出現在收件匣');
       boot();
+      // M6-01: the item came BACK, so the badge goes UP — not only down (see act()).
+      if (window.pdRefreshInboxBadge) window.pdRefreshInboxBadge();
     });
   }
 
@@ -163,6 +189,8 @@
     window.pdApi.post('/api/dividend-inbox/unskip', { fingerprints: [fp] }).then(() => {
       if (window.toast) window.toast('已取消忽略', 'ok', '項目將重新出現在收件匣');
       boot();
+      // M6-01: an un-skipped item re-enters the pending count (see act()).
+      if (window.pdRefreshInboxBadge) window.pdRefreshInboxBadge();
     }).catch((err) => {
       if (window.toast) window.toast((err && err.message) || '操作失敗', 'fail', err && err.code);
     });

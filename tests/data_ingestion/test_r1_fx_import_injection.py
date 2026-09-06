@@ -58,6 +58,7 @@ def _pool_fn(conn: sqlite3.Connection) -> CashPoolFn:
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         rows = [m for m in movements if m.id != exclude_id]
         rows.extend(
@@ -102,6 +103,7 @@ def test_a_stub_probe_reporting_a_rich_pool_lets_the_overdraft_through(
     def rich(
         account_id: str, ccy: Currency, *,
         include: Sequence[CashMovementInput] = (), exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         return CashPool(balance=Decimal("999999999"), low=_ZERO)
 

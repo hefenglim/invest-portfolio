@@ -106,6 +106,23 @@ class Holding(BaseModel):
     # unless something says so. Display mechanism (1) only; see the taxonomy above for why
     # valuation and XIRR are deliberately NOT suppressed.
     revived_by_dividend: bool = False
+    # M1-03 / D21 (owner-approved 2026-08-09, grill Q9). A SPINOFF scales both totals by the
+    # same cost_carry, so the child's `payback_ratio` equals the parent's to the last digit
+    # while the child may never have paid a dividend — arithmetic that is CORRECT under
+    # weighted average (the cost came across, so the recovery came with it) under a label
+    # that describes something that never happened. The ratio is untouched; these three say
+    # whose dividends it is built on, and every surface that shows the ratio shows them:
+    #   `payback_from_symbol`       — the DIRECT parent the basis was carved from (None when
+    #                                 no SPINOFF ever fed this position);
+    #   `payback_carried_dividends` — the dividend portion carved in AT the SPINOFF, i.e. the
+    #                                 parent's dividend_portion × cost_carry on the action
+    #                                 date (historical: a partial sell does not rescale it);
+    #   `payback_own_dividends`     — cash dividends this position received itself.
+    # The pair is None whenever `payback_from_symbol` is None, so an ordinary holding's row
+    # gains three nulls and nothing else. NOT a 待釐清 flag: nothing is wrong or missing.
+    payback_from_symbol: str | None = None
+    payback_carried_dividends: Decimal | None = None
+    payback_own_dividends: Decimal | None = None
 
 
 class RealizedRow(BaseModel):

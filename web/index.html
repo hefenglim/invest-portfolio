@@ -20,7 +20,9 @@
 <div class="page">
 
   <!-- B. KPI band -->
-  <section class="kpi-band" id="kpi-band" data-screen-label="KPI"></section>
+  <!-- M1-01: the four reserved-height hosts carry `is-loading` in the HTML (載入中… from first
+       paint, before app.js has even downloaded); the JS only ever REMOVES it. -->
+  <section class="kpi-band is-loading" id="kpi-band" data-screen-label="KPI"></section>
 
   <!-- B1. 今日摘要 + 週行動清單 (P3 batch 3) -->
   <div class="row-2 align-start" data-screen-label="摘要與週報">
@@ -104,7 +106,7 @@
         </div>
       </div>
     </div>
-    <div id="trend-chart"></div>
+    <div id="trend-chart" class="is-loading"></div>
     <div id="twr-chart" hidden="hidden" style="width:100%; height:360px; max-width:100%;"></div>
     <div id="twr-caption" hidden="hidden"
          style="font-size:11px; color:var(--text-3); padding:6px 2px 0;
@@ -129,7 +131,7 @@
       <span class="spacer"></span>
     </div>
     <div class="filter-bar" id="filter-bar"></div>
-    <div class="table-wrap">
+    <div class="table-wrap is-loading">
       <table class="data" id="holdings-table">
         <thead><tr id="holdings-head"></tr></thead>
         <tbody id="holdings-body"></tbody>
@@ -145,7 +147,7 @@
         <h2 class="panel-title">產業配置</h2>
         <span class="panel-sub">報告幣別 TWD</span>
       </div>
-      <div class="chart-box" id="sector-chart"></div>
+      <div class="chart-box is-loading" id="sector-chart"></div>
     </section>
     <section class="panel">
       <div class="panel-head">

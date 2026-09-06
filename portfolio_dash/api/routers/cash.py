@@ -1,6 +1,8 @@
 """資金管理 API (2026-07-03, R6 item 7): per-account cash pools on one seam.
 
-GET /api/cash — balances per (account, ccy) + a best-effort reporting-ccy total
+GET /api/cash — balances per (account, ccy) **as of today** (M5-06, owner ruling
+2026-09-06: a row dated after the app clock's day is in the ledger, not in today's balance;
+the envelope states ``as_of``) + a best-effort reporting-ccy total
 (skip-not-abort on a missing FX rate — a dust pool no longer nulls the whole total,
 audit C6) + a negative-pool list (overdraft visibility, audit C1a) + the movements
 ledger. Writes: deposits/withdrawals/openings and FX conversions. WITHDRAWALS (FU-D43a)
@@ -31,7 +33,11 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.data_ingestion.fx_import import fx_balance_issues, fx_ccy_issues
+from portfolio_dash.data_ingestion.fx_import import (
+    fx_amount_issues,
+    fx_balance_issues,
+    fx_ccy_issues,
+)
 from portfolio_dash.data_ingestion.store import (
     StoredCashMovement,
     StoredFxConversion,
@@ -53,6 +59,8 @@ from portfolio_dash.data_ingestion.validate import (
     CashPoolFn,
     Issue,
     cash_movement_kind,
+    dip_phrase,
+    exceeds_magnitude,
     resolve_acq_home_amount,
     validate_cash_movement,
 )
@@ -61,7 +69,7 @@ from portfolio_dash.portfolio.cash import (
     account_statement,
     cash_balances,
     pool_lines,
-    running_min,
+    running_low,
 )
 from portfolio_dash.pricing.store import get_fx, get_fx_on
 from portfolio_dash.shared.enums import Currency
@@ -94,9 +102,11 @@ def _allowed_ccys(account: Account) -> set[Currency]:
 def _balances(
     conn: sqlite3.Connection,
     *,
+    as_of: date,
     movements: list[StoredCashMovement] | None = None,
 ) -> dict[tuple[str, Currency], Decimal]:
-    """Pool balances; ``movements`` overrides the stored movement ledger (would-be /
+    """Pool balances as of ``as_of`` (M5-06 — the request clock's day, never
+    ``date.today()``); ``movements`` overrides the stored movement ledger (would-be /
     excluding-a-row reads for the withdraw guard, FU-D43a)."""
     return cash_balances(
         movements if movements is not None else list_cash_movements(conn),
@@ -104,20 +114,23 @@ def _balances(
         list_transactions(conn),
         list_dividends(conn),
         {i.symbol: i for i in list_instruments(conn)},
+        as_of=as_of,
     )
 
 
-def _pool_min(
+def _pool_low(
     conn: sqlite3.Connection,
     account_id: str,
     ccy: Currency,
     *,
     movements: list[StoredCashMovement] | None = None,
     fx: list[StoredFxConversion] | None = None,
-) -> Decimal:
-    """Minimum running balance of one pool over its date-ordered ledger (audit C3).
+) -> tuple[Decimal, date | None]:
+    """Minimum running balance of one pool over its date-ordered ledger (audit C3), and the
+    first day it is reached (M5-07; ``None`` when the pool never dips).
 
-    Callers pass the WOULD-BE movement/fx list; unspecified ledgers load from store.
+    Callers pass the WOULD-BE movement/fx list; unspecified ledgers load from store. The
+    timeline is never date-bounded — see ``portfolio/cash.py``.
     """
     ms = movements if movements is not None else list_cash_movements(conn)
     fxs = fx if fx is not None else list_fx_conversions(conn)
@@ -125,7 +138,7 @@ def _pool_min(
         account_id, ccy, ms, fxs, list_transactions(conn), list_dividends(conn),
         {i.symbol: i for i in list_instruments(conn)},
     )
-    return running_min(lines)
+    return running_low(lines)
 
 
 def _synthetic(movement: CashMovementInput) -> StoredCashMovement:
@@ -157,8 +170,9 @@ def cash_pool_fn(
     batch's own funding row count toward a later withdrawal in the same file.
 
     The two figures are computed by the SAME two expressions the manual door used before the
-    extraction (``cash_balances`` for the balance, ``running_min(pool_lines(...))`` for the
-    dip), so the guard's verdict is unchanged.
+    extraction (``cash_balances`` for the balance, ``running_low(pool_lines(...))`` for the
+    dip and its day). ``as_of`` bounds the balance only (M5-06): the guard asks for the pool
+    as of the row's own date, the timeline stays whole.
 
     ``exclude_fx_id`` is the fx-conversion analogue of ``CashPoolFn.exclude_id``: the EDITED
     conversion's own prior effect is stripped from the snapshot before anything is asked of
@@ -180,14 +194,17 @@ def cash_pool_fn(
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         rows: list[StoredCashMovement] = [m for m in movements if m.id != exclude_id]
         rows.extend(_synthetic(m) for m in include)
+        low, low_date = running_low(
+            pool_lines(account_id, ccy, rows, fx, txns, divs, insts))
         return CashPool(
-            balance=cash_balances(rows, fx, txns, divs, insts).get(
+            balance=cash_balances(rows, fx, txns, divs, insts, as_of=as_of).get(
                 (account_id, ccy), _ZERO),
-            low=running_min(
-                pool_lines(account_id, ccy, rows, fx, txns, divs, insts)),
+            low=low,
+            low_date=low_date,
         )
 
     return probe
@@ -199,6 +216,9 @@ def cash_pool_fn(
 _MOVEMENT_ISSUE_FIELD: dict[str, str] = {
     "unknown_movement_kind": "kind",
     "non_positive_amount": "amount",
+    "amount_too_large": "amount",
+    "acq_cost_too_large": "acq_home_amount",
+    "acq_rate_too_large": "acq_rate",
     "unknown_account": "account_id",
     "ccy_not_allowed": "ccy",
     "acq_cost_ambiguous": "acq_home_amount",
@@ -233,10 +253,12 @@ def _movement_error(issues: Sequence[Issue]) -> JSONResponse | None:
         "validation_error", hard.message, field=field))
 
 
-def _negative_response(account_id: str, ccy: Currency, low: Decimal) -> JSONResponse:
+def _negative_response(
+    account_id: str, ccy: Currency, low: Decimal, on: date | None
+) -> JSONResponse:
     return JSONResponse(status_code=422, content=error_body(
         "negative_cash",
-        f"此筆會使 {account_id} 的 {ccy.value} 現金於某時點降至 {decimal_str(low)} — "
+        f"此筆會使 {account_id} 的 {ccy.value} 現金{dip_phrase(on)} {decimal_str(low)} — "
         "通常代表漏記入金或換匯;確認無誤可強制寫入"))
 
 
@@ -269,6 +291,14 @@ def fx_change_guard(
     (self-exclusion) so a correction inside the headroom the row already consumes is not
     refused; the guard's other branch is what stops that correction growing past it.
     """
+    # M5-05: structural, needs no ledger, so it comes first — and it is the same
+    # ``fx_amount_issues`` the CSV door runs, so the three doors cannot disagree about size.
+    # Leg order, like the currency check: the from-leg names the field whenever it offends.
+    amount_issues = fx_amount_issues(from_amt, to_amt)
+    if amount_issues:
+        field = "from_amt" if exceeds_magnitude(from_amt) else "to_amt"
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", amount_issues[0].message, field=field))
     acct = _accounts(conn).get(account_id)
     if acct is None:
         return JSONResponse(status_code=400, content=error_body(
@@ -309,9 +339,9 @@ def fx_delete_guard(
         return None
     would_be = [f for f in list_fx_conversions(conn) if f.id != existing.id]
     for ccy in (existing.to_ccy, existing.from_ccy):
-        low = _pool_min(conn, existing.account_id, ccy, fx=would_be)
+        low, on = _pool_low(conn, existing.account_id, ccy, fx=would_be)
         if low < _ZERO:
-            return _negative_response(existing.account_id, ccy, low)
+            return _negative_response(existing.account_id, ccy, low, on)
     return None
 
 
@@ -324,7 +354,10 @@ def cash_overview(
     reporting: Currency = Depends(get_reporting),
 ) -> dict[str, Any]:
     accounts = _accounts(conn)
-    bal = _balances(conn)
+    # M5-06: today's balance counts what has happened by today. ``now`` is the injected
+    # app clock (Asia/Taipei), so the frozen test clock and prod read the same rule.
+    as_of = now.date()
+    bal = _balances(conn, as_of=as_of)
     rows = [
         {
             "account_id": account_id,
@@ -376,6 +409,7 @@ def cash_overview(
     movements = list(reversed(list_cash_movements(conn)))
     page = movements[offset:offset + limit]
     return {
+        "as_of": as_of.isoformat(),
         "balances": rows,
         "negative_pools": negative_pools,
         "reporting_total": decimal_str(total),
@@ -408,10 +442,14 @@ def cash_overview(
     }
 
 
-def _stmt_row_wire(ccy: Currency, ln: CashLine, bal: Decimal) -> dict[str, Any]:
+def _stmt_row_wire(
+    ccy: Currency, ln: CashLine, bal: Decimal, *, as_of: date
+) -> dict[str, Any]:
     """One statement row: the existing keys (date/kind/ref/delta/balance) + the per-row
-    ``ccy`` (needed by the combined view) + the OPTIONAL structured detail keys (null when
-    the field does not apply to the kind). Every Decimal is a wire STRING."""
+    ``ccy`` (needed by the combined view) + ``future`` (M5-06: the row is dated after
+    ``as_of``, so its running ``balance`` is a projection past today's ``current_balance``)
+    + the OPTIONAL structured detail keys (null when the field does not apply to the kind).
+    Every Decimal is a wire STRING."""
     def _d(value: Decimal | None) -> str | None:
         return decimal_str(value) if value is not None else None
 
@@ -422,6 +460,7 @@ def _stmt_row_wire(ccy: Currency, ln: CashLine, bal: Decimal) -> dict[str, Any]:
         "ref": ln.ref,
         "delta": decimal_str(ln.delta),
         "balance": decimal_str(bal),
+        "future": ln.date > as_of,
         "symbol": ln.symbol,
         "name": ln.name,
         "qty": _d(ln.qty),
@@ -441,6 +480,7 @@ def cash_statement(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """Merged, date-ordered flow timeline with a server-computed running balance (audit C5).
 
@@ -448,20 +488,35 @@ def cash_statement(
     ``ccy`` absent → the ACCOUNT-LEVEL all-currency view: every pool's rows merged
     newest-first, each row carrying its own ``ccy`` and its per-(account, ccy) running
     balance (balances are NEVER blended across currencies); envelope ``ccy`` is null and a
-    per-ccy ``balances`` list is returned. Newest-first, paged; Decimal strings."""
+    per-ccy ``balances`` list is returned. Newest-first, paged; Decimal strings.
+
+    M5-06: EVERY row is listed — a future-dated row is in the ledger, and a statement that
+    hid it would read as a lost row — but ``current_balance`` / ``balances`` are as of
+    ``as_of`` (today, from the injected clock), the same figure ``GET /api/cash`` shows, and
+    a row dated after it carries ``future: true`` so the page can draw the line between the
+    balance and the projection past it."""
     accounts = _accounts(conn)
     acct = accounts.get(account)
     if acct is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"帳戶 {account} 不存在", field="account"))
+    as_of = now.date()
     statements = account_statement(
         account, list_cash_movements(conn), list_fx_conversions(conn),
         list_transactions(conn), list_dividends(conn),
         {i.symbol: i for i in list_instruments(conn)}, ccy=ccy,
     )
-    # Per-ccy current balances (last running balance in each pool; 0 for an empty pool).
+
+    def _as_of_balance(stmt: list[tuple[CashLine, Decimal]]) -> Decimal:
+        # The running balance after the LAST line dated on or before ``as_of`` — the
+        # statement is chronological, so that is the end-of-day balance of the last day that
+        # has happened; 0 for a pool with no such line. Equal by construction to
+        # ``cash_balances(..., as_of=as_of)`` for the same pool.
+        return next((bal for ln, bal in reversed(stmt) if ln.date <= as_of), _ZERO)
+
+    # Per-ccy balances as of today (0 for an empty pool).
     balances = [
-        {"ccy": pool_ccy.value, "balance": decimal_str(stmt[-1][1] if stmt else _ZERO)}
+        {"ccy": pool_ccy.value, "balance": decimal_str(_as_of_balance(stmt))}
         for pool_ccy, stmt in statements
     ]
     # Flatten every pool's rows, then display the EXACT reverse of the chronological order
@@ -480,14 +535,15 @@ def cash_statement(
     flat.reverse()
     page = flat[offset:offset + limit]
     single = ccy is not None
-    current_balance = statements[0][1][-1][1] if single and statements[0][1] else _ZERO
+    current_balance = _as_of_balance(statements[0][1]) if single else _ZERO
     return {
         "account_id": account,
         "account": acct.name,
         "ccy": ccy.value if ccy is not None else None,
+        "as_of": as_of.isoformat(),
         "current_balance": decimal_str(current_balance) if single else None,
         "balances": balances,
-        "rows": [_stmt_row_wire(c, ln, bal) for c, ln, bal in page],
+        "rows": [_stmt_row_wire(c, ln, bal, as_of=as_of) for c, ln, bal in page],
         "total_count": len(flat),
     }
 
@@ -630,11 +686,11 @@ def edit_movement(
                 # must never resurface as an ack-able warning. What remains ack-able here
                 # is only the effect of REMOVING the old row (e.g. a deposit edited into
                 # a withdraw stranding later flows) — deposit-side semantics, untouched.
-                low = _pool_min(conn, account_id, ccy, movements=without)
+                low, on = _pool_low(conn, account_id, ccy, movements=without)
             else:
-                low = _pool_min(conn, account_id, ccy, movements=would_be)
+                low, on = _pool_low(conn, account_id, ccy, movements=would_be)
             if low < _ZERO:
-                return _negative_response(account_id, ccy, low)
+                return _negative_response(account_id, ccy, low, on)
     update_cash_movement(
         conn, move_id, account_id=body.account_id, move_date=body.date,
         kind=kind, ccy=body.ccy, amount=body.amount, note=body.note,
@@ -654,9 +710,9 @@ def remove_movement(
                             content=error_body("not_found", f"紀錄 #{move_id} 不存在"))
     if not ack_negative:
         would_be = [m for m in list_cash_movements(conn) if m.id != move_id]
-        low = _pool_min(conn, existing.account_id, existing.ccy, movements=would_be)
+        low, on = _pool_low(conn, existing.account_id, existing.ccy, movements=would_be)
         if low < _ZERO:
-            return _negative_response(existing.account_id, existing.ccy, low)
+            return _negative_response(existing.account_id, existing.ccy, low, on)
     delete_cash_movement(conn, move_id)
     return {"ok": True, "id": move_id}
 

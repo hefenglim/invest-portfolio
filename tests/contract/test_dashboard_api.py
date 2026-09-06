@@ -118,7 +118,11 @@ def test_dashboard_embeds_real_cards_newest_first(
         "id", "title", "summary", "body_md", "symbol", "created_at", "cost_usd",
         # AI attribution (2026-07-07): every LLM output carries model + token usage.
         "model", "tokens_in", "tokens_out",
+        # M7-08 (2026-09-06): a card whose stored prediction cannot be read back is served
+        # flagged (待釐清 pill) instead of taking the whole dashboard down.
+        "unreadable",
     }
+    assert newer["unreadable"] is False
     assert newer["summary"] == "newer summary"
     assert newer["body_md"] == "# newer"
     assert newer["symbol"] is None  # portfolio card -> null symbol passes through

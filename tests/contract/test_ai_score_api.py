@@ -127,3 +127,88 @@ def test_ai_score_decision_quality_fields(
     assert combo["calib_error_pp"] == "5.00"
     # The rolling gap shares the prompt variable's definition: claimed 0.80, actual 0.75.
     assert body["rolling_gap"] == {"gap": "-0.050", "window_n": 8, "min_scored": 8}
+
+
+# --- M7-03: the DISPLAY GATE belongs to the payload, not to one page -----------
+
+
+def test_ai_score_totals_carry_the_sample_gate(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """``totals`` reports its own gate the way ``by_combo`` already does (M7-03).
+
+    Three scored rows against a min_samples of 8: the rates are still computed and still
+    exact Decimal strings, but the payload now SAYS the gate is shut, so the band (and any
+    other consumer) has something to render 「資料不足」 from instead of 66.67%.
+    """
+    now = datetime(2026, 6, 11, 14, 30)
+    es.ensure_tables(golden_db)
+    for i in range(3):
+        es.add_evaluation(
+            golden_db, insight_id=200 + i, insight_type_id=10, calibration_version=1,
+            is_shadow=False, status="scored", quant_hit=i < 2, narrative_score=80 + i,
+            miss=i >= 2, actual_value=None, confidence=70, now=now)
+    totals = api_client.get("/api/ai-score").json()["totals"]
+    # the gate — same field names/shape as by_combo (W7 AI-D36)
+    assert totals["min_samples"] == 8
+    assert totals["resolved_n"] == 3
+    assert totals["gate_open"] is False
+    # unchanged: the numbers themselves are right, only the disclosure was missing
+    assert totals["n"] == 3
+    assert totals["quant_hit_rate"] == "0.6667"
+    assert totals["miss_rate"] == "0.3333"
+    assert totals["avg_narrative"] == "81.00"
+
+
+def test_ai_score_totals_gate_opens_at_min_samples(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The aggregate gate opens on the SAME threshold the per-combo gate uses."""
+    now = datetime(2026, 6, 11, 14, 30)
+    es.ensure_tables(golden_db)
+    for i in range(8):
+        es.add_evaluation(
+            golden_db, insight_id=300 + i, insight_type_id=10, calibration_version=1,
+            is_shadow=False, status="scored", quant_hit=True, narrative_score=None,
+            miss=False, actual_value=None, confidence=70, now=now)
+    totals = api_client.get("/api/ai-score").json()["totals"]
+    assert totals["resolved_n"] == 8 and totals["gate_open"] is True
+
+
+def test_ai_score_empty_totals_are_never_readable_as_zero_percent(
+    api_client: TestClient
+) -> None:
+    """An empty record must not hand a consumer a bare "0" it can print as 0.00%.
+
+    ``quant_hit_rate``/``miss_rate``/``avg_narrative`` keep their existing type (Decimal
+    string — the wire contract), so what makes them judgeable is the DENOMINATOR shipping
+    beside them: ``resolved_n``/``quant_n`` are 0 and ``gate_open`` is false, which is
+    exactly how ``by_combo`` has always been readable.
+    """
+    totals = api_client.get("/api/ai-score").json()["totals"]
+    assert totals["n"] == 0
+    assert totals["resolved_n"] == 0
+    assert totals["quant_n"] == 0
+    assert totals["gate_open"] is False
+    assert totals["min_samples"] == 8
+
+
+def test_ai_score_totals_quant_denominator_survives_an_open_gate(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """``quant_hit_rate`` is "0" both for "no hits" and for "no quantitative row at all".
+
+    Above the gate only ``quant_n`` tells the two apart, so ``totals`` carries it — the
+    narrative-only record below would otherwise read as a 0% hit rate over 8 samples.
+    """
+    now = datetime(2026, 6, 11, 14, 30)
+    es.ensure_tables(golden_db)
+    for i in range(8):
+        es.add_evaluation(
+            golden_db, insight_id=400 + i, insight_type_id=10, calibration_version=1,
+            is_shadow=False, status="scored", quant_hit=None, narrative_score=70,
+            miss=False, actual_value=None, confidence=70, now=now)
+    totals = api_client.get("/api/ai-score").json()["totals"]
+    assert totals["gate_open"] is True
+    assert totals["quant_hit_rate"] == "0"  # unchanged type/name
+    assert totals["quant_n"] == 0           # ...and now disambiguated

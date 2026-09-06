@@ -532,7 +532,7 @@ defaulted**. A SPINOFF row without it is rejected at validation — the same pos
 ### 4.4 Complete `_Position` field transfer table — NORMATIVE
 
 The formulas above name only the fields they change, which leaves the rest to inference. `_Position`
-has **fourteen** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an
+has **seventeen** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an
 explicit rule here, because "the formula didn't mention it" is not a specification.
 
 > **Count corrected 2026-08-10 (F-37), and the guard has since paid for itself.** This paragraph
@@ -568,6 +568,9 @@ explicit rule here, because "the formula didn't mention it" is not a specificati
 | `unbookable_action` *(added 2026-08-10)* | unchanged | OR-ed into Q: `Q.unbookable_action \|= P.unbookable_action` (the propagation line in the EXCHANGE branch) | same OR into the child (the SPINOFF branch's line); `P` keeps its own |
 | `revived_by_dividend` *(added 2026-09-01, **QA-06**)* | unchanged | OR-ed into Q: `Q.revived_by_dividend \|= P.revived_by_dividend` — an EXCHANGE moves the zero-basis shares to Q and zeroes `P`, so leaving the flag behind would launder it onto a position nobody looks at again | same OR into the child: the carve `× c` of a zero basis is zero, so the child inherits the same zero-basis doubt; `P` keeps its own |
 | `vacated_to` *(added 2026-08-11, **E24 / D32**)* | unchanged (`None`) | **`P.vacated_to := to_symbol`** — the field's only writer | unchanged (`None`): a SPINOFF does **not** vacate its parent |
+| `payback_from` *(added 2026-09-06, **D21 / M1-03**)* | unchanged | moved onto Q (`Q.payback_from := P.payback_from` **if Q has none** — first writer wins); `P := None` — a rename must not launder 「承接自」 off the lot it describes | **`Q.payback_from := P`** if Q has none (the DIRECT parent, never recursed — a grandchild names the child it was carved from); `P` keeps its own |
+| `payback_carried` *(added 2026-09-06, **D21 / M1-03**)* | unchanged | `Q += P.payback_carried`; `P := 0` | **`Q += carved_original − carved_adjusted`** — `P`'s dividend portion × `c` on the action date, HISTORICAL (a later partial sell does not rescale it; the ratio it explains does not move either); `P` unchanged |
+| `payback_own` *(added 2026-09-06, **D21 / M1-03**)* | unchanged | `Q += P.payback_own`; `P := 0` | unchanged on both sides — the child has received nothing yet; accumulated by the CASH/NET dividend branch on every position, emitted only beside `payback_from` |
 
 **Why three fields whose rule is "unreachable" still get rows (F-16, 2026-08-27).** They record
 WHERE the first oversell happened — the date, the quantity sold and the quantity held — so a caller

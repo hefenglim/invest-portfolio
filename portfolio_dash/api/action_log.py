@@ -31,18 +31,31 @@ CREATE TABLE IF NOT EXISTS action_log (
 """
 
 # Paths that mutate nothing (pure computation / auth chatter): not logged.
+# ⚠ Every ``*/preview`` endpoint belongs here — ``tests/contract/test_action_log_labels.py``
+# enumerates the router table and fails on one that is missing. Five previews were listed and
+# ``/api/ledgers/corporate-actions/preview`` was not (found 2026-09-02); that form previews on
+# a DEBOUNCE, so one 補登 wrote a burst of phantom "operations" into a log whose own docstring
+# promises previews are excluded.
 _EXCLUDED_PREFIXES = (
     "/api/input/manual/preview",
     "/api/input/ai/preview",
     "/api/import/preview",
     "/api/prompts/preview",
     "/api/rebalance/preview",
+    "/api/ledgers/corporate-actions/preview",
     "/api/whatif",
     "/api/auth/session",
 )
 
 # Ordered (method, path-prefix, label) — first match wins. Labels are the
 # user-facing Chinese action names shown in 設定 › 排程 › 系統操作記錄.
+#
+# ⚠ This table must cover EVERY mutating ``/api/*`` route the app registers: the fallback in
+# ``label_for`` prints the raw English path, so a missing row shows the owner
+# ``POST /api/news/run`` where the row above it says 「手動更新報價」. It is not maintained by
+# memory — ``tests/contract/test_action_log_labels.py`` walks FastAPI's own route table and
+# fails, naming the endpoint, the day a new one lands without a label (2026-09-02: 43 routes
+# had drifted out, four of them user-visible).
 _LABELS: list[tuple[str, str, str]] = [
     ("POST", "/api/input/manual/commit", "手動交易寫入"),
     ("POST", "/api/import/commit", "匯入寫入（CSV / 單筆表單）"),
@@ -81,6 +94,49 @@ _LABELS: list[tuple[str, str, str]] = [
     ("POST", "/api/insight-types", "AI 洞察任務操作"),
     ("PUT", "/api/llm/", "LLM 設定變更"),
     ("POST", "/api/llm/", "LLM 操作"),
+    # --- 2026-09-02 sweep: the endpoints that had drifted out of the table -------------
+    # spec 07 §7.0 makes ``/api/insight-tasks/*`` a FULL alias of ``/api/insight-types/*``
+    # (one handler, two paths). The label must therefore be the SAME string for both, or the
+    # log records which PAGE fired the click instead of what happened — which is exactly how
+    # 「AI 洞察任務操作」 and ``POST /api/insight-tasks/official-pack`` came to sit in one list.
+    ("POST", "/api/insight-tasks", "AI 洞察任務操作"),
+    ("PUT", "/api/insight-types", "AI 洞察任務設定變更"),
+    ("PUT", "/api/insight-tasks", "AI 洞察任務設定變更"),
+    ("DELETE", "/api/insight-types", "AI 洞察任務刪除"),
+    ("DELETE", "/api/insight-tasks", "AI 洞察任務刪除"),
+    ("POST", "/api/calibrations/", "校正版本封存"),
+    ("POST", "/api/strategy-prompts", "策略模板新增"),
+    ("PUT", "/api/strategy-prompts", "策略模板變更"),
+    ("DELETE", "/api/strategy-prompts", "策略模板刪除"),
+    # 公司行動 write door (its /preview sibling is excluded above, so the order is safe).
+    ("POST", "/api/ledgers/corporate-actions", "公司行動新增"),
+    ("DELETE", "/api/instruments", "刪除標的"),
+    ("DELETE", "/api/import/batches/", "匯入批次刪除"),
+    ("POST", "/api/broker/convert", "券商匯出檔轉換"),
+    ("POST", "/api/dividend-inbox/unskip", "配息取消略過"),
+    ("POST", "/api/rebates/unskip", "折讓款取消略過"),
+    # reset-all first: it also matches the generic /api/fee-rules/ prefix below.
+    ("POST", "/api/fee-rules/reset-all", "費稅規則全部重設"),
+    ("POST", "/api/fee-rules/", "費稅規則重設"),
+    ("PUT", "/api/fee-rules/", "費稅規則變更"),
+    # llm-fail-log's export lives OUTSIDE export.py on purpose (its router docstring: to stay
+    # clear of the test_export_endpoints_have_callers contract), which is precisely why the
+    # "/api/export/" prefix above never reached it. All 15 exports now read 「匯出報表」.
+    ("POST", "/api/llm-fail-log/export", "匯出報表"),
+    ("DELETE", "/api/llm-fail-log", "AI 失敗紀錄清除"),
+    ("DELETE", "/api/llm/", "LLM 設定刪除"),
+    ("POST", "/api/news/run", "新聞抓取"),
+    ("PUT", "/api/news-prompt", "新聞提示詞變更"),
+    ("POST", "/api/news-prompt/reset", "新聞提示詞重設"),
+    ("POST", "/api/system-prompt/reset", "系統提示詞重設"),
+    ("POST", "/api/prompts/test", "提示詞測試"),
+    ("PUT", "/api/digest/config", "摘要設定變更"),
+    ("POST", "/api/digest/run", "摘要手動產生"),
+    ("PUT", "/api/notify/config", "通知設定變更"),
+    ("POST", "/api/notify/test", "通知測試發送"),
+    ("PUT", "/api/target-weights", "目標配置變更"),
+    ("PUT", "/api/ui-prefs", "介面偏好設定"),
+    ("POST", "/api/whats-new/seen", "更新說明已讀"),
 ]
 
 

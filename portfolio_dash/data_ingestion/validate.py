@@ -63,11 +63,17 @@ from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
-from portfolio_dash.shared.money import from_db, quantize_amount
+from portfolio_dash.shared.money import MINOR_UNITS, from_db, quantize_amount
 from portfolio_dash.shared.wire import decimal_str
 
 # Overflow guard (audit M4): shares/price above this are rejected as a hard issue so the
 # downstream fee quantize (fees._round) can never overflow the Decimal context into a 500.
+# Since M5-05 (owner ruling 2026-09-06) the SAME bound covers every money amount at the cash,
+# 換匯 and dividend doors — ``Decimal``'s default context is 28 significant digits, so an
+# amount past it either lost its last digit in the pool sum (27/28 digits, silently) or raised
+# ``InvalidOperation`` out of the settlement quantize (29+) into the ArithmeticError net,
+# whose sentence points at a ledger row that was never written. ``dividend_model.check_amounts``
+# and ``api/routers/ledgers.TxEditBody`` restate the literal; keep the three equal.
 _MAX_MAGNITUDE = Decimal("1e12")
 _ZERO = Decimal("0")
 
@@ -113,6 +119,33 @@ class Issue(BaseModel):
     kind: str
     message: str
     needs_confirm: bool = False
+
+
+def exceeds_magnitude(value: Decimal) -> bool:
+    """True when *value* is past the M4/M5-05 bound — the ONE comparison every door makes."""
+    return value > _MAX_MAGNITUDE
+
+
+def amount_too_large_issue(value: Decimal, label: str) -> Issue | None:
+    """The M4 「過大,無法處理」 finding for a money amount, or ``None`` inside the bound (M5-05).
+
+    ``label`` names the figure in the door's own words (金額 / 換出金額 / 取得成本 …) so the
+    sentence reads like the shares/price ones it is modelled on. Call it BEFORE any
+    precision check: the precision check is the quantize that raises.
+    """
+    if exceeds_magnitude(value):
+        return Issue(kind="amount_too_large", message=f"{label}過大,無法處理")
+    return None
+
+
+def dip_phrase(on: date | None) -> str:
+    """「於 <day> 降至」 for an overdraft message, naming THE DAY the pool bottoms (M5-07).
+
+    ``running_low`` supplies the day; ``None`` (a pool that never dips, which no caller
+    should reach here with, or a test double that reports no day) keeps the old 「於某時點」
+    rather than printing ``None`` into the owner's sentence.
+    """
+    return f"於 {on.isoformat()} 降至" if on is not None else "於某時點降至"
 
 
 def _same_ratio(a_to: Decimal, a_from: Decimal, b_to: Decimal, b_from: Decimal) -> bool:
@@ -206,23 +239,35 @@ def unknown_account_issue(account_id: str) -> Issue:
     The ``kind`` is ``unknown_account`` at every call site and is unchanged, so no wire
     contract moves; the finding stays HARD (``needs_confirm=False``) everywhere.
 
-    ⚠ Not yet the owner of the SAME sentence in ``portfolio_dash/api/routers/``, which build
-    it by hand for ``error_body`` envelopes rather than for an :class:`Issue`. Sharing it
-    there wants a message-only function under this one; it was out of L-1's scope and is
-    recorded so the next reader finds the copies rather than the divergence.
+    The SAME sentence is also built by hand in ``portfolio_dash/api/routers/`` for
+    ``error_body`` envelopes rather than for an :class:`Issue`. The message-only function
+    this docstring asked for now exists — :func:`unknown_account_message`, which this
+    function delegates to, so the two cannot drift — and ``rebates.confirm`` was its first
+    router-side caller (M6-03, 2026-09-06: that door had folded 「does not exist」 into
+    「無折讓款設定」 and answered a ghost account with a sentence about its rebate setting).
 
-    **Six copies remain**, re-measured 2026-08-29 and listed by FUNCTION rather than counted
-    per module — a bare tally cannot say WHICH copy a later wave already took, and this list
-    was misread once for exactly that reason: ``broker_import.broker_convert`` ·
+    **Six copies remain to converge** (re-measured 2026-09-06; ``rebates`` was never on
+    this list because it had a *different* wrong sentence), listed by FUNCTION rather than
+    counted per module — a bare tally cannot say WHICH copy a later wave already took, and
+    this list was misread once for exactly that reason: ``broker_import.broker_convert`` ·
     ``cash.fx_change_guard`` · ``cash.cash_statement`` · ``cash.cash_acq_rate`` ·
     ``input_center.input_holdings`` · ``ledgers._mutation_guard``. ``input_center`` held
     **two**; the auto-register refusal in ``manual_commit`` was registered on this helper in
-    wave 9, so the door still appears above — one copy fixed is not the door done.
+    wave 9, so the door still appears above — one copy fixed is not the door done. Each is
+    a one-line swap onto :func:`unknown_account_message`; they are left for their own item.
     """
-    return Issue(
-        kind="unknown_account",
-        message=("帳戶不可空白" if not account_id.strip() else f"帳戶 {account_id} 不存在"),
-    )
+    return Issue(kind="unknown_account", message=unknown_account_message(account_id))
+
+
+def unknown_account_message(account_id: str) -> str:
+    """The SENTENCE of :func:`unknown_account_issue`, for a door whose carrier is not an Issue.
+
+    Same predicate, same two sentences, no ``kind``: a router that answers with
+    ``error_body(code, message, field=…)`` has its own code and its own field, and only needs
+    the words. Keep the words HERE — this is the one interpolation of the sentence the
+    structural test in ``tests/data_ingestion/test_m2_unknown_account_message.py`` allows.
+    """
+    return "帳戶不可空白" if not account_id.strip() else f"帳戶 {account_id} 不存在"
 
 
 def validate_opening_cost(original_cost_total: Decimal) -> Issue | None:
@@ -463,7 +508,15 @@ def validate_transaction(
             Issue(
                 kind="duplicate_trade",
                 needs_confirm=True,
-                message="相同交易已存在(今日已登錄一筆相同買賣),確認要再次寫入?",
+                # M4-05 (2026-09-02): the text said 「今日已登錄一筆相同買賣」 and
+                # `_duplicate_exists` has no notion of 今日 — it matches account + symbol +
+                # side + TRADE DATE + quantity + price. Measured on rows dated a month back,
+                # which invites the reader to dismiss the warning as a false alarm. The
+                # sentence now states the six fields it actually compared, so it reads the
+                # same wherever it is shown (the 更正門 restates it, but a message must not
+                # depend on a surface re-explaining it).
+                message="相同交易已存在(同帳戶、標的、買賣別、交易日、股數、價格),"
+                        "確認要再次寫入?",
             )
         )
 
@@ -1354,14 +1407,21 @@ class CashMovementInput(BaseModel):
 class CashPool(BaseModel):
     """One (account, ccy) pool, as the withdraw guard needs to see it.
 
-    ``balance`` is the END balance — the same ``cash_balances`` figure the 賬戶現金 line
-    displays, so the frontend hint and the backend authority never disagree. ``low`` is the
-    MINIMUM running balance over the pool's date-ordered timeline (audit C3), which is what
-    catches a withdrawal back-dated before its funding while the end balance still looks fine.
+    ``balance`` is the ``cash_balances`` figure AS OF the day the probe was asked for
+    (``CashPoolFn.as_of``; the whole history when no day is given). Since M5-06 the 賬戶現金
+    line displays the balance as of TODAY and the guard asks for the balance as of THE
+    WITHDRAWAL'S OWN DATE, so the two agree whenever the withdrawal is dated today and the
+    guard stays honest when it is not. ``low`` is the MINIMUM running balance over the
+    pool's WHOLE date-ordered timeline (audit C3) — never bounded, so a future-dated flow
+    still counts — which is what catches a withdrawal that strands a later flow while the
+    balance on its own day still looks fine. ``low_date`` is the first day that minimum is
+    reached (M5-07), ``None`` when the pool never dips (or the probe is a test double that
+    does not report it).
     """
 
     balance: Decimal
     low: Decimal
+    low_date: date | None = None
 
 
 class CashPoolFn(Protocol):
@@ -1370,7 +1430,9 @@ class CashPoolFn(Protocol):
     ``include`` are would-be movement rows added on top of the stored ledger: the row being
     validated, plus its siblings in the same import batch. ``exclude_id`` strips one stored
     row's own prior effect first, so raising a withdrawal within the headroom its OLD amount
-    already consumed is not falsely blocked on an edit.
+    already consumed is not falsely blocked on an edit. ``as_of`` bounds ``balance`` — and
+    ONLY ``balance`` — to rows dated on or before that day (M5-06); ``low`` always reads the
+    whole timeline.
 
     Implementations MUST bind their ledger snapshot once, outside this call — the guard
     invokes it twice per withdrawal row.
@@ -1383,6 +1445,7 @@ class CashPoolFn(Protocol):
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool: ...
 
 
@@ -1452,16 +1515,28 @@ def resolve_acq_home_amount(
             kind="acq_cost_not_an_acquisition",
             message="利息與費用不是外幣取得，不帶取得成本（沿用資金池平均匯率）",
         )
+    # M5-05: both spellings end in the SAME settlement quantize, which raises
+    # ``InvalidOperation`` past 28 significant digits; the bound is tested on the figure
+    # that is about to be quantized — the amount itself, or the amount x rate product — so
+    # an absurd rate on an ordinary amount is caught on the rate, not on a number the owner
+    # never typed.
     if inp.acq_home_amount is not None:
         if inp.acq_home_amount <= _ZERO:
             return None, Issue(
                 kind="acq_cost_not_positive", message="取得成本必須大於 0"
             )
+        if exceeds_magnitude(inp.acq_home_amount):
+            return None, Issue(kind="acq_cost_too_large", message="取得成本過大,無法處理")
         return quantize_amount(inp.acq_home_amount, funding_ccy), None
     rate = inp.acq_rate
     if rate is None or rate <= _ZERO:  # `is None` unreachable; narrows for mypy
         return None, Issue(kind="acq_rate_not_positive", message="取得匯率必須大於 0")
-    return quantize_amount(inp.amount * rate, funding_ccy), None
+    home_cost = inp.amount * rate
+    if exceeds_magnitude(home_cost):
+        return None, Issue(
+            kind="acq_rate_too_large",
+            message="取得匯率過大,無法處理（換算後的取得成本超過可處理上限）")
+    return quantize_amount(home_cost, funding_ccy), None
 
 
 def _withdraw_issues(
@@ -1474,14 +1549,20 @@ def _withdraw_issues(
 ) -> list[Issue]:
     """FU-D43a: a withdrawal may NEVER overdraft its pool — HARD, with no ack override.
 
-    Primary check: the amount must be covered by the pool's CURRENT balance, the same
-    ``cash_balances`` figure the 賬戶現金 line displays; an exact-balance withdrawal
+    Primary check: the amount must be covered by the pool's balance **on the withdrawal's
+    own date** (M5-06 — the equity side's ``shares_through`` rule, applied to cash: the
+    covering money is the money that exists on that day). For a withdrawal dated today that
+    is exactly the ``cash_balances`` figure the 賬戶現金 line displays, so the hint and the
+    authority agree; for a back-dated one it is the honest figure. It used to be the END
+    balance of the whole ledger, which let a deposit dated 2099 cover a withdrawal today
+    whenever a pre-existing dip silenced the check below. An exact-balance withdrawal
     (== available) passes.
 
     Date-aware check (audit C3, hardened for withdrawals): a withdrawal that INTRODUCES or
-    DEEPENS a below-zero dip in the running timeline — e.g. back-dated before its funding —
-    is blocked too. A PRE-EXISTING dip it does not worsen never blocks it (scoped like the
-    ledger-correction replay guard, audit H3).
+    DEEPENS a below-zero dip in the running timeline — e.g. one that strands a later spend —
+    is blocked too, and the message names the day the pool bottoms (M5-07). The timeline is
+    never bounded, so a future-dated flow still counts. A PRE-EXISTING dip it does not
+    worsen never blocks it (scoped like the ledger-correction replay guard, audit H3).
 
     *batch* is every row committed together, INCLUDING *inp* (the convention
     :func:`validate_corporate_action` uses). A cash CSV is normally "the deposit that funded
@@ -1491,7 +1572,8 @@ def _withdraw_issues(
     JOINTLY overdraft are both caught — each sees the other in its ``include`` set.
     """
     siblings = [_pool_row(b) for b in batch if b is not inp]
-    before = pool(inp.account_id, inp.ccy, include=siblings, exclude_id=exclude_id)
+    before = pool(inp.account_id, inp.ccy, include=siblings, exclude_id=exclude_id,
+                  as_of=inp.date)
     if inp.amount > before.balance:
         return [Issue(
             kind="withdraw_insufficient_balance",
@@ -1504,10 +1586,44 @@ def _withdraw_issues(
     if after.low < min(before.low, _ZERO):
         return [Issue(
             kind="withdraw_insufficient_balance",
-            message=(f"此筆出金會使 {account.name} 的 {inp.ccy.value} 現金於某時點降至 "
-                     f"{decimal_str(after.low)}（出金日早於資金到位）— 出金不可透支，"
-                     "請先補登入金或換匯"))]
+            message=(f"此筆出金會使 {account.name} 的 {inp.ccy.value} 現金"
+                     f"{dip_phrase(after.low_date)} {decimal_str(after.low)}"
+                     "（出金日早於資金到位）— 出金不可透支，請先補登入金或換匯"))]
     return []
+
+
+def _amount_precision_issue(inp: CashMovementInput) -> Issue | None:
+    """Reject a cash amount the currency's minor unit cannot represent (M5-02).
+
+    ``data-and-pricing.md`` fixes the settlement precision per currency — TWD 0 dp, USD/MYR
+    2 dp — and every DISPLAY seam already obeys it. The write door did not, so a ``123.45``
+    TWD movement was stored verbatim and then rendered ``123`` in the list, ``+123`` in the
+    statement and ``57,875`` in the running balance: 0.45 that exists in the database and
+    nowhere the owner can see it, growing with every such row.
+
+    Rejected, deliberately: **quantizing on the way in.** It is the tempting fix and it is the
+    wrong one twice over — ``architecture.md`` requires this layer to 「reject bad input
+    loudly; never silently coerce」, and silently moving the owner's money by 0.45 is the same
+    defect from the other side (a number the owner never typed, presented as the one they
+    did). The user is told instead, and retypes.
+
+    Scoped to the cash-movement amount ONLY. Prices, FX rates and the per-share figures on
+    other doors are NOT settlement amounts and carry their own (higher) precision rules; the
+    same test applied to them would be a bug, not a stricter guard.
+
+    Trailing zeros are not a sub-unit: the comparison is between VALUES, so ``123.00`` TWD is
+    accepted (``Decimal("123") == Decimal("123.00")``) while ``123.45`` is not.
+    """
+    minor = MINOR_UNITS[inp.ccy]
+    if quantize_amount(inp.amount, inp.ccy) == inp.amount:
+        return None
+    unit = "1" if minor == 0 else f"0.{'0' * (minor - 1)}1"
+    return Issue(
+        kind="amount_precision",
+        message=(f"{inp.ccy.value} 金額最小單位為 {unit}，"
+                 f"{decimal_str(inp.amount)} 無法完整記錄（顯示與結算皆為 "
+                 f"{minor} 位小數）— 請改填可完整記錄的金額，例如 "
+                 f"{decimal_str(quantize_amount(inp.amount, inp.ccy))}"))
 
 
 def validate_cash_movement(
@@ -1555,6 +1671,13 @@ def validate_cash_movement(
             message=f"未知類型 {inp.kind}（可用類型：{_ACCEPTED_KINDS_ZH}）")]
     if inp.amount <= _ZERO:
         return [Issue(kind="non_positive_amount", message="金額必須大於 0")]
+    # M5-05: bounded BEFORE the precision check — that check is the quantize that raises.
+    too_large = amount_too_large_issue(inp.amount, "金額")
+    if too_large is not None:
+        return [too_large]
+    precision_issue = _amount_precision_issue(inp)
+    if precision_issue is not None:
+        return [precision_issue]
     known = (accounts if accounts is not None
              else {a.account_id: a for a in list_accounts(conn)})
     account = known.get(inp.account_id)

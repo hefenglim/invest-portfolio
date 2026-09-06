@@ -199,10 +199,37 @@ def _r1_error_response(tokens: list[str]) -> JSONResponse:
 # --- strategy-prompts CRUD ----------------------------------------------------
 
 
+def _strategy_scope(body: str) -> str:
+    """The scope a strategy body REQUIRES: ``per_symbol`` if it uses any ``per_symbol``
+    variable, else ``portfolio``.
+
+    Derived from the SAME :func:`variables.validate_tokens` core that :func:`_r1_violations`
+    rejects with — a body this stamps ``per_symbol`` is exactly a body a non-``per_symbol``
+    insight_type is refused for, so a badge and a 422 can never disagree.
+
+    M7-04 (2026-09-03): the fact existed in TWO places and was served by neither. The
+    wizard's step-3 compatibility lock read ``t.scope`` off this list payload, which never
+    carried it — ``undefined !== 'per_symbol'`` is true for every template, so all five rows
+    rendered 「全組合」, nothing was ever locked, and an incompatible pick surfaced only as a
+    create-time 422 that names no template. Meanwhile ``web/settings-prompts.js`` re-derived
+    the same predicate in JS off its own variable registry (which is why THAT page was
+    right). Answering it here makes the server the one owner; the JS copy is a legacy second
+    site left untouched by this fix's scope lock, not a sanctioned duplicate.
+    """
+    return "per_symbol" if V.validate_tokens(body, "portfolio").scope_violations else "portfolio"
+
+
 @router.get("/strategy-prompts")
 def list_strategy_prompts(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
+    """List the (non-archived) strategies, each stamped with the scope its body REQUIRES.
+
+    ``scope`` is ADDITIVE (M7-04) — every existing field keeps its name and type.
+    """
     cs.ensure_seeded(conn)
-    return [s.model_dump() for s in cs.list_strategies(conn)]
+    return [
+        {**s.model_dump(), "scope": _strategy_scope(s.body)}
+        for s in cs.list_strategies(conn)
+    ]
 
 
 @router.post("/strategy-prompts")
@@ -663,14 +690,43 @@ def get_ai_score(
     kept in ``rows`` for the promotion view. Empty DB → zeroed/[] (CSV export is a frontend
     concern over this payload). WPE (2026-07-07): the previously-unbounded ``rows`` pages
     via ``limit``/``offset`` (+ ``rows_total_count``); the aggregates stay whole-set.
+
+    M7-03 (2026-09-03) — **the DISPLAY GATE ships with the aggregate, not with one page.**
+    ``by_combo`` has carried ``min_samples``/``resolved_n``/``gate_open`` since W7 (AI-D36);
+    ``totals`` never did, so the 戰績 band printed 「量化命中率 66.67%」 over THREE rows in the
+    same `#score-band` whose next card honestly read 「樣本不足 3／8」. The arithmetic was
+    right; the disclosure was absent. Fixing the band alone fixes one consumer, so the flags
+    are attached HERE, in exactly ``by_combo``'s field shape:
+
+    * ``min_samples`` / ``resolved_n`` / ``gate_open`` — below the gate a consumer must say
+      「資料不足」 and print no percentage (the same red line as "a stale price is labelled,
+      never guessed").
+    * ``quant_n`` — the DENOMINATOR. ``_ratio_str`` returns the bare string ``"0"`` when the
+      denominator is 0, which is indistinguishable from a real 0% hit rate; ``by_combo`` was
+      always readable because it carries ``quant_n`` beside the rate, and ``totals`` now is
+      too. This matters ABOVE the gate as well (8 narrative-only rows → ``quant_hit_rate``
+      ``"0"`` with ``quant_n`` 0).
+
+    Purely ADDITIVE: ``n``/``miss_rate``/``quant_hit_rate``/``avg_narrative`` keep their
+    existing names and types (Decimal strings — the wire contract), and the numbers
+    themselves come from ``evaluations_store`` unchanged.
     """
     es.ensure_tables(conn)
     cs.ensure_seeded(conn)
-    return es.ai_score(
-        conn, min_samples=int(cs.get_evolution_config(conn)["min_samples"]),
+    min_samples = int(cs.get_evolution_config(conn)["min_samples"])
+    payload = es.ai_score(
+        conn, min_samples=min_samples,
         exclude_type_ids=cs.archived_type_ids(conn),
         rows_limit=limit, rows_offset=offset,
     )
+    totals = payload["totals"]
+    totals["min_samples"] = min_samples
+    totals["resolved_n"] = totals["n"]
+    totals["gate_open"] = totals["n"] >= min_samples
+    # The same expression ``ai_score`` sums its own ``total_quant_n`` from, over the same
+    # already-returned per-combo counts — a re-read of one definition, not a second one.
+    totals["quant_n"] = sum(int(c["quant_n"]) for c in payload["by_combo"])
+    return payload
 
 
 # --- evolution-config (spec 4.6) ----------------------------------------------
@@ -926,6 +982,9 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
             if pred is not None
             else None
         ),
+        # M7-08: the stored prediction could not be read back → prediction is None above
+        # and the page draws a 待釐清 pill instead of a confidence chip. Flagged, not hidden.
+        "unreadable": rec.unreadable,
         "horizon_days": rec.horizon_days,
         "due_at": rec.due_at,
         "model": rec.model,

@@ -117,6 +117,9 @@ def dashboard(
             "model": c.model,
             "tokens_in": c.tokens_in,
             "tokens_out": c.tokens_out,
+            # M7-08: the stored prediction could not be read back; the card is served
+            # (title + summary intact) and the page draws a 待釐清 pill. Flagged, not hidden.
+            "unreadable": c.unreadable,
         }
         for c in cards
     ]

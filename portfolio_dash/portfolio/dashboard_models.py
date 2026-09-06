@@ -65,6 +65,12 @@ class HoldingRow(BaseModel):
     # the two flags above nothing is wrong or missing — `unrealized_pnl` really is the whole
     # market value — so the UI states the CAUSE, not a warning that the numbers are unreliable.
     revived_by_dividend: bool = False
+    # M1-03 / D21: whose dividends `payback_ratio` is built on, when a SPINOFF carved this
+    # position's basis in (see Holding). The UI labels the ratio 「承接自 <parent>：分拆時承接
+    # 配息 X・自身配息 Y」 wherever it shows it; all three are None on a position no SPINOFF fed.
+    payback_from_symbol: str | None = None
+    payback_carried_dividends: Decimal | None = None
+    payback_own_dividends: Decimal | None = None
     # Unrealized return rate for THIS holding, server-computed (audit H1, 2026-07-26):
     # ``unrealized_pnl / original_cost_total``. The denominator is deliberately the ORIGINAL
     # invested cost — the same basis as ``KpiSummary.total_return_rate`` (domain-ledger.md:

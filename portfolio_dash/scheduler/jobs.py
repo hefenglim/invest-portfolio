@@ -10,7 +10,7 @@ import logging
 import sqlite3
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -176,8 +176,37 @@ def get_calibration_runner() -> EvolutionRunner | None:
     """The currently-registered calibration runner, or None (scheduler-only / not wired)."""
     return _CALIBRATION_RUNNER
 
-# A job does its own trigger+wiring and returns a short run summary for job_runs.detail.
-JobFunc = Callable[..., str]
+@dataclass(frozen=True)
+class JobOutcome:
+    """A job's terminal verdict, returned INSTEAD of a bare detail string (M10-02).
+
+    ``run_job`` / ``run_job_func`` used to know two outcomes: the func returned → ``ok``, the
+    func raised → ``error``. A quote refresh deliberately never raises for a lost symbol
+    (``pricing/refresh.py``: failed keys are recorded, not raised — never crash the dashboard),
+    so a run that lost every holding was structurally invisible as anything but ``ok``. A job
+    that can finish without raising and still not have succeeded returns one of these; the
+    wrappers write ``status`` verbatim. ``partial`` is ``job_runs``' existing vocabulary — the
+    insight runner has written it since R6 — not a new state.
+
+    ``results`` is whatever structured detail the job wants a synchronous caller to have
+    (the refresh-quotes door serves it as an additive ``results`` block). It is built from
+    the job's own data, never parsed back out of ``detail``; the ``job_runs`` row stores
+    ``status`` + ``detail`` only.
+    """
+
+    status: str
+    detail: str
+    results: dict[str, Any] = field(default_factory=dict)
+
+
+def _outcome_of(result: str | JobOutcome) -> JobOutcome:
+    """Normalise a job func's return: a bare string is, as it always was, ``ok``."""
+    return result if isinstance(result, JobOutcome) else JobOutcome("ok", result)
+
+
+# A job does its own trigger+wiring and returns a short run summary for job_runs.detail —
+# or a JobOutcome when the summary must carry a status the wrappers cannot infer.
+JobFunc = Callable[..., str | JobOutcome]
 
 
 @dataclass(frozen=True)
@@ -326,7 +355,10 @@ def _summarize(summary: RefreshSummary) -> str:
 
     The old "N ok, M failed" told the user nothing about data sources or targets;
     now: ``3 ok, 1 failed [twse: 2330, 2603; yfinance: AAPL] failed: 8299``.
-    Long lists truncate so job_runs.detail stays a one-liner.
+    The per-source OK list still truncates at 8 (it is colour, not evidence); the FAILED
+    list never does (M10-02, owner ruling 2026-09-06) — 18 lost holdings used to store 8
+    names and an ellipsis, and the other 10 were written nowhere. ``detail`` is TEXT, and
+    the scheduler center already puts the full text in a tooltip.
     """
     parts = [f"{len(summary.ok)} ok, {len(summary.failed)} failed"]
     if summary.ok:
@@ -339,9 +371,67 @@ def _summarize(summary: RefreshSummary) -> str:
         )
         parts.append(f"[{srcs}]")
     if summary.failed:
-        failed = sorted(summary.failed)
-        parts.append("failed: " + ", ".join(failed[:8]) + ("…" if len(failed) > 8 else ""))
+        parts.append("failed: " + ", ".join(sorted(summary.failed)))
     return " ".join(parts)
+
+
+# Held-symbols seam (M10-02): the partial verdict below asks "did a HELD instrument fail?",
+# and the held set is a ``data_ingestion``/``portfolio`` computation (``current_shares``:
+# opening + buys − sells + reinvest shares, every corporate action applied in date order)
+# that ``scheduler/`` may not import (architecture.md; the guard in
+# ``tests/scheduler/test_ingest_jobs.py``). Same injection pattern as the fundamentals AV
+# runner above: the app registers ``api.routers.actions.held_symbols`` at startup.
+# Unregistered, the verdict degrades CONSERVATIVELY — every lost instrument counts — so a
+# process that forgot the wiring over-reports; it never hides a lost holding.
+HeldSymbolsFn = Callable[[sqlite3.Connection], set[str]]
+_HELD_SYMBOLS_FN: HeldSymbolsFn | None = None
+
+
+def register_held_symbols_fn(fn: HeldSymbolsFn | None) -> None:
+    """Register (or clear with None) the held-symbols reader (app wiring seam)."""
+    global _HELD_SYMBOLS_FN
+    _HELD_SYMBOLS_FN = fn
+
+
+def _quote_outcome(
+    conn: sqlite3.Connection,
+    summary: RefreshSummary,
+    instruments: list[InstrumentRef],
+    fx_pairs: list[FxPair],
+) -> JobOutcome:
+    """The quote job's verdict + structured counts, from the worklist and ``summary.ok``.
+
+    Threshold (owner ruling 2026-09-06): **any HELD instrument failed → ``partial``**. A lost
+    FX pair or a watchlist-only symbol is written into ``detail`` but does not change the
+    verdict — the status chip answers "is my holdings valuation complete?".
+
+    What failed is derived as ``worklist − summary.ok``, NOT from ``summary.failed``: that list
+    mixes bare keys with zh refusal lines (``2330：收盤價非正數…``), and parsing a symbol back
+    out of a sentence is exactly the string-only bookkeeping this fix removes.
+    """
+    ok = summary.ok
+    instruments_failed = sorted(ref.symbol for ref in instruments if ref.symbol not in ok)
+    fx_failed = sorted(
+        key for key in (f"{p.base.value}{p.quote.value}" for p in fx_pairs) if key not in ok
+    )
+    held: set[str] | None = None
+    held_fn = _HELD_SYMBOLS_FN
+    if held_fn is not None:
+        try:
+            held = held_fn(conn)
+        except Exception as exc:  # noqa: BLE001 — cannot tell what is held → count everything
+            logger.warning("held-symbols seam failed; counting every lost instrument: %s", exc)
+    held_failed = [s for s in instruments_failed if held is None or s in held]
+    return JobOutcome(
+        status="partial" if held_failed else "ok",
+        detail=_summarize(summary),
+        results={
+            "instruments": len(instruments),
+            "instruments_failed": instruments_failed,
+            "held_failed": held_failed,
+            "fx_failed": fx_failed,
+        },
+    )
 
 
 def refresh_quotes_for(
@@ -350,13 +440,17 @@ def refresh_quotes_for(
     *,
     now: datetime,
     progress_job_id: str | None = None,
-) -> str:
+) -> JobOutcome:
     """Refresh latest quotes + FX for one market's instruments.
 
     FU-D46: when invoked as a scheduled job the caller passes its ``progress_job_id``
     so the in-flight registry shows the stage. Providers batch latest quotes per
     market (one routed call for the whole list), so one honest stage message —
     no fake per-symbol counter.
+
+    Returns a :class:`JobOutcome` (M10-02), not the detail string: the ``RefreshSummary``
+    is the only place the counts exist structurally, and flattening it here was the root
+    cause — from this line on, the counts lived only inside a sentence.
     """
     instruments, fx_pairs = build_worklist(conn, market)
     if progress_job_id is not None:
@@ -367,18 +461,18 @@ def refresh_quotes_for(
         conn, default_registry(conn), instruments, fx_pairs, now=now,
         factor_of=split_factor_fn(conn),
     )
-    return _summarize(summary)
+    return _quote_outcome(conn, summary, instruments, fx_pairs)
 
 
-def quotes_tw(conn: sqlite3.Connection, *, now: datetime) -> str:
+def quotes_tw(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     return refresh_quotes_for(conn, Market.TW, now=now, progress_job_id="quotes_tw")
 
 
-def quotes_us(conn: sqlite3.Connection, *, now: datetime) -> str:
+def quotes_us(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     return refresh_quotes_for(conn, Market.US, now=now, progress_job_id="quotes_us")
 
 
-def quotes_my(conn: sqlite3.Connection, *, now: datetime) -> str:
+def quotes_my(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     return refresh_quotes_for(conn, Market.MY, now=now, progress_job_id="quotes_my")
 
 
@@ -1312,6 +1406,18 @@ def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
     only AFTER the row is finalized, so a concurrent status poll reads it as 執行中
     throughout the run (never briefly as 已排入 on the way out).
     """
+    return run_job_outcome(conn, job_id, now=now)[0]
+
+
+def run_job_outcome(
+    conn: sqlite3.Connection, job_id: str, *, now: datetime
+) -> tuple[int, JobOutcome]:
+    """:func:`run_job`, also handing back the recorded outcome (M10-02).
+
+    The synchronous refresh-quotes door needs the verdict and the structured counts the
+    job produced, and the only alternative was to read ``job_runs.detail`` back and parse
+    the numbers out of the sentence. The row is written exactly as before.
+    """
     spec = _jobs_by_id()[job_id]
     cur = conn.execute(
         "INSERT INTO job_runs (job_id, started_at) VALUES (?, ?)",
@@ -1322,20 +1428,20 @@ def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
     _mark_running(job_id)
     try:
         try:
-            detail = spec.func(conn, now=now)
-            status = "ok"
+            outcome = _outcome_of(spec.func(conn, now=now))
         except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
-            detail, status = str(exc), "error"
+            outcome = JobOutcome("error", str(exc))
         # finished_at shares *now*'s timezone (M1 fix): a UTC finish next to a +08:00 start
         # reads as a negative-duration run in any naive display.
         conn.execute(
             "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
-            (datetime.now(tz=now.tzinfo or UTC).isoformat(), status, detail, run_id),
+            (datetime.now(tz=now.tzinfo or UTC).isoformat(), outcome.status, outcome.detail,
+             run_id),
         )
         conn.commit()
     finally:
         _clear_running(job_id)
-    return run_id
+    return run_id, outcome
 
 
 def start_job_run(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
@@ -1405,11 +1511,12 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
             _mark_running(job_id)
             try:
                 try:
-                    detail = _jobs_by_id()[job_id].func(conn, now=now)
-                    status = "ok"
+                    outcome = _outcome_of(_jobs_by_id()[job_id].func(conn, now=now))
                 except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
-                    detail, status = str(exc), "error"
-                finish_job_run(conn, int(rid["id"]), status=status, detail=detail, now=now)
+                    outcome = JobOutcome("error", str(exc))
+                finish_job_run(
+                    conn, int(rid["id"]), status=outcome.status, detail=outcome.detail, now=now
+                )
             finally:
                 _clear_running(job_id)
     except Exception:  # noqa: BLE001 — background worker must never raise out of the thread

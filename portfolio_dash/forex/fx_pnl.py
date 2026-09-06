@@ -1,6 +1,7 @@
 """Realized + unrealized FX P&L per account, and the reporting-currency rollup."""
 
 from collections.abc import Callable, Sequence
+from datetime import date
 from decimal import Decimal
 
 from portfolio_dash.forex.pools import MovementRow, acquisition_basis, foreign_cash_balance
@@ -107,19 +108,28 @@ def _realized_fx(
     home: Currency,
     foreign: Currency,
     avg_rate: Decimal | None,
+    *,
+    as_of: date | None,
 ) -> Decimal | None:
     """Sum realized FX P&L over reconversions (foreign -> home), each priced as at its date.
 
-    ``avg_rate`` is the FULL-HISTORY pool average and is used only as the account-level
-    None gate: no basis at all anywhere -> the account reports None, exactly as before.
-    Once a basis exists the figure is a real sum, so an undatable reconversion contributes
-    0 rather than voiding the whole account's number.
+    ``avg_rate`` is the pool average as of the valuation day and is used only as the
+    account-level None gate: no basis at all by then -> the account reports None, exactly
+    as before. Once a basis exists the figure is a real sum, so an undatable reconversion
+    contributes 0 rather than voiding the whole account's number.
+
+    Only rows dated ``<= as_of`` are summed (``None`` = every row): 「至今已實現」 is a sum of
+    disposals that have happened, so a reconversion dated 2099 is in the ledger and in the
+    tax package for 2099, not in today's figure. The consequence is a STEP, not a defect —
+    the figure changes on the day such a row falls due, exactly as the funds view's balance
+    does (M5-06) and as a future-dated sell would on the equity side.
     """
     if avg_rate is None:
         return None
     total: Decimal = sum(
         (r.realized
-         for r in realized_fx_rows_as_of(conversions, movements, home, foreign)), _ZERO
+         for r in realized_fx_rows_as_of(conversions, movements, home, foreign)
+         if as_of is None or r.date <= as_of), _ZERO
     )
     return total
 
@@ -134,6 +144,8 @@ def compute_account_fx(
     instruments: dict[str, Instrument],
     spot: Decimal | None,
     movements: Sequence[MovementRow] | None = None,
+    *,
+    as_of: date | None = None,
 ) -> AccountFXResult:
     """FX P&L for one account (ledgers already scoped to it).
 
@@ -142,26 +154,37 @@ def compute_account_fx(
     ``spot`` is the current foreign->home exchange rate (None if unavailable).
     ``movements`` are the account's cash movements; foreign-currency ones now fund the
     pool and (when they carry ``acq_home_amount``) its cost basis — spec 2026-07-30.
+    ``as_of`` is the valuation day (X8b): the pool balance, the basis it is marked with and
+    the realized sum count rows dated ``<= as_of``; ``None`` is the whole history — the
+    reading every caller had before, and still the default, so a caller that passes nothing
+    is not changed by this parameter.
 
-    Unrealized figures are None when avg_rate is None (no basis at all) or spot is None.
-    Realized figures are None when avg_rate is None; zero if no reconversions occurred.
+    Unrealized figures are None when avg_rate is None (no basis by ``as_of``) or spot is
+    None. Realized figures are None when avg_rate is None; zero if no reconversions occurred.
 
-    ``avg_rate`` (reported, and used for unrealized) is the FULL-HISTORY pool average;
-    ``realized_fx`` prices each reconversion at the average AS AT ITS OWN DATE, so a
+    ``avg_rate`` (reported, and used for unrealized) is the pool average AS OF the valuation
+    day; ``realized_fx`` prices each reconversion at the average AS AT ITS OWN DATE, so a
     conversion entered later cannot restate a figure already reported (QA-02, manual §8.2).
     """
     home = account.funding_ccy
     moves: Sequence[MovementRow] = movements or []
-    # FULL-HISTORY basis: this is the mark-to-market side. ``avg_rate`` is the rate today's
+    # AS-OF basis: this is the mark-to-market side. ``avg_rate`` is the rate today's
     # remaining exposure was acquired at, and ``covered_ratio`` is a property of the pool as
-    # it stands — neither is a statement about any one past disposal, so neither is bounded.
-    basis = acquisition_basis(conversions, moves, home, foreign)
+    # it stands TODAY — neither is a statement about any one past disposal (so neither is
+    # bounded to a disposal's date), and neither may include an acquisition that has not
+    # happened yet (so both are bounded to the valuation day; see ``acquisition_basis``).
+    basis = acquisition_basis(conversions, moves, home, foreign, as_of=as_of)
     avg_rate = basis.avg_rate
     ratio = basis.covered_ratio
+    # The SAME bound as the basis and as ``portfolio/cash.py::cash_balances(as_of=...)`` —
+    # the manual's ``fx.pool_equals_funds`` (§8.3) is an identity between this figure and
+    # the funds view, which only holds if the two are asked for the same day.
     foreign_cash = foreign_cash_balance(
-        transactions, dividends, conversions, instruments, foreign, movements=movements)
-    # REALIZED is priced per row, as at each reconversion's own date (QA-02, manual §8.2).
-    realized = _realized_fx(conversions, moves, home, foreign, avg_rate)
+        transactions, dividends, conversions, instruments, foreign, movements=movements,
+        as_of=as_of)
+    # REALIZED is priced per row, as at each reconversion's own date (QA-02, manual §8.2),
+    # and summed over the rows that have happened by ``as_of``.
+    realized = _realized_fx(conversions, moves, home, foreign, avg_rate, as_of=as_of)
 
     # F2/F3: one ratio, applied to the WHOLE foreign exposure. Cash is fungible, so an
     # outflow draws proportionally from the basis-known and basis-unknown parts; and the
@@ -255,12 +278,18 @@ def compute_fx_summary(
     current_spot: SpotRate,
     reporting: Currency,
     movements: Sequence[MovementRow] | None = None,
+    *,
+    as_of: date | None = None,
 ) -> FXSummary:
     """FX P&L for every FX-exposed account + reporting rollup.
 
     ``foreign_exposure`` maps account_id -> (foreign_ccy, foreign stock market value in
     that foreign ccy), supplied by the orchestrator from the portfolio core's valued
     holdings. Only accounts present in ``foreign_exposure`` are processed.
+
+    ``as_of`` is handed to every account's :func:`compute_account_fx` unchanged — the
+    valuation day the orchestrator already holds (``build_dashboard``'s ``now.date()``, from
+    the injected clock, never ``date.today()``). ``None`` is the whole history.
 
     ``current_spot(x, x)`` must return ``Decimal("1")`` (identity rate). BOTH rates it is
     asked for may be missing, and each degrades this account ONLY (QA-01 / QA-02,
@@ -305,7 +334,8 @@ def compute_fx_summary(
         except KeyError:
             spot = None
         result = compute_account_fx(
-            account, foreign, stock_value, txs, divs, convs, instruments, spot, moves
+            account, foreign, stock_value, txs, divs, convs, instruments, spot, moves,
+            as_of=as_of,
         )
         by_account[account_id] = result
         # home==reporting short-circuits to the identity rate so the rollup can't be broken

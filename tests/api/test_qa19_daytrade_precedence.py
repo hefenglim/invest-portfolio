@@ -111,7 +111,11 @@ def test_the_drawer_discloses_that_it_assumed_non_daytrade() -> None:
     note = r["daytrade_note"]
     assert note is not None, "a surface that cannot know the branch must say so"
     assert "當沖" in str(note)
-    assert str(_rules(conn).tax_daytrade) in str(note), "name the rate, not just the doubt"
+    # G-02 (2026-09-02): the rate is now quoted as a PERCENTAGE, the same notation the
+    # 費稅規則 summary this sentence is appended to already used ("證交稅 0.3%"). Naming the
+    # rate is still the requirement — the raw Decimal "0.0015" was never the requirement.
+    pct = f"{(Decimal(str(_rules(conn).tax_daytrade)) * 100).normalize():f}%"
+    assert pct in str(note), "name the rate, not just the doubt"
     conn.close()
 
 

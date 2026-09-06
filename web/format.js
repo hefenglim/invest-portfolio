@@ -220,6 +220,16 @@ window.fmt = (function () {
     return num(v, Number(v) < 10 ? 4 : 2);
   }
 
+  /** FX rate at a FIXED precision (default 4 dp) — the 換匯 ledgers' 隱含匯率 columns
+      (M3-08, 2026-09-06). `rate()`'s magnitude switch printed one column in two precisions
+      (4.6000 beside 28.00), and 28.00 is a rate rounded like money: rates are NOT money
+      (data-and-pricing.md — 4–6 dp). `rate()` itself is unchanged; the dashboard's 換匯損益
+      card keeps its 2 dp by owner ruling. */
+  function rateExact(v, dp) {
+    if (isNil(v)) return NULL_GLYPH;
+    return num(v, dp === undefined ? 4 : dp);
+  }
+
   /** ISO date/datetime -> YYYY-MM-DD. */
   function date(iso) {
     if (isNil(iso)) return NULL_GLYPH;
@@ -255,6 +265,6 @@ window.fmt = (function () {
     return parts.join(' · ');
   }
 
-  return { num, shares, exact, money, price, signed, signedNum, pct, signedPct, rate,
+  return { num, shares, exact, money, price, signed, signedNum, pct, signedPct, rate, rateExact,
            date, datetime, signClass, aiAttrib, NULL_GLYPH };
 })();

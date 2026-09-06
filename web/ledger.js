@@ -133,75 +133,165 @@
      "oversell" — surfaced here as a second, danger-styled confirm before re-sending
      with ack_oversell (the dashboard then shows the flagged 賣超 state). */
 
+  /* The 422 codes a correction door may be ACKED past, and the parameter each ack rides on.
+     Until 2026-09-03 (M3-01) only `oversell` was recognised, and `negative_cash` — which
+     ONLY `DELETE /api/ledgers/fx/{id}` raises (QA-10), from a control this page is the whole
+     app's ONLY door to — fell through to a plain fail toast. The server's own message ends
+     「確認無誤可強制寫入」, so the user was left inside an error that promised an exit no
+     control implemented: that FX row could never be deleted from anywhere. A promised exit
+     nobody implements is worse than no exit.
+
+     `fx_insufficient_balance` is DELIBERATELY absent. FU-D34 makes an overdrafting conversion
+     a HARD refusal with no ack, so `PUT /api/ledgers/fx/{id}` answers that code and never
+     `negative_cash`; offering an ack for it here would be financing. That is also the answer
+     to "does the edit door have the same defect?" — it does not, because the edit door has no
+     ack-able code at all today. The table is shared by BOTH doors anyway so the two can never
+     drift again: a code either is ack-able on this page or it is not, in ONE place. */
+  const ACK_CODES = {
+    oversell: { param: 'ack_oversell', title: '賣超確認' },
+    negative_cash: { param: 'ack_negative', title: '現金將變為負數' },
+  };
+
+  /* Turn an ack-able 422 into the danger confirm; `retry(param)` re-sends carrying that ack.
+     Returns true when it handled the error — the caller must then NOT also toast a failure.
+     `before()` runs only when the dialog IS about to open: it closes whatever must be gone
+     first (M3-04 below — the edit modal, or the delete path's progress toast). */
+  function ackConfirm(err, verb, retry, before) {
+    const meta = err && err.status === 422 ? ACK_CODES[err.code] : null;
+    if (!meta) return false;
+    if (before) before();
+    window.confirmDialog({
+      title: meta.title, body: err.message, danger: true,
+      confirmLabel: '我了解，仍要' + verb,
+      onConfirm: () => retry(meta.param),
+    });
+    return true;
+  }
+
+  /* ===== M3-04 (2026-09-06): one ledger mutation at a time, and it is visible =====
+     Every correction door on this page used to close its dialog FIRST and await the request
+     second — `dismiss(); await …` — so by the time the request started, the button that could
+     have carried a busy state was already out of the DOM. Measured under a 2.5 s delay: no
+     modal, no toast, no spinner, all 100 row buttons live, and a second 儲存 / 刪除 fired a
+     second PUT / DELETE against the same row. Two mechanisms, both already on this page:
+
+       * the edit modal STAYS OPEN with 儲存 in `pdBusy` until the request settles — the
+         precedent is the 公司行動 form (corp-action-form.js: pdBusy → restore → dismiss on
+         success only). A failure restores the button and leaves the modal, values intact, so
+         the user corrects and re-sends instead of re-typing;
+       * the delete confirm (shell.js `confirmDialog`) closes itself before `onConfirm` runs, so
+         there is no button to hold: a `toastProgress` spinner stands in, and the module-level
+         `inflight` flag makes every row button a no-op (`actionsCell`) until the tables have
+         been rebuilt. The same runner carries every retry after an ack dialog, whose button is
+         gone for the same reason.
+
+     ORDER MATTERS on an ack-able 422: the edit modal is closed BEFORE the ack dialog opens,
+     never left open beside it — `tests/e2e/test_ledger_correction_doors_flow.py` clicks the
+     FIRST `.modal-foot .btn-danger` it finds, and a user's eye does the same. */
+  let inflight = false;
+
+  /* The progress toast for a mutation whose control is gone. `drop()` covers the one outcome
+     the shared API has no verb for — the server answered 「needs your confirmation」: a spinner
+     beside that question would say the delete is still running, and shell.js's toastProgress
+     can only settle into an ok / warn / fail toast (that file is outside this change). */
+  function progressToast(msg) {
+    if (!window.toastProgress) return { done: () => {}, fail: () => {}, drop: () => {} };
+    const p = window.toastProgress(msg, '帳本更新中，請稍候');
+    const host = document.querySelector('.toast-host');
+    const node = host ? host.lastElementChild : null;
+    return { done: p.done, fail: p.fail, drop: () => { if (node) node.remove(); } };
+  }
+
   function actionsCell(onEdit, onDel) {
     const td = el('td');
     const wrap = el('div', 'wl-actions');
     const e = el('button', 'btn', '編輯'); e.type = 'button';
-    e.addEventListener('click', (ev) => { ev.stopPropagation(); onEdit(); });
+    e.addEventListener('click', (ev) => { ev.stopPropagation(); if (!inflight) onEdit(); });
     const d = el('button', 'btn btn-row-del', '刪除'); d.type = 'button';
-    d.addEventListener('click', (ev) => { ev.stopPropagation(); onDel(); });
+    d.addEventListener('click', (ev) => { ev.stopPropagation(); if (!inflight) onDel(); });
     wrap.appendChild(e); wrap.appendChild(d);
     td.appendChild(wrap);
     return td;
   }
 
-  function mutationOk(kind) {
-    if (window.toast) window.toast(kind + '完成', 'ok', '帳本已更新，統計將由帳本重建');
-    boot();
+  /* The success toast fires AFTER the tables are rebuilt — it used to fire before `boot()`,
+     so 「刪除完成」 stood on screen beside the row it claimed was gone. */
+  async function mutationOk(kind, prog) {
+    await boot();
+    const sub = '帳本已更新，統計將由帳本重建';
+    if (prog) prog.done(kind + '完成', sub);
+    else if (window.toast) window.toast(kind + '完成', 'ok', sub);
   }
-  function mutationFail(err, kind) {
-    if (window.toast) window.toast(kind + '失敗', 'fail', (err && err.message) || undefined);
+  function mutationFail(err, kind, prog) {
+    const msg = (err && err.message) || undefined;
+    if (prog) prog.fail(kind + '失敗', msg);
+    else if (window.toast) window.toast(kind + '失敗', 'fail', msg);
   }
 
-  /* PUT with the oversell-ack retry loop. bodyFn(ack) builds the payload. */
-  async function putWithOversellGuard(path, bodyFn, kind) {
+  /* Run a mutation whose control is already gone (a delete; any retry after an ack dialog):
+     progress toast + inflight guard, tables rebuilt before the settle toast. `onErr(err, prog)`
+     returns true when it took over (opened a dialog — after `prog.drop()`); otherwise the
+     failure settles the toast. */
+  async function runMutation(kind, send, onErr) {
+    if (inflight) return;
+    inflight = true;
+    const prog = progressToast(kind + '中…');
     try {
-      await window.pdApi.put(path, bodyFn(false));
-      mutationOk(kind);
+      await send();
     } catch (err) {
-      if (err && err.status === 422 && err.code === 'oversell') {
-        window.confirmDialog({
-          title: '賣超確認', body: err.message, confirmLabel: '我了解，仍要寫入', danger: true,
-          onConfirm: async () => {
-            try { await window.pdApi.put(path, bodyFn(true)); mutationOk(kind); }
-            catch (e2) { mutationFail(e2, kind); }
-          }
-        });
-        return;
-      }
-      mutationFail(err, kind);
+      inflight = false;
+      if (!(onErr && onErr(err, prog))) mutationFail(err, kind, prog);
+      return;
     }
+    try { await mutationOk(kind, prog); } finally { inflight = false; }
   }
 
-  /* DELETE with confirm + the oversell-ack retry loop (ack rides as a query param). */
+  /* Run a save from an edit modal: 儲存 goes busy and the modal stays until `send()` settles.
+     Success closes the modal and rebuilds the tables before the toast. On an error `onErr`
+     may take over (an ack dialog — it must `ui.dismiss()` BEFORE opening it); otherwise the
+     failure is toasted and the modal stays, values intact, for the user to correct. */
+  async function saveFromModal(ui, kind, send, onErr) {
+    const restore = window.pdBusy ? window.pdBusy(ui.ok, '儲存中…') : () => {};
+    inflight = true;
+    try {
+      await send();
+    } catch (err) {
+      inflight = false;
+      restore();
+      if (!(onErr && onErr(err))) mutationFail(err, kind);
+      return;
+    }
+    restore();
+    ui.dismiss();
+    try { await mutationOk(kind); } finally { inflight = false; }
+  }
+
+  /* PUT with the ack retry loop. bodyFn(ack) builds the payload; the ack rides in the BODY.
+     `ui` = {ok, dismiss} handed over by editModal. */
+  function putWithAckGuard(path, bodyFn, kind, ui) {
+    const send = (param) => {
+      const body = bodyFn(param === 'ack_oversell');
+      if (param) body[param] = true;
+      return window.pdApi.put(path, body);
+    };
+    return saveFromModal(ui, kind, () => send(null), (err) => ackConfirm(
+      err, '寫入', (param) => runMutation(kind, () => send(param)), ui.dismiss));
+  }
+
+  /* DELETE with confirm + the ack retry loop (the ack rides as a query param). */
   function delWithConfirm(path, label) {
+    const send = (param) => window.pdApi.del(
+      param ? path + (path.indexOf('?') === -1 ? '?' : '&') + param + '=true' : path);
     window.confirmDialog({
       title: '刪除' + label, body: '確定刪除這筆' + label + '？統計將由其餘帳本紀錄重建。',
       confirmLabel: '刪除', danger: true,
-      onConfirm: async () => {
-        try {
-          await window.pdApi.del(path);
-          mutationOk('刪除');
-        } catch (err) {
-          if (err && err.status === 422 && err.code === 'oversell') {
-            window.confirmDialog({
-              title: '賣超確認', body: err.message, confirmLabel: '我了解，仍要刪除', danger: true,
-              onConfirm: async () => {
-                try {
-                  await window.pdApi.del(path + (path.indexOf('?') === -1 ? '?' : '&') + 'ack_oversell=true');
-                  mutationOk('刪除');
-                } catch (e2) { mutationFail(e2, '刪除'); }
-              }
-            });
-            return;
-          }
-          mutationFail(err, '刪除');
-        }
-      }
+      onConfirm: () => runMutation('刪除', () => send(null), (err, prog) => ackConfirm(
+        err, '刪除', (param) => runMutation('刪除', () => send(param)), prog.drop)),
     });
   }
 
-  /* generic edit modal: rows = [[label, inputNode]], onSave(dismiss) async */
+  /* generic edit modal: rows = [[label, inputNode]], onSave({ok, dismiss}) async — the 儲存
+     button itself is handed over so the save can hold it busy (M3-04) */
   function editModal(title, rows, onSave) {
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal');
@@ -228,7 +318,7 @@
     close.addEventListener('click', dismiss);
     cancel.addEventListener('click', dismiss);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
-    ok.addEventListener('click', () => onSave(dismiss));
+    ok.addEventListener('click', () => onSave({ ok: ok, dismiss: dismiss }));
     document.body.appendChild(backdrop);
   }
   const inp = (value, type, step) => {
@@ -253,6 +343,65 @@
     return sel(ids.map((id) => [id, acctZh(id)]), current);
   };
 
+  /* ===== the edit modal's issue panel (M3-02 / M3-03, 2026-09-03) =====
+     `editTx` reuses `POST /api/input/manual/preview` for the computed fee/tax. It read ONLY
+     `resp.fee` / `resp.tax` and dropped `resp.issues` on the floor, so an edit that moved a
+     trade to 2099-12-31 wrote 200 in silence while the modal's OWN response carried
+     「交易日期 2099-12-31 晚於今日,確認無誤?」.
+
+     Rendering that payload verbatim is NOT the fix, because the preview answers a different
+     question: 「如果 ADD 這一筆會怎樣」. This modal REPLACES row #id, so an issue transfers
+     only when it is still true of a replacement:
+
+       * pure field predicates (未來日期／tick／lot／etf_flag_unknown…) transfer unchanged;
+       * `symbol_auto_register` / `symbol_needs_market` are true as a FACT and false as a
+         PROMISE — the entry door auto-registers an unknown symbol, this door answers 400
+         「未註冊標的 X — 請先至「標的管理」註冊」. The preview promised 「寫入時將自動查詢並
+         註冊」 and 儲存 then said the opposite, so the text is replaced with the one THIS door
+         will honour (M3-03). The refusal itself is correct — a correction door must not
+         auto-create instruments — it is the promise that was wrong;
+       * `duplicate_trade` matches on 帳戶+代號+買賣+日期+股數+價格 and the ledger still holds
+         THIS row, so the match may be the row being edited. The modal cannot tell which, so
+         it states the fork instead of asserting a duplicate (domain-ledger.md: a surface that
+         cannot know which branch applies must SAY so, not pick one);
+       * `sell_exceeds_holdings` / `cash_overdraft` are computed over a ledger that ALREADY
+         contains this row, so the preview's figure double-counts it. Dropped: the save-time
+         replay guard (422 `oversell` + its ack dialog) is this door's authority for the
+         first and the second has no edit-door equivalent — a second, wrong answer beside the
+         authoritative one is the 「one app must not show three answers」 trap.
+
+     Anything NOT listed renders verbatim: a new server issue must surface by default, since
+     silently swallowing the payload is the defect this replaced. */
+  const EDIT_ISSUE_DROP = ['sell_exceeds_holdings', 'cash_overdraft'];
+  function editIssueWire(i, symbol) {
+    if (!i || EDIT_ISSUE_DROP.indexOf(i.code) >= 0) return null;
+    if (i.code === 'symbol_auto_register' || i.code === 'symbol_needs_market') {
+      return { sev: 'error', code: i.code,
+        text: '未註冊標的 ' + symbol + ' — 帳本更正不會自動註冊；請先至「標的管理」註冊，'
+          + '再回來儲存這筆修改' };
+    }
+    if (i.code === 'duplicate_trade') {
+      return { sev: 'warn', code: i.code,
+        text: '另有一筆同帳戶、代號、買賣、日期、股數、價格的紀錄 — 若那就是本筆'
+          + '（只改了費用／稅／備註）可忽略；若不是，儲存後帳本會有兩筆相同紀錄' };
+    }
+    return i;
+  }
+  const ISSUE_GLYPH = { error: '✕', warn: '⚠', info: 'ℹ' };
+  /* Paint the translated list into `box`; hides its whole .field row when empty so a clean
+     edit shows no stray gap. */
+  function renderEditIssues(box, list) {
+    box.replaceChildren();
+    list.forEach((i) => {
+      const sev = i.sev === 'error' || i.sev === 'warn' ? i.sev : 'info';
+      const div = el('div', 'issue issue-' + sev);
+      div.appendChild(el('span', null, ISSUE_GLYPH[sev]));
+      div.appendChild(el('span', null, i.text));
+      box.appendChild(div);
+    });
+    if (box.parentElement) box.parentElement.style.display = list.length ? '' : 'none';
+  }
+
   function editTx(t) {
     const fDate = inp(t.date, 'date');
     const fAcc = accountSel(t.account_id);
@@ -272,16 +421,31 @@
     let taxDirty = false;
     fFee.addEventListener('input', () => { feeDirty = true; });
     fTax.addEventListener('input', () => { taxDirty = true; });
+    const issueBox = el('div', 'issues');
+    /* recompute() is fired by every core-field change, so responses can land out of order; a
+       monotonic token keeps the LAST request the one on screen. Harmless for fee/tax (one
+       number replacing another) and load-bearing for the issue list, where a stale response
+       would leave a warning standing for a value the user has already changed. */
+    let previewSeq = 0;
     async function recompute() {
       if (!window.pdApi) return;
+      const seq = ++previewSeq;
+      const symbol = fSym.value.trim();
       try {
         const resp = await window.pdApi.post('/api/input/manual/preview', {
-          account_id: fAcc.value, symbol: fSym.value.trim(), side: fSide.value,
+          account_id: fAcc.value, symbol: symbol, side: fSide.value,
           date: fDate.value, shares: fShares.value || '0', price: fPrice.value || '0',
         });
+        if (seq !== previewSeq) return;
         if (resp && !feeDirty && resp.fee !== undefined) fFee.value = resp.fee;
         if (resp && !taxDirty && resp.tax !== undefined) fTax.value = resp.tax;
-      } catch (e) { /* best-effort; the save-time recompute is the source of truth */ }
+        renderEditIssues(issueBox, ((resp && resp.issues) || [])
+          .map((i) => editIssueWire(i, symbol)).filter((i) => i !== null));
+      } catch (e) {
+        /* best-effort; the save-time recompute is the source of truth. Clear the panel so a
+           warning from an earlier value never outlives the request that replaced it. */
+        if (seq === previewSeq) renderEditIssues(issueBox, []);
+      }
     }
     [fShares, fPrice].forEach((n) => n.addEventListener('input', recompute));
     [fAcc, fSym, fSide, fDate].forEach((n) => n.addEventListener('change', recompute));
@@ -309,18 +473,24 @@
     editModal('編輯交易 #' + t.id + ' — ' + t.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['方向', fSide],
       ['股數', fShares], ['價格', fPrice], ['手續費', feeCell], ['交易稅', taxCell], ['備註', fNote],
+      ['', issueBox],
       ['', warn],
-    ], async (dismiss) => {
-      dismiss();
+    ], async (ui) => {
       /* values ride through as the user's raw STRINGS; the backend parses Decimal */
-      await putWithOversellGuard('/api/ledgers/transactions/' + t.id, (ack) => ({
+      await putWithAckGuard('/api/ledgers/transactions/' + t.id, (ack) => ({
         account_id: fAcc.value, symbol: fSym.value.trim(), side: fSide.value,
         date: fDate.value, shares: fShares.value, price: fPrice.value,
         fee: fFee.value, tax: fTax.value, note: fNote.value.trim() || null,
         fee_overridden: feeDirty, tax_overridden: taxDirty,
         ack_oversell: ack,
-      }), '編輯');
+      }), '編輯', ui);
     });
+    /* The panel starts collapsed and stays that way until a core field changes. Opening the
+       dialog deliberately does NOT run recompute(): fee/tax are not dirty at that moment, so
+       a preview on open would silently overwrite a broker-supplied fee with the engine's own
+       figure on a row the user only came to add a note to (data-and-pricing.md — a supplied
+       fee is the money that actually left the account). */
+    renderEditIssues(issueBox, []);
   }
 
   const DIV_TYPE_OPTS = [['cash', '現金'], ['stock', '配股'], ['drip', 'DRIP'], ['net', '淨額']];
@@ -338,16 +508,15 @@
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['類型', fType],
       ['總額', fGross], ['預扣', fWh], ['淨額', fNet],
       ['再投資股數（DRIP）', fReSh], ['再投資價格（DRIP）', fRePx],
-    ], async (dismiss) => {
-      dismiss();
-      await putWithOversellGuard('/api/ledgers/dividends/' + d.id, (ack) => ({
+    ], async (ui) => {
+      await putWithAckGuard('/api/ledgers/dividends/' + d.id, (ack) => ({
         account_id: fAcc.value, symbol: fSym.value.trim(), date: fDate.value,
         type: fType.value, gross: fGross.value || '0', withhold: fWh.value || '0',
         net: fNet.value || '0',
         reinvest_shares: fReSh.value === '' ? null : fReSh.value,
         reinvest_price: fRePx.value === '' ? null : fRePx.value,
         ack_oversell: ack,
-      }), '編輯');
+      }), '編輯', ui);
     });
   }
 
@@ -363,13 +532,12 @@
       ['日期', fDate], ['帳戶', fAcc],
       ['換出幣別', fFromC], ['換出金額', fFromA],
       ['換入幣別', fToC], ['換入金額', fToA],
-    ], async (dismiss) => {
-      dismiss();
-      await putWithOversellGuard('/api/ledgers/fx/' + x.id, () => ({
+    ], async (ui) => {
+      await putWithAckGuard('/api/ledgers/fx/' + x.id, () => ({
         account_id: fAcc.value, date: fDate.value,
         from_ccy: fFromC.value, from_amt: fFromA.value,
         to_ccy: fToC.value, to_amt: fToA.value,
-      }), '編輯');
+      }), '編輯', ui);
     });
   }
 
@@ -379,12 +547,11 @@
     const fDate = inp(o.date, 'date');
     editModal('編輯期初 — ' + o.symbol + '（' + acctZh(o.account_id) + '）', [
       ['股數', fShares], ['原始均價', fAvg], ['建檔日', fDate],
-    ], async (dismiss) => {
-      dismiss();
-      await putWithOversellGuard(
+    ], async (ui) => {
+      await putWithAckGuard(
         '/api/ledgers/openings/' + encodeURIComponent(o.account_id) + '/' + encodeURIComponent(o.symbol),
         (ack) => ({ shares: fShares.value, avg: fAvg.value, date: fDate.value, ack_oversell: ack }),
-        '編輯');
+        '編輯', ui);
     });
   }
   function symCell(symbol, name) {
@@ -410,7 +577,7 @@
       const tdCaret = el('td', 'num caret-cell', '▸');
       tr.appendChild(tdCaret);
       tr.appendChild(el('td', 'num', f.date(t.date)));
-      tr.appendChild(el('td', 'col-text', t.account));
+      tr.appendChild(el('td', 'col-text', acctZh(t.account_id)));
       tr.appendChild(symCell(t.symbol, t.name));
       const tdSide = el('td', 'col-text');
       tdSide.appendChild(dirChip(t.side));
@@ -469,7 +636,7 @@
     byKeyword(D.dividends).forEach((d) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(d.date)));
-      tr.appendChild(el('td', 'col-text', d.account));
+      tr.appendChild(el('td', 'col-text', acctZh(d.account_id)));
       tr.appendChild(symCell(d.symbol));
       const meta = DIV_TYPE[d.type] || { label: d.type, cls: '' };
       const tdType = el('td', 'col-text');
@@ -502,12 +669,14 @@
     byKeyword(D.fx).forEach((x) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(x.date)));
-      tr.appendChild(el('td', 'col-text', x.account));
+      tr.appendChild(el('td', 'col-text', acctZh(x.account_id)));
       tr.appendChild(el('td', 'num', f.money(x.from_amt, x.from_ccy) + ' ' + x.from_ccy));
       tr.appendChild(el('td', 'num', f.money(x.to_amt, x.to_ccy) + ' ' + x.to_ccy));
       /* Finding 9: the implied rate is computed by the backend (from_amount / to_amount,
-         home units per one foreign unit) — never recomputed here. */
-      tr.appendChild(el('td', 'num', '1 ' + x.to_ccy + ' = ' + f.rate(x.implied_rate) + ' ' + x.from_ccy));
+         home units per one foreign unit) — never recomputed here. Fixed 4 dp (M3-08): a
+         rate is not money, and `rate()`'s magnitude switch gave this one column two
+         precisions (4.6000 beside 28.00). */
+      tr.appendChild(el('td', 'num', '1 ' + x.to_ccy + ' = ' + f.rateExact(x.implied_rate, 4) + ' ' + x.from_ccy));
       tr.appendChild(actionsCell(
         () => editFx(x),
         () => delWithConfirm('/api/ledgers/fx/' + x.id, '換匯')));
@@ -521,7 +690,7 @@
     tbody.replaceChildren();
     byKeyword(D.openings).forEach((o) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'col-text', o.account));
+      tr.appendChild(el('td', 'col-text', acctZh(o.account_id)));
       tr.appendChild(symCell(o.symbol));
       tr.appendChild(el('td', 'num', f.shares(o.shares)));
       tr.appendChild(el('td', 'num', f.price(o.avg, o.ccy)));
@@ -564,8 +733,7 @@
       ['每持有（股）', fRatioFrom], ['變成／換得（股）', fRatioTo],
       ['成本分攤比例（分拆用）', fCarry], ['備註', fNote],
       ['', warn],
-    ], async (dismiss) => {
-      dismiss();
+    ], async (ui) => {
       const body = {
         account_id: fAcc.value, date: fDate.value, kind: fKind.value,
         from_symbol: fFrom.value.trim(), to_symbol: fTo.value.trim(),
@@ -573,26 +741,20 @@
         cost_carry: fCarry.value.trim() || null,
         note: fNote.value.trim() || null, ack_warnings: false,
       };
-      try {
-        await window.pdApi.put('/api/ledgers/corporate-actions/' + a.id, body);
-        mutationOk('編輯');
-      } catch (err) {
-        if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
-          window.confirmDialog({
-            title: '公司行動警告確認', body: err.message,
-            confirmLabel: '我了解，仍要儲存', danger: true,
-            onConfirm: async () => {
-              body.ack_warnings = true;
-              try {
-                await window.pdApi.put('/api/ledgers/corporate-actions/' + a.id, body);
-                mutationOk('編輯');
-              } catch (e2) { mutationFail(e2, '編輯'); }
-            }
-          });
-          return;
-        }
-        mutationFail(err, '編輯');
-      }
+      const put = () => window.pdApi.put('/api/ledgers/corporate-actions/' + a.id, body);
+      /* `warnings_unacknowledged` is this door's own ack code (not in ACK_CODES: the ack
+         rides as a body flag, not a param), so it opens its dialog here — the modal closed
+         first, same order as ackConfirm. */
+      await saveFromModal(ui, '編輯', put, (err) => {
+        if (!(err && err.status === 422 && err.code === 'warnings_unacknowledged')) return false;
+        ui.dismiss();
+        window.confirmDialog({
+          title: '公司行動警告確認', body: err.message,
+          confirmLabel: '我了解，仍要儲存', danger: true,
+          onConfirm: () => { body.ack_warnings = true; runMutation('編輯', put); },
+        });
+        return true;
+      });
     });
   }
 
@@ -602,36 +764,27 @@
      mismatch. The refusal is turned into a guided action here rather than a dead end:
      the owner who really does want the action gone is offered the WHOLE SET. */
   function delAction(a) {
+    const delOne = () => window.pdApi.del('/api/ledgers/corporate-actions/' + a.id);
+    const delSet = () => window.pdApi.del('/api/ledgers/corporate-actions/set'
+      + '?from_symbol=' + encodeURIComponent(a.symbol)
+      + '&date=' + encodeURIComponent(a.date)
+      + '&kind=' + encodeURIComponent(a.kind));
     window.confirmDialog({
       title: '刪除公司行動',
       body: '確定刪除 ' + a.symbol + ' 在 ' + a.date + ' 的' + a.kind_label
         + '？股數、成本與價格基準都會由帳本重建。',
       confirmLabel: '刪除', danger: true,
-      onConfirm: async () => {
-        try {
-          await window.pdApi.del('/api/ledgers/corporate-actions/' + a.id);
-          mutationOk('刪除');
-        } catch (err) {
-          if (err && err.status === 422 && err.code === 'partial_action_set_change') {
-            window.confirmDialog({
-              title: '這筆行動屬於多帳戶整組紀錄',
-              body: err.message + '　要整組一起刪除嗎？',
-              confirmLabel: '整組刪除', danger: true,
-              onConfirm: async () => {
-                try {
-                  await window.pdApi.del('/api/ledgers/corporate-actions/set'
-                    + '?from_symbol=' + encodeURIComponent(a.symbol)
-                    + '&date=' + encodeURIComponent(a.date)
-                    + '&kind=' + encodeURIComponent(a.kind));
-                  mutationOk('刪除');
-                } catch (e2) { mutationFail(e2, '刪除'); }
-              }
-            });
-            return;
-          }
-          mutationFail(err, '刪除');
-        }
-      }
+      onConfirm: () => runMutation('刪除', delOne, (err, prog) => {
+        if (!(err && err.status === 422 && err.code === 'partial_action_set_change')) return false;
+        prog.drop();
+        window.confirmDialog({
+          title: '這筆行動屬於多帳戶整組紀錄',
+          body: err.message + '　要整組一起刪除嗎？',
+          confirmLabel: '整組刪除', danger: true,
+          onConfirm: () => runMutation('刪除', delSet),
+        });
+        return true;
+      }),
     });
   }
 
@@ -642,7 +795,7 @@
     byKeyword(D.actions).forEach((a) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(a.date)));
-      tr.appendChild(el('td', 'col-text', a.account));
+      tr.appendChild(el('td', 'col-text', acctZh(a.account_id)));
       tr.appendChild(el('td', 'col-text', a.kind_label));
       tr.appendChild(symCell(a.symbol, a.name));
       const tdTo = el('td', 'col-text');
@@ -675,7 +828,7 @@
     byKeyword(D.cash).forEach((m) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(m.date)));
-      tr.appendChild(el('td', 'col-text', m.account));
+      tr.appendChild(el('td', 'col-text', acctZh(m.account_id)));
       tr.appendChild(el('td', 'col-text', m.kind_label));
       tr.appendChild(el('td', 'col-text', m.ccy));
       /* signed_amount is the SERVER's figure. The sign lives in the kind
@@ -727,7 +880,13 @@
   function ledgerParams(kind) {
     const p = { limit: PAGE, offset: pageState[kind].offset };
     if (state.account !== 'all') p.account_id = state.account;
-    if (kind !== 'open') { /* openings has no date filter server-side */
+    /* openings has no date filter server-side (GET /api/ledgers/openings takes no from/to:
+       an opening is a per-(帳戶,代號) balance, not a dated flow). The SCREEN says so as of
+       M3-06 — #lopen-date-note in the 期初庫存 pane + the filter tooltips — because until
+       then a 2026 range emptied the other five tabs while this one stayed full and the
+       tooltip called the range global. If a from/to is ever added to that endpoint, drop
+       both this branch and that note together. */
+    if (kind !== 'open') {
       if (state.from) p.from = state.from;
       if (state.to) p.to = state.to;
     }

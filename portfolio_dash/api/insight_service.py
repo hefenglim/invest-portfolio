@@ -1113,10 +1113,20 @@ def build_status(
     quota = budget_remaining(conn)
     quota_low = get_alert_threshold(conn)
     master_configured = get_role_model_id(conn, LLMRole.MASTER) is not None
-    data = build_dashboard(conn, now=now, reporting=reporting)
+    # M7-07: built on FIRST USE, not unconditionally. `data` is read only inside
+    # `_gather_facts`, so zero tasks meant zero reads — and a 124-byte response still paid
+    # for a full replay (measured: 1,939 ms of which `build_dashboard` was 1,401 ms, and
+    # 87% of THAT is `daily_value_series` replaying the book once per day, 2,053 times).
+    # Same function, same arguments, same connection snapshot: only the evaluation ORDER
+    # changes, so the payload is byte-identical. This does not help a prod DB with tasks
+    # configured — a lighter builder would, but a second freshness definition is a second
+    # truth, so that stays a separate ticket.
+    data: DashboardData | None = None
 
     tasks: list[dict[str, Any]] = []
     for it in cs.list_insight_types(conn):
+        if data is None:
+            data = build_dashboard(conn, now=now, reporting=reporting)
         facts = _gather_facts(
             conn, it, data, quota_remaining=quota, quota_low=quota_low,
             master_configured=master_configured,

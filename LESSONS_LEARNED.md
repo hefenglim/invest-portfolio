@@ -1529,3 +1529,70 @@ finished, the same test passed **6/6** with the changes in place. The change was
 - Kill only your own process tree by walking `ParentProcessId`. The stale browser processes on
   this machine belonged to the USER's Chrome session, and killing them to tidy up would have
   closed their windows.
+
+## Eight fixers on one working tree: what only breaks at that scale (2026-09-06)
+
+A site-wide stability round dispatched eight Fable-5.1 fixers (≤3 concurrent) against ONE
+checkout, each range-locked to a disjoint file set. The locks held. What did not hold was
+everything AROUND the locks.
+
+**A guard test goes red in the OWNER's files for the OTHER agent's change.** X1 finished
+clean, then `tests/data_ingestion/test_holdings_containment.py::test_the_call_site_census_is_
+still_accurate` failed — the census of `current_shares` call sites. X1 owned none of it: X2
+had added `held_symbols()` to `api/routers/actions.py` for the quote-job partial threshold.
+X1 diagnosed it correctly by reading the failure's OWN evidence (`added {('…/actions.py',
+'current_shares')}`) plus `grep` proving its own diff contained no such call. X8a did the same
+later with 8 failures that belonged to X5's in-flight red tests, and proved it from the import
+graph rather than from "those aren't my files".
+→ **Under a shared tree, a red test's owner is the agent named by the failure's evidence, not
+the agent whose area it sits in.** Never let an agent "fix" a red it cannot attribute to its
+own diff; make it report instead. Three separate fixers correctly ignored each other's
+in-flight edits this round because the brief said to.
+
+**A trap you have trained yourself out of comes back through the instructions you write for
+others.** The `-qq` trap (three prior entries) reappeared as a FOURTH recurrence — not in my
+own command, but in the dispatch template I handed to subagents, which said to run `pytest -q`
+while `addopts` already carries `-q`. One fixer identified it correctly; another
+misattributed it to "Windows stdout buffering" and re-derived the count from progress
+characters.
+→ **Audit your own delegation text against your own lessons file.** A rule that lives only in
+your habits does not survive being handed to someone else.
+
+**`git stash` is process-global; in a shared checkout it is a destructive act.** The reflex
+A/B (`stash` → measure → `stash pop`) would have swept every other agent's uncommitted work
+out from under them mid-edit. Use `git show HEAD:<file>` into a scratch path instead, or apply
+the inverse edit in place and restore it immediately (measured exposure: ~30 s, and only on a
+file no live agent owned).
+
+**Baselines pinned before the fixture is final are wrong twice over.** The shared environment
+brief told testers the alerts baseline was 28 (actual 22 — measured before a backfill script
+finished, and drawdown compares against each symbol's own 52-week high, so it drifts with the
+WALL CLOCK) and claimed the fixture was frozen (it is not: the app fetches yfinance and writes
+rows mid-test). Both errors were found BY the testers, against the document that was supposed
+to orient them.
+→ **Measure a baseline only after the fixture is final, and state what makes it drift.** A
+number in a brief is read as an invariant.
+
+**A "free semantic consequence" derived by reading code is a hypothesis.** The exploration
+report argued a spinoff child's provenance label would vanish on a clear-out because
+`build_book` drops `shares == 0`. The behaviour was right; the MECHANISM was not — that is
+only the holdings loop's `continue`, and the `_Position` object survives in the map, so a
+re-buy would have carried a stale "carried 270 from KEMB" beside `dividend_portion = 0`. The
+fixer verified instead of inheriting, and added an explicit clear at four seams.
+→ Inherit findings from an explorer; re-derive mechanisms.
+
+**A start command handed to someone else must ship with its stop command.** Fourteen agent
+briefs told each fixer how to launch its own sandbox (`launch.ps1 -Name X -Port N -Fresh`) and
+none told it to call the `stop.ps1` sitting next to it. Fourteen uvicorns — three explorers on
+8701-8703, eleven fixers on 8801-8811, 28 processes counting children — were still listening
+hours later and had squeezed free memory to 1.3 GB of 8 GB. The symptom did not look like a
+leak: the harness started killing my background *monitors* for low memory, twice, while the
+e2e suite underneath them needed that memory for Chrome. Cleanup identified targets by
+`--port` on the command line, never by process name or start time, so the running suite's own
+harness server (port 57940) and its two pytest processes were provably out of scope — the same
+"kill only your own tree" rule as the earlier Chrome entry, applied to servers.
+
+**Fix-introduced regressions are the round's own product.** Two landed and were caught the
+same day: a new third toast face made "官方套組已存在" — a successful no-op — persist forever,
+and an implicit string concatenation put an f-string inside an `else` branch so a flagged row
+printed an empty `<tr>`. Both were found by the new tests written for the fix, not by review.

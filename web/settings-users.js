@@ -23,6 +23,13 @@
   function _toast(msg, kind, code) { if (window.toast) window.toast(msg, kind, code); }
 
   let USERS = []; /* [{username, name, created_at, is_current}] from GET /api/users */
+  /* M9-06: set once the FIRST user has been created from this (still unauthenticated)
+     browser. The app is protected from that instant — every /api/users call now 401s and
+     api.js's global interceptor sends the tab to login.html. That enforcement is correct
+     and stays exactly as it is; what was missing is the explanation. While locked we do
+     NOT re-fetch, so the page stops navigating out from under the user and the panel says
+     what happened instead. */
+  let LOCKED = false;
 
   function render() {
     const wrap = $('#users-wrap');
@@ -99,9 +106,31 @@
     }
   }
 
+  /* The first user has just been created and this browser has no session yet: GET /api/users
+     would 401 and bounce the tab to login.html before any toast could be read. Render the
+     explanation in place and let the USER decide when to go and log in. */
+  function renderProtectionEnabled(label, username) {
+    const wrap = $('#users-wrap');
+    if (!wrap) return;
+    wrap.replaceChildren();
+    const box = el('div', 'users-empty');
+    box.appendChild(el('div', null,
+      '✓ 已啟用帳密保護 — 「' + label + '」已建立，本系統即刻起需要登入。'));
+    box.appendChild(el('div', null,
+      '此瀏覽器尚未登入，因此用戶清單與新增用戶暫時無法使用（伺服器已開始要求登入，'
+      + '這是預期行為）。請以帳號「' + username + '」登入後再回到本頁管理用戶。'));
+    const go = el('button', 'btn btn-primary', '前往登入');
+    go.type = 'button';
+    go.style.marginTop = '8px';
+    go.addEventListener('click', () => { window.location.href = 'login.html'; });
+    box.appendChild(go);
+    wrap.appendChild(box);
+  }
+
   /* POST /api/users -> re-fetch. The FIRST user flips the app guest -> protected mode;
      we tell the user login is now required (NOT a faked client session). */
   async function add() {
+    if (LOCKED) return;
     const name = $('#nu-name').value.trim();
     const user = $('#nu-user').value.trim();
     const pass = $('#nu-pass').value;
@@ -118,16 +147,25 @@
       $('#nu-user').value = '';
       $('#nu-pass').value = '';
       if (wasEmpty) {
+        /* M9-06: do NOT boot() here. Protection is live from this instant, this browser has
+           no session, so GET /api/users answers 401 and api.js replaces the location with
+           login.html — destroying the toast before it can be read and leaving the user with
+           「按了新增用戶，畫面莫名跳到登入頁」. The 401 interceptor is the app's enforcement
+           point and is deliberately untouched; we simply stop asking a question we know we
+           are no longer allowed to ask, and explain instead. */
+        LOCKED = true;
         _toast('已啟用帳密保護', 'ok',
           '「' + (name || user) + '」已建立；本系統現為受保護模式，下次進入需以此帳號登入');
+        renderProtectionEnabled(name || user, user);
       } else {
         _toast('已新增用戶', 'ok', (name || user) + ' 可登入本系統');
+        await boot();
       }
-      await boot();
     } catch (err) {
       _toast((err && err.message) || '新增失敗', 'fail', err && err.code);
     } finally {
-      if (addBtn) addBtn.disabled = false;
+      /* stays disabled once locked — a second POST would 401 and bounce the tab too */
+      if (addBtn) addBtn.disabled = LOCKED;
     }
   }
 

@@ -312,7 +312,10 @@ def _status_last_run(conn: sqlite3.Connection, job_id: str, row: Any) -> dict[st
     """Map a COMPLETED job_runs row to the FU-D36/D46 ``last_run`` shape.
 
     ``ok`` is the boolean the chip keys off (green 成功 / red 失敗); ``status`` is passed
-    through raw so the frontend can render the non-terminal ``skipped`` (略過) distinctly.
+    through raw so the frontend can render the non-terminal ``skipped`` (略過) distinctly —
+    and, since M10-02, ``partial`` (部分, amber). ``ok`` stays False for a partial run on
+    purpose: a partial failure is not a success (owner ruling 2026-09-06); the RENDERER
+    branches on ``status`` before it falls through to 失敗, so ``ok`` is not the only fact.
     FU-D46 adds ``duration_seconds`` (server-computed) and the honest ``cost`` block
     (null unless the run is LLM-bearing AND its spend is attributable — see
     ``_LLM_JOB_AGENTS`` / ``_cost_block``).

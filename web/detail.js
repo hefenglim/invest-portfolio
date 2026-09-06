@@ -27,6 +27,17 @@
     return n;
   };
 
+  /* M1-03 / D21 — the provenance sentence for a SPINOFF child's 回本進度. Both totals were
+     scaled by the same cost_carry, so the child's ratio IS the parent's, built on dividends
+     the child never paid; the server says whose (payback_from_symbol) and how much was
+     carried in at the spinoff vs. paid by the child itself — both server Decimal strings.
+     Text only, never money; identical wording to app.js's chip hover and 股利總覽. */
+  function paybackProvenance(h) {
+    return '承接自 ' + h.payback_from_symbol + '：分拆時承接配息 '
+      + f.money(h.payback_carried_dividends, h.quote_ccy) + '・自身配息 '
+      + f.money(h.payback_own_dividends, h.quote_ccy);
+  }
+
   /* Account zh-TW display name — single source of truth is web/names.js (FU-D37,
      window.pdNames). Local delegator with a graceful no-op (id fallback) when names.js
      has not loaded on this page yet (index.html's <script> tag is added by the
@@ -72,6 +83,11 @@
      holdings list; the drawer's holding summary now comes from detail.position (the server
      cross-account aggregate), NOT a lookup into this list (round-8.1 Wave A owner #2c). */
   let currentDash = null;
+  /* The ROW (index into currentHoldings) the open drawer came from — the list's real key is
+     (帳戶, 標的), so a symbol held in two accounts has two rows and a symbol lookup cannot tell
+     them apart (M2-04). -1 = unknown (opened without row context) → cycling falls back to the
+     first row carrying the symbol, exactly as before. */
+  let currentIndex = -1;
 
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -93,12 +109,21 @@
     /* E6: ←/→ 切換上一檔/下一檔持倉（持倉清單來自已載入的 /api/dashboard；未就緒則停用） */
     if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.target.closest('input, textarea, select')) {
       if (!currentHoldings || !currentHoldings.length || !currentSymbol) return;
-      const syms = currentHoldings.map((h) => h.symbol);
-      const i = syms.indexOf(currentSymbol);
+      /* The holdings list is keyed by (帳戶, 標的), NOT by 標的: a symbol held in TWO accounts
+         occupies TWO rows. Cycling by `syms.indexOf(currentSymbol)` therefore always resolved
+         to the FIRST row of a duplicated symbol, so → from the second ORBT jumped BACKWARDS
+         to the row after the first one, and every row past the last duplicate was unreachable
+         (M2-04). Cycle POSITIONALLY instead: `currentIndex` is the row we actually came from,
+         and only when it no longer matches (a drawer opened from somewhere with no row
+         context) do we fall back to the first row carrying this symbol. */
+      const list = currentHoldings;
+      const known = currentIndex >= 0 && currentIndex < list.length
+        && list[currentIndex] && list[currentIndex].symbol === currentSymbol;
+      const i = known ? currentIndex : list.findIndex((h) => h && h.symbol === currentSymbol);
       if (i < 0) return;
       e.preventDefault();
-      const next = e.key === 'ArrowRight' ? (i + 1) % syms.length : (i - 1 + syms.length) % syms.length;
-      window.openSymbolDrawer(syms[next]);
+      const next = e.key === 'ArrowRight' ? (i + 1) % list.length : (i - 1 + list.length) % list.length;
+      window.openSymbolDrawer(list[next].symbol, { index: next });
     }
   }
   let currentSymbol = null;
@@ -109,10 +134,15 @@
      `currentSymbol === symbol` guard alone cannot see a same-symbol re-open; this can. */
   let drawerSeq = 0;
 
-  window.openSymbolDrawer = function (symbol) {
+  /* opts.index (optional): the caller's ROW index into the dashboard holdings list, so ←/→
+     can keep cycling from the row the user actually opened rather than from the first row
+     that happens to carry this symbol (M2-04). Omitted → -1 → lookup fallback. */
+  window.openSymbolDrawer = function (symbol, opts) {
     close();
     drawerSeq += 1;
     currentSymbol = symbol;
+    const hintedIndex = (opts && Number.isInteger(opts.index)) ? opts.index : -1;
+    currentIndex = hintedIndex;
 
     /* Synchronous scaffold: backdrop + drawer + keydown are wired immediately so Esc /
        backdrop-click / open-close work even while data is loading; the data-dependent
@@ -148,6 +178,11 @@
       if (currentSymbol !== symbol) return;  // a newer open superseded this one
       currentDash = dash || null;
       currentHoldings = (dash && dash.holdings) || [];  // for ←/→ cycling (dashboard order)
+      /* No row hint (deep link / search / another page) → resolve to the FIRST row carrying
+         this symbol, which is what cycling did unconditionally before M2-04. */
+      if (currentIndex < 0) {
+        currentIndex = currentHoldings.findIndex((h) => h && h.symbol === symbol);
+      }
       /* The holding summary the drawer renders is the SERVER aggregate (detail.position) — the
          cross-account TOTAL — NOT a single dashboard holding row (round-8.1 Wave A owner #2c). */
       renderDrawer(drawer, head, body, symbol, detail);
@@ -226,18 +261,38 @@
       body.appendChild(adviceSection(symbol));
       body.appendChild(splitSection(pos));
       /* 試算 binds to ONE account (fees/tax are per-account); default to the PRIMARY
-         (most-shares) account, which the server returns first in position_accounts. */
+         (most-shares) account, which the server returns first in position_accounts. The
+         binding is deliberate — but it was invisible: on a cross-account symbol the card
+         showed 持股 / 權重 for ONE account two sections below a 部位摘要 stating the 合計, with
+         no account named anywhere in it (M2-03). `pos` + `accts` are passed in so the card
+         can SAY so; the binding itself is unchanged. */
       const primary = accts[0] || null;
-      if (primary) body.appendChild(simSection(primary));
+      if (primary) body.appendChild(simSection(primary, accts, pos));
       body.appendChild(dividendSection(symbol, detail));
       body.appendChild(realizedSection(symbol, detail));
     } else {
-      /* Watchlist (unheld) symbol: no position/P&L, but 技術訊號 still matter — a watched
-         name is an entry candidate (P2 batch 3). Render the signals section (honest-empty
-         when data is thin) alongside the price chart; skip the holding-only sections. */
+      /* Unheld — but that is TWO different states and they must not share one sentence
+         (M2-01). `detail.activity` is the ledger's own answer, and it is the SAME predicate
+         txSection already uses to decide whether a symbol has history at all:
+           · activity non-empty → a CLOSED (or fully transferred-out) position. It has no
+             部位摘要 / 報酬貢獻拆分 / 試算 (all three need a live position), but its 已實現
+             記錄 and 配息史 are money of record and were being DROPPED — while 交易明細 two
+             rows below printed the very sale that produced the realized figure, and the
+             empty state claimed 「無部位／損益資料」 over a −3,085.63 realized row.
+           · activity empty → a genuine watchlist name, which keeps the original sentence.
+         The sections below take `detail`, never `pos`, so they render unchanged here. */
       body.appendChild(signalsSection(symbol));
       body.appendChild(adviceSection(symbol));
-      body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
+      const closed = ((detail && detail.activity) || []).length > 0;
+      if (closed) {
+        body.appendChild(el('div', 'sd-empty',
+          '此標的目前無持倉（帳本有交易紀錄，部位已結清）— 部位摘要／報酬貢獻拆分／試算需要現有部位，'
+          + '故不顯示；以下為已實現損益、配息史與交易明細。'));
+        body.appendChild(dividendSection(symbol, detail));
+        body.appendChild(realizedSection(symbol, detail));
+      } else {
+        body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
+      }
     }
     /* 交易明細 — the UNIFIED activity list (期初 + 買 + 賣 + 配股/DRIP), rendered from
        detail.activity with a reconciliation footer + (when multi-account) an account filter.
@@ -434,6 +489,23 @@
      count is right and the row is short by exactly one dividend), then a healthy declared
      short — which is a real priced position, NOT a data problem, and must never look like
      one. Returns [] for a clean position. */
+  /* WHY a valued figure came back null — and there are THREE causes, not two
+     (portfolio/pnl.py valuation suppression): no price at all, `oversold` (the cost basis
+     was DISCARDED), or `unbookable_action` (the share count is pre-action while the price is
+     post-action). Only the FIRST is 缺價. Calling the other two 缺價 sends the reader off to
+     fetch a quote the drawer HEAD is already displaying, instead of to the sell row (or the
+     corporate action) that actually needs fixing.
+     ONE helper, because TWO cells in this drawer render such a null — 部位摘要 → 市值
+     (M2-05) and 報酬貢獻拆分's empty state (NEW-03) — and a second copy of this ternary is
+     exactly how one screen ends up telling the user two different stories about one
+     position. The vocabulary is the 待釐清 badges' own (flagBadges below). */
+  function nullValueCause(h) {
+    if (h.market_price === null || h.market_price === undefined) return '缺價';
+    if (h.oversold) return '賣超待釐清';
+    if (h.unbookable_action) return '股數待釐清';
+    return '待釐清';
+  }
+
   function flagBadges(h) {
     const out = [];
     const add = (cls, label, title) => {
@@ -495,18 +567,26 @@
        a +223,473 gain was rendered as −1399.07%. Audit H1, 2026-07-26. */
     const pnlPct = h.unrealized_pct == null
       ? null : f.signedPct(h.unrealized_pct) + '・vs 原始成本';
+    const mvSub = h.market_value !== null ? h.quote_ccy : nullValueCause(h);
     grid.appendChild(stat('股數', f.shares(h.shares)));
-    grid.appendChild(stat('市值', h.market_value === null ? f.NULL_GLYPH : f.money(h.market_value, h.quote_ccy), h.market_value === null ? '缺價' : h.quote_ccy));
+    grid.appendChild(stat('市值', h.market_value === null ? f.NULL_GLYPH : f.money(h.market_value, h.quote_ccy), mvSub));
     grid.appendChild(stat('未實現損益', h.unrealized_pnl === null ? f.NULL_GLYPH : f.signed(h.unrealized_pnl, h.quote_ccy), pnlPct, f.signClass(h.unrealized_pnl)));
     grid.appendChild(stat('權重', h.weight === null ? f.NULL_GLYPH : f.pct(h.weight), '報告幣別市值'));
     grid.appendChild(stat('原始均價', f.price(h.original_avg, h.quote_ccy), '總成本 ' + f.money(h.original_cost_total, h.quote_ccy)));
     /* 已回本 (server flag `fully_recovered`, exact Decimal comparison): the adjusted basis
        has gone <= 0, so a NEGATIVE 調整均價 is correct — say so instead of leaving the user
        to wonder why an average price is negative (audit H1). */
+    /* M1-03 / D21 — a SPINOFF child's 回本進度 IS the parent's ratio, built on dividends the
+       child never received. The drawer has the room (owner ruling), so the whole provenance
+       goes under the figure — and 已回本 names the parent too, or it credits the child with a
+       payback it never earned. */
+    const carried = h.payback_from_symbol ? paybackProvenance(h) : null;
     grid.appendChild(stat('調整均價', f.price(h.adjusted_avg, h.quote_ccy),
-      h.fully_recovered ? '已回本・配息已完全沖減成本' : '配息沖減後'));
+      h.fully_recovered
+        ? ('已回本・配息已完全沖減成本' + (carried ? '（承接自 ' + h.payback_from_symbol + '）' : ''))
+        : '配息沖減後'));
     grid.appendChild(stat('累計配息', f.money(h.dividend_portion, h.quote_ccy), h.quote_ccy));
-    grid.appendChild(stat('回本進度', f.pct(h.payback_ratio), '配息 / 原始成本'));
+    grid.appendChild(stat('回本進度', f.pct(h.payback_ratio), carried || '配息 / 原始成本'));
     sec.appendChild(grid);
     if (multi) sec.appendChild(accountBreakdown(accts));
     return sec;
@@ -765,7 +845,11 @@
     sec.appendChild(secHead('報酬貢獻拆分', '資本利得 vs 股利（未實現，vs 原始成本）'));
     const wrap = el('div', 'sd-split');
     if (h.capital_gain === null || h.capital_gain === undefined) {
-      wrap.appendChild(el('div', 'sd-empty', '缺價 — 無法計算貢獻拆分'));
+      /* NEW-03 — the SAME three-state cause as 市值 (nullValueCause), not a second guess.
+         `capital_gain` being null on a 賣超 is CORRECT and stays null: the basis it would
+         decompose was discarded, so there is no number to state. Only the REASON changes —
+         M2-05 stopped one cell on this screen calling that 缺價, and this is the other. */
+      wrap.appendChild(el('div', 'sd-empty', nullValueCause(h) + ' — 無法計算貢獻拆分'));
       sec.appendChild(wrap);
       return sec;
     }
@@ -879,10 +963,13 @@
     }
     const wrap = el('div', 'table-wrap');
     const table = el('table', 'data');
-    table.innerHTML = '<thead><tr><th class="col-text">帳戶</th><th>賣出股數</th><th>淨收款</th><th>調整成本移除</th><th>已實現損益</th></tr></thead>';
+    /* 日期 first, as 交易明細 below it (M2-06): `sell_date` is the sale date, the dividend's
+       payment date, or — for a short cover — the COVER date, which is when the gain realizes. */
+    table.innerHTML = '<thead><tr><th>日期</th><th class="col-text">帳戶</th><th>賣出股數</th><th>淨收款</th><th>調整成本移除</th><th>已實現損益</th></tr></thead>';
     const tbody = el('tbody');
     rows.forEach((r) => {
       const tr = el('tr');
+      tr.appendChild(el('td', 'num', f.date(r.sell_date)));
       /* kind="dividend": a cash dividend that landed AFTER this position closed — realized
          income with no cost to remove (audit H2). Mark it and show the sale-only columns as
          不適用 rather than a misleading 0. */
@@ -891,6 +978,13 @@
       if (isDiv) {
         const chip = el('span', 'rz-kind', '股利');
         chip.title = '清倉後入帳的現金股利 — 已無成本可沖減，列為已實現收益';
+        tdAcct.appendChild(chip);
+      } else if (r.kind === 'short_cover') {
+        /* A declared short bought back (M2-06): 淨收款 is the short's weighted-average SALE
+           value and 調整成本移除 is the covering BUY's all-in cost — the columns read the other
+           way round from a sale, so the row must not look like one. Same chip slot as 股利. */
+        const chip = el('span', 'rz-kind', '空單回補');
+        chip.title = '放空回補：以買回成本結算的已實現損益，股數為回補股數';
         tdAcct.appendChild(chip);
       }
       tr.appendChild(tdAcct);
@@ -974,8 +1068,10 @@
     /* distinct accounts, first-seen order */
     const accounts = [];
     allRows.forEach((r) => {
+      /* id only — the filter chips render acctZh(a.id) (buildFilter below), so carrying the
+         payload's English `account` here served nothing but the risk of it being printed. */
       if (!accounts.some((a) => a.id === r.account_id)) {
-        accounts.push({ id: r.account_id, name: r.account });
+        accounts.push({ id: r.account_id });
       }
     });
     const multi = accounts.length > 1;
@@ -1019,7 +1115,10 @@
       rows.forEach((t) => {
         const tr = el('tr');
         tr.appendChild(el('td', 'num', f.date(t.date)));
-        tr.appendChild(el('td', 'col-text', t.account));
+        /* G-01: acctZh, like the filter chips two rows above this table. Printing the
+           payload's `account` here is what made ONE drawer show 「嘉信 Schwab」 on the button
+           and 「Charles Schwab」 on every row that button filtered. */
+        tr.appendChild(el('td', 'col-text', acctZh(t.account_id)));
         const tdSide = el('td', 'col-text');
         tdSide.appendChild(sideChip(t.side));
         if (t.side === 'action') {
@@ -1205,11 +1304,28 @@
   }
 
   /* ---------- 試算 (backend /api/whatif — compute-only, never writes) ---------- */
-  function simSection(h) {
+  function simSection(h, accts, pos) {
     const sec = el('div', 'sd-section');
     const badge = el('span', 'sd-sim-badge', '試算不寫入帳本');
-    sec.appendChild(secHead('試算', '後端 試算 模式 — POST /api/whatif', badge));
+    const acctName = acctZh(h.account_id);
+    const multi = !!(accts && accts.length > 1);
+    /* M2-03 — the account this card binds to is now part of its own subtitle, so the 持股 /
+       權重 figures below can never again be read as the symbol's cross-account total. */
+    sec.appendChild(secHead('試算',
+      '後端 試算 模式 — POST /api/whatif・僅 ' + acctName, badge));
     const box = el('div', 'sd-sim');
+    if (multi) {
+      /* Cross-account symbol: state the gap between this card and 部位摘要 explicitly, in the
+         two SERVER Decimal strings themselves (f.* renders them — no arithmetic, no subtraction
+         of one from the other). Fees and tax bind to the account, so one card cannot cover
+         both; naming the account is the disclosure, not a change of behaviour. */
+      const scope = el('div', 'sd-sim-scope',
+        '此標的跨 ' + accts.length + ' 個帳戶（部位摘要合計 ' + f.shares(pos && pos.shares)
+        + ' 股）。費稅依帳戶而異，本試算僅涵蓋「' + acctName + '」的 '
+        + f.shares(h.shares) + ' 股，下方持股與權重皆為該帳戶數字。');
+      scope.style.cssText = 'font-size:11px;color:var(--text-3);line-height:1.5;margin-bottom:8px';
+      box.appendChild(scope);
+    }
 
     const controls = el('div', 'sd-sim-controls');
     const seg = el('div', 'segmented');

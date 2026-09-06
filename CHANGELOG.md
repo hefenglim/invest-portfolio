@@ -9,6 +9,111 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Site-wide stability convergence round — 29 items closed, 11 fixer agents, one working tree (2026-09-02 → 09-06).**
+A walk of every module as a real user, then a second wave that closed every remaining decision.
+The judgment rule throughout: a change that makes a **broken** thing work again is in scope; one
+that makes a **working** thing better goes to the backlog. 84 findings are tracked; 56 are fixed
+and regression-covered, 28 are deferred and each one records **why**. No P0 or P1 remains open.
+
+*Numbers and money*
+
+- **A balance now answers "how much do I have TODAY" on every surface that quotes it.** A cash
+  movement dated 2099 made the 資金 page read 993,579 while the dashboard's net-worth series —
+  which walks the calendar — showed no change at all: **two screens, one pool, 777,777 apart**.
+  `portfolio/cash.py::cash_balances` takes an `as_of` bound, and the overdraft guard splits into
+  the two questions it always was: *is there enough* is answered on the **withdrawal's own date**
+  (the cash-side twin of `holdings.shares_through`), while *does the timeline ever dip* still runs
+  unbounded, so a back-dated withdrawal is still caught. Four readers were then pulled onto the
+  same day — the manual-trade draft's 賬戶現金 line and its overdraft warning, the printed
+  statement's 目前餘額, and the FX card's foreign exposure. The manual's `fx.pool_equals_funds`
+  anchor (§8.3) holds again. On a ledger with no future rows every figure is **byte-identical**,
+  print output included.
+- **Amounts are bounded at `1e12` on the cash, FX-conversion and dividend doors.** Past 28
+  significant digits a `Decimal` silently loses precision (measured: a 1e30 conversion put the USD
+  pool ~4,221 USD out); past 29 the door returned a 422 that pointed at the wrong ledger. The cap
+  goes **before** the precision check — the `quantize` inside it is what was raising — and lands on
+  `dividend_model.check_amounts`, the one shared gate, so the bulk importer cannot be weaker than
+  the single-row form.
+- **D21 is implemented: a spinoff child's payback progress says whose dividends it inherited.**
+  `KEMG`'s 12.48% was byte-identical to its parent `KEMB`'s while `KEMG` had **never paid a
+  dividend** — the ratio is carved from the parent, and that identity is exactly what D21 asked to
+  be labelled. Approved 2026-08-09, it had no code at all. Holdings now carry
+  `payback_from_symbol` / `payback_carried_dividends` / `payback_own_dividends`, so the label
+  reaches all six places the figure appears — homepage chip, dividend strip, drawer, CSV export and
+  the LLM variable, which the frontend-only alternatives could not. Golden payload: +24 / −0, every
+  new key `null`. The provenance is **cleared** at four seams (full exit, short-leg exhaustion,
+  oversell, EXCHANGE-out): `build_book` drops a zero-share holding from its output but keeps the
+  `_Position` object, so a re-buy would otherwise have inherited a label for dividends it never got.
+- **A TW ETF spun off from a parent is no longer taxed at 3× in silence.**
+  `spinoff_child_draft` passed neither `is_etf` nor `etf_flag_unknown`, so the child was asserted
+  **not** an ETF — and `etf_flag_unknown=False` means *someone answered*, which nobody had. AI-D40's
+  disclosure never fired: a first sell would compute 0.3% instead of 0.1% and say nothing. The
+  child now registers as **unknown**, which is what it is. `scripts/seed_demo.py` had the same shape
+  for 0056 and is fixed with a seed-consistency test.
+- **A quote refresh that loses 18 of 24 symbols no longer reports success.** The job wrote `ok`
+  because it raised no exception, while `pricing/` deliberately does not raise on a single symbol —
+  so partial failure was structurally invisible. Runs now resolve to the `job_runs` table's existing
+  `partial` status, thresholded on *"did a HELD instrument fail?"*; the held set is **injected** from
+  `api/routers/actions.py` (the scheduler may not import `data_ingestion`), and an unregistered seam
+  counts every failure rather than hiding one. Counts come from the structured `RefreshSummary`, not
+  parsed back out of a Chinese rejection sentence, and the failure list is no longer truncated at 8.
+
+*Robustness and truth on screen*
+
+- **One unreadable `prediction` blob took the whole homepage down.** `_card_from_row` re-validated
+  the stored JSON on every read and caught nothing, so a single bad row 500'd `/api/insights` **and**
+  `/api/dashboard` with no clue which row. The real exposure is future schema drift: one new required
+  field on `Prediction` makes every historical row unreadable at once. The row now degrades to a
+  flagged 待釐清 card — narrative kept, prediction dropped, one WARNING naming the id and reason —
+  reusing the holdings table's existing badge.
+- **The ledger's correction and delete doors give feedback again.** Every `onSave` called
+  `dismiss()` before `await`, so the button was out of the DOM before the request started: no
+  spinner, no disabled control, and a second click fired a second `PUT`. Edits keep the dialog open
+  with a busy button (and keep the user's text on failure); deletes show a progress toast and gate
+  the row buttons. The ack dialog opens only after the first one closes.
+- **Rates are not money.** The print report formatted an implied FX rate through the *amount*
+  formatter — TWD at 0 dp — so `27.99998642…` printed as **`1 USD = 28 TWD`**, against
+  `data-and-pricing.md`'s explicit rule. Fixed to 4 dp there and on the three ledger surfaces that
+  showed the same figure at two different precisions.
+- Also: a `short_cover` row rendered identically to an ordinary sale (now dated, and chipped
+  「空單回補」) · archiving an instrument did not stop its drawdown alert, and a symbol replaced by an
+  EXCHANGE kept alerting from frozen prices · the watchlist showed a bare table for six different
+  kinds of "empty", two of which must not claim 「尚無標的」 · four dashboard hosts and the TWR chart
+  were empty boxes for 1.5–7 s with only a 2px top bar as a signal · the scheduler panel's 時區 label
+  had never been written by any version of the JS · 重算 warned it was slow and asked for confirmation
+  before a 17 ms read-only action.
+
+*Documents corrected against the code*
+
+- `domain-ledger.md` was the **only** artefact in the repository claiming `INTEREST` is an XIRR
+  flow (it is not — measured: adding one leaves XIRR byte-identical, while a `BROKER_FEE` control
+  moves it) and cited a `CASH_KIND_TABLE.credit` that does not exist. The manual's superseded
+  D1 = A section gained its supersession banner, a contradictory leftover in §9.1.1 was fixed, and
+  the English mirror — which contained **zero** mentions of AI-D42 — was regenerated.
+- `markets-and-fees.md` described `is_etf`'s three states as a stored `NULL`. Storage is two
+  `NOT NULL` booleans; the three states are the **input** parameter. Querying the documented way
+  returns 0 rows on every database.
+
+*Performance*
+
+- `GET /api/insight-tasks/status` rebuilt the entire dashboard unconditionally — a 124-byte
+  response costing 1,939 ms, of which 1,401 ms was `build_dashboard` and 87% of *that* was the
+  net-worth series replaying the book once per day (2,053 `build_book` calls) — while reading it
+  **zero** times when no task exists. Built on first use instead; same function, same arguments,
+  same snapshot, only the evaluation order moved. The pipeline wizard was the last caller still
+  issuing its own `/api/dashboard` request instead of the shared promise.
+
+*Deferred, with reasons recorded*
+
+The equity side has no date bound (`build_book` takes no `as_of`), so a future-dated foreign trade
+— which validation only soft-warns about — still values in today's holdings while its cash leg now
+correctly does not. A prediction with a NULL confidence is flagged 待釐清 on screen but still counted
+as a hit or miss by the scoreboard, because the scorer parses `Prediction` directly and never builds
+the card whose validator rejects it. An unreadable card now reads as a same-day cache hit, so it is
+never regenerated. The stress-audit oracle compares an unbounded pool against the now-bounded API and
+will disagree the day its corpus gains a future-dated row. Each is a policy or cross-layer decision
+rather than a defect fix, and each is written down rather than left implicit.
+
 **KPI band v3 — seven cards, one grammar, a measured breakpoint ladder (owner design review 2026-09-01/02).**
 The v2 band was not wrong, it was unreadable: `資產損益` answered **four unrelated questions** — 我賺多少 / 報酬率 / 含匯兌口徑 / 跟指數比 — in seven inline `flex-wrap` lines inside the second-narrowest of five `fr` tracks (**249px** at a 1,440px viewport, against **220px** for the card holding one number). Because the detail was one wrapping flex run, the container chose the breaks: 「其中本金匯率效果」 ended a line and its 「−13,187」 began the next **alone, in the value column**, reading as an independent KPI; a 「·」 opened a row that was really a continuation; and one bullet character carried four different grammatical roles across four lines. The band also spoke **three** data grammars at once (big-number-only / big-number-plus-inline-run / aligned key⟷value). Frontend only — **no payload field added, moved or renamed**.
 

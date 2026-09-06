@@ -435,7 +435,12 @@
       };
       /* 更新報價：POST /api/actions/refresh-quotes（同步執行 quotes_tw/us/my，
          real provider fetch — 約 10 秒）。進度以常駐 toastProgress 顯示（Progress 系統），
-         成功後自動重載以顯示新價。 */
+         成功後自動重載以顯示新價。
+         M10-02: the door answers `results[job] = {status, detail, held_failed, …}` — the
+         SAME status the job_runs row carries — and the toast reads it instead of declaring
+         完成 unread. A partial run (a HELD symbol's quote was lost) stays on screen with the
+         full list and does NOT auto-reload: the reload would wipe the one place the user
+         is told; the updated prices show on the next refresh. */
       let refreshBusy = false;
       menu.appendChild(mkOpt('更新報價', '報告模式：抓取最新報價與匯率（約 10 秒）', () => {
         if (refreshBusy) return;
@@ -449,6 +454,21 @@
           .then((resp) => {
             refreshBusy = false;
             const jobs = (resp && resp.jobs) ? resp.jobs.join(' / ') : 'quotes';
+            const results = (resp && resp.results) || {};
+            const byStatus = (s) => Object.keys(results).filter((j) => results[j].status === s);
+            const errored = byStatus('error');
+            if (errored.length) {
+              prog.fail('報價更新失敗', errored.map((j) => j + '：' + (results[j].detail || '')).join('；'));
+              return;
+            }
+            const partial = byStatus('partial');
+            if (partial.length) {
+              const lost = [];
+              partial.forEach((j) => { (results[j].held_failed || []).forEach((s) => lost.push(s)); });
+              prog.warn('報價更新部分完成',
+                lost.length + ' 檔持倉未更新：' + lost.join('、') + '。其餘已更新，重新整理頁面即可看到新價。');
+              return;
+            }
             prog.done('報價更新完成', jobs + ' 已執行，正在重新整理…');
             setTimeout(() => { window.location.reload(); }, 900);
           })
@@ -464,31 +484,26 @@
          entering a rate by hand. It also omitted 公司行動, which IS replayed.
          Deliberately not "fixed" by widening the endpoint: `forex/pools.py` and
          `portfolio/cash.py` cannot raise, so replaying them would be a verification that
-         can never fail — and a verification that cannot fail is a progress bar. */
-      menu.appendChild(mkOpt('重算（重建統計）', '由帳本完整重放驗證 — 較耗時', () => {
-        if (window.confirmDialog) {
-          window.confirmDialog({
-            title: '重算（重建統計）',
-            body: '將重放期初庫存、交易、股利與公司行動帳本，重建所有持倉與報酬統計。帳本本身不會被修改。'
-                + '換匯與資金收支為純紀錄帳本，不經此路徑驗證。',
-            confirmLabel: '開始重算',
-            onConfirm: () => {
-              const prog = window.toastProgress('重算中…', '正在重放帳本');
-              pdEnsureApi()
-                .then((ok) => {
-                  if (!ok) throw new Error('API 層載入失敗');
-                  return window.pdApi.post('/api/actions/recompute');
-                })
-                .then(() => {
-                  prog.done('重算完成', '帳本重放驗證通過，正在重新整理…');
-                  setTimeout(() => { window.location.reload(); }, 900);
-                })
-                .catch((e) => {
-                  prog.fail('重算失敗', (e && e.message) || '請稍後再試');
-                });
-            }
+         can never fail — and a verification that cannot fail is a progress bar.
+         M10-04 (owner ruling 2026-09-06): no confirm dialog and no 「較耗時」. The replay is
+         read-only and takes 17–30 ms end to end (measured: 24,000 rows 0.77 s, 50,000 rows
+         1.86 s — under a second at any scale this app assumes); the wait the user feels is
+         the page reload that follows (/api/dashboard, 1.5–2.6 s), so the copy names that.
+         The name stays 重算. */
+      menu.appendChild(mkOpt('重算（重建統計）', '重放期初庫存、交易、股利與公司行動帳本驗證統計（瞬間完成；隨後重新整理頁面）', () => {
+        const prog = window.toastProgress('重算…', '重放帳本只需一瞬間；驗證通過後重新整理頁面約需 2 秒');
+        pdEnsureApi()
+          .then((ok) => {
+            if (!ok) throw new Error('API 層載入失敗');
+            return window.pdApi.post('/api/actions/recompute');
+          })
+          .then(() => {
+            prog.done('重算完成', '帳本重放驗證通過（帳本本身未修改；換匯與資金收支不經此路徑驗證），正在重新整理…');
+            setTimeout(() => { window.location.reload(); }, 900);
+          })
+          .catch((e) => {
+            prog.fail('重算失敗', (e && e.message) || '請稍後再試');
           });
-        }
       }));
       btn.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
       document.addEventListener('click', (e) => { if (!menu.hidden && !wrap.contains(e.target)) menu.hidden = true; });
@@ -657,9 +672,14 @@
   /* ---- toasts ---- */
   const host = el('div', 'toast-host');
   document.body.appendChild(host);
+  /* kind: 'ok' (green ✓, auto-dismiss) | 'fail' (red ✕, stays) | 'warn' (amber !, stays).
+     'warn' is the third face (M10-02): three callers already passed it and were painted as
+     a green ✓ — a partial result is not a success, and it is not read in 4 seconds either.
+     Colour comes from styles.css's .toast-warn (the same --amber token .pill-warn uses). */
   window.toast = function (msg, kind, sub) {
-    const t = el('div', 'toast ' + (kind === 'fail' ? 'toast-fail' : 'toast-ok'));
-    t.appendChild(el('span', null, kind === 'fail' ? '✕' : '✓'));
+    const cls = kind === 'fail' ? 'toast-fail' : (kind === 'warn' ? 'toast-warn' : 'toast-ok');
+    const t = el('div', 'toast ' + cls);
+    t.appendChild(el('span', null, kind === 'fail' ? '✕' : (kind === 'warn' ? '!' : '✓')));
     const txt = el('div');
     txt.appendChild(el('div', 'msg', msg));
     if (sub) txt.appendChild(el('div', 'sub', sub));
@@ -669,7 +689,7 @@
     x.addEventListener('click', () => t.remove());
     t.appendChild(x);
     host.appendChild(t);
-    if (kind !== 'fail') setTimeout(() => t.remove(), 4200); /* 失敗訊息常駐直到關閉 */
+    if (kind !== 'fail' && kind !== 'warn') setTimeout(() => t.remove(), 4200); /* 失敗／部分訊息常駐直到關閉 */
   };
 
   /* toastProgress(msg, sub): a persistent spinner toast for LONG network operations
@@ -701,6 +721,7 @@
         if (sub2) { sEl.textContent = sub2; if (!sEl.parentNode) txt.appendChild(sEl); }
       },
       done: (msg2, sub2) => settle('ok', msg2, sub2),
+      warn: (msg2, sub2) => settle('warn', msg2, sub2),
       fail: (msg2, sub2) => settle('fail', msg2, sub2)
     };
   };

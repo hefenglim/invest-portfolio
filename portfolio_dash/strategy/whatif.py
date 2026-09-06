@@ -100,15 +100,22 @@ def _fee_rule_set_name(
         return None
 
 
+def _pct(value: str) -> str:
+    """A rate as a trimmed percentage, e.g. ``"0.001425"`` -> ``"0.1425"``.
+
+    Module-level so the 費稅規則 summary and the 當沖 disclosure below it read the SAME
+    grammar. They did not: the summary said 「證交稅 0.3%」 while the sentence after it said
+    「賣出稅率為 0.0015」 — one rate, two notations, one line apart (G-02, 2026-09-02).
+    """
+    return f"{(Decimal(value) * 100).normalize():f}"
+
+
 def _fee_rule_desc(snapshot: dict[str, str], side: Side) -> str:
     """A short human-readable fee summary, best-effort from the fee-engine v2 snapshot.
 
     e.g. TW buy -> "0.1425%・最低 20"; TW sell adds "・證交稅 0.3%"; US/MY compose from the
     commission / platform / SEC-TAF / stamp components recorded in the snapshot.
     """
-    def _pct(value: str) -> str:  # rate -> trimmed percentage, e.g. "0.001425" -> "0.1425"
-        return f"{(Decimal(value) * 100).normalize():f}"
-
     parts: list[str] = []
     brokerage = snapshot.get("brokerage")  # TW commission rate
     if brokerage is not None and Decimal(brokerage) > _ZERO:
@@ -402,8 +409,10 @@ def compute_whatif(
     applied_rate = fr.snapshot.get("tax_rate")
     if (side is Side.SELL and applied_rate is not None
             and str(rules.tax_daytrade) != applied_rate):
-        out["daytrade_note"] = ("此試算以非當沖稅率計算;若為當沖,賣出稅率為 "
-                                f"{rules.tax_daytrade}(當沖優先於 ETF 稅率)")
+        # Full-width punctuation and a PERCENTAGE, both borrowed from the 費稅規則 summary this
+        # sentence is appended to (`_pct`) — the owner reads one line, not two dialects.
+        out["daytrade_note"] = ("此試算以非當沖稅率計算；若為當沖，賣出稅率為 "
+                                f"{_pct(str(rules.tax_daytrade))}%（當沖優先於 ETF 稅率）")
     else:
         out["daytrade_note"] = None
     out["new_weight"] = new_weight

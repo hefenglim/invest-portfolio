@@ -91,6 +91,7 @@ from portfolio_dash.scheduler.jobs import (
     register_dividend_scan_runner,
     register_evaluation_runner,
     register_fundamentals_runner,
+    register_held_symbols_fn,
     register_insight_runner,
     register_news_runner,
     register_signal_scan_runner,
@@ -207,6 +208,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Fundamentals AV leg (W3, AI-D16): the Saturday job covers HELD symbols only; the
     # held set is computed here (scheduler/ + pricing/ cannot replay the book).
     register_fundamentals_runner(run_fundamentals_av)
+    # Quote-job partial threshold (M10-02): "did a HELD instrument fail?" — the held set is
+    # computed here for the same reason as the line above. Unregistered, the verdict counts
+    # every lost instrument (over-reports, never hides).
+    register_held_symbols_fn(actions.held_symbols)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()

@@ -595,9 +595,12 @@ def build_dashboard(
     fx_summary: FXSummary | None
     fx_reason: str | None = None
     try:
+        # `as_of` is the SAME day `GET /api/cash` bounds its balances to (M5-06), so the FX
+        # pool and the funds view are asked for the same day — the manual's
+        # `fx.pool_equals_funds` (§8.3) is an identity only under that condition (X8b).
         fx_summary = compute_fx_summary(accounts, instruments, txs, divs, convs,
                                         exposure, resolver.rate, reporting,
-                                        cash_movements)
+                                        cash_movements, as_of=as_of)
     except KeyError as exc:
         # LAST RESORT, and no longer a SILENT one. `compute_fx_summary` now degrades per
         # account (QA-01: an EMPTY account with no home->reporting rate used to raise here

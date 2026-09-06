@@ -130,7 +130,8 @@ def _seed_base(conn: sqlite3.Connection) -> None:
                                        sector="Information Technology", name="台積電 (DEMO)",
                                        board="TWSE"))
     upsert_instrument(conn, Instrument(symbol="0056", market=Market.TW, quote_ccy=Currency.TWD,
-                                       sector="ETF", name="元大高股息 (DEMO)", board="TWSE"))
+                                       sector="ETF", name="元大高股息 (DEMO)", board="TWSE",
+                                       is_etf=True))  # M10-01: the tax answer, not the label
     upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=Currency.USD,
                                        sector="Information Technology", name="Apple (DEMO)"))
     upsert_instrument(conn, Instrument(symbol="NVDA", market=Market.US, quote_ccy=Currency.USD,

@@ -47,6 +47,17 @@
     return (Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0) + '%';
   };
 
+  /* M1-03 / D21 — the provenance sentence for a SPINOFF child's 股利回收率. Both totals were
+     scaled by the same cost_carry, so the child's ratio IS the parent's, built on dividends
+     the child never paid; the server says whose (payback_from_symbol) and how much was
+     carried in at the spinoff vs. paid by the child itself — both server Decimal strings.
+     The frontend composes TEXT here, never money. Same wording as the drawer and 股利總覽. */
+  function paybackProvenance(h) {
+    return '承接自 ' + h.payback_from_symbol + '：分拆時承接配息 '
+      + f.money(h.payback_carried_dividends, h.quote_ccy) + '・自身配息 '
+      + f.money(h.payback_own_dividends, h.quote_ccy);
+  }
+
   /* ============ A. Header ============ */
   function renderHeader() {
     $('#asof-value').textContent = f.datetime(D.as_of);
@@ -113,6 +124,7 @@
     const k = D.kpis;
     const ccy = k ? k.reporting_currency : D.reporting_currency;
     const band = $('#kpi-band');
+    band.classList.remove('is-loading');  // M1-01: the answer is in — before any branch
     band.replaceChildren();
 
     const nil = (v) => v === null || v === undefined;
@@ -411,8 +423,18 @@
     { key: 'adjusted_avg', label: '調整均價' },
     { key: 'market_price', label: '現價' },
     { key: '_spark', label: '30 日走勢', nosort: true },
-    { key: 'market_value', label: '市值' },
-    { key: 'unrealized_pnl', label: '未實現損益' },
+    /* 市值 / 未實現損益 are ORIGINAL-CURRENCY Decimal strings, so a bare numeric compare
+       ranked 32,340 MYR above 26,915 USD while the 權重 column on the same rows said the
+       opposite (M1-02). The frontend may not convert money (CLAUDE.md), so:
+       · 市值 sorts by `weight` — already the report-currency market-value share, so its
+         order IS the report-currency market-value order, at zero computation.
+       · 未實現損益 has no such report-currency twin in the payload, and inventing one would
+         mean a new API field. It therefore sorts CURRENCY-FIRST, value-second: the ranking
+         is honest inside each currency and never claims a cross-currency one. */
+    { key: 'market_value', label: '市值', sortBy: 'weight',
+      note: '依報告幣別市值排序（＝權重順序）' },
+    { key: 'unrealized_pnl', label: '未實現損益', ccyScoped: true,
+      note: '原幣金額：排序先分幣別、同幣別內比大小（前端不做匯率換算）' },
     { key: 'payback_ratio', label: '股利回收率' },
     { key: 'weight', label: '權重' }
   ];
@@ -426,8 +448,17 @@
         return;
       }
       const th = el('th', 'sortable' + (c.text ? ' col-text' : ''), c.label);
+      /* M1-02: a column whose sort is not the naive numeric one says so on hover, and — while
+         it IS the active sort — in the header itself, so the ordering on screen is never
+         unexplained. */
+      if (c.note) th.title = c.note;
       if (holdingsState.sortKey === c.key) {
         th.appendChild(el('span', 'arrow', holdingsState.sortDir > 0 ? '▲' : '▼'));
+        if (c.ccyScoped) {
+          const m = el('span', 'sort-scope', '（分幣別）');
+          m.style.cssText = 'font-weight:400;color:var(--text-3);font-size:10px;margin-left:2px';
+          th.appendChild(m);
+        }
       }
       th.addEventListener('click', () => {
         if (holdingsState.sortKey === c.key) holdingsState.sortDir *= -1;
@@ -452,11 +483,22 @@
          (string−string coerces to a number; that is display-ordering, not money math). */
       const col = HOLDING_COLS.find((c) => c.key === k);
       const isText = !!(col && col.text);
+      /* A column may sort on a DIFFERENT field than it displays (`sortBy`) — 市值 borrows
+         `weight`, the report-currency share of exactly that quantity, because the frontend
+         must not convert currencies to compare them (M1-02). */
+      const sk = (col && col.sortBy) || k;
+      const ccyScoped = !!(col && col.ccyScoped);
       rows = rows.slice().sort((a, b) => {
-        const av = a[k], bv = b[k];
+        const av = a[sk], bv = b[sk];
         if (av === null || av === undefined) return 1;   /* nulls last */
         if (bv === null || bv === undefined) return -1;
         if (isText) return String(av).localeCompare(String(bv)) * dir;
+        /* currency-scoped: group by quote_ccy FIRST (a fixed A→Z order, independent of the
+           sort direction, so the currency blocks never reshuffle), then rank within it. */
+        if (ccyScoped) {
+          const ac = String(a.quote_ccy || ''), bc = String(b.quote_ccy || '');
+          if (ac !== bc) return ac.localeCompare(bc);
+        }
         return (Number(av) - Number(bv)) * dir;
       });
     }
@@ -536,6 +578,10 @@
 
   function renderHoldings() {
     const tbody = $('#holdings-body');
+    /* M1-01: the loading text lives on the .table-wrap (never inside <tbody>); clear it
+       first, so an empty `rows` draws the real empty table, not 載入中…. */
+    const wrap = tbody.closest('.table-wrap');
+    if (wrap) wrap.classList.remove('is-loading');
     tbody.replaceChildren();
     const rows = sortedFilteredHoldings();
     const maxWeight = Math.max(...D.holdings.map((h) => h.weight || 0));
@@ -606,7 +652,13 @@
         cell.appendChild(sb);
       }
       cell.addEventListener('click', () => {
-        if (window.openSymbolDrawer) window.openSymbolDrawer(h.symbol);
+        /* Hand the drawer the ROW this click came from (identity lookup into the payload
+           order the drawer cycles over — no math). A symbol held in two accounts occupies
+           two rows, so ←/→ afterwards must continue from THIS one; without the hint it
+           resumed from the first row carrying the symbol (M2-04). */
+        if (window.openSymbolDrawer) {
+          window.openSymbolDrawer(h.symbol, { index: D.holdings.indexOf(h) });
+        }
       });
       tdSym.appendChild(cell);
       tr.appendChild(tdSym);
@@ -687,6 +739,14 @@
         track.appendChild(fill);
         wrap.appendChild(track);
         wrap.appendChild(el('span', null, f.pct(h.payback_ratio)));
+        /* M1-03 / D21 — the column is too narrow for the sentence (owner ruling: chip on
+           the narrow column, full text on the drawer and 股利總覽), so: a muted 「承接」 chip,
+           the whole provenance on hover. */
+        if (h.payback_from_symbol) {
+          const chip = el('span', 'badge badge-window-mini', '承接');
+          chip.title = paybackProvenance(h);
+          wrap.appendChild(chip);
+        }
         tdPb.appendChild(wrap);
       }
       tr.appendChild(tdPb);
@@ -825,7 +885,12 @@
     const grid = el('div', 'cash-mini-grid');
     const byAcct = new Map();
     balances.forEach((b) => {
-      if (!byAcct.has(b.account_id)) byAcct.set(b.account_id, { name: b.account, lines: [] });
+      /* G-01: the card header resolves through acctZh (names.js), NOT the payload's English
+         `account` — this card sat one panel away from the 持倉表, whose 帳戶 column already
+         said 嘉信 Schwab while this one said Charles Schwab. */
+      if (!byAcct.has(b.account_id)) {
+        byAcct.set(b.account_id, { name: acctZh(b.account_id), lines: [] });
+      }
       byAcct.get(b.account_id).lines.push(b);
     });
     byAcct.forEach((entry) => {
@@ -1128,6 +1193,14 @@
       const head = el('div', 'insight-head');
       head.appendChild(el('span', 'badge badge-ai', 'AI'));
       head.appendChild(el('h3', 'insight-title', ins.title));
+      if (ins.unreadable) {
+        /* M7-08: the server could not read this card's stored prediction back (schema
+           drift or a corrupt blob) and serves the narrative flagged. Same badge as the
+           holdings table's 待釐清 marks — a data problem is shown, never hidden. */
+        const pill = el('span', 'badge badge-missing', '預測待釐清');
+        pill.title = '此卡片儲存的預測資料無法讀取，僅顯示敘述內容';
+        head.appendChild(pill);
+      }
       card.appendChild(head);
       /* Task-1.5 card shape: summary = concise body (body_md is the full markdown). */
       card.appendChild(el('p', 'insight-body', ins.summary));
@@ -1388,6 +1461,12 @@
   function bootError(err) {
     const body = $('#holdings-body');
     if (body) body.replaceChildren(el('tr', null, ''));
+    /* M1-01: a failure IS an answer — the two hosts this file owns stop saying 載入中… so
+       #dash-load-error below stands alone (charts.js clears its own two the same way). A
+       placeholder that outlives its fetch is exactly the lie the loading state exists to
+       avoid — the same reset `instruments.js` performs on `listKnown` in its catch. */
+    document.querySelectorAll('#kpi-band.is-loading, .table-wrap.is-loading')
+      .forEach((n) => n.classList.remove('is-loading'));
     const host = document.querySelector('.page');
     if (host && window.emptyState && !document.getElementById('dash-load-error')) {
       const box = emptyState('儀表板資料載入失敗，請稍後重新整理。');

@@ -81,6 +81,7 @@ def _rich_pool() -> CashPoolFn:
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         return CashPool(balance=Decimal("999999999"), low=_ZERO)
 
@@ -290,6 +291,7 @@ def test_a_broken_row_still_funds_no_sibling(seeded: sqlite3.Connection) -> None
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         seen.append(len(include))
         return CashPool(balance=Decimal("900000"), low=_ZERO)

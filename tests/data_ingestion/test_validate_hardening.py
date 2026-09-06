@@ -121,3 +121,33 @@ def test_no_duplicate_when_fields_differ(conn: sqlite3.Connection) -> None:
     kinds = {i.kind for i in validate_transaction(
         conn, _inp("tw_broker", "2330", qty="100", price="601"))}
     assert "duplicate_trade" not in kinds
+
+
+def test_the_duplicate_message_describes_what_it_actually_compared(
+    conn: sqlite3.Connection,
+) -> None:
+    """M4-05: the warning said 「今日已登錄一筆相同買賣」 and ``_duplicate_exists`` has no
+    notion of 「今日」.
+
+    Its SQL is ``WHERE account_id=? AND symbol=? AND side=? AND trade_date=?`` plus a
+    Decimal compare of quantity and price — six fields, none of them the wall clock. Measured
+    2026-09-02: the sentence was attached to two rows whose trade date was a month old, which
+    invites exactly the wrong conclusion (「I did not enter anything today, so this must be a
+    false alarm」) about the most easily-ignored warning in the door.
+
+    Asserted on the CONDITIONS rather than on a fixed string, so a re-wording stays free and
+    a re-wording that drops a matched field does not.
+    """
+    _setup(conn)
+    a_month_back = date(2026, 5, 1)
+    enter_transaction(conn, _inp("tw_broker", "2330", qty="100", price="600",
+                                 trade_date=a_month_back), confirm=True)
+    issues = validate_transaction(
+        conn,
+        _inp("tw_broker", "2330", qty="100", price="600", trade_date=a_month_back),
+        today=date(2026, 6, 11))
+    hit = next(i for i in issues if i.kind == "duplicate_trade")
+    assert "今日" not in hit.message, hit.message
+    missing = [w for w in ("帳戶", "標的", "買賣", "交易日", "股數", "價格")
+               if w not in hit.message]
+    assert not missing, f"the duplicate warning does not name {missing}: {hit.message}"

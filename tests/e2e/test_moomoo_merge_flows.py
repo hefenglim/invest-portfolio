@@ -125,6 +125,16 @@ def _manual_preview(
     ``runManualPreview`` only POSTs once symbol + shares > 0 + price > 0 (earlier fills render
     local-issue states with NO request), so the single preview POST is the one the price fill
     triggers — captured deterministically here (spec-17 §17.7.4: expect-polling, no sleeps).
+
+    ⚠ That holds only while ``#m-price`` starts EMPTY, which is true of the first call in a
+    test and false of every later one: the field still carries the previous draft's price, so
+    the ``#m-shares`` fill already satisfies symbol + shares + price and fires a POST of its
+    own. ``expect_response`` then hands back whichever response lands first, and the sanity
+    assert below caught it — `captured a stale preview: gross='90'` (shares 10 × the previous
+    draft's leftover price 9) on the second call of
+    ``test_preview_ccy_and_precision_follow_the_symbol_market``, in a full-suite run; the test
+    passes alone, which is what an ordering-dependent capture looks like. Clearing the price
+    first restores the docstring's premise instead of widening the window and hoping.
     """
     page.select_option("#m-account", account)
     if side == "sell":
@@ -132,6 +142,7 @@ def _manual_preview(
     else:
         page.click("#m-side-buy")
     page.fill("#m-date", _BUY_DATE)
+    page.fill("#m-price", "")  # see the warning above — price 0 means no POST until we ask
     page.fill("#m-symbol", symbol)
     page.fill("#m-shares", shares)
     with page.expect_response("**/api/input/manual/preview") as pv:

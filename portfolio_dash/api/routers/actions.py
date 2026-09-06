@@ -10,17 +10,39 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.data_ingestion.store import load_ledger_bundle
+from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.store import (
+    list_accounts,
+    list_instruments,
+    load_ledger_bundle,
+)
 from portfolio_dash.portfolio.cost_basis import (
     OversellError,
     UnbookableLedgerError,
     build_book,
 )
-from portfolio_dash.scheduler.jobs import backfill_history_all, run_job
+from portfolio_dash.scheduler.jobs import backfill_history_all, run_job_outcome
 
 router = APIRouter()
 
 _MARKET_JOB = {"TW": "quotes_tw", "US": "quotes_us", "MY": "quotes_my"}
+
+
+def held_symbols(conn: sqlite3.Connection) -> set[str]:
+    """Symbols carrying a live position in any account — the quote jobs' partial threshold.
+
+    Registered into ``scheduler.jobs.register_held_symbols_fn`` by ``api/app.py`` (M10-02):
+    the scheduler may not import ``data_ingestion``, and "held" is ``current_shares > 0`` —
+    the predicate ``api/routers/instruments.py::_held``, ``api/signals_service.py::_is_held``,
+    ``api/fundamentals_service.py::_held_refs`` and ``api/routers/strategy.py::_held_set``
+    already agree on. Lives here because this router owns the door whose verdict it decides.
+    """
+    account_ids = [a.account_id for a in list_accounts(conn)]
+    return {
+        inst.symbol
+        for inst in list_instruments(conn)
+        if any(current_shares(conn, aid, inst.symbol) > 0 for aid in account_ids)
+    }
 
 
 class RefreshBody(BaseModel):
@@ -33,14 +55,31 @@ def refresh_quotes_action(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
+    """Run the per-market quote jobs synchronously; answer ``{run_ids, jobs, results}``.
+
+    ``results`` (additive, M10-02) is one block per job — ``run_id`` / ``status`` / ``detail``
+    plus the job's structured counts (``instruments``, ``instruments_failed``,
+    ``held_failed``, ``fx_failed``) — so the caller can say what was lost without parsing
+    the detail sentence. ``status`` is the SAME value the ``job_runs`` row carries.
+    """
     markets = body.markets if body.markets else list(_MARKET_JOB)
     unknown = [m for m in markets if m not in _MARKET_JOB]
     if unknown:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知市場代碼 {unknown[0]}", field="markets"))
     jobs = [_MARKET_JOB[m] for m in markets]
-    run_ids = [run_job(conn, job_id, now=now) for job_id in jobs]
-    return {"run_ids": run_ids, "jobs": jobs}
+    run_ids: list[int] = []
+    results: dict[str, Any] = {}
+    for job_id in jobs:
+        run_id, outcome = run_job_outcome(conn, job_id, now=now)
+        run_ids.append(run_id)
+        results[job_id] = {
+            "run_id": run_id,
+            "status": outcome.status,
+            "detail": outcome.detail,
+            **outcome.results,
+        }
+    return {"run_ids": run_ids, "jobs": jobs, "results": results}
 
 
 class BackfillBody(BaseModel):

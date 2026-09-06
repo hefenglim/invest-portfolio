@@ -27,12 +27,22 @@ the structures below are the schema; exact rates are filled/verified at setup.
   the thing that **seeds** the registry defaulting to `False`: `quick_register`'s auto-register
   path (`api/routers/input_center.py`) never passed the flag at all, so a TW ETF entered on its
   first manual trade was taxed at 現股 **0.3%** instead of **0.1%** — 3× — and `tax_rate: 0.003`
-  was written into `fee_rule_snapshot` as the authority. `is_etf` is therefore `True` / `False` /
-  **`None`**; auto-registration writes `None`, and the fee engine meeting `None` **on a TW SELL**
-  computes with `False` but raises a soft issue `etf_flag_unknown`「無法判定是否為 ETF，賣出稅率
-  待確認」. A BUY carries no TW tax, so it stays silent. This is the same red line as "a stale
-  price is labelled, never guessed": **an unknown rate is disclosed, never defaulted in silence.**
-  Existing `0`/`1` rows are never rewritten — only future auto-registrations land `NULL`.
+  was written into `fee_rule_snapshot` as the authority. The three states are `True` / `False` /
+  **`None`** **at the INPUT** (`quick_register(is_etf: bool | None)`, `UpdateBody.is_etf`,
+  `ManualBody.new_symbol_is_etf`); **at rest they are TWO `NOT NULL` booleans** —
+  `instruments.is_etf` + `instruments.etf_flag_unknown` (`data_ingestion/schema.py`: SQLite
+  cannot relax `NOT NULL` without a table rebuild, so "unknown" rides alongside as an additive
+  column). `None` at the door is stored as `is_etf=0, etf_flag_unknown=1`; an explicit answer
+  stores `etf_flag_unknown=0`. **Query the unknowns with `etf_flag_unknown=1`, never
+  `is_etf IS NULL`** (that column is never NULL — the query returns 0 rows on every database).
+  Auto-registration lands unknown — both the manual-trade path (`input_center.py`) and the
+  SPINOFF child (`register.py::spinoff_child_draft`, NEW-21 2026-09-06) — and the fee engine
+  meeting `unknown` **on a TW SELL** computes with `False` but raises a soft issue
+  `etf_flag_unknown`「無法判定是否為 ETF，賣出稅率待確認」(`fees.py::resolve_etf_flag` returns the
+  `(is_etf, unknown)` pair). A BUY carries no TW tax, so it stays silent. This is the same red
+  line as "a stale price is labelled, never guessed": **an unknown rate is disclosed, never
+  defaulted in silence.** Existing rows were migrated in as `etf_flag_unknown=0` (KNOWN) and are
+  never rewritten — only future auto-registrations land unknown.
   ⚠ **當沖 OUTRANKS ETF — settled, not incidental (QA-19, owner ruling 2026-09-01).** A TW sell
   that is both a same-day round trip AND an ETF resolves to the **當沖 0.15%**, never the ETF
   0.1%. `fees.py::_tw` already reads `tax_daytrade if daytrade else tax_etf if is_etf else

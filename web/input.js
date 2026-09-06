@@ -67,7 +67,13 @@
   });
 
   /* ================= Tab 1 手動交易 ================= */
-  const m = { side: 'buy', feeOverride: false, taxOverride: false, acked: false };
+  /* `acks` is a SET of acknowledged soft warnings (key -> true), not a single boolean:
+     M4-02, 2026-09-03. One `acked` flag meant one tick spoke for every soft warning on the
+     draft — and, because only one of them was ever drawn, for warnings the owner had not
+     been shown. `ackOversell` is the derived answer to the ONE question the commit asks
+     (`ack_oversell`), so ticking 「重複交易」 can no longer claim a 賣超 was accepted. */
+  const m = { side: 'buy', feeOverride: false, taxOverride: false,
+              acks: Object.create(null), ackOversell: false };
   /* Latest server preview (Decimal STRINGS) — null until the first preview lands. */
   let mPreview = null;
   /* Today (local) — the natural default trade date; retires the design-stub
@@ -578,7 +584,30 @@
     const hard = issues.filter((i) => i.sev === 'error');
     const soft = issues.filter((i) => i.sev === 'warn');
     const infos = issues.filter((i) => i.sev === 'info');
-    const oversell = soft.find((i) => i.code === 'sell_exceeds_holdings') || soft[0] || null;
+
+    /* ===== M4-02 (2026-09-03): EVERY soft warning is shown, and acked on its own =====
+
+       This line used to be `soft.find(sell_exceeds_holdings) || soft[0] || null`, and only
+       that ONE issue was rendered. Everything else the server warned about never entered the
+       DOM. Measured on the running app: `duplicate_trade` + `etf_flag_unknown` drew the
+       duplicate alone, so a TW sell was computed at 現股 0.3% with 「無法判定是否為 ETF，
+       賣出稅率待確認」 dropped — which is the silence AI-D40 exists to end
+       (`markets-and-fees.md`: an unknown rate is DISCLOSED, never defaulted in silence). Same
+       shape for 「無 USD/MYR 匯率，印花稅未計」 hiding behind a cash overdraft.
+
+       賣超 keeps the FIRST slot — it is the destructive one, `#m-ack` is its tick in five e2e
+       flows, and §6.7 orders its own block — so a single-warning draft renders byte-identically
+       to before. The rest are listed BESIDE it, never folded into it. */
+    const softRank = (i) => (i.code === 'sell_exceeds_holdings' ? 0 : 1);
+    const softOrdered = soft.slice().sort((a, b) => softRank(a) - softRank(b));
+    /* One tick per warning, keyed by code AND the exact sentence, for two reasons: two
+       different warnings can never share a tick (that is what「勾一次認掉全部」was), and a
+       re-worded warning — the 賣超 text names the quantities — is a warning that has not been
+       read yet, so its tick starts clear. Keys not on screen are dropped, so an ack never
+       outlives the warning it answered. */
+    const ackKey = (i) => i.code + '\n' + i.text;
+    const liveAcks = softOrdered.map(ackKey);
+    Object.keys(m.acks).forEach((k) => { if (liveAcks.indexOf(k) < 0) delete m.acks[k]; });
 
     /* field-error highlight from issue.field (mapped to the m-* input ids) */
     const FIELD_ID = { symbol: 'm-symbol', shares: 'm-shares', price: 'm-price' };
@@ -706,7 +735,8 @@
       issueBox.appendChild(div);
     });
     let ackOk = true;
-    if (oversell) {
+    m.ackOversell = false;
+    softOrdered.forEach((warn, idx) => {
       /* ===== §6.7 door 1, ON THE ORDINARY PATH (fixed 2026-08-12) =====
 
          This acknowledgement used to be a bare tick — 「我了解，仍要寫入。」 — and ticking it
@@ -729,18 +759,19 @@
          system and it used to describe itself as 「我了解」; it now names the consequence in
          §6.7's own words, so the two options can be compared before one is taken.
 
-         ⚠ `oversell` is NOT always an oversell. It is `soft.find(sell_exceeds_holdings) ||
-         soft[0]` — the FIRST soft issue of any kind — so `cash_overdraft`, `future_trade_date`
-         and `duplicate_trade` all render through this same box and this same checkbox. Both
-         additions below are therefore gated on the real code: a 補登公司行動 button beside a
-         cash overdraft would be a repair for a problem it cannot touch, and telling the owner
-         that acknowledging a future-dated trade 「歸零成本基礎」 would be simply false. */
-      const isOversell = oversell.code === 'sell_exceeds_holdings';
+         ⚠ `warn` is NOT always an oversell — `cash_overdraft`, `future_trade_date`,
+         `duplicate_trade`, `etf_flag_unknown` and `stamp_fx_missing` all render through this
+         same shape. Both additions below are therefore gated on the real code: a 補登公司行動
+         button beside a cash overdraft would be a repair for a problem it cannot touch, and
+         telling the owner that acknowledging a future-dated trade 「歸零成本基礎」 would be
+         simply false. Until M4-02 this block ran ONCE for `soft[0]` and the rest of the list
+         was dropped; it now runs per warning, which is why the gating matters more, not less. */
+      const isOversell = warn.code === 'sell_exceeds_holdings';
       const div = el('div', 'issue issue-warn');
       div.appendChild(el('span', null, '⚠'));
       const col = el('div');
       col.style.cssText = 'display:flex;flex-direction:column;gap:6px;min-width:0;';
-      col.appendChild(el('span', null, oversell.text));
+      col.appendChild(el('span', null, warn.text));
       if (isOversell) {
         /* Accent-weighted, like the same option in the dialog: §6.7 lists it FIRST because
            it is the recommended reading, and a neutral button next to a tick makes the two
@@ -751,7 +782,7 @@
         fix.type = 'button';
         fix.id = 'm-oversell-fix';
         fix.style.cssText = 'align-self:flex-start;text-align:left;';
-        fix.addEventListener('click', () => openCorpActionRepair(oversell.text, manualBody()));
+        fix.addEventListener('click', () => openCorpActionRepair(warn.text, manualBody()));
         col.appendChild(fix);
         const sub = el('span', null,
           '開啟補登表單，已帶入帳戶、代號與日期範圍；補登後這筆賣出就會通過檢查，成本基礎不會被捨棄');
@@ -760,10 +791,16 @@
       }
       const lab = el('label');
       const cb = el('input');
+      const key = ackKey(warn);
       cb.type = 'checkbox';
-      cb.id = 'm-ack';
-      cb.checked = m.acked;
-      cb.addEventListener('change', () => { m.acked = cb.checked; renderManual(mPreview, issues, serverOk); });
+      /* The first tick keeps the id `#m-ack`. Five e2e flows drive it by that id, and 賣超
+         sorts first, so a draft carrying one is unchanged; the rest are numbered. */
+      cb.id = idx === 0 ? 'm-ack' : 'm-ack-' + idx;
+      cb.checked = m.acks[key] === true;
+      cb.addEventListener('change', () => {
+        if (cb.checked) m.acks[key] = true; else delete m.acks[key];
+        renderManual(mPreview, issues, serverOk);
+      });
       lab.appendChild(cb);
       lab.appendChild(el('span', null, isOversell
         ? '確認為賣超，接受成本基礎歸零（待釐清）：這個部位的成本基礎會被永久捨棄，之後再買回也不會還原。'
@@ -771,11 +808,13 @@
       col.appendChild(lab);
       div.appendChild(col);
       issueBox.appendChild(div);
-      ackOk = m.acked;
-    } else {
-      m.acked = false;
-    }
-    if (hasServer && !hard.length && !oversell) {
+      /* 確認寫入 waits for ALL of them: a warning is read one at a time, so it is consented
+         to one at a time. `ackOversell` answers the commit's single `ack_oversell` question
+         from the 賣超 tick ALONE — never from whichever box happened to be on screen. */
+      if (m.acks[key] !== true) ackOk = false;
+      else if (isOversell) m.ackOversell = true;
+    });
+    if (hasServer && !hard.length && !softOrdered.length) {
       const div = el('div', 'issue issue-ok');
       div.appendChild(el('span', null, '✓'));
       div.appendChild(el('span', null, '草稿檢核通過，可寫入'));
@@ -905,7 +944,10 @@
      400 / other PdApiError -> error toast carrying the backend message + code. */
   async function commitManual() {
     const body = manualBody();
-    body.ack_oversell = m.acked;
+    /* M4-02: from the 賣超 tick alone. A `duplicate_trade` or `future_trade_date` tick is
+       not a claim that a 賣超 was accepted, and this flag is the only thing that silences
+       the commit-time 422. */
+    body.ack_oversell = m.ackOversell;
     /* busy state: the commit may auto-register an unknown symbol (real provider
        fetch, seconds) — the button must show that work, not appear frozen. */
     const restore = window.pdBusy ? window.pdBusy($('#m-confirm'), '寫入中…') : () => {};
@@ -935,7 +977,8 @@
       window.toast('寫入成功', 'ok', '交易已寫入帳本 ' + id + arTxt);
     }
     /* reset draft state and re-preview a clean form (clears the override toggles too) */
-    applyOverrideState('fee', false); applyOverrideState('tax', false); m.acked = false;
+    applyOverrideState('fee', false); applyOverrideState('tax', false);
+    m.acks = Object.create(null); m.ackOversell = false;
     $('#m-shares').value = '';
     $('#m-price').value = '';
     /* Fable F8: a commit that AUTO-REGISTERED an unknown symbol must refresh ctx so the 未註冊

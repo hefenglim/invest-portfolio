@@ -386,13 +386,21 @@
     <div class="filter-bar" id="ledger-filters"></div>
     <div class="filter-bar" style="gap: 8px;">
       <span class="group-label">篩選</span>
+      <!-- M3-06 (2026-09-03): this title used to say 「帳戶與日期為全帳本篩選」 flatly, and the
+           期初庫存 tab has no date filter at all (GET /api/ledgers/openings takes no from/to,
+           and ledger.js::ledgerParams skips them for `open`). A 2026 range therefore emptied
+           the other five tabs and left 期初庫存 showing all five 2021 rows — five empty tables
+           and one full one, with the tooltip insisting the range was global. The claim is
+           narrowed to what is true; the exception is ALSO stated visibly inside the 期初庫存
+           pane, because a tooltip is not read by someone who is not hovering it. -->
       <input class="input" id="ledger-sym-search" type="search" placeholder="代號或名稱（篩選本頁）…"
-             style="width: 190px;" spellcheck="false" title="關鍵字僅過濾目前頁面；帳戶與日期為全帳本篩選"></input>
+             style="width: 190px;" spellcheck="false"
+             title="關鍵字僅過濾目前頁面；帳戶為全帳本篩選；日期區間套用於交易／股利／換匯／公司行動／資金收支（期初庫存不受影響）"></input>
       <input class="input" id="ledger-date-from" type="date" style="width: 150px;"
-             title="起日（含）"></input>
+             title="起日（含）— 期初庫存不受此區間影響"></input>
       <span class="group-label">→</span>
       <input class="input" id="ledger-date-to" type="date" style="width: 150px;"
-             title="迄日（含）"></input>
+             title="迄日（含）— 期初庫存不受此區間影響"></input>
     </div>
 
     <div class="mode-pane" id="pane-tx">
@@ -417,6 +425,11 @@
       <div id="lfx-pager" hidden="hidden"></div>
     </div>
     <div class="mode-pane" id="pane-lopen">
+      <!-- M3-06: the visible half of the correction above. 期初庫存 is a per-(帳戶,代號)
+           opening balance, not a dated flow, so the shared 日期區間 does not apply to it —
+           said here, on the tab where the range appears to be ignored, rather than only in a
+           tooltip on a control two rows up. 帳戶 篩選 still applies. -->
+      <div class="append-note" id="lopen-date-note" style="padding: 8px var(--pad) 0;">期初庫存是各帳戶標的的期初餘額，不是有日期的流水，因此不受上方日期區間篩選（帳戶篩選仍有效）。</div>
       <div class="table-wrap"><table class="data">
         <thead><tr><th class="col-text">帳戶</th><th class="col-text">代號</th><th>股數</th><th>原始均價</th><th>原始總成本</th><th>建檔日</th><th></th></tr></thead>
         <tbody id="open-body"></tbody>

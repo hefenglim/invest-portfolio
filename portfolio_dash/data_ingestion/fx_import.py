@@ -46,6 +46,8 @@ from portfolio_dash.data_ingestion.validate import (
     CashPoolFn,
     Issue,
     alias_import_account,
+    amount_too_large_issue,
+    dip_phrase,
     unknown_account_issue,
 )
 from portfolio_dash.shared.enums import Currency
@@ -121,6 +123,23 @@ def fx_ccy_issues(
     ]
 
 
+def fx_amount_issues(from_amount: Decimal, to_amount: Decimal) -> list[Issue]:
+    """M5-05: both legs bounded at the M4 magnitude, in leg order (like :func:`fx_ccy_issues`).
+
+    The 換匯 door had no bound at all: a 31-digit leg was refused only if the pool happened
+    not to cover it, and written otherwise — after which every later sum in that pool lost
+    its last digit to the 28-digit Decimal context. Called by the CSV door's structural pass
+    (so an oversized row funds no sibling) and by ``api/routers/cash.py::fx_change_guard``
+    (the manual and edit doors), so the three cannot answer differently.
+    """
+    return [
+        issue
+        for issue in (amount_too_large_issue(from_amount, "換出金額"),
+                      amount_too_large_issue(to_amount, "換入金額"))
+        if issue is not None
+    ]
+
+
 def fx_balance_issues(
     *,
     account: Account,
@@ -134,14 +153,18 @@ def fx_balance_issues(
 ) -> list[Issue]:
     """FU-D34 + audit C3 for ONE conversion — the guard EVERY 換匯 door runs.
 
-    **Two checks, and both of them** (QA-11). The end-balance test was chosen deliberately
-    for display consistency with the 賬戶現金 line, so that the frontend hint and the backend
-    authority never disagree; it stays, message and all. But an end aggregate cannot see a
-    BACK-DATED conversion: one that leaves the pool at −320,000 from January to March nets to
-    zero by the end, and was accepted. The withdraw guard next door has used the date-ordered
-    running minimum since audit C3, and the equity side has been date-aware since 2026-07-31
-    for the identical problem class ("a net-only check let a back-dated sell through"). So the
-    running minimum is added ALONGSIDE the aggregate, never in place of it.
+    **Two checks, and both of them** (QA-11). The balance test reads the pool AS OF the
+    conversion's own date (M5-06 — it used to be the END balance of the whole ledger, which
+    a deposit dated 2099 could inflate); for a conversion dated today that is the 賬戶現金
+    figure the 換匯中心 line displays, so the frontend hint and the backend authority never
+    disagree. But a balance on one day cannot see a conversion that strands a LATER spend,
+    and an end aggregate could not see a BACK-DATED one: one that leaves the pool at −320,000
+    from January to March nets to zero by the end, and was accepted. The withdraw guard next
+    door has used the date-ordered running minimum since audit C3, and the equity side has
+    been date-aware since 2026-07-31 for the identical problem class ("a net-only check let a
+    back-dated sell through"). So the running minimum — over the WHOLE timeline, future rows
+    included — is added ALONGSIDE the balance, never in place of it, and its message names
+    the day the pool bottoms (M5-07).
 
     A PRE-EXISTING dip the conversion does not DEEPEN never blocks it
     (``after.low < min(before.low, 0)``) — scoped exactly like ``_withdraw_issues``, so a
@@ -151,7 +174,7 @@ def fx_balance_issues(
     (empty for a single-row door). There is no ack override in either branch: FU-D34 is a hard
     rule, and a door that offered one would be financing.
     """
-    before = pool(account.account_id, from_ccy, include=siblings)
+    before = pool(account.account_id, from_ccy, include=siblings, as_of=on)
     if from_amount > before.balance:
         return [Issue(
             kind="fx_insufficient_balance",
@@ -164,9 +187,9 @@ def fx_balance_issues(
     if after.low < min(before.low, _ZERO):
         return [Issue(
             kind="fx_insufficient_balance",
-            message=(f"此筆換匯會使 {account.name} 的 {from_ccy.value} 現金於某時點降至 "
-                     f"{decimal_str(after.low)}（換匯日早於資金到位）— 換匯不可透支，"
-                     "請先補登入金或換匯"))]
+            message=(f"此筆換匯會使 {account.name} 的 {from_ccy.value} 現金"
+                     f"{dip_phrase(after.low_date)} {decimal_str(after.low)}"
+                     "（換匯日早於資金到位）— 換匯不可透支，請先補登入金或換匯"))]
     return []
 
 
@@ -359,6 +382,7 @@ def _structural_issues(
         issues.append(Issue(kind="non_positive_amount", message="換出金額必須大於 0"))
     if parsed.to_amount <= _ZERO:
         issues.append(Issue(kind="non_positive_amount", message="換入金額必須大於 0"))
+    issues.extend(fx_amount_issues(parsed.from_amount, parsed.to_amount))  # M5-05
     if parsed.from_ccy == parsed.to_ccy:
         issues.append(Issue(
             kind="same_currency",

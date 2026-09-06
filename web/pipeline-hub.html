@@ -66,7 +66,10 @@
     window.pdApi.post('/api/insight-tasks/official-pack').then(function (r) {
       var made = (r && r.created || []).map(function (c) { return c.name; });
       var skip = (r && r.skipped) || [];
-      window.toast(made.length ? '官方套組已建立' : '官方套組已存在', made.length ? 'ok' : 'warn',
+      /* 'ok' for both outcomes: "already exists" is a successful no-op, not a partial
+         result. M10-02 gave 'warn' a third face (amber, stays until closed) — right for
+         a partial write, wrong for a message that means nothing needed doing. */
+      window.toast(made.length ? '官方套組已建立' : '官方套組已存在', 'ok',
         (made.length ? '建立：' + made.join('、') + '（含週排程）' : '') +
         (skip.length ? (made.length ? '；' : '') + '已存在跳過：' + skip.join('、') : ''));
       if (window.ppRefresh) window.ppRefresh();

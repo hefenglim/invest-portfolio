@@ -269,3 +269,29 @@ def test_the_spinoff_child_has_a_payback_figure_for_D21_to_label(
     assert child.dividend_portion > 0, "nothing for D21's provenance label to qualify"
     assert Decimal("0") < child.payback_ratio < Decimal("1"), "keep 已回本 off this fixture"
     assert child.payback_ratio == parent.payback_ratio
+
+
+def test_every_seeded_etf_sector_instrument_carries_the_etf_flag(
+    conn: sqlite3.Connection,
+) -> None:
+    """M10-01 (2026-09-06): the seed registered 0056 (元大高股息) with ``sector="ETF"`` and
+    no ``is_etf``, so the model default landed ``is_etf=False, etf_flag_unknown=False`` —
+    "answered: not an ETF" — and a demo sell of 0056 was taxed at 現股 0.3% instead of 0.1%
+    with NO disclosure (AI-D40's soft issue needs ``unknown=True``, and the seed asserted a
+    wrong answer rather than no answer).
+
+    Scope: the SEED SCRIPT only. ``shared/sectors.py`` forbids deriving ``is_etf`` from the
+    sector label at runtime, and this test does not — it checks that the AUTHOR of the seed
+    answered the tax question for every row whose sector label says ETF."""
+    seed_demo.seed(conn)
+    rows = conn.execute(
+        "SELECT symbol, is_etf, etf_flag_unknown FROM instruments WHERE sector='ETF' "
+        "ORDER BY symbol"
+    ).fetchall()
+    symbols = [r["symbol"] for r in rows]
+    assert "0056" in symbols, f"the seed no longer registers 0056 as an ETF-sector row: {symbols}"
+    for r in rows:
+        assert (int(r["is_etf"]), int(r["etf_flag_unknown"])) == (1, 0), (
+            f"{r['symbol']}: sector says ETF but is_etf={r['is_etf']} "
+            f"etf_flag_unknown={r['etf_flag_unknown']} — the seed asserted a wrong answer"
+        )

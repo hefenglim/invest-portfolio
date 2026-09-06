@@ -320,6 +320,16 @@ _SPEC_4_4_FIELDS = (
     # assertion is for. Transfer rule: written by EXCHANGE (`P.vacated_to := to_symbol`),
     # untouched by SPLIT and SPINOFF. Pinned by tests/portfolio/test_dividend_after_exchange.py.
     "vacated_to",
+    # M1-03 / D21, 2026-09-06 — whose dividends a SPINOFF child's payback ratio is built on.
+    # Transfer rule: SPINOFF writes the CHILD (`Q.payback_from := P` if unset;
+    # `Q.payback_carried += carved_original − carved_adjusted`) and leaves the parent's own
+    # record alone; EXCHANGE moves all three onto Q (first writer wins for the symbol) and
+    # clears P — a rename must not launder the label; SPLIT untouched. Cleared by a full
+    # exit / oversell (`_clear_payback_provenance`). Pinned by
+    # tests/portfolio/test_m103_spinoff_payback_provenance.py, one replay test per action kind.
+    "payback_from",
+    "payback_carried",
+    "payback_own",
 )
 _SPEC_4_4_FIELD_COUNT = len(_SPEC_4_4_FIELDS)
 

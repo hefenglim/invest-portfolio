@@ -299,6 +299,7 @@ def _inert_probe(
     *,
     include: Sequence[CashMovementInput] = (),
     exclude_id: int | None = None,
+    as_of: date | None = None,
 ) -> CashPool:
     """A deliberately inert :class:`CashPoolFn`: it reads no ledger and refuses nothing.
 

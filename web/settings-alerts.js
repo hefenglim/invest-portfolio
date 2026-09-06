@@ -185,20 +185,39 @@
     return out;
   }
 
+  /* M9-03: PUT /api/alert-rules recomputes EVERY alert before it answers — measured 5.3s to
+     38.3s. Both buttons used to stay enabled and unlabelled for that whole window, so the
+     user got no feedback at all and a second click fired a second full recompute. `pdBusy`
+     is the house pattern already used by 資料來源「測試」 / 匯出 / 寫入 buttons: it disables
+     the button (double-click guard by construction) and swaps in a spinner + label. */
   async function saveRules() {
     if (!window.pdApi) return;
+    const restore = window.pdBusy ? window.pdBusy(saveBtn, '儲存中…') : function () {};
     try {
       const res = await window.pdApi.put('/api/alert-rules', { rules: collectRuleBody() });
       if (res && res.rules) renderRulesFrom(res.rules);
       if (window.toast) window.toast('預警規則已儲存', 'ok', '頂欄鈴鐺與儀表板於下次載入時生效');
     } catch (err) {
       if (window.toast) window.toast(err.message, 'fail', err.code);
+    } finally {
+      restore();
     }
   }
 
   /* 還原預設值 — PUT the backend default thresholds (rules_config.py RULE_META):
      all rules enabled; ratio defaults as ratio strings; pp/days as native; toggle-only
-     rules value:null. No dedicated reset endpoint exists, so we PUT the known contract. */
+     rules value:null. No dedicated reset endpoint exists, so we PUT the known contract.
+
+     ⚠ THIS TABLE MUST LIST EVERY BACKEND RULE. `PUT /api/alert-rules` is a SUBSET MERGE —
+     a rule absent from the body keeps its CURRENT value — so an id missing here is silently
+     NOT restored while the button still reports 「已還原預設值」. That is exactly what
+     happened to `portfolio_drawdown` / `currency_weight` (R5): added to RULE_META, never
+     added here, so 還原 sent 13 of 15 ids and left both thresholds at whatever the user had
+     typed — thresholds that decide whether the bell fires at all.
+     RULE_META stays the single authority for the numbers; this is a MIRROR, and it is
+     allowed to exist only while it is provably equal:
+     `tests/contract/test_m9_alert_reset_covers_every_rule.py` fails the build on the next
+     rule added to RULE_META without a line here. */
   const DEFAULTS_WIRE = [
     { id: 'single_weight', enabled: true, value: '0.30' },
     { id: 'sector_weight', enabled: true, value: '0.60' },
@@ -212,17 +231,22 @@
     { id: 'vol_spike', enabled: true, value: '1.8' },
     { id: 'rebalance_drift', enabled: true, value: '0.05' },
     { id: 'consensus_change', enabled: true, value: '0.5' },
+    { id: 'portfolio_drawdown', enabled: true, value: '0.20' },
+    { id: 'currency_weight', enabled: true, value: '0.70' },
     { id: 'target_cross', enabled: true, value: null }
   ];
 
   async function resetRules() {
     if (!window.pdApi) return;
+    const restore = window.pdBusy ? window.pdBusy(resetBtn, '還原中…') : function () {};
     try {
       const res = await window.pdApi.put('/api/alert-rules', { rules: DEFAULTS_WIRE });
       if (res && res.rules) renderRulesFrom(res.rules);
       if (window.toast) window.toast('已還原預設值', 'ok');
     } catch (err) {
       if (window.toast) window.toast(err.message, 'fail', err.code);
+    } finally {
+      restore();
     }
   }
 

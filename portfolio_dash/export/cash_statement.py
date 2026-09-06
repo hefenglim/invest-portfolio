@@ -12,7 +12,7 @@ never blended. The full statement is exported (all rows), never the paged API wi
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from portfolio_dash.data_ingestion.store import (
@@ -167,7 +167,21 @@ def _describe(ln: CashLine, ccy: str) -> str:
     if ln.kind in ("fx_in", "fx_out"):
         parts = [f"換匯 {_esc(ln.ref)}"]
         if ln.fx_rate is not None:
-            parts.append(f"@ {_fmt_rate(ln.fx_rate)}")
+            # M5-01, second surface. `web/cash.js::describe()` was corrected to label this
+            # rate; this builder is the same sentence's other copy and was left bare, so a
+            # single conversion then read 「1 USD = 31.77 TWD」 on screen and 「31.7723」 in
+            # the printed report — a screen-vs-print split the fix itself created (before it,
+            # both were consistently unlabelled). Found by regression R3, not by the fix.
+            # The wording below is `describe()`'s, verbatim: the backend rate is
+            # from_amount / to_amount for BOTH legs, so pool ccy + counter ccy recover the
+            # pair (fx_out spends from_ccy, fx_in receives to_ccy); with either missing it
+            # degrades to the bare rate rather than mislabelling one.
+            frm = ccy if ln.kind == "fx_out" else ln.counter_ccy
+            to = ln.counter_ccy if ln.kind == "fx_out" else ccy
+            if frm and to:
+                parts.append(f"@ 1 {_esc(to)} = {_fmt_rate(ln.fx_rate)} {_esc(frm)}")
+            else:
+                parts.append(f"@ {_fmt_rate(ln.fx_rate)}")
         if ln.counter_amount is not None and ln.counter_ccy:
             parts.append(
                 f"（對應 {_fmt_signed(ln.counter_amount, ln.counter_ccy)} {_esc(ln.counter_ccy)}）"
@@ -177,27 +191,67 @@ def _describe(ln: CashLine, ccy: str) -> str:
     return _esc(note) if note else "（無備註）"
 
 
-def _pool_section(pool_ccy: Currency, stmt: list[tuple[CashLine, Decimal]]) -> str:
+def _as_of_balance(stmt: list[tuple[CashLine, Decimal]], as_of: date) -> Decimal:
+    """The running balance after the LAST line dated on or before ``as_of`` — that day's
+    end-of-day balance (M5-06); 0 for a pool with no such line. The statement is
+    chronological, so this equals ``cash_balances(..., as_of=as_of)`` for the same pool by
+    construction — the figure ``GET /api/cash`` and ``GET /api/cash/statement`` serve."""
+    return next((bal for ln, bal in reversed(stmt) if ln.date <= as_of), _ZERO)
+
+
+def _pool_section(
+    pool_ccy: Currency, stmt: list[tuple[CashLine, Decimal]], *, as_of: date
+) -> str:
+    """One pool's printed section.
+
+    「目前餘額」 is the balance AS OF ``as_of`` (M5-06, X8a) — the ``now`` the page header
+    was given, never a second clock read (a re-read would date the balance differently from
+    the header on an export that crosses midnight). It was ``stmt[-1][1]``, the running
+    balance after the LAST row: a projection, not today's balance, whenever a future-dated
+    row exists — and a number the 資金 page had stopped showing.
+
+    Future rows are still printed. The web statement lists every row, bounds the balance to
+    today and flags the rows past it; a static page says the same thing its own way: one cut
+    row drawn between the last row that has happened and the first that has not, 「（未來）」
+    on each row past it (a table may break across pages, and the cut stays on the first),
+    and the title counting what the balance leaves out. Hiding the rows would make the
+    printed ledger look like it lost them; folding them in would print a figure no other
+    surface shows. With no future row the section is byte-identical to what it was.
+    """
     ccy = pool_ccy.value
-    bal = stmt[-1][1] if stmt else _ZERO
+    bal = _as_of_balance(stmt, as_of)
+    future = sum(1 for ln, _ in stmt if ln.date > as_of)
     head = (
         '<tr><th>日期</th><th class="l">類型</th><th class="l">說明</th>'
         "<th>金額</th><th>餘額</th></tr>"
     )
+    cut = (
+        '<tr class="cut"><td class="l note" colspan="5">'
+        f"以下 {future} 筆為未來日期（{_esc(as_of.isoformat())} 之後），不計入目前餘額；"
+        "其餘額欄為投影</td></tr>"
+    )
     if not stmt:
         body = '<tr><td class="l" colspan="5">本帳戶此幣別尚無紀錄</td></tr>'
     else:
-        body = "".join(
-            "<tr>"
-            f'<td class="num">{_esc(ln.date.isoformat())}</td>'
-            f'<td class="l">{_esc(_KIND_ZH.get(ln.kind, ln.kind))}</td>'
-            f'<td class="l">{_describe(ln, ccy)}</td>'
-            f'<td class="num">{_fmt_signed(ln.delta, ccy)}</td>'
-            f'<td class="num">{_fmt_amount(b, ccy)}</td>'
-            "</tr>"
-            for ln, b in stmt
-        )
+        rows: list[str] = []
+        for ln, b in stmt:
+            is_future = ln.date > as_of
+            if is_future and len(rows) == len(stmt) - future:
+                rows.append(cut)  # once, before the first future row (rows are chronological)
+            kind = _esc(_KIND_ZH.get(ln.kind, ln.kind)) + ("（未來）" if is_future else "")
+            rows.append(
+                ('<tr class="future">' if is_future else "<tr>")
+                + f'<td class="num">{_esc(ln.date.isoformat())}</td>'
+                f'<td class="l">{kind}</td>'
+                f'<td class="l">{_describe(ln, ccy)}</td>'
+                f'<td class="num">{_fmt_signed(ln.delta, ccy)}</td>'
+                f'<td class="num">{_fmt_amount(b, ccy)}</td>'
+                "</tr>"
+            )
+        body = "".join(rows)
     title = f"{_esc(ccy)} 資金池 · 目前餘額 {_fmt_amount(bal, ccy)} {_esc(ccy)}"
+    if future:
+        title += f"（截至 {_esc(as_of.isoformat())}，不含 {future} 筆未來日期）"
     return (
         f"<section><h2>{title}</h2>"
         f'<p class="note">共 {len(stmt)} 筆</p>'
@@ -230,7 +284,8 @@ def build_cash_statement_report_html(
         return None
     movements, fx, txs, divs, instruments = _load(conn)
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy)
-    sections = [_pool_section(c, stmt) for c, stmt in statements] or [
+    # One clock for the whole page: the header's ``now`` dates the balances too (M5-06).
+    sections = [_pool_section(c, stmt, as_of=now.date()) for c, stmt in statements] or [
         '<section><p class="note">此帳戶尚無現金收支紀錄</p></section>'
     ]
     body = "\n".join([

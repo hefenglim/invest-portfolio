@@ -56,6 +56,7 @@ def _pool_fn(conn: sqlite3.Connection) -> CashPoolFn:
         *,
         include: Sequence[CashMovementInput] = (),
         exclude_id: int | None = None,
+        as_of: date | None = None,
     ) -> CashPool:
         rows = [m for m in movements if m.id != exclude_id]
         rows.extend(

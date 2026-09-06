@@ -31,6 +31,7 @@ from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.technicals import annualized_volatility, week52_position
 from portfolio_dash.pricing import consensus_source, snapshots_store
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.strategy import target_weights as tw
@@ -120,13 +121,12 @@ def assemble(
 
     Reuses the already-built ``data`` for the held set + current weights (no second dashboard
     build). Held = symbols carrying a live position; every REGISTERED symbol (held + watch)
-    gets 52-week drawdown + consensus; vol is fed only for held symbols (vol_spike is
-    held-only). ``target_cross`` (FU-D28) is fed the latest stored price + the instrument's
-    configured target band, but ONLY for symbols that actually carry a target (no target set →
-    the symbol is omitted, so the rule reads nothing to cross).
+    gets 52-week drawdown + consensus — minus the archived ones and the un-held source
+    tickers of an EXCHANGE (M1-05, see the comment at the filter); vol is fed only for held
+    symbols (vol_spike is held-only). ``target_cross`` (FU-D28) is fed the latest stored
+    price + the instrument's configured target band, but ONLY for symbols that actually carry
+    a target (no target set → the symbol is omitted, so the rule reads nothing to cross).
     """
-    instruments = sorted(list_instruments(conn), key=lambda i: i.symbol)
-    registered = [i.symbol for i in instruments]
     held = {h.symbol for h in data.holdings if h.shares > 0}
     end = now.date()
     start = end - timedelta(days=_HISTORY_DAYS)
@@ -138,6 +138,29 @@ def assemble(
     # fires a 52-week-low breach that never happened. `series_in` short-circuits structurally
     # on "no SPLIT for this symbol", so an action-free ledger reads byte-identically.
     actions = load_action_index(conn)
+    # M1-05 (owner ruling 2026-09-06): two kinds of registered symbol are OUT of the universe.
+    # (1) `archived` — 封存 already means "off every fetch scope" to the price refresh and the
+    #     signal scan (`scheduler/jobs.py::build_worklist`); this seam gave the same flag a
+    #     second meaning by feeding every registered row. An archived symbol is never fetched
+    #     again, so its drawdown froze at the last stored close and kept firing for as long as
+    #     the 400-day window still held those closes (~13 months, measured on MRCA).
+    # (2) the SOURCE of an EXCHANGE that holds no position — the old ticker of a rename /
+    #     merger (MRCA→NVSA). Its stored history is a dead series for a name that no longer
+    #     trades; the destination is the live position and is fed on its own row.
+    #     「AND no position」 is load-bearing: a source ticker bought again is held again.
+    # Un-held watch-list symbols are NOT excluded — drawdown ① and consensus ④ fire for them
+    # by design (`strategy/alerts.py`, `web/settings-alerts.js`).
+    exchange_sources = {
+        a.from_symbol for a in actions.all if a.kind is CorporateActionKind.EXCHANGE
+    }
+    instruments = sorted(
+        (
+            i for i in list_instruments(conn)
+            if not i.archived and not (i.symbol in exchange_sources and i.symbol not in held)
+        ),
+        key=lambda i: i.symbol,
+    )
+    registered = [i.symbol for i in instruments]
 
     metrics: dict[str, SymbolMetric] = {}
     levels: dict[str, TargetLevels] = {}

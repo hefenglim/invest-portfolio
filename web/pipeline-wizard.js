@@ -42,14 +42,39 @@
     };
     var step = 0;
 
-    /* Load the reference data, THEN open the modal (so selectors are populated). */
+    /* Load the reference data, then FILL the already-open modal (so selectors are populated).
+       M7-02 (2026-09-03): this used to await the five fetches BEFORE calling ppModal, so
+       ＋新增洞察任務 produced no button state, no spinner, no toast and no shell for ~11.7s —
+       an unchanged screen, which reads as a dead button. The page's own 乾跑預檢 already had
+       the right shape (modal shell + 「執行預檢中…」 in 0.35s, pipeline-preflight.js), so the
+       feedback mechanism existed and this one button simply was not wired to it. The shell
+       now opens synchronously on the click and the stage is built when the data lands; the
+       five requests are unchanged (their latency is a separate, backlogged concern). */
     var loads = pdApi ? Promise.all([
       pdApi.get('/api/strategy-prompts').catch(function () { return []; }),
       pdApi.get('/api/alert-rules').catch(function () { return { rules: [] }; }),
-      pdApi.get('/api/dashboard').catch(function () { return { holdings: [] }; }),
+      /* M7-07: the shared window.pdDashboard promise, like app.js / charts.js /
+         detail.js / dividends-card.js / alerts.js / rebalance.js — this was the one
+         caller still issuing its own request, so opening the wizard rebuilt the whole
+         dashboard a SECOND time (and /api/insight-tasks/status below rebuilt it a
+         third). Same payload, one request. */
+      (window.pdDashboard || (window.pdDashboard = pdApi.get('/api/dashboard')))
+        .catch(function () { return { holdings: [] }; }),
       pdApi.get('/api/insight-tasks/status').catch(function () { return { health: {} }; }),
       pdApi.get('/api/instruments').catch(function () { return { list: [] }; })
     ]) : Promise.resolve([[], { rules: [] }, { holdings: [] }, { health: {} }, { list: [] }]);
+
+    /* The shell, on the click — mirrors the 乾跑預檢 loading modal. */
+    var slot = null;
+    var backdrop = window.ppModal('新增洞察任務', function (body) {
+      body.classList.add('wz-body');
+      slot = body;
+      body.appendChild(el('div', 'wz-note', '載入設定中…'));
+    }, true);
+    /* 加寬精靈 modal — scoped to THIS backdrop (the shell now opens before other layers
+       may have closed, so a bare document query could widen someone else's box). */
+    var wideBox = backdrop.querySelector('.pv-box.wide');
+    if (wideBox) wideBox.style.width = '880px';
 
     loads.then(function (res) {
       REF.templates = (Array.isArray(res[0]) ? res[0] : []).filter(function (x) { return !x.archived; });
@@ -58,11 +83,13 @@
       /* every registered instrument (held + watchlist) — drives the opt-in「含觀察標的」宇宙 */
       REF.registered = ((res[4] && res[4].list) || []).map(function (i) { return i.symbol; });
       REF.quota = res[3] && res[3].health ? res[3].health.quota_remaining : null;
-      openWizard();
+      /* dismissed (ESC / ✕ / backdrop) while loading → nothing to fill. */
+      if (!slot || !slot.isConnected) return;
+      openWizard(slot);
     });
 
-    function openWizard() {
-    window.ppModal('新增洞察任務', function (body) {
+    function openWizard(body) {
+      body.replaceChildren();
       body.classList.add('wz-body');
       var shell = el('div', 'wz-shell');
       var main = el('div', 'wz-main');
@@ -364,11 +391,6 @@
       }
 
       renderStage();
-    }, true);
-
-    /* 加寬精靈 modal */
-    var box = document.querySelector('.pv-box.wide');
-    if (box) box.style.width = '880px';
     }
   };
 

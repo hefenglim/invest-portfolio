@@ -460,7 +460,12 @@
         }
         ok.disabled = true;
         try {
-          await api.post('/api/llm/quota/topup', { amount_usd: raw });
+          /* M9-02: the 備註 field was collected and never sent, so every top-up landed with
+             note = None and the 加值歷史 table's 備註 column was blank forever. The backend's
+             TopupBody has taken `note: str | None` since it was written; an empty box stays
+             null (an empty string is not a note). The AMOUNT path is untouched. */
+          const note = noteIn.value.trim();
+          await api.post('/api/llm/quota/topup', { amount_usd: raw, note: note || null });
           dismiss();
           _toast('加值成功', 'ok', '+' + usd(raw) + ' USD 已加入額度');
           await boot();

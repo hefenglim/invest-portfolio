@@ -102,9 +102,30 @@ _ADDED_COLUMNS = (
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
+    """Add ``col`` unless it is already there — safe under CONCURRENT first-run callers.
+
+    The PRAGMA-then-ALTER pair is a TOCTOU: `news.html` issues `GET /api/news` and
+    `GET /api/news/filters` together, each opens its own connection and each calls
+    `create_tables()`. On a brand-new `news.db` both read the column as absent, both
+    ALTER, and the loser raised `OperationalError: duplicate column name: …` out of a
+    plain GET — a 500 on the FIRST load of a fresh install, gone on reload. Observed by
+    three separate QA agents on three different columns (`model`, `fetch_status`,
+    `fetch_attempts`), which is what a race looks like from the outside.
+
+    The check is kept (it skips the ALTER in the overwhelmingly common already-migrated
+    case); the raise is what changes. `duplicate column name` means the column now
+    exists, which is precisely the post-condition this function promises, so it is a
+    success, not an error. Every other `OperationalError` still propagates — a real DDL
+    failure must not be swallowed by a race guard.
+    """
     existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-    if col not in existing:
+    if col in existing:
+        return
+    try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    except sqlite3.OperationalError as exc:  # pragma: no cover - timing-dependent
+        if "duplicate column name" not in str(exc).lower():
+            raise
 
 
 def create_tables(conn: sqlite3.Connection) -> None:

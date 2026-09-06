@@ -609,6 +609,12 @@ def _symbol_detail(ctx: VarContext) -> dict[str, Any]:
         "market_value": primary.market_value,
         "unrealized_pnl": primary.unrealized_pnl,
         "payback_ratio": primary.payback_ratio,
+        # M1-03 / D21: whose dividends that ratio is built on. A narrator handed the ratio
+        # alone says 「已回收 12%」 about a SPINOFF child that never paid a cent (llm-insight.md
+        # hard rule 3: the LLM may only believe what it is handed — so hand it the source).
+        "payback_from_symbol": primary.payback_from_symbol,
+        "payback_carried_dividends": primary.payback_carried_dividends,
+        "payback_own_dividends": primary.payback_own_dividends,
         "quote_ccy": primary.quote_ccy,
         "positions": [h.model_dump() for h in rows],
         "realized_rows": [r.model_dump() for r in realized_rows],
