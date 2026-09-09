@@ -33,6 +33,7 @@ from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.store import (
+    _no_factor,
     get_fx,
     get_latest_price,
     storable_rate,
@@ -129,7 +130,9 @@ def test_refresh_quotes_lands_the_good_pair_and_reports_the_bad_one(
     conn: sqlite3.Connection,
 ) -> None:
     """★ One unusable rate must never cost the other pairs their update."""
-    summary = refresh_quotes(conn, _registry(), [_AAPL], [_USDTWD, _USDMYR], now=_NOW)
+    summary = refresh_quotes(
+        conn, _registry(), [_AAPL], [_USDTWD, _USDMYR], now=_NOW, factor_of=_no_factor,
+    )
     good = get_fx(conn, Currency.USD, Currency.MYR, now=_NOW)
     assert good is not None and good.rate == Decimal("4.4")
     assert get_fx(conn, Currency.USD, Currency.TWD, now=_NOW) is None
@@ -147,7 +150,9 @@ def test_refresh_quotes_still_returns_the_summary_and_keeps_the_prices(
     The run was left half-applied with no summary at all — so the scheduler could not record
     which pair failed, and the next run had no way to know the prices were already current.
     """
-    summary = refresh_quotes(conn, _registry(), [_AAPL], [_USDTWD], now=_NOW)
+    summary = refresh_quotes(
+        conn, _registry(), [_AAPL], [_USDTWD], now=_NOW, factor_of=_no_factor,
+    )
     price = get_latest_price(conn, "AAPL", now=_NOW)
     assert price is not None and price.value == Decimal("100")
     assert summary.ok == {"AAPL": "fake"}
@@ -156,7 +161,9 @@ def test_refresh_quotes_still_returns_the_summary_and_keeps_the_prices(
 
 def test_the_fx_refusal_is_written_for_the_owner(conn: sqlite3.Connection) -> None:
     """``failed`` is joined verbatim into ``job_runs.detail``; English never reaches it."""
-    summary = refresh_quotes(conn, _registry(), [], [_USDTWD], now=_NOW)
+    summary = refresh_quotes(
+        conn, _registry(), [], [_USDTWD], now=_NOW, factor_of=_no_factor,
+    )
     (entry,) = summary.failed
     assert any("一" <= ch <= "鿿" for ch in entry), entry
     assert entry.startswith("USD/TWD"), entry      # which pair, or the line is useless
@@ -165,7 +172,9 @@ def test_the_fx_refusal_is_written_for_the_owner(conn: sqlite3.Connection) -> No
 
 def test_a_clean_fx_batch_reports_nothing_failed(conn: sqlite3.Connection) -> None:
     """Control: the pre-filter is invisible when every rate is usable."""
-    summary = refresh_quotes(conn, _registry(), [_AAPL], [_USDMYR], now=_NOW)
+    summary = refresh_quotes(
+        conn, _registry(), [_AAPL], [_USDMYR], now=_NOW, factor_of=_no_factor,
+    )
     assert summary.failed == []
     assert summary.ok == {"AAPL": "fake", "USDMYR": "fake"}
 

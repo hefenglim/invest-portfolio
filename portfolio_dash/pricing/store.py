@@ -225,6 +225,15 @@ def upsert_prices(
     (the window ``(as_of, fetched_at]``); how a (raw, factor) pair becomes stored TEXT has
     exactly one owner, so the write and the reconcile cannot drift apart.
 
+    **Why this seam keeps the identity DEFAULT while ``refresh_quotes`` / ``refresh_history``
+    do not** (2026-09-10). ``architecture.md``'s injection obligation (1) — "the injected
+    parameter has no default" — is enforced at the two entry points the ``scheduler`` /
+    ``api`` layers call, where a forgotten binding is the real hazard (a held symbol's
+    re-stated history stored as if as-traded, then divided again on read). This function is
+    ``pricing``-internal: its production callers are those two entry points, which cannot
+    omit the argument any more, and its other callers are tests writing rows with no ledger
+    at all. ``tests/architecture/test_injection_seams.py`` pins both halves.
+
     **A non-positive close is REFUSED here, at the single price write seam** (QA-09), for the
     same reason and in the same shape as :func:`upsert_fx`'s rate guard — the two ends of the
     ``prices`` table now agree that a value no reader may use is a value no writer may store.

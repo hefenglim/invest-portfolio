@@ -25,12 +25,20 @@ Adapter / storage-key decision (verified against
     same ticker ``pricing/index_source.py`` already uses for the sentiment variable), so
     no ``SPY``-style proxy is needed and the series is a genuine index price-return series.
 
-Collision conclusion (senior review): the key ``"0050"`` MAY equal a user-registered
-symbol if the owner also holds 元大台灣50. That collision is **harmless**: the benchmark
-ref and the user's instrument both resolve to the SAME yfinance ticker ``"0050.TW"`` and
-write byte-identical ``PriceRow``s through the idempotent ``(instrument, as_of_date)``
-upsert — the two writers can never disagree on a stored row. ``"^GSPC"`` cannot collide
-(a ``"^"``-prefixed symbol is not a valid user instrument). Orphan benchmark rows (no
+Collision conclusion (senior review, amended 2026-09-10): the key ``"0050"`` MAY equal a
+user-registered symbol if the owner also holds 元大台灣50. The collision is harmless **only
+while both writers apply the same split basis**: the benchmark ref and the user's
+instrument resolve to the SAME yfinance ticker ``"0050.TW"`` and go through the idempotent
+``(instrument, as_of_date)`` upsert, but since D30 a stored close is
+``close_raw × split_basis``, and 0050 is an ETF that can split (it did, 1→4, in 2025-06).
+The benchmark jobs therefore bind ``split_factor_fn`` exactly like the instrument sweeps
+(``scheduler/jobs.py::_refresh_benchmark_history`` / ``_backfill_benchmarks``); until
+2026-09-10 they wrote the identity and, running last, reverted a held 0050's pre-split rows
+to the provider's basis after every deep backfill (site-architecture map D-11). With the
+same factor on both sides the rows are byte-identical again —
+``tests/scheduler/test_benchmark_history.py`` holds the two writers to it. ``"^GSPC"`` /
+``"^KLSE"`` cannot collide (a ``"^"``-prefixed symbol is not a valid user instrument), so
+for them the bound factor is the identity by construction. Orphan benchmark rows (no
 matching ``instruments`` row) are fine too: holdings come from the ledger, never from
 ``prices``, so a benchmark series is invisible to portfolio valuation.
 """

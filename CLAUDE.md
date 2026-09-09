@@ -72,11 +72,15 @@ portfolio_dash/
   pricing/       # market quotes + FX -> SQLite, scheduled refresh, idempotent upserts
   portfolio/     # CORE calc: cost basis, realized/unrealized P&L, returns, sector mix
   forex/         # currency-exchange ledger, FX cost basis, realized/unrealized FX P&L
-  strategy/      # user-defined strategy logic as Python modules (parameterized)
-  llm_insight/   # LiteLLM orchestration: portfolio + news -> structured cards (cached)
+  strategy/      # user-defined strategy logic as Python modules (parameterized), rules/alerts
+  llm_insight/   # LiteLLM orchestration: portfolio + news -> structured cards (cached); prompts
+  news/          # news library: fetch, store, organizer-prompt seed
+  export/        # report + CSV builders (holdings, ledgers, tax, cash statement, print)
+  ops/           # backup, notification dispatch, digests
   api/           # FastAPI JSON API: routers (call core + serialize), no business logic
   web/           # static vanilla-JS frontend (HTML/CSS/JS + vendored echarts.min.js); by api/
-  scheduler/     # APScheduler jobs (pricing refresh, scheduled insight runs)
+  scheduler/     # APScheduler jobs (pricing refresh, insight, alert, digest, backup runs)
+  bootstrap.py   # first-run composition root (schema + config seed)
 ```
 
 Markets: **TW / US / MY**. Accounts: **TW broker · Charles Schwab (US) · Moomoo MY

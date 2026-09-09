@@ -16,7 +16,6 @@ from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import FxRow, PriceRow, RefreshSummary
 from portfolio_dash.pricing.store import (
     SplitFactorFn,
-    _no_factor,
     storable_close,
     storable_rate,
     upsert_dividend_events,
@@ -124,7 +123,7 @@ def refresh_quotes(
     fx_pairs: list[FxPair],
     *,
     now: datetime,
-    factor_of: SplitFactorFn = _no_factor,
+    factor_of: SplitFactorFn,
 ) -> RefreshSummary:
     """Fetch latest quotes + FX via ``registry``, upsert into SQLite, summarize.
 
@@ -136,7 +135,13 @@ def refresh_quotes(
 
     ``factor_of`` is a **pass-through** to the write seam (D17): this module still
     imports nothing but ``pricing.*``; the corporate-action lookup is bound by the
-    ``scheduler`` / ``api`` caller. Omitted, it is the identity and nothing changes.
+    ``scheduler`` / ``api`` caller — and it is **required, never defaulted** (2026-09-10,
+    ``architecture.md`` injection obligation (1)). "Store what the provider sent" is only
+    the as-traded value when no split lies in ``(as_of, fetched_at]``; for a held symbol
+    that has split, a caller that forgot the binding would store re-stated history as if it
+    were as-traded and the read path would divide it again — silently. A required argument
+    turns that omission into a ``TypeError``. A caller that genuinely has no ledger (a test
+    writing rows in isolation) spells the identity out: ``factor_of=_no_factor``.
     """
     p_rows, p_sources, p_failed = registry.fetch_quote_latest(instruments)
     f_rows, f_sources, f_failed = registry.fetch_fx(fx_pairs)
@@ -163,7 +168,7 @@ def refresh_history(
     start: date,
     *,
     now: datetime,
-    factor_of: SplitFactorFn = _no_factor,
+    factor_of: SplitFactorFn,
 ) -> RefreshSummary:
     """Fetch historical daily quotes via ``registry`` from ``start``, upsert, summarize.
 
@@ -174,7 +179,8 @@ def refresh_history(
 
     This is the path §5.1 identifies as the artifact's source — backfilling history
     AFTER a split returns closes the provider has already re-stated — so ``factor_of``
-    matters most here. Pass-through only (D17); see :func:`refresh_quotes`.
+    matters most here. Pass-through only (D17), and required — never defaulted — for the
+    reason :func:`refresh_quotes` states.
     """
     rows, sources, failed = registry.fetch_quote_history(instruments, start)
     rows, unusable, refusals = _refuse_nonpositive_closes(rows)

@@ -2230,6 +2230,41 @@ non-deterministic runner's default to one run turns the next run's noise into a 
 regression. ⚠ The preview's 當沖 chip stays — a better prompt is not a reason to remove the
 backstop that lets the user see and untick a flag that moves money.
 
+*Architecture*
+
+- **A third authorised upward edge, recorded and guarded** (D-01 of the 2026-09-09 site
+  architecture map). `data_ingestion/agents.py` has imported the code-owned AI-input prompt from
+  `llm_insight/official_templates.py` since FU-D20 (2026-07-17) — with no diagram entry and no
+  guard — and it closes a second package-level cycle (`llm_insight → portfolio → data_ingestion
+  → llm_insight`), dormant only because `official_templates.py` and `llm_insight/__init__.py`
+  import nothing above `shared/`. `architecture.md` now records the edge in D39's form, and
+  `tests/architecture/test_layer_edges.py` guards it: allowlist, presence, and the two leaves
+  (which may import `shared/` only — not even an `llm_insight` sibling). Injection from the
+  router was rejected: a prompt body is a constant, not a computation with an ownership problem.
+- **The dependency diagram redrawn from the verified import graph** (D-02 / D-03 / D-04).
+  `architecture.md` still drew a `web_ui/` Jinja2/HTMX layer that decision (B) of 2026-06-13
+  had replaced with `api/` + `web/`, omitted `forex/`, `export/`, `news/`, `ops/` and the
+  `scheduler → strategy / ops` edges, and its testability bullet asked for HTML-fragment
+  assertions on a layer that does not exist; `engineering-process.md` repeated the sentence and
+  `CLAUDE.md`'s module map listed 10 of 13 modules. All three now describe the ladder as it is.
+- **`refresh_quotes` / `refresh_history` take `factor_of` with NO default** (D-05, owner
+  ruling (a) 2026-09-10). The identity default was "safe" only for a symbol with no split in
+  `(as_of, fetched_at]`; a caller that forgot the binding on a held symbol that had split would
+  store re-stated history as if as-traded and the read path would divide it again, silently —
+  the exact failure `architecture.md`'s injection obligation (1) exists to make impossible.
+  `upsert_prices` keeps its default as the `pricing`-internal seam and says why.
+  `tests/architecture/test_injection_seams.py` pins both the signatures and, by AST, every
+  caller in `portfolio_dash/`; the eleven test call sites now spell `factor_of=_no_factor` out.
+- **The benchmark history sweeps bind the split factor** (D-11). Both omitted it on the
+  argument that "an index is never the subject of a corporate action" — true of `^GSPC` /
+  `^KLSE`, false of `0050`, an ETF the owner may also hold. For a held 0050 with a SPLIT row
+  the instrument sweeps wrote `close_raw × factor` and the benchmark sweep wrote the same
+  `(instrument, as_of_date)` rows as `close_raw × 1` — last, in both jobs, so every deep
+  backfill reverted the pre-split rows the reconcile had repaired, and the holding's trend
+  replay and the benchmark overlay both divided a provider-adjusted price again. With the
+  ledger bound the two writers are byte-identical (`tests/scheduler/test_benchmark_history.py`
+  holds them to it); for the two true indices the factor is the identity by construction.
+
 ## [v0.1.28] - 2026-08-09
 
 A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not

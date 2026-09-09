@@ -28,7 +28,7 @@ from portfolio_dash.pricing.refresh import refresh_history, refresh_quotes
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import FxRow, PriceRow
-from portfolio_dash.pricing.store import get_latest_price, upsert_prices
+from portfolio_dash.pricing.store import _no_factor, get_latest_price, upsert_prices
 from portfolio_dash.shared.enums import Currency, Market
 
 _NOW = datetime(2026, 6, 8, 12, 0, 0)
@@ -135,7 +135,9 @@ def test_refresh_quotes_lands_the_good_rows_and_reports_the_bad_symbol(
     conn: sqlite3.Connection,
 ) -> None:
     """★ One unusable close must never cost the rest of the batch its update."""
-    summary = refresh_quotes(conn, _registry(), [_AAPL, _HALT], [_PAIR], now=_NOW)
+    summary = refresh_quotes(
+        conn, _registry(), [_AAPL, _HALT], [_PAIR], now=_NOW, factor_of=_no_factor,
+    )
     good = get_latest_price(conn, "AAPL", now=_NOW)
     assert good is not None and good.value == Decimal("100")
     assert get_latest_price(conn, "HALT", now=_NOW) is None
@@ -147,13 +149,17 @@ def test_refresh_quotes_failure_entry_is_written_for_the_owner(
     conn: sqlite3.Connection,
 ) -> None:
     """``failed`` is rendered verbatim into ``job_runs.detail``; English never reaches it."""
-    summary = refresh_quotes(conn, _registry(), [_HALT], [_PAIR], now=_NOW)
+    summary = refresh_quotes(
+        conn, _registry(), [_HALT], [_PAIR], now=_NOW, factor_of=_no_factor,
+    )
     (entry,) = [f for f in summary.failed if f.startswith("HALT")]
     assert any("一" <= ch <= "鿿" for ch in entry), entry
 
 
 def test_refresh_history_pre_filters_the_same_way(conn: sqlite3.Connection) -> None:
-    summary = refresh_history(conn, _registry(), [_AAPL, _HALT], _AS_OF, now=_NOW)
+    summary = refresh_history(
+        conn, _registry(), [_AAPL, _HALT], _AS_OF, now=_NOW, factor_of=_no_factor,
+    )
     assert get_latest_price(conn, "AAPL", now=_NOW) is not None
     assert get_latest_price(conn, "HALT", now=_NOW) is None
     assert [f for f in summary.failed if f.startswith("HALT")], summary.failed
@@ -161,6 +167,8 @@ def test_refresh_history_pre_filters_the_same_way(conn: sqlite3.Connection) -> N
 
 def test_a_clean_batch_reports_nothing_failed(conn: sqlite3.Connection) -> None:
     """Control: the pre-filter is invisible when every row is usable."""
-    summary = refresh_quotes(conn, _registry(), [_AAPL], [_PAIR], now=_NOW)
+    summary = refresh_quotes(
+        conn, _registry(), [_AAPL], [_PAIR], now=_NOW, factor_of=_no_factor,
+    )
     assert summary.failed == []
     assert summary.ok == {"AAPL": "fake", "USDTWD": "fake"}

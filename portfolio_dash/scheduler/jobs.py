@@ -485,12 +485,23 @@ def _refresh_benchmark_history(conn: sqlite3.Connection, start: date, *, now: da
     fetch failure degrades silently (logged + summarized) so a bad index fetch can never
     fail the daily instrument history job.
 
-    No ``factor_of``: a benchmark is a market INDEX, not a holding — it is never the
-    subject of a corporate action, and it has no ``instruments`` row an action could
-    reference. Injecting would be a provable no-op; omitting it says so.
+    ``factor_of`` IS bound (2026-09-10, site-architecture map D-11). Until then this call
+    omitted it on the argument that "an index is never the subject of a corporate action" —
+    true of ``^GSPC`` / ``^KLSE``, which can never carry an ``instruments`` row, and FALSE
+    of ``0050``: an ETF the owner may also hold. A held 0050 with a SPLIT row is written by
+    the instrument sweeps as ``close_raw × factor`` while this call wrote the SAME
+    ``(instrument, as_of_date)`` rows as ``close_raw × 1`` — and it runs LAST in both jobs,
+    so it always had the final word: every deep backfill quietly reverted the pre-split rows
+    the reconcile had just repaired. With the ledger bound, the two writers produce
+    byte-identical rows again (the property ``pricing/benchmarks.py`` relies on); for the
+    two true indices the factor is the identity by construction, so nothing changes there.
+    Bound once per call, never per ref (trap #21).
     """
     try:
-        summary = refresh_history(conn, default_registry(conn), benchmark_refs(), start, now=now)
+        summary = refresh_history(
+            conn, default_registry(conn), benchmark_refs(), start, now=now,
+            factor_of=split_factor_fn(conn),
+        )
         return _summarize(summary)
     except Exception as exc:  # noqa: BLE001 - benchmark fetch must never block instrument refresh
         logger.warning("benchmark history refresh failed: %s", exc)
@@ -1220,11 +1231,14 @@ def _backfill_benchmarks(
     path as instruments. A benchmark failure is logged + summarized, never raised, so a bad
     index backfill can never fail the whole-portfolio backfill job.
 
-    No ``factor_of`` — an index is never the subject of a corporate action; see
-    :func:`_refresh_benchmark_history`.
+    ``factor_of`` is bound here too (2026-09-10): the deep backfill rewrites the WHOLE
+    history, so this was the call that undid every reconcile of a held 0050's pre-split
+    rows. Mechanism in :func:`_refresh_benchmark_history`.
     """
     try:
-        summary = refresh_history(conn, registry, benchmark_refs(), start, now=now)
+        summary = refresh_history(
+            conn, registry, benchmark_refs(), start, now=now, factor_of=split_factor_fn(conn),
+        )
         return _summarize(summary)
     except Exception as exc:  # noqa: BLE001 - benchmark backfill must never fail the job
         logger.warning("benchmark backfill failed: %s", exc)

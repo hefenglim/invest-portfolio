@@ -1596,3 +1596,34 @@ harness server (port 57940) and its two pytest processes were provably out of sc
 same day: a new third toast face made "官方套組已存在" — a successful no-op — persist forever,
 and an implicit string concatenation put an f-string inside an `else` branch so a flagged row
 printed an empty `<tr>`. Both were found by the new tests written for the fix, not by review.
+
+## A "provable no-op" that rested on a category, not on the registry (2026-09-10)
+
+**Context.** The 2026-09-09 site architecture map listed two things about the price write
+seam: the benchmark history jobs omitted `factor_of` (D-11), and the pricing entry points
+defaulted it to the identity against `architecture.md`'s "no default" obligation (D-05).
+
+**What went wrong.** Two docstrings argued the omission was safe: "a benchmark is a market
+INDEX, never the subject of a corporate action — injecting would be a provable no-op". True of
+`^GSPC` and `^KLSE`. The third benchmark in the SAME registry is `0050`, an ETF that can split
+(and did, 1→4, in 2025-06) and that the owner may also hold. For a held 0050 with a SPLIT row,
+the instrument sweeps store `close_raw × factor` and the benchmark sweep stored `close_raw × 1`
+on the SAME `(instrument, as_of_date)` keys — and it runs LAST in both jobs, so every deep
+backfill quietly reverted the pre-split rows the reconcile had just repaired, and both readers
+(the holding's trend replay and the benchmark overlay) divided a provider-adjusted price
+again. The `benchmarks.py` docstring's "the two writers can never disagree on a stored row"
+had been true before D30 and nobody re-read it when the split basis landed.
+
+**Lessons.**
+- **A "no-op by category" claim must be checked against the registry, not the category.**
+  The sentence "an index never splits" was correct; the list it was applied to contained a
+  non-index. When a docstring says *provable*, the proof is one grep away — do it.
+- **A default on an injection seam is the exact failure the convention forbids.** The seam's
+  own docstring said the identity was "safe" because "no ledger injected means store what the
+  provider sent" — but that is only as-traded when no split lies in `(as_of, fetched_at]`. The
+  two omitting callers were found by the map, not by a test. Now the two entry points take
+  `factor_of` with no default and `tests/architecture/test_injection_seams.py` walks every
+  call in `portfolio_dash/` by AST, so an omitting caller cannot return.
+- **When a fix "harmless-ifies" a collision, write the invariant as a test on both writers.**
+  `tests/scheduler/test_benchmark_history.py` now writes the same pre-split row through the
+  instrument path and the benchmark path and asserts byte-identity.
