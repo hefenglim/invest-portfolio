@@ -9,8 +9,13 @@ narrator, not a calculator.
 1. **Batch only.** Insights are generated on a **manual trigger** or by the
    **scheduler**. Never called synchronously during a dashboard page render.
 2. **Cache everything.** Persist output in the `insights` table keyed on an input
-   fingerprint (portfolio snapshot + source articles + prompt version). The
-   dashboard renders the cached result; it does not re-call the LLM to display.
+   fingerprint — `sha256(insight_type_id + assembled prompt + input-snapshot digest +
+   prompt_version)` (`llm_insight/insights_store.py`). News and every other qualitative
+   input reach the key only through the assembled prompt, and the prompt is **day-anchored**,
+   so re-triggering the same inputs on the same day is a cache hit (zero LLM calls) while a
+   new trading day is a new key. The dashboard renders the cached result; it does not
+   re-call the LLM to display. *(Wording corrected 2026-09-10 — it said 「snapshot + source
+   articles + prompt version」, which named an input that is not a separate key component.)*
 3. **The LLM never emits numbers of record.** Prices, P&L, returns, and weights are
    computed by `portfolio/` and passed *into* the prompt. The model reasons about
    them; it does not invent or recompute them.

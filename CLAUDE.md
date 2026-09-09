@@ -36,8 +36,11 @@ in `CHANGELOG.md`.
   `tests/contract/test_web_pdapi_only.py` asserts it stays deleted.)
 - **Storage:** **SQLite**. DuckDB is deferred — add it *only* if analytical query
   volume later justifies a second engine. Do not add it pre-emptively.
-- **Financial math:** pandas / numpy / numpy-financial. **Money is never `float`** —
-  use `Decimal` (or scaled integers). See `rules/data-and-pricing.md`.
+- **Financial math:** `decimal.Decimal` arithmetic in the package + **`pyxirr`** for
+  irregular-cashflow XIRR (the dependency since v0.1.0). pandas / numpy / numpy-financial were
+  named in the 2026-06-05 plan and never became dependencies — adding one is a stack decision,
+  not a convenience (`rules/stack.md`; recorded 2026-09-10). **Money is never `float`** — use
+  `Decimal` (or scaled integers). See `rules/data-and-pricing.md`.
 - **LLM access:** **LiteLLM**, OpenAI-compatible interface. Providers
   (OpenRouter / OpenAI-compatible / Anthropic) are swappable by config, not code.
 - **Scheduling:** APScheduler, in-process.

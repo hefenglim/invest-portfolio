@@ -948,7 +948,8 @@ delivered, **un-capped**) and `split_basis` (the factor applied), with
 `close = close_raw × split_basis` **recomputed** at the write seam (the 4 dp cap applied to
 the **product**, §1.3). On read, a price that was **carried forward across a split date** is
 re-expressed into the valuation day's share terms by
-`portfolio/price_basis.py::split_factor`. **The factor is for prices only, never for share
+`shared/corporate_actions.py::split_factor` (applied on read by
+`portfolio/price_basis.py::price_in` / `series_in`). **The factor is for prices only, never for share
 counts** (share counts go through §4.4.2's two integer terms). The re-expression is
 **SPLIT-scoped**: an EXCHANGE adds to its destination rather than re-denominating it, and
 widening the factor to EXCHANGE would corrupt the price history of any merger destination you

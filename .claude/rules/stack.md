@@ -14,8 +14,8 @@ decision in `CHANGELOG.md` before acting.
 | Front/back contract | JSON over `/api/*` | Money as Decimal **strings**; frontend never computes; `web/api.js` single fetch layer; **spec-17 golden payload** (`tests/golden/dashboard_full.json`) = documented contract (`mock-data.js` retired under spec-19 §6; `test_web_pdapi_only` asserts it stays deleted) |
 | Charts | ECharts 5.5.0, **self-hosted** (`web/echarts.min.js`) | Visual quality lives in the chart lib + CSS, not in a JS framework. Vendored 2026-08-12 (owner ruling) so a CDN outage cannot take the charts down; byte-pinned by `tests/contract/test_vendored_assets.py`, re-fetched by `scripts/vendor_echarts.py`. Copying a pre-minified `dist` file is a file copy — **"no bundler, no build step" is unchanged**; a custom/partial ECharts build would need a toolchain and is forbidden. The **webfont deliberately stays on Google's CDN** (presentational, full fallback chains, continuously tested against an empty stylesheet). See `docs/reference/vendored-assets.md`. |
 | Storage | SQLite | Tiny data volume; zero-ops; one file |
-| DataFrames / math | pandas, numpy | Idiomatic financial computation |
-| Returns (IRR/XIRR) | numpy-financial (+ XIRR helper) | Periodic IRR built-in; irregular cashflows need XIRR |
+| Numeric core | `decimal.Decimal` + stdlib — **no pandas / numpy** | The 2026-06-05 plan named pandas / numpy / numpy-financial; at < 2,400 ledger rows a year nothing ever needed a DataFrame, and none of the three is a dependency (`pyproject.toml`). Recorded 2026-09-10 (site-architecture map D-07): adding one is a stack decision, not a convenience. |
+| Returns (XIRR) | `pyxirr` | Irregular-cashflow XIRR over the Decimal flows (`portfolio/returns.py`); the dependency since v0.1.0 (CHANGELOG). |
 | Money type | `decimal.Decimal` | Never float for currency |
 | LLM gateway | LiteLLM | One OpenAI-format call across all providers |
 | Scheduling | APScheduler | In-process; no extra service |

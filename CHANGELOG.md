@@ -2264,6 +2264,26 @@ backstop that lets the user see and untick a flag that moves money.
   replay and the benchmark overlay both divided a provider-adjusted price again. With the
   ledger bound the two writers are byte-identical (`tests/scheduler/test_benchmark_history.py`
   holds them to it); for the two true indices the factor is the identity by construction.
+- **The map's remaining six findings closed** (D-06 – D-10, D-12; 2026-09-10). README said
+  `v0.1.1` and 「ECharts (CDN)」 — now v0.1.28, vendored, and honest about the branch. The numeric
+  stack as it is: `CLAUDE.md` and `stack.md` named pandas / numpy / numpy-financial, none of which
+  is a dependency; the calculation core is `Decimal` + `pyxirr` (since v0.1.0), and adding a
+  DataFrame library is now recorded as a stack decision, not a convenience. The accounting manual
+  (zh + en) pointed `split_factor` at `portfolio/price_basis.py`; it lives in
+  `shared/corporate_actions.py` and `price_basis` applies it on read. `llm-insight.md` described
+  the cache key as 「snapshot + source articles + prompt version」; it is
+  `sha256(insight_type_id + assembled prompt + snapshot digest + prompt_version)`, day-anchored,
+  and the rule now says so. `make mypy` ran the narrow gate that has missed real errors twice; it
+  now runs the bare `mypy --strict` the project pins. And the ten routes no browser code reaches
+  are no longer a drift: `tests/contract/test_api_routes_have_frontend_callers.py` matches every
+  `/api/*` route against `web/` (direct `pdApi` calls verb-aware, helper-routed literals
+  verb-agnostic, inline `<script>` included) and holds each of the ten as an allowlist entry with
+  its reason — a new silent route fails the build, and so does an entry whose route gains a
+  caller. Kept, not deleted: `POST /api/instruments/quick` (superseded by the quick-add dialog,
+  still the scriptable one-step add), the news-organizer prompt trio (user-editable prompt whose
+  settings UI was never built — backlog), the signals collection view, and the spec-4.7
+  calibration-sample / active-calibration / schedule-removal surfaces the pipeline drawer does
+  not expose.
 
 ## [v0.1.28] - 2026-08-09
 

@@ -25,8 +25,11 @@ e2e:
 regress:
 	$(PY) -m pytest tests --ignore=tests/e2e -q
 
+# The REAL gate: pyproject [tool.mypy].files = portfolio_dash + tests + scripts/probe. The old
+# `mypy portfolio_dash --strict` skipped tests/ and missed real errors twice (LESSONS 2026-07-20,
+# 2026-08-27; site-architecture map D-12).
 mypy:
-	$(PY) -m mypy portfolio_dash --strict
+	$(PY) -m mypy --strict
 
 ruff:
 	$(PY) -m ruff check portfolio_dash tests

@@ -783,7 +783,8 @@ $$\text{child payback} = \frac{c\,(\text{orig}-\text{adj})}{c\cdot\text{orig}} =
 是**已還原**（post-split）的收盤價，而帳本對同一日的股數**沒有**被還原——兩者相乘即得到一個錯誤的市值。
 故：`prices` 以兩欄表達基礎——`close_raw`（供應商原樣交付的值，**不截位**）與 `split_basis`（已套用的
 因子），而 `close = close_raw × split_basis` 於寫入接縫**重算**（4 dp cap 套在**乘積**上，§1.3）；讀取
-時，若一個價格是**跨越分割日被沿用**的，再以 `portfolio/price_basis.py::split_factor` 重新表述成估值
+時，若一個價格是**跨越分割日被沿用**的，再以 `shared/corporate_actions.py::split_factor`（由
+`portfolio/price_basis.py::price_in` / `series_in` 於讀取時套用）重新表述成估值
 當日的股數單位。**因子只用於價格，永不用於股數**（股數走 §4.4.2 的兩項整數）。此再表述**限定於 SPLIT**：
 EXCHANGE 是併入目的標的而非重新計價它，若把因子擴及 EXCHANGE，會汙染任何一個**已持有**之併購目的標的
 的價格歷史。
