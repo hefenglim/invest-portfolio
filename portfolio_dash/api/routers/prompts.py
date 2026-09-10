@@ -111,6 +111,17 @@ class SystemPromptIn(BaseModel):
     body: str
 
 
+def _blank_prompt_422(code: str, what: str) -> JSONResponse:
+    """A prompt body that is empty or whitespace is refused (spec 2026-09-10, owner D2(b)).
+
+    Measured before the guard: ``PUT {"body": ""}`` returned 200 and the next pipeline
+    run would have sent the model no system prompt at all. Restoring the default is the
+    reset route's job, and the sentence says so; the UI keeps the user's text on 422.
+    """
+    return JSONResponse(status_code=422, content=error_body(
+        code, f"{what}不可為空白；要恢復預設請按「重置回官方版」", field="body"))
+
+
 class PromptBody(BaseModel):
     body: str
     scope: str  # "portfolio" | "per_symbol" | "per_market"
@@ -165,7 +176,9 @@ def write_system_prompt(
     payload: SystemPromptIn,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, str]:
+) -> Any:
+    if not payload.body.strip():
+        return _blank_prompt_422("system_prompt_empty", "系統提示詞")
     return set_system_prompt(conn, payload.body, now=now)
 
 
@@ -195,9 +208,10 @@ def reset_system_prompt(
 
 
 @router.get("/news-prompt")
-def read_news_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, str]:
-    """The editable news-organizer system prompt (default-seeded from the official library)."""
-    return news_organizer_prompt.get_news_prompt(conn)
+def read_news_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """The editable news-organizer system prompt (default-seeded from the official library),
+    with ``official_version`` + ``is_official`` for the settings page's badge (D1(a))."""
+    return dict(news_organizer_prompt.get_news_prompt(conn))
 
 
 @router.put("/news-prompt")
@@ -205,18 +219,25 @@ def write_news_prompt(
     payload: SystemPromptIn,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, str]:
-    """Overwrite the news-organizer prompt (applies to the next nightly news run)."""
-    return news_organizer_prompt.set_news_prompt(conn, payload.body, now=now)
+) -> Any:
+    """Overwrite the news-organizer prompt (applies to the next nightly news run).
+
+    Blank is refused with 422 ``news_prompt_empty`` — measured before the guard, an empty
+    body was stored verbatim and the next pipeline run would have organised every
+    article with no system prompt.
+    """
+    if not payload.body.strip():
+        return _blank_prompt_422("news_prompt_empty", "新聞整理提示詞")
+    return dict(news_organizer_prompt.set_news_prompt(conn, payload.body, now=now))
 
 
 @router.post("/news-prompt/reset")
 def reset_news_prompt(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Restore the news-organizer prompt to the official library version."""
-    return news_organizer_prompt.reset_news_prompt(conn, now=now)
+    return dict(news_organizer_prompt.reset_news_prompt(conn, now=now))
 
 
 # --- shared assembly ----------------------------------------------------------

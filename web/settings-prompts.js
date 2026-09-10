@@ -555,6 +555,93 @@
     });
   });
 
+  /* ================= 新聞整理提示詞 (GET/PUT /api/news-prompt · POST reset) =================
+     spec docs/spec/2026-09-10-news-prompt-settings.html (owner D1(a)/D2(b)/D3(a)/D4(a)):
+     the news pipeline's organizer system prompt, same grammar as the system prompt above.
+     The badge answers "is this still the official version" from the BACKEND's is_official —
+     the frontend never holds the official body. Blank is refused server-side (422
+     news_prompt_empty) and the textarea keeps the user's text. The field reminder is a
+     non-blocking hint: the organizer parses {title, news_date, body_summary,
+     related_stocks} back out of the model's JSON, so a prompt that stops naming a key will
+     fail every article — say so, do not block. */
+  const NEWS_FIELDS = ['title', 'news_date', 'body_summary', 'related_stocks'];
+  const newsTa = document.getElementById('news-prompt');
+  if (newsTa) {
+    const newsBadge = $('#news-prompt-badge'), newsMeta = $('#news-prompt-meta');
+    const newsSchema = $('#news-prompt-schema');
+    const newsSave = $('#news-save'), newsReset = $('#news-reset');
+    const N = { body: '', updated_at: '', official_version: '', is_official: true };
+    const newsBadgeSet = (text, official) => {
+      newsBadge.textContent = text;
+      newsBadge.className = 'badge prompt-badge ' + (official ? 'is-official' : 'is-custom');
+    };
+    const newsMetaSet = () => {
+      newsMeta.textContent = '更新 ' + (N.updated_at ? f.date(N.updated_at) : '—') +
+        '・官方 ' + (N.official_version || '—') + '・每日 06:00 新聞管線與手動抓取共用';
+    };
+    const newsSchemaCheck = (text) => {
+      const missing = NEWS_FIELDS.filter((k) => text.indexOf(k) < 0);
+      if (missing.length) {
+        newsSchema.textContent = '提示詞未提及欄位 ' + missing.join('、') +
+          ' — 整理員回傳的 JSON 需要這四個鍵，缺了文章會整理失敗（不擋儲存，只提醒）';
+        newsSchema.hidden = false;
+      } else {
+        newsSchema.textContent = '';
+        newsSchema.hidden = true;
+      }
+    };
+    const newsApply = (wire) => {
+      N.body = (wire && wire.body) || '';
+      N.updated_at = (wire && wire.updated_at) || '';
+      N.official_version = (wire && wire.official_version) || '';
+      N.is_official = !!(wire && wire.is_official);
+      newsTa.value = N.body;
+      newsBadgeSet(N.is_official ? '與官方版相同' : '已自訂', N.is_official);
+      newsMetaSet();
+      newsSchemaCheck(N.body);
+    };
+    try {
+      newsApply(await api.get('/api/news-prompt'));
+    } catch (err) {
+      _toast('新聞整理提示詞載入失敗', 'fail', (err && err.message) || undefined);
+      newsBadgeSet('載入失敗', false);
+    }
+    newsTa.addEventListener('input', () => {
+      const same = newsTa.value === N.body;
+      newsBadgeSet(same ? (N.is_official ? '與官方版相同' : '已自訂') : '未儲存的修改',
+        same && N.is_official);
+      newsSchemaCheck(newsTa.value);
+    });
+    newsSave.addEventListener('click', async () => {
+      const restore = window.pdBusy ? window.pdBusy(newsSave, '儲存中…') : () => {};
+      try {
+        newsApply(await api.put('/api/news-prompt', { body: newsTa.value }));
+        _toast('已儲存', 'ok', '新聞整理提示詞已更新，下次新聞管線執行生效');
+      } catch (err) {
+        /* 422 news_prompt_empty: the message is the server's zh sentence; the textarea
+           keeps whatever the user typed (never cleared on a refusal). */
+        _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
+      } finally {
+        restore();
+      }
+    });
+    newsReset.addEventListener('click', () => {
+      window.confirmDialog({
+        title: '重置新聞整理提示詞',
+        body: '將以官方模板庫的最新版本覆蓋目前內容；自訂修改將遺失（系統提示詞與策略提示詞不受影響）。',
+        confirmLabel: '重置回官方版', danger: true,
+        onConfirm: async () => {
+          try {
+            newsApply(await api.post('/api/news-prompt/reset'));
+            _toast('已重置', 'ok', '新聞整理提示詞已回到官方 ' + (N.official_version || ''));
+          } catch (err) {
+            _toast((err && err.message) || '重置失敗', 'fail', err && err.code);
+          }
+        }
+      });
+    });
+  }
+
   /* 從官方模板庫新增策略副本：GET /api/prompt-templates → POST from-template */
   const tplFromLib = document.getElementById('tpl-from-lib');
   if (tplFromLib) tplFromLib.addEventListener('click', async () => {

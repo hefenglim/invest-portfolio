@@ -70,6 +70,19 @@ CATALOG: list[Feature] = [
     # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
     # delivery date and this has not been delivered; it is set at ship time, in the same edit
     # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29, news-organizer prompt settings (2026-09-10) -----------------------------
+    Feature(
+        version="0.1.29",
+        id="news-prompt-settings",
+        title="新聞整理提示詞現在看得到、改得了、一鍵回官方版",
+        desc="新聞管線每天把每篇文章交給 AI 整理成標題／日期／摘要／相關個股，那一次呼叫用的"
+        "系統提示詞從 7 月起就是「可編輯」的——但從來沒有畫面接上它。現在「AI 提示詞」分頁多了"
+        "第三個面板：徽章隨時說明目前是官方版還是自訂版、清空不能儲存（要回預設走「重置回官方版」）、"
+        "刪掉四個欄位名之一會提醒但不擋。新聞庫的排程提示也多了一個「整理提示詞」連結",
+        href="settings.html#prompts",
+        area="系統設定 → AI 提示詞",
+        target="#news-prompt-panel",
+    ),
     # --- v0.1.29, AI extraction quality (2026-08-28) --------------------------------------
     Feature(
         version="0.1.29",

@@ -333,6 +333,26 @@
         <button class="btn btn-primary" id="prompts-save" type="button">儲存設定</button>
       </div>
     </section>
+    <!-- ===== 新聞整理提示詞 (spec docs/spec/2026-09-10-news-prompt-settings.html, owner D3(a)):
+         the news pipeline's organizer system prompt — one global text, same grammar as the
+         system-prompt panel above. Badge text/state come from the backend (is_official). ===== -->
+    <section class="panel" id="news-prompt-panel">
+      <div class="panel-head">
+        <h2 class="panel-title">新聞整理提示詞 <span class="badge prompt-badge" id="news-prompt-badge"></span></h2>
+        <span class="panel-sub" id="news-prompt-meta"></span>
+        <span class="spacer"></span>
+        <button class="btn" id="news-reset" type="button" title="以官方模板庫最新版覆蓋目前內容">重置回官方版</button>
+      </div>
+      <div class="sys-prompt-card">
+        <textarea class="input" id="news-prompt" spellcheck="false"></textarea>
+        <div class="prompt-schema-hint" id="news-prompt-schema" hidden></div>
+        <span class="hint">新聞管線把每篇文章正文交給 AI 整理成 title / news_date / body_summary / related_stocks；這是那一次呼叫的系統提示詞。下次執行（每日 06:00 排程或新聞庫的「抓取新聞」）生效。</span>
+      </div>
+      <div class="save-bar" data-screen-label="儲存列" style="border-top: 1px solid var(--border-soft);">
+        <span class="note">修改後按「儲存」；空白內容不會被接受——要回到預設請用「重置回官方版」</span>
+        <button class="btn btn-primary" id="news-save" type="button">儲存</button>
+      </div>
+    </section>
     <section class="panel">
       <div class="panel-head">
         <h2 class="panel-title">策略提示詞</h2>

@@ -74,14 +74,36 @@ def test_symbol_news_var_excludes_out_of_window(api_client: TestClient) -> None:
 
 
 def test_news_prompt_get_put_reset(api_client: TestClient) -> None:
+    from portfolio_dash.llm_insight import official_templates as ot
+
     got = api_client.get("/api/news-prompt").json()
     assert got["body"] and "新聞整理員" in got["body"]  # official default seeded
+    # spec 2026-09-10 (owner D1(a)): the badge's truth comes from the backend.
+    assert got["official_version"] == ot.NEWS_ORGANIZER_PROMPT_VERSION
+    assert got["is_official"] is True
     r = api_client.put("/api/news-prompt", json={"body": "我的新聞整理規則"})
     assert r.status_code == 200 and r.json()["body"] == "我的新聞整理規則"
-    assert api_client.get("/api/news-prompt").json()["body"] == "我的新聞整理規則"
+    assert r.json()["is_official"] is False
+    again = api_client.get("/api/news-prompt").json()
+    assert again["body"] == "我的新聞整理規則" and again["is_official"] is False
     reset = api_client.post("/api/news-prompt/reset").json()
-    assert "新聞整理員" in reset["body"]
+    assert "新聞整理員" in reset["body"] and reset["is_official"] is True
     assert api_client.get("/api/news-prompt").json()["body"] == reset["body"]
+
+
+@pytest.mark.parametrize("blank", ["", "   \n  "])
+def test_news_prompt_rejects_blank_and_keeps_the_stored_body(
+    api_client: TestClient, blank: str
+) -> None:
+    """Measured 2026-09-10 before the guard: PUT {"body": ""} returned 200 and the next
+    pipeline run would have organised every article with NO system prompt (spec D2(b))."""
+    before = api_client.get("/api/news-prompt").json()["body"]
+    r = api_client.put("/api/news-prompt", json={"body": blank})
+    assert r.status_code == 422
+    err = r.json()["error"]
+    assert err["code"] == "news_prompt_empty" and err["field"] == "body"
+    assert "不可為空白" in err["message"] and "重置回官方版" in err["message"]
+    assert api_client.get("/api/news-prompt").json()["body"] == before
 
 
 # --- /api/news browse endpoint (batch ④ news library page) ---------------------

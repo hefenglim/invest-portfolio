@@ -527,6 +527,18 @@ table.data td.log-msg {
 .sys-prompt-card { padding: 12px var(--pad) 14px; display: flex; flex-direction: column; gap: 8px; }
 .sys-prompt-card textarea.input { min-height: 170px; }
 
+/* prompt: news-organizer panel (spec 2026-09-10) — official/custom badge + field reminder.
+   The badge is `.badge` (styles.css) with two states the backend decides; the reminder is
+   amber like a soft issue and never blocks (owner D4(a)). */
+.prompt-badge { margin-left: 8px; vertical-align: 1px; font-weight: 500; letter-spacing: 0; }
+.prompt-badge.is-official { color: var(--ok); border-color: rgba(79, 174, 108, 0.4); background: var(--ok-soft); }
+.prompt-badge.is-custom { color: var(--amber); border-color: rgba(217, 161, 63, 0.4); background: var(--amber-soft); }
+.prompt-schema-hint {
+  font-size: 11px; color: var(--amber); background: var(--amber-soft);
+  border: 1px solid rgba(217, 161, 63, 0.35); border-radius: var(--radius-sm); padding: 6px 9px;
+}
+.prompt-schema-hint[hidden] { display: none; }
+
 @media (max-width: 1000px) {
   .billing-grid { grid-template-columns: 1fr; }
 }

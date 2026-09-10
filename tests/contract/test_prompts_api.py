@@ -287,6 +287,16 @@ def test_fresh_default_system_prompt_is_official(api_client: TestClient) -> None
     assert "不提供買賣建議，只描述風險與現象" not in body  # the v1 rule is superseded
 
 
+@pytest.mark.parametrize("blank", ["", " \t\n"])
+def test_system_prompt_rejects_blank(api_client: TestClient, blank: str) -> None:
+    """Same hole as the news prompt, same guard (spec 2026-09-10, owner D2(b))."""
+    before = api_client.get("/api/system-prompt").json()["body"]
+    r = api_client.put("/api/system-prompt", json={"body": blank})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "system_prompt_empty"
+    assert api_client.get("/api/system-prompt").json()["body"] == before
+
+
 def test_system_prompt_reset_restores_official(api_client: TestClient) -> None:
     api_client.put("/api/system-prompt", json={"body": "使用者自訂版"})
     assert api_client.get("/api/system-prompt").json()["body"] == "使用者自訂版"

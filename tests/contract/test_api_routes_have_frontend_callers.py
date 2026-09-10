@@ -1,10 +1,12 @@
 """Every `/api/*` route has a browser caller, or an entry here that says why it does not.
 
 The 2026-09-09 site architecture map matched all 190 routes against `web/` and found ten
-with no caller at all (its finding D-10). None of them is broken; each is a surface the UI
-never grew or no longer uses. `test_export_endpoints_have_callers.py` already holds the
-export router to this rule with an EMPTY allowlist; this file widens the rule to the whole
-API and keeps the ten as *decisions* — an allowlist entry with a stated reason — so that:
+with no caller at all (its finding D-10). None of them was broken; each was a surface the
+UI never grew or no longer used. Three of the ten — the news-organizer prompt trio — gained
+their settings panel on 2026-09-10 and left this list the way the presence test demands.
+`test_export_endpoints_have_callers.py` already holds the export router to this rule with an
+EMPTY allowlist; this file widens the rule to the whole API and keeps the rest as
+*decisions* — an allowlist entry with a stated reason — so that:
 
 * a NEW route nobody calls fails the build the day it lands (the drift this map caught), and
 * an allowlisted route that later gains a caller fails too, so the entry is deleted with the
@@ -48,11 +50,6 @@ _NO_CALLER_ALLOWED: dict[tuple[str, str], str] = {
     ("POST", "/api/instruments/quick"):
         "superseded by the quick-add dialog (FU-D23: GET /api/instruments/lookup + POST "
         "/api/instruments); kept as the scriptable one-step add, contract-tested, action-logged",
-    ("GET", "/api/news-prompt"):
-        "user-editable news-organizer prompt (FU-D30 registry, storage news_prompt_config) whose "
-        "settings UI was never built — backlog; the seed is applied by the news service",
-    ("PUT", "/api/news-prompt"): "see GET /api/news-prompt",
-    ("POST", "/api/news-prompt/reset"): "see GET /api/news-prompt",
     ("GET", "/api/signals"):
         "the whole-universe collection view for scripts and tests; the UI reads one symbol at a "
         "time (GET /api/signals/{symbol} from the detail drawer)",

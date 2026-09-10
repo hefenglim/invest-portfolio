@@ -2285,6 +2285,24 @@ backstop that lets the user see and untick a flag that moves money.
   calibration-sample / active-calibration / schedule-removal surfaces the pipeline drawer does
   not expose.
 
+*Features*
+
+- **The news-organizer prompt has a settings panel** (spec by demo
+  `docs/spec/2026-09-10-news-prompt-settings.html`; owner rulings D1(a) / D2(b) / D3(a) / D4(a),
+  2026-09-10). The prompt the nightly news pipeline hands the model for every article had been
+  「user-editable」 since batch ④ (2026-07-06) — routes, contract test, action-log labels — and no
+  screen had ever reached it; the only way to change it was `curl`, and `PUT {"body": ""}` was
+  accepted (measured: 200, then 0 characters). Now 設定 → AI 提示詞 carries a third panel with the
+  same grammar as the system prompt: a badge that says 「與官方版相同 / 已自訂 / 未儲存的修改」
+  from the backend's new `is_official` + `official_version` fields (one truth, computed once),
+  重置回官方版 behind a confirmDialog, and an amber reminder — never a block — when the text stops
+  naming one of the four keys the organizer parses back (`title` / `news_date` / `body_summary` /
+  `related_stocks`). A blank body is refused with **422 `news_prompt_empty`** and the textarea
+  keeps the user's text; the system prompt got the same guard (`system_prompt_empty`) because it
+  had the same hole. The news library's schedule hint links to the panel. The three routes left
+  the frontend-caller allowlist the way its presence test demands; a Playwright flow walks
+  acceptance rows 3–7 against the real stack.
+
 ## [v0.1.28] - 2026-08-09
 
 A **share-reconciliation** release: the symbol drawer's 對帳 footer flagged a break that did not
