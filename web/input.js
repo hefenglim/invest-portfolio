@@ -2346,7 +2346,7 @@
         values = [a.id, sym, dte, 'NET', amt, '', '', '', '', ''];
       }
       commitOneRow('dividends', oneRowCsv(header, values), $('#d-confirm'),
-        sym + ' 股利已寫入帳本（' + a.name + '）', () => {
+        sym + ' 股利已寫入帳本（' + acctZh(a.id) + '）', () => {
           ['d-tw-gross', 'd-tw-net', 'd-drip-gross', 'd-drip-wh', 'd-drip-net',
             'd-drip-shares', 'd-drip-price', 'd-net-amt', 'd-exdate'].forEach((id) => {
             const n = $('#' + id); if (n) n.value = '';
@@ -2477,7 +2477,7 @@
   function initFxOpen() {
     const oAccSel = $('#o-account');
     ctx.accounts.forEach((a) => {
-      const o = el('option', null, a.name); o.value = a.id;
+      const o = el('option', null, accountLabel(a)); o.value = a.id;  /* zh + trading ccys (M5/L8) */
       oAccSel.appendChild(o);
     });
     $('#o-date').value = TODAY;

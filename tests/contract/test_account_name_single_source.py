@@ -155,3 +155,19 @@ def test_the_pending_list_is_not_stale() -> None:
             f"web/{name} no longer renders a raw account name — remove it from _PENDING "
             "so the file is guarded like the rest."
         )
+
+
+def test_the_context_accounts_english_name_is_never_rendered_either() -> None:
+    """The second spelling has a SECOND source the `.account` scanner cannot see.
+
+    `/api/input/context` lists accounts as `{id, name, …}` with the English `name`, and
+    cash.js rendered `a.name` as the 各帳戶現金 card header and in its account <select>s —
+    measured on the deployed demo on 2026-09-16 AFTER the six `_PENDING` files had been
+    fixed: the cards still read 「TW Broker」. Any `a.name` in the files that iterate that
+    list is that defect; the resolver takes `a.id`.
+    """
+    for name in ("cash.js", "input.js"):
+        src = _strip_js_comments((_WEB_DIR / name).read_text(encoding="utf-8"))
+        assert re.search(r"\ba\.name\b", src) is None, (
+            f"web/{name} renders the context accounts' English name — use acctZh(a.id)"
+        )

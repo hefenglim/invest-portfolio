@@ -227,7 +227,7 @@ def test_a_fee_is_rendered_and_counted_as_a_debit_not_a_credit(
 
     # (2) the running statement: the fee is a NEGATIVE delta, the interest a positive one.
     page.click(".cash-tab[data-tab='pools']")
-    card = page.locator(".cash-card", has_text="TW Broker")
+    card = page.locator(".cash-card", has_text="台灣券商")  # zh header since M5 (2026-09-16)
     card.locator(".cash-line", has_text="TWD").click()
     page.wait_for_selector("#cash-stmt-body tr")
     fee_delta = page.locator("#cash-stmt-body tr", has_text="帳管費").locator("td").nth(3)
@@ -385,7 +385,7 @@ def test_editing_an_imported_movement_does_not_rewrite_its_kind(
 
     # The pool still shows the fee as a debit after the round trip.
     page.click(".cash-tab[data-tab='pools']")
-    card = page.locator(".cash-card", has_text="TW Broker")
+    card = page.locator(".cash-card", has_text="台灣券商")  # zh header since M5 (2026-09-16)
     expect(card.locator(".cash-line", has_text="TWD").locator(".amt")).to_have_text("999,970")
 
     assert console_errors == [] and page_errors == []

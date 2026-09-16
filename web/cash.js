@@ -220,7 +220,10 @@
       const card = el('div', 'cash-card');
       /* Account name = clickable header -> the ACCOUNT-LEVEL all-currency statement
          (openStatement with ccy=null); active when that combined view is open. */
-      const acctDiv = el('div', 'acct clickable', a.name);
+      /* zh name (M5 follow-up, 2026-09-16): the card header read the context's English
+         `name` — the one read the `.account` scanner cannot see — and the deployed demo
+         still said 「TW Broker」 here after every other surface had moved. */
+      const acctDiv = el('div', 'acct clickable', acctZh(a.id));
       if (stmt.account === a.id && stmt.ccy == null) acctDiv.classList.add('active');
       acctDiv.title = '點擊查看全部幣別收支明細';
       acctDiv.addEventListener('click', () => openStatement(a.id, null));
@@ -823,7 +826,7 @@
     const accSelects = [$('#cm-account'), $('#cfx-account')];
     accSelects.forEach((sel) => {
       accounts.forEach((a) => {
-        const o = el('option', null, a.name + '（' + settlementCcy(a) + '）');
+        const o = el('option', null, acctZh(a.id) + '（' + settlementCcy(a) + '）');
         o.value = a.id;
         sel.appendChild(o);
       });
