@@ -226,3 +226,67 @@ def test_summarize_keeps_the_whole_failed_list() -> None:
     assert "…" not in out.split("failed: ")[1]
     for key in failed:
         assert key in out
+
+
+# --- L24 (demo audit 2026-09-16): a held symbol the provider left on an older date -------
+
+
+def _price(conn: sqlite3.Connection, symbol: str, market: str, as_of: str) -> None:
+    conn.execute(
+        "INSERT INTO prices (instrument, market, as_of_date, close, close_raw, source, "
+        "fetched_at) VALUES (?, ?, ?, '100', '100', 'test', ?)",
+        (symbol, market, as_of, _NOW.isoformat()),
+    )
+    conn.commit()
+
+
+def test_lagging_names_the_held_symbol_behind_its_peers(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    """0056 came back dated 09-11 while 2330 moved to 09-14: the fetch SUCCEEDED, so it was
+    neither failed nor partial — and nothing told the user. The verdict stays ok; the
+    outcome names the laggard so the toast can."""
+    from portfolio_dash.pricing.schema import create_tables
+
+    create_tables(conn)
+    _add(conn, "2330", "TW")
+    _add(conn, "0056", "TW")
+    _price(conn, "2330", "TW", "2026-09-14")
+    _price(conn, "0056", "TW", "2026-09-11")
+    register_held_symbols_fn(lambda c: {"2330", "0056"})
+    _fake_refresh(monkeypatch, _Summary(ok={"2330": "twse", "0056": "twse"}, failed=[]))
+    out = refresh_quotes_for(conn, Market.TW, now=_NOW)
+    assert out.status == "ok"
+    assert out.results["held_failed"] == []
+    assert out.results["lagging"] == ["0056"]
+
+
+def test_lagging_ignores_watchlist_and_failed_symbols(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    from portfolio_dash.pricing.schema import create_tables
+
+    create_tables(conn)
+    _add(conn, "2330", "TW")
+    _add(conn, "WATCH", "TW")
+    _add(conn, "LOST", "TW")
+    _price(conn, "2330", "TW", "2026-09-14")
+    _price(conn, "WATCH", "TW", "2026-09-01")
+    _price(conn, "LOST", "TW", "2026-08-01")
+    register_held_symbols_fn(lambda c: {"2330", "LOST"})
+    _fake_refresh(monkeypatch, _Summary(ok={"2330": "twse", "WATCH": "twse"}, failed=["LOST"]))
+    out = refresh_quotes_for(conn, Market.TW, now=_NOW)
+    assert out.results["lagging"] == []          # WATCH is not held; LOST failed outright
+    assert out.results["held_failed"] == ["LOST"]
+
+
+def test_lagging_degrades_to_empty_without_a_prices_table(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    """A ledger-only database (bootstrap_db creates no `prices`) must read as nothing
+    lagging, never as an OperationalError out of the job."""
+    _add(conn, "AAPL", "US")
+    register_held_symbols_fn(lambda c: {"AAPL"})
+    _fake_refresh(monkeypatch, _Summary(ok={"AAPL": "yfinance"}, failed=[]))
+    out = refresh_quotes_for(conn, Market.US, now=_NOW)
+    assert out.results["lagging"] == []

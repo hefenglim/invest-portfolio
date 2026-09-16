@@ -441,6 +441,25 @@ def validate_transaction(
                 )
             )
 
+    # --- whole shares only on TW / MY (HARD; demo audit 2026-09-16, L12) ---
+    # 零股 trade in units of ONE share and a Bursa odd lot in units of ONE unit
+    # (rules/markets-and-fees.md), yet a TW sell of 0.5 股 previewed cleanly — min fee 20,
+    # tax floored, every number "right" — for a position no broker can hold. US is
+    # deliberately NOT checked: fractional US shares are deferred, not forbidden, and DRIP
+    # already books fractions there. Needs the instrument (its market); an unregistered
+    # symbol is caught by the registration path, not here.
+    if inst is not None and inst.market.value in ("TW", "MY") \
+            and inp.quantity != inp.quantity.to_integral_value():
+        issues.append(
+            Issue(
+                kind="shares_not_integer",
+                message=(
+                    f"{MARKET_ZH.get(inst.market, inst.market.value)}股數必須是整數"
+                    f"（零股以 1 股為單位），目前是 {inp.quantity}"
+                ),
+            )
+        )
+
     # --- sell must not exceed holdings (soft) ---
     # A DECLARED short sale (spec 2026-07-31 option C) is exempt: exceeding the position is
     # the whole point, the intent is recorded on the row, and the replay opens a short lot
@@ -1408,7 +1427,7 @@ class CashPool(BaseModel):
     """One (account, ccy) pool, as the withdraw guard needs to see it.
 
     ``balance`` is the ``cash_balances`` figure AS OF the day the probe was asked for
-    (``CashPoolFn.as_of``; the whole history when no day is given). Since M5-06 the 賬戶現金
+    (``CashPoolFn.as_of``; the whole history when no day is given). Since M5-06 the 帳戶現金
     line displays the balance as of TODAY and the guard asks for the balance as of THE
     WITHDRAWAL'S OWN DATE, so the two agree whenever the withdrawal is dated today and the
     guard stays honest when it is not. ``low`` is the MINIMUM running balance over the
@@ -1552,7 +1571,7 @@ def _withdraw_issues(
     Primary check: the amount must be covered by the pool's balance **on the withdrawal's
     own date** (M5-06 — the equity side's ``shares_through`` rule, applied to cash: the
     covering money is the money that exists on that day). For a withdrawal dated today that
-    is exactly the ``cash_balances`` figure the 賬戶現金 line displays, so the hint and the
+    is exactly the ``cash_balances`` figure the 帳戶現金 line displays, so the hint and the
     authority agree; for a back-dated one it is the honest figure. It used to be the END
     balance of the whole ledger, which let a deposit dated 2099 cover a withdrawal today
     whenever a pre-existing dip silenced the check below. An exact-balance withdrawal
@@ -1578,7 +1597,7 @@ def _withdraw_issues(
         return [Issue(
             kind="withdraw_insufficient_balance",
             message=(f"出金金額 {decimal_str(inp.amount)} {inp.ccy.value} 超過 "
-                     f"{account.name} 的 {inp.ccy.value} 賬戶現金 "
+                     f"{account.name} 的 {inp.ccy.value} 帳戶現金 "
                      f"{decimal_str(before.balance)} — 出金不可透支"
                      "（請先補登入金或換匯）"))]
     after = pool(inp.account_id, inp.ccy,

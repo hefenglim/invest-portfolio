@@ -59,20 +59,14 @@ _RAW_ACCOUNT_READ = re.compile(r"\b([A-Za-z_$][A-Za-z0-9_$]*)\.account(?:_name)?
 #   never rendered.
 _LOCAL_STATE_RECEIVERS = frozenset({"pdNames", "state", "holdingsState", "stmt", "opts"})
 
-# Files whose raw reads are known and out of scope for the G-01 fix (each is a real
-# instance of the same defect; see the module docstring):
-#   cash.js            — 資金管理 statement/movement tables + edit modal titles.
-#   corp-action-form.js— `acct.account || acct.account_id` in the preview cards.
-#   input.js           — the CSV preview table's 帳戶 column.
-# The three below were invisible until the pattern above was widened to `.account_name`;
-# they are the same defect, found by regression R5, and deferred with the rest of G-01:
-#   rebalance.js       — the 再平衡試算 drawer's per-account chips (user-visible on index).
-#   rebate-inbox.js    — 折讓款 titles, e.g. 「2026-01 折讓款（TW Broker）」.
-#   inbox.js           — 待確認配息 group headers (unrendered on this fixture, still the same read).
-_PENDING = frozenset({
-    "cash.js", "corp-action-form.js", "input.js",
-    "rebalance.js", "rebate-inbox.js", "inbox.js",
-})
+# Files whose raw reads are known and out of scope for the current fix. EMPTY since
+# 2026-09-16 (demo audit M5): the six deferred surfaces — cash.js (statement / movement
+# tables, edit-modal titles), corp-action-form.js (preview cards), input.js (the CSV
+# preview's 帳戶 column and both account <select>s), rebalance.js (per-account chips and
+# legs), rebate-inbox.js (折讓款 titles) and inbox.js (配息 titles) — all resolve through
+# window.pdNames now, and every page hosting them loads names.js. The set stays so a
+# future deferral has a home, and `test_the_pending_list_is_not_stale` keeps it honest.
+_PENDING: frozenset[str] = frozenset()
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 _LINE_COMMENT = re.compile(r"//[^\n]*")

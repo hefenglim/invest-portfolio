@@ -10,7 +10,7 @@
    For deposit/opening-side CORRECTIONS (edit/delete), the negative-pool 422 (audit C3)
    surfaces as a danger confirm before re-sending with ack_negative. FX conversions
    (FU-D34, 需求五) and WITHDRAWALS (FU-D43a) are DIFFERENT: neither may overdraft, so the
-   換匯中心 shows the pool's 可用餘額 (the sell ceiling), the 出金 form shows 賬戶現金 (the
+   換匯中心 shows the pool's 可用餘額 (the sell ceiling), the 出金 form shows 帳戶現金 (the
    withdraw ceiling), and both amounts are HARD-blocked when they exceed it — live
    disabled-確認 + inline error, backed by the server's fx_insufficient_balance /
    withdraw_insufficient_balance 422 (no ack override).
@@ -58,6 +58,11 @@
     ['interest', '利息'], ['interest_expense', '融資利息'], ['broker_fee', '券商費用'],
   ];
   const settlementCcy = (a) => (a && (a.settlement_ccy || a.ccy)) || '';
+  /* zh account name from the single naming authority (web/names.js, FU-D37). Every row this
+     page renders carries `account_id`; the payload's English `account` is never printed
+     again (M5, demo audit 2026-09-16: 各帳戶現金 read 「Charles Schwab」/「TW Broker」 beside
+     pages saying 「嘉信 Schwab」/「台灣券商」). */
+  const acctZh = (id) => (id ? (window.pdNames ? window.pdNames.account(id) : id) : '');
 
   /* FU-D34: Decimal-safe compare of two numeric STRINGS — the sell amount vs. the pool
      balance. This is a display-only UX HINT (the backend re-validates as the authority),
@@ -180,14 +185,17 @@
     cfxLed.rows.forEach((x) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(x.date)));
-      tr.appendChild(el('td', 'col-text', x.account));
+      tr.appendChild(el('td', 'col-text', acctZh(x.account_id)));
       tr.appendChild(el('td', 'num', f.money(x.from_amt, x.from_ccy) + ' ' + x.from_ccy));
       tr.appendChild(el('td', 'num', f.money(x.to_amt, x.to_ccy) + ' ' + x.to_ccy));
-      /* implied rate is computed by the backend (from/to, home per foreign) — never here.
+      /* implied rate is computed by the backend — never here. Quoted the conventional way
+         (L6, 2026-09-16): rate ≥ 1 with the direction named by implied_unit_ccy /
+         implied_per_ccy, so a USD→MYR row and a MYR→USD row print the same 4.0000.
          Fixed 4 dp (M3-08): a rate is not money, and `rate()`'s magnitude switch gave this
          one column two precisions (4.6000 beside 28.00). */
       tr.appendChild(el('td', 'num',
-        '1 ' + x.to_ccy + ' = ' + f.rateExact(x.implied_rate, 4) + ' ' + x.from_ccy));
+        '1 ' + (x.implied_unit_ccy || x.to_ccy) + ' = ' + f.rateExact(x.implied_rate, 4) +
+        ' ' + (x.implied_per_ccy || x.from_ccy)));
       tbody.appendChild(tr);
     });
     if (!cfxLed.rows.length) {
@@ -205,7 +213,7 @@
     wrap.replaceChildren();
     const byAcct = new Map();
     D.balances.forEach((b) => {
-      if (!byAcct.has(b.account_id)) byAcct.set(b.account_id, { name: b.account, lines: [] });
+      if (!byAcct.has(b.account_id)) byAcct.set(b.account_id, { name: acctZh(b.account_id), lines: [] });
       byAcct.get(b.account_id).lines.push(b);
     });
     accounts.forEach((a) => {
@@ -264,7 +272,7 @@
     if (!negs.length) { banner.hidden = true; return; }
     banner.hidden = false;
     banner.textContent = '⚠ 資金池透支 — 可能漏登入金或換匯：' + negs.map((p) =>
-      (p.account + ' ' + f.money(p.amount, p.ccy) + ' ' + p.ccy)).join('；');
+      (acctZh(p.account_id) + ' ' + f.money(p.amount, p.ccy) + ' ' + p.ccy)).join('；');
   }
 
   /* ---- C5: statement table ---- */
@@ -340,10 +348,10 @@
       if (combined) {
         const bals = (resp.balances || [])
           .map((b) => b.ccy + ' ' + f.money(b.balance, b.ccy)).join('　·　');
-        sub.textContent = (resp.account || stmt.account) + '・全部幣別' +
+        sub.textContent = acctZh(stmt.account) + '・全部幣別' +
           (bals ? '　目前餘額 ' + bals : '');
       } else {
-        sub.textContent = (resp.account || stmt.account) + '・' + resp.ccy +
+        sub.textContent = acctZh(stmt.account) + '・' + resp.ccy +
           '　目前餘額 ' + f.money(resp.current_balance, resp.ccy) + ' ' + resp.ccy;
       }
     }
@@ -447,7 +455,7 @@
     D.movements.forEach((m) => {
       const tr = el('tr');
       tr.appendChild(el('td', 'num', f.date(m.date)));
-      tr.appendChild(el('td', 'col-text', m.account));
+      tr.appendChild(el('td', 'col-text', acctZh(m.account_id)));
       const tdKind = el('td', 'col-text');
       const chipCls = DEBIT_KINDS.indexOf(m.kind) >= 0 ? 'dir-sell' : 'dir-buy';
       tdKind.appendChild(el('span', 'dir-chip ' + chipCls, KIND_LABEL[m.kind] || m.kind));
@@ -523,13 +531,26 @@
   function enforceFxCcyDistinct(source) {
     const fromSel = $('#cfx-from-ccy');
     const toSel = $('#cfx-to-ccy');
-    if (!fromSel || !toSel || fromSel.value !== toSel.value) return;
+    const note = $('#cfx-ccy-note');
+    if (!fromSel || !toSel) return;
+    if (fromSel.value !== toSel.value) { if (note) note.hidden = true; return; }
+    /* L7 (demo audit 2026-09-16): the sibling flip was SILENT — picking 買入 = MYR on a
+       MYR→USD form rewrote 賣出 to USD and the 可用餘額 line switched pools with it, and
+       nothing on the page said so. Say which field was changed and why, inline under the
+       selects; the note clears on the next change that needs no flip. */
+    let flipped = null;
     if (source === 'from') {
       const alt = otherCcyOption(toSel, fromSel.value);
-      if (alt !== null) toSel.value = alt;
+      if (alt !== null) { toSel.value = alt; flipped = ['買入', alt]; }
     } else {
       const alt = otherCcyOption(fromSel, toSel.value);
-      if (alt !== null) fromSel.value = alt;
+      if (alt !== null) { fromSel.value = alt; flipped = ['賣出', alt]; }
+    }
+    if (note) {
+      note.hidden = !flipped;
+      note.textContent = flipped
+        ? '買賣幣別不可相同 — 已自動將' + flipped[0] + '幣別改為 ' + flipped[1] + '，可用餘額也隨之切換'
+        : '';
     }
   }
 
@@ -621,7 +642,7 @@
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal');
     const head = el('div', 'modal-head');
-    head.appendChild(el('h3', 'modal-title', '編輯資金紀錄 #' + m.id + '（' + m.account + '・' + m.ccy + '）'));
+    head.appendChild(el('h3', 'modal-title', '編輯資金紀錄 #' + m.id + '（' + acctZh(m.account_id) + '・' + m.ccy + '）'));
     const close = el('button', 'modal-close', '✕'); close.type = 'button';
     head.appendChild(close);
     modal.appendChild(head);
@@ -689,7 +710,7 @@
     window.confirmDialog({
       title: '刪除資金紀錄',
       body: f.date(m.date) + '・' + (KIND_LABEL[m.kind] || m.kind) + ' ' +
-        f.money(m.amount, m.ccy) + ' ' + m.ccy + '（' + m.account + '）',
+        f.money(m.amount, m.ccy) + ' ' + m.ccy + '（' + acctZh(m.account_id) + '）',
       confirmLabel: '刪除', danger: true,
       onConfirm: async () => {
         const send = (ack) => api.del('/api/cash/movements/' + m.id + (ack ? '?ack_negative=true' : ''));
@@ -786,14 +807,14 @@
     if (single) { const c = $('#cfx-confirm'); if (c) c.disabled = true; }
   }
 
-  /* FU-D43a: the 出金 賬戶現金 line (withdraw ceiling) — shown only for kind=出金;
+  /* FU-D43a: the 出金 帳戶現金 line (withdraw ceiling) — shown only for kind=出金;
      deposit/opening entry has no ceiling (credits need no balance). */
   function updCmBalance() {
     updCeiling({
       line: '#cm-balance', err: '#cm-amt-err', confirm: '#cm-confirm',
       amount: '#cm-amount', active: cmKind === 'withdraw',
       account: $('#cm-account').value, ccy: $('#cm-ccy').value,
-      label: '賬戶現金', overMsg: '出金金額超過賬戶現金', overTail: '出金不可透支',
+      label: '帳戶現金', overMsg: '出金金額超過帳戶現金', overTail: '出金不可透支',
     });
   }
 
@@ -813,7 +834,7 @@
     /* C2: movement ccy dropdown tracks the selected account */
     const syncMovementCcy = () => {
       fillCcySelect($('#cm-ccy'), $('#cm-account').value);
-      updCmBalance();  // FU-D43a: refresh the 賬戶現金 ceiling for the new account/ccy
+      updCmBalance();  // FU-D43a: refresh the 帳戶現金 ceiling for the new account/ccy
       // fillCcySelect writes the <select> programmatically, which fires NO change event —
       // without this call the 取得成本 field would stay hidden on load and after an account
       // switch, i.e. exactly when a foreign default is selected for the user.
@@ -997,7 +1018,7 @@
     /* FU-D43a: NO ack-retry on movement POST — a withdrawal may never overdraft (the
        backend answers a hard 422 withdraw_insufficient_balance; deposits/openings are
        credits and need no balance guard, so POST can no longer answer negative_cash).
-       The live check already disables 確認 while the amount exceeds 賬戶現金; a backend
+       The live check already disables 確認 while the amount exceeds 帳戶現金; a backend
        422 renders inline under the amount as the authority (mirrors the FX form). */
     $('#cm-confirm').addEventListener('click', async () => {
       const amount = $('#cm-amount').value.trim();
@@ -1029,7 +1050,7 @@
         if (err && err.status === 422 && err.code === 'withdraw_insufficient_balance') {
           // Backend authority: render ITS message inline (verbatim) and keep 確認 blocked.
           // Editing the amount/帳戶/幣別 fires updCmBalance(), which re-validates against
-          // the pool and clears the block once the amount is within 賬戶現金.
+          // the pool and clears the block once the amount is within 帳戶現金.
           const errEl = $('#cm-amt-err');
           if (errEl) { errEl.hidden = false; errEl.textContent = err.message; }
           $('#cm-confirm').disabled = true;
@@ -1044,10 +1065,22 @@
     function updImplied() {
       const fromA = parseFloat($('#cfx-from-amt').value) || 0;
       const toA = parseFloat($('#cfx-to-amt').value) || 0;
-      /* implied-rate what-if on the USER's own entry (input-side calc exception) */
-      $('#cfx-implied').textContent = (fromA > 0 && toA > 0)
-        ? '1 ' + $('#cfx-to-ccy').value + ' = ' + (fromA / toA).toFixed(4) + ' ' + $('#cfx-from-ccy').value
-        : f.NULL_GLYPH;
+      /* implied-rate what-if on the USER's own entry (input-side calc exception).
+         L6 (demo audit 2026-09-16): it always read 「1 買入幣 = x 賣出幣」, so USD 1,000 →
+         MYR 4,000 said 「1 MYR = 0.2500 USD」 while the same pair the other way round said
+         「1 USD = 4.0000 MYR」 — one rate, two spellings, and the ledger below quotes it the
+         conventional way. Quote the pair with the more valuable currency as the unit (the
+         rate ≥ 1 — USD/TWD 31.8, USD/MYR 4.08, MYR/TWD 7.8), whichever side is sold: the
+         same rule the backend's `implied_quote` applies to the ledger rows. */
+      const fromC = $('#cfx-from-ccy').value;
+      const toC = $('#cfx-to-ccy').value;
+      let txt = f.NULL_GLYPH;
+      if (fromA > 0 && toA > 0) {
+        txt = fromA >= toA
+          ? '1 ' + toC + ' = ' + (fromA / toA).toFixed(4) + ' ' + fromC
+          : '1 ' + fromC + ' = ' + (toA / fromA).toFixed(4) + ' ' + toC;
+      }
+      $('#cfx-implied').textContent = txt;
     }
 
     /* ---- FU-D43c: server-computed buy-amount estimate --------------------------------
@@ -1169,9 +1202,20 @@
     function markBuyEdited() {
       estPristine = $('#cfx-to-amt').value.trim() === '';
       setReestimateVisible(!estPristine);
+      const cap = $('#cfx-estimate');
       if (estPristine) {
-        const cap = $('#cfx-estimate');
         if (cap) { cap.hidden = true; cap.textContent = ''; }
+        return;
+      }
+      /* M7 (demo audit 2026-09-16): a manual edit while the estimate was still in flight
+         left the caption at 「試算中…」 FOREVER — runEstimate's `!estPristine` early return
+         is right to drop the answer, but it dropped the caption's promise with it, so the
+         page announced a computation that would never complete. The caption is rewritten
+         SYNCHRONOUSLY with the edit (same posture as scheduleEstimate's retraction): the
+         buy amount is now the user's, and 重新試算 is the way back to the spot figure. */
+      if (cap) {
+        cap.hidden = false;
+        cap.textContent = '已手動指定買入金額 — 按「重新試算」可依即期匯率回填';
       }
     }
 
@@ -1279,7 +1323,7 @@
     await loadFxLedger();  // FU-D40: keep the 換匯中心 ledger in step with every refresh
     booted = true;
     updFxBalance();  // FU-D34: refresh the 換匯中心 可用餘額 ceiling from the fresh balances
-    updCmBalance();  // FU-D43a: refresh the 出金 賬戶現金 ceiling too
+    updCmBalance();  // FU-D43a: refresh the 出金 帳戶現金 ceiling too
   }
 
   /* FU-D25: re-render the activated tab's section from cached state on every tab switch.

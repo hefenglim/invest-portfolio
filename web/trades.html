@@ -102,7 +102,9 @@
                   <button type="button" id="m-side-buy" class="active buy-on">買進</button>
                   <button type="button" id="m-side-sell">賣出</button>
                 </div>
-                <label class="hint daytrade-line" for="m-daytrade" title="台股當日沖銷賣出：證交稅 0.15%">
+                <!-- 當沖 is a SELL-side tax rate; hidden on 買進 like 放空 (input.js setSide). -->
+                <label class="hint daytrade-line" id="m-daytrade-line" for="m-daytrade" hidden="hidden"
+                       title="台股當日沖銷賣出：證交稅 0.15%">
                   <input type="checkbox" id="m-daytrade"> 當沖（賣出稅 0.15%）
                 </label>
                 <!-- 放空 is DECLARED, never inferred: only a flagged sell may exceed

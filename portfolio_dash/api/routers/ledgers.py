@@ -239,6 +239,7 @@ def fx(
     for c in list_fx_conversions(conn, account_id=account_id):
         if not _in_range(c.date, frm, to):
             continue
+        quote = c.implied_quote
         out.append({
             "id": c.id, "date": c.date.isoformat(), "account_id": c.account_id,
             "account": accts.get(c.account_id, c.account_id),
@@ -246,8 +247,13 @@ def fx(
             "to_ccy": c.to_ccy.value, "to_amt": decimal_str(c.to_amount),
             # None when nothing was received (QA-10): `decimal_str` takes a Decimal, and
             # `web/format.js`'s `f.rate(null)` already renders 「—」.
-            "implied_rate": (decimal_str(c.implied_rate)
-                             if c.implied_rate is not None else None),
+            # Quoted the conventional way (L6, 2026-09-16): `implied_rate` is ≥ 1 and the two
+            # ccy fields say which way — 「1 implied_unit_ccy = implied_rate implied_per_ccy」.
+            # The from/to-bound figure is `StoredFxConversion.implied_rate`; the wire carries
+            # the quote, so a USD→MYR row and a MYR→USD row print the same 4.0000.
+            "implied_rate": (decimal_str(quote[2]) if quote is not None else None),
+            "implied_unit_ccy": (quote[0].value if quote is not None else None),
+            "implied_per_ccy": (quote[1].value if quote is not None else None),
         })
     return _page(out, limit, offset)
 

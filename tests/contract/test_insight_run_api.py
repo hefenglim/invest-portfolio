@@ -161,6 +161,60 @@ def test_insights_list_returns_stored_card(
     assert len(grouped["groups"][0]["cards"]) == 1
 
 
+def test_insights_list_carries_figure_flags(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """M9 (audit 2026-09-16): every card carries the read-time figure check on the wire.
+
+    The audit measured a card printing 「未實現獲利 429.1 萬美元」 whose sibling from the same
+    batch said 「4,290.80 美元」 (×1000), and one naming 「LRDIM (6883)」 — a code held nowhere.
+    The check compares the card's text against its OWN stored ``input_snapshot`` and flags;
+    it never hides the card, so ``title``/``summary`` come back unchanged either way.
+    """
+    import json
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard
+
+    it_id = _make_combo(api_client)
+    now = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
+    snapshot = json.dumps({"unrealized_pnl": "4290.80", "cost_total": "11951"})
+
+    def _store(card: InsightCard, fp: str) -> None:
+        istore.add_card(
+            golden_db, insight_type_id=it_id, card=card,
+            fingerprint=istore.fingerprint(it_id, fp, "d", "v1"), calibration_version=None,
+            horizon_days=5, input_snapshot=snapshot, model="m", cost_usd=Decimal("0"),
+            now=now,
+        )
+
+    _store(InsightCard(
+        title="持倉檢視", summary="未實現獲利 429.1 萬美元", body_md="留意 LRDIM (6883)。",
+        tags=[],
+    ), "bad")
+    _store(InsightCard(
+        title="持倉檢視", summary="未實現收益 4,290.80 美元，成本 11,951 美元。",
+        body_md="台積電 (2330) 部位不變。", tags=[],
+    ), "good")
+
+    rows = {r["summary"]: r for r in api_client.get("/api/insights").json()["rows"]}
+    bad = rows["未實現獲利 429.1 萬美元"]
+    good = rows["未實現收益 4,290.80 美元，成本 11,951 美元。"]
+    assert bad["figure_flags"] == {
+        "unverified_figures": ["429.1 萬"], "unknown_symbols": ["6883"]
+    }
+    assert good["figure_flags"] == {"unverified_figures": [], "unknown_symbols": []}
+    assert bad["summary"] == "未實現獲利 429.1 萬美元"  # flagged, never hidden
+    # the grouped shape serializes through the same helper
+    grouped = api_client.get("/api/insights?group=symbol").json()
+    for grp in grouped["groups"]:
+        for card in grp["cards"]:
+            assert set(card["figure_flags"]) == {"unverified_figures", "unknown_symbols"}
+
+
 def test_deleted_task_history_hidden_but_preserved(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:

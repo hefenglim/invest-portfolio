@@ -1716,7 +1716,20 @@
     "trend_unavailable_reason": null,
     "fx_unavailable_reason": null,
     "unregistered_symbols": [],
-    "last_backup_at": null
+    "last_backup_at": null,
+    "fx_triangulation": [
+      {
+        "via": "USD/MYR × MYR/TWD",
+        "pair": "USD/TWD",
+        "implied": "30.800000",
+        "direct": "32.000000",
+        "gap_pct": "-3.7500",
+        "ok": false,
+        "as_of": "2026-06-09",
+        "stale": false
+      }
+    ],
+    "scheduler_running": false
   },
   "insights": [],
   "dividend_projection": {

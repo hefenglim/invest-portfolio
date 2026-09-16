@@ -83,8 +83,12 @@ def test_e1_dashboard_kpis_and_missing_price_badge(
         "() => { const e = document.querySelector('#asof-value');"
         " return e && e.textContent && e.textContent.includes('2026'); }"
     )
-    # any_stale (00919 missing + MSFT stale) -> header shows the '部分過期' chip.
-    assert "部分過期" in page.inner_text("#fresh-chip")
+    # any_stale (00919 missing + MSFT stale) -> header shows a stale chip. Since 2026-09-16
+    # (demo audit L14) the chip counts: 「部分過期 n/m」, or 「全部過期」 when every listed price
+    # and pair is stale — which this frozen June fixture becomes as the wall clock moves on,
+    # so the assertion accepts either wording and pins only that the chip says 過期.
+    chip = page.inner_text("#fresh-chip")
+    assert "過期" in chip and ("部分過期" in chip or "全部過期" in chip), chip
     # 總市值 hero value == golden total_market_value (2,937,965), separator/decimal-agnostic.
     hero = page.locator(".kpi-hero .kpi-value").first.inner_text()
     m = re.search(r"[\d,]+", hero)

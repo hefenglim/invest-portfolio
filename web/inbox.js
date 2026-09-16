@@ -16,6 +16,10 @@
     if (text !== undefined) n.textContent = text;
     return n;
   };
+  /* zh account name from the single naming authority (web/names.js, FU-D37); id fallback.
+     M5 (demo audit 2026-09-16): every inbox row carries `account_id`; the payload's English
+     `account_name` (「TW Broker」) is never printed again. */
+  const acctZh = (id) => (id ? (window.pdNames ? window.pdNames.account(id) : id) : '');
   const section = document.getElementById('inbox-section');
   if (!section) return;
   const list = $('#inbox-list');
@@ -170,7 +174,7 @@
       const d = s.detail;
       let title = s.symbol || s.fingerprint;
       if (s.ex_date) title += '・除息 ' + (f ? f.date(s.ex_date) : s.ex_date);
-      if (d && d.account_name) title += '（' + d.account_name + '）';
+      if (d && d.account_id) title += '（' + acctZh(d.account_id) + '）';
       main.appendChild(el('span', null, title));
       let sub = '已忽略於 ' + (s.skipped_at ? String(s.skipped_at).slice(0, 10) : '—');
       if (d && d.est_gross != null && d.ccy && f) sub += '・預估 ' + f.money(d.est_gross, d.ccy) + ' ' + d.ccy;
@@ -246,7 +250,7 @@
         };
         main.appendChild(el('span', 'inbox-title',
           (KIND_TITLE[r.kind] || '偵測到配息') + '：' + r.symbol + ' ' + r.name +
-          '（' + r.account_name + '）'));
+          '（' + acctZh(r.account_id) + '）'));
         let sub;
         if (r.kind === 'stock') {
           sub = '除息日 ' + f.date(r.ex_date) + '・股票股利 ' + r.per_share +

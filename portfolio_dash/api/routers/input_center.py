@@ -442,7 +442,7 @@ def _cash_overdraft_issue(
     Never a hard block — users may not track cash at all (only fires once they do).
 
     ``as_of`` is the request clock's day (M5-06, X8a): the pool is read as of TODAY — the
-    same figure the 賬戶現金 line beside this warning quotes — so a deposit dated in the
+    same figure the 帳戶現金 line beside this warning quotes — so a deposit dated in the
     future is in the ledger but cannot silence a warning about a pool that is negative
     today. Required, no default: a caller that forgets it is a ``TypeError``, not a quiet
     return to the whole-history read.

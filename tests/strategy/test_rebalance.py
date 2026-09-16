@@ -121,6 +121,9 @@ def test_missing_price_symbol_is_excluded() -> None:
     summary = result["summary"]
     assert isinstance(summary, dict)
     assert "NOPRICE" in summary["excluded"]
+    # L11: the exclusion says WHY, and `excluded` keeps its back-compatible list shape
+    # (export/rebalance_report.py reads it as a list of symbols).
+    assert summary["excluded_reasons"] == {"NOPRICE": "no_price"}
     conn.close()
 
 
@@ -186,8 +189,37 @@ def test_summary_keys_present() -> None:
     summary = result["summary"]
     assert isinstance(summary, dict)
     assert set(summary) >= {"turnover_reporting", "total_fees_reporting", "cash_after",
-                            "excluded", "over_allocated", "excluded_with_target"}
+                            "excluded", "excluded_reasons", "holds", "over_allocated",
+                            "excluded_with_target"}
     conn.close()
+
+
+def test_holds_say_why_a_symbol_produced_no_row() -> None:
+    """L11: the two NON-error no-trade outcomes reach the UI as reasons, not as a bare 「—」.
+
+    Measured 2026-09-16 on the demo drawer: AAPL and NVDA both rendered 「—」 in 動作 with
+    nothing beside them — one was already on target, the other had no usable price. The same
+    glyph for "nothing to do" and for "I could not compute this" hides the one the user has
+    to act on.
+    """
+    conn = _golden()
+    # 2330 asked for exactly its own combined weight -> on_target (delta is exactly zero).
+    on_target = Decimal("600000") / Decimal("639600")
+    # AAPL asked for 100 TWD more than it holds: a REAL delta, but 100 TWD / 33 / 120 USD =
+    # 0.025 shares, which snaps to no trade -> rounds_to_zero. Same empty cell, other cause.
+    rounds_to_zero = (Decimal("39600") + Decimal("100")) / Decimal("639600")
+    result = compute_rebalance(conn, now=_NOW, reporting=Currency.TWD,
+                               targets={"2330": on_target, "AAPL": rounds_to_zero})
+    assert _rows_by_symbol(result) == {}  # neither symbol trades
+    summary = _summary(result)
+    holds = summary["holds"]
+    assert isinstance(holds, list)
+    assert {h["symbol"]: h["reason"] for h in holds} == {
+        "2330": "on_target", "AAPL": "rounds_to_zero"}
+    assert summary["excluded"] == []  # a hold is NOT an exclusion
+    conn.close()
+
+
 
 
 def test_my_market_leg_snaps_to_100_lot() -> None:
@@ -358,6 +390,43 @@ def test_over_allocated_flag() -> None:
     ok = compute_rebalance(conn, now=_NOW, reporting=Currency.TWD,
                            targets={"2330": Decimal("0.6"), "AAPL": Decimal("0.2")})
     assert _summary(ok)["over_allocated"] is False  # sum 0.8
+    conn.close()
+
+
+def test_float_residue_from_a_client_is_not_over_allocated() -> None:
+    """H1: a Σ over 1 by 4e-18 is float residue, not a 101% plan.
+
+    These four strings are the BODY intercepted on the demo site 2026-09-16: the drawer's
+    fields read 0.7 / 3.6 / 2.6 / 93.1 and summed to exactly 100.0 on screen, but the client
+    built each ratio as a JS float and POSTed ``String(ratio)``, so the backend received the
+    doubles printed in full. Summed as exact Decimals they come to 1.000000000000000004, and
+    the bare ``> 1`` test raised 「目標合計超過 100%」 beside a footer reading 100.00%.
+
+    The client now sends exact fixed-point strings, so this exact body should no longer be
+    produced — the tolerance is kept (and tested) because the wire accepts a ratio from any
+    caller, and a flag that fires on the 18th decimal place is a false alarm whoever sent it.
+    """
+    conn = _dual()
+    targets = {
+        "2330": Decimal("0.930999999999999999"),
+        "AAPL": Decimal("0.006999999999999999"),
+        "2454": Decimal("0.036000000000000004"),
+        "NOPRICE": Decimal("0.026000000000000002"),
+    }
+    # Guard the guard: the sum really does exceed 1, so this fails without the tolerance.
+    assert sum(targets.values(), Decimal("0")) == Decimal("1.000000000000000004")
+    result = compute_rebalance(conn, now=_NOW, reporting=Currency.TWD, targets=targets)
+    assert _summary(result)["over_allocated"] is False
+    conn.close()
+
+
+def test_one_tenth_of_a_percent_over_is_still_over_allocated() -> None:
+    """The tolerance cannot mask a real overshoot: the coarsest overshoot the 1-dp field can
+    express is 0.1pp = 0.001, a thousand times the 0.0001 tolerance."""
+    conn = _dual()
+    result = compute_rebalance(conn, now=_NOW, reporting=Currency.TWD,
+                               targets={"2330": Decimal("0.501"), "AAPL": Decimal("0.5")})
+    assert _summary(result)["over_allocated"] is True  # sum 1.001 = 100.1%
     conn.close()
 
 

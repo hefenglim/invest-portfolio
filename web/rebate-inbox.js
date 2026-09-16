@@ -17,6 +17,10 @@
     if (text !== undefined) n.textContent = text;
     return n;
   };
+  /* zh account name from the single naming authority (web/names.js, FU-D37); id fallback.
+     M5 (demo audit 2026-09-16): every rebate row carries `account_id`; the payload's English
+     `account_name` (「2026-07 折讓款（TW Broker）」) is never printed again. */
+  const acctZh = (id) => (id ? (window.pdNames ? window.pdNames.account(id) : id) : '');
   const section = document.getElementById('rebate-section');
   if (!section) return;
   const list = $('#rebate-list');
@@ -116,7 +120,7 @@
         { account_id: r.account_id, month: r.month });
       if (window.toast) {
         window.toast(kind === 'skip' ? '已略過' : '已取消略過', 'ok',
-          r.month + '・' + (r.account_name || ''));
+          r.month + '・' + acctZh(r.account_id));
       }
       await boot();
       /* F2b/F8: refresh the sidebar 收件匣 badge — a skip/unskip changes the pending count. */
@@ -140,7 +144,7 @@
 
     const body = el('div', 'modal-body');
     body.appendChild(el('div', null,
-      r.account_name + '・' + r.month + '（當月 ' + r.trade_count + ' 筆交易）'));
+      acctZh(r.account_id) + '・' + r.month + '（當月 ' + r.trade_count + ' 筆交易）'));
     const fieldLabel = el('label', 'rb-cf-label', '實際入帳金額（' + r.ccy + '）');
     body.appendChild(fieldLabel);
     const inp = el('input', 'input');
@@ -208,7 +212,7 @@
       const item = el('div', 'inbox-item rbt-item');
       const main = el('div', 'inbox-main');
       main.appendChild(el('span', 'inbox-title',
-        r.month + ' 折讓款（' + r.account_name + '）'));
+        r.month + ' 折讓款（' + acctZh(r.account_id) + '）'));
       main.appendChild(el('span', 'inbox-sub',
         '當月 ' + r.trade_count + ' 筆交易・手續費合計 ' +
         f.money(r.fee_total, r.ccy) + ' ' + r.ccy + ' → 預估退款 ' +
@@ -265,7 +269,7 @@
       const main = el('div', 'inbox-main');
       const title = el('span', 'inbox-title');
       title.appendChild(document.createTextNode(
-        r.month + ' 折讓款預估（' + r.account_name + '）'));
+        r.month + ' 折讓款預估（' + acctZh(r.account_id) + '）'));
       const caret = el('span', 'rbt-caret', '▸');
       title.appendChild(caret);
       main.appendChild(title);
@@ -297,7 +301,7 @@
     items.forEach((s) => {
       const row = el('div', 'sk-row');
       const main = el('div', 'sk-main');
-      main.appendChild(el('span', null, s.month + '（' + s.account_name + '）'));
+      main.appendChild(el('span', null, s.month + '（' + acctZh(s.account_id) + '）'));
       let sub = '已略過於 ' + (s.skipped_at ? String(s.skipped_at).slice(0, 10) : '—');
       if (s.detail && s.detail.expected != null && f) {
         sub += '・預估 ' + f.money(s.detail.expected, s.detail.ccy) + ' ' + s.detail.ccy;

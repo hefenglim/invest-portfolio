@@ -84,10 +84,13 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   })();
 
+  /* zh account name from the single naming authority (web/names.js, FU-D37); id fallback. */
+  const acctZh = (id) => (id ? (window.pdNames ? window.pdNames.account(id) : id) : '');
+
   function initManual() {
     const accSel = $('#m-account');
     ctx.accounts.forEach((a) => {
-      const o = el('option', null, a.name + '（' + a.ccy + '）');
+      const o = el('option', null, accountLabel(a));
       o.value = a.id;
       accSel.appendChild(o);
     });
@@ -170,6 +173,11 @@
     const sl = $('#m-short-line'), sc = $('#m-short');
     if (sl) sl.hidden = s !== 'sell';
     if (sc && s !== 'sell') sc.checked = false;
+    /* 當沖 is a SELL-tax rate (0.15% vs 0.3%); on a buy the box did nothing but could still
+       be ticked (L20, demo audit 2026-09-16). Same treatment as 放空: hidden and cleared. */
+    const dl = $('#m-daytrade-line'), dt = $('#m-daytrade');
+    if (dl) dl.hidden = s !== 'sell';
+    if (dt && s !== 'sell') dt.checked = false;
     schedulePreview();
   }
 
@@ -367,6 +375,25 @@
     if (mk.length === 1) return mk[0];
     return a ? (_CCY_MARKET[a.settlement_ccy || a.ccy] || 'TW') : 'TW';
   }
+  /* Account <option> label (demo audit 2026-09-16, M5 + L8). Two defects in one string:
+     it printed `a.name` — the API's English name, so the select read 「TW Broker」 while the
+     filter chips one panel up read 「台灣券商」 (the second spelling web/names.js exists to
+     end) — and it bracketed `a.ccy`, the SETTLEMENT currency, which on the merged Moomoo
+     account is USD although its funding currency is MYR and its MY trades book in MYR: the
+     one currency the label named was the one the user was least likely to be entering.
+     Now: the zh name from the single naming authority + the currencies the account
+     actually trades in, derived from its bound markets (「Moomoo MY（USD／MYR）」). */
+  const _MARKET_CCY = { TW: 'TWD', US: 'USD', MY: 'MYR' };
+  function accountLabel(a) {
+    const name = window.pdNames ? window.pdNames.account(a.id) : a.id;
+    const ccys = [];
+    acctMarkets(a).forEach((mk) => {
+      const c = _MARKET_CCY[mk];
+      if (c && ccys.indexOf(c) === -1) ccys.push(c);
+    });
+    if (!ccys.length && a.ccy) ccys.push(a.ccy);
+    return name + '（' + ccys.join('／') + '）';
+  }
   /* Dividend MODEL (tw/drip/net) for the current dividend entry.
      Single-market account -> its one model (byte-identical to the old `a.div_model`).
      Merged account -> the model bound to the ENTERED SYMBOL's market (a.markets[market]).
@@ -511,8 +538,11 @@
     const price = Number($('#m-price').value) || 0;
 
     /* pristine form (boots empty since 2026-07-02): no red errors on an untouched
-       page — render the neutral empty state with the confirm disabled. */
-    if (!sym && $('#m-shares').value.trim() === '' && $('#m-price').value.trim() === '') {
+       page — render the neutral empty state with the confirm disabled. A selected symbol
+       alone does not end pristineness (L18): after a commit or 清除 the symbol may stay for
+       the next entry, and 「股數必須大於 0」 before any 股數 was typed blames the user for a
+       field the page itself just emptied. Both entry fields empty ⇒ neutral. */
+    if ($('#m-shares').value.trim() === '' && $('#m-price').value.trim() === '') {
       mPreview = null;
       renderManual(null, [], false);
       return;
@@ -981,6 +1011,13 @@
     m.acks = Object.create(null); m.ackOversell = false;
     $('#m-shares').value = '';
     $('#m-price').value = '';
+    /* L18 (demo audit 2026-09-16): 手續費 20 / 交易稅 0 stayed in their fields after a commit
+       — the auto-computed values of the trade just written, beside an empty 股數 — and the
+       re-preview then printed 「股數必須大於 0」 in red for a form nobody had touched yet. The
+       read-only fields are cleared with the entry fields, and runManualPreview treats
+       "no shares and no price" as pristine whether or not a symbol is still selected. */
+    $('#m-fee').value = '';
+    $('#m-tax').value = '';
     /* Fable F8: a commit that AUTO-REGISTERED an unknown symbol must refresh ctx so the 未註冊
        hint clears, the symbol resolves in the preview, and it appears in every picker (manual /
        opening read ctx.instruments live). Awaited before schedulePreview so renderSymbolHint
@@ -1195,7 +1232,10 @@
       tr.appendChild(tdCb);
       tr.appendChild(el('td', 'num', '#' + ((r.n || 0) + 1)));
       tr.appendChild(el('td', 'num', f.date(d.trade_date || d.date)));
-      tr.appendChild(el('td', 'col-text', d.account_id || d.account || ''));
+      /* The row's account is an ID (the CSV column is `account`, normalised to `account_id`
+         by the parser); it printed raw — 「tw_broker」 in a table whose neighbours say
+         「台灣券商」 (M5, demo audit 2026-09-16). Resolve through the single naming authority. */
+      tr.appendChild(el('td', 'col-text', acctZh(d.account_id)));
       /* The 買/賣 chip is TRANSACTION-shaped, and only a transaction row carries a `side`.
          Every other kind's payload has none, and `side || ''` is not 'buy', so the chip fell
          through to its else branch and stamped a red 「賣」 on rows that are not sells at all
@@ -2084,9 +2124,21 @@
       /* AWAIT the in-place table refresh so the flash targets the ACTUAL new row (was a
          fixed-300ms guess wired to #m-confirm). A refresh failure must not break the commit
          flow — the caller already toasted success. */
-      try { await window.pdLedgerRefresh(); } catch (e) { /* degrade silently */ }
+      try { await window.pdLedgerRefresh(kind); } catch (e) { /* degrade silently */ }
     }
     renderSellHints();   // cache miss -> refetch for the selected manual account
+    /* M4 (demo audit 2026-09-16): the only warm-up here read `#d-account` — the DIVIDEND
+       form's select — so after a TW buy the request on the wire was
+       `holdings?account=moomoo_my` while `#m-account` said tw_broker, and the next entry's
+       picker still annotated 2884 with the pre-trade 100 股 / 93.20. Warm the account the
+       commit was written TO (the manual select), then re-render the picker if it is open so
+       the annotation changes in front of the user; the dividend warm-up stays. */
+    const mSel = $('#m-account');
+    if (mSel && mSel.value) {
+      loadAcctHoldings(mSel.value, false).then(() => {
+        if (manualPicker && manualPicker.render) manualPicker.render();
+      }).catch(() => {});
+    }
     const dSel = $('#d-account');
     if (dSel && dSel.value) loadAcctHoldings(dSel.value, false).catch(() => {});
     /* #10: flash + auto-switch on FULL success only (highlight !== false); partial/failed
@@ -2150,7 +2202,7 @@
   function initDiv() {
     const accSel = $('#d-account');
     ctx.accounts.forEach((a) => {
-      const o = el('option', null, a.name + '（' + a.ccy + '）');
+      const o = el('option', null, accountLabel(a));
       o.value = a.id;
       accSel.appendChild(o);
     });

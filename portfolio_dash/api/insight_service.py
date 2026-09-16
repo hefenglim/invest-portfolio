@@ -56,7 +56,7 @@ from portfolio_dash.llm_insight.cards import Prediction
 from portfolio_dash.llm_insight.gating import GateContext, GateResult
 from portfolio_dash.llm_insight.generate import RunInputs, RunResult, run_insight_type
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.portfolio.dashboard_models import DashboardData, FreshnessReport
+from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.technicals import annualized_volatility
 from portfolio_dash.portfolio.twr import twr_index
@@ -1007,16 +1007,51 @@ def _unapplied_calibration(conn: sqlite3.Connection, it: cs.InsightType) -> bool
     return it.active_calibration_version != latest
 
 
-def _freshness_affected(freshness: FreshnessReport, symbols: list[str]) -> list[str]:
-    """The given symbols whose dashboard price is missing OR stale (the R4-source view).
+def _price_population(
+    data: DashboardData, scope: str, universe_symbols: list[str]
+) -> list[str]:
+    """The SYMBOLS a task's price check covers, DEDUPED in first-seen order.
 
-    Reuses the dashboard's own freshness (same snapshot): a symbol is affected when it is in
-    ``missing_prices`` or its ``PriceFreshness.stale`` flag is set. Preserves *symbols* order.
+    ``per_symbol`` reads its own resolved universe; every other scope (portfolio / on_alert /
+    per_market — whose ``universe_symbols`` are MARKET codes, not symbols) reads the whole
+    book. M2 (2026-09-16): ``data.holdings`` is one row per (account, symbol), so the old
+    ``[h.symbol for h in data.holdings]`` listed a symbol held in two accounts TWICE — the
+    pipeline card's sub-line printed AAPL twice on the demo site. A price is a property of
+    the symbol, never of the account holding it.
     """
-    missing = set(freshness.missing_prices)
-    stale = {p.symbol for p in freshness.prices if p.stale}
-    affected = missing | stale
-    return [s for s in symbols if s in affected]
+    symbols = universe_symbols if scope == "per_symbol" else [h.symbol for h in data.holdings]
+    return list(dict.fromkeys(symbols))
+
+
+def _price_state_for(
+    data: DashboardData, scope: str, universe_symbols: list[str], conn: sqlite3.Connection
+) -> tuple[list[str], list[str]]:
+    """``(missing, stale)`` prices for one task — the ONE helper BOTH surfaces read (M8).
+
+    Measured 2026-09-16 on one task: the pipeline card's input node said ⚠ 「… 8299 缺價/過期」
+    while that task's own dry-run preflight said 「R4 價格資料 ✓ 通過」. Two code paths, two
+    definitions: the card called ``_freshness_affected`` (missing OR stale, flattened into one
+    warn) and the dry run called ``_missing_prices_for`` (missing only). The fix is one helper
+    returning the PAIR, with both surfaces keeping the distinction rather than flattening it:
+
+    * **missing** → the R4 warn on both surfaces. Gate behaviour is UNCHANGED (the same list
+      still feeds ``GateContext.missing_price_symbols`` → the deterministic zero-LLM anomaly
+      card); ``_missing_prices_for`` below is still the missing leg's one implementation,
+      including its per_symbol "no stored history at all" extension.
+    * **stale** → an ``info`` line on both. A stale close still produces a real card, off an
+      older price; calling that a warning on one surface and a pass on the other is the
+      double-truth this fixes.
+
+    ``stale`` EXCLUDES ``missing``: the dashboard marks a symbol with no read at all
+    ``stale=True`` as well (``dashboard.py``: ``stale=pr.stale if pr is not None else True``),
+    so without the exclusion every missing symbol would be reported twice, once per level.
+    """
+    population = _price_population(data, scope, universe_symbols)
+    missing_all = set(_missing_prices_for(data, scope, universe_symbols, conn))
+    missing = [s for s in population if s in missing_all]
+    stale_all = {p.symbol for p in data.freshness.prices if p.stale}
+    stale = [s for s in population if s in stale_all and s not in missing_all]
+    return missing, stale
 
 
 def _last_run_for(conn: sqlite3.Connection, insight_type_id: int) -> dict[str, Any] | None:
@@ -1053,7 +1088,9 @@ def _gather_facts(
         else _resolve_markets(data) if it.scope == "per_market"
         else []
     )
-    affected_scope = universe if it.scope == "per_symbol" else [h.symbol for h in data.holdings]
+    # M8: the SAME helper the dry-run preflight reads, so the card and the dry run can no
+    # longer disagree about this task's price data.
+    missing, stale = _price_state_for(data, it.scope, universe, conn)
     live, total = _template_counts(conn, it.id)
     last_run = _last_run_for(conn, it.id)
     return ps.PipelineFacts(
@@ -1062,7 +1099,8 @@ def _gather_facts(
         scheduled=_is_scheduled(conn, it.id),
         universe_symbols=universe,
         removed_recently=[],  # R2 removal events are surfaced by the gate; v1 status: none
-        missing_or_stale_symbols=_freshness_affected(data.freshness, affected_scope),
+        missing_price_symbols=missing,
+        stale_price_symbols=stale,
         live_template_count=live,
         total_template_count=total,
         r1_mismatch=_r1_mismatch(conn, it),
@@ -1311,6 +1349,9 @@ _RULE_FIX: dict[str, str] = {
     "R2": "edit_universe", "R3": "enable_template", "R4": "edit_universe",
     "R5": "edit_templates",
 }
+# The display name of the R4-adjacent stale-price info row (M8). Distinct from R4's own
+# 「價格資料」 so the two rows are not read as one duplicated line.
+_RULE_STALE_NAME = "價格新鮮度"
 
 
 def _finding_for(result: GateResult, rule_id: str) -> gating.GateFinding | None:
@@ -1325,8 +1366,36 @@ def _lv_of(finding: gating.GateFinding | None) -> str:
     return "fail" if finding.lv == "block" else finding.lv
 
 
-def _rule_gates(result: GateResult, *, disabled_template_id: int | None) -> list[dict[str, Any]]:
-    """The R1..R6 display gates (in order), each mapped from the shared gate's findings."""
+def _stale_price_finding(stale: list[str]) -> gating.GateFinding:
+    """The R4-adjacent ``info`` finding for STALE (present but old) prices — M8, 2026-09-16.
+
+    Not part of ``gating.evaluate_gates``: R4's hard job is the missing-price anomaly card,
+    and staleness changes NEITHER the verdict NOR what executes (the run proceeds off the
+    older close). What it does change is what the owner is told — and until now the pipeline
+    card warned about staleness while this very dry run reported 「R4 價格資料 ✓ 通過」 for the
+    same task. It is emitted at the display layer, beside R4, in the gate layer's own
+    ``GateFinding`` shape, so the modal renders it like any other row (``pipeline-preflight.
+    js`` iterates the list; ``_verdict``/``_first_blocker`` read only fail/warn, so an info
+    row is display-only by construction — the same posture as a labelled stale price on the
+    dashboard: disclosed, never guessed, never blocking).
+    """
+    return gating.GateFinding(
+        id="R4", lv="info",
+        msg=f"價格過期（以舊價產生）：{', '.join(stale)}",
+        reason="R4_stale_price",
+    )
+
+
+def _rule_gates(
+    result: GateResult, *, disabled_template_id: int | None, stale_prices: list[str],
+) -> list[dict[str, Any]]:
+    """The R1..R6 display gates (in order), each mapped from the shared gate's findings.
+
+    ``stale_prices`` appends ONE extra info row directly after the R4 slot (M8). It is
+    appended rather than merged into R4 because the slot must keep reporting the gate's own
+    verdict verbatim — a reader comparing the modal against ``job_runs`` must still see the
+    R4 the runtime gate produced.
+    """
     gates: list[dict[str, Any]] = []
     for rule_id in _RULE_SLOTS:
         finding = _finding_for(result, rule_id)
@@ -1342,6 +1411,12 @@ def _rule_gates(result: GateResult, *, disabled_template_id: int | None) -> list
         gates.append(
             {"id": rule_id, "name": _RULE_NAMES[rule_id], "lv": lv, "msg": msg, "fix": fix}
         )
+        if rule_id == "R4" and stale_prices:
+            extra = _stale_price_finding(stale_prices)
+            gates.append({
+                "id": extra.id, "name": _RULE_STALE_NAME, "lv": extra.lv,
+                "msg": extra.msg, "reason": extra.reason, "fix": None,
+            })
     return gates
 
 
@@ -1529,7 +1604,8 @@ def _preflight_saved(
         else _resolve_markets(data) if it.scope == "per_market"
         else []
     )
-    missing = _missing_prices_for(data, it.scope, universe, conn)
+    # M8: the SAME pair the pipeline card's input node reads (``_gather_facts``).
+    missing, stale = _price_state_for(data, it.scope, universe, conn)
     inputs = RunInputs(
         budget_remaining=quota,
         master_configured=master_configured,
@@ -1544,7 +1620,7 @@ def _preflight_saved(
         enabled=it.enabled, scope=it.scope, scheduled=_is_scheduled(conn, it.id),
         self_correct=it.self_correct, master_configured=master_configured,
         unapplied_calibration=_unapplied_calibration(conn, it),
-        strategy_ids=strategy_ids,
+        strategy_ids=strategy_ids, stale_prices=stale,
     )
     payload: dict[str, Any] = {"gates": gates, "verdict": _verdict(gates)}
     if include_preview:
@@ -1574,7 +1650,7 @@ def _preflight_draft(
         else _resolve_markets(data) if draft.scope == "per_market"
         else []
     )
-    missing = _missing_prices_for(data, draft.scope, universe, conn)
+    missing, stale = _price_state_for(data, draft.scope, universe, conn)
     inputs = RunInputs(
         budget_remaining=quota,
         master_configured=master_configured,
@@ -1588,7 +1664,7 @@ def _preflight_draft(
         enabled=draft.enabled, scope=draft.scope, scheduled=False,  # a draft has no schedule
         self_correct=draft.self_correct, master_configured=master_configured,
         unapplied_calibration=False,  # a draft has no calibration chain
-        strategy_ids=draft.strategy_ids,
+        strategy_ids=draft.strategy_ids, stale_prices=stale,
     )
     payload: dict[str, Any] = {"gates": gates, "verdict": _verdict(gates)}
     if include_preview:
@@ -1613,11 +1689,13 @@ def _compose_gates(
     master_configured: bool,
     unapplied_calibration: bool,
     strategy_ids: list[int],
+    stale_prices: list[str],
 ) -> list[dict[str, Any]]:
-    """Assemble the fixed §7.2 gate list: G0, G1, R1..R6 (shared gate), G7."""
+    """Assemble the fixed §7.2 gate list: G0, G1, R1..R6 (shared gate) [+R4 stale info], G7."""
     g0, g1 = _g0_g1(enabled=enabled, scope=scope, scheduled=scheduled)
     rule_gates = _rule_gates(
-        result, disabled_template_id=_disabled_template_id(conn, strategy_ids)
+        result, disabled_template_id=_disabled_template_id(conn, strategy_ids),
+        stale_prices=stale_prices,
     )
     g7 = _g7(
         conn, self_correct=self_correct, master_configured=master_configured,

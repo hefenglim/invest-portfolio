@@ -168,10 +168,14 @@ def test_the_rebalance_footer_total_equals_the_visible_fields(
     assert total_text, f"no 目標合計 in the footer: {footer}"
     footer_pct = float(total_text.replace("目標合計", "").replace("%", "").strip())
 
-    # Guard the guard: with three equal positions the fields must NOT sum to a clean 100,
-    # or this test would pass on a fixture that cannot express the defect.
-    assert abs(field_sum - 100.0) > 0.05, (
-        f"the fixture rounds too cleanly to detect the defect: {shown}")
+    # Guard the guard (rewritten 2026-09-16 for L9): three equal positions round naively to
+    # 33.3 × 3 = 99.9 — the fixture this test used to rely on to expose F-06. The seeds are
+    # now apportioned by largest remainder, so the fields sum to 100.0 BY CONSTRUCTION; the
+    # proof that the apportionment ran (rather than the fixture rounding cleanly) is that
+    # the three fields are NOT all equal — one of them carries the leftover tenth.
+    assert abs(field_sum - 100.0) < 0.05, (
+        f"the apportioned seeds should close the leftover tenth: {shown}")
+    assert len(set(shown)) > 1, f"the leftover tenth was not apportioned: {shown}"
     assert abs(footer_pct - field_sum) < 0.05, (
         f"footer says {footer_pct}% but the {len(shown)} visible fields sum to {field_sum}%")
 

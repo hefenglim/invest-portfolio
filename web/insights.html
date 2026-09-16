@@ -306,6 +306,12 @@
     return pill;
   }
 
+  /* L21: the server sends `confidence` as the model's self-rated 0–100 INTEGER. It used to
+     render as `f.num(c / 100, 2)` — a bare ratio — so 85 printed 「信心 0.85」 and 0 printed
+     「信心 0.00」, which is indistinguishable at a glance from the 「純描述・無預測」 case one
+     line of code above it. The code always distinguished them; only the FORMAT hid it.
+     Now: an integer percent, plus an explicit tooltip on the 0 case, because 0% is a real
+     self-assessment (極低信心) and must not read as "not provided". */
   function confChip(card) {
     if (card.unreadable) return null;
     if (card.confidence == null) {
@@ -313,11 +319,32 @@
     }
     var chip = el('span', 'insight-conf');
     chip.appendChild(document.createTextNode('信心 '));
-    chip.appendChild(el('b', null, f.num(card.confidence / 100, 2)));
+    chip.appendChild(el('b', null, f.num(card.confidence, 0) + '%'));
+    if (Number(card.confidence) === 0) chip.title = '模型自評信心 0%（極低）— 非未提供';
     if (card.calibration_version != null) {
       chip.appendChild(document.createTextNode('・校正 v' + card.calibration_version));
     }
     return chip;
+  }
+
+  /* M9: the server's read-time figure check (`figure_flags`) compared what this card PRINTS
+     against the variable snapshot it was generated from. Measured on cached cards: 「未實現
+     獲利 429.1 萬美元」 beside a sibling card's 「4,290.80 美元」 (×1000), and a card naming
+     「LRDIM (6883)」 — a code held nowhere. The card is NEVER hidden: a flagged number sits in
+     narrative the owner may still want. Both lists are server-computed and server-capped;
+     this renders them and nothing else. */
+  function figureFlagPill(card) {
+    var ff = card.figure_flags || {};
+    var figs = ff.unverified_figures || [];
+    var syms = ff.unknown_symbols || [];
+    if (!figs.length && !syms.length) return null;
+    var pill = el('span', 'badge badge-missing', '數值待核');
+    var lines = [];
+    if (figs.length) lines.push('對不上的數字：' + figs.join('、'));
+    if (syms.length) lines.push('未知代碼：' + syms.join('、'));
+    lines.push('卡片中的數字未出現在餵入的變數快照中，請以儀表板數字為準');
+    pill.title = lines.join('\n');
+    return pill;
   }
 
   function cardNode(card) {
@@ -335,6 +362,8 @@
     foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
     var conf = confChip(card);
     if (conf) foot.appendChild(conf);
+    var flagged = figureFlagPill(card);
+    if (flagged) foot.appendChild(flagged);
     foot.appendChild(attribNode(card));
     c.appendChild(foot);
     return c;
@@ -383,6 +412,8 @@
     foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
     var conf = confChip(card);
     if (conf) foot.appendChild(conf);
+    var flagged = figureFlagPill(card);
+    if (flagged) foot.appendChild(flagged);
     foot.appendChild(attribNode(card));
     c.appendChild(foot);
     if (opts.dimmed) c.classList.add('dimmed');

@@ -9,9 +9,11 @@ PROTECTED (one auth user — the router's guest lockdown checks ``auth_store.is_
 """
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -19,12 +21,17 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pytest_socket import disable_socket, enable_socket
 
+from portfolio_dash.api import digest_service
 from portfolio_dash.api.auth_store import create_auth_tables, create_user
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import register_error_handlers
 from portfolio_dash.api.routers import digest as digest_router
 from portfolio_dash.ops import digest as digest_store
+from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.pricing.store import upsert_prices
 from portfolio_dash.scheduler.jobs import create_scheduler_tables
+from portfolio_dash.shared.enums import Market
+from tests.conftest import GOLDEN_NOW
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=ZoneInfo("Asia/Taipei"))
 
@@ -187,3 +194,51 @@ def test_guest_reads_are_open(guest_client: TestClient) -> None:
     assert guest_client.get("/api/digest/latest", params={"kind": "daily"}).status_code == 200
     assert guest_client.get("/api/digest/config").status_code == 200
     assert guest_client.get("/api/digest/history", params={"kind": "weekly"}).status_code == 200
+
+
+# --- L17: the job summary must not print an unquantized Decimal ------------------------
+
+
+def test_daily_summary_percentage_is_quantized(golden_db: sqlite3.Connection) -> None:
+    """L17 — ``run_digest_daily``'s return value lands in ``job_runs.detail`` and is read
+    by a human in 設定 → 排程中心 → 執行歷史. It printed the raw weighted-average ratio:
+
+        daily digest 2026-07-22: 組合 -0.06720304659217097625472012746, 警示 0, ...
+
+    — the full division tail of ``Σ(w·pct)/Σw``. It now routes through the SAME
+    ``_signed_pct`` the push body uses, so one number has one display form everywhere.
+    The STORED payload is untouched: quantize at display, never at storage
+    (data-and-pricing.md).
+    """
+    # The golden DB holds one close (2026-06-09); a second one makes day-change computable.
+    # 7/600 and 1/120 are both non-terminating once value-weighted — i.e. exactly the shape
+    # that produced the 28-digit tail, not a round number that would hide the defect.
+    upsert_prices(golden_db, [
+        PriceRow(instrument="2330", market=Market.TW, as_of=date(2026, 6, 10),
+                 close=Decimal("607"), source="test"),
+        PriceRow(instrument="AAPL", market=Market.US, as_of=date(2026, 6, 10),
+                 close=Decimal("121"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+
+    summary = digest_service.run_digest_daily(golden_db, now=GOLDEN_NOW)
+
+    body = summary.split("組合 ", 1)[1].split(",", 1)[0]
+    assert body != "—", "the fixture must actually produce a day-change to be a regression"
+    # A signed percentage at 2 dp — never a 28-digit Decimal tail.
+    assert re.fullmatch(r"[+−]?\d+\.\d{2}%", body), f"unquantized summary figure: {body!r}"
+
+    # …while the stored payload keeps FULL precision (the quantization is display-only).
+    stored = digest_store.get_latest(golden_db, "daily")
+    assert stored is not None
+    raw = stored["payload"]["day_change"]["portfolio_pct"]
+    assert raw is not None and len(str(raw).split(".")[-1]) > 4, (
+        f"the stored ratio was truncated too — quantize at display only: {raw!r}")
+
+
+def test_digest_latest_wire_is_unchanged(client: TestClient, conn: sqlite3.Connection) -> None:
+    """The L17 fix touches a SUMMARY STRING, not the payload. The /latest wire keys the
+    dashboard card binds to are pinned here so a later 'tidy up' cannot migrate the fix
+    into the contract."""
+    _seed(conn, "daily", "2026-07-14", {"schema_version": 1, "kind": "daily"})
+    body = client.get("/api/digest/latest", params={"kind": "daily"}).json()
+    assert set(body) == {"kind", "digest_date", "generated_at", "payload"}

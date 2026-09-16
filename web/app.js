@@ -64,9 +64,20 @@
     $('#report-ccy').textContent = '報告幣別 ' + D.reporting_currency;
     const chip = $('#fresh-chip');
     if (D.freshness && D.freshness.any_stale) {
+      /* L14 (demo audit 2026-09-16): one wording — 「部分過期」 — covered 1 stale symbol of
+         13 and 13 of 13 alike. Count what the freshness block already lists (prices + FX
+         pairs) and say 全部 when it is all of them; the count rides in the chip so the
+         reader knows the size of the problem before opening the panel. */
+      const fr = D.freshness;
+      const staleN = (fr.prices || []).filter((p) => p.stale).length
+        + (fr.fx || []).filter((x) => x.stale).length;
+      const totalN = (fr.prices || []).length + (fr.fx || []).length;
+      const allStale = totalN > 0 && staleN === totalN;
       chip.className = 'badge badge-fresh-stale';
-      chip.innerHTML = '<span class="dot"></span>部分過期';
-      chip.title = '部分價格或匯率資料已過期，點擊查看資料新鮮度明細';
+      chip.innerHTML = '<span class="dot"></span>'
+        + (allStale ? '全部過期' : '部分過期 ' + staleN + '/' + totalN);
+      chip.title = (allStale ? '所有價格與匯率資料都已過期'
+        : staleN + ' 項價格／匯率資料已過期（共 ' + totalN + ' 項）') + '，點擊查看資料新鮮度明細';
       // Restored, not assumed: the else-branch below REMOVES the href, so a refresh that
       // went fresh -> stale left a chip that says 「點擊查看」 and is no longer a link.
       chip.href = '#freshness';
@@ -431,9 +442,13 @@
        · 未實現損益 has no such report-currency twin in the payload, and inventing one would
          mean a new API field. It therefore sorts CURRENCY-FIRST, value-second: the ranking
          is honest inside each currency and never claims a cross-currency one. */
-    { key: 'market_value', label: '市值', sortBy: 'weight',
-      note: '依報告幣別市值排序（＝權重順序）' },
-    { key: 'unrealized_pnl', label: '未實現損益', ccyScoped: true,
+    /* `scope` is the marker shown IN the header while the column is the active sort (L1,
+       demo audit 2026-09-16): 市值 sorted by report-currency value showed 41,321 USD above
+       343,500 TWD with nothing on screen explaining it, while its neighbour said 「（分幣別）」.
+       Two non-naive sorts, two markers. */
+    { key: 'market_value', label: '市值', sortBy: 'weight', scope: '（依報告幣別）',
+      note: '依報告幣別市值排序（＝權重順序）；顯示的是原幣金額' },
+    { key: 'unrealized_pnl', label: '未實現損益', ccyScoped: true, scope: '（分幣別）',
       note: '原幣金額：排序先分幣別、同幣別內比大小（前端不做匯率換算）' },
     { key: 'payback_ratio', label: '股利回收率' },
     { key: 'weight', label: '權重' }
@@ -454,8 +469,8 @@
       if (c.note) th.title = c.note;
       if (holdingsState.sortKey === c.key) {
         th.appendChild(el('span', 'arrow', holdingsState.sortDir > 0 ? '▲' : '▼'));
-        if (c.ccyScoped) {
-          const m = el('span', 'sort-scope', '（分幣別）');
+        if (c.scope) {
+          const m = el('span', 'sort-scope', c.scope);
           m.style.cssText = 'font-weight:400;color:var(--text-3);font-size:10px;margin-left:2px';
           th.appendChild(m);
         }
@@ -587,6 +602,19 @@
     const maxWeight = Math.max(...D.holdings.map((h) => h.weight || 0));
     const maxPayback = Math.max(...D.holdings.map((h) => h.payback_ratio || 0));
     /* Mini-bar fill widths go through the module-scope `barWidth` clamp — see its note. */
+    /* L23 (demo audit 2026-09-16): 「台灣券商 × 美股」 is an empty intersection, and the table
+       answered it with nothing but a totals row reading 「0 0」. Say what happened. */
+    if (!rows.length) {
+      const tr = el('tr', 'holdings-empty');
+      const td = el('td', 'hint');
+      td.colSpan = HOLDING_COLS.length;
+      td.style.cssText = 'text-align:center;padding:14px 8px;color:var(--text-3)';
+      td.textContent = (holdingsState.account !== 'all' || holdingsState.market !== 'all')
+        ? '此篩選條件下沒有持倉 — 所選帳戶與市場沒有交集，請調整上方篩選'
+        : '尚無持倉';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
 
     rows.forEach((h) => {
       const tr = el('tr');
@@ -781,10 +809,13 @@
     tr.appendChild(tdLabel);
     const sub = holdingsSubtotal();
     const tdMv = el('td', 'num');
-    tdMv.textContent = f.money(sub.total_market_value, D.reporting_currency);
+    /* An empty filter result has no subtotal to report (L23): 「—」, not a fabricated 0. */
+    tdMv.textContent = rows.length ? f.money(sub.total_market_value, D.reporting_currency) : f.NULL_GLYPH;
     tr.appendChild(tdMv);
     const pnl = sub.unrealized_total;
-    const tdPnl = el('td', 'num ' + f.signClass(pnl), f.signed(pnl, D.reporting_currency));
+    const tdPnl = rows.length
+      ? el('td', 'num ' + f.signClass(pnl), f.signed(pnl, D.reporting_currency))
+      : el('td', 'num', f.NULL_GLYPH);
     tr.appendChild(tdPnl);
     const tdRest = el('td');
     tdRest.colSpan = 2;
@@ -1271,6 +1302,31 @@
     [fr.xirr_unavailable_reason, fr.trend_unavailable_reason].forEach((reason) => {
       if (reason) notes.appendChild(el('div', 'fresh-note', reason));
     });
+    /* M3 (demo audit 2026-09-16): a stopped scheduler was invisible from here — the 今日摘要
+       card sat on a July run with nothing on the dashboard saying why. Router-fed flag. */
+    if (fr.scheduler_running === false) {
+      notes.appendChild(el('div', 'fresh-note',
+        '排程器未啟動：本實例的報價更新、摘要、備份等排程工作都不會自動執行'
+        + '（設定 → 排程中心 可手動執行）'));
+    }
+    /* M1 (demo audit 2026-09-16): the three stored pairs are fetched independently and do not
+       close a triangle — measured USD/MYR × MYR/TWD = 31.8570 vs USD/TWD 31.8350 (+0.069%),
+       enough for a spot conversion to move the report-currency total by 40 TWD with no ledger
+       change. The backend measures the gap (`fx_triangulation`); this line discloses it. The
+       rates themselves are never touched here — which pair should be derived is an owner call. */
+    (fr.fx_triangulation || []).forEach((t) => {
+      const n = el('div', 'fresh-note');
+      if (!t.ok) n.style.color = 'var(--amber)';
+      /* implied / direct are backend Decimal strings already quantized for display (6 dp);
+         printed verbatim — a rate is not money, and app.js keeps `f.rate` as its only rate
+         formatter (M3-08 ruling, pinned by test_m3_08_fx_ledger_rate_precision). */
+      n.textContent = '匯率三角一致性 ' + t.pair + '：' + t.via + ' 推得 '
+        + t.implied + '，直接報價 ' + t.direct
+        + '，落差 ' + t.gap_pct + '%'
+        + (t.ok ? '（一致）'
+          : '（超過 0.05% — 三組匯率各自獨立取得，跨幣別換算路徑不同時會出現微小的幻影損益）');
+      notes.appendChild(n);
+    });
   }
 
   /* shared empty state */
@@ -1289,7 +1345,9 @@
     kbRows().forEach((r, i) => r.classList.toggle('kb-focus', i === kbIndex));
   }
   document.addEventListener('keydown', (e) => {
-    if (e.target.closest('input, textarea, select')) return;
+    /* L2 (demo audit 2026-09-16): `e.target` is not always an Element — a synthetic keydown
+       dispatched on `document` reached `.closest` and threw. Guard, never assume. */
+    if (!(e.target instanceof Element) || e.target.closest('input, textarea, select')) return;
     if (document.querySelector('.sd-backdrop') || document.querySelector('.search-backdrop')) return;
     const rows = kbRows();
     if (!rows.length) return;
@@ -1430,12 +1488,51 @@
     twMaybeHint(anyScrollable);
   }
 
+  /* L25 (demo audit 2026-09-16): 更新報價 / 重算 end in a full page reload (shell.js), which
+     threw away the holdings filter + sort, every open <details>, and the scroll position.
+     The reload STAYS — charts.js / digest.js / alerts.js / dividends-card.js each read their
+     own endpoint, so a partial re-render here would put two vintages of data on one screen —
+     but the view state survives it: shell.js calls `pdBeforeReload` right before reloading,
+     and boot() consumes the note once. sessionStorage is per-tab and may be absent
+     (private mode, blocked storage): every access is guarded and a miss just boots fresh. */
+  const RELOAD_KEY = 'pd_reload_state';
+  window.pdBeforeReload = function () {
+    try {
+      const open = Array.from(document.querySelectorAll('details[id]'))
+        .filter((d) => d.open).map((d) => d.id);
+      sessionStorage.setItem(RELOAD_KEY, JSON.stringify({
+        holdings: {
+          account_id: holdingsState.account, market: holdingsState.market,
+          sortKey: holdingsState.sortKey, sortDir: holdingsState.sortDir,
+        },
+        open: open,
+        scrollY: window.scrollY,
+      }));
+    } catch (e) { /* no storage: the reload simply starts fresh */ }
+  };
+  function takeReloadState() {
+    try {
+      const raw = sessionStorage.getItem(RELOAD_KEY);
+      if (!raw) return null;
+      sessionStorage.removeItem(RELOAD_KEY);
+      return JSON.parse(raw);
+    } catch (e) { return null; }
+  }
+
   async function boot() {
     try {
       D = await (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
     } catch (err) {
       bootError(err);
       return;
+    }
+    const saved = takeReloadState();
+    if (saved && saved.holdings) {
+      const hs = saved.holdings;
+      if (typeof hs.account_id === 'string') holdingsState.account = hs.account_id;
+      if (typeof hs.market === 'string') holdingsState.market = hs.market;
+      holdingsState.sortKey = hs.sortKey || null;
+      holdingsState.sortDir = hs.sortDir === 1 ? 1 : -1;
     }
     renderHeader();
     renderKpis();
@@ -1454,6 +1551,13 @@
     /* Tables are populated above; measure overflow now (and re-measure on resize). */
     enhanceTableScroll();
     window.addEventListener('resize', enhanceTableScroll);
+    if (saved) {
+      (saved.open || []).forEach((id) => {
+        const d = document.getElementById(id);
+        if (d && d.tagName === 'DETAILS') d.open = true;
+      });
+      if (typeof saved.scrollY === 'number') window.scrollTo(0, saved.scrollY);
+    }
   }
 
   /* Graceful degradation when the dashboard payload cannot be loaded (non-401; 401 is

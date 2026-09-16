@@ -422,6 +422,7 @@ def _quote_outcome(
         except Exception as exc:  # noqa: BLE001 — cannot tell what is held → count everything
             logger.warning("held-symbols seam failed; counting every lost instrument: %s", exc)
     held_failed = [s for s in instruments_failed if held is None or s in held]
+    fetched = [ref.symbol for ref in instruments if ref.symbol in ok]
     return JobOutcome(
         status="partial" if held_failed else "ok",
         detail=_summarize(summary),
@@ -430,7 +431,46 @@ def _quote_outcome(
             "instruments_failed": instruments_failed,
             "held_failed": held_failed,
             "fx_failed": fx_failed,
+            "lagging": _lagging_symbols(conn, fetched, held),
         },
+    )
+
+
+def _lagging_symbols(
+    conn: sqlite3.Connection, fetched: list[str], held: set[str] | None
+) -> list[str]:
+    """HELD symbols the provider answered with a close OLDER than the run's newest (L24).
+
+    Demo audit 2026-09-16: after 更新報價, 0056 stayed on 2026-09-11 while every other TW
+    holding moved to 09-14. That is not a FAILURE — the fetch succeeded and stored the date
+    the provider had — so ``held_failed`` was empty, the verdict was ``ok``, and the only
+    place the user could learn it was the freshness table. The verdict stays ``ok`` (the
+    data is exactly what the source has); the outcome just NAMES the laggards so the toast
+    can. Compared within one run: the worklist is per market, so the newest date across
+    ``fetched`` is the market's newest session, and a symbol behind it is behind its peers.
+
+    Read straight from ``prices`` (a ``pricing`` table — the direct-SQL convention,
+    ``architecture.md``): ``MAX(as_of_date)`` per instrument, an EXISTENCE-and-DATE read
+    that no split can change. Degrades to ``[]`` when the table is absent (ledger-only DB).
+    """
+    if not fetched:
+        return []
+    marks = ",".join("?" for _ in fetched)
+    try:
+        rows = conn.execute(
+            f"SELECT instrument, MAX(as_of_date) FROM prices WHERE instrument IN ({marks}) "
+            "GROUP BY instrument",
+            fetched,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    latest = {str(r[0]): str(r[1]) for r in rows if r[1] is not None}
+    if not latest:
+        return []
+    newest = max(latest.values())
+    return sorted(
+        s for s, d in latest.items()
+        if d < newest and (held is None or s in held)
     )
 
 

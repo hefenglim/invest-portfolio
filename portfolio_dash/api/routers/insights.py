@@ -23,10 +23,11 @@ from portfolio_dash.api import insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.routers.scheduler import get_scheduler
+from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
+from portfolio_dash.llm_insight import figure_check, official_templates
 from portfolio_dash.llm_insight import insights_store as istore
-from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.scheduler.jobs import (
     bind_insight_schedule,
@@ -957,7 +958,34 @@ def insight_task_diagnose(
 # --- stored cards list (spec 4.10) --------------------------------------------
 
 
-def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
+def _known_symbols(conn: sqlite3.Connection) -> set[str]:
+    """Every registered instrument symbol — the M9 figure check's "is this a real ticker?".
+
+    Computed ONCE per request and threaded into :func:`_card_wire` (trap #21): the list
+    endpoint serializes up to 500 cards, and re-reading ``instruments`` per card would pay
+    for the same table 500 times.
+    """
+    return {i.symbol for i in list_instruments(conn)}
+
+
+def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, Any]:
+    """The M9 read-time figure check for one card (never blocks, never hides).
+
+    Compares what the card PRINTS against the variable snapshot it was GENERATED from.
+    Measured on cached cards (audit 2026-09-16): 「未實現獲利 429.1 萬美元」 beside a sibling
+    card's 「未實現收益 4,290.80 美元」 from the same batch (×1000), and a card naming
+    「LRDIM (6883)」 — a code held nowhere. The logic is the pure ``llm_insight.figure_check``;
+    this router only feeds it and serializes (no business logic in routers).
+    """
+    flags = figure_check.check_figures(
+        f"{rec.card.title}\n{rec.card.summary}\n{rec.card.body_md}",
+        rec.input_snapshot,
+        known_symbols,
+    )
+    return flags.model_dump()
+
+
+def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, Any]:
     pred = rec.card.prediction
     return {
         "id": rec.id,
@@ -985,6 +1013,9 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
         # M7-08: the stored prediction could not be read back → prediction is None above
         # and the page draws a 待釐清 pill instead of a confidence chip. Flagged, not hidden.
         "unreadable": rec.unreadable,
+        # M9: the read-time figure check's two capped lists. Always present (empty = clean);
+        # the page renders a 「數值待核」 pill beside the confidence chip when either is filled.
+        "figure_flags": _figure_flags(rec, known_symbols),
         "horizon_days": rec.horizon_days,
         "due_at": rec.due_at,
         "model": rec.model,
@@ -1030,6 +1061,7 @@ def list_insights(
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"group 非有效值：{group}", field="group"))
     excluded = cs.archived_type_ids(conn)
+    known = _known_symbols(conn)  # once per request, not once per card
     if group == "symbol":
         groups, total_symbols = istore.list_symbol_groups(
             conn, history_limit=history_limit, limit=limit, offset=offset,
@@ -1037,7 +1069,11 @@ def list_insights(
         )
         return {
             "groups": [
-                {"symbol": sym, "total": total, "cards": [_card_wire(c) for c in cards]}
+                {
+                    "symbol": sym,
+                    "total": total,
+                    "cards": [_card_wire(c, known) for c in cards],
+                }
                 for sym, total, cards in groups
             ],
             "total_count": total_symbols,
@@ -1046,7 +1082,7 @@ def list_insights(
             "history_limit": history_limit,
         }
     rows = [
-        _card_wire(rec)
+        _card_wire(rec, known)
         for rec in istore.list_cards(
             conn, insight_type_id=insight_type, symbol=symbol,
             exclude_type_ids=excluded, scope=scope, limit=limit, offset=offset,

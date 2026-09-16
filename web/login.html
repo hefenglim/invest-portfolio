@@ -65,15 +65,26 @@
      returns { username, name }, then we go to index.html. On a PdApiError (401 bad
      creds, or 400 body validation) we show the message in #login-error — the api.js
      401-redirect is suppressed on this page, so the error survives to be rendered.
-     No network call on load (the shell, not this page, routes signed-out users here);
-     empty-field validation stays client-side. */
+     ONE network call on load — GET /api/auth/session — only to learn whether the site is in
+     guest mode (L22, demo audit 2026-09-16: with no authorised user yet, any credentials
+     pass, and a page that says nothing about it reads as a lock to a visitor). A failed
+     probe leaves the form exactly as before; empty-field validation stays client-side. */
   (function () {
     var userInput = document.getElementById('login-user');
     var passInput = document.getElementById('login-pass');
     var errEl = document.getElementById('login-error');
     var btn = document.getElementById('login-btn');
+    var hintEl = document.getElementById('login-hint');
 
     function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
+
+    window.pdApi.get('/api/auth/session').then(function (s) {
+      if (s && s.mode === 'guest' && hintEl) {
+        hintEl.textContent = '目前為訪客模式：尚未設定授權用戶，任何帳號密碼都能進入，'
+          + '資料未受登入保護。要啟用保護，請在 設定 → 授權用戶 新增用戶。';
+        hintEl.hidden = false;
+      }
+    }).catch(function () { /* unknown mode: say nothing rather than guess */ });
 
     async function submit() {
       var u = userInput.value.trim();

@@ -486,8 +486,16 @@ def run_digest_daily(
     )
     push = _push(conn, "daily", payload, now=now, sender=sender)
     dc = payload["day_change"]["portfolio_pct"]
+    # L17: this line is a HUMAN summary (it lands in ``job_runs.detail`` and in the 排程中心
+    # 執行歷史 column), and it printed the raw ratio — measured
+    # 「組合 -0.06720304659217097625472012746」, the full 28-digit tail of the weighted
+    # division. Route it through the SAME ``_signed_pct`` the push body uses, so one number
+    # has one display form everywhere: 「組合 −6.72%」. The STORED payload keeps full
+    # precision (``_signed_pct`` reads it, never replaces it) — quantizing at display is
+    # the rule (data-and-pricing.md), quantizing at storage is the thing that rule forbids.
+    dc_txt = _signed_pct(str(dc)) if dc is not None else "—"
     return (
-        f"daily digest {payload['digest_date']}: 組合 {dc if dc is not None else '—'}, "
+        f"daily digest {payload['digest_date']}: 組合 {dc_txt}, "
         f"警示 {len(payload['alerts_today'])}, 訊號 {len(payload['signals_today'])}; {push}"
     )
 

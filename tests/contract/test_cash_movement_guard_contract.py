@@ -28,7 +28,7 @@ re-recording is deliberate behaviour, not drift:
   status, same code, same figure; only the day is new.
 * M5-06 — ``withdraw_backdated_before_funding`` is refused by a DIFFERENT branch: the guard's
   covering balance is now the pool's balance ON THE WITHDRAWAL'S OWN DATE (2026-06-01 → 0), so
-  the primary 「超過 … 賬戶現金 0」 check fires before the running-minimum one ever runs. Same
+  the primary 「超過 … 帳戶現金 0」 check fires before the running-minimum one ever runs. Same
   status, same code, same verdict; the sentence states the same fact more directly.
 * M5-06 — ``GET /api/cash`` balances are AS OF the request clock, and every row this sequence
   writes is dated AFTER the frozen GOLDEN_NOW (2026-06-11). The ledger is therefore read back
@@ -156,21 +156,21 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "MYR", "amount": "1"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 1 MYR 超過 Moomoo MY 的 MYR 賬戶現金 0 — "
+         "message": "出金金額 1 MYR 超過 Moomoo MY 的 MYR 帳戶現金 0 — "
                     "出金不可透支（請先補登入金或換匯）"}},
     {"n": "withdraw_negative_pool", "m": _POST, "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "withdraw",
         "ccy": "TWD", "amount": "100"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 100 TWD 超過 TW Broker 的 TWD 賬戶現金 -495000 — "
+         "message": "出金金額 100 TWD 超過 TW Broker 的 TWD 帳戶現金 -495000 — "
                     "出金不可透支（請先補登入金或換匯）"}},
     {"n": "withdraw_ack_does_not_bypass", "m": _POST, "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "withdraw",
         "ccy": "TWD", "amount": "100", "ack_negative": True},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 100 TWD 超過 TW Broker 的 TWD 賬戶現金 -495000 — "
+         "message": "出金金額 100 TWD 超過 TW Broker 的 TWD 帳戶現金 -495000 — "
                     "出金不可透支（請先補登入金或換匯）"}},
     # --- happy paths (the ids they mint are load-bearing for the edits below) ------------
     {"n": "deposit_ok", "m": _POST, "b": {
@@ -199,7 +199,7 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "999999"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 999999 TWD 超過 TW Broker 的 TWD 賬戶現金 55153 — "
+         "message": "出金金額 999999 TWD 超過 TW Broker 的 TWD 帳戶現金 55153 — "
                     "出金不可透支（請先補登入金或換匯）"}},
     # audit C3: the END balance covers it, but the pool had nothing on 2026-06-01. Since
     # M5-06 the covering balance is the one on the withdrawal's own date, so the primary
@@ -209,7 +209,7 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "USD", "amount": "400"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 400 USD 超過 Moomoo MY 的 USD 賬戶現金 0 — "
+         "message": "出金金額 400 USD 超過 Moomoo MY 的 USD 帳戶現金 0 — "
                     "出金不可透支（請先補登入金或換匯）"}},
     {"n": "withdraw_exact_balance", "m": _POST, "b": {
         "account_id": "moomoo_my", "date": "2026-07-25", "kind": "withdraw",

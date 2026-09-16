@@ -1,6 +1,7 @@
 /* portfolio-dash — 設定 · 排程 (wired to /api/scheduler/*, spec 15/19).
 
-   Boot: GET /api/scheduler/jobs -> { jobs:[{id,desc,cron,tz,enabled,last,next}] } and
+   Boot: GET /api/scheduler/jobs -> { jobs:[{id,desc,cron,tz,enabled,last,next}],
+   scheduler:{running,reason} } and
    GET /api/scheduler/runs -> { rows:[{id,job_id,started_at,finished_at,status,detail,
    duration_s,cost_usd}], total_count }, fetched in PARALLEL. The inline window.SCHED_DATA
    mock is RETIRED.
@@ -56,6 +57,33 @@
   let jobs = [];
   let runs = [];
   let sysRows = [];
+  /* M3: the top-level `scheduler` block from GET /api/scheduler/jobs, {running, reason}.
+     null until the first GET lands (render nothing rather than accuse a healthy instance). */
+  let schedState = null;
+
+  /* M3 — 「啟用」 is a STORED INTENT (a schedule_config row); it says nothing about whether
+     a scheduler exists in this process to honour it. Measured on the demo: all 25 jobs read
+     「啟用」 with 「下次執行」 = 「—」, which is indistinguishable from "the next fire is just
+     unknown" — and the dashboard's 今日摘要 was 56 days stale underneath a current-looking
+     title because of it. The banner names the cause once, above the table, and states the
+     one thing that still works (立即執行). Rejected: greying every 啟用 toggle (it would
+     misreport the stored setting, which IS on and IS what a restart will honour). */
+  function renderSchedBanner() {
+    const host = $('#sched-off-banner');
+    if (!host) return;
+    host.replaceChildren();
+    if (!schedState || schedState.running !== false) { host.hidden = true; return; }
+    host.hidden = false;
+    host.className = 'unreg-banner';
+    host.appendChild(el('span', null, '⚠'));
+    const text = el('div', 'unreg-text',
+      '排程器未啟動 — 本實例的所有排程工作都不會自動執行（「下次執行」因此皆為 —）；'
+      + '仍可用「立即執行」手動觸發');
+    if (schedState.reason) {
+      text.appendChild(el('span', 'sym-name cron-code', '　原因：' + schedState.reason));
+    }
+    host.appendChild(text);
+  }
 
   /* WPD (2026-07-07): the 200-dump + client-side job filter is replaced by SERVER
      job_id filter + limit/offset with the shared pdPager. Page size = the user's
@@ -682,6 +710,8 @@
       return null;
     });
     jobs = (jobsResp && jobsResp.jobs) || [];
+    schedState = (jobsResp && jobsResp.scheduler) || null;
+    renderSchedBanner();
     renderJobs();
     initHistFilter();
     await refreshRuns();
@@ -699,6 +729,8 @@
     const jobsResp = await api.get('/api/scheduler/jobs').catch(() => null);
     if (jobsResp && jobsResp.jobs) {
       jobs = jobsResp.jobs;
+      schedState = jobsResp.scheduler || null;
+      renderSchedBanner();
       renderJobs();
       initHistFilter();  // job list unchanged in practice; preserves the active filter chip
       // Overlay live status onto the freshly-rendered rows; resume polling if a run is

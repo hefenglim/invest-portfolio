@@ -9,6 +9,89 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Demo black-box audit remediation — 37 findings, 1 H / 9 M / 27 L (2026-09-16).**
+A full-site click-through of the demo on `85dfafd` (real browser, three widths, every form
+submitted and reverted) found no money-of-record defect — 93 identities held, three write/undo
+paths restored byte-identically — and 37 presentation, wiring and disclosure problems. 31 are
+fixed here; the rest are recorded in the report with their evidence and the owner decision each
+one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per item).
+
+*Numbers on the wire*
+
+- **The rebalance drawer no longer reports 100.00% and 「超過 100%」 in the same footer (H1).**
+  The client kept targets as JS floats and sent `String(ratio)` — `"0.006999999999999999"` —
+  which the server summed as exact Decimals to `1.000000000000000004 > 1`. Targets are now
+  integer tenths of a percent spelled onto the wire by digit surgery, the client Σ check is
+  integer arithmetic, and the server flag carries a `0.0001` tolerance that can never hide a
+  real overshoot. Seeds are apportioned by largest remainder so the drawer opens at exactly
+  100.0% when everything is priced (L9); the backend's `cash_after` is shown, negative or not,
+  with an overdraft warning (L10); a row with no trade says why — `summary.holds` /
+  `excluded_reasons` (L11). `LESSONS_LEARNED.md` records the class.
+- **The three stored FX pairs are checked for triangular consistency (M1).** USD/MYR × MYR/TWD
+  measured 31.8570 against a direct USD/TWD of 31.8350 (+0.069%), enough for a spot
+  conversion to move the report-currency total by 40 TWD with no ledger change.
+  `freshness.fx_triangulation` carries the implied / direct / gap per closed triangle and the
+  資料新鮮度 panel discloses it. Which pair should be DERIVED is an owner decision and is not
+  made here; the rates are untouched.
+- **An FX conversion's implied rate is quoted the conventional way on every surface (L6):**
+  the more valuable currency is the unit (rate ≥ 1), whichever side was sold, so a USD→MYR row
+  and a MYR→USD row both read 「1 USD = 4.0000 MYR」 — ledger pages, the printed report, and the
+  entry form's what-if line. `implied_unit_ccy` / `implied_per_ccy` name the direction.
+- **TW / MY share counts must be whole (L12).** A 0.5-股 TW sell previewed cleanly (min fee
+  20, tax floored). `validate_transaction` now raises the hard `shares_not_integer` on every
+  door, and the drawer's 試算 refuses the same input before pricing it. US fractions stay
+  allowed (deferred, not forbidden; DRIP books them).
+
+*Insight pipeline*
+
+- **The pipeline card's 「② 輸入」 node is scope-aware in every branch (M2)** — 「全持倉」 /
+  「N 個市場」 / 「N 檔標的」 — and the affected-symbol list is deduplicated (a symbol held in two
+  accounts appeared twice).
+- **Dry-run R4 and the pipeline card read the same price-readiness helper (M8):** missing →
+  warn on both (the zero-LLM anomaly card, unchanged), stale-only → info on both, so the two
+  gatekeepers can no longer contradict each other about the same task.
+- **AI cards get a read-time figure check (M9).** `llm_insight/figure_check.py` compares every
+  number in a card against the variable snapshot the card was generated from (scale variants,
+  0.5% tolerance) and flags parenthesised codes that are not registered instruments; the wire
+  carries `figure_flags`, and the card shows 「數值待核」 with the offending figures. Measured on
+  the cached cards: 「429.1 萬美元」 beside a sibling's 「4,290.80 美元」, and 「LRDIM (6883)」.
+  Nothing is hidden or blocked. Confidence renders as an integer percent (L21).
+
+*Disclosure and wiring*
+
+- **A stopped scheduler is visible (M3):** `GET /api/scheduler/jobs` carries
+  `scheduler: {running, reason}`, the 排程中心 shows a banner, the dashboard freshness block
+  carries `scheduler_running`, and a digest older than its cadence (daily > 2 days, weekly > 8)
+  is marked 「已過期・N 天前產生」. The demo runs with `PD_DISABLE_SCHEDULER=1` by design; the
+  screen now says so instead of showing a July 「今日摘要」 as current.
+- **The manual-trade commit warms the account it wrote to (M4)** — it warmed the dividend
+  form's select instead, so the next entry's picker showed the pre-trade 100 股 / 93.20.
+- **Every remaining English account name is gone (M5):** cash.js, corp-action-form.js,
+  input.js (CSV preview + both selects), rebalance.js, rebate-inbox.js and inbox.js resolve
+  through `window.pdNames`; `_PENDING` in the single-source contract test is empty. Account
+  selects also name the currencies the account actually trades (L8).
+- **The symbol drawer lives in the browser history (M6):** one open pushes one `#sym=` entry
+  (shareable), Back closes it, ✕ pops it, switching symbols replaces it.
+- **The FX estimate caption can no longer freeze on 「試算中…」 (M7)** — a manual buy amount
+  typed while the estimate was in flight now rewrites the caption synchronously (the audit's
+  guess was a copy defect; the cause was a race).
+- **Smaller:** 市值 sort marker (L1); keydown `.closest` guards (L2); fail/warn toasts dismiss
+  after 30 s and identical toasts dedupe (L3); 「賬」→「帳」 everywhere incl. server messages (L4);
+  full-width punctuation on three hints (L5); the FX form says when it flips the sibling
+  currency (L7); 「全部過期」 vs 「部分過期 n/m」 (L14); the ledger page fetches only the visible
+  tab (L16); job summaries quantize the digest pct (L17); fee/tax fields clear with the form and
+  an empty form is never red (L18); 當沖 hidden on 買進 (L20); the login page says when the site
+  is in guest mode (L22); an empty filter intersection says so (L23); 更新報價 names held
+  symbols the provider left on an older date (`lagging`, L24) and the reload keeps filters,
+  open panels and scroll position (L25).
+
+*Not fixed, recorded with evidence*: L13 (automatic AI resolve is a deliberate R6-B design —
+owner call), L15 / L19 (not reproducible from the code; the footer and the toast exist —
+awaiting the owner's repro), L27 (the duplicate TSLA/MSFT sells and 2330/5225 dividends are
+accumulated stress-test writes, the 1987 dividend event is AAPL's real yfinance history —
+whether to dedupe the corpus is an owner call). The demo's `0056` sector was corrected to
+`ETF` in place after a backup (L26).
+
 **Site-wide stability convergence round — 29 items closed, 11 fixer agents, one working tree (2026-09-02 → 09-06).**
 A walk of every module as a real user, then a second wave that closed every remaining decision.
 The judgment rule throughout: a change that makes a **broken** thing work again is in scope; one

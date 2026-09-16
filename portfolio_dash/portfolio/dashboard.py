@@ -14,7 +14,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
@@ -40,6 +40,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     ExDividendItem,
     FreshnessReport,
     FxFreshness,
+    FxTriangle,
     HoldingRow,
     HoldingSubtotal,
     KpiSummary,
@@ -136,6 +137,76 @@ class RateResolver:
             # badge renders (web/app.js) — so it is a user-facing string, not log text.
             raise KeyError(f"尚無 {base.value}/{quote.value} 匯率資料")
         return read.rate
+
+
+# M1 — triangular-consistency disclosure over the stored FX rates.
+#
+# Display scales. The RATES are never touched: these quantize the two DERIVED figures so
+# the wire carries a readable number instead of a 28-significant-digit division tail.
+# 6 dp matches the FX rate cap in data-and-pricing.md (a rate is not money; the 2-dp rule
+# never applies), and 4 dp on a PERCENT is 6 dp on the underlying ratio — the same
+# resolution as the legs it is derived from, so the gap can never be "more precise" than
+# its own inputs.
+_TRI_RATE_DP = Decimal("0.000001")
+_TRI_GAP_DP = Decimal("0.0001")
+# Tolerance in PERCENT. 0.05% is roughly a retail FX spread: below it the disagreement is
+# indistinguishable from two providers quoting a moment apart, above it the reporting total
+# visibly depends on which conversion path was used (the measured demo gap is 0.0690%).
+_TRI_TOLERANCE_PCT = Decimal("0.05")
+
+
+def _fx_triangulation(
+    reads: dict[tuple[Currency, Currency], FxRead | None],
+) -> list[FxTriangle]:
+    """Every triangle closable from the pairs actually READ this request.
+
+    Generic over ``reads`` on purpose — in practice the only triple stored today is
+    USD/TWD · USD/MYR · MYR/TWD, but a fourth currency must not need a code change to be
+    checked. For each directly-read pair ``(a, c)`` and each other currency ``b`` whose two
+    legs ``(a, b)`` and ``(b, c)`` were ALSO read, the two-leg product is compared with the
+    direct rate.
+
+    Presence is the only gate: a stale leg still produces a triangle (flagged ``stale``)
+    because a stale rate is exactly when a path disagreement is most likely, and hiding the
+    check there would blind the reader at the worst moment. A MISSING leg produces nothing —
+    the resolver's inverse fallback already means a read exists for either direction, so an
+    absent key means the pair was genuinely never asked for, not that it is unknown.
+
+    Pure: it reads the resolver's recorded rates and mutates nothing.
+    """
+    have = {k: v for k, v in reads.items() if v is not None}
+    # Every currency that appears on either side of a read — the candidate pivots.
+    pivots = sorted({c for pair in have for c in pair}, key=lambda x: x.value)
+    out: list[FxTriangle] = []
+    for (a, c), direct_read in sorted(have.items(), key=lambda kv: (kv[0][0].value,
+                                                                   kv[0][1].value)):
+        if a == c:
+            continue
+        for b in pivots:
+            if b in (a, c):
+                continue
+            leg1, leg2 = have.get((a, b)), have.get((b, c))
+            if leg1 is None or leg2 is None:
+                continue
+            implied = leg1.rate * leg2.rate
+            direct = direct_read.rate
+            if direct == _ZERO:  # never divide by a zero rate — a rate of 0 is not a rate
+                continue
+            gap_pct = ((implied / direct) - _ONE) * Decimal("100")
+            gap_q = gap_pct.quantize(_TRI_GAP_DP, rounding=ROUND_HALF_UP)
+            out.append(FxTriangle(
+                via=f"{a.value}/{b.value} × {b.value}/{c.value}",
+                pair=f"{a.value}/{c.value}",
+                implied=implied.quantize(_TRI_RATE_DP, rounding=ROUND_HALF_UP),
+                direct=direct.quantize(_TRI_RATE_DP, rounding=ROUND_HALF_UP),
+                gap_pct=gap_q,
+                # Judged on the QUANTIZED gap: the badge and the number printed beside it
+                # must never disagree, which they can if ok reads full precision.
+                ok=abs(gap_q) <= _TRI_TOLERANCE_PCT,
+                as_of=min(leg1.as_of, leg2.as_of, direct_read.as_of),
+                stale=leg1.stale or leg2.stale or direct_read.stale,
+            ))
+    return out
 
 
 # Fixed market order for the per-market subtotal rows (deterministic wire order).
@@ -881,6 +952,9 @@ def build_dashboard(
         trend_unavailable_reason=trend_reason,
         fx_unavailable_reason=fx_reason,
         unregistered_symbols=unregistered,
+        # M1: a CHECK over the same reads the list above reports on — no extra query, no
+        # rate mutated. Empty unless three read pairs close a triangle.
+        fx_triangulation=_fx_triangulation(resolver.reads),
     )
 
     return DashboardData(

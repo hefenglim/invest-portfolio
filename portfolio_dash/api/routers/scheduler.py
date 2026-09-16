@@ -7,6 +7,7 @@ route degrades gracefully when it is absent. Money/cost is a Decimal **string**;
 router computes no business numbers.
 """
 
+import os
 import sqlite3
 import threading
 from datetime import datetime
@@ -43,6 +44,49 @@ def get_scheduler(request: Request) -> BaseScheduler | None:
     """The live APScheduler singleton, or None (no lifespan / PD_DISABLE_SCHEDULER=1)."""
     sched = getattr(request.app.state, "scheduler", None)
     return sched if isinstance(sched, BaseScheduler) else None
+
+
+def scheduler_state(request: Request) -> dict[str, Any]:
+    """Is the APScheduler singleton actually RUNNING in this process, and if not, why?
+
+    M3 (measured on the demo 2026-09-16): 排程中心 listed all 25 jobs 「啟用」 with
+    「下次執行」 = 「—」 for every one of them, because the instance runs with
+    ``PD_DISABLE_SCHEDULER=1`` — ``app.state.scheduler`` is None, so ``_next_fire`` has
+    nothing to ask. ``enabled`` is a row in ``schedule_config`` (a stored *intent*); it says
+    nothing about whether a scheduler exists to honour it, and 25 empty next-fire cells look
+    exactly like 25 jobs that merely have not been scheduled yet. Nothing on the page — or
+    in this payload — distinguished "the scheduler is off" from "the next fire is unknown",
+    and the dashboard's 今日摘要 sat 56 days stale under a current-looking title as a result.
+
+    ``reason`` is diagnostic, not user-facing prose: the frontend owns the zh sentence and
+    prints this as the cause. Two causes are distinguishable and both are real deployments —
+    the env var (demo/test/CI) and a process that simply never ran lifespan (hermetic
+    TestClient). Rejected: reporting ``running`` per JOB row — the scheduler is a
+    process-wide fact, and repeating it 25 times invites the reader to treat it as a
+    per-job setting they can toggle.
+    """
+    if get_scheduler(request) is not None:
+        return {"running": True, "reason": None}
+    reason = (
+        "PD_DISABLE_SCHEDULER=1"
+        if os.environ.get("PD_DISABLE_SCHEDULER") == "1"
+        else "scheduler not started"
+    )
+    return {"running": False, "reason": reason}
+
+
+def scheduler_running_dep(request: Request) -> bool:
+    """``Depends`` form of :func:`scheduler_state`'s ``running`` flag, for other routers.
+
+    A dependency rather than a bare ``request: Request`` parameter on the consuming route:
+    several tests call those route functions DIRECTLY as Python (no ASGI scope, no app), and
+    a required ``Request`` argument would break every one of them for a field that is a
+    side-note on the payload. A defaulted ``Depends`` leaves the signature backwards
+    compatible; the consumer treats an unresolved default as **None = unknown**, never as
+    False — reporting "the scheduler is off" without a request to ask would accuse a
+    perfectly healthy instance.
+    """
+    return bool(scheduler_state(request)["running"])
 
 
 def _desc(job_id: str) -> str:
@@ -107,13 +151,21 @@ def list_jobs(
     request: Request,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """§15.1 — schedule config + latest run + next fire for every scheduled job."""
+    """§15.1 — schedule config + latest run + next fire for every scheduled job.
+
+    M3: the top-level ``scheduler`` block says whether a scheduler exists at all, so the
+    page can explain 25 empty 「下次執行」 cells instead of leaving them ambiguous (see
+    :func:`scheduler_state`).
+    """
     ensure_job_rows(conn)  # idempotent seed so registry jobs always have a config row
     scheduler = get_scheduler(request)
     rows = conn.execute(
         "SELECT job_id, enabled, cron, timezone FROM schedule_config ORDER BY job_id"
     ).fetchall()
-    return {"jobs": [_job_element(conn, r, scheduler) for r in rows]}
+    return {
+        "jobs": [_job_element(conn, r, scheduler) for r in rows],
+        "scheduler": scheduler_state(request),
+    }
 
 
 class _PutBody(BaseModel):

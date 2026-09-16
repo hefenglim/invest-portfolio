@@ -808,6 +808,24 @@ class StoredFxConversion(BaseModel):
             return None
         return self.from_amount / self.to_amount
 
+    @property
+    def implied_quote(self) -> tuple[Currency, Currency, Decimal] | None:
+        """The implied rate quoted the CONVENTIONAL way: ``(unit_ccy, per_ccy, rate)`` meaning
+        「1 unit_ccy = rate per_ccy」 with the more valuable currency as the unit, so
+        ``rate >= 1`` — USD/TWD 31.8, USD/MYR 4.08, MYR/TWD 7.8 — whichever side was sold.
+
+        :attr:`implied_rate` is direction-bound (from / to), so the same USD↔MYR conversion
+        read 「1 USD = 4.0000 MYR」 when MYR was sold and 「1 MYR = 0.2500 USD」 when USD was
+        (demo audit 2026-09-16, L6): one rate, two spellings, and the entry form's what-if
+        line quoted it a third way. This is presentation-level (the FX pool never reads it);
+        ``None`` exactly when :attr:`implied_rate` is None, for the same QA-10 reason.
+        """
+        if self.to_amount == 0 or self.from_amount == 0:
+            return None
+        if self.from_amount >= self.to_amount:
+            return (self.to_ccy, self.from_ccy, self.from_amount / self.to_amount)
+        return (self.from_ccy, self.to_ccy, self.to_amount / self.from_amount)
+
 
 def insert_fx_conversion(
     conn: sqlite3.Connection,

@@ -95,19 +95,50 @@
 
   /* ---------- drawer scaffold ---------- */
   let chart = null;
-  function close() {
+  /* M6 (demo audit 2026-09-16): the drawer lived OUTSIDE the browser history. Opening one
+     left the URL untouched (nothing to bookmark or hand to someone), and 上一頁 while it was
+     open navigated the page away WITHOUT closing it — the phone reflex "back = dismiss the
+     sheet" failed. The deep link (`#sym=2330`, from 全域搜尋 / the weekly card) already
+     worked in the other direction, so the history is the one mechanism that gives both:
+       · a user-initiated open pushes ONE entry carrying `#sym=…` (state.pdDrawer marks it
+         as ours), so the URL is shareable and Back closes the drawer (popstate below);
+       · ✕ / Esc / backdrop on such a drawer POP that entry (`history.back()`), so Back
+         afterwards never lands on a phantom step whose only content was a closed drawer;
+       · switching symbols (←/→, another row) REPLACES the entry — one drawer, one entry;
+       · a drawer opened FROM the hash (deep link, Back/Forward) pushes nothing — its entry
+         already exists — and its ✕ clears the hash in place, exactly as before. */
+  let pushedEntry = false;   // the open drawer's history entry is one WE pushed
+  function hashFor(symbol) { return '#sym=' + encodeURIComponent(symbol); }
+  function removeDrawerDom() {
     const b = $('.sd-backdrop');
     if (b) b.remove();
     if (chart) { chart.dispose(); chart = null; }
     document.removeEventListener('keydown', onKey);
+  }
+  function close() {
+    removeDrawerDom();
+    if (pushedEntry && history.state && history.state.pdDrawer) {
+      pushedEntry = false;
+      history.back();   // lands on the pre-drawer entry; the DOM is already gone
+      return;
+    }
+    pushedEntry = false;
     if (location.hash.indexOf('#sym=') === 0) {
       history.replaceState(null, '', location.pathname + location.search);
     }
   }
+  window.addEventListener('popstate', () => {
+    /* Back/Forward: the hash says whether a drawer belongs on the entry we landed on. Off →
+       close the DOM only (the entry is gone with the navigation). On → `hashchange` runs
+       checkHash, which opens it and pushes nothing because the hash already matches. */
+    if (location.hash.indexOf('#sym=') !== 0) { pushedEntry = false; removeDrawerDom(); }
+  });
   function onKey(e) {
     if (e.key === 'Escape') { close(); return; }
     /* E6: ←/→ 切換上一檔/下一檔持倉（持倉清單來自已載入的 /api/dashboard；未就緒則停用） */
-    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.target.closest('input, textarea, select')) {
+    /* `e.target` may be the document itself for a synthetic event (L2): guard before .closest */
+    const inField = e.target instanceof Element && e.target.closest('input, textarea, select');
+    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !inField) {
       if (!currentHoldings || !currentHoldings.length || !currentSymbol) return;
       /* The holdings list is keyed by (帳戶, 標的), NOT by 標的: a symbol held in TWO accounts
          occupies TWO rows. Cycling by `syms.indexOf(currentSymbol)` therefore always resolved
@@ -138,11 +169,23 @@
      can keep cycling from the row the user actually opened rather than from the first row
      that happens to carry this symbol (M2-04). Omitted → -1 → lookup fallback. */
   window.openSymbolDrawer = function (symbol, opts) {
-    close();
+    /* Never close() here: a symbol SWITCH must not pop the history entry (M6). */
+    const wasPushed = pushedEntry;
+    removeDrawerDom();
     drawerSeq += 1;
     currentSymbol = symbol;
     const hintedIndex = (opts && Number.isInteger(opts.index)) ? opts.index : -1;
     currentIndex = hintedIndex;
+    const target = hashFor(symbol);
+    if (location.hash !== target) {
+      if (wasPushed) history.replaceState({ pdDrawer: true }, '', target);
+      else history.pushState({ pdDrawer: true }, '', target);
+      pushedEntry = true;
+    } else {
+      /* Opened from the hash itself (deep link / Back-Forward): the entry exists. It is ours
+         to pop only if it carries our marker (a Forward onto an entry we pushed earlier). */
+      pushedEntry = !!(history.state && history.state.pdDrawer);
+    }
 
     /* Synchronous scaffold: backdrop + drawer + keydown are wired immediately so Esc /
        backdrop-click / open-close work even while data is loading; the data-dependent

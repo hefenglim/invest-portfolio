@@ -14,16 +14,19 @@ from tests.e2e.conftest import assert_page_ok
 
 @pytest.mark.e2e
 def test_login_page_smoke(live_server: str, browser_page: Page) -> None:
-    """/login.html loads clean and makes NO /api/* call on load (spec 19, 9.x).
+    """/login.html loads clean and makes ONE read-only /api/* call on load (spec 19, 9.x).
 
     After wiring login to POST /api/auth/login, the page loads api.js + an inline auth
-    script, but the inline script must NOT fire any network call on load (the shell — not
-    this page — routes signed-out users here). This asserts: (a) the form is present
-    (#login-btn / #login-user / #login-pass), (b) the page stays on /login.html (no
-    redirect), (c) ZERO /api/* requests were issued on load, and (d) ZERO console + page
-    errors. A login ATTEMPT is NOT triggered here (a 401 would emit a "Failed to load
-    resource: 401" console message); the 401 logic is covered by the auth.py contract
-    tests + the api.js 401-redirect smoke.
+    script. The inline script fires no network call that could ROUTE the visitor (the
+    shell — not this page — routes signed-out users here); since 2026-09-16 (demo audit
+    L22) it makes exactly one read-only probe, GET /api/auth/session, to say so when the
+    site is in guest mode — the fixture app has no users, so the hint must be visible.
+    This asserts: (a) the form is present (#login-btn / #login-user / #login-pass), (b) the
+    page stays on /login.html (no redirect), (c) the ONLY /api/* request on load is that
+    probe, (d) the guest hint rendered, and (e) ZERO console + page errors. A login ATTEMPT
+    is NOT triggered here (a 401 would emit a "Failed to load resource: 401" console
+    message); the 401 logic is covered by the auth.py contract tests + the api.js
+    401-redirect smoke.
     """
     page = browser_page
     assert isinstance(page, Page)
@@ -54,12 +57,19 @@ def test_login_page_smoke(live_server: str, browser_page: Page) -> None:
         page.wait_for_selector("#login-user")
         page.wait_for_selector("#login-pass")
         assert page.url.endswith("login.html"), f"unexpected redirect to {page.url}"
+        # L22: the guest-mode hint (the fixture app has no authorised users).
+        page.wait_for_selector("#login-hint:not([hidden])", state="visible")
+        assert "訪客模式" in (page.text_content("#login-hint") or "")
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
         page.remove_listener("request", _on_request)
 
-    assert not api_requests, f"login.html fired /api/* on load: {api_requests!r}"
+    probes = [u for u in api_requests if u.endswith("/api/auth/session")]
+    others = [u for u in api_requests if not u.endswith("/api/auth/session")]
+    assert len(probes) == 1, (
+        f"login.html should probe /api/auth/session exactly once: {api_requests!r}")
+    assert not others, f"login.html fired /api/* beyond the guest probe on load: {others!r}"
     assert not console_errors and not page_errors, (
         f"/login.html: console errors={console_errors!r}; page errors={page_errors!r}"
     )
@@ -1713,7 +1723,7 @@ def test_cash_page_smoke(live_server: str, browser_page: Page) -> None:
     Regression guard for the stress-audit finding (2026-07-15): a TDZ ReferenceError
     in cash.js initForms() aborted BEFORE the deposit/FX click handlers were attached,
     so the buttons silently did nothing — and no smoke covered this page. FU-D5: on the
-    default 賬戶現金 tab, click one per-ccy cash line and assert the statement renders
+    default 帳戶現金 tab, click one per-ccy cash line and assert the statement renders
     real server rows (the describe()/detail path must not throw). FU-D25: the deposit
     button and the FX button now live under the 出金入金 / 換匯中心 tabs — activate each
     tab and assert its key control becomes visible (a hidden-tab id-drift regression guard).
@@ -1734,7 +1744,7 @@ def test_cash_page_smoke(live_server: str, browser_page: Page) -> None:
     try:
         page.goto(live_server + "/cash.html", wait_until="load")
 
-        # 賬戶現金 (default tab): pools + statement.
+        # 帳戶現金 (default tab): pools + statement.
         page.wait_for_selector(".cash-line.clickable")       # balance cards rendered
         page.click(".cash-line.clickable")                    # open one pool's statement
         # td.num rows are REAL server rows (the empty-state row has no .num cell), so this

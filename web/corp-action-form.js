@@ -41,6 +41,8 @@
   };
   const api = () => window.pdApi;
   const f = () => window.fmt;
+  /* zh account name from the single naming authority (web/names.js, FU-D37); id fallback. */
+  const acctZh = (id) => (id ? (window.pdNames ? window.pdNames.account(id) : id) : '');
 
   /* The component carries its OWN styling, scoped under `.ca-modal`, injected once.
      Not a shared stylesheet edit: `.input` / `.select` / `.field` / `.form-grid` are
@@ -192,7 +194,9 @@
 
     (data.accounts || []).forEach((acct) => {
       const card = el('div', 'ca-acct');
-      card.appendChild(el('div', 'ca-acct-name', acct.account || acct.account_id));
+      /* M5 (demo audit 2026-09-16): the zh name from the single naming authority, never the
+         payload's English `account` (see web/names.js). */
+      card.appendChild(el('div', 'ca-acct-name', acctZh(acct.account_id)));
       const table = el('table', 'ca-table');
       const thead = el('thead');
       const hr = el('tr');
@@ -238,7 +242,7 @@
        system understood their ledger rather than merely applied a rule (§6.7). */
     (data.not_affected || []).forEach((a) => {
       host.appendChild(el('div', 'hint',
-        '不受影響：' + (a.account || a.account_id) + '（' + a.reason + '）'));
+        '不受影響：' + acctZh(a.account_id) + '（' + a.reason + '）'));
     });
 
     /* Said BEFORE saving — this is the sentence door 1 exists to produce. */

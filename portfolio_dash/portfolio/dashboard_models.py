@@ -236,6 +236,41 @@ class FxFreshness(BaseModel):
     stale: bool
 
 
+class FxTriangle(BaseModel):
+    """One stored-rate triangle: does ``A/B × B/C`` agree with the stored ``A/C``?
+
+    M1 (measured on the demo 2026-09-16, all three rows freshly refreshed and dated
+    2026-09-15, none stale): USD/TWD 31.834999 · MYR/TWD 7.803300 · USD/MYR 4.082500, so
+    USD/MYR × MYR/TWD = 31.856972 — **+0.0690% above** the stored USD/TWD. The three rates
+    are fetched independently and no derivation ties them together, so the reporting-
+    currency total depends on WHICH PATH a conversion happens to take: converting
+    4,000 MYR → 983.28 USD at spot moved ``reporting_total`` by −40.88 TWD, and deleting
+    the row restored it bit-identically. That is a phantom P&L produced by the conversion
+    path alone.
+
+    This model is the **check and the disclosure only**. Whether a base currency should be
+    picked and the third rate DERIVED as a cross rate (which would make the triangle close
+    by construction) is an owner decision, not one to take in a read path. Until it is
+    taken, the gap is measured from the rates as stored and shown — never silently
+    corrected, and the rates themselves are never mutated (``data-and-pricing.md``: the
+    stored rate is the provider's number of record).
+
+    ``implied`` / ``direct`` are quantized to 6 dp and ``gap_pct`` to 4 dp **for display**;
+    the underlying reads keep full precision. ``ok`` is judged on the QUANTIZED gap so the
+    verdict can never disagree with the number printed beside it.
+    """
+
+    via: str  # the two-leg path, e.g. "USD/MYR × MYR/TWD"
+    pair: str  # the directly stored pair the path is compared against, e.g. "USD/TWD"
+    implied: Decimal
+    direct: Decimal
+    gap_pct: Decimal  # (implied / direct - 1) * 100, in PERCENT
+    ok: bool  # |gap_pct| <= 0.05
+    as_of: date | None = None  # the OLDEST of the three reads (the triangle is only as
+    # current as its stalest leg)
+    stale: bool = False  # any of the three legs is stale
+
+
 class BenchmarkMarketLeg(BaseModel):
     """One market's share of the benchmark counterfactual (which index, and what it did)."""
 
@@ -293,6 +328,17 @@ class FreshnessReport(BaseModel):
     # Router-fed (ops/file state, not pure calc): build_dashboard leaves this None;
     # the dashboard router fills it from ops.backup.latest_backup_at() after to_wire.
     last_backup_at: str | None = None
+    # M1 — triangular consistency of the stored FX rates (see FxTriangle). Empty whenever
+    # fewer than three pairs closing a triangle were read, which is the normal single- or
+    # dual-currency case; a non-empty list with ok=False means a conversion's reporting-
+    # currency effect depends on the path it takes. Additive with an empty default so
+    # FreshnessReport constructions that predate it still validate.
+    fx_triangulation: list[FxTriangle] = Field(default_factory=list)
+    # Router-fed exactly like last_backup_at above (process state, not pure calc):
+    # build_dashboard leaves this None; the dashboard router fills it from the scheduler
+    # router's scheduler_state(). False means nothing on this instance refreshes on a
+    # schedule — every 「最後更新」 stamp on the page is only as new as the last manual run.
+    scheduler_running: bool | None = None
 
 
 class InsightCardStub(BaseModel):

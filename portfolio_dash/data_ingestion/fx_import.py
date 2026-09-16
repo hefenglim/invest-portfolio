@@ -155,7 +155,7 @@ def fx_balance_issues(
 
     **Two checks, and both of them** (QA-11). The balance test reads the pool AS OF the
     conversion's own date (M5-06 — it used to be the END balance of the whole ledger, which
-    a deposit dated 2099 could inflate); for a conversion dated today that is the 賬戶現金
+    a deposit dated 2099 could inflate); for a conversion dated today that is the 帳戶現金
     figure the 換匯中心 line displays, so the frontend hint and the backend authority never
     disagree. But a balance on one day cannot see a conversion that strands a LATER spend,
     and an end aggregate could not see a BACK-DATED one: one that leaves the pool at −320,000

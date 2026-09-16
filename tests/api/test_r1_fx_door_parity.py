@@ -11,7 +11,7 @@
   date-ordered running minimum since audit C3.
 
 The end-balance check and its message are DELIBERATELY kept — the comment above it chose
-``cash_balances`` for display consistency with the 賬戶現金 line. The running-minimum test is
+``cash_balances`` for display consistency with the 帳戶現金 line. The running-minimum test is
 added ALONGSIDE it, not in place of it.
 """
 
@@ -215,7 +215,7 @@ def test_a_back_dated_conversion_that_dips_the_pool_is_refused(
 def test_the_end_balance_message_is_preserved_for_the_plain_overdraft(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
-    """The end-balance check was chosen for display consistency with the 賬戶現金 line and
+    """The end-balance check was chosen for display consistency with the 帳戶現金 line and
     is kept: a conversion larger than the balance still answers with THAT message."""
     client = dashboard_client_factory(_seed_late_deposit)
     response = client.post("/api/cash/fx", json={

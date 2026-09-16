@@ -221,3 +221,23 @@ def test_old_fields_null_for_fresh_buy() -> None:
     assert r["old_adjusted_avg"] is None
     assert r["old_weight"] is None
     conn.close()
+
+
+def test_tw_fractional_shares_are_refused_before_pricing() -> None:
+    """L12 (demo audit 2026-09-16): the drawer priced a 0.5-股 TW sell (min fee 20, tax
+    floored — every number "right") for a trade the write door refuses. Same rule, same
+    place in the flow (before fees), field = shares so the form can point at the input."""
+    import pytest
+
+    from portfolio_dash.strategy.whatif import WhatIfError
+
+    conn = _db()
+    with pytest.raises(WhatIfError) as exc:
+        _whatif(conn, symbol="2330", side=Side.SELL, shares=Decimal("0.5"),
+                price=Decimal("600"), account_id="tw_broker")
+    assert exc.value.field == "shares"
+    assert "整數" in str(exc.value)
+    # A whole-share sell on the same fixture still simulates.
+    out = _whatif(conn, symbol="2330", side=Side.SELL, shares=Decimal("1"),
+                  price=Decimal("600"), account_id="tw_broker")
+    assert "amount" in out and out["account_id"] == "tw_broker"

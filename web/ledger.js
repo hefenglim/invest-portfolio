@@ -23,7 +23,14 @@
      僅在獨立帳本頁（無 pane-ldiv）時於此接線，避免誤抓輸入區同名的 #tab-div / #pane-div。 */
   const TABS = ['tx', 'div', 'fx', 'open', 'action', 'cash'];
   const ownsTabs = !document.getElementById('pane-ldiv');
+  /* trades.html names its ledger tabs tab-ldiv / tab-lfx / … (the input panes took
+     tab-div); ledger.html uses the bare names. Both spellings map to the same loader. */
+  const TAB_IDS = ownsTabs
+    ? { tx: 'tx', div: 'div', fx: 'fx', open: 'open', action: 'action', cash: 'cash' }
+    : { tx: 'tx', div: 'ldiv', fx: 'lfx', open: 'lopen', action: 'laction', cash: 'lcash' };
+  let activeTab = 'tx';
   function showTab(t) {
+    activeTab = t;
     TABS.forEach((x) => {
       const p = $('#pane-' + x);
       const b = $('#tab-' + x);
@@ -37,6 +44,14 @@
       if (b) b.addEventListener('click', () => showTab(t));
     });
   }
+  /* L16 (demo audit 2026-09-16): every filter change fired all six ledger requests although
+     one pane is visible. A hidden pane is now marked DIRTY instead of fetched, and fetched
+     the moment its tab is shown (ensureTab). On trades.html the tab glue lives in the page's
+     own script, so the listener here only tracks the active tab and tops it up. */
+  TABS.forEach((t) => {
+    const b = document.getElementById('tab-' + TAB_IDS[t]);
+    if (b) b.addEventListener('click', () => { activeTab = t; ensureTab(t); });
+  });
 
   /* ===== filter chips (shared bar; 帳戶 + 代號搜尋 + 日期區間) =====
      `state.account` holds an account_id ('all' = no filter), NOT the display name —
@@ -676,7 +691,11 @@
          home units per one foreign unit) — never recomputed here. Fixed 4 dp (M3-08): a
          rate is not money, and `rate()`'s magnitude switch gave this one column two
          precisions (4.6000 beside 28.00). */
-      tr.appendChild(el('td', 'num', '1 ' + x.to_ccy + ' = ' + f.rateExact(x.implied_rate, 4) + ' ' + x.from_ccy));
+      /* L6 (2026-09-16): the backend quotes the pair the conventional way (rate ≥ 1) and
+         names the direction in implied_unit_ccy / implied_per_ccy — the row no longer
+         inverts with the side that was sold. */
+      tr.appendChild(el('td', 'num', '1 ' + (x.implied_unit_ccy || x.to_ccy) + ' = ' +
+        f.rateExact(x.implied_rate, 4) + ' ' + (x.implied_per_ccy || x.from_ccy)));
       tr.appendChild(actionsCell(
         () => editFx(x),
         () => delWithConfirm('/api/ledgers/fx/' + x.id, '換匯')));
@@ -931,20 +950,42 @@
   const loadCash = () => loadOne('cash', '/api/ledgers/cash',
     (rows) => { D.cash = rows; }, renderCash);
 
-  async function loadAll() {
+  const LOADERS = {
+    tx: loadTx, div: loadDiv, fx: loadFx, open: loadOpen, action: loadAction, cash: loadCash,
+  };
+  /* Panes whose data is behind the current filter state (L16). A pane is fetched when it is
+     the active tab, when a commit lands in it, or when its tab is next shown — never all
+     six at once for one filter keystroke. */
+  const dirty = {};
+  function ensureTab(t) {
+    if (!dirty[t]) return;
+    dirty[t] = false;
     loadFailToasted = false;
-    await Promise.all([
-      loadTx(), loadDiv(), loadFx(), loadOpen(), loadAction(), loadCash(),
-    ]);
+    LOADERS[t]();
+  }
+
+  /* Refresh the visible pane (+ `also`, the pane a commit just wrote to, so the flash lands
+     on a fresh row) and mark the rest dirty for their next tab switch. */
+  async function loadAll(also) {
+    loadFailToasted = false;
+    const now = [activeTab];
+    if (also && LOADERS[also] && also !== activeTab) now.push(also);
+    TABS.forEach((t) => { dirty[t] = now.indexOf(t) < 0; });
+    await Promise.all(now.map((t) => LOADERS[t]()));
   }
 
   /* FU-D45: live-refresh seam for the input panes (trades.html). After ANY successful
      input commit, input.js calls this to re-fetch the ledger tables IN PLACE (current
-     account/date filters + page offsets preserved; NO page reload). All four panes
-     refresh — they share one filter state and a hidden pane must not go stale for the
-     next tab switch — so the ACTIVE tab always re-renders. A plain function assignment
-     (not addEventListener), so repeated calls/loads can never double-bind. */
-  window.pdLedgerRefresh = loadAll;
+     account/date filters + page offsets preserved; NO page reload). The ACTIVE pane and the
+     committed ledger's pane refresh now; the other panes are marked dirty and fetch on their
+     next tab switch (L16) — one filter state, nothing shown stale. `kind` is the input
+     ledger kind (transactions / dividends / fx / openings / corporate_actions / cash). A
+     plain function assignment (not addEventListener), so repeated calls can never double-bind. */
+  const KIND_TAB = {
+    transactions: 'tx', dividends: 'div', fx: 'fx', openings: 'open',
+    corporate_actions: 'action', cash: 'cash',
+  };
+  window.pdLedgerRefresh = (kind) => loadAll(kind ? KIND_TAB[kind] : undefined);
 
   /* pagers: pane hosts exist on trades.html only — guarded per the 略過 convention */
   if (window.pdPager) {

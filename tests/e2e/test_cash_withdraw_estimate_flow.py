@@ -2,11 +2,11 @@
 
 Driven against the REAL stack (fresh uvicorn + on-disk golden DB + headless chromium):
 
-* FU-D43a — kind=出金 shows 「賬戶現金：{balance} {ccy}」 for the selected account+ccy;
+* FU-D43a — kind=出金 shows 「帳戶現金：{balance} {ccy}」 for the selected account+ccy;
   an over-balance amount shows the inline error and disables 確認; the exact-balance
   withdraw round-trips 201 and drains the pool (server-authoritative readback).
 * FU-D43b — clicking the balance FIGURE (both the FX 可用餘額 line and the withdraw
-  賬戶現金 line) fills the amount field with the full raw balance.
+  帳戶現金 line) fills the amount field with the full raw balance.
 * FU-D43c — entering/filling the sell amount auto-fills the buy amount from
   GET /api/cash/fx-estimate (server-computed; caption 「以 {date} 匯率 {rate} 試算…」);
   once the buy field is edited manually the auto-fill STOPS (a later sell-amount change
@@ -139,18 +139,18 @@ def test_cash_withdraw_guard_maxfill_estimate_and_fx_ledger(
     page.select_option("#cm-ccy", "MYR")
     page.wait_for_function(
         "() => { const n = document.querySelector('#cm-balance');"
-        " return n && n.textContent.includes('賬戶現金') && n.textContent.includes('50,000')"
+        " return n && n.textContent.includes('帳戶現金') && n.textContent.includes('50,000')"
         " && n.textContent.includes('MYR'); }"
     )
 
-    # ---- FU-D43b: clicking the 賬戶現金 figure fills the amount ---------------------------
+    # ---- FU-D43b: clicking the 帳戶現金 figure fills the amount ---------------------------
     page.click("#cm-balance .can-fill")
     assert page.input_value("#cm-amount") == "50000"
 
     # ---- (A) over-balance amount -> inline error + 確認 disabled -------------------------
     page.fill("#cm-amount", "60000")
     page.wait_for_selector("#cm-amt-err", state="visible")
-    assert page.is_disabled("#cm-confirm"), "確認 must be disabled while amount > 賬戶現金"
+    assert page.is_disabled("#cm-confirm"), "確認 must be disabled while amount > 帳戶現金"
 
     # ---- (B) exact-balance amount -> error cleared + 確認 enabled + real round-trip -----
     page.fill("#cm-amount", "50000")   # == the MYR pool; must NOT be blocked

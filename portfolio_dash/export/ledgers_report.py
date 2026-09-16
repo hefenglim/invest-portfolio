@@ -245,9 +245,13 @@ def _fx_section(
         # 「—」 rather than 「1 USD = — TWD」, which reads as a missing digit in a real sentence.
         # M3-08: the rate is formatted as a RATE (4 dp), never through `_fmt_amount` in the
         # from-currency's minor unit — that printed 27.99998642… as 「28」 because TWD is 0 dp.
-        rate = _NULL if c.implied_rate is None else (
-            f"1 {_esc(c.to_ccy.value)} = "
-            f"{_fmt_rate(c.implied_rate)} {_esc(c.from_ccy.value)}")
+        # L6 (2026-09-16): quoted the conventional way (rate ≥ 1, the more valuable currency
+        # as the unit) via `implied_quote`, the same rule the ledger pages and the entry form
+        # follow — a USD→MYR row no longer reads 「1 MYR = 0.2500 USD」.
+        quote = c.implied_quote
+        rate = _NULL if quote is None else (
+            f"1 {_esc(quote[0].value)} = "
+            f"{_fmt_rate(quote[2])} {_esc(quote[1].value)}")
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(c.date.isoformat())}</td>'

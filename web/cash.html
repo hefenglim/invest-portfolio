@@ -73,7 +73,7 @@
   .cash-help { padding: 0 var(--pad) 12px; font-size: 10.5px; color: var(--text-3); }
   /* FU-D34: 換匯中心 可用餘額 ceiling line + inline oversell error (amber = the app's
      warning language, theme-aware via --amber; NOT the red/green P&L axis).
-     FU-D43a reuses the same classes for the 出金 賬戶現金 line (#cm-balance/#cm-amt-err). */
+     FU-D43a reuses the same classes for the 出金 帳戶現金 line (#cm-balance/#cm-amt-err). */
   .cfx-balance { font-size: 10.5px; color: var(--text-3); margin-top: 4px; font-family: var(--font-num); }
   .cfx-balance.warn { color: var(--amber); font-weight: 700; }
   .cfx-amt-err { font-size: 10.5px; color: var(--amber); font-weight: 700; margin-top: 3px; }
@@ -108,15 +108,16 @@
 <header id="topbar" class="topbar"></header>
 <div class="page">
 
-  <!-- FU-D25: 資金管理 three tabs — 賬戶現金 / 出金入金 / 換匯中心 -->
+  <!-- FU-D25: 資金管理 three tabs — 帳戶現金 / 出金入金 / 換匯中心
+       (L4, 2026-09-16: 「賬」 was the non-Taiwan variant; every other surface says 「帳」) -->
   <div class="cash-tabbar" id="cash-tabbar">
-    <button class="cash-tab" data-tab="pools" type="button">賬戶現金</button>
+    <button class="cash-tab" data-tab="pools" type="button">帳戶現金</button>
     <button class="cash-tab" data-tab="flows" type="button">出金入金</button>
     <button class="cash-tab" data-tab="fx" type="button">換匯中心</button>
   </div>
 
-  <!-- ===== 賬戶現金：現金池 + 收支明細 ===== -->
-  <div class="cash-view" id="cview-pools" data-screen-label="賬戶現金">
+  <!-- ===== 帳戶現金：現金池 + 收支明細 ===== -->
+  <div class="cash-view" id="cview-pools" data-screen-label="帳戶現金">
 
     <!-- A. 各帳戶現金池 -->
     <section class="panel" data-screen-label="現金池">
@@ -193,7 +194,7 @@
         <div class="field">
           <label for="cm-amount">金額</label>
           <input class="input" id="cm-amount" type="number" step="0.01" min="0"></input>
-          <!-- FU-D43a: 出金 shows the pool's 賬戶現金 (the withdraw ceiling) + live oversell error -->
+          <!-- FU-D43a: 出金 shows the pool's 帳戶現金 (the withdraw ceiling) + live oversell error -->
           <div class="cfx-balance" id="cm-balance"></div>
           <div class="cfx-amt-err" id="cm-amt-err" hidden="hidden"></div>
         </div>
@@ -222,7 +223,7 @@
         <button class="btn btn-primary" id="cm-confirm" type="button">確認寫入</button>
       </div>
     </div>
-    <div class="cash-flows-note">出金不可超過該帳戶的賬戶現金（不提供透支）；其他會讓現金變負的更正將先要求確認（通常代表漏記入金或換匯）。</div>
+    <div class="cash-flows-note">出金不可超過該帳戶的帳戶現金（不提供透支）；其他會讓現金變負的更正將先要求確認（通常代表漏記入金或換匯）。</div>
 
     <!-- C. 入金/出金紀錄 -->
     <section class="panel" data-screen-label="資金紀錄">
@@ -286,6 +287,8 @@
             <option value="USD" selected="selected">USD</option>
             <option value="MYR">MYR</option>
           </select>
+          <!-- L7: the never-equal rule flips the sibling select; this says so (cash.js enforceFxCcyDistinct) -->
+          <div class="cfx-balance" id="cfx-ccy-note" hidden="hidden"></div>
         </div>
         <div class="field">
           <label for="cfx-to-amt">買入金額</label>
@@ -336,6 +339,7 @@
 <script src="format.js?v=0.1.28"></script>
 <script src="pager.js?v=0.1.28"></script>
 <script src="alerts.js?v=0.1.28"></script>
+<script src="names.js?v=0.1.28"></script>
 <script src="cash.js?v=0.1.28"></script>
 <script>
 (function () {
@@ -357,7 +361,7 @@
   document.querySelectorAll('.cash-tab').forEach(function (b) {
     b.addEventListener('click', function () { window.showCashTab(b.dataset.tab); });
   });
-  /* activate from hash or default (賬戶現金) */
+  /* activate from hash or default (帳戶現金) */
   var hash = location.hash.slice(1);
   window.showCashTab(TABS.indexOf(hash) >= 0 ? hash : 'pools', true);
   window.addEventListener('hashchange', function () {

@@ -469,8 +469,28 @@
                 lost.length + ' 檔持倉未更新：' + lost.join('、') + '。其餘已更新，重新整理頁面即可看到新價。');
               return;
             }
-            prog.done('報價更新完成', jobs + ' 已執行，正在重新整理…');
-            setTimeout(() => { window.location.reload(); }, 900);
+            /* L24 (demo audit 2026-09-16): 0056 came back from the provider dated 09-11 while
+               its market peers moved to 09-14 — not a FAILURE (the fetch succeeded), so no
+               toast named it and the user only found it by reading the freshness table.
+               The job now reports `lagging` (held symbols whose newest stored close is older
+               than the run's newest for the same market); it is said here, before the reload
+               that would otherwise wipe the only place it is said. */
+            const lagging = [];
+            Object.keys(results).forEach((j) => {
+              (results[j].lagging || []).forEach((s) => { if (lagging.indexOf(s) < 0) lagging.push(s); });
+            });
+            const lagTxt = lagging.length
+              ? '；' + lagging.length + ' 檔資料來源未提供更新（仍為舊日期）：' + lagging.join('、')
+              : '';
+            prog.done('報價更新完成', jobs + ' 已執行' + lagTxt + '，正在重新整理…');
+            if (lagging.length && window.toast) {
+              window.toast('部分報價仍為舊日期', 'warn',
+                lagging.join('、') + ' 的資料來源尚未提供新收盤價；可稍後再按一次更新報價');
+            }
+            setTimeout(() => {
+              if (window.pdBeforeReload) window.pdBeforeReload();
+              window.location.reload();
+            }, 900);
           })
           .catch((e) => {
             refreshBusy = false;
@@ -499,7 +519,10 @@
           })
           .then(() => {
             prog.done('重算完成', '帳本重放驗證通過（帳本本身未修改；換匯與資金收支不經此路徑驗證），正在重新整理…');
-            setTimeout(() => { window.location.reload(); }, 900);
+            setTimeout(() => {
+              if (window.pdBeforeReload) window.pdBeforeReload();   // L25: keep the view state
+              window.location.reload();
+            }, 900);
           })
           .catch((e) => {
             prog.fail('重算失敗', (e && e.message) || '請稍後再試');
@@ -672,13 +695,27 @@
   /* ---- toasts ---- */
   const host = el('div', 'toast-host');
   document.body.appendChild(host);
-  /* kind: 'ok' (green ✓, auto-dismiss) | 'fail' (red ✕, stays) | 'warn' (amber !, stays).
+  /* kind: 'ok' (green ✓, 4.2 s) | 'fail' (red ✕, 30 s) | 'warn' (amber !, 30 s).
      'warn' is the third face (M10-02): three callers already passed it and were painted as
      a green ✓ — a partial result is not a success, and it is not read in 4 seconds either.
-     Colour comes from styles.css's .toast-warn (the same --amber token .pill-warn uses). */
+     Colour comes from styles.css's .toast-warn (the same --amber token .pill-warn uses).
+     L3 (demo audit 2026-09-16): fail / warn used to stay until closed, and they outlived the
+     condition they reported — 「帳本資料載入失敗 日期區間無效」 was still on screen minutes
+     after the dates had been fixed and the table had loaded. Two changes, neither of which
+     makes a failure easy to miss: (1) fail/warn dismiss after 30 s — long enough to read a
+     list of lost symbols, and hovering pauses the clock; (2) a toast whose text (msg + sub)
+     is already showing REPLACES the earlier copy, so a retried request never stacks the
+     same sentence three deep. */
+  const OK_MS = 4200;
+  const ATTENTION_MS = 30000;
   window.toast = function (msg, kind, sub) {
     const cls = kind === 'fail' ? 'toast-fail' : (kind === 'warn' ? 'toast-warn' : 'toast-ok');
+    const key = cls + ' ' + (msg || '') + ' ' + (sub || '');
+    Array.from(host.querySelectorAll('.toast')).forEach((old) => {
+      if (old.dataset.toastKey === key) old.remove();
+    });
     const t = el('div', 'toast ' + cls);
+    t.dataset.toastKey = key;
     t.appendChild(el('span', null, kind === 'fail' ? '✕' : (kind === 'warn' ? '!' : '✓')));
     const txt = el('div');
     txt.appendChild(el('div', 'msg', msg));
@@ -689,7 +726,12 @@
     x.addEventListener('click', () => t.remove());
     t.appendChild(x);
     host.appendChild(t);
-    if (kind !== 'fail' && kind !== 'warn') setTimeout(() => t.remove(), 4200); /* 失敗／部分訊息常駐直到關閉 */
+    const ttl = (kind === 'fail' || kind === 'warn') ? ATTENTION_MS : OK_MS;
+    let timer = setTimeout(() => t.remove(), ttl);
+    t.addEventListener('mouseenter', () => { clearTimeout(timer); timer = null; });
+    t.addEventListener('mouseleave', () => {
+      if (timer === null && t.parentNode) timer = setTimeout(() => t.remove(), ttl);
+    });
   };
 
   /* toastProgress(msg, sub): a persistent spinner toast for LONG network operations

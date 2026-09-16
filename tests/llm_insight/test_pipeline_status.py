@@ -23,7 +23,8 @@ def _facts(**over: object) -> PipelineFacts:
         "scheduled": True,
         "universe_symbols": ["2330", "AAPL"],
         "removed_recently": [],
-        "missing_or_stale_symbols": [],
+        "missing_price_symbols": [],
+        "stale_price_symbols": [],
         "live_template_count": 2,
         "total_template_count": 2,
         "r1_mismatch": False,
@@ -77,9 +78,31 @@ def test_input_empty_universe_fails() -> None:
     assert out.nodes["input"].lv == "fail"
 
 
-def test_input_missing_or_stale_price_warns() -> None:
-    out = derive_node_states(_facts(missing_or_stale_symbols=["AAPL"]))
+def test_input_missing_price_warns() -> None:
+    # M8: MISSING keeps the warn — it is what the shared gate's R4 fires on (the
+    # deterministic zero-LLM anomaly card). Split from the old combined
+    # `test_input_missing_or_stale_price_warns`, which pinned one level for both states.
+    out = derive_node_states(_facts(missing_price_symbols=["AAPL"]))
     assert out.nodes["input"].lv == "warn"
+    assert out.nodes["input"].sub is not None
+    assert "AAPL 缺價" in out.nodes["input"].sub
+
+
+def test_input_stale_only_price_is_info() -> None:
+    # M8: a STALE price still produces a real card off an older close — the dry run's R4
+    # passes it, so the card must not shout warn at the same fact.
+    out = derive_node_states(_facts(stale_price_symbols=["AAPL"]))
+    assert out.nodes["input"].lv == "info"
+    assert out.nodes["input"].sub == "價格過期（以舊價產生）：AAPL"
+
+
+def test_input_missing_outranks_stale_but_names_both() -> None:
+    out = derive_node_states(
+        _facts(missing_price_symbols=["AAPL"], stale_price_symbols=["2330"])
+    )
+    node = out.nodes["input"]
+    assert node.lv == "warn"
+    assert node.sub is not None and "AAPL 缺價" in node.sub and "2330 價格過期" in node.sub
 
 
 def test_input_recent_removal_is_info() -> None:
@@ -96,6 +119,47 @@ def test_portfolio_scope_input_ignores_universe() -> None:
     # portfolio scope has no universe lifecycle → empty list is not a fail.
     out = derive_node_states(_facts(scope="portfolio", universe_symbols=[]))
     assert out.nodes["input"].lv == "ok"
+    assert out.nodes["input"].text == "全持倉"
+
+
+# --- M2: the head text is decided by SCOPE, before the branches --------------------
+# Measured 2026-09-16: a portfolio task printed 「0 檔標的」 and a per_market task 「3 檔標的」
+# (its 3 markets) while both listed 14 symbols underneath — the scope-aware label existed
+# only on the ok branch, so every warning task fell back to len(universe_symbols).
+
+
+def test_portfolio_scope_head_is_all_holdings_on_every_branch() -> None:
+    for over in (
+        {"missing_price_symbols": ["AAPL"]},
+        {"stale_price_symbols": ["AAPL"]},
+        {"removed_recently": ["AAPL"]},
+    ):
+        out = derive_node_states(_facts(scope="portfolio", universe_symbols=[], **over))
+        assert out.nodes["input"].text == "全持倉", over
+
+
+def test_on_alert_scope_head_is_all_holdings() -> None:
+    out = derive_node_states(
+        _facts(scope="on_alert", universe_symbols=[], missing_price_symbols=["AAPL"])
+    )
+    assert out.nodes["input"].text == "全持倉"
+
+
+def test_per_market_scope_head_counts_markets() -> None:
+    facts = _facts(scope="per_market", universe_symbols=["TW", "US", "MY"])
+    assert derive_node_states(facts).nodes["input"].text == "3 個市場"
+    warned = _facts(
+        scope="per_market", universe_symbols=["TW", "US", "MY"],
+        missing_price_symbols=["AAPL"],
+    )
+    assert derive_node_states(warned).nodes["input"].text == "3 個市場"
+
+
+def test_per_symbol_scope_head_counts_symbols_on_every_branch() -> None:
+    warned = _facts(missing_price_symbols=["AAPL"])
+    assert derive_node_states(warned).nodes["input"].text == "2 檔標的"
+    stale = _facts(stale_price_symbols=["AAPL"])
+    assert derive_node_states(stale).nodes["input"].text == "2 檔標的"
 
 
 # --- assemble ------------------------------------------------------------------

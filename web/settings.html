@@ -378,6 +378,9 @@
     </section>
     <section class="panel">
       <div class="panel-head"><h2 class="panel-title">排程工作表</h2></div>
+      <!-- M3: filled by settings-scheduler.js ONLY when GET /api/scheduler/jobs reports
+           scheduler.running === false. Starts hidden so a healthy instance shows nothing. -->
+      <div id="sched-off-banner" hidden></div>
       <div class="table-wrap"><table class="data" id="jobs-table"><thead><tr>
         <th class="col-text">工作</th><th>啟用</th><th class="col-text">排程 (cron)</th>
         <th class="col-text">時區</th><th class="col-text">狀態</th><th class="col-text">上次執行</th><th>下次執行</th><th></th>

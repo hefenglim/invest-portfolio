@@ -353,6 +353,126 @@ def test_scenario_3_missing_price_holding_warns_input(
     assert task["nodes"]["input"]["lv"] == "warn"  # missing price, not empty
 
 
+# --- M2/M8 (audit 2026-09-16): the input node's head text + one price definition ----
+# Measured on the demo site: a portfolio task's input node read 「0 檔標的」 and a per_market
+# one 「3 檔標的」 (its 3 markets) while both listed 14 symbols underneath, with AAPL twice;
+# and the same task showed ⚠「缺價/過期」 on its card while its own dry run said 「R4 ✓ 通過」.
+
+
+def _kill_aapl_price(golden_db: sqlite3.Connection) -> None:
+    """Make the golden book's AAPL price MISSING (it is held in TWO accounts — the
+    duplicate the old `[h.symbol for h in data.holdings]` printed twice)."""
+    golden_db.execute("DELETE FROM prices WHERE instrument = 'AAPL'")
+    golden_db.commit()
+
+
+def _age_aapl_price(golden_db: sqlite3.Connection) -> None:
+    """Make the golden book's AAPL price STALE (present, older than max_age_days=4)."""
+    golden_db.execute("UPDATE prices SET as_of_date = '2026-05-01' WHERE instrument='AAPL'")
+    golden_db.commit()
+
+
+def test_portfolio_task_input_head_is_all_holdings_and_dedupes(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """M2: a portfolio task with a missing-price holding warns as 「全持倉」 — not 「0 檔標的」 —
+    and names the affected symbol ONCE (AAPL is held in schwab AND moomoo_my)."""
+    _kill_aapl_price(golden_db)
+    tid = _make_combo(api_client, scope="portfolio")
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    node = task["nodes"]["input"]
+    assert node["lv"] == "warn"
+    assert node["text"] == "全持倉"
+    assert node["sub"].count("AAPL") == 1  # one row per symbol, not one per holding row
+
+
+def test_per_market_task_input_head_counts_markets(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """M2: a per_market task's universe is MARKET codes — 「N 個市場」, never 「N 檔標的」."""
+    _kill_aapl_price(golden_db)
+    sp = api_client.post(
+        "/api/strategy-prompts", json={"name": "M", "body": "{{holdings_json}}"}
+    ).json()
+    it = api_client.post(
+        "/api/insight-tasks",
+        json={"name": "市場卡", "scope": "per_market", "strategy_ids": [sp["id"]]},
+    ).json()
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == it["id"]
+    )
+    # The golden book holds TW + US → 2 markets, while its affected symbol list is AAPL.
+    assert task["nodes"]["input"]["text"] == "2 個市場"
+    assert task["nodes"]["input"]["lv"] == "warn"
+
+
+def test_card_and_dry_run_agree_on_missing_price(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """M8: MISSING is a warn on the card AND an R4 warn in the dry run, naming one symbol."""
+    _kill_aapl_price(golden_db)
+    tid = _make_combo(api_client, scope="portfolio")
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    node = task["nodes"]["input"]
+    r4 = [
+        g for g in api_client.post(f"/api/insight-tasks/{tid}/preflight").json()["gates"]
+        if g["id"] == "R4"
+    ]
+    assert node["lv"] == "warn" and "AAPL" in node["sub"]
+    assert len(r4) == 1 and r4[0]["lv"] == "warn" and "AAPL" in r4[0]["msg"]
+
+
+def test_card_and_dry_run_agree_on_stale_price(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """M8: STALE is an info on BOTH surfaces — the card no longer warns where the dry run
+    passes. The R4 slot keeps reporting the shared gate's own verdict (通過); the stale line
+    is an extra R4-adjacent info row, and the verdict is unchanged by it."""
+    _age_aapl_price(golden_db)
+    tid = _make_combo(api_client, scope="portfolio")
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    node = task["nodes"]["input"]
+    assert node["lv"] == "info"
+    assert node["text"] == "全持倉"
+    assert "AAPL" in node["sub"] and "過期" in node["sub"]
+
+    pf = api_client.post(f"/api/insight-tasks/{tid}/preflight").json()
+    r4_rows = [g for g in pf["gates"] if g["id"] == "R4"]
+    assert [g["lv"] for g in r4_rows] == ["ok", "info"]  # the gate passes; the info explains
+    stale_row = r4_rows[1]
+    assert stale_row["reason"] == "R4_stale_price"
+    assert "AAPL" in stale_row["msg"]
+    assert stale_row["fix"] is None
+    # An info row never changes the go/no-go: the quota (0 in the golden DB) is the blocker.
+    assert pf["verdict"] == "blocked"
+    assert all(g["lv"] != "fail" for g in r4_rows)
+
+
+def test_no_stale_row_when_prices_are_fresh(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The golden book's prices are fresh → exactly one R4 row, and the card's input is ok."""
+    tid = _make_combo(api_client, scope="portfolio")
+    pf = api_client.post(f"/api/insight-tasks/{tid}/preflight").json()
+    assert [g["id"] for g in pf["gates"] if g["id"] == "R4"] == ["R4"]
+    task = next(
+        t for t in api_client.get("/api/insight-tasks/status").json()["tasks"]
+        if t["id"] == tid
+    )
+    assert task["nodes"]["input"]["lv"] == "ok"
+    assert task["nodes"]["input"]["text"] == "全持倉"
+
+
 # --- one-click official pack (usability decision ①, 2026-07-05) ----------------
 
 #: The pack's five names, in creation order (W2 added the last two, 2026-08-16).

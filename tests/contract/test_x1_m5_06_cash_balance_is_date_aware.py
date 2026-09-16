@@ -153,7 +153,7 @@ def test_a_future_deposit_cannot_fund_a_withdrawal_today(api_client: TestClient)
     err = r.json()["error"]
     assert err["code"] == "withdraw_insufficient_balance"
     # The balance quoted is the pool's balance ON THE WITHDRAWAL'S DATE.
-    assert "賬戶現金 -495000" in err["message"], err["message"]
+    assert "帳戶現金 -495000" in err["message"], err["message"]
     assert _pools(_cash(api_client)) == [
         ("schwab", "TWD", "-32000"), ("schwab", "USD", "0"), ("tw_broker", "TWD", "-495000")]
 

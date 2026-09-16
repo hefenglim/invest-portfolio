@@ -204,7 +204,7 @@ def test_a_fee_is_rendered_and_counted_as_a_debit_not_a_credit(
 
     * the 紀錄 table's direction chip — ``dir-sell`` (outbound), never ``dir-buy``;
     * the 現金收支明細 delta — a negative amount carrying ``sign-down``;
-    * the 賬戶現金 card — the balance actually FELL.
+    * the 帳戶現金 card — the balance actually FELL.
 
     Breaks if ``DEBIT_KINDS`` loses a kind: the chip flips, the delta prints ``+30`` and the
     card reads 1,000,060 instead of 999,980.

@@ -216,6 +216,14 @@ def compute_whatif(
         raise WhatIfError(
             f"無法推斷帳戶：{symbol} 未持有且未指定 account_id", field="account_id")
     inst = instruments.get(symbol)
+    # Whole shares only on TW / MY (L12, demo audit 2026-09-16) — the same rule the write
+    # door enforces (`validate.py::shares_not_integer`), so the drawer's 試算 can never
+    # price a 0.5-股 TW sell the ledger would refuse. US fractions stay allowed (deferred,
+    # not forbidden; DRIP books them).
+    if inst is not None and inst.market.value in ("TW", "MY") \
+            and shares != shares.to_integral_value():
+        raise WhatIfError(
+            f"台股／馬股股數必須是整數（零股以 1 股為單位），目前是 {shares}", field="shares")
     # Market-aware fee rule (Batch B): pass the resolved instrument's market so a dual-market
     # account picks the market-appropriate rule set. An unregistered symbol (inst None) has no
     # market, so the helper keeps reading the account scalar exactly as before.

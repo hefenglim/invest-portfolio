@@ -37,10 +37,19 @@ Conventions / honest degradation:
 - ``new_weight`` is the resulting COMBINED position's reporting MV divided by the ORIGINAL
   total reporting MV (weights are relative to today's book, not a recomputed post-trade
   total); this keeps each row independent and is the honest, simplest choice for a preview.
-- ``summary.over_allocated`` flags Σ(submitted targets) > 1 (informational — no hard
-  block). ``summary.excluded_with_target`` surfaces symbols carrying a stored 目標配置
-  weight that do not appear in the preview (not held / unpriced) so the UI never silently
-  drops them.
+- ``summary.over_allocated`` flags Σ(submitted targets) > 1 + a 0.0001 tolerance
+  (informational — no hard block; see ``_OVER_TOLERANCE``).
+  ``summary.excluded_with_target`` surfaces symbols carrying a stored 目標配置 weight that
+  do not appear in the preview (not held / unpriced) so the UI never silently drops them.
+- EVERY targeted symbol that produces no row says WHY (audit L11, 2026-09-16). A submitted
+  symbol leaves the engine down one of five paths, and until now four of them looked
+  identical on screen — the row simply rendered 「—」 with nothing beside it, so "already on
+  target" and "this symbol has no price" were the same glyph. ``summary.holds`` carries the
+  two NON-error outcomes (``on_target`` / ``rounds_to_zero``) and ``summary.excluded_reasons``
+  maps each excluded symbol to its cause (``no_price`` / ``no_rate`` / ``no_fee_rule`` /
+  ``no_total``). ``summary.excluded`` stays a plain list of symbols — the execution-report
+  builder (``export/rebalance_report.py``) reads it as one, and a reason dict alongside costs
+  nothing while changing its type would break that reader.
 - Money is ``Decimal`` end to end; the router serializes to wire strings.
 """
 
@@ -63,6 +72,21 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _HUNDRED = Decimal("100")
 _THOUSAND = Decimal("1000")
+
+# Σ(targets) must exceed 100% by MORE than this before the over-allocation flag trips.
+#
+# The 目標 % field is a ONE-decimal-place percent, so the smallest overshoot a user can
+# actually express is 0.1pp = 0.001 — two orders of magnitude above this tolerance. What sat
+# inside it was not a user intent but float residue: measured 2026-09-16 on the demo site, a
+# drawer whose footer read 「目標合計 100.00%」 carried the over-100% warning because the
+# client had POSTed "0.006999999999999999" / "0.036000000000000004" / "0.026000000000000002"
+# (IEEE doubles printed in full), summing to Decimal("1.000000000000000004") — greater than 1
+# by 4e-18. The client now sends exact fixed-point strings (web/rebalance.js builds them from
+# integer tenths-of-a-percent), which removes THIS residue; the tolerance stays because the
+# wire accepts a ratio from any caller, and a flag that fires on the 18th decimal place is a
+# false alarm no matter who produced it. It can never mask a real overshoot: the coarsest
+# legitimate one is 100x larger.
+_OVER_TOLERANCE = Decimal("0.0001")
 
 
 def _round_shares(raw: Decimal, market: Market) -> Decimal:
@@ -190,20 +214,30 @@ def compute_rebalance(
     missing = set(data.freshness.missing_prices)
     stored_targets = tw.load_target_weights(conn)
 
-    # over_allocated: submitted targets exceed 100% (flag only — the preview stays
-    # informational; the router does not hard-block Σ > 1).
+    # over_allocated: submitted targets exceed 100% by more than _OVER_TOLERANCE (flag only —
+    # the preview stays informational; the router does not hard-block Σ > 1).
     submitted_sum = _ZERO
     for ratio in targets.values():
         submitted_sum += ratio
-    over_allocated = submitted_sum > _ONE
+    over_allocated = submitted_sum > _ONE + _OVER_TOLERANCE
     excluded_with_target = _excluded_with_target(data, stored_targets, missing)
 
     rows: list[dict[str, object]] = []
     excluded: list[str] = []
+    # Why each targeted symbol produced no row (L11). ``excluded_reasons`` mirrors
+    # ``excluded`` key-for-key; ``holds`` carries the two outcomes that are NOT exclusions —
+    # the symbol is priced and computable, it simply needs no trade.
+    excluded_reasons: dict[str, str] = {}
+    holds: list[dict[str, str]] = []
+
+    def _exclude(symbol: str, reason: str) -> None:
+        excluded.append(symbol)
+        excluded_reasons[symbol] = reason
 
     # Degrade honestly: with no priced total there is nothing to rebalance against.
     if total is None or total == _ZERO:
-        excluded = list(targets)
+        for symbol in targets:
+            _exclude(symbol, "no_total")
         return {
             "rows": rows,
             "summary": {
@@ -211,6 +245,8 @@ def compute_rebalance(
                 "total_fees_reporting": _ZERO,
                 "cash_after": _ZERO,
                 "excluded": excluded,
+                "excluded_reasons": excluded_reasons,
+                "holds": holds,
                 "over_allocated": over_allocated,
                 "excluded_with_target": excluded_with_target,
                 "rebate_estimate_total": None,
@@ -229,7 +265,7 @@ def compute_rebalance(
         cons = _priced_constituents(data.holdings, symbol)
         # Exclude any symbol without a usable current price (never fabricate one).
         if not cons or symbol in missing:
-            excluded.append(symbol)
+            _exclude(symbol, "no_price")
             continue
 
         quote_ccy = cons[0].quote_ccy
@@ -238,7 +274,7 @@ def compute_rebalance(
         try:
             rate = resolver.rate(quote_ccy, reporting)
         except KeyError:
-            excluded.append(symbol)
+            _exclude(symbol, "no_rate")
             continue
 
         # Every constituent's account must resolve a fee rule set (a seeded account always
@@ -252,7 +288,7 @@ def compute_rebalance(
                 break
             rules_by_acct[h.account_id] = get_fee_rule_set(rn, conn)
         if missing_rule:
-            excluded.append(symbol)
+            _exclude(symbol, "no_fee_rule")
             continue
 
         # Aggregate the COMBINED position across all accounts (exact: one price/ccy).
@@ -275,6 +311,7 @@ def compute_rebalance(
         ]
 
         if delta_reporting == _ZERO:
+            holds.append({"symbol": symbol, "reason": "on_target"})
             continue  # already on target — no trade row
 
         side = Side.BUY if delta_reporting > _ZERO else Side.SELL
@@ -329,6 +366,9 @@ def compute_rebalance(
             total_fee += lg.fee
             total_tax += lg.tax
         if total_shares == _ZERO:
+            # The delta is real but smaller than one tradable unit (one share, or one
+            # 100-unit MY board lot), so every leg snapped to zero.
+            holds.append({"symbol": symbol, "reason": "rounds_to_zero"})
             continue  # rounds to no trade
 
         signed = total_shares if side is Side.BUY else -total_shares
@@ -376,6 +416,8 @@ def compute_rebalance(
             "total_fees_reporting": total_fees_reporting,
             "cash_after": cash_after,
             "excluded": excluded,
+            "excluded_reasons": excluded_reasons,
+            "holds": holds,
             "over_allocated": over_allocated,
             "excluded_with_target": excluded_with_target,
             "rebate_estimate_total": (

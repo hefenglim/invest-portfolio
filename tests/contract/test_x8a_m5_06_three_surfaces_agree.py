@@ -6,7 +6,7 @@ ledger, not in today's balance). Two more surfaces quote 「今天有多少現�
 reading the whole history, so the original finding — two screens, two answers for today's
 cash — had only moved house:
 
-* the manual-entry draft's 賬戶現金 line (``input_center._account_cash``), whose own
+* the manual-entry draft's 帳戶現金 line (``input_center._account_cash``), whose own
   docstring promised 「the SAME cash_balances figure /api/cash serves」, and the soft overdraft
   warning beside it (``_cash_overdraft_issue``), which a far-future deposit could silence;
 * the printed 現金收支明細's 「目前餘額」 (``export/cash_statement._pool_section``), which
@@ -95,7 +95,7 @@ def _as_printed(api_amount: str, ccy: str) -> str:
 
 
 def test_draft_account_cash_line_is_todays_balance(api_client: TestClient) -> None:
-    """The manual-entry draft's 賬戶現金 line quotes the 資金 page's figure — as of today —
+    """The manual-entry draft's 帳戶現金 line quotes the 資金 page's figure — as of today —
     after a 2099 deposit, not the whole-history sum."""
     assert api_client.post("/api/cash/movements", json=_FAR_FUTURE_DEPOSIT).status_code == 201
     api_cash = _api_cash_pool(api_client, "tw_broker", "TWD")

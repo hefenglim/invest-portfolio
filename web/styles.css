@@ -2410,6 +2410,10 @@ button[disabled], .btn[disabled] {
   border-radius: 3px; padding: 0 4px; flex: none;
 }
 .digest-stamp { font-size: 10px; color: var(--text-3); font-family: var(--font-num); }
+/* M3 — the 已過期 / 排程器未啟動 line that sits under the 產生於 stamp. Slightly larger and
+   amber (the same #d9a13f as .digest-health.warn) so it out-reads the timestamp it explains:
+   a stale digest's problem is not the date, it is that the date is old. */
+.digest-stale { font-size: 11px; color: #d9a13f; }
 .digest-empty {
   padding: 8px 0; font-size: 12px; color: var(--text-2); line-height: 1.5;
   display: flex; flex-direction: column; align-items: flex-start; gap: 8px;

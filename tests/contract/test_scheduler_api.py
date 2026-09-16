@@ -8,6 +8,7 @@ insert on ``golden_db`` + the 202; the thread's completion is covered by the
 
 import sqlite3
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -393,3 +394,35 @@ def test_status_insight_zero_cost_run_serves_no_block(
     golden_db.commit()
     lr = api_client.get("/api/scheduler/status").json()["jobs"]["insight:8"]["last_run"]
     assert lr["cost"] is None
+
+
+# --- M3: the scheduler-liveness block -------------------------------------------------
+
+
+def test_jobs_payload_carries_the_scheduler_liveness_block(api_client: TestClient) -> None:
+    """M3 — measured on the demo: all 25 jobs read 「啟用」 with 「下次執行」 = 「—」, because
+    the instance runs with ``PD_DISABLE_SCHEDULER=1``. ``enabled`` is a STORED INTENT and
+    ``next: null`` is ambiguous (no scheduler vs. next fire unknown), so nothing in this
+    payload distinguished "off" from "unknown". The top-level block does.
+
+    The hermetic ``api_client`` builds the app WITHOUT lifespan and the ``_safe_db`` fixture
+    sets ``PD_DISABLE_SCHEDULER=1``, so this test app is exactly the shape that produced the
+    defect: ``running`` is False and the env var is the reported cause.
+    """
+    body = api_client.get("/api/scheduler/jobs").json()
+    assert body["scheduler"] == {"running": False, "reason": "PD_DISABLE_SCHEDULER=1"}
+    # The jobs array is UNCHANGED by the addition (the wire contract the page already binds
+    # to), and the ambiguity the block resolves is still visible beside it.
+    assert all(j["next"] is None for j in body["jobs"])
+    assert any(j["enabled"] is True for j in body["jobs"])
+
+
+def test_scheduler_reason_distinguishes_not_started_from_the_env_var(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two real deployments produce a null scheduler and they are NOT the same fact: the env
+    var is a deliberate choice (demo/test/CI), a missing lifespan is an accident. Reporting
+    one reason for both would send the reader to an env var that is not set."""
+    monkeypatch.delenv("PD_DISABLE_SCHEDULER", raising=False)
+    body = api_client.get("/api/scheduler/jobs").json()
+    assert body["scheduler"] == {"running": False, "reason": "scheduler not started"}

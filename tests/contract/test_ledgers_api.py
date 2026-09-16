@@ -76,3 +76,29 @@ def test_fx_row_with_nothing_received_degrades_instead_of_500(
 def test_openings_empty_and_shape(api_client: TestClient) -> None:
     body = api_client.get("/api/ledgers/openings").json()
     assert body["total_count"] == 0 and body["rows"] == []
+
+
+def test_fx_row_quotes_the_rate_the_conventional_way(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """L6 (demo audit 2026-09-16): the implied rate was direction-bound (from / to), so the
+    same USD↔MYR conversion read 「1 USD = 4.0000 MYR」 when MYR was sold and
+    「1 MYR = 0.2500 USD」 when USD was. The wire now quotes with the more valuable currency
+    as the unit (rate ≥ 1) and names the direction, whichever side was sold."""
+    golden_db.execute(
+        "INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy,"
+        " to_amount) VALUES ('moomoo_my','2026-01-06','USD','1000','MYR','4000')")
+    golden_db.execute(
+        "INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy,"
+        " to_amount) VALUES ('moomoo_my','2026-01-07','MYR','4000','USD','1000')")
+    golden_db.commit()
+    rows = api_client.get("/api/ledgers/fx").json()["rows"]
+    usd_sold = next(x for x in rows if x["from_ccy"] == "USD" and x["to_ccy"] == "MYR")
+    myr_sold = next(x for x in rows if x["from_ccy"] == "MYR" and x["to_ccy"] == "USD")
+    for x in (usd_sold, myr_sold):
+        assert x["implied_rate"] == "4"
+        assert x["implied_unit_ccy"] == "USD" and x["implied_per_ccy"] == "MYR"
+    # The golden TWD→USD row: 1 USD = 32 TWD, unchanged in value, now with the direction named.
+    twd = next(x for x in rows if x["from_ccy"] == "TWD")
+    assert twd["implied_rate"] == "32"
+    assert twd["implied_unit_ccy"] == "USD" and twd["implied_per_ccy"] == "TWD"

@@ -23,6 +23,58 @@
   var POLL_MS = 2000;        // poll /latest every ~2s after a manual run…
   var POLL_MAX_MS = 90000;   // …up to ~90s before giving up (generation is a background job)
 
+  /* ---- M3: a digest is only as current as the job that generates it ----
+     Measured on the demo (2026-09-16): the 今日摘要 card was generated 2026-07-22 and the
+     週行動清單 2026-07-15, both rendered under a present-tense title (「今日」/「本週」) with
+     only a small 產生於 stamp underneath. A timestamp is not a warning — the reader has to
+     do the subtraction and then know what the cadence should have been. These two lines do
+     the subtraction and name the cause.
+
+     Thresholds are ONE cadence of slack past the job's own period, so a single missed run
+     (or a weekend, for the daily job) does not cry wolf: daily > 2 days, weekly > 8 days.
+     Day arithmetic only — no money, no rate (data-and-pricing.md constrains money, not the
+     age of a document). */
+  var STALE_DAYS = { daily: 2, weekly: 8 };
+
+  function _ageDays(iso) {
+    if (!iso) return null;
+    var t = Date.parse(iso);
+    if (isNaN(t)) return null;
+    var days = Math.floor((Date.now() - t) / 86400000);
+    return days < 0 ? 0 : days;   // a clock skew into the future is not "negative age"
+  }
+
+  /* The 排程器未啟動 note: WHY the digest is old, when the answer is process-wide. It reads
+     the SHARED window.pdDashboard promise and deliberately never CREATES it — this card
+     must not add a /api/dashboard request to a page that may not want one (a settings
+     surface embedding the card would otherwise pay for a full dashboard build). Absent
+     promise → no note; the staleness line above already stands on its own. */
+  function _schedNote(host) {
+    var p = window.pdDashboard;
+    if (!p || typeof p.then !== 'function') return;
+    p.then(function (D) {
+      var fr = D && D.freshness;
+      if (!fr || fr.scheduler_running !== false) return;
+      if (host.querySelector('.digest-sched-off')) return;   // a re-render raced us
+      host.appendChild(el('div', 'digest-stale digest-sched-off',
+        '排程器未啟動，摘要不會自動更新'));
+    }).catch(function () { /* the dashboard's own surface owns that failure, not this card */ });
+  }
+
+  /* The 產生於 stamp + the two staleness disclosures. One helper so every card that prints
+     a stamp gets them (the daily card, the weekly card, and the weekly empty state — the
+     empty state is where a stale digest is LEAST obvious, since 「本週無待辦事項」 reads as
+     good news whether it is 2 days or 2 months old). */
+  function _stamp(host, d, kind) {
+    host.appendChild(el('div', 'digest-stamp', '產生於 ' + f.datetime(d.generated_at)));
+    var age = _ageDays(d.generated_at);
+    var limit = STALE_DAYS[kind] || STALE_DAYS.daily;
+    if (age !== null && age > limit) {
+      host.appendChild(el('div', 'digest-stale', '已過期・' + age + ' 天前產生'));
+    }
+    _schedNote(host);
+  }
+
   /* ---- empty state: link + inline 立即產生 (items 4) ----
      Shown when NO digest of this kind exists yet. Offers a real jump to the settings
      surface that enables scheduled digests AND an inline generate button that POSTs
@@ -172,7 +224,7 @@
       host.appendChild(note);
     }
 
-    host.appendChild(el('div', 'digest-stamp', '產生於 ' + f.datetime(d.generated_at)));
+    _stamp(host, d, 'daily');
   }
 
   function _countLink(label, n, href, title) {
@@ -190,7 +242,7 @@
     var items = d.payload.items || [];
     if (!items.length) {
       host.appendChild(el('div', 'digest-empty', '本週無待辦事項 — 一切就緒。'));
-      host.appendChild(el('div', 'digest-stamp', '產生於 ' + f.datetime(d.generated_at)));
+      _stamp(host, d, 'weekly');
       return;
     }
     var list = el('div', 'digest-checklist');
@@ -210,7 +262,7 @@
       list.appendChild(row);
     });
     host.appendChild(list);
-    host.appendChild(el('div', 'digest-stamp', '產生於 ' + f.datetime(d.generated_at)));
+    _stamp(host, d, 'weekly');
   }
 
   /* ---- history modal (copied from web/whatsnew.js openHistory) ---- */

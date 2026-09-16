@@ -1627,3 +1627,28 @@ had been true before D30 and nobody re-read it when the split basis landed.
 - **When a fix "harmless-ifies" a collision, write the invariant as a test on both writers.**
   `tests/scheduler/test_benchmark_history.py` now writes the same pre-split row through the
   instrument path and the benchmark path and asserts byte-identity.
+
+## A float that never touches money can still corrupt a verdict (2026-09-16, demo audit H1)
+
+**What happened.** The 再平衡試算 drawer kept its target weights as JS numbers — a UI
+percentage, deliberately outside the "no money in floats" rule — and sent them as
+`String(ratio)`. `0.7 / 100` serialises as `"0.006999999999999999"`, `3.6 / 100` as
+`"0.036000000000000004"`; the backend parsed those strings as EXACT Decimals, summed them to
+`1.000000000000000004`, and `over_allocated = submitted_sum > 1` was true. The footer,
+computed from the same floats with a `> 1.0001` fallback, said 100.00% beside the warning.
+Neither side was "wrong" by its own rule; the defect lived in the seam between them.
+
+**Lessons.**
+- **The Decimal rule is about the WIRE, not only about money.** A value that is exact on
+  one side and float on the other is a float value with an exact-looking spelling. Any
+  number a browser sends is built from what the user typed (integer tenths, digit surgery,
+  `toFixed` on an exact quotient), never from `String(float)` — and a static contract test
+  now pins that for `rebalance.js`.
+- **A tolerance-less comparison on a value that crossed a float boundary is a bug in
+  waiting, whatever the other side promises.** The backend now compares against
+  `1 + 0.0001`, with the comment recording why the tolerance can never mask a real
+  overshoot (the coarsest step of a 1-dp percent field is 0.001).
+- **Seeding through display precision and rounding each row independently can open the
+  page in an error state.** Largest-remainder apportionment keeps F-06's "fields ≡ POSTed
+  plan" invariant AND sums to what the raw weights round to — the fix that looked like
+  "add a tolerance" was three fixes.
