@@ -184,7 +184,11 @@ def test_a_clean_fx_batch_reports_nothing_failed(conn: sqlite3.Connection) -> No
 def test_refresh_fx_history_pre_filters_the_same_way(conn: sqlite3.Connection) -> None:
     summary = refresh_fx_history(conn, _registry(), [_USDTWD, _USDMYR], date(2026, 6, 1),
                                  now=_NOW)
+    # 2026-06-05 is the one day BOTH USD legs landed (31.5 / 31.5), so the cross rule
+    # (owner ruling 2026-09-16, pricing/cross.py) derives MYR/TWD = 1 for it; the day USD/TWD
+    # was refused has no derived row — a missing leg derives nothing, never fabricates.
     assert _rates(conn) == [
+        ("MYR", "TWD", "1"),
         ("USD", "MYR", "31.5"), ("USD", "MYR", "4.4"), ("USD", "TWD", "31.5"),
     ]
     assert [f for f in summary.failed if "USD/TWD" in f], summary.failed

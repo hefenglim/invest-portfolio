@@ -1881,6 +1881,29 @@ CATALOG: list[Feature] = [
         area="全站",
         target=".kpi-band",
     ),
+    # --- 2026-09-16, demo black-box audit follow-ups (owner rulings) ----------------------
+    Feature(
+        version="0.1.29",
+        id="auto-ai-resolve-toggle",
+        title="代號查無時的自動 AI 辨識：打錯代號不再扣額度，也可整個關掉",
+        desc="觀察清單快速加入在查無報價時會自動送 AI 判讀一次——連打錯一個字母的代號也送，"
+        "額度就這樣被扣掉而你不會知道。現在純代號型輸入（例如 AAPLL）查無時只提示、不自動送，"
+        "按「AI 辨識」才會；用名稱找的輸入照舊自動。另外多了一個開關可以整個關掉自動辨識",
+        href="settings.html#llm",
+        area="系統設定 → AI 與額度",
+        target="#ai-resolve-panel",
+    ),
+    Feature(
+        version="0.1.29",
+        id="fx-cross-rate-derived",
+        title="MYR/TWD 匯率改由 USD 兩組匯率推導，三組匯率永遠三角一致",
+        desc="三組匯率原本各自向資料來源抓取，彼此不閉合（實測落差 0.069%），一筆 4,000 MYR 的"
+        "換匯就讓報告幣別淨值憑空少了 40.88 TWD。現在只抓 USD/TWD 與 USD/MYR，MYR/TWD 由兩者"
+        "相除得出並標記為「推導」；資料新鮮度面板的三角一致性會從此讀 0",
+        href="index.html#freshness",
+        area="儀表板 → 資料新鮮度",
+        target="#freshness",
+    ),
 ]
 
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's

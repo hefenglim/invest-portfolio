@@ -1288,7 +1288,17 @@
     fxBody.replaceChildren();
     fr.fx.forEach((p) => {
       const tr = el('tr');
-      tr.appendChild(el('td', null, p.base + '/' + p.quote));
+      const tdPair = el('td', null, p.base + '/' + p.quote);
+      /* A cross rate computed from the two USD legs (pricing/cross.py, owner ruling
+         2026-09-16 M1) is labelled so nobody reads it as a market quote. */
+      if (p.source && String(p.source).indexOf('derived:') === 0) {
+        const d = el('span', 'badge badge-stale-mini', '推導');
+        d.title = '由 ' + p.source.slice(8) + ' 兩組匯率推導（' + p.base + '/' + p.quote
+          + ' 無直接市場報價），三組匯率永遠三角一致';
+        d.style.marginLeft = '4px';
+        tdPair.appendChild(d);
+      }
+      tr.appendChild(tdPair);
       tr.appendChild(el('td', null, f.date(p.as_of)));
       const td = el('td');
       if (p.stale) td.appendChild(el('span', 'badge badge-stale-mini', '過期'));

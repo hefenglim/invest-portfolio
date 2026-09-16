@@ -234,6 +234,10 @@ class FxFreshness(BaseModel):
     quote: Currency
     as_of: date | None  # None = pair never stored
     stale: bool
+    # Where the rate came from — a provider name, or "derived:USD" for a cross rate
+    # computed by `pricing/cross.py` (owner ruling 2026-09-16, M1). Additive; the
+    # freshness panel labels a derived row so the reader knows it is not a market quote.
+    source: str | None = None
 
 
 class FxTriangle(BaseModel):

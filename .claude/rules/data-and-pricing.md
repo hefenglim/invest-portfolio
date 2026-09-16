@@ -20,6 +20,25 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
   **6 dp**, ROUND_HALF_UP — cap only, never pad (clean values store byte-identical).
   This refines, not contradicts, "store at full source precision": the cap removes
   representation noise, not information.
+- **FX cross rates are DERIVED through one base currency, never fetched (owner ruling
+  2026-09-16, demo audit M1 option (b)).** `USD/TWD` and `USD/MYR` are the two pairs with a
+  liquid direct market and are fetched; `MYR/TWD` is `USD/TWD ÷ USD/MYR`, written by
+  `pricing/cross.py` right after every FX write (latest refresh and history backfill alike,
+  over the whole stored history) with `source = "derived:USD"`. Measured before the rule: the
+  three independently fetched rates, all dated 2026-09-15 and none stale, disagreed by
+  +0.0690% (USD/MYR × MYR/TWD = 31.856972 vs USD/TWD 31.834999), and a 4,000 MYR spot
+  conversion moved the report-currency total by 40.88 TWD with no ledger change — the
+  conversion path and the valuation path used different rates. The provider's `MYRTWD=X` is
+  itself a USD cross sampled at another moment, so nothing real is lost. Consequences:
+  **(1)** `freshness.fx_triangulation` is now a *guard*, not a warning — a non-zero gap means a
+  row reached `fx_rates` by some path other than this module; **(2)** a derived pair must
+  never be handed to a provider (`pricing/cross.py::fetched_pairs` filters the worklist, so
+  two writers can never own one row); **(3)** the freshness panel labels a derived row
+  「推導」 so nobody reads it as a market quote; **(4)** the 6-dp cap applies to the derived
+  value exactly as to a fetched one. Adding a fourth currency is a row in `CROSS_RATES`, not
+  code. Rejected: base = TWD (derives away the one pair with a real market — and the pair the
+  Moomoo FX pool's acquisition cost is booked in); read-time derivation in `shared/fx` (the
+  stored row and the used rate would differ — two truths).
 - **Average cost** — never stored as an authoritative rounded value. Store
   `total_cost` + `shares`; compute `average = total_cost / shares` on read
   (see `domain-ledger.md`).

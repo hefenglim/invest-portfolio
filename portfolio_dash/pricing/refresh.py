@@ -11,6 +11,7 @@ import sqlite3
 from datetime import date, datetime
 from decimal import Decimal
 
+from portfolio_dash.pricing.cross import derive_cross_rates
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import FxRow, PriceRow, RefreshSummary
@@ -149,16 +150,26 @@ def refresh_quotes(
     f_rows, f_unusable, f_refusals = _refuse_nonpositive_rates(f_rows)
     if p_rows:
         upsert_prices(conn, p_rows, fetched_at=now, factor_of=factor_of)
+    derived: dict[str, str] = {}
     if f_rows:
         upsert_fx(conn, f_rows, fetched_at=now)
+        # Cross rates are DERIVED from what was just written (owner ruling 2026-09-16, M1):
+        # MYR/TWD = USD/TWD ÷ USD/MYR, source "derived:USD", so the stored triangle always
+        # closes. Reported in `ok` under the pair key like any other winning source.
+        derived = _derived_sources(derive_cross_rates(conn, fetched_at=now))
     return RefreshSummary(
         # A symbol / pair whose only row was refused stored nothing, so reporting a winning
         # source for it would contradict the refusal listed beside it.
-        ok={k: v for k, v in {**p_sources, **f_sources}.items()
-            if k not in p_unusable and k not in f_unusable},
+        ok={**{k: v for k, v in {**p_sources, **f_sources}.items()
+               if k not in p_unusable and k not in f_unusable}, **derived},
         failed=[*p_failed, *p_refusals, *f_failed, *f_refusals],
         fetched_at=now,
     )
+
+
+def _derived_sources(rows: list[FxRow]) -> dict[str, str]:
+    """``{"MYRTWD": "derived:USD", …}`` for the cross rows just written (any date)."""
+    return {f"{r.base.value}{r.quote.value}": r.source for r in rows}
 
 
 def refresh_history(
@@ -210,10 +221,14 @@ def refresh_fx_history(
     """
     rows, sources, failed = registry.fetch_fx_history(pairs, start)
     rows, unusable, refusals = _refuse_nonpositive_rates(rows)
+    derived: dict[str, str] = {}
     if rows:
         upsert_fx(conn, rows, fetched_at=now)
+        # Same derivation as `refresh_quotes`, over the whole stored history: a backfill of
+        # the two USD legs re-expresses every MYR/TWD day they cover (owner ruling, M1).
+        derived = _derived_sources(derive_cross_rates(conn, fetched_at=now))
     return RefreshSummary(
-        ok={k: v for k, v in sources.items() if k not in unusable},
+        ok={**{k: v for k, v in sources.items() if k not in unusable}, **derived},
         failed=[*failed, *refusals],
         fetched_at=now,
     )

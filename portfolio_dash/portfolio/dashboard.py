@@ -938,7 +938,8 @@ def build_dashboard(
     fx_fresh = [
         FxFreshness(base=base, quote=quote,
                     as_of=read.as_of if read is not None else None,
-                    stale=read.stale if read is not None else True)
+                    stale=read.stale if read is not None else True,
+                    source=read.source if read is not None else None)
         for (base, quote), read in fx_reads_sorted
     ]
     freshness = FreshnessReport(

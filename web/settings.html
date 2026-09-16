@@ -261,6 +261,15 @@
         <button class="btn btn-warn" id="llm-restore" type="button">關閉全部角色</button>
       </div>
     </section>
+    <!-- L13 (owner ruling 2026-09-16, 3(d)): the automatic AI-resolve switch, persisted in
+         /api/ui-prefs as auto_ai_resolve (settings-llm.js). -->
+    <section class="panel" id="ai-resolve-panel">
+      <div class="panel-head"><h2 class="panel-title">代號查無時自動 AI 辨識</h2><span class="panel-sub">觀察清單快速加入：用名稱找不到報價時，是否自動送 AI 判讀（會使用 AI 額度）</span></div>
+      <div class="roles-close-bar">
+        <span class="roles-close-hint" id="pref-auto-ai-hint">開啟：名稱型輸入查無報價時自動送 AI 判讀一次；純代號型輸入（例如打錯的 AAPLL）一律不自動送，按「AI 辨識」才會。關閉：一律不自動送。</span>
+        <button class="toggle on" id="pref-auto-ai" type="button" role="switch" aria-checked="true" title="切換自動 AI 辨識"></button>
+      </div>
+    </section>
     <section class="panel" id="quota">
       <div class="panel-head"><h2 class="panel-title">額度治理</h2><span class="panel-sub">額度依 AI 代理閘道回報的實際用量自動扣抵；餘額歸零後，所有 AI 服務請求將暫停，補充額度後自動恢復。</span></div>
       <div class="billing-grid" style="padding:0;">

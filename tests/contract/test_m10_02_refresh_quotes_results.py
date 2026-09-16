@@ -48,7 +48,9 @@ def test_results_block_is_additive_and_partial_when_holdings_fail(
     assert res["status"] == "partial"
     assert "AAPL" in res["held_failed"]
     assert res["held_failed"] == sorted(res["held_failed"])
-    assert set(res["fx_failed"]) == {"USDTWD", "USDMYR", "MYRTWD"}
+    # MYR/TWD is DERIVED, never fetched (owner ruling 2026-09-16, pricing/cross.py), so it
+    # can no longer be a FETCH failure; only the two USD legs are asked of a provider.
+    assert set(res["fx_failed"]) == {"USDTWD", "USDMYR"}
     # The run row and the response say the same thing.
     row = golden_db.execute(
         "SELECT status, detail FROM job_runs WHERE id = ?", (res["run_id"],)

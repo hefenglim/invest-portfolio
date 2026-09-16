@@ -201,9 +201,21 @@
   /* Expose the shared field so web/instruments.js (edit caller) reuses it (loaded after). */
   window.pdSectorField = pdSectorField;
 
+  /* L13 (owner ruling 2026-09-16): the 設定 → AI 與額度 switch. Read fresh on every open so a
+     change on the settings page is honoured without a reload; a failed read keeps the
+     default (ON — the R6-B behaviour), never silently switches the feature off. */
+  let autoAiPref = true;
+  function loadAutoAiPref() {
+    if (!api) return;
+    api.get('/api/ui-prefs').then((p) => {
+      if (p && typeof p.auto_ai_resolve === 'boolean') autoAiPref = p.auto_ai_resolve;
+    }).catch(() => { /* keep the default */ });
+  }
+
   window.pdInstQuickAdd = function (opts) {
     opts = opts || {};
     if (!api) return;
+    loadAutoAiPref();
     /* Wave A1: ONE modal builder for BOTH flows. mode:'edit' turns this into the instrument
        editor (locked 代號/市場, edit-only 目標價 + TW 板別, PUT save, no 記一筆買入); the DEFAULT
        (add) mode is byte-for-byte the prior register flow, so the cross-agent add caller shape
@@ -453,10 +465,22 @@
           if (industryPristine) industryIn.value = '';
           /* AUTOMATIC unified AI resolve (R6-B): fire once per DISTINCT settled input — the
              observable union of the two spec triggers (code-format miss OR registry+provider
-             miss both surface here as found:false). The form stays fully editable meanwhile. */
+             miss both surface here as found:false). The form stays fully editable meanwhile.
+             L13 (demo audit; owner ruling 2026-09-16, 3(b)+(d)): the automatic fire is now
+             gated twice. (b) a CODE-like input — up to 6 letters/digits, no name typed — is
+             almost always a typo, and the LLM has nothing to add to 「AAPLL」 except a bill;
+             it gets the plain miss text and the 「AI 辨識」 button stays one click away. A
+             name-like input (CJK, spaces, longer text, or a name in the 名稱 field) still
+             fires. (d) the 設定 → AI 與額度 switch `auto_ai_resolve` turns the automatic
+             fire off entirely; the manual button is never gated. */
           const q = aiQuery();
           const key = q + '|' + mktSel.value;
-          if (q && key !== lastAiKey) {
+          const codeLike = /^[A-Za-z0-9.\-]{1,6}$/.test(symIn.value.trim()) && !nameIn.value.trim();
+          if (!autoAiPref) {
+            status.textContent = '查無報價 — 請確認代號與市場；或按「AI 辨識」判讀（自動辨識已在設定關閉）';
+          } else if (codeLike) {
+            status.textContent = '查無報價 — 請確認代號與市場；若是用名稱找，可按「AI 辨識」（使用 AI 額度）';
+          } else if (q && key !== lastAiKey) {
             lastAiKey = key;
             runAiResolve({ auto: true });  // sets its own 「AI 判讀中…」 status
           } else {

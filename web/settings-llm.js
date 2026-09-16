@@ -608,6 +608,34 @@
     renderQuota();
     renderUsageTable(); /* table + chips render now */
     maybeRenderLlmChart(); /* chart only if the tab is visible (standalone page = yes) */
+    initAutoAiToggle();
+  }
+
+  /* L13 (owner ruling 2026-09-16, 3(d)): the automatic AI-resolve switch — persisted in
+     GET/PUT /api/ui-prefs as `auto_ai_resolve` (subset merge, so page_size is untouched).
+     The quick-add modal reads it on every open. Same toggle grammar as the scheduler rows. */
+  function initAutoAiToggle() {
+    const t = $('#pref-auto-ai');
+    if (!t) return;
+    const paint = (on) => {
+      t.classList.toggle('on', !!on);
+      t.setAttribute('aria-checked', on ? 'true' : 'false');
+    };
+    api.get('/api/ui-prefs').then((p) => {
+      if (p && typeof p.auto_ai_resolve === 'boolean') paint(p.auto_ai_resolve);
+    }).catch(() => { /* leave the default painted */ });
+    t.addEventListener('click', async () => {
+      const next = !t.classList.contains('on');
+      t.disabled = true;
+      try {
+        const p = await api.put('/api/ui-prefs', { auto_ai_resolve: next });
+        paint(p && typeof p.auto_ai_resolve === 'boolean' ? p.auto_ai_resolve : next);
+        _toast('已儲存', 'ok', next ? '名稱型輸入查無報價時會自動 AI 辨識' : '不再自動 AI 辨識，按「AI 辨識」才會');
+      } catch (err) {
+        _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
+      }
+      t.disabled = false;
+    });
   }
 
   boot();

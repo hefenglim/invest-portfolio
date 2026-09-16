@@ -21,6 +21,7 @@ from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.ops import notify_dispatch
 from portfolio_dash.pricing import datasources_store, ingest
 from portfolio_dash.pricing.benchmarks import benchmark_refs
+from portfolio_dash.pricing.cross import fetched_pairs
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
 from portfolio_dash.pricing.refresh import (
@@ -1171,13 +1172,17 @@ JOBS: list[JobSpec] = [
 DEFAULT_BOARD: dict[Market, str] = {Market.US: "", Market.MY: ".KL", Market.TW: "TWSE"}
 _DEFAULT_BOARD = DEFAULT_BOARD  # back-compat alias (internal callers below)
 
-# Reporting-currency FX pairs needed for the combined view (reporting ccy = TWD).
+# Reporting-currency FX pairs the providers are asked for (reporting ccy = TWD).
 # Public: the api-layer instrument service reuses the same fixed set.
-REPORTING_FX_PAIRS: list[FxPair] = [
+# MYR/TWD is NOT here since 2026-09-16 (owner ruling, demo audit M1 (b)): it is DERIVED
+# from the two USD legs by `pricing/cross.py` right after every FX write, so the three
+# pairs always close a triangle. Asking a provider for it too would put two writers on one
+# row; `fetched_pairs` filters it out even if someone adds it back.
+REPORTING_FX_PAIRS: list[FxPair] = fetched_pairs([
     FxPair(base=Currency.USD, quote=Currency.TWD),
     FxPair(base=Currency.USD, quote=Currency.MYR),
     FxPair(base=Currency.MYR, quote=Currency.TWD),
-]
+])
 _FX_PAIRS = REPORTING_FX_PAIRS  # back-compat alias (internal callers below)
 
 

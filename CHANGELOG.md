@@ -85,6 +85,31 @@ one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per 
   symbols the provider left on an older date (`lagging`, L24) and the reload keeps filters,
   open panels and scroll position (L25).
 
+*Owner rulings on the seven open questions (2026-09-16, same day)*
+
+- **MYR/TWD is DERIVED, not fetched (M1, ruling 1(b)).** `pricing/cross.py` writes
+  `MYR/TWD = USD/TWD ÷ USD/MYR` with `source = "derived:USD"` right after every FX write —
+  the latest refresh and the history backfill alike, over the whole stored history — and the
+  providers are no longer asked for it (`fetched_pairs` filters the worklist). The triangle
+  check is now a guard that must read 0.0000; the freshness panel labels the row 「推導」
+  (`FxFreshness.source`, golden payload +6 / −3). Rule recorded in
+  `rules/data-and-pricing.md` with the rejected alternatives.
+- **Automatic AI resolve is gated on input shape and on a switch (L13, ruling 3(b)+(d)).**
+  A code-like miss (≤ 6 letters/digits, no name typed) no longer fires the paid resolver by
+  itself — the LLM has nothing to add to 「AAPLL」 except a bill — while a name-like input
+  still does (R6-B kept). 設定 → AI 與額度 gains 「代號查無時自動 AI 辨識」, persisted as
+  `auto_ai_resolve` in `/api/ui-prefs` (PUT is now a subset merge; the table gains the
+  column by additive migration).
+- **Demo data (L27, ruling 2(a)):** the duplicate stress-test rows were deleted after a
+  backup — TSLA sells 38/49/59, MSFT sells 41/52/62, dividends 2330 #4 and 5225 19/28/31 —
+  and the dashboard diff confirmed only those four holdings and the realized table moved.
+- **L15 / L19 (ruling 5(b)) reproduced on the demo with a real browser:** the realized
+  card's per-currency footer renders at 390 / 768 / 1440 (not a defect), and the 「已復原」
+  toast does appear 1.5 s after 「刪除並復原」 — then auto-dismisses at 4.2 s while the list
+  is still repainting, which is how it was missed. Recorded, not changed.
+- M3 stays as shipped (demo scheduler off, 2 / 8-day digest thresholds; ruling 4(a)); M9
+  keeps its defaults (ruling 7).
+
 *Not fixed, recorded with evidence*: L13 (automatic AI resolve is a deliberate R6-B design —
 owner call), L15 / L19 (not reproducible from the code; the footer and the toast exist —
 awaiting the owner's repro), L27 (the duplicate TSLA/MSFT sells and 2330/5225 dividends are
