@@ -30,12 +30,12 @@
 
 > 本節與各項目下方的「修復狀態」區塊由修復作業補記；上方審計原文未改動。
 > 分支 `feat/corporate-actions`，已 push（`909f0b2`／`486bbb8`／`7445208`，未併 main）；demo 站部署於 `7445208` 並驗證通過（`verify_live` ALL PASS、真瀏覽器走查 0 錯誤）。demo 資料修正：L26（0056 產業）與 L27（重複列，裁定 2(a)）。
-> 狀態同步至 2026-09-17：§七的七題全數裁定並執行（§八），§七**無待決事項**；複驗回覆的 Q1 已於同日裁定（分批，第一批完成，見 §十.5），**無待決事項**。
+> 狀態同步至 2026-09-17：§七的七題全數裁定並執行（§八），§七**無待決事項**；複驗回覆的 Q1 已於同日裁定並兩批執行完畢（§十.5），**無待決事項**。
 
 > **複驗（2026-09-17 01:5x–02:4x，Asia/Taipei）**：由原稽核者在 demo 站（`v0.1.28 · 7445208`）以真實瀏覽器逐項重放原始重現步驟，佐以 API 回應與原始碼交叉確認。
 > 結果：**34 項驗收完成**（含 2 項確認為非缺陷）、**1 項未通過（M9）**、**2 項部分通過（L5／L8）**。回歸無退化：94 項金額恆等式全過、匯出 15/15、390px 五頁（含設定 8 分頁）0 溢位、正常操作 0 console error。逐項證據見各項目下方的「驗收」區塊與 §九。
 
-> **複驗回覆（2026-09-17，修復作業補記）**：M9／L5／L8 三項複驗意見逐一比對原始碼與 demo 資料庫（唯讀 SELECT，走 `vm_exec.py`）後**全部成立**，已依「修類別、不動已驗收項目」的原則修復；M9 的根因比複驗所述更深（**149/149 張卡**從未存過變數快照，不只舊卡）。修法、邏輯與驗證見 **§十**。本輪修改**尚未 commit、未部署 demo**，待指示。
+> **複驗回覆（2026-09-17，修復作業補記）**：M9／L5／L8 三項複驗意見逐一比對原始碼與 demo 資料庫（唯讀 SELECT，走 `vm_exec.py`）後**全部成立**，已依「修類別、不動已驗收項目」的原則修復；M9 的根因比複驗所述更深（**149/149 張卡**從未存過變數快照，不只舊卡）。修法、邏輯與驗證見 **§十**。本輪已 commit 到分支（`cbfac0a` 複驗三項＋Q1 第一批、`55e0216` Q1 第二批），**未 push、未部署 demo**（demo 仍為 `7445208`）；M9／L5／L8 的修復尚待部署後由原稽核者第二次複驗。
 
 | 狀態 | 項目 | 複驗結果（2026-09-17） |
 | --- | --- | --- |
@@ -492,7 +492,7 @@ _報告產生於 2026-09-16 01:14（Asia/Taipei）・受測版本 v0.1.28 · 85d
 
 **建議**：加一條靜態測試 —— 掃 `web/*.html` 的可見文字節點與 `web/*.js` 的中文字串常量，禁止「CJK 字元相鄰的半形 `, : ; ! ? ( )`」（排除程式註解與英文句）。一次掃乾淨，並防止回流。這是典型的「修了實例、沒修類別」。
 
-> **修復回覆（2026-09-17）**：建議的靜態測試已加入並以稽核原句作陽性對照；前端 25 處＋點名的後端 2 處全改。後端其餘 96 處另列待決（§十.5 Q1）。詳 §十.2。
+> **修復回覆（2026-09-17）**：建議的靜態測試已加入並以稽核原句作陽性對照；前端 25 處＋點名的後端 2 處全改。後端另有 96 處提為 Q1，同日裁定分批並兩批掃完（§十.5）。詳 §十.2。
 
 #### ⚠️ L8 — 帳戶下拉的幣別標註
 
@@ -535,9 +535,11 @@ _報告產生於 2026-09-16 01:14（Asia/Taipei）・受測版本 v0.1.28 · 85d
 
 需要再處理的只有三項：**M9 要重做**（目前抓不到該抓的、卻誤報 27 張卡），**L5／L8 要把同類掃乾淨**（現在是修了實例、沒修類別）。其餘 34 項驗收完成。
 
+> **修復回覆（2026-09-17）**：三項皆於同日處理完畢（M9 重做、L5／L8 改為類別修法＋守門），並延伸掃完後端 96 處中的 86 處可見文字（Q1 兩批），見 §十；已 commit 到分支（`cbfac0a`、`55e0216`），待部署後請再複驗一輪。
+
 ## 十、複驗回覆與修復（2026-09-17，修復作業補記）
 
-> 三項複驗意見逐一比對原始碼與 demo 資料庫後**全部成立**。修法原則：**修類別、不動已驗收項目**——不改 `input_snapshot`／快取指紋／Loop-2 評分輸入，交易帳本三個已驗收下拉的輸出逐字不變，後端 96 處字串另列待決。閘門：ruff clean（`portfolio_dash`／`tests`／`scripts`）・`mypy --strict --no-incremental` 820 檔，在閘門範圍（`portfolio_dash`／`tests`／`scripts/probe`）0 錯誤（285 個錯誤全在範圍外的 `scripts/stress_audit`，既有）・pytest 非 e2e 全套 **4,958 通過／4 略過／0 失敗**・e2e：`test_cash_withdraw_estimate_flow.py`＋`test_pages_smoke.py`＋`test_corporate_actions_flow.py` 52 通過／22 略過／1 失敗——該失敗為 `909f0b2`（M5 把預覽卡帳戶名改成中文）遺留的舊測試期望值 `"Charles Schwab"`，與本次改動無關，已改為「嘉信 Schwab」後單獨重跑通過。本輪依裁定 commit 到分支（見 §十.7），未 push、未部署 demo。
+> 三項複驗意見逐一比對原始碼與 demo 資料庫後**全部成立**。修法原則：**修類別、不動已驗收項目**——不改 `input_snapshot`／快取指紋／Loop-2 評分輸入，交易帳本三個已驗收下拉的輸出逐字不變，後端 96 處字串提為 Q1（同日裁定並兩批完成）。閘門：ruff clean（`portfolio_dash`／`tests`／`scripts`）・`mypy --strict --no-incremental` 820 檔，在閘門範圍（`portfolio_dash`／`tests`／`scripts/probe`）0 錯誤（285 個錯誤全在範圍外的 `scripts/stress_audit`，既有）・pytest 非 e2e 全套 **4,958 通過／4 略過／0 失敗**・e2e：`test_cash_withdraw_estimate_flow.py`＋`test_pages_smoke.py`＋`test_corporate_actions_flow.py` 52 通過／22 略過／1 失敗——該失敗為 `909f0b2`（M5 把預覽卡帳戶名改成中文）遺留的舊測試期望值 `"Charles Schwab"`，與本次改動無關，已改為「嘉信 Schwab」後單獨重跑通過。本輪依裁定 commit 到分支（見 §十.7），未 push、未部署 demo。
 
 ### 10.1 M9 — 根因、修法與邏輯
 
@@ -559,7 +561,7 @@ _報告產生於 2026-09-16 01:14（Asia/Taipei）・受測版本 v0.1.28 · 85d
 - 掃描器（與新測試同一邏輯）在 `web/` 找到 **25 處字串／11 檔**（複驗的「16 處」是渲染後實例數，對應 `rebate-inbox.js` 4 句＋`dividend-inbox.html` 4 句）：`dividend-inbox.html`、`news.html`、`insights.html`、`app.js`、`cash.js`、`corp-action-form.js`、`input.js`（CSV 欄位提示 5 句，同句內既有 `（選填）` 故整句統一全形）、`news.js`、`rebalance.js`、`rebate-inbox.js`。全數改為 ，：；？（）～。
 - 複驗點名的「`ledger.js` 確認框」那句來自後端 `data_ingestion/validate.py`（`晚於今日,確認無誤?`），與 `改記為分割(SPLIT)` 按鈕標籤（`api/routers/ledgers.py`；前端只是 fallback）一併改，對應 e2e 期望值同步。
 - 新守門 `tests/contract/test_zh_punctuation_fullwidth.py`：HTML 文字節點＋`title/placeholder/aria-label/alt/value` 屬性＋`<script>` 內字串；JS 用狀態機取字串／模板常量並跳過註解（regex 分不出網址裡的 `//` 與註解）；規則「半形 `, : ; ! ? ( )` 任一側緊鄰 CJK」；含陽性對照（稽核原句必須被抓到）與空白 allowlist 的過期檢查（D39）。
-- **未納入：** 後端 `portfolio_dash/**` 字串常量（AST 掃描、排除 docstring）另有 **98 處**（改 2 處後 **96**；先前寫 121 是把 25 個前端行也算進去了，此處更正）——其中 **57** 處是使用者可見訊息（驗證訊息、確認框、toast、匯出標籤）、**29** 處是「更新紀錄」目錄（`shared/whatsnew.py`）、**10** 處是 regex 與 LLM 提示詞（不需處理）。實測只有 **6** 處被測試逐字釘住、8 處出現在文件／頁面；未納入的理由不是測試，而是範圍（散在約 20 檔）、每句都要判讀括號是不是程式片段（如 `ceil(金額/1,000)`、`RSI(14)`），以及這一輪「不動已驗收項目」的原則 → 提為 Q1；**同日裁定分批，第一批已完成（§十.5）**。
+- **未納入：** 後端 `portfolio_dash/**` 字串常量（AST 掃描、排除 docstring）另有 **98 處**（改 2 處後 **96**；先前寫 121 是把 25 個前端行也算進去了，此處更正）——其中 **57** 處是使用者可見訊息（驗證訊息、確認框、toast、匯出標籤）、**29** 處是「更新紀錄」目錄（`shared/whatsnew.py`）、**10** 處是 regex 與 LLM 提示詞（不需處理）。實測只有 **6** 處被測試逐字釘住、8 處出現在文件／頁面；未納入的理由不是測試，而是範圍（散在約 20 檔）、每句都要判讀括號是不是程式片段（如 `ceil(金額/1,000)`、`RSI(14)`），以及這一輪「不動已驗收項目」的原則 → 提為 Q1；**同日裁定分批，兩批皆已完成（§十.5），後端掃描現為 0 處**。
 
 ### 10.3 L8 — 單一定義
 
@@ -570,7 +572,7 @@ _報告產生於 2026-09-16 01:14（Asia/Taipei）・受測版本 v0.1.28 · 85d
 
 見 §9.5 下方回覆：不加開關，三項以既有隔離測試（老化夾具）覆蓋。
 
-### 10.5 待你決策
+### 10.5 待你決策（Q1，已裁定並執行）
 
 | # | 問題 | 選項 | 建議 |
 | --- | --- | --- | --- |
@@ -584,13 +586,13 @@ _報告產生於 2026-09-16 01:14（Asia/Taipei）・受測版本 v0.1.28 · 85d
 
 ### 10.6 本輪變更檔案
 
-`portfolio_dash/llm_insight/figure_check.py`（母體、第三態、代碼規則）・`insights_store.py`（`prompt_figures` 欄）・`generate.py`（產生端存母體）・`api/routers/insights.py`（讀取端）・`web/insights.html`＋`styles.css`（三種徽章）・`web/names.js`／`input.js`／`cash.js`（L8）・11 個 `web/*` 檔＋`validate.py`＋`ledgers.py`（L5）・測試：`test_figure_check.py`、`test_generate.py`、`test_insights_store.py`、`test_insight_run_api.py`、`test_account_name_single_source.py`、新檔 `test_zh_punctuation_fullwidth.py`、e2e `test_cash_withdraw_estimate_flow.py`／`test_corporate_actions_flow.py`（後者另修一處 `909f0b2` 遺留的英文帳戶名期望值）・`LESSONS_LEARNED.md`（一則：以測試餵給檢核器它在正式環境永遠拿不到的輸入）。
+`portfolio_dash/llm_insight/figure_check.py`（母體、第三態、代碼規則）・`insights_store.py`（`prompt_figures` 欄）・`generate.py`（產生端存母體）・`api/routers/insights.py`（讀取端）・`web/insights.html`＋`styles.css`（三種徽章）・`web/names.js`／`input.js`／`cash.js`（L8）・11 個 `web/*` 檔＋`validate.py`＋`ledgers.py`（L5）・測試：`test_figure_check.py`、`test_generate.py`、`test_insights_store.py`、`test_insight_run_api.py`、`test_account_name_single_source.py`、新檔 `test_zh_punctuation_fullwidth.py`、e2e `test_cash_withdraw_estimate_flow.py`／`test_corporate_actions_flow.py`（後者另修一處 `909f0b2` 遺留的英文帳戶名期望值）・`LESSONS_LEARNED.md`（一則：以測試餵給檢核器它在正式環境永遠拿不到的輸入）。・`CHANGELOG.md`（`[Unreleased]` 段：M9 重做、L5／L8 類別修法、Q1 兩批的補記）。
 
 Q1 第一批另動：`digest_service.py`、`dividend_inbox.py`、`api/routers/cash.py`／`input_center.py`／`ledgers.py`、`data_ingestion/csv_import.py`／`manual.py`／`dividend_model.py`／`fees.py`／`import_templates.py`／`validate.py`、`forex/fx_pnl.py`、`ops/notify_dispatch.py`、`portfolio/dashboard.py`、`strategy/whatif.py`；測試 `test_cash_movement_guard_contract.py`、`test_validate_dual_market.py`、`test_cash_import_api.py`、`test_import_template.py`（＋雙寬度表頭測試）、`test_user_messages_are_zh_tw.py`（docstring）、e2e `test_corporate_actions_flow.py`（範本表頭）、`test_zh_punctuation_fullwidth.py`（後端掃描）；`.claude/rules/markets-and-fees.md`（引句）。第二批另動：`shared/whatsnew.py`、`test_zh_punctuation_fullwidth.py`（清空 pending）。閘門：ruff clean・`mypy --strict --no-incremental`（bare 閘門）**796 檔 0 問題**・pytest 非 e2e 全套 **5,223 通過／0 失敗**（第一次跑出 1 個失敗：spec-17 黃金快照 `tests/golden/dashboard_full.json` 的 `fx_complete_reason` 仍是舊標點，只替換該字串、其餘位元組不動後重跑通過）・e2e `test_corporate_actions_flow.py`＋`test_ledger_correction_doors_flow.py`＋`test_cash_withdraw_estimate_flow.py`＋`test_pages_smoke.py` 四檔同跑 54 通過／1 失敗——`test_dashboard_digest_cards_smoke` 收到一次 500，單獨重跑該測試與整檔 `test_pages_smoke.py`（38/38）皆通過，判定為多檔同一 session 的暫時性狀況，與本次改動無關。
 
 ### 10.7 commit（2026-09-17，分支 `feat/corporate-actions`，未 push）
 
-單一 commit（複驗三項修復＋Q1 第一批，因 `validate.py`／`ledgers.py`／CHANGELOG 同時承載兩者，不拆）：`fix: the audit author's re-verification — M9 checks the numbers the model was fed, L5 and L8 fixed as classes, backend zh punctuation batch 1`；→ **`cbfac0a`**。第二批：`fix(zh): backend punctuation batch 2 — the what's-new catalog`（雜湊見 `git log -1`，本節在該 commit 前寫入）。兩個 commit 皆未 push、未部署 demo。
+單一 commit（複驗三項修復＋Q1 第一批，因 `validate.py`／`ledgers.py`／CHANGELOG 同時承載兩者，不拆）：`fix: the audit author's re-verification — M9 checks the numbers the model was fed, L5 and L8 fixed as classes, backend zh punctuation batch 1`；→ **`cbfac0a`**。第二批：`fix(zh): backend punctuation batch 2 — the what's-new catalog` → **`55e0216`**。兩個 commit 皆未 push、未部署 demo（demo 仍為 `7445208`）；分支領先 origin 三個 commit（`9c19296`、`cbfac0a`、`55e0216`）。
 
 ---
 
