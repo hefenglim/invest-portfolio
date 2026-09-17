@@ -35,7 +35,7 @@
 > **複驗（2026-09-17 01:5x–02:4x，Asia/Taipei）**：由原稽核者在 demo 站（`v0.1.28 · 7445208`）以真實瀏覽器逐項重放原始重現步驟，佐以 API 回應與原始碼交叉確認。
 > 結果：**34 項驗收完成**（含 2 項確認為非缺陷）、**1 項未通過（M9）**、**2 項部分通過（L5／L8）**。回歸無退化：94 項金額恆等式全過、匯出 15/15、390px 五頁（含設定 8 分頁）0 溢位、正常操作 0 console error。逐項證據見各項目下方的「驗收」區塊與 §九。
 
-> **複驗回覆（2026-09-17，修復作業補記）**：M9／L5／L8 三項複驗意見逐一比對原始碼與 demo 資料庫（唯讀 SELECT，走 `vm_exec.py`）後**全部成立**，已依「修類別、不動已驗收項目」的原則修復；M9 的根因比複驗所述更深（**149/149 張卡**從未存過變數快照，不只舊卡）。修法、邏輯與驗證見 **§十**。本輪已 commit 到分支（`cbfac0a` 複驗三項＋Q1 第一批、`55e0216` Q1 第二批），**未 push、未部署 demo**（demo 仍為 `7445208`）；M9／L5／L8 的修復尚待部署後由原稽核者第二次複驗。
+> **複驗回覆（2026-09-17，修復作業補記）**：M9／L5／L8 三項複驗意見逐一比對原始碼與 demo 資料庫（唯讀 SELECT，走 `vm_exec.py`）後**全部成立**，已依「修類別、不動已驗收項目」的原則修復；M9 的根因比複驗所述更深（**149/149 張卡**從未存過變數快照，不只舊卡）。修法、邏輯與驗證見 **§十**。本輪 commit（`cbfac0a` 複驗三項＋Q1 第一批、`55e0216` Q1 第二批、`86a6d6d` 報告同步）已 **push**（`7445208..86a6d6d`，未併 main），**demo 已部署於 `86a6d6d` 並站外驗證通過**（§十.8）；M9／L5／L8 的修復待原稽核者在 demo 上第二次複驗並於本報告加註。
 
 | 狀態 | 項目 | 複驗結果（2026-09-17） |
 | --- | --- | --- |
@@ -590,9 +590,23 @@ _報告產生於 2026-09-16 01:14（Asia/Taipei）・受測版本 v0.1.28 · 85d
 
 Q1 第一批另動：`digest_service.py`、`dividend_inbox.py`、`api/routers/cash.py`／`input_center.py`／`ledgers.py`、`data_ingestion/csv_import.py`／`manual.py`／`dividend_model.py`／`fees.py`／`import_templates.py`／`validate.py`、`forex/fx_pnl.py`、`ops/notify_dispatch.py`、`portfolio/dashboard.py`、`strategy/whatif.py`；測試 `test_cash_movement_guard_contract.py`、`test_validate_dual_market.py`、`test_cash_import_api.py`、`test_import_template.py`（＋雙寬度表頭測試）、`test_user_messages_are_zh_tw.py`（docstring）、e2e `test_corporate_actions_flow.py`（範本表頭）、`test_zh_punctuation_fullwidth.py`（後端掃描）；`.claude/rules/markets-and-fees.md`（引句）。第二批另動：`shared/whatsnew.py`、`test_zh_punctuation_fullwidth.py`（清空 pending）。閘門：ruff clean・`mypy --strict --no-incremental`（bare 閘門）**796 檔 0 問題**・pytest 非 e2e 全套 **5,223 通過／0 失敗**（第一次跑出 1 個失敗：spec-17 黃金快照 `tests/golden/dashboard_full.json` 的 `fx_complete_reason` 仍是舊標點，只替換該字串、其餘位元組不動後重跑通過）・e2e `test_corporate_actions_flow.py`＋`test_ledger_correction_doors_flow.py`＋`test_cash_withdraw_estimate_flow.py`＋`test_pages_smoke.py` 四檔同跑 54 通過／1 失敗——`test_dashboard_digest_cards_smoke` 收到一次 500，單獨重跑該測試與整檔 `test_pages_smoke.py`（38/38）皆通過，判定為多檔同一 session 的暫時性狀況，與本次改動無關。
 
-### 10.7 commit（2026-09-17，分支 `feat/corporate-actions`，未 push）
+### 10.7 commit 與 push（2026-09-17，分支 `feat/corporate-actions`，未併 main）
 
-單一 commit（複驗三項修復＋Q1 第一批，因 `validate.py`／`ledgers.py`／CHANGELOG 同時承載兩者，不拆）：`fix: the audit author's re-verification — M9 checks the numbers the model was fed, L5 and L8 fixed as classes, backend zh punctuation batch 1`；→ **`cbfac0a`**。第二批：`fix(zh): backend punctuation batch 2 — the what's-new catalog` → **`55e0216`**。兩個 commit 皆未 push、未部署 demo（demo 仍為 `7445208`）；分支領先 origin 三個 commit（`9c19296`、`cbfac0a`、`55e0216`）。
+單一 commit（複驗三項修復＋Q1 第一批，因 `validate.py`／`ledgers.py`／CHANGELOG 同時承載兩者，不拆）：`fix: the audit author's re-verification — M9 checks the numbers the model was fed, L5 and L8 fixed as classes, backend zh punctuation batch 1`；→ **`cbfac0a`**。第二批：`fix(zh): backend punctuation batch 2 — the what's-new catalog` → **`55e0216`**。報告同步：`docs(audit): finish the re-verification sync …` → **`86a6d6d`**。四個 commit（`9c19296`、`cbfac0a`、`55e0216`、`86a6d6d`）已於 2026-09-17 push 到 `origin/feat/corporate-actions`（`7445208..86a6d6d`），未併 main。部署見 §十.8。
+
+### 10.8 demo 部署與站外驗證（2026-09-17，`86a6d6d`）
+
+| 步驟 | 結果 |
+| --- | --- |
+| 1. 備份 demo DB（`vm_exec.py`，已記錄） | `portfolio-pre-86a6d6d-20260917T074819Z.db`，20,234,240 bytes 與來源相同，`integrity_check` ok；備份時 `insights` 149 列、尚無 `prompt_figures` 欄；交易 56／股利 23 |
+| 2. 快轉＋重啟（`vm_exec.py`，已記錄） | demo checkout `git pull --ff-only origin feat/corporate-actions` → HEAD `86a6d6d`；`pyproject.toml` 無變更；重啟 `portfolio-dash-demo`，15 秒後 `/api/health` `{"status":"ok","version":"0.1.28","commit":"86a6d6d"}`；開機遷移已加上 `insights.prompt_figures` 欄，149 列未動 |
+| 3. `verify_live --expect-version 0.1.28` | **ALL PASS**（health commit `86a6d6d`、holdings 14、echarts sha 一致） |
+| 4. `/api/insights`（148 張卡） | `figure_flags.snapshot`：none 142／checked 6；`unverified_figures` 0 張（尚無新產生的卡）；`unknown_symbols` 只剩 **6883 ×1**（複驗時 48 個實例）；#37 → `snapshot: "none"` |
+| 5. 真瀏覽器唯讀走查（本機 headless Chromium 對 demo） | `insights.html`：「無快照可核」×81、「未知代碼」×1（6883）、無「數值待核」，tooltip 為新文案；`cash.html` 換匯／出金入金下拉皆為「Moomoo MY（USD／MYR）」「嘉信 Schwab（USD）」「台灣券商（TWD）」；渲染文字半形緊鄰中文：收件匣 0、設定 0、儀表板 0、新聞庫 6（全在新聞**標題資料**內，如「玉山金(2884)」，屬來源資料非介面文案）；`/api/whats-new` 與 `/history` 回應 0 處 |
+| 6. console | 僅一則 401：`login.html` 送出任意帳密的 `POST /api/auth/login`（見下方新觀察）；其餘頁面 0 錯誤 |
+| 註 | 第一次以 Chromium 連 demo 遇 `ERR_NAME_NOT_RESOLVED`（curl 同時可解析），5 秒後重試即成功——與 2026-09-16 部署後同類的暫時性狀況 |
+
+> **新觀察（未處理，供複驗時一併判定）— L22 訪客模式的文案與行為不一致**：demo 為訪客模式（`/api/auth/session` → `mode: guest`，所有頁面與 API 不需登入即可使用），登入頁提示寫「任何帳號密碼都能進入」，但實際在該頁送出任意帳密會得到 `POST /api/auth/login` **401**、畫面顯示「帳號或密碼錯誤」（`auth_store.authenticate` 在沒有任何用戶時一律回 False）。訪客可直接開 `index.html` 進入，所以不是阻斷，但提示句與送出結果矛盾。建議二選一：(a) 訪客模式下登入頁改為「直接進入」按鈕、不打 login；(b) 提示改寫為「無需登入，直接前往儀表板」。此為既有行為（`909f0b2` 之前即如此），非本輪改動所致，未在本輪修改。
 
 ---
 
