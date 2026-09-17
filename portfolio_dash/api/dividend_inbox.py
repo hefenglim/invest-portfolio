@@ -205,7 +205,7 @@ def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> s
     if not refs:
         return "無持倉可偵測"
     summary = refresh_dividends(conn, default_registry(conn), refs, now=now)
-    return f"{len(summary.ok)} 檔事件已更新, {len(summary.failed)} 檔失敗"
+    return f"{len(summary.ok)} 檔事件已更新，{len(summary.failed)} 檔失敗"
 
 
 def _price_on_or_before(

@@ -35,7 +35,7 @@
     const x = el('button', 'nw-x', '✕');
     x.addEventListener('click', closeModal);
     m.appendChild(x);
-    m.appendChild(el('h3', null, item.title || '(未命名)'));
+    m.appendChild(el('h3', null, item.title || '（未命名）'));
     const meta = el('div', 'm-meta');
     meta.appendChild(el('span', null, item.date || ''));
     if (item.source) meta.appendChild(el('span', null, '· ' + item.source));
@@ -43,7 +43,7 @@
     (item.related_stocks || []).forEach((s) => meta.appendChild(el('span', 'nw-tag', s)));
     m.appendChild(meta);
     m.appendChild(el('div', 'm-summary',
-      item.summary || (item.headline_only ? '(此則僅取得標題，未整理內文摘要)' : '')));
+      item.summary || (item.headline_only ? '（此則僅取得標題，未整理內文摘要）' : '')));
     const foot = el('div', 'm-foot');
     if (item.link) {
       const a = el('a', null, '前往原文 ↗'); a.href = item.link; a.target = '_blank';
@@ -62,7 +62,7 @@
     const row = el('div', 'nw-row');
     const top = el('div', 'nw-row-top');
     top.appendChild(el('span', 'nw-date', item.date || ''));
-    top.appendChild(el('span', 'nw-title', item.title || '(未命名)'));
+    top.appendChild(el('span', 'nw-title', item.title || '（未命名）'));
     top.appendChild(el('span', 'nw-cost', '$' + f.num(item.cost_usd, 4)));
     row.appendChild(top);
     const meta = el('div', 'nw-row-meta');
@@ -189,14 +189,14 @@
     const scope = ($('#nw-scope') && $('#nw-scope').value) || 'all';
     const restore = window.pdBusy ? window.pdBusy(runBtn, '抓取中…') : () => {};
     const prog = window.toastProgress
-      ? window.toastProgress('新聞抓取中…', '正在向資料源抓取並以 AI 整理(數十秒~數分鐘)')
+      ? window.toastProgress('新聞抓取中…', '正在向資料源抓取並以 AI 整理（數十秒～數分鐘）')
       : null;
     api.post('/api/news/run', { scope: scope }).then(() => {
       restore();
       pollNewsRun(prog, 0);
     }).catch((err) => {
       restore();
-      const msg = (err && err.status === 409) ? '已有抓取正在進行,請稍候'
+      const msg = (err && err.status === 409) ? '已有抓取正在進行，請稍候'
         : (err && err.message) || '抓取失敗';
       if (prog) prog.fail('無法開始抓取', msg);
       else if (window.toast) window.toast(msg, 'fail', err && err.code);

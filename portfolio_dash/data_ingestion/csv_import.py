@@ -211,7 +211,7 @@ def txn_preview_row(
             if stamp_fx is None:
                 issues.append(Issue(
                     kind="stamp_fx_missing", needs_confirm=True,
-                    message="無 USD/MYR 匯率,印花稅未計"))
+                    message="無 USD/MYR 匯率，印花稅未計"))
         try:
             fr = compute_fees(
                 rules,
@@ -232,8 +232,8 @@ def txn_preview_row(
                 # single-row form, nor a noisier one).
                 issues.append(Issue(
                     kind="etf_flag_unknown", needs_confirm=True,
-                    message="無法判定是否為 ETF,賣出稅率待確認"
-                            "(暫以現股稅率試算,請至標的管理設定)"))
+                    message="無法判定是否為 ETF，賣出稅率待確認"
+                            "（暫以現股稅率試算，請至標的管理設定）"))
             if fee is None:
                 fee = fr.fee
             if tax is None:

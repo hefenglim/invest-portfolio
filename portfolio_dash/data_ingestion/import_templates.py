@@ -180,7 +180,7 @@ _CASH_ROWS: list[list[str]] = [
     ["schwab", "2026-07-02", "OPENING", "USD", "100000", "3135870", "期初外幣資金"],
     # The same movement WITHOUT a cost: legal, and the honest entry when the rate is not
     # known. It funds the pool but stays out of the FX weighted average (covered_ratio < 1).
-    ["moomoo_my", "2026-07-03", "DEPOSIT", "MYR", "5000", "", "取得成本不明時留空,不要猜"],
+    ["moomoo_my", "2026-07-03", "DEPOSIT", "MYR", "5000", "", "取得成本不明時留空，不要猜"],
     # A withdrawal covered by the first row. 出金 / 入金 / 期初 / 折讓款 are accepted as
     # kind labels too; REBATE is normally booked by the 折讓款 inbox confirm (FE-D1), not
     # by hand, so it carries no example row here.
@@ -221,11 +221,12 @@ def template_columns(kind: str) -> list[str]:
 
 def _annotate(kind: str, col: str) -> str:
     """A single column with its FU-D19 annotation: the date column carries its ISO hint,
-    optional columns are marked ``(選填)``; a required non-date column is unchanged."""
+    optional columns are marked ``（選填）`` (full-width since 2026-09-17, L5;
+    the importer strips either width); a required non-date column is unchanged."""
     if col == DATE_COLUMN_BY_KIND.get(kind):
         return f"{col}(YYYY-MM-DD)"
     if col in OPTIONAL_COLUMNS[kind]:
-        return f"{col}(選填)"
+        return f"{col}（選填）"
     return col
 
 

@@ -942,7 +942,7 @@
     host.appendChild(grid);
     if (resp.reporting_total != null) {
       host.appendChild(el('div', 'hint',
-        '合併現金（' + resp.reporting_currency + '）: ' +
+        '合併現金（' + resp.reporting_currency + '）：' +
         f.money(resp.reporting_total, resp.reporting_currency) + ' ' + resp.reporting_currency));
     }
   }

@@ -226,14 +226,14 @@ _SEQUENCE: list[dict[str, Any]] = [
      "status": 400, "err": {
          "code": "validation_error", "field": "kind",
          "message": "折讓款的類型與日期已鎖定以避免重複入帳"
-                    "(可修正金額或備註;如需撤銷請刪除此筆)"}},
+                    "（可修正金額或備註；如需撤銷請刪除此筆）"}},
     {"n": "edit_rebate_date_locked", "m": _PUT, "target": "rebate_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-03", "kind": "rebate",
         "ccy": "TWD", "amount": "153"},
      "status": 400, "err": {
          "code": "validation_error", "field": "kind",
          "message": "折讓款的類型與日期已鎖定以避免重複入帳"
-                    "(可修正金額或備註;如需撤銷請刪除此筆)"}},
+                    "（可修正金額或備註；如需撤銷請刪除此筆）"}},
     # Amount stays correctable — but the deposit-side ack guard still applies, and here the
     # tw_broker pool was already negative at the 2026-01-05 buy, so it answers negative_cash.
     {"n": "edit_rebate_amount", "m": _PUT, "target": "rebate_ok", "b": {
@@ -242,14 +242,14 @@ _SEQUENCE: list[dict[str, Any]] = [
      "status": 422, "err": {
          "code": "negative_cash",
          "message": "此筆會使 tw_broker 的 TWD 現金於 2026-01-05 降至 -500000 — "
-                    "通常代表漏記入金或換匯;確認無誤可強制寫入"}},
+                    "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     {"n": "edit_deposit_shrinks_pool", "m": _PUT, "target": "deposit_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "deposit",
         "ccy": "TWD", "amount": "1"},
      "status": 422, "err": {
          "code": "negative_cash",
          "message": "此筆會使 tw_broker 的 TWD 現金於 2026-07-20 降至 -544846 — "
-                    "通常代表漏記入金或換匯;確認無誤可強制寫入"}},
+                    "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     # ...and the ack DOES still bypass the deposit-side guard (only the withdraw one is hard).
     {"n": "edit_deposit_shrinks_acked", "m": _PUT, "target": "deposit_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "deposit",
@@ -262,7 +262,7 @@ _SEQUENCE: list[dict[str, Any]] = [
      "status": 422, "err": {
          "code": "negative_cash",
          "message": "此筆會使 tw_broker 的 TWD 現金於 2026-07-20 降至 -544999 — "
-                    "通常代表漏記入金或換匯;確認無誤可強制寫入"}},
+                    "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     {"n": "delete_unknown_id", "m": _DELETE, "target": "__missing__",
      "status": 404, "err": {"code": "not_found", "message": "紀錄 #99999 不存在"}},
 ]

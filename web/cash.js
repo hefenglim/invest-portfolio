@@ -258,7 +258,7 @@
     totalEl.replaceChildren();
     if (D.reporting_total != null) {
       totalEl.appendChild(document.createTextNode(
-        '合併現金（' + D.reporting_currency + '，依最新匯率換算）: ' +
+        '合併現金（' + D.reporting_currency + '，依最新匯率換算）：' +
         f.money(D.reporting_total, D.reporting_currency) + ' ' + D.reporting_currency));
       if (D.reporting_total_unavailable_reason) {
         totalEl.appendChild(el('span', 'excl', '　（' + D.reporting_total_unavailable_reason + '）'));
@@ -661,8 +661,8 @@
     });
     if (isRebate) {
       body.appendChild(el('div', 'inbox-rule',
-        '折讓款為系統標記的現金退款 — 類型／備註／日期已鎖定以避免重複入帳,僅可修正金額;' +
-        '若要撤銷此筆退款,請直接刪除。'));
+        '折讓款為系統標記的現金退款 — 類型／備註／日期已鎖定以避免重複入帳，僅可修正金額；' +
+        '若要撤銷此筆退款，請直接刪除。'));
     }
     modal.appendChild(body);
     const foot = el('div', 'modal-foot');
@@ -824,9 +824,17 @@
   /* ---- B. forms ---- */
   function initForms() {
     const accSelects = [$('#cm-account'), $('#cfx-account')];
+    /* Option label = zh name + the currencies the account actually trades in, from the ONE
+       definition in names.js (L8, re-verification 2026-09-17: this line bracketed the
+       SETTLEMENT currency, so 換匯／出金入金 read 「Moomoo MY（USD）」 while the ledger's
+       three selects already read 「Moomoo MY（USD／MYR）」). The settlement-ccy form remains
+       only as the no-names.js fallback. */
+    const optionLabel = (a) => (window.pdNames && window.pdNames.accountOption)
+      ? window.pdNames.accountOption(a)
+      : acctZh(a.id) + '（' + settlementCcy(a) + '）';
     accSelects.forEach((sel) => {
       accounts.forEach((a) => {
-        const o = el('option', null, acctZh(a.id) + '（' + settlementCcy(a) + '）');
+        const o = el('option', null, optionLabel(a));
         o.value = a.id;
         sel.appendChild(o);
       });

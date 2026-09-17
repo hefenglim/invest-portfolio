@@ -609,7 +609,9 @@ def test_door3_exchange_states_its_whole_multi_account_scope_before_it_writes(
     expect(modal.locator(".ca-acct")).to_have_count(2)
     # schwab: 30 @100 -> 30 NEWA @100. The SOURCE goes to zero and the DESTINATION carries
     # the whole basis; both rows are rendered, so the reader can see nothing was created.
-    schwab_rows = _account_card(modal, "Charles Schwab").locator("tbody tr")
+    # The card is addressed by the zh display name: M5 (demo audit 2026-09-16, 909f0b2) made
+    # the preview resolve `acctZh(account_id)`, so 「Charles Schwab」 no longer appears here.
+    schwab_rows = _account_card(modal, "嘉信 Schwab").locator("tbody tr")
     assert _cells(schwab_rows.nth(2))[:3] == ["行動後", "AAPL", "0"]
     child = _cells(schwab_rows.nth(3))
     assert child[1:3] == ["NEWA", "30"], child
@@ -1154,7 +1156,7 @@ def test_e23_one_click_convert_rewrites_the_form_and_the_converted_row_commits(
     expect(modal.locator(".ca-issue-error").first).to_be_visible()
     expect(_save_button(modal)).to_be_disabled()
     fix = modal.locator(".ca-fix")
-    expect(fix).to_have_text("改記為分割(SPLIT)")
+    expect(fix).to_have_text("改記為分割（SPLIT）")
     expect(modal.locator(".ca-fix-note").first).to_contain_text("2330")
 
     with page.expect_response("**/api/ledgers/corporate-actions/preview") as prev2:
@@ -1254,7 +1256,7 @@ def test_corporate_action_csv_template_round_trips_through_the_browser(
     header = text.split("\r\n")[0]
     assert header == (
         "account,date(YYYY-MM-DD),kind,from_symbol,to_symbol,ratio_to,ratio_from,"
-        "cost_carry(選填),note(選填)"
+        "cost_carry（選填）,note（選填）"
     ), header
 
     with page.expect_response("**/api/import/preview") as pv:

@@ -31,7 +31,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from portfolio_dash.llm_insight import assemble
+from portfolio_dash.llm_insight import assemble, figure_check
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
@@ -434,6 +434,10 @@ def run_insight_type(
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
             price_at_create=seen_price, ceiling_at_create=seen_ceiling,
             tokens_in=completion.tokens_in, tokens_out=completion.tokens_out,
+            # M9 (2026-09-17): the numbers this card was FED, taken from the very string
+            # handed to the model above — the figure check's comparison population. Same
+            # reason as price_at_create / ceiling_at_create: unrecoverable after the fact.
+            prompt_figures=figure_check.prompt_figures_json(prompt),
         )
         created += 1
 

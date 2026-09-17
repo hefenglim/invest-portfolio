@@ -51,11 +51,24 @@ one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per 
   warn on both (the zero-LLM anomaly card, unchanged), stale-only → info on both, so the two
   gatekeepers can no longer contradict each other about the same task.
 - **AI cards get a read-time figure check (M9).** `llm_insight/figure_check.py` compares every
-  number in a card against the variable snapshot the card was generated from (scale variants,
-  0.5% tolerance) and flags parenthesised codes that are not registered instruments; the wire
-  carries `figure_flags`, and the card shows 「數值待核」 with the offending figures. Measured on
-  the cached cards: 「429.1 萬美元」 beside a sibling's 「4,290.80 美元」, and 「LRDIM (6883)」.
+  number in a card against the numbers the model was fed (scale variants, 0.5% tolerance) and
+  flags parenthesised codes that are not registered instruments; the wire carries
+  `figure_flags`, and the card shows 「數值待核」 with the offending figures. Measured on the
+  cached cards: 「429.1 萬美元」 beside a sibling's 「4,290.80 美元」, and 「LRDIM (6883)」.
   Nothing is hidden or blocked. Confidence renders as an integer percent (L21).
+  **Re-verified 2026-09-17 and redone (audit author's ❌):** the first version compared
+  against `insights.input_snapshot`, which on 149 of 149 demo cards holds the
+  `"<date>|<target>"` fingerprint fallback — `RunInputs.input_snapshots` has no caller — so the
+  figure check had never run on a real card, and 47 of its 48 「未知代碼」 hits were `MA20` /
+  `PBR` / `KLCI` / `BUY`. Now: the numbers are extracted from the exact prompt at the LLM call
+  into a new additive column `insights.prompt_figures` (`input_snapshot`, the cache
+  fingerprint and the Loop-2 master prompt are untouched); a card that prints figures with no
+  recorded population reports `snapshot: "none"` and wears a muted 「無快照可核」 instead of a
+  clean `[]`; indicators with a period match a shape rule (`^(MA|EMA|RSI|KD|…)\d+$`), the
+  not-a-ticker list is grouped and extended, 4–6-digit codes and bare registered codes are
+  never read as figures; and the pill says what was found — 數值待核 / 未知代碼 / 無快照可核.
+  The regression test now runs the real generation path and asserts on the stored row
+  (`LESSONS_LEARNED.md`).
 
 *Disclosure and wiring*
 
@@ -70,6 +83,26 @@ one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per 
   input.js (CSV preview + both selects), rebalance.js, rebate-inbox.js and inbox.js resolve
   through `window.pdNames`; `_PENDING` in the single-source contract test is empty. Account
   selects also name the currencies the account actually trades (L8).
+  **Re-verified 2026-09-17 as partial, then fixed as a class:** the L8 derivation lived in
+  `input.js`, so the 換匯 / 出金入金 selects on the cash page still bracketed the settlement
+  currency (「Moomoo MY（USD）」). It is now one definition, `pdNames.accountOption(a)` in
+  `names.js`; every account `<option>` calls it, a contract test says so, and an e2e pins the
+  cash-page labels. Likewise L5 (half-width punctuation in zh copy): the three quoted
+  sentences had been fixed and 25 more in eleven files had not — all are full-width now, and
+  `tests/contract/test_zh_punctuation_fullwidth.py` scans every rendered string in `web/`
+  (text nodes, visible attributes, script literals; comments excluded) and holds the count at
+  zero. The backend's zh strings carried 96 more of the same class (57 user-facing messages,
+  29 what's-new catalog entries, 10 regex / prompt text); the owner ruled the sweep in
+  batches (report §十.5). **Batch 1 is in this change:** the 57 user-facing messages
+  (validation issues, confirm prompts, toasts, dashboard subtitles, job summaries) are
+  full-width, the six tests that pinned them byte-for-byte follow, and the same test file now
+  scans `portfolio_dash/**` by AST — string constants, docstrings excluded, f-string literal
+  parts included — with `shared/whatsnew.py` held in a stale-checked pending set for batch 2
+  and the regexes / prompt text / one fee formula allowed by name with a reason. The one
+  swept string a parser reads back is the CSV template's optional-column mark, `(選填)` →
+  `（選填）`: `canonical_header` already stripped either width, and a new test proves every
+  annotated header of every template — shipped width and the half-width an older download
+  still carries — canonicalizes to its bare column, so no numeric column can shift.
 - **The symbol drawer lives in the browser history (M6):** one open pushes one `#sym=` entry
   (shareable), Back closes it, ✕ pops it, switching symbols replaces it.
 - **The FX estimate caption can no longer freeze on 「試算中…」 (M7)** — a manual buy amount

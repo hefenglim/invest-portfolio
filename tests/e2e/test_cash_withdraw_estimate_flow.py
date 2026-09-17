@@ -91,6 +91,16 @@ def test_cash_withdraw_guard_maxfill_estimate_and_fx_ledger(
     # ===== 換匯中心 first (the estimate/click-fill part needs the still-full MYR pool) ====
     page.goto(base + "/cash.html#fx", wait_until="load")
     page.wait_for_selector("#cfx-account option", state="attached")
+    # L8 (re-verified 2026-09-17): the 換匯 / 出金入金 selects label an account by the
+    # currencies it TRADES in, from the one definition in names.js — not by settlement ccy.
+    # The merged Moomoo account is the case that distinguishes the two.
+    for sel in ("#cfx-account", "#cm-account"):
+        assert page.locator(f"{sel} option[value='moomoo_my']").text_content() == (
+            "Moomoo MY（USD／MYR）"
+        ), sel
+        assert page.locator(f"{sel} option[value='tw_broker']").text_content() == (
+            "台灣券商（TWD）"
+        ), sel
     page.select_option("#cfx-account", "moomoo_my")
     page.wait_for_function(
         "() => { const n = document.querySelector('#cfx-balance');"

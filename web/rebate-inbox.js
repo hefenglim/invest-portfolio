@@ -154,7 +154,7 @@
     inp.value = r.expected;   /* prefill with the estimate STRING (editable) */
     body.appendChild(inp);
     body.appendChild(el('div', 'inbox-rule',
-      '以實際入帳金額為準,預估僅供參考;確認後記入該帳戶現金池,不影響成本。'));
+      '以實際入帳金額為準，預估僅供參考；確認後記入該帳戶現金池，不影響成本。'));
     modal.appendChild(body);
 
     const foot = el('div', 'modal-foot');
@@ -205,7 +205,7 @@
     setCount(items.length);
     if (!items.length) {
       list.appendChild(el('div', 'inbox-note',
-        '目前沒有待確認的折讓款 — 有台股交易的月份,系統會在次月自動列出預估退款。'));
+        '目前沒有待確認的折讓款 — 有台股交易的月份，系統會在次月自動列出預估退款。'));
       return;
     }
     items.forEach((r) => {
@@ -218,7 +218,7 @@
         f.money(r.fee_total, r.ccy) + ' ' + r.ccy + ' → 預估退款 ' +
         f.money(r.expected, r.ccy) + ' ' + r.ccy + '（不計入成本）'));
       main.appendChild(el('span', 'inbox-rule',
-        '台股先收後退:預估僅供參考,確認後以實際金額記入該帳戶現金池,不計入成本／損益。'));
+        '台股先收後退：預估僅供參考，確認後以實際金額記入該帳戶現金池，不計入成本／損益。'));
       item.appendChild(main);
       const acts = el('div', 'inbox-actions');
       const ok = el('button', 'btn btn-primary', '確認入帳');
@@ -278,7 +278,7 @@
         f.money(r.fee_total, r.ccy) + ' ' + r.ccy + ' → 預估退款 ' +
         f.money(r.expected, r.ccy) + ' ' + r.ccy + '（未到期）'));
       main.appendChild(el('span', 'inbox-rule',
-        '尚未到退款月份 — 台股先收後退,次月起才會列入「待確認」可確認入帳;此為累計預估,僅供參考。'));
+        '尚未到退款月份 — 台股先收後退，次月起才會列入「待確認」可確認入帳；此為累計預估，僅供參考。'));
       item.appendChild(main);
       if (r.trades && r.trades.length) {
         const detail = buildDetail(r);

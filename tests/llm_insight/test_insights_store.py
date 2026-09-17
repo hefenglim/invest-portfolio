@@ -377,3 +377,39 @@ def test_legal_record_is_unchanged_and_unflagged_beside_an_unreadable_row(
     assert recs[1].card.prediction == Prediction(
         metric="price_change", direction="up", target_pct=Decimal("0.05"), horizon_days=5
     )
+
+
+def test_prompt_figures_column_round_trips_and_defaults_to_unrecorded() -> None:
+    """M9 re-verification (2026-09-17): the fed-numbers population has its own column.
+
+    ``''`` (the default, and what every pre-existing row reads after the additive ALTER)
+    means "no population recorded" — the figure check reports that as its own state. A
+    stored JSON list comes back byte-identical, through the single-row and the list read.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    # An OLD-shape table (no prompt_figures): ensure_tables must add the column in place.
+    conn.executescript(store._DDL)
+    assert "prompt_figures" not in {r[1] for r in conn.execute("PRAGMA table_info(insights)")}
+    store.ensure_tables(conn)
+    assert "prompt_figures" in {r[1] for r in conn.execute("PRAGMA table_info(insights)")}
+
+    when = datetime(2026, 9, 17, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    legacy = store.add_card(
+        conn, insight_type_id=1,
+        card=InsightCard(title="t", summary="s", body_md="b", tags=[]),
+        fingerprint="fp-legacy", calibration_version=None, horizon_days=14,
+        input_snapshot="2026-07-05|US", model="m", cost_usd=Decimal("0"), now=when,
+    )
+    assert legacy.prompt_figures == ""
+    fed = store.add_card(
+        conn, insight_type_id=1,
+        card=InsightCard(title="t2", summary="s", body_md="b", tags=[]),
+        fingerprint="fp-fed", calibration_version=None, horizon_days=14,
+        input_snapshot="2026-09-17|US", model="m", cost_usd=Decimal("0"), now=when,
+        prompt_figures='["4290.80", "11951", "12.49%"]',
+    )
+    assert fed.prompt_figures == '["4290.80", "11951", "12.49%"]'
+    by_id = {r.id: r for r in store.list_cards(conn)}
+    assert by_id[fed.id].prompt_figures == fed.prompt_figures
+    assert by_id[legacy.id].prompt_figures == ""

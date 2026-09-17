@@ -101,7 +101,7 @@ the structures below are the schema; exact rates are filled/verified at setup.
   from the USD notional × trade-date USD/MYR rate (`ceil(amount_usd × fx / 1,000) × RM1`,
   cap RM1,000 stock / RM200 ETF) then **booked back in USD** on the single-currency row; the
   snapshot records the FX rate + the MYR figure. No stored USD/MYR rate → stamp 0 + a soft
-  issue 「無 USD/MYR 匯率,印花稅未計」.
+  issue 「無 USD/MYR 匯率，印花稅未計」.
 - **Dividend:** cash; Malaysian single-tier system. Record net received (Q10); confirm
   any high-income dividend surtax in the probe.
 

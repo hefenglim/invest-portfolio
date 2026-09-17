@@ -259,7 +259,7 @@ def _negative_response(
     return JSONResponse(status_code=422, content=error_body(
         "negative_cash",
         f"此筆會使 {account_id} 的 {ccy.value} 現金{dip_phrase(on)} {decimal_str(low)} — "
-        "通常代表漏記入金或換匯;確認無誤可強制寫入"))
+        "通常代表漏記入金或換匯；確認無誤可強制寫入"))
 
 
 def fx_change_guard(
@@ -402,7 +402,7 @@ def cash_overview(
             })
     reason = (
         None if not excluded
-        else "部分幣別缺匯率已略過:" + "、".join(sorted({e["ccy"] for e in excluded}))
+        else "部分幣別缺匯率已略過：" + "、".join(sorted({e["ccy"] for e in excluded}))
     )
     # WPE (2026-07-07): the movements ledger pages via limit/offset (additive — same
     # shape, total_count still counts the WHOLE ledger; balances untouched).
@@ -661,7 +661,7 @@ def edit_movement(
     ):
         return JSONResponse(status_code=400, content=error_body(
             "validation_error",
-            "折讓款的類型與日期已鎖定以避免重複入帳(可修正金額或備註;如需撤銷請刪除此筆)",
+            "折讓款的類型與日期已鎖定以避免重複入帳（可修正金額或備註；如需撤銷請刪除此筆）",
             field="kind"))
     # The SAME shared guard the POST door and the CSV door run, plus ``exclude_id``: the
     # edited row's own prior effect is stripped from the pool first (self-exclusion), so

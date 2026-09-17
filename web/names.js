@@ -49,6 +49,9 @@
 
   const asId = (id) => (id === null || id === undefined ? '' : String(id));
 
+  /* The currency each market trades in — for the <option> label below. */
+  const MARKET_CCY = { TW: 'TWD', US: 'USD', MY: 'MYR' };
+
   window.pdNames = {
     /* Full canonical zh display name for an account id (unknown id -> the id itself). */
     account(id) {
@@ -59,6 +62,28 @@
     accountShort(id) {
       const a = ACCOUNTS[id];
       return a ? a.short : asId(id);
+    },
+    /* Account <option> label for a `/api/input/context` account row `{id, ccy,
+       settlement_ccy, markets}`: the zh name + the currencies the account actually TRADES
+       in, derived from its bound markets (「Moomoo MY（USD／MYR）」, 「台灣券商（TWD）」).
+       Demo audit 2026-09-16 L8 fixed this in input.js (交易輸入／股利／期初庫存); the
+       re-verification of 2026-09-17 found cash.js still bracketing the SETTLEMENT currency
+       (「Moomoo MY（USD）」 on 換匯／出金入金) — the instance was fixed, the class was not.
+       One definition here, every account <select> calls it; the settlement/legacy `ccy`
+       is only the fallback for a stale context lacking `markets`. */
+    accountOption(a) {
+      const name = a ? window.pdNames.account(a.id) : '';
+      const ccys = [];
+      const markets = (a && a.markets && typeof a.markets === 'object') ? Object.keys(a.markets) : [];
+      markets.forEach((mk) => {
+        const c = MARKET_CCY[mk];
+        if (c && ccys.indexOf(c) === -1) ccys.push(c);
+      });
+      if (!ccys.length && a) {
+        const legacy = a.ccy || a.settlement_ccy;
+        if (legacy) ccys.push(legacy);
+      }
+      return ccys.length ? name + '（' + ccys.join('／') + '）' : name;
     }
   };
 })();

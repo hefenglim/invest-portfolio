@@ -345,7 +345,7 @@ def fx_complete_return(
     to prevent.
     """
     if not trend.available or not trend.points:
-        return FxCompleteOutcome(None, "尚無趨勢資料,無法計算含匯兌損益")
+        return FxCompleteOutcome(None, "尚無趨勢資料，無法計算含匯兌損益")
     last = trend.points[-1]
     if last.incomplete:
         # WHICH kind of incomplete (F-13, 2026-08-27). `TrendPoint.incomplete` is set by five
@@ -359,8 +359,8 @@ def fx_complete_return(
                else "帳本中有公司行動無法套用（待釐清）" if has_unapplied_action
                else "最新一日有標的缺價")
         return FxCompleteOutcome(
-            None, f"{why},含匯兌總損益暫不計算(不以較早日期替代,否則與"
-                  "上方資產損益不同日,兩者的差額會失去意義)")
+            None, f"{why}，含匯兌總損益暫不計算（不以較早日期替代，否則與"
+                  "上方資產損益不同日，兩者的差額會失去意義）")
     return FxCompleteOutcome(last.total_value - last.net_invested, None)
 
 
@@ -586,7 +586,7 @@ def build_dashboard(
         # Same: rendered in the XIRR badge. Keeps the pair + the date, because those two
         # facts are what tell the owner which rate to backfill.
         raise KeyError(
-            f"查無 {d.isoformat()}(含)之前的 {base.value}/{quote.value} 匯率"
+            f"查無 {d.isoformat()}（含）之前的 {base.value}/{quote.value} 匯率"
         )
 
     xirr_value: Decimal | None = None
@@ -635,7 +635,7 @@ def build_dashboard(
                 # unaffected and still on the wire. `window_days` is reported either way.
                 xirr_value = None
                 xirr_reason = (f"觀察期 {xirr_window_days} 天・不足以年化"
-                               f"(需 ≥{_XIRR_MIN_WINDOW_DAYS} 天)")
+                               f"（需 ≥{_XIRR_MIN_WINDOW_DAYS} 天）")
         except KeyError as exc:
             xirr_reason = str(exc).strip("'\"")
     if xirr_value is None and xirr_reason is None:
@@ -698,7 +698,7 @@ def build_dashboard(
         # LEDGER rather than from whether some unrelated pair happened to be stored, which
         # is what made the old behaviour differ for the same portfolio on two days.
         fx_summary = None
-        fx_reason = "尚無換匯或外幣入金的取得成本,無匯兌損益可計算"
+        fx_reason = "尚無換匯或外幣入金的取得成本，無匯兌損益可計算"
 
     # 6. Dividend summary — cash actually received (incl. DRIP net), native ccy.
     # ttm_cutoff bounds the trailing-12-month window (display-only attribution).

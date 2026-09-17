@@ -736,3 +736,73 @@ def test_shadow_and_active_fingerprints_are_separate_lanes(
         inputs=RunInputs(budget_remaining=Decimal("100"), is_shadow=True), now=NOW,
     )
     assert calls["n"] == 2
+
+
+# --- M9 re-verification (2026-09-17): the figure check must see what the model saw ------
+
+
+def test_generated_card_stores_the_prompt_figures_it_was_fed(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The population reaches the row from the REAL write seam, not a synthetic snapshot.
+
+    The first M9 fix was certified by unit tests that supplied a JSON snapshot by hand;
+    on the demo database every card held the ``"<date>|<target>"`` fallback and the check
+    had fired 0 times on 148 cards. This test runs the generation path end to end with a
+    stubbed model and asserts, on the STORED record, that the ×1000 card is flagged and a
+    figure the prompt really contained is not.
+    """
+    import json
+
+    from portfolio_dash.llm_insight.figure_check import check_figures
+
+    bad_card = (
+        '{"title":"美股部位","summary":"未實現獲利 429.1 萬美元",'
+        '"body_md":"科技雙巨頭領漲。","tags":[],"symbol":null,"confidence":60,'
+        '"prediction":null}'
+    )
+    _patch_llm(monkeypatch, bad_card)
+    it_id = _portfolio_combo(conn)
+    res = generate.run_insight_type(
+        conn, it_id, var_contexts={None: _ctx(conn)},
+        inputs=RunInputs(budget_remaining=Decimal("100")), now=NOW,
+    )
+    assert res.cards_created == 1
+    rec = istore.list_cards(conn, insight_type_id=it_id)[0]
+    population = json.loads(rec.prompt_figures)
+    assert population, "the generation site must record the numbers the prompt carried"
+    # input_snapshot is UNCHANGED by this feature: still the day-anchored fingerprint tag,
+    # so cache semantics and the Loop-2 master prompt are exactly what they were.
+    assert rec.input_snapshot == f"{NOW.date()}|portfolio"
+
+    text = f"{rec.card.title}\n{rec.card.summary}\n{rec.card.body_md}"
+    flags = check_figures(text, rec.prompt_figures, set())
+    assert flags.snapshot == "checked"
+    assert flags.unverified_figures == ["429.1 萬"]
+    # A figure the prompt really contained (any fed value with a fractional part) verifies.
+    fed_value = next(v for v in population if "." in v and not v.endswith("%"))
+    assert check_figures(f"數值 {fed_value}", rec.prompt_figures, set()).unverified_figures == []
+
+
+def test_anomaly_card_records_no_population_and_reads_as_checked(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The zero-LLM 資料異常 card has no prompt, prints no figure, and must not wear a pill."""
+    from portfolio_dash.llm_insight.figure_check import check_figures
+
+    _patch_llm(monkeypatch)
+    sp = cs.create_strategy(conn, name="S", body="觀察 {{symbol}}", now=NOW)
+    it = cs.create_insight_type(conn, name="Per", scope="per_symbol", now=NOW)
+    cs.set_strategies(conn, it.id, [(sp.id, 0)])
+    generate.run_insight_type(
+        conn, it.id, var_contexts={"2330": _ctx(conn, "2330")},
+        inputs=RunInputs(
+            budget_remaining=Decimal("100"), universe_symbols=["2330"],
+            missing_price_symbols=["2330"],
+        ),
+        now=NOW,
+    )
+    rec = istore.list_cards(conn, insight_type_id=it.id)[0]
+    assert rec.model == "(none)" and rec.prompt_figures == ""
+    text = f"{rec.card.title}\n{rec.card.summary}\n{rec.card.body_md}"
+    assert check_figures(text, rec.prompt_figures, {"2330"}).snapshot == "checked"

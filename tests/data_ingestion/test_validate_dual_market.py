@@ -83,4 +83,4 @@ def test_single_market_us_rejects_my_byte_identical_message(conn: sqlite3.Connec
     issues = validate_transaction(conn, _inp("schwab", "1155"))
     hit = next((i for i in issues if i.kind == "market_mismatch"), None)
     assert hit is not None
-    assert hit.message == "1155 屬 MY 市場,不可登錄於 美股帳戶"
+    assert hit.message == "1155 屬 MY 市場，不可登錄於 美股帳戶"

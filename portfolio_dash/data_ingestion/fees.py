@@ -120,7 +120,7 @@ def _cent(value: Decimal) -> Decimal:
     try:
         return value.quantize(_CENT, rounding=ROUND_HALF_UP)
     except InvalidOperation as exc:
-        raise FeeComputationError("數值過大,無法計算費用/稅") from exc
+        raise FeeComputationError("數值過大，無法計算費用/稅") from exc
 
 
 def _floor_int(value: Decimal) -> Decimal:
@@ -128,7 +128,7 @@ def _floor_int(value: Decimal) -> Decimal:
     try:
         return value.quantize(_INT, rounding=ROUND_DOWN)
     except InvalidOperation as exc:
-        raise FeeComputationError("數值過大,無法計算費用/稅") from exc
+        raise FeeComputationError("數值過大，無法計算費用/稅") from exc
 
 
 def _tw(

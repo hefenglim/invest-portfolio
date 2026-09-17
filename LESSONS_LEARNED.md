@@ -1652,3 +1652,40 @@ Neither side was "wrong" by its own rule; the defect lived in the seam between t
   page in an error state.** Largest-remainder apportionment keeps F-06's "fields ≡ POSTed
   plan" invariant AND sums to what the raw weights round to — the fix that looked like
   "add a tolerance" was three fixes.
+
+## A checker certified by tests that feed it what production never does (2026-09-17, demo audit M9 re-verification)
+
+**What happened.** The M9 fix added a read-time figure check comparing each AI card's
+numbers against "the variable snapshot the card was generated from" (`insights.input_snapshot`).
+Its unit tests supplied a synthetic JSON snapshot and passed; the report said 「舊卡片因快照仍在，
+讀取時同樣會被標」. The audit author re-verified on the demo: `unverified_figures` had fired
+**0 times on 148 cards**, the ×1000 card included. The stored snapshot was
+`"2026-07-05|US"` on **149 of 149 rows** — the fingerprint fallback — because
+`RunInputs.input_snapshots`, the seam the docstring called "fed by the service", has no
+caller. The check had never once run against a real card. Meanwhile its other half,
+`unknown_symbols`, flagged 48 codes of which 47 were `MA20` / `PBR` / `KLCI` / `BUY`: a
+name-only allowlist cannot enumerate period-suffixed indicators.
+
+**Lessons.**
+- **Before shipping a checker, measure the population it checks against on real data — one
+  `SELECT length(col), count(*) GROUP BY 1` would have shown 13–20-character tags.** A unit
+  test that hands the function the input it wishes it had certifies the function, not the
+  system. The regression test now runs the real generation path with a stubbed model and
+  asserts on the STORED row.
+- **A seam nobody feeds is a defect wearing a docstring.** "Fed by the service, else the
+  fallback" reads as a design; it was a fallback running 100% of the time. When a field's
+  meaning depends on an optional feeder, grep for the feeder before trusting the meaning.
+- **"Cannot check" must be its own state, never a clean `[]`.** The first version returned
+  no flags when the population was empty — conservative on paper, and in practice it
+  painted the worst cards as clean. Three states (checked / flagged / no population), and
+  the pill text follows the state; a red 「數值待核」 on a card whose only hit was a code was
+  two sentences contradicting each other.
+- **An allowlist of names is the wrong tool for a family with a free parameter.** `MA` was
+  listed; `MA20` was not, and never could be. Match the SHAPE (`^(MA|EMA|RSI|…)\d+$`) and
+  keep the list for the genuinely enumerable (ratios, index names, ratings).
+- **Instance vs class, again (L5, L8 in the same re-verification).** The audit quoted three
+  sentences and named "the 換匯 dropdown"; the fix changed those three sentences and the
+  file that held the label derivation. 25 more sentences and two more dropdowns had the
+  same defect. When a finding names an example, the deliverable is the scan that finds
+  every example plus the guard that keeps the count at zero — the reviewer's word for the
+  alternative was 「修了實例、沒修類別」.

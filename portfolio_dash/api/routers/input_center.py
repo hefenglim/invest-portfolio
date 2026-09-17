@@ -468,7 +468,7 @@ def _cash_overdraft_issue(
         return Issue(
             kind="cash_overdraft",
             needs_confirm=True,
-            message=f"此帳戶 {inst.quote_ccy.value} 現金將不足(可能漏登入金或換匯),確認要寫入?",
+            message=f"此帳戶 {inst.quote_ccy.value} 現金將不足（可能漏登入金或換匯），確認要寫入？",
         )
     return None
 

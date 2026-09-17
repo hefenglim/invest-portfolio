@@ -265,7 +265,7 @@ def _rollup_reason(
     if not missing or not figures:
         return None
     accounts = "、".join(f"{aid}（{'、'.join(missing[aid])}）" for aid in sorted(missing))
-    return f"部分帳戶缺匯率已略過:{accounts} — {'與'.join(figures)}匯損益為部分合計"
+    return f"部分帳戶缺匯率已略過：{accounts} — {'與'.join(figures)}匯損益為部分合計"
 
 
 def compute_fx_summary(

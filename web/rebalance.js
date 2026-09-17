@@ -427,7 +427,7 @@
       if (rebateTotal != null && Number(rebateTotal) > 0) {
         foot.appendChild(el('div', 'sd-chart-note',
           '預估次月折讓合計 ' + f.money(rebateTotal, REPORTING) + ' ' + REPORTING +
-          '（台股先收後退,不計入成本）'));
+          '（台股先收後退，不計入成本）'));
       }
       /* targeted symbols the engine could not act on, each with its cause (L11) — the same
          treatment `excluded_with_target` already gets, for the list that was silent. */

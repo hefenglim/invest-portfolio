@@ -127,14 +127,14 @@ def exceeds_magnitude(value: Decimal) -> bool:
 
 
 def amount_too_large_issue(value: Decimal, label: str) -> Issue | None:
-    """The M4 「過大,無法處理」 finding for a money amount, or ``None`` inside the bound (M5-05).
+    """The M4 「過大，無法處理」 finding for a money amount, or ``None`` inside the bound (M5-05).
 
     ``label`` names the figure in the door's own words (金額 / 換出金額 / 取得成本 …) so the
     sentence reads like the shares/price ones it is modelled on. Call it BEFORE any
     precision check: the precision check is the quantize that raises.
     """
     if exceeds_magnitude(value):
-        return Issue(kind="amount_too_large", message=f"{label}過大,無法處理")
+        return Issue(kind="amount_too_large", message=f"{label}過大，無法處理")
     return None
 
 
@@ -208,7 +208,7 @@ def alias_import_account(raw_account: str) -> tuple[str, Issue | None]:
     return resolved, Issue(
         kind="account_alias",
         needs_confirm=True,
-        message=f"帳戶 {raw_account} 已合併為 {resolved},已自動轉換",
+        message=f"帳戶 {raw_account} 已合併為 {resolved}，已自動轉換",
     )
 
 
@@ -364,11 +364,11 @@ def transaction_structural_issues(inp: TxnInput) -> list[Issue]:
     if inp.quantity <= 0:
         issues.append(Issue(kind="non_positive_quantity", message="股數必須大於 0"))
     elif inp.quantity > _MAX_MAGNITUDE:
-        issues.append(Issue(kind="amount_too_large", message="股數過大,無法處理"))
+        issues.append(Issue(kind="amount_too_large", message="股數過大，無法處理"))
     if inp.price <= 0:
         issues.append(Issue(kind="non_positive_price", message="價格必須大於 0"))
     elif inp.price > _MAX_MAGNITUDE:
-        issues.append(Issue(kind="amount_too_large", message="價格過大,無法處理"))
+        issues.append(Issue(kind="amount_too_large", message="價格過大，無法處理"))
     if inp.fee is not None and inp.fee < 0:
         issues.append(Issue(kind="negative_fee", message="手續費不可為負"))
     if inp.tax is not None and inp.tax < 0:
@@ -435,7 +435,7 @@ def validate_transaction(
                 Issue(
                     kind="market_mismatch",
                     message=(
-                        f"{inp.symbol} 屬 {inst.market.value} 市場,"
+                        f"{inp.symbol} 屬 {inst.market.value} 市場，"
                         f"不可登錄於 {MARKET_ZH.get(acct_mkt, acct_mkt.value)}帳戶"
                     ),
                 )
@@ -517,7 +517,7 @@ def validate_transaction(
             Issue(
                 kind="future_trade_date",
                 needs_confirm=True,
-                message=f"交易日期 {inp.trade_date.isoformat()} 晚於今日,確認無誤?",
+                message=f"交易日期 {inp.trade_date.isoformat()} 晚於今日，確認無誤？",
             )
         )
 
@@ -534,8 +534,8 @@ def validate_transaction(
                 # sentence now states the six fields it actually compared, so it reads the
                 # same wherever it is shown (the 更正門 restates it, but a message must not
                 # depend on a surface re-explaining it).
-                message="相同交易已存在(同帳戶、標的、買賣別、交易日、股數、價格),"
-                        "確認要再次寫入?",
+                message="相同交易已存在（同帳戶、標的、買賣別、交易日、股數、價格），"
+                        "確認要再次寫入？",
             )
         )
 
@@ -744,7 +744,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
         kind = CorporateActionKind(inp.kind.strip().upper())
     except ValueError:
         add(Issue(kind="unknown_action_kind",
-                  message=f"未知的公司行動類型 {inp.kind}(僅支援 分割 / 換股 / 分拆)"))
+                  message=f"未知的公司行動類型 {inp.kind}（僅支援 分割 / 換股 / 分拆）"))
         return issues
 
     if conn.execute("SELECT 1 FROM accounts WHERE account_id=?",
@@ -759,7 +759,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     for label, term in (("換得股數", inp.ratio_to), ("換出股數", inp.ratio_from)):
         if not is_ratio_term(term):
             add(Issue(kind="ratio_not_positive_integer",
-                      message=(f"{label} 必須是正整數,目前是 {term}。"
+                      message=(f"{label} 必須是正整數，目前是 {term}。"
                                "公司行動的比例請填兩個整數（例如 3 換 1、1 換 20、2 換 7），"
                                "不要填算好的小數 — 小數會讓股數短少，之後賣出時會被誤判為賣超")))
 
@@ -767,12 +767,12 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     same_symbol = inp.from_symbol == inp.to_symbol
     if kind is CorporateActionKind.SPLIT and not same_symbol:
         add(Issue(kind="split_symbol_mismatch",
-                  message=f"分割的標的必須相同({inp.from_symbol} → {inp.to_symbol});"
+                  message=f"分割的標的必須相同（{inp.from_symbol} → {inp.to_symbol}）；"
                           "若標的有變更，請改用「換股」"))
     if kind is not CorporateActionKind.SPLIT and same_symbol:
         zh = "換股" if kind is CorporateActionKind.EXCHANGE else "分拆"
         add(Issue(kind="self_referential_action",
-                  message=f"{zh}的來源與目的標的不可相同({inp.from_symbol});"
+                  message=f"{zh}的來源與目的標的不可相同（{inp.from_symbol}）；"
                           "若只是股數變動，請改用「分割」"))
 
     # --- E8 / E9: cost_carry ---
@@ -782,7 +782,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                       message="分拆必須填寫成本分攤比例（母公司移轉給子公司的成本佔比）"))
         elif not (Decimal("0") <= inp.cost_carry <= Decimal("1")):
             add(Issue(kind="cost_carry_out_of_range",
-                      message=f"成本分攤比例必須介於 0 與 1 之間,目前是 {inp.cost_carry}"))
+                      message=f"成本分攤比例必須介於 0 與 1 之間，目前是 {inp.cost_carry}"))
         elif inp.cost_carry == Decimal("1"):
             # E9 soft — and the text must name the DISPLAY consequence, not just the basis.
             add(Issue(kind="cost_carry_all", needs_confirm=True,
@@ -792,7 +792,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                                "甚至可能標示「已回本」。確定要這樣登錄嗎？")))
     elif inp.cost_carry is not None:
         add(Issue(kind="cost_carry_not_applicable",
-                  message=f"成本分攤比例僅適用於分拆,{inp.kind} 不需填寫"))
+                  message=f"成本分攤比例僅適用於分拆，{inp.kind} 不需填寫"))
 
     # --- E7: a no-op SPLIT (soft; ratio == 1 on an EXCHANGE is the ordinary rename) ---
     if kind is CorporateActionKind.SPLIT and inp.ratio_to == inp.ratio_from:
@@ -834,7 +834,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                                "（而非交易代號），自動建立會產生一檔查不到報價的標的")))
         elif inst is None:
             add(Issue(kind="unregistered_symbol",
-                      message=(f"{label}標的 {symbol} 尚未註冊。請先到「標的管理」註冊;"
+                      message=(f"{label}標的 {symbol} 尚未註冊。請先到「標的管理」註冊；"
                                "若這是券商對帳單上的內部代碼（而非交易代號），"
                                "請改填該證券真正的代號")))
 
@@ -843,7 +843,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     if (from_inst is not None and to_inst is not None
             and from_inst.quote_ccy is not to_inst.quote_ccy):
         add(Issue(kind="quote_ccy_mismatch",
-                  message=(f"{inp.from_symbol} 以 {from_inst.quote_ccy.value} 計價,"
+                  message=(f"{inp.from_symbol} 以 {from_inst.quote_ccy.value} 計價，"
                            f"{inp.to_symbol} 以 {to_inst.quote_ccy.value} 計價 — "
                            "跨幣別的成本移轉需要當日匯率，本系統不會自行假設")))
 
@@ -996,7 +996,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
         if missing:
             add(Issue(kind="incomplete_account_coverage",
                       message=(f"{inp.from_symbol} 在 {inp.date.isoformat()} 還有 "
-                               f"{'、'.join(sorted(missing))} 也持有,公司行動必須對每個持有"
+                               f"{'、'.join(sorted(missing))} 也持有，公司行動必須對每個持有"
                                "的帳戶都登錄一筆。只登錄一部分的話，未登錄的帳戶會用行動前的"
                                "股數搭配行動後的價格，市值會錯，而且畫面上不會有任何警示")))
 
@@ -1244,7 +1244,7 @@ def identifier_change_repair(
     retired = inp.from_symbol.strip()
     if not ticker or not retired or ticker == retired:
         return None
-    provenance = f"原始來源代號 {retired}(識別碼變更，改記為分割)"
+    provenance = f"原始來源代號 {retired}（識別碼變更，改記為分割）"
     return CorporateActionInput(
         account_id=inp.account_id,
         date=inp.date,
@@ -1545,7 +1545,7 @@ def resolve_acq_home_amount(
                 kind="acq_cost_not_positive", message="取得成本必須大於 0"
             )
         if exceeds_magnitude(inp.acq_home_amount):
-            return None, Issue(kind="acq_cost_too_large", message="取得成本過大,無法處理")
+            return None, Issue(kind="acq_cost_too_large", message="取得成本過大，無法處理")
         return quantize_amount(inp.acq_home_amount, funding_ccy), None
     rate = inp.acq_rate
     if rate is None or rate <= _ZERO:  # `is None` unreachable; narrows for mypy
@@ -1554,7 +1554,7 @@ def resolve_acq_home_amount(
     if exceeds_magnitude(home_cost):
         return None, Issue(
             kind="acq_rate_too_large",
-            message="取得匯率過大,無法處理（換算後的取得成本超過可處理上限）")
+            message="取得匯率過大，無法處理（換算後的取得成本超過可處理上限）")
     return quantize_amount(home_cost, funding_ccy), None
 
 

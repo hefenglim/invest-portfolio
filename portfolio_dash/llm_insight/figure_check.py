@@ -1,9 +1,29 @@
 """Read-time figure check for a stored insight card (M9, owner audit 2026-09-16).
 
 **What this is.** A PURE, read-time post-check that compares the figures a card PRINTS
-against the variable snapshot the card was GENERATED from (``insights.input_snapshot`` —
-the exact JSON fed into the prompt). It never blocks, never rewrites and never hides a
-card; it returns two lists the API attaches to the card so the page can mark it 「數值待核」.
+against the numbers the model was FED — ``insights.prompt_figures``, every numeric token of
+the exact prompt text that produced the card, recorded at generation time. It never
+blocks, never rewrites and never hides a card; it returns two capped lists plus a
+``snapshot`` state the API attaches to the card so the page can mark it 「數值待核」.
+
+**Why the population is the prompt's numbers, not ``input_snapshot``** (re-verification
+2026-09-17, the audit author's ❌ on M9). The first version compared against
+``insights.input_snapshot``, documented here as "the exact JSON fed into the prompt". It
+never was: ``generate.RunInputs.input_snapshots`` is a seam no caller feeds, so every stored
+row holds the fallback fingerprint tag (``"2026-07-05|US"``, 13–20 characters) — measured
+on the demo database, 149 of 149 cards, the newest from 2026-08-25. The unit tests passed
+because they supplied a synthetic JSON snapshot; the check had never run against a real
+card and ``unverified_figures`` had fired 0 times on 148 cards, the audit's ×1000 card
+included. The population is now extracted from the prompt string at the single generation
+site (:func:`prompt_figures_json`), stored in its own additive column, and read here.
+``input_snapshot`` is untouched: it feeds the cache fingerprint and the Loop-2 master
+prompt, and changing it would have moved cache semantics to fix a display flag.
+
+**The third state.** A card generated before the column existed has no population, and
+"cannot check" must not read as "clean" — the audit's #37 card carried no pill for exactly
+that reason. ``snapshot == "none"`` means: this card prints at least one figure and there is
+nothing to check it against. A legacy card that prints no figure at all is vacuously
+``"checked"``, so the state appears exactly where it carries information.
 
 **Why it exists.** Measured on cached cards: one card said 「未實現獲利 429.1 萬美元」 while
 its sibling from the SAME batch said 「未實現收益 4,290.80 美元，部位規模共 11,951 美元成本」 —
@@ -26,11 +46,15 @@ trust in the flag, so every rule below errs towards NOT flagging:
 * percent forms additionally try ×100 / ÷100 (a snapshot stores ``0.1249`` for 「12.49%」);
 * bare integers < 100 (counts: 5 天, 3 個帳戶), 4-digit years and date-like tokens are not
   figures and are skipped;
-* a parenthesised 4-digit code is read as a TICKER, not as a figure (it is the symbol
-  check's business), and common uppercase abbreviations (PE / ETF / USD …) are never read
-  as tickers;
-* a snapshot with NO parseable number at all yields NO figure flags — an empty snapshot is
-  not evidence of a wrong number.
+* a parenthesised 4–6-digit code is read as a TICKER, not as a figure (it is the symbol
+  check's business — and 「（00878）」 read as the number 878 would be a flag on every
+  five-digit TW ETF), and common uppercase abbreviations (PE / ETF / USD …) plus every
+  period-suffixed indicator (MA20 / MA200 / RSI14 …) are never read as tickers — measured
+  2026-09-17: 47 of 48 ``unknown_symbols`` hits on the demo were PBR / MA20 / MA60 / MA120 /
+  MA200 / MA50 / RSI14 / BUY / HOLD / KLCI / TAIEX, and one was the real 6883;
+* a population with NO number at all yields NO figure flags — it yields the ``"none"``
+  state instead, because an empty population is not evidence of a wrong number, and a
+  silent ``[]`` is not evidence of a right one.
 
 Pure: no connection, no clock, no LLM. ``llm_insight`` may import ``portfolio``/``shared``
 only (architecture.md), and this module imports neither — it is a leaf.
@@ -39,7 +63,7 @@ only (architecture.md), and this module imports neither — it is a leaf.
 import json
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -72,21 +96,46 @@ _DATE_RE = re.compile(
     r"|\d{1,2}\s*[/月]\s*\d{1,2}\s*日?"
 )
 
-#: A parenthesised ticker: a 4-digit TW/MY-style code, or an uppercase US-style symbol.
-#: Masked out of the number scan (a code is not a figure) and fed to the symbol check.
-_CODE_RE = re.compile(r"[(（]\s*(\d{4}|[A-Z][A-Z0-9]{0,5}(?:\.[A-Z]{1,3})?)\s*[)）]")
+#: A parenthesised ticker: a 4–6-digit TW/MY-style code (0050 / 00878 / 006208 / 5225), or
+#: an uppercase US-style symbol. Masked out of the number scan (a code is not a figure) and
+#: fed to the symbol check.
+_CODE_RE = re.compile(r"[(（]\s*(\d{4,6}|[A-Z][A-Z0-9]{0,5}(?:\.[A-Z]{1,3})?)\s*[)）]")
 
 #: Uppercase tokens a card legitimately writes in parentheses that are NOT tickers. Without
 #: this, 「本益比（PE）」 and 「單位：USD」 would each raise a hallucinated-symbol flag.
+#: Grouped by what they are so the next addition lands in the right row; a registered
+#: symbol is never flagged regardless of this set (the registry check runs first), so the
+#: only cost of a name here is a missed flag on an unregistered code of the same spelling.
 _NOT_A_TICKER = frozenset({
-    "AI", "LLM", "US", "TW", "MY", "KL", "USD", "TWD", "MYR", "NTD", "RM",
+    # markets / currencies / units
+    "AI", "LLM", "US", "TW", "MY", "KL", "OTC", "USD", "TWD", "MYR", "NTD", "RM",
+    "CNY", "RMB", "JPY", "EUR", "GBP", "HKD", "SGD", "AUD",
+    # instrument kinds / corporate terms
     "ETF", "ETN", "REIT", "ADR", "DRIP", "IPO", "ESG", "NAV", "TTM", "GAAP", "EBITDA",
-    "EPS", "PE", "PER", "PB", "PEG", "PS", "ROE", "ROA", "ROI", "EV", "FCF", "DCF",
+    # valuation ratios and return measures
+    "EPS", "DPS", "BPS", "SPS", "PE", "PER", "PB", "PBR", "PEG", "PS", "PSR", "PCF",
+    "ROE", "ROA", "ROI", "ROIC", "EV", "FCF", "DCF", "WACC", "NPV", "YTM", "APY", "APR",
     "CAGR", "XIRR", "TWR", "IRR", "YOY", "QOQ", "MOM", "YTD", "MTD", "QTD",
+    # macro / regulators / fee names
     "GDP", "CPI", "PPI", "PMI", "FED", "FOMC", "SEC", "TAF", "CAT", "SST", "GST",
-    "MA", "EMA", "SMA", "RSI", "MACD", "KD", "ATR", "VIX", "BETA", "SD",
+    # bare indicators (period-suffixed forms are matched by _INDICATOR_RE below)
+    "MA", "EMA", "SMA", "WMA", "RSI", "MACD", "KD", "KDJ", "ATR", "ADX", "CCI", "OBV",
+    "DMI", "SAR", "MFI", "VWAP", "BOLL", "BB", "VIX", "BETA", "SD",
+    # index names a card writes as 「（TAIEX）」 / 「（KLCI）」
+    "TAIEX", "TWII", "TPEX", "KLCI", "SPX", "NDX", "DJI", "DJIA", "SOX",
+    # ratings / stances
+    "BUY", "SELL", "HOLD", "LONG", "SHORT", "BULL", "BEAR", "OW", "UW", "EW",
+    # period / misc tokens
     "Q1", "Q2", "Q3", "Q4", "H1", "H2", "FY", "OK", "NA", "N", "A",
 })
+
+#: An indicator with its period — 「MA20 / MA200 / RSI14 / EMA12 / KD9」. A name-only set
+#: cannot enumerate these (the period is free text), so the rule matches the shape: one of
+#: the indicator stems above followed by digits. No real ticker on the three markets has
+#: this shape — TW/MY codes are all-digit, US symbols are all-letter (plus a dotted class).
+_INDICATOR_RE = re.compile(
+    r"^(?:MA|EMA|SMA|WMA|DMA|RSI|KD|KDJ|ATR|ADX|CCI|OBV|DMI|SAR|MFI|ROC|MACD|BOLL|BB)\d+$"
+)
 
 #: A number, optionally grouped with thousands separators, plus an optional unit suffix.
 #: The lookbehind keeps the scan off the tail of a longer token (a version string, an id).
@@ -97,13 +146,24 @@ _NUM_RE = re.compile(
 )
 
 
-class FigureFlags(BaseModel):
-    """The read-time check's verdict for ONE card. Both lists empty = nothing to flag."""
+SnapshotState = Literal["checked", "none"]
 
-    #: Figures printed by the card that match no snapshot number at any plausible scale.
+
+class FigureFlags(BaseModel):
+    """The read-time check's verdict for ONE card.
+
+    Both lists empty AND ``snapshot == "checked"`` = nothing to disclose. ``"none"`` = the
+    card prints figures and no population was recorded to check them against (a card
+    generated before ``prompt_figures`` existed) — disclosed as its own state, never as a
+    clean ``[]``.
+    """
+
+    #: Figures printed by the card that match no fed number at any plausible scale.
     unverified_figures: list[str] = Field(default_factory=list)
     #: Parenthesised ticker-shaped codes in the card text that are not registered symbols.
     unknown_symbols: list[str] = Field(default_factory=list)
+    #: Whether the figure comparison could run at all (see the class docstring).
+    snapshot: SnapshotState = "checked"
 
 
 def _decimal_or_none(text: str) -> Decimal | None:
@@ -209,30 +269,67 @@ def _mask(text: str) -> str:
     return _CODE_RE.sub(lambda m: " " * len(m.group(0)), masked)
 
 
-def _unverified_figures(card_text: str, snapshot: list[Decimal]) -> list[str]:
-    """Figures in *card_text* that match no snapshot number at any plausible scale."""
-    if not snapshot:
-        return []  # nothing to compare against → nothing is "unverified"
-    flagged: list[str] = []
+def _card_figures(card_text: str, known_forms: set[str]) -> list[tuple[str, Decimal, bool]]:
+    """Every figure the card prints: ``(token as printed, value at its printed scale,
+    is_percent)``. Counts, years, dates and parenthesised codes are not figures — and
+    neither is a registered all-digit symbol written bare (「2330 量縮整理」, the anomaly
+    card's own 「2330 資料異常」 title): it is a name, and reading it as the number 2,330
+    would demand that every population contain it."""
+    figures: list[tuple[str, Decimal, bool]] = []
     for match in _NUM_RE.finditer(_mask(card_text)):
         raw, suffix = match.group(1), (match.group(2) or "")
         value = _decimal_or_none(raw)
         if value is None or _is_not_a_figure(raw, suffix, value):
             continue
-        is_percent = suffix in _PERCENT_SUFFIXES
+        if not suffix and raw in known_forms:
+            continue  # a bare registered code, not a figure
         scaled = value * _MULTIPLIERS.get(suffix, Decimal(1))
+        figures.append((match.group(0).strip(), scaled, suffix in _PERCENT_SUFFIXES))
+    return figures
+
+
+def _unverified_figures(
+    figures: list[tuple[str, Decimal, bool]], population: list[Decimal]
+) -> list[str]:
+    """The printed figures that match no fed number at any plausible scale (capped)."""
+    flagged: list[str] = []
+    for token, scaled, is_percent in figures:
         if any(
             _matches(candidate, known)
             for candidate in _candidates(scaled, is_percent=is_percent)
-            for known in snapshot
+            for known in population
         ):
             continue
-        token = match.group(0).strip()
         if token not in flagged:
             flagged.append(token)
         if len(flagged) >= MAX_FLAGS:
             break
     return flagged
+
+
+def prompt_figures_json(prompt: str) -> str:
+    """The comparison population for a card, extracted from the prompt that produced it.
+
+    Called ONCE at the generation site with the exact string handed to the model, and
+    stored as ``insights.prompt_figures``. Every numeric token is kept at the scale the
+    model saw it, de-duplicated, as a JSON list of strings: ``"4,290.80"`` → ``"4290.80"``,
+    ``"12.49%"`` stays a percent form (the reader expands it to the ratio too), ``"120 億"``
+    is stored scaled. Deliberately PERMISSIVE — years, dates and counts all stay in — because
+    a population that is too small produces false 待核 pills, and the reader's own filters
+    already keep those tokens off the card side. Nothing is capped: a truncated population
+    would silently turn correct figures into flags.
+    """
+    seen: dict[str, None] = {}
+    for match in _NUM_RE.finditer(prompt):
+        raw, suffix = match.group(1), (match.group(2) or "")
+        value = _decimal_or_none(raw)
+        if value is None:
+            continue
+        if suffix in _PERCENT_SUFFIXES:
+            seen[f"{value}%"] = None
+        else:
+            seen[str(value * _MULTIPLIERS.get(suffix, Decimal(1)))] = None
+    return json.dumps(list(seen))
 
 
 def _known_forms(known_symbols: set[str]) -> set[str]:
@@ -257,8 +354,10 @@ def _unknown_symbols(card_text: str, known_symbols: set[str]) -> list[str]:
     flagged: list[str] = []
     for match in _CODE_RE.finditer(card_text):
         code = match.group(1).upper()
-        if code in _NOT_A_TICKER or code in forms or code.split(".")[0] in forms:
-            continue
+        if code in forms or code.split(".")[0] in forms:
+            continue  # registered — never a hallucination, whatever it looks like
+        if code in _NOT_A_TICKER or _INDICATOR_RE.match(code):
+            continue  # an abbreviation / indicator the card wrote in parentheses
         if code not in flagged:
             flagged.append(code)
         if len(flagged) >= MAX_FLAGS:
@@ -269,13 +368,24 @@ def _unknown_symbols(card_text: str, known_symbols: set[str]) -> list[str]:
 def check_figures(
     card_text: str, snapshot_json: str, known_symbols: set[str]
 ) -> FigureFlags:
-    """Post-check ONE card's text against its own input snapshot (pure; see module docstring).
+    """Post-check ONE card's text against the numbers it was fed (pure; see module docstring).
 
     *card_text* is the card as the owner reads it (``title + summary + body_md``),
-    *snapshot_json* the stored ``insights.input_snapshot``, *known_symbols* the registered
-    instrument symbols. Returns the two capped lists; both empty means nothing to disclose.
+    *snapshot_json* the stored population — ``insights.prompt_figures`` (a JSON list from
+    :func:`prompt_figures_json`) or any JSON whose numeric leaves are the fed values —
+    *known_symbols* the registered instrument symbols. Returns the two capped lists and the
+    ``snapshot`` state: ``"none"`` when the card prints a figure and the population holds
+    no number (blank, not JSON, or JSON without a numeric leaf — the legacy
+    ``"2026-07-05|US"`` fingerprint tag is all three at once).
     """
+    figures = _card_figures(card_text, _known_forms(known_symbols))
+    population = snapshot_numbers(snapshot_json)
+    if not population:
+        return FigureFlags(
+            unknown_symbols=_unknown_symbols(card_text, known_symbols),
+            snapshot="none" if figures else "checked",
+        )
     return FigureFlags(
-        unverified_figures=_unverified_figures(card_text, snapshot_numbers(snapshot_json)),
+        unverified_figures=_unverified_figures(figures, population),
         unknown_symbols=_unknown_symbols(card_text, known_symbols),
     )

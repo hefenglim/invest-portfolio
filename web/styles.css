@@ -597,6 +597,19 @@ button.is-busy {
   line-height: 15px;
   padding: 0 5px;
 }
+/* 無快照可核 — the M9 figure check's third state (2026-09-17): the card prints figures and
+   nothing was recorded to check them against (generated before `prompt_figures` existed).
+   Muted on purpose: it is "could not check", not "found wrong" — the red pill above is
+   reserved for a figure or code that actually failed the check. */
+.badge-unchecked {
+  color: var(--text);
+  opacity: 0.6;
+  border-color: var(--border);
+  background: transparent;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 5px;
+}
 /* 放空中 — a DECLARED short that is still open. Amber, not red: unlike 賣超 (a data
    problem) this is a legitimate position with a real basis, so it informs rather than warns. */
 .badge-short {

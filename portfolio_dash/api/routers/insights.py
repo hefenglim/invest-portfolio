@@ -971,15 +971,21 @@ def _known_symbols(conn: sqlite3.Connection) -> set[str]:
 def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, Any]:
     """The M9 read-time figure check for one card (never blocks, never hides).
 
-    Compares what the card PRINTS against the variable snapshot it was GENERATED from.
-    Measured on cached cards (audit 2026-09-16): 「未實現獲利 429.1 萬美元」 beside a sibling
-    card's 「未實現收益 4,290.80 美元」 from the same batch (×1000), and a card naming
-    「LRDIM (6883)」 — a code held nowhere. The logic is the pure ``llm_insight.figure_check``;
-    this router only feeds it and serializes (no business logic in routers).
+    Compares what the card PRINTS against the numbers it was FED. Measured on cached cards
+    (audit 2026-09-16): 「未實現獲利 429.1 萬美元」 beside a sibling card's 「未實現收益
+    4,290.80 美元」 from the same batch (×1000), and a card naming 「LRDIM (6883)」 — a code
+    held nowhere. The logic is the pure ``llm_insight.figure_check``; this router only
+    feeds it and serializes (no business logic in routers).
+
+    The population is ``prompt_figures`` (M9 re-verification 2026-09-17). ``input_snapshot``
+    is the fallback ONLY so a row whose snapshot genuinely is JSON with numbers still gets
+    checked; on every real row it is the ``"<date>|<target>"`` fingerprint tag, which the
+    check reports as ``snapshot: "none"`` — the state the audit's #37 card now shows
+    instead of a silent clean ``[]``.
     """
     flags = figure_check.check_figures(
         f"{rec.card.title}\n{rec.card.summary}\n{rec.card.body_md}",
-        rec.input_snapshot,
+        rec.prompt_figures if rec.prompt_figures else rec.input_snapshot,
         known_symbols,
     )
     return flags.model_dump()
@@ -1013,8 +1019,10 @@ def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, 
         # M7-08: the stored prediction could not be read back → prediction is None above
         # and the page draws a 待釐清 pill instead of a confidence chip. Flagged, not hidden.
         "unreadable": rec.unreadable,
-        # M9: the read-time figure check's two capped lists. Always present (empty = clean);
-        # the page renders a 「數值待核」 pill beside the confidence chip when either is filled.
+        # M9: the read-time figure check's two capped lists + its `snapshot` state. Always
+        # present; the page renders 「數值待核」 / 「未知代碼」 by which list is filled, and a
+        # muted 「無快照可核」 when `snapshot == "none"` (a pre-2026-09-17 card that prints
+        # figures nothing was recorded to check against).
         "figure_flags": _figure_flags(rec, known_symbols),
         "horizon_days": rec.horizon_days,
         "due_at": rec.due_at,

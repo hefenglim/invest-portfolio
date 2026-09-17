@@ -109,3 +109,77 @@ def test_tolerance_absorbs_display_rounding_not_a_scale_error() -> None:
     assert check_figures("收益 4,390.00 美元", snapshot, _KNOWN).unverified_figures == [
         "4,390.00"
     ]
+
+
+# --- re-verification 2026-09-17 (the audit author's ❌ on M9) ---------------------------
+
+
+def test_the_real_legacy_row_is_reported_as_unchecked_not_clean() -> None:
+    """The audit's #37 card, with the population it REALLY has on the demo database.
+
+    Every one of the 149 stored cards holds the fingerprint fallback ``"<date>|<target>"``
+    as its snapshot (no caller ever fed ``RunInputs.input_snapshots``), so the first version
+    of this check returned a clean ``[]`` for the ×1000 card — "cannot check" read as
+    "checked". The state is now its own value, and it is the state the page renders.
+    """
+    flags = check_figures(
+        "美股部位：科技雙巨頭領漲\n美股部位淨值 202.4 萬美元，未實現獲利 429.1 萬美元",
+        "2026-07-05|US", _KNOWN,
+    )
+    assert flags.snapshot == "none"
+    assert flags.unverified_figures == []  # nothing was compared, so nothing is "wrong"
+
+    # A legacy card that prints no figure at all has nothing to check: vacuously checked,
+    # so the pill appears exactly where it carries information.
+    narrative = check_figures("科技股走勢偏多，建議持續觀察。", "2026-07-05|US", _KNOWN)
+    assert narrative.snapshot == "checked"
+    assert narrative.unverified_figures == []
+
+    # The symbol check does not need a population and still runs on a legacy row.
+    both = check_figures("留意 LRDIM (6883)，獲利 429.1 萬美元", "2026-07-05|US", _KNOWN)
+    assert both.snapshot == "none" and both.unknown_symbols == ["6883"]
+
+
+def test_prompt_figures_json_is_the_population_the_model_saw() -> None:
+    """The population is extracted from the exact prompt string, at the scale it was fed."""
+    from portfolio_dash.llm_insight.figure_check import prompt_figures_json
+
+    prompt = (
+        "<kpis>未實現損益 4,290.80 USD；成本 11951；權重 12.49%；營收 120 億；"
+        "資料日 2026-09-16</kpis> 請回 JSON。"
+    )
+    population = json.loads(prompt_figures_json(prompt))
+    assert "4290.80" in population and "11951" in population
+    assert "12.49%" in population  # kept as a percent form; the reader expands it
+    assert "12000000000" in population  # 120 億, scaled once at extraction
+    assert population == list(dict.fromkeys(population))  # de-duplicated, order kept
+
+    # End to end through the reader: the ×1000 card is flagged, its correct sibling is not.
+    bad = check_figures("未實現獲利 429.1 萬美元", prompt_figures_json(prompt), _KNOWN)
+    assert bad.snapshot == "checked" and bad.unverified_figures == ["429.1 萬"]
+    good = check_figures(
+        "未實現收益 4,290.80 美元，權重 12.49%，營收 120 億", prompt_figures_json(prompt), _KNOWN
+    )
+    assert good.snapshot == "checked" and good.unverified_figures == []
+
+
+def test_period_suffixed_indicators_ratios_ratings_and_indices_are_not_tickers() -> None:
+    """Measured 2026-09-17 on the demo: 47 of 48 unknown_symbols hits were these tokens."""
+    text = (
+        "股價站上 (MA20)、(MA60)、(MA120)、(MA200)、(MA50)，(RSI14) 中性，(PBR) 偏高；"
+        "評等 (BUY) 轉 (HOLD)；對比 (KLCI) 與 (TAIEX)；(EMA12) 與 (KD9) 交叉。"
+    )
+    assert check_figures(text, _SNAPSHOT, _KNOWN).unknown_symbols == []
+    # …and the one real hallucination in that same measurement is still caught.
+    assert check_figures(text + " 留意 LRDIM (6883)。", _SNAPSHOT, _KNOWN).unknown_symbols == [
+        "6883"
+    ]
+
+
+def test_five_and_six_digit_tw_codes_are_codes_not_figures() -> None:
+    """「（00878）」 read as the number 878 would be an unverified figure on every TW ETF."""
+    flags = check_figures("高股息 (00878) 與 (006208) 的配置。", _SNAPSHOT, _KNOWN)
+    assert flags.unverified_figures == []
+    assert flags.unknown_symbols == ["00878", "006208"]  # unregistered here → symbol check
+    known = check_figures("高股息 (00878) 的配置。", _SNAPSHOT, _KNOWN | {"00878.TW"})
+    assert known.unknown_symbols == []

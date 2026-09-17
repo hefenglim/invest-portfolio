@@ -401,7 +401,7 @@ def compute_whatif(
         conn, now=now, reporting=reporting, symbol=symbol, inst=inst,
         held=held, result_shares=result_shares)
     if etf_flag_issue_applies(rules, side, etf_unknown):
-        out["etf_flag_note"] = ("無法判定是否為 ETF,此試算暫以現股稅率計算,"
+        out["etf_flag_note"] = ("無法判定是否為 ETF，此試算暫以現股稅率計算，"
                                 "實際稅率待你在標的管理確認")
     else:
         out["etf_flag_note"] = None

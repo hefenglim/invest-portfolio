@@ -62,6 +62,14 @@ class InsightRecord(BaseModel):
     # call's usage maps 1:1. Zero for legacy cards (the UI omits the token segment then).
     tokens_in: int = 0
     tokens_out: int = 0
+    # M9 re-verification (2026-09-17): the numbers the model was FED — every numeric token
+    # of the exact prompt that produced this card, as a JSON list of strings
+    # (``figure_check.prompt_figures_json``). The read-time figure check's comparison
+    # population. Empty on every card generated before the column existed, which the check
+    # reports as its own ``"none"`` state, never as clean. Stored in its OWN column on
+    # purpose: ``input_snapshot`` feeds the cache fingerprint and the Loop-2 master prompt,
+    # and was found to hold only the ``"<date>|<target>"`` fallback tag on 149/149 demo rows.
+    prompt_figures: str = ""
     # M7-08 (owner ruling, option C, 2026-09-06): True when the stored ``prediction`` blob
     # could not be read back through the card schema (a required field the schema grew
     # later, a narrowed Literal, a corrupt blob, a NULLed confidence). The card is then
@@ -125,6 +133,10 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     # AI attribution (2026-07-07): per-card token usage for the unified model/token/cost line.
     _add_column_if_missing(conn, "insights", "tokens_in", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "insights", "tokens_out", "INTEGER NOT NULL DEFAULT 0")
+    # M9 re-verification (2026-09-17): additive migration — the fed numbers the figure
+    # check compares against. DEFAULT '' so every existing row reads "no population
+    # recorded" (the check's "none" state), never as an empty-but-checked population.
+    _add_column_if_missing(conn, "insights", "prompt_figures", "TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -211,8 +223,15 @@ def add_card(
     ceiling_at_create: int | None = None,
     tokens_in: int = 0,
     tokens_out: int = 0,
+    prompt_figures: str = "",
 ) -> InsightRecord:
     """Append one generated card; compute ``due_at``; return the stored record.
+
+    ``prompt_figures`` (M9, 2026-09-17) is the JSON list of numeric tokens in the prompt
+    the model was handed — ``figure_check.prompt_figures_json(prompt)`` at the LLM site.
+    Default ``""`` = no population recorded (the deterministic anomaly card, tests): the
+    figure check then reports ``snapshot="none"`` for a card that prints figures, so a
+    forgotten argument surfaces as a visible state rather than as a silent clean verdict.
 
     Append-only (spec 04 invariant): every run inserts a new row, never mutating history.
     ``cost_usd`` is stored as a canonical Decimal string. ``due_at`` is the prediction's
@@ -231,8 +250,8 @@ def add_card(
         "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
         "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
-        "price_at_create, ceiling_at_create, tokens_in, tokens_out) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "price_at_create, ceiling_at_create, tokens_in, tokens_out, prompt_figures) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -255,6 +274,7 @@ def add_card(
             ceiling_at_create,
             tokens_in,
             tokens_out,
+            prompt_figures,
         ),
     )
     conn.commit()
@@ -330,6 +350,9 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         ),
         tokens_in=(row["tokens_in"] or 0) if "tokens_in" in row.keys() else 0,
         tokens_out=(row["tokens_out"] or 0) if "tokens_out" in row.keys() else 0,
+        prompt_figures=(
+            (row["prompt_figures"] or "") if "prompt_figures" in row.keys() else ""
+        ),
     )
 
 

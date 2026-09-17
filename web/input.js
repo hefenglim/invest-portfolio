@@ -382,17 +382,13 @@
      account is USD although its funding currency is MYR and its MY trades book in MYR: the
      one currency the label named was the one the user was least likely to be entering.
      Now: the zh name from the single naming authority + the currencies the account
-     actually trades in, derived from its bound markets (「Moomoo MY（USD／MYR）」). */
-  const _MARKET_CCY = { TW: 'TWD', US: 'USD', MY: 'MYR' };
+     actually trades in, derived from its bound markets (「Moomoo MY（USD／MYR）」).
+     Re-verification 2026-09-17 (L8 partial): the derivation lived HERE, so cash.js's two
+     selects never got it. It now lives in names.js (`pdNames.accountOption`) beside the
+     name it decorates; this is the delegate, with the id as the no-names.js fallback. */
   function accountLabel(a) {
-    const name = window.pdNames ? window.pdNames.account(a.id) : a.id;
-    const ccys = [];
-    acctMarkets(a).forEach((mk) => {
-      const c = _MARKET_CCY[mk];
-      if (c && ccys.indexOf(c) === -1) ccys.push(c);
-    });
-    if (!ccys.length && a.ccy) ccys.push(a.ccy);
-    return name + '（' + ccys.join('／') + '）';
+    if (window.pdNames && window.pdNames.accountOption) return window.pdNames.accountOption(a);
+    return a.id + (a.ccy ? '（' + a.ccy + '）' : '');
   }
   /* Dividend MODEL (tw/drip/net) for the current dividend entry.
      Single-market account -> its one model (byte-identical to the old `a.div_model`).
@@ -1054,17 +1050,17 @@
      the REQUIRED `account` column; matches the *_COLUMNS constants in the backend parsers +
      the downloadable 範本; date carries its YYYY-MM-DD hint, optional columns marked 選填). */
   const CSV_HINTS = {
-    transactions: '欄位：account・symbol・side・date(YYYY-MM-DD)・shares・price・fee（選填）・tax（選填）・daytrade（選填）・short_sale（選填，1＝宣告放空）・note（選填）',
-    dividends: '欄位：account・symbol・date(YYYY-MM-DD，發放日)・type(CASH/STOCK/DRIP/NET)・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）・ex_date（選填，除息日；僅配股會用到）',
-    fx: '欄位：account・date(YYYY-MM-DD)・from_ccy・from_amount・to_ccy・to_amount',
-    openings: '欄位：account・symbol・shares・original_cost_total・build_date(YYYY-MM-DD)・original_avg_cost（選填・舊檔相容）',
+    transactions: '欄位：account・symbol・side・date（YYYY-MM-DD）・shares・price・fee（選填）・tax（選填）・daytrade（選填）・short_sale（選填，1＝宣告放空）・note（選填）',
+    dividends: '欄位：account・symbol・date（YYYY-MM-DD，發放日）・type（CASH/STOCK/DRIP/NET）・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）・ex_date（選填，除息日；僅配股會用到）',
+    fx: '欄位：account・date（YYYY-MM-DD）・from_ccy・from_amount・to_ccy・to_amount',
+    openings: '欄位：account・symbol・shares・original_cost_total・build_date（YYYY-MM-DD）・original_avg_cost（選填・舊檔相容）',
     /* 比例一定是「兩個整數欄位」，不是一個算好的小數（§3.1(ii)）：0.2857 這種寫法會讓
        700 股的 2 換 7 算成 199.99 股，之後賣 200 股會被判成賣超、成本基礎被永久捨棄。 */
-    corporate_actions: '欄位：account・date(YYYY-MM-DD)・kind(SPLIT/EXCHANGE/SPINOFF，也可填 分割/換股/分拆)・from_symbol・to_symbol・ratio_to・ratio_from（兩個整數，不可填小數）・cost_carry（選填・僅分拆）・note（選填）',
+    corporate_actions: '欄位：account・date（YYYY-MM-DD）・kind（SPLIT/EXCHANGE/SPINOFF，也可填 分割/換股/分拆）・from_symbol・to_symbol・ratio_to・ratio_from（兩個整數，不可填小數）・cost_carry（選填・僅分拆）・note（選填）',
     /* 取得成本只收「家幣金額」，不收匯率（spec F1）：匯率是平均值，平均值不可以是帳本的
        權威來源。外幣入金若不填取得成本，該筆金額仍會計入餘額、但不會進入換匯成本均價，
        畫面上會以 covered_ratio／匯損缺口揭露 — 寧可留白，也不要猜一個匯率。 */
-    cash: '欄位：account・date(YYYY-MM-DD)・kind(DEPOSIT/WITHDRAW/OPENING/REBATE/INTEREST/INTEREST_EXPENSE/BROKER_FEE，也可填 入金/出金/期初/折讓款/利息/融資利息/券商費用)・ccy・amount・acq_home_amount（選填・僅外幣入金與期初，利息費用不適用；填家幣金額不是匯率）・note（選填）',
+    cash: '欄位：account・date（YYYY-MM-DD）・kind（DEPOSIT/WITHDRAW/OPENING/REBATE/INTEREST/INTEREST_EXPENSE/BROKER_FEE，也可填 入金/出金/期初/折讓款/利息/融資利息/券商費用）・ccy・amount・acq_home_amount（選填・僅外幣入金與期初，利息費用不適用；填家幣金額不是匯率）・note（選填）',
   };
 
   function initCsv() {

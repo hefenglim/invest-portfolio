@@ -9,7 +9,7 @@ style preference.
 Found 2026-08-05 by the 0->1 sweep. A first-time user hits these constantly — every symbol
 is unregistered on day one — and 21 of them were English. The clincher was inside a single
 ``validate_transaction`` call: ``"quantity must be > 0"`` sat four lines from
-``"股數過大,無法處理"``. Not a decision; drift. Without this guard the 22nd arrives next
+``"股數過大，無法處理"``. Not a decision; drift. Without this guard the 22nd arrives next
 release, so the rule is enforced rather than remembered.
 
 The scan resolves module-level string constants, because ``f"{symbol} {_HAS_HISTORY_MSG}"``

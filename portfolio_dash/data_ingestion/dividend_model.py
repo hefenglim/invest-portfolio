@@ -55,7 +55,7 @@ def check_amounts(gross: Decimal, withholding: Decimal, net: Decimal) -> str | N
     # stored verbatim, after which every pool sum holding it lost its last digit to the
     # 28-digit Decimal context. Here, in the ONE gate, so the CSV door and the edit door agree.
     if gross > _MAX_MAGNITUDE or withholding > _MAX_MAGNITUDE or net > _MAX_MAGNITUDE:
-        return "股利金額過大,無法處理"
+        return "股利金額過大，無法處理"
     if withholding + net > gross:
         return (
             f"股利金額不自洽：預扣 {withholding} + 淨額 {net} 大於總額 {gross}"

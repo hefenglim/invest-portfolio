@@ -204,15 +204,81 @@ def test_insights_list_carries_figure_flags(
     bad = rows["未實現獲利 429.1 萬美元"]
     good = rows["未實現收益 4,290.80 美元，成本 11,951 美元。"]
     assert bad["figure_flags"] == {
-        "unverified_figures": ["429.1 萬"], "unknown_symbols": ["6883"]
+        "unverified_figures": ["429.1 萬"], "unknown_symbols": ["6883"], "snapshot": "checked",
     }
-    assert good["figure_flags"] == {"unverified_figures": [], "unknown_symbols": []}
+    assert good["figure_flags"] == {
+        "unverified_figures": [], "unknown_symbols": [], "snapshot": "checked",
+    }
     assert bad["summary"] == "未實現獲利 429.1 萬美元"  # flagged, never hidden
     # the grouped shape serializes through the same helper
     grouped = api_client.get("/api/insights?group=symbol").json()
     for grp in grouped["groups"]:
         for card in grp["cards"]:
-            assert set(card["figure_flags"]) == {"unverified_figures", "unknown_symbols"}
+            assert set(card["figure_flags"]) == {
+                "unverified_figures", "unknown_symbols", "snapshot",
+            }
+
+
+def test_legacy_card_reads_as_unchecked_on_the_wire_not_clean(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """M9 re-verification (2026-09-17): the audit's #37 card exactly as the demo stores it.
+
+    Every pre-existing row holds ``input_snapshot = "<date>|<target>"`` (the fingerprint
+    fallback — ``RunInputs.input_snapshots`` was never fed) and an empty ``prompt_figures``.
+    The first fix returned ``unverified_figures: []`` for that shape, so the ×1000 card wore
+    no pill. Now the wire says ``snapshot: "none"`` and the page renders 「無快照可核」; a
+    row that DOES carry a recorded population is checked through the same helper.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard
+
+    it_id = _make_combo(api_client)
+    now = datetime(2026, 7, 5, 18, 22, tzinfo=ZoneInfo("Asia/Taipei"))
+
+    def _store(card: InsightCard, fp: str, prompt_figures: str = "") -> None:
+        istore.add_card(
+            golden_db, insight_type_id=it_id, card=card,
+            fingerprint=istore.fingerprint(it_id, fp, "d", "v1"), calibration_version=None,
+            horizon_days=5, input_snapshot="2026-07-05|US", model="m",
+            cost_usd=Decimal("0"), now=now, prompt_figures=prompt_figures,
+        )
+
+    _store(InsightCard(
+        title="美股部位：科技雙巨頭領漲", summary="未實現獲利 429.1 萬美元",
+        body_md="美股部位淨值 202.4 萬美元。", tags=[],
+    ), "legacy-37")
+    _store(InsightCard(
+        title="美股部位", summary="未實現收益 4,290.80 美元",
+        body_md="部位規模共 11,951 美元成本。", tags=[],
+    ), "fed-40", prompt_figures='["4290.80", "11951"]')
+    _store(InsightCard(
+        title="市場觀察", summary="科技股走勢偏多。", body_md="建議持續觀察。", tags=[],
+    ), "legacy-narrative")
+
+    rows = {r["summary"]: r for r in api_client.get("/api/insights").json()["rows"]}
+    assert rows["未實現獲利 429.1 萬美元"]["figure_flags"] == {
+        "unverified_figures": [], "unknown_symbols": [], "snapshot": "none",
+    }
+    assert rows["未實現收益 4,290.80 美元"]["figure_flags"] == {
+        "unverified_figures": [], "unknown_symbols": [], "snapshot": "checked",
+    }
+    # A legacy card with no figure has nothing to check: no pill, not even the muted one.
+    assert rows["科技股走勢偏多。"]["figure_flags"]["snapshot"] == "checked"
+
+    # The page has one pill per state, and the old one-pill-fits-all tooltip is gone.
+    html = (Path(__file__).resolve().parents[2] / "web" / "insights.html").read_text(
+        encoding="utf-8"
+    )
+    for pill in ("數值待核", "未知代碼", "無快照可核"):
+        assert pill in html, pill
+    assert "badge-unchecked" in html
+    assert "ff.snapshot === 'none'" in html
 
 
 def test_deleted_task_history_hidden_but_preserved(

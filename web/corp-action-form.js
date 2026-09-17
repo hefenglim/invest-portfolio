@@ -282,7 +282,7 @@
          transactions have to be restated first. The reason is shown instead of a button
          that would end in an error. */
       if (i.fix && state.applyFix) {
-        const btn = el('button', 'btn ca-fix', i.fix.label || '改記為分割(SPLIT)');
+        const btn = el('button', 'btn ca-fix', i.fix.label || '改記為分割（SPLIT）');
         btn.type = 'button';
         btn.addEventListener('click', () => state.applyFix(i.fix));
         col.appendChild(btn);

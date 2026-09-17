@@ -110,7 +110,7 @@ def dispatch_notifications(
 
     detail = f"notify: {sent} 送出 / {len(rows)} 待送"
     if failed_channels:
-        detail += f" (通道異常: {', '.join(sorted(failed_channels))})"
+        detail += f"（通道異常：{', '.join(sorted(failed_channels))}）"
     if gave_up:
         detail += f"; gave up on {gave_up} event(s)"
     return detail

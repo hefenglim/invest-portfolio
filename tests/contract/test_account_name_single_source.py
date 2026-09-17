@@ -171,3 +171,35 @@ def test_the_context_accounts_english_name_is_never_rendered_either() -> None:
         assert re.search(r"\ba\.name\b", src) is None, (
             f"web/{name} renders the context accounts' English name — use acctZh(a.id)"
         )
+
+
+def test_every_account_option_label_comes_from_the_one_definition() -> None:
+    """L8 (demo audit 2026-09-16), re-verified 2026-09-17 as PARTIAL: the class, not the instance.
+
+    The audit's title named 「交易輸入／股利／換匯 帳戶下拉」. The fix derived the label
+    (zh name + the currencies the account TRADES in, from its bound markets) inside
+    input.js, so its three selects read 「Moomoo MY（USD／MYR）」 — and cash.js's 換匯 and
+    出金入金 selects, which build their options from the same context list, kept bracketing
+    the SETTLEMENT currency: 「Moomoo MY（USD）」. One derivation now lives in names.js as
+    `pdNames.accountOption`; this pins that every file building an account <option> calls
+    it and that no file derives the bracket from `settlement_ccy` / `ccy` on its own.
+    """
+    names = (_WEB_DIR / "names.js").read_text(encoding="utf-8")
+    assert "accountOption(a)" in names, "names.js lost the account <option> label authority"
+    assert "MARKET_CCY" in names  # the bracket is the TRADING currencies, market-derived
+
+    for name in ("cash.js", "input.js"):
+        src = _strip_js_comments((_WEB_DIR / name).read_text(encoding="utf-8"))
+        assert "pdNames.accountOption(" in src, (
+            f"web/{name} builds an account <option> without pdNames.accountOption"
+        )
+        # The settlement-ccy bracket may survive ONLY as the no-names.js fallback on the
+        # same expression that prefers the authority — never as a label of its own.
+        for m in re.finditer(r"'（'\s*\+\s*settlementCcy\(a\)", src):
+            window = src[max(0, m.start() - 200):m.start()]
+            assert "pdNames.accountOption" in window, (
+                f"web/{name}: a settlement-currency option label that is not the fallback "
+                "of pdNames.accountOption"
+            )
+        # …and the market→currency table exists in exactly one place.
+        assert "_MARKET_CCY" not in src, f"web/{name} re-derives the market→currency table"

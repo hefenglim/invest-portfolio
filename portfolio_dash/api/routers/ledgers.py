@@ -430,7 +430,7 @@ def _replay_block(
         return _ReplayBlock(
             code="orphan",
             message=(
-                f"此更正會使 {sym} 的股利/期初紀錄失去對應持倉,請先處理該紀錄"
+                f"此更正會使 {sym} 的股利/期初紀錄失去對應持倉，請先處理該紀錄"
             ),
         )
 
@@ -500,7 +500,7 @@ def _mutation_guard(
             if acct_mkt is not None and inst.market not in allowed_markets(conn, account_id):
                 return JSONResponse(status_code=400, content=error_body(
                     "validation_error",
-                    f"{symbol} 屬 {inst.market.value} 市場,"
+                    f"{symbol} 屬 {inst.market.value} 市場，"
                     f"不可登錄於 {MARKET_ZH.get(acct_mkt, acct_mkt.value)}帳戶",
                     field="symbol"))
     return None
@@ -1281,13 +1281,13 @@ def _split_conversion(
             tail = (f"　這表示帳本是把這檔證券記在 {retired} 之下。"
                     f"要改記為分割，必須先把 {retired} 的交易紀錄改成 {ticker}，"
                     "而不是改這一筆行動。")
-        return {"fix_blocked": f"改記為「分割」後仍無法存檔:{hard[0].message}{tail}"}
+        return {"fix_blocked": f"改記為「分割」後仍無法存檔：{hard[0].message}{tail}"}
     # Every key here is consumed by the shared form, and a contract test asserts exactly
     # that: an unread field is a repair half-wired, which is the defect this whole surface
     # exists to close. The finding's own `code` identifies WHICH repair this is — the
     # payload does not repeat it.
     return {"fix": {
-        "label": "改記為分割(SPLIT)",
+        "label": "改記為分割（SPLIT）",
         "summary": (f"改為 {ticker} 在 {repaired.date.isoformat()} 的分割，"
                     f"每 {decimal_str(repaired.ratio_from)} 股 → "
                     f"{decimal_str(repaired.ratio_to)} 股"),
@@ -1407,7 +1407,7 @@ def _preview_payload(
     except (ValueError, KeyError) as exc:
         return JSONResponse(status_code=422, content=error_body(
             "ledger_unbookable",
-            f"目前的帳本無法重播,因此無法試算這筆公司行動({exc})。請先修正帳本紀錄"))
+            f"目前的帳本無法重播，因此無法試算這筆公司行動（{exc}）。請先修正帳本紀錄"))
 
     accts, _names_map, _ccys = _names(conn)
     issues: list[Issue] = []
@@ -1473,7 +1473,7 @@ def _preview_payload(
         "kind_label": KIND_ZH.get(kind, kind),
         "accounts": accounts_wire,
         "not_affected": [{"account_id": a, "account": accts.get(a, a),
-                          "reason": "部位在行動日之後才建立,這筆行動不會套用"}
+                          "reason": "部位在行動日之後才建立，這筆行動不會套用"}
                          for a in batch.not_affected],
         "rows_to_write": len(batch.rows),
         "cost_before_total": decimal_str(cost_before),
@@ -1572,7 +1572,7 @@ def add_corporate_action(
     except (ValueError, KeyError) as exc:
         return JSONResponse(status_code=422, content=error_body(
             "ledger_unbookable",
-            f"目前的帳本無法重播,因此無法登錄公司行動({exc})。請先修正帳本紀錄"))
+            f"目前的帳本無法重播，因此無法登錄公司行動（{exc}）。請先修正帳本紀錄"))
     # D48b: the optional child price is refused LOUDLY rather than dropped. A value the
     # owner typed that silently does not arrive is the failure mode this whole module is
     # written against — and here it would be invisible, because the field's only effect is
@@ -1668,7 +1668,7 @@ def _child_price_refusal(kind: str, raw: str | None) -> JSONResponse | None:
     if kind.strip().upper() != CorporateActionKind.SPINOFF.value:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error",
-            f"子公司起始價僅適用於分拆,{kind} 不需填寫",
+            f"子公司起始價僅適用於分拆，{kind} 不需填寫",
             field="to_symbol_price"))
     try:
         close = Decimal(text)
@@ -1677,7 +1677,7 @@ def _child_price_refusal(kind: str, raw: str | None) -> JSONResponse | None:
     if close <= 0:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error",
-            f"子公司起始價必須是正數,目前是 {text}",
+            f"子公司起始價必須是正數，目前是 {text}",
             field="to_symbol_price"))
     return None
 
@@ -1808,7 +1808,7 @@ def edit_corporate_action(
         build_book(sibling_bundle, allow_oversell=True)   # reachability check only
     except (ValueError, KeyError) as exc:
         return JSONResponse(status_code=422, content=error_body(
-            "ledger_unbookable", f"帳本無法重播,無法修改這筆公司行動({exc})"))
+            "ledger_unbookable", f"帳本無法重播，無法修改這筆公司行動（{exc}）"))
     issues = [
         i for i in validate_corporate_action(
             conn, replacement, batch=[replacement], bundle=sibling_bundle,
@@ -1870,7 +1870,7 @@ def remove_corporate_action_set(
         action_date = date.fromisoformat(on)
     except ValueError:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"日期格式無效:{on}", field="date"))
+            "validation_error", f"日期格式無效：{on}", field="date"))
     rows = [a for a in list_corporate_actions(conn)
             if a.from_symbol == from_symbol and a.date == action_date
             and a.kind == wanted]

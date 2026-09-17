@@ -87,7 +87,7 @@ def test_template_endpoint_shape(api_client: TestClient, kind: str) -> None:
 def test_template_header_carries_date_and_optional_annotations() -> None:
     txn = annotated_columns("transactions")
     assert "date(YYYY-MM-DD)" in txn
-    assert "fee(選填)" in txn and "note(選填)" in txn
+    assert "fee（選填）" in txn and "note（選填）" in txn
     # openings annotates the build_date column, not `date`.
     assert "build_date(YYYY-MM-DD)" in annotated_columns("openings")
     # fx has no optional columns -> no 選填 markers, but still the date hint.
@@ -271,5 +271,31 @@ def test_every_blank_able_column_is_marked_optional(kind: str) -> None:
         # absent, which is exactly how it dodged this question for a release.
         blank_somewhere = any(pos >= len(r) or r[pos] == "" for r in examples)
         if blank_somewhere:
-            assert "(選填)" in name or "(YYYY-MM-DD)" in name, (
+            assert "（選填）" in name or "(YYYY-MM-DD)" in name, (
                 f"{kind}: column {name!r} is blank in an example row but is not marked 選填")
+
+
+def test_every_annotated_header_canonicalizes_to_its_bare_column_in_both_widths() -> None:
+    """L5 / Q1 (2026-09-17): the template now marks optional columns 「（選填）」 (full-width).
+
+    The annotation is the ONE string in this sweep that a parser reads back: the importer
+    strips it to recover the column name, and a header it failed to strip would shift every
+    numeric column one place — text becoming the wrong number. So: every annotated header
+    of every template, in the width the template ships AND in the half-width form an older
+    downloaded template still carries, canonicalizes to exactly the bare column the parser
+    expects.
+    """
+    from portfolio_dash.data_ingestion.csv_import import canonical_header
+    from portfolio_dash.data_ingestion.import_templates import (
+        TEMPLATE_KINDS,
+        annotated_columns,
+        template_columns,
+    )
+
+    for kind in TEMPLATE_KINDS:
+        shipped = annotated_columns(kind)
+        bare = template_columns(kind)
+        assert [canonical_header(h) for h in shipped] == bare, kind
+        legacy = [h.replace("（選填）", "(選填)") for h in shipped]
+        assert [canonical_header(h) for h in legacy] == bare, kind
+        assert any("（選填）" in h for h in shipped) or not any("選填" in h for h in shipped)

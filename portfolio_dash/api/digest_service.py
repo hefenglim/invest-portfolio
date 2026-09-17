@@ -669,7 +669,7 @@ def run_digest_weekly(
         generated_at=str(payload["generated_at"]),
     )
     push = _push(conn, "weekly", payload, now=now, sender=sender)
-    return f"weekly digest {payload['digest_date']}: {len(items)} 項; {push}"
+    return f"weekly digest {payload['digest_date']}: {len(items)} 項；{push}"
 
 
 def run_digest(conn: sqlite3.Connection, kind: str, *, now: datetime) -> str:

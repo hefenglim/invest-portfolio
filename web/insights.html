@@ -328,21 +328,41 @@
   }
 
   /* M9: the server's read-time figure check (`figure_flags`) compared what this card PRINTS
-     against the variable snapshot it was generated from. Measured on cached cards: 「未實現
-     獲利 429.1 萬美元」 beside a sibling card's 「4,290.80 美元」 (×1000), and a card naming
-     「LRDIM (6883)」 — a code held nowhere. The card is NEVER hidden: a flagged number sits in
-     narrative the owner may still want. Both lists are server-computed and server-capped;
-     this renders them and nothing else. */
+     against the numbers the model was fed (the prompt's figures, recorded at generation).
+     Measured on cached cards: 「未實現獲利 429.1 萬美元」 beside a sibling card's 「4,290.80
+     美元」 (×1000), and a card naming 「LRDIM (6883)」 — a code held nowhere. The card is NEVER
+     hidden: a flagged number sits in narrative the owner may still want. Everything here is
+     server-computed and server-capped; this renders it and nothing else.
+     Three pills, by what was actually found (re-verification 2026-09-17: one pill for every
+     case put 「數值待核」 + "the numbers are not in the snapshot" on cards whose only hit was a
+     code — two sentences contradicting each other):
+       數值待核  — at least one printed figure matches nothing the model was fed;
+       未知代碼  — only a parenthesised code the registry does not know;
+       無快照可核 — the card prints figures, and it was generated before the fed numbers were
+                   recorded (`snapshot: "none"`), so nothing could be checked. Muted, not red. */
   function figureFlagPill(card) {
     var ff = card.figure_flags || {};
     var figs = ff.unverified_figures || [];
     var syms = ff.unknown_symbols || [];
-    if (!figs.length && !syms.length) return null;
-    var pill = el('span', 'badge badge-missing', '數值待核');
+    var noSnapshot = ff.snapshot === 'none';
+    if (!figs.length && !syms.length && !noSnapshot) return null;
     var lines = [];
-    if (figs.length) lines.push('對不上的數字：' + figs.join('、'));
-    if (syms.length) lines.push('未知代碼：' + syms.join('、'));
-    lines.push('卡片中的數字未出現在餵入的變數快照中，請以儀表板數字為準');
+    var pill;
+    if (figs.length) {
+      pill = el('span', 'badge badge-missing', '數值待核');
+      lines.push('對不上的數字：' + figs.join('、'));
+      if (syms.length) lines.push('未知代碼：' + syms.join('、'));
+      lines.push('這些數字未出現在餵給模型的資料中，請以儀表板數字為準');
+    } else if (syms.length) {
+      pill = el('span', 'badge badge-missing', '未知代碼');
+      lines.push('未知代碼：' + syms.join('、'));
+      lines.push('卡片提到的代號不在持倉、觀察清單或已註冊標的中，可能是模型幻覺');
+      if (noSnapshot) lines.push('（數字部分無法核對：此卡片產生時未記錄餵入的數字）');
+    } else {
+      pill = el('span', 'badge badge-unchecked', '無快照可核');
+      lines.push('此卡片產生時未記錄餵給模型的數字（2026-09-17 之前產生），無法核對卡片中的數字');
+      lines.push('請以儀表板數字為準');
+    }
     pill.title = lines.join('\n');
     return pill;
   }
@@ -351,7 +371,7 @@
     var c = el('div', 'insight-card');
     var head = el('div', 'insight-head');
     head.appendChild(el('span', 'badge badge-ai', 'AI'));
-    head.appendChild(el('h3', 'insight-title', card.title || '(未命名洞察)'));
+    head.appendChild(el('h3', 'insight-title', card.title || '（未命名洞察）'));
     if (card.symbol) {
       head.appendChild(el('span', 'insight-time', MARKET_LABEL[card.symbol] || card.symbol));
     }

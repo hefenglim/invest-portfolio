@@ -63,7 +63,7 @@ def test_template_download_serves_the_cash_kind(api_client: TestClient) -> None:
     assert response.status_code == 200
     text = response.content.decode("utf-8").lstrip("﻿")
     assert text.split("\r\n")[0] == (
-        "account,date(YYYY-MM-DD),kind,ccy,amount,acq_home_amount(選填),note(選填)")
+        "account,date(YYYY-MM-DD),kind,ccy,amount,acq_home_amount（選填）,note（選填）")
     assert "import_template_cash.csv" in response.headers["content-disposition"]
 
 
