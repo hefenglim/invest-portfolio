@@ -93,7 +93,11 @@ one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per 
   (text nodes, visible attributes, script literals; comments excluded) and holds the count at
   zero. The backend's zh strings carried 96 more of the same class (57 user-facing messages,
   29 what's-new catalog entries, 10 regex / prompt text); the owner ruled the sweep in
-  batches (report §十.5). **Batch 1 is in this change:** the 57 user-facing messages
+  batches (report §十.5). **Batch 2 followed the same day:** the what's-new catalog's 29
+  strings (`shared/whatsnew.py`, title / desc of the ✦ 新功能 panel and the 版本發佈資訊
+  browser) are full-width, converted by AST-located literal with paren pairs kept as
+  pairs and the diff reviewed line by line; `_BACKEND_PENDING` is empty and the backend
+  scan reports zero. **Batch 1 is in this change:** the 57 user-facing messages
   (validation issues, confirm prompts, toasts, dashboard subtitles, job summaries) are
   full-width, the six tests that pinned them byte-for-byte follow, and the same test file now
   scans `portfolio_dash/**` by AST — string constants, docstrings excluded, f-string literal

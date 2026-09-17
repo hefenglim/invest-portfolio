@@ -45,7 +45,7 @@
 | ✅ 已裁定並執行（§七 → §八） | M1（1b：MYR/TWD 改推導）、L13（3b+d：代號型不自動送＋開關）、L27（2a：刪除重複列）、M3（4a：demo 排程器維持關閉）、M9（7：接受預設） | ✅ 裁定 1/2/3/4 已在站上生效並驗收；裁定 7 的預設值造成 M9 未通過（見 §九） |
 | ❌ 複驗未通過 → **✅ 已依複驗修復（§十.1）** | **M9** | `unverified_figures` 從未觸發；`unknown_symbols` 誤報率 ~98% → 母體改為「實際提示詞內的數字」（新欄 `insights.prompt_figures`，`input_snapshot` 不動）、新增第三態「無快照可核」、代碼規則改為名單＋形狀、徽章依命中分三種 |
 | ⚠️ 複驗部分通過 → **✅ 已依類別修復（§十.2／10.3）** | **L5、L8** | 點名的實例已修，同類問題仍在 → L5：前端 25 處（11 檔）＋點名的後端 2 處全改全形，新增靜態守門測試（現為 0 處）；L8：標籤推導移為 `names.js` 單一定義，換匯／出金入金下拉同步 |
-| ❓ 待你決策 | 無（0 項）— Q1 已裁定「分批」：第一批 57 處使用者可見訊息已掃完並加後端守門；第二批更新紀錄目錄 29 處待排程（§十.5） | — |
+| ❓ 待你決策 | 無（0 項）— Q1 已裁定「分批」，兩批皆已完成：第一批 57 處使用者可見訊息、第二批更新紀錄目錄 29 處，後端守門現為 0 處（§十.5） | — |
 
 ---
 
@@ -579,18 +579,18 @@ _報告產生於 2026-09-16 01:14（Asia/Taipei）・受測版本 v0.1.28 · 85d
 > **裁定（2026-09-17）：採分批，先掃 57 處可見訊息，然後 commit 到分支。**
 > **執行結果（第一批）**：57 處全部改為全形（`validate.py` 20、`ledgers.py` 12、`dashboard.py` 6、`cash.py` 3、`csv_import.py`／`manual.py` 各 2、`fees.py` 2、`import_templates.py` 2、其餘 8 檔各 1）；連動更新 6 處逐字釘住的測試與 `.claude/rules/markets-and-fees.md` 的引句。**唯一會被程式再解析的字串**是 CSV 範本表頭的 `(選填)` → `（選填）`：匯入端 `canonical_header` 的去註解 regex 本來就同時吃半形／全形，新增測試 `test_every_annotated_header_canonicalizes_to_its_bare_column_in_both_widths` 釘住五種範本的每個表頭在「範本現行寫法」與「舊下載檔的半形寫法」都還原成同一個欄名，數字欄不會錯位；其他 56 處皆為純顯示文字（toast／驗證訊息／確認框／副標／工作摘要），前端只依 `kind`／`code` 判斷、不比對訊息文字（grep 確認）。`wire.py` 的費率公式 `ceil(金額/1,000)` 保留半形並以理由列入 allowlist。
 > **守門**：`test_zh_punctuation_fullwidth.py` 新增後端 AST 掃描（字串常量、排除 docstring、f-string 取字面部分）：`shared/whatsnew.py` 列為 `_BACKEND_PENDING`（第二批，須仍違規否則測試失敗）、`official_templates.py`／`variables.py` 以「提示詞非使用者文案」排除、regex 與公式各以理由列入 `_BACKEND_ALLOWED`（過期即失敗）。
-> **第二批（待排程）**：`shared/whatsnew.py` 29 處更新紀錄目錄文案。
+> **第二批（同日執行，owner 指示「接著掃第二批 29 處，然後 commit 到分支」）**：`shared/whatsnew.py` 29 個字串（更新紀錄目錄的 title／desc）以 AST 定位字串常量後自動轉換——括號成對且任一側或內容含中文者整對轉全形、`, : ; ? !` 緊鄰中文者轉全形；逐行審閱 diff（46 行）無誤，另補一處跨字串串接的 `MYR,」馬幣`。全部是純顯示文字（設定 › 更新紀錄面板與 ✦ 新功能面板），不被任何程式解析；docs／web 無引用舊字串。守門測試的 `_BACKEND_PENDING` 清空（保留為未來延後項的位置），後端掃描現為 **0 處**。閘門：ruff clean・`mypy --strict --no-incremental` 796 檔 0 問題・目標測試（守門＋`test_whatsnew_api`＋`test_whatsnew`＋`test_db_stats_api`）52 通過・e2e `test_whatsnew_flow.py`＋`test_rebate_inbox_flow.py` 4 通過；依 owner 指示重型閘門於本輪結束一次跑完。
 
 
 ### 10.6 本輪變更檔案
 
 `portfolio_dash/llm_insight/figure_check.py`（母體、第三態、代碼規則）・`insights_store.py`（`prompt_figures` 欄）・`generate.py`（產生端存母體）・`api/routers/insights.py`（讀取端）・`web/insights.html`＋`styles.css`（三種徽章）・`web/names.js`／`input.js`／`cash.js`（L8）・11 個 `web/*` 檔＋`validate.py`＋`ledgers.py`（L5）・測試：`test_figure_check.py`、`test_generate.py`、`test_insights_store.py`、`test_insight_run_api.py`、`test_account_name_single_source.py`、新檔 `test_zh_punctuation_fullwidth.py`、e2e `test_cash_withdraw_estimate_flow.py`／`test_corporate_actions_flow.py`（後者另修一處 `909f0b2` 遺留的英文帳戶名期望值）・`LESSONS_LEARNED.md`（一則：以測試餵給檢核器它在正式環境永遠拿不到的輸入）。
 
-Q1 第一批另動：`digest_service.py`、`dividend_inbox.py`、`api/routers/cash.py`／`input_center.py`／`ledgers.py`、`data_ingestion/csv_import.py`／`manual.py`／`dividend_model.py`／`fees.py`／`import_templates.py`／`validate.py`、`forex/fx_pnl.py`、`ops/notify_dispatch.py`、`portfolio/dashboard.py`、`strategy/whatif.py`；測試 `test_cash_movement_guard_contract.py`、`test_validate_dual_market.py`、`test_cash_import_api.py`、`test_import_template.py`（＋雙寬度表頭測試）、`test_user_messages_are_zh_tw.py`（docstring）、e2e `test_corporate_actions_flow.py`（範本表頭）、`test_zh_punctuation_fullwidth.py`（後端掃描）；`.claude/rules/markets-and-fees.md`（引句）。閘門：ruff clean・`mypy --strict --no-incremental`（bare 閘門）**796 檔 0 問題**・pytest 非 e2e 全套 **5,223 通過／0 失敗**（第一次跑出 1 個失敗：spec-17 黃金快照 `tests/golden/dashboard_full.json` 的 `fx_complete_reason` 仍是舊標點，只替換該字串、其餘位元組不動後重跑通過）・e2e `test_corporate_actions_flow.py`＋`test_ledger_correction_doors_flow.py`＋`test_cash_withdraw_estimate_flow.py`＋`test_pages_smoke.py` 四檔同跑 54 通過／1 失敗——`test_dashboard_digest_cards_smoke` 收到一次 500，單獨重跑該測試與整檔 `test_pages_smoke.py`（38/38）皆通過，判定為多檔同一 session 的暫時性狀況，與本次改動無關。
+Q1 第一批另動：`digest_service.py`、`dividend_inbox.py`、`api/routers/cash.py`／`input_center.py`／`ledgers.py`、`data_ingestion/csv_import.py`／`manual.py`／`dividend_model.py`／`fees.py`／`import_templates.py`／`validate.py`、`forex/fx_pnl.py`、`ops/notify_dispatch.py`、`portfolio/dashboard.py`、`strategy/whatif.py`；測試 `test_cash_movement_guard_contract.py`、`test_validate_dual_market.py`、`test_cash_import_api.py`、`test_import_template.py`（＋雙寬度表頭測試）、`test_user_messages_are_zh_tw.py`（docstring）、e2e `test_corporate_actions_flow.py`（範本表頭）、`test_zh_punctuation_fullwidth.py`（後端掃描）；`.claude/rules/markets-and-fees.md`（引句）。第二批另動：`shared/whatsnew.py`、`test_zh_punctuation_fullwidth.py`（清空 pending）。閘門：ruff clean・`mypy --strict --no-incremental`（bare 閘門）**796 檔 0 問題**・pytest 非 e2e 全套 **5,223 通過／0 失敗**（第一次跑出 1 個失敗：spec-17 黃金快照 `tests/golden/dashboard_full.json` 的 `fx_complete_reason` 仍是舊標點，只替換該字串、其餘位元組不動後重跑通過）・e2e `test_corporate_actions_flow.py`＋`test_ledger_correction_doors_flow.py`＋`test_cash_withdraw_estimate_flow.py`＋`test_pages_smoke.py` 四檔同跑 54 通過／1 失敗——`test_dashboard_digest_cards_smoke` 收到一次 500，單獨重跑該測試與整檔 `test_pages_smoke.py`（38/38）皆通過，判定為多檔同一 session 的暫時性狀況，與本次改動無關。
 
 ### 10.7 commit（2026-09-17，分支 `feat/corporate-actions`，未 push）
 
-單一 commit（複驗三項修復＋Q1 第一批，因 `validate.py`／`ledgers.py`／CHANGELOG 同時承載兩者，不拆）：`fix: the audit author's re-verification — M9 checks the numbers the model was fed, L5 and L8 fixed as classes, backend zh punctuation batch 1`；雜湊見 `git log -1`（本節在 commit 前寫入）。未 push、未部署 demo。
+單一 commit（複驗三項修復＋Q1 第一批，因 `validate.py`／`ledgers.py`／CHANGELOG 同時承載兩者，不拆）：`fix: the audit author's re-verification — M9 checks the numbers the model was fed, L5 and L8 fixed as classes, backend zh punctuation batch 1`；→ **`cbfac0a`**。第二批：`fix(zh): backend punctuation batch 2 — the what's-new catalog`（雜湊見 `git log -1`，本節在該 commit 前寫入）。兩個 commit 皆未 push、未部署 demo。
 
 ---
 

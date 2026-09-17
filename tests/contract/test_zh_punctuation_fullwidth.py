@@ -16,9 +16,9 @@ the set: they are not the confusable pairs the audit was about.
 
 The backend is the SAME class on a different surface, and is scanned below by AST
 (string constants, docstrings excluded): batch 1 (owner ruling 2026-09-17) swept the 57
-user-facing messages; the what's-new catalog (29 strings) is batch 2 and sits in
-`_BACKEND_PENDING`; regexes that deliberately accept both widths, prompt text and one
-fee formula are allowed by name with a reason.
+user-facing messages, batch 2 the what's-new catalog (29 strings); `_BACKEND_PENDING`
+is empty and stays as the home for a future deferral. Regexes that deliberately accept
+both widths, prompt text and one fee formula are allowed by name with a reason.
 """
 
 from __future__ import annotations
@@ -202,9 +202,7 @@ _NOT_USER_COPY: frozenset[str] = frozenset({
 #: batch 1 = the 57 user-facing messages; batch 2 = the what's-new catalog, 29 strings).
 #: Same contract as `_PENDING` in test_account_name_single_source.py: an entry must still
 #: violate, and fixing the file means deleting the entry.
-_BACKEND_PENDING: frozenset[str] = frozenset({
-    "shared/whatsnew.py",
-})
+_BACKEND_PENDING: frozenset[str] = frozenset()  # batch 2 (whatsnew.py) landed 2026-09-17
 
 #: Individual strings that legitimately mix, keyed "relative/path.py:exact substring".
 #: Every entry names its reason; an entry nobody can justify gets deleted.
