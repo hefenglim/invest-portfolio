@@ -982,11 +982,21 @@ def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[st
     checked; on every real row it is the ``"<date>|<target>"`` fingerprint tag, which the
     check reports as ``snapshot: "none"`` — the state the audit's #37 card now shows
     instead of a silent clean ``[]``.
+
+    The card's own stored ``prediction`` and ``confidence`` join the population (second
+    re-verification 2026-09-17): a body echoing 「target_pct: 0.05」 is quoting the
+    card's forecast, which is the one number the model legitimately originates.
     """
+    pred = rec.card.prediction
     flags = figure_check.check_figures(
         f"{rec.card.title}\n{rec.card.summary}\n{rec.card.body_md}",
         rec.prompt_figures if rec.prompt_figures else rec.input_snapshot,
         known_symbols,
+        own_figures=figure_check.card_own_figures(
+            target_pct=pred.target_pct if pred is not None else None,
+            horizon_days=pred.horizon_days if pred is not None else None,
+            confidence=rec.card.confidence,
+        ),
     )
     return flags.model_dump()
 

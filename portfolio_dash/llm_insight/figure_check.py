@@ -25,6 +25,28 @@ that reason. ``snapshot == "none"`` means: this card prints at least one figure 
 nothing to check it against. A legacy card that prints no figure at all is vacuously
 ``"checked"``, so the state appears exactly where it carries information.
 
+**Two more numbers the population must hold** (second re-verification 2026-09-17, the
+audit author's ⚠️ on M9: 3 of the 4 flags on 14 freshly generated cards were false):
+
+* **the card's OWN declared prediction.** A body that prints 「target_pct: 0.05」 is
+  echoing the ``prediction`` the model returned in the same JSON, and a forecast is not a
+  number of record — it is the one number the model is *supposed* to originate (Loop 2
+  scores it later). The router passes the stored ``prediction`` and ``confidence`` through
+  :func:`card_own_figures` and they join the population. Tied to the STORED fields, not
+  to the word: a card with no prediction that prints one is still flagged.
+* **the symbol's cross-account totals.** 「總計 95.0457 股，總成本約為 15,916.00 USD」 was
+  the model's correct sum of two per-account rows the prompt had handed it separately.
+  The checker was right that no fed number said 95.0457; the prompt was wrong to make
+  the model add. The per-symbol prompt now carries the combined position (``variables.
+  _combined_block``, from ``portfolio/position_aggregate.py`` — the drawer's definition),
+  so the totals are in the prompt and therefore in ``prompt_figures``. The fix is
+  upstream, not a tolerance here: pairwise sums over the population were rejected because
+  ~200 fed numbers give ~20,000 sums, and a check that accepts any of them within 0.5%
+  stops catching much.
+
+The fourth flag on those cards, 「近 20 日淨買超 497.43 萬」 against a fed ``497427``, is a
+×10 error and stays flagged — the check's first real catch on a freshly generated card.
+
 **Why it exists.** Measured on cached cards: one card said 「未實現獲利 429.1 萬美元」 while
 its sibling from the SAME batch said 「未實現收益 4,290.80 美元，部位規模共 11,951 美元成本」 —
 a ×1000 scale error — and another named 「LRDIM (6883)」, a code that exists in neither the
@@ -62,6 +84,7 @@ only (architecture.md), and this module imports neither — it is a leaf.
 
 import json
 import re
+from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
@@ -365,15 +388,44 @@ def _unknown_symbols(card_text: str, known_symbols: set[str]) -> list[str]:
     return flagged
 
 
+def card_own_figures(
+    *, target_pct: Decimal | None, horizon_days: int | None, confidence: int | None
+) -> list[Decimal]:
+    """The card's OWN declared numbers, to join the population: its prediction's
+    ``target_pct`` and ``horizon_days``, and its ``confidence``.
+
+    A forecast is the one number a card legitimately originates (llm-insight.md's rule
+    is about numbers OF RECORD) and Loop 2 scores it later, so a body echoing it must not
+    read as a hallucination. Only the STORED fields count — a body that prints a
+    prediction the card did not declare is still flagged. ``horizon_days`` and
+    ``confidence`` are usually counts (< 100, never figures), but 「120 天」 and 「信心
+    100」 are not.
+    """
+    own: list[Decimal] = []
+    if target_pct is not None:
+        own.append(target_pct)
+    if horizon_days is not None:
+        own.append(Decimal(horizon_days))
+    if confidence is not None:
+        own.append(Decimal(confidence))
+    return own
+
+
 def check_figures(
-    card_text: str, snapshot_json: str, known_symbols: set[str]
+    card_text: str,
+    snapshot_json: str,
+    known_symbols: set[str],
+    *,
+    own_figures: Iterable[Decimal] = (),
 ) -> FigureFlags:
     """Post-check ONE card's text against the numbers it was fed (pure; see module docstring).
 
     *card_text* is the card as the owner reads it (``title + summary + body_md``),
     *snapshot_json* the stored population — ``insights.prompt_figures`` (a JSON list from
     :func:`prompt_figures_json`) or any JSON whose numeric leaves are the fed values —
-    *known_symbols* the registered instrument symbols. Returns the two capped lists and the
+    *known_symbols* the registered instrument symbols, *own_figures* the card's own
+    declared numbers (:func:`card_own_figures`) — they join the population only when
+    there IS one, so a legacy card stays ``"none"``. Returns the two capped lists and the
     ``snapshot`` state: ``"none"`` when the card prints a figure and the population holds
     no number (blank, not JSON, or JSON without a numeric leaf — the legacy
     ``"2026-07-05|US"`` fingerprint tag is all three at once).
@@ -385,6 +437,7 @@ def check_figures(
             unknown_symbols=_unknown_symbols(card_text, known_symbols),
             snapshot="none" if figures else "checked",
         )
+    population = list(dict.fromkeys([*population, *own_figures]))
     return FigureFlags(
         unverified_figures=_unverified_figures(figures, population),
         unknown_symbols=_unknown_symbols(card_text, known_symbols),

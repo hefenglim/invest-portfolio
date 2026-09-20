@@ -1689,3 +1689,16 @@ name-only allowlist cannot enumerate period-suffixed indicators.
   same defect. When a finding names an example, the deliverable is the scan that finds
   every example plus the guard that keeps the count at zero — the reviewer's word for the
   alternative was 「修了實例、沒修類別」.
+- **Addendum, the same day's second re-verification: a false flag on a correct card points
+  UPSTREAM.** Fourteen fresh cards produced four flags; three looked false. Two were the
+  model's *correct* sum of two per-account rows — and the right question was not "how does
+  the checker tolerate sums" but "why did the model have to add": the prompt handed it the
+  parts and asked for the whole, which is the model recomputing a number the rule says the
+  system supplies. The fix went into the prompt (hand it the total, from the drawer's own
+  aggregate) and the checker stayed strict — a pairwise-sum tolerance would have let ≈20,000
+  derived values through a 200-number population. The third was the card's own `prediction`
+  echoed in its body, the one number a card is *supposed* to originate; the population now
+  includes the stored forecast, tied to the field and not to the word. The fourth, marked
+  undecidable by the reviewer, was decided by one SELECT of the stored population: a ×10
+  error — the checker's first real catch on a new card. Read a checker's false positives as
+  evidence about its INPUT before touching its tolerance.

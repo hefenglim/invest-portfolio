@@ -34,6 +34,10 @@ from zoneinfo import ZoneInfo
 
 from portfolio_dash.portfolio import market_view, technicals
 from portfolio_dash.portfolio.dashboard_models import DashboardData
+from portfolio_dash.portfolio.position_aggregate import (
+    AggregatePosition,
+    aggregate_position,
+)
 from portfolio_dash.shared.wire import to_wire
 
 Scope = Literal["portfolio", "per_symbol"]
@@ -123,9 +127,10 @@ REGISTRY: tuple[VarSpec, ...] = (
     ),
     VarSpec(
         "symbol_detail_json", "單一標的全檔", "position", "per_symbol", True,
-        "per_symbol 範圍專用：該標的部位、成本、配息史、交易事件、已實現記錄",
+        "per_symbol 範圍專用：該標的部位、成本、配息史、交易事件、已實現記錄；"
+        "跨帳戶持有時另附 combined（全部帳戶合計）",
         '{"symbol":"2330","shares":1000,"adjusted_avg":"495.00","dividend_events":[…],'
-        '"trade_events":[…]}',
+        '"trade_events":[…],"combined":{"account_count":2,"shares":"40",…}}',
     ),
     # --- price (價格與技術) — all available ---
     VarSpec(
@@ -584,6 +589,37 @@ def _holdings_for_symbol(data: DashboardData, symbol: str) -> list[Any]:
     return [h for h in data.holdings if h.symbol == symbol]
 
 
+#: The aggregate's fields the prompt carries — the ones a card narrates as 「總計」.
+_COMBINED_FIELDS: frozenset[str] = frozenset({
+    "account_count", "shares", "original_avg", "adjusted_avg", "original_cost_total",
+    "adjusted_cost_total", "dividend_portion", "payback_ratio", "market_price",
+    "market_value", "unrealized_pnl", "unrealized_pct", "capital_gain", "weight",
+})
+
+
+def _combined_block(agg: AggregatePosition) -> dict[str, Any]:
+    """The symbol's cross-account totals, from the drawer's own definition
+    (``portfolio/position_aggregate.py``), for a symbol held in more than one account.
+
+    Second re-verification 2026-09-17 (audit M9): the prompt handed the model the
+    per-account rows alone, so a card describing the whole position added them itself —
+    「總計 95.0457 股，總成本約為 15,916.00 USD」, correct to the digit and flagged 數值待核
+    because no fed number said so. llm-insight.md's rule is that the model narrates the
+    system's numbers and never recomputes them; a prompt that gives the parts and needs
+    the whole breaks that rule on the model's behalf. Handing it the whole fixes both the
+    flag (the total is now in ``prompt_figures``) and the arithmetic risk.
+    """
+    block: dict[str, Any] = {
+        "note": (
+            "totals over EVERY account holding this symbol, server-computed (the top-level "
+            "fields are the largest account's; per-account rows are in positions). Quote "
+            "these for the whole position instead of adding the rows."
+        ),
+    }
+    block.update(agg.model_dump(include=set(_COMBINED_FIELDS)))
+    return block
+
+
 def _symbol_detail(ctx: VarContext) -> dict[str, Any]:
     """Assemble the per-symbol full record from the computed dashboard (no router call).
 
@@ -599,6 +635,7 @@ def _symbol_detail(ctx: VarContext) -> dict[str, Any]:
         return {"symbol": symbol, "unavailable": True}
     # Q1: the account holding the most shares (matches spec-01 cost_basis selection).
     primary = max(rows, key=lambda h: h.shares)
+    combined = aggregate_position(rows)
     realized_rows = [r for r in ctx.data.realized.rows if r.symbol == symbol]
     return {
         "symbol": symbol,
@@ -617,6 +654,14 @@ def _symbol_detail(ctx: VarContext) -> dict[str, Any]:
         "payback_own_dividends": primary.payback_own_dividends,
         "quote_ccy": primary.quote_ccy,
         "positions": [h.model_dump() for h in rows],
+        # Single-account symbols are unchanged (the top-level fields already are the whole
+        # position, and their prompts stay byte-identical); a multi-account symbol carries
+        # its combined position so the model never has to add rows (see _combined_block).
+        **(
+            {"combined": _combined_block(combined)}
+            if combined is not None and combined.account_count > 1
+            else {}
+        ),
         "realized_rows": [r.model_dump() for r in realized_rows],
     }
 

@@ -38,6 +38,7 @@
     border-radius: var(--radius-sm); padding: 7px 10px;
   }
   .login-btn { width: 100%; justify-content: center; padding: 9px; font-size: 13px; }
+  .login-guest-link { display: block; text-align: center; font-size: 12px; }
 </style>
 </head>
 <body data-page="login">
@@ -46,6 +47,7 @@
     <div class="login-logo">portfolio<span class="tld">-dash</span></div>
     <div class="login-sub">個人多市場投資管理</div>
     <div class="login-hint" id="login-hint" hidden="hidden"></div>
+    <a class="login-guest-link" id="login-guest-link" href="index.html" hidden="hidden">前往儀表板</a>
     <div class="login-error" id="login-error" hidden="hidden">帳號或密碼錯誤</div>
     <div class="field">
       <label for="login-user">使用者</label>
@@ -66,8 +68,12 @@
      creds, or 400 body validation) we show the message in #login-error — the api.js
      401-redirect is suppressed on this page, so the error survives to be rendered.
      ONE network call on load — GET /api/auth/session — only to learn whether the site is in
-     guest mode (L22, demo audit 2026-09-16: with no authorised user yet, any credentials
-     pass, and a page that says nothing about it reads as a lock to a visitor). A failed
+     guest mode (L22, demo audit 2026-09-16: with no authorised user yet every page is open
+     WITHOUT logging in, and a page that says nothing about it reads as a lock to a
+     visitor). In that mode this form's POST /api/auth/login is REFUSED — authenticate()
+     finds no user and answers 401 by design — so the hint sends the visitor to the
+     dashboard and says the form will not pass (L22b, second re-verification 2026-09-17:
+     the first hint promised 「任何帳號密碼都能進入」 and contradicted the 401). A failed
      probe leaves the form exactly as before; empty-field validation stays client-side. */
   (function () {
     var userInput = document.getElementById('login-user');
@@ -75,14 +81,17 @@
     var errEl = document.getElementById('login-error');
     var btn = document.getElementById('login-btn');
     var hintEl = document.getElementById('login-hint');
+    var guestLink = document.getElementById('login-guest-link');
 
     function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
 
     window.pdApi.get('/api/auth/session').then(function (s) {
       if (s && s.mode === 'guest' && hintEl) {
-        hintEl.textContent = '目前為訪客模式：尚未設定授權用戶，任何帳號密碼都能進入，'
-          + '資料未受登入保護。要啟用保護，請在 設定 → 授權用戶 新增用戶。';
+        hintEl.textContent = '目前為訪客模式：尚未設定授權用戶，無需登入即可使用，'
+          + '請直接前往儀表板（此頁送出帳密不會通過）。資料未受登入保護；'
+          + '要啟用保護，請在 設定 → 授權用戶 新增用戶。';
         hintEl.hidden = false;
+        if (guestLink) { guestLink.hidden = false; }
       }
     }).catch(function () { /* unknown mode: say nothing rather than guess */ });
 

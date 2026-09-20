@@ -69,6 +69,20 @@ one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per 
   never read as figures; and the pill says what was found — 數值待核 / 未知代碼 / 無快照可核.
   The regression test now runs the real generation path and asserts on the stored row
   (`LESSONS_LEARNED.md`).
+  **Second re-verification 2026-09-17 (audit author's ⚠️):** on 14 freshly generated cards
+  the check fired 4 times — 「總計 95.0457 股／15,916.00」 (the model's correct sum of two
+  per-account rows), 「target_pct: 0.05」 (the card's own prediction echoed in its body) and
+  「近 20 日淨買超 497.43 萬」 against a fed `497427`, a ×10 error the reviewer had marked
+  undecidable and the stored population decides. Fixes: the card's stored `prediction` /
+  `confidence` join the population (`figure_check.card_own_figures`; tied to the stored
+  fields, so an undeclared prediction printed in a body is still flagged), and the
+  per-symbol prompt's `symbol_detail_json` carries a `combined` block for a symbol held in
+  more than one account — the drawer's own cross-account aggregate, lifted from
+  `api/routers/symbol.py` into `portfolio/position_aggregate.py` so both readers share one
+  definition — so the model is handed the total instead of adding rows (llm-insight.md:
+  it narrates the numbers, it does not recompute them). Single-account prompts and the
+  drawer's wire are byte-identical. Pairwise sums in the checker were rejected: ≈20,000
+  sums over a 200-number population would accept almost anything.
 
 *Disclosure and wiring*
 
@@ -118,7 +132,10 @@ one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per 
   currency (L7); 「全部過期」 vs 「部分過期 n/m」 (L14); the ledger page fetches only the visible
   tab (L16); job summaries quantize the digest pct (L17); fee/tax fields clear with the form and
   an empty form is never red (L18); 當沖 hidden on 買進 (L20); the login page says when the site
-  is in guest mode (L22); an empty filter intersection says so (L23); 更新報價 names held
+  is in guest mode (L22 — and, **L22b, second re-verification 2026-09-17**: that hint had
+  promised 「任何帳號密碼都能進入」 while `POST /api/auth/login` answers 401 with no users by
+  design; it now says no login is needed, sends the visitor to the dashboard with a link,
+  and says the form will not pass); an empty filter intersection says so (L23); 更新報價 names held
   symbols the provider left on an older date (`lagging`, L24) and the reload keeps filters,
   open panels and scroll position (L25).
 

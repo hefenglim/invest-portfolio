@@ -327,3 +327,51 @@ def test_deleted_task_history_hidden_but_preserved(
         "SELECT COUNT(*) FROM insight_evaluations WHERE insight_type_id = ?", (it_id,)
     ).fetchone()[0]
     assert n_cards == 1 and n_evals == 1
+
+
+def test_a_cards_own_prediction_echoed_in_its_body_is_not_flagged(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Second re-verification (2026-09-17): the audit author's #175 printed 「target_pct:
+    0.05」 — the card's OWN stored prediction — and wore 數值待核. A forecast is the one number
+    the model legitimately originates, so the stored ``prediction`` / ``confidence`` join the
+    population on the wire. Tied to the STORED fields: the same body on a card that declares
+    no prediction is still flagged.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard, Prediction
+
+    it_id = _make_combo(api_client)
+    now = datetime(2026, 9, 17, 19, 10, tzinfo=ZoneInfo("Asia/Taipei"))
+    body = "- **prediction**：\n  - target_pct: 0.05\n  - horizon_days: 14\n- **confidence**：70"
+
+    def _store(card: InsightCard, fp: str) -> None:
+        istore.add_card(
+            golden_db, insight_type_id=it_id, card=card,
+            fingerprint=istore.fingerprint(it_id, fp, "d", "v1"), calibration_version=None,
+            horizon_days=14, input_snapshot="2026-09-17|NVDA", model="m",
+            cost_usd=Decimal("0"), now=now, prompt_figures='["215.12", "139.99", "0.5366"]',
+        )
+
+    _store(InsightCard(
+        title="NVDA 偏多", summary="股價 215.12 美元，均價 139.99 美元。", body_md=body, tags=[],
+        confidence=70,
+        prediction=Prediction(metric="price_change", direction="up",
+                              target_pct=Decimal("0.05"), horizon_days=14),
+    ), "declared")
+    _store(InsightCard(
+        title="NVDA 偏多", summary="股價 215.12 美元，均價 139.99 美元，未宣告預測。",
+        body_md=body, tags=[],
+    ), "undeclared")
+
+    rows = {r["summary"]: r for r in api_client.get("/api/insights").json()["rows"]}
+    assert rows["股價 215.12 美元，均價 139.99 美元。"]["figure_flags"] == {
+        "unverified_figures": [], "unknown_symbols": [], "snapshot": "checked",
+    }
+    assert rows["股價 215.12 美元，均價 139.99 美元，未宣告預測。"]["figure_flags"] == {
+        "unverified_figures": ["0.05"], "unknown_symbols": [], "snapshot": "checked",
+    }

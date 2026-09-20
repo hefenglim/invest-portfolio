@@ -183,3 +183,72 @@ def test_five_and_six_digit_tw_codes_are_codes_not_figures() -> None:
     assert flags.unknown_symbols == ["00878", "006208"]  # unregistered here → symbol check
     known = check_figures("高股息 (00878) 的配置。", _SNAPSHOT, _KNOWN | {"00878.TW"})
     assert known.unknown_symbols == []
+
+
+def test_the_cards_own_prediction_is_not_a_hallucination() -> None:
+    """Second re-verification (2026-09-17), the audit author's #175: the body echoed
+    「target_pct: 0.05」 — the card's OWN stored prediction — and wore 數值待核. A forecast is
+    the one number the model legitimately originates, so the stored fields join the
+    population through ``card_own_figures``. Tied to the STORED fields, never to the word."""
+    from decimal import Decimal
+
+    from portfolio_dash.llm_insight.figure_check import card_own_figures, prompt_figures_json
+
+    prompt = "<position>市價 215.12；均價 139.99；帳面獲利 1502.56</position>"
+    body = "- **prediction**：\n  - target_pct: 0.05\n  - horizon_days: 14\n- **confidence**：70"
+
+    # without the card's declared prediction, 0.05 IS a number nobody fed it
+    bare = check_figures(body, prompt_figures_json(prompt), _KNOWN)
+    assert bare.unverified_figures == ["0.05"]
+
+    own = card_own_figures(target_pct=Decimal("0.05"), horizon_days=14, confidence=70)
+    assert own == [Decimal("0.05"), Decimal(14), Decimal(70)]
+    declared = check_figures(body, prompt_figures_json(prompt), _KNOWN, own_figures=own)
+    assert declared.snapshot == "checked" and declared.unverified_figures == []
+    # the same forecast written as a percent
+    pct = check_figures("預期兩週內上漲 5%", prompt_figures_json(prompt), _KNOWN, own_figures=own)
+    assert pct.unverified_figures == []
+    # a card that declares nothing contributes nothing
+    assert card_own_figures(target_pct=None, horizon_days=None, confidence=None) == []
+    # own figures never manufacture a population: a legacy card stays "none"
+    legacy = check_figures(body, "2026-07-05|US", _KNOWN, own_figures=own)
+    assert legacy.snapshot == "none" and legacy.unverified_figures == []
+
+
+def test_a_real_scale_error_on_a_fresh_card_stays_flagged() -> None:
+    """The audit author's #172 (8299) — 「無法判定」 in the report, decidable from the stored
+    population: the prompt fed ``16706711`` and ``497427``; the card wrote 「外資淨買超 1,670.67
+    萬，近 20 日淨買超 497.43 萬」. The first is right, the second is ×10. The check's first
+    real catch on a freshly generated card; pinned so a later relaxation cannot lose it."""
+    from portfolio_dash.llm_insight.figure_check import prompt_figures_json
+
+    prompt = '{"foreign_net":"16706711","foreign_net_20d":"497427","margin_change":"12385"}'
+    population = prompt_figures_json(prompt)
+    flags = check_figures("外資淨買超 1,670.67 萬，近 20 日淨買超 497.43 萬", population, _KNOWN)
+    assert flags.unverified_figures == ["497.43 萬"]
+    right = check_figures("外資淨買超 1,670.67 萬，近 20 日淨買超 49.74 萬", population, _KNOWN)
+    assert right.unverified_figures == []
+
+
+def test_cross_account_totals_come_from_the_prompt_not_from_arithmetic() -> None:
+    """The audit author's #173 (AAPL): 「總計 95.0457 股，總成本約為 15,916.00 USD」 was the
+    model's correct sum of two per-account rows — and no fed number said so. The fix is
+    upstream (``variables._combined_block`` hands the model the totals), which this test
+    shows from the checker's side: the same card against the population WITH the combined
+    block verifies. Pairwise sums here were rejected (they would accept almost anything)."""
+    from portfolio_dash.llm_insight.figure_check import prompt_figures_json
+
+    per_account = (
+        '{"positions":[{"shares":"85.03925471251653744415967210","original_cost_total":"13515"},'
+        '{"shares":"10.00645756457564575645756458","original_cost_total":"2401"}]}'
+    )
+    card = "持有 Apple (AAPL) 總計 95.0457 股，總成本約為 15,916.00 USD。"
+    before = check_figures(card, prompt_figures_json(per_account), _KNOWN)
+    assert before.unverified_figures == ["95.0457", "15,916.00"]
+
+    with_combined = per_account[:-1] + (
+        ',"combined":{"account_count":2,"shares":"95.04571227709218320061723668",'
+        '"original_cost_total":"15916"}}'
+    )
+    after = check_figures(card, prompt_figures_json(with_combined), _KNOWN)
+    assert after.snapshot == "checked" and after.unverified_figures == []

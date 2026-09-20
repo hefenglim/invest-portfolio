@@ -558,3 +558,46 @@ def test_per_market_kpis_and_fx_carry_scope_note(golden_db: sqlite3.Connection) 
     # without a market, no scope_note (portfolio card unchanged)
     p = V.value_for("kpis_json", V.VarContext(data=data, now=_NOW))
     assert "scope_note" not in p
+
+
+def test_symbol_detail_hands_the_model_the_cross_account_total() -> None:
+    """Second re-verification 2026-09-17 (audit M9): a symbol held in TWO accounts carries
+    its ``combined`` position — the drawer's own definition — so the model quotes a total the
+    system computed instead of adding the per-account rows itself (the AAPL card's correct
+    「總計 95.0457 股」 was flagged 數值待核 because no fed number said so). A single-account
+    symbol has no ``combined`` block: its prompt is byte-identical to before.
+    """
+    import json as _json
+
+    from portfolio_dash.llm_insight.figure_check import check_figures, prompt_figures_json
+    from tests.conftest import _seed_dual_account, init_golden_base
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_golden_base(conn)
+    _seed_dual_account(conn)
+    data = build_dashboard(conn, now=_NOW, reporting=Currency.TWD)
+
+    out, _ = V.render_prompt("{{symbol_detail_json}}", V.VarContext(data=data, symbol="AAPL"))
+    detail = _json.loads(out)
+    assert len(detail["positions"]) == 2
+    combined = detail["combined"]
+    assert combined["account_count"] == 2
+    # 30 + 10 shares; (3000 + 1100) / 40 average — computed on read, quoted as strings
+    assert Decimal(combined["shares"]) == Decimal("40")
+    assert Decimal(combined["original_cost_total"]) == Decimal("4100")
+    assert Decimal(combined["original_avg"]) == Decimal("102.5")
+    assert Decimal(combined["market_value"]) == Decimal("4800")
+    assert Decimal(combined["unrealized_pnl"]) == Decimal("700")
+    assert "note" in combined
+    # the top-level fields are still the largest account's (spec-01 Q1) — unchanged
+    assert Decimal(detail["shares"]) == Decimal("30")
+    # and the totals are now in the population the figure check reads
+    flags = check_figures(
+        "持有 AAPL 總成本 4,100.00 USD，市值 4,800 USD。", prompt_figures_json(out), {"AAPL"}
+    )
+    assert flags.unverified_figures == []
+
+    single, _ = V.render_prompt("{{symbol_detail_json}}", V.VarContext(data=data, symbol="2330"))
+    assert "combined" not in _json.loads(single)
+    conn.close()

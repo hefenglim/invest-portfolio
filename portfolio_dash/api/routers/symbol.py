@@ -65,6 +65,7 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import HoldingRow
+from portfolio_dash.portfolio.position_aggregate import aggregate_position
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.portfolio.results import RealizedRow, UnappliedAction
 from portfolio_dash.pricing.store import get_price_history
@@ -188,108 +189,49 @@ def _account_wire(h: HoldingRow) -> dict[str, Any]:
 def _aggregate_position(
     rows: list[HoldingRow], inst: Instrument | None
 ) -> dict[str, Any] | None:
-    """Cross-account aggregate of a symbol's holdings (owner #2c) — server-side Decimal only.
+    """Cross-account aggregate of a symbol's holdings (owner #2c), serialized for the drawer.
 
-    All holdings of one symbol share the same quote currency, so the aggregate is a plain
-    Decimal sum (money) + a shares-weighted average cost (``total_cost / total_shares``,
-    computed on read per domain-ledger.md — never a stored rounded average). The frontend
-    prints these strings; it does NOT sum market value / unrealized / cost across accounts
-    (that would breach the "frontend never computes money" invariant — which is exactly why
-    this aggregation lives here). ``None`` when the symbol is not held.
-
-    Missing-price degradation mirrors the dashboard: a 缺價 holding carries ``None`` market
-    fields and is excluded from the value sums; because price is per-symbol, either every
-    holding of the symbol is valued or none is, so no partial-blend can occur.
+    The arithmetic is ``portfolio.position_aggregate.aggregate_position`` — lifted out of
+    this router on 2026-09-17 so the per-symbol LLM prompt can hand the model the SAME
+    totals (see that module's docstring); this router only serializes it, Decimal → string.
+    The frontend prints these strings; it does NOT sum market value / unrealized / cost
+    across accounts (that would breach the "frontend never computes money" invariant —
+    which is exactly why the aggregation is server-side). ``None`` when the symbol is not
+    held.
     """
-    if not rows:
+    agg = aggregate_position(rows)
+    if agg is None:
         return None
-    quote_ccy = rows[0].quote_ccy
-    total_shares = _sum([h.shares for h in rows])
-    original_total = _sum([h.original_cost_total for h in rows])
-    adjusted_total = _sum([h.adjusted_cost_total for h in rows])
-    dividend_portion = _sum([h.dividend_portion for h in rows])
-
-    mv = [h.market_value for h in rows if h.market_value is not None]
-    ur = [h.unrealized_pnl for h in rows if h.unrealized_pnl is not None]
-    cg = [h.capital_gain for h in rows if h.capital_gain is not None]
-    wt = [h.weight for h in rows if h.weight is not None]
-
-    # market_price / staleness are per-symbol identical; take them from a priced row.
-    src = next((h for h in rows if h.market_price is not None), rows[0])
-
-    original_avg = original_total / total_shares if total_shares != _ZERO else _ZERO
-    adjusted_avg = adjusted_total / total_shares if total_shares != _ZERO else _ZERO
-    # abs(): same guard, same reason as unrealized_pct below — a short leg contributes a
-    # NEGATIVE basis, so a signed sum can shrink or flip the denominator and print a
-    # position that really returned 30% of its cost as -7.5% 回本進度 (review 2026-08-24).
-    payback = dividend_portion / abs(original_total) if original_total != _ZERO else _ZERO
-    # Aggregate unrealized % on the SAME basis as the per-holding figure (audit H1):
-    # Σ unrealized / Σ original cost. Server-side Decimal; the drawer only prints it.
-    unrealized_sum = _sum(ur) if ur else None
-    # abs(): a short's basis is negative (proceeds received) and would flip the sign, showing
-    # a profitable short as a loss. Same guard as the per-holding figure in dashboard.py.
-    unrealized_pct = (
-        unrealized_sum / abs(original_total)
-        if unrealized_sum is not None and original_total != _ZERO
-        else None
-    )
-    # M1-03 / D21: the aggregate's ratio is over the SUM of the rows' portions, so its
-    # provenance is the sum of the carried / own amounts of the rows that carry one, named
-    # after the first such row. None when no account's position was fed by a SPINOFF.
-    # Known limit: a same-symbol position in ANOTHER account that was bought outright emits
-    # no `payback_own_dividends`, so it feeds the aggregate ratio but not 自身配息 here; the
-    # per-account rows beneath the aggregate are each exact.
-    carried_rows = [h for h in rows if h.payback_from_symbol is not None]
-    payback_from = carried_rows[0].payback_from_symbol if carried_rows else None
-    payback_carried = (_sum([h.payback_carried_dividends for h in carried_rows
-                             if h.payback_carried_dividends is not None])
-                       if carried_rows else None)
-    payback_own = (_sum([h.payback_own_dividends for h in carried_rows
-                         if h.payback_own_dividends is not None])
-                   if carried_rows else None)
-
     return {
-        "account_count": len(rows),
-        "symbol": rows[0].symbol,
-        "quote_ccy": quote_ccy.value,
+        "account_count": agg.account_count,
+        "symbol": agg.symbol,
+        "quote_ccy": agg.quote_ccy.value,
         "name": inst.name if inst is not None else None,
         "market": inst.market.value if inst is not None else None,
         "board": inst.board if inst is not None else "",
-        "shares": decimal_str(total_shares),
-        "original_avg": decimal_str(original_avg),
-        "adjusted_avg": decimal_str(adjusted_avg),
-        "original_cost_total": decimal_str(original_total),
-        "adjusted_cost_total": decimal_str(adjusted_total),
-        "dividend_portion": decimal_str(dividend_portion),
-        "payback_ratio": decimal_str(payback),
-        "market_price": _dstr_or_none(src.market_price),
-        "market_value": decimal_str(_sum(mv)) if mv else None,
-        "unrealized_pnl": decimal_str(unrealized_sum) if unrealized_sum is not None else None,
-        "unrealized_pct": _dstr_or_none(unrealized_pct),
-        "capital_gain": decimal_str(_sum(cg)) if cg else None,
-        # weight is a dimensionless ratio; summing the per-account weights server-side
-        # (Σ mv_i/total) gives the aggregate share of portfolio value. Still done here, not
-        # in JS, to keep ALL of 部位摘要's numbers server-authoritative.
-        "weight": decimal_str(_sum(wt)) if wt else None,
-        "price_stale": src.price_stale,
-        "price_as_of": src.price_as_of.isoformat() if src.price_as_of is not None else None,
-        "oversold": any(h.oversold for h in rows),
-        "short_open": any(h.short_open for h in rows),
-        "unbookable_dividend": any(h.unbookable_dividend for h in rows),
-        # `any`, like the two flags above: the aggregate's shares/market value are a SUM, so
-        # one account's pre-action share count contaminates the total. A per-account row can
-        # still be clean — the drawer shows both, and only the aggregate is poisoned by one.
-        "unbookable_action": any(h.unbookable_action for h in rows),
-        "payback_from_symbol": payback_from,
-        "payback_carried_dividends": _dstr_or_none(payback_carried),
-        "payback_own_dividends": _dstr_or_none(payback_own),
-        # 已回本 across the aggregated position — the SAME three conditions, over the
-        # aggregate's own figures (see _account_wire for why each one is there). `payback`
-        # is this function's aggregate ratio, so a symbol whose accounts are individually
-        # 已回本 stays 已回本 in total, and one whose basis merely reached zero does not.
-        "fully_recovered": (payback >= _ONE
-                            and adjusted_total <= _ZERO
-                            and not any(h.short_open for h in rows)),
+        "shares": decimal_str(agg.shares),
+        "original_avg": decimal_str(agg.original_avg),
+        "adjusted_avg": decimal_str(agg.adjusted_avg),
+        "original_cost_total": decimal_str(agg.original_cost_total),
+        "adjusted_cost_total": decimal_str(agg.adjusted_cost_total),
+        "dividend_portion": decimal_str(agg.dividend_portion),
+        "payback_ratio": decimal_str(agg.payback_ratio),
+        "market_price": _dstr_or_none(agg.market_price),
+        "market_value": _dstr_or_none(agg.market_value),
+        "unrealized_pnl": _dstr_or_none(agg.unrealized_pnl),
+        "unrealized_pct": _dstr_or_none(agg.unrealized_pct),
+        "capital_gain": _dstr_or_none(agg.capital_gain),
+        "weight": _dstr_or_none(agg.weight),
+        "price_stale": agg.price_stale,
+        "price_as_of": agg.price_as_of.isoformat() if agg.price_as_of is not None else None,
+        "oversold": agg.oversold,
+        "short_open": agg.short_open,
+        "unbookable_dividend": agg.unbookable_dividend,
+        "unbookable_action": agg.unbookable_action,
+        "payback_from_symbol": agg.payback_from_symbol,
+        "payback_carried_dividends": _dstr_or_none(agg.payback_carried_dividends),
+        "payback_own_dividends": _dstr_or_none(agg.payback_own_dividends),
+        "fully_recovered": agg.fully_recovered,
     }
 
 

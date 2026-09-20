@@ -60,6 +60,11 @@ def test_login_page_smoke(live_server: str, browser_page: Page) -> None:
         # L22: the guest-mode hint (the fixture app has no authorised users).
         page.wait_for_selector("#login-hint:not([hidden])", state="visible")
         assert "訪客模式" in (page.text_content("#login-hint") or "")
+        # L22b (second re-verification 2026-09-17): the hint sends the visitor to the
+        # dashboard instead of promising the form will pass, and shows the link with it.
+        assert "無需登入" in (page.text_content("#login-hint") or "")
+        page.wait_for_selector("#login-guest-link:not([hidden])", state="visible")
+        assert (page.get_attribute("#login-guest-link", "href") or "").endswith("index.html")
     finally:
         page.remove_listener("console", _on_console)
         page.remove_listener("pageerror", _on_pageerror)
