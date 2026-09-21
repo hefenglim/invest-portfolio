@@ -339,7 +339,7 @@ def test_a_mixed_zh_numeral_is_one_figure() -> None:
 
 def test_latin_billion_and_trillion_suffixes() -> None:
     """The audit author's suggestion: a model also writes 「4.51T」 / 「520B」. Upper-case
-    only, and never inside a word or an ISO timestamp (「2026-07-06T00:12」 is on 11 cards)."""
+    only, and never inside a word or an ISO timestamp (「2026-07-06T00:12」 is on 12 cards)."""
     snapshot = json.dumps({"cap": "4514709672075.806", "rev": "520000000000"})
     assert check_figures("市值 4.51T USD，營收 520B。", snapshot, _KNOWN).unverified_figures == []
     assert check_figures("市值 4.51B USD", snapshot, _KNOWN).unverified_figures == ["4.51B"]
