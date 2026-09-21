@@ -252,3 +252,115 @@ def test_cross_account_totals_come_from_the_prompt_not_from_arithmetic() -> None
     )
     after = check_figures(card, prompt_figures_json(with_combined), _KNOWN)
     assert after.snapshot == "checked" and after.unverified_figures == []
+
+
+# --- third re-verification 2026-09-21 (the audit author's M9-a) --------------------------
+
+#: The six market caps the audit author's 13 regenerated cards printed, each with the
+#: ``fundamentals_json.market_cap`` its prompt was fed (read from the demo's stored
+#: ``prompt_figures``) and the line exactly as the card wrote it. Four are right and were
+#: flagged only because the scale table had no 兆; two are ×10 unit errors — the same class
+#: as #172 — and must stay flagged.
+_MARKET_CAPS = [
+    # (card, fed market_cap, the card's line, flagged token or None)
+    ("#186 AAPL", "4514709672075.806", "*   市值 (Market Cap): 4.51 兆 USD", None),
+    ("#187 MSFT", "3588320530555.747", "*   市值：3.59 兆 USD", None),
+    ("#189 TSLA", "1433132709532.1418", "*   市值：USD 1.43 兆", None),
+    (
+        "#180 2330",
+        "62497011861470",
+        "*   **yfinance (2026-08-23):** 本益比 28.63，股價淨值比 11.67，近四季 EPS 84.19 TWD，"
+        "市值 62.5 兆 TWD，殖利率 0.91%，股東權益報酬率 41.40%，營收年增率 36.05%。",
+        None,
+    ),
+    ("#188 NVDA", "5200733149566.65", "*   市值達 5,200 億美元以上。", "5,200 億"),
+    (
+        "#185 8299",
+        "458917375000",
+        "*   **市值**：458.92 億 TWD (yfinance, 2026-08-23)",
+        "458.92 億",
+    ),
+]
+
+
+def test_trillion_market_caps_verify_and_the_x10_ones_stay_flagged() -> None:
+    """M9-a: the scale table had 千 / 萬 / 億 and no 兆, so 「4.51 兆」 was read as the bare
+    number 4.51 and could match nothing. Pinned on the audit author's own six cards: the
+    four 兆 figures verify, the two ×10 億 figures are still caught."""
+    from portfolio_dash.llm_insight.figure_check import prompt_figures_json
+
+    for card, fed, line, flagged in _MARKET_CAPS:
+        # the rest of #180's line is ratios the prompt also carried
+        prompt = (
+            f'{{"market_cap":{fed},"pe":28.63,"pb":11.67,"eps":84.19,'
+            '"dividend_yield":"0.91%","roe":"41.40%","revenue_growth":"36.05%"}'
+        )
+        flags = check_figures(line, prompt_figures_json(prompt), _KNOWN)
+        assert flags.snapshot == "checked", card
+        assert flags.unverified_figures == ([flagged] if flagged else []), card
+
+
+def test_compound_zh_units_multiply() -> None:
+    """The class behind M9-a, not just its instance: a zh magnitude is a PREFIX (十 / 百 /
+    千) times a BASE (萬 / 億 / 兆), and 萬億 is 兆. Measured on the demo's older cards:
+    「已實現獲利 3.66 百萬 TWD」 read as the bare 3.66, 「市值約 1.38 千萬元」 read as 1,380."""
+    snapshot = json.dumps(
+        {"a": "3660000", "b": "13800000", "c": "113000000000", "d": "2500000000000",
+         "e": "52000000000"}
+    )
+    text = "獲利 3.66 百萬，市值 1.38 千萬，營收 1.13 千億，總額 2.5 萬億，約 52 十億。"
+    assert check_figures(text, snapshot, _KNOWN).unverified_figures == []
+    # the same figures one unit off are still scale errors
+    wrong = check_figures("獲利 3.66 千萬，市值 1.38 百萬", snapshot, _KNOWN)
+    assert wrong.unverified_figures == ["3.66 千萬", "1.38 百萬"]
+
+
+def test_hundred_alone_is_not_a_unit() -> None:
+    """百 is only a prefix. Standing alone after a number it is 百分位 / 百分點 — a
+    percentile or percentage points — and reading 「20 百分位」 as 2,000 or 「0.5 百分點」
+    as 50 would paint a correct card 待核 (the demo has 「20百分位以下」 on a stored card)."""
+    snapshot = json.dumps({"pctile": "20", "pp": "0.5"})
+    text = "股價淨值比進入歷史低位（20百分位以下），利差擴大 0.5 百分點。"
+    assert check_figures(text, snapshot, _KNOWN).unverified_figures == []
+
+
+def test_a_mixed_zh_numeral_is_one_figure() -> None:
+    """「市值突破 1兆1,300億元」 (a stored demo card) is ONE number, 1.13 兆 — read as two
+    figures, 1 兆 and 1,300 億, it could match nothing a prompt ever held."""
+    snapshot = json.dumps({"market_cap": "1131234000000", "cost": "350000000"})
+    ok = check_figures("市值突破 1兆1,300億元，成本 3億5,000萬。", snapshot, _KNOWN)
+    assert ok.unverified_figures == []
+    bad = check_figures("市值突破 1兆3,100億元。", snapshot, _KNOWN)
+    assert bad.unverified_figures == ["1兆3,100億"]
+    # two SEPARATE figures are not merged just because both carry a unit
+    apart = check_figures("市值 1兆，成本 1,300億。", snapshot, _KNOWN)
+    assert apart.unverified_figures == ["1兆", "1,300億"]
+
+
+def test_latin_billion_and_trillion_suffixes() -> None:
+    """The audit author's suggestion: a model also writes 「4.51T」 / 「520B」. Upper-case
+    only, and never inside a word or an ISO timestamp (「2026-07-06T00:12」 is on 11 cards)."""
+    snapshot = json.dumps({"cap": "4514709672075.806", "rev": "520000000000"})
+    assert check_figures("市值 4.51T USD，營收 520B。", snapshot, _KNOWN).unverified_figures == []
+    assert check_figures("市值 4.51B USD", snapshot, _KNOWN).unverified_figures == ["4.51B"]
+    stamp = check_figures("資料時間 2026-07-06T00:12:05，營收 520B。", snapshot, _KNOWN)
+    assert stamp.unverified_figures == []
+
+
+def test_the_prompt_side_reads_the_same_scale_grammar() -> None:
+    """The population is extracted with the SAME grammar the card is read with, or a news
+    line fed as 「營收 3.82 兆元」 would be stored as 3.82 and the card quoting it flagged."""
+    from decimal import Decimal
+
+    from portfolio_dash.llm_insight.figure_check import prompt_figures_json
+
+    population = {
+        Decimal(token)
+        for token in json.loads(
+            prompt_figures_json("新聞：營收 3.82 兆元；獲利 3.66 百萬；市值 1兆1,300億；4.51T")
+        )
+    }
+    assert population == {
+        Decimal("3820000000000"), Decimal("3660000"), Decimal("1130000000000"),
+        Decimal("4510000000000"),
+    }

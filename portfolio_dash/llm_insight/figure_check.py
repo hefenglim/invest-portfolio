@@ -47,6 +47,14 @@ audit author's ⚠️ on M9: 3 of the 4 flags on 14 freshly generated cards were
 The fourth flag on those cards, 「近 20 日淨買超 497.43 萬」 against a fed ``497427``, is a
 ×10 error and stays flagged — the check's first real catch on a freshly generated card.
 
+**The unit grammar** (third re-verification 2026-09-21, M9-a: 4 of 6 market-cap flags on
+13 regenerated cards were false). 「4.51 兆 USD」 was read as the bare 4.51 because the
+scale table stopped at 億. The fix is the class, not the row — see ``_ZH_UNITS`` and
+:func:`_scan_numbers`: compound zh magnitudes multiply, a numeral in descending parts is
+one figure, and the card and the prompt are read by the same scanner. The two other flags
+on those cards (「5,200 億」 for 5.2 兆, 「458.92 億」 for 4,589 億) are ×10 errors like
+#172's and stay flagged.
+
 **Why it exists.** Measured on cached cards: one card said 「未實現獲利 429.1 萬美元」 while
 its sibling from the SAME batch said 「未實現收益 4,290.80 美元，部位規模共 11,951 美元成本」 —
 a ×1000 scale error — and another named 「LRDIM (6883)」, a code that exists in neither the
@@ -86,7 +94,7 @@ import json
 import re
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -99,16 +107,34 @@ MAX_FLAGS = 5
 _REL_TOL = Decimal("0.005")
 _ABS_TOL = Decimal("0.005")
 
-#: Multipliers a card may apply to a figure. The zh ones are the whole point of M9: 「429.1
+#: Magnitudes a card may apply to a figure. The zh ones are the whole point of M9: 「429.1
 #: 萬」 IS 4,291,000 and must be compared as such, or the scale error reads as a match.
-_MULTIPLIERS: dict[str, Decimal] = {
+#:
+#: A zh magnitude COMPOSES — a prefix (十 / 百 / 千) times a base (萬 / 億 / 兆), and 萬億 is
+#: 兆 — so the table holds characters and :func:`_multiplier` takes the product. It held
+#: 千 / 萬 / 億 as whole units until the third re-verification (2026-09-21, M9-a): 13
+#: regenerated cards printed six market caps, and the four written in 兆 (「4.51 兆 USD」,
+#: all correct) were read as the bare 4.51 and flagged. The demo's older cards show the rest
+#: of the class — 「3.66 百萬」 read as 3.66, 「1.38 千萬」 read as 1,380. 百 is a prefix
+#: ONLY: alone after a number it is 百分位 / 百分點, and the unit pattern never admits it.
+_ZH_UNITS: dict[str, Decimal] = {
+    "十": Decimal("10"),
+    "百": Decimal("100"),
     "千": Decimal("1000"),
     "萬": Decimal("10000"),
     "億": Decimal("100000000"),
+    "兆": Decimal("1000000000000"),
+}
+#: Latin magnitude letters. K / M in either case; B / T upper-case only (the audit author's
+#: 「4.51T」 / 「520B」) — a lower-case b / t after a number is bits or tonnes. The pattern's
+#: lookahead keeps every letter off a word (「5 TWD」) and an ISO timestamp (「06T00:12」).
+_LATIN_UNITS: dict[str, Decimal] = {
     "K": Decimal("1000"),
     "k": Decimal("1000"),
     "M": Decimal("1000000"),
     "m": Decimal("1000000"),
+    "B": Decimal("1000000000"),
+    "T": Decimal("1000000000000"),
 }
 _PERCENT_SUFFIXES = ("%", "％")
 
@@ -162,11 +188,17 @@ _INDICATOR_RE = re.compile(
 
 #: A number, optionally grouped with thousands separators, plus an optional unit suffix.
 #: The lookbehind keeps the scan off the tail of a longer token (a version string, an id).
+#: Alternation order matters: 萬億 before the prefixed base (else it stops at 萬), and the
+#: prefixed base before a lone 千 (else 千萬 stops at 千).
 _NUM_RE = re.compile(
     r"(?<![\d.A-Za-z])"
     r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
-    r"\s*(%|％|千|萬|億|[KkMm](?![A-Za-z0-9]))?"
+    r"\s*(%|％|萬億|[十百千]?[萬億兆]|千|[KkMm](?![A-Za-z0-9])|[BT](?![A-Za-z0-9]))?"
 )
+
+#: What may sit between the parts of one zh numeral (「1兆 1,300億」): spaces, never a line
+#: break — two figures on consecutive lines are two figures.
+_PART_GAP_RE = re.compile(r"[ \t\u3000]*")
 
 
 SnapshotState = Literal["checked", "none"]
@@ -292,22 +324,80 @@ def _mask(text: str) -> str:
     return _CODE_RE.sub(lambda m: " " * len(m.group(0)), masked)
 
 
+def _multiplier(suffix: str) -> Decimal:
+    """The magnitude a unit suffix applies: a Latin letter's value, or the PRODUCT of a zh
+    unit's characters (千萬 = 千 × 萬). A percent sign or no suffix is 1."""
+    if suffix in _LATIN_UNITS:
+        return _LATIN_UNITS[suffix]
+    out = Decimal(1)
+    for char in suffix:
+        out *= _ZH_UNITS.get(char, Decimal(1))
+    return out
+
+
+class _Number(NamedTuple):
+    """One number as printed: its span, the digits of its first part, its (last) unit, and
+    its value at the printed scale."""
+
+    start: int
+    end: int
+    raw: str
+    suffix: str
+    value: Decimal
+
+
+def _scan_numbers(text: str) -> list[_Number]:
+    """Every number in *text* at its printed scale — the ONE grammar both sides use.
+
+    The card is read with it (:func:`_card_figures`) and so is the prompt that produced the
+    card (:func:`prompt_figures_json`); two grammars would store 「營收 3.82 兆元」 from a news
+    line as 3.82 and then flag the card that quotes it.
+
+    A zh numeral written in descending parts — 「市值突破 1兆1,300億元」 (a stored demo card),
+    「3億5,000萬」 — is ONE value, the sum of its parts: each later part follows the one
+    before with only spaces between and carries a strictly smaller zh magnitude. Read as
+    two figures, neither 1 兆 nor 1,300 億 is a number any prompt held.
+    """
+    out: list[_Number] = []
+    prev_zh: Decimal | None = None  # the zh magnitude of the part just read, if any
+    for match in _NUM_RE.finditer(text):
+        raw, suffix = match.group(1), (match.group(2) or "")
+        value = _decimal_or_none(raw)
+        if value is None:
+            prev_zh = None
+            continue
+        mult = _multiplier(suffix)
+        end = match.end(2) if suffix else match.end(1)
+        zh = mult if suffix and all(char in _ZH_UNITS for char in suffix) else None
+        if (
+            zh is not None
+            and prev_zh is not None
+            and zh < prev_zh
+            and _PART_GAP_RE.fullmatch(text, out[-1].end, match.start(1))
+        ):
+            head = out[-1]
+            out[-1] = _Number(head.start, end, head.raw, suffix, head.value + value * mult)
+        else:
+            out.append(_Number(match.start(1), end, raw, suffix, value * mult))
+        prev_zh = zh
+    return out
+
+
 def _card_figures(card_text: str, known_forms: set[str]) -> list[tuple[str, Decimal, bool]]:
     """Every figure the card prints: ``(token as printed, value at its printed scale,
     is_percent)``. Counts, years, dates and parenthesised codes are not figures — and
     neither is a registered all-digit symbol written bare (「2330 量縮整理」, the anomaly
     card's own 「2330 資料異常」 title): it is a name, and reading it as the number 2,330
     would demand that every population contain it."""
+    masked = _mask(card_text)
     figures: list[tuple[str, Decimal, bool]] = []
-    for match in _NUM_RE.finditer(_mask(card_text)):
-        raw, suffix = match.group(1), (match.group(2) or "")
-        value = _decimal_or_none(raw)
-        if value is None or _is_not_a_figure(raw, suffix, value):
+    for number in _scan_numbers(masked):
+        if _is_not_a_figure(number.raw, number.suffix, number.value):
             continue
-        if not suffix and raw in known_forms:
+        if not number.suffix and number.raw in known_forms:
             continue  # a bare registered code, not a figure
-        scaled = value * _MULTIPLIERS.get(suffix, Decimal(1))
-        figures.append((match.group(0).strip(), scaled, suffix in _PERCENT_SUFFIXES))
+        token = masked[number.start:number.end]
+        figures.append((token, number.value, number.suffix in _PERCENT_SUFFIXES))
     return figures
 
 
@@ -343,15 +433,11 @@ def prompt_figures_json(prompt: str) -> str:
     would silently turn correct figures into flags.
     """
     seen: dict[str, None] = {}
-    for match in _NUM_RE.finditer(prompt):
-        raw, suffix = match.group(1), (match.group(2) or "")
-        value = _decimal_or_none(raw)
-        if value is None:
-            continue
-        if suffix in _PERCENT_SUFFIXES:
-            seen[f"{value}%"] = None
+    for number in _scan_numbers(prompt):
+        if number.suffix in _PERCENT_SUFFIXES:
+            seen[f"{number.value}%"] = None
         else:
-            seen[str(value * _MULTIPLIERS.get(suffix, Decimal(1)))] = None
+            seen[str(number.value)] = None
     return json.dumps(list(seen))
 
 

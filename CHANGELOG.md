@@ -83,6 +83,18 @@ one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per 
   it narrates the numbers, it does not recompute them). Single-account prompts and the
   drawer's wire are byte-identical. Pairwise sums in the checker were rejected: ≈20,000
   sums over a 200-number population would accept almost anything.
+  **Third re-verification 2026-09-21 (audit author's M9-a):** 13 regenerated cards printed six
+  market caps and all six were flagged. Four were correct — 「4.51 兆 USD」 against a fed
+  `4514709672075.806` — and read as the bare 4.51 because the scale table had 千 / 萬 / 億 and
+  no 兆; two were real ×10 errors (「5,200 億」 for 5.2 兆, 「458.92 億」 for 4,589 億), the
+  same class as #172. The unit grammar is now fixed as a class, not a row: a zh magnitude is
+  a prefix (十 / 百 / 千) times a base (萬 / 億 / 兆) and 萬億 is 兆, so the demo's older
+  「3.66 百萬」 / 「1.38 千萬」 read at their real scale too; 百 alone is never a unit (百分位 /
+  百分點); a numeral in descending parts — 「1兆1,300億」 — is one figure; B / T (upper-case,
+  word- and timestamp-safe) join K / M. The card and the prompt are read by ONE scanner, so
+  the stored population cannot disagree with the card about what 「兆」 means. Measured
+  offline over all 176 demo cards: exactly the four false flags cleared, the three ×10 true
+  positives and 6883 kept, no other card changed.
 
 *Disclosure and wiring*
 

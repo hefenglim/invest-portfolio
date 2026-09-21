@@ -1702,3 +1702,17 @@ name-only allowlist cannot enumerate period-suffixed indicators.
   undecidable by the reviewer, was decided by one SELECT of the stored population: a ×10
   error — the checker's first real catch on a new card. Read a checker's false positives as
   evidence about its INPUT before touching its tolerance.
+- **Addendum, third re-verification (2026-09-21): the checker's own vocabulary is part of
+  what must be tested against real output.** The ×1000 detector was built around a scale
+  table — 千 / 萬 / 億 — and every test fed it units from that table. The first batch of
+  fresh cards that talked about market caps wrote 「4.51 兆」, and four correct figures wore
+  「數值待核」 because the table stopped one row short. The reviewer's fix was the row; the
+  corpus said it was a grammar. One grep of the 176 stored cards for "number + any unit the
+  table lacks" returned 兆 ×19, 百萬 and 千萬 (read as 3.66 and 1,380 — the second a
+  *wrong* scale, not merely no scale), and 「1兆1,300億」 (one number the checker read as
+  two). Two practices came out of it: when a detector's input is free text, survey what the
+  producer actually writes before trusting the detector's vocabulary; and when two sides
+  parse the same notation (here, the card and the prompt it was generated from), give them
+  ONE scanner — two grammars would store 「3.82 兆」 from a news line as 3.82 and then flag
+  the card that quoted it. The offline A/B over the whole corpus (before vs after, per
+  card) was the acceptance evidence, not the unit tests: exactly four cards changed.
