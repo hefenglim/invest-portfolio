@@ -7,7 +7,8 @@ files (the rebate inbox alone had 16 rendered instances). An instance was fixed,
 was not — so this file is the class: every string the web layer can RENDER (HTML text nodes
 and the title / placeholder / aria-label / alt / value attributes, plus every string and
 template literal in the page scripts) is scanned for a half-width `, : ; ! ? ( )` that
-touches a CJK character on either side, and the count must be zero.
+touches a CJK character on either side — or is separated from one by spaces only (widened
+2026-09-22, L5-b; see `_MIXED`) — and the count must be zero.
 
 What is deliberately NOT scanned: JS comments and HTML comments (not rendered), `<style>`
 bodies, and any punctuation that touches only ASCII on both sides (an English sentence, a
@@ -18,7 +19,8 @@ The backend is the SAME class on a different surface, and is scanned below by AS
 (string constants, docstrings excluded): batch 1 (owner ruling 2026-09-17) swept the 57
 user-facing messages, batch 2 the what's-new catalog (29 strings); `_BACKEND_PENDING`
 is empty and stays as the home for a future deferral. Regexes that deliberately accept
-both widths, prompt text and one fee formula are allowed by name with a reason.
+both widths, prompt text, one fee formula, the `http(s)` scheme notation and one message
+that lists forbidden characters are allowed by name with a reason.
 """
 
 from __future__ import annotations
@@ -33,8 +35,16 @@ _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
 #: CJK ideographs + CJK punctuation block + full-width forms.
 _CJK = "　-〿一-鿿＀-￯"
-#: A half-width confusable touching a CJK character on either side.
-_MIXED = re.compile("[" + _CJK + "][,:;!?()]|[,:;!?()][" + _CJK + "]")
+#: A half-width confusable next to a CJK character on either side — touching it, or
+#: separated from it by spaces only.
+#:
+#: ⚠ "Touching" was the whole rule until the second full re-verification (2026-09-22,
+#: L5-b), and it missed the English-typing habit of a space AFTER the mark: the daily
+#: digest's run line 「組合 +2.53%, 警示 0, 訊號 0; 示範模式略過推播」 has no half-width mark
+#: that touches a CJK character, and f-string interpolation splits it further, so the
+#: literal parts are `", 警示 "` / `"; "`. The same widening measured 16 more strings of the
+#: shape 「年化報酬 (XIRR)」 / 「notify: 靜音時段」: 12 fixed with it, 4 named in the allowlist.
+_MIXED = re.compile("[" + _CJK + "][ \t]*[,:;!?()]|[,:;!?()][ \t]*[" + _CJK + "]")
 
 #: Rendered strings that are ALLOWED to mix (none today). Format: "file.js:exact text".
 #: An entry needs a reason next to it; an entry nobody can justify gets deleted.
@@ -128,12 +138,19 @@ def test_the_detector_can_see_the_audited_strings() -> None:
         "偵測是持續進行的:每日排程掃描,",
         "改記為分割(SPLIT)",
         "晚於今日,確認無誤?",
+        # L5-b (2026-09-22): a space between the mark and the zh text
+        ": 組合 ",
+        ", 警示 ",
+        "年化報酬 (XIRR)",
+        "notify: 靜音時段",
     ]
     for text in audited:
         assert _MIXED.search(text), text
     # …and their full-width forms, an English sentence, and a code-like token are clean.
     for text in ("配息／配股偵測，台美馬全市場", "改記為分割（SPLIT）", "Hello, world (ok)!",
-                 "date(YYYY-MM-DD)・shares", "逐則 token／成本追蹤，協助評估用量"):
+                 "date(YYYY-MM-DD)・shares", "逐則 token／成本追蹤，協助評估用量",
+                 # an English run line keeps its own marks; only the zh tail's are full-width
+                 "3 alert(s) [a, b], 2 dispatched; notify：無啟用通道", "notify: error"):
         assert not _MIXED.search(text), text
 
 
@@ -216,6 +233,13 @@ _BACKEND_ALLOWED: dict[str, str] = {
     "scheduler/jobs.py:(feeds 待確認匯入)": "English job description",
     # fee-rule formula notation: `ceil(金額/1,000)` is a function call, not prose
     "api/wire.py:印花 ceil(金額/": "formula notation",
+    # --- admitted when the detector learned to see across a space (L5-b, 2026-09-22) ---
+    # a URL scheme written as notation: `http(s)` is one token, not a parenthesis in prose
+    "api/routers/notify.py:http(s) ": "URL-scheme notation",
+    # the message LISTS the forbidden characters; this `:` is the character itself
+    "api/routers/notify.py:不可含 / @ : 或空白": "names the forbidden characters",
+    # a line of the master-calibration PROMPT; the model reads it, no page renders it
+    "llm_insight/master.py:: 校準誤差": "LLM prompt text",
 }
 
 

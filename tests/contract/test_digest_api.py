@@ -222,10 +222,16 @@ def test_daily_summary_percentage_is_quantized(golden_db: sqlite3.Connection) ->
 
     summary = digest_service.run_digest_daily(golden_db, now=GOLDEN_NOW)
 
-    body = summary.split("組合 ", 1)[1].split(",", 1)[0]
+    body = summary.split("組合 ", 1)[1].split("，", 1)[0]
     assert body != "—", "the fixture must actually produce a day-change to be a regression"
     # A signed percentage at 2 dp — never a 28-digit Decimal tail.
     assert re.fullmatch(r"[+−]?\d+\.\d{2}%", body), f"unquantized summary figure: {body!r}"
+    # L5-b (second full re-verification 2026-09-22): the marks joining the zh clauses are
+    # full-width, like the weekly line — the run history showed 「組合 +2.53%, 警示 0, 訊號
+    # 0; …」 beside 「14 檔事件已更新，1 檔失敗」.
+    assert re.fullmatch(
+        r"daily digest \d{4}-\d{2}-\d{2}：組合 \S+，警示 \d+，訊號 \d+；.+", summary
+    ), summary
 
     # …while the stored payload keeps FULL precision (the quantization is display-only).
     stored = digest_store.get_latest(golden_db, "daily")

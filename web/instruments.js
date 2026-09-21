@@ -107,7 +107,7 @@
          so the toggle covers both intents. */
       toggle.textContent = showArchived
         ? '隱藏已移除／封存'
-        : ('顯示已移除／封存 (' + archivedCount + ')');
+        : ('顯示已移除／封存（' + archivedCount + '）');
     }
     const matches = (i) => !q || i.symbol.toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q);
     const visible = D.list.filter((i) => showArchived || !i.archived).filter(matches);

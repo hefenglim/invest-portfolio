@@ -187,7 +187,7 @@ def test_no_match_and_hidden_archived_hits_are_told_apart(
     text4 = _note(page) or ""
     assert _TOGGLE in text4 and "3 筆" in text4, text4
     assert _NO_DATA not in text4, f"case 4 claims 尚無標的 with 3 archived rows: {text4!r}"
-    expect(page.locator("#toggle-archived")).to_have_text("顯示已移除／封存 (3)")
+    expect(page.locator("#toggle-archived")).to_have_text("顯示已移除／封存（3）")
     page.click("#toggle-archived")
     expect(page.locator("#inst-body tr")).to_have_count(3)
     expect(page.locator("#inst-empty")).to_have_count(0)

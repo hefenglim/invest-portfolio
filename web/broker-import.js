@@ -488,14 +488,20 @@
         api.get('/api/broker/adapters'),
         api.get('/api/input/context'),
       ]);
+      /* M5-b (demo audit, second full re-verification 2026-09-22): both pickers take their
+         labels from web/names.js. They were the last surface rendering the context list's
+         English `a.name` + the raw id — 「TW Broker（tw_broker）」 on the same page as
+         #m-account's 「台灣券商（TWD）」 — because the guard's file list named cash.js and
+         input.js by hand and never reached this file. The id is the no-names.js fallback. */
+      const names = window.pdNames;
       (b.brokers || []).forEach((id) => {
-        const o = el('option', null, id === 'schwab' ? 'Charles Schwab' : id);
+        const o = el('option', null, names ? names.broker(id) : id);
         o.value = id;
         bsel.appendChild(o);
       });
       accounts = (ctx && ctx.accounts) || [];
       accounts.forEach((a) => {
-        const o = el('option', null, a.name + '（' + a.id + '）');
+        const o = el('option', null, names ? names.accountOption(a) : a.id);
         o.value = a.id;
         asel.appendChild(o);
       });

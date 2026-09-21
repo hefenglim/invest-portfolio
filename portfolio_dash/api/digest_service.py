@@ -494,9 +494,13 @@ def run_digest_daily(
     # precision (``_signed_pct`` reads it, never replaces it) — quantizing at display is
     # the rule (data-and-pricing.md), quantizing at storage is the thing that rule forbids.
     dc_txt = _signed_pct(str(dc)) if dc is not None else "—"
+    # L5-b (second full re-verification 2026-09-22): the marks joining these zh clauses are
+    # full-width, as in the weekly line below. They were `, ` / `; ` — each followed by a
+    # space, which is why the punctuation guard (that then only saw a mark TOUCHING a CJK
+    # character) passed this line while 排程中心 showed it beside 「14 檔事件已更新，1 檔失敗」.
     return (
-        f"daily digest {payload['digest_date']}: 組合 {dc_txt}, "
-        f"警示 {len(payload['alerts_today'])}, 訊號 {len(payload['signals_today'])}; {push}"
+        f"daily digest {payload['digest_date']}：組合 {dc_txt}，"
+        f"警示 {len(payload['alerts_today'])}，訊號 {len(payload['signals_today'])}；{push}"
     )
 
 
@@ -669,7 +673,7 @@ def run_digest_weekly(
         generated_at=str(payload["generated_at"]),
     )
     push = _push(conn, "weekly", payload, now=now, sender=sender)
-    return f"weekly digest {payload['digest_date']}: {len(items)} 項；{push}"
+    return f"weekly digest {payload['digest_date']}：{len(items)} 項；{push}"
 
 
 def run_digest(conn: sqlite3.Connection, kind: str, *, now: datetime) -> str:

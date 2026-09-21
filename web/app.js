@@ -253,10 +253,10 @@
       sign(card, k && k.total_return);
     }
 
-    /* 3 · 年化報酬 (XIRR) — the decision metric, so it is the card that goes full width
+    /* 3 · 年化報酬（XIRR） — the decision metric, so it is the card that goes full width
        first when the band folds (`kpi-wide-sm`, <=860px). */
     {
-      const card = mkCard('hero', '年化報酬 (XIRR)', 'kpi-wide-sm');
+      const card = mkCard('hero', '年化報酬（XIRR）', 'kpi-wide-sm');
       const xirrNil = nil(k && k.xirr);
       card.appendChild(mkValue(k && k.xirr, f.signedPct, true));
       /* short flag, full reason in the tooltip (the 資料新鮮度 panel prints it in full). */

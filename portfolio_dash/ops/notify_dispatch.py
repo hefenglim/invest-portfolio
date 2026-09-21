@@ -65,9 +65,9 @@ def dispatch_notifications(
     cfg = notify.load_config(conn)
     channels = notify.build_enabled_channels(cfg)
     if not channels:
-        return "notify: 無啟用通道"
+        return "notify：無啟用通道"
     if notify.in_quiet_hours(cfg.quiet_hours, now):
-        return "notify: 靜音時段"
+        return "notify：靜音時段"
     base = cfg.public_base_url  # FU-D17: empty ⇒ frontend_url returns None ⇒ legacy text
 
     rows = conn.execute(
@@ -108,7 +108,7 @@ def dispatch_notifications(
             if result != "ok":
                 failed_channels.add(name)
 
-    detail = f"notify: {sent} 送出 / {len(rows)} 待送"
+    detail = f"notify：{sent} 送出 / {len(rows)} 待送"
     if failed_channels:
         detail += f"（通道異常：{', '.join(sorted(failed_channels))}）"
     if gave_up:

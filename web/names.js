@@ -47,6 +47,17 @@
     moomoo_my_my: { name: 'Moomoo 馬股', short: 'Moomoo 馬股' }
   };
 
+  /* Broker (statement FORMAT) id -> zh display name, for the 券商對帳單 picker. A broker is
+     not an account, but the one that exists is the same company as the `schwab` account, so
+     it carries the same spelling: the second re-verification of 2026-09-22 (M5-b) found
+     broker-import.js hard-coding 「Charles Schwab」 in this picker directly above an account
+     select reading 「TW Broker（tw_broker）」. Every id in
+     `data_ingestion/broker/registry.py::BROKER_IDS` needs an entry here — pinned by
+     tests/contract/test_account_name_single_source.py. */
+  const BROKERS = {
+    schwab: '嘉信 Schwab'
+  };
+
   const asId = (id) => (id === null || id === undefined ? '' : String(id));
 
   /* The currency each market trades in — for the <option> label below. */
@@ -62,6 +73,10 @@
     accountShort(id) {
       const a = ACCOUNTS[id];
       return a ? a.short : asId(id);
+    },
+    /* zh display name for a broker-statement adapter id (unknown id -> the id itself). */
+    broker(id) {
+      return Object.prototype.hasOwnProperty.call(BROKERS, id) ? BROKERS[id] : asId(id);
     },
     /* Account <option> label for a `/api/input/context` account row `{id, ccy,
        settlement_ccy, markets}`: the zh name + the currencies the account actually TRADES

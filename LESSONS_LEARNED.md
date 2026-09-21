@@ -1716,3 +1716,28 @@ name-only allowlist cannot enumerate period-suffixed indicators.
   ONE scanner — two grammars would store 「3.82 兆」 from a news line as 3.82 and then flag
   the card that quoted it. The offline A/B over the whole corpus (before vs after, per
   card) was the acceptance evidence, not the unit tests: exactly four cards changed.
+
+## A class guard is only as wide as its scope and its definition of "adjacent" (2026-09-22, demo audit M5-b / L5-b)
+
+- **What happened:** the second full re-verification re-tested all 38 closed items (38/38 held)
+  and found two escapes of fixes that had been done *as a class*, each with a contract test
+  holding the count at zero. Both guards were green over a live defect.
+  **M5-b:** the account-name guard had a per-file test for the context list's English `a.name`,
+  and its file tuple was written by hand — `("cash.js", "input.js")`, the two files where the
+  defect had been measured. The same test file's comment even named `broker-import.js` as a
+  KNOWN LIMIT "to be found by reading". Nobody read it; the 券商對帳單 select still printed
+  「TW Broker（tw_broker）」. **L5-b:** the punctuation guard flagged a half-width mark only when
+  it TOUCHED a CJK character. English typing puts a space after the mark, and f-string
+  interpolation split the line further, so 「組合 +2.53%, 警示 0, 訊號 0; …」 had no touching
+  mark at all.
+- **Rules:** (1) A guard's SCOPE must be discovered from the property that defines the class
+  (here: "fetches an account list"), never listed from the files where it was first seen —
+  and it needs a positive control that the discovery still finds the known members, or an
+  empty discovery passes forever. (2) A known limit written in a comment is a to-do list, not
+  a control; either enforce it or say in the report that it is unguarded. (3) When widening a
+  detector, run the widened version over the whole tree BEFORE deciding anything: here it
+  measured 16 more hits, 12 real and 4 legitimate notation. Fix the real ones in the same
+  change and allow the rest by name with a reason, so the widening lands at zero. (4) Prove
+  the new guard on the pre-fix file (it fails) and prove the old guard was blind to it (the
+  old detector returned 0 hits on the pre-fix `digest_service.py`), so the report can say
+  why the class fix had escaped, not just that it had.

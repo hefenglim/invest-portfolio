@@ -1655,7 +1655,7 @@ def _record_skipped_overlap(
         "'already_running', '0', 0)",
         (
             job_id, now.isoformat(), now.isoformat(),
-            "already_running: 前一次執行尚未完成，本次排程觸發已略過", str(payload),
+            "already_running：前一次執行尚未完成，本次排程觸發已略過", str(payload),
         ),
     )
     conn.commit()

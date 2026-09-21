@@ -48,7 +48,7 @@
 
   /* Read-only fields: the stored spelling -> what it means, and why it cannot be changed.
      The server marks them with `editable: false`; these two maps are display only. */
-  const ROUNDING_ZH = { floor: '無條件捨去 (floor)', half_up: '四捨五入 (half_up)' };
+  const ROUNDING_ZH = { floor: '無條件捨去（floor）', half_up: '四捨五入（half_up）' };
   const READONLY_ZH = {
     rounding: '由市場規定，不可修改（台股費稅無條件捨去至整數元，財政部「角以下免收」；美／馬每項費用四捨五入至最小幣值單位）'
   };

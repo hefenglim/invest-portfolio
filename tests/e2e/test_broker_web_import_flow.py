@@ -91,6 +91,13 @@ def _open_broker_mode(page: Page, base: str) -> None:
     page.wait_for_selector("#bk-dropzone", state="visible")
     # …and the standard-template block yields the pane rather than stacking under it.
     expect(page.locator("#csv-standard")).to_be_hidden()
+    # M5-b (demo audit, second full re-verification 2026-09-22): both pickers are named by
+    # web/names.js. The account picker read 「TW Broker（tw_broker）」 — the API's English
+    # name + the raw id — on the page whose trade form reads 「台灣券商（TWD）」.
+    expect(page.locator("#bk-broker option[value='schwab']")).to_have_text("嘉信 Schwab")
+    expect(page.locator("#bk-account option[value='tw_broker']")).to_have_text("台灣券商（TWD）")
+    labels = page.locator("#bk-account option").all_inner_texts()
+    assert not [t for t in labels if "Broker" in t or "Charles" in t or "_" in t], labels
 
 
 def _drop_exports(page: Page) -> dict[str, Any]:

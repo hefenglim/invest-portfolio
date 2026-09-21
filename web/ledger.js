@@ -78,7 +78,7 @@
     cash: { offset: 0, total: 0 },
   };
   const pagers = {};
-  let accountList = []; /* [{id, name}] from GET /api/accounts (chip registry) */
+  let accountList = []; /* [{id}] from GET /api/accounts (chip registry) */
 
   function initFilters() {
     const bar = $('#ledger-filters');
@@ -1013,9 +1013,10 @@
   async function loadAccounts() {
     try {
       const resp = await window.pdApi.get('/api/accounts');
-      accountList = ((resp && resp.accounts) || []).map((a) => ({
-        id: a.account_id, name: a.name,
-      }));
+      /* Ids only: every chip is named by acctZh(id). The English `a.name` used to ride
+         along here unread — the one context-list `.name` the widened guard in
+         tests/contract/test_account_name_single_source.py would otherwise have to excuse. */
+      accountList = ((resp && resp.accounts) || []).map((a) => ({ id: a.account_id }));
     } catch (err) {
       accountList = [];
     }

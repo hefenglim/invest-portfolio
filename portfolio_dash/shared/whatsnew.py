@@ -660,7 +660,7 @@ CATALOG: list[Feature] = [
         "現在觀察期不足 30 天就不顯示年化數字（改列出天數與原因）；"
         "「累計報酬率」不受影響，那才是短期間該看的數字",
         href="index.html",
-        area="總覽 → KPI 年化報酬 (XIRR)",
+        area="總覽 → KPI 年化報酬（XIRR）",
         target="#kpi-band",
     ),
     # --- v0.1.26 (whole-site layout sweep) ------------------------------------------------

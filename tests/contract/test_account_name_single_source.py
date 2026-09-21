@@ -45,11 +45,14 @@ _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 # reading 「嘉信 Schwab」 — G-01's exact defect, on a surface declared fixed, with the guard
 # green. A guard that certifies one spelling certifies one spelling.
 #
-# ⚠ KNOWN LIMIT, deliberately not closed here: `/api/accounts` rows carry the same English
-# string as plain `.name` (`web/broker-import.js`, and the 帳戶 dropdowns in `web/input.js`).
-# `\w+\.name` cannot be flagged without drowning the scan in unrelated matches, so those
-# sites are invisible to this test and must be found by reading. Written down rather than
-# left implicit: the failure mode being guarded against is exactly "nobody remembered".
+# The account-LIST endpoints (`/api/input/context`, `/api/accounts`) carry the same English
+# string as plain `.name`. `\w+\.name` cannot be flagged site-wide without drowning the scan
+# in unrelated matches, so that spelling is guarded per FILE instead: every web/*.js that
+# fetches one of those lists is found by `_account_list_readers()` and held to the rules in
+# the last three tests. ⚠ This comment used to name `web/broker-import.js` as a KNOWN LIMIT
+# "to be found by reading" while the test beside it listed cash.js and input.js by hand —
+# and the second full re-verification (2026-09-22, M5-b) found broker-import.js rendering
+# 「TW Broker（tw_broker）」. A limit that is written down but not enforced is a to-do list.
 _RAW_ACCOUNT_READ = re.compile(r"\b([A-Za-z_$][A-Za-z0-9_$]*)\.account(?:_name)?\b")
 
 # Receivers that are NOT an API row:
@@ -157,20 +160,67 @@ def test_the_pending_list_is_not_stale() -> None:
         )
 
 
+#: The two endpoints that list accounts with the English `name`, as a page fetches them.
+_ACCOUNT_LIST_FETCH = re.compile(r"""['"`]/api/(?:input/context|accounts)['"`]""")
+#: `symCell(x.symbol, x.name)` — an instrument's code + name cell, whatever the row is called.
+_INSTRUMENT_NAME_CELL = re.compile(r"symCell\(\s*(\w+)\.symbol\s*,\s*\1\.name\s*\)")
+
+
+def _account_list_readers() -> dict[str, str]:
+    """Every web/*.js that fetches an account list, with its comment-stripped source.
+
+    DISCOVERED, never listed by hand: the hand-written ("cash.js", "input.js") this replaced
+    is exactly how broker-import.js stayed out of reach (M5-b, 2026-09-22).
+    """
+    out = {}
+    for path in _web_js():
+        src = _strip_js_comments(path.read_text(encoding="utf-8"))
+        if _ACCOUNT_LIST_FETCH.search(src):
+            out[path.name] = src
+    return out
+
+
+def test_the_account_list_readers_are_discovered() -> None:
+    """Positive control: an empty discovery would pass the two tests below forever. The
+    five files known to fetch an account list today must all be found."""
+    found = set(_account_list_readers())
+    expected = {"broker-import.js", "cash.js", "corp-action-form.js", "input.js", "ledger.js"}
+    assert expected <= found, f"discovery lost {sorted(expected - found)}"
+
+
 def test_the_context_accounts_english_name_is_never_rendered_either() -> None:
     """The second spelling has a SECOND source the `.account` scanner cannot see.
 
     `/api/input/context` lists accounts as `{id, name, …}` with the English `name`, and
     cash.js rendered `a.name` as the 各帳戶現金 card header and in its account <select>s —
     measured on the deployed demo on 2026-09-16 AFTER the six `_PENDING` files had been
-    fixed: the cards still read 「TW Broker」. Any `a.name` in the files that iterate that
-    list is that defect; the resolver takes `a.id`.
+    fixed: the cards still read 「TW Broker」. broker-import.js did the same in its 匯入到帳戶
+    select (M5-b, 2026-09-22), in a file this test did not open. Any `a.name` in a file that
+    fetches an account list is that defect; the resolver takes `a.id`.
     """
-    for name in ("cash.js", "input.js"):
-        src = _strip_js_comments((_WEB_DIR / name).read_text(encoding="utf-8"))
+    for name, src in _account_list_readers().items():
+        # A ledger ROW named `a` also has a `.name` — the INSTRUMENT's (ledger.js's 公司行動
+        # table: `symCell(a.symbol, a.name)`). That pairing is structurally a symbol cell,
+        # never an account label, so it is removed before the scan rather than excused.
+        src = _INSTRUMENT_NAME_CELL.sub("", src)
         assert re.search(r"\ba\.name\b", src) is None, (
-            f"web/{name} renders the context accounts' English name — use acctZh(a.id)"
+            f"web/{name} renders the account list's English name — use pdNames.account(a.id)"
         )
+
+
+def test_every_broker_adapter_has_a_display_name() -> None:
+    """M5-b's second half: the 券商對帳單 picker hard-coded 「Charles Schwab」 and fell back to
+    the raw id for any other adapter. Its labels now come from `pdNames.broker`, so a new
+    adapter in the registry without a names.js entry would reach the page as a bare id."""
+    from portfolio_dash.data_ingestion.broker.registry import BROKER_IDS
+
+    names = (_WEB_DIR / "names.js").read_text(encoding="utf-8")
+    table = re.search(r"const BROKERS = \{(.*?)\};", names, flags=re.S)
+    assert table, "names.js lost the BROKERS table"
+    keys = set(re.findall(r"^\s*([a-z_]+)\s*:", table.group(1), flags=re.M))
+    assert set(BROKER_IDS) <= keys, f"no zh name for broker(s) {sorted(set(BROKER_IDS) - keys)}"
+    src = _strip_js_comments((_WEB_DIR / "broker-import.js").read_text(encoding="utf-8"))
+    assert "names.broker(" in src and "'Charles Schwab'" not in src
 
 
 def test_every_account_option_label_comes_from_the_one_definition() -> None:
@@ -188,9 +238,13 @@ def test_every_account_option_label_comes_from_the_one_definition() -> None:
     assert "accountOption(a)" in names, "names.js lost the account <option> label authority"
     assert "MARKET_CCY" in names  # the bracket is the TRADING currencies, market-derived
 
-    for name in ("cash.js", "input.js"):
-        src = _strip_js_comments((_WEB_DIR / name).read_text(encoding="utf-8"))
-        assert "pdNames.accountOption(" in src, (
+    # Every file that builds <option>s from the CONTEXT list (discovered, M5-b — the tuple
+    # this replaced named cash.js and input.js and missed broker-import.js).
+    builders = {name: src for name, src in _account_list_readers().items()
+                if "/api/input/context" in src and "'option'" in src}
+    assert {"broker-import.js", "cash.js", "input.js"} <= set(builders), sorted(builders)
+    for name, src in builders.items():
+        assert re.search(r"\.accountOption\(", src), (
             f"web/{name} builds an account <option> without pdNames.accountOption"
         )
         # The settlement-ccy bracket may survive ONLY as the no-names.js fallback on the

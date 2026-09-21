@@ -133,6 +133,25 @@ one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per 
   `（選填）`: `canonical_header` already stripped either width, and a new test proves every
   annotated header of every template — shipped width and the half-width an older download
   still carries — canonicalizes to its bare column, so no numeric column can shift.
+  **Second full re-verification 2026-09-22 (audit author's M5-b, L5-b)** — both were escapes
+  of these two class fixes, and in both the GUARD had the blind spot. **M5-b:** the 券商對帳單
+  pane's 匯入到帳戶 select read 「TW Broker（tw_broker）」 (context `a.name` + raw id) and its
+  broker picker hard-coded 「Charles Schwab」. Both now come from `names.js`
+  (`pdNames.accountOption`, and a new `pdNames.broker` with one entry per adapter in
+  `BROKER_IDS`). The contract test had named cash.js / input.js by hand — its own comment
+  listed broker-import.js as a known limit "to be found by reading" — so it now DISCOVERS
+  every web/*.js that fetches `/api/input/context` or `/api/accounts` and holds each to the
+  rules; a positive control pins the five files it must find, and the pre-fix file fails
+  three tests. **L5-b:** the daily digest's run line read 「組合 +2.53%, 警示 0, 訊號 0; …」
+  beside 「14 檔事件已更新，1 檔失敗」. The detector only saw a half-width mark TOUCHING a CJK
+  character, and English typing puts a space after the mark (f-string parts split it
+  further); it now also sees a mark separated from zh text by spaces only. That widening
+  measured 16 more strings of the class: 12 are full-width now (「年化報酬（XIRR）」 KPI title,
+  「排程（cron）」, the two rounding options, TWSE / TPEx source names, the archived-row toggle,
+  a what's-new area, and the `notify：` / `already_running：` / `error：` run and test
+  lines, whose zh tails decide the mark), and 4 are allowed by name with a reason (`http(s)`
+  scheme notation ×2, a message listing the forbidden characters `/ @ :`, one calibration
+  prompt line). An English run line keeps its own marks (「3 alert(s) [a, b], 2 dispatched;」).
 - **The symbol drawer lives in the browser history (M6):** one open pushes one `#sym=` entry
   (shareable), Back closes it, ✕ pops it, switching symbols replaces it.
 - **The FX estimate caption can no longer freeze on 「試算中…」 (M7)** — a manual buy amount
